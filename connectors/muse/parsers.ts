@@ -126,6 +126,14 @@ const sessionsResponseSchema = z.object({ sessions: z.array(z.unknown()) });
 
 const cursorValue = z.union([z.string(), z.number()]).nullable().optional();
 
+/** A paging cursor as the source gave it. */
+export type PageCursor = string | number;
+
+/** Identity of a cursor for repeat detection: type and value. */
+export function cursorKey(cursor: PageCursor): string {
+	return `${typeof cursor}:${String(cursor)}`;
+}
+
 const sessionsPagingSchema = z.object({
 	next_cursor: cursorValue,
 	has_more: z.boolean().nullable().optional(),
@@ -134,7 +142,7 @@ const sessionsPagingSchema = z.object({
 export interface SessionsPage {
 	sessions: MuseSession[];
 	/** The cursor for the next page; null when the answer says the list ended. */
-	nextCursor: string | null;
+	nextCursor: PageCursor | null;
 	/** has_more:true with no cursor to follow: the list cannot be read to its end. */
 	moreWithoutCursor: boolean;
 }
@@ -151,10 +159,9 @@ export function parseSessionsPage(raw: unknown): SessionsPage | null {
 	const paging = sessionsPagingSchema.safeParse(raw);
 	if (sessions === null || !paging.success) return null;
 	const cursor = paging.data.next_cursor;
+	// Opaque: passed back exactly as received, string or number.
 	const nextCursor =
-		cursor === undefined || cursor === null || cursor === ""
-			? null
-			: String(cursor);
+		cursor === undefined || cursor === null || cursor === "" ? null : cursor;
 	return {
 		sessions,
 		nextCursor,
@@ -428,7 +435,7 @@ export interface GoalsPage {
 	goals: MuseGoal[];
 	hasNextPage: boolean;
 	/** The cursor the answer gives for its next page, if any. */
-	nextCursor: string | null;
+	nextCursor: PageCursor | null;
 }
 
 export function parseGoals(raw: unknown): GoalsPage | null {
@@ -450,7 +457,8 @@ export function parseGoals(raw: unknown): GoalsPage | null {
 	return {
 		goals,
 		hasNextPage: pagination.has_next_page,
-		nextCursor: cursor === undefined || cursor === null ? null : String(cursor),
+		// Opaque: passed back exactly as received, string or number.
+		nextCursor: cursor === undefined || cursor === null ? null : cursor,
 	};
 }
 

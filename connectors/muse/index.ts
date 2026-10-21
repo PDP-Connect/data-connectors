@@ -68,12 +68,14 @@ import {
 	buildMemoryFileRecord,
 	buildMessageRecord,
 	buildScheduledTaskRecord,
+	cursorKey,
 	isConnectedApp,
 	isFinalEvent,
 	MEMORY_FILE_NAMES,
 	type MuseLibraryEntry,
 	type MuseSession,
 	memoryFileEntries,
+	type PageCursor,
 	parseActivities,
 	parseConnectors,
 	parseFsList,
@@ -599,7 +601,7 @@ async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
 	for (const archivedView of [false, true]) {
 		const label = archivedView ? "archived chat list" : "chat list";
 		const cursors = new Set<string>();
-		let cursor: string | null = null;
+		let cursor: PageCursor | null = null;
 		for (let pageIndex = 0; ; pageIndex++) {
 			if (pageIndex >= MAX_SESSION_PAGES) {
 				throw new StreamFailure(
@@ -620,10 +622,12 @@ async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
 					`Muse's ${label} came back in a shape the connector cannot read; nothing was checkpointed.`,
 				);
 			}
+			let added = 0;
 			for (const session of page.sessions) {
 				if (seen.has(session.session_id)) continue;
 				seen.add(session.session_id);
 				out.push({ session, archivedView });
+				added += 1;
 			}
 			if (page.moreWithoutCursor) {
 				throw new StreamFailure(
@@ -631,12 +635,19 @@ async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
 				);
 			}
 			if (page.nextCursor === null) break; // the source's end signal
-			if (cursors.has(page.nextCursor)) {
+			// A page that says more follow must add chats: one that adds none
+			// (a moving list, a stuck page) cannot prove the list complete.
+			if (added === 0) {
+				throw new StreamFailure(
+					`Muse's ${label} returned a page with no new chats while saying more follow; nothing was checkpointed.`,
+				);
+			}
+			if (cursors.has(cursorKey(page.nextCursor))) {
 				throw new StreamFailure(
 					`Muse's ${label} repeated a page cursor; nothing was checkpointed.`,
 				);
 			}
-			cursors.add(page.nextCursor);
+			cursors.add(cursorKey(page.nextCursor));
 			cursor = page.nextCursor;
 		}
 	}
@@ -751,6 +762,8 @@ async function hydrateChat(
 			// the revision, one more first-page read confirms the chat did not
 			// change while it was walked.
 			if (revisionUnseen && revision !== null) {
+				// Proven unchanged only when the final read reports the same
+				// known revision; an unknown one is not proof.
 				let latest: number | null;
 				try {
 					latest = await readRevision(gateway, sessionId);
@@ -762,7 +775,7 @@ async function hydrateChat(
 						throw error;
 					latest = Number.NaN; // the chat went away: not unchanged
 				}
-				if (latest !== null && latest !== revision) revisionMoved = true;
+				if (latest !== revision) revisionMoved = true;
 			}
 			return finish();
 		}
@@ -800,6 +813,21 @@ async function hydrateChat(
 	};
 }
 
+/** Whether chat.history also says the chat does not exist. */
+async function chatGone(
+	gateway: MuseGateway,
+	sessionId: string,
+): Promise<boolean> {
+	try {
+		await call(gateway, "chat.history", { limit: 1, session_id: sessionId });
+		return false;
+	} catch (error) {
+		if (error instanceof MuseRpcError && error.code === "not_found")
+			return true;
+		throw error;
+	}
+}
+
 /** The chat's current transcript revision from a one-message read; null when unknown. */
 async function readRevision(
 	gateway: MuseGateway,
@@ -810,6 +838,32 @@ async function readRevision(
 		session_id: sessionId,
 	});
 	return parseHistory(raw)?.transcriptRevision ?? null;
+}
+
+/** Whether a chat's parent record was emitted, and so whether its messages may follow. */
+type ParentOutcome =
+	| { kind: "emitted" }
+	/** The chat no longer exists. */
+	| { kind: "gone" }
+	/** No honest parent record could be emitted: the chat stays a gap. */
+	| { kind: "blocked"; errorClass: string; message: string };
+
+/** DETAIL_GAP_RECOVERED for each gap an earlier run left for this chat. */
+async function resolvePendingGaps(
+	ctx: MuseCtx,
+	pending: ReadonlyMap<string, readonly PendingGap[]>,
+	sessionId: string,
+): Promise<void> {
+	for (const gap of pending.get(sessionId) ?? []) {
+		await ctx.emit({
+			type: "DETAIL_GAP_RECOVERED",
+			reference_only: true,
+			gap_id: gap.gapId,
+			...(gap.leaseId ? { lease_id: gap.leaseId } : {}),
+			stream: MESSAGES,
+			record_key: sessionId,
+		});
+	}
 }
 
 /** A message gap the host carried over from an earlier run. */
@@ -852,32 +906,40 @@ async function hydrateChats(
 	tally: TextTally,
 	required: readonly string[],
 	pending: ReadonlyMap<string, readonly PendingGap[]> = new Map(),
-	beforeChat?: (sessionId: string) => Promise<void>,
+	beforeChat?: (sessionId: string) => Promise<ParentOutcome>,
 ): Promise<Map<string, number | null>> {
 	const hydrated: string[] = [];
 	const revisions = new Map<string, number | null>();
 	const gaps: string[] = [];
+	const gone = new Set<string>();
 	for (const [index, sessionId] of required.entries()) {
 		await ctx.progress(`Reading chat ${index + 1} of ${required.length}`, {
 			stream: MESSAGES,
 		});
 		// The chat's parent record, when the caller emits it here.
-		if (beforeChat) await beforeChat(sessionId);
-		const outcome = await hydrateChat(ctx, gateway, tally, sessionId);
+		const parent: ParentOutcome = beforeChat
+			? await beforeChat(sessionId)
+			: { kind: "emitted" };
+		if (parent.kind === "gone") {
+			// The chat no longer exists: nothing is left to read, so its pending
+			// gaps are resolved and it is not a required key.
+			gone.add(sessionId);
+			await resolvePendingGaps(ctx, pending, sessionId);
+			continue;
+		}
+		const outcome: HistoryOutcome =
+			parent.kind === "blocked"
+				? {
+						kind: "gap",
+						errorClass: parent.errorClass,
+						message: parent.message,
+					}
+				: await hydrateChat(ctx, gateway, tally, sessionId);
 		if (outcome.kind === "hydrated") {
 			hydrated.push(sessionId);
 			revisions.set(sessionId, outcome.revision);
 			// Read completely: resolve the gaps an earlier run left for it.
-			for (const gap of pending.get(sessionId) ?? []) {
-				await ctx.emit({
-					type: "DETAIL_GAP_RECOVERED",
-					reference_only: true,
-					gap_id: gap.gapId,
-					...(gap.leaseId ? { lease_id: gap.leaseId } : {}),
-					stream: MESSAGES,
-					record_key: sessionId,
-				});
-			}
+			await resolvePendingGaps(ctx, pending, sessionId);
 			continue;
 		}
 		await emitDetailGap(ctx, {
@@ -893,7 +955,7 @@ async function hydrateChats(
 	await emitDetailCoverage(ctx, {
 		stream: MESSAGES,
 		stateStream: CONVERSATIONS,
-		requiredKeys: required,
+		requiredKeys: required.filter((id) => !gone.has(id)),
 		hydratedKeys: hydrated,
 		gapKeys: gaps,
 	});
@@ -943,32 +1005,53 @@ export async function runChatStreams(
 		? pendingMessageGaps(ctx)
 		: new Map<string, PendingGap[]>();
 
-	// Parent records come before their children:
-	// - A normal run with conversations in scope emits every conversation
-	//   record below, before any message record, gap or coverage.
+	// Parent records come before their children. messages is collected only
+	// together with conversations:
+	// - Collection Profile 5.1: "A connector MUST emit records only for
+	//   streams in scope.streams ... A connector that cannot apply a
+	//   constraint MUST emit SKIP_RESULT with reason: "scope_not_supported"
+	//   for that stream or fail the run. It MUST NOT silently broaden scope."
+	//   A messages-only request cannot get its parent records without
+	//   broadening scope, so messages is skipped as scope_not_supported
+	//   (the manifest's messages description says it needs conversations).
+	// - A normal run emits every conversation record below, before any
+	//   message record, gap or coverage.
 	// - A recovery-only run fetches each gapped chat with sessions.get and
 	//   emits its conversation record right before that chat's messages or
-	//   gap (and so before the coverage).
-	// - A messages-only request does not have conversations in START.scope.
-	//   Collection Profile 5.1: "A connector MUST emit records only for
-	//   streams in scope.streams ... It MUST NOT silently broaden scope", and
-	//   6.1 item 4: a conforming connector "Emits records only within
-	//   START.scope". The profile places no requirement that a child stream
-	//   be collected with its parent stream, so messages are collected alone
-	//   and carry session_id for the join; no conversation record is emitted.
+	//   gap. A chat that is gone resolves its gap (DETAIL_GAP_RECOVERED);
+	//   one whose parent cannot be emitted honestly stays a gap.
+	if (wantMessages && !wantConversations) {
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream: MESSAGES,
+			reason: "scope_not_supported",
+			message:
+				"Muse messages are collected together with their conversations; request both streams.",
+			recovery_hint: { action: "not_retriable", retryable: false },
+		});
+		return;
+	}
 	if (ctx.recoveryOnly) {
 		if (pending.size === 0) return;
-		const emitParent = async (sessionId: string): Promise<void> => {
-			if (!wantConversations) return;
+		let unsafeParents = 0;
+		const emitParent = async (sessionId: string): Promise<ParentOutcome> => {
 			let raw: unknown;
 			try {
 				raw = await call(gateway, "sessions.get", { id: sessionId });
 			} catch (error) {
-				// A chat that no longer exists has no parent to emit; its read
-				// below gaps it. Anything else stops the recovery pass.
-				if (error instanceof MuseRpcError && PER_ITEM_RPC_CODES.has(error.code))
-					return;
-				throw error;
+				if (
+					!(error instanceof MuseRpcError) ||
+					!PER_ITEM_RPC_CODES.has(error.code)
+				)
+					throw error;
+				// Gone only when its history is gone too.
+				return (await chatGone(gateway, sessionId))
+					? { kind: "gone" }
+					: {
+							kind: "blocked",
+							errorClass: "muse_parent_not_found",
+							message: "sessions.get did not find the chat",
+						};
 			}
 			const session = parseSessionGet(raw);
 			if (session === null || session.session_id !== sessionId) {
@@ -976,12 +1059,26 @@ export async function runChatStreams(
 					"Muse's sessions.get came back in a shape the connector cannot read; nothing was checkpointed.",
 				);
 			}
-			await emitBuilt(
-				ctx,
-				tally,
-				CONVERSATIONS,
-				buildConversationRecord(session, session.archived === true),
-			);
+			// Without the archived flag the record would have to guess it; the
+			// chat waits for a normal run, which knows its list view.
+			if (typeof session.archived !== "boolean") {
+				return {
+					kind: "blocked",
+					errorClass: "muse_parent_archived_unknown",
+					message: "sessions.get did not say whether the chat is archived",
+				};
+			}
+			const built = buildConversationRecord(session, session.archived);
+			if (built.replaced > 0) {
+				unsafeParents += 1;
+				return {
+					kind: "blocked",
+					errorClass: "muse_parent_unsafe_text",
+					message: "the chat's title or snippet is not storable text",
+				};
+			}
+			await emitBuilt(ctx, tally, CONVERSATIONS, built);
+			return { kind: "emitted" };
 		};
 		try {
 			await hydrateChats(
@@ -993,10 +1090,17 @@ export async function runChatStreams(
 				emitParent,
 			);
 		} catch (error) {
+			await failStreams(ctx, [CONVERSATIONS, MESSAGES], error);
+			return;
+		}
+		if (unsafeParents > 0) {
 			await failStreams(
 				ctx,
-				[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
-				error,
+				[CONVERSATIONS],
+				new StreamFailure(
+					`${unsafeParents} Muse conversation records hold text that cannot be stored; they were not imported and their messages stay pending.`,
+					false,
+				),
 			);
 		}
 		return;
@@ -1055,9 +1159,16 @@ export async function runChatStreams(
 					changed.push(c.id);
 			}
 			const changedIds = new Set(changed);
+			// The list was read to its end: a gapped chat that is not in it no
+			// longer exists, so its gaps are resolved instead of read again.
+			for (const id of pending.keys()) {
+				if (!listedIds.has(id)) await resolvePendingGaps(ctx, pending, id);
+			}
 			// Retry earlier gaps first, then every chat that changed.
 			const required = [
-				...[...pending.keys()].filter((id) => !changedIds.has(id)),
+				...[...pending.keys()].filter(
+					(id) => listedIds.has(id) && !changedIds.has(id),
+				),
 				...changed,
 			];
 			hydrated = await hydrateChats(ctx, gateway, tally, required, pending);
@@ -1277,7 +1388,7 @@ export async function runGoals(
 		for (const variant of GOAL_VARIANTS) {
 			const label = Object.values(variant).join(" ");
 			const cursors = new Set<string>();
-			let cursor: string | null = null;
+			let cursor: PageCursor | null = null;
 			for (let pageIndex = 0; ; pageIndex++) {
 				if (pageIndex >= MAX_GOAL_PAGES) {
 					throw new StreamFailure(
@@ -1293,9 +1404,11 @@ export async function runGoals(
 						`Muse's ${label} goals came back in a shape the connector cannot read; nothing was checkpointed.`,
 					);
 				}
+				let added = 0;
 				for (const goal of page.goals) {
 					if (seen.has(goal.goal_id)) continue;
 					seen.add(goal.goal_id);
+					added += 1;
 					await emitBuilt(
 						ctx,
 						tally,
@@ -1314,12 +1427,19 @@ export async function runGoals(
 						false,
 					);
 				}
-				if (cursors.has(page.nextCursor)) {
+				// A page that says more follow must add goals; one that adds none
+				// is stuck, even with a new cursor.
+				if (added === 0) {
+					throw new StreamFailure(
+						`Muse's ${label} goals returned a page with no new goals while saying more follow; nothing was checkpointed.`,
+					);
+				}
+				if (cursors.has(cursorKey(page.nextCursor))) {
 					throw new StreamFailure(
 						`Muse's ${label} goals repeated a page cursor; nothing was checkpointed.`,
 					);
 				}
-				cursors.add(page.nextCursor);
+				cursors.add(cursorKey(page.nextCursor));
 				cursor = page.nextCursor;
 			}
 		}

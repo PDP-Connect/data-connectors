@@ -119,7 +119,7 @@
 		},
 		{
 			"name": "messages",
-			"description": "Messages in Muse chats, yours and the agent's, from chat.history. A chat with more history than one page holds is reported as a detail gap rather than as complete.",
+			"description": "Messages in Muse chats, yours and the agent's, from chat.history, paged back to the start of each chat. Collected only together with conversations (each message's chat record is emitted before it); a request for messages without conversations is answered with scope_not_supported.",
 			"display": {
 				"label": "Your Muse messages",
 				"detail": "Role, message text, time, the message it replies to, source and visibility."
