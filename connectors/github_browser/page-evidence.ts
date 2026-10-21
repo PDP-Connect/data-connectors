@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { parseHTML } from "linkedom";
-import { type InventoryTerminalProof, type PageEvidence } from "./inventory-evidence.ts";
+import type { InventoryTerminalProof, PageEvidence } from "./inventory-evidence.ts";
 
 export interface BrowserPageObservation {
 	readonly requestedUrl: string;

@@ -10,7 +10,7 @@ export interface CollectionBoundary {
 
 /** What one page says about the rest of its inventory. Only inspectors build these. */
 export type Continuation =
-	/** The validated immediate successor of the request that produced the page. */
+	/** An inspector-bound successor; the walk still checks selection support. */
 	| { kind: "next"; url: string }
 	/** Positive source-end evidence on this page. */
 	| { kind: "end" }
@@ -25,6 +25,8 @@ export interface PageObservation extends PageEvidence {
 	ids: readonly string[];
 	rowsComplete: boolean;
 	rejectedRows: number;
+	exactTotals?: readonly number[];
+	totalConflict?: boolean;
 }
 
 /** What a page's metadata says about the walk, beyond its own rows. */
@@ -47,6 +49,8 @@ export class InventoryEvidence {
 	private readonly pageLimit: number;
 	private readonly window: number;
 	private readonly seen = new Set<string>();
+	private readonly observed = new Set<string>();
+	private readonly requests = new Set<string>();
 	private readonly totals = new Set<number>();
 	private pages = 0;
 	private failure: string | null = null;
@@ -61,6 +65,7 @@ export class InventoryEvidence {
 	 */
 	constructor(first: string, limits: { pages?: number; window?: number } = {}) {
 		this.request = { url: first, page: 1 };
+		this.requests.add(first);
 		this.pageLimit = limits.pages ?? Number.POSITIVE_INFINITY;
 		this.window = limits.window ?? Number.POSITIVE_INFINITY;
 	}
@@ -80,6 +85,8 @@ export class InventoryEvidence {
 
 	/** The only request a walker may issue next, or null when the walk is over. */
 	get next(): { readonly url: string; readonly page: number } | null {
+		const contradiction = this.invariantFailure();
+		if (contradiction !== null) this.fail(contradiction);
 		return this.failure === null ? this.request : null;
 	}
 
@@ -93,10 +100,39 @@ export class InventoryEvidence {
 		return total === undefined ? null : Math.min(total, this.window);
 	}
 
-	/** Preview without accepting rows from an alternate route we may discard. */
+	/** Preview distinct rows without consuming the outstanding request. */
 	previewPage(ids: readonly string[]): { distinct: number; noProgress: boolean } {
 		const distinct = new Set([...this.seen, ...ids]).size;
 		return { distinct, noProgress: this.pages > 0 && distinct === this.seen.size };
+	}
+
+	/**
+	 * Two routes can answer the same browser request. Retain both observations
+	 * before selecting a payload: an absent alternate list cannot replace a
+	 * readable primary, and neither route may erase identities or page obligations.
+	 */
+	observeRoutes<T extends PageObservation>(primary: T, alternate?: T): { selected: T; added: Set<string> } {
+		this.retain(primary);
+		if (alternate !== undefined) this.retain(alternate);
+		const selected = alternate === undefined ||
+			(alternate.continuation.kind === "unknown" && alternate.continuation.reason === "unreadable_list" && primary.continuation.kind === "unproven")
+			? primary : alternate;
+		const added = this.observePage(selected);
+		if (primary.rejectedRows > 0 || (alternate?.rejectedRows ?? 0) > 0) this.fail("discarded_rows");
+		return { selected, added };
+	}
+
+	/** Page facts survive route selection, independently of which rows are published. */
+	private retain(page: PageObservation): void {
+		if (page.continuation.kind === "unbound") return;
+		for (const id of page.ids) this.observed.add(id);
+		this.addTotals({ exactTotals: page.exactTotals ?? [], totalConflict: page.totalConflict ?? false });
+		if (page.lastPage !== undefined) {
+			if (this.lastPage !== null && this.lastPage !== page.lastPage) this.fail("pagination_bound_changed");
+			this.lastPage ??= page.lastPage;
+		}
+		this.linkedPage = Math.max(this.linkedPage, page.linkedPage ?? 0);
+		if (page.continuation.kind === "next") this.requests.add(page.continuation.url);
 	}
 
 	/**
@@ -125,22 +161,17 @@ export class InventoryEvidence {
 		}
 		if (noProgress) this.fail("no_progress");
 		this.pages += 1;
-		if (page.lastPage !== undefined) {
-			if (this.lastPage !== null && this.lastPage !== page.lastPage) this.fail("pagination_bound_changed");
-			this.lastPage ??= page.lastPage;
-		}
-		this.linkedPage = Math.max(this.linkedPage, page.linkedPage ?? 0);
+		this.retain(page);
 		if (continuation.kind === "unknown") this.fail(continuation.reason);
 		else if (continuation.kind === "end") {
-			// An end proves the walk complete only at the last page any page advertised.
-			if (this.lastPage !== null && request.page !== this.lastPage) this.fail("end_before_advertised_last");
-			if (request.page < this.linkedPage) this.fail("end_before_linked_page");
 			this.endProven = true;
 		} else if (continuation.kind === "next") {
 			if (this.lastPage !== null && request.page >= this.lastPage) this.fail("continuation_beyond_advertised_last");
 			else if (request.page >= this.pageLimit) this.fail("page_limit_reached");
 			else this.request = { url: continuation.url, page: request.page + 1 };
 		}
+		const contradiction = this.invariantFailure();
+		if (contradiction !== null) this.fail(contradiction);
 		return added;
 	}
 
@@ -166,10 +197,30 @@ export class InventoryEvidence {
 		this.failure ??= reason;
 	}
 
+	/** Every continuation and every success witness must satisfy the same facts. */
+	private invariantFailure(): string | null {
+		for (const request of this.requests) {
+			try {
+				const url = new URL(request);
+				if (["after", "before", "cursor"].some(key => url.searchParams.has(key))) return "unknown_continuation";
+			} catch {
+				return "unknown_continuation";
+			}
+		}
+		if (this.request === null) {
+			if (this.lastPage !== null && this.pages !== this.lastPage) return "end_before_advertised_last";
+			if (this.pages < this.linkedPage) return "end_before_linked_page";
+			if (Array.from(this.observed).some(id => !this.seen.has(id))) return "identity_mismatch";
+		}
+		return null;
+	}
+
 	/** Only the final distinct inventory can be compared against every route. */
 	decide(covered: number): string | null {
 		const distinct = this.seen.size;
 		if (this.failure !== null) return this.failure;
+		const contradiction = this.invariantFailure();
+		if (contradiction !== null) return contradiction;
 		const expected = this.expectedTotal;
 		if (expected !== null && expected !== distinct) return "total_mismatch";
 		if (covered !== distinct) return "coverage_mismatch";

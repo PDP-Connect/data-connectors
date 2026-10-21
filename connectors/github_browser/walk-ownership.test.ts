@@ -14,24 +14,28 @@ const event = JSON.parse(await readFile(new URL("./__fixtures__/synthetic/events
 const issue = JSON.parse(await readFile(new URL("./__fixtures__/synthetic/history-issue.json", import.meta.url), "utf8")).items[0];
 
 type Api = { link: string | null | undefined; data: unknown };
-async function collect(stream: string, api: (url: URL) => Api, html = owner) {
+async function collect(stream: string, api: (url: URL) => Api, html: string | ((url: URL) => string) = owner) {
 	const records: object[] = [];
 	const messages: Array<{ type: string; diagnostics?: unknown }> = [];
 	const requests: string[] = [];
+	const browserRequests: string[] = [];
 	const state: Record<string, unknown> = { [stream]: structuredClone(prior) };
 	await collectGitHubBrowser({
 		emit: async message => { messages.push(message); },
 		emitRecord: async (_stream, data) => { records.push(data); },
 		progress: async () => {}, requested: new Set([stream]), state,
 	}, {
-		openPage: async url => ({ requestedUrl: url, currentUrl: url, html }),
+		openPage: async url => {
+			browserRequests.push(url);
+			return { requestedUrl: url, currentUrl: url, html: typeof html === "string" ? html : html(new URL(url)) };
+		},
 		fetchPublicJson: async url => {
 			requests.push(url);
 			return { requestedUrl: url, responseUrl: url, status: 200, ...api(new URL(url)) };
 		},
 		now: () => new Date("2026-01-01T00:00:00Z"), sleep: async () => {},
 	});
-	return { records, messages, state, requests };
+	return { records, messages, state, requests, browserRequests };
 }
 
 function assertWithheld(result: Awaited<ReturnType<typeof collect>>, stream: string) {
@@ -258,3 +262,153 @@ for (const stream of ["starred", "repositories"] as const) {
 		});
 	}
 }
+
+const inventoryPage = (stream: "repositories" | "starred", names: string[], pager = "", total?: number) => {
+	const tab = stream === "starred" ? "stars" : "repositories";
+	return owner + (total === undefined ? "" : `<nav><a data-tab-item="${tab}" href="/sample-user?tab=${tab}"><span class="Counter">${total}</span></a></nav>`) +
+		`<div id="${stream === "starred" ? "user-starred-repos" : "user-repositories-list"}"><ul>${names.map(name => `<li><h3><a href="/sample-user/${name}">${name}</a></h3></li>`).join("")}</ul>${pager}</div>`;
+};
+const disabledNext = '<div class="pagination"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
+
+for (const stream of ["repositories", "starred"] as const) {
+	test(`${stream} cannot use a retained total or REST reconciliation to erase a linked-page floor`, async () => {
+		const tab = stream === "starred" ? "stars" : "repositories";
+		const result = await collect(stream, () => ({ link: null, data: ["a", "b", "c"].map(name => ({ full_name: `sample-user/${name}`, html_url: `https://github.com/sample-user/${name}` })) }), url => {
+			if (!url.searchParams.has("page")) return owner;
+			const page = Number(url.searchParams.get("page"));
+			const pager = page === 3 ? "" : `<div class="pagination"><a rel="next" href="/sample-user?page=${page + 1}&amp;tab=${tab}">Next</a>${page === 1 ? `<a href="/sample-user?page=7&amp;tab=${tab}">7</a>` : ""}</div>`;
+			return inventoryPage(stream, [["a"], ["b"], ["c"]][page - 1] ?? [], pager, stream === "repositories" && page === 1 ? 3 : undefined);
+		});
+		assertWithheld(result, stream);
+		assert.equal(cause(result), "end_before_linked_page");
+	});
+}
+
+test("a terminal starred fallback cannot drop an identity observed on the primary route", async () => {
+	const result = await collect("starred", () => ({ link: null, data: [] }), url => url.pathname.startsWith("/stars/")
+		? inventoryPage("starred", ["a"], disabledNext)
+		: inventoryPage("starred", ["a", "b"]));
+	assertWithheld(result, "starred");
+	assert.equal(cause(result), "identity_mismatch");
+});
+
+for (const stream of ["repositories", "starred"] as const) {
+	for (const starsRoute of stream === "starred" ? [false, true] : [false]) {
+		for (const total of [undefined, 1]) {
+			for (const numericPage of [false, true]) {
+				test(`${stream} rejects ${numericPage ? "page plus cursor" : "cursor-only"} Next on ${starsRoute ? "stars" : "profile"} route with total ${total}`, async () => {
+					const result = await collect(stream, () => ({ link: null, data: [] }), url => {
+						if (!url.searchParams.has("page")) return owner;
+						if (starsRoute && !url.pathname.startsWith("/stars/")) return inventoryPage(stream, ["a"]);
+						const target = starsRoute ? "/stars/sample-user?" : `/sample-user?tab=${stream === "starred" ? "stars" : "repositories"}&amp;`;
+						return Number(url.searchParams.get("page")) === 1
+							? inventoryPage(stream, ["a"], `<div class="pagination"><a rel="next" class="next_page" href="${target}${numericPage ? "page=2&amp;" : ""}after=SKIP">Next</a></div>`, total)
+							: inventoryPage(stream, ["c"], disabledNext);
+					});
+					assertWithheld(result, stream);
+					assert.ok(result.browserRequests.every(url => !new URL(url).searchParams.has("after")));
+				});
+			}
+		}
+	}
+}
+
+// Exhaust all short walk lengths, advertised floors, and independent end witnesses.
+// The oracle describes source obligations, independently of the walk's decision.
+test("generated walks satisfy every advertised page on every successful decision", () => {
+	let successes = 0;
+	let contradictions = 0;
+	for (let length = 1; length <= 4; length += 1) {
+		for (let floor = 1; floor <= 5; floor += 1) {
+			for (const witness of ["end", "total", "reconcile"] as const) {
+				const evidence = new InventoryEvidence("https://github.com/sample-user?page=1&tab=repositories");
+				for (let page = 1; page <= length; page += 1) {
+					evidence.observePage({ ids: [`r${page}`], rowsComplete: true, rejectedRows: 0,
+						...(page === 1 ? { linkedPage: floor } : {}),
+						continuation: page < length ? { kind: "next", url: `https://github.com/sample-user?page=${page + 1}&tab=repositories` }
+							: { kind: witness === "end" ? "end" : "unproven" } });
+				}
+				if (witness === "total") evidence.addTotals({ exactTotals: [length], totalConflict: false });
+				if (witness === "reconcile") {
+					const independent = new InventoryEvidence("https://api.github.com/users/sample-user/starred?page=1");
+					independent.observePage({ ids: Array.from({ length }, (_, i) => `r${i + 1}`), rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } });
+					evidence.reconcile(independent);
+				}
+				const decision = evidence.decide(length);
+				if (length < floor) {
+					assert.equal(decision, "end_before_linked_page", JSON.stringify({ length, floor, witness }));
+					contradictions += 1;
+				} else {
+					assert.equal(decision, null, JSON.stringify({ length, floor, witness }));
+					successes += 1;
+				}
+			}
+		}
+	}
+	assert.ok(successes > 0 && contradictions > 0);
+});
+
+test("generated fallback sequences conserve every observed identity without unioning payloads", () => {
+	const start = "https://github.com/sample-user?page=1&tab=stars";
+	const names = ["a", "b", "c"];
+	const subset = (mask: number) => names.filter((_, i) => (mask & (1 << i)) !== 0);
+	let complete = 0;
+	let withheld = 0;
+	for (let primaryMask = 1; primaryMask < 8; primaryMask += 1) {
+		for (let alternateMask = 1; alternateMask < 8; alternateMask += 1) {
+			for (const witness of ["end", "total", "reconcile", "later-page"] as const) {
+				const evidence = new InventoryEvidence(start);
+				const primary = subset(primaryMask);
+				const alternate = subset(alternateMask);
+				const missing = primary.filter(id => !alternate.includes(id));
+				const { selected, added } = evidence.observeRoutes(
+					{ ids: primary, rowsComplete: true, rejectedRows: 0, continuation: { kind: "unproven" } },
+					{ ids: alternate, rowsComplete: true, rejectedRows: 0, continuation: witness === "later-page"
+						? { kind: "next", url: "https://github.com/stars/sample-user?page=2" }
+						: { kind: witness === "end" ? "end" : "unproven" } },
+				);
+				assert.deepEqual(selected.ids, alternate);
+				assert.deepEqual([...added], alternate, "an omitted primary identity must not be invented in the selected payload");
+				let covered = alternate.length;
+				if (witness === "later-page") {
+					const tail = missing.length > 0 ? missing : ["d"];
+					evidence.observePage({ ids: tail, rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } });
+					covered += tail.length;
+				}
+				if (witness === "total") evidence.addTotals({ exactTotals: [covered], totalConflict: false });
+				if (witness === "reconcile") {
+					const independent = new InventoryEvidence("https://api.github.com/users/sample-user/starred?page=1");
+					independent.observePage({ ids: alternate, rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } });
+					evidence.reconcile(independent);
+				}
+				const shouldComplete = witness === "later-page" || missing.length === 0;
+				assert.equal(evidence.decide(covered), shouldComplete ? null : "identity_mismatch", JSON.stringify({ primary, alternate, witness }));
+				if (shouldComplete) complete += 1;
+				else withheld += 1;
+			}
+		}
+	}
+	assert.ok(complete > 0 && withheld > 0);
+});
+
+test("generated cursor contradictions stop the owner before another request, despite later witnesses", () => {
+	for (let length = 1; length <= 4; length += 1) {
+		for (let cursorPage = 1; cursorPage <= length; cursorPage += 1) {
+			for (const key of ["after", "before", "cursor"]) {
+				for (const value of ["", "SKIP"]) {
+					const evidence = new InventoryEvidence("https://github.com/sample-user?page=1&tab=stars");
+					for (let page = 1; page <= cursorPage; page += 1) {
+						const next = `https://github.com/sample-user?page=${page + 1}&tab=stars${page === cursorPage ? `&${key}=${value}` : ""}`;
+						evidence.observePage({ ids: [`r${page}`], rowsComplete: true, rejectedRows: 0, continuation: { kind: "next", url: next } });
+					}
+					assert.equal(evidence.next, null);
+					const independent = new InventoryEvidence("https://api.github.com/users/sample-user/starred?page=1");
+					independent.observePage({ ids: Array.from(evidence.identities), rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } });
+					evidence.addTotals({ exactTotals: [evidence.identities.size], totalConflict: false });
+					evidence.reconcile(independent);
+					assert.equal(evidence.decide(evidence.identities.size), "unknown_continuation");
+				}
+			}
+		}
+	}
+});

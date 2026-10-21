@@ -64,6 +64,13 @@ walk may not end before the highest page any page linked to. Forward numbered
 links without an enabled Next withhold the snapshot. GitHub paginates stars lists
 longer than one page with `after=` cursors, which are not followed yet, so those
 lists are withheld; a single page of stars publishes.
+The walk checks the linked-page floor for every successful decision, including
+retained exact totals and REST reconciliation. First-page fallback observations
+enter the owner before it selects a payload: every observed identity remains a
+lower bound on that inventory. A smaller alternate payload cannot publish unless
+later pages account for the missing identities. Payloads from partial routes are
+not unioned. The same invariant check rejects cursor-bearing successors, including
+a Next URL that also has a numeric page, before the walk issues another request.
 For repositories/starred, evidence stays binding across routes and pages. Rejected
 entries, duplicate identities (even unchanged rows), and later pages
 without new identities remain failures even if a later page or counter looks complete.

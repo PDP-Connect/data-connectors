@@ -249,27 +249,18 @@ export async function collectGitHubBrowser(
 					const { distinct, noProgress } = evidence.previewPage(parsed.rows.map(row => row.id));
 					return inspectInventoryPage(page, stream, username, request.page, distinct, parsed.rejectedRows, noProgress);
 				};
-				let page = await sourceRequest(() => services.openPage(request.url), counts());
-				let parsed = inventoryRows(stream, page.html);
-				let proof = inspect(page, parsed);
-				evidence.addTotals(proof);
-				if (stream === "starred" && request.page === 1 && (proof.reason === "terminal_unverified" || proof.reason === "unreadable_list")) {
-					// The stars route is the same first page; its totals stay binding either way.
-					const primary = { parsed, proof };
-					page = await sourceRequest(() => services.openPage(`${GITHUB}/stars/${username}?page=1`), counts());
-					parsed = inventoryRows(stream, page.html);
-					proof = inspect(page, parsed);
-					evidence.addTotals(proof);
-					// An unreadable alternate route must not discard a readable primary list.
-					if (proof.reason === "unreadable_list" && primary.proof.reason === "terminal_unverified") {
-						parsed = primary.parsed;
-						proof = primary.proof;
-					}
-				}
-				const added = evidence.observePage({ ids: parsed.rows.map(row => row.id),
-					rowsComplete: parsed.entriesComplete, rejectedRows: parsed.rejectedRows, continuation: proof.continuation,
-					...(proof.linkedPage === undefined ? {} : { linkedPage: proof.linkedPage }) });
-				for (const row of parsed.rows) {
+				const read = async (url: string) => {
+					const page = await sourceRequest(() => services.openPage(url), counts());
+					const parsed = inventoryRows(stream, page.html);
+					return { ...inspect(page, parsed), rows: parsed.rows, ids: parsed.rows.map(row => row.id),
+						rowsComplete: parsed.entriesComplete, rejectedRows: parsed.rejectedRows };
+				};
+				const primary = await read(request.url);
+				const alternate = stream === "starred" && request.page === 1 &&
+					(primary.reason === "terminal_unverified" || primary.reason === "unreadable_list")
+					? await read(`${GITHUB}/stars/${username}?page=1`) : undefined;
+				const { selected, added } = evidence.observeRoutes(primary, alternate);
+				for (const row of selected.rows) {
 					if (added.delete(row.id) && await emitEntity(stream, row)) covered += 1;
 				}
 			}
