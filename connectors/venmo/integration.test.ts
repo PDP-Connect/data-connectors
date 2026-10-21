@@ -218,6 +218,61 @@ test("collectTransactions emits zone-less dates and stores a normalized latest c
 	});
 });
 
+test("collectTransactions chooses the latest instant across fractional precisions and pages", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		"/stories/target-or-actor/1111111111111111111": [
+			{
+				body: {
+					data: [
+						story("4010", "2026-07-02T00:00:00Z"),
+						story("4011", "2026-07-02T00:00:00.1Z"),
+					],
+				},
+			},
+			{ body: { data: [story("4012", "2026-07-02T00:00:00.12Z")] } },
+			{ body: { data: [] } },
+		],
+	});
+	const { ctx, emitted, messages } = makeCtx({}, ["transactions"]);
+	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.deepEqual(
+		emitted.map((entry) => entry.data.date_created),
+		[
+			"2026-07-02T00:00:00Z",
+			"2026-07-02T00:00:00.1Z",
+			"2026-07-02T00:00:00.12Z",
+		],
+	);
+	const state = messages.find(
+		(message) => message.type === "STATE" && message.stream === "transactions",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.deepEqual(state.cursor, {
+		last_seen_date_created: "2026-07-02T00:00:00.12Z",
+	});
+
+	const fractionOnly = makeScriptedFetch({
+		"/stories/target-or-actor/1111111111111111111": [
+			{
+				body: {
+					data: [
+						story("4013", "2026-07-02T00:00:00.1Z"),
+						story("4014", "2026-07-02T00:00:00.12Z"),
+					],
+				},
+			},
+			{ body: { data: [] } },
+		],
+	});
+	const fractionResult = await collectTransactions(
+		makeCtx({}, ["transactions"]).ctx,
+		fractionOnly.fetchPath,
+		OWNER_ID,
+		NO_DELAY,
+	);
+	assert.equal(fractionResult.latestSeenAt, "2026-07-02T00:00:00.12Z");
+});
+
 test("collectTransactions: a short non-empty page does not terminate the walk", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [

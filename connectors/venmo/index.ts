@@ -349,6 +349,22 @@ export async function fetchTransactionsPage(
 	return (JSON.parse(body) as VenmoStoriesResponse).data ?? [];
 }
 
+/** Compare normalized UTC timestamps without losing sub-millisecond precision. */
+function isLaterVenmoDate(candidate: string, current: string): boolean {
+	const candidateSecond = candidate.slice(0, 19);
+	const currentSecond = current.slice(0, 19);
+	if (candidateSecond !== currentSecond) {
+		return candidateSecond > currentSecond;
+	}
+	const candidateFraction =
+		candidate[19] === "." ? candidate.slice(20, -1) : "";
+	const currentFraction = current[19] === "." ? current.slice(20, -1) : "";
+	const width = Math.max(candidateFraction.length, currentFraction.length);
+	return (
+		candidateFraction.padEnd(width, "0") > currentFraction.padEnd(width, "0")
+	);
+}
+
 async function emitTransactionsPage(
 	emitRecord: BrowserCollectContext["emitRecord"],
 	stories: VenmoStory[],
@@ -365,7 +381,10 @@ async function emitTransactionsPage(
 		modeled += 1;
 		const createdAt =
 			typeof record.date_created === "string" ? record.date_created : null;
-		if (createdAt && (!latestSeenAt || createdAt > latestSeenAt)) {
+		if (
+			createdAt &&
+			(!latestSeenAt || isLaterVenmoDate(createdAt, latestSeenAt))
+		) {
 			latestSeenAt = createdAt;
 		}
 	}
@@ -418,7 +437,10 @@ export async function collectTransactions(
 				stories,
 				ownerId,
 			);
-			if (pageLatest && (!latestSeenAt || pageLatest > latestSeenAt)) {
+			if (
+				pageLatest &&
+				(!latestSeenAt || isLaterVenmoDate(pageLatest, latestSeenAt))
+			) {
 				latestSeenAt = pageLatest;
 			}
 			totalSeen += stories.length;
