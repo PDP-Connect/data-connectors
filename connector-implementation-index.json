@@ -22798,7 +22798,7 @@
 					{
 						"name": "nutrition",
 						"required": false,
-						"description": "Exactly one nutrition row per ordered product per run, keyed by `product_id` and joinable to `order_items`. `status` says what the lookup concluded: `matched` (facts from Amazon, Whole Foods or USDA FoodData Central) or `not_found`, `error`, `blocked` (no facts). Fact fields are valid only when `status` is `matched`. The connector keeps no per-key state and a non-matched row has the same key as a matched one, so a store that upserts by key lets a later non-matched row replace an earlier matched row: consumers MUST NOT apply the fact fields of a row whose `status` is not `matched`. Rows stored before `status` and `cause` existed have neither; read their status from `source` (`not_found`, `error` or `blocked` for a failure, otherwise matched).",
+						"description": "Exactly one nutrition row per ordered product per run, keyed by `product_id` and joinable to `order_items`. `status` says what the lookup concluded: `matched` (facts from Amazon, Whole Foods or USDA FoodData Central) or `not_found`, `error`, `blocked` (no facts). Fact fields are valid only when `status` is `matched`. The connector keeps no per-key state and a non-matched row has the same key as a matched one, so a store that upserts by key lets a later non-matched row replace an earlier matched row: consumers MUST NOT apply the fact fields of a row whose `status` is not `matched`. This is not new: connector 0.3.34 already emits same-key failure rows (`source` = not_found, error or blocked); splitting outcomes into their own stream is a separate, pending decision. Rows stored before `status` and `cause` existed have neither; read their status from `source` (`not_found`, `error` or `blocked` for a failure, otherwise matched).",
 						"display": {
 							"label": "Nutrition facts",
 							"detail": "A nutrition row for every ordered product: facts when a full panel was read, otherwise the reason there are none (not found, could not be read, or blocked). Facts of a row that was not matched must not replace stored facts."
@@ -22935,12 +22935,14 @@
 										"http_error",
 										"navigation_failed",
 										"unrecognized_page",
+										"identity_conflict",
+										"identity_unbound",
 										"panel_partial",
 										"usda_request_failed",
 										"no_match",
 										null
 									],
-									"description": "Stable reason code for a non-matched row; null on a matched row. blocked: robot_check (a captcha or robot check). error: http_error (a page answered HTTP 4xx/5xx other than 404/410), navigation_failed (a page read threw or left the trusted origin), unrecognized_page (a 200 page that is not a known product or search page), panel_partial (this product's panel was seen but not fully read), usda_request_failed (the USDA lookup failed). not_found: no_match (every source answered and none had a usable panel). When several sources fail, robot_check wins, otherwise the first failure."
+									"description": "Stable reason code for a non-matched row; null on a matched row. blocked: robot_check (a captcha or robot check). error: http_error (a page answered HTTP 4xx/5xx other than 404/410), navigation_failed (a page read threw), unrecognized_page (a 200 page that is not a known product or search page), identity_conflict (a page that cannot be this product: another ASIN, order or origin, or an ambiguous main product), identity_unbound (a page with no identity evidence to bind it to this product), panel_partial (this product's panel was seen but not fully read), usda_request_failed (the USDA lookup failed). not_found: no_match (every source answered and none had a usable panel). When several sources fail, robot_check wins, otherwise the first failure."
 								}
 							},
 							"required": ["id", "product_id", "source", "confidence"]

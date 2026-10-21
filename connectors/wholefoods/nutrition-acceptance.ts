@@ -68,8 +68,10 @@ export function acceptNutrition(
  *  |-----------|---------------------|--------------------------------------------------|
  *  | blocked   | robot_check         | a page was a captcha / robot check               |
  *  | error     | http_error          | a page answered HTTP 4xx/5xx (not 404/410)       |
- *  | error     | navigation_failed   | a page read threw or left the trusted origin     |
+ *  | error     | navigation_failed   | a page read threw                                |
  *  | error     | unrecognized_page   | a 200 page that is not a known product/search page |
+ *  | error     | identity_conflict   | a page that cannot be this product: another ASIN, order or origin, or an ambiguous main product |
+ *  | error     | identity_unbound    | a page with no identity evidence to bind it to this product |
  *  | error     | panel_partial       | this product's panel was seen but not fully read |
  *  | error     | usda_request_failed | the USDA lookup failed                           |
  *  | not_found | no_match            | every source answered; none had a usable panel   |
@@ -83,6 +85,8 @@ export type NutritionNoMatch =
 				| "http_error"
 				| "navigation_failed"
 				| "unrecognized_page"
+				| "identity_conflict"
+				| "identity_unbound"
 				| "panel_partial"
 				| "usda_request_failed";
 	  }

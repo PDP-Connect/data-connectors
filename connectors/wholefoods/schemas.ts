@@ -99,8 +99,11 @@ export const orderItemsSchema = z.object({
  *     value connector 0.3.34 published) and `cause` is a stable reason code:
  *       blocked   robot_check          a page was a captcha / robot check
  *       error     http_error           a page answered HTTP 4xx/5xx (not 404/410)
- *       error     navigation_failed    a page read threw or left the trusted origin
+ *       error     navigation_failed    a page read threw
  *       error     unrecognized_page    a 200 page that is not a known product/search page
+ *       error     identity_conflict    a page that cannot be this product: another ASIN,
+ *                                      order or origin, or an ambiguous main product
+ *       error     identity_unbound     a page with no identity evidence to bind it
  *       error     panel_partial        this product's panel was seen but not fully read
  *       error     usda_request_failed  the USDA lookup failed
  *       not_found no_match             every source answered; none had a usable panel
@@ -112,7 +115,10 @@ export const orderItemsSchema = z.object({
  * The connector keeps no per-key state, and a non-matched row has the same
  * key as a matched one. A store that upserts by key lets a later non-matched
  * row replace an earlier matched row's facts. Consumers MUST NOT apply the
- * fact fields of a row whose status is not `matched`.
+ * fact fields of a row whose status is not `matched`. This is not new: the
+ * published 0.3.34 already emits same-key failure rows (`source` =
+ * not_found/error/blocked). Splitting outcomes into their own stream is a
+ * separate, pending decision.
  */
 const FAILURE_STATUSES = ["not_found", "error", "blocked"] as const;
 const CAUSES_BY_STATUS = {
@@ -121,6 +127,8 @@ const CAUSES_BY_STATUS = {
 		"http_error",
 		"navigation_failed",
 		"unrecognized_page",
+		"identity_conflict",
+		"identity_unbound",
 		"panel_partial",
 		"usda_request_failed",
 	],
@@ -131,6 +139,8 @@ const NUTRITION_CAUSES = [
 	"http_error",
 	"navigation_failed",
 	"unrecognized_page",
+	"identity_conflict",
+	"identity_unbound",
 	"panel_partial",
 	"usda_request_failed",
 	"no_match",

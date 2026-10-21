@@ -232,3 +232,26 @@ test("validateRecord routes a valid nutrition record through as ok", () => {
 	const result = validateRecord("nutrition", NUTRITION_RECORD);
 	assert.equal(result.ok, true);
 });
+
+test("nutrition schema accepts the identity causes and cross-checks them with the status", () => {
+	for (const cause of ["identity_conflict", "identity_unbound"] as const) {
+		const ok = nutritionSchema.safeParse({
+			...NO_FACTS,
+			source: "error",
+			status: "error",
+			cause,
+		});
+		assert.ok(ok.success, JSON.stringify(ok.error?.issues));
+		// An identity cause belongs to status error only.
+		for (const [status, source] of [
+			["blocked", "blocked"],
+			["not_found", "not_found"],
+		] as const) {
+			assert.equal(
+				nutritionSchema.safeParse({ ...NO_FACTS, source, status, cause }).success,
+				false,
+				`${status} cannot carry ${cause}`,
+			);
+		}
+	}
+});
