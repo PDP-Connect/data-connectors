@@ -912,3 +912,64 @@ test("a USDA serving in an unrecognised unit does not claim a per-100 g basis", 
 		"per 100 g",
 	);
 });
+
+// ─── Round 4: panel ends and glued labels ─────────────────────────────────
+
+test("the footnotes under a panel never supply rows", () => {
+	const perGram = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories 100 Total Fat 2g Total Carbohydrate 10g Sodium 5mg *Percent Daily Values are based on a 2,000 calorie diet. Calories per gram: Fat 9 Carbohydrate 4 Protein 4",
+		),
+	);
+	assert.equal(perGram?.proteinG, null);
+	assert.ok(!perGram?.coreStated.includes("protein"));
+	const allowance = parseAmazonProductNutritionDom(
+		panelOf(
+			"Total Fat 2g Total Carbohydrate 10g Protein 3g *Percent Daily Values Calories: 2,000 2,500",
+		),
+	);
+	assert.ok(allowance === null || allowance.calories === null);
+});
+
+test("an Ingredients heading without a colon ends the panel", () => {
+	const facts = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories 100 Total Fat 2g Total Carbohydrate 10g IngredientsWater, whey protein 20g",
+		),
+	);
+	assert.equal(facts?.proteinG, null);
+	assert.ok(!facts?.coreStated.includes("protein"));
+});
+
+test("an Ingredients line before the panel neither cuts the panel nor supplies rows", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content">Ingredients: whey protein 20g, sodium 5mg<div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g</div></div></body></html>`,
+	);
+	assert.equal(facts?.calories, 100);
+	assert.equal(facts?.proteinG, 3);
+	assert.equal(facts?.sodiumMg, null);
+});
+
+test("the Whole Foods panel ends at its footnotes and starts at its heading", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		`<html><body><div>Ingredients: whey protein 20g<h3>Nutrition Facts</h3><div>Calories 100 Total Fat 2g Total Carbohydrate 10g *Percent Daily Values Calories per gram: Fat 9 Carbohydrate 4 Protein 4</div></div></body></html>`,
+	);
+	assert.equal(facts?.proteinG, null);
+	assert.ok(!facts?.coreStated.includes("protein"));
+});
+
+test("plural and glued labels still state their rows", () => {
+	const plural = parseAmazonProductNutritionDom(
+		panelOf("Calories 100 Total Fat 2g Total Carbohydrates 10g Protein 3g"),
+	);
+	assert.equal(plural?.carbsG, 10);
+	const afterKcal = parseAmazonProductNutritionDom(
+		panelOf("150kcalTotal Fat3gTotal Carbohydrate10gProtein5g Calories 150"),
+	);
+	assert.equal(afterKcal?.fatG, 3);
+	const afterIu = parseAmazonProductNutritionDom(
+		panelOf("Calories 100 Total Fat 2g Total Carbohydrate 10g Vitamin D80IUProtein5g"),
+	);
+	assert.equal(afterIu?.vitaminDMcg, 2);
+	assert.equal(afterIu?.proteinG, 5);
+});

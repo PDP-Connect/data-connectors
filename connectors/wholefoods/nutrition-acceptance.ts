@@ -8,11 +8,12 @@
 // stored. Two things make an observation unfit, whatever its parse:
 //   - it does not state the core rows of a Nutrition Facts panel, so it would
 //     blank facts read earlier; and
-//   - it is a fuzzy USDA text match made while a page source was blocked or
-//     failed, so it would put another product's facts under this product's key
-//     on the strength of a lookup that could not check the real page.
+//   - it is a fuzzy USDA text match, which names another product, made while
+//     the product's own pages could still be speaking for it: one was blocked,
+//     failed or was not recognised, or one showed part of this product's panel.
+//     That is a degraded or partial read of this product, not "no panel".
 // The connector keeps no per-key record of which source produced the stored
-// row, so the second rule is stated against this run's page-source health.
+// row, so the second rule is stated against what this run's page sources said.
 
 import type { CoreNutritionRow, NutritionFacts } from "./types.ts";
 
@@ -32,12 +33,16 @@ export function hasCoreNutrition(facts: NutritionFacts): boolean {
 	);
 }
 
-/** Whether the page sources (Amazon product page, Whole Foods search and
- *  product pages) answered this run. `degraded` means one was blocked, returned
- *  an HTTP error, or threw: its silence is not "no panel on the page". */
-export interface PageSourceHealth {
-	readonly degraded: boolean;
-}
+/** What this run's page sources (Amazon product page, Whole Foods search and
+ *  product pages) said about THIS product's panel, when none of them gave a
+ *  complete one:
+ *  - `none`: every page source answered and none showed a core row, so the
+ *    product has no panel on the pages;
+ *  - `partial`: a source showed some core rows for this product but not all,
+ *    a partial render of a panel that may have been complete before;
+ *  - `unknown`: a source was blocked, failed, or showed no recognisable
+ *    product, so its silence says nothing. */
+export type PageSourceEvidence = "none" | "partial" | "unknown";
 
 /** A nutrition observation that may be emitted. `acceptNutrition` is the only
  *  way to obtain one, and row building takes nothing else. */
@@ -45,11 +50,11 @@ export type AcceptedNutrition = NutritionFacts & { readonly accepted: true };
 
 export function acceptNutrition(
 	facts: NutritionFacts | null,
-	pages: PageSourceHealth,
+	pages: PageSourceEvidence,
 ): AcceptedNutrition | null {
 	if (!(facts && hasCoreNutrition(facts))) return null;
 	const fuzzyUsda =
 		facts.source === "usda_fdc" && facts.usdaMatchMethod !== "upc";
-	if (fuzzyUsda && pages.degraded) return null;
+	if (fuzzyUsda && pages !== "none") return null;
 	return { ...facts, accepted: true as const };
 }

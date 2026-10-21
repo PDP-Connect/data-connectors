@@ -2802,3 +2802,116 @@ test("a good -> interstitial -> recovered refresh never swaps in another brand's
 		restore();
 	}
 });
+
+// ─── Round 4: a partial panel of this product is not "no panel" ───────────
+
+const AMAZON_PARTIAL_PANEL =
+	'<html><body><span id="productTitle">Banana Peppers</span><div id="nic-nutrition-facts">Calories 160 Total Fat 15g Total Carbohydrate 9g</div></body></html>';
+
+test("a partial Amazon panel for this product blocks a USDA text match", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				isAmazon(url) ? AMAZON_PARTIAL_PANEL : NO_PAGE_SOURCE(),
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a partial Whole Foods panel for this product blocks a USDA text match", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				isAmazon(url)
+					? AMAZON_PRODUCT_NO_PANEL
+					: url.includes("/search?")
+						? '<a href="/product/banana-peppers">Banana Peppers</a>'
+						: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Banana Peppers"}</script><h1>Banana Peppers</h1><div><h3>Nutrition Facts</h3><div>Calories 160 Total Fat 15g</div></div></body></html>',
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a partial panel of another product does not stop the USDA fallback", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				isAmazon(url)
+					? AMAZON_PRODUCT_NO_PANEL
+					: url.includes("/search?")
+						? '<a href="/product/pears">Pears</a>'
+						: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Pears"}</script><h1>Pears</h1><div><h3>Nutrition Facts</h3><div>Calories 160 Total Fat 15g</div></div></body></html>',
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.notEqual(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("an Amazon id=dp shell around interstitial text is not a product page", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				isAmazon(url)
+					? '<html><body><div id="dp"><p>Click the button below to continue shopping</p></div></body></html>'
+					: NO_PAGE_SOURCE(),
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a good -> partial -> recovered refresh never swaps in another brand's facts", async () => {
+	const restore = stubUsda([
+		usdaApple({
+			description: "Bananas, raw",
+			gtinUpc: null,
+			foodNutrients: usdaCoreNutrients,
+		}),
+	]);
+	let amazon = AMAZON_FULL_PANEL;
+	const nutritionRows = async () => {
+		const { harness } = await runCollectOrders(
+			degradingSite(() => amazon, [ONE_ROW_SEARCH]),
+			["nutrition"],
+		);
+		return harness.emitted.filter((r) => r.stream === "nutrition");
+	};
+	try {
+		assert.equal((await nutritionRows()).length, 1);
+		amazon =
+			'<html><body><span id="productTitle">Organic Bananas</span><div id="nic-nutrition-facts">Calories 150 Total Fat 8g Total Carbohydrate 37g</div></body></html>';
+		assert.deepEqual(await nutritionRows(), []);
+		amazon = AMAZON_FULL_PANEL;
+		const recovered = await nutritionRows();
+		assert.equal(recovered.length, 1);
+		assert.equal(recovered[0]?.data.source, "amazon_product_page");
+	} finally {
+		restore();
+	}
+});

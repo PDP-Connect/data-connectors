@@ -153,11 +153,28 @@ function readCalories(text: string): number | null {
 	return null;
 }
 
-/** Cut a container's text where its ingredients begin, so ingredient prose is
- *  never read as a panel row. */
-function beforeIngredients(text: string): string {
-	const at = text.search(/Ingredients?\s*:/i);
-	return at === -1 ? text : text.slice(0, at);
+/** Footnotes under a panel: the daily-value note and the energy table
+ *  ("Calories per gram: Fat 9 Carbohydrate 4 Protein 4", "Calories: 2,000
+ *  2,500"). None of it is a row of this product. */
+const PANEL_FOOTNOTE_RE =
+	/Percent Daily Values?|The\s*%\s*Daily Value|Calories\s*per\s*gram|Calories\s*:\s*2,?000/i;
+const PANEL_START_RE = /Calories/i;
+
+/** A panel's text up to its structural end: its footnotes, and an
+ *  `Ingredients` heading (with or without a colon) once the panel has
+ *  started. An ingredients line before the panel is not the panel's end, and
+ *  the caller does not take rows from it. */
+function cutPanelEnd(text: string): string {
+	const footnote = text.search(PANEL_FOOTNOTE_RE);
+	const body = footnote === -1 ? text : text.slice(0, footnote);
+	const starts = [
+		body.search(PANEL_START_RE),
+		panelLabels(body)[0]?.index ?? -1,
+	].filter((at) => at >= 0);
+	if (starts.length === 0) return body;
+	const start = Math.min(...starts);
+	const heading = body.slice(start).search(/Ingredients?/i);
+	return heading === -1 ? body : body.slice(0, start + heading);
 }
 
 /** Vitamin D: 1 mcg is 40 IU, the one unambiguous IU factor a panel row uses. */
@@ -262,6 +279,7 @@ const PANEL_ROWS: readonly (readonly [label: string, key: string, unit: MassUnit
 	["Total Fat", "Total Fat", "g"],
 	["Saturated Fat", "Saturated Fat", "g"],
 	["Trans Fat", "Trans Fat", "g"],
+	["Total Carbohydrates", "Total Carbohydrate", "g"],
 	["Total Carbohydrate", "Total Carbohydrate", "g"],
 	["Dietary Fiber", "Dietary Fiber", "g"],
 	["Cholesterol", "Cholesterol", "mg"],
@@ -273,6 +291,9 @@ const PANEL_ROWS: readonly (readonly [label: string, key: string, unit: MassUnit
 	["Iron", "Iron", "mg"],
 	["Vitamin D", "Vitamin D", "mcg"],
 ];
+/** The text before a label ends in an amount and its unit ("5mg", "150kcal"):
+ *  the run-together render puts the next label right after it. */
+const AFTER_AMOUNT_UNIT_RE = /\d\s*(?:mcg|mg|µg|μg|ug|g|iu|kcal|cal)$/i;
 const PANEL_LABEL_RE = new RegExp(
 	PANEL_ROWS.map(([label]) => label).join("|"),
 	"gi",
@@ -301,14 +322,17 @@ function readPanelRows(panelText: string): Map<string, Stated> {
 }
 
 /** Label occurrences that start a row. A label inside a longer word
- *  ("Environ" holds "iron") is not one; in the run-together render a label
- *  directly after a unit's last letter and starting with a capital
- *  ("5mgIron") is. */
+ *  ("Environ" holds "iron") is not one; in the run-together render a
+ *  capitalised label directly after an amount and its unit ("5mgIron",
+ *  "150kcalTotal Fat", "80IUProtein") is. */
 function panelLabels(panelText: string) {
 	return [...panelText.matchAll(PANEL_LABEL_RE)].filter((label) => {
 		const previous = panelText[label.index - 1];
 		if (previous === undefined || !/[A-Za-z]/.test(previous)) return true;
-		return /[gG]/.test(previous) && /[A-Z]/.test(label[0][0] ?? "");
+		return (
+			/[A-Z]/.test(label[0][0] ?? "") &&
+			AFTER_AMOUNT_UNIT_RE.test(panelText.slice(0, label.index))
+		);
 	});
 }
 
@@ -1263,7 +1287,11 @@ export function parseWholeFoodsProductPageDom(
 	const container =
 		nutritionHeading.closest("div, section, article") ??
 		nutritionHeading.parentElement;
-	const allText = container ? beforeIngredients(textOf(container)) : "";
+	const containerText = container ? textOf(container) : "";
+	const headingAt = containerText.search(NUTRITION_HEADING_RE);
+	const allText = cutPanelEnd(
+		headingAt === -1 ? containerText : containerText.slice(headingAt),
+	);
 	const calories = readCalories(allText);
 	if (calories === null) {
 		return structuredFacts();
@@ -1372,8 +1400,12 @@ export function parseAmazonProductNutritionDom(
 	// (the legacy script widens it the same way).
 	const panel =
 		table?.closest('.a-expander-content, [class*="nicSection"]') ?? table;
-	const allText = beforeIngredients(panelText(panel ?? important));
-	const calories = readCalories(allText);
+	// Rows come from the nutrient table itself; the enclosing expander can
+	// hold ingredient prose before or after it. Calories and the serving size
+	// are in the expander when the table has none.
+	const rowsText = cutPanelEnd(panelText(table ?? important));
+	const allText = cutPanelEnd(panelText(panel ?? important));
+	const calories = readCalories(rowsText) ?? readCalories(allText);
 	const upcMatch = /(?:UPC|ASIN|GTIN)[:\s]*([\d-]{8,14})/i.exec(
 		textOf(
 			document.querySelector(
@@ -1383,7 +1415,7 @@ export function parseAmazonProductNutritionDom(
 	);
 	const amazonUpc = normalizeGtin(upcMatch?.[1]);
 	if (calories === null && !amazonUpc) return null;
-	const rows = readPanelRows(allText);
+	const rows = readPanelRows(rowsText);
 	const get = (key: string): number | null => amountOf(rows.get(key) ?? null);
 	const ingredientsNode = document.querySelector(
 		'#ingredients_feature_div, [data-component="ingredients"]',

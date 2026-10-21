@@ -22,9 +22,10 @@ import { nutritionSchema, validateRecord } from "./schemas.ts";
 const AMAZON_PANEL = `<html><body><div id="nic-nutrition-facts">Calories 150 Total Fat 8g Total Carbohydrate 37g Protein 3g</div></body></html>`;
 
 function acceptedAmazonRow() {
-	const facts = acceptNutrition(parseAmazonProductNutritionDom(AMAZON_PANEL), {
-		degraded: false,
-	});
+	const facts = acceptNutrition(
+		parseAmazonProductNutritionDom(AMAZON_PANEL),
+		"none",
+	);
 	assert.ok(facts);
 	return buildNutritionRecord("B012345678", "Source product", facts);
 }
@@ -144,7 +145,7 @@ test("nutrition parsing retains the legacy script's expanded nutrition payload",
 		<script type="application/ld+json">{"@type":"Product","gtin12":"012345678905","category":"Produce","ingredients":"Apples","nutrition":{"@type":"NutritionInformation","calories":"52","proteinContent":"0.3 g","carbohydrateContent":"14 g","fatContent":"0.2 g","saturatedFatContent":"0 g","transFatContent":"0 g","cholesterolContent":"0 mg","fiberContent":"2.4 g","sugarContent":"10 g","sodiumContent":"1 mg","potassiumContent":"107 mg","calciumContent":"6 mg","ironContent":"0.1 mg","vitaminDContent":"0 mcg"}}</script>
 	</head><body></body></html>`);
 	assert.ok(facts);
-	const accepted = acceptNutrition(facts, { degraded: false });
+	const accepted = acceptNutrition(facts, "none");
 	assert.ok(accepted);
 	const row = buildNutritionRecord("B012345678", "Apples", accepted);
 	assert.deepEqual(

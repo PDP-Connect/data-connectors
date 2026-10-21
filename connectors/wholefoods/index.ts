@@ -60,7 +60,12 @@ import {
 	parseWholeFoodsSearchResultDoms,
 	sameGtin,
 } from "./parsers.ts";
-import { type AcceptedNutrition, acceptNutrition, hasCoreNutrition } from "./nutrition-acceptance.ts";
+import {
+	type AcceptedNutrition,
+	acceptNutrition,
+	hasCoreNutrition,
+	type PageSourceEvidence,
+} from "./nutrition-acceptance.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
 	NutritionFacts,
@@ -568,7 +573,7 @@ function hasProductPageEvidence(html: string): boolean {
 }
 
 function hasAmazonProductEvidence(html: string): boolean {
-	return /\bid=["'](?:productTitle|dp)["']/i.test(html);
+	return /\bid=["']productTitle["']/i.test(html);
 }
 
 /** An ASIN or product URL the site says does not exist. That is an answer
@@ -583,21 +588,23 @@ async function lookupNutritionForProduct(
 ): Promise<NutritionOutcome> {
 	const query = cleanProductName(name);
 	let candidate: NutritionFacts | null = null;
-	// The one page-source health value. `unanswered` is why a page read could
-	// not say anything about this product, or null when every read did. An
+	// What the page sources said about this product's panel (see
+	// `PageSourceEvidence`), the one value that gates a fuzzy USDA match. An
 	// answer is positive evidence: a rendered product page, a 404/410 for a
 	// page that does not exist, a search result list or its no-results
 	// message. A captcha, a 5xx, a thrown error and a 200 page that shows no
-	// product are not answers. Nothing less than an answer from every page
-	// source lets a fuzzy USDA match stand in for the product.
-	let unanswered: "blocked" | "error" | null = null;
+	// product are not answers. `cause` names the strongest such failure.
+	let evidence: PageSourceEvidence = "none";
+	let cause: "blocked" | "error" | null = null;
 	const unable = (kind: "blocked" | "error") => {
-		if (unanswered !== "blocked") unanswered = kind;
+		evidence = "unknown";
+		if (cause !== "blocked") cause = kind;
 	};
-	const pages = {
-		get degraded() {
-			return unanswered !== null;
-		},
+	// A source showed some core rows of this product, but not a full panel.
+	const sawPartialPanel = (facts: NutritionFacts | null) => {
+		if (facts && facts.coreStated.length > 0 && evidence === "none") {
+			evidence = "partial";
+		}
 	};
 	try {
 		const status = await navigateAndSettle(
@@ -615,8 +622,9 @@ async function lookupNutritionForProduct(
 			unable("error");
 		} else {
 			candidate = parseAmazonProductNutritionDom(amazonHtml);
-			const direct = acceptNutrition(candidate, pages);
+			const direct = acceptNutrition(candidate, evidence);
 			if (direct) return direct;
+			sawPartialPanel(candidate);
 			if (!(candidate || hasAmazonProductEvidence(amazonHtml))) unable("error");
 		}
 	} catch {
@@ -685,13 +693,14 @@ async function lookupNutritionForProduct(
 								actualName && expectedName && actualName === expectedName,
 							);
 							const verified =
-								sameUpc || sameName ? acceptNutrition(facts, pages) : null;
+								sameUpc || sameName ? acceptNutrition(facts, evidence) : null;
 							if (verified) return verified;
 							if (facts && !sameUpc && !sameName) {
 								// A readable page for another product: an answer.
 								continue;
 							}
 							if (facts) {
+								sawPartialPanel(facts);
 								candidate = {
 									...facts,
 									upc: facts.upc ?? candidate?.upc ?? null,
@@ -731,13 +740,13 @@ async function lookupNutritionForProduct(
 					rawNutritionText: candidate?.rawNutritionText ?? null,
 					upc: candidate?.upc ?? usda.upc,
 				},
-				pages,
+				evidence,
 			);
 			if (merged) return merged;
 		}
-		return acceptNutrition(candidate, pages) ?? unanswered ?? "not_found";
+		return acceptNutrition(candidate, evidence) ?? cause ?? "not_found";
 	} catch {
-		return acceptNutrition(candidate, pages) ?? unanswered ?? "error";
+		return acceptNutrition(candidate, evidence) ?? cause ?? "error";
 	}
 }
 
