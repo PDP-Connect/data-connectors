@@ -1797,7 +1797,7 @@ test("collectAllStreams: invalid UTF-8 in a title, snippet or folder name withho
 			seed: noteQueryResponse(),
 			broken: note({ TitleEncrypted: { value: INVALID_UTF8 } }),
 			repaired: note({ TitleEncrypted: { value: b64("Repaired title") } }),
-			emitted: { id: "note-text", text: "Repaired title" },
+			emitted: { id: "note-text", value: "Repaired title" },
 		},
 		{
 			stream: "notes",
@@ -1806,7 +1806,7 @@ test("collectAllStreams: invalid UTF-8 in a title, snippet or folder name withho
 			seed: noteQueryResponse(),
 			broken: note({ SnippetEncrypted: { value: INVALID_UTF8 } }),
 			repaired: note({ SnippetEncrypted: { value: b64("Repaired snippet") } }),
-			emitted: { id: "note-text", text: "Repaired snippet" },
+			emitted: { id: "note-text", value: "Repaired snippet" },
 		},
 		{
 			stream: "folders",
@@ -1815,7 +1815,7 @@ test("collectAllStreams: invalid UTF-8 in a title, snippet or folder name withho
 			seed: folderQueryResponse(),
 			broken: folder(INVALID_UTF8),
 			repaired: folder(b64("Repaired folder")),
-			emitted: { id: "folder-text", text: "Repaired folder" },
+			emitted: { id: "folder-text", value: "Repaired folder" },
 		},
 	];
 	const stateOf = (harness: ReturnType<typeof makeRecordingEmit>, stream: string) =>
@@ -1855,7 +1855,7 @@ test("collectAllStreams: invalid UTF-8 in a title, snippet or folder name withho
 			assert.deepEqual(
 				retry.emitted.map((record) => ({
 					id: record.data.id,
-					text: record.data[field],
+					value: record.data[field],
 				})),
 				[emitted],
 			);

@@ -86,6 +86,11 @@ test("decodeBase64Text: invalid UTF-8 is not text, and an encoded U+FFFD is", as
 		decodeBase64Text(Buffer.from([0x41, 0xc3, 0x28]).toString("base64")),
 		null,
 	);
+	// A leading BOM is source text too, not a marker to strip.
+	assert.equal(
+		decodeBase64Text(Buffer.from("\uFEFFx", "utf-8").toString("base64")),
+		"\uFEFFx",
+	);
 	// A replacement character the source really encoded is source text.
 	assert.equal(
 		decodeBase64Text(Buffer.from("a\uFFFDb", "utf-8").toString("base64")),
