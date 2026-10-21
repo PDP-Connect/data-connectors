@@ -22587,7 +22587,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.34",
+				"version": "0.3.35",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -22798,10 +22798,10 @@
 					{
 						"name": "nutrition",
 						"required": false,
-						"description": "Nutrition facts or observed lookup outcome per unique product. Sources are the Whole Foods product page and USDA FoodData Central. Joins to `order_items` on `product_id`.",
+						"description": "Nutrition facts per unique product. Sources are Amazon, Whole Foods, and USDA FoodData Central. Joins to `order_items` on `product_id`.",
 						"display": {
 							"label": "Nutrition facts",
-							"detail": "Nutrition facts when found, or a not found, blocked, or error outcome when lookup fails."
+							"detail": "Nutrition facts when a lookup reads a complete panel. A lookup that fails or finds only part of a panel adds no row and leaves stored facts as they are."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -22818,6 +22818,8 @@
 									"type": "string",
 									"enum": [
 										"wholefoods_product_page",
+										"wholefoods_structured_data",
+										"amazon_product_page",
 										"usda_fdc",
 										"not_found",
 										"error",
@@ -22857,6 +22859,69 @@
 								},
 								"id": {
 									"type": "string"
+								},
+								"added_sugar_g": {
+									"type": ["number", "null"]
+								},
+								"allergens": {
+									"type": ["string", "null"]
+								},
+								"calcium_mg": {
+									"type": ["number", "null"]
+								},
+								"category": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"cholesterol_mg": {
+									"type": ["number", "null"]
+								},
+								"ingredients": {
+									"type": ["string", "null"]
+								},
+								"iron_mg": {
+									"type": ["number", "null"]
+								},
+								"highlights": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"potassium_mg": {
+									"type": ["number", "null"]
+								},
+								"raw_nutrition_text": {
+									"type": ["string", "null"]
+								},
+								"saturated_fat_g": {
+									"type": ["number", "null"]
+								},
+								"trans_fat_g": {
+									"type": ["number", "null"]
+								},
+								"upc": {
+									"type": ["string", "null"]
+								},
+								"usda_brand": {
+									"type": ["string", "null"]
+								},
+								"usda_description": {
+									"type": ["string", "null"]
+								},
+								"usda_fdc_id": {
+									"type": ["integer", "null"]
+								},
+								"usda_match_method": {
+									"type": ["string", "null"]
+								},
+								"vitamin_d_mcg": {
+									"type": ["number", "null"]
+								},
+								"type": {
+									"type": ["string"]
 								}
 							},
 							"required": ["id", "product_id", "source", "confidence"]
