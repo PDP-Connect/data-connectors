@@ -790,7 +790,13 @@ export async function collectLinkedIn(
 	}
 	const ownerEvidence = profileEvidence(meResult, dashProfile);
 
-	const sink: StreamSink = { emit, emitRecord, progress, isRecordSelected: ctx.isRecordSelected };
+	const sink: StreamSink = {
+		emit,
+		emitRecord,
+		progress,
+		isRecordSelected: ctx.isRecordSelected,
+		reportStreamFailure: ctx.reportStreamFailure,
+	};
 
 	if (wantsProfileFields) {
 		await emitRows(
@@ -893,12 +899,21 @@ export async function collectLinkedIn(
 				pageTotal: connectionsResult.total, confirmation,
 			});
 		const connectionsComplete = !evidenceReason;
+		// A failed connections page is a failed read: HTTP 401/403 means
+		// LinkedIn rejected the session, anything else (429, 5xx, a thrown
+		// fetch) means the read did not complete.
+		const readFailure = connectionsComplete || terminationReason !== "page_error"
+			? undefined
+			: /^http_40[13]$/u.test(connectionsResult.error ?? "")
+				? "session_rejected" as const
+				: "read_failed" as const;
 		await emitRows(
 			sink,
 			"connections",
 			rows,
 			{
 				enumerated: connectionsComplete,
+				...(readFailure === undefined ? {} : { readFailure }),
 				gapReason: "connectionFieldsUnreadable",
 				diagnostics: {
 					evidence_reason: evidenceReason,
@@ -951,6 +966,7 @@ interface StreamSink {
 	emit: BrowserCollectContext["emit"];
 	emitRecord: BrowserCollectContext["emitRecord"];
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
+	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 }
 
 type RowGapReason =
@@ -976,12 +992,21 @@ async function emitRows(
 		diagnostics?: Record<string, unknown>;
 		enumerated: boolean;
 		gapReason: RowGapReason;
+		/** The walk stopped because a request failed, not because the end was
+		 *  unproven: a rejected session ends the run, any other failure is a
+		 *  failed read of this stream. */
+		readFailure?: "read_failed" | "session_rejected";
 	},
 ): Promise<void> {
 	const { gapReason } = options;
 	await reportRowIssues(stream, rows, sink.progress);
 	for (const record of rows.records) {
 		await sink.emitRecord(stream, record);
+	}
+	if (options.readFailure === "session_rejected") {
+		throw new Error(
+			`linkedin_session_dead: LinkedIn rejected the session while reading ${stream}; manual login required in the connector's browser profile`,
+		);
 	}
 	const selectedCount = rows.records.filter((record) => sink.isRecordSelected?.(stream, record) ?? true).length;
 	if (options.enumerated && rows.covered === rows.considered && selectedCount === rows.records.length) {
@@ -993,23 +1018,34 @@ async function emitRows(
 		(stream !== "connections" || options.diagnostics?.missing_urn_count === 0)) {
 		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
 	}
+	const diagnostics = {
+		...(rows.covered < rows.considered
+			? { source_reason: ROW_GAP_REASON[gapReason] }
+			: {}),
+		selected_count: selectedCount,
+		considered: rows.considered,
+		covered: rows.covered,
+		omitted_rows: rows.omittedRows,
+		unavailable_fields: rows.unavailableFields,
+		...options.diagnostics,
+	};
+	const recoveryHint = { action: "retry_by_runtime", retryable: true };
+	if (options.readFailure === "read_failed") {
+		const message = `LinkedIn stopped returning ${stream} pages before the list ended; covered entries are upserted only`;
+		if (sink.reportStreamFailure)
+			await sink.reportStreamFailure(stream, message, { recoveryHint, diagnostics });
+		else
+			await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed",
+				recovery_hint: recoveryHint, message, diagnostics });
+		return;
+	}
 	await sink.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason: "linkedin_enumeration_unproven",
-		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		recovery_hint: recoveryHint,
 		message: `LinkedIn ${stream} enumeration is unproven; covered entries are upserted only`,
-		diagnostics: {
-			...(rows.covered < rows.considered
-				? { source_reason: ROW_GAP_REASON[gapReason] }
-				: {}),
-			selected_count: selectedCount,
-			considered: rows.considered,
-			covered: rows.covered,
-			omitted_rows: rows.omittedRows,
-			unavailable_fields: rows.unavailableFields,
-			...options.diagnostics,
-		},
+		diagnostics,
 	});
 }
 

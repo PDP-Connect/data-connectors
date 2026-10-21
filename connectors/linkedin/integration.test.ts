@@ -1084,7 +1084,7 @@ test("collectLinkedIn: a short reported full page cannot prove connection end", 
 	);
 });
 
-test("collectLinkedIn: error-ended connections walk withholds full-scan coverage", async () => {
+async function runConnectionsPageError(pageError: string) {
 	const recording = makeRecordingEmit(validateRecord);
 	let page = 0;
 	const route = (path: string): unknown => {
@@ -1100,7 +1100,7 @@ test("collectLinkedIn: error-ended connections walk withholds full-scan coverage
 						createdAt: 1_700_000_000_000,
 					})),
 					}
-				: { _error: "http_503" };
+				: { _error: pageError };
 		}
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
 			const ids = decodeURIComponent(
@@ -1119,7 +1119,8 @@ test("collectLinkedIn: error-ended connections walk withholds full-scan coverage
 		}
 		return { _error: "http_404" };
 	};
-	await collectLinkedIn(buildCtx(["connections"], recording, route));
+	const error = await collectLinkedIn(buildCtx(["connections"], recording, route))
+		.then(() => null, (failure: unknown) => failure);
 	assert.equal(
 		recording.emitted.filter((event) => event.stream === "connections").length,
 		40,
@@ -1137,6 +1138,10 @@ test("collectLinkedIn: error-ended connections walk withholds full-scan coverage
 	const failedSkip = skipResults(recording).find(
 		(skip) => diagnosticsOf(skip).page_reason === "linkedin_connections_page_failed",
 	);
+	if (/^http_40[13]$/u.test(pageError)) {
+		assert.equal(failedSkip, undefined, "a rejected session is not a stream skip");
+		return { error, failedSkip };
+	}
 	assert.ok(failedSkip);
 	assert.deepEqual(Object.fromEntries(
 		["termination_reason", "observed_count", "total", "missing_urn_count", "error"]
@@ -1146,9 +1151,37 @@ test("collectLinkedIn: error-ended connections walk withholds full-scan coverage
 		observed_count: 40,
 		total: null,
 		missing_urn_count: 0,
-		error: "http_503",
+		error: pageError,
 	});
-});
+	return { error, failedSkip };
+}
+
+// A failed connections page is a failed read (Collection Profile 5.5): 429 and
+// 5xx are reported as stream failures, 401/403 end the run as the session
+// failure. Valid rows before the failed page stay upserted either way.
+for (const pageError of ["http_503", "http_429"]) {
+	test(`collectLinkedIn: a connections page ${pageError} is a failed read, not an unproven enumeration`, async () => {
+		const { error, failedSkip } = await runConnectionsPageError(pageError);
+		assert.equal(error, null);
+		assert.equal(failedSkip?.reason, "stream_collection_failed");
+		assert.equal(
+			failedSkip?.message,
+			"LinkedIn stopped returning connections pages before the list ended; covered entries are upserted only",
+		);
+		assert.deepEqual(failedSkip?.recovery_hint, {
+			action: "retry_by_runtime",
+			retryable: true,
+		});
+	});
+}
+
+for (const pageError of ["http_401", "http_403"]) {
+	test(`collectLinkedIn: a connections page ${pageError} ends the run as linkedin_session_dead`, async () => {
+		const { error } = await runConnectionsPageError(pageError);
+		assert.ok(error instanceof Error);
+		assert.match(error.message, /^linkedin_session_dead: /u);
+	});
+}
 
 test("collectLinkedIn: a failed member batch retries each URN as a singleton", async () => {
 	const recording = makeRecordingEmit(validateRecord);
