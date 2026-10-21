@@ -32,6 +32,7 @@ const API = "https://api.github.com";
 const INVENTORY_PAGE_LIMIT = 60;
 const HISTORY_PAGE_SIZE = 100;
 const HISTORY_PAGE_LIMIT = 10;
+const SEARCH_SPACING_MS = 6500;
 
 export interface BrowserCollectionPort {
 	emit(message: EmittedMessage): Promise<void>;
@@ -50,6 +51,16 @@ interface HistoryTypeResult extends CoverageCounts {
 	complete: boolean;
 	capped: boolean;
 	failure: string | null;
+}
+
+// A failed write to the output is not a failed source read. It carries the
+// original error past `runIsolated` to the caller.
+class OutputFailure extends Error {
+	original: unknown;
+	constructor(original: unknown) {
+		super("github_browser_output_failed");
+		this.original = original;
+	}
 }
 
 type ApiResponse = Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>;
@@ -71,7 +82,24 @@ export async function collectGitHubBrowser(
 		throw new Error("github_browser_session_missing");
 
 	const wants = context.requested;
+	const output = {
+		emit: async (message: EmittedMessage): Promise<void> => {
+			try {
+				await context.emit(message);
+			} catch (error) {
+				throw new OutputFailure(error);
+			}
+		},
+		emitRecord: async (stream: string, record: RecordData): Promise<void> => {
+			try {
+				await context.emitRecord(stream, record);
+			} catch (error) {
+				throw new OutputFailure(error);
+			}
+		},
+	};
 	const snapshotId = (stream: string): string => `${username}:${stream}`;
+	let searchRequests = 0;
 	const pending = new Map<string, RecordData[]>();
 	const flushed = new Map<string, boolean>();
 	const flush = async (stream: string, allowEmpty = false): Promise<boolean> => {
@@ -101,9 +129,12 @@ export async function collectGitHubBrowser(
 			};
 		}
 		const validated = validateRecord(stream, data);
-		flushed.set(stream, validated.ok);
-		if (!validated.ok) return false;
-		await context.emitRecord(stream, validated.data);
+		if (!validated.ok) {
+			flushed.set(stream, false);
+			return false;
+		}
+		await output.emitRecord(stream, validated.data);
+		flushed.set(stream, true);
 		return true;
 	};
 	const complete = async (
@@ -115,16 +146,13 @@ export async function collectGitHubBrowser(
 			await incomplete(stream, "invalid_snapshot_shape", counts);
 			return;
 		}
-		context.state[stream] = {
+		const cursor = {
 			fetched_at: services.now().toISOString(),
 			...metadata,
 		};
-		await context.emit({
-			type: "STATE",
-			stream,
-			cursor: context.state[stream],
-		});
-		await context.emit(fullInventoryCoverage(stream, { kind: "enumerated", complete: true, considered: 1, covered: 1 }));
+		await output.emit({ type: "STATE", stream, cursor });
+		context.state[stream] = cursor;
+		await output.emit(fullInventoryCoverage(stream, { kind: "enumerated", complete: true, considered: 1, covered: 1 }));
 	};
 	const incomplete = async (
 		stream: string,
@@ -132,12 +160,12 @@ export async function collectGitHubBrowser(
 		counts?: CoverageCounts,
 	): Promise<void> => {
 		if (stream === "profile") {
-			await context.emit({ type: "SKIP_RESULT", stream, reason: "github_browser_incomplete", message: `GitHub did not return a complete result for this stream: ${reason}.`, diagnostics: { cause: reason },
+			await output.emit({ type: "SKIP_RESULT", stream, reason: "github_browser_incomplete", message: `GitHub did not return a complete result for this stream: ${reason}.`, diagnostics: { cause: reason },
 				recovery_hint: { action: "retry_by_runtime", retryable: true } });
 			return;
 		}
 		// Inventory snapshots are withheld until their source window is complete.
-		await context.emit(fullInventoryCoverage(stream, {
+		await output.emit(fullInventoryCoverage(stream, {
 			kind: "enumerated", complete: false,
 			considered: counts?.considered ?? 0, covered: counts?.covered ?? 0,
 		}, reason));
@@ -153,7 +181,8 @@ export async function collectGitHubBrowser(
 	};
 	// A failed page or API read withholds the stream that made it, never the
 	// run. On the mobile PageShim host a read that outlives the bridge call
-	// timeout rejects here; the other streams still run.
+	// timeout rejects here; the other streams still run. A failed write to the
+	// output is not a source failure and ends the run.
 	const runIsolated = async (
 		stream: string,
 		work: () => Promise<void>,
@@ -161,7 +190,12 @@ export async function collectGitHubBrowser(
 		try {
 			await work();
 		} catch (error) {
-			await incomplete(stream, isTimeout(error) ? "source_read_timeout" : "source_request_failed");
+			if (error instanceof OutputFailure) throw error.original;
+			try {
+				await incomplete(stream, isTimeout(error) ? "source_read_timeout" : "source_request_failed");
+			} catch (reportError) {
+				throw reportError instanceof OutputFailure ? reportError.original : reportError;
+			}
 		}
 	};
 
@@ -195,8 +229,9 @@ export async function collectGitHubBrowser(
 			// Singleton presence only. Embedded lists are best-effort, not inventories.
 			// Never issue self coverage or derive deletes from these fields.
 			if (await flush("profile")) {
-				context.state.profile = { fetched_at: services.now().toISOString() };
-				await context.emit({ type: "STATE", stream: "profile", cursor: context.state.profile });
+				const cursor = { fetched_at: services.now().toISOString() };
+				await output.emit({ type: "STATE", stream: "profile", cursor });
+				context.state.profile = cursor;
 			} else await incomplete("profile", "invalid_snapshot_shape");
 		});
 	}
@@ -318,6 +353,7 @@ export async function collectGitHubBrowser(
 			let considered = 0;
 			let rejected = 0;
 			let sourceFailed = false;
+			let timedOut = false;
 			const openContributionPage =
 				services.openContributionPage ?? services.openPage;
 			for (let offset = 0; offset < 4; offset += 1) {
@@ -328,8 +364,9 @@ export async function collectGitHubBrowser(
 				let page: BrowserPageObservation;
 				try {
 					page = await openContributionPage(url);
-				} catch {
+				} catch (error) {
 					sourceFailed = true;
+					timedOut ||= isTimeout(error);
 					continue;
 				}
 				if (
@@ -392,7 +429,7 @@ export async function collectGitHubBrowser(
 				await incomplete(
 					"contributions",
 					sourceFailed
-						? "year_view_unavailable"
+						? timedOut ? "source_read_timeout" : "year_view_unavailable"
 						: "date_coverage_or_shape_mismatch",
 					{ considered, covered },
 				);
@@ -455,6 +492,14 @@ export async function collectGitHubBrowser(
 		});
 	}
 
+	// One Search budget for the run: issue and PR queries share GitHub's
+	// 10-requests-a-minute limit, so every request after the first waits 6.5 s.
+	async function readSearch(url: string): Promise<ApiRead> {
+		if (searchRequests > 0) await services.sleep(SEARCH_SPACING_MS);
+		searchRequests += 1;
+		return readApi(services, url);
+	}
+
 	async function collectHistoryType(
 		type: "issue" | "pr",
 	): Promise<HistoryTypeResult> {
@@ -469,7 +514,7 @@ export async function collectGitHubBrowser(
 			const kind = type === "pr" ? "type:pr" : "type:issue";
 			const query = encodeURIComponent(`author:${username} ${kind}`);
 			const url = `${API}/search/issues?q=${query}&sort=created&order=desc&per_page=${HISTORY_PAGE_SIZE}&page=${page}`;
-			const read = await readApi(services, url);
+			const read = await readSearch(url);
 			if (read.failure !== null) {
 				failure = read.failure;
 				break;
@@ -479,13 +524,21 @@ export async function collectGitHubBrowser(
 			if (
 				body === null ||
 				!Array.isArray(body.items) ||
-				body.incomplete_results !== false ||
 				typeof body.total_count !== "number" ||
 				!Number.isInteger(body.total_count) ||
 				body.total_count < 0
-			)
+			) {
+				failure = "invalid_api_response";
 				break;
-			if (expectedTotal !== null && body.total_count !== expectedTotal) break;
+			}
+			if (body.incomplete_results !== false) {
+				failure = "incomplete_search_results";
+				break;
+			}
+			if (expectedTotal !== null && body.total_count !== expectedTotal) {
+				failure = "search_total_changed";
+				break;
+			}
 			expectedTotal = body.total_count;
 			considered = Math.max(considered, body.total_count);
 			if (body.total_count > HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT) {
@@ -506,14 +559,17 @@ export async function collectGitHubBrowser(
 			}
 			if (invalid) break;
 			// The API caps this search window, not the underlying authored history.
-			// Short pages and our page budget are never completion evidence.
-			if (expectedTotal === seen.size ||
-				(capped && (apiWindowEnded(response.link) || seen.size === HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT))) {
+			// Only validated unique rows reaching the window target complete the
+			// type. Short pages, our page budget and an absent next Link are never
+			// completion evidence.
+			if (seen.size === Math.min(expectedTotal, HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT)) {
 				completeType = true;
 				break;
 			}
-			if (body.items.length === 0 || apiWindowEnded(response.link)) break;
-			if (page < HISTORY_PAGE_LIMIT) await services.sleep(6500);
+			if (body.items.length === 0 || apiWindowEnded(response.link)) {
+				failure = "search_ended_before_total";
+				break;
+			}
 		}
 		return { complete: completeType, capped, considered, covered, failure };
 	}

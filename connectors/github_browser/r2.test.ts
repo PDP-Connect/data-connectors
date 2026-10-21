@@ -158,7 +158,7 @@ test("events complete on an empty page without relying on short-page length", as
  assert.deepEqual(result.records[0]?.data.events, []);
 });
 for (const end of ["link", "cap", "unread"] as const) {
- test(`history above 1000 respects documented window: ${end}`, async () => {
+ test(`history above 1000 completes only with the full window: ${end}`, async () => {
   const source = JSON.parse(await fixture("history-issue.json")).items[0];
   let calls = 0;
   const result = await collect(["history"], { fetchPublicJson: async url => {
@@ -172,9 +172,12 @@ for (const end of ["link", "cap", "unread"] as const) {
      items: pr ? [] : Array.from({ length: size }, (_, i) => ({ ...source, id: pageNumber * 100 + i, number: pageNumber * 100 + i })) } };
   } });
   assert.equal(calls, end === "link" ? 2 : 10);
-  assert.equal(result.records.length, end === "unread" ? 0 : 1);
-  if (end !== "unread") {
-   assert.equal((result.records[0]?.data.issues as unknown[]).length, end === "link" ? 200 : 1000);
+  // A terminal Link or short pages before the 1,000-row window is full are a
+  // count deficit, not completion evidence.
+  const withheld = end === "unread" || end === "link";
+  assert.equal(result.records.length, withheld ? 0 : 1);
+  if (!withheld) {
+   assert.equal((result.records[0]?.data.issues as unknown[]).length, 1000);
    assert.match(String(result.records[0]?.data.windowDescription), /1,000 items per type/);
    assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE"));
   } else assert.equal(result.state.history, undefined);
