@@ -19,8 +19,16 @@
  * debt below. A failure is never a terminal skip: it stays retryable debt
  * until a later run covers it or the UID no longer exists.
  *
- * This module does no I/O. The caller fetches what `plan` names, reports one
- * outcome per (UID, stream), and writes what `commit` returns.
+ * A stream's `scope` is the time range its covered UIDs were collected under.
+ * When a run widens that range (a later `until`, an earlier `since`), the
+ * newly included band is owed for every covered UID. It becomes a catch-up
+ * pass: a third lane over the covered UIDs that SEARCH places in the band,
+ * walked in bounded pages. A pass in progress is never reset; a band that
+ * arrives while it runs is queued behind it, and merges only into a pass that
+ * has not started.
+ *
+ * This module does no I/O. The caller fetches what the ledger names, reports
+ * one outcome per (UID, stream), and writes what `commit` returns.
  */
 
 export const LEDGER_STREAMS = [
@@ -33,13 +41,38 @@ export type LedgerStream = (typeof LEDGER_STREAMS)[number];
 
 /** Upper bound on persisted retry debt. A full debt list holds the cursor. */
 export const MAX_RETRY_DEBT = 200;
-/** Debt entries retried per run, oldest attempt first. */
+/** Debt entries retried per run, from the head of the queue. */
 export const DEBT_RETRIES_PER_RUN = 25;
+/** Queued catch-up passes per stream before they collapse into one. */
+export const MAX_CATCHUP_PASSES = 4;
+
+/** Streams whose collection is filtered by the run's time range. */
+const SCOPED_STREAMS: readonly LedgerStream[] = [
+	"messages",
+	"message_bodies",
+	"attachments",
+];
+
+/** A half-open time band `[since, until)`, as `time_range` is applied. */
+export interface TimeBand {
+	since?: string;
+	until?: string;
+}
+
+/** Covered UIDs up to `end` still owe the band; `through` is the progress. */
+export interface CatchupPass extends TimeBand {
+	end: number;
+	through: number;
+}
 
 export interface StreamProgress {
 	through: number;
 	coveredFrom: number;
 	next: number;
+	/** The time range covered UIDs were collected under (scoped streams). */
+	scope?: TimeBand;
+	/** Bands owed for already covered UIDs, oldest first. */
+	catchup?: CatchupPass[];
 }
 
 export interface RetryDebt {
@@ -119,6 +152,8 @@ export interface LedgerOpenInput {
 	uidnext: number;
 	requested: ReadonlySet<LedgerStream>;
 	windowUids: number;
+	/** The run's time range, applied to every scoped stream. */
+	timeRange?: TimeBand | undefined;
 }
 
 const integer = (v: unknown, min = 0): v is number =>
@@ -126,6 +161,20 @@ const integer = (v: unknown, min = 0): v is number =>
 
 const isLedgerStream = (v: unknown): v is LedgerStream =>
 	(LEDGER_STREAMS as readonly unknown[]).includes(v);
+
+const instant = (v: unknown): number | null =>
+	typeof v === "string" && Number.isFinite(Date.parse(v))
+		? Date.parse(v)
+		: null;
+
+function validBand(v: unknown): v is TimeBand {
+	if (typeof v !== "object" || v === null) return false;
+	const b = v as Record<string, unknown>;
+	return (
+		(b.since === undefined || instant(b.since) !== null) &&
+		(b.until === undefined || instant(b.until) !== null)
+	);
+}
 
 function validStream(v: unknown, uidnext: number): v is StreamProgress {
 	if (typeof v !== "object" || v === null) return false;
@@ -136,7 +185,19 @@ function validStream(v: unknown, uidnext: number): v is StreamProgress {
 		integer(s.next, 1) &&
 		s.coveredFrom <= s.next &&
 		s.next <= uidnext &&
-		s.through < s.next
+		s.through < s.next &&
+		(s.scope === undefined || validBand(s.scope)) &&
+		(s.catchup === undefined ||
+			(Array.isArray(s.catchup) &&
+				s.catchup.length <= MAX_CATCHUP_PASSES &&
+				s.catchup.every(
+					(c) =>
+						validBand(c) &&
+						integer((c as CatchupPass).through) &&
+						integer((c as CatchupPass).end, 1) &&
+						(c as CatchupPass).through < (c as CatchupPass).end &&
+						(c as CatchupPass).end < uidnext,
+				)))
 	);
 }
 
@@ -218,9 +279,101 @@ function progressIn(
 
 /** A complete history is stored as `through = next - 1, coveredFrom = next`. */
 function normalize(s: StreamProgress): StreamProgress {
-	return s.through + 1 >= s.coveredFrom
-		? { through: s.next - 1, coveredFrom: s.next, next: s.next }
-		: s;
+	const out =
+		s.through + 1 >= s.coveredFrom
+			? { ...s, through: s.next - 1, coveredFrom: s.next }
+			: { ...s };
+	if (out.catchup?.length === 0) delete out.catchup;
+	return out;
+}
+
+function band(since: string | undefined, until: string | undefined): TimeBand {
+	return {
+		...(since !== undefined ? { since } : {}),
+		...(until !== undefined ? { until } : {}),
+	};
+}
+
+/** The bands `now` includes that `prior` excluded. */
+function widenedBands(prior: TimeBand, now: TimeBand): TimeBand[] {
+	const out: TimeBand[] = [];
+	const pu = instant(prior.until);
+	const nu = instant(now.until);
+	if (pu !== null && (nu === null || nu > pu)) {
+		out.push(band(prior.until, now.until));
+	}
+	const ps = instant(prior.since);
+	const ns = instant(now.since);
+	if (ps !== null && (ns === null || ns < ps)) {
+		out.push(band(now.since, prior.since));
+	}
+	return out;
+}
+
+/** `a ∩ b`, or null when the intersection is empty. */
+function intersect(a: TimeBand, b: TimeBand): TimeBand | null {
+	const sinces = [a.since, b.since].filter((x): x is string => x !== undefined);
+	const untils = [a.until, b.until].filter((x): x is string => x !== undefined);
+	const since = sinces.sort((x, y) => Date.parse(y) - Date.parse(x))[0];
+	const until = untils.sort((x, y) => Date.parse(x) - Date.parse(y))[0];
+	if (
+		since !== undefined &&
+		until !== undefined &&
+		Date.parse(since) >= Date.parse(until)
+	) {
+		return null;
+	}
+	return band(since, until);
+}
+
+/**
+ * Queue `owed` for covered UIDs up to `end`. A pass that has started is never
+ * changed, so its progress cannot be reset or skipped; a contiguous band may
+ * extend only a pass that has not started.
+ */
+function enqueueCatchup(
+	s: StreamProgress,
+	owed: TimeBand,
+	end: number,
+	scope: TimeBand,
+): void {
+	if (end < 1) return;
+	const passes = s.catchup ?? [];
+	const last = passes.at(-1);
+	if (
+		last &&
+		last.through === 0 &&
+		last.until !== undefined &&
+		owed.since === last.until
+	) {
+		if (owed.until === undefined) delete last.until;
+		else last.until = owed.until;
+		last.end = Math.max(last.end, end);
+	} else if (
+		last &&
+		last.through === 0 &&
+		last.since !== undefined &&
+		owed.until === last.since
+	) {
+		if (owed.since === undefined) delete last.since;
+		else last.since = owed.since;
+		last.end = Math.max(last.end, end);
+	} else {
+		passes.push({ ...owed, end, through: 0 });
+	}
+	// Too many disjoint bands: re-check every covered UID once under the
+	// current scope. Redundant work, never a skipped band.
+	s.catchup =
+		passes.length > MAX_CATCHUP_PASSES
+			? [{ ...scope, end: Math.max(...passes.map((p) => p.end)), through: 0 }]
+			: passes;
+}
+
+interface CatchupPlan {
+	key: string;
+	band: TimeBand;
+	planned: number[];
+	exhausted: boolean;
 }
 
 interface Expected {
@@ -240,6 +393,9 @@ export class GmailProgressLedger {
 	private readonly forwardRange: UidRange | null;
 	private readonly retried: RetryDebt[];
 	private readonly expected = new Map<number, Expected>();
+	private readonly timeRange: TimeBand;
+	private readonly windowUids: number;
+	private readonly catchupPlans = new Map<LedgerStream, CatchupPlan>();
 
 	constructor(input: LedgerOpenInput) {
 		if (!integer(input.uidvalidity, 1) || !integer(input.uidnext, 1)) {
@@ -251,6 +407,11 @@ export class GmailProgressLedger {
 		this.uidvalidity = input.uidvalidity;
 		this.uidnext = input.uidnext;
 		this.requested = input.requested;
+		this.windowUids = input.windowUids;
+		if (input.timeRange && !validBand(input.timeRange)) {
+			throw new Error("gmail_progress_invalid_time_range");
+		}
+		this.timeRange = band(input.timeRange?.since, input.timeRange?.until);
 
 		let streams: Partial<Record<LedgerStream, StreamProgress>> = {};
 		let debt: RetryDebt[] = [];
@@ -290,6 +451,19 @@ export class GmailProgressLedger {
 					next: input.uidnext,
 				});
 			}
+		}
+		// A widened time range owes its new band for every covered UID. A
+		// stream with no recorded scope (new, reset or migrated) was walked
+		// under this run's range.
+		for (const stream of SCOPED_STREAMS) {
+			const s = streams[stream];
+			if (!(s && this.requested.has(stream))) continue;
+			if (s.scope) {
+				for (const owed of widenedBands(s.scope, this.timeRange)) {
+					enqueueCatchup(s, owed, s.next - 1, this.timeRange);
+				}
+			}
+			s.scope = { ...this.timeRange };
 		}
 		this.streams = streams;
 		this.debt = debt;
@@ -360,9 +534,10 @@ export class GmailProgressLedger {
 	private laneOf(
 		stream: LedgerStream,
 		uid: number,
-	): "history" | "forward" | null {
+	): "history" | "forward" | "catchup" | null {
 		const s = this.streams[stream];
 		if (!(s && this.requested.has(stream))) return null;
+		if (this.catchupPlans.get(stream)?.planned.includes(uid)) return "catchup";
 		if (
 			this.history &&
 			uid >= this.history.start &&
@@ -386,6 +561,65 @@ export class GmailProgressLedger {
 	/** Debt UIDs to re-fetch this run, ascending. */
 	get debtUids(): number[] {
 		return this.retried.map((d) => d.uid).sort((a, b) => a - b);
+	}
+
+	/**
+	 * The bands to SEARCH this run, one per distinct active catch-up pass,
+	 * already narrowed to the run's time range.
+	 */
+	get catchupSearches(): { key: string; band: TimeBand }[] {
+		const out = new Map<string, TimeBand>();
+		for (const stream of this.requestedStreams()) {
+			const active = this.progressOf(stream).catchup?.[0];
+			const owed = active ? intersect(active, this.timeRange) : null;
+			if (owed) out.set(JSON.stringify(owed), owed);
+		}
+		return [...out].map(([key, b]) => ({ key, band: b }));
+	}
+
+	/**
+	 * Plan one bounded catch-up page from the UIDs SEARCH placed in the band:
+	 * only covered UIDs past the pass's progress, at most one window.
+	 */
+	planCatchup(key: string, searched: readonly number[]): void {
+		if (this.expected.size > 0) {
+			throw new Error("gmail_progress_page_already_consumed");
+		}
+		const uids = [...new Set(searched)].sort((a, b) => a - b);
+		for (const stream of this.requestedStreams()) {
+			const s = this.progressOf(stream);
+			const active = s.catchup?.[0];
+			const owed = active ? intersect(active, this.timeRange) : null;
+			if (!(active && owed && JSON.stringify(owed) === key)) continue;
+			const candidates = uids.filter(
+				(uid) =>
+					uid > active.through &&
+					uid <= active.end &&
+					(uid <= s.through || (uid >= s.coveredFrom && uid < s.next)),
+			);
+			this.catchupPlans.set(stream, {
+				key,
+				band: owed,
+				planned: candidates.slice(0, this.windowUids),
+				exhausted: candidates.length <= this.windowUids,
+			});
+		}
+	}
+
+	/** UIDs planned for catch-up this run, ascending. */
+	get catchupUids(): number[] {
+		const all = new Set<number>();
+		for (const plan of this.catchupPlans.values()) {
+			for (const uid of plan.planned) all.add(uid);
+		}
+		return [...all].sort((a, b) => a - b);
+	}
+
+	/** The time range `stream` must apply to `uid`: its band on catch-up. */
+	timeRangeFor(uid: number, stream: LedgerStream): TimeBand {
+		return this.laneOf(stream, uid) === "catchup"
+			? (this.catchupPlans.get(stream)?.band ?? this.timeRange)
+			: this.timeRange;
 	}
 
 	/** Streams that walk part of the historical page. */
@@ -532,7 +766,7 @@ export class GmailProgressLedger {
 			let forwardEnd = this.uidnext - 1;
 			for (const uid of fetched) {
 				const lane = this.laneOf(stream, uid);
-				if (lane === null) continue;
+				if (lane === null || lane === "catchup") continue;
 				if (uid > (lane === "history" ? historyEnd : forwardEnd)) continue;
 				const o = outcome(uid, stream);
 				const accounted =
@@ -564,9 +798,12 @@ export class GmailProgressLedger {
 				}
 			}
 			if (forwardEnd >= s.next) s.next = forwardEnd + 1;
+			this.commitCatchup(stream, s, outcome, addDebt, unaccounted, counts);
 			const normalized = normalize(s);
 			streams[stream] = normalized;
-			const done = normalized.through + 1 >= normalized.coveredFrom;
+			const done =
+				normalized.through + 1 >= normalized.coveredFrom &&
+				!normalized.catchup?.length;
 			historyComplete[stream] = done;
 			if (historyPage[stream] && !done) {
 				continuation[stream] = historyPage[stream];
@@ -611,5 +848,47 @@ export class GmailProgressLedger {
 				!debt.some((d) => d.streams.includes("attachments")),
 			unaccounted: [...unaccounted].sort((a, b) => a - b),
 		};
+	}
+
+	/** Advance `stream`'s active catch-up pass over its accounted prefix. */
+	private commitCatchup(
+		stream: LedgerStream,
+		s: StreamProgress,
+		outcome: (uid: number, s: LedgerStream) => UidOutcome | undefined,
+		addDebt: (uid: number, stream: LedgerStream, failure: string) => boolean,
+		unaccounted: Set<number>,
+		counts: StreamCoverage,
+	): void {
+		const passes = s.catchup;
+		const active = passes?.[0];
+		if (!(passes && active)) return;
+		if (!intersect(active, this.timeRange)) {
+			// Nothing of this band is in the current scope: no UID can owe it.
+			passes.shift();
+			return;
+		}
+		const plan = this.catchupPlans.get(stream);
+		if (!plan) return;
+		let through = active.through;
+		let held = false;
+		for (const uid of plan.planned) {
+			const o = outcome(uid, stream);
+			// A planned UID that FETCH did not return was expunged.
+			if (this.expected.has(uid)) {
+				const accounted =
+					o !== undefined &&
+					(o.kind !== "failed" || addDebt(uid, stream, o.failure));
+				if (!accounted) {
+					unaccounted.add(uid);
+					held = true;
+					break;
+				}
+				if (o.kind !== "out_of_scope") counts.considered += 1;
+				if (o.kind === "covered") counts.covered += 1;
+			}
+			through = uid;
+		}
+		if (!held && plan.exhausted) passes.shift();
+		else active.through = through;
 	}
 }

@@ -277,7 +277,7 @@ test("served attachment gaps preempt an attachment-only history page, and served
 	assert.deepEqual(m.ranges, [], "no historical (or forward) FETCH this run");
 	assert.deepEqual(
 		progressOf(r).streams.attachments,
-		{ through: 250, coveredFrom: 500, next: 600 },
+		{ through: 250, coveredFrom: 500, next: 600, scope: {} },
 		"the attachments history waits a run",
 	);
 	assert.deepEqual(m.lookups, ["fedcba01"], "X-GM-MSGID lookup");

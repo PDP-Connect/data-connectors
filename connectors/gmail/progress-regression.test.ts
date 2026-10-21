@@ -52,6 +52,39 @@ function attachmentMessage(uid: number): FetchMessageObject {
 	};
 }
 
+/** A message received at `iso`. */
+function dated(uid: number, iso: string): FetchMessageObject {
+	return { ...message(uid), internalDate: new Date(iso) };
+}
+
+const MONTHS = [
+	"Jan",
+	"Feb",
+	"Mar",
+	"Apr",
+	"May",
+	"Jun",
+	"Jul",
+	"Aug",
+	"Sep",
+	"Oct",
+	"Nov",
+	"Dec",
+];
+
+/** Days since epoch for an IMAP "DD-Mon-YYYY" string or a Date. */
+function imapDay(v: unknown): number {
+	if (v instanceof Date) return dayOf(v);
+	const [d, mon, y] = String(v).split("-");
+	return Math.floor(
+		Date.UTC(Number(y), MONTHS.indexOf(String(mon)), Number(d)) / 86_400_000,
+	);
+}
+
+function dayOf(date: unknown): number {
+	return Math.floor(new Date(date as string).getTime() / 86_400_000);
+}
+
 function requested(names: string[]): Map<string, StreamRequest> {
 	return new Map(names.map((name) => [name, { name }]));
 }
@@ -90,6 +123,7 @@ function mailbox(rows: FetchMessageObject[], uidNext: number, exists = 1200) {
 	const control = {
 		failBodyReadAfter: Number.POSITIVE_INFINITY,
 		expungeOnFetch: null as number | null,
+		searches: [] as Record<string, unknown>[],
 		/** A UID that SEARCH still reports but FETCH no longer returns. */
 		phantomSearchUid: null as number | null,
 		bodyText: "saved snippet",
@@ -117,13 +151,21 @@ function mailbox(rows: FetchMessageObject[], uidNext: number, exists = 1200) {
 			threadId?: string;
 			or?: { threadId: string }[];
 			since?: unknown;
+			before?: unknown;
 		}) {
+			control.searches.push(query);
+			// IMAP SINCE/BEFORE are day-granular; the fixture models that.
+			const day = (v: unknown) => imapDay(v);
 			const uids = rows
 				.filter(
 					(row) =>
 						(query.threadId === undefined || row.threadId === query.threadId) &&
 						(query.or === undefined ||
-							query.or.some((clause) => clause.threadId === row.threadId)),
+							query.or.some((clause) => clause.threadId === row.threadId)) &&
+						(query.since === undefined ||
+							dayOf(row.internalDate) >= day(query.since)) &&
+						(query.before === undefined ||
+							dayOf(row.internalDate) < day(query.before)),
 				)
 				.map((row) => row.uid);
 			if (control.phantomSearchUid !== null && query.since === undefined) {
@@ -531,4 +573,193 @@ test("guard: every commit keeps the RI band contiguous (backfill.target_uid + 1 
 			JSON.stringify(c),
 		);
 	}
+});
+
+// ─── Scope widening: a moved time_range bound is caught up, never skipped ──
+
+const JAN = "2026-01-15T00:00:00.000Z";
+const MAR = "2026-03-15T00:00:00.000Z";
+const MAY = "2026-05-15T00:00:00.000Z";
+const JUL = "2026-07-15T00:00:00.000Z";
+
+function until(iso: string | undefined, streams = ["messages"]) {
+	return new Map<string, StreamRequest>(
+		streams.map((name) => [
+			name,
+			{ name, ...(iso ? { time_range: { until: iso } } : {}) },
+		]),
+	);
+}
+
+const collectedIds = (runs: RunResult[]) =>
+	runs.flatMap((r) => ofStream(r, "messages").map((x) => String(x.data.id)));
+
+async function withWindow<T>(uids: number, fn: () => Promise<T>): Promise<T> {
+	const prior = process.env.PDPP_GMAIL_MESSAGES_BACKFILL_WINDOW_UIDS;
+	process.env.PDPP_GMAIL_MESSAGES_BACKFILL_WINDOW_UIDS = String(uids);
+	try {
+		return await fn();
+	} finally {
+		if (prior === undefined)
+			delete process.env.PDPP_GMAIL_MESSAGES_BACKFILL_WINDOW_UIDS;
+		else process.env.PDPP_GMAIL_MESSAGES_BACKFILL_WINDOW_UIDS = prior;
+	}
+}
+
+test("scope: a later until collects the mail the earlier bound excluded, after the walk is complete", async () => {
+	const m = mailbox([dated(10, JAN), dated(20, MAR), dated(30, MAY)], 101);
+	const first = await run(m, {}, until("2026-02-01T00:00:00.000Z"));
+	assert.deepEqual(collectedIds([first]), ["a"]);
+	assert.equal(
+		progressOf(first).streams.messages?.through,
+		100,
+		"history complete under the old bound",
+	);
+	const widened = await runUntilCaughtUp(
+		m,
+		first.state,
+		until("2026-04-01T00:00:00.000Z"),
+	);
+	assert.deepEqual(
+		collectedIds(widened),
+		["14"],
+		"March mail is collected; May is still out of scope",
+	);
+});
+
+test("scope: until moving again mid catch-up keeps the pass and skips nothing", async () => {
+	await withWindow(2, async () => {
+		// Six messages in [Feb, Jun) and two in [Jun, Aug), all walked under
+		// until=Feb. UID 11 is below where the first pass will stop, so a pass
+		// that absorbed the second band would skip it.
+		const rows = [
+			dated(10, JAN),
+			dated(11, JUL),
+			...[12, 13, 14, 15, 16, 17].map((uid) => dated(uid, MAR)),
+			dated(18, JUL),
+		];
+		const m = mailbox(rows, 19);
+		let state =
+			(await runUntilCaughtUp(m, {}, until("2026-02-01T00:00:00.000Z"))).at(-1)
+				?.state ?? {};
+		// One catch-up page under until=Jun collects two of the six.
+		const page = await run(m, state, until("2026-06-01T00:00:00.000Z"));
+		assert.deepEqual(collectedIds([page]), ["c", "d"]);
+		state = page.state;
+		const pass = progressOf(page).streams.messages as unknown as {
+			catchup?: { through: number }[];
+		};
+		assert.equal(
+			pass.catchup?.[0]?.through,
+			13,
+			"the pass records how far it got",
+		);
+		// The bound moves on before the pass finishes.
+		const rest = await runUntilCaughtUp(
+			m,
+			state,
+			until("2026-08-01T00:00:00.000Z"),
+		);
+		const ids = collectedIds(rest);
+		assert.deepEqual(
+			[...ids].sort(),
+			["e", "f", "10", "11", "b", "12"].sort(),
+			"the rest of the first band and all of the new band arrive, nothing twice",
+		);
+		assert.equal(
+			ids.includes("c"),
+			false,
+			"the preserved pass does not restart",
+		);
+	});
+});
+
+test("scope: a rolling until that moves every run still converges", async () => {
+	await withWindow(2, async () => {
+		const rows = [10, 11, 12, 13, 14, 15].map((uid, i) =>
+			dated(uid, new Date(Date.UTC(2026, 0, 10 + i * 10)).toISOString()),
+		);
+		const m = mailbox(rows, 16);
+		// The walk completes before any of this mail is in scope.
+		let state =
+			(await runUntilCaughtUp(m, {}, until("2026-01-01T00:00:00.000Z"))).at(-1)
+				?.state ?? {};
+		const seen: string[] = [];
+		for (let i = 0; i < 12; i += 1) {
+			const bound = new Date(Date.UTC(2026, 0, 12 + i * 10)).toISOString();
+			const r = await run(m, state, until(bound));
+			seen.push(...collectedIds([r]));
+			state = r.state;
+		}
+		assert.deepEqual([...new Set(seen)].sort(), ["a", "b", "c", "d", "e", "f"]);
+		assert.equal(seen.length, 6, "each message is collected once");
+	});
+});
+
+test("scope: an earlier since collects the older band once", async () => {
+	const m = mailbox([dated(10, JAN), dated(20, MAR), dated(30, MAY)], 101);
+	const since = (iso: string) =>
+		new Map<string, StreamRequest>([
+			["messages", { name: "messages", time_range: { since: iso } }],
+		]);
+	const first = await run(m, {}, since("2026-04-01T00:00:00.000Z"));
+	assert.deepEqual(collectedIds([first]), ["1e"]);
+	const widened = await runUntilCaughtUp(
+		m,
+		first.state,
+		since("2026-02-01T00:00:00.000Z"),
+	);
+	assert.deepEqual(collectedIds(widened), ["14"]);
+});
+
+async function runUntilCaughtUp(
+	m: ReturnType<typeof mailbox>,
+	state: Record<string, unknown>,
+	scope: Map<string, StreamRequest>,
+	maxRuns = 12,
+): Promise<RunResult[]> {
+	const out: RunResult[] = [];
+	let current = state;
+	for (let i = 0; i < maxRuns; i += 1) {
+		const r = await run(m, current, scope);
+		out.push(r);
+		current = r.state;
+		const s = progressOf(r).streams.messages as unknown as {
+			through: number;
+			coveredFrom: number;
+			catchup?: unknown[];
+		};
+		if (s.through + 1 >= s.coveredFrom && !(s.catchup && s.catchup.length > 0))
+			break;
+	}
+	return out;
+}
+
+test("debt: retries reach every owed UID, not only the first batch, while all keep failing", async () => {
+	// 60 owed UIDs, more than two retry batches (25 per run). Every upload
+	// keeps failing, so a queue that re-tried its head would starve the tail.
+	const uids = Array.from({ length: 60 }, (_, i) => 100 + i);
+	const m = mailbox(
+		uids.map((uid) => message(uid)),
+		201,
+	);
+	m.control.bodyText = "binary\u0000body";
+	const attempts = new Map<string, number>();
+	const uploadBodyBlob = async (args: { recordKey: string }) => {
+		attempts.set(args.recordKey, (attempts.get(args.recordKey) ?? 0) + 1);
+		throw new Error("upload transport 503");
+	};
+	let state = (await run(m, {}, ["message_bodies"], { uploadBodyBlob })).state;
+	assert.equal(progressOf({ state } as RunResult).debt.length, 60);
+	for (let i = 0; i < 3; i += 1) {
+		state = (await run(m, state, ["message_bodies"], { uploadBodyBlob })).state;
+	}
+	const retried = uids.filter(
+		(uid) => (attempts.get(uid.toString(16)) ?? 0) >= 2,
+	);
+	assert.equal(
+		retried.length,
+		60,
+		"every owed UID was retried within three runs",
+	);
 });

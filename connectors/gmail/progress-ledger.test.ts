@@ -8,6 +8,7 @@ import {
 	GmailProgressLedger,
 	type GmailProgressState,
 	type LedgerStream,
+	MAX_CATCHUP_PASSES,
 	MAX_RETRY_DEBT,
 	persistedProgressProblem,
 } from "./progress-ledger.ts";
@@ -55,6 +56,7 @@ test("ledger: a first run walks one bounded history page and no forward lane", (
 		through: 500,
 		coveredFrom: 1201,
 		next: 1201,
+		scope: {},
 	});
 	assert.deepEqual(c.historyPage.messages, { start: 1, end: 500 });
 	assert.deepEqual(c.continuation.messages, { start: 1, end: 500 });
@@ -86,6 +88,7 @@ test("ledger: history and forward lanes are disjoint as mail arrives during the 
 		through: 1000,
 		coveredFrom: 1201,
 		next: 1301,
+		scope: {},
 	});
 	const last = open({
 		persisted: c.state,
@@ -102,6 +105,7 @@ test("ledger: history and forward lanes are disjoint as mail arrives during the 
 		through: 1300,
 		coveredFrom: 1301,
 		next: 1301,
+		scope: {},
 	});
 	assert.equal(done.historyComplete.messages, true);
 	assert.equal(done.continuation.messages, undefined);
@@ -470,4 +474,164 @@ test("ledger: legacy migration seeds streams that are not requested yet", () => 
 		{ start: 1201, end: 1300 },
 		"it catches up from its own next",
 	);
+});
+
+// ─── Catch-up passes for a widened time range ───────────────────────────
+
+const FEB = "2026-02-01T00:00:00.000Z";
+const JUN = "2026-06-01T00:00:00.000Z";
+const AUG = "2026-08-01T00:00:00.000Z";
+
+function scoped(
+	persisted: GmailProgressState | undefined,
+	timeRange: { since?: string; until?: string },
+	uidnext = 101,
+	window = 500,
+) {
+	return new GmailProgressLedger({
+		persisted,
+		legacy: {},
+		fullResync: persisted === undefined,
+		uidvalidity: 123,
+		uidnext,
+		requested: new Set<LedgerStream>(["messages"]),
+		windowUids: window,
+		timeRange,
+	});
+}
+
+test("ledger: a later until queues a catch-up band over every covered UID", () => {
+	const walked = scoped(undefined, { until: FEB }).commit(NOW).state;
+	assert.deepEqual(walked.streams.messages?.scope, { until: FEB });
+	const widened = scoped(walked, { until: JUN });
+	assert.deepEqual(
+		widened.catchupSearches.map((s) => s.band),
+		[{ since: FEB, until: JUN }],
+	);
+	const key = widened.catchupSearches[0]?.key ?? "";
+	widened.planCatchup(key, [5, 50, 150]);
+	assert.deepEqual(
+		widened.catchupUids,
+		[5, 50],
+		"only covered UIDs below the pass end",
+	);
+	assert.deepEqual(widened.timeRangeFor(5, "messages"), {
+		since: FEB,
+		until: JUN,
+	});
+	for (const uid of [5, 50]) {
+		widened.expect(uid);
+		widened.record(uid, ["messages"], { kind: "covered" });
+	}
+	const c = widened.commit(NOW);
+	assert.equal(
+		c.state.streams.messages?.catchup,
+		undefined,
+		"the pass completes",
+	);
+	assert.deepEqual(c.state.streams.messages?.scope, { until: JUN });
+	assert.equal(c.historyComplete.messages, true);
+});
+
+test("ledger: a pass in progress is kept when the bound moves again; the new band queues behind it", () => {
+	const walked = scoped(undefined, { until: FEB }).commit(NOW).state;
+	const first = scoped(walked, { until: JUN }, 101, 2);
+	first.planCatchup(first.catchupSearches[0]?.key ?? "", [11, 12, 13, 14]);
+	for (const uid of first.catchupUids) {
+		first.expect(uid);
+		first.record(uid, ["messages"], { kind: "covered" });
+	}
+	const mid = first.commit(NOW).state;
+	assert.deepEqual(mid.streams.messages?.catchup, [
+		{ since: FEB, until: JUN, end: 100, through: 12 },
+	]);
+	assert.equal(
+		scoped(mid, { until: JUN }).commit(NOW).historyComplete.messages,
+		false,
+	);
+	const moved = scoped(mid, { until: AUG }, 121).commit(NOW).state;
+	assert.deepEqual(moved.streams.messages?.catchup, [
+		{ since: FEB, until: JUN, end: 100, through: 12 },
+		// UIDs 101..120 are this run's forward lane, walked under the new range.
+		{ since: JUN, until: AUG, end: 100, through: 0 },
+	]);
+	assert.deepEqual(
+		scoped(moved, { until: AUG }, 121).catchupSearches.map((s) => s.band),
+		[{ since: FEB, until: JUN }],
+		"the older pass resumes first",
+	);
+});
+
+test("ledger: a band that arrives before a pass starts extends it instead of queueing", () => {
+	const walked = scoped(undefined, { until: FEB }).commit(NOW).state;
+	const queued = scoped(walked, { until: JUN }).commit(NOW).state;
+	const extended = scoped(queued, { until: AUG }, 121).commit(NOW).state;
+	assert.deepEqual(extended.streams.messages?.catchup, [
+		{ since: FEB, until: AUG, end: 100, through: 0 },
+	]);
+});
+
+test("ledger: catch-up never takes a UID the stream's history has not walked", () => {
+	const persisted: GmailProgressState = {
+		version: 1,
+		uidvalidity: 123,
+		streams: {
+			messages: {
+				through: 10,
+				coveredFrom: 51,
+				next: 101,
+				scope: { until: FEB },
+			},
+		},
+		debt: [],
+	};
+	const ledger = scoped(persisted, { until: JUN });
+	ledger.planCatchup(ledger.catchupSearches[0]?.key ?? "", [5, 20, 60]);
+	assert.deepEqual(
+		ledger.catchupUids,
+		[5, 60],
+		"UID 20 is unwalked history, walked under the new range",
+	);
+});
+
+test("ledger: too many disjoint bands collapse into one re-check, never a skipped band", () => {
+	let state = scoped(undefined, {
+		since: "2026-05-01T00:00:00.000Z",
+		until: JUN,
+	}).commit(NOW).state;
+	const ranges = [
+		{ since: "2026-04-01T00:00:00.000Z", until: "2026-07-01T00:00:00.000Z" },
+		{ since: "2026-03-01T00:00:00.000Z", until: "2026-08-01T00:00:00.000Z" },
+		{ since: "2026-02-01T00:00:00.000Z", until: "2026-09-01T00:00:00.000Z" },
+	];
+	for (const r of ranges) {
+		// Start each queued pass so the next band cannot merge into it.
+		const l = scoped(state, r, 101, 1);
+		for (const { key } of l.catchupSearches) l.planCatchup(key, [1, 2]);
+		for (const uid of l.catchupUids) {
+			l.expect(uid);
+			l.record(uid, ["messages"], { kind: "covered" });
+		}
+		state = l.commit(NOW).state;
+	}
+	// Five disjoint bands were owed at once, more than MAX_CATCHUP_PASSES, so
+	// they collapsed into one re-check of the whole current range.
+	assert.ok(MAX_CATCHUP_PASSES < 5);
+	assert.deepEqual(state.streams.messages?.catchup, [
+		{
+			since: "2026-02-01T00:00:00.000Z",
+			until: "2026-09-01T00:00:00.000Z",
+			end: 100,
+			through: 1,
+		},
+	]);
+});
+
+test("ledger: a catch-up band outside the current range completes without work", () => {
+	const walked = scoped(undefined, { until: FEB }).commit(NOW).state;
+	const queued = scoped(walked, { until: JUN }).commit(NOW).state;
+	// The range narrows back before the pass runs.
+	const narrowed = scoped(queued, { until: FEB });
+	assert.deepEqual(narrowed.catchupSearches, []);
+	assert.equal(narrowed.commit(NOW).state.streams.messages?.catchup, undefined);
 });

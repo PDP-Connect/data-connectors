@@ -96,6 +96,7 @@ import {
 	type LedgerCommit,
 	type LedgerStream,
 	MAX_RETRY_DEBT,
+	type TimeBand,
 	type UidOutcome,
 } from "./progress-ledger.ts";
 import {
@@ -4291,6 +4292,7 @@ function openProgressLedger(
 	session: AllMailSession,
 	uidnext: number,
 	requested: ReadonlyMap<string, StreamRequest>,
+	timeRange: TimeBand | undefined,
 ): GmailProgressLedger {
 	const messagesState = (state.messages ?? {}) as PriorMessagesState & {
 		progress?: unknown;
@@ -4312,7 +4314,29 @@ function openProgressLedger(
 		uidnext,
 		requested: requestedLedgerStreams(requested),
 		windowUids: resolveMessagesBackfillWindowUids(),
+		timeRange,
 	});
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * IMAP SEARCH for a catch-up band. SINCE/BEFORE are day-granular and use the
+ * server's day, so the query is widened by a day on each side; processing
+ * applies the exact band.
+ */
+function catchupSearchQuery(owed: TimeBand): {
+	since?: string;
+	before?: string;
+} {
+	const shift = (iso: string, days: number) =>
+		isoToImapDate(new Date(Date.parse(iso) + days * DAY_MS).toISOString());
+	const since = owed.since ? shift(owed.since, -1) : null;
+	const before = owed.until ? shift(owed.until, 2) : null;
+	return {
+		...(since ? { since } : {}),
+		...(before ? { before } : {}),
+	};
 }
 
 /** Fetch one lane's metadata, or nothing when the ledger planned no lane. */
@@ -4448,6 +4472,7 @@ export async function runAllMailPasses(
 		session,
 		session.uidnext,
 		deps.requested,
+		timeRange,
 	);
 	if (ledger.resetReason) {
 		gmailDiagnostic("progress_ledger_reset", { reason: ledger.resetReason });
@@ -4496,8 +4521,27 @@ export async function runAllMailPasses(
 		sinceIso,
 	);
 	ledger.recordAbsentDebt(new Set(debtMetas.map((m) => m.uid)));
+	// A widened time range: find the covered UIDs in each owed band.
+	for (const { key, band } of ledger.catchupSearches) {
+		const searched = await client.search(catchupSearchQuery(band), {
+			uid: true,
+		});
+		ledger.planCatchup(key, searched || []);
+	}
+	const catchupUids = ledger.catchupUids;
+	const catchupMetas = await collectLaneMetadata(
+		client,
+		catchupUids.length > 0 ? catchupUids.join(",") : null,
+		null,
+		null,
+	);
 	const byUid = new Map<number, FetchMessageObject>();
-	for (const m of [...historicalMetas, ...forwardMetas, ...debtMetas]) {
+	for (const m of [
+		...historicalMetas,
+		...forwardMetas,
+		...debtMetas,
+		...catchupMetas,
+	]) {
 		if (ledger.expect(m.uid).length > 0) byUid.set(m.uid, m);
 	}
 	const metas = [...byUid.values()].sort((a, b) => a.uid - b.uid);
@@ -4507,6 +4551,7 @@ export async function runAllMailPasses(
 		historical: page ? `${page.start}:${page.end}` : null,
 		forward: forward ? `${forward.start}:${forward.end}` : null,
 		debt_uids: debtUids.length,
+		catchup_uids: catchupUids.length,
 		mailbox: allMail.path,
 	});
 	let fetchProgressMessage = "No new messages to fetch";
@@ -4601,22 +4646,43 @@ export async function runAllMailPasses(
 			.expect(msg.uid)
 			.filter((s): s is MessageStream => s !== "threads");
 		if (streams.length === 0) continue;
-		const outcome = await settleMessage(
-			{
-				...perMessageDeps,
-				requested: new Map(
-					[...deps.requested].filter(
-						([name]) =>
-							!isLedgerStreamName(name) ||
-							(name !== "threads" && streams.includes(name)),
-					),
+		// A catch-up stream applies its owed band; every other stream applies
+		// the run's range. One settle per distinct range.
+		const groups = new Map<
+			string,
+			{ range: TimeBand; streams: MessageStream[] }
+		>();
+		for (const stream of streams) {
+			const range = ledger.timeRangeFor(msg.uid, stream);
+			const key = JSON.stringify(range);
+			const group = groups.get(key) ?? { range, streams: [] };
+			group.streams.push(stream);
+			groups.set(key, group);
+		}
+		const outcome: MessageOutcome = {};
+		for (const group of groups.values()) {
+			Object.assign(
+				outcome,
+				await settleMessage(
+					{
+						...perMessageDeps,
+						requested: new Map(
+							[...deps.requested].filter(
+								([name]) =>
+									!isLedgerStreamName(name) ||
+									(name !== "threads" &&
+										group.streams.includes(name as MessageStream)),
+							),
+						),
+						emitRecord: emitRecordWithSummary,
+						timeRange: group.range,
+						wantBodies: group.streams.includes("message_bodies"),
+						wantMessages: group.streams.includes("messages"),
+					},
+					msg,
 				),
-				emitRecord: emitRecordWithSummary,
-				wantBodies: streams.includes("message_bodies"),
-				wantMessages: streams.includes("messages"),
-			},
-			msg,
-		);
+			);
+		}
 		for (const s of streams) {
 			ledger.record(
 				msg.uid,
