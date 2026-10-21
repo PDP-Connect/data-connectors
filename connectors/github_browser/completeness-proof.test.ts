@@ -13,9 +13,9 @@ const owner = '<meta name="user-login" content="sample-user"><span class="p-nick
 const terminal = '<div class="pagination"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
 const prior = { fetched_at: "2025-12-01T00:00:00Z" };
 
-async function collect(stream: string, htmlFor: (url: string) => string) {
+async function collect(stream: string, htmlFor: (url: string) => string, api?: (url: string) => { link: string | null | undefined; data: unknown }) {
 	const records: object[] = [];
-	const messages: Array<{ type: string; reason?: string }> = [];
+	const messages: Array<{ type: string; reason?: string; diagnostics?: unknown }> = [];
 	const state: Record<string, unknown> = { [stream]: structuredClone(prior) };
 	await collectGitHubBrowser({
 		emit: async message => { messages.push(message); },
@@ -23,7 +23,7 @@ async function collect(stream: string, htmlFor: (url: string) => string) {
 		progress: async () => {}, requested: new Set([stream]), state,
 	}, {
 		openPage: async url => ({ requestedUrl: url, currentUrl: url, html: htmlFor(url) }),
-		fetchPublicJson: async url => ({ requestedUrl: url, responseUrl: url, status: 500, data: null }),
+		fetchPublicJson: async url => ({ requestedUrl: url, responseUrl: url, status: api === undefined ? 500 : 200, data: null, ...api?.(url) }),
 		now: () => new Date("2026-01-01T00:00:00Z"), sleep: async () => {},
 	});
 	return { records, messages, state };
@@ -227,3 +227,76 @@ test("InventoryEvidence cannot complete from a caller label without positive end
 	evidence.addEnd({ nextUrl: null, reason: "terminal_list", terminalProof: "disabled_next" });
 	assert.equal(evidence.decide(1, null), null);
 });
+
+for (const link of ["unreadable", '<https://api.github.com/users/sample-user/events/public?page=2>; rel="continue"']) {
+	test(`events withholds state and coverage for unknown Link: ${link}`, async () => {
+		const event = JSON.parse(await readFile(new URL("./__fixtures__/synthetic/events.json", import.meta.url), "utf8"))[0];
+		let calls = 0;
+		const result = await collect("events", () => owner, url => {
+			calls += 1;
+			const page = new URL(url).searchParams.get("page");
+			return { link, data: Array.from({ length: 100 }, (_, i) => ({ ...event, id: `${page}-${i}` })) };
+		});
+		assert.equal(calls, 3);
+		const diagnostics = result.messages[0]?.diagnostics;
+		assert.ok(typeof diagnostics === "object" && diagnostics !== null && "cause" in diagnostics);
+		assert.equal(diagnostics.cause, "end_not_proven");
+		assert.deepEqual(result.records, []);
+		assert.deepEqual(result.state, { events: prior });
+		assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+	});
+}
+
+test("events withholds an empty later page with unobserved pagination", async () => {
+	const event = JSON.parse(await readFile(new URL("./__fixtures__/synthetic/events.json", import.meta.url), "utf8"))[0];
+	const result = await collect("events", () => owner, url => new URL(url).searchParams.get("page") === "1"
+		? { link: '<https://api.github.com/users/sample-user/events/public?page=2>; rel="next"', data: [event] }
+		: { link: undefined, data: [] });
+	assert.deepEqual(result.records, []);
+	assert.deepEqual(result.state, { events: prior });
+	assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+});
+
+for (const disabled of [false, true]) {
+	test(`starred real BtnGroup pagination, disabled Next ${disabled}, cannot certify end`, async () => {
+		const list = `<ul id="user-starred-repos">${Array.from({ length: 30 }, (_, i) => `<li><h3><a href="/sample-user/repo${i}">repo${i}</a></h3></li>`).join("")}</ul>`;
+		const control = disabled ? '<button class="btn BtnGroup-item" disabled="disabled">Next</button>'
+			: '<a rel="nofollow" class="btn BtnGroup-item" href="https://github.com/sample-user?after=Y3Vyc29y&tab=stars">Next</a>';
+		const html = owner + list + `<div class="paginate-container"><div class="BtnGroup" data-test-selector="pagination"><button class="btn BtnGroup-item" disabled="disabled">Previous</button>${control}</div></div>`;
+		const url = "https://github.com/sample-user?page=1&tab=stars";
+		const proof = inspectInventoryPage({ requestedUrl: url, currentUrl: url, html }, "starred", "sample-user", 1, 30, 0);
+		assert.equal(proof.complete, false);
+		assert.equal(proof.reason, disabled ? "terminal_unverified" : "unknown_continuation");
+		const result = await collect("starred", () => html);
+		assert.deepEqual(result.records, []);
+		assert.deepEqual(result.state, { starred: prior });
+		assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+	});
+}
+
+for (const matches of [false, true]) {
+	test(`starred missing browser pagination needs independent REST reconciliation: matches ${matches}`, async () => {
+		const html = owner + '<ul id="user-starred-repos"><li><h3><a href="/sample-user/a">a</a></h3></li></ul>';
+		const data = (matches ? ["a"] : ["a", "b"]).map(name => ({ full_name: `sample-user/${name}`, html_url: `https://github.com/sample-user/${name}` }));
+		const result = await collect("starred", () => html, () => ({ link: null, data }));
+		if (matches) {
+			assert.equal(result.records.length, 1);
+			assert.deepEqual(result.messages.map(message => message.type), ["STATE", "DETAIL_COVERAGE"]);
+		} else {
+			assert.deepEqual(result.records, []);
+			assert.deepEqual(result.state, { starred: prior });
+			assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+		}
+	});
+}
+
+for (const stream of ["events", "starred"] as const) {
+	for (const link of ["unreadable", '<https://api.github.com/items?page=2>; rel="continue"']) {
+		test(`${stream} explicit empty data cannot override an unknown pagination header: ${link}`, async () => {
+			const result = await collect(stream, () => owner + '<ul id="user-starred-repos"></ul>', () => ({ link, data: [] }));
+			assert.deepEqual(result.records, []);
+			assert.deepEqual(result.state, { [stream]: prior });
+			assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+		});
+	}
+}

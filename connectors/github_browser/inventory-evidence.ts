@@ -19,14 +19,15 @@ export class InventoryEvidence {
 	private terminalProven = false;
 
 	/** Missing controls and short pages are not source-end observations. */
-	static terminalReason(proof: InventoryTerminalProof): "terminal_unverified" | "terminal_list" {
-		return proof === null ? "terminal_unverified" : "terminal_list";
+	static terminalProof(observed: { disabledNext: boolean; total: number | null; distinct: number }): InventoryTerminalProof {
+		if (observed.total !== null && observed.total === observed.distinct) return "exact_count";
+		return observed.disabledNext ? "disabled_next" : null;
 	}
 
 	/** Only a validated page with positive end evidence may end a walk. */
 	addEnd(page: { nextUrl: string | null; reason: string; terminalProof: InventoryTerminalProof }): void {
 		this.terminalProven ||= page.nextUrl === null && page.reason === "terminal_list" &&
-			InventoryEvidence.terminalReason(page.terminalProof) === "terminal_list";
+			page.terminalProof !== null;
 	}
 
 	get identities(): ReadonlySet<string> {
@@ -63,15 +64,8 @@ export class InventoryEvidence {
 		this.conflict ||= evidence.totalConflict || this.totals.size > 1;
 	}
 
-	addEnumeration(total: number, end: { link: string | null | undefined; explicitEmpty: boolean }): boolean {
-		// An observed absent Link header or a recognized backward-only window is
-		// source-end evidence. Missing metadata and unknown relations are not.
-		const links = end.link?.split(",");
-		const backwardOnly = links !== undefined && links.length > 0 && links.every(link =>
-			/^\s*<https:\/\/api\.github\.com\/[^<>]+>;\s*rel=(?:"(?:prev|first)"|prev|first)\s*$/u.test(link));
-		if (!end.explicitEmpty && end.link !== null && !backwardOnly) return false;
+	addEnumeration(total: number): void {
 		this.add({ exactTotals: [total], totalConflict: false });
-		return true;
 	}
 
 	get expectedTotal(): number | null {

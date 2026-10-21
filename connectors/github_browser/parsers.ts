@@ -944,8 +944,7 @@ export function inspectInventoryPage(
 		(next !== null && !disabled && nextUrl === null);
 	const renderComplete = list !== null && !isUnreadable(list) && countersReady &&
 		paginators.every(node => !isUnreadable(node));
-	const terminalProof: InventoryTerminalProof = total !== null && total === parsedRows
-		? "exact_count" : disabled ? "disabled_next" : null;
+	const terminalProof = InventoryEvidence.terminalProof({ disabledNext: disabled, total, distinct: parsedRows });
 	const result = inspectInventoryEnd({
 		page, username, stream, pageNumber, parsedRows, rejectedRows, noProgress,
 		explicitEmpty: false, hasRecognizedList: list !== null, renderComplete,

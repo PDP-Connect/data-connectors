@@ -5,6 +5,7 @@ import type {
 	EmittedMessage,
 	RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { inspectApiWindow } from "./page-evidence.ts";
 import { InventoryEvidence } from "./inventory-evidence.ts";
 import { fullInventoryCoverage } from "./inventory-coverage.ts";
 import {
@@ -318,11 +319,13 @@ export async function collectGitHubBrowser(
 					if (await emitEntity("events", event)) covered += 1;
 					else valid = false;
 				}
-				if (response.data.length === 0 || apiWindowEnded(response.link)) {
+				const window = inspectApiWindow(response.link);
+				if (window.kind === "ended" || (page === 1 && response.data.length === 0 && response.link === undefined)) {
 					if (valid) await complete("events", { considered, covered });
 					else await incomplete("events", "invalid_or_duplicate_rows", { considered, covered });
 					return;
 				}
+				if (response.data.length === 0) break;
 			}
 			const counts = { considered, covered };
 			// Neither a short page nor our loop limit establishes the source end.
@@ -513,7 +516,7 @@ export async function collectGitHubBrowser(
 			if (seen.size === Math.min(expectedTotal, HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT)) {
 				return { failure: null, capped, considered, covered };
 			}
-			if (body.items.length === 0 || apiWindowEnded(response.link)) break;
+			if (body.items.length === 0 || inspectApiWindow(response.link).kind === "ended") break;
 			if (page < HISTORY_PAGE_LIMIT) await services.sleep(6500);
 		}
 		return failed("end_not_proven");
@@ -557,14 +560,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 		: null;
 }
 
-// undefined means the adapter did not observe headers; null means an observed
-// absent Link header. Only the latter is GitHub source-end evidence.
-function apiWindowEnded(link: string | null | undefined): boolean {
-	if (link === undefined) return false;
-	if (link === null) return true;
-	return !/;\s*rel\s*=\s*(?:"[^"]*\bnext\b[^"]*"|next\b)/iu.test(link);
-}
-
 /** REST supplies enumeration evidence; browser rows remain the emitted payload. */
 async function inspectStarredRest(
 	services: BrowserServices,
@@ -586,11 +581,14 @@ async function inspectStarredRest(
 				return "invalid_or_duplicate_rows";
 			seen.add(repo.html_url as string);
 		}
-		if (evidence.addEnumeration(seen.size, { link: response.link, explicitEmpty: page === 1 && response.data.length === 0 })) {
+		const window = inspectApiWindow(response.link);
+		if (window.kind === "ended" || (page === 1 && response.data.length === 0 && response.link === undefined)) {
+			evidence.addEnumeration(seen.size);
 			if (seen.size !== browserRepos.size) return "total_mismatch";
 			if (Array.from(seen).some(repo => !browserRepos.has(repo))) return "repository_mismatch";
 			return null;
 		}
+		if (window.kind !== "next" || response.data.length === 0) break;
 	}
 	return "end_not_proven";
 }

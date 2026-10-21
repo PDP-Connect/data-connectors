@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { inspectApiWindow } from "./page-evidence.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -128,4 +129,14 @@ test("the exact stars route binds the owner through signed-in identity without a
 	assert.equal(inspectInventoryEnd({
 		...evidence, page: { requestedUrl: profileUrl, currentUrl: profileUrl, html },
 	}).reason, "wrong_owner");
+});
+
+test("API pagination requires recognized source-end evidence", () => {
+	for (const link of [undefined, "", "unreadable", '<https://api.github.com/items?page=2>; rel="continue"', '<https://api.github.com/items?page=2>; rel="last"']) {
+		assert.deepEqual(inspectApiWindow(link), { kind: "unknown" });
+	}
+	assert.deepEqual(inspectApiWindow(null), { kind: "ended" });
+	assert.deepEqual(inspectApiWindow('<https://api.github.com/items?page=1>; rel="prev", <https://api.github.com/items?page=1>; rel="first"'), { kind: "ended" });
+	assert.deepEqual(inspectApiWindow('<https://api.github.com/items?page=2>; rel="next", <https://api.github.com/items?page=4>; rel="last"'), { kind: "next", url: "https://api.github.com/items?page=2" });
+	assert.deepEqual(inspectApiWindow('<https://api.github.com/items?page=2>; rel="next", unreadable'), { kind: "unknown" });
 });

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { parseHTML } from "linkedom";
-import { InventoryEvidence, type InventoryTerminalProof } from "./inventory-evidence.ts";
+import { type InventoryTerminalProof } from "./inventory-evidence.ts";
 
 export interface BrowserPageObservation {
 	readonly requestedUrl: string;
@@ -79,7 +79,7 @@ export function inspectInventoryEnd(
 	}
 	if (evidence.rejectedRows > 0)
 		return { complete: false, nextUrl: null, reason: "discarded_rows" };
-	const reason = InventoryEvidence.terminalReason(evidence.terminalProof);
+	const reason = evidence.terminalProof === null ? "terminal_unverified" : "terminal_list";
 	return { complete: reason === "terminal_list", nextUrl: null, reason };
 }
 
@@ -206,4 +206,31 @@ function validSelection(url: URL, starsRoute: boolean): boolean {
 		(!url.searchParams.has("after") || (url.searchParams.get("after")?.trim().length ?? 0) > 0) &&
 		Array.from(url.searchParams.keys()).every((key) =>
 			allowed.includes(key) && url.searchParams.getAll(key).length === 1);
+}
+
+export type ApiWindow = { kind: "next"; url: string } | { kind: "ended" } | { kind: "unknown" };
+
+/** Unknown metadata never proves source end. An observed absent header does. */
+export function inspectApiWindow(link: string | null | undefined): ApiWindow {
+	if (link === null) return { kind: "ended" };
+	if (link === undefined) return { kind: "unknown" };
+	let nextUrl: string | null = null;
+	let hasLast = false;
+	for (const segment of link.split(",")) {
+		const match = /^\s*<([^<>]+)>;\s*rel=(?:"(next|prev|first|last)"|(next|prev|first|last))\s*$/u.exec(segment);
+		if (match === null) return { kind: "unknown" };
+		let url: URL;
+		try { url = new URL(match[1] ?? ""); } catch { return { kind: "unknown" }; }
+		if (url.origin !== "https://api.github.com" || url.username || url.password || url.hash) return { kind: "unknown" };
+		const relation = match[2] ?? match[3];
+		if (relation === "next") {
+			if (nextUrl !== null) return { kind: "unknown" };
+			nextUrl = url.href;
+		} else if (relation === "last") {
+			// A last-page target alone does not say that this response is last.
+			hasLast = true;
+		}
+	}
+	if (nextUrl !== null) return { kind: "next", url: nextUrl };
+	return { kind: hasLast ? "unknown" : "ended" };
 }
