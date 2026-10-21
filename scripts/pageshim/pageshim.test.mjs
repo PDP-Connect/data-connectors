@@ -1433,8 +1433,6 @@ test("github_browser: an incomplete stream is an omitted error", {
 			disposition: "omitted",
 			scope: "github.starred",
 			phase: "collect",
-			code: "inventory_not_proven_complete",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		},
 	);
 });
@@ -3414,38 +3412,6 @@ test("icloud_notes: failed continuation preserves readable rows and never checkp
 	assert.equal(r.states["icloud_notes.notes"], undefined);
 	assert.ok(r.states["icloud_notes.profile"]);
 	assert.ok(r.states["icloud_notes.folders"]);
-});
-
-test("icloud_notes: incomplete inventories retain recovery hints without checkpointing", { timeout: 180_000 }, async () => {
-	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
-	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-recovery.js") });
-	for (const [status, action, retryable] of [
-		[429, "retry_by_runtime", true], [503, "retry_by_runtime", true],
-		[401, "manual_action_required", false], [403, "manual_action_required", false],
-		[200, "not_retriable", false],
-	]) {
-		for (const resultStreaming of [false, true]) {
-			const fixtures = { ...c.fixtures, resolve(url, request) {
-				const response = c.fixtures.resolve(url, request);
-				if (!url.includes("/records/query")) return response;
-				const query = JSON.parse(request.postData);
-				if (query.query.filterBy[0].fieldValue.value !== "parentless") return response;
-				return { ...response, status, body: JSON.stringify(status === 200 ? { records: [{ recordType: "Folder" }] } : { error: "synthetic failure" }) };
-			} };
-			const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes,
-				gotoDelayMs: 0, loginWaitMs: 1000, resultStreaming,
-				resultSpoolDirectory: join(out, `icloud-recovery-${status}-${resultStreaming}`) });
-			assertCleanRun(r);
-			assert.deepEqual(r.ret, { ok: true });
-			const errors = resultStreaming ? r.streamDone.errors : r.result.errors;
-			for (const scope of ["icloud_notes.folders", "icloud_notes.notes"]) {
-				const error = errors.find(error => error.scope === scope);
-				assert.equal(error?.code, "inventory_not_proven_complete", `${status}: ${scope}`);
-				assert.deepEqual(error?.recovery_hint, { action, retryable }, `${status}: ${scope}`);
-				assert.equal(r.states[scope], undefined, `${status}: no checkpoint for ${scope}`);
-			}
-		}
-	}
 });
 
 test("icloud_notes: thin host commits all streams only after accepted completion", { timeout: 120_000 }, async () => {

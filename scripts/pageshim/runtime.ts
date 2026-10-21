@@ -20,7 +20,6 @@ import {
 	makeEmitRecord,
 	withholdsBoundedProgress,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { isConnectorErrorCodeShaped } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
 
 /** Set by build.mjs: the connector directory whose manifest declares the streams. */
@@ -848,9 +847,9 @@ export async function runOnPageShim(
 					disposition: (streamCounts[stream] ?? 0) ? "degraded" : "omitted",
 					scope: `${prefix}${stream}`,
 					phase: "collect",
-					...(typeof msg.reason === "string" && isConnectorErrorCodeShaped(msg.reason) ? { code: msg.reason } : {}),
-					...(typeof hint?.action === "string" && isConnectorErrorCodeShaped(hint.action) && typeof hint.retryable === "boolean" ? {
-						recovery_hint: { action: hint.action, retryable: hint.retryable },
+					...(deferredCoverage ? {
+						code: String(msg.reason),
+						recovery_hint: { action: "retry_by_runtime", retryable: true },
 					} : {}),
 				});
 				return;

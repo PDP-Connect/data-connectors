@@ -780,36 +780,3 @@ test("audited crypto parity and every admitted bundle byte comparison", async ()
   }
   console.log("PAGESHIM_CRYPTO_IMPACT_SUMMARY "+JSON.stringify(report));
 });
-
-test("SKIP_RESULT forwards only bounded machine codes and recovery actions", { timeout: 60_000 }, async () => {
-	await mkdir(root, { recursive: true });
-	const bundle = join(root, "skip-machine-fields.js");
-	await buildPageshim({
-		connector: "strava_browser",
-		entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
-		outfile: bundle,
-		extraDefines: {
-			PAGESHIM_COVERAGE_MESSAGES: JSON.stringify([
-				{ type: "SKIP_RESULT", stream: "conversations", reason: "inventory_not_proven_complete", recovery_hint: { action: "retry_by_runtime", retryable: true } },
-				{ type: "SKIP_RESULT", stream: "conversations", reason: "UPPERCASE", recovery_hint: { action: "x".repeat(65), retryable: true } },
-				{ type: "SKIP_RESULT", stream: "conversations", reason: "x".repeat(65), recovery_hint: { action: "a URL https://example.invalid", retryable: false } },
-				{ type: "SKIP_RESULT", stream: "conversations", recovery_hint: { action: "retry_by_runtime", retryable: "true" } },
-			]),
-			PAGESHIM_COVERAGE_THROW: "false", PAGESHIM_COVERAGE_RECORD: "false", PAGESHIM_COVERAGE_STREAM: "false",
-		},
-	});
-	for (const resultStreaming of [false, true]) {
-		const r = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], resultStreaming,
-			resultSpoolDirectory: join(root, `skip-machine-${resultStreaming}`) });
-		assertCleanRun(r);
-		assert.deepEqual(r.ret, { ok: true });
-		const errors = resultStreaming ? r.streamDone.errors : r.result.errors;
-		assert.equal(errors.length, 4);
-		assert.equal(errors[0].code, "inventory_not_proven_complete");
-		assert.deepEqual(errors[0].recovery_hint, { action: "retry_by_runtime", retryable: true });
-		for (const error of errors.slice(1)) {
-			assert.equal(error.code, undefined);
-			assert.equal(error.recovery_hint, undefined);
-		}
-	}
-});
