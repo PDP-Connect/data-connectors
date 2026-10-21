@@ -183,33 +183,47 @@ export class MuseRpcError extends Error {
  * A plain string (not a function) so the bundler cannot inject helpers such
  * as `__name` that do not exist in the page.
  */
+/**
+ * Finds the app's gateway client: a React context value with `sendRequest` and `gatewayUrl`. It is
+ * looked up fresh on every call (context values are replaced as the connection state changes), and
+ * the one whose `isReady` is true wins: the client exists before its encrypted channel is up.
+ */
+const FIND_GATEWAY_FN = `function __pdppMuseFindGateway() {
+  if (!document.body) return null;
+  let fiber = null;
+  const elements = [document.body, ...document.querySelectorAll("body *")].slice(0, 5000);
+  for (const el of elements) {
+    const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
+    if (key) { fiber = el[key]; break; }
+  }
+  if (!fiber) return null;
+  let root = fiber;
+  while (root.return) root = root.return;
+  const stack = [root];
+  let visited = 0;
+  let first = null;
+  while (stack.length && visited < 400000) {
+    const node = stack.pop();
+    visited++;
+    const value = node.memoizedProps && node.memoizedProps.value;
+    if (value && typeof value === "object" && typeof value.sendRequest === "function" && "gatewayUrl" in value) {
+      if (value.isReady === true) return value;
+      if (!first) first = value;
+    }
+    if (node.child) stack.push(node.child);
+    if (node.sibling) stack.push(node.sibling);
+  }
+  return first;
+}`;
+
+/** True once the client is found and its channel is ready; asks the app to connect when it is not. */
 export const LOCATE_GATEWAY_SCRIPT = `(() => {
   try {
-    const cached = window.__pdppMuseGateway;
-    if (cached && typeof cached.sendRequest === "function") return true;
-    if (!document.body) return false;
-    let fiber = null;
-    const elements = [document.body, ...document.querySelectorAll("body *")].slice(0, 5000);
-    for (const el of elements) {
-      const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
-      if (key) { fiber = el[key]; break; }
-    }
-    if (!fiber) return false;
-    let root = fiber;
-    while (root.return) root = root.return;
-    const stack = [root];
-    let visited = 0;
-    while (stack.length && visited < 400000) {
-      const node = stack.pop();
-      visited++;
-      const value = node.memoizedProps && node.memoizedProps.value;
-      if (value && typeof value === "object" && typeof value.sendRequest === "function" && "gatewayUrl" in value) {
-        window.__pdppMuseGateway = value;
-        return true;
-      }
-      if (node.child) stack.push(node.child);
-      if (node.sibling) stack.push(node.sibling);
-    }
+    ${FIND_GATEWAY_FN}
+    const gateway = __pdppMuseFindGateway();
+    if (!gateway) return false;
+    if (gateway.isReady === true) return true;
+    try { if (typeof gateway.ensureLiveConnection === "function") gateway.ensureLiveConnection(); } catch (e) {}
     return false;
   } catch (e) {
     return false;
@@ -222,8 +236,9 @@ export function gatewayCallScript(
 	params: Record<string, unknown>,
 ): string {
 	return `(async () => {
-  const gateway = window.__pdppMuseGateway;
-  if (!gateway || typeof gateway.sendRequest !== "function") {
+  ${FIND_GATEWAY_FN}
+  const gateway = __pdppMuseFindGateway();
+  if (!gateway || gateway.isReady !== true) {
     return JSON.stringify({ ok: false, code: "not_ready" });
   }
   let timer = null;
@@ -236,7 +251,7 @@ export function gatewayCallScript(
     return JSON.stringify({ ok: true, value: value === undefined ? null : value });
   } catch (e) {
     const text = String((e && e.message) || e || "error");
-    return JSON.stringify({ ok: false, code: /timeout/i.test(text) ? "timeout" : "rpc_error", message: text.slice(0, 120) });
+    return JSON.stringify({ ok: false, code: /timeout/i.test(text) ? "timeout" : /not connected/i.test(text) ? "not_ready" : "rpc_error", message: text.slice(0, 120) });
   } finally {
     if (timer !== null) clearTimeout(timer);
   }
@@ -309,7 +324,11 @@ export function pageGateway(page: ScriptRunner): MuseGateway {
 		async call(method, params) {
 			assertReadOnlyCall(method, params);
 			let answer = await once(method, params);
-			if (!answer.ok && answer.code === "not_ready") {
+			for (
+				let retry = 0;
+				retry < 3 && !answer.ok && answer.code === "not_ready";
+				retry++
+			) {
 				// The app replaced or dropped its client (reconnect, navigation).
 				if (!(await waitForGateway(page))) throw authFailure();
 				answer = await once(method, params);

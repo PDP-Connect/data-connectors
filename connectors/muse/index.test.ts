@@ -685,7 +685,11 @@ class FakeBlob {
 function sandboxPage(
 	sendRequest: (method: string, params: unknown) => unknown,
 ) {
-	const value = { gatewayUrl: "wss://example.invalid/v1/noise", sendRequest };
+	const value = {
+		gatewayUrl: "wss://example.invalid/v1/noise",
+		isReady: true,
+		sendRequest,
+	};
 	const provider = { memoizedProps: { value }, child: null, sibling: null };
 	const other = {
 		memoizedProps: { value: { theme: "dark" } },
@@ -708,7 +712,9 @@ function sandboxPage(
 		evaluate: async (script: string): Promise<unknown> =>
 			await vm.runInContext(script, context),
 		forget: () => {
-			sandbox.__pdppMuseGateway = undefined;
+			(
+				sandbox.document as { body: Record<string, unknown> }
+			).body.__reactFiber$abc = leaf;
 		},
 	};
 }
