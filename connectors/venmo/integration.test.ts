@@ -192,6 +192,25 @@ test("collectTransactions: a partial page emits every modeled record and clears 
 	);
 });
 
+test("collectTransactions emits zone-less dates and stores a normalized latest cursor", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		"/stories/target-or-actor/1111111111111111111": [
+			{ body: { data: [story("4003", "2026-07-02T00:00:00.123456")] } },
+			{ body: { data: [] } },
+		],
+	});
+	const { ctx, emitted, messages } = makeCtx({}, ["transactions"]);
+	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.equal(emitted.length, 1);
+	const state = messages.find(
+		(m) => m.type === "STATE" && m.stream === "transactions",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.deepEqual(state.cursor, {
+		last_seen_date_created: "2026-07-02T00:00:00.123456Z",
+	});
+});
+
 test("collectTransactions: a short non-empty page does not terminate the walk", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [
@@ -601,7 +620,7 @@ test("collectAllStreams: a capped Venmo friends walk is partial and holds its fi
 	assert.deepEqual(state.cursor, { fingerprints: { prior: "fingerprint" } });
 });
 
-test("collectAllStreams: a capped Venmo transactions walk is partial and holds its date checkpoint", async () => {
+test("collectAllStreams: a capped Venmo transactions walk normalizes its held date checkpoint", async () => {
 	const page = Array.from({ length: 50 }, (_, i) =>
 		story(String(40_000 + i), "2026-01-01T00:00:00Z"),
 	);
@@ -614,7 +633,7 @@ test("collectAllStreams: a capped Venmo transactions walk is partial and holds i
 		),
 	});
 	const { ctx, messages } = makeCtx(
-		{ transactions: { last_seen_date_created: "2020-01-01T00:00:00Z" } },
+		{ transactions: { last_seen_date_created: "2020-01-01T00:00:00" } },
 		["transactions"],
 	);
 
