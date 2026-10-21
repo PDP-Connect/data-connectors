@@ -37,6 +37,7 @@ import {
 	shouldPreserveRemotePagesOnAcquire,
 } from "./connector-runtime.ts";
 import type { CaptureSession } from "./fixture-capture.ts";
+import { TerminalError } from "./terminal-error.ts";
 
 const HEADLESS: BrowserRuntimeVisibility = {
 	envKey: "PDPP_BROWSER_HEADLESS",
@@ -1836,6 +1837,31 @@ test("typed recovery survives a normalizer that only returns message and retryab
 		}),
 	});
 	assert.equal(overridden.recovery_hint, "not_retriable");
+});
+
+test("typed recovery fills an omitted retryable bit independently of its action", () => {
+	for (const retryable of [false, true]) {
+		for (const hintRetryable of [undefined, false, true]) {
+			const error = createConnectorFailure(
+				"auth_failed",
+				"Authentication rejected.",
+				{
+					retryable,
+					recoveryHint: {
+						action: "manual_action_required",
+						...(hintRetryable === undefined
+							? {}
+							: { retryable: hintRetryable }),
+					},
+				},
+			);
+			assert.ok(error instanceof TerminalError);
+			assert.deepEqual(error.recoveryHint, {
+				action: "manual_action_required",
+				retryable: hintRetryable ?? retryable,
+			});
+		}
+	}
 });
 
 test("createConnectorFailure rejects recovery actions outside the machine-field contract", () => {

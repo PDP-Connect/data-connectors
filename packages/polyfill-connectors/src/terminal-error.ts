@@ -47,7 +47,13 @@ export class TerminalError extends Error {
 		this.name = "TerminalError";
 		this.retryable = options.retryable ?? false;
 		if (options.recoveryHint !== undefined)
-			this.recoveryHint = options.recoveryHint;
+			this.recoveryHint =
+				typeof options.recoveryHint === "string"
+					? options.recoveryHint
+					: {
+							...options.recoveryHint,
+							retryable: options.recoveryHint.retryable ?? this.retryable,
+						};
 		if (options.code !== undefined) {
 			this.code = options.code;
 		}
