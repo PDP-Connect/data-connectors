@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.2.17",
+				"version": "0.2.18",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -3639,7 +3639,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.2.18",
+				"version": "0.2.19",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -9681,7 +9681,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.8",
+				"version": "0.3.9",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -13052,7 +13052,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.22",
+				"version": "0.6.23",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -14512,7 +14512,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.33",
+				"version": "0.3.34",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -21184,7 +21184,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.18",
+				"version": "0.2.19",
 				"display_name": "USAA",
 				"runtime_requirements": {
 					"bindings": {
@@ -21842,7 +21842,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.21",
+				"version": "0.2.22",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
