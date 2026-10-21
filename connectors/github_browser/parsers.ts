@@ -235,18 +235,21 @@ function listEmptyStates(list: Element | null, rows: Element[]): Element[] {
 		node.querySelector("button, form, dialog, dialog-helper") === null);
 }
 
+const STARRED_CARD_SELECTOR = "div.col-12.d-block.width-full.border-bottom";
+
 // Rows are the entries of the lists inside the container, or list items placed
 // directly in a wrapper. Wrappers, toolbars, pagination and empty states
 // between them are not rows; an entry that is not an ordinary row still counts,
 // so identity-less placeholders are rejected.
-function cardRows(roots: Element | null | Array<Element | null>): Element[] {
+function cardRows(roots: Element | null | Array<Element | null>, starred = false): Element[] {
 	const rows: Element[] = [];
 	const visit = (node: Element, list: Element): void => {
 		const isList = node.matches("ul, ol");
 		for (const child of Array.from(node.children)) {
 			if (child.matches(OVERLAY_SELECTOR) || insideOverlay(child, list)) continue;
 			if (child.matches(`${EMPTY_STATE}, .paginate-container, .pagination`)) continue;
-			if (child.matches("ul, ol") || (!isList && !child.matches("li, [role='listitem']"))) visit(child, list);
+			if (starred && child.matches(STARRED_CARD_SELECTOR)) rows.push(child);
+			else if (child.matches("ul, ol") || (!isList && !child.matches("li, [role='listitem']"))) visit(child, list);
 			else if (child.children.length > 0 &&
 				Array.from(child.children).every((entry) => entry.matches(OVERLAY_SELECTOR))) continue;
 			else rows.push(child);
@@ -730,13 +733,22 @@ export function parseStarredHtml(html: string): StarredRow[] {
 export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 	const { document } = parseHTML(html);
 	const list = starredList(document);
-	const sourceRows = cardRows(list);
+	const sourceRows = cardRows(list, true);
 	const rows: StarredRow[] = [];
 	const unreadableFields: string[] = [];
 	let rejectedRows = 0;
 	const seen = new Set<string>();
 	for (const [index, source] of sourceRows.entries()) {
-		const link = source.querySelector("h3 a[href]");
+		const headings = Array.from(source.querySelectorAll("h3")).filter((node) => !insideOverlay(node, source));
+		const links = Array.from(source.querySelectorAll("h3 a[href]")).filter((node) => !insideOverlay(node, source));
+		// A card is one entry only when it has one primary identity. Nested
+		// cards and extra headings cannot disappear inside an accounted row.
+		if (headings.length !== 1 || links.length !== 1 ||
+			Array.from(source.querySelectorAll(STARRED_CARD_SELECTOR)).some((node) => !insideOverlay(node, source))) {
+			rejectedRows += 1;
+			continue;
+		}
+		const link = links[0] ?? null;
 		const repo = repositoryName(link?.getAttribute("href") ?? null);
 		const fullName = sourceText(link);
 		if (!repo || !fullName) {
@@ -754,7 +766,7 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 		const data = classifyRow(source, (node) => node === description || node.matches(
 			'h3 a, [itemprop="programmingLanguage"], [data-ga-click*="Repository, language"], a[href$="/stargazers"], a[href$="/forks"], relative-time'));
 		const layout = renderedRow(source,
-			source.matches("li") && source.querySelector("h3 a") !== null &&
+			source.matches(`li, ${STARRED_CARD_SELECTOR}`) && source.querySelector("h3 a") !== null &&
 				sourceTime(source.querySelector("relative-time")) !== undefined,
 			data);
 		const missing: string[] = layout ? [] : ["rowLayout"];
@@ -830,7 +842,7 @@ export function inspectInventoryPage(
 	const candidates = new Set<Element>();
 	if (list !== null) {
 		for (const node of Array.from(list.querySelectorAll(selector))) {
-			if (node.closest(OVERLAY_SELECTOR) === null && !cardRows(list).some(row => row.contains(node)))
+			if (node.closest(OVERLAY_SELECTOR) === null && !cardRows(list, stream === "starred").some(row => row.contains(node)))
 				candidates.add(node);
 		}
 		for (let scope: Element | null = list; scope !== null; scope = scope.parentElement) {
@@ -1091,15 +1103,36 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 				: payload.commits === undefined && (payload.size === undefined || nullableNumber(payload.size)));
 			break;
 		}
-		case "PullRequestEvent":
+		case "PullRequestEvent": {
+			const expectedApiUrl = `https://api.github.com/repos/${value.repo}/pulls/${pr.number}`;
+			const validNumber = typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0;
+			const htmlPrefix = `https://github.com/${value.repo}/pull/`;
+			const htmlNumber = typeof pr.html_url === "string" && pr.html_url.startsWith(htmlPrefix)
+				? Number(pr.html_url.slice(htmlPrefix.length)) : NaN;
+			const matchingHtmlUrl = Number.isSafeInteger(htmlNumber) && htmlNumber > 0 &&
+				pr.html_url === `${htmlPrefix}${htmlNumber}` &&
+				(pr.number === undefined || pr.number === htmlNumber) &&
+				(payload.number === undefined || payload.number === htmlNumber);
+			// The Events API also returns a compact PR reference without title/body.
+			// Accept that known source shape; arbitrary missing detail still vetoes.
+			const compact = pr.title === undefined && pr.body === undefined &&
+				typeof pr.id === "number" && Number.isSafeInteger(pr.id) && pr.id > 0 &&
+				validNumber &&
+				payload.number === pr.number &&
+				pr.url === expectedApiUrl &&
+				(pr.html_url === undefined || matchingHtmlUrl) &&
+				typeof objectValue(pr.head).ref === "string" && objectValue(pr.head).ref !== "" &&
+				typeof objectValue(pr.base).ref === "string" && objectValue(pr.base).ref !== "";
 			requireField("action", typeof payload.action === "string");
-			requireField("title", nullableText(pr.title));
+			requireField("title", compact || nullableText(pr.title));
 			if (pr.title === null) row.title = null;
-			requireField("body", nullableText(pr.body));
-			requireField("url", nullableText(pr.html_url) || typeof pr.url === "string");
+			requireField("body", compact || nullableText(pr.body));
+			requireField("url", pr.html_url === null || matchingHtmlUrl ||
+				(pr.html_url === undefined && validNumber && pr.url === expectedApiUrl));
 			if (pr.html_url === null) row.url = null;
 			requireField("branch", nullableText(objectValue(pr.head).ref));
 			break;
+		}
 		case "PullRequestReviewEvent":
 			requireField("action", typeof review.state === "string");
 			requireField("title", nullableText(pr.title));
@@ -1216,11 +1249,8 @@ function legacyEventValues(raw: unknown): LegacyEvent | null {
 			extras.body = stringValue(pullRequest.body)?.slice(0, 280) ?? null;
 			extras.url =
 				stringValue(pullRequest.html_url) ??
-				stringValue(pullRequest.url)?.replace(
-					"api.github.com/repos",
-					"github.com",
-				) ??
-				null;
+				(pullRequest.url === `https://api.github.com/repos/${parsed.data.repo.name}/pulls/${number}`
+					? `https://github.com/${parsed.data.repo.name}/pull/${number}` : null);
 			extras.branch = prBranch;
 			break;
 		}

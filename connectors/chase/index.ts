@@ -1454,7 +1454,7 @@ function hasParse(v: unknown): v is OfxParser {
 	);
 }
 
-async function parseQfxFile(path: string): Promise<unknown> {
+export async function parseQfxFile(path: string): Promise<unknown> {
 	// ofx-js (0.2.x) ships no declaration file. The default export has
 	// shifted shape across versions (top-level OFX, nested under default,
 	// bare parse). types/ofx-js.d.ts shims the module as `unknown`; we
@@ -2193,15 +2193,29 @@ export async function emitBalancesDetailCoverage(
 	if (!(deps.wantsBalances && deps.wantsAccounts)) {
 		return;
 	}
-	const { requiredKeys, hydratedKeys, gapKeys } =
-		accountDetailCoverageKeys(outcomes);
+	const { requiredKeys, hydratedKeys, gapKeys } = accountDetailCoverageKeys(
+		outcomes.map((outcome) =>
+			outcome.kind === "gap" && outcome.balanceEmitted
+				? { kind: "hydrated", accountId: outcome.accountId }
+				: outcome,
+		),
+	);
+	// A parsed but unaccepted balance is debt, not a fabricated transport gap.
+	const actualGapKeys = gapKeys.filter((key) =>
+		outcomes.some(
+			(outcome) =>
+				outcome.accountId === key &&
+				outcome.kind === "gap" &&
+				outcome.balanceEmitted === undefined,
+		),
+	);
 	await deps.emit(
 		buildDetailCoverageMessage({
 			stream: "balances",
 			stateStream: "accounts",
 			requiredKeys,
 			hydratedKeys,
-			gapKeys,
+			gapKeys: actualGapKeys,
 			considered: outcomes.length,
 			covered: hydratedKeys.length,
 		}),
@@ -2348,6 +2362,8 @@ export type AccountDetailOutcome =
 			accountId: string;
 			reason: DetailGapMessage["reason"];
 			errorClass: string;
+			/** Independent evidence from a parsed QFX despite transaction debt. */
+			balanceEmitted?: boolean;
 	  };
 
 export function classifyNoActivityOutcome(
@@ -2456,13 +2472,38 @@ async function processAccountDownload(
 		};
 	}
 
-	const { transactions, balance } = extractFromQfx(parsed);
+	return processParsedAccountQfx(
+		deps,
+		account,
+		activityChoice.activity,
+		parsed,
+		progressLabel,
+	);
+}
+
+/** The production extraction, emission and account-credit boundary, without browser I/O. */
+export async function processParsedAccountQfx(
+	deps: EmitDeps,
+	account: ChaseAccount,
+	activity: ActivityKind,
+	parsed: unknown,
+	progressLabel = "?/?",
+): Promise<AccountDetailOutcome> {
+	const { transactions, balance, integrity } = extractFromQfx(parsed);
+	const partial =
+		deps.wantsTransactions &&
+		(!integrity.sourceShapeValid || integrity.malformedCount > 0);
+	// Keep valid records, but never advance this account past an unknown row.
+	// An isolated cursor map also preserves the absence of a first-run cursor.
+	const transactionDeps = partial
+		? { ...deps, maxSeenByAccount: { ...deps.maxSeenByAccount } }
+		: deps;
 
 	if (deps.wantsTransactions) {
 		await emitTransactionsForAccount(
-			deps,
+			transactionDeps,
 			account,
-			activityChoice.activity,
+			activity,
 			transactions,
 			deps.transactionsFingerprintCursor,
 		);
@@ -2470,14 +2511,21 @@ async function processAccountDownload(
 
 	let balanceEmitted = false;
 	if (deps.wantsBalances && balance) {
-		await deps.emitRecord("balances", {
-			id: `${account.internal_id}|${balance.as_of}`,
-			account_id: account.internal_id,
-			as_of: balance.as_of,
-			ledger_balance_cents: balance.ledger_cents,
-			available_balance_cents: balance.available_cents,
-		});
-		balanceEmitted = true;
+		await deps.emitRecord(
+			"balances",
+			{
+				id: `${account.internal_id}|${balance.as_of}`,
+				account_id: account.internal_id,
+				as_of: balance.as_of,
+				ledger_balance_cents: balance.ledger_cents,
+				available_balance_cents: balance.available_cents,
+			},
+			{
+				beforeEmit: async () => {
+					balanceEmitted = true;
+				},
+			},
+		);
 	}
 
 	await deps.emit({
@@ -2485,6 +2533,24 @@ async function processAccountDownload(
 		stream: "transactions",
 		message: `Parsed account ${progressLabel}: emitted ${transactions.length} transaction(s)`,
 	});
+	if (partial) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "qfx_partial_parse",
+			message:
+				"Some transaction rows could not be read; the account's saved position was kept",
+			recovery_hint: "retry_on_connector_upgrade",
+			diagnostics: { ...integrity },
+		});
+		return {
+			kind: "gap",
+			accountId: account.internal_id,
+			reason: "temporary_unavailable",
+			errorClass: "qfx_partial_parse",
+			balanceEmitted,
+		};
+	}
 	// Reached and parsed (even a 0-transaction QFX is real coverage of this
 	// account's ledger for the window).
 	return { kind: "hydrated", accountId: account.internal_id, balanceEmitted };
@@ -2656,6 +2722,7 @@ export async function runTransactionsAndBalances(
 	deps: EmitDeps,
 	page: Page,
 	filteredAccounts: readonly ChaseAccount[],
+	processAccount: typeof processAccountDownload = processAccountDownload,
 ): Promise<void> {
 	const outcomes: AccountDetailOutcome[] = [];
 	for (let i = 0; i < filteredAccounts.length; i += 1) {
@@ -2663,7 +2730,7 @@ export async function runTransactionsAndBalances(
 		if (!account) {
 			continue;
 		}
-		const outcome = await processAccountDownload(deps, page, account, {
+		const outcome = await processAccount(deps, page, account, {
 			index: i + 1,
 			total: filteredAccounts.length,
 		});

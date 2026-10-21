@@ -337,8 +337,8 @@ export async function collectGitHubBrowser(
 			for (const graph of graphs) {
 				for (const day of graph.days) {
 					if (days.has(day.date)) {
-						const prior = days.get(day.date);
-						if (prior?.count !== day.count || prior.level !== day.level)
+						const prior = days.get(day.date); // Keep the first (rolling) view's relative color level.
+						if (prior?.count !== day.count)
 							rejected += 1;
 						continue;
 					}

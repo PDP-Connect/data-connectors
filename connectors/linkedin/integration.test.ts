@@ -2194,3 +2194,43 @@ test("profile fallback counts distinct walked members before failed enrichment",
 	assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 0);
 	assert.ok(progressMessages.includes("LinkedIn profile connection_count=1 (walked distinct fallback): summary_request_failed"));
 });
+
+// Synthetic opaque owner IDs mirror the source shape without personal data.
+const OPAQUE_OWNER_CONNECTIONS = JSON.parse(readFileSync(
+	new URL("./fixtures/scrubbed/opaque-owner-connections.json", import.meta.url), "utf8",
+)) as {
+	me: unknown;
+	summary: { entityUrn: string; numConnections: number };
+	listing: unknown;
+	terminal: unknown;
+	profiles: unknown;
+};
+
+for (const scenario of [
+	{ name: "matching source total", total: 2, complete: true },
+	{ name: "mismatched source total", total: 3, complete: false },
+	{ name: "missing source total", total: null, complete: false },
+]) {
+	test(`collectLinkedIn: opaque owner with ${scenario.name}`, async () => {
+		const fixture = OPAQUE_OWNER_CONNECTIONS;
+		const recording = makeRecordingEmit(validateRecord);
+		const route = (path: string): unknown => {
+			if (path.startsWith("/voyager/api/me")) return fixture.me;
+			if (path === "/voyager/api/relationships/connectionsSummary/") {
+				return scenario.total === null
+					? { entityUrn: fixture.summary.entityUrn }
+					: { ...fixture.summary, numConnections: scenario.total };
+			}
+			if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+				return path.endsWith("&start=0") ? fixture.listing : fixture.terminal;
+			}
+			if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) return fixture.profiles;
+			return { _error: "http_404" };
+		};
+		await collectLinkedIn(buildCtx(["connections"], recording, route));
+		assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 2);
+		assert.equal(claimsFullCoverage(recording, "connections"), scenario.complete);
+		assert.equal(skipResults(recording).some((skip) => skip.stream === "connections" &&
+			skip.reason === "linkedin_enumeration_unproven"), !scenario.complete);
+	});
+}

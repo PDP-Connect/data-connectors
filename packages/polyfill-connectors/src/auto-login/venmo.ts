@@ -144,6 +144,15 @@ export const VENMO_DECLARED_REASON_TOKENS: ReadonlySet<string> = new Set([
 ]);
 
 const HOME_URL = "https://venmo.com/";
+/**
+ * A venmo.com document that Venmo serves without redirecting. A signed-in
+ * request for {@link HOME_URL} is redirected to `account.venmo.com` every
+ * time (prod run_9f4c54fd, 2026-10-20), so a retry of HOME_URL cannot reach
+ * the CORS-granted origin. Loading this file leaves the page on
+ * `https://venmo.com`, and the credentialed `api.venmo.com` fetch then
+ * returns 200 (checked live on the same signed-in browser).
+ */
+const ORIGIN_ANCHOR_URL = "https://venmo.com/robots.txt";
 const LOGIN_URL = "https://venmo.com/login";
 /**
  * The probe hits the SAME endpoint `collect()` does — `api.venmo.com/v1/account`
@@ -528,7 +537,10 @@ export async function ensureVenmoOrigin(page: Page): Promise<void> {
 	// something.
 	if (landedOrigin !== VENMO_ORIGIN && isVenmoFamilyUrl(landedUrl)) {
 		await page
-			.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+			.goto(ORIGIN_ANCHOR_URL, {
+				waitUntil: "domcontentloaded",
+				timeout: 30_000,
+			})
 			.catch((): undefined => undefined);
 		try {
 			landedOrigin = new URL(page.url()).origin;

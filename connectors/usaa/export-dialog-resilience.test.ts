@@ -21,7 +21,10 @@ import {
 	driveExport,
 	type EmitDeps,
 	emitPdfStatementTransactions,
+	processAccountTransactions,
+	recoverServedAccountTransactionGaps,
 	runSingleLadderAttempt,
+	runTransactionsStream,
 	tryExportLadder,
 } from "./index.ts";
 
@@ -35,6 +38,8 @@ interface FieldState {
 }
 
 interface ExportPageShape {
+	outcomeForStart?: (start: string) => "success" | "failure" | "empty";
+	csvForStart?: (start: string) => string;
 	detachField?: FieldName;
 	dialog?: boolean;
 	end?: FieldState;
@@ -57,10 +62,10 @@ type Listener = (...args: unknown[]) => void;
 
 const ACCOUNT_URL = "https://www.usaa.com/my/checking/fixture-account";
 
-function makeResponse(): Record<string, unknown> {
+function makeResponse(csv?: string): Record<string, unknown> {
 	return {
 		body: async () =>
-			Buffer.from("Date,Description,Amount\n01/02/2025,Fixture,1.00\n"),
+			Buffer.from(csv ?? "Date,Description,Amount\n01/02/2025,Fixture,1.00\n"),
 		headers: () => ({
 			"content-disposition": 'attachment; filename="fixture.csv"',
 			"content-type": "text/csv",
@@ -143,7 +148,13 @@ function makePage(shape: ExportPageShape): ExportPageProbe {
 				}
 				if (isSubmit) {
 					submitCount += 1;
-					emit("response", makeResponse());
+					events.push(`submit:${values.start}`);
+					if (
+						shape.outcomeForStart?.(values.start) &&
+						shape.outcomeForStart(values.start) !== "success"
+					)
+						return;
+					emit("response", makeResponse(shape.csvForStart?.(values.start)));
 					emit("download", {});
 					return;
 				}
@@ -223,10 +234,20 @@ function makePage(shape: ExportPageShape): ExportPageProbe {
 				}
 				return ["date-range"];
 			},
-			textContent: async (): Promise<string | null> => null,
+			textContent: async (): Promise<string | null> =>
+				isError && shape.outcomeForStart
+					? shape.outcomeForStart(values.start) === "empty"
+						? "No transactions to export"
+						: "Please try again later"
+					: null,
 			waitFor: async ({ state }: { state: string }): Promise<void> => {
 				await Promise.resolve();
-				if (state === "visible" && isError) {
+				if (
+					state === "visible" &&
+					isError &&
+					(!shape.outcomeForStart ||
+						shape.outcomeForStart(values.start) === "success")
+				) {
 					throw new Error("no dialog error is present");
 				}
 				if (state === "visible" && isDialog && shape.dialog === false) {
@@ -652,3 +673,475 @@ test("PDF parse summary shows plain progress and keeps the template counters in 
 		'[usaa-diagnostic] pdf_parse_complete {"transactions":0,"statements":0,"unknown_templates":0,"unreconciled":0}',
 	]);
 });
+
+for (const suffixOutcome of ["success", "empty"] as const) {
+	test(`account export: shorter ${suffixOutcome} cannot certify the failed original window`, async () => {
+		const run = async (fullWindowWorks: boolean) => {
+			const probe = makePage({
+				dialog: true,
+				start: {},
+				end: {},
+				outcomeForStart: (start) =>
+					start === "01/02/2025"
+						? fullWindowWorks
+							? "success"
+							: "failure"
+						: suffixOutcome,
+			});
+			const messages: Parameters<EmitDeps["emit"]>[0][] = [];
+			let records = 0;
+			const deps: EmitDeps = {
+				emit: async (m) => {
+					messages.push(m);
+				},
+				emitRecord: async () => {
+					records += 1;
+				},
+				servedAccountTransactionGaps: new Map([
+					["fixture-account", "gap-original"],
+				]),
+			};
+			const result = await processAccountTransactions(
+				deps,
+				{} as BrowserContext,
+				probe.page,
+				async () => ({
+					request_id: "fixture",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				}),
+				{
+					account_id_raw: "fixture-account",
+					account_type: "checking",
+					account_url: "/my/checking/fixture-account",
+					balance_cents: 0,
+					last_four: "0000",
+					name: "Fixture checking",
+					raw_text: "Fixture checking",
+				},
+				null,
+				"2025-01-02",
+				"2025-01-02",
+				{ sessionDeadMidRun: false, sessionRepairAttempted: false },
+				1,
+				1,
+				undefined,
+				{ since: "2025-01-02", until: "2025-02-01" },
+			);
+			assert.ok(result);
+			await recoverServedAccountTransactionGaps(deps, [result.outcome]);
+			return { result, records, messages, events: probe.events() };
+		};
+		const partial = await run(false);
+		assert.equal(
+			partial.events.filter((e) => e.startsWith("submit:")).length,
+			2,
+			"full export failed then suffix was tried",
+		);
+		assert.equal(
+			partial.result.outcome.kind,
+			"gap",
+			"suffix success must not certify the original interval",
+		);
+		assert.equal(
+			partial.result.last_date,
+			null,
+			"uncovered history must hold the watermark",
+		);
+		assert.equal(
+			partial.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		if (suffixOutcome === "success")
+			assert.ok(partial.records > 0, "keep the useful suffix records");
+		const retry = await run(true);
+		assert.equal(
+			retry.events.find((e) => e.startsWith("submit:")),
+			"submit:01/02/2025",
+		);
+		assert.equal(retry.result.outcome.kind, "hydrated");
+		assert.ok(retry.records > 0);
+	});
+}
+
+for (const suffix of ["rows", "header-only", "empty"] as const) {
+	test(`persisted account interval survives next-day ${suffix} fallback`, async (t) => {
+		const t0 = Date.parse("2026-06-01T12:00:00Z");
+		t.mock.timers.enable({ apis: ["Date"], now: t0 });
+		// Keep the calendar deterministic while allowing production deadline loops to expire.
+		const clockTick = setInterval(() => t.mock.timers.tick(25), 25);
+		t.after(() => clearInterval(clockTick));
+		const { BACKFILL_17MO, mmddyyyy } = await import("./parsers.ts");
+		const original = new Date(t0 - BACKFILL_17MO).toISOString().slice(0, 10);
+		const account = {
+			account_id_raw: "fixture-account",
+			account_type: "checking",
+			account_url: "/my/checking/fixture-account",
+			balance_cents: 0,
+			last_four: "0000",
+			name: "Fixture checking",
+			raw_text: "Fixture checking",
+		};
+		let persisted: Record<string, unknown> = {};
+		async function run(day: number, full: boolean, served: boolean) {
+			t.mock.timers.setTime(t0 + day * 86400000);
+			const messages: Parameters<EmitDeps["emit"]>[0][] = [];
+			const probe = makePage({
+				start: {},
+				end: {},
+				outcomeForStart: (start) =>
+					start === mmddyyyy(original) && !full
+						? "failure"
+						: suffix === "empty"
+							? "empty"
+							: "success",
+				csvForStart: (start) =>
+					"Date,Description,Amount\n" +
+					(suffix === "header-only" ? "" : start + ",Fixture,1.00\n"),
+			});
+			const deps: EmitDeps = {
+				emit: async (m) => {
+					messages.push(m);
+				},
+				emitRecord: async () => {},
+				...(served
+					? {
+							servedAccountTransactionGaps: new Map([
+								["fixture-account", "gap-original"],
+							]),
+						}
+					: {}),
+			};
+			await runTransactionsStream(
+				deps,
+				{} as BrowserContext,
+				probe.page,
+				async () => ({
+					request_id: "fixture",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				}),
+				[account],
+				persisted,
+				new Map([["transactions", { name: "transactions" }]]),
+				{ sessionDeadMidRun: false, sessionRepairAttempted: false },
+			);
+			const states = messages.filter(
+				(m) => m.type === "STATE" && m.stream === "transactions",
+			);
+			const lastState = states.at(-1);
+			if (lastState?.type === "STATE")
+				persisted = JSON.parse(
+					JSON.stringify({ transactions: lastState.cursor }),
+				);
+			return {
+				messages,
+				starts: probe.events().filter((e) => e.startsWith("submit:")),
+			};
+		}
+		const first = await run(0, false, false);
+		assert.ok(first.messages.some((m) => m.type === "DETAIL_GAP"));
+		const saved = (
+			persisted.transactions as Record<
+				string,
+				{
+					last_date?: string | null;
+					pending_export?: { since: string; until: string };
+				}
+			>
+		)?.["fixture-account"];
+		assert.equal(saved?.last_date, null, "no watermark is invented");
+		assert.equal(
+			saved?.pending_export?.since,
+			original,
+			"original default start is durably continued",
+		);
+		const second = await run(1, false, true);
+		assert.equal(second.starts[0], "submit:" + mmddyyyy(original));
+		assert.equal(
+			second.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+			"shifted default cannot settle original day",
+		);
+		const third = await run(2, true, true);
+		assert.equal(third.starts[0], "submit:" + mmddyyyy(original));
+		assert.deepEqual(
+			third.messages
+				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+				.map((m) => m.gap_id),
+			["gap-original"],
+		);
+		assert.equal(
+			(persisted.transactions as Record<string, { pending_export?: unknown }>)[
+				"fixture-account"
+			]?.pending_export,
+			undefined,
+		);
+	});
+}
+
+for (const format of ["rows", "header-only", "empty"] as const) {
+	test(`known account interval survives interruption before recovery ACK: ${format}`, async () => {
+		const account = {
+			account_id_raw: "fixture-account",
+			account_type: "checking",
+			account_url: "/my/checking/fixture-account",
+			balance_cents: 0,
+			last_four: "0000",
+			name: "Fixture checking",
+			raw_text: "Fixture checking",
+		};
+		const original = { since: "2025-01-02", until: "2025-02-01" };
+		let persisted: Record<string, unknown> = {
+			transactions: {
+				"fixture-account": {
+					last_date: "2025-02-01",
+					pending_export: original,
+				},
+			},
+		};
+		const interrupted = new Error("stop before recovery ACK is persisted");
+		async function run(interruptRecovery: boolean) {
+			const messages: Parameters<EmitDeps["emit"]>[0][] = [];
+			const order: string[] = [];
+			const probe = makePage({
+				start: {},
+				end: {},
+				outcomeForStart: () => (format === "empty" ? "empty" : "success"),
+				csvForStart: () =>
+					"Date,Description,Amount\n" +
+					(format === "rows" ? "02/02/2025,Fixture,1.00\n" : ""),
+			});
+			const deps: EmitDeps = {
+				emit: async (message) => {
+					if (message.type === "DETAIL_GAP_RECOVERED" && interruptRecovery)
+						throw interrupted;
+					messages.push(message);
+					order.push(message.type);
+					if (message.type === "STATE" && message.stream === "transactions") {
+						// Model durable STATE delivery immediately, not after the caller returns.
+						persisted = JSON.parse(
+							JSON.stringify({ transactions: message.cursor }),
+						);
+					}
+				},
+				emitRecord: async () => {
+					order.push("RECORD");
+				},
+				servedAccountTransactionGaps: new Map([
+					["fixture-account", "gap-original"],
+				]),
+			};
+			const collect = runTransactionsStream(
+				deps,
+				{} as BrowserContext,
+				probe.page,
+				async () => ({
+					request_id: "fixture",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				}),
+				[account],
+				persisted,
+				new Map([["transactions", { name: "transactions" }]]),
+				{ sessionDeadMidRun: false, sessionRepairAttempted: false },
+			);
+			if (interruptRecovery) {
+				await assert.rejects(collect, (error) => error === interrupted);
+			} else {
+				await collect;
+			}
+			return { messages, order, probe };
+		}
+
+		const first = await run(true);
+		assert.equal(
+			first.messages.some((message) => message.type === "DETAIL_GAP_RECOVERED"),
+			false,
+			"the crash must leave the original gap pending",
+		);
+		if (format === "rows")
+			assert.ok(first.order.includes("RECORD"), "records precede recovery");
+		// The old caller persisted the clearing STATE before the interrupted ACK.
+		// Replay must retain the known interval and recover the still-served gap.
+		const replay = await run(false);
+		const saved = (
+			persisted.transactions as Record<
+				string,
+				{ pending_export?: { unknown_original?: true } }
+			>
+		)["fixture-account"];
+		assert.equal(
+			saved?.pending_export?.unknown_original,
+			undefined,
+			"a known original interval must not become unknown_original on restart",
+		);
+		assert.equal(
+			replay.probe.events().find((event) => event.startsWith("submit:")),
+			"submit:01/02/2025",
+		);
+		assert.deepEqual(
+			replay.messages
+				.filter((message) => message.type === "DETAIL_GAP_RECOVERED")
+				.map((message) => message.gap_id),
+			["gap-original"],
+		);
+		assert.equal(saved?.pending_export, undefined);
+		const ack = replay.order.indexOf("DETAIL_GAP_RECOVERED");
+		assert.ok(ack < replay.order.indexOf("STATE"), "ACK precedes clearing proof");
+		if (format === "rows")
+			assert.ok(replay.order.indexOf("RECORD") < ack, "records precede ACK");
+	});
+}
+
+for (const [name, prior, since, expectGap] of [
+	["legacy unknown start", null, undefined, true],
+	["legacy with new explicit start", null, "2025-01-02", true],
+	[
+		"legacy with watermark but no original interval",
+		"2025-02-01",
+		undefined,
+		true,
+	],
+] as const) {
+	test(`served account interval: ${name}`, async () => {
+		const probe = makePage({
+			start: {},
+			end: {},
+			outcomeForStart: () => "empty",
+		});
+		const messages: Parameters<EmitDeps["emit"]>[0][] = [];
+		const deps: EmitDeps = {
+			emit: async (m) => {
+				messages.push(m);
+			},
+			emitRecord: async () => {},
+			servedAccountTransactionGaps: new Map([
+				["fixture-account", "gap-original"],
+			]),
+		};
+		const result = await processAccountTransactions(
+			deps,
+			{} as BrowserContext,
+			probe.page,
+			async () => ({
+				request_id: "fixture",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			}),
+			{
+				account_id_raw: "fixture-account",
+				account_type: "checking",
+				account_url: "/my/checking/fixture-account",
+				balance_cents: 0,
+				last_four: "0000",
+				name: "Fixture checking",
+				raw_text: "Fixture checking",
+			},
+			prior,
+			since,
+			"2025-01-03",
+			{ sessionDeadMidRun: false, sessionRepairAttempted: false },
+			1,
+			1,
+		);
+		assert.ok(result);
+		assert.equal(result.outcome.kind, expectGap ? "gap" : "no_activity");
+		if (expectGap) {
+			assert.equal(result.last_date, prior);
+			assert.equal(result.pending_export?.unknown_original, true);
+		}
+		await recoverServedAccountTransactionGaps(deps, [result.outcome]);
+		assert.deepEqual(
+			messages
+				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+				.map((m) => m.gap_id),
+			expectGap ? [] : ["gap-original"],
+		);
+	});
+}
+
+for (const format of ["rows", "header-only", "empty"] as const) {
+	test(`legacy unknown interval with newly narrowed since survives STATE replay: ${format}`, async () => {
+		const account = {
+			account_id_raw: "fixture-account",
+			account_type: "checking",
+			account_url: "/my/checking/fixture-account",
+			balance_cents: 0,
+			last_four: "0000",
+			name: "Fixture checking",
+			raw_text: "Fixture checking",
+		};
+		let persisted: Record<string, unknown> = {};
+		for (const since of ["2025-04-01", "2025-05-01"]) {
+			const messages: Parameters<EmitDeps["emit"]>[0][] = [];
+			let records = 0;
+			const probe = makePage({
+				start: {},
+				end: {},
+				outcomeForStart: () => (format === "empty" ? "empty" : "success"),
+				csvForStart: (start) =>
+					"Date,Description,Amount\n" +
+					(format === "header-only" ? "" : start + ",Fixture,1.00\n"),
+			});
+			const deps: EmitDeps = {
+				emit: async (m) => {
+					messages.push(m);
+				},
+				emitRecord: async () => {
+					records++;
+				},
+				servedAccountTransactionGaps: new Map([
+					["fixture-account", "gap-legacy-older"],
+				]),
+			};
+			await runTransactionsStream(
+				deps,
+				{} as BrowserContext,
+				probe.page,
+				async () => ({
+					request_id: "fixture",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				}),
+				[account],
+				persisted,
+				new Map([
+					["transactions", { name: "transactions", time_range: { since } }],
+				]),
+				{ sessionDeadMidRun: false, sessionRepairAttempted: false },
+			);
+			assert.deepEqual(
+				messages
+					.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+					.map((m) => m.gap_id),
+				[],
+				"current grant cannot prove the old gap's unknown original interval",
+			);
+			assert.ok(messages.some((m) => m.type === "DETAIL_GAP"));
+			if (format === "rows")
+				assert.ok(records > 0, "useful permitted suffix records remain");
+			const last = messages
+				.filter((m) => m.type === "STATE" && m.stream === "transactions")
+				.at(-1);
+			assert.ok(last?.type === "STATE");
+			persisted = JSON.parse(JSON.stringify({ transactions: last.cursor }));
+			const saved = (
+				persisted.transactions as Record<
+					string,
+					{
+						last_date: string | null;
+						pending_export: { unknown_original?: boolean };
+					}
+				>
+			)["fixture-account"];
+			assert.ok(saved, "the fixture account must persist its pending window");
+			assert.equal(saved.last_date, null);
+			assert.equal(
+				saved.pending_export.unknown_original,
+				true,
+				"unknown remains sticky after configuration changes",
+			);
+		}
+	});
+}
