@@ -3270,6 +3270,19 @@ test("N1: product specifications and customer reviews are page sections, not pro
 	assert.equal(outcome.facts.calories, 52);
 });
 
+test("N1: the main heading binds its panel across separate page sections", async () => {
+	const outcome = await typedLookup(
+		site8(AMAZON_APPLES_NO_PANEL, {
+			"/product/apples": `<html><body><section><h1>Apples</h1></section><section>${APPLES_PANEL}<div><h3>Ingredients</h3><p>apples</p></div></section></body></html>`,
+		}),
+		"Apples",
+	);
+	assert.equal(outcome.status, "matched");
+	if (outcome.status !== "matched") return;
+	assert.equal(outcome.facts.calories, 52);
+	assert.equal(outcome.facts.ingredients, "apples");
+});
+
 test("N2: a script or hidden 'No results' text is not the source's empty state", async () => {
 	const outcomes = await Promise.all(
 		[

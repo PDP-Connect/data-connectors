@@ -1135,7 +1135,8 @@ function scopeOf(
 			if (!heading.matches(PRODUCT_HEADING_SELECTOR) || !isRendered(heading))
 				return false;
 			const section = heading.closest("aside, article, section");
-			if (section && !section.contains(label)) return false;
+			if (heading !== mainHeading && section && !section.contains(label))
+				return false;
 			const text = renderedTextOf(heading).trim();
 			return (
 				text !== "" &&
