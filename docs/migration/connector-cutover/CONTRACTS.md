@@ -1,6 +1,6 @@
-# Connector hard cutover: contract decisions
+# Historical log: connector hard cutover decisions
 
-Historical plan from the September 2026 cutover. The repository has since removed the frozen legacy catalogs and release lane. The Oura legacy artifact remains until F2. Use the live manifest and publication checks for current PDPP connector work; this document records the decisions and constraints that preceded artifact removal.
+Historical log from the September 2026 cutover. Instructions, consumer descriptions, and rollout gates below record decisions at that time; they are not current operating instructions. The legacy publishing lane is retired. Permanent frozen scope IDs and schema paths live in `legacy-shapes.json`, checked by `npm run legacy-shapes:check`. Release metadata snapshots and fixture proofs belong to `artifacts/legacy-retention/` and are removed with F10. Oura executable artifacts remain until F2; their retirement does not remove these metadata proofs or permanent Oura schema definitions. Use the live manifest and publication checks for current PDPP connector work.
 
 Base: `main` at `20bba85`.
 

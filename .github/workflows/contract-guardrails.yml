@@ -24,7 +24,13 @@ jobs:
       - name: Check packed library manifest projection
         run: npm run polyfill-library-metadata:check
 
-      - name: Test the retained Oura artifact and connector brand icons
+      - name: Check permanent frozen scope IDs and schemas
+        run: npm run legacy-shapes:check && npm run legacy-shapes:test
+
+      - name: Test temporary release metadata and fixture proofs (remove with F10)
+        run: npm run legacy-retention:test
+
+      - name: Test the retained Oura artifact (until F2) and connector brand icons
         run: npm run oura-retention:test
 
       - name: Test installer artifact contracts

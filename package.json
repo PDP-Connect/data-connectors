@@ -40,7 +40,7 @@
     "test:tooling": "scripts/test-sandbox/test-sandbox -- node --test scripts/test-sandbox/vendored-copy.test.mjs scripts/test-lanes-coverage.test.mjs",
     "scripts:test": "scripts/test-sandbox/test-sandbox -- node --test ./scripts/publish-tag-guard.test.mjs ./scripts/lookup-manifest.test.mjs ./scripts/registry-rate-limit.test.mjs ./scripts/check-additive-schemas.test.mjs",
     "test:pageshim": "scripts/test-sandbox/test-sandbox -- node --test scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs",
-    "test": "npm run connector-implementation-index:check && npm run oura-retention:test && npm run installer:test && npm run manifest-schema:test && npm run cross-repo-integrity:test && npm run test:tooling && npm run scripts:test && npm --prefix packages/polyfill-connectors test && npm run test:pageshim",
+    "test": "npm run connector-implementation-index:check && npm run legacy-shapes:check && npm run legacy-shapes:test && npm run legacy-retention:test && npm run oura-retention:test && npm run installer:test && npm run manifest-schema:test && npm run cross-repo-integrity:test && npm run test:tooling && npm run scripts:test && npm --prefix packages/polyfill-connectors test && npm run test:pageshim",
     "connector-implementation-index:generate": "node ./scripts/generate-connector-implementation-index.mjs",
     "connector-implementation-index:check": "node ./scripts/generate-connector-implementation-index.mjs --check && scripts/test-sandbox/test-sandbox -- node --test ./scripts/generate-connector-implementation-index.test.mjs",
     "mobile:bundle": "node ./scripts/pageshim/mobile-bundle.mjs",
@@ -55,7 +55,11 @@
     "manifest-schema:test": "scripts/test-sandbox/test-sandbox -- node --test ./schemas/connector-manifest.schema.test.mjs ./schemas/connector-binding-grammar.test.mjs ./schemas/observation.schema.test.mjs",
     "polyfill-library-metadata:generate": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs",
     "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check",
-    "connector-stdout-console:check": "node --import tsx ./packages/polyfill-connectors/scripts/check-connector-stdout-console.ts"
+    "connector-stdout-console:check": "node --import tsx ./packages/polyfill-connectors/scripts/check-connector-stdout-console.ts",
+    "legacy-shapes:check": "node ./scripts/check-frozen-legacy-contracts.mjs",
+    "legacy-shapes:test": "scripts/test-sandbox/test-sandbox -- node --test ./scripts/frozen-legacy-contracts.test.mjs",
+    "legacy-retention:check": "node ./scripts/check-legacy-retention.mjs",
+    "legacy-retention:test": "npm run legacy-retention:check && scripts/test-sandbox/test-sandbox -- node --test ./scripts/legacy-retention.test.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
