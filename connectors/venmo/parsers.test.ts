@@ -67,6 +67,18 @@ test("profileRecord uses is_business (not is_group/is_active) and passes the pro
 	assert.equal(validateRecord("profile", record).ok, true);
 });
 
+test("profile and friend records normalize zone-less joined dates and preserve null", () => {
+	const user = { ...RAW_USER, date_joined: "2020-01-02T03:04:05.123456" };
+	const profile = profileRecord(user);
+	const friend = userRecord(user);
+	assert.equal(profile.date_joined, "2020-01-02T03:04:05.123456Z");
+	assert.equal(friend.date_joined, "2020-01-02T03:04:05.123456Z");
+	assert.equal(validateRecord("profile", profile).ok, true);
+	assert.equal(validateRecord("friends", friend).ok, true);
+	assert.equal(profileRecord({ ...user, date_joined: null }).date_joined, null);
+	assert.equal(userRecord({ ...user, date_joined: null }).date_joined, null);
+});
+
 const RAW_PAY_STORY: VenmoStory = {
 	id: "4242424242424242424",
 	audience: "private",
@@ -106,6 +118,40 @@ test("transactionRecord converts a pay story to a valid record, correctly derivi
 		true,
 		"owner is the actor (sender) on a pay story",
 	);
+	assert.equal(validateRecord("transactions", record).ok, true);
+});
+
+test("transactionRecord normalizes zone-less dates and retains alphanumeric payment ids", () => {
+	const record = transactionRecord(
+		{
+			...RAW_PAY_STORY,
+			date_created: "2026-07-15T14:30:00",
+			date_updated: "2026-07-15T14:30:05.123456",
+			payment: {
+				...RAW_PAY_STORY.payment,
+				id: "12A34567890123456",
+				date_completed: "2026-07-15T14:30:05",
+			},
+		},
+		RAW_USER.id,
+	);
+	assert.ok(record);
+	assert.equal(record.date_created, "2026-07-15T14:30:00Z");
+	assert.equal(record.date_updated, "2026-07-15T14:30:05.123456Z");
+	assert.equal(record.date_completed, "2026-07-15T14:30:05Z");
+	assert.equal(validateRecord("transactions", record).ok, true);
+});
+
+test("transactionRecord accepts an alphanumeric id on an ordinary payment story", () => {
+	const record = transactionRecord(
+		{
+			...RAW_PAY_STORY,
+			payment: { ...RAW_PAY_STORY.payment, id: "12A34567890123456" },
+		},
+		RAW_USER.id,
+	);
+	assert.ok(record);
+	assert.equal(record.payment_id, "12A34567890123456");
 	assert.equal(validateRecord("transactions", record).ok, true);
 });
 
