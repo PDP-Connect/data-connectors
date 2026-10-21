@@ -2866,7 +2866,7 @@ export async function collectAllStreams(
 		// that failed to prove its end: end the run as a session failure.
 		if (authentication.blocked) {
 			throw createConnectorFailure("meta_session_required",
-				"meta_session_required: Instagram signed out or requested a challenge during this run",
+				"meta_session_required: Instagram authentication was rejected or challenged during this run",
 				{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
 			);
 		}

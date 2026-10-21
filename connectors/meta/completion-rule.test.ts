@@ -110,6 +110,7 @@ for (const blocked of [false, true]) {
    await assert.rejects(collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK), error => {
     assert.ok(error instanceof TerminalError);
     assert.equal(error.code, "meta_session_required");
+    assert.match(error.message, /authentication/);
     assert.equal(error.retryable, false);
     assert.deepEqual(error.recoveryHint, { action: "manual_action_required", retryable: false });
     return true;
