@@ -763,3 +763,84 @@ test("debt: retries reach every owed UID, not only the first batch, while all ke
 		"every owed UID was retried within three runs",
 	);
 });
+
+test("scope+debt: an expunged retry UID during an active catch-up does not fail the run", async () => {
+	const rows = [dated(10, JAN), dated(20, MAR), dated(30, MAR)];
+	const m = mailbox(rows, 101);
+	m.control.bodyText = "binary\u0000body";
+	const failing = async () => {
+		throw new Error("upload transport 503");
+	};
+	const scope = (iso: string) =>
+		new Map<string, StreamRequest>(
+			["messages", "message_bodies"].map((name) => [
+				name,
+				{ name, time_range: { until: iso } },
+			]),
+		);
+	// UID 10 fails its body upload and becomes debt under until=Feb.
+	const first = await run(m, {}, scope("2026-02-01T00:00:00.000Z"), {
+		uploadBodyBlob: failing,
+	});
+	assert.deepEqual(
+		progressOf(first).debt.map((d) => d.uid),
+		[10],
+	);
+	m.rows.splice(0, 1); // UID 10 is expunged
+	const widened = await run(m, first.state, scope("2026-06-01T00:00:00.000Z"), {
+		uploadBodyBlob: async () => ({
+			blob_id: "b",
+			sha256: "0".repeat(64),
+			size_bytes: 1,
+			mime_type: "text/plain",
+		}),
+	});
+	assert.deepEqual(progressOf(widened).debt, [], "the expunged UID settles");
+	assert.deepEqual(
+		collectedIds([widened]).sort(),
+		["14", "1e"],
+		"the catch-up still runs",
+	);
+});
+
+test("scope+debt: a retry owed under the old range is collected, not settled as out of scope", async () => {
+	// Jan 31 is inside until=Feb 1 and inside SEARCH's padded catch-up band.
+	const m = mailbox(
+		[dated(10, "2026-01-31T12:00:00.000Z"), dated(20, MAR)],
+		101,
+	);
+	m.control.bodyText = "binary\u0000body";
+	let fail = true;
+	const upload = async () => {
+		if (fail) throw new Error("upload transport 503");
+		return {
+			blob_id: "b",
+			sha256: "0".repeat(64),
+			size_bytes: 1,
+			mime_type: "text/plain",
+		};
+	};
+	const scope = (iso: string) =>
+		new Map<string, StreamRequest>(
+			["messages", "message_bodies"].map((name) => [
+				name,
+				{ name, time_range: { until: iso } },
+			]),
+		);
+	const first = await run(m, {}, scope("2026-02-01T00:00:00.000Z"), {
+		uploadBodyBlob: upload,
+	});
+	assert.deepEqual(
+		progressOf(first).debt.map((d) => d.uid),
+		[10],
+	);
+	fail = false;
+	const widened = await run(m, first.state, scope("2026-06-01T00:00:00.000Z"), {
+		uploadBodyBlob: upload,
+	});
+	assert.ok(
+		collectedIds([widened]).includes("a"),
+		"the owed January message is collected",
+	);
+	assert.deepEqual(progressOf(widened).debt, []);
+});

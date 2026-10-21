@@ -635,3 +635,44 @@ test("ledger: a catch-up band outside the current range completes without work",
 	assert.deepEqual(narrowed.catchupSearches, []);
 	assert.equal(narrowed.commit(NOW).state.streams.messages?.catchup, undefined);
 });
+
+test("ledger: a started catch-up pass survives queue compaction while both bounds keep widening", () => {
+	let state = scoped(undefined, {
+		since: "2026-05-01T00:00:00.000Z",
+		until: JUN,
+	}).commit(NOW).state;
+	const candidates = Array.from({ length: 10 }, (_, i) => i + 1);
+	const throughs: number[] = [];
+	for (let i = 1; i <= 30; i += 1) {
+		const r = {
+			since: new Date(Date.UTC(2026, 4, 1 - i)).toISOString(),
+			until: new Date(Date.UTC(2026, 5, 1 + i)).toISOString(),
+		};
+		const l = scoped(state, r, 101, 2);
+		for (const { key } of l.catchupSearches) l.planCatchup(key, candidates);
+		for (const uid of l.catchupUids) {
+			l.expect(uid);
+			l.record(uid, ["messages"], { kind: "covered" });
+		}
+		state = l.commit(NOW).state;
+		const head = state.streams.messages?.catchup?.[0];
+		throughs.push(head?.through ?? -1);
+	}
+	// The head advances by one window per run and is never reset to 0 while
+	// it still has work; every queued pass therefore completes in turn.
+	for (let i = 1; i < throughs.length; i += 1) {
+		const prev = throughs[i - 1] ?? 0;
+		const cur = throughs[i] ?? 0;
+		assert.ok(
+			cur > prev || cur === 0 || prev === 8,
+			`head regressed at run ${i}: ${prev} -> ${cur}`,
+		);
+	}
+	assert.ok(
+		(state.streams.messages?.catchup ?? []).length <= MAX_CATCHUP_PASSES,
+	);
+	assert.ok(
+		throughs.filter((t) => t === 0 || t === -1).length > 0,
+		"passes complete and the next one starts",
+	);
+});

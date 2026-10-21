@@ -361,12 +361,19 @@ function enqueueCatchup(
 	} else {
 		passes.push({ ...owed, end, through: 0 });
 	}
-	// Too many disjoint bands: re-check every covered UID once under the
-	// current scope. Redundant work, never a skipped band.
-	s.catchup =
-		passes.length > MAX_CATCHUP_PASSES
-			? [{ ...scope, end: Math.max(...passes.map((p) => p.end)), through: 0 }]
-			: passes;
+	// Too many disjoint bands: compact the passes that have not started into
+	// one re-check of every covered UID under the current scope. Redundant
+	// work, never a skipped band, and a started head keeps its progress.
+	if (passes.length > MAX_CATCHUP_PASSES) {
+		const head = passes[0] && passes[0].through > 0 ? passes[0] : undefined;
+		const rest = head ? passes.slice(1) : passes;
+		s.catchup = [
+			...(head ? [head] : []),
+			{ ...scope, end: Math.max(...rest.map((p) => p.end)), through: 0 },
+		];
+	} else {
+		s.catchup = passes;
+	}
 }
 
 interface CatchupPlan {
@@ -582,8 +589,10 @@ export class GmailProgressLedger {
 	 * only covered UIDs past the pass's progress, at most one window.
 	 */
 	planCatchup(key: string, searched: readonly number[]): void {
+		// The run's plan is final before any outcome is recorded: a UID's owed
+		// streams are fixed when it is first expected.
 		if (this.expected.size > 0) {
-			throw new Error("gmail_progress_page_already_consumed");
+			throw new Error("gmail_progress_plan_after_outcomes");
 		}
 		const uids = [...new Set(searched)].sort((a, b) => a - b);
 		for (const stream of this.requestedStreams()) {
@@ -615,9 +624,16 @@ export class GmailProgressLedger {
 		return [...all].sort((a, b) => a - b);
 	}
 
-	/** The time range `stream` must apply to `uid`: its band on catch-up. */
+	/**
+	 * The time range `stream` must apply to `uid`: its band on catch-up. A UID
+	 * the stream also owes as retry debt applies the full run range, so the
+	 * retry is never settled as out of the narrower band.
+	 */
 	timeRangeFor(uid: number, stream: LedgerStream): TimeBand {
-		return this.laneOf(stream, uid) === "catchup"
+		const owed = this.retried.some(
+			(d) => d.uid === uid && d.streams.includes(stream),
+		);
+		return !owed && this.laneOf(stream, uid) === "catchup"
 			? (this.catchupPlans.get(stream)?.band ?? this.timeRange)
 			: this.timeRange;
 	}

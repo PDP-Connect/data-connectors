@@ -4513,6 +4513,14 @@ export async function runAllMailPasses(
 		sinceDate,
 		sinceIso,
 	);
+	// A widened time range: find the covered UIDs in each owed band. The
+	// plan is final before the first outcome (absent debt) is recorded.
+	for (const { key, band } of ledger.catchupSearches) {
+		const searched = await client.search(catchupSearchQuery(band), {
+			uid: true,
+		});
+		ledger.planCatchup(key, searched || []);
+	}
 	const debtUids = ledger.debtUids;
 	const debtMetas = await collectLaneMetadata(
 		client,
@@ -4521,13 +4529,6 @@ export async function runAllMailPasses(
 		sinceIso,
 	);
 	ledger.recordAbsentDebt(new Set(debtMetas.map((m) => m.uid)));
-	// A widened time range: find the covered UIDs in each owed band.
-	for (const { key, band } of ledger.catchupSearches) {
-		const searched = await client.search(catchupSearchQuery(band), {
-			uid: true,
-		});
-		ledger.planCatchup(key, searched || []);
-	}
 	const catchupUids = ledger.catchupUids;
 	const catchupMetas = await collectLaneMetadata(
 		client,

@@ -1939,14 +1939,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/gmail/index.ts",
-			line: 4666,
+			line: 4667,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "settleMessage(): Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
 			path: "connectors/gmail/index.ts",
-			line: 4526,
+			line: 4519,
 			column: 20,
 			category: "dependent_pagination",
 			note: "client.search(): catch-up band SEARCHes share one IMAP connection, which runs one command at a time",
