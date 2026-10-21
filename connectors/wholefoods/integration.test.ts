@@ -3235,6 +3235,41 @@ test("N1: a visible detail label does not release hidden detail text", async () 
 	assert.deepEqual(outcome.facts.highlights, []);
 });
 
+test("N1: a hidden panel label does not authorize unlabelled numeric prose", async () => {
+	const outcome = await typedLookup(
+		site8(AMAZON_APPLES_NO_PANEL, {
+			"/product/apples":
+				"<html><body><h1>Apples</h1><div>Calories 52 Total Fat 0.2g Total Carbohydrate 14g Protein 0.3g <span hidden>Nutrition Facts</span></div></body></html>",
+		}),
+		"Apples",
+	);
+	assert.notEqual(outcome.status, "matched");
+});
+
+test("N1: a hidden detail sibling does not authorize a later unrelated paragraph", async () => {
+	const outcome = await typedLookup(
+		site8(AMAZON_APPLES_NO_PANEL, {
+			"/product/apples": `<html><body><h1>Apples</h1>${APPLES_PANEL}<section><h3>Ingredients</h3><div hidden>peanuts</div><p>Distributed by Acme</p></section></body></html>`,
+		}),
+		"Apples",
+	);
+	assert.equal(outcome.status, "matched");
+	if (outcome.status !== "matched") return;
+	assert.equal(outcome.facts.ingredients, null);
+});
+
+test("N1: product specifications and customer reviews are page sections, not product subjects", async () => {
+	const outcome = await typedLookup(
+		site8(AMAZON_APPLES_NO_PANEL, {
+			"/product/apples": `<html><body><h1>Apples</h1><h2>Product Specifications</h2><h2>Customer Reviews</h2>${APPLES_PANEL}</body></html>`,
+		}),
+		"Apples",
+	);
+	assert.equal(outcome.status, "matched");
+	if (outcome.status !== "matched") return;
+	assert.equal(outcome.facts.calories, 52);
+});
+
 test("N2: a script or hidden 'No results' text is not the source's empty state", async () => {
 	const outcomes = await Promise.all(
 		[

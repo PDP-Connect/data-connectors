@@ -1070,7 +1070,7 @@ function parseJsonLdScripts(document: Document): unknown[] {
 
 /** Headings that name a part of a product page, not a product. */
 const SECTION_HEADING_RE =
-	/^(?:nutrition(?:\s+(?:facts|information|info))?|ingredients?|allergens?|contains|details|product details|description|about(?: this item)?|highlights)\s*:?$/i;
+	/^(?:nutrition(?:\s+(?:facts|information|info))?|ingredients?|allergens?|contains|details|product (?:details|specifications)|customer reviews|customers also viewed|description|about(?: this item)?|highlights)\s*:?$/i;
 const PRODUCT_HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
 const PANEL_LABEL_SELECTOR = "h2, h3, h4, span, div";
 
@@ -1079,7 +1079,7 @@ const PANEL_LABEL_SELECTOR = "h2, h3, h4, span, div";
  *  are two labels. */
 function panelLabelsOf(document: Document): Element[] {
 	const labelling = renderedAll(document, PANEL_LABEL_SELECTOR).filter((el) =>
-		NUTRITION_HEADING_RE.test(textOf(el)),
+		NUTRITION_HEADING_RE.test(renderedTextOf(el)),
 	);
 	return labelling.filter(
 		(el) => !labelling.some((other) => other !== el && el.contains(other)),
@@ -1244,11 +1244,10 @@ function scopedDetails(
 		const label = renderedTextOf(el).trim();
 		const field = fieldOf(el);
 		if (!field) return [];
-		const text =
-			renderedTextOf(el.nextElementSibling).trim() ||
-			renderedTextOf(
+		const text = renderedTextOf(
+			el.nextElementSibling ??
 				el.parentElement?.querySelector("p, div:last-child"),
-			).trim();
+		).trim();
 		return text && text !== label
 			? [{ field, text, scope: scopeOf(el, el, mainHeading) }]
 			: [];
@@ -1275,7 +1274,7 @@ function breadcrumbCategories(document: Document): string[] {
 		document,
 		'nav[aria-label*="breadcrumb" i] a, .breadcrumb a',
 	).flatMap((element) => {
-		const label = textOf(element).trim();
+		const label = renderedTextOf(element).trim();
 		return label && !/home|whole foods/i.test(label) ? [label] : [];
 	});
 }
@@ -1296,7 +1295,7 @@ export function readWholeFoodsProductPage(
 	return {
 		canonicalUrl:
 			document.querySelector(selectors.canonical)?.getAttribute("href") ?? null,
-		h1: textOf(heading).trim() || null,
+		h1: renderedTextOf(heading).trim() || null,
 		products: productNodes(parseJsonLdScripts(document)),
 		panels: renderedPanels(document, heading),
 		details: scopedDetails(document, heading),
