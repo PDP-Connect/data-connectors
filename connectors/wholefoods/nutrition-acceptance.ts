@@ -5,15 +5,13 @@
 //
 // A nutrition row replaces the stored row under its key (`mutable_state`), so
 // emitting is a claim that the observation is at least as good as what is
-// stored. Two things make an observation unfit, whatever its parse:
-//   - it does not state the core rows of a Nutrition Facts panel, so it would
-//     blank facts read earlier; and
-//   - it is a fuzzy USDA text match, which names another product, made while
-//     the product's own pages could still be speaking for it: unless every
-//     page source proved it has no panel (`SourceAnswer`), the read is
-//     degraded, partial or unfinished, not "no panel".
-// The connector keeps no per-key record of which source produced the stored
-// row, so the second rule is stated against what this run's page sources said.
+// stored. An observation that does not state the core rows of a Nutrition
+// Facts panel would blank facts read earlier, so it is not emitted.
+//
+// The connector collects only what the owner's own sources show: the Amazon
+// product page and the Whole Foods product pages the order links to. It does
+// not look nutrition up anywhere else. A product whose panel could not be read
+// has no nutrition row; `SourceAnswer` records why, for the run log.
 
 import type { CoreNutritionRow, NutritionFacts } from "./types.ts";
 
@@ -63,7 +61,7 @@ export type AbsenceProof =
 
 /** What all of this run's page sources said, reduced:
  *  - `none`: every consulted source is `proven_absent`, so the product has no
- *    panel on the pages; only then may a fuzzy USDA text match stand in;
+ *    panel on the pages;
  *  - `partial`: a source showed part of this product's panel;
  *  - `unknown`: a source answered `unknown`. */
 export type PageSourceEvidence = "none" | "partial" | "unknown";
@@ -76,13 +74,10 @@ export function pageEvidence(
 	return "none";
 }
 
-/** Why there is no match: the strongest unresolved read (a robot check wins,
- *  otherwise the first), else a partial panel, else a failed USDA request,
- *  else nothing found. `not_found` needs every source proven absent. */
-export function noMatch(
-	answers: readonly SourceAnswer[],
-	usdaFailed: boolean,
-): NutritionNoMatch {
+/** Why there is no row: the strongest unresolved read (a robot check wins,
+ *  otherwise the first), else a partial panel, else nothing found.
+ *  `not_found` needs every source proven absent. */
+export function noMatch(answers: readonly SourceAnswer[]): NutritionNoMatch {
 	const failures = answers.flatMap((answer) =>
 		answer.kind === "unknown" ? [answer.failure] : [],
 	);
@@ -92,9 +87,7 @@ export function noMatch(
 	if (pageEvidence(answers) === "partial") {
 		return { status: "error", cause: "panel_partial" };
 	}
-	return usdaFailed
-		? { status: "error", cause: "usda_request_failed" }
-		: { status: "not_found", cause: "no_match" };
+	return { status: "not_found", cause: "no_match" };
 }
 
 /** A nutrition observation that may be emitted. `acceptNutrition` is the only
@@ -103,12 +96,8 @@ export type AcceptedNutrition = NutritionFacts & { readonly accepted: true };
 
 export function acceptNutrition(
 	facts: NutritionFacts | null,
-	pages: PageSourceEvidence,
 ): AcceptedNutrition | null {
 	if (!(facts && hasCoreNutrition(facts))) return null;
-	const fuzzyUsda =
-		facts.source === "usda_fdc" && facts.usdaMatchMethod !== "upc";
-	if (fuzzyUsda && pages !== "none") return null;
 	return { ...facts, accepted: true as const };
 }
 
@@ -118,10 +107,9 @@ export function acceptNutrition(
  *  hide a complete rendered one). */
 export function selectNutrition(
 	panels: readonly NutritionFacts[],
-	pages: PageSourceEvidence,
 ): AcceptedNutrition | null {
 	for (const panel of panels) {
-		const accepted = acceptNutrition(panel, pages);
+		const accepted = acceptNutrition(panel);
 		if (accepted) return accepted;
 	}
 	return null;
@@ -130,7 +118,9 @@ export function selectNutrition(
 /** The outcome of one product's nutrition lookup, as a split a type can
  *  enforce: a `matched` outcome carries the accepted observation and nothing
  *  else; every other outcome carries a status and a cause code and no facts.
- *  The cause codes are stable; they are documented in the manifest.
+ *  Only a matched outcome becomes a row. The others go to the run log, and
+ *  `error` and `blocked` also mark the stream's read as incomplete, because a
+ *  later run may read what this one could not.
  *
  *  | status    | cause               | meaning                                          |
  *  |-----------|---------------------|--------------------------------------------------|
@@ -143,7 +133,6 @@ export function selectNutrition(
  *  | error     | panel_partial       | this product's panel was seen but not fully read |
  *  | error     | panel_unresolved    | a bound page shows a panel that cannot be proven this product's |
  *  | error     | search_incomplete   | the search listed more results than the walk reads |
- *  | error     | usda_request_failed | the USDA lookup failed                           |
  *  | not_found | no_match            | every source proved it has no usable panel       |
  *
  *  When several sources fail, `robot_check` wins; otherwise the first failure. */
@@ -159,8 +148,7 @@ export type NutritionNoMatch =
 				| "identity_unbound"
 				| "panel_partial"
 				| "panel_unresolved"
-				| "search_incomplete"
-				| "usda_request_failed";
+				| "search_incomplete";
 	  }
 	| { readonly status: "not_found"; readonly cause: "no_match" };
 

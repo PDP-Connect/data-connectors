@@ -80,7 +80,6 @@ async function runOrders(stubs: OrderStub[], html: Record<string, string>) {
 	const harness = makeRecordingEmit(validateRecord);
 	const progressUpdates: { message: string; details?: unknown }[] = [];
 	await connector.collectOrderStubs({
-		credentials: {},
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		ordersCursor: openFingerprintCursor(undefined),

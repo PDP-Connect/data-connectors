@@ -16,8 +16,10 @@
  *   - profile      — the Amazon account's name/email.
  *   - orders       — Whole-Foods-filtered Amazon orders.
  *   - order_items  — line items within those orders.
- *   - nutrition    — typed nutrition facts per unique product, sourced from
- *                     the Whole Foods product page first, then USDA FDC.
+ *   - nutrition    — typed nutrition facts per unique product, read from the
+ *                     Amazon product page, then the Whole Foods product pages the
+ *                     order links to. Nothing is looked up anywhere else: a
+ *                     product whose panel could not be read has no row.
  *
  * Unlike connectors/amazon, this connector does not year-partition or run a
  * cross-run detail-gap-recovery pass: Whole Foods order volume per account is
@@ -39,11 +41,29 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
-	bestUsdaMatch,
+	type BindingCause,
+	type BoundProduct,
+	bindOrder,
+	bindProduct,
+	isUnbound,
+	normalizeName,
+	onSourceSite,
+	type Via,
+	WHOLE_FOODS_ORIGIN,
+} from "./binding.ts";
+import {
+	type AbsenceProof,
+	type AcceptedNutrition,
+	type NutritionLookup,
+	noMatch,
+	type PageReadFailure,
+	type SourceAnswer,
+	selectNutrition,
+} from "./nutrition-acceptance.ts";
+import {
 	hasOrderDetailEvidence,
 	hasOrderSearchEmptyState,
 	isCancelledOrderDetail,
-	mapUsdaNutrients,
 	mergeProductIds,
 	ORDER_DETAIL_READY_SELECTOR,
 	OrderDetailUnreadableError,
@@ -53,42 +73,13 @@ import {
 	parseOrderDateIso,
 	parseOrderDetailDom,
 	parseOrderSearchPageDom,
-	parseUsdaFood,
 	readAmazonProductPage,
 	readOrderObservation,
 	readWholeFoodsProductPage,
 	readWholeFoodsSearchPage,
 } from "./parsers.ts";
-import {
-	type BindingCause,
-	type BoundProduct,
-	bindGtin,
-	bindOrder,
-	bindProduct,
-	capConfidence,
-	gtinQueryForms,
-	isUnbound,
-	normalizeName,
-	onSourceSite,
-	type ProductDetails,
-	type Via,
-	WHOLE_FOODS_ORIGIN,
-} from "./binding.ts";
-import {
-	type AbsenceProof,
-	type AcceptedNutrition,
-	acceptNutrition,
-	hasCoreNutrition,
-	type NutritionLookup,
-	noMatch,
-	type PageReadFailure,
-	pageEvidence,
-	type SourceAnswer,
-	selectNutrition,
-} from "./nutrition-acceptance.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
-	NutritionFacts,
 	NutritionRecord,
 	OrderDetail,
 	OrderDetailItem,
@@ -96,11 +87,8 @@ import type {
 	OrderRecord,
 	OrderStub,
 	ProfileRecord,
-	UsdaFood,
-	UsdaMatchMethod,
 } from "./types.ts";
 
-const USDA_DEMO_KEY = "DEMO_KEY";
 const NAV_TIMEOUT_MS = 30_000;
 const NAV_SETTLE_MS = 2500;
 const POLITE_DELAY_MS = 800;
@@ -110,7 +98,6 @@ const POLITE_DELAY_MS = 800;
 // ~22 minutes. Desktop kills a run after 15 minutes without a message, so the
 // walk sends one progress message per page.
 const MAX_SEARCH_PAGES = 250;
-const USDA_MIN_TEXT_SCORE = 0.4;
 
 const AMAZON_ORDER_HISTORY_URL = "https://www.amazon.com/gp/css/homepage.html";
 const AMAZON_SEARCH_BASE =
@@ -318,7 +305,8 @@ async function walkSearchPages(
 			new OrderEnumerationUnprovenError(
 				"Whole Foods order pagination served a different page than requested",
 			);
-		if (selectedPage !== null && selectedPage < pageNum) throw servedOtherPage();
+		if (selectedPage !== null && selectedPage < pageNum)
+			throw servedOtherPage();
 		if (rowSignature && rowSignature === previousRowSignature) {
 			throw new OrderEnumerationUnprovenError(
 				"Whole Foods order pagination repeated a page",
@@ -343,7 +331,8 @@ async function walkSearchPages(
 			count: stubs.length,
 			stream: "orders",
 		});
-		if (selectedPage !== null && selectedPage > pageNum) throw servedOtherPage();
+		if (selectedPage !== null && selectedPage > pageNum)
+			throw servedOtherPage();
 		if (hasNextPage && pageNum === MAX_SEARCH_PAGES) {
 			throw new OrderEnumerationUnprovenError(
 				"Whole Foods order search exceeded the page limit before reaching the end",
@@ -374,6 +363,9 @@ export const ORDER_ITEM_COUNT_UNVERIFIED_REASON =
 	"wholefoods_order_item_count_unverified";
 export const ORDER_ITEM_ASIN_MISSING_REASON =
 	"wholefoods_order_item_asin_missing";
+/** Reason code for products whose nutrition pages could not be read. Display
+ *  copy lives in manifest.json `reason_display_messages`. */
+export const NUTRITION_UNREAD_REASON = "wholefoods_nutrition_unread";
 
 /**
  * True when the order-detail page agrees with the search-page row count.
@@ -483,100 +475,6 @@ export function buildOrderItemRecords(
 
 // ─── Nutrition ─────────────────────────────────────────────────────────────
 
-interface UsdaSearchResponse {
-	foods?: unknown[];
-}
-
-function isUsdaSearchResponse(value: unknown): value is UsdaSearchResponse {
-	return typeof value === "object" && value !== null;
-}
-
-/** One USDA search. Each result is validated and normalized here, once, so
- *  nothing downstream sees a food with a missing key. */
-async function usdaSearch(
-	apiKey: string,
-	params: Record<string, string>,
-): Promise<UsdaFood[]> {
-	const url = new URL("https://api.nal.usda.gov/fdc/v1/foods/search");
-	for (const [key, value] of Object.entries(params)) {
-		url.searchParams.set(key, value);
-	}
-	url.searchParams.set("api_key", apiKey);
-	const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-	if (!res.ok) {
-		throw new Error(`USDA nutrition lookup failed with HTTP ${res.status}`);
-	}
-	const json: unknown = await res.json();
-	if (!isUsdaSearchResponse(json) || !Array.isArray(json.foods)) {
-		throw new Error("USDA nutrition lookup returned an invalid response");
-	}
-	return json.foods.flatMap((food) => {
-		const parsed = parseUsdaFood(food);
-		return parsed ? [parsed] : [];
-	});
-}
-
-/** Look up USDA nutrition: an exact UPC match first when a UPC is known, then
- *  Branded text search, then Foundation text search (better for produce and
- *  staples). A UPC match counts only when USDA returns that same GTIN. A text
- *  search picks the best-matching food by identity first; that one food is
- *  then accepted or withheld. A less similar food never stands in for it.
- *  Returns null when no confident, complete match exists rather than
- *  guessing. */
-async function lookupUsdaNutrition(
-	apiKey: string,
-	name: string,
-	upc: string | null,
-	upcVia: Via | null,
-): Promise<NutritionFacts | null> {
-	const complete = (food: UsdaFood, method: UsdaMatchMethod) => {
-		const facts = mapUsdaNutrients(food, method);
-		return hasCoreNutrition(facts) ? facts : null;
-	};
-	if (upc) {
-		for (const form of gtinQueryForms(upc)) {
-			const exact = await usdaSearch(apiKey, {
-				pageSize: "1",
-				query: `gtinUpc:${form}`,
-			});
-			const match = exact[0];
-			const facts =
-				match && bindGtin(upc, match.gtinUpc).kind === "BOUND"
-					? complete(match, "upc")
-					: null;
-			// An exact hit is only as strong as the binding that supplied the GTIN.
-			if (facts) {
-				return upcVia === null
-					? facts
-					: { ...facts, confidence: capConfidence(facts.confidence, upcVia) };
-			}
-		}
-	}
-	// A fuzzy text query: the normalized name without "organic", which USDA
-	// descriptions rarely carry. This is an approximation, not a binding.
-	const cleaned = normalizeName(name).base.replace(/\borganic\b/g, "").trim();
-	if (!cleaned || cleaned.length < 3) {
-		return null;
-	}
-	const branded = await usdaSearch(apiKey, {
-		dataType: "Branded",
-		pageSize: "5",
-		query: cleaned,
-	});
-	const brandedMatch = bestUsdaMatch(cleaned, branded, USDA_MIN_TEXT_SCORE);
-	if (brandedMatch) {
-		const facts = complete(brandedMatch, "text");
-		if (facts) return facts;
-	}
-	const foundation = await usdaSearch(apiKey, {
-		dataType: "Foundation",
-		pageSize: "5",
-		query: cleaned,
-	});
-	const foundationMatch = bestUsdaMatch(cleaned, foundation, 0.3);
-	return foundationMatch ? complete(foundationMatch, "text") : null;
-}
-
 function isBlockedPage(html: string): boolean {
 	return /(?:validateCaptcha|captchacharacters|Sorry, we just need to make sure|<title>[^<]*(?:robot|captcha|blocked|denied)[^<]*<\/title>)/i.test(
 		html,
@@ -603,17 +501,16 @@ const unusable = (cause: BindingCause): PageReadFailure => ({
 	cause: isUnbound(cause) ? "identity_unbound" : "identity_conflict",
 });
 
-/** Look up one ordered product's nutrition, following the legacy source
- *  order: Amazon product page, Whole Foods product pages, then UPC-first/text
- *  USDA. A page is bound to the request by `binding.ts` before anything on it
- *  is used, and only the BOUND value (the product's name, barcode and own
- *  panels) is used. The result is `NutritionLookup`: an accepted observation,
- *  or a status and cause with no facts. Either way the caller writes the
- *  product's one row. Whether an observation may be emitted is
- *  `nutrition-acceptance.ts`'s decision. */
+/** Look up one ordered product's nutrition in the owner's own sources: the
+ *  Amazon product page, then the Whole Foods product pages found by searching
+ *  the product's name. A page is bound to the request by `binding.ts` before
+ *  anything on it is used, and only the BOUND value (the product's name,
+ *  barcode and own panels) is used. The result is `NutritionLookup`: an
+ *  accepted observation, or a status and cause with no facts. The caller
+ *  writes a row for an accepted observation only. Whether an observation may
+ *  be emitted is `nutrition-acceptance.ts`'s decision. */
 async function lookupNutritionForProduct(
 	page: Page,
-	usdaApiKey: string,
 	name: string,
 	productId = "B012345678",
 ): Promise<NutritionLookup> {
@@ -628,17 +525,8 @@ async function lookupNutritionForProduct(
 	// this binds a Whole Foods tile by barcode; a GTIN read from a tile never
 	// becomes one, however that tile was bound.
 	let amazonGtin: { gtin: string; via: Via } | null = null;
-	// What bound pages showed that was not emitted, kept for USDA: the GTIN
-	// the exact lookup uses (Amazon's, else the first bound tile's; a
-	// conclusion built on it is no stronger than `via`), and the latest bound
-	// page's details (allergens, ingredients, category), which decorate a
-	// USDA match.
-	const kept: {
-		usdaGtin: { gtin: string; via: Via } | null;
-		decoration: ProductDetails | null;
-	} = { usdaGtin: null, decoration: null };
-	// One answer per source read (see `SourceAnswer`). They alone decide
-	// whether a fuzzy USDA match may stand in and why there is no match.
+	// One answer per source read (see `SourceAnswer`). They alone say why
+	// there is no row.
 	const answers: SourceAnswer[] = [];
 	const unable = (failure: PageReadFailure) => {
 		answers.push({ kind: "unknown", failure });
@@ -657,15 +545,10 @@ async function lookupNutritionForProduct(
 	 *  proves absence. */
 	const take = (
 		product: BoundProduct,
-		via: Via,
 		recognised: boolean,
 	): AcceptedNutrition | null => {
-		const accepted = selectNutrition(product.panels, pageEvidence(answers));
+		const accepted = selectNutrition(product.panels);
 		if (accepted) return accepted;
-		kept.decoration = product.details ?? kept.decoration;
-		if (product.gtin && kept.usdaGtin === null) {
-			kept.usdaGtin = { gtin: product.gtin, via };
-		}
 		if (product.panels.some((panel) => panel.coreStated.length > 0)) {
 			answers.push({ kind: "panel" });
 		} else if (product.unresolvedPanels > 0) {
@@ -679,7 +562,9 @@ async function lookupNutritionForProduct(
 	};
 	/** Read one Whole Foods tile into one answer. Its failure is this tile's:
 	 *  the walk goes on to the next tile. */
-	const readTile = async (productUrl: string): Promise<AcceptedNutrition | null> => {
+	const readTile = async (
+		productUrl: string,
+	): Promise<AcceptedNutrition | null> => {
 		try {
 			const status = await navigateAndSettle(page, productUrl, undefined, true);
 			const html = await page.content();
@@ -701,14 +586,18 @@ async function lookupNutritionForProduct(
 						boundGtin: amazonGtin?.gtin ?? null,
 						boundGtinVia: amazonGtin?.via ?? null,
 					},
-					{ source: "wholefoods", obs: readWholeFoodsProductPage(html), finalUrl },
+					{
+						source: "wholefoods",
+						obs: readWholeFoodsProductPage(html),
+						finalUrl,
+					},
 				);
 				if (binding.kind === "UNKNOWN") {
 					unable(unusable(binding.cause));
 				} else if (binding.kind === "OTHER") {
 					absent("other_product");
 				} else {
-					return take(binding.product, binding.via, hasProductPageEvidence(html));
+					return take(binding.product, hasProductPageEvidence(html));
 				}
 			}
 		} catch {
@@ -741,7 +630,11 @@ async function lookupNutritionForProduct(
 			if (binding.kind !== "BOUND") {
 				// Another ASIN, or no ASIN, or another origin: nothing on this
 				// page, not even a UPC, may be taken.
-				unable(unusable(binding.kind === "UNKNOWN" ? binding.cause : "no_identity_evidence"));
+				unable(
+					unusable(
+						binding.kind === "UNKNOWN" ? binding.cause : "no_identity_evidence",
+					),
+				);
 			} else {
 				const { product } = binding;
 				if (product.gtin) {
@@ -749,7 +642,6 @@ async function lookupNutritionForProduct(
 				}
 				const direct = take(
 					product,
-					binding.via,
 					product.gtin !== null || read.hasProductTitle,
 				);
 				if (direct) return matched(direct);
@@ -803,92 +695,18 @@ async function lookupNutritionForProduct(
 	} catch {
 		unable({ status: "error", cause: "navigation_failed" });
 	}
-	try {
-		const { usdaGtin: exact, decoration: own } = kept;
-		const usda = await lookupUsdaNutrition(
-			usdaApiKey,
-			name,
-			exact?.gtin ?? null,
-			exact?.via ?? null,
-		);
-		if (usda) {
-			const merged = acceptNutrition(
-				{
-					...usda,
-					allergens: own?.allergens ?? null,
-					category: own?.category ?? [],
-					highlights: own?.highlights ?? [],
-					ingredients: own?.ingredients ?? usda.ingredients ?? null,
-					rawNutritionText: own?.rawNutritionText ?? null,
-					upc: exact?.gtin ?? usda.upc,
-				},
-				pageEvidence(answers),
-			);
-			if (merged) return matched(merged);
-		}
-		return noMatch(answers, false);
-	} catch {
-		return noMatch(answers, true);
-	}
+	return noMatch(answers);
 }
 
-/** One nutrition row per ordered product. A matched row carries the accepted
- *  observation's facts. Any other outcome carries its status and cause and
- *  no fact at all: every fact field is null (lists empty), and it names the
- *  ordered product only by its own key and name.
- *
- *  The row has the same key whatever its status, and the connector keeps no
- *  per-key state. A store that upserts by key will let a later not_found,
- *  error or blocked row replace an earlier matched row. Consumers MUST apply
- *  fact fields only when `status` is `matched`. */
+/** The nutrition row of an accepted observation: the facts a source panel
+ *  states, keyed by the ordered product. Only an accepted observation has a
+ *  row; a product whose panel could not be read has none. */
 function buildNutritionRecord(
 	productId: string,
 	name: string,
-	outcome: NutritionLookup,
+	facts: AcceptedNutrition,
 ): NutritionRecord {
-	if (outcome.status !== "matched") {
-		return {
-			added_sugar_g: null,
-			allergens: null,
-			calcium_mg: null,
-			calories: null,
-			carbs_g: null,
-			category: [],
-			cause: outcome.cause,
-			cholesterol_mg: null,
-			confidence: "low",
-			fat_g: null,
-			fiber_g: null,
-			highlights: [],
-			id: productId,
-			ingredients: null,
-			iron_mg: null,
-			name,
-			potassium_mg: null,
-			product_id: productId,
-			protein_g: null,
-			raw_nutrition_text: null,
-			saturated_fat_g: null,
-			serving_size: null,
-			servings_per_container: null,
-			sodium_mg: null,
-			source: outcome.status,
-			status: outcome.status,
-			sugar_g: null,
-			trans_fat_g: null,
-			type: "https://schema.org/NutritionInformation",
-			upc: null,
-			usda_brand: null,
-			usda_description: null,
-			usda_fdc_id: null,
-			usda_match_method: null,
-			vitamin_d_mcg: null,
-		};
-	}
-	const facts = outcome.facts;
 	return {
-		cause: null,
-		status: "matched",
 		added_sugar_g: facts.addedSugarG,
 		allergens: facts.allergens,
 		calcium_mg: facts.calciumMg,
@@ -900,12 +718,12 @@ function buildNutritionRecord(
 		fat_g: facts.fatG,
 		fiber_g: facts.fiberG,
 		highlights: facts.highlights,
+		id: productId,
 		ingredients: facts.ingredients,
 		iron_mg: facts.ironMg,
 		name,
-		id: productId,
-		product_id: productId,
 		potassium_mg: facts.potassiumMg,
+		product_id: productId,
 		protein_g: facts.proteinG,
 		raw_nutrition_text: facts.rawNutritionText,
 		saturated_fat_g: facts.saturatedFatG,
@@ -914,13 +732,9 @@ function buildNutritionRecord(
 		sodium_mg: facts.sodiumMg,
 		source: facts.source,
 		sugar_g: facts.sugarG,
-		type: "https://schema.org/NutritionInformation",
 		trans_fat_g: facts.transFatG,
+		type: "https://schema.org/NutritionInformation",
 		upc: facts.upc,
-		usda_brand: facts.usdaBrand,
-		usda_description: facts.usdaDescription,
-		usda_fdc_id: facts.fdcId,
-		usda_match_method: facts.usdaMatchMethod,
 		vitamin_d_mcg: facts.vitaminDMcg,
 	};
 }
@@ -977,7 +791,6 @@ function readOrderDetail(html: string): OrderDetail {
  *  its items are withheld, the rest are still read, and the caller reports the
  *  order-derived streams as failed. */
 async function collectOrderStubs({
-	credentials,
 	emit,
 	emitRecord,
 	ordersCursor,
@@ -989,7 +802,6 @@ async function collectOrderStubs({
 	wantsNutrition,
 	wantsOrders,
 }: {
-	credentials: BrowserCollectContext["credentials"];
 	emit: BrowserCollectContext["emit"];
 	emitRecord: BrowserCollectContext["emitRecord"];
 	ordersCursor: ReturnType<typeof openFingerprintCursor>;
@@ -1001,19 +813,19 @@ async function collectOrderStubs({
 	wantsNutrition: boolean;
 	wantsOrders: boolean;
 }): Promise<OrderCollectionOutcome> {
-	const usdaApiKey = credentials.USDA_API_KEY || USDA_DEMO_KEY;
 	let unverifiedCountOrders = 0;
 	let unreadable = null as OrderCollectionOutcome["unreadable"];
-	// Every source-backed item is considered once per run, and every one gets a
-	// nutrition row: matched facts, or an outcome row with status and cause.
+	// Every source-backed item is considered once per run. Only a product whose
+	// panel was read gets a nutrition row; the others are counted here, with
+	// the cause, for the run log.
 	const consideredProductIds = new Set<string>();
 	const nutritionCoverage = {
 		blocked: 0,
 		found: 0,
-		foundUSDA: 0,
 		error: 0,
 		notFound: 0,
 	};
+	const unreadCauses = new Map<string, number>();
 	const nutritionCursor = wantsNutrition
 		? openFingerprintCursor(state.nutrition)
 		: null;
@@ -1136,29 +948,30 @@ async function collectOrderStubs({
 				consideredProductIds.add(item.productId);
 				const outcome = await lookupNutritionForProduct(
 					page,
-					usdaApiKey,
 					item.name,
 					item.productId,
 				);
-				// Every ordered product gets exactly one row, whatever the
-				// outcome; the coverage counts below are tallied from the same
-				// outcome that builds the row.
+				// Only what a source showed is emitted. A product whose panel
+				// could not be read, or that has none, gets no row: a row with no
+				// facts would replace the stored facts under the same key.
 				if (outcome.status === "matched") {
-					if (outcome.facts.source === "usda_fdc") {
-						nutritionCoverage.foundUSDA += 1;
-					} else {
-						nutritionCoverage.found += 1;
+					nutritionCoverage.found += 1;
+					const record = buildNutritionRecord(
+						item.productId,
+						item.name,
+						outcome.facts,
+					);
+					if (nutritionCursor.shouldEmit(record)) {
+						await emitRecord("nutrition", record);
 					}
-				} else if (outcome.status === "blocked") {
-					nutritionCoverage.blocked += 1;
-				} else if (outcome.status === "error") {
-					nutritionCoverage.error += 1;
-				} else {
+				} else if (outcome.status === "not_found") {
 					nutritionCoverage.notFound += 1;
-				}
-				const record = buildNutritionRecord(item.productId, item.name, outcome);
-				if (nutritionCursor.shouldEmit(record)) {
-					await emitRecord("nutrition", record);
+				} else {
+					nutritionCoverage[outcome.status] += 1;
+					unreadCauses.set(
+						outcome.cause,
+						(unreadCauses.get(outcome.cause) ?? 0) + 1,
+					);
 				}
 				// Per product, not per order: one order can hold many products,
 				// each with several page reads.
@@ -1199,22 +1012,35 @@ async function collectOrderStubs({
 	// No inspected source surface supplies owner/response-bound inventory proof.
 	// Layout and matching parsed counts never authorize a checkpoint.
 	if (wantsNutrition && nutritionCursor) {
+		const unread = nutritionCoverage.error + nutritionCoverage.blocked;
 		connectorDiagnostic("wholefoods", "nutrition_lookup_coverage", {
 			products: consideredProductIds.size,
-			whole_foods: nutritionCoverage.found,
-			usda: nutritionCoverage.foundUSDA,
-			blocked: nutritionCoverage.blocked,
-			error: nutritionCoverage.error,
-			not_found: nutritionCoverage.notFound,
+			read: nutritionCoverage.found,
+			no_panel: nutritionCoverage.notFound,
+			unread,
+			...Object.fromEntries(
+				[...unreadCauses].map(([cause, count]) => [`unread_${cause}`, count]),
+			),
 		});
 		await progress(
-			`Looked up nutrition for ${consideredProductIds.size} products (${nutritionCoverage.notFound} not found, ${nutritionCoverage.error + nutritionCoverage.blocked} could not be read)`,
+			`Looked up nutrition for ${consideredProductIds.size} products (${nutritionCoverage.notFound} not found, ${unread} could not be read)`,
 			{
-				count: nutritionCoverage.found + nutritionCoverage.foundUSDA,
+				count: nutritionCoverage.found,
 				stream: "nutrition",
 				total: consideredProductIds.size,
 			},
 		);
+		if (unread > 0) {
+			// A product whose pages could not be read gets no row, so this run
+			// does not cover it. A later run may read it.
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "nutrition",
+				reason: NUTRITION_UNREAD_REASON,
+				message: `The nutrition panel of ${unread} product(s) could not be read; they have no nutrition row.`,
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+		}
 	}
 	return { unreadable, unverifiedCountOrders };
 }
@@ -1228,13 +1054,7 @@ const ORDER_DERIVED_STREAMS = ["orders", "order_items", "nutrition"] as const;
 async function collectOrders(
 	ctx: Pick<
 		BrowserCollectContext,
-		| "credentials"
-		| "emit"
-		| "emitRecord"
-		| "page"
-		| "progress"
-		| "requested"
-		| "state"
+		"emit" | "emitRecord" | "page" | "progress" | "requested" | "state"
 	> & {
 		reportStreamFailure:
 			| BrowserCollectContext["reportStreamFailure"]
@@ -1250,7 +1070,6 @@ async function collectOrders(
 			stream: "orders",
 		});
 		const outcome = await collectOrderStubs({
-			credentials: ctx.credentials,
 			emit: ctx.emit,
 			emitRecord: ctx.emitRecord,
 			ordersCursor,
@@ -1339,7 +1158,6 @@ async function deliverPartialStubs(
 	stubs: readonly OrderStub[],
 ): Promise<OrderCollectionOutcome> {
 	return collectOrderStubs({
-		credentials: ctx.credentials,
 		emit: ctx.emit,
 		emitRecord: ctx.emitRecord,
 		ordersCursor: openFingerprintCursor(ctx.state.orders),
@@ -1360,13 +1178,6 @@ async function deliverPartialStubs(
 // process entry point.
 if (isMainModule(import.meta.url)) {
 	runConnector({
-		// USDA_API_KEY is a connection-scoped optional setting (a public API key,
-		// not a login credential): `authOptional: true` means an unset key
-		// resolves to `{}` instead of raising a `credentials` interaction or
-		// failing the run — collect() falls back to the public USDA DEMO_KEY,
-		// matching the legacy connector's `process.env.USDA_API_KEY || 'DEMO_KEY'`.
-		auth: { kind: "env", required: ["USDA_API_KEY"] },
-		authOptional: true,
 		// Dedicated persistent profile (shared session story: this profile is
 		// expected to already be signed into amazon.com — see the manifest and
 		// docs/migration/connector-cutover/CONTRACTS.md D8).
@@ -1412,7 +1223,6 @@ if (isMainModule(import.meta.url)) {
 		},
 		validateRecord,
 		async collect({
-			credentials,
 			emit,
 			emitRecord,
 			page,
@@ -1435,7 +1245,6 @@ if (isMainModule(import.meta.url)) {
 			}
 
 			await collectOrders({
-				credentials,
 				emit,
 				emitRecord,
 				page,
@@ -1459,6 +1268,5 @@ export {
 	collectProfile,
 	discoverOrderStubs,
 	lookupNutritionForProduct,
-	lookupUsdaNutrition,
 	orderDetailCountsMatch,
 };

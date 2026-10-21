@@ -10,27 +10,20 @@ import {
 	buildOrderRecord,
 	collectOrders,
 } from "./index.ts";
+import { acceptNutrition } from "./nutrition-acceptance.ts";
 import {
-	mapUsdaNutrients,
 	parseAmazonProductNutritionDom,
 	parseOrderDetailDom,
 } from "./parsers.ts";
-import { parseWholeFoodsProductPageDom } from "./test-support.ts";
-import { acceptNutrition, type NutritionNoMatch } from "./nutrition-acceptance.ts";
 import { nutritionSchema, validateRecord } from "./schemas.ts";
+import { parseWholeFoodsProductPageDom } from "./test-support.ts";
 
 const AMAZON_PANEL = `<html><body><div id="nic-nutrition-facts">Calories 150 Total Fat 8g Total Carbohydrate 37g Protein 3g</div></body></html>`;
 
 function acceptedAmazonRow() {
-	const facts = acceptNutrition(
-		parseAmazonProductNutritionDom(AMAZON_PANEL),
-		"none",
-	);
+	const facts = acceptNutrition(parseAmazonProductNutritionDom(AMAZON_PANEL));
 	assert.ok(facts);
-	return buildNutritionRecord("B012345678", "Source product", {
-		status: "matched",
-		facts,
-	});
+	return buildNutritionRecord("B012345678", "Source product", facts);
 }
 
 test("accepted nutrition survives production keying and schema validation", async () => {
@@ -53,29 +46,6 @@ test("accepted nutrition survives production keying and schema validation", asyn
 			(message) => message.type === "RECORD" && message.key === "B012345678",
 		),
 	);
-});
-
-test("rows stored before status and cause existed, with a failure source, still validate", () => {
-	// The connector builds these with a status now, but they may still be
-	// stored. The schema keeps the failure sources and makes status and cause
-	// optional so reading them back is not a break.
-	const outcomes: NutritionNoMatch[] = [
-		{ status: "not_found", cause: "no_match" },
-		{ status: "error", cause: "http_error" },
-		{ status: "blocked", cause: "robot_check" },
-	];
-	for (const outcome of outcomes) {
-		const { status, cause } = outcome;
-		const { status: _status, cause: _cause, ...stored } =
-			buildNutritionRecord("B012345678", "Source product", outcome);
-		assert.equal(validateRecord("nutrition", stored).ok, true, status);
-		assert.equal(stored.source, status);
-		assert.equal(
-			validateRecord("nutrition", { ...stored, status, cause }).ok,
-			true,
-			status,
-		);
-	}
 });
 
 test("unproven order totals and absent quantity stay unknown", () => {
@@ -139,35 +109,14 @@ test("unrelated body date is never used as the order date", () => {
 	assert.equal(order.order_date, null);
 });
 
-test("USDA absent serving units never imply grams", () => {
-	const facts = mapUsdaNutrients(
-		{
-			description: "food",
-			fdcId: 1,
-			brandName: null,
-			brandOwner: null,
-			gtinUpc: null,
-			servingSize: 30,
-			servingSizeUnit: null,
-			foodNutrients: [{ nutrientId: 1008, value: 100 }],
-		},
-		"text",
-	);
-	assert.equal(facts.servingSize, "per 100 g");
-	assert.equal(facts.calories, 100);
-});
-
 test("nutrition parsing retains the legacy script's expanded nutrition payload", () => {
 	const facts = parseWholeFoodsProductPageDom(`<html><head>
 		<script type="application/ld+json">{"@type":"Product","gtin12":"012345678905","category":"Produce","ingredients":"Apples","nutrition":{"@type":"NutritionInformation","calories":"52","proteinContent":"0.3 g","carbohydrateContent":"14 g","fatContent":"0.2 g","saturatedFatContent":"0 g","transFatContent":"0 g","cholesterolContent":"0 mg","fiberContent":"2.4 g","sugarContent":"10 g","sodiumContent":"1 mg","potassiumContent":"107 mg","calciumContent":"6 mg","ironContent":"0.1 mg","vitaminDContent":"0 mcg"}}</script>
 	</head><body></body></html>`);
 	assert.ok(facts);
-	const accepted = acceptNutrition(facts, "none");
+	const accepted = acceptNutrition(facts);
 	assert.ok(accepted);
-	const row = buildNutritionRecord("B012345678", "Apples", {
-		status: "matched",
-		facts: accepted,
-	});
+	const row = buildNutritionRecord("B012345678", "Apples", accepted);
 	assert.deepEqual(
 		{
 			calories: row.calories,
@@ -252,7 +201,6 @@ test("DOM terminal and loading empty pages emit retryable inventory skip and no 
 			locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
 		} as unknown as Page;
 		await collectOrders({
-			credentials: {},
 			page,
 			state: {},
 			requested: new Map([["orders", {}]]) as never,

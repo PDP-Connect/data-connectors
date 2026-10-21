@@ -56,12 +56,18 @@ export interface OrderDetail {
 	status?: "Cancelled" | null;
 }
 
+/** The pages a nutrition panel is read from. */
+export type NutritionSource =
+	| "wholefoods_product_page"
+	| "wholefoods_structured_data"
+	| "amazon_product_page";
+
 /** The rows every Nutrition Facts panel carries. */
 export type CoreNutritionRow = "calories" | "carbs" | "fat" | "protein";
 
-/** Nutrition facts extracted from either the Whole Foods product page or
- *  the USDA FoodData Central API, normalized to one shape regardless of
- *  source. Fields absent from the source are `null`, never guessed. */
+/** Nutrition facts extracted from the Amazon or Whole Foods product page the
+ *  ordered item links to, normalized to one shape regardless of source.
+ *  Fields absent from the source are `null`, never guessed. */
 export interface NutritionFacts {
 	addedSugarG: number | null;
 	allergens: string | null;
@@ -75,7 +81,6 @@ export interface NutritionFacts {
 	 *  stated and has a null amount; a row the source does not carry is not
 	 *  stated. A missing row is never read as zero. */
 	coreStated: readonly CoreNutritionRow[];
-	fdcId: number | null;
 	fatG: number | null;
 	fiberG: number | null;
 	highlights: string[];
@@ -89,45 +94,14 @@ export interface NutritionFacts {
 	servingsPerContainer: number | null;
 	saturatedFatG: number | null;
 	sodiumMg: number | null;
-	source:
-		| "usda_fdc"
-		| "wholefoods_product_page"
-		| "wholefoods_structured_data"
-		| "amazon_product_page";
+	source: NutritionSource;
 	sugarG: number | null;
 	transFatG: number | null;
 	type?: "https://schema.org/NutritionInformation";
-	usdaBrand: string | null;
-	usdaDescription: string | null;
-	usdaMatchMethod: UsdaMatchMethod | null;
 	vitaminDMcg: number | null;
-	/** Universal Product Code, when the source page/response exposed one.
-	 *  Used to key a UPC-first USDA lookup; not itself part of the emitted
-	 *  nutrition record. */
+	/** Universal Product Code, when the product page states one. */
 	upc: string | null;
 }
-
-/** One USDA FoodData Central search result, trimmed to the fields the
- *  matcher and nutrient mapper use. The real API response has many more
- *  fields; only these are load-bearing. */
-export interface UsdaFood {
-	brandName: string | null;
-	brandOwner: string | null;
-	description: string;
-	fdcId: number;
-	foodNutrients: readonly UsdaFoodNutrient[];
-	gtinUpc: string | null;
-	ingredients?: string | null;
-	servingSize: number | null;
-	servingSizeUnit: string | null;
-}
-
-export interface UsdaFoodNutrient {
-	nutrientId: number;
-	value: number;
-}
-
-export type UsdaMatchMethod = "text" | "upc";
 
 /** Emitted `profile` stream record shape. */
 export interface ProfileRecord {
@@ -172,8 +146,6 @@ export interface NutritionRecord {
 	confidence: "high" | "medium" | "low";
 	category: string[];
 	cholesterol_mg: number | null;
-	/** Why a non-matched row has no facts; null on a matched row. */
-	cause: string | null;
 	fat_g: number | null;
 	highlights: string[];
 	ingredients: string | null;
@@ -188,24 +160,11 @@ export interface NutritionRecord {
 	serving_size: string | null;
 	servings_per_container: number | null;
 	sodium_mg: number | null;
-	source:
-		| "usda_fdc"
-		| "wholefoods_product_page"
-		| "wholefoods_structured_data"
-		| "amazon_product_page"
-		| "not_found"
-		| "error"
-		| "blocked";
-	/** `matched`: the facts are this product's. Any other status: no facts. */
-	status: "matched" | "not_found" | "error" | "blocked";
+	source: NutritionSource;
 	sugar_g: number | null;
 	trans_fat_g: number | null;
 	type: "https://schema.org/NutritionInformation";
 	upc: string | null;
-	usda_brand: string | null;
-	usda_description: string | null;
-	usda_fdc_id: number | null;
-	usda_match_method: UsdaMatchMethod | null;
 	vitamin_d_mcg: number | null;
 	[field: string]: unknown;
 }

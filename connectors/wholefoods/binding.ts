@@ -8,11 +8,6 @@
 // the source at all. No other file compares ids, names,
 // GTINs, order tokens or origins.
 //
-// Fuzzy USDA text matching (`bestUsdaMatch`) also compares names. It stays
-// outside this module on purpose: it is an approximation, labelled
-// `usda_match_method: text`, allowed only when page evidence is `none`, and it
-// never writes a `upc`.
-//
 // Evidence limits. Every product and order page in the repo is a synthetic
 // fixture; no scrubbed real capture of an Amazon /dp page, a Whole Foods
 // product page or an order detail exists here. The legacy script trusted the
@@ -173,16 +168,6 @@ export function sameGtin(left: unknown, right: unknown): boolean {
 	return a !== null && a === gtin14(right);
 }
 
-/** The forms a barcode is queried in, as the legacy lookup did: as read, then
- *  zero-padded to 14 and to 13 digits. */
-export function gtinQueryForms(raw: unknown): string[] {
-	const digits = normalizeGtin(raw);
-	if (digits === null) return [];
-	return [
-		...new Set([digits, digits.padStart(14, "0"), digits.padStart(13, "0")]),
-	];
-}
-
 // ─── Names and package sizes ───────────────────────────────────────────────
 
 type Measure = "mass" | "volume";
@@ -278,13 +263,20 @@ export function normalizeName(raw: string | null | undefined): NormalizedName {
 	};
 }
 
-/** A sorted list with each run of equivalent values kept once: "12 fl oz
- *  (355 ml)" states one quantity twice, not two quantities. */
-function oneOfEach<T>(sorted: readonly T[], same: (a: T, b: T) => boolean): T[] {
-	return sorted.filter((value, i) => {
-		const previous = sorted[i - 1];
-		return previous === undefined || !same(previous, value);
-	});
+/** A sorted list reduced to one value per group of equivalent amounts, each
+ *  group measured from its first value: "12 fl oz (355 ml)" states one
+ *  quantity twice, not two, while 100 g, 102.5 g and 105 g stay two amounts
+ *  because rounding tolerance does not chain. */
+function oneOfEach<T>(
+	sorted: readonly T[],
+	same: (a: T, b: T) => boolean,
+): T[] {
+	const groups: T[] = [];
+	for (const value of sorted) {
+		const first = groups.at(-1);
+		if (first === undefined || !same(first, value)) groups.push(value);
+	}
+	return groups;
 }
 
 /** Two amounts are one amount when they differ by no more than rounding. */
@@ -322,7 +314,9 @@ function sameProductName(
 ): boolean {
 	const a = normalizeName(left);
 	const b = normalizeName(right);
-	return a.base !== "" && a.base === b.base && !packagesDisagree(a.pack, b.pack);
+	return (
+		a.base !== "" && a.base === b.base && !packagesDisagree(a.pack, b.pack)
+	);
 }
 
 // ─── Observations ──────────────────────────────────────────────────────────
@@ -332,11 +326,10 @@ function sameProductName(
 // panel as the rows it states, partial panels included. Parsers produce them;
 // only this module decides which of it is about the requested product.
 
-/** What a page says about a product besides its panel rows. A bound page's
- *  details decorate a USDA match of the same product, panel or not. */
+/** What a page says about a product besides its panel rows. */
 export type ProductDetails = Pick<
 	NutritionFacts,
-	"allergens" | "category" | "highlights" | "ingredients" | "rawNutritionText"
+	"allergens" | "category" | "highlights" | "ingredients"
 >;
 
 /** Everything an Amazon /dp page says about which ASIN it is, and the
@@ -355,8 +348,6 @@ export interface AmazonProductObservation {
 	/** The nutrition panel as the page states it (partial or complete), or
 	 *  null when the page states no nutrition row. */
 	readonly panel: NutritionFacts | null;
-	/** Ingredients, allergens and the like, or null when the page states none. */
-	readonly details: ProductDetails | null;
 }
 
 /** One Product node of a Whole Foods page's JSON-LD, with its own facts. */
@@ -446,9 +437,6 @@ export type MainSubject =
 			 *  nutrition first, then the rendered panels shown for it. Partial
 			 *  panels are kept; which one is usable is acceptance's decision. */
 			readonly panels: readonly NutritionFacts[];
-			/** This subject's descriptive details: the tied node's own, then the
-			 *  rendered ones shown for it, and the page's categories. */
-			readonly details: ProductDetails | null;
 			/** Rendered panels on the page that are not released to this
 			 *  subject. Their owner is unresolved, so the page cannot prove
 			 *  this product has no panel. */
@@ -528,9 +516,6 @@ export function mainSubject(
 			heading,
 			nodeName: node.name,
 			panels: node.facts ? [node.facts] : [],
-			details: ((details) => (statesAny(details) ? details : null))(
-				subjectDetails(node.facts, [], []),
-			),
 			unreleasedPanels: obs.panels.length,
 		};
 	}
@@ -559,10 +544,6 @@ export function mainSubject(
 		upc: gtin,
 	}));
 	const panels = [...(own?.facts ? [own.facts] : []), ...shown];
-	const withText = {
-		...details,
-		rawNutritionText: panels[0]?.rawNutritionText ?? null,
-	};
 	return {
 		kind: "SUBJECT",
 		identity: { name, gtin },
@@ -572,7 +553,6 @@ export function mainSubject(
 		heading,
 		nodeName: node?.name ?? null,
 		panels,
-		details: statesAny(withText) ? withText : null,
 		unreleasedPanels: obs.panels.length - released.length,
 	};
 }
@@ -594,18 +574,8 @@ function subjectDetails(
 			.filter((detail) => detail.field === "highlight")
 			.map((detail) => detail.text),
 		ingredients: nodeFacts?.ingredients ?? first("ingredients"),
-		rawNutritionText: null,
 	};
 }
-
-const statesAny = (details: ProductDetails): boolean =>
-	Boolean(
-		details.allergens ||
-			details.ingredients ||
-			details.rawNutritionText ||
-			details.highlights.length > 0 ||
-			details.category.length > 0,
-	);
 
 // ─── bindProduct ───────────────────────────────────────────────────────────
 
@@ -615,24 +585,32 @@ const asinOf = (raw: string | null | undefined): string | null =>
 
 type ProductObservation =
 	| { readonly source: "amazon"; readonly obs: AmazonProductObservation }
-	| { readonly source: "wholefoods"; readonly obs: WholeFoodsProductObservation; readonly finalUrl: string };
+	| {
+			readonly source: "wholefoods";
+			readonly obs: WholeFoodsProductObservation;
+			readonly finalUrl: string;
+	  };
 
 /** What a bound page shows about the requested product, and only that: its
  *  name, its barcode and every panel proven to be its own (partial ones
  *  included), each panel's confidence capped by what bound it. A GTIN here is
- *  identity evidence for an exact lookup; it is not a request GTIN. */
+ *  the barcode the page states for the product; only a BOUND Amazon page's
+ *  GTIN becomes the request's `boundGtin`. */
 export interface BoundProduct {
 	readonly name: string | null;
 	readonly gtin: string | null;
 	readonly panels: readonly NutritionFacts[];
-	readonly details: ProductDetails | null;
 	/** Panels the bound page shows whose owner is unresolved: not proven this
 	 *  product's, so not used, and not proof that it has none either. */
 	readonly unresolvedPanels: number;
 }
 
 export type ProductBinding =
-	| { readonly kind: "BOUND"; readonly via: Via; readonly product: BoundProduct }
+	| {
+			readonly kind: "BOUND";
+			readonly via: Via;
+			readonly product: BoundProduct;
+	  }
 	| { readonly kind: "OTHER" }
 	| { readonly kind: "UNKNOWN"; readonly cause: BindingCause };
 
@@ -694,7 +672,9 @@ function bindAmazon(
 	const fromUrl = asinOf(parseUrl(obs.finalUrl)?.pathname);
 	const content = [
 		asinOf(obs.canonical),
-		obs.input && /^[A-Z0-9]{10}$/.test(obs.input.trim()) ? obs.input.trim() : null,
+		obs.input && /^[A-Z0-9]{10}$/.test(obs.input.trim())
+			? obs.input.trim()
+			: null,
 		obs.dataAsin && /^[A-Z0-9]{10}$/.test(obs.dataAsin.trim())
 			? obs.dataAsin.trim()
 			: null,
@@ -708,7 +688,6 @@ function bindAmazon(
 		name: null,
 		gtin,
 		panels: obs.panel ? [{ ...obs.panel, upc: gtin }] : [],
-		details: obs.details,
 		unresolvedPanels: 0,
 	});
 }
@@ -755,7 +734,6 @@ function bindWholeFoods(
 	const product = {
 		...identity,
 		panels: subject.panels,
-		details: subject.details,
 		unresolvedPanels: subject.unreleasedPanels,
 	};
 	const requestedGtin = gtin14(requested.boundGtin);
@@ -788,15 +766,6 @@ export function onSourceSite(
 	);
 }
 
-/** Does a barcode observed on another record (a USDA food) name the same
- *  product as the one the request is bound to? */
-export function bindGtin(requested: unknown, observed: unknown): Binding {
-	const wanted = gtin14(requested);
-	const seen = gtin14(observed);
-	if (wanted === null || seen === null) return unknown("no_identity_evidence");
-	return wanted === seen ? bound("gtin") : OTHER;
-}
-
 // ─── bindOrder ─────────────────────────────────────────────────────────────
 
 /** Does this order detail page belong to the requested order?
@@ -819,10 +788,14 @@ export function bindOrder(
 	const url = parseUrl(obs.finalUrl);
 	if (url?.origin !== AMAZON_ORIGIN) return unknown("untrusted_origin");
 	const urlId =
-		[...url.searchParams].find(([key]) => key.toLowerCase() === "orderid")?.[1] ??
-		null;
+		[...url.searchParams].find(
+			([key]) => key.toLowerCase() === "orderid",
+		)?.[1] ?? null;
 	const header = [...new Set(obs.headerIds)];
-	if (header.length > 1 || (urlId !== null && header.length === 1 && header[0] !== urlId)) {
+	if (
+		header.length > 1 ||
+		(urlId !== null && header.length === 1 && header[0] !== urlId)
+	) {
 		return unknown("order_id_sources_disagree");
 	}
 	const authoritative = [...(urlId !== null ? [urlId] : []), ...header];

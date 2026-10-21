@@ -155,26 +155,7 @@ const NUTRITION_RECORD = {
 	trans_fat_g: null,
 	type: "https://schema.org/NutritionInformation",
 	upc: null,
-	usda_brand: null,
-	usda_description: null,
-	usda_fdc_id: null,
-	usda_match_method: null,
 	vitamin_d_mcg: null,
-};
-
-/** A row with no fact at all: what a non-matched lookup emits. */
-const NO_FACTS = {
-	...NUTRITION_RECORD,
-	calories: null,
-	carbs_g: null,
-	confidence: "low" as const,
-	fat_g: null,
-	fiber_g: null,
-	protein_g: null,
-	serving_size: null,
-	servings_per_container: null,
-	sodium_mg: null,
-	sugar_g: null,
 };
 
 test("nutrition schema accepts a fully-populated wholefoods_product_page record", () => {
@@ -182,33 +163,34 @@ test("nutrition schema accepts a fully-populated wholefoods_product_page record"
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("nutrition schema accepts a usda_fdc record with medium confidence", () => {
-	const result = nutritionSchema.safeParse({
-		...NUTRITION_RECORD,
-		confidence: "medium",
-		source: "usda_fdc",
-	});
-	assert.ok(result.success, JSON.stringify(result.error?.issues));
+test("nutrition schema accepts a full record from each observed source", () => {
+	for (const source of [
+		"amazon_product_page",
+		"wholefoods_product_page",
+		"wholefoods_structured_data",
+	] as const) {
+		const result = nutritionSchema.safeParse({ ...NUTRITION_RECORD, source });
+		assert.ok(
+			result.success,
+			`${source}: ${JSON.stringify(result.error?.issues)}`,
+		);
+	}
 });
 
-for (const source of ["not_found", "error", "blocked"] as const) {
-	test(`nutrition schema accepts a source-backed ${source} outcome`, () => {
-		const result = nutritionSchema.safeParse({
-			...NO_FACTS,
-			source,
-		});
-		assert.ok(result.success, JSON.stringify(result.error?.issues));
-	});
+test("nutrition schema rejects the sources the connector no longer writes", () => {
+	for (const source of ["usda_fdc", "not_found", "error", "blocked"]) {
+		const result = nutritionSchema.safeParse({ ...NUTRITION_RECORD, source });
+		assert.equal(result.success, false, source);
+	}
+});
 
-	test(`nutrition schema rejects a ${source} row that carries a fact`, () => {
-		const result = nutritionSchema.safeParse({
-			...NUTRITION_RECORD,
-			confidence: "low",
-			source,
-		});
-		assert.equal(result.success, false);
+test("nutrition schema rejects an id that is not its product_id", () => {
+	const result = nutritionSchema.safeParse({
+		...NUTRITION_RECORD,
+		id: "B087654321",
 	});
-}
+	assert.equal(result.success, false);
+});
 
 test("nutrition schema rejects an unknown source", () => {
 	const result = nutritionSchema.safeParse({
@@ -231,27 +213,4 @@ test("validateRecord routes an invalid orders record to a SKIP_RESULT-shaped fai
 test("validateRecord routes a valid nutrition record through as ok", () => {
 	const result = validateRecord("nutrition", NUTRITION_RECORD);
 	assert.equal(result.ok, true);
-});
-
-test("nutrition schema accepts the identity causes and cross-checks them with the status", () => {
-	for (const cause of ["identity_conflict", "identity_unbound"] as const) {
-		const ok = nutritionSchema.safeParse({
-			...NO_FACTS,
-			source: "error",
-			status: "error",
-			cause,
-		});
-		assert.ok(ok.success, JSON.stringify(ok.error?.issues));
-		// An identity cause belongs to status error only.
-		for (const [status, source] of [
-			["blocked", "blocked"],
-			["not_found", "not_found"],
-		] as const) {
-			assert.equal(
-				nutritionSchema.safeParse({ ...NO_FACTS, source, status, cause }).success,
-				false,
-				`${status} cannot carry ${cause}`,
-			);
-		}
-	}
 });

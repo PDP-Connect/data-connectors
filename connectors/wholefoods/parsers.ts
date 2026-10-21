@@ -10,14 +10,13 @@
 
 import { parseHTML } from "linkedom";
 import {
+	type AmazonProductObservation,
 	IDENTITY_SELECTORS,
 	normalizeGtin,
-	resolveWholeFoodsUrl,
-	type AmazonProductObservation,
 	type OrderObservation,
-	type ProductDetails,
 	type ProductNode,
 	type RenderedPanel,
+	resolveWholeFoodsUrl,
 	type ScopedDetail,
 	type WholeFoodsProductObservation,
 } from "./binding.ts";
@@ -26,8 +25,6 @@ import type {
 	OrderDetail,
 	OrderDetailItem,
 	OrderStub,
-	UsdaFood,
-	UsdaMatchMethod,
 	WholeFoodsProfile,
 } from "./types.ts";
 
@@ -55,7 +52,6 @@ type NutritionDetails = Pick<
 	| "category"
 	| "cholesterolMg"
 	| "coreStated"
-	| "fdcId"
 	| "highlights"
 	| "ingredients"
 	| "ironMg"
@@ -64,9 +60,6 @@ type NutritionDetails = Pick<
 	| "saturatedFatG"
 	| "transFatG"
 	| "upc"
-	| "usdaBrand"
-	| "usdaDescription"
-	| "usdaMatchMethod"
 	| "vitaminDMcg"
 >;
 
@@ -78,7 +71,6 @@ function emptyNutritionDetails(): NutritionDetails {
 		category: [],
 		cholesterolMg: null,
 		coreStated: [],
-		fdcId: null,
 		highlights: [],
 		ingredients: null,
 		ironMg: null,
@@ -87,9 +79,6 @@ function emptyNutritionDetails(): NutritionDetails {
 		saturatedFatG: null,
 		transFatG: null,
 		upc: null,
-		usdaBrand: null,
-		usdaDescription: null,
-		usdaMatchMethod: null,
 		vitaminDMcg: null,
 	};
 }
@@ -146,7 +135,8 @@ const STATED_AMOUNT_RE = new RegExp(
 const CALORIES_LABEL_RE = /Calories[:\s]*/gi;
 const AMOUNT_AT_START_RE = new RegExp(`^${AMOUNT_SOURCE}`);
 
-const parseAmount = (text: string): number => Number.parseFloat(text.replace(/,/g, ""));
+const parseAmount = (text: string): number =>
+	Number.parseFloat(text.replace(/,/g, ""));
 
 /** The number after a "Calories" label, if it is a clean amount. */
 function readCalories(text: string): number | null {
@@ -212,7 +202,9 @@ function statedMass(text: string, target: MassUnit): Stated | null {
 		if (!unit) return null;
 		amount = convertMass(value, unit, target);
 	}
-	return match[1] ? { bound: "less_than", limit: amount } : { bound: "exact", amount };
+	return match[1]
+		? { bound: "less_than", limit: amount }
+		: { bound: "exact", amount };
 }
 
 /** Units a panel row can state, longest first. */
@@ -223,7 +215,8 @@ const PANEL_UNITS = ["mcg", "mg", "µg", "μg", "ug", "iu", "g"] as const;
  *  a known unit directly followed by a capital is that unit. */
 function resolveUnit(letters: string): string {
 	const lower = letters.toLowerCase();
-	if (lower in MASS_UNIT_ALIASES || lower === "iu" || lower === "") return lower;
+	if (lower in MASS_UNIT_ALIASES || lower === "iu" || lower === "")
+		return lower;
 	for (const unit of PANEL_UNITS) {
 		const next = letters[unit.length];
 		if (lower.startsWith(unit) && next !== undefined && /[A-Z]/.test(next)) {
@@ -258,7 +251,11 @@ function structuredEnergy(raw: unknown): Stated | null {
 
 /** Panel rows and the unit each is stored in. Longer labels come first so
  *  "Includes Added Sugars" is never read as "Sugars". */
-const PANEL_ROWS: readonly (readonly [label: string, key: string, unit: MassUnit])[] = [
+const PANEL_ROWS: readonly (readonly [
+	label: string,
+	key: string,
+	unit: MassUnit,
+])[] = [
 	["Includes Added Sugars", "Includes Added Sugars", "g"],
 	["Added Sugars", "Includes Added Sugars", "g"],
 	["Total Sugars", "Total Sugars", "g"],
@@ -697,7 +694,9 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		const sourceName = textOf(anchor ?? title).trim();
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
 		if (productId && sourceName.length < 3) {
-			throw new OrderDetailUnreadableError("Whole Foods order item has no source product name");
+			throw new OrderDetailUnreadableError(
+				"Whole Foods order item has no source product name",
+			);
 		}
 		// A grid container with no title and no link is an empty shell, not a
 		// row: counting it would fabricate an item and hide that nothing was read.
@@ -769,7 +768,9 @@ function parseDeliveryOrderItems(document: Document): OrderDetailItem[] | null {
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
 		const linkedName = textOf(anchor).replace(WHITESPACE_RE, " ").trim();
 		if (productId && !linkedName) {
-			throw new OrderDetailUnreadableError("Whole Foods delivery item has no source product name");
+			throw new OrderDetailUnreadableError(
+				"Whole Foods delivery item has no source product name",
+			);
 		}
 		const rowText = textOf(row).replace(WHITESPACE_RE, " ").trim();
 		// An empty row element is a shell, not an item.
@@ -840,7 +841,9 @@ function parseInStoreItems(document: Document): OrderDetailItem[] | null {
 			.replace(WHITESPACE_RE, " ")
 			.trim();
 		if (name.length < 3) {
-			throw new OrderDetailUnreadableError("Whole Foods in-store order row has no item name");
+			throw new OrderDetailUnreadableError(
+				"Whole Foods in-store order row has no item name",
+			);
 		}
 		const rowText = textOf(row).replace(WHITESPACE_RE, " ");
 		const qty = IN_STORE_QTY_RE.exec(rowText);
@@ -904,186 +907,6 @@ export function parseDollarsToCents(
 		return null;
 	}
 	return Math.round(Number(m[1]) * CURRENCY_CENTS_MULTIPLIER);
-}
-
-// ─── Nutrition: name cleaning + USDA fuzzy match (pure) ───────────────────
-
-/** Fraction (0-1) of the query's significant words (length > 2) that appear
- *  in a USDA food's description + brand. Ported from the legacy
- *  `scoreMatch`. */
-export function scoreUsdaMatch(query: string, food: UsdaFood): number {
-	const qWords = query
-		.toLowerCase()
-		.split(WHITESPACE_RE)
-		.filter((w) => w.length > 2);
-	if (qWords.length === 0) {
-		return 0;
-	}
-	const haystack =
-		`${food.description} ${food.brandName ?? food.brandOwner ?? ""}`.toLowerCase();
-	const hits = qWords.filter((w) => haystack.includes(w)).length;
-	return hits / qWords.length;
-}
-
-/** Pick the best-scoring USDA food above `minScore`, or null. Ported from
- *  the legacy `bestMatch`. */
-export function bestUsdaMatch(
-	query: string,
-	foods: readonly UsdaFood[],
-	minScore = 0.4,
-): UsdaFood | null {
-	let best: UsdaFood | null = null;
-	let bestScore = 0;
-	for (const food of foods) {
-		const s = scoreUsdaMatch(query, food);
-		if (s > bestScore) {
-			best = food;
-			bestScore = s;
-		}
-	}
-	return bestScore >= minScore ? best : null;
-}
-
-// USDA nutrient ids (FoodData Central's fixed vocabulary).
-const USDA_NUTRIENT_ID = {
-	addedSugar: 1235,
-	calcium: 1087,
-	calories: 1008,
-	carbs: 1005,
-	cholesterol: 1253,
-	fat: 1004,
-	fiber: 1079,
-	iron: 1089,
-	potassium: 1092,
-	protein: 1003,
-	saturatedFat: 1258,
-	sodium: 1093,
-	sugar: 2000,
-	transFat: 1257,
-	vitaminD: 1114,
-} as const;
-
-/** One USDA search result as the connector uses it, from the wire shape.
- *  Foundation foods omit `servingSize`, `servingSizeUnit`, `gtinUpc` and
- *  `brandOwner` entirely, so an absent key becomes null here and nowhere
- *  else. A result that is not a food with an id and a description, and any
- *  nutrient entry without a numeric id and value, is dropped. */
-export function parseUsdaFood(raw: unknown): UsdaFood | null {
-	if (typeof raw !== "object" || raw === null) return null;
-	const food = raw as Record<string, unknown>;
-	if (typeof food.fdcId !== "number" || typeof food.description !== "string") {
-		return null;
-	}
-	const text = (value: unknown) => (typeof value === "string" ? value : null);
-	const nutrients = Array.isArray(food.foodNutrients) ? food.foodNutrients : [];
-	return {
-		brandName: text(food.brandName),
-		brandOwner: text(food.brandOwner),
-		description: food.description,
-		fdcId: food.fdcId,
-		foodNutrients: nutrients.flatMap((entry: unknown) => {
-			const nutrient = entry as Record<string, unknown> | null;
-			return typeof nutrient?.nutrientId === "number" &&
-				typeof nutrient.value === "number" &&
-				Number.isFinite(nutrient.value)
-				? [{ nutrientId: nutrient.nutrientId, value: nutrient.value }]
-				: [];
-		}),
-		gtinUpc: text(food.gtinUpc),
-		ingredients: text(food.ingredients),
-		servingSize:
-			typeof food.servingSize === "number" && food.servingSize > 0
-				? food.servingSize
-				: null,
-		servingSizeUnit: text(food.servingSizeUnit),
-	};
-}
-
-/** FoodData Central energy: Branded and most Foundation foods report 1008;
- *  Foundation foods that derive energy report only 2047 or 2048 (Atwater). */
-const USDA_ENERGY_IDS = [1008, 2047, 2048] as const;
-/** USDA nutrient values are per 100 g, or per 100 ml for a food whose serving
- *  is stated in millilitres. */
-const USDA_SERVING_BASIS: Record<string, "g" | "ml"> = {
-	g: "g",
-	grm: "g",
-	ml: "ml",
-	mlt: "ml",
-};
-
-/** Map a matched USDA food's nutrients to the connector's typed nutrition
- *  shape. A serving stated in grams or millilitres scales the per-100 values
- *  to that serving, as the legacy `mapUSDANutrients` did for grams. With no
- *  such serving the values stay per 100 g and say so in the serving label,
- *  so no source leaves "per 100" to be inferred from a null. A nutrient the
- *  food does not report is not stated; it is never read as zero. */
-export function mapUsdaNutrients(
-	food: UsdaFood,
-	matchMethod: UsdaMatchMethod,
-): NutritionFacts {
-	const basis =
-		food.servingSize !== null && food.servingSizeUnit !== null
-			? USDA_SERVING_BASIS[food.servingSizeUnit.toLowerCase()]
-			: undefined;
-	const scale = basis && food.servingSize !== null ? food.servingSize / 100 : 1;
-	const reported = (id: number): number | null =>
-		food.foodNutrients.find((nutrient) => nutrient.nutrientId === id)?.value ??
-		null;
-	const get = (id: number): number | null => {
-		const raw = reported(id);
-		return raw === null ? null : Math.round(raw * scale * 100) / 100;
-	};
-	const energyId = USDA_ENERGY_IDS.find((id) => reported(id) !== null);
-	const calories = energyId === undefined ? null : get(energyId);
-	const fat = get(USDA_NUTRIENT_ID.fat);
-	const carbs = get(USDA_NUTRIENT_ID.carbs);
-	const protein = get(USDA_NUTRIENT_ID.protein);
-	const stated = (value: number | null): Stated | null =>
-		value === null ? null : { bound: "exact", amount: value };
-	return {
-		...emptyNutritionDetails(),
-		addedSugarG: get(USDA_NUTRIENT_ID.addedSugar),
-		allergens: null,
-		calciumMg: get(USDA_NUTRIENT_ID.calcium),
-		calories,
-		carbsG: carbs,
-		category: [],
-		cholesterolMg: get(USDA_NUTRIENT_ID.cholesterol),
-		confidence: matchMethod === "upc" ? "high" : "medium",
-		coreStated: coreStatedOf({
-			calories: stated(calories),
-			carbs: stated(carbs),
-			fat: stated(fat),
-			protein: stated(protein),
-		}),
-		fdcId: food.fdcId,
-		fatG: fat,
-		fiberG: get(USDA_NUTRIENT_ID.fiber),
-		highlights: [],
-		ingredients: food.ingredients || null,
-		ironMg: get(USDA_NUTRIENT_ID.iron),
-		potassiumMg: get(USDA_NUTRIENT_ID.potassium),
-		proteinG: protein,
-		rawNutritionText: null,
-		saturatedFatG: get(USDA_NUTRIENT_ID.saturatedFat),
-		servingSize:
-			basis && food.servingSize !== null
-				? `${food.servingSize}${basis}`
-				: food.servingSizeUnit === null
-					? "per 100 g"
-					: "per 100 g or 100 ml",
-		servingsPerContainer: null,
-		sodiumMg: get(USDA_NUTRIENT_ID.sodium),
-		source: "usda_fdc",
-		sugarG: get(USDA_NUTRIENT_ID.sugar),
-		transFatG: get(USDA_NUTRIENT_ID.transFat),
-		// A text match is another product: its GTIN is not this product's.
-		upc: matchMethod === "upc" ? normalizeGtin(food.gtinUpc) : null,
-		usdaBrand: food.brandOwner,
-		usdaDescription: food.description,
-		usdaMatchMethod: matchMethod,
-		vitaminDMcg: get(USDA_NUTRIENT_ID.vitaminD),
-	};
 }
 
 // ─── Nutrition: Whole Foods product page ──────────────────────────────────
@@ -1196,7 +1019,14 @@ function productNodes(documents: unknown[]): ProductNode[] {
 		);
 		const only = standalone.length === 1 ? standalone[0] : undefined;
 		return only
-			? [{ name: null, urls: [], gtin: null, facts: factsFromNutrition(only, null) }]
+			? [
+					{
+						name: null,
+						urls: [],
+						gtin: null,
+						facts: factsFromNutrition(only, null),
+					},
+				]
 			: [];
 	}
 	return products.map((product) => {
@@ -1349,7 +1179,8 @@ function renderedPanels(
 			cholesterolMg: nutrient("Cholesterol"),
 			confidence: "high",
 			coreStated: coreStatedOf({
-				calories: calories === null ? null : { bound: "exact", amount: calories },
+				calories:
+					calories === null ? null : { bound: "exact", amount: calories },
 				carbs: rows.get("Total Carbohydrate") ?? null,
 				fat: rows.get("Total Fat") ?? null,
 				protein: rows.get("Protein") ?? null,
@@ -1382,7 +1213,8 @@ const DETAIL_SECTIONS: readonly (readonly [ScopedDetail["field"], RegExp])[] = [
 	["allergens", /^(?:allergens?|contains)\b/i],
 	["ingredients", /^ingredients:?$/i],
 ];
-const BADGE_SELECTOR = '[class*="badge"], [class*="diet"], [data-testid*="badge"]';
+const BADGE_SELECTOR =
+	'[class*="badge"], [class*="diet"], [data-testid*="badge"]';
 const BADGE_RE = /organic|gluten.?free|vegan|non.?gmo|kosher|paleo|keto/i;
 
 /** Every rendered allergen, ingredient and badge statement on the page, each
@@ -1414,7 +1246,13 @@ function scopedDetails(
 	const badges = renderedAll(document, BADGE_SELECTOR).flatMap((el) => {
 		const text = textOf(el).trim();
 		return BADGE_RE.test(text)
-			? [{ field: "highlight" as const, text, scope: scopeOf(el, el, mainHeading) }]
+			? [
+					{
+						field: "highlight" as const,
+						text,
+						scope: scopeOf(el, el, mainHeading),
+					},
+				]
 			: [];
 	});
 	return [...sections, ...badges];
@@ -1564,21 +1402,6 @@ function readAmazonNutrition(document: Document): {
 	return { facts, statesRows: calories !== null || rows.size > 0 };
 }
 
-/** The descriptive fields an Amazon page states, or null when it states
- *  none. */
-function amazonDetails(facts: NutritionFacts): ProductDetails | null {
-	const details = {
-		allergens: facts.allergens,
-		category: facts.category,
-		highlights: facts.highlights,
-		ingredients: facts.ingredients,
-		rawNutritionText: facts.rawNutritionText || null,
-	};
-	return details.allergens || details.ingredients || details.rawNutritionText
-		? details
-		: null;
-}
-
 /** What an Amazon /dp page says about which ASIN it is (the positions in
  *  `IDENTITY_SELECTORS.amazon`), the barcode and panel it shows (each on its
  *  own: a barcode with no panel, or a panel without calories, is still what
@@ -1598,14 +1421,15 @@ export function readAmazonProductPage(
 		observation: {
 			finalUrl,
 			canonical:
-				document.querySelector(selectors.canonical)?.getAttribute("href") ?? null,
-			input: document.querySelector(selectors.input)?.getAttribute("value") ?? null,
+				document.querySelector(selectors.canonical)?.getAttribute("href") ??
+				null,
+			input:
+				document.querySelector(selectors.input)?.getAttribute("value") ?? null,
 			dataAsin:
 				document.querySelector(selectors.dataAsin)?.getAttribute("data-asin") ??
 				null,
 			gtin: nutrition.facts.upc,
 			panel: nutrition.statesRows ? nutrition.facts : null,
-			details: amazonDetails(nutrition.facts),
 		},
 		hasProductTitle: document.querySelector(selectors.title) !== null,
 	};
@@ -1664,7 +1488,11 @@ function searchResultLinks(document: Document): string[] {
 	const seen = new Set<string>();
 	return [...links].flatMap((link) => {
 		const href = link.getAttribute("href");
-		if (!href || link.closest("header, footer, nav, aside") || !isRendered(link)) {
+		if (
+			!href ||
+			link.closest("header, footer, nav, aside") ||
+			!isRendered(link)
+		) {
 			return [];
 		}
 		// A link off Whole Foods is not a read of this product; it is dropped

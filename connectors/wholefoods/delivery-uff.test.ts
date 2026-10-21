@@ -112,7 +112,6 @@ test("delivery count mismatch withholds same-key rows and reports PROGRESS", asy
 	const mismatchStub = { ...STUB, expectedItemCount: 33 };
 	const harness = makeRecordingEmit(validateRecord);
 	await connector.collectOrderStubs({
-		credentials: {},
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		ordersCursor: openFingerprintCursor(undefined),
