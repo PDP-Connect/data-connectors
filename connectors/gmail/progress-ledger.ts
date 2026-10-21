@@ -31,6 +31,8 @@
  * one outcome per (UID, stream), and writes what `commit` returns.
  */
 
+import { parseIsoInstant } from "../../packages/polyfill-connectors/src/time-range.ts";
+
 export const LEDGER_STREAMS = [
 	"messages",
 	"message_bodies",
@@ -152,8 +154,8 @@ export interface LedgerOpenInput {
 	uidnext: number;
 	requested: ReadonlySet<LedgerStream>;
 	windowUids: number;
-	/** The run's time range, applied to every scoped stream. */
-	timeRange?: TimeBand | undefined;
+	/** Each requested stream's own time range (`StreamRequest.time_range`). */
+	timeRanges?: Partial<Record<LedgerStream, TimeBand | undefined>>;
 }
 
 const integer = (v: unknown, min = 0): v is number =>
@@ -162,17 +164,43 @@ const integer = (v: unknown, min = 0): v is number =>
 const isLedgerStream = (v: unknown): v is LedgerStream =>
 	(LEDGER_STREAMS as readonly unknown[]).includes(v);
 
-const instant = (v: unknown): number | null =>
-	typeof v === "string" && Number.isFinite(Date.parse(v))
-		? Date.parse(v)
-		: null;
+/**
+ * Exact order of two ISO instants, with the same sub-millisecond precision
+ * the record filter uses (`isOutsideTimeRange`). `Date.parse` alone would
+ * drop digits past milliseconds and treat a widened bound as unchanged.
+ */
+function compareInstants(a: string, b: string): number {
+	const x = parseIsoInstant(a);
+	const y = parseIsoInstant(b);
+	if (!(x && y)) throw new Error("gmail_progress_invalid_instant");
+	if (x.second !== y.second) return x.second - y.second;
+	const length = Math.max(x.fraction.length, y.fraction.length);
+	const fx = x.fraction.padEnd(length, "0");
+	const fy = y.fraction.padEnd(length, "0");
+	return fx < fy ? -1 : fx > fy ? 1 : 0;
+}
+
+/**
+ * The lower bound that keeps every UID some range may want: the earliest
+ * `since`, or none when any range has no lower bound.
+ */
+export function loosestSince(
+	ranges: readonly (TimeBand | undefined)[],
+): string | undefined {
+	let out: string | undefined;
+	for (const r of ranges) {
+		if (r?.since === undefined) return undefined;
+		if (out === undefined || compareInstants(r.since, out) < 0) out = r.since;
+	}
+	return out;
+}
 
 function validBand(v: unknown): v is TimeBand {
 	if (typeof v !== "object" || v === null) return false;
 	const b = v as Record<string, unknown>;
 	return (
-		(b.since === undefined || instant(b.since) !== null) &&
-		(b.until === undefined || instant(b.until) !== null)
+		(b.since === undefined || parseIsoInstant(b.since) !== null) &&
+		(b.until === undefined || parseIsoInstant(b.until) !== null)
 	);
 }
 
@@ -267,6 +295,23 @@ function legacyStream(
 	return normalize({ through, coveredFrom: next, next });
 }
 
+/** Merge entries for the same UID, keeping the first one's queue position. */
+function canonicalDebt(debt: readonly RetryDebt[]): RetryDebt[] {
+	const byUid = new Map<number, RetryDebt>();
+	for (const d of debt) {
+		const known = byUid.get(d.uid);
+		if (known) {
+			known.streams = LEDGER_STREAMS.filter(
+				(s) => known.streams.includes(s) || d.streams.includes(s),
+			);
+			known.attempts = Math.max(known.attempts, d.attempts);
+		} else {
+			byUid.set(d.uid, { ...d, streams: [...d.streams] });
+		}
+	}
+	return [...byUid.values()];
+}
+
 /** Every requested stream has an entry once the ledger is open. */
 function progressIn(
 	streams: Partial<Record<LedgerStream, StreamProgress>>,
@@ -297,14 +342,16 @@ function band(since: string | undefined, until: string | undefined): TimeBand {
 /** The bands `now` includes that `prior` excluded. */
 function widenedBands(prior: TimeBand, now: TimeBand): TimeBand[] {
 	const out: TimeBand[] = [];
-	const pu = instant(prior.until);
-	const nu = instant(now.until);
-	if (pu !== null && (nu === null || nu > pu)) {
+	if (
+		prior.until !== undefined &&
+		(now.until === undefined || compareInstants(now.until, prior.until) > 0)
+	) {
 		out.push(band(prior.until, now.until));
 	}
-	const ps = instant(prior.since);
-	const ns = instant(now.since);
-	if (ps !== null && (ns === null || ns < ps)) {
+	if (
+		prior.since !== undefined &&
+		(now.since === undefined || compareInstants(now.since, prior.since) < 0)
+	) {
 		out.push(band(now.since, prior.since));
 	}
 	return out;
@@ -314,12 +361,12 @@ function widenedBands(prior: TimeBand, now: TimeBand): TimeBand[] {
 function intersect(a: TimeBand, b: TimeBand): TimeBand | null {
 	const sinces = [a.since, b.since].filter((x): x is string => x !== undefined);
 	const untils = [a.until, b.until].filter((x): x is string => x !== undefined);
-	const since = sinces.sort((x, y) => Date.parse(y) - Date.parse(x))[0];
-	const until = untils.sort((x, y) => Date.parse(x) - Date.parse(y))[0];
+	const since = sinces.sort((x, y) => compareInstants(y, x))[0];
+	const until = untils.sort((x, y) => compareInstants(x, y))[0];
 	if (
 		since !== undefined &&
 		until !== undefined &&
-		Date.parse(since) >= Date.parse(until)
+		compareInstants(since, until) >= 0
 	) {
 		return null;
 	}
@@ -400,7 +447,7 @@ export class GmailProgressLedger {
 	private readonly forwardRange: UidRange | null;
 	private readonly retried: RetryDebt[];
 	private readonly expected = new Map<number, Expected>();
-	private readonly timeRange: TimeBand;
+	private readonly timeRanges: Partial<Record<LedgerStream, TimeBand>>;
 	private readonly windowUids: number;
 	private readonly catchupPlans = new Map<LedgerStream, CatchupPlan>();
 
@@ -415,10 +462,15 @@ export class GmailProgressLedger {
 		this.uidnext = input.uidnext;
 		this.requested = input.requested;
 		this.windowUids = input.windowUids;
-		if (input.timeRange && !validBand(input.timeRange)) {
-			throw new Error("gmail_progress_invalid_time_range");
+		const ranges: Partial<Record<LedgerStream, TimeBand>> = {};
+		for (const stream of LEDGER_STREAMS) {
+			const r = input.timeRanges?.[stream];
+			if (r && !validBand(r)) {
+				throw new Error("gmail_progress_invalid_time_range");
+			}
+			ranges[stream] = band(r?.since, r?.until);
 		}
-		this.timeRange = band(input.timeRange?.since, input.timeRange?.until);
+		this.timeRanges = ranges;
 
 		let streams: Partial<Record<LedgerStream, StreamProgress>> = {};
 		let debt: RetryDebt[] = [];
@@ -437,7 +489,7 @@ export class GmailProgressLedger {
 			if (resetReason === null) {
 				const p = structuredClone(input.persisted) as GmailProgressState;
 				streams = p.streams;
-				debt = p.debt;
+				debt = canonicalDebt(p.debt);
 			} else {
 				useLegacy = true;
 			}
@@ -466,11 +518,11 @@ export class GmailProgressLedger {
 			const s = streams[stream];
 			if (!(s && this.requested.has(stream))) continue;
 			if (s.scope) {
-				for (const owed of widenedBands(s.scope, this.timeRange)) {
-					enqueueCatchup(s, owed, s.next - 1, this.timeRange);
+				for (const owed of widenedBands(s.scope, this.rangeOf(stream))) {
+					enqueueCatchup(s, owed, s.next - 1, this.rangeOf(stream));
 				}
 			}
-			s.scope = { ...this.timeRange };
+			s.scope = { ...this.rangeOf(stream) };
 		}
 		this.streams = streams;
 		this.debt = debt;
@@ -522,6 +574,11 @@ export class GmailProgressLedger {
 			forwardNext: s?.next ?? this.uidnext,
 			complete: !s || s.through + 1 >= s.coveredFrom,
 		};
+	}
+
+	/** `stream`'s own requested time range; threads apply none. */
+	private rangeOf(stream: LedgerStream): TimeBand {
+		return stream === "threads" ? {} : (this.timeRanges[stream] ?? {});
 	}
 
 	private progressOf(stream: LedgerStream): StreamProgress {
@@ -578,7 +635,7 @@ export class GmailProgressLedger {
 		const out = new Map<string, TimeBand>();
 		for (const stream of this.requestedStreams()) {
 			const active = this.progressOf(stream).catchup?.[0];
-			const owed = active ? intersect(active, this.timeRange) : null;
+			const owed = active ? intersect(active, this.rangeOf(stream)) : null;
 			if (owed) out.set(JSON.stringify(owed), owed);
 		}
 		return [...out].map(([key, b]) => ({ key, band: b }));
@@ -598,7 +655,7 @@ export class GmailProgressLedger {
 		for (const stream of this.requestedStreams()) {
 			const s = this.progressOf(stream);
 			const active = s.catchup?.[0];
-			const owed = active ? intersect(active, this.timeRange) : null;
+			const owed = active ? intersect(active, this.rangeOf(stream)) : null;
 			if (!(active && owed && JSON.stringify(owed) === key)) continue;
 			const candidates = uids.filter(
 				(uid) =>
@@ -634,8 +691,8 @@ export class GmailProgressLedger {
 			(d) => d.uid === uid && d.streams.includes(stream),
 		);
 		return !owed && this.laneOf(stream, uid) === "catchup"
-			? (this.catchupPlans.get(stream)?.band ?? this.timeRange)
-			: this.timeRange;
+			? (this.catchupPlans.get(stream)?.band ?? this.rangeOf(stream))
+			: this.rangeOf(stream);
 	}
 
 	/** Streams that walk part of the historical page. */
@@ -731,11 +788,15 @@ export class GmailProgressLedger {
 		const outcome = (uid: number, s: LedgerStream) =>
 			this.expected.get(uid)?.outcomes.get(s);
 
-		// Debt keeps queue order: untouched entries, then new failures, then
-		// retried entries that did not settle.
+		// One debt entry per UID; its streams are that UID's owed streams. The
+		// queue keeps its order: untouched entries, then new failures, then
+		// retried entries that did not settle (they rejoin at the tail).
 		const retriedUids = new Set(this.retried.map((d) => d.uid));
-		const carried = this.debt.filter((d) => !retriedUids.has(d.uid));
-		const unsettled: RetryDebt[] = [];
+		const queue = new Map<number, RetryDebt>();
+		for (const d of this.debt) {
+			if (!retriedUids.has(d.uid)) queue.set(d.uid, structuredClone(d));
+		}
+		const tail = new Map<number, RetryDebt>();
 		for (const d of this.retried) {
 			let failure = d.failure;
 			let attempted = false;
@@ -748,7 +809,7 @@ export class GmailProgressLedger {
 				return true;
 			});
 			if (still.length > 0) {
-				unsettled.push({
+				tail.set(d.uid, {
 					uid: d.uid,
 					streams: still,
 					attempts: d.attempts + (attempted ? 1 : 0),
@@ -757,17 +818,15 @@ export class GmailProgressLedger {
 			}
 		}
 		const fresh = new Map<number, RetryDebt>();
-		let capacity = MAX_RETRY_DEBT - carried.length - unsettled.length;
 		const addDebt = (uid: number, stream: LedgerStream, failure: string) => {
-			const known = fresh.get(uid);
+			const known = queue.get(uid) ?? tail.get(uid) ?? fresh.get(uid);
 			if (known) {
 				known.streams = LEDGER_STREAMS.filter(
 					(s) => s === stream || known.streams.includes(s),
 				);
 				return true;
 			}
-			if (capacity <= 0) return false;
-			capacity -= 1;
+			if (queue.size + tail.size + fresh.size >= MAX_RETRY_DEBT) return false;
 			fresh.set(uid, { uid, streams: [stream], attempts: 1, failure });
 			return true;
 		};
@@ -826,7 +885,7 @@ export class GmailProgressLedger {
 			}
 			coverage[stream] = counts;
 		}
-		const debt = [...carried, ...fresh.values(), ...unsettled];
+		const debt = [...queue.values(), ...fresh.values(), ...tail.values()];
 
 		const state: GmailProgressState = {
 			version: 1,
@@ -878,7 +937,7 @@ export class GmailProgressLedger {
 		const passes = s.catchup;
 		const active = passes?.[0];
 		if (!(passes && active)) return;
-		if (!intersect(active, this.timeRange)) {
+		if (!intersect(active, this.rangeOf(stream))) {
 			// Nothing of this band is in the current scope: no UID can owe it.
 			passes.shift();
 			return;

@@ -496,7 +496,7 @@ function scoped(
 		uidnext,
 		requested: new Set<LedgerStream>(["messages"]),
 		windowUids: window,
-		timeRange,
+		timeRanges: { messages: timeRange },
 	});
 }
 

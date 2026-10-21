@@ -95,6 +95,7 @@ import {
 	LEDGER_STREAMS,
 	type LedgerCommit,
 	type LedgerStream,
+	loosestSince,
 	MAX_RETRY_DEBT,
 	type TimeBand,
 	type UidOutcome,
@@ -4292,7 +4293,7 @@ function openProgressLedger(
 	session: AllMailSession,
 	uidnext: number,
 	requested: ReadonlyMap<string, StreamRequest>,
-	timeRange: TimeBand | undefined,
+	timeRanges: Partial<Record<LedgerStream, TimeBand | undefined>>,
 ): GmailProgressLedger {
 	const messagesState = (state.messages ?? {}) as PriorMessagesState & {
 		progress?: unknown;
@@ -4314,7 +4315,7 @@ function openProgressLedger(
 		uidnext,
 		requested: requestedLedgerStreams(requested),
 		windowUids: resolveMessagesBackfillWindowUids(),
-		timeRange,
+		timeRanges,
 	});
 }
 
@@ -4379,14 +4380,25 @@ export async function runAllMailPasses(
 		return;
 	}
 
-	const timeRange =
-		deps.requested.get("messages")?.time_range ||
-		deps.requested.get("attachments")?.time_range;
-	// Parse declared collection_scope.since into IMAP date format (day-granular)
-	// for the bounded SINCE search criterion, and keep the exact ISO for
-	// post-filtering to honor time-of-day precision.
-	const sinceDate = timeRange?.since ? isoToImapDate(timeRange.since) : null;
-	const sinceIso = timeRange?.since ?? null;
+	// Each stream applies its own time_range. Threads apply none: a thread row
+	// is rebuilt from every member.
+	const ledgerStreams = [...requestedLedgerStreams(deps.requested)];
+	const timeRanges = Object.fromEntries(
+		ledgerStreams.map((s) => [
+			s,
+			s === "threads" ? undefined : deps.requested.get(s)?.time_range,
+		]),
+	) as Partial<Record<LedgerStream, TimeBand | undefined>>;
+	// The metadata pre-filter keeps every UID any requested stream may want:
+	// the IMAP-date form of the loosest `since` for the day-granular SEARCH,
+	// and the exact ISO for the post-filter. Each stream's own bound is
+	// applied per message (`ledger.timeRangeFor`).
+	const prefilterSince =
+		ledgerStreams.length === 0
+			? undefined
+			: loosestSince(ledgerStreams.map((s) => timeRanges[s] ?? {}));
+	const sinceDate = prefilterSince ? isoToImapDate(prefilterSince) : null;
+	const sinceIso = prefilterSince ?? null;
 	const servedAttachmentRecoveryRequested =
 		servedAttachmentDetailGaps(deps.detailGaps).length > 0;
 	const fetchBodiesBound: FetchBodiesFn = (
@@ -4472,7 +4484,7 @@ export async function runAllMailPasses(
 		session,
 		session.uidnext,
 		deps.requested,
-		timeRange,
+		timeRanges,
 	);
 	if (ledger.resetReason) {
 		gmailDiagnostic("progress_ledger_reset", { reason: ledger.resetReason });
@@ -4624,7 +4636,8 @@ export async function runAllMailPasses(
 		nowIso,
 		uploadBodyBlob: deps.uploadBodyBlob ?? buildRuntimeBlobUploader(),
 		requested: deps.requested,
-		timeRange,
+		// Set per stream group below from `ledger.timeRangeFor`.
+		timeRange: undefined,
 		wantBodies: false,
 		wantMessages: false,
 	};

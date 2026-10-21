@@ -844,3 +844,123 @@ test("scope+debt: a retry owed under the old range is collected, not settled as 
 	);
 	assert.deepEqual(progressOf(widened).debt, []);
 });
+
+test("debt: body debt survives when messages join and retry the same UIDs in a later batch", async () => {
+	// 25 UIDs, exactly one retry batch. Uploads keep failing throughout.
+	const uids = Array.from({ length: 25 }, (_, i) => 100 + i);
+	const m = mailbox(
+		uids.map((uid) => message(uid)),
+		201,
+	);
+	m.control.bodyText = "binary\u0000body";
+	let failUpload = true;
+	const uploadBodyBlob = async () => {
+		if (failUpload) throw new Error("upload transport 503");
+		return {
+			blob_id: "b",
+			sha256: "0".repeat(64),
+			size_bytes: 1,
+			mime_type: "text/plain",
+		};
+	};
+	const bodies = await run(m, {}, ["message_bodies"], { uploadBodyBlob });
+	assert.equal(progressOf(bodies).debt.length, 25);
+	// messages join; the body upload still fails before the messages emit.
+	const joined = await run(m, bodies.state, ["messages", "message_bodies"], {
+		uploadBodyBlob,
+	});
+	const third = await run(m, joined.state, ["messages", "message_bodies"], {
+		uploadBodyBlob,
+	});
+	const owed = progressOf(third).debt;
+	assert.equal(
+		new Set(owed.map((d) => d.uid)).size,
+		owed.length,
+		"one debt entry per UID",
+	);
+	assert.deepEqual(
+		uids.filter(
+			(uid) =>
+				!owed.some(
+					(d) => d.uid === uid && d.streams.includes("message_bodies"),
+				),
+		),
+		[],
+		"every body is still owed while uploads fail",
+	);
+	failUpload = false;
+	let state = third.state;
+	const collected: string[] = [];
+	for (let i = 0; i < 3; i += 1) {
+		const r = await run(m, state, ["messages", "message_bodies"], {
+			uploadBodyBlob,
+		});
+		collected.push(
+			...ofStream(r, "message_bodies").map((x) => String(x.data.id)),
+		);
+		state = r.state;
+	}
+	assert.equal(
+		new Set(collected).size,
+		25,
+		"every body is collected once uploads recover",
+	);
+	assert.deepEqual(progressOf({ state } as RunResult).debt, []);
+});
+
+test("scope: each stream applies its own time range, before any body I/O", async () => {
+	const m = mailbox([dated(10, MAR)], 101);
+	const bodiesOnly = new Map<string, StreamRequest>([
+		[
+			"message_bodies",
+			{
+				name: "message_bodies",
+				time_range: { until: "2026-02-01T00:00:00.000Z" },
+			},
+		],
+	]);
+	const r = await run(m, {}, bodiesOnly);
+	assert.equal(
+		ofStream(r, "message_bodies").length,
+		0,
+		"an out-of-range body is not collected",
+	);
+	assert.equal(m.bodyReads.get(10) ?? 0, 0, "and its body is not even read");
+	const siblings = new Map<string, StreamRequest>([
+		[
+			"messages",
+			{ name: "messages", time_range: { until: "2026-02-01T00:00:00.000Z" } },
+		],
+		[
+			"message_bodies",
+			{
+				name: "message_bodies",
+				time_range: { until: "2026-06-01T00:00:00.000Z" },
+			},
+		],
+	]);
+	const s = await run(mailbox([dated(10, MAR)], 101), {}, siblings);
+	assert.equal(
+		ofStream(s, "messages").length,
+		0,
+		"messages applies its own bound",
+	);
+	assert.equal(ofStream(s, "message_bodies").length, 1, "bodies apply theirs");
+});
+
+test("scope: widening until by less than a millisecond still catches up the boundary message", async () => {
+	const edge = "2026-01-01T00:00:00.000Z";
+	const m = mailbox([dated(10, edge)], 101);
+	const first = await run(m, {}, until(edge));
+	assert.deepEqual(
+		collectedIds([first]),
+		[],
+		"[since, until) excludes the boundary instant",
+	);
+	const widened = await runUntilCaughtUp(
+		m,
+		first.state,
+		until("2026-01-01T00:00:00.0001Z"),
+	);
+	assert.deepEqual(collectedIds(widened), ["a"]);
+});
