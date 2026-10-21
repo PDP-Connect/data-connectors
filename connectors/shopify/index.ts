@@ -975,6 +975,7 @@ export interface CollectShopifyArgs {
 	orderHistoryReady?: boolean;
 	readVerifiedEmptyState?: () => Promise<boolean>;
 	requested: BrowserCollectContext["requested"];
+	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 	scroll: () => Promise<void>;
 	state: BrowserCollectContext["state"];
 	browserOperationTimeoutMs?: number;
@@ -1241,6 +1242,23 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		...(mismatch ? [{ fields: [{ field: "total_count", reason: "invalid_or_unreconciled" }] }] : []),
 	];
 	const complete = pageComplete && !truncated && !pageBlocked && !mismatch && discardedRows === 0;
+	// A sign-in or block page during the walk is the session's failure, not a
+	// list that failed to prove its end: end the run as `ensureShopifySession`
+	// does.
+	if (pageBlocked && walked.pageEvidence?.blocked === true) {
+		throw new Error("shopify_signed_out_or_blocked");
+	}
+	const skipDiagnostics = () => ({
+		...diagnostics(),
+		discovered_rows: cacheCoverage.discoveredRows + invalidShapeCount,
+		valid_rows: pageBlocked ? 0 : validRecords.length,
+		discarded_rows: discardedRows,
+		withheld_fields: aggregateWithheldFields(allWithheldRows),
+		terminal_evidence: pageComplete,
+		page_owner: walked.pageEvidence?.url ?? null,
+		page_navigation: walked.pageEvidence?.navigation ?? null,
+		end_reason: walked.reason,
+	});
 	if (!complete && discardedRows > 0) {
 		await emit({
 			type: "SKIP_RESULT",
@@ -1248,19 +1266,22 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			reason: "shopify_order_rows_unresolved",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: "Shop order history contained rows that could not be read completely; retry to collect them.",
-			diagnostics: {
-				...diagnostics(),
-				discovered_rows: cacheCoverage.discoveredRows + invalidShapeCount,
-				valid_rows: pageBlocked ? 0 : validRecords.length,
-				discarded_rows: discardedRows,
-				withheld_fields: aggregateWithheldFields(allWithheldRows),
-				terminal_evidence: pageComplete,
-				page_owner: walked.pageEvidence?.url ?? null,
-				page_navigation: walked.pageEvidence?.navigation ?? null,
-				end_reason: walked.reason,
-			},
+			diagnostics: skipDiagnostics(),
 		});
-	} else if (!complete && (pageBlocked || !pageComplete || mismatch)) {
+	} else if (!complete && pageBlocked) {
+		// The page changed or lost its order-history context mid-walk: the read
+		// failed, so nothing about the list's end was observed.
+		const message = "Shop order history changed during the read; retry to collect the remaining rows.";
+		const failure = {
+			recoveryHint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: skipDiagnostics(),
+		};
+		if (args.reportStreamFailure) await args.reportStreamFailure(ORDERS_STREAM, message, failure);
+		else await emit({
+			type: "SKIP_RESULT", stream: ORDERS_STREAM, reason: "stream_collection_failed", message,
+			recovery_hint: failure.recoveryHint, diagnostics: failure.diagnostics,
+		});
+	} else if (!complete && (!pageComplete || mismatch)) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
@@ -1269,17 +1290,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 				: "inventory_not_proven_complete",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: "Shop order history could not be proven complete; retry to collect the remaining rows.",
-			diagnostics: {
-				...diagnostics(),
-				discovered_rows: cacheCoverage.discoveredRows + invalidShapeCount,
-				valid_rows: pageBlocked ? 0 : validRecords.length,
-				discarded_rows: discardedRows,
-				withheld_fields: aggregateWithheldFields(allWithheldRows),
-				terminal_evidence: pageComplete,
-				page_owner: walked.pageEvidence?.url ?? null,
-				page_navigation: walked.pageEvidence?.navigation ?? null,
-				end_reason: walked.reason,
-			},
+			diagnostics: skipDiagnostics(),
 		});
 	}
 
@@ -1471,6 +1482,7 @@ export async function collect(
 		emitRecord,
 		progress,
 		requested,
+		reportStreamFailure: ctx.reportStreamFailure,
 		state,
 		navigationStartedAt,
 		runDeadlineAt,

@@ -1620,3 +1620,68 @@ test("readiness navigation survives into the walk and cannot prune prior fingerp
 		assert.deepEqual(state, originalState);
 	}
 });
+
+// A sign-in or block page during the walk is not an unproven inventory
+// (Collection Profile 5.5): it ends the run as the session check does. A
+// page that changes mid-walk is a failed read reported through
+// reportStreamFailure.
+function walkEvidence(blockedFrom: number): () => Promise<{
+	url: string; navigation: string; orderContext: boolean; blocked: boolean;
+	pageHeight: number; domHasContinuation: boolean; domCardCount: number;
+}> {
+	let reads = 0;
+	return async () => {
+		reads += 1;
+		const blocked = reads >= blockedFrom;
+		return {
+			url: blocked ? "https://shop.app/account/login" : "https://shop.app/account/order-history",
+			navigation: "nav-1", orderContext: !blocked, blocked,
+			pageHeight: 100, domHasContinuation: false, domCardCount: 1,
+		};
+	};
+}
+
+test("collectShopify ends the run as shopify_signed_out_or_blocked when the walk reaches a sign-in page", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	const reports: string[] = [];
+	await assert.rejects(
+		collectShopify({
+			emit: run.emit, emitRecord: run.emitRecord,
+			progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+			readCache: async () => makeCache(["Order:1"], false),
+			readDomOrders: async () => [],
+			readPageEvidence: walkEvidence(3),
+			reportStreamFailure: async (stream) => { reports.push(stream); },
+			cacheWaitTimeoutMs: 0,
+			scroll: async () => undefined,
+		}),
+		{ message: "shopify_signed_out_or_blocked" },
+	);
+	assert.deepEqual(reports, []);
+	assert.equal(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+	assert.equal(recordsOf(run.emitted, "orders").length, 0);
+});
+
+test("collectShopify reports a page that changes during the walk as a failed read", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	const reports: Array<{ stream: string; message: string; options: unknown }> = [];
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => makeCache(["Order:1"], false),
+		readDomOrders: async () => [],
+		readPageEvidence: letSwitchingEvidence(),
+		reportStreamFailure: async (stream, message, options) => { reports.push({ stream, message, options }); },
+		cacheWaitTimeoutMs: 0,
+		scroll: async () => undefined,
+	});
+	assert.equal(reports.length, 1);
+	assert.equal(reports[0]?.stream, "orders");
+	assert.equal(reports[0]?.message, "Shop order history changed during the read; retry to collect the remaining rows.");
+	const options = reports[0]?.options as { recoveryHint: unknown; diagnostics: Record<string, unknown> };
+	assert.deepEqual(options.recoveryHint, { action: "retry_by_runtime", retryable: true });
+	assert.equal(options.diagnostics.end_reason, "page_blocked");
+	assert.equal(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+});
