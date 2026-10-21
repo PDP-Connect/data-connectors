@@ -16,7 +16,7 @@ import {
 	parseOrderDetailDom,
 	parseWholeFoodsProductPageDom,
 } from "./parsers.ts";
-import { acceptNutrition } from "./nutrition-acceptance.ts";
+import { acceptNutrition, type NutritionNoMatch } from "./nutrition-acceptance.ts";
 import { nutritionSchema, validateRecord } from "./schemas.ts";
 
 const AMAZON_PANEL = `<html><body><div id="nic-nutrition-facts">Calories 150 Total Fat 8g Total Carbohydrate 37g Protein 3g</div></body></html>`;
@@ -27,7 +27,10 @@ function acceptedAmazonRow() {
 		"none",
 	);
 	assert.ok(facts);
-	return buildNutritionRecord("B012345678", "Source product", facts);
+	return buildNutritionRecord("B012345678", "Source product", {
+		status: "matched",
+		facts,
+	});
 }
 
 test("accepted nutrition survives production keying and schema validation", async () => {
@@ -52,12 +55,26 @@ test("accepted nutrition survives production keying and schema validation", asyn
 	);
 });
 
-test("rows from older connector versions with a failure source still validate", () => {
-	// The connector no longer builds these, but they may still be stored. The
-	// schema keeps the failure sources so reading them back is not a break.
-	for (const source of ["not_found", "error", "blocked"] as const) {
-		const stored = { ...acceptedAmazonRow(), source, calories: null };
-		assert.equal(validateRecord("nutrition", stored).ok, true, source);
+test("rows stored before status and cause existed, with a failure source, still validate", () => {
+	// The connector builds these with a status now, but they may still be
+	// stored. The schema keeps the failure sources and makes status and cause
+	// optional so reading them back is not a break.
+	const outcomes: NutritionNoMatch[] = [
+		{ status: "not_found", cause: "no_match" },
+		{ status: "error", cause: "http_error" },
+		{ status: "blocked", cause: "robot_check" },
+	];
+	for (const outcome of outcomes) {
+		const { status, cause } = outcome;
+		const { status: _status, cause: _cause, ...stored } =
+			buildNutritionRecord("B012345678", "Source product", outcome);
+		assert.equal(validateRecord("nutrition", stored).ok, true, status);
+		assert.equal(stored.source, status);
+		assert.equal(
+			validateRecord("nutrition", { ...stored, status, cause }).ok,
+			true,
+			status,
+		);
 	}
 });
 
@@ -147,7 +164,10 @@ test("nutrition parsing retains the legacy script's expanded nutrition payload",
 	assert.ok(facts);
 	const accepted = acceptNutrition(facts, "none");
 	assert.ok(accepted);
-	const row = buildNutritionRecord("B012345678", "Apples", accepted);
+	const row = buildNutritionRecord("B012345678", "Apples", {
+		status: "matched",
+		facts: accepted,
+	});
 	assert.deepEqual(
 		{
 			calories: row.calories,

@@ -22587,7 +22587,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.35",
+				"version": "0.3.36",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -22798,10 +22798,10 @@
 					{
 						"name": "nutrition",
 						"required": false,
-						"description": "Nutrition facts per unique product. Sources are Amazon, Whole Foods, and USDA FoodData Central. Joins to `order_items` on `product_id`.",
+						"description": "Exactly one nutrition row per ordered product per run, keyed by `product_id` and joinable to `order_items`. `status` says what the lookup concluded: `matched` (facts from Amazon, Whole Foods or USDA FoodData Central) or `not_found`, `error`, `blocked` (no facts). Fact fields are valid only when `status` is `matched`. The connector keeps no per-key state and a non-matched row has the same key as a matched one, so a store that upserts by key lets a later non-matched row replace an earlier matched row: consumers MUST NOT apply the fact fields of a row whose `status` is not `matched`. Rows stored before `status` and `cause` existed have neither; read their status from `source` (`not_found`, `error` or `blocked` for a failure, otherwise matched).",
 						"display": {
 							"label": "Nutrition facts",
-							"detail": "Nutrition facts when a lookup reads a complete panel. A lookup that fails or finds only part of a panel adds no row and leaves stored facts as they are."
+							"detail": "A nutrition row for every ordered product: facts when a full panel was read, otherwise the reason there are none (not found, could not be read, or blocked). Facts of a row that was not matched must not replace stored facts."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -22922,6 +22922,25 @@
 								},
 								"type": {
 									"type": ["string"]
+								},
+								"status": {
+									"type": "string",
+									"enum": ["matched", "not_found", "error", "blocked"],
+									"description": "What the lookup concluded. Facts are valid only when `matched`. Absent on rows stored before this field existed."
+								},
+								"cause": {
+									"type": ["string", "null"],
+									"enum": [
+										"robot_check",
+										"http_error",
+										"navigation_failed",
+										"unrecognized_page",
+										"panel_partial",
+										"usda_request_failed",
+										"no_match",
+										null
+									],
+									"description": "Stable reason code for a non-matched row; null on a matched row. blocked: robot_check (a captcha or robot check). error: http_error (a page answered HTTP 4xx/5xx other than 404/410), navigation_failed (a page read threw or left the trusted origin), unrecognized_page (a 200 page that is not a known product or search page), panel_partial (this product's panel was seen but not fully read), usda_request_failed (the USDA lookup failed). not_found: no_match (every source answered and none had a usable panel). When several sources fail, robot_check wins, otherwise the first failure."
 								}
 							},
 							"required": ["id", "product_id", "source", "confidence"]

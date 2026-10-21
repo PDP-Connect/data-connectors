@@ -172,6 +172,8 @@ export interface NutritionRecord {
 	confidence: "high" | "medium" | "low";
 	category: string[];
 	cholesterol_mg: number | null;
+	/** Why a non-matched row has no facts; null on a matched row. */
+	cause: string | null;
 	fat_g: number | null;
 	highlights: string[];
 	ingredients: string | null;
@@ -194,6 +196,8 @@ export interface NutritionRecord {
 		| "not_found"
 		| "error"
 		| "blocked";
+	/** `matched`: the facts are this product's. Any other status: no facts. */
+	status: "matched" | "not_found" | "error" | "blocked";
 	sugar_g: number | null;
 	trans_fat_g: number | null;
 	type: "https://schema.org/NutritionInformation";

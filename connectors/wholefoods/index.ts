@@ -64,6 +64,9 @@ import {
 	type AcceptedNutrition,
 	acceptNutrition,
 	hasCoreNutrition,
+	type NutritionLookup,
+	type NutritionNoMatch,
+	type PageReadFailure,
 	type PageSourceEvidence,
 } from "./nutrition-acceptance.ts";
 import { validateRecord } from "./schemas.ts";
@@ -557,8 +560,6 @@ async function lookupUsdaNutrition(
  *  failure outcome that explains why there is none. A failure outcome is
  *  diagnostics only: no row is built from it, so a refresh cannot erase facts.
  *  Whether an observation may be emitted is `acceptNutrition`'s decision. */
-type NutritionFailure = "not_found" | "error" | "blocked";
-type NutritionOutcome = AcceptedNutrition | NutritionFailure;
 
 function isBlockedPage(html: string): boolean {
 	return /(?:validateCaptcha|captchacharacters|Sorry, we just need to make sure|<title>[^<]*(?:robot|captcha|blocked|denied)[^<]*<\/title>)/i.test(
@@ -585,7 +586,7 @@ async function lookupNutritionForProduct(
 	usdaApiKey: string,
 	name: string,
 	productId = "B012345678",
-): Promise<NutritionOutcome> {
+): Promise<NutritionLookup> {
 	const query = cleanProductName(name);
 	let candidate: NutritionFacts | null = null;
 	// What the page sources said about this product's panel (see
@@ -593,13 +594,27 @@ async function lookupNutritionForProduct(
 	// answer is positive evidence: a rendered product page, a 404/410 for a
 	// page that does not exist, a search result list or its no-results
 	// message. A captcha, a 5xx, a thrown error and a 200 page that shows no
-	// product are not answers. `cause` names the strongest such failure.
+	// product are not answers. `failure` names the strongest such failure.
 	let evidence: PageSourceEvidence = "none";
-	let cause: "blocked" | "error" | null = null;
-	const unable = (kind: "blocked" | "error") => {
+	let failure: PageReadFailure | null = null;
+	const unable = (reason: PageReadFailure) => {
 		evidence = "unknown";
-		if (cause !== "blocked") cause = kind;
+		if (failure === null || (failure.status !== "blocked" && reason.status === "blocked")) {
+			failure = reason;
+		}
 	};
+	const matched = (facts: AcceptedNutrition): NutritionLookup => ({
+		status: "matched",
+		facts,
+	});
+	// Why there is no match: a failed read, a partial panel, or nothing found.
+	const noMatch = (usdaFailed: boolean): NutritionNoMatch =>
+		failure ??
+		(evidence === "partial"
+			? { status: "error", cause: "panel_partial" }
+			: usdaFailed
+				? { status: "error", cause: "usda_request_failed" }
+				: { status: "not_found", cause: "no_match" });
 	// A source showed some core rows of this product, but not a full panel.
 	const sawPartialPanel = (facts: NutritionFacts | null) => {
 		if (facts && facts.coreStated.length > 0 && evidence === "none") {
@@ -615,20 +630,22 @@ async function lookupNutritionForProduct(
 		);
 		const amazonHtml = await page.content();
 		if (isBlockedPage(amazonHtml)) {
-			unable("blocked");
+			unable({ status: "blocked", cause: "robot_check" });
 		} else if (isGone(status)) {
 			// No page for this ASIN: nothing to read, and nothing wrong.
 		} else if (status !== null && status >= 400) {
-			unable("error");
+			unable({ status: "error", cause: "http_error" });
 		} else {
 			candidate = parseAmazonProductNutritionDom(amazonHtml);
 			const direct = acceptNutrition(candidate, evidence);
-			if (direct) return direct;
+			if (direct) return matched(direct);
 			sawPartialPanel(candidate);
-			if (!(candidate || hasAmazonProductEvidence(amazonHtml))) unable("error");
+			if (!(candidate || hasAmazonProductEvidence(amazonHtml))) {
+				unable({ status: "error", cause: "unrecognized_page" });
+			}
 		}
 	} catch {
-		unable("error");
+		unable({ status: "error", cause: "navigation_failed" });
 	}
 	try {
 		if (query.length >= 3) {
@@ -640,9 +657,9 @@ async function lookupNutritionForProduct(
 			);
 			const searchHtml = await page.content();
 			if (isBlockedPage(searchHtml)) {
-				unable("blocked");
+				unable({ status: "blocked", cause: "robot_check" });
 			} else if (searchStatus !== null && searchStatus >= 400) {
-				unable("error");
+				unable({ status: "error", cause: "http_error" });
 			} else {
 				const productUrls = [
 					...new Set(parseWholeFoodsSearchResultDoms(searchHtml)),
@@ -663,11 +680,11 @@ async function lookupNutritionForProduct(
 						);
 						const productHtml = await page.content();
 						if (isBlockedPage(productHtml)) {
-							unable("blocked");
+							unable({ status: "blocked", cause: "robot_check" });
 						} else if (isGone(productStatus)) {
 							// This tile's page is gone; the other tiles still count.
 						} else if (productStatus !== null && productStatus >= 400) {
-							unable("error");
+							unable({ status: "error", cause: "http_error" });
 						} else {
 							const finalUrl = new URL(page.url());
 							if (finalUrl.origin !== WHOLE_FOODS_ORIGIN) {
@@ -694,7 +711,7 @@ async function lookupNutritionForProduct(
 							);
 							const verified =
 								sameUpc || sameName ? acceptNutrition(facts, evidence) : null;
-							if (verified) return verified;
+							if (verified) return matched(verified);
 							if (facts && !sameUpc && !sameName) {
 								// A readable page for another product: an answer.
 								continue;
@@ -706,7 +723,7 @@ async function lookupNutritionForProduct(
 									upc: facts.upc ?? candidate?.upc ?? null,
 								};
 							} else if (!hasProductPageEvidence(productHtml)) {
-								unable("error");
+								unable({ status: "error", cause: "unrecognized_page" });
 							}
 						}
 					}
@@ -716,12 +733,12 @@ async function lookupNutritionForProduct(
 					)
 				) {
 					// Neither tiles nor a no-results message: not a search page we know.
-					unable("error");
+					unable({ status: "error", cause: "unrecognized_page" });
 				}
 			}
 		}
 	} catch {
-		unable("error");
+		unable({ status: "error", cause: "navigation_failed" });
 	}
 	try {
 		const usda = await lookupUsdaNutrition(
@@ -742,20 +759,73 @@ async function lookupNutritionForProduct(
 				},
 				evidence,
 			);
-			if (merged) return merged;
+			if (merged) return matched(merged);
 		}
-		return acceptNutrition(candidate, evidence) ?? cause ?? "not_found";
+		const own = acceptNutrition(candidate, evidence);
+		return own ? matched(own) : noMatch(false);
 	} catch {
-		return acceptNutrition(candidate, evidence) ?? cause ?? "error";
+		const own = acceptNutrition(candidate, evidence);
+		return own ? matched(own) : noMatch(true);
 	}
 }
 
+/** One nutrition row per ordered product. A matched row carries the accepted
+ *  observation's facts. Any other outcome carries its status and cause and
+ *  no fact at all: every fact field is null (lists empty), and it names the
+ *  ordered product only by its own key and name.
+ *
+ *  The row has the same key whatever its status, and the connector keeps no
+ *  per-key state. A store that upserts by key will let a later not_found,
+ *  error or blocked row replace an earlier matched row. Consumers MUST apply
+ *  fact fields only when `status` is `matched`. */
 function buildNutritionRecord(
 	productId: string,
 	name: string,
-	facts: AcceptedNutrition,
+	outcome: NutritionLookup,
 ): NutritionRecord {
+	if (outcome.status !== "matched") {
+		return {
+			added_sugar_g: null,
+			allergens: null,
+			calcium_mg: null,
+			calories: null,
+			carbs_g: null,
+			category: [],
+			cause: outcome.cause,
+			cholesterol_mg: null,
+			confidence: "low",
+			fat_g: null,
+			fiber_g: null,
+			highlights: [],
+			id: productId,
+			ingredients: null,
+			iron_mg: null,
+			name,
+			potassium_mg: null,
+			product_id: productId,
+			protein_g: null,
+			raw_nutrition_text: null,
+			saturated_fat_g: null,
+			serving_size: null,
+			servings_per_container: null,
+			sodium_mg: null,
+			source: outcome.status,
+			status: outcome.status,
+			sugar_g: null,
+			trans_fat_g: null,
+			type: "https://schema.org/NutritionInformation",
+			upc: null,
+			usda_brand: null,
+			usda_description: null,
+			usda_fdc_id: null,
+			usda_match_method: null,
+			vitamin_d_mcg: null,
+		};
+	}
+	const facts = outcome.facts;
 	return {
+		cause: null,
+		status: "matched",
 		added_sugar_g: facts.addedSugarG,
 		allergens: facts.allergens,
 		calcium_mg: facts.calciumMg,
@@ -861,9 +931,8 @@ async function collectOrderStubs({
 	const usdaApiKey = credentials.USDA_API_KEY || USDA_DEMO_KEY;
 	let unverifiedCountOrders = 0;
 	let unreadable = null as OrderCollectionOutcome["unreadable"];
-	// Every source-backed item is considered. Only a product whose lookup
-	// produced accepted nutrition gets a row; the rest are counted in the
-	// coverage diagnostic and leave any stored row untouched.
+	// Every source-backed item is considered once per run, and every one gets a
+	// nutrition row: matched facts, or an outcome row with status and cause.
 	const consideredProductIds = new Set<string>();
 	const nutritionCoverage = {
 		blocked: 0,
@@ -987,24 +1056,31 @@ async function collectOrderStubs({
 					continue;
 				}
 				consideredProductIds.add(item.productId);
-				const facts = await lookupNutritionForProduct(
+				const outcome = await lookupNutritionForProduct(
 					page,
 					usdaApiKey,
 					item.name,
 					item.productId,
 				);
-				if (typeof facts === "string") {
-					if (facts === "blocked") nutritionCoverage.blocked += 1;
-					else if (facts === "error") nutritionCoverage.error += 1;
-					else nutritionCoverage.notFound += 1;
-				} else if (facts.source === "usda_fdc")
-					nutritionCoverage.foundUSDA += 1;
-				else nutritionCoverage.found += 1;
-				if (typeof facts !== "string") {
-					const record = buildNutritionRecord(item.productId, item.name, facts);
-					if (nutritionCursor.shouldEmit(record)) {
-						await emitRecord("nutrition", record);
+				// Every ordered product gets exactly one row, whatever the
+				// outcome; the coverage counts below are tallied from the same
+				// outcome that builds the row.
+				if (outcome.status === "matched") {
+					if (outcome.facts.source === "usda_fdc") {
+						nutritionCoverage.foundUSDA += 1;
+					} else {
+						nutritionCoverage.found += 1;
 					}
+				} else if (outcome.status === "blocked") {
+					nutritionCoverage.blocked += 1;
+				} else if (outcome.status === "error") {
+					nutritionCoverage.error += 1;
+				} else {
+					nutritionCoverage.notFound += 1;
+				}
+				const record = buildNutritionRecord(item.productId, item.name, outcome);
+				if (nutritionCursor.shouldEmit(record)) {
+					await emitRecord("nutrition", record);
 				}
 				await politeDelay(POLITE_DELAY_MS);
 			}
@@ -1048,14 +1124,13 @@ async function collectOrderStubs({
 			not_found: nutritionCoverage.notFound,
 		});
 		await progress(
-			`Looked up nutrition for ${consideredProductIds.size} products (${nutritionCoverage.notFound} not found)`,
+			`Looked up nutrition for ${consideredProductIds.size} products (${nutritionCoverage.notFound} not found, ${nutritionCoverage.error + nutritionCoverage.blocked} could not be read)`,
 			{
 				count: nutritionCoverage.found + nutritionCoverage.foundUSDA,
 				stream: "nutrition",
 				total: consideredProductIds.size,
 			},
 		);
-		// Lookup failures emit no nutrition row, and no inventory checkpoint is justified.
 	}
 	return { unreadable, unverifiedCountOrders };
 }

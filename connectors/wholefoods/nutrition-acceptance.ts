@@ -58,3 +58,42 @@ export function acceptNutrition(
 	if (fuzzyUsda && pages !== "none") return null;
 	return { ...facts, accepted: true as const };
 }
+
+/** The outcome of one product's nutrition lookup, as a split a type can
+ *  enforce: a `matched` outcome carries the accepted observation and nothing
+ *  else; every other outcome carries a status and a cause code and no facts.
+ *  The cause codes are stable; they are documented in the manifest.
+ *
+ *  | status    | cause               | meaning                                          |
+ *  |-----------|---------------------|--------------------------------------------------|
+ *  | blocked   | robot_check         | a page was a captcha / robot check               |
+ *  | error     | http_error          | a page answered HTTP 4xx/5xx (not 404/410)       |
+ *  | error     | navigation_failed   | a page read threw or left the trusted origin     |
+ *  | error     | unrecognized_page   | a 200 page that is not a known product/search page |
+ *  | error     | panel_partial       | this product's panel was seen but not fully read |
+ *  | error     | usda_request_failed | the USDA lookup failed                           |
+ *  | not_found | no_match            | every source answered; none had a usable panel   |
+ *
+ *  When several sources fail, `robot_check` wins; otherwise the first failure. */
+export type NutritionNoMatch =
+	| { readonly status: "blocked"; readonly cause: "robot_check" }
+	| {
+			readonly status: "error";
+			readonly cause:
+				| "http_error"
+				| "navigation_failed"
+				| "unrecognized_page"
+				| "panel_partial"
+				| "usda_request_failed";
+	  }
+	| { readonly status: "not_found"; readonly cause: "no_match" };
+
+export type NutritionLookup =
+	| { readonly status: "matched"; readonly facts: AcceptedNutrition }
+	| NutritionNoMatch;
+
+/** Failures a page read can report; a subset of `NutritionNoMatch`. */
+export type PageReadFailure = Extract<
+	NutritionNoMatch,
+	{ status: "blocked" | "error" }
+>;

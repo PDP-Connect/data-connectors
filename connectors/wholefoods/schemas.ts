@@ -87,13 +87,83 @@ export const orderItemsSchema = z.object({
 });
 
 /**
- * nutrition stream (manifest required: id/product_id). One record per
- * unique product encountered in this run's order_items, keyed by
- * `product_id` (the Amazon ASIN — the same id order_items uses, so
- * consumers can join the two streams). `source` names which surface
- * produced facts or which observed failure occurred. `confidence` reflects
- * match certainty for facts and is low for unsuccessful outcomes.
+ * nutrition stream (manifest required: id/product_id). Exactly one record per
+ * ordered product per run, keyed by `product_id` (the Amazon ASIN, the same
+ * id order_items uses, so consumers can join the two streams).
+ *
+ * `status` says what the lookup concluded:
+ *   - `matched`: the facts are this product's; `source` names the surface
+ *     that produced them and `cause` is null.
+ *   - `not_found`, `error`, `blocked`: the lookup produced no facts. Every
+ *     fact field is null (lists empty), `source` repeats the status (the
+ *     value connector 0.3.34 published) and `cause` is a stable reason code:
+ *       blocked   robot_check          a page was a captcha / robot check
+ *       error     http_error           a page answered HTTP 4xx/5xx (not 404/410)
+ *       error     navigation_failed    a page read threw or left the trusted origin
+ *       error     unrecognized_page    a 200 page that is not a known product/search page
+ *       error     panel_partial        this product's panel was seen but not fully read
+ *       error     usda_request_failed  the USDA lookup failed
+ *       not_found no_match             every source answered; none had a usable panel
+ *
+ * `status` and `cause` are optional here so rows stored before they existed
+ * (no status, `source` = not_found/error/blocked for a failure) still
+ * validate; for such a row the status is read from `source`.
+ *
+ * The connector keeps no per-key state, and a non-matched row has the same
+ * key as a matched one. A store that upserts by key lets a later non-matched
+ * row replace an earlier matched row's facts. Consumers MUST NOT apply the
+ * fact fields of a row whose status is not `matched`.
  */
+const FAILURE_STATUSES = ["not_found", "error", "blocked"] as const;
+const CAUSES_BY_STATUS = {
+	blocked: ["robot_check"],
+	error: [
+		"http_error",
+		"navigation_failed",
+		"unrecognized_page",
+		"panel_partial",
+		"usda_request_failed",
+	],
+	not_found: ["no_match"],
+} as const;
+const NUTRITION_CAUSES = [
+	"robot_check",
+	"http_error",
+	"navigation_failed",
+	"unrecognized_page",
+	"panel_partial",
+	"usda_request_failed",
+	"no_match",
+] as const;
+/** Every field that states something about the matched product. */
+const NUTRITION_FACT_FIELDS = [
+	"added_sugar_g",
+	"allergens",
+	"calcium_mg",
+	"calories",
+	"carbs_g",
+	"cholesterol_mg",
+	"fat_g",
+	"fiber_g",
+	"ingredients",
+	"iron_mg",
+	"potassium_mg",
+	"protein_g",
+	"raw_nutrition_text",
+	"saturated_fat_g",
+	"serving_size",
+	"servings_per_container",
+	"sodium_mg",
+	"sugar_g",
+	"trans_fat_g",
+	"upc",
+	"usda_brand",
+	"usda_description",
+	"usda_fdc_id",
+	"usda_match_method",
+	"vitamin_d_mcg",
+] as const;
+
 export const nutritionSchema = z
 	.object({
 		added_sugar_g: z.number().min(0).nullable(),
@@ -103,6 +173,7 @@ export const nutritionSchema = z
 		calories: z.number().min(0).nullable(),
 		carbs_g: z.number().min(0).nullable(),
 		category: z.array(z.string()),
+		cause: z.enum(NUTRITION_CAUSES).nullable().optional(),
 		cholesterol_mg: z.number().min(0).nullable(),
 		confidence: z.enum(["high", "medium", "low"]),
 		fat_g: z.number().min(0).nullable(),
@@ -130,6 +201,7 @@ export const nutritionSchema = z
 			"error",
 			"blocked",
 		]),
+		status: z.enum(["matched", "not_found", "error", "blocked"]).optional(),
 		sugar_g: z.number().min(0).nullable(),
 		trans_fat_g: z.number().min(0).nullable(),
 		type: z.literal("https://schema.org/NutritionInformation"),
@@ -140,9 +212,34 @@ export const nutritionSchema = z
 		usda_match_method: z.enum(["text", "upc"]).nullable(),
 		vitamin_d_mcg: z.number().min(0).nullable(),
 	})
-	.refine((record) => record.id === record.product_id, {
-		message: "nutrition id must equal its source product_id",
-		path: ["id"],
+	.superRefine((record, ctx) => {
+		const issue = (message: string, path: string) =>
+			ctx.addIssue({ code: "custom", message, path: [path] });
+		if (record.id !== record.product_id) {
+			issue("nutrition id must equal its source product_id", "id");
+		}
+		const sourceStatus = FAILURE_STATUSES.find((s) => s === record.source);
+		const status = record.status ?? sourceStatus ?? "matched";
+		if (status === "matched") {
+			if (sourceStatus) issue("a matched row cannot have a failure source", "source");
+			if (record.cause != null) issue("a matched row has no cause", "cause");
+			return;
+		}
+		if (record.source !== status) {
+			issue("a non-matched row's source repeats its status", "source");
+		}
+		if (record.status !== undefined) {
+			const allowed: readonly string[] = CAUSES_BY_STATUS[status];
+			if (record.cause == null || !allowed.includes(record.cause)) {
+				issue(`a ${status} row needs one of: ${allowed.join(", ")}`, "cause");
+			}
+		}
+		// A non-matched row carries no facts, and no other product's identity.
+		for (const field of NUTRITION_FACT_FIELDS) {
+			if (record[field] !== null) issue("a non-matched row carries no facts", field);
+		}
+		if (record.category.length > 0) issue("a non-matched row carries no facts", "category");
+		if (record.highlights.length > 0) issue("a non-matched row carries no facts", "highlights");
 	});
 
 /**

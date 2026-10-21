@@ -162,6 +162,21 @@ const NUTRITION_RECORD = {
 	vitamin_d_mcg: null,
 };
 
+/** A row with no fact at all: what a non-matched lookup emits. */
+const NO_FACTS = {
+	...NUTRITION_RECORD,
+	calories: null,
+	carbs_g: null,
+	confidence: "low" as const,
+	fat_g: null,
+	fiber_g: null,
+	protein_g: null,
+	serving_size: null,
+	servings_per_container: null,
+	sodium_mg: null,
+	sugar_g: null,
+};
+
 test("nutrition schema accepts a fully-populated wholefoods_product_page record", () => {
 	const result = nutritionSchema.safeParse(NUTRITION_RECORD);
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
@@ -179,12 +194,19 @@ test("nutrition schema accepts a usda_fdc record with medium confidence", () => 
 for (const source of ["not_found", "error", "blocked"] as const) {
 	test(`nutrition schema accepts a source-backed ${source} outcome`, () => {
 		const result = nutritionSchema.safeParse({
-			...NUTRITION_RECORD,
-			calories: null,
-			confidence: "low",
+			...NO_FACTS,
 			source,
 		});
 		assert.ok(result.success, JSON.stringify(result.error?.issues));
+	});
+
+	test(`nutrition schema rejects a ${source} row that carries a fact`, () => {
+		const result = nutritionSchema.safeParse({
+			...NUTRITION_RECORD,
+			confidence: "low",
+			source,
+		});
+		assert.equal(result.success, false);
 	});
 }
 
