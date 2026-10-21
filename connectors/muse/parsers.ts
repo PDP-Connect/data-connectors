@@ -124,37 +124,30 @@ export type MuseSession = z.infer<typeof sessionSchema>;
 
 const sessionsResponseSchema = z.object({ sessions: z.array(z.unknown()) });
 
-const continuationSchema = z.object({
-	has_more: z.unknown().optional(),
-	next_cursor: z.unknown().optional(),
-	cursor: z.unknown().optional(),
-	next_page_token: z.unknown().optional(),
-	pagination: z
-		.object({ has_next_page: z.unknown().optional() })
-		.nullable()
-		.optional(),
-});
-
 /**
- * Whether a sessions.list answer says the list goes on. The app never pages
- * this list (its answer is observed as the whole list, with no paging
- * field), so any continuation signal means this answer is not the whole
- * list, and the connector has no observed way to read the rest.
+ * Whether a sessions.list answer carries any paging field. The app never
+ * pages this list: it sends no paging parameter, and its answer is observed
+ * as `{ sessions }` alone. An answer with a has_more, cursor, next-page or
+ * pagination field (even a terminal-looking one) is not the observed shape,
+ * and the connector has no observed way to follow it, so it cannot prove
+ * the list complete.
  */
 export function sessionsListContinues(raw: unknown): boolean {
-	const parsed = continuationSchema.safeParse(raw);
-	if (!parsed.success) return false;
-	const c = parsed.data;
-	const present = (v: unknown) =>
-		v !== undefined && v !== null && v !== false && v !== "";
-	return (
-		present(c.has_more) ||
-		present(c.next_cursor) ||
-		present(c.cursor) ||
-		present(c.next_page_token) ||
-		present(c.pagination?.has_next_page)
-	);
+	if (typeof raw !== "object" || raw === null) return false;
+	return PAGING_KEYS.some((key) => Object.hasOwn(raw, key));
 }
+
+const PAGING_KEYS = [
+	"has_more",
+	"hasMore",
+	"next_cursor",
+	"nextCursor",
+	"cursor",
+	"next_page_token",
+	"next",
+	"next_offset",
+	"pagination",
+] as const;
 
 /** Every session of one sessions.list answer, or null when any is unreadable. */
 export function parseSessions(raw: unknown): MuseSession[] | null {
@@ -242,11 +235,14 @@ export function isFinalEvent(e: MuseChatEvent): boolean {
 const historyResponseSchema = z.object({
 	chat_events: z.array(z.unknown()),
 	has_more: z.boolean(),
+	transcript_revision: z.number().nullable().optional(),
 });
 
 export interface HistoryPage {
 	events: MuseChatEvent[];
 	hasMore: boolean;
+	/** The chat transcript's revision, which changes with every change to it; null when absent. */
+	transcriptRevision: number | null;
 }
 
 /** One chat.history page, or null when it or any event is unreadable. */
@@ -259,7 +255,15 @@ export function parseHistory(raw: unknown): HistoryPage | null {
 		if (!e.success || msToIso(e.data.occurred_at_ms) === null) return null;
 		events.push(e.data);
 	}
-	return { events, hasMore: parsed.data.has_more };
+	const revision = parsed.data.transcript_revision;
+	return {
+		events,
+		hasMore: parsed.data.has_more,
+		transcriptRevision:
+			typeof revision === "number" && Number.isFinite(revision)
+				? revision
+				: null,
+	};
 }
 
 export function buildMessageRecord(

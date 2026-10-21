@@ -125,6 +125,8 @@ const GATEWAY_WAIT_ATTEMPTS = 20;
 const GATEWAY_WAIT_MS = 1_500;
 const RPC_TIMEOUT_MS = 60_000;
 const CURSOR_VERSION = 1;
+/** Version 1 held a single update-time watermark; it is not read back. */
+const CHATS_CURSOR_VERSION = 2;
 const FRACTION_RE = /\.\d+/;
 
 type Page = BrowserCollectContext["page"];
@@ -262,9 +264,9 @@ export function gatewayCallScript(
     const status = Number.isInteger(Number(raw)) ? Number(raw) : 0;
     const code = /timeout|timed out/i.test(text) ? "timeout"
       : /not connected/i.test(text) ? "not_ready"
-      : status === 429 || /\b429\b|rate.?limit|too many requests/i.test(text) ? "rate_limited"
-      : status >= 500 || /\b5dd\b|service unavailable|internal server error|bad gateway/i.test(text) ? "server_error"
-      : status === 404 || /\b404\b|not found|no such/i.test(text) ? "not_found"
+      : status === 429 || /\\b429\\b|rate.?limit|too many requests/i.test(text) ? "rate_limited"
+      : status >= 500 || /\\b5\\d\\d\\b|\\binternal\\b|service unavailable|bad gateway|gateway time-?out/i.test(text) ? "server_error"
+      : status === 404 || /\\b404\\b|not found|no such/i.test(text) ? "not_found"
       : "rpc_error";
     return JSON.stringify({ ok: false, code, message: text.slice(0, 120) });
   } finally {
@@ -529,23 +531,45 @@ async function call(
 	return await gateway.call(method, params);
 }
 
-/** conversations cursor: how far every chat's messages have been read. */
+/** What a complete read of one chat's messages saw. */
+export interface ChatMark {
+	updated_at_ms: number;
+	transcript_revision: number;
+}
+
+/**
+ * conversations cursor: for each chat whose messages were read completely,
+ * its list update time and its transcript revision at that read. Chat ids
+ * and two numbers; no credential. A chat is read again when either value
+ * changed or is unknown.
+ */
 interface ConversationsCursor {
-	version: typeof CURSOR_VERSION;
-	messages_read_through_ms: number | null;
+	version: typeof CHATS_CURSOR_VERSION;
+	chats: Record<string, ChatMark>;
 }
 
 function parseConversationsCursor(value: unknown): ConversationsCursor | null {
 	if (typeof value !== "object" || value === null) return null;
 	const v = value as Record<string, unknown>;
-	const through = v.messages_read_through_ms;
-	if (v.version !== CURSOR_VERSION) return null;
-	if (
-		through !== null &&
-		(typeof through !== "number" || !Number.isFinite(through))
-	)
-		return null;
-	return { version: CURSOR_VERSION, messages_read_through_ms: through };
+	if (v.version !== CHATS_CURSOR_VERSION) return null;
+	if (typeof v.chats !== "object" || v.chats === null) return null;
+	const chats: Record<string, ChatMark> = {};
+	for (const [id, mark] of Object.entries(v.chats as Record<string, unknown>)) {
+		if (typeof mark !== "object" || mark === null) continue;
+		const m = mark as Record<string, unknown>;
+		if (
+			typeof m.updated_at_ms === "number" &&
+			Number.isFinite(m.updated_at_ms) &&
+			typeof m.transcript_revision === "number" &&
+			Number.isFinite(m.transcript_revision)
+		) {
+			chats[id] = {
+				updated_at_ms: m.updated_at_ms,
+				transcript_revision: m.transcript_revision,
+			};
+		}
+	}
+	return { version: CHATS_CURSOR_VERSION, chats };
 }
 
 interface ListedSession {
@@ -568,11 +592,12 @@ async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
 				`Muse's ${archivedView ? "archived " : ""}chat list came back in a shape the connector cannot read; nothing was checkpointed.`,
 			);
 		}
-		// The observed answer is the whole list with no paging field; one that
-		// says more chats follow cannot be read to its end.
+		// The app never pages this list; the observed answer is the whole list
+		// with no paging field. An answer with any paging field cannot be
+		// proven complete, so nothing is checkpointed.
 		if (sessionsListContinues(raw)) {
 			throw new StreamFailure(
-				`Muse's ${archivedView ? "archived " : ""}chat list says more chats follow than one answer holds; nothing was checkpointed.`,
+				`Muse's ${archivedView ? "archived " : ""}chat list came back with paging fields the app never uses; it cannot be proven complete and nothing was checkpointed.`,
 			);
 		}
 		for (const session of sessions) {
@@ -584,14 +609,15 @@ async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
 	return out;
 }
 
-/** Gateway error codes that concern one item, not the gateway as a whole. */
-const PER_ITEM_RPC_CODES: ReadonlySet<string> = new Set([
-	"not_found",
-	"rpc_error",
-]);
+/**
+ * Gateway error codes that concern one chat, not the gateway as a whole.
+ * Only "not found" is item-level evidence; every other failure (timeout,
+ * rate limit, server error, an unclassified error) stops the chat walk.
+ */
+const PER_ITEM_RPC_CODES: ReadonlySet<string> = new Set(["not_found"]);
 
 type HistoryOutcome =
-	| { kind: "hydrated" }
+	| { kind: "hydrated"; revision: number | null }
 	| { kind: "gap"; errorClass: string; message: string };
 
 /**
@@ -610,6 +636,8 @@ async function hydrateChat(
 	// Set when an event was left out; the chat is then a gap, never hydrated.
 	let notFinal = 0;
 	let unsafe = 0;
+	let revision: number | null = null;
+	let revisionMoved = false;
 	const finish = (): HistoryOutcome =>
 		notFinal > 0
 			? {
@@ -623,7 +651,13 @@ async function hydrateChat(
 						errorClass: "muse_history_unsafe_text",
 						message: "a message body is not storable text",
 					}
-				: { kind: "hydrated" };
+				: revisionMoved
+					? {
+							kind: "gap",
+							errorClass: "muse_history_changed",
+							message: "the chat changed while it was read",
+						}
+					: { kind: "hydrated", revision };
 	for (let pageIndex = 0; pageIndex < MAX_HISTORY_PAGES; pageIndex++) {
 		const params: Record<string, unknown> = {
 			limit: HISTORY_LIMIT,
@@ -655,6 +689,8 @@ async function hydrateChat(
 				message: "chat.history came back in an unreadable shape",
 			};
 		}
+		if (pageIndex === 0) revision = page.transcriptRevision;
+		else if (page.transcriptRevision !== revision) revisionMoved = true;
 		const fresh = uniqueEvents(page.events).filter(
 			(e) => !seen.has(e.message_id),
 		);
@@ -746,8 +782,9 @@ async function hydrateChats(
 	tally: TextTally,
 	required: readonly string[],
 	pending: ReadonlyMap<string, readonly PendingGap[]> = new Map(),
-): Promise<Set<string>> {
+): Promise<Map<string, number | null>> {
 	const hydrated: string[] = [];
+	const revisions = new Map<string, number | null>();
 	const gaps: string[] = [];
 	for (const [index, sessionId] of required.entries()) {
 		await ctx.progress(`Reading chat ${index + 1} of ${required.length}`, {
@@ -756,6 +793,7 @@ async function hydrateChats(
 		const outcome = await hydrateChat(ctx, gateway, tally, sessionId);
 		if (outcome.kind === "hydrated") {
 			hydrated.push(sessionId);
+			revisions.set(sessionId, outcome.revision);
 			// Read completely: resolve the gaps an earlier run left for it.
 			for (const gap of pending.get(sessionId) ?? []) {
 				await ctx.emit({
@@ -789,38 +827,35 @@ async function hydrateChats(
 	if (gaps.length > 0) {
 		connectorDiagnostic("muse", "message_gaps", { count: gaps.length });
 	}
-	return new Set(hydrated);
+	return revisions;
 }
 
 /**
- * The new messages watermark: the newest update time below which every chat
- * this run had to read was read completely. A chat gapped in an earlier run
- * (already below the old watermark) is tracked by its DETAIL_GAP instead.
+ * Whether a chat must be read again: no complete read is on record, its
+ * list update time differs, or its transcript revision (read with a one-
+ * message page) differs or is unknown. Update times are whole seconds, so
+ * the revision catches a change within the same second.
  */
-export function nextMessagesWatermark(
-	prior: number | null,
-	required: ReadonlyArray<{ id: string; updatedMs: number | null }>,
-	hydrated: ReadonlySet<string>,
-): number | null {
-	const fresh = required.filter(
-		(c) => prior === null || c.updatedMs === null || c.updatedMs >= prior,
-	);
-	// A chat without an update time cannot be placed below any watermark.
-	if (fresh.some((c) => c.updatedMs === null && !hydrated.has(c.id))) {
-		return prior;
+async function chatUnchanged(
+	gateway: MuseGateway,
+	id: string,
+	updatedMs: number | null,
+	mark: ChatMark | undefined,
+): Promise<boolean> {
+	if (!mark || updatedMs === null || mark.updated_at_ms !== updatedMs)
+		return false;
+	let raw: unknown;
+	try {
+		raw = await call(gateway, "chat.history", { limit: 1, session_id: id });
+	} catch (error) {
+		// A chat the gateway cannot find is read (and gapped) like a changed
+		// one; anything else stops the walk.
+		if (error instanceof MuseRpcError && PER_ITEM_RPC_CODES.has(error.code))
+			return false;
+		throw error;
 	}
-	let limit = Number.POSITIVE_INFINITY;
-	for (const c of fresh) {
-		if (!hydrated.has(c.id) && c.updatedMs !== null && c.updatedMs < limit)
-			limit = c.updatedMs;
-	}
-	let next = prior;
-	for (const c of fresh) {
-		if (c.updatedMs === null || !hydrated.has(c.id) || c.updatedMs >= limit)
-			continue;
-		if (next === null || c.updatedMs > next) next = c.updatedMs;
-	}
-	return next;
+	const revision = parseHistory(raw)?.transcriptRevision ?? null;
+	return revision !== null && revision === mark.transcript_revision;
 }
 
 export async function runChatStreams(
@@ -835,6 +870,16 @@ export async function runChatStreams(
 		? pendingMessageGaps(ctx)
 		: new Map<string, PendingGap[]>();
 
+	// Parent records (Collection Profile 5.6 "parent before children"):
+	// - A normal run with conversations in scope emits every conversation
+	//   record below, before any message record, gap or coverage.
+	// - A recovery-only run (START.recovery_only) must run gap recovery and
+	//   return before any list-phase fetch, so it cannot list chats to emit
+	//   their records. Each gapped chat's conversation record was emitted by
+	//   the run that recorded the gap.
+	// - A messages-only request leaves conversations out of START.scope;
+	//   emitting conversation records would put records outside the
+	//   requested scope (6.1 item 4). Messages carry session_id for the join.
 	if (ctx.recoveryOnly) {
 		if (pending.size === 0) return;
 		try {
@@ -873,33 +918,50 @@ export async function runChatStreams(
 		ctx.collectionMode === "full_refresh"
 			? null
 			: parseConversationsCursor(ctx.state[CONVERSATIONS]);
-	const prior = stored?.messages_read_through_ms ?? null;
-	let through = prior;
+	const prior = stored?.chats ?? {};
+	const listedIds = new Set(listed.map(({ session }) => session.session_id));
+	// Marks of chats still listed carry forward; a chat no longer listed drops.
+	let nextChats: Record<string, ChatMark> = Object.fromEntries(
+		Object.entries(prior).filter(([id]) => listedIds.has(id)),
+	);
 	if (wantMessages) {
-		const chats = listed.map(({ session }) => ({
-			id: session.session_id,
-			updatedMs:
-				typeof session.updated_at_ms === "number" &&
-				Number.isFinite(session.updated_at_ms)
-					? session.updated_at_ms
-					: null,
-		}));
-		// Update times are whole seconds: a chat updated in the same second
-		// as the watermark may have changed after it was read, so it is
-		// read again (at or after, not only after).
-		const changed = chats.filter(
-			(c) => prior === null || c.updatedMs === null || c.updatedMs >= prior,
-		);
-		changed.sort((a, b) => (a.updatedMs ?? 0) - (b.updatedMs ?? 0));
-		const changedIds = new Set(changed.map((c) => c.id));
-		// Retry earlier gaps first, then every chat changed since the watermark.
-		const required = [
-			...[...pending.keys()].filter((id) => !changedIds.has(id)),
-			...changed.map((c) => c.id),
-		];
-		let hydrated: Set<string>;
+		const chats = listed
+			.map(({ session }) => ({
+				id: session.session_id,
+				updatedMs:
+					typeof session.updated_at_ms === "number" &&
+					Number.isFinite(session.updated_at_ms)
+						? session.updated_at_ms
+						: null,
+			}))
+			.sort((a, b) => (a.updatedMs ?? 0) - (b.updatedMs ?? 0));
+		let hydrated: Map<string, number | null>;
 		try {
+			const changed: string[] = [];
+			for (const c of chats) {
+				if (!(await chatUnchanged(gateway, c.id, c.updatedMs, prior[c.id])))
+					changed.push(c.id);
+			}
+			const changedIds = new Set(changed);
+			// Retry earlier gaps first, then every chat that changed.
+			const required = [
+				...[...pending.keys()].filter((id) => !changedIds.has(id)),
+				...changed,
+			];
 			hydrated = await hydrateChats(ctx, gateway, tally, required, pending);
+			for (const id of changed) {
+				const revision = hydrated.get(id);
+				const updatedMs = chats.find((c) => c.id === id)?.updatedMs ?? null;
+				// Not read completely, or nothing to compare next time: read again.
+				if (revision === undefined || revision === null || updatedMs === null) {
+					delete nextChats[id];
+				} else {
+					nextChats[id] = {
+						updated_at_ms: updatedMs,
+						transcript_revision: revision,
+					};
+				}
+			}
 		} catch (error) {
 			await failStreams(
 				ctx,
@@ -908,10 +970,12 @@ export async function runChatStreams(
 			);
 			return;
 		}
-		// A time-ranged run reads only part of each chat: it moves no watermark.
-		through = ctx.requested.get(MESSAGES)?.time_range
-			? prior
-			: nextMessagesWatermark(prior, changed, hydrated);
+		// A time-ranged run reads only part of each chat: it records no marks.
+		if (ctx.requested.get(MESSAGES)?.time_range) {
+			nextChats = Object.fromEntries(
+				Object.entries(prior).filter(([id]) => listedIds.has(id)),
+			);
+		}
 	}
 
 	if (wantConversations) {
@@ -925,8 +989,8 @@ export async function runChatStreams(
 		}
 		await ctx.emit(buildFullScanCoverageMessage(CONVERSATIONS, listed.length));
 		const cursor: ConversationsCursor = {
-			version: CURSOR_VERSION,
-			messages_read_through_ms: through,
+			version: CHATS_CURSOR_VERSION,
+			chats: nextChats,
 		};
 		await ctx.emit({
 			type: "STATE",
@@ -1111,6 +1175,11 @@ export async function runGoals(
 				seen.add(goal.goal_id);
 				await emitBuilt(ctx, tally, GOALS, buildGoalRecord(goal, source));
 			}
+			// The app has no known next-page parameter for goals.list (none is
+			// observed in its bundle or live traffic), so a page that says more
+			// goals follow cannot be read to the end. Guessing a parameter could
+			// re-read page one and claim completeness; the stream fails visibly
+			// instead and is never checkpointed as complete.
 			if (page.hasNextPage) incomplete = true;
 		}
 		if (incomplete) {

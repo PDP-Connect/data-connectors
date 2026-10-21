@@ -26,7 +26,6 @@ import {
 	type MuseGateway,
 	MuseRpcError,
 	museReadiness,
-	nextMessagesWatermark,
 	pageGateway,
 	READ_METHODS,
 } from "./index.ts";
@@ -256,8 +255,11 @@ test("a full run reads every stream through read methods only and follows the pr
 	}
 	assert.ok((h.of("STATE", "conversations")[0]?.index ?? -1) > cov.index);
 	assert.deepEqual(h.states("conversations")[0], {
-		version: 1,
-		messages_read_through_ms: 1792612428000,
+		version: 2,
+		chats: {
+			[SIDE_CHAT]: { updated_at_ms: 1792610689000, transcript_revision: 31 },
+			[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
+		},
 	});
 	assert.deepEqual(h.states("activities")[0], {
 		version: 1,
@@ -323,8 +325,11 @@ test("chat.history pages back with before_seq until has_more is false", async ()
 	assert.deepEqual(cov?.hydrated_keys, [SIDE_CHAT, MAIN_CHAT]);
 	assert.equal(h.of("DETAIL_GAP").length, 0);
 	assert.deepEqual(h.states("conversations")[0], {
-		version: 1,
-		messages_read_through_ms: 1792612428000,
+		version: 2,
+		chats: {
+			[SIDE_CHAT]: { updated_at_ms: 1792610689000, transcript_revision: 31 },
+			[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
+		},
 	});
 });
 
@@ -357,10 +362,12 @@ test("a chat.history page that repeats is a DETAIL_GAP, not a complete chat", as
 	assert.ok(cov && cov.index > (gaps[0]?.index ?? Infinity));
 	assert.deepEqual(cov.m.gap_keys, [SIDE_CHAT]);
 	assert.deepEqual(cov.m.hydrated_keys, [MAIN_CHAT]);
-	// The watermark stays below the gapped chat (updated 1792610689000).
+	// The gapped chat gets no mark, so the next run reads it again.
 	assert.deepEqual(h.states("conversations")[0], {
-		version: 1,
-		messages_read_through_ms: null,
+		version: 2,
+		chats: {
+			[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
+		},
 	});
 });
 
@@ -383,12 +390,26 @@ test("a chat.history cursor that does not move back is a DETAIL_GAP", async () =
 	]);
 });
 
-test("the next run reads only chats updated after the watermark, plus pending gaps", async () => {
+test("the next run reads only chats that changed, plus pending gaps", async () => {
 	const { gateway, calls } = fakeGateway();
 	const h = harness({
 		streams: ["conversations", "messages"],
 		state: {
-			conversations: { version: 1, messages_read_through_ms: 1792610689000 },
+			conversations: {
+				version: 2,
+				chats: {
+					// Unchanged: same update time, same revision.
+					[SIDE_CHAT]: {
+						updated_at_ms: 1792610689000,
+						transcript_revision: 31,
+					},
+					// Changed: an older update time.
+					[MAIN_CHAT]: {
+						updated_at_ms: 1792600000000,
+						transcript_revision: 31,
+					},
+				},
+			},
 		},
 		detailGaps: [
 			{
@@ -407,20 +428,25 @@ test("the next run reads only chats updated after the watermark, plus pending ga
 	assert.deepEqual(
 		calls
 			.filter((c) => c.method === "chat.history")
-			.map((c) => c.params.session_id),
-		["11111111-1111-4111-8111-111111111111", SIDE_CHAT, MAIN_CHAT],
+			.map((c) => [c.params.session_id, c.params.limit]),
+		[
+			[SIDE_CHAT, 1], // revision check only
+			["11111111-1111-4111-8111-111111111111", 50],
+			[MAIN_CHAT, 50],
+		],
 	);
 	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
-	// SIDE_CHAT sits exactly at the watermark: it is read again (finding 3).
 	assert.deepEqual(cov?.required_keys, [
 		"11111111-1111-4111-8111-111111111111",
-		SIDE_CHAT,
 		MAIN_CHAT,
 	]);
-	assert.deepEqual(
-		h.states("conversations")[0]?.messages_read_through_ms,
-		1792612428000,
-	);
+	assert.deepEqual(h.states("conversations")[0], {
+		version: 2,
+		chats: {
+			[SIDE_CHAT]: { updated_at_ms: 1792610689000, transcript_revision: 31 },
+			[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
+		},
+	});
 });
 
 test("a recovery-only run retries pending gaps and nothing else", async () => {
@@ -657,25 +683,6 @@ test("only read methods and the five memory files may be called", () => {
 	assert.doesNotThrow(() => assertReadOnlyCall("fs.raw", { path: "SOUL.md" }));
 });
 
-test("the watermark never passes a chat this run could not finish", () => {
-	const chats = [
-		{ id: "a", updatedMs: 10 },
-		{ id: "b", updatedMs: 20 },
-		{ id: "c", updatedMs: 30 },
-	];
-	assert.equal(
-		nextMessagesWatermark(null, chats, new Set(["a", "b", "c"])),
-		30,
-	);
-	assert.equal(nextMessagesWatermark(null, chats, new Set(["a", "c"])), 10);
-	assert.equal(nextMessagesWatermark(5, chats, new Set(["b", "c"])), 5);
-	assert.equal(nextMessagesWatermark(5, [], new Set()), 5);
-	assert.equal(
-		nextMessagesWatermark(5, [{ id: "x", updatedMs: null }], new Set()),
-		5,
-	);
-});
-
 // ─── Page scripts in a sandbox ──────────────────────────────────────────
 
 class FakeBlob {
@@ -771,10 +778,13 @@ test("a gateway error becomes a retryable muse_rpc_failed error", async () => {
 
 // ─── Review round 4 ─────────────────────────────────────────────────────
 
-test("finding 1: a chat list that says it has more is not checkpointed as complete", async () => {
+test("finding 1: a chat list answer with any paging field is not checkpointed", async () => {
 	for (const extra of [
 		{ has_more: true },
+		{ has_more: false },
 		{ next_cursor: "c2" },
+		{ next_cursor: null },
+		{ cursor: "c2" },
 		{ pagination: { has_next_page: true } },
 	]) {
 		const { gateway } = fakeGateway({
@@ -792,14 +802,10 @@ test("finding 1: a chat list that says it has more is not checkpointed as comple
 		);
 		assert.equal(h.states("conversations").length, 0);
 		assert.equal(h.of("DETAIL_COVERAGE").length, 0);
+		assert.equal(h.records("conversations").length, 0);
 	}
-	// The observed terminal shape (no paging fields) stays complete.
-	const { gateway } = fakeGateway({
-		"sessions.list": (p) =>
-			p.view === "archived"
-				? fixture("sessions-archived")
-				: { ...SESSIONS, has_more: false, next_cursor: null },
-	});
+	// The observed shape, `{ sessions }` alone, is the whole list.
+	const { gateway } = fakeGateway();
 	const h = harness({ streams: ["conversations"] });
 	await collectMuseWith(h.ctx, gateway);
 	assert.deepEqual(h.failures, []);
@@ -844,32 +850,102 @@ test("finding 2: a message still being generated is not stored and its chat is a
 		assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
 			SIDE_CHAT,
 		]);
-		assert.deepEqual(
-			h.states("conversations")[0]?.messages_read_through_ms,
-			null,
+		assert.equal(
+			((h.states("conversations")[0]?.chats ?? {}) as Json)[SIDE_CHAT],
+			undefined,
 		);
 	}
 });
 
-test("finding 3: a chat whose update time equals the watermark is read again", async () => {
-	const { gateway, calls } = fakeGateway();
+test("round 5 #2: a chat whose transcript revision changed under the same update time is read again", async () => {
+	const marks = {
+		[SIDE_CHAT]: { updated_at_ms: 1792610689000, transcript_revision: 31 },
+		[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
+	};
+	const { gateway, calls } = fakeGateway({
+		"chat.history": (p) => {
+			const h = historyFor(String(p.session_id));
+			// MAIN_CHAT got a new message within the same second: revision 32.
+			if (p.session_id === MAIN_CHAT) h.transcript_revision = 32;
+			return h;
+		},
+	});
 	const h = harness({
 		streams: ["conversations", "messages"],
-		state: {
-			conversations: { version: 1, messages_read_through_ms: 1792612428000 },
-		},
+		state: { conversations: { version: 2, chats: marks } },
 	});
 	await collectMuseWith(h.ctx, gateway);
 	assert.deepEqual(
 		calls
 			.filter((c) => c.method === "chat.history")
-			.map((c) => c.params.session_id),
-		[MAIN_CHAT],
+			.map((c) => [c.params.session_id, c.params.limit]),
+		[
+			[SIDE_CHAT, 1],
+			[MAIN_CHAT, 1],
+			[MAIN_CHAT, 50],
+		],
 	);
-	assert.equal(
-		nextMessagesWatermark(10, [{ id: "a", updatedMs: 10 }], new Set()),
-		10,
+	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.required_keys, [
+		MAIN_CHAT,
+	]);
+	assert.deepEqual(
+		((h.states("conversations")[0]?.chats ?? {}) as Json)[MAIN_CHAT],
+		{
+			updated_at_ms: 1792612428000,
+			transcript_revision: 32,
+		},
 	);
+});
+
+test("round 5 #2: a chat with no known revision is always read again", async () => {
+	const { gateway, calls } = fakeGateway({
+		"chat.history": (p) => {
+			const h = historyFor(String(p.session_id));
+			delete h.transcript_revision;
+			return h;
+		},
+	});
+	const h = harness({
+		streams: ["conversations", "messages"],
+		state: {
+			conversations: {
+				version: 2,
+				chats: {
+					[SIDE_CHAT]: {
+						updated_at_ms: 1792610689000,
+						transcript_revision: 31,
+					},
+					[MAIN_CHAT]: {
+						updated_at_ms: 1792612428000,
+						transcript_revision: 31,
+					},
+				},
+			},
+		},
+	});
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.required_keys, [
+		SIDE_CHAT,
+		MAIN_CHAT,
+	]);
+	assert.equal(calls.filter((c) => c.params.limit === 50).length, 2);
+	// Nothing to compare next time: no mark is kept.
+	assert.deepEqual(h.states("conversations")[0], { version: 2, chats: {} });
+});
+
+test("round 5 #2: a version 1 watermark cursor is not trusted", async () => {
+	const { gateway } = fakeGateway();
+	const h = harness({
+		streams: ["messages"],
+		state: {
+			conversations: { version: 1, messages_read_through_ms: 1792612428000 },
+		},
+	});
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.required_keys, [
+		SIDE_CHAT,
+		MAIN_CHAT,
+	]);
 });
 
 test("finding 4: unsafe text never reaches a checkpoint", async () => {
@@ -889,9 +965,9 @@ test("finding 4: unsafe text never reaches a checkpoint", async () => {
 		assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
 			SIDE_CHAT,
 		]);
-		assert.deepEqual(
-			h.states("conversations")[0]?.messages_read_through_ms,
-			null,
+		assert.equal(
+			((h.states("conversations")[0]?.chats ?? {}) as Json)[SIDE_CHAT],
+			undefined,
 		);
 	}
 	// A memory file body: not stored, the stream fails.
@@ -1064,7 +1140,7 @@ test("finding 7: a pending gap that is read completely is reported recovered", a
 });
 
 test("finding 9: a rate limit or outage stops the chat walk instead of gapping every chat", async () => {
-	for (const code of ["rate_limited", "server_error", "timeout"]) {
+	for (const code of ["rate_limited", "server_error", "timeout", "rpc_error"]) {
 		const { gateway, calls } = fakeGateway({
 			"chat.history": () => {
 				throw new MuseRpcError(code, `muse_rpc_failed: chat.history ${code}`);
@@ -1111,6 +1187,9 @@ test("finding 9: the page script keeps the gateway's status class", async () => 
 		],
 		[new Error("HTTP 503 Service Unavailable"), "server_error"],
 		[new Error("session not found"), "not_found"],
+		[new Error("HTTP 500"), "server_error"],
+		[new Error("HTTP 429"), "rate_limited"],
+		[new Error("Internal error"), "server_error"],
 		[new Error("boom"), "rpc_error"],
 	] as const) {
 		const page = sandboxPage(() => Promise.reject(error));
@@ -1159,4 +1238,25 @@ test("finding 11: a challenge page is reported as a bot challenge, not a sign-in
 		},
 	};
 	await assert.rejects(museReadiness(plain, 1), /muse_auth_failed/);
+});
+
+test("round 5 #2: a chat whose revision moves between pages is a gap, not a mark", async () => {
+	const side = pagedHistory(120);
+	const { gateway } = fakeGateway({
+		"chat.history": (p) => {
+			if (p.session_id !== SIDE_CHAT) return historyFor(String(p.session_id));
+			const page = side(p);
+			if (typeof p.before_seq === "number") page.transcript_revision = 32;
+			return page;
+		},
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
+		SIDE_CHAT,
+	]);
+	assert.equal(
+		((h.states("conversations")[0]?.chats ?? {}) as Json)[SIDE_CHAT],
+		undefined,
+	);
 });
