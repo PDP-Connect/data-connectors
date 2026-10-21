@@ -793,53 +793,110 @@ function hasBoundEndProof(
 	);
 }
 
+/** What a stream failure says about the stream. Only a source that answered
+ *  without proving the whole inventory (a stalled continuation, rows that
+ *  could not be read or kept) is an unproven enumeration. A rejected session
+ *  is the run's failure, as it is in the config step. Every other failure is
+ *  a read that did not complete. A dependency takes its dependency's route. */
+function failureRoute(
+	failure: QueryFailure,
+): "auth_rejected" | "read_failed" | "unproven_enumeration" {
+	if (failure.cause.kind === "dependency") {
+		return failureRoute(failure.cause.failure);
+	}
+	if (failure.cause.kind === "auth_rejected") return "auth_rejected";
+	return failure.reason === "icloud_no_progress" ||
+		failure.reason === "icloud_omitted_rows"
+		? "unproven_enumeration"
+		: "read_failed";
+}
+
+function rootFailure(failure: QueryFailure): QueryFailure {
+	return failure.cause.kind === "dependency"
+		? rootFailure(failure.cause.failure)
+		: failure;
+}
+
 async function emitStreamFailure(
-	emit: BrowserCollectContext["emit"],
+	ctx: Pick<BrowserCollectContext, "emit" | "reportStreamFailure">,
 	stream: StreamName,
 	failure: QueryFailure,
 ): Promise<void> {
-	await emit({
+	const route = failureRoute(failure);
+	if (route === "auth_rejected") {
+		const root = rootFailure(failure);
+		throw createConnectorFailure(
+			"icloud_auth_failed",
+			`icloud_auth_failed: ${root.message}`,
+			{ retryable: recoveryHintFor(root.cause).retryable },
+		);
+	}
+	const recoveryHint = recoveryHintFor(failure.cause);
+	const diagnostics = streamFailureDiagnostics(failure);
+	if (route === "read_failed") {
+		if (ctx.reportStreamFailure) {
+			await ctx.reportStreamFailure(stream, failure.message, {
+				recoveryHint,
+				diagnostics,
+			});
+			return;
+		}
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "stream_collection_failed",
+			message: failure.message,
+			recovery_hint: recoveryHint,
+			diagnostics,
+		});
+		return;
+	}
+	await ctx.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason: "inventory_not_proven_complete",
 		message: failure.message,
-		recovery_hint: recoveryHintFor(failure.cause),
-		diagnostics: {
-			source_reason: QUERY_FAILURE_REASON_CODES[failure.reason],
-			...(failure.cause.kind === "dependency"
-				? {
-						dependency_stream: failure.cause.stream,
-						dependency_reason:
-							QUERY_FAILURE_REASON_CODES[failure.cause.failure.reason],
-					}
-				: {}),
-			page_count: failure.pageCount,
-			...(failure.rowsSeen === undefined
-				? {}
-				: { rows_seen: failure.rowsSeen }),
-			...(failure.sourceRowsSeen === undefined
-				? {}
-				: { source_rows_seen: failure.sourceRowsSeen }),
-			...(failure.noteRowsSeen === undefined
-				? {}
-				: { note_rows_seen: failure.noteRowsSeen }),
-			...(failure.deletedNoteRows === undefined
-				? {}
-				: { deleted_note_rows: failure.deletedNoteRows }),
-			...(failure.intentionalExclusions === undefined
-				? {}
-				: { intentional_exclusions: failure.intentionalExclusions }),
-			...(failure.omittedRows === undefined
-				? {}
-				: { omitted_rows: failure.omittedRows }),
-			...(failure.fieldOmissions === undefined
-				? {}
-				: { field_omissions: failure.fieldOmissions }),
-			...(failure.omittedRowDiagnostics === undefined
-				? {}
-				: { omitted_row_diagnostics: failure.omittedRowDiagnostics }),
-		},
+		recovery_hint: recoveryHint,
+		diagnostics,
 	});
+}
+
+function streamFailureDiagnostics(
+	failure: QueryFailure,
+): Record<string, unknown> {
+	return {
+		source_reason: QUERY_FAILURE_REASON_CODES[failure.reason],
+		...(failure.cause.kind === "dependency"
+			? {
+					dependency_stream: failure.cause.stream,
+					dependency_reason:
+						QUERY_FAILURE_REASON_CODES[failure.cause.failure.reason],
+				}
+			: {}),
+		page_count: failure.pageCount,
+		...(failure.rowsSeen === undefined ? {} : { rows_seen: failure.rowsSeen }),
+		...(failure.sourceRowsSeen === undefined
+			? {}
+			: { source_rows_seen: failure.sourceRowsSeen }),
+		...(failure.noteRowsSeen === undefined
+			? {}
+			: { note_rows_seen: failure.noteRowsSeen }),
+		...(failure.deletedNoteRows === undefined
+			? {}
+			: { deleted_note_rows: failure.deletedNoteRows }),
+		...(failure.intentionalExclusions === undefined
+			? {}
+			: { intentional_exclusions: failure.intentionalExclusions }),
+		...(failure.omittedRows === undefined
+			? {}
+			: { omitted_rows: failure.omittedRows }),
+		...(failure.fieldOmissions === undefined
+			? {}
+			: { field_omissions: failure.fieldOmissions }),
+		...(failure.omittedRowDiagnostics === undefined
+			? {}
+			: { omitted_row_diagnostics: failure.omittedRowDiagnostics }),
+	};
 }
 
 // ─── Collect ────────────────────────────────────────────────────────────
@@ -874,12 +931,19 @@ async function requireNotesPage(page: Page): Promise<string> {
 			const remaining = deadline - Date.now();
 			if (remaining <= 0) break;
 			// Test membership before reading: the thin facade records missing members.
-			if ("waitForLoadState" in page && typeof page.waitForLoadState === "function") {
+			if (
+				"waitForLoadState" in page &&
+				typeof page.waitForLoadState === "function"
+			) {
 				try {
 					await withinReadinessBudget(
-						() => page.waitForLoadState("load", {
-							timeout: Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, remaining),
-						}),
+						() =>
+							page.waitForLoadState("load", {
+								timeout: Math.min(
+									NOTES_READINESS_OPERATION_TIMEOUT_MS,
+									remaining,
+								),
+							}),
 						deadline,
 					);
 				} catch (error) {
@@ -910,7 +974,8 @@ async function requireNotesPage(page: Page): Promise<string> {
 							);
 							let blocked = false;
 							for (let index = 0; index < blockedNodes.length; index += 1) {
-								if (blockedNodes[index]?.getClientRects().length) blocked = true;
+								if (blockedNodes[index]?.getClientRects().length)
+									blocked = true;
 							}
 							return {
 								href: window.location.href,
@@ -1149,7 +1214,7 @@ export async function collectAllStreams(
 				cursor: { fingerprints: cursor.toState() },
 			});
 		} else {
-			await emitStreamFailure(emit, "profile", {
+			await emitStreamFailure(ctx, "profile", {
 				reason: "icloud_navigation_changed",
 				message:
 					"The iCloud Notes page changed before the profile could be checkpointed.",
@@ -1289,7 +1354,7 @@ export async function collectAllStreams(
 					intentionalExclusions,
 				};
 			if (failure) {
-				await emitStreamFailure(emit, "folders", failure);
+				await emitStreamFailure(ctx, "folders", failure);
 			} else if (
 				hasBoundEndProof(folderWalk, pageUrl, config, "folders") &&
 				remainsInICloudNotes(await readPageUrl(page), pageUrl)
@@ -1479,7 +1544,7 @@ export async function collectAllStreams(
 			};
 		}
 		if (failure) {
-			await emitStreamFailure(emit, "notes", failure);
+			await emitStreamFailure(ctx, "notes", failure);
 		} else if (hasBoundEndProof(walk, pageUrl, config, "notes")) {
 			cursor.dropUnseenIds();
 			await emit({

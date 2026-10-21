@@ -505,7 +505,7 @@ test("collectAllStreams: refuses malformed successful envelopes and does not che
 					(message) =>
 						message.type === "SKIP_RESULT" &&
 						message.stream === stream &&
-						message.reason === "inventory_not_proven_complete" &&
+						message.reason === "stream_collection_failed" &&
 						diagnosticField(message, "source_reason") ===
 							"icloud_invalid_query_response",
 				),
@@ -537,8 +537,10 @@ test("collectAllStreams: a failed folder query leaves notes withheld without a f
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "notes" &&
-				message.reason === "inventory_not_proven_complete" &&
-				diagnosticField(message, "source_reason") === "icloud_omitted_rows",
+				message.reason === "stream_collection_failed" &&
+				diagnosticField(message, "source_reason") === "icloud_omitted_rows" &&
+				diagnosticField(message, "dependency_reason") ===
+					"icloud_invalid_query_response",
 		),
 	);
 	assert.equal(
@@ -1665,7 +1667,7 @@ test("collectAllStreams: navigation change vetoes a terminal query response", as
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "inventory_not_proven_complete" &&
+				message.reason === "stream_collection_failed" &&
 				diagnosticField(message, "source_reason") ===
 					"icloud_navigation_changed",
 		),
@@ -2386,7 +2388,7 @@ for (const { name, folders, notes, hint, reason } of [
 		reason: "icloud_http_error",
 	},
 ]) {
-	test(`collectAllStreams: notes withheld after ${name} carry the folders cause`, async () => {
+	test(`collectAllStreams: notes withheld after ${name} follow the folders cause`, async () => {
 		const harness = makeRecordingEmit(validateRecord);
 		const seed = { notes: { fingerprints: { "note-1": "prior" } } };
 		const ctx = makeCtx(
@@ -2403,6 +2405,26 @@ for (const { name, folders, notes, hint, reason } of [
 			["notes"],
 			structuredClone(seed),
 		);
+		if (reason === "icloud_auth_failed") {
+			// A rejected session is the run's failure, not a withheld stream.
+			await assert.rejects(collectAllStreams(ctx), (error: unknown) => {
+				const failure = error as Error & { code?: string; retryable?: boolean };
+				assert.equal(failure.code, "icloud_auth_failed", name);
+				assert.equal(failure.retryable, hint.retryable, name);
+				return true;
+			});
+			assert.equal(harness.emitted.length, 0, name);
+			assert.equal(
+				harness.protocolMessages.some(
+					(message) =>
+						message.type === "STATE" || message.type === "SKIP_RESULT",
+				),
+				false,
+				`${name}: no checkpoint and no stream failure`,
+			);
+			assert.deepEqual(ctx.state, seed, `${name}: prior cursor kept`);
+			return;
+		}
 		await collectAllStreams(ctx);
 
 		assert.equal(harness.emitted.length, 0, name);
@@ -2517,3 +2539,162 @@ test("collectAllStreams: a query that resolves after its timeout changes nothing
 	assert.deepEqual(laterCtx.state, seed, "later run state unchanged");
 	assert.equal(notesQueries, 3);
 });
+
+// A failed CloudKit read is not an unproven enumeration (Collection Profile
+// 5.5): a rejected session ends the run as the config step does, and any
+// other failed read goes through reportStreamFailure with the connector's
+// own hint and diagnostics. Only a stalled continuation or rows that could
+// not be read or kept keep `inventory_not_proven_complete`.
+function withStreamFailureSpy(ctx: BrowserCollectContext): {
+	ctx: BrowserCollectContext;
+	reports: Array<{ stream: string; message: string; options: unknown }>;
+} {
+	const reports: Array<{ stream: string; message: string; options: unknown }> =
+		[];
+	return {
+		ctx: {
+			...ctx,
+			reportStreamFailure: (stream, message, options) => {
+				reports.push({ stream, message, options });
+				return Promise.resolve();
+			},
+		},
+		reports,
+	};
+}
+
+for (const status of [401, 403]) {
+	test(`collectAllStreams: a notes query HTTP ${String(status)} ends the run as icloud_auth_failed, not a stream failure`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+		const { ctx, reports } = withStreamFailureSpy(
+			makeCtx(
+				makeFakePage([
+					{ stream: "folders", response: folderQueryResponse() },
+					{ stream: "notes", response: { status, json: null } },
+				]),
+				harness,
+				["profile", "notes"],
+				structuredClone(seed),
+			),
+		);
+		await assert.rejects(collectAllStreams(ctx), (error: unknown) => {
+			const failure = error as Error & { code?: string; retryable?: boolean };
+			assert.equal(failure.code, "icloud_auth_failed");
+			assert.equal(failure.retryable, false);
+			assert.equal(
+				failure.message,
+				`icloud_auth_failed: iCloud Notes notes query did not return a valid page (HTTP ${String(status)}); the stream was not checkpointed.`,
+			);
+			return true;
+		});
+		assert.deepEqual(reports, [], "no certified stream failure");
+		assert.deepEqual(
+			harness.protocolMessages
+				.filter((message) => message.type === "SKIP_RESULT")
+				.map((message) => message.type === "SKIP_RESULT" && message.reason),
+			[],
+			"no unproven-enumeration SKIP_RESULT",
+		);
+		assert.deepEqual(ctx.state.notes, seed.notes, "prior cursor kept");
+	});
+}
+
+test("collectAllStreams: notes withheld after a folders HTTP 401 end the run as icloud_auth_failed", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx, reports } = withStreamFailureSpy(
+		makeCtx(
+			makeFakePage([
+				{ stream: "folders", response: { status: 401, json: null } },
+				{ stream: "notes", response: noteQueryResponse() },
+			]),
+			harness,
+			["notes"],
+		),
+	);
+	await assert.rejects(collectAllStreams(ctx), (error: unknown) => {
+		const failure = error as Error & { code?: string; retryable?: boolean };
+		assert.equal(failure.code, "icloud_auth_failed");
+		assert.equal(failure.retryable, false);
+		assert.equal(
+			failure.message,
+			"icloud_auth_failed: iCloud Notes folders query did not return a valid page (HTTP 401); the stream was not checkpointed.",
+		);
+		return true;
+	});
+	assert.deepEqual(reports, []);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+for (const { name, response, reason, hint } of [
+	{
+		name: "HTTP 429",
+		response: { status: 429, json: null },
+		reason: "icloud_rate_limited",
+		hint: { action: "retry_by_runtime", retryable: true },
+	},
+	{
+		name: "HTTP 503",
+		response: { status: 503, json: null },
+		reason: "icloud_http_error",
+		hint: { action: "retry_by_runtime", retryable: true },
+	},
+	{
+		name: "HTTP 404",
+		response: { status: 404, json: null },
+		reason: "icloud_http_error",
+		hint: { action: "retry_on_connector_upgrade", retryable: false },
+	},
+	{
+		name: "an unrecognized 200 body",
+		response: { status: 200, json: { unexpected: true } },
+		reason: "icloud_invalid_query_response",
+		hint: { action: "retry_on_connector_upgrade", retryable: false },
+	},
+]) {
+	test(`collectAllStreams: a notes query with ${name} is a reported stream failure with the connector's hint`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx, reports } = withStreamFailureSpy(
+			makeCtx(
+				makeFakePage([
+					{ stream: "folders", response: folderQueryResponse() },
+					{ stream: "notes", response },
+				]),
+				harness,
+				["notes"],
+			),
+		);
+		await collectAllStreams(ctx);
+		const status = response.status === 200 ? 200 : response.status;
+		assert.deepEqual(reports, [
+			{
+				stream: "notes",
+				message: `iCloud Notes notes query did not return a valid page (HTTP ${String(status)}); the stream was not checkpointed.`,
+				options: {
+					recoveryHint: hint,
+					diagnostics: {
+						source_reason: reason,
+						page_count: 1,
+						rows_seen: 0,
+						source_rows_seen: 0,
+						note_rows_seen: 0,
+						deleted_note_rows: 0,
+						intentional_exclusions: 0,
+					},
+				},
+			},
+		]);
+		assert.equal(
+			harness.protocolMessages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "inventory_not_proven_complete",
+			),
+			false,
+			"a failed read is not an unproven enumeration",
+		);
+	});
+}
