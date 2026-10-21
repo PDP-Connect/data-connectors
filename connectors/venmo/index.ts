@@ -81,6 +81,7 @@ import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fi
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
 	API_BASE,
+	normalizeVenmoDate,
 	profileRecord,
 	transactionRecord,
 	userRecord,
@@ -606,7 +607,7 @@ export async function collectAllStreams(
 		if (truncated) {
 			nextLatestSeenAt =
 				typeof priorLatestSeenAt === "string" || priorLatestSeenAt === null
-					? priorLatestSeenAt
+					? normalizeVenmoDate(priorLatestSeenAt)
 					: null;
 		}
 		await emit({
