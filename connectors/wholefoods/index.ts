@@ -610,7 +610,9 @@ async function lookupNutritionForProduct(
 			} else if (searchStatus !== null && searchStatus >= 400) {
 				sourceOutcome = "error";
 			} else {
-				const productUrls = parseWholeFoodsSearchResultDoms(searchHtml);
+				const productUrls = [
+					...new Set(parseWholeFoodsSearchResultDoms(searchHtml)),
+				];
 				if (productUrls.length) {
 					for (const productUrl of productUrls) {
 						const resolvedUrl = new URL(productUrl, WHOLE_FOODS_ORIGIN);
@@ -649,7 +651,7 @@ async function lookupNutritionForProduct(
 										.trim()
 								: "";
 							const sameUpc = Boolean(
-								candidate?.upc && facts?.upc && candidate.upc === facts.upc,
+								candidate?.upc && facts?.upc && sameGtin(candidate.upc, facts.upc),
 							);
 							const sameName = Boolean(
 								actualName && expectedName && actualName === expectedName,

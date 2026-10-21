@@ -2315,3 +2315,63 @@ test("a detail page that shows the requested order id is accepted", async () => 
 		["orders", "order_items"],
 	);
 });
+
+function nutritionSite(searchPages: string[]): Page {
+	let current = "";
+	let currentUrl = "";
+	return {
+		content: () => Promise.resolve(current),
+		goto: (url: string) => {
+			currentUrl = url;
+			const parsed = new URL(url);
+			if (parsed.hostname === "www.wholefoodsmarket.com") {
+				current = "<html><body>No matching products</body></html>";
+			} else if (parsed.pathname.startsWith("/dp/")) {
+				current = AMAZON_UPC_PAGE;
+			} else if (parsed.pathname.includes("search")) {
+				const pageNum = Number(parsed.searchParams.get("page") ?? "1");
+				current = searchPages[pageNum - 1] ?? "";
+			} else {
+				current = ordersWithIdentity(
+					parsed.searchParams.get("orderID") ?? "",
+					DETAIL_HTML,
+				);
+			}
+			return Promise.resolve(null);
+		},
+		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
+		url: () => currentUrl,
+	} as unknown as Page;
+}
+
+test("collectOrders emits no nutrition row for a product whose lookup finds no nutrients", async () => {
+	const restore = stubUsda([usdaApple({ foodNutrients: [] })]);
+	try {
+		const { harness } = await runCollectOrders(
+			nutritionSite([ONE_ROW_SEARCH]),
+			["orders", "nutrition"],
+		);
+		assert.deepEqual(
+			harness.emitted.map((r) => r.stream),
+			["orders"],
+		);
+	} finally {
+		restore();
+	}
+});
+
+test("collectOrders emits the nutrition row when the lookup reads the core panel", async () => {
+	const restore = stubUsda([usdaApple({ foodNutrients: usdaCoreNutrients })]);
+	try {
+		const { harness } = await runCollectOrders(
+			nutritionSite([ONE_ROW_SEARCH]),
+			["nutrition"],
+		);
+		const rows = harness.emitted.filter((r) => r.stream === "nutrition");
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0]?.data.calories, 52);
+		assert.equal(rows[0]?.data.upc, "012345678905");
+	} finally {
+		restore();
+	}
+});
