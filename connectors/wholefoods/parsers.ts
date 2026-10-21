@@ -504,6 +504,16 @@ function renderedFirst<T extends Element = HTMLElement>(
 	return renderedAll<T>(root, selector)[0] ?? null;
 }
 
+/** Text the markup shows, including only rendered descendants. */
+function renderedTextOf(el: Element | null | undefined): string {
+	if (!el || !isRendered(el)) return "";
+	const copy = el.cloneNode(true) as Element;
+	for (const child of [...copy.querySelectorAll("*")]) {
+		if (!isRendered(child)) child.remove();
+	}
+	return textOf(copy);
+}
+
 /**
  * True when an order-search page with no result rows shows the source's own
  * empty-state renderer: a rendered empty-orders element, or an order count or
@@ -1061,8 +1071,6 @@ function parseJsonLdScripts(document: Document): unknown[] {
 /** Headings that name a part of a product page, not a product. */
 const SECTION_HEADING_RE =
 	/^(?:nutrition(?:\s+(?:facts|information|info))?|ingredients?|allergens?|contains|details|product details|description|about(?: this item)?|highlights)\s*:?$/i;
-/** `compareDocumentPosition` bit: the argument follows the element. */
-const FOLLOWS = 4;
 const PRODUCT_HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
 const PANEL_LABEL_SELECTOR = "h2, h3, h4, span, div";
 
@@ -1080,7 +1088,7 @@ function panelLabelsOf(document: Document): Element[] {
 
 /** The panel's text from its label to its structural end. */
 function panelTextFrom(container: Element): string {
-	const text = textOf(container);
+	const text = renderedTextOf(container);
 	const headingAt = text.search(NUTRITION_HEADING_RE);
 	return cutPanelEnd(headingAt === -1 ? text : text.slice(headingAt));
 }
@@ -1111,32 +1119,32 @@ function panelContainer(label: Element, labels: readonly Element[]): Element {
 
 /** Where the page shows a panel or a detail: the smallest rendered element
  *  that holds it and a product heading decides (see `RenderedPanel.scope`).
- *  Inside its own container only a heading before its label counts: one
- *  after it ("Serving size") is part of it. */
+ *  The last product heading before the label owns it, including when product
+ *  sections are siblings rather than wrapped in separate containers. */
 function scopeOf(
 	container: Element,
 	label: Element,
 	mainHeading: Element | null,
 ): RenderedPanel["scope"] {
 	for (let node: Element | null = container; node; node = node.parentElement) {
-		const headings = renderedAll(node, PRODUCT_HEADING_SELECTOR).filter(
-			(heading) => {
-				const text = textOf(heading).trim();
-				return (
-					text !== "" &&
-					!NUTRITION_HEADING_RE.test(text) &&
-					!SECTION_HEADING_RE.test(text) &&
-					!(
-						container.contains(heading) &&
-						(heading.compareDocumentPosition(label) & FOLLOWS) === 0
-					)
-				);
-			},
-		);
+		// linkedom's compareDocumentPosition misorders some nested siblings.
+		// Read document order directly, stopping before this label.
+		const elements = [node, ...node.querySelectorAll("*")];
+		const beforeLabel = elements.slice(0, elements.indexOf(label));
+		const headings = beforeLabel.filter((heading) => {
+			if (!heading.matches(PRODUCT_HEADING_SELECTOR) || !isRendered(heading))
+				return false;
+			const section = heading.closest("aside, article, section");
+			if (section && !section.contains(label)) return false;
+			const text = renderedTextOf(heading).trim();
+			return (
+				text !== "" &&
+				!NUTRITION_HEADING_RE.test(text) &&
+				!SECTION_HEADING_RE.test(text)
+			);
+		});
 		if (headings.length > 0) {
-			return mainHeading !== null && node.contains(mainHeading)
-				? "main_heading"
-				: "other_heading";
+			return headings.at(-1) === mainHeading ? "main_heading" : "other_heading";
 		}
 	}
 	return "no_heading";
@@ -1225,7 +1233,7 @@ function scopedDetails(
 	mainHeading: Element | null,
 ): ScopedDetail[] {
 	const fieldOf = (el: Element) =>
-		DETAIL_SECTIONS.find(([, re]) => re.test(textOf(el).trim()))?.[0];
+		DETAIL_SECTIONS.find(([, re]) => re.test(renderedTextOf(el).trim()))?.[0];
 	const labelled = renderedAll(document, PANEL_LABEL_SELECTOR).filter(fieldOf);
 	// The innermost label only: a wrapper whose text starts with the label is
 	// not the label.
@@ -1233,18 +1241,20 @@ function scopedDetails(
 		(el) => !labelled.some((other) => other !== el && el.contains(other)),
 	);
 	const sections = labels.flatMap((el) => {
-		const label = textOf(el).trim();
+		const label = renderedTextOf(el).trim();
 		const field = fieldOf(el);
 		if (!field) return [];
 		const text =
-			textOf(el.nextElementSibling).trim() ||
-			textOf(el.parentElement?.querySelector("p, div:last-child")).trim();
+			renderedTextOf(el.nextElementSibling).trim() ||
+			renderedTextOf(
+				el.parentElement?.querySelector("p, div:last-child"),
+			).trim();
 		return text && text !== label
 			? [{ field, text, scope: scopeOf(el, el, mainHeading) }]
 			: [];
 	});
 	const badges = renderedAll(document, BADGE_SELECTOR).flatMap((el) => {
-		const text = textOf(el).trim();
+		const text = renderedTextOf(el).trim();
 		return BADGE_RE.test(text)
 			? [
 					{

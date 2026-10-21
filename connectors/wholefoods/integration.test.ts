@@ -3184,6 +3184,57 @@ test("N1: the bound product's own details are kept next to a recommendation's", 
 	assert.deepEqual(outcome.facts.highlights, []);
 });
 
+test("N1: sibling recommendation headings cannot lend details or a panel to the main product", async () => {
+	const outcomes = await Promise.all(
+		[APPLES_PANEL, ""].map((mainPanel) =>
+			typedLookup(
+				site8(AMAZON_APPLES_NO_PANEL, {
+					"/product/apples": `<html><body><h1>Apples</h1>${mainPanel}<h2>Recommended Pears</h2><div><h3>Ingredients</h3><p>peanuts</p></div><span class="badge">Vegan</span>${PEPPERS_PANEL}</body></html>`,
+				}),
+				"Apples",
+			),
+		),
+	);
+	for (const [index, outcome] of outcomes.entries()) {
+		if (index === 0) {
+			assert.equal(outcome.status, "matched");
+			if (outcome.status !== "matched") continue;
+			assert.equal(outcome.facts.calories, 52);
+			assert.equal(outcome.facts.ingredients, null);
+			assert.deepEqual(outcome.facts.highlights, []);
+		} else {
+			assert.notEqual(outcome.status, "matched");
+		}
+	}
+});
+
+test("N1: a heading in an earlier recommendation section does not hide the main panel", async () => {
+	const outcome = await typedLookup(
+		site8(AMAZON_APPLES_NO_PANEL, {
+			"/product/apples": `<html><body><h1>Apples</h1>${RECOMMENDED_PEARS_DETAILS}${APPLES_PANEL}</body></html>`,
+		}),
+		"Apples",
+	);
+	assert.equal(outcome.status, "matched");
+	if (outcome.status !== "matched") return;
+	assert.equal(outcome.facts.calories, 52);
+	assert.equal(outcome.facts.ingredients, null);
+});
+
+test("N1: a visible detail label does not release hidden detail text", async () => {
+	const outcome = await typedLookup(
+		site8(AMAZON_APPLES_NO_PANEL, {
+			"/product/apples": `<html><body><h1>Apples</h1>${APPLES_PANEL}<div><h3>Ingredients</h3><p hidden>peanuts</p></div><div><h3>Allergens</h3><p><span hidden>Peanuts</span></p></div><span class="badge"><span hidden>Vegan</span></span></body></html>`,
+		}),
+		"Apples",
+	);
+	assert.equal(outcome.status, "matched");
+	if (outcome.status !== "matched") return;
+	assert.equal(outcome.facts.ingredients, null);
+	assert.equal(outcome.facts.allergens, null);
+	assert.deepEqual(outcome.facts.highlights, []);
+});
+
 test("N2: a script or hidden 'No results' text is not the source's empty state", async () => {
 	const outcomes = await Promise.all(
 		[
