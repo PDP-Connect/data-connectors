@@ -21,16 +21,11 @@ jobs:
       - name: Install contract tooling dependencies
         run: npm ci
 
-      - name: Check frozen historical scope, fixture, and artifact contracts
-        run: npm run historical-contract:check
-
       - name: Check packed library manifest projection
         run: npm run polyfill-library-metadata:check
 
-      - name: Test historical artifact contracts
-        run: npm run historical-contract:test
-      - name: Test the legacy artifact release lane
-        run: npm run release-index:test
+      - name: Test the retained Oura artifact and connector brand icons
+        run: npm run oura-retention:test
 
       - name: Test installer artifact contracts
         run: npm run installer:test

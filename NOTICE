@@ -13,7 +13,7 @@ the products and companies a connector integrates with; their use implies no
 sponsorship, affiliation, or endorsement by the mark holder.
 
 A connector manifest with no legitimately available brand mark should not
-carry an invented or unofficial logo. Consumers of this package's
-`connector-index.json` render a deterministic monogram (the connector's
+carry an invented or unofficial logo. Consumers of the Collection Profile
+catalog render a deterministic monogram (the connector's
 initial(s) and a color derived from its name) as the correct default for
 that case — this is a normal, first-class fallback, not an error state.

@@ -11,7 +11,7 @@ npm ci
 npm run verify --workspace @pdpp/polyfill-connectors
 npm test --workspace @pdpp/polyfill-connectors
 npm run connector-implementation-index:check
-npm run historical-contract:check
+npm run oura-retention:test
 ```
 
 The package's `npm run pack-install-run` builds a tarball, installs it in an isolated project, and imports every remaining library export. `scripts/build-connector-oci-artifact.mjs` bundles an individual root connector into an OCI artifact. The [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) covers source, manifest, and fixture review.
@@ -20,11 +20,9 @@ The package's `npm run pack-install-run` builds a tarball, installs it in an iso
 
 Collection Profiles are published as individually versioned, signed OCI artifacts. The source manifest at `connectors/<key>/manifest.json` owns its version and runtime bindings. The root [`connector-implementation-index.json`](connector-implementation-index.json) is generated from these implementations; `npm run connector-implementation-index:check` verifies it.
 
-The legacy Playwright source, runner, and registry have been retired. [`scope-catalog.json`](scope-catalog.json), [`SCOPES.md`](SCOPES.md), [`connector-index.json`](connector-index.json), and [`fixture-index.json`](fixture-index.json) remain as historical public contracts. They are frozen along with the schemas and fixtures they reference. `npm run historical-contract:check` verifies their bytes and references. Do not regenerate them from the new Collection Profile manifests or reuse their legacy scope IDs for raw connector streams.
+The repository no longer contains the legacy connector tarballs, frozen scope and fixture indexes, or their hand-dispatched signing and release workflow. The Oura legacy artifact remains under `artifacts/oura-playwright/` until F2. Existing GitHub release assets are separate; this change does not modify them. `npm run oura-retention:test` keeps the retained artifact's collection behavior covered.
 
-Vana Desktop installs those historical artifacts from the signed `connectors-latest` GitHub release, verified against the Sigstore identity of `.github/workflows/publish-connector-release-index.yml` on `main`. That workflow is dispatched by hand: it builds a release copy of the frozen index (`scripts/build-connector-release-index.mjs`), signs it and every committed tarball (`scripts/sign-connector-release.mjs`), and publishes both to `connectors-<sha12>` and `connectors-latest`. Merging an artifact does not reach a Desktop until the lane runs.
-
-The root layout changes the private `@pdpp/polyfill-connectors` workspace API: connector implementations, manifest discovery, source-dependent registries, and the local device exporter are no longer shipped in its tarball. Consumers of the previous package must migrate those imports before repinning. The existing data-connect tarball pin and signed legacy artifacts are separate release inputs; changing this source tree does not establish replacement Desktop projections by itself.
+The root layout changes the private `@pdpp/polyfill-connectors` workspace API: connector implementations, manifest discovery, source-dependent registries, and the local device exporter are no longer shipped in its tarball. Consumers of the previous package must migrate those imports before repinning. This source change does not modify artifacts already published to GitHub Releases.
 
 ## Further references
 

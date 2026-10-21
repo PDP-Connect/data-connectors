@@ -1,6 +1,6 @@
 # Connector hard cutover: contract decisions
 
-Status: lead decisions for the cutover integration branch. The per-scope mapping is in [`capability-map.json`](capability-map.json). A lane that finds evidence against a decision must stop and file a contract-change request in its report. It must not invent a local answer.
+Historical plan from the September 2026 cutover. The repository has since removed the frozen legacy catalogs and release lane. The Oura legacy artifact remains until F2. Use the live manifest and publication checks for current PDPP connector work; this document records the decisions and constraints that preceded artifact removal.
 
 Base: `main` at `20bba85`.
 

@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 
 const root = join(dirname(new URL(import.meta.url).pathname), "..");
+const PINNED_ARCHIVE = join(
+  root,
+  "artifacts/oura-playwright/oura-playwright-3.1.2.tgz",
+);
 // The newest committed oura-playwright source directory, so a new version is
 // covered the moment its directory lands beside the tarball.
 const OURA_VERSION = readdirSync(join(root, "artifacts/oura-playwright"), { withFileTypes: true })
@@ -15,6 +19,10 @@ const OURA_VERSION = readdirSync(join(root, "artifacts/oura-playwright"), { with
   .map((entry) => entry.name.replace("oura-playwright-", ""))
   .sort((a, b) => { const [x, y] = [a, b].map((v) => v.split(".").map(Number)); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2]; })
   .at(-1);
+test("retains the Oura archive used by legacy clients until F2", () => {
+  assert.equal(existsSync(PINNED_ARCHIVE), true);
+});
+
 const script = readFileSync(
   join(root, `artifacts/oura-playwright/oura-playwright-${OURA_VERSION}/script.js`),
   "utf8",
