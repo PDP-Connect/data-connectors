@@ -831,7 +831,7 @@ type ParentOutcome =
 	/**
 	 * Absent from a fully read inventory and not found by sessions.get. The
 	 * chat looks deleted, but deletion is never inferred: its pending gap is
-	 * left untouched for the host, and nothing about it is emitted this run.
+	 * emitted again (not resolved) and counted as a gap key this run.
 	 */
 	| { kind: "absent" }
 	/** No honest parent record could be emitted this run. */
@@ -860,8 +860,9 @@ class ParentsBlocked extends StreamFailure {
  * The conversation record of a chat the inventory did not list, read with
  * sessions.get and emitted before its messages. `absentFromCompleteInventory`
  * says this run read both views of sessions.list to their end without the
- * chat: only then is a sessions.get not-found "absent" (left pending, not
- * emitted) instead of a blocked parent that fails the stream.
+ * chat: only then is a sessions.get not-found "absent" (its pending gap is
+ * re-emitted, never resolved) instead of a blocked parent that fails the
+ * stream.
  */
 async function parentFromSessionsGet(
 	ctx: MuseCtx,
@@ -975,9 +976,31 @@ async function hydrateChats(
 			? await beforeChat(sessionId)
 			: { kind: "emitted" };
 		if (parent.kind === "absent") {
-			// Never resolved without a full history read: the gap stays pending
-			// with the host, and the chat is not a required key this run.
+			// Never resolved without a full history read (deletion is never
+			// inferred): the still-failing gap is emitted again and accounted
+			// for as a gap key. Protocol rule 4 ("Every key in gapKeys needs a
+			// DETAIL_GAP in this same run. Including an item whose gap was
+			// already pending from an earlier run and still fails now: emit the
+			// gap again") and Collection Profile 5.6 (a gap key is accounted by
+			// a matching DETAIL_GAP for the same stream, key and parent
+			// boundary). Only a chat with a pending gap reaches here, and that
+			// gap was recorded by a run that emitted the chat's conversation
+			// record before it; 5.6 asks for the gap and coverage, not for the
+			// parent record again, so the re-emitted gap refers to that parent.
 			absent.add(sessionId);
+			await emitDetailGap(ctx, {
+				stream: MESSAGES,
+				parentStream: CONVERSATIONS,
+				recordKey: sessionId,
+				reason: "temporary_unavailable",
+				locator: { kind: "muse.chat_history", chat_id: sessionId },
+				error: {
+					class: "muse_chat_not_found",
+					message:
+						"the chat is in no chat list view and sessions.get does not find it",
+				},
+			});
+			gaps.push(sessionId);
 			continue;
 		}
 		if (parent.kind === "blocked") {
@@ -1009,14 +1032,14 @@ async function hydrateChats(
 			count: absent.size,
 		});
 		await ctx.progress(
-			`${absent.size} earlier-unread Muse ${absent.size === 1 ? "chat was" : "chats were"} not found; ${absent.size === 1 ? "it stays" : "they stay"} pending and nothing was resolved`,
+			`${absent.size} earlier-unread Muse ${absent.size === 1 ? "chat was" : "chats were"} not found; ${absent.size === 1 ? "its gap stays" : "their gaps stay"} pending and nothing was resolved`,
 			{ stream: MESSAGES, count: absent.size },
 		);
 	}
 	await emitDetailCoverage(ctx, {
 		stream: MESSAGES,
 		stateStream: CONVERSATIONS,
-		requiredKeys: required.filter((id) => !absent.has(id)),
+		requiredKeys: required,
 		hydratedKeys: hydrated,
 		gapKeys: gaps,
 	});
@@ -1084,7 +1107,7 @@ export async function runChatStreams(
 	//   for the run (see ParentsBlocked); its gap stays pending. A gap is
 	//   never resolved without a full history read of that chat; deletion is
 	//   never inferred, even for a chat absent from both fully read views
-	//   and not found by sessions.get (it is left pending, not emitted).
+	//   and not found by sessions.get (its pending gap is emitted again).
 	if (wantMessages && !wantConversations) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
@@ -1176,7 +1199,7 @@ export async function runChatStreams(
 			// Retry earlier gaps first, then every chat that changed. A gapped
 			// chat the inventory did not list gets its parent from sessions.get
 			// (it may have moved between the two views during the walk); it is
-			// left pending (never resolved) when that also does not find it.
+			// re-gapped (never resolved) when that also does not find it.
 			const required = [
 				...[...pending.keys()].filter((id) => !changedIds.has(id)),
 				...changed,

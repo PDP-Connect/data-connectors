@@ -446,14 +446,22 @@ test("the next run reads only chats that changed, plus pending gaps", async () =
 		],
 	);
 	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
-	assert.deepEqual(cov?.required_keys, [MAIN_CHAT]);
+	assert.deepEqual(cov?.required_keys, [
+		"11111111-1111-4111-8111-111111111111",
+		MAIN_CHAT,
+	]);
+	assert.deepEqual(cov?.gap_keys, ["11111111-1111-4111-8111-111111111111"]);
 	// Round 9: the gapped chat is absent from both fully read views and
 	// sessions.get does not find it. Deletion is never inferred: its gap is
 	// not resolved (no DETAIL_GAP_RECOVERED without a full history read), and
 	// with no parent record nothing about it is emitted, so it stays pending.
 	assert.ok(calls.some((c) => c.method === "sessions.get"));
 	assert.equal(h.of("DETAIL_GAP_RECOVERED").length, 0);
-	assert.equal(h.of("DETAIL_GAP").length, 0);
+	// Round 10: its still-failing gap is re-emitted and accounted for.
+	assert.deepEqual(
+		h.of("DETAIL_GAP").map((x) => [x.m.record_key, x.m.reason]),
+		[["11111111-1111-4111-8111-111111111111", "temporary_unavailable"]],
+	);
 	assert.equal(
 		calls.some(
 			(c) =>
@@ -1831,13 +1839,21 @@ test("round 9: DETAIL_GAP_RECOVERED is emitted only after a full history read", 
 		],
 	});
 	await collectMuseWith(h.ctx, gateway);
-	// Only the chat read in full is recovered; the absent one stays pending
-	// and is not a coverage key.
+	// Only the chat read in full is recovered; the absent one gets its gap
+	// re-emitted (round 10) and is a required and gap key of the coverage.
 	assert.deepEqual(
 		h.of("DETAIL_GAP_RECOVERED").map((x) => x.m.gap_id),
 		["g-side"],
 	);
-	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
-	assert.equal((cov?.required_keys as string[]).includes(absent), false);
+	const gaps = h.of("DETAIL_GAP", "messages");
+	assert.deepEqual(
+		gaps.map((x) => [x.m.record_key, (x.m.detail_locator as Json).kind]),
+		[[absent, "muse.chat_history"]],
+	);
+	const covMsg = h.of("DETAIL_COVERAGE", "messages")[0];
+	const cov = covMsg?.m;
+	assert.ok((covMsg?.index ?? -1) > (gaps[0]?.index ?? Infinity));
+	assert.ok((cov?.required_keys as string[]).includes(absent));
+	assert.deepEqual(cov?.gap_keys, [absent]);
 	assert.equal(h.states("conversations").length, 1);
 });
