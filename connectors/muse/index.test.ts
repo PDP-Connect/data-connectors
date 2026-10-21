@@ -24,6 +24,8 @@ import {
 	LOCATE_GATEWAY_SCRIPT,
 	type MuseCtx,
 	type MuseGateway,
+	MuseRpcError,
+	museReadiness,
 	nextMessagesWatermark,
 	pageGateway,
 	READ_METHODS,
@@ -406,11 +408,13 @@ test("the next run reads only chats updated after the watermark, plus pending ga
 		calls
 			.filter((c) => c.method === "chat.history")
 			.map((c) => c.params.session_id),
-		["11111111-1111-4111-8111-111111111111", MAIN_CHAT],
+		["11111111-1111-4111-8111-111111111111", SIDE_CHAT, MAIN_CHAT],
 	);
 	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
+	// SIDE_CHAT sits exactly at the watermark: it is read again (finding 3).
 	assert.deepEqual(cov?.required_keys, [
 		"11111111-1111-4111-8111-111111111111",
+		SIDE_CHAT,
 		MAIN_CHAT,
 	]);
 	assert.deepEqual(
@@ -489,15 +493,17 @@ test("activities page back with before until a page with no days", async () => {
 	const h = harness({ streams: ["activities"] });
 	await collectMuseWith(h.ctx, gateway);
 	assert.equal(h.records("activities").length, ACTIVITY_LIMIT + 5);
-	assert.equal(params.length, 3);
+	assert.equal(params.length, 4);
 	assert.deepEqual(params[0], {
 		limit: 30,
 		before: null,
 		capabilities: ["ACTIVITY_FEED_GOALS", "ACTIVITY_FEED_PEER_CONVERSATIONS"],
 	});
-	// The oldest timestamp string, unchanged.
-	assert.equal(params[1]?.before, "2026-01-31T11:31:00Z");
-	assert.equal(params[2]?.before, "2026-01-31T11:26:00Z");
+	// One second past the oldest time, so tied activities come back; then,
+	// when a page brings nothing new, the oldest timestamp string unchanged.
+	assert.equal(params[1]?.before, "2026-01-31T11:31:01Z");
+	assert.equal(params[2]?.before, "2026-01-31T11:26:01Z");
+	assert.equal(params[3]?.before, "2026-01-31T11:26:00Z");
 	assert.deepEqual(h.states("activities")[0], {
 		version: 1,
 		newest_timestamp: "2026-01-31T12:00:00.000Z",
@@ -582,7 +588,8 @@ test("the file library pages by offset until has_more is false", async () => {
 	});
 	const h = harness({ streams: ["files"] });
 	await collectMuseWith(h.ctx, gateway);
-	assert.deepEqual(offsets, [0, LIBRARY_LIMIT]);
+	// Two pages, so a second complete walk confirms the same files.
+	assert.deepEqual(offsets, [0, LIBRARY_LIMIT, 0, LIBRARY_LIMIT]);
 	assert.equal(h.records("files").length, LIBRARY_LIMIT + 2);
 	assert.equal(h.states("files").length, 1);
 });
@@ -760,4 +767,396 @@ test("a gateway error becomes a retryable muse_rpc_failed error", async () => {
 		pageGateway(page).call("tasks.list", {}),
 		/muse_rpc_failed: tasks\.list error: boom/,
 	);
+});
+
+// ─── Review round 4 ─────────────────────────────────────────────────────
+
+test("finding 1: a chat list that says it has more is not checkpointed as complete", async () => {
+	for (const extra of [
+		{ has_more: true },
+		{ next_cursor: "c2" },
+		{ pagination: { has_next_page: true } },
+	]) {
+		const { gateway } = fakeGateway({
+			"sessions.list": (p) =>
+				p.view === "archived"
+					? fixture("sessions-archived")
+					: { ...SESSIONS, ...extra },
+		});
+		const h = harness({ streams: ["conversations", "messages"] });
+		await collectMuseWith(h.ctx, gateway);
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["conversations", "messages"],
+			JSON.stringify(extra),
+		);
+		assert.equal(h.states("conversations").length, 0);
+		assert.equal(h.of("DETAIL_COVERAGE").length, 0);
+	}
+	// The observed terminal shape (no paging fields) stays complete.
+	const { gateway } = fakeGateway({
+		"sessions.list": (p) =>
+			p.view === "archived"
+				? fixture("sessions-archived")
+				: { ...SESSIONS, has_more: false, next_cursor: null },
+	});
+	const h = harness({ streams: ["conversations"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.states("conversations").length, 1);
+});
+
+/** The history of `chat` with its first event changed by `edit`. */
+function historyWith(chat: string, edit: (e: Json) => void): Json {
+	const h = historyFor(chat);
+	const first = (h.chat_events as Json[])[0];
+	assert.ok(first);
+	edit(first);
+	return h;
+}
+
+test("finding 2: a message still being generated is not stored and its chat is a gap", async () => {
+	for (const edit of [
+		(e: Json) => {
+			(e.payload as Json).status = "running";
+		},
+		(e: Json) => {
+			e.display_text_ready = false;
+		},
+	]) {
+		let partialId = "";
+		const { gateway } = fakeGateway({
+			"chat.history": (p) => {
+				if (p.session_id !== SIDE_CHAT) return historyFor(String(p.session_id));
+				const h = historyWith(SIDE_CHAT, edit);
+				partialId = String((h.chat_events as Json[])[0]?.message_id);
+				return h;
+			},
+		});
+		const h = harness({ streams: ["conversations", "messages"] });
+		await collectMuseWith(h.ctx, gateway);
+		assert.ok(partialId);
+		assert.equal(
+			h.records("messages").some((r) => r.id === partialId),
+			false,
+		);
+		assert.equal(h.records("messages").length, 5);
+		assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
+			SIDE_CHAT,
+		]);
+		assert.deepEqual(
+			h.states("conversations")[0]?.messages_read_through_ms,
+			null,
+		);
+	}
+});
+
+test("finding 3: a chat whose update time equals the watermark is read again", async () => {
+	const { gateway, calls } = fakeGateway();
+	const h = harness({
+		streams: ["conversations", "messages"],
+		state: {
+			conversations: { version: 1, messages_read_through_ms: 1792612428000 },
+		},
+	});
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(
+		calls
+			.filter((c) => c.method === "chat.history")
+			.map((c) => c.params.session_id),
+		[MAIN_CHAT],
+	);
+	assert.equal(
+		nextMessagesWatermark(10, [{ id: "a", updatedMs: 10 }], new Set()),
+		10,
+	);
+});
+
+test("finding 4: unsafe text never reaches a checkpoint", async () => {
+	// A message body: the message is not stored, its chat is a gap.
+	{
+		const { gateway } = fakeGateway({
+			"chat.history": (p) =>
+				p.session_id === SIDE_CHAT
+					? historyWith(SIDE_CHAT, (e) => {
+							e.display_text = "bad\u0000body";
+						})
+					: historyFor(String(p.session_id)),
+		});
+		const h = harness({ streams: ["conversations", "messages"] });
+		await collectMuseWith(h.ctx, gateway);
+		assert.equal(h.records("messages").length, 5);
+		assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
+			SIDE_CHAT,
+		]);
+		assert.deepEqual(
+			h.states("conversations")[0]?.messages_read_through_ms,
+			null,
+		);
+	}
+	// A memory file body: not stored, the stream fails.
+	{
+		const { gateway } = fakeGateway({
+			"fs.raw": (p) => ({
+				__blob_text: p.path === "USER.md" ? "bad\u0000" : "fine",
+			}),
+		});
+		const h = harness({ streams: ["memory_files"] });
+		await collectMuseWith(h.ctx, gateway);
+		assert.deepEqual(
+			h.records("memory_files").map((r) => r.id),
+			["MEMORY.md"],
+		);
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["memory_files"],
+		);
+		assert.equal(h.states("memory_files").length, 0);
+	}
+	// Any other free-text field: the stream is not checkpointed.
+	{
+		const { gateway } = fakeGateway({
+			"sessions.list": (p) => {
+				if (p.view === "archived") return fixture("sessions-archived");
+				const s = fixture("sessions");
+				const first = (s.sessions as Json[])[0];
+				assert.ok(first);
+				first.title = "bad\u0001title";
+				return s;
+			},
+		});
+		const h = harness({ streams: ["conversations"] });
+		await collectMuseWith(h.ctx, gateway);
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["conversations"],
+		);
+		assert.equal(h.states("conversations").length, 0);
+	}
+});
+
+test("finding 5: activities that share the page boundary time are all read", async () => {
+	const day = (fixture("activity").days as Json[])[0] ?? {};
+	const template = ((day.activities as Json[]) ?? [])[0] ?? {};
+	const at = (i: number) =>
+		new Date(Date.UTC(2026, 0, 31, 12, 0, 0) - Math.min(i, 29) * 60_000)
+			.toISOString()
+			.replace(".000Z", "Z");
+	// 35 activities: the 30th through the 35th share one timestamp.
+	const all = Array.from({ length: ACTIVITY_LIMIT + 5 }, (_, i) => ({
+		...template,
+		message_id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+		timestamp: at(i),
+	}));
+	const { gateway } = fakeGateway({
+		// Strictly before, newest first, `limit` at a time.
+		"activity.list": (p) => {
+			const before =
+				typeof p.before === "string" ? Date.parse(p.before) : Infinity;
+			const page = all
+				.filter((a) => Date.parse(a.timestamp) < before)
+				.slice(0, Number(p.limit));
+			return page.length === 0
+				? { days: [] }
+				: { days: [{ ...day, count: page.length, activities: page }] };
+		},
+	});
+	const h = harness({ streams: ["activities"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.records("activities").length, ACTIVITY_LIMIT + 5);
+	assert.equal(h.states("activities").length, 1);
+});
+
+test("finding 5: more tied activities than one page holds fail instead of skipping", async () => {
+	const day = (fixture("activity").days as Json[])[0] ?? {};
+	const template = ((day.activities as Json[]) ?? [])[0] ?? {};
+	const all = Array.from({ length: ACTIVITY_LIMIT * 2 }, (_, i) => ({
+		...template,
+		message_id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+		timestamp: "2026-01-31T12:00:00Z",
+	}));
+	const { gateway } = fakeGateway({
+		"activity.list": (p) => {
+			const before =
+				typeof p.before === "string" ? Date.parse(p.before) : Infinity;
+			const page = all
+				.filter((a) => Date.parse(a.timestamp) < before)
+				.slice(0, Number(p.limit));
+			return page.length === 0
+				? { days: [] }
+				: { days: [{ ...day, count: page.length, activities: page }] };
+		},
+	});
+	const h = harness({ streams: ["activities"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["activities"],
+	);
+	assert.equal(h.states("activities").length, 0);
+});
+
+test("finding 6: a library that changes between pages is walked again until it is stable", async () => {
+	const template = (fixture("library-recents").entries as Json[])[0] ?? {};
+	const file = (name: string) => ({ ...template, name, path: `notes/${name}` });
+	let list = Array.from({ length: LIBRARY_LIMIT + 1 }, (_, i) =>
+		file(`f${i}.md`),
+	);
+	let calls = 0;
+	const { gateway } = fakeGateway({
+		"fs.library": (p) => {
+			calls += 1;
+			const start = Number(p.offset);
+			const entries = list.slice(start, start + Number(p.limit));
+			const answer = {
+				entries,
+				total: list.length,
+				has_more: start + entries.length < list.length,
+			};
+			// After the first page: f0 is deleted and c.md moves to the top.
+			if (calls === 1) list = [file("c.md"), ...list.slice(1)];
+			return answer;
+		},
+	});
+	const h = harness({ streams: ["files"] });
+	await collectMuseWith(h.ctx, gateway);
+	const paths = h.records("files").map((r) => r.path);
+	assert.ok(paths.includes("notes/c.md"));
+	assert.equal(paths.includes("notes/f0.md"), false);
+	assert.equal(new Set(paths).size, paths.length);
+	assert.equal(h.states("files").length, 1);
+});
+
+test("finding 7: a pending gap that is read completely is reported recovered", async () => {
+	const { gateway } = fakeGateway();
+	const h = harness({
+		streams: ["conversations", "messages"],
+		detailGaps: [
+			{
+				gap_id: "g1",
+				lease_id: "l1",
+				status: "pending",
+				stream: "messages",
+				record_key: SIDE_CHAT,
+				detail_locator: { kind: "muse.chat_history", chat_id: SIDE_CHAT },
+			},
+		],
+	});
+	await collectMuseWith(h.ctx, gateway);
+	const recovered = h.of("DETAIL_GAP_RECOVERED");
+	assert.equal(recovered.length, 1);
+	assert.deepEqual(recovered[0]?.m, {
+		type: "DETAIL_GAP_RECOVERED",
+		reference_only: true,
+		gap_id: "g1",
+		lease_id: "l1",
+		stream: "messages",
+		record_key: SIDE_CHAT,
+	});
+	const lastSideMessage = Math.max(
+		...h
+			.of("RECORD", "messages")
+			.filter((x) => (x.m.data as Json).session_id === SIDE_CHAT)
+			.map((x) => x.index),
+	);
+	assert.ok((recovered[0]?.index ?? -1) > lastSideMessage);
+});
+
+test("finding 9: a rate limit or outage stops the chat walk instead of gapping every chat", async () => {
+	for (const code of ["rate_limited", "server_error", "timeout"]) {
+		const { gateway, calls } = fakeGateway({
+			"chat.history": () => {
+				throw new MuseRpcError(code, `muse_rpc_failed: chat.history ${code}`);
+			},
+		});
+		const h = harness({ streams: ["conversations", "messages"] });
+		await collectMuseWith(h.ctx, gateway);
+		assert.equal(
+			calls.filter((c) => c.method === "chat.history").length,
+			1,
+			code,
+		);
+		assert.equal(h.of("DETAIL_GAP").length, 0, code);
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["conversations", "messages"],
+			code,
+		);
+	}
+	// A chat the gateway cannot find is a per-chat gap; the walk goes on.
+	const { gateway } = fakeGateway({
+		"chat.history": (p) => {
+			if (p.session_id === SIDE_CHAT)
+				throw new MuseRpcError(
+					"not_found",
+					"muse_rpc_failed: chat.history not_found",
+				);
+			return historyFor(String(p.session_id));
+		},
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
+		SIDE_CHAT,
+	]);
+	assert.deepEqual(h.failures, []);
+});
+
+test("finding 9: the page script keeps the gateway's status class", async () => {
+	for (const [error, code] of [
+		[
+			Object.assign(new Error("Too Many Requests"), { status: 429 }),
+			"rate_limited",
+		],
+		[new Error("HTTP 503 Service Unavailable"), "server_error"],
+		[new Error("session not found"), "not_found"],
+		[new Error("boom"), "rpc_error"],
+	] as const) {
+		const page = sandboxPage(() => Promise.reject(error));
+		const answer = JSON.parse(
+			String(await page.evaluate(gatewayCallScript("tasks.list", {}))),
+		) as Json;
+		assert.equal(answer.code, code, error.message);
+	}
+});
+
+test("finding 11: a challenge page is reported as a bot challenge, not a sign-in", async () => {
+	const page = {
+		evaluate: async (script: string): Promise<unknown> => {
+			const sandbox: Record<string, unknown> = {
+				document: {
+					body: {},
+					title: "Just a moment...",
+					querySelector: (sel: string) =>
+						sel.includes("challenge-platform") ? {} : null,
+					querySelectorAll: () => [],
+				},
+				location: { origin: "https://muse.ai" },
+			};
+			sandbox.window = sandbox;
+			return await vm.runInContext(script, vm.createContext(sandbox));
+		},
+	};
+	await assert.rejects(museReadiness(page, 1), (error: Error) => {
+		assert.match(error.message, /muse_bot_challenge/);
+		assert.doesNotMatch(error.message, /muse_auth_failed/);
+		return true;
+	});
+	const plain = {
+		evaluate: async (script: string): Promise<unknown> => {
+			const sandbox: Record<string, unknown> = {
+				document: {
+					body: {},
+					title: "Muse",
+					querySelector: () => null,
+					querySelectorAll: () => [],
+				},
+				location: { origin: "https://muse.ai" },
+			};
+			sandbox.window = sandbox;
+			return await vm.runInContext(script, vm.createContext(sandbox));
+		},
+	};
+	await assert.rejects(museReadiness(plain, 1), /muse_auth_failed/);
 });

@@ -124,6 +124,38 @@ export type MuseSession = z.infer<typeof sessionSchema>;
 
 const sessionsResponseSchema = z.object({ sessions: z.array(z.unknown()) });
 
+const continuationSchema = z.object({
+	has_more: z.unknown().optional(),
+	next_cursor: z.unknown().optional(),
+	cursor: z.unknown().optional(),
+	next_page_token: z.unknown().optional(),
+	pagination: z
+		.object({ has_next_page: z.unknown().optional() })
+		.nullable()
+		.optional(),
+});
+
+/**
+ * Whether a sessions.list answer says the list goes on. The app never pages
+ * this list (its answer is observed as the whole list, with no paging
+ * field), so any continuation signal means this answer is not the whole
+ * list, and the connector has no observed way to read the rest.
+ */
+export function sessionsListContinues(raw: unknown): boolean {
+	const parsed = continuationSchema.safeParse(raw);
+	if (!parsed.success) return false;
+	const c = parsed.data;
+	const present = (v: unknown) =>
+		v !== undefined && v !== null && v !== false && v !== "";
+	return (
+		present(c.has_more) ||
+		present(c.next_cursor) ||
+		present(c.cursor) ||
+		present(c.next_page_token) ||
+		present(c.pagination?.has_next_page)
+	);
+}
+
 /** Every session of one sessions.list answer, or null when any is unreadable. */
 export function parseSessions(raw: unknown): MuseSession[] | null {
 	const parsed = sessionsResponseSchema.safeParse(raw);
@@ -164,6 +196,7 @@ const chatEventSchema = z.object({
 	occurred_at_ms: z.number(),
 	role: optString,
 	display_text: optString,
+	display_text_ready: optBool,
 	reply_to_message_id: optString,
 	visibility: optString,
 	seq: optNumber,
@@ -171,11 +204,40 @@ const chatEventSchema = z.object({
 		.object({
 			content: z.unknown().optional(),
 			source: optString,
+			status: optString,
+			display_text_ready: optBool,
 		})
 		.nullable()
 		.optional(),
 });
 export type MuseChatEvent = z.infer<typeof chatEventSchema>;
+
+/** Message statuses after which the text no longer changes ("completed" is observed live). */
+const FINAL_STATUSES = new Set([
+	"completed",
+	"complete",
+	"done",
+	"failed",
+	"error",
+	"cancelled",
+	"canceled",
+	"interrupted",
+	"stopped",
+	"aborted",
+]);
+
+/**
+ * Whether an event's text is final. A display text the source marks not
+ * ready, or a status that is not a known final one (such as "running"), is
+ * still being generated and must not be stored under its append-only id.
+ * No status at all (user messages) is final.
+ */
+export function isFinalEvent(e: MuseChatEvent): boolean {
+	if (e.display_text_ready === false || e.payload?.display_text_ready === false)
+		return false;
+	const status = e.payload?.status;
+	return status === undefined || status === null || FINAL_STATUSES.has(status);
+}
 
 const historyResponseSchema = z.object({
 	chat_events: z.array(z.unknown()),

@@ -49,6 +49,7 @@ import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/conn
 import {
 	type BrowserCollectContext,
 	buildFullScanCoverageMessage,
+	createConnectorFailure,
 	type EnsureSessionArgs,
 	emitDetailCoverage,
 	emitDetailGap,
@@ -68,7 +69,9 @@ import {
 	buildMessageRecord,
 	buildScheduledTaskRecord,
 	isConnectedApp,
+	isFinalEvent,
 	MEMORY_FILE_NAMES,
+	type MuseLibraryEntry,
 	type MuseSession,
 	memoryFileEntries,
 	parseActivities,
@@ -80,6 +83,7 @@ import {
 	parseRawText,
 	parseSchedules,
 	parseSessions,
+	sessionsListContinues,
 	TextTally,
 	uniqueEvents,
 	zonedIsoToIso,
@@ -107,6 +111,8 @@ export const ACTIVITY_LIMIT = 30;
 const MAX_ACTIVITY_PAGES = 500;
 export const LIBRARY_LIMIT = 48;
 const MAX_LIBRARY_PAGES = 500;
+/** Complete library walks before a library that keeps changing fails the stream. */
+const LIBRARY_WALKS = 3;
 /** What the web app sends with activity.list. */
 export const ACTIVITY_CAPABILITIES = [
 	"ACTIVITY_FEED_GOALS",
@@ -119,6 +125,7 @@ const GATEWAY_WAIT_ATTEMPTS = 20;
 const GATEWAY_WAIT_MS = 1_500;
 const RPC_TIMEOUT_MS = 60_000;
 const CURSOR_VERSION = 1;
+const FRACTION_RE = /\.\d+/;
 
 type Page = BrowserCollectContext["page"];
 
@@ -251,7 +258,15 @@ export function gatewayCallScript(
     return JSON.stringify({ ok: true, value: value === undefined ? null : value });
   } catch (e) {
     const text = String((e && e.message) || e || "error");
-    return JSON.stringify({ ok: false, code: /timeout/i.test(text) ? "timeout" : /not connected/i.test(text) ? "not_ready" : "rpc_error", message: text.slice(0, 120) });
+    const raw = e && (e.status !== undefined ? e.status : e.statusCode !== undefined ? e.statusCode : e.code);
+    const status = Number.isInteger(Number(raw)) ? Number(raw) : 0;
+    const code = /timeout|timed out/i.test(text) ? "timeout"
+      : /not connected/i.test(text) ? "not_ready"
+      : status === 429 || /\b429\b|rate.?limit|too many requests/i.test(text) ? "rate_limited"
+      : status >= 500 || /\b5dd\b|service unavailable|internal server error|bad gateway/i.test(text) ? "server_error"
+      : status === 404 || /\b404\b|not found|no such/i.test(text) ? "not_found"
+      : "rpc_error";
+    return JSON.stringify({ ok: false, code, message: text.slice(0, 120) });
   } finally {
     if (timer !== null) clearTimeout(timer);
   }
@@ -299,8 +314,11 @@ async function locateGateway(page: ScriptRunner): Promise<boolean> {
 }
 
 /** Wait for the app to finish loading its gateway client. */
-async function waitForGateway(page: ScriptRunner): Promise<boolean> {
-	for (let attempt = 0; attempt < GATEWAY_WAIT_ATTEMPTS; attempt++) {
+async function waitForGateway(
+	page: ScriptRunner,
+	attempts = GATEWAY_WAIT_ATTEMPTS,
+): Promise<boolean> {
+	for (let attempt = 0; attempt < attempts; attempt++) {
 		if (await locateGateway(page)) return true;
 		await politeDelay(GATEWAY_WAIT_MS);
 	}
@@ -338,7 +356,7 @@ export function pageGateway(page: ScriptRunner): MuseGateway {
 			const detail = answer.message ? `: ${answer.message}` : "";
 			throw new MuseRpcError(
 				code,
-				`muse_rpc_failed: ${method} ${code === "timeout" ? "timeout" : "error"}${detail}`,
+				`muse_rpc_failed: ${method} ${code === "rpc_error" ? "error" : code}${detail}`,
 			);
 		},
 	};
@@ -480,6 +498,18 @@ async function failStreams(
 	}
 }
 
+function unsafeTextCount(tally: TextTally, stream: string): number {
+	return tally.byStream.get(stream) ?? 0;
+}
+
+/** Text replaced with null cannot be checkpointed as collected; not retryable. */
+function unsafeTextFailure(tally: TextTally, stream: string): StreamFailure {
+	return new StreamFailure(
+		`${unsafeTextCount(tally, stream)} ${stream} text values hold characters that cannot be stored; they were imported as empty and ${stream} is not checkpointed as complete.`,
+		false,
+	);
+}
+
 async function emitBuilt(
 	ctx: MuseCtx,
 	tally: TextTally,
@@ -538,6 +568,13 @@ async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
 				`Muse's ${archivedView ? "archived " : ""}chat list came back in a shape the connector cannot read; nothing was checkpointed.`,
 			);
 		}
+		// The observed answer is the whole list with no paging field; one that
+		// says more chats follow cannot be read to its end.
+		if (sessionsListContinues(raw)) {
+			throw new StreamFailure(
+				`Muse's ${archivedView ? "archived " : ""}chat list says more chats follow than one answer holds; nothing was checkpointed.`,
+			);
+		}
 		for (const session of sessions) {
 			if (seen.has(session.session_id)) continue;
 			seen.add(session.session_id);
@@ -546,6 +583,12 @@ async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
 	}
 	return out;
 }
+
+/** Gateway error codes that concern one item, not the gateway as a whole. */
+const PER_ITEM_RPC_CODES: ReadonlySet<string> = new Set([
+	"not_found",
+	"rpc_error",
+]);
 
 type HistoryOutcome =
 	| { kind: "hydrated" }
@@ -564,6 +607,23 @@ async function hydrateChat(
 ): Promise<HistoryOutcome> {
 	const seen = new Set<string>();
 	let cursor: number | null = null;
+	// Set when an event was left out; the chat is then a gap, never hydrated.
+	let notFinal = 0;
+	let unsafe = 0;
+	const finish = (): HistoryOutcome =>
+		notFinal > 0
+			? {
+					kind: "gap",
+					errorClass: "muse_history_not_final",
+					message: "a message was still being generated",
+				}
+			: unsafe > 0
+				? {
+						kind: "gap",
+						errorClass: "muse_history_unsafe_text",
+						message: "a message body is not storable text",
+					}
+				: { kind: "hydrated" };
 	for (let pageIndex = 0; pageIndex < MAX_HISTORY_PAGES; pageIndex++) {
 		const params: Record<string, unknown> = {
 			limit: HISTORY_LIMIT,
@@ -574,11 +634,17 @@ async function hydrateChat(
 		try {
 			raw = await call(gateway, "chat.history", params);
 		} catch (error) {
-			if (isAuthError(error)) throw error;
+			// Only a failure about this chat is a per-chat gap; a timeout, rate
+			// limit or outage stops the walk for a runtime retry.
+			if (
+				!(error instanceof MuseRpcError) ||
+				!PER_ITEM_RPC_CODES.has(error.code)
+			)
+				throw error;
 			return {
 				kind: "gap",
-				errorClass: "muse_history_failed",
-				message: "chat.history failed",
+				errorClass: `muse_history_${error.code}`,
+				message: "chat.history failed for this chat",
 			};
 		}
 		const page = parseHistory(raw);
@@ -594,14 +660,18 @@ async function hydrateChat(
 		);
 		for (const event of fresh) {
 			seen.add(event.message_id);
-			await emitBuilt(
-				ctx,
-				tally,
-				MESSAGES,
-				buildMessageRecord(event, sessionId),
-			);
+			if (!isFinalEvent(event)) {
+				notFinal += 1;
+				continue;
+			}
+			const built = buildMessageRecord(event, sessionId);
+			if (built.replaced > 0) {
+				unsafe += 1;
+				continue;
+			}
+			await emitBuilt(ctx, tally, MESSAGES, built);
 		}
-		if (!page.hasMore) return { kind: "hydrated" }; // the source's end signal
+		if (!page.hasMore) return finish(); // the source's end signal
 		if (fresh.length === 0) {
 			return {
 				kind: "gap",
@@ -636,16 +706,33 @@ async function hydrateChat(
 	};
 }
 
+/** A message gap the host carried over from an earlier run. */
+interface PendingGap {
+	gapId: string;
+	leaseId?: string;
+}
+
 /** Message gaps the host carried over from earlier runs, by chat id. */
-function pendingMessageGaps(ctx: MuseCtx): string[] {
-	const keys = new Set<string>();
+function pendingMessageGaps(ctx: MuseCtx): Map<string, PendingGap[]> {
+	const byChat = new Map<string, PendingGap[]>();
 	for (const gap of ctx.detailGaps ?? []) {
 		if (gap.stream !== MESSAGES) continue;
-		const key = gap.record_key;
-		if (typeof key === "string" && key !== "") keys.add(key);
-		else if (typeof key === "number") keys.add(String(key));
+		const raw = gap.record_key;
+		const key =
+			typeof raw === "string"
+				? raw
+				: typeof raw === "number"
+					? String(raw)
+					: "";
+		if (key === "") continue;
+		const list = byChat.get(key) ?? [];
+		list.push({
+			gapId: gap.gap_id,
+			...(gap.lease_id ? { leaseId: gap.lease_id } : {}),
+		});
+		byChat.set(key, list);
 	}
-	return [...keys];
+	return byChat;
 }
 
 /**
@@ -658,6 +745,7 @@ async function hydrateChats(
 	gateway: MuseGateway,
 	tally: TextTally,
 	required: readonly string[],
+	pending: ReadonlyMap<string, readonly PendingGap[]> = new Map(),
 ): Promise<Set<string>> {
 	const hydrated: string[] = [];
 	const gaps: string[] = [];
@@ -668,6 +756,17 @@ async function hydrateChats(
 		const outcome = await hydrateChat(ctx, gateway, tally, sessionId);
 		if (outcome.kind === "hydrated") {
 			hydrated.push(sessionId);
+			// Read completely: resolve the gaps an earlier run left for it.
+			for (const gap of pending.get(sessionId) ?? []) {
+				await ctx.emit({
+					type: "DETAIL_GAP_RECOVERED",
+					reference_only: true,
+					gap_id: gap.gapId,
+					...(gap.leaseId ? { lease_id: gap.leaseId } : {}),
+					stream: MESSAGES,
+					record_key: sessionId,
+				});
+			}
 			continue;
 		}
 		await emitDetailGap(ctx, {
@@ -704,7 +803,7 @@ export function nextMessagesWatermark(
 	hydrated: ReadonlySet<string>,
 ): number | null {
 	const fresh = required.filter(
-		(c) => prior === null || c.updatedMs === null || c.updatedMs > prior,
+		(c) => prior === null || c.updatedMs === null || c.updatedMs >= prior,
 	);
 	// A chat without an update time cannot be placed below any watermark.
 	if (fresh.some((c) => c.updatedMs === null && !hydrated.has(c.id))) {
@@ -732,10 +831,17 @@ export async function runChatStreams(
 	const wantConversations = ctx.requested.has(CONVERSATIONS);
 	const wantMessages = ctx.requested.has(MESSAGES);
 	if (!(wantConversations || wantMessages)) return;
-	const pending = wantMessages ? pendingMessageGaps(ctx) : [];
+	const pending = wantMessages
+		? pendingMessageGaps(ctx)
+		: new Map<string, PendingGap[]>();
 
 	if (ctx.recoveryOnly) {
-		if (pending.length > 0) await hydrateChats(ctx, gateway, tally, pending);
+		if (pending.size === 0) return;
+		try {
+			await hydrateChats(ctx, gateway, tally, [...pending.keys()], pending);
+		} catch (error) {
+			await failStreams(ctx, [MESSAGES], error);
+		}
 		return;
 	}
 
@@ -778,17 +884,30 @@ export async function runChatStreams(
 					? session.updated_at_ms
 					: null,
 		}));
+		// Update times are whole seconds: a chat updated in the same second
+		// as the watermark may have changed after it was read, so it is
+		// read again (at or after, not only after).
 		const changed = chats.filter(
-			(c) => prior === null || c.updatedMs === null || c.updatedMs > prior,
+			(c) => prior === null || c.updatedMs === null || c.updatedMs >= prior,
 		);
 		changed.sort((a, b) => (a.updatedMs ?? 0) - (b.updatedMs ?? 0));
 		const changedIds = new Set(changed.map((c) => c.id));
 		// Retry earlier gaps first, then every chat changed since the watermark.
 		const required = [
-			...pending.filter((id) => !changedIds.has(id)),
+			...[...pending.keys()].filter((id) => !changedIds.has(id)),
 			...changed.map((c) => c.id),
 		];
-		const hydrated = await hydrateChats(ctx, gateway, tally, required);
+		let hydrated: Set<string>;
+		try {
+			hydrated = await hydrateChats(ctx, gateway, tally, required, pending);
+		} catch (error) {
+			await failStreams(
+				ctx,
+				[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
+				error,
+			);
+			return;
+		}
 		// A time-ranged run reads only part of each chat: it moves no watermark.
 		through = ctx.requested.get(MESSAGES)?.time_range
 			? prior
@@ -796,6 +915,14 @@ export async function runChatStreams(
 	}
 
 	if (wantConversations) {
+		if (unsafeTextCount(tally, CONVERSATIONS) > 0) {
+			await failStreams(
+				ctx,
+				[CONVERSATIONS],
+				unsafeTextFailure(tally, CONVERSATIONS),
+			);
+			return;
+		}
 		await ctx.emit(buildFullScanCoverageMessage(CONVERSATIONS, listed.length));
 		const cursor: ConversationsCursor = {
 			version: CURSOR_VERSION,
@@ -807,6 +934,41 @@ export async function runChatStreams(
 			cursor: { ...cursor },
 		});
 	}
+}
+
+/** One second after a zoned timestamp, in the same shape (`Z`, whole seconds unless the source had a fraction). */
+function oneSecondAfter(raw: string, iso: string): string {
+	const shifted = new Date(Date.parse(iso) + 1000).toISOString();
+	return FRACTION_RE.test(raw) ? shifted : shifted.replace(".000Z", "Z");
+}
+
+/**
+ * The `before` for the next activity.list page, or null when the walk cannot
+ * go on without skipping activities.
+ *
+ * The app pages with `before` = the oldest timestamp on the page, which
+ * leaves out any activity sharing that time beyond the page. So the
+ * connector first asks for everything up to one second after the oldest
+ * time: the activities tied at that time come back (already read ones are
+ * deduplicated) together with older ones. Only when such a page brings
+ * nothing new does it step strictly past that time, as the app does. A page
+ * filled entirely by one timestamp cannot prove every tied activity was
+ * read, so the walk fails instead.
+ */
+export function nextActivityCursor(input: {
+	oldestRaw: string;
+	oldestIso: string;
+	freshCount: number;
+	tiedFullPage: boolean;
+	previous: string | null;
+}): string | null {
+	if (input.tiedFullPage) return null;
+	const inclusive = oneSecondAfter(input.oldestRaw, input.oldestIso);
+	if (input.freshCount > 0 && input.previous !== inclusive) return inclusive;
+	// Nothing new up to one second after the oldest time: every activity at
+	// that time has been read. Step strictly past it, unless already there.
+	if (input.previous === input.oldestRaw) return null;
+	return input.oldestRaw;
 }
 
 /** activities cursor: the newest activity time a complete walk has emitted. */
@@ -832,7 +994,6 @@ export async function runActivities(
 	const seen = new Set<string>();
 	let newest = prior;
 	let before: string | null = null;
-	let beforeIso: string | null = null;
 	try {
 		for (let pageIndex = 0; ; pageIndex++) {
 			if (pageIndex >= MAX_ACTIVITY_PAGES) {
@@ -856,18 +1017,14 @@ export async function runActivities(
 			}
 			// The source's end: a page with no days, so no time to page back from.
 			if (items.length === 0) break;
+			// A page with nothing new is expected after an inclusive request (see
+			// nextActivityCursor), which decides whether the walk can go on.
 			const fresh = items.filter((a) => !seen.has(activityId(a)));
-			if (fresh.length === 0) {
-				throw new StreamFailure(
-					"Muse's activity log returned the same page again; older activity was not read and nothing was checkpointed.",
-				);
-			}
 			for (const a of fresh) {
 				seen.add(activityId(a));
 				await emitBuilt(ctx, tally, ACTIVITIES, buildActivityRecord(a));
 			}
-			// The oldest activity across all days of the page; its timestamp
-			// string, unchanged, is the next before.
+			// The oldest activity across all days of the page.
 			let oldestRaw: string | null = null;
 			let oldestIso: string | null = null;
 			for (const a of items) {
@@ -882,14 +1039,25 @@ export async function runActivities(
 			if (oldestRaw === null || oldestIso === null) break;
 			// Reached activity a complete earlier walk already emitted.
 			if (stopAt !== null && oldestIso <= stopAt) break;
-			if (beforeIso !== null && oldestIso >= beforeIso) {
+			const tiedFullPage =
+				items.length >= ACTIVITY_LIMIT &&
+				items.every((a) => zonedIsoToIso(a.timestamp) === oldestIso);
+			const next = nextActivityCursor({
+				oldestRaw,
+				oldestIso,
+				freshCount: fresh.length,
+				tiedFullPage,
+				previous: before,
+			});
+			if (next === null) {
 				throw new StreamFailure(
-					"Muse's activity log did not page back to older activity; nothing was checkpointed.",
+					"Muse's activity log has more activities at one time than a page holds, or did not page back; nothing was checkpointed.",
 				);
 			}
-			before = oldestRaw;
-			beforeIso = oldestIso;
+			before = next;
 		}
+		if (unsafeTextCount(tally, ACTIVITIES) > 0)
+			throw unsafeTextFailure(tally, ACTIVITIES);
 	} catch (error) {
 		await failStreams(ctx, [ACTIVITIES], error);
 		return;
@@ -907,9 +1075,12 @@ export async function runActivities(
 /** Emit a full-inventory stream's STATE and its self-coverage. */
 async function closeFullInventory(
 	ctx: MuseCtx,
+	tally: TextTally,
 	stream: string,
 	considered: number,
 ): Promise<void> {
+	if (unsafeTextCount(tally, stream) > 0)
+		throw unsafeTextFailure(tally, stream);
 	await ctx.emit(buildFullScanCoverageMessage(stream, considered));
 	await ctx.emit({
 		type: "STATE",
@@ -948,7 +1119,7 @@ export async function runGoals(
 				false,
 			);
 		}
-		await closeFullInventory(ctx, GOALS, seen.size);
+		await closeFullInventory(ctx, tally, GOALS, seen.size);
 	} catch (error) {
 		await failStreams(ctx, [GOALS], error);
 	}
@@ -974,7 +1145,7 @@ export async function runScheduledTasks(
 			seen.add(s.id);
 			await emitBuilt(ctx, tally, SCHEDULED_TASKS, buildScheduledTaskRecord(s));
 		}
-		await closeFullInventory(ctx, SCHEDULED_TASKS, seen.size);
+		await closeFullInventory(ctx, tally, SCHEDULED_TASKS, seen.size);
 	} catch (error) {
 		await failStreams(ctx, [SCHEDULED_TASKS], error);
 	}
@@ -1012,22 +1183,84 @@ export async function runMemoryFiles(
 				failed += 1;
 				continue;
 			}
-			await emitBuilt(
-				ctx,
-				tally,
-				MEMORY_FILES,
-				buildMemoryFileRecord(entry, text),
-			);
+			const built = buildMemoryFileRecord(entry, text);
+			// The body is the record: an unstorable one is not stored as null.
+			if (built.replaced > 0) {
+				failed += 1;
+				continue;
+			}
+			await emitBuilt(ctx, tally, MEMORY_FILES, built);
 		}
 		if (failed > 0) {
 			throw new StreamFailure(
-				`${failed} of ${present.length} Muse memory files could not be read; the memory files are not checkpointed.`,
+				`${failed} of ${present.length} Muse memory files could not be read or are not storable text; the memory files are not checkpointed.`,
 			);
 		}
-		await closeFullInventory(ctx, MEMORY_FILES, present.length);
+		await closeFullInventory(ctx, tally, MEMORY_FILES, present.length);
 	} catch (error) {
 		await failStreams(ctx, [MEMORY_FILES], error);
 	}
+}
+
+interface LibraryWalk {
+	entries: MuseLibraryEntry[];
+	pages: number;
+}
+
+/** One complete offset walk of the recents library, to its has_more:false page. */
+async function walkLibrary(gateway: MuseGateway): Promise<LibraryWalk> {
+	const entries: MuseLibraryEntry[] = [];
+	const seen = new Set<string>();
+	let total: number | null = null;
+	let offset = 0;
+	for (let pageIndex = 0; ; pageIndex++) {
+		if (pageIndex >= MAX_LIBRARY_PAGES) {
+			throw new StreamFailure(
+				`Muse's file library is longer than ${MAX_LIBRARY_PAGES} pages; nothing was checkpointed.`,
+				false,
+			);
+		}
+		const page = parseLibrary(
+			await call(gateway, "fs.library", {
+				preset: "recents",
+				limit: LIBRARY_LIMIT,
+				offset,
+			}),
+		);
+		if (page === null) {
+			throw new StreamFailure(
+				"Muse's file library came back in a shape the connector cannot read; nothing was checkpointed.",
+			);
+		}
+		total = page.total ?? total;
+		const fresh = page.entries.filter((e) => !seen.has(e.path));
+		for (const entry of fresh) {
+			seen.add(entry.path);
+			entries.push(entry);
+		}
+		if (!page.hasMore) {
+			if (total !== null && total !== entries.length) {
+				throw new StreamFailure(
+					`Muse's file library reported ${total} files but listed ${entries.length}; it changed while it was read, and nothing was checkpointed.`,
+				);
+			}
+			return { entries, pages: pageIndex + 1 };
+		}
+		if (page.entries.length === 0 || fresh.length === 0) {
+			throw new StreamFailure(
+				"Muse's file library said it had more files but returned no new ones; nothing was checkpointed.",
+			);
+		}
+		offset += page.entries.length;
+	}
+}
+
+/** Path and modified time of every file: what two walks must agree on. */
+function libraryMembership(walk: LibraryWalk): string {
+	return walk.entries
+		.map((e) => `${e.path}\u0000${e.modified_ms ?? ""}`)
+		.sort()
+		.join("\u0001");
 }
 
 export async function runFiles(
@@ -1038,52 +1271,34 @@ export async function runFiles(
 	if (!ctx.requested.has(FILES)) return;
 	await ctx.progress("Reading the file library", { stream: FILES });
 	try {
-		const seen = new Set<string>();
-		let total: number | null = null;
-		let offset = 0;
-		let unsafePaths = 0;
-		for (let pageIndex = 0; ; pageIndex++) {
-			if (pageIndex >= MAX_LIBRARY_PAGES) {
-				throw new StreamFailure(
-					`Muse's file library is longer than ${MAX_LIBRARY_PAGES} pages; nothing was checkpointed.`,
-					false,
-				);
+		// The library is ordered by recency and paged by offset, so a file
+		// changed during a walk can shift the pages under it. A one-page walk
+		// is one answer; a longer one counts only when the next complete walk
+		// lists the same files.
+		let accepted: LibraryWalk | null = null;
+		let previous: string | null = null;
+		for (let attempt = 0; attempt < LIBRARY_WALKS; attempt++) {
+			const walk = await walkLibrary(gateway);
+			const membership = libraryMembership(walk);
+			if (walk.pages === 1 || membership === previous) {
+				accepted = walk;
+				break;
 			}
-			const page = parseLibrary(
-				await call(gateway, "fs.library", {
-					preset: "recents",
-					limit: LIBRARY_LIMIT,
-					offset,
-				}),
-			);
-			if (page === null) {
-				throw new StreamFailure(
-					"Muse's file library came back in a shape the connector cannot read; nothing was checkpointed.",
-				);
-			}
-			total = page.total ?? total;
-			const fresh = page.entries.filter((e) => !seen.has(e.path));
-			for (const entry of fresh) {
-				seen.add(entry.path);
-				const built = buildFileRecord(entry);
-				if (built === null) {
-					unsafePaths += 1;
-					continue;
-				}
-				await emitBuilt(ctx, tally, FILES, built);
-			}
-			if (!page.hasMore) break; // the source's end signal
-			if (page.entries.length === 0 || fresh.length === 0) {
-				throw new StreamFailure(
-					"Muse's file library said it had more files but returned no new ones; nothing was checkpointed.",
-				);
-			}
-			offset += page.entries.length;
+			previous = membership;
 		}
-		if (total !== null && total !== seen.size) {
+		if (accepted === null) {
 			throw new StreamFailure(
-				`Muse's file library reported ${total} files but listed ${seen.size}; it changed while it was read, and nothing was checkpointed.`,
+				`Muse's file library changed during each of ${LIBRARY_WALKS} reads; nothing was checkpointed.`,
 			);
+		}
+		let unsafePaths = 0;
+		for (const entry of accepted.entries) {
+			const built = buildFileRecord(entry);
+			if (built === null) {
+				unsafePaths += 1;
+				continue;
+			}
+			await emitBuilt(ctx, tally, FILES, built);
 		}
 		if (unsafePaths > 0) {
 			throw new StreamFailure(
@@ -1091,7 +1306,7 @@ export async function runFiles(
 				false,
 			);
 		}
-		await closeFullInventory(ctx, FILES, seen.size);
+		await closeFullInventory(ctx, tally, FILES, accepted.entries.length);
 	} catch (error) {
 		await failStreams(ctx, [FILES], error);
 	}
@@ -1119,7 +1334,7 @@ export async function runConnectedApps(
 			seen.add(c.id);
 			await emitBuilt(ctx, tally, CONNECTED_APPS, buildConnectedAppRecord(c));
 		}
-		await closeFullInventory(ctx, CONNECTED_APPS, seen.size);
+		await closeFullInventory(ctx, tally, CONNECTED_APPS, seen.size);
 	} catch (error) {
 		await failStreams(ctx, [CONNECTED_APPS], error);
 	}
@@ -1151,13 +1366,70 @@ export async function collectMuseWith(
 	}
 }
 
+/**
+ * Signals that the page is a bot challenge or an interstitial, not the app:
+ * Cloudflare's "Just a moment" / "Attention Required" pages, its challenge
+ * scripts, Turnstile frames and challenge containers, or a bare 5xx page.
+ * The same markers as packages/polyfill-connectors/src/platform-probes.ts,
+ * read with one page script so it also runs on the mobile host.
+ */
+export const CHALLENGE_SCRIPT = `(() => {
+  try {
+    const signals = [];
+    const title = String(document.title || "");
+    if (/^just a moment/i.test(title)) signals.push("title_just_a_moment");
+    if (/^attention required/i.test(title)) signals.push("title_attention_required");
+    if (/^(?:5\\d\\d\\b|service unavailable|bad gateway|gateway time-?out)/i.test(title)) signals.push("title_http_5xx");
+    if (document.querySelector('script[src*="challenge-platform"]')) signals.push("challenge_platform_script");
+    if (document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]')) signals.push("turnstile_iframe");
+    if (document.querySelector("#cf-challenge-running, #challenge-running, #cf-error-details, #challenge-form")) signals.push("cf_challenge_dom");
+    return signals;
+  } catch (e) {
+    return [];
+  }
+})()`;
+
+async function challengeSignals(page: ScriptRunner): Promise<string[]> {
+	try {
+		const value = await page.evaluate(CHALLENGE_SCRIPT);
+		return Array.isArray(value)
+			? value.filter((v): v is string => typeof v === "string")
+			: [];
+	} catch {
+		return [];
+	}
+}
+
+function challengeFailure(signals: readonly string[]): Error {
+	return createConnectorFailure(
+		"muse_bot_challenge",
+		`muse_bot_challenge: muse.ai served a bot challenge or interstitial instead of the app (signals: ${signals.join(", ")}); complete it in the browser, then run again`,
+		{ retryable: false },
+	);
+}
+
+/**
+ * Throws unless the page is muse.ai with the app's gateway client ready. A
+ * challenge or interstitial page is reported as such before the missing
+ * client is taken to mean the owner is signed out.
+ */
+export async function museReadiness(
+	page: ScriptRunner,
+	attempts = GATEWAY_WAIT_ATTEMPTS,
+): Promise<void> {
+	const early = await challengeSignals(page);
+	if (early.length > 0) throw challengeFailure(early);
+	if ((await isOnMuse(page)) && (await waitForGateway(page, attempts))) return;
+	const late = await challengeSignals(page);
+	if (late.length > 0) throw challengeFailure(late);
+	throw authFailure();
+}
+
 export async function collectMuse(ctx: BrowserCollectContext): Promise<void> {
 	if (ctx.requested.size === 0) return;
 	await openMuse(ctx.page);
 	const main = mainWorld(ctx.page);
-	if (!(await isOnMuse(main)) || !(await waitForGateway(main))) {
-		throw authFailure();
-	}
+	await museReadiness(main);
 	await collectMuseWith(ctx, pageGateway(main));
 }
 
