@@ -7631,6 +7631,43 @@ test("recoverServedAttachmentGaps: rejected emission leaves the served gap unrec
 	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"), false);
 });
 
+test("recoverServedAttachmentGaps: a rejected emission re-defers its served gap for this run", async () => {
+	const message = makeServedRecoveryMsg({ attachments: [16], emailId: "abc456", uid: 6001 });
+	const coverage = makeAttachmentDetailCoverage();
+	const harness = makeRecordingEmit();
+	await recoverServedAttachmentGaps(
+		{
+			search: mock.fn(() => Promise.resolve([6001])),
+			fetchOne: mock.fn(() => Promise.resolve(message)),
+		},
+		{
+			attachmentCoverage: coverage,
+			detailGaps: [makeServedRecoveryGap({ gapId: "gap-reject", leaseId: "lease-reject", messageId: "abc456", partIndex: 1 })],
+			emitProtocol: harness.emit,
+			emitRecord: async () => false,
+			hydrateAttachment: async (_message, attachment) => hydratedResult({
+				...attachment,
+				hydration_status: "hydrated",
+				hydration_error: null,
+			}),
+		},
+	);
+	// The host credits a required key only against a gap it settled in this
+	// run. An untouched served gap from an earlier run does not count, so
+	// without a re-deferral this key blocks the messages checkpoint every run.
+	assert.deepEqual(coverage.requiredKeys, ["abc456:1"]);
+	assert.deepEqual(coverage.hydratedKeys, []);
+	assert.deepEqual(coverage.gapKeys, ["abc456:1"]);
+	const gaps = harness.protocolMessages.filter(
+		(m) => m.type === "DETAIL_GAP" && m.stream === "attachments" && m.record_key === "abc456:1",
+	);
+	assert.equal(gaps.length, 1, JSON.stringify(harness.protocolMessages));
+	assert.ok(gaps[0]?.type === "DETAIL_GAP");
+	assert.equal(gaps[0].gap_id, "gap-reject");
+	assert.equal(gaps[0].lease_id, "lease-reject");
+	assert.equal(coverage.localEmitRejected, false);
+});
+
 function realResourceEmitter(requested: Map<string, StreamRequest>, emit: RecordingHarness["emit"]) {
 	const filters = new Map<string, Set<string> | null>();
 	for (const [name, scope] of requested) filters.set(name, resourceSet(scope));
@@ -7963,8 +8000,9 @@ test("production attachment caller restart retains messages checkpoint after loc
 		uid: 321,
 	});
 	const requested = makeRequested(["attachments"]);
+	let gapWritesFail = true;
 	process.stdout.write = ((data: string): boolean => {
-		if (data.includes('"attachment_record_rejected"'))
+		if (gapWritesFail && data.includes('"attachment_record_rejected"'))
 			throw new Error("gap persistence unavailable");
 		try {
 			const m = JSON.parse(data) as EmittedMessage;
@@ -8087,14 +8125,49 @@ test("production attachment caller restart retains messages checkpoint after loc
 			true,
 		);
 		assert.deepEqual(servedRetry.attempted, ["abc123:1"]);
+		// A gap served from an earlier run does not account for this run's
+		// required key, so with no gap write possible the checkpoint is held,
+		// and the run says so.
+		assert.equal(servedRetry.state, undefined);
 		assert.ok(
-			servedRetry.state,
-			"a pending durable gap permits messages progress after rejection",
+			servedRetry.messages.some(
+				(m) =>
+					m.type === "PROGRESS" &&
+					m.stream === "attachments" &&
+					/retry the same messages/.test(String(m.message)),
+			),
+			"a held checkpoint is reported, not silent",
 		);
 		assert.equal(
 			servedRetry.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
 			false,
 		);
+		gapWritesFail = false;
+		const servedRedeferred = await run(
+			{
+				messages: {
+					all_mail: { uidvalidity: 123, uidnext: 1201, forward_uidnext: 1201 },
+					backfill: {
+						uidvalidity: 123,
+						target_uid: 1200,
+						backfilled_through_uid: 1200,
+						completed_at: FROZEN_NOW,
+					},
+				},
+			},
+			true,
+			true,
+		);
+		assert.ok(
+			servedRedeferred.state,
+			"re-deferring the served gap accounts for the key and permits progress",
+		);
+		const redeferral = servedRedeferred.messages.filter(
+			(m) => m.type === "DETAIL_GAP",
+		);
+		assert.equal(redeferral.length, 1);
+		assert.ok(redeferral[0]?.type === "DETAIL_GAP");
+		assert.equal(redeferral[0].gap_id, "already-durable");
 	} finally {
 		process.stdout.write = originalWrite;
 		globalThis.fetch = originalFetch;
@@ -8207,9 +8280,7 @@ for (const rejection of ["schema", "throw"] as const) {
 					uidvalidityNum: 123,
 				},
 			});
-			if (served && rejection === "throw")
-				await assert.rejects(operation, /persistent rejection/);
-			else await operation;
+			await operation;
 			const state = harness.protocolMessages.find(
 				(m) => m.type === "STATE" && m.stream === "attachments",
 			);
@@ -8249,11 +8320,20 @@ for (const rejection of ["schema", "throw"] as const) {
 			retry.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
 			false,
 		);
-		assert.equal(
-			retry.protocolMessages.filter((m) => m.type === "DETAIL_GAP").length,
-			0,
-			"served rejection retains the existing obligation without creating a new gap",
+		const redeferred = retry.protocolMessages.filter(
+			(m) => m.type === "DETAIL_GAP",
 		);
+		assert.equal(
+			redeferred.length,
+			1,
+			"served rejection re-defers its own gap instead of creating a new one",
+		);
+		assert.ok(redeferred[0]?.type === "DETAIL_GAP");
+		assert.equal(redeferred[0].gap_id, "persistent");
+		assert.equal(redeferred[0].lease_id, "retry");
+		assert.deepEqual(redeferred[0].last_error, {
+			class: "attachment_record_rejected",
+		});
 		assert.equal(pending.size, 1);
 		assert.ok(pending.has("abc123:1"));
 	});

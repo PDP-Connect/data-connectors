@@ -946,6 +946,25 @@ export function attachmentOutsideResourceScope(
 	return resources !== null && !resources.has(String(attachment.id));
 }
 
+/**
+ * Say why this run commits no checkpoint: an attachment emission was rejected
+ * and no retry locator could be written, so every cursor that could pass it
+ * is held and the same window replays next run.
+ */
+async function reportAttachmentCheckpointHold(
+	emitFn: (msg: EmittedMessage) => Promise<void>,
+): Promise<void> {
+	gmailDiagnostic("attachment_checkpoint_held", {
+		reason: "attachment_emit_rejected_without_retry_locator",
+	});
+	await emitFn({
+		type: "PROGRESS",
+		stream: "attachments",
+		message:
+			"An attachment could not be saved, so this sync will retry the same messages next time",
+	});
+}
+
 /** Retain retry identity independently of the rejected record's schema. */
 async function emitRejectedAttachmentGap(
 	message: FetchMessageObject,
@@ -2887,14 +2906,45 @@ async function settleServedAttachmentRecoveryAttempt(
 		emitRecord: EmitRecordFn;
 	},
 	state: ServedAttachmentRecoveryState,
+	gap: DetailGapStartEntry,
 	hydration: AttachmentHydrationResult,
 ): Promise<void> {
 	const hydrated = hydration.record;
 	let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
+	let emitFailure: { error: unknown } | undefined;
+	let gapEmitted = false;
 	try {
 		emitted = await deps.emitRecord("attachments", { ...hydrated });
+	} catch (error) {
+		emitFailure = { error };
 	} finally {
+		// The host credits a required key only against a gap it settled in this
+		// run. Leaving the served gap untouched would leave this key unaccounted
+		// on every run, so a rejected emission re-defers the served gap under
+		// its own lease, as a lookup miss does.
+		if (emitted === false) {
+			try {
+				await deps.emitProtocol(
+					buildServedAttachmentRecoveryDeferredGap(
+						gap,
+						"attachment_record_rejected",
+					),
+				);
+				gapEmitted = true;
+			} catch {
+				// A failed protocol write leaves no durable retry obligation.
+			}
+		}
 		if (deps.attachmentCoverage) {
+			if (emitted === false && !gapEmitted) {
+				deps.attachmentCoverage.localEmitRejected = true;
+			}
+			if (
+				gapEmitted &&
+				!deps.attachmentCoverage.gapKeys.includes(hydrated.id)
+			) {
+				deps.attachmentCoverage.gapKeys.push(hydrated.id);
+			}
 			recordAttachmentCoverage(
 				deps.attachmentCoverage,
 				hydrated,
@@ -2903,6 +2953,7 @@ async function settleServedAttachmentRecoveryAttempt(
 			);
 		}
 	}
+	if (emitFailure && !gapEmitted) throw emitFailure.error;
 	if (emitted && hydrated.hydration_status === "hydrated") {
 		const recoveredGaps = findRecoveredAttachmentDetailGaps(
 			deps.detailGaps,
@@ -2942,7 +2993,10 @@ async function settleServedAttachmentRecoveryAttempt(
 
 function buildServedAttachmentRecoveryDeferredGap(
 	gap: DetailGapStartEntry,
-	errorClass: "attachment_lookup_miss" | "run_cap_deferred",
+	errorClass:
+		| "attachment_lookup_miss"
+		| "attachment_record_rejected"
+		| "run_cap_deferred",
 ): EmittedMessage {
 	const locator =
 		gap.detail_locator &&
@@ -3087,7 +3141,7 @@ async function processServedAttachmentRecoveryGap(
 	});
 
 	const hydration = await deps.hydrateAttachment(loadedMessage, attachment);
-	await settleServedAttachmentRecoveryAttempt(deps, state, hydration);
+	await settleServedAttachmentRecoveryAttempt(deps, state, gap, hydration);
 	return false;
 }
 
@@ -3345,7 +3399,10 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 				backfillSummary.failed +
 				backfillSummary.unavailable_skipped,
 		});
-		if (attachmentCoverage.localEmitRejected) return;
+		if (attachmentCoverage.localEmitRejected) {
+			await reportAttachmentCheckpointHold(args.emit);
+			return;
+		}
 		await args.emit({
 			type: "STATE",
 			stream: "attachments",
@@ -4872,7 +4929,10 @@ export async function runAllMailPasses(
 	);
 
 	// Replay both walks if any rejection still lacks an emitted retry locator.
-	if (attachmentCoverage?.localEmitRejected) return;
+	if (attachmentCoverage?.localEmitRejected) {
+		await reportAttachmentCheckpointHold(emit);
+		return;
+	}
 
 	if (messageHistoryRequested && historicalFetchRange) {
 		const historicalPageEndUid = Number(historicalFetchRange.split(":")[1]);
