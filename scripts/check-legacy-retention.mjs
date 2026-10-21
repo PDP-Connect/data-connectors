@@ -56,6 +56,10 @@ export function checkLegacyRetention(directory = root) {
 		assert.ok(!ids.has(fixture.id), "duplicate frozen fixture ID");
 		ids.add(fixture.id);
 		assert.match(fixture.path, /^connectors\/[^/]+\/fixtures\/[^/]+\.json$/);
+		assert.ok(
+			shapes.has(fixture.scope),
+			`${fixture.path} must reference a permanent scope`,
+		);
 		assert.equal(
 			fixture.schemaPath,
 			shapes.get(fixture.scope),

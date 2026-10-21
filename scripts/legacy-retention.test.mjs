@@ -127,3 +127,54 @@ test("schema bytes are owned by the permanent check only", (t) => {
 	checkLegacyRetention(dir);
 	assert.throws(() => checkFrozenLegacyShapes(dir), /frozen bytes/);
 });
+
+test("temporary fixtures must name a known scope even when metadata is repinned", (t) => {
+	const dir = sandbox(t);
+	const index = read(dir, fixtures);
+	delete index.fixtures[0].scope;
+	delete index.fixtures[0].schemaPath;
+	write(dir, fixtures, index);
+	repin(dir, temporaryPins, fixtures);
+	assert.throws(() => checkLegacyRetention(dir), /permanent scope/);
+});
+
+test("temporary check rejects a missing fixture pin", (t) => {
+	const dir = sandbox(t);
+	const pins = read(dir, temporaryPins);
+	delete pins.sha256[read(dir, fixtures).fixtures[0].path];
+	write(dir, temporaryPins, pins);
+	assert.throws(() => checkLegacyRetention(dir), /reference set/);
+});
+
+test("temporary check rejects a changed fixture count", (t) => {
+	const dir = sandbox(t);
+	const pins = read(dir, temporaryPins);
+	pins.fixtureCount++;
+	write(dir, temporaryPins, pins);
+	assert.throws(() => checkLegacyRetention(dir), /fixture count/);
+});
+
+for (const change of ["duplicate ID", "byte size"]) {
+	test(`temporary check rejects repinned fixture ${change}`, (t) => {
+		const dir = sandbox(t);
+		const index = read(dir, fixtures);
+		if (change === "duplicate ID") index.fixtures[1].id = index.fixtures[0].id;
+		else index.fixtures[0].sizeBytes++;
+		write(dir, fixtures, index);
+		repin(dir, temporaryPins, fixtures);
+		assert.throws(
+			() => checkLegacyRetention(dir),
+			change === "duplicate ID" ? /duplicate frozen fixture ID/ : /index size/,
+		);
+	});
+}
+
+test("temporary schema references must still match a changed permanent mapping", (t) => {
+	const dir = sandbox(t);
+	const shapes = read(dir, mapping);
+	const fixture = read(dir, fixtures).fixtures[0];
+	shapes.scopes.find((scope) => scope.id === fixture.scope).schemaPath =
+		"connectors/unknown/schemas/unknown.json";
+	write(dir, mapping, shapes);
+	assert.throws(() => checkLegacyRetention(dir), /permanent schema/);
+});

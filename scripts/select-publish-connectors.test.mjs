@@ -667,3 +667,26 @@ test("allowlist comments, formatting, and row order change no artifact hash", as
     rmSync(repo.dir, { recursive: true, force: true });
   }
 });
+
+for (const [label, path, metadata] of [
+  ["installer version", "packages/connector-installer-core/package.json", { version: "0.2.0" }],
+  ["installer dependency", "packages/connector-installer-core/package.json", { dependencies: { tar: "7.5.22" } }],
+  ["installer engine", "packages/connector-installer-core/package.json", { engines: { node: ">=24" } }],
+  ["polyfill engine", "packages/polyfill-connectors/package.json", { engines: { node: ">=24" } }],
+]) {
+  test(`${label} metadata remains an artifact input requiring a version bump`, async () => {
+    const repo = makeRepo();
+    try {
+      const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+      repo.write(path, JSON.stringify(metadata));
+      const after = repo.commit(`change ${label}`);
+      assert.notEqual(await artifactInputHash({ commit: after, manifest: "oura", cwd: repo.dir }), before);
+      await assert.rejects(
+        () => selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
+        (error) => error instanceof PublishSelectionError && /oura shipped artifact content changed/.test(error.message),
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+}
