@@ -969,7 +969,7 @@ test("collectAllStreams: unreadable mapped fields are reported and veto both str
 					},
 					{
 						field: "text_content",
-						reason: "body_text_unreadable",
+						reason: "body_protobuf_malformed",
 						source_shape: { type: "string", length: 32 },
 					},
 					{
@@ -1763,4 +1763,97 @@ test("iCloud sign-in keeps one Patchright tab and collection reuses the authenti
 	} finally {
 		await browser.close();
 	}
+});
+
+test("collectAllStreams: an undecodable body withholds the row and the checkpoint until a repaired retry re-emits it", async () => {
+	const noteWithBody = (decompressedBody: Buffer) => ({
+		records: [
+			{
+				recordName: "note-body-only",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({
+					TitleEncrypted: { value: b64("Body under repair") },
+					TextDataEncrypted: {
+						value: gzipSync(decompressedBody).toString("base64"),
+					},
+				}),
+			},
+		],
+	});
+	// note_body 2 -> note_document 3 -> rich_text { text as varint, empty metadata }
+	const wrongWireType = Buffer.from([
+		0x12, 0x06, 0x1a, 0x04, 0x10, 0x01, 0x1a, 0x00,
+	]);
+	// Same note: a short run after a long one, in a readable structure.
+	const field = (fieldNumber: number, value: Buffer) =>
+		Buffer.concat([Buffer.from([(fieldNumber << 3) | 2, value.length]), value]);
+	const repaired = field(
+		2,
+		field(
+			3,
+			Buffer.concat([
+				field(2, Buffer.from("First paragraph")),
+				field(2, Buffer.from("hi")),
+			]),
+		),
+	);
+
+	const previous = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([noteQueryResponse()]), previous, ["notes"]),
+	);
+	const previousState = previous.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "notes",
+	);
+	assert.ok(previousState && previousState.type === "STATE");
+	const seed = { notes: previousState.cursor };
+
+	const broken = makeRecordingEmit(validateRecord);
+	const brokenCtx = makeCtx(
+		makeNotePage([noteWithBody(wrongWireType)]),
+		broken,
+		["notes"],
+		seed,
+	);
+	await collectAllStreams(brokenCtx);
+	assert.equal(broken.emitted.length, 0, "an undecodable body emits no row");
+	assert.equal(
+		broken.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+		"an undecodable body vetoes the notes checkpoint",
+	);
+	assert.deepEqual(brokenCtx.state, seed, "the prior cursor stays untouched");
+	const skip = broken.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.deepEqual(
+		(
+			diagnosticField(skip, "field_omissions") as {
+				field: string;
+				reason: string;
+			}[]
+		).map(({ field, reason }) => ({ field, reason })),
+		[{ field: "text_content", reason: "body_text_wrong_wire_type" }],
+	);
+
+	const retry = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([noteWithBody(repaired)]), retry, ["notes"], seed),
+	);
+	assert.deepEqual(
+		retry.emitted.map((record) => ({
+			id: record.data.id,
+			text_content: record.data.text_content,
+		})),
+		[{ id: "note-body-only", text_content: "First paragraph\nhi" }],
+	);
+	assert.ok(
+		retry.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		"a decodable body lets the notes checkpoint advance",
+	);
 });

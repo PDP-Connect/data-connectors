@@ -59,11 +59,10 @@
  * folders stream fetched as a notes projection dependency. A note row is
  * uncovered when a referenced folder does not resolve to a readable name.
  *
- * Note body text (`text_content`) is decoded from the known Apple Notes
- * protobuf structure (`parsers.ts#extractNoteText`) and rendered with the
- * legacy script's paragraph and marker handling when its scan preserves
- * Unicode. Short and Unicode text that the legacy scan omits uses the
- * structured decode.
+ * Note body text (`text_content`) is decoded from the recognized Apple Notes
+ * protobuf structure by `parsers.ts#decodeNoteBody`. Paragraph runs join with
+ * a line feed as in the legacy script. A body that cannot be decoded withholds
+ * the row and records its cause; it never becomes empty text.
  *
  * Synthetic query and parser fixtures cover collection behavior. A live
  * account run is separate and only occurs when a signed-in profile exists.

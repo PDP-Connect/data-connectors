@@ -21,10 +21,10 @@ import {
 	buildFolderRecord,
 	buildNoteRecord,
 	decodeBase64Text,
+	decodeNoteBody,
+	decodeNoteBodyBytes,
 	decompressBytes,
 	epochMsToIso,
-	extractCleanText,
-	extractNoteText,
 	readCloudKitRecordType,
 	readDeletedNote,
 	readFolderRecord,
@@ -93,49 +93,25 @@ test("epochMsToIso: accepts zero and rejects negative, non-finite, or non-number
 	assert.equal(epochMsToIso(undefined), null);
 });
 
-// ─── extractCleanText / extractNoteText (protobuf decode) ──────────────
+// ─── decodeNoteBodyBytes / decodeNoteBody (protobuf decode) ────────────
 
-test("extractCleanText: reads UTF-8 strings from length-delimited protobuf fields", async () => {
+test("decodeNoteBodyBytes: reads UTF-8 strings from length-delimited protobuf fields", async () => {
 	const text = "Grocery list: milk, eggs, bread.";
 	const decompressed = encodeBodyText(text);
-	assert.equal(extractCleanText(decompressed), text);
+	assert.deepEqual(decodeNoteBodyBytes(decompressed), decoded(text));
 });
 
-test("extractCleanText: preserves text that resembles a nested protobuf", async () => {
+test("decodeNoteBodyBytes: preserves text that resembles a nested protobuf", async () => {
 	const body = Buffer.from([
 		0x0a, 0x0c, 0x52, 0x0a, 0x43, 0x61, 0x6c, 0x6c,
 		0x20, 0x41, 0x6c, 0x69, 0x63, 0x65,
 	]);
-	assert.equal(extractCleanText(body), "R\nCall Alice");
+	assert.deepEqual(decodeNoteBodyBytes(body), decoded("R\nCall Alice"));
 });
 
-test("extractCleanText: recurses into the known structural field", async () => {
+test("decodeNoteBodyBytes: recurses into the known structural field", async () => {
 	const body = encodeStructuredBodyText("Nested note");
-	assert.equal(extractCleanText(body), "Nested note");
-});
-
-test("extractCleanText: matches legacy runs across paragraph and marker boundaries", async () => {
-	const cases = [
-		{
-			name: "separate rich-text runs",
-			body: encodeStructuredBodyText(["First paragraph", "Second paragraph"]),
-			expected: "First paragraph\nSecond paragraph",
-		},
-		{
-			name: "inline object-replacement marker",
-			body: encodeStructuredBodyText("\uFFFCPhoto description"),
-			expected: "\uFFFCPhoto description",
-		},
-		{
-			name: "trailing line feed",
-			body: encodeStructuredBodyText("Final line\n"),
-			expected: "Final line",
-		},
-	];
-	for (const { name, body, expected } of cases) {
-		assert.equal(legacyExtractCleanText(body), expected, `${name}: legacy oracle`);
-		assert.equal(extractCleanText(body), expected, name);
-	}
+	assert.deepEqual(decodeNoteBodyBytes(body), decoded("Nested note"));
 });
 
 test("readNoteRecord: preserves text that resembles a nested protobuf", async () => {
@@ -160,34 +136,34 @@ test("readNoteRecord: preserves text that resembles a nested protobuf", async ()
 	assert.equal(result.record?.text_content, "R\nCall Alice");
 });
 
-test("extractCleanText: short and Unicode body text is preserved", async () => {
+test("decodeNoteBodyBytes: short and Unicode body text is preserved", async () => {
 	await Promise.all(
 		["a", "hi", "yes", "猫", "你好世界", "📝", "مرحبا мир 🌍", "café 世界"].map(
 			async (text) =>
-				assert.equal(extractCleanText(encodeBodyText(text)), text),
+				assert.deepEqual(decodeNoteBodyBytes(encodeBodyText(text)), decoded(text)),
 		),
 	);
 });
 
-test("extractCleanText: legacy formatting cannot drop mixed-script or emoji text", async () => {
+test("decodeNoteBodyBytes: mixed-script and emoji text is exact", async () => {
 	const text = "English words are long enough 📝 世界";
-	const body = encodeStructuredBodyText(text);
-	const legacyText = legacyExtractCleanText(body);
-	assert.notEqual(legacyText, text);
-	assert.equal(extractCleanText(body), legacyText);
-	assert.equal(
-		[...extractCleanText(body)!].filter((character) => character.codePointAt(0)! > 0x7f).join(""),
-		[...text].filter((character) => character.codePointAt(0)! > 0x7f).join(""),
-	);
+	assert.deepEqual(decodeNoteBodyBytes(encodeStructuredBodyText(text)), {
+		kind: "DECODED",
+		text,
+	});
 });
 
-test("extractNoteText: decodes a synthetic gzip-compressed note body (labelled synthetic)", async () => {
+test("decodeNoteBody: decodes a synthetic gzip-compressed note body (labelled synthetic)", async () => {
 	const text =
 		"Meeting notes: discuss Q3 roadmap and follow up with the design team.";
 	const compressed = gzipSync(encodeBodyText(text));
 	const base64 = compressed.toString("base64");
-	assert.equal(await extractNoteText(base64), text);
+	assert.deepEqual(await decodeNoteBody(base64), decoded(text));
 });
+
+function decoded(text: string) {
+	return { kind: "DECODED", text } as const;
+}
 
 function encodeBodyText(text: string): Buffer {
 	const value = Buffer.from(text, "utf-8");
@@ -210,28 +186,14 @@ function encodeStructuredBodyText(text: string | readonly string[]): Buffer {
 	return encodeLengthDelimitedField(2, document);
 }
 
-function legacyExtractCleanText(bytes: Uint8Array): string | null {
-	const fullText = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-	const textRuns: string[] = [];
-	const runRe = /[\x20-\x7E\u00A0-\uFFFF]{4,}/g;
-	for (const match of fullText.matchAll(runRe)) {
-		const run = match[0];
-		const cleanCount = (
-			run.match(/[a-zA-Z0-9 .,;:!?\x27"()\-\n\r\t\u2018\u2019\u201C\u201D\u2026\u2013\u2014]/g) ?? []
-		).length;
-		if (cleanCount / run.length > 0.6) textRuns.push(run);
-	}
-	return textRuns.length > 0 ? textRuns.join("\n") : null;
-}
-
-test("extractNoteText: preserves short and Unicode text from the protobuf body structure", async () => {
+test("decodeNoteBody: preserves short and Unicode text from the protobuf body structure", async () => {
 	await Promise.all(
 		["a", "hi", "yes", "猫", "你好世界", "📝", "مرحبا мир 🌍", "café 世界"].map(
 			async (text) => {
 				const compressed = gzipSync(encodeBodyText(text));
-				assert.equal(
-					await extractNoteText(compressed.toString("base64")),
-					text,
+				assert.deepEqual(
+					await decodeNoteBody(compressed.toString("base64")),
+					decoded(text),
 				);
 			},
 		),
@@ -258,7 +220,7 @@ test("readNoteRecord: nonempty undecodable protobuf body is unavailable", async 
 	assert.ok(
 		result.unavailableFields.some(
 			({ field, reason }) =>
-				field === "text_content" && reason === "body_text_unreadable",
+				field === "text_content" && reason === "body_protobuf_malformed",
 		),
 	);
 });
@@ -288,45 +250,57 @@ test("readNoteRecord: unreadable UTF-8 in a valid body withholds the field", asy
 			assert.ok(
 				result.unavailableFields.some(
 					({ field, reason }) =>
-						field === "text_content" && reason === "body_text_unreadable",
+						field === "text_content" && reason === "body_text_invalid_utf8",
 				),
 			);
 		}),
 	);
 });
 
-test("extractNoteText: decodes a synthetic zlib-deflate-compressed note body", async () => {
+test("decodeNoteBody: decodes a synthetic zlib-deflate-compressed note body", async () => {
 	const text = "Second synthetic fixture using zlib deflate, not gzip.";
 	const compressed = deflateSync(encodeBodyText(text));
 	const base64 = compressed.toString("base64");
-	assert.equal(await extractNoteText(base64), text);
+	assert.deepEqual(await decodeNoteBody(base64), decoded(text));
 });
 
-test("extractNoteText: decodes a synthetic raw-deflate-compressed note body", async () => {
+test("decodeNoteBody: decodes a synthetic raw-deflate-compressed note body", async () => {
 	const text = "Third synthetic fixture using raw deflate.";
 	const compressed = deflateRawSync(encodeBodyText(text));
 	const base64 = compressed.toString("base64");
-	assert.equal(await extractNoteText(base64), text);
+	assert.deepEqual(await decodeNoteBody(base64), decoded(text));
 });
 
-test("extractNoteText: null for absent/empty/non-string input", async () => {
-	assert.equal(await extractNoteText(undefined), null);
-	assert.equal(await extractNoteText(null), null);
-	assert.equal(await extractNoteText(""), null);
+test("decodeNoteBody: an empty string is not a compressed body", async () => {
+	assert.deepEqual(await decodeNoteBody(""), {
+		kind: "UNDECODABLE",
+		cause: "body_not_compressed",
+	});
 });
 
-test("extractNoteText: null for base64 input that decompresses under no tried format", async () => {
+test("decodeNoteBody: base64 that decompresses under no tried format is undecodable", async () => {
 	const garbage = Buffer.from("not compressed data at all", "utf-8").toString(
 		"base64",
 	);
-	assert.equal(await extractNoteText(garbage), null);
+	assert.deepEqual(await decodeNoteBody(garbage), {
+		kind: "UNDECODABLE",
+		cause: "body_not_compressed",
+	});
 });
 
-test("extractNoteText: null for input that isn't valid base64-decodable bytes at all", async () => {
-	// Buffer.from(..., 'base64') never throws in Node (it tolerates invalid
-	// chars), so this exercises the decompress-failure path, not a base64
-	// parse failure — kept as a documented behavior check.
-	assert.equal(await extractNoteText("!!!not-base64!!!"), null);
+test("decodeNoteBody: input that is not base64 at all is undecodable", async () => {
+	assert.deepEqual(await decodeNoteBody("!!!not-base64!!!"), {
+		kind: "UNDECODABLE",
+		cause: "body_base64_invalid",
+	});
+});
+
+test("decodeNoteBodyBytes: empty and attachment-only bodies are absent, not text", async () => {
+	assert.deepEqual(decodeNoteBodyBytes(new Uint8Array()), { kind: "ABSENT" });
+	const attachmentOnly = structuredBody(
+		encodeLengthDelimitedField(3, encodeLengthDelimitedField(3, Buffer.alloc(0))),
+	);
+	assert.deepEqual(decodeNoteBodyBytes(attachmentOnly), { kind: "ABSENT" });
 });
 
 // ─── isDeletedNote ───────────────────────────────────────────────────────
@@ -533,7 +507,7 @@ test("readNoteRecord: a valid base64 body that cannot be decoded is unavailable"
 	assert.ok(
 		result.unavailableFields.some(
 			({ field, reason }) =>
-				field === "text_content" && reason === "body_text_unreadable",
+				field === "text_content" && reason === "body_not_compressed",
 		),
 	);
 });
@@ -669,9 +643,9 @@ test("browser decoder byte parity with Node across gzip, deflate and raw-deflate
 				decodeBase64Text(vector.toString("base64")),
 				vector.toString("utf-8"),
 			);
-			assert.equal(
-				await extractNoteText(compressed.toString("base64")),
-				extractCleanText(vector) || null,
+			assert.deepEqual(
+				await decodeNoteBody(compressed.toString("base64")),
+				decodeNoteBodyBytes(vector),
 			);
 		}
 		assert.equal(
@@ -679,4 +653,189 @@ test("browser decoder byte parity with Node across gzip, deflate and raw-deflate
 			null,
 		);
 	}
+});
+
+// ─── one body decoder: decoded / absent / undecodable ───────────────────
+
+/** Run decompressed protobuf bytes through the real note-record path. */
+async function readBody(decompressed: Uint8Array) {
+	return readNoteRecord({
+		recordName: "note-body-under-test",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: null },
+			SnippetEncrypted: { value: null },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [] },
+			TextDataEncrypted: {
+				value: gzipSync(decompressed).toString("base64"),
+			},
+		},
+	});
+}
+
+/** note_body field 2 -> note_document field 3 -> rich_text made of `fields`. */
+function structuredBody(...richTextFields: Buffer[]): Buffer {
+	return encodeLengthDelimitedField(
+		2,
+		encodeLengthDelimitedField(3, Buffer.concat(richTextFields)),
+	);
+}
+
+function textRun(text: string): Buffer {
+	return encodeLengthDelimitedField(2, Buffer.from(text, "utf-8"));
+}
+
+test("structured body: a short run after a long run is kept", async () => {
+	const result = await readBody(
+		encodeStructuredBodyText(["First paragraph", "hi"]),
+	);
+	assert.equal(result.record?.text_content, "First paragraph\nhi");
+	assert.deepEqual(result.unavailableFields, []);
+});
+
+test("structured body: attachment and style metadata never become body text", async () => {
+	const result = await readBody(
+		structuredBody(
+			textRun("hi"),
+			encodeLengthDelimitedField(3, Buffer.from("SECRET")),
+		),
+	);
+	assert.equal(result.record?.text_content, "hi");
+});
+
+test("structured body: printable length-prefix bytes do not leak into the text", async () => {
+	// Lengths 0x28 '(' and 0x3a ':' are printable ASCII, so a raw byte scan
+	// would glue them to the front of the text.
+	await Promise.all(
+		[0x28, 0x3a, 0x41].map(async (length) => {
+			const text = "a".repeat(length);
+			assert.equal(Buffer.byteLength(text), length);
+			const result = await readBody(encodeStructuredBodyText(text));
+			assert.equal(result.record?.text_content, text, `length ${length}`);
+		}),
+	);
+});
+
+test("structured body: rich-text paragraphs, marker and trailing line feed", async () => {
+	await Promise.all(
+		(
+			[
+				[
+					["First paragraph", "Second paragraph"],
+					"First paragraph\nSecond paragraph",
+				],
+				["￼Photo description", "￼Photo description"],
+				["Final line\n", "Final line"],
+				[["ok", "猫", "📝"], "ok\n猫\n📝"],
+			] as const
+		).map(async ([text, expected]) => {
+			const result = await readBody(encodeStructuredBodyText(text));
+			assert.equal(result.record?.text_content, expected);
+		}),
+	);
+});
+
+test("structured body: a known text field with the wrong wire type is undecodable, not empty", async () => {
+	// note_body 2 -> note_document 3 -> rich_text { field 2 as varint 1, empty field 3 }
+	const result = await readBody(
+		Buffer.from([0x12, 0x06, 0x1a, 0x04, 0x10, 0x01, 0x1a, 0x00]),
+	);
+	assert.equal(result.record?.text_content, null);
+	assert.deepEqual(
+		result.unavailableFields.map(({ field, reason }) => ({ field, reason })),
+		[{ field: "text_content", reason: "body_text_wrong_wire_type" }],
+	);
+});
+
+test("structured body: wrong wire type is undecodable at every level", async () => {
+	const cases: [string, Buffer][] = [
+		["note_body text as varint", Buffer.from([0x08, 0x01])],
+		["note_body document as varint", Buffer.from([0x10, 0x01])],
+		[
+			"note_document rich text as varint",
+			encodeLengthDelimitedField(2, Buffer.from([0x18, 0x01])),
+		],
+		[
+			"rich_text value as fixed32",
+			structuredBody(Buffer.from([0x15, 0, 0, 0, 0])),
+		],
+	];
+	await Promise.all(
+		cases.map(async ([name, body]) => {
+			const result = await readBody(body);
+			assert.equal(result.record?.text_content, null, name);
+			assert.deepEqual(
+				result.unavailableFields.map(({ reason }) => reason),
+				["body_text_wrong_wire_type"],
+				name,
+			);
+		}),
+	);
+});
+
+test("structured body: each undecodable cause is recorded and none becomes empty or metadata", async () => {
+	const cases: [string, Buffer, string][] = [
+		[
+			"malformed protobuf",
+			Buffer.from([0x00, 0xff, 0xfe, 0x80]),
+			"body_protobuf_malformed",
+		],
+		[
+			"invalid UTF-8 text",
+			Buffer.from([0x0a, 0x01, 0xff]),
+			"body_text_invalid_utf8",
+		],
+		[
+			"unrecognized structure",
+			Buffer.from([0x32, 0x04, 0x74, 0x65, 0x78, 0x74]),
+			"body_structure_unrecognized",
+		],
+	];
+	await Promise.all(
+		cases.map(async ([name, body, reason]) => {
+			const result = await readBody(body);
+			assert.equal(result.record?.text_content, null, name);
+			assert.deepEqual(
+				result.unavailableFields.map((omission) => omission.reason),
+				[reason],
+				name,
+			);
+		}),
+	);
+});
+
+test("structured body: text beside an undecodable sibling field is withheld whole", async () => {
+	const result = await readBody(
+		structuredBody(textRun("kept?"), Buffer.from([0x10, 0x01])),
+	);
+	assert.equal(result.record?.text_content, null);
+	assert.deepEqual(
+		result.unavailableFields.map(({ reason }) => reason),
+		["body_text_wrong_wire_type"],
+	);
+});
+
+test("body text that decompresses under no format is undecodable with a recorded cause", async () => {
+	const result = await readNoteRecord({
+		recordName: "note-not-compressed",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: null },
+			SnippetEncrypted: { value: null },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [] },
+			TextDataEncrypted: { value: b64("synthetic undecodable body") },
+		},
+	});
+	assert.deepEqual(
+		result.unavailableFields.map(({ reason }) => reason),
+		["body_not_compressed"],
+	);
 });

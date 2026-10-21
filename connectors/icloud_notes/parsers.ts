@@ -6,10 +6,11 @@
  * they unit-test in isolation — the CloudKit fetch loop and browser
  * lifecycle live in index.ts.
  *
- * Note bodies are compressed protobuf rich-text documents. We decode the
- * protobuf wire structure and strict UTF-8 strings without script-based text
- * scoring. Apple does not publish the rich-text schema, so this preserves
- * text while omitting formatting and attachment metadata.
+ * Note bodies are compressed protobuf rich-text documents. One decoder
+ * (`decodeNoteBodyBytes`) reads only the recognized text fields and returns
+ * DECODED, ABSENT or UNDECODABLE with a recorded cause. Apple does not
+ * publish the rich-text schema, so formatting and attachment metadata are
+ * skipped and any malformed recognized field is undecodable, never empty.
  */
 
 import type { CloudKitFieldValue, CloudKitRecord } from "./types.ts";
@@ -86,20 +87,51 @@ export async function decompressBytes(
 type ProtobufField = {
 	fieldNumber: number;
 	wireType: number;
+	/** Present only for length-delimited (wire type 2) fields. */
 	value?: Uint8Array;
 };
 
-const NOTE_BODY_TEXT_FIELD = 1;
-const NOTE_BODY_DOCUMENT_FIELD = 2;
-const NOTE_DOCUMENT_RICH_TEXT_FIELD = 3;
-const RICH_TEXT_VALUE_FIELD = 2;
+/** Why a body that exists could not be turned into text. Each value is the
+ *  `reason` recorded on the withheld `text_content` field. */
+export type NoteBodyUndecodableCause =
+	| "body_base64_invalid"
+	| "body_not_compressed"
+	| "body_protobuf_malformed"
+	| "body_structure_unrecognized"
+	| "body_text_invalid_utf8"
+	| "body_text_wrong_wire_type";
+
+/** The one outcome of decoding a note body. Undecodable is never empty and
+ *  never text: callers withhold the field and record the cause. */
+export type NoteBodyDecode =
+	| { kind: "DECODED"; text: string }
+	| { kind: "ABSENT" }
+	| { kind: "UNDECODABLE"; cause: NoteBodyUndecodableCause };
 
 type ProtobufMessage = "note_body" | "note_document" | "rich_text";
 
-type NoteTextExtraction =
-	| { kind: "READ"; value: string }
-	| { kind: "EXPLICIT_EMPTY" }
-	| { kind: "UNAVAILABLE"; reason: "body_text_unreadable" };
+/** The recognized Apple Notes body structure. Apple publishes no schema, so
+ *  only these fields are read: everything else is formatting or attachment
+ *  metadata and never contributes text. */
+interface MessageShape {
+	/** Field holding a UTF-8 text run. */
+	textField?: number;
+	/** Field holding a nested message that may carry text. */
+	childField?: number;
+	child?: ProtobufMessage;
+	/** Fields that prove the structure but never carry body text. */
+	metadataFields?: readonly number[];
+}
+
+const MESSAGE_SHAPES: Record<ProtobufMessage, MessageShape> = {
+	note_body: { textField: 1, childField: 2, child: "note_document" },
+	note_document: { childField: 3, child: "rich_text" },
+	rich_text: { textField: 2, metadataFields: [3] },
+};
+
+type MessageWalk =
+	| { kind: "WALKED"; runs: string[]; recognized: boolean }
+	| { kind: "UNDECODABLE"; cause: NoteBodyUndecodableCause };
 
 function readVarint(
 	bytes: Uint8Array,
@@ -179,174 +211,84 @@ function decodeUtf8(bytes: Uint8Array): string | null {
 	}
 }
 
+/** Paragraph rule shared with the legacy script: control characters (line
+ *  feeds, tabs) end a run, and the runs are later joined with one line feed.
+ *  The object-replacement marker U+FFFC is ordinary text and stays. */
 function splitTextRuns(value: string): string[] {
 	return value
 		.split(/[\u0000-\u001F\u007F-\u009F]/)
 		.filter((run) => run.length > 0);
 }
 
-function extractLegacyTextRuns(bytes: Uint8Array): string | null {
-	const fullText = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-	const textRuns: string[] = [];
-	const runRe = /[\x20-\x7E\u00A0-\uFFFF]{4,}/g;
-	for (const match of fullText.matchAll(runRe)) {
-		const run = match[0];
-		const cleanCount = (
-			run.match(
-				/[a-zA-Z0-9 .,;:!?\x27"()\-\n\r\t\u2018\u2019\u201C\u201D\u2026\u2013\u2014]/g,
-			) ?? []
-		).length;
-		if (cleanCount / run.length > 0.6) textRuns.push(run);
-	}
-	return textRuns.length > 0 ? textRuns.join("\n") : null;
-}
-
-function legacyRenderingPreservesUnicode(
-	legacyText: string,
-	structuredText: string,
-): boolean {
-	const unicodeCharacters = (value: string) =>
-		[...value.replace(/[\u0000-\u001F\u007F-\u009F\uFFFC]/g, "")]
-			.filter((character) => (character.codePointAt(0) ?? 0) > 0x7f)
-			.join("");
-	return unicodeCharacters(legacyText) === unicodeCharacters(structuredText);
-}
-
-function extractProtobufText(
+function walkMessage(
 	bytes: Uint8Array,
-	message: ProtobufMessage = "note_body",
-	depth = 0,
-): NoteTextExtraction {
-	if (depth > 32) {
-		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
-	}
-	if (bytes.length === 0) return { kind: "EXPLICIT_EMPTY" };
+	message: ProtobufMessage,
+): MessageWalk {
 	const fields = parseProtobuf(bytes);
-	if (!fields) {
-		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
-	}
-	let sawRecognizedField = false;
-	let sawDocumentField = false;
-	const textParts: string[] = [];
+	if (!fields) return { kind: "UNDECODABLE", cause: "body_protobuf_malformed" };
+	const shape = MESSAGE_SHAPES[message];
+	const runs: string[] = [];
+	let recognized = false;
 	for (const field of fields) {
-		if (
-			message === "note_body" &&
-			field.fieldNumber === NOTE_BODY_TEXT_FIELD &&
-			field.wireType === 2
-		) {
-			sawRecognizedField = true;
-			const value = field.value ? decodeUtf8(field.value) : null;
-			if (value === null) {
-				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
-			}
-			textParts.push(...splitTextRuns(value));
-			continue;
-		}
-		if (
-			message === "note_body" &&
-			field.fieldNumber === NOTE_BODY_DOCUMENT_FIELD
-		) {
-			sawRecognizedField = true;
-			sawDocumentField = true;
+		if (field.fieldNumber === shape.textField) {
 			if (field.wireType !== 2 || !field.value) {
-				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+				return { kind: "UNDECODABLE", cause: "body_text_wrong_wire_type" };
 			}
-			const document = extractProtobufText(
-				field.value,
-				"note_document",
-				depth + 1,
-			);
-			if (document.kind === "UNAVAILABLE") return document;
-			if (document.kind === "READ") textParts.push(document.value);
-			continue;
-		}
-		if (
-			message === "note_document" &&
-			field.fieldNumber === NOTE_DOCUMENT_RICH_TEXT_FIELD &&
-			field.wireType === 2 &&
-			field.value
-		) {
-			sawRecognizedField = true;
-			const richText = extractProtobufText(
-				field.value,
-				"rich_text",
-				depth + 1,
-			);
-			if (richText.kind === "UNAVAILABLE") return richText;
-			if (richText.kind === "READ") textParts.push(richText.value);
-			continue;
-		}
-		if (
-			message === "rich_text" &&
-			field.fieldNumber === RICH_TEXT_VALUE_FIELD &&
-			field.wireType === 2
-		) {
-			sawRecognizedField = true;
-			const value = field.value ? decodeUtf8(field.value) : null;
-			if (value === null) {
-				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+			const text = decodeUtf8(field.value);
+			if (text === null) {
+				return { kind: "UNDECODABLE", cause: "body_text_invalid_utf8" };
 			}
-			textParts.push(...splitTextRuns(value));
-			continue;
-		}
-		if (message === "rich_text" && field.fieldNumber === 3) {
-			// Rich-text formatting and attachment metadata do not contain body text.
-			sawRecognizedField = true;
-		}
-	}
-	if (!sawRecognizedField) {
-		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
-	}
-	if (textParts.length === 0) return { kind: "EXPLICIT_EMPTY" };
-	const structuredText = textParts.join("\n");
-	if (message === "note_body" && depth === 0 && sawDocumentField) {
-		const legacyText = extractLegacyTextRuns(bytes);
-		if (
-			legacyText !== null &&
-			legacyRenderingPreservesUnicode(legacyText, structuredText)
-		) {
-			return { kind: "READ", value: legacyText };
+			recognized = true;
+			runs.push(...splitTextRuns(text));
+		} else if (field.fieldNumber === shape.childField && shape.child) {
+			if (field.wireType !== 2 || !field.value) {
+				return { kind: "UNDECODABLE", cause: "body_text_wrong_wire_type" };
+			}
+			const child = walkMessage(field.value, shape.child);
+			if (child.kind === "UNDECODABLE") return child;
+			recognized = true;
+			runs.push(...child.runs);
+		} else if (shape.metadataFields?.includes(field.fieldNumber)) {
+			recognized = true;
 		}
 	}
-	return { kind: "READ", value: structuredText };
+	return { kind: "WALKED", runs, recognized };
 }
 
-/** Decode UTF-8 strings from length-delimited rich-text protobuf fields. */
-export function extractCleanText(decompressed: Uint8Array): string | null {
-	const extraction = extractProtobufText(decompressed);
-	return extraction.kind === "READ" ? extraction.value : null;
+/** Decode a decompressed note body. The recognized structure is the only
+ *  source of text, so metadata bytes and length prefixes cannot leak in and
+ *  short or non-Latin runs cannot be filtered out. */
+export function decodeNoteBodyBytes(bytes: Uint8Array): NoteBodyDecode {
+	if (bytes.length === 0) return { kind: "ABSENT" };
+	const walk = walkMessage(bytes, "note_body");
+	if (walk.kind === "UNDECODABLE") return walk;
+	if (!walk.recognized) {
+		return { kind: "UNDECODABLE", cause: "body_structure_unrecognized" };
+	}
+	return walk.runs.length === 0
+		? { kind: "ABSENT" }
+		: { kind: "DECODED", text: walk.runs.join("\n") };
 }
 
 /** Decode a note's `TextDataEncrypted` field (base64 of a compressed
- *  protobuf blob) to its text content. Tries gzip, then raw deflate, then
- *  zlib deflate. A nonempty body with unknown structure or invalid UTF-8 is
- *  unavailable; only recognized empty or attachment-only structures are
- *  explicitly empty. */
-async function readCompressedNoteText(
+ *  protobuf blob). Tries gzip, then zlib deflate, then raw deflate. */
+export async function decodeNoteBody(
 	base64Data: string,
-): Promise<NoteTextExtraction> {
+): Promise<NoteBodyDecode> {
 	let bytes: Uint8Array;
 	try {
 		bytes = base64Bytes(base64Data);
 	} catch {
-		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+		return { kind: "UNDECODABLE", cause: "body_base64_invalid" };
 	}
 	for (const format of DECOMPRESS_FORMATS) {
 		const decompressed = await decompressBytes(bytes, format);
 		if (!decompressed) {
 			continue;
 		}
-		return extractProtobufText(decompressed);
+		return decodeNoteBodyBytes(decompressed);
 	}
-	return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
-}
-
-export async function extractNoteText(
-	base64Data: unknown,
-): Promise<string | null> {
-	if (typeof base64Data !== "string" || base64Data.length === 0) return null;
-	const result = await readCompressedNoteText(base64Data);
-	return result.kind === "READ" ? result.value : null;
+	return { kind: "UNDECODABLE", cause: "body_not_compressed" };
 }
 
 // ─── CloudKit field access ───────────────────────────────────────────────
@@ -661,12 +603,9 @@ async function bodyTextField(
 		return unavailable("expected_base64_body", raw.value);
 	if (!isBase64(raw.value))
 		return unavailable("invalid_base64_body", raw.value);
-	const extraction = await readCompressedNoteText(raw.value);
-	if (extraction.kind === "UNAVAILABLE")
-		return unavailable(extraction.reason, raw.value);
-	return extraction.kind === "EXPLICIT_EMPTY"
-		? explicitEmpty(null)
-		: read(extraction.value);
+	const body = await decodeNoteBody(raw.value);
+	if (body.kind === "UNDECODABLE") return unavailable(body.cause, raw.value);
+	return body.kind === "ABSENT" ? explicitEmpty(null) : read(body.text);
 }
 
 function collectUnavailableFields(
