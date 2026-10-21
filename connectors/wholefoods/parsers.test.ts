@@ -14,11 +14,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	bestUsdaMatch,
-	cleanProductName,
 	hasOrderSearchEmptyState,
 	isCancelledOrderDetail,
 	mapUsdaNutrients,
-	orderDetailBelongsTo,
 	parseAmazonProductNutritionDom,
 	parseAmazonProfileDom,
 	parseDollarsToCents,
@@ -257,13 +255,6 @@ test("parseDollarsToCents returns null for absent input", () => {
 });
 
 // ─── Nutrition: name cleaning + USDA fuzzy match ──────────────────────────
-
-test("cleanProductName strips brand prefix and trailing size", () => {
-	assert.equal(
-		cleanProductName("365 by Whole Foods Market Organic Bananas, 1 lb"),
-		"Bananas",
-	);
-});
 
 function usdaFood(overrides: Partial<UsdaFood> = {}): UsdaFood {
 	return {
@@ -510,10 +501,14 @@ function ld(json: string): string {
 	return `<html><head><script type="application/ld+json">${json}</script></head><body></body></html>`;
 }
 
+const ldWithHeading = (json: string, heading: string) =>
+	`<html><head><script type="application/ld+json">${json}</script></head><body><h1>${heading}</h1></body></html>`;
+
 test("JSON-LD nutrition belongs to the Product node that holds it, not to the first named node", () => {
 	const facts = parseWholeFoodsProductPageDom(
-		ld(
+		ldWithHeading(
 			`[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears",${LD_NUTRITION_95}}]`,
+			"Pears",
 		),
 	);
 	assert.equal(facts?.calories, 95);
@@ -521,10 +516,22 @@ test("JSON-LD nutrition belongs to the Product node that holds it, not to the fi
 	assert.equal(facts?.upc, null);
 });
 
+test("several Product nodes with no tie to the page have no main subject", () => {
+	assert.equal(
+		parseWholeFoodsProductPageDom(
+			ld(
+				`[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears",${LD_NUTRITION_95}}]`,
+			),
+		),
+		null,
+	);
+});
+
 test("JSON-LD @graph keeps nutrition, name and gtin from one Product node", () => {
 	const facts = parseWholeFoodsProductPageDom(
-		ld(
+		ldWithHeading(
 			`{"@graph":[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears","gtin13":"2222222222222",${LD_NUTRITION_95}}]}`,
+			"Pears",
 		),
 	);
 	assert.equal(facts?.productName, "Pears");
@@ -816,26 +823,6 @@ test("a text-matched USDA food never lends its GTIN to the product", () => {
 	const food = usdaFood({ gtinUpc: "012345678905" });
 	assert.equal(mapUsdaNutrients(food, "text").upc, null);
 	assert.equal(mapUsdaNutrients(food, "upc").upc, "012345678905");
-});
-
-test("an order id from the URL is the only binding when the page shows several ids", () => {
-	const html = '<span>111-1111111-1111111</span><span>222-2222222-2222222</span>';
-	assert.equal(
-		orderDetailBelongsTo(
-			"111-1111111-1111111",
-			"https://www.amazon.com/your-orders/order-details",
-			html,
-		),
-		false,
-	);
-	assert.equal(
-		orderDetailBelongsTo(
-			"111-1111111-1111111",
-			"https://www.amazon.com/your-orders/order-details?orderID=111-1111111-1111111",
-			html,
-		),
-		true,
-	);
 });
 
 // ─── Round 3: units, labels, scope and numbers ────────────────────────────

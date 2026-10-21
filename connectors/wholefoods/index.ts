@@ -40,26 +40,36 @@ import {
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
 	bestUsdaMatch,
-	cleanProductName,
 	hasOrderDetailEvidence,
 	hasOrderSearchEmptyState,
 	isCancelledOrderDetail,
 	mapUsdaNutrients,
 	mergeProductIds,
 	ORDER_DETAIL_READY_SELECTOR,
-	orderDetailBelongsTo,
 	orderDetailUnitCount,
 	parseAmazonProfileDom,
-	parseAmazonProductNutritionDom,
 	parseDollarsToCents,
 	parseOrderDateIso,
 	parseOrderDetailDom,
 	parseOrderSearchPageDom,
-	parseWholeFoodsProductPageDom,
 	parseUsdaFood,
+	readAmazonProductPage,
+	readOrderObservation,
+	readWholeFoodsProductPage,
 	parseWholeFoodsSearchResultDoms,
-	sameGtin,
 } from "./parsers.ts";
+import {
+	type BindingCause,
+	bindGtin,
+	bindOrder,
+	bindProduct,
+	capConfidence,
+	gtinQueryForms,
+	isUnbound,
+	mainSubject,
+	normalizeName,
+	type Via,
+} from "./binding.ts";
 import {
 	type AcceptedNutrition,
 	acceptNutrition,
@@ -496,14 +506,6 @@ async function usdaSearch(
 	});
 }
 
-/** The forms a UPC is queried in, as the legacy lookup did: as read, then
- *  zero-padded to 14 and to 13 digits. */
-function upcQueryForms(upc: string): string[] {
-	return [
-		...new Set([upc, upc.padStart(14, "0"), upc.padStart(13, "0")]),
-	];
-}
-
 /** Look up USDA nutrition: an exact UPC match first when a UPC is known, then
  *  Branded text search, then Foundation text search (better for produce and
  *  staples). A UPC match counts only when USDA returns that same GTIN. A text
@@ -515,24 +517,34 @@ async function lookupUsdaNutrition(
 	apiKey: string,
 	name: string,
 	upc: string | null,
+	upcVia: Via | null,
 ): Promise<NutritionFacts | null> {
 	const complete = (food: UsdaFood, method: UsdaMatchMethod) => {
 		const facts = mapUsdaNutrients(food, method);
 		return hasCoreNutrition(facts) ? facts : null;
 	};
 	if (upc) {
-		for (const form of upcQueryForms(upc)) {
+		for (const form of gtinQueryForms(upc)) {
 			const exact = await usdaSearch(apiKey, {
 				pageSize: "1",
 				query: `gtinUpc:${form}`,
 			});
 			const match = exact[0];
 			const facts =
-				match && sameGtin(match.gtinUpc, upc) ? complete(match, "upc") : null;
-			if (facts) return facts;
+				match && bindGtin(upc, match.gtinUpc).kind === "BOUND"
+					? complete(match, "upc")
+					: null;
+			// An exact hit is only as strong as the binding that supplied the GTIN.
+			if (facts) {
+				return upcVia === null
+					? facts
+					: { ...facts, confidence: capConfidence(facts.confidence, upcVia) };
+			}
 		}
 	}
-	const cleaned = cleanProductName(name);
+	// A fuzzy text query: the normalized name without "organic", which USDA
+	// descriptions rarely carry. This is an approximation, not a binding.
+	const cleaned = normalizeName(name).base.replace(/\borganic\b/g, "").trim();
 	if (!cleaned || cleaned.length < 3) {
 		return null;
 	}
@@ -555,12 +567,6 @@ async function lookupUsdaNutrition(
 	return foundationMatch ? complete(foundationMatch, "text") : null;
 }
 
-/** Follow the legacy source order: Amazon product page, Whole Foods product
- *  page, then UPC-first/text USDA. The result is an accepted observation or a
- *  failure outcome that explains why there is none. A failure outcome is
- *  diagnostics only: no row is built from it, so a refresh cannot erase facts.
- *  Whether an observation may be emitted is `acceptNutrition`'s decision. */
-
 function isBlockedPage(html: string): boolean {
 	return /(?:validateCaptcha|captchacharacters|Sorry, we just need to make sure|<title>[^<]*(?:robot|captcha|blocked|denied)[^<]*<\/title>)/i.test(
 		html,
@@ -573,28 +579,45 @@ function hasProductPageEvidence(html: string): boolean {
 	);
 }
 
-function hasAmazonProductEvidence(html: string): boolean {
-	return /\bid=["']productTitle["']/i.test(html);
-}
-
 /** An ASIN or product URL the site says does not exist. That is an answer
  *  about the product ("no page"), not a failure to answer. */
 const isGone = (status: number | null) => status === 404 || status === 410;
 
+/** Most Whole Foods search tiles visited for one product. */
+const MAX_WHOLE_FOODS_TILES = 8;
+
+/** A binding that says nothing usable becomes a page-read failure whose cause
+ *  tells a conflicting identity from a missing one. */
+const unusable = (cause: BindingCause): PageReadFailure => ({
+	status: "error",
+	cause: isUnbound(cause) ? "identity_unbound" : "identity_conflict",
+});
+
+/** Look up one ordered product's nutrition, following the legacy source
+ *  order: Amazon product page, Whole Foods product pages, then UPC-first/text
+ *  USDA. A page is bound to the request by `binding.ts` before anything on it
+ *  (facts, name, UPC) is used. The result is `NutritionLookup`: an accepted
+ *  observation, or a status and cause with no facts. Either way the caller
+ *  writes the product's one row. Whether an observation may be emitted is
+ *  `acceptNutrition`'s decision. */
 async function lookupNutritionForProduct(
 	page: Page,
 	usdaApiKey: string,
 	name: string,
 	productId = "B012345678",
 ): Promise<NutritionLookup> {
-	const query = cleanProductName(name);
+	const query = normalizeName(name).base;
+	const requested = { asin: productId, name, boundGtin: null as string | null };
+	// The weakest binding of the facts and the GTIN this lookup rests on.
+	let candidateVia: Via | null = null;
 	let candidate: NutritionFacts | null = null;
 	// What the page sources said about this product's panel (see
 	// `PageSourceEvidence`), the one value that gates a fuzzy USDA match. An
-	// answer is positive evidence: a rendered product page, a 404/410 for a
-	// page that does not exist, a search result list or its no-results
-	// message. A captcha, a 5xx, a thrown error and a 200 page that shows no
-	// product are not answers. `failure` names the strongest such failure.
+	// answer is positive evidence: a bound product page, a 404/410 for a page
+	// that does not exist, a page the binding says is a different product, a
+	// search result list or its no-results message. A captcha, a 5xx, a thrown
+	// error, a page that cannot be bound to the request and a 200 page that
+	// shows no product are not answers. `failure` names the strongest one.
 	let evidence: PageSourceEvidence = "none";
 	let failure: PageReadFailure | null = null;
 	const unable = (reason: PageReadFailure) => {
@@ -621,6 +644,11 @@ async function lookupNutritionForProduct(
 			evidence = "partial";
 		}
 	};
+	// A bound observation's facts, with confidence capped by what bound them.
+	const boundFacts = (facts: NutritionFacts, via: Via): NutritionFacts => ({
+		...facts,
+		confidence: capConfidence(facts.confidence, via),
+	});
 	try {
 		const status = await navigateAndSettle(
 			page,
@@ -636,12 +664,24 @@ async function lookupNutritionForProduct(
 		} else if (status !== null && status >= 400) {
 			unable({ status: "error", cause: "http_error" });
 		} else {
-			candidate = parseAmazonProductNutritionDom(amazonHtml);
-			const direct = acceptNutrition(candidate, evidence);
-			if (direct) return matched(direct);
-			sawPartialPanel(candidate);
-			if (!(candidate || hasAmazonProductEvidence(amazonHtml))) {
-				unable({ status: "error", cause: "unrecognized_page" });
+			const read = readAmazonProductPage(amazonHtml, page.url());
+			const binding = bindProduct(requested, {
+				source: "amazon",
+				obs: read.observation,
+			});
+			if (binding.kind !== "BOUND") {
+				// Another ASIN, or no ASIN, or another origin: nothing on this
+				// page, not even a UPC, may be taken.
+				unable(unusable(binding.kind === "UNKNOWN" ? binding.cause : "no_identity_evidence"));
+			} else {
+				candidate = read.facts ? boundFacts(read.facts, binding.via) : null;
+				candidateVia = candidate ? binding.via : null;
+				const direct = acceptNutrition(candidate, evidence);
+				if (direct) return matched(direct);
+				sawPartialPanel(candidate);
+				if (!(candidate || read.hasProductTitle)) {
+					unable({ status: "error", cause: "unrecognized_page" });
+				}
 			}
 		}
 	} catch {
@@ -661,16 +701,17 @@ async function lookupNutritionForProduct(
 			} else if (searchStatus !== null && searchStatus >= 400) {
 				unable({ status: "error", cause: "http_error" });
 			} else {
-				const productUrls = [
-					...new Set(parseWholeFoodsSearchResultDoms(searchHtml)),
-				];
+				const productUrls = parseWholeFoodsSearchResultDoms(searchHtml).slice(
+					0,
+					MAX_WHOLE_FOODS_TILES,
+				);
 				if (productUrls.length) {
 					for (const productUrl of productUrls) {
 						const resolvedUrl = new URL(productUrl, WHOLE_FOODS_ORIGIN);
 						if (resolvedUrl.origin !== WHOLE_FOODS_ORIGIN) {
-							throw new Error(
-								"Whole Foods search returned a non-Whole-Foods product URL",
-							);
+							// This tile is not ours to open; the others still count.
+							unable(unusable("untrusted_origin"));
+							continue;
 						}
 						const productStatus = await navigateAndSettle(
 							page,
@@ -686,42 +727,34 @@ async function lookupNutritionForProduct(
 						} else if (productStatus !== null && productStatus >= 400) {
 							unable({ status: "error", cause: "http_error" });
 						} else {
-							const finalUrl = new URL(page.url());
-							if (finalUrl.origin !== WHOLE_FOODS_ORIGIN) {
-								throw new Error(
-									"Whole Foods product navigation left the trusted origin",
-								);
+							const finalUrl = page.url();
+							const observation = readWholeFoodsProductPage(productHtml);
+							const binding = bindProduct(
+								{ ...requested, boundGtin: candidate?.upc ?? null },
+								{ source: "wholefoods", obs: observation, finalUrl },
+							);
+							if (binding.kind === "UNKNOWN") {
+								unable(unusable(binding.cause));
+								continue;
 							}
-							const facts = parseWholeFoodsProductPageDom(productHtml);
-							const expectedName = cleanProductName(name)
-								.toLowerCase()
-								.replace(/[^a-z0-9]+/g, " ")
-								.trim();
-							const actualName = facts?.productName
-								? cleanProductName(facts.productName)
-										.toLowerCase()
-										.replace(/[^a-z0-9]+/g, " ")
-										.trim()
-								: "";
-							const sameUpc = Boolean(
-								candidate?.upc && facts?.upc && sameGtin(candidate.upc, facts.upc),
-							);
-							const sameName = Boolean(
-								actualName && expectedName && actualName === expectedName,
-							);
-							const verified =
-								sameUpc || sameName ? acceptNutrition(facts, evidence) : null;
-							if (verified) return matched(verified);
-							if (facts && !sameUpc && !sameName) {
+							if (binding.kind === "OTHER") {
 								// A readable page for another product: an answer.
 								continue;
 							}
+							const subject = mainSubject(observation, finalUrl);
+							const facts =
+								subject.kind === "SUBJECT" && subject.facts
+									? boundFacts(subject.facts, binding.via)
+									: null;
+							const verified = acceptNutrition(facts, evidence);
+							if (verified) return matched(verified);
 							if (facts) {
 								sawPartialPanel(facts);
 								candidate = {
 									...facts,
 									upc: facts.upc ?? candidate?.upc ?? null,
 								};
+								candidateVia = binding.via;
 							} else if (!hasProductPageEvidence(productHtml)) {
 								unable({ status: "error", cause: "unrecognized_page" });
 							}
@@ -745,6 +778,7 @@ async function lookupNutritionForProduct(
 			usdaApiKey,
 			name,
 			candidate?.upc ?? null,
+			candidateVia,
 		);
 		if (usda) {
 			const merged = acceptNutrition(
@@ -967,7 +1001,12 @@ async function collectOrderStubs({
 			}
 			// The page must be the requested order's before any of its rows,
 			// dates or cancellation status are read as that order's.
-			if (!orderDetailBelongsTo(stub.orderId, page.url(), html)) {
+			if (
+				bindOrder(
+					{ orderId: stub.orderId },
+					readOrderObservation(page.url(), html),
+				).kind !== "BOUND"
+			) {
 				throw new OrderEnumerationUnprovenError(
 					"Whole Foods order detail was not the requested order",
 				);
@@ -1082,6 +1121,12 @@ async function collectOrderStubs({
 				if (nutritionCursor.shouldEmit(record)) {
 					await emitRecord("nutrition", record);
 				}
+				// Per product, not per order: one order can hold many products,
+				// each with several page reads.
+				await progress(
+					`Looked up nutrition for ${consideredProductIds.size} products`,
+					{ count: consideredProductIds.size, stream: "nutrition" },
+				);
 				await politeDelay(POLITE_DELAY_MS);
 			}
 		}

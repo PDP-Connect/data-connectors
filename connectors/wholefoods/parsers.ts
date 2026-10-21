@@ -9,6 +9,15 @@
 // connectors/amazon/parsers.ts uses.
 
 import { parseHTML } from "linkedom";
+import {
+	IDENTITY_SELECTORS,
+	mainSubject,
+	normalizeGtin,
+	type AmazonProductObservation,
+	type OrderObservation,
+	type ProductNode,
+	type WholeFoodsProductObservation,
+} from "./binding.ts";
 import type {
 	NutritionFacts,
 	OrderDetail,
@@ -31,12 +40,6 @@ const NAV_SIGN_IN_RE = /^\s*hello,\s*sign\s+in\s*$/i;
 const WHITESPACE_RE = /\s+/g;
 const QTY_RE = /(?:Qty|Quantity)[:\s]*(\d+(?:\.\d+)?)/i;
 const PRICE_RE = /\$(\d+(?:\.\d{2})?)/;
-const SIZE_SUFFIX_RE =
-	/,?\s*(\d+(\.\d+)?\s*)?(oz|lb|lbs|fl oz|gal|ct|pk|count|each)\.?\s*$/i;
-const PACK_SUFFIX_RE =
-	/,?\s*\d+\s+(Mega\s+)?(Rolls|Bags|Cans|Bottles|Packs?)$/i;
-const BRAND_PREFIX_RE = /^(365\s+by\s+)?Whole\s+Foods\s+Market\s*/i;
-const GENERIC_PREFIX_RE = /^(Organic|365\s+Everyday\s+Value)\s*/i;
 const NUTRITION_HEADING_RE = /nutrition\s*facts/i;
 const SERVING_SIZE_RE = /Serving [Ss]ize[:\s]*([^\n]+)/;
 const SERVINGS_PER_CONTAINER_RE =
@@ -179,9 +182,6 @@ function cutPanelEnd(text: string): string {
 
 /** Vitamin D: 1 mcg is 40 IU, the one unambiguous IU factor a panel row uses. */
 const VITAMIN_D_IU_PER_MCG = 40;
-/** GTIN-8, GTIN-12 (UPC-A), GTIN-13 and GTIN-14 are the only barcode lengths. */
-const GTIN_LENGTHS = new Set([8, 12, 13, 14]);
-
 function roundAmount(value: number): number {
 	return Math.round(value * 1e6) / 1e6;
 }
@@ -251,23 +251,6 @@ function structuredEnergy(raw: unknown): Stated | null {
 	return ENERGY_UNIT_ALIASES.has((match[3] ?? "").toLowerCase())
 		? { bound: "exact", amount: parseAmount(match[2]) }
 		: null;
-}
-
-/** A real barcode as digits, or null. Hyphens and spaces are formatting. */
-export function normalizeGtin(raw: unknown): string | null {
-	if (typeof raw !== "string" && typeof raw !== "number") return null;
-	const compact = String(raw).replace(/[\s-]/g, "");
-	return /^\d+$/.test(compact) && GTIN_LENGTHS.has(compact.length)
-		? compact
-		: null;
-}
-
-/** Two barcodes name the same product when they agree once padding zeros
- *  (UPC-A inside GTIN-13/14) are ignored. */
-export function sameGtin(left: unknown, right: unknown): boolean {
-	const a = normalizeGtin(left);
-	const b = normalizeGtin(right);
-	return a !== null && b !== null && a.replace(/^0+/, "") === b.replace(/^0+/, "");
 }
 
 /** Panel rows and the unit each is stored in. Longer labels come first so
@@ -729,40 +712,25 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 	return { items, orderDateRaw: detailOrderDate(document) };
 }
 
-const ORDER_ID_TOKEN_RE = /\b\d{3}-\d{7}-\d{7}\b/g;
-const AMAZON_ORIGIN = "https://www.amazon.com";
-
-/** The one rule that ties a fetched order-detail page to the order that was
- *  requested. The final URL must be on https://www.amazon.com (a redirect to
- *  any other host, bare amazon.com included, fails closed). Then:
- *  - a URL that names another order rejects the page;
- *  - a URL that names the requested order accepts it, provided the page does
- *    not show order ids that exclude it;
- *  - a URL that names no order accepts the page only if every order id the
- *    page shows is the requested one.
- *  A page with no order id on either surface is unbound and is rejected: a
- *  redirect to another order, or to a cancellation page, must never be read as
- *  this order. */
-export function orderDetailBelongsTo(
-	orderId: string,
+/** Read the order ids an order detail page renders in its header, with its
+ *  final URL. Deciding whether they belong to the requested order is
+ *  `bindOrder`'s job; incidental order-shaped text elsewhere is not read. */
+export function readOrderObservation(
 	finalUrl: string,
 	html: string,
-): boolean {
-	let url: URL;
-	try {
-		url = new URL(finalUrl);
-	} catch {
-		return false;
-	}
-	if (url.origin !== AMAZON_ORIGIN) return false;
-	const urlOrderId = [...url.searchParams].find(
-		([key]) => key.toLowerCase() === "orderid",
-	)?.[1];
-	if (urlOrderId !== undefined && urlOrderId !== orderId) return false;
-	const shownIds: string[] = html.match(ORDER_ID_TOKEN_RE) ?? [];
-	if (shownIds.length > 0 && !shownIds.includes(orderId)) return false;
-	if (urlOrderId === orderId) return true;
-	return shownIds.length > 0 && shownIds.every((id) => id === orderId);
+): OrderObservation {
+	const { document } = parseHTML(html);
+	const selectors = IDENTITY_SELECTORS.order;
+	const fromAttributes = [
+		...document.querySelectorAll(selectors.headerAttribute),
+	].flatMap((element) => {
+		const value = element.getAttribute("data-orderid")?.trim();
+		return value ? [value] : [];
+	});
+	const fromText = [...document.querySelectorAll(selectors.headerText)].flatMap(
+		(element) => textOf(element).match(/\d{3}-\d{7}-\d{7}/g) ?? [],
+	);
+	return { finalUrl, headerIds: [...fromAttributes, ...fromText] };
 }
 
 /**
@@ -926,18 +894,6 @@ export function parseDollarsToCents(
 }
 
 // ─── Nutrition: name cleaning + USDA fuzzy match (pure) ───────────────────
-
-/** Strip Whole Foods brand prefixes and trailing size/pack descriptors so
- *  the cleaned name is a better USDA FDC search query. Ported verbatim
- *  (semantics preserved) from the legacy `cleanProductName`. */
-export function cleanProductName(name: string): string {
-	return name
-		.replace(BRAND_PREFIX_RE, "")
-		.replace(GENERIC_PREFIX_RE, "")
-		.replace(SIZE_SUFFIX_RE, "")
-		.replace(PACK_SUFFIX_RE, "")
-		.trim();
-}
 
 /** Fraction (0-1) of the query's significant words (length > 2) that appear
  *  in a USDA food's description + brand. Ported from the legacy
@@ -1152,32 +1108,95 @@ function nutritionOf(product: JsonLdNode): JsonLdNode | null {
 		: null;
 }
 
-/** The one Product node a page's structured data speaks for. The nutrition,
- *  name, GTIN, category and ingredients all come from this node, so they
- *  describe one entity. A node holding nutrition is preferred; with none,
- *  the first Product still names the page for the rendered panel. A document
- *  with no Product but a single standalone NutritionInformation node keeps
- *  that nutrition with no identity. */
-function selectProductEvidence(documents: unknown[]): {
-	product: JsonLdNode | null;
-	nutrition: JsonLdNode | null;
-} {
-	const objects = documents.flatMap((doc) => jsonLdObjects(doc));
-	const products = objects.filter((node) => jsonLdTypes(node).includes("Product"));
-	const withNutrition = products.find((node) => nutritionOf(node) !== null);
-	if (withNutrition) {
-		return { product: withNutrition, nutrition: nutritionOf(withNutrition) };
-	}
-	if (products.length > 0) {
-		return { product: products[0] ?? null, nutrition: null };
-	}
-	const standalone = objects.filter((node) =>
-		jsonLdTypes(node).includes("NutritionInformation"),
-	);
+/** Facts from one JSON-LD nutrition object, with the identity of the node that
+ *  carries it (a node's nutrition is bound by that node's own identity). */
+function factsFromNutrition(
+	nutrition: JsonLdNode,
+	product: JsonLdNode | null,
+): NutritionFacts {
+	const mass = (field: string, unit: MassUnit) =>
+		structuredMass(nutrition[field], unit);
+	const calories = structuredEnergy(nutrition.calories);
+	const carbs = mass("carbohydrateContent", "g");
+	const fat = mass("fatContent", "g");
+	const protein = mass("proteinContent", "g");
+	const productCategory = product?.category;
+	const category = Array.isArray(productCategory)
+		? productCategory.filter(
+				(value): value is string => typeof value === "string",
+			)
+		: typeof productCategory === "string" && productCategory
+			? [productCategory]
+			: [];
 	return {
-		product: null,
-		nutrition: standalone.length === 1 ? (standalone[0] ?? null) : null,
+		...emptyNutritionDetails(),
+		calciumMg: amountOf(mass("calciumContent", "mg")),
+		calories: amountOf(calories),
+		carbsG: amountOf(carbs),
+		category,
+		cholesterolMg: amountOf(mass("cholesterolContent", "mg")),
+		confidence: "high",
+		coreStated: coreStatedOf({ calories, carbs, fat, protein }),
+		fatG: amountOf(fat),
+		fiberG: amountOf(mass("fiberContent", "g")),
+		ingredients:
+			typeof product?.ingredients === "string" ? product.ingredients : null,
+		ironMg: amountOf(mass("ironContent", "mg")),
+		potassiumMg: amountOf(mass("potassiumContent", "mg")),
+		productName: typeof product?.name === "string" ? product.name : null,
+		proteinG: amountOf(protein),
+		saturatedFatG: amountOf(mass("saturatedFatContent", "g")),
+		servingSize:
+			typeof nutrition.servingSize === "string" ? nutrition.servingSize : null,
+		servingsPerContainer: null,
+		sodiumMg: amountOf(mass("sodiumContent", "mg")),
+		source: "wholefoods_structured_data",
+		sugarG: amountOf(mass("sugarContent", "g")),
+		transFatG: amountOf(mass("transFatContent", "g")),
+		upc: product ? normalizeGtin(gtinFieldOf(product)) : null,
+		vitaminDMcg: amountOf(mass("vitaminDContent", "mcg")),
 	};
+}
+
+function gtinFieldOf(product: JsonLdNode): unknown {
+	return (
+		product.gtin12 ??
+		product.gtin13 ??
+		product.gtin14 ??
+		product.gtin ??
+		product.gtin8
+	);
+}
+
+/** Every Product node on a page, recommendations included, each with the
+ *  facts of its own `nutrition`. A page with no Product node but exactly one
+ *  standalone NutritionInformation node yields that nutrition as an unnamed
+ *  node. Choosing which node the page is about is `mainSubject`'s job. */
+function productNodes(documents: unknown[]): ProductNode[] {
+	const objects = documents.flatMap((doc) => jsonLdObjects(doc));
+	const products = objects.filter((node) =>
+		jsonLdTypes(node).includes("Product"),
+	);
+	if (products.length === 0) {
+		const standalone = objects.filter((node) =>
+			jsonLdTypes(node).includes("NutritionInformation"),
+		);
+		const only = standalone.length === 1 ? standalone[0] : undefined;
+		return only
+			? [{ name: null, urls: [], gtin: null, facts: factsFromNutrition(only, null) }]
+			: [];
+	}
+	return products.map((product) => {
+		const nutrition = nutritionOf(product);
+		return {
+			name: typeof product.name === "string" ? product.name : null,
+			urls: [product.url, product["@id"]].filter(
+				(value): value is string => typeof value === "string",
+			),
+			gtin: gtinFieldOf(product),
+			facts: nutrition ? factsFromNutrition(nutrition, product) : null,
+		};
+	});
 }
 
 function parseJsonLdScripts(document: Document): unknown[] {
@@ -1196,91 +1215,13 @@ function parseJsonLdScripts(document: Document): unknown[] {
 	return parsed;
 }
 
-/**
- * Parse a Whole Foods product page for nutrition facts. Tries JSON-LD
- * `NutritionInformation` structured data first (high confidence, machine
- * readable); falls back to a text-pattern parse of the rendered
- * "Nutrition Facts" panel (medium-to-high confidence — page copy, not
- * structured data). Returns null when neither surface has nutrition
- * evidence — the caller decides whether to fall back to USDA.
- */
-export function parseWholeFoodsProductPageDom(
-	html: string,
-): NutritionFacts | null {
-	const { document } = parseHTML(html);
-	const { product: productInfo, nutrition: ldNutrition } =
-		selectProductEvidence(parseJsonLdScripts(document));
-	const productUpc = productInfo
-		? normalizeGtin(
-				productInfo.gtin12 ??
-					productInfo.gtin13 ??
-					productInfo.gtin14 ??
-					productInfo.gtin ??
-					productInfo.gtin8,
-			)
-		: null;
+/** The rendered "Nutrition Facts" panel, with no identity of its own: it
+ *  belongs to the page's heading subject, which `mainSubject` decides. */
+function renderedPanel(document: Document): NutritionFacts | null {
 	const headings = [...document.querySelectorAll("h2, h3, h4, span, div")];
-	const productName =
-		typeof productInfo?.name === "string"
-			? productInfo.name
-			: textOf(document.querySelector("h1")).trim() || null;
-	const productCategory = productInfo?.category;
-	const category = Array.isArray(productCategory)
-		? productCategory.filter(
-				(value): value is string => typeof value === "string",
-			)
-		: typeof productCategory === "string" && productCategory
-			? [productCategory]
-			: [];
-	const productIngredients =
-		typeof productInfo?.ingredients === "string"
-			? productInfo.ingredients
-			: null;
 	const nutritionHeading = headings.find((el) =>
 		NUTRITION_HEADING_RE.test(textOf(el).trim()),
 	);
-	const structuredFacts = (): NutritionFacts | null => {
-		if (!ldNutrition) return null;
-		const mass = (field: string, unit: MassUnit) =>
-			structuredMass(ldNutrition[field], unit);
-		const calories = structuredEnergy(ldNutrition.calories);
-		const carbs = mass("carbohydrateContent", "g");
-		const fat = mass("fatContent", "g");
-		const protein = mass("proteinContent", "g");
-		return {
-			...emptyNutritionDetails(),
-			calciumMg: amountOf(mass("calciumContent", "mg")),
-			calories: amountOf(calories),
-			carbsG: amountOf(carbs),
-			category,
-			cholesterolMg: amountOf(mass("cholesterolContent", "mg")),
-			confidence: "high",
-			coreStated: coreStatedOf({ calories, carbs, fat, protein }),
-			fatG: amountOf(fat),
-			fiberG: amountOf(mass("fiberContent", "g")),
-			ingredients: productIngredients,
-			ironMg: amountOf(mass("ironContent", "mg")),
-			potassiumMg: amountOf(mass("potassiumContent", "mg")),
-			productName,
-			proteinG: amountOf(protein),
-			saturatedFatG: amountOf(mass("saturatedFatContent", "g")),
-			servingSize:
-				typeof ldNutrition.servingSize === "string"
-					? ldNutrition.servingSize
-					: null,
-			servingsPerContainer: null,
-			sodiumMg: amountOf(mass("sodiumContent", "mg")),
-			source: "wholefoods_structured_data",
-			sugarG: amountOf(mass("sugarContent", "g")),
-			transFatG: amountOf(mass("transFatContent", "g")),
-			upc: productUpc,
-			vitaminDMcg: amountOf(mass("vitaminDContent", "mcg")),
-		};
-	};
-	if (ldNutrition && !nutritionHeading) {
-		return structuredFacts();
-	}
-
 	if (!nutritionHeading) {
 		return null;
 	}
@@ -1294,7 +1235,7 @@ export function parseWholeFoodsProductPageDom(
 	);
 	const calories = readCalories(allText);
 	if (calories === null) {
-		return structuredFacts();
+		return null;
 	}
 	const rows = readPanelRows(allText);
 	const servingSizeMatch = SERVING_SIZE_RE.exec(allText);
@@ -1363,10 +1304,42 @@ export function parseWholeFoodsProductPageDom(
 		source: "wholefoods_product_page",
 		sugarG: nutrient("Total Sugars"),
 		transFatG: nutrient("Trans Fat"),
-		upc: productUpc,
+		upc: null,
 		vitaminDMcg: nutrient("Vitamin D"),
-		productName,
+		productName: null,
 	};
+}
+
+/**
+ * Read a Whole Foods product page into an observation: the canonical URL, the
+ * visible heading, every Product node (each with the facts of its own
+ * `nutrition`) and the rendered panel. It does not decide what the page is
+ * about; `mainSubject` and `bindProduct` do.
+ */
+export function readWholeFoodsProductPage(
+	html: string,
+): WholeFoodsProductObservation {
+	const { document } = parseHTML(html);
+	const selectors = IDENTITY_SELECTORS.wholeFoods;
+	return {
+		canonicalUrl:
+			document.querySelector(selectors.canonical)?.getAttribute("href") ?? null,
+		h1: textOf(document.querySelector(selectors.heading)).trim() || null,
+		products: productNodes(parseJsonLdScripts(document)),
+		panel: renderedPanel(document),
+	};
+}
+
+/**
+ * The facts a Whole Foods product page states about its main subject, or null.
+ * Convenience over `readWholeFoodsProductPage` + `mainSubject`; callers that
+ * must know whether the page is the requested product bind it first.
+ */
+export function parseWholeFoodsProductPageDom(
+	html: string,
+): NutritionFacts | null {
+	const subject = mainSubject(readWholeFoodsProductPage(html));
+	return subject.kind === "SUBJECT" ? subject.facts : null;
 }
 
 /** The text of a panel container without its ingredient and important-
@@ -1467,6 +1440,35 @@ export function parseAmazonProductNutritionDom(
 	};
 }
 
+/** What an Amazon /dp page says about which ASIN it is (the positions in
+ *  `IDENTITY_SELECTORS.amazon`), plus the panel it shows and whether it shows a
+ *  product title. Deciding whether the page is the requested product is
+ *  `bindProduct`'s job. */
+export function readAmazonProductPage(
+	html: string,
+	finalUrl: string,
+): {
+	observation: AmazonProductObservation;
+	facts: NutritionFacts | null;
+	hasProductTitle: boolean;
+} {
+	const { document } = parseHTML(html);
+	const selectors = IDENTITY_SELECTORS.amazon;
+	return {
+		observation: {
+			finalUrl,
+			canonical:
+				document.querySelector(selectors.canonical)?.getAttribute("href") ?? null,
+			input: document.querySelector(selectors.input)?.getAttribute("value") ?? null,
+			dataAsin:
+				document.querySelector(selectors.dataAsin)?.getAttribute("data-asin") ??
+				null,
+		},
+		facts: parseAmazonProductNutritionDom(html),
+		hasProductTitle: document.querySelector(selectors.title) !== null,
+	};
+}
+
 /** Extract a candidate Whole Foods product page URL from a
  *  wholefoodsmarket.com search-results page for `productName`. Returns null
  *  when the results page has no recognizable product tile. */
@@ -1478,11 +1480,26 @@ export function parseWholeFoodsSearchResultDom(html: string): string | null {
  * identity and continue past related products. */
 export function parseWholeFoodsSearchResultDoms(html: string): string[] {
 	const { document } = parseHTML(html);
-	const links = document.querySelectorAll<HTMLAnchorElement>(
-		'a[href*="/product/"], a[href*="/products/"], [data-testid="product-tile"] a, .w-pie--product-tile a',
+	// Product tiles in the results grid; a link elsewhere on the page (the
+	// header, a recommendations carousel) is not a result for this search.
+	const grid = document.querySelectorAll<HTMLAnchorElement>(
+		'[data-testid="product-tile"] a, .w-pie--product-tile a',
 	);
+	const links =
+		grid.length > 0
+			? grid
+			: document.querySelectorAll<HTMLAnchorElement>(
+					'main a[href*="/product/"], main a[href*="/products/"], a[href*="/product/"], a[href*="/products/"]',
+				);
+	const seen = new Set<string>();
 	return [...links].flatMap((link) => {
 		const href = link.getAttribute("href");
-		return href ? [href] : [];
+		if (!href || link.closest("header, footer, nav, aside")) return [];
+		// One tile is one path: the same product linked twice (image and title,
+		// or with tracking parameters) is visited once.
+		const path = href.replace(/[?#].*$/, "");
+		if (seen.has(path)) return [];
+		seen.add(path);
+		return [href];
 	});
 }
