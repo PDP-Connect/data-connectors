@@ -54,6 +54,14 @@
  * run. `dropUnseenIds()` runs after each full scan so deleted notes/folders
  * don't stay gated forever.
  *
+ * Failure recovery: each stream failure carries the recovery hint of its own
+ * cause. A transient page, transport or pagination failure asks for a runtime
+ * retry. A source row this connector cannot represent (for example invalid
+ * UTF-8) fails the same way on every retry of that revision, so its hint is
+ * `not_retriable`. The stream still emits no STATE, because STATE on a
+ * full-inventory stream claims every row. The next scheduled run reads the
+ * source again and checkpoints once the row is readable.
+ *
  * Folder projection: `folder_id` remains the CloudKit recordName foreign
  * key. `folder_name` carries the legacy display name, resolved from the
  * folders stream fetched as a notes projection dependency. A note row is
@@ -169,10 +177,17 @@ type StreamName = "folders" | "notes" | "profile";
 type FieldOmission = ParsedFieldOmission;
 type OmittedRowDiagnostic = {
 	row_index: number;
+	record_id?: string;
 	field_count: number;
 	field_omissions: FieldOmission[];
 	row_reason?: string;
 };
+
+type RecoveryHint =
+	| { action: "retry_by_runtime"; retryable: true }
+	| { action: "manual_action_required"; retryable: false }
+	| { action: "retry_on_connector_upgrade"; retryable: false }
+	| { action: "not_retriable"; retryable: false };
 
 interface QueryFailure {
 	reason:
@@ -185,7 +200,11 @@ interface QueryFailure {
 		| "icloud_rate_limited"
 		| "icloud_readiness_exhausted";
 	message: string;
-	retryable: boolean;
+	/** Decided where the failure is classified, from its own cause, and
+	 *  serialized unchanged. A transient page or transport failure can succeed
+	 *  on retry. An unrepresentable source revision fails the same way until
+	 *  the source changes, so it asks for no retry. */
+	recoveryHint: RecoveryHint;
 	pageCount: number;
 	rowsSeen?: number;
 	sourceRowsSeen?: number;
@@ -472,7 +491,12 @@ function queryFailure(
 	return {
 		reason,
 		message: `iCloud Notes ${stream} query did not return a valid page (HTTP ${status || "network error"}); the stream was not checkpointed.`,
-		retryable: status === 0 || status === 429 || status >= 500,
+		recoveryHint:
+			status === 0 || status === 429 || status >= 500
+				? { action: "retry_by_runtime", retryable: true }
+				: reason === "icloud_auth_failed"
+					? { action: "manual_action_required", retryable: false }
+					: { action: "retry_on_connector_upgrade", retryable: false },
 		pageCount,
 	};
 }
@@ -502,7 +526,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_navigation_changed",
 					message: `The iCloud Notes page changed during the ${stream} scan; its results were not checkpointed.`,
-					retryable: true,
+					recoveryHint: { action: "retry_by_runtime", retryable: true },
 					pageCount,
 				},
 				pageCount,
@@ -527,7 +551,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_navigation_changed",
 					message: `The iCloud Notes page changed during the ${stream} scan; its results were not checkpointed.`,
-					retryable: true,
+					recoveryHint: { action: "retry_by_runtime", retryable: true },
 					pageCount,
 				},
 				pageCount,
@@ -582,7 +606,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_no_progress",
 					message: `iCloud Notes ${stream} pagination repeated a continuation marker; the stream was not checkpointed.`,
-					retryable: true,
+					recoveryHint: { action: "retry_by_runtime", retryable: true },
 					pageCount,
 				},
 				pageCount,
@@ -595,7 +619,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_omitted_rows",
 					message: `iCloud Notes returned ${malformedRows} malformed, unidentified, or duplicate ${stream} row(s); the stream was not checkpointed.`,
-					retryable: false,
+					recoveryHint: { action: "not_retriable", retryable: false },
 					pageCount,
 					omittedRows: malformedRows,
 				},
@@ -623,7 +647,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_no_progress",
 					message: `iCloud Notes ${stream} pagination returned no new rows while a continuation remained; the stream was not checkpointed.`,
-					retryable: true,
+					recoveryHint: { action: "retry_by_runtime", retryable: true },
 					pageCount,
 				},
 				pageCount,
@@ -662,10 +686,9 @@ async function emitStreamFailure(
 		stream,
 		reason: "inventory_not_proven_complete",
 		message: failure.message,
-		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		recovery_hint: failure.recoveryHint,
 		diagnostics: {
 			source_reason: QUERY_FAILURE_REASON_CODES[failure.reason],
-			source_retryable: failure.retryable,
 			page_count: failure.pageCount,
 			...(failure.rowsSeen === undefined
 				? {}
@@ -861,7 +884,7 @@ function omittedRowsFailure(
 	return {
 		reason: "icloud_omitted_rows",
 		message: `iCloud Notes could not fully read or represent ${count} ${stream} row(s); the stream was not checkpointed.`,
-		retryable: false,
+		recoveryHint: { action: "not_retriable", retryable: false },
 		pageCount,
 		omittedRows: count,
 		...(fieldOmissions.length === 0
@@ -870,6 +893,24 @@ function omittedRowsFailure(
 		...(omittedRowDiagnostics.length === 0
 			? {}
 			: { omittedRowDiagnostics: omittedRowDiagnostics.slice() }),
+	};
+}
+
+/** Identify a withheld row by its source record id, so the rejected revision
+ *  can be found again; `row_index` alone changes as other rows change. */
+function omittedRow(
+	record: CloudKitRecord,
+	rowIndex: number,
+	fieldOmissions: FieldOmission[],
+	rowReason?: string,
+): OmittedRowDiagnostic {
+	const recordId = resolveCloudKitRecordId(record);
+	return {
+		row_index: rowIndex,
+		...(recordId === null ? {} : { record_id: recordId }),
+		field_count: fieldOmissions.length,
+		field_omissions: fieldOmissions,
+		...(rowReason === undefined ? {} : { row_reason: rowReason }),
 	};
 }
 
@@ -984,7 +1025,7 @@ export async function collectAllStreams(
 				reason: "icloud_navigation_changed",
 				message:
 					"The iCloud Notes page changed before the profile could be checkpointed.",
-				retryable: true,
+				recoveryHint: { action: "retry_by_runtime", retryable: true },
 				pageCount: 1,
 			});
 		}
@@ -1024,12 +1065,9 @@ export async function collectAllStreams(
 				};
 				fieldOmissions.push(omission);
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: 1,
-					field_omissions: [omission],
-					row_reason: "unavailable_fields",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, [omission], "unavailable_fields"),
+				);
 				continue;
 			}
 			if (recordType.value !== "Folder") {
@@ -1043,32 +1081,29 @@ export async function collectAllStreams(
 			const built = result.record;
 			if (built === null) {
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: result.unavailableFields.length,
-					field_omissions: result.unavailableFields,
-					row_reason: "record_identity_unavailable",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(
+						record,
+						rowIndex,
+						result.unavailableFields,
+						"record_identity_unavailable",
+					),
+				);
 				continue;
 			}
 			if (result.unavailableFields.length > 0) {
 				omitted += 1;
 				unavailableFolderIds.add(built.id);
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: result.unavailableFields.length,
-					field_omissions: result.unavailableFields,
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, result.unavailableFields),
+				);
 			}
 			if (!validateRecord("folders", built).ok) {
 				if (result.unavailableFields.length === 0) {
 					omitted += 1;
-					omittedRowDiagnostics.push({
-						row_index: rowIndex,
-						field_count: 0,
-						field_omissions: [],
-						row_reason: "record_schema_invalid",
-					});
+					omittedRowDiagnostics.push(
+						omittedRow(record, rowIndex, [], "record_schema_invalid"),
+					);
 				}
 				continue;
 			}
@@ -1113,7 +1148,7 @@ export async function collectAllStreams(
 							reason: "icloud_navigation_changed",
 							message:
 								"The iCloud Notes page changed before the folders stream could be checkpointed.",
-							retryable: true,
+							recoveryHint: { action: "retry_by_runtime", retryable: true },
 							pageCount: folderWalk.pageCount,
 						}
 					: null);
@@ -1182,12 +1217,9 @@ export async function collectAllStreams(
 				};
 				fieldOmissions.push(omission);
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: 1,
-					field_omissions: [omission],
-					row_reason: "unavailable_fields",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, [omission], "unavailable_fields"),
+				);
 				continue;
 			}
 			if (recordType.value !== "Note") {
@@ -1210,12 +1242,9 @@ export async function collectAllStreams(
 				};
 				fieldOmissions.push(omission);
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: 1,
-					field_omissions: [omission],
-					row_reason: "unavailable_fields",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, [omission], "unavailable_fields"),
+				);
 				continue;
 			}
 			const result = await readNoteRecord(record, folderNames, {
@@ -1226,35 +1255,33 @@ export async function collectAllStreams(
 			const built = result.record;
 			if (built === null) {
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: result.unavailableFields.length,
-					field_omissions: result.unavailableFields,
-					row_reason:
-						built === null
-							? "record_identity_unavailable"
-							: "record_schema_invalid",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(
+						record,
+						rowIndex,
+						result.unavailableFields,
+						"record_identity_unavailable",
+					),
+				);
 				continue;
 			}
 			if (result.unavailableFields.length > 0) {
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: result.unavailableFields.length,
-					field_omissions: result.unavailableFields,
-					row_reason: "unavailable_fields",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(
+						record,
+						rowIndex,
+						result.unavailableFields,
+						"unavailable_fields",
+					),
+				);
 				continue;
 			}
 			if (!validateRecord("notes", built).ok) {
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: 0,
-					field_omissions: [],
-					row_reason: "record_schema_invalid",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, [], "record_schema_invalid"),
+				);
 				continue;
 			}
 			if (cursor.shouldEmit(built)) {
@@ -1280,6 +1307,18 @@ export async function collectAllStreams(
 						omittedRowDiagnostics,
 					)
 				: null);
+		// A note withheld only because the folders scan did not finish has the
+		// recovery of that scan, not of a malformed note.
+		const folderFailure = folderWalk?.failure;
+		if (
+			failure &&
+			folderFailure?.recoveryHint.retryable === true &&
+			fieldOmissions.some(
+				(omission) => omission.reason === "folder_projection_incomplete",
+			)
+		) {
+			failure = { ...failure, recoveryHint: folderFailure.recoveryHint };
+		}
 		if (failure) {
 			failure = {
 				...failure,
@@ -1295,7 +1334,7 @@ export async function collectAllStreams(
 				reason: "icloud_navigation_changed",
 				message:
 					"The iCloud Notes page changed before the notes stream could be checkpointed.",
-				retryable: true,
+				recoveryHint: { action: "retry_by_runtime", retryable: true },
 				pageCount: walk.pageCount,
 			};
 		}

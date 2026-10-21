@@ -739,14 +739,17 @@ test("collectAllStreams: unknown recordType withholds both streams and preserves
 			`${stream} must be withheld`,
 		);
 		assert.equal(skip.reason, "inventory_not_proven_complete");
+		// The same unreadable discriminator fails every retry of this revision.
 		assert.deepEqual(skip.recovery_hint, {
-			action: "retry_by_runtime",
-			retryable: true,
+			action: "not_retriable",
+			retryable: false,
 		});
 		assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
 		assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
 			{
 				row_index: 0,
+				record_id:
+					stream === "folders" ? "folder-unknown-type" : "note-missing-type",
 				field_count: 1,
 				field_omissions: [{ field: "recordType", reason, source_shape: shape }],
 				row_reason: "unavailable_fields",
@@ -1148,14 +1151,16 @@ test("collectAllStreams: malformed Deleted controls withhold rows and preserve s
 	);
 	assert.ok(skip && skip.type === "SKIP_RESULT");
 	assert.equal(skip.reason, "inventory_not_proven_complete");
+	// The same malformed control fails every retry of this revision.
 	assert.deepEqual(skip.recovery_hint, {
-		action: "retry_by_runtime",
-		retryable: true,
+		action: "not_retriable",
+		retryable: false,
 	});
 	assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
 	assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
 		{
 			row_index: 0,
+			record_id: "note-deleted-wrapper-malformed",
 			field_count: 1,
 			field_omissions: [
 				{
@@ -1168,6 +1173,7 @@ test("collectAllStreams: malformed Deleted controls withhold rows and preserve s
 		},
 		{
 			row_index: 1,
+			record_id: "note-deleted-value-malformed",
 			field_count: 1,
 			field_omissions: [
 				{
@@ -1960,5 +1966,169 @@ test("collectAllStreams: an undecodable body withholds the row and the checkpoin
 			(message) => message.type === "STATE" && message.stream === "notes",
 		),
 		"a decodable body lets the notes checkpoint advance",
+	);
+});
+
+test("collectAllStreams: a permanently malformed note is not retried as the same revision, never checkpoints false coverage, and emits once repaired", async () => {
+	// "/w==" is valid base64 for the one byte 0xFF, which is not UTF-8.
+	const INVALID_UTF8 = "/w==";
+	const good = (title: string) => ({
+		recordName: "note-good",
+		recordType: "Note",
+		fields: readableEmptyNoteFields({ TitleEncrypted: { value: b64(title) } }),
+	});
+	const bad = (titleValue: string) => ({
+		recordName: "note-bad",
+		recordType: "Note",
+		fields: readableEmptyNoteFields({ TitleEncrypted: { value: titleValue } }),
+	});
+	const notesStateOf = (harness: ReturnType<typeof makeRecordingEmit>) =>
+		harness.protocolMessages.find(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		);
+
+	const healthy = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeNotePage([{ records: [good("Good v0"), bad(b64("Bad v0"))] }]),
+			healthy,
+			["notes"],
+		),
+	);
+	const healthyState = notesStateOf(healthy);
+	assert.ok(healthyState && healthyState.type === "STATE");
+	const seed = { notes: healthyState.cursor };
+
+	// The bad note's bytes stay identical on every run. The healthy note
+	// changes on every run.
+	for (const revision of ["Good v1", "Good v2", "Good v3"]) {
+		const run = makeRecordingEmit(validateRecord);
+		const ctx = makeCtx(
+			makeNotePage([{ records: [good(revision), bad(INVALID_UTF8)] }]),
+			run,
+			["notes"],
+			structuredClone(seed),
+		);
+		await collectAllStreams(ctx);
+
+		assert.deepEqual(
+			run.emitted.map((record) => ({
+				id: record.data.id,
+				title: record.data.title,
+			})),
+			[{ id: "note-good", title: revision }],
+			`${revision}: the changed healthy note emits; the malformed note does not`,
+		);
+		assert.ok(
+			!JSON.stringify(run.emitted).includes("�"),
+			`${revision}: no replacement-character text`,
+		);
+		assert.equal(
+			notesStateOf(run),
+			undefined,
+			`${revision}: no checkpoint claims complete inventory`,
+		);
+		assert.deepEqual(ctx.state, seed, `${revision}: prior cursor kept`);
+		const skip = run.protocolMessages.find(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+		);
+		assert.ok(skip && skip.type === "SKIP_RESULT", revision);
+		assert.deepEqual(
+			skip.recovery_hint,
+			{ action: "not_retriable", retryable: false },
+			`${revision}: an unchanged malformed revision is not offered for automatic retry`,
+		);
+		assert.deepEqual(
+			(
+				diagnosticField(skip, "omitted_row_diagnostics") as {
+					record_id?: string;
+					field_omissions: { field: string; reason: string }[];
+				}[]
+			).map((row) => ({
+				record_id: row.record_id,
+				fields: row.field_omissions.map(({ field, reason }) => ({
+					field,
+					reason,
+				})),
+			})),
+			[
+				{
+					record_id: "note-bad",
+					fields: [{ field: "title", reason: "invalid_utf8_text" }],
+				},
+			],
+			`${revision}: the rejected row is identified by its record id`,
+		);
+	}
+
+	// The source repairs the bad note: both notes emit and the stream
+	// checkpoints, after which the next run is a fixed point.
+	const repaired = makeRecordingEmit(validateRecord);
+	const repairedCtx = makeCtx(
+		makeNotePage([{ records: [good("Good v3"), bad(b64("Bad v1"))] }]),
+		repaired,
+		["notes"],
+		seed,
+	);
+	await collectAllStreams(repairedCtx);
+	assert.deepEqual(
+		repaired.emitted
+			.map((record) => ({ id: record.data.id, title: record.data.title }))
+			.sort((left, right) => String(left.id).localeCompare(String(right.id))),
+		[
+			{ id: "note-bad", title: "Bad v1" },
+			{ id: "note-good", title: "Good v3" },
+		],
+	);
+	const repairedState = notesStateOf(repaired);
+	assert.ok(repairedState && repairedState.type === "STATE");
+	assert.equal(
+		repaired.protocolMessages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+
+	const steady = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeNotePage([{ records: [good("Good v3"), bad(b64("Bad v1"))] }]),
+			steady,
+			["notes"],
+			{ notes: repairedState.cursor },
+		),
+	);
+	assert.equal(steady.emitted.length, 0, "converged: nothing re-emits");
+	assert.ok(notesStateOf(steady), "converged: the checkpoint holds");
+});
+
+test("collectAllStreams: notes withheld by a transient folders failure keep the folders retry hint", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const ctx = makeCtx(
+		makeFakePage([
+			{ stream: "folders", response: { status: 503, json: null } },
+			{ stream: "notes", response: noteQueryResponse() },
+		]),
+		harness,
+		["notes"],
+	);
+	await collectAllStreams(ctx);
+
+	assert.equal(harness.emitted.length, 0);
+	const skip = harness.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.deepEqual(
+		(
+			diagnosticField(skip, "field_omissions") as {
+				field: string;
+				reason: string;
+			}[]
+		).map(({ field, reason }) => ({ field, reason })),
+		[{ field: "folder_name", reason: "folder_projection_incomplete" }],
+	);
+	assert.deepEqual(
+		skip.recovery_hint,
+		{ action: "retry_by_runtime", retryable: true },
+		"the folders outage is transient, so the notes it withheld stay retryable",
 	);
 });
