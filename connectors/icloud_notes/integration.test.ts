@@ -2640,8 +2640,9 @@ for (const status of [401, 403]) {
 			),
 		);
 		await assert.rejects(collectAllStreams(ctx), (error: unknown) => {
-			const failure = error as Error & { code?: string; retryable?: boolean };
+			const failure = error as Error & { code?: string; retryable?: boolean; recoveryHint?: unknown };
 			assert.equal(failure.code, "icloud_auth_failed");
+			assert.deepEqual(failure.recoveryHint, { action: "manual_action_required", retryable: false });
 			assert.equal(failure.retryable, false);
 			assert.equal(
 				failure.message,

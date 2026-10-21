@@ -823,15 +823,15 @@ async function emitStreamFailure(
 	failure: QueryFailure,
 ): Promise<void> {
 	const route = failureRoute(failure);
+	const recoveryHint = recoveryHintFor(failure.cause);
 	if (route === "auth_rejected") {
 		const root = rootFailure(failure);
 		throw createConnectorFailure(
 			"icloud_auth_failed",
 			`icloud_auth_failed: ${root.message}`,
-			{ retryable: recoveryHintFor(root.cause).retryable },
+			{ retryable: recoveryHint.retryable, recoveryHint },
 		);
 	}
-	const recoveryHint = recoveryHintFor(failure.cause);
 	const diagnostics = streamFailureDiagnostics(failure);
 	if (route === "read_failed") {
 		if (ctx.reportStreamFailure) {
