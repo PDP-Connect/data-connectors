@@ -2271,3 +2271,249 @@ for (const phase of ["validate", "query page 2", "location read"] as const) {
 		}
 	});
 }
+
+for (const { name, validate, code, retryable } of [
+	{
+		name: "a network failure",
+		validate: () => Promise.resolve({ status: 0, json: null }),
+		code: "icloud_http_error",
+		retryable: true,
+	},
+	{
+		name: "HTTP 429",
+		validate: () => Promise.resolve({ status: 429, json: {} }),
+		code: "icloud_rate_limited",
+		retryable: true,
+	},
+	{
+		name: "HTTP 503",
+		validate: () => Promise.resolve({ status: 503, json: {} }),
+		code: "icloud_http_error",
+		retryable: true,
+	},
+	{
+		name: "a rejected page call",
+		validate: () =>
+			Promise.reject(new Error("Execution context was destroyed")),
+		code: "icloud_http_error",
+		retryable: true,
+	},
+	{
+		name: "HTTP 401",
+		validate: () => Promise.resolve({ status: 401, json: {} }),
+		code: "icloud_auth_failed",
+		retryable: false,
+	},
+	{
+		name: "HTTP 403",
+		validate: () => Promise.resolve({ status: 403, json: {} }),
+		code: "icloud_auth_failed",
+		retryable: false,
+	},
+	{
+		name: "a malformed 200 response",
+		validate: () => Promise.resolve({ status: 200, json: { dsInfo: {} } }),
+		code: "icloud_invalid_config_response",
+		retryable: false,
+	},
+]) {
+	test(`collectAllStreams: a validate that returns ${name} fails with its own cause`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+		const page = makeNotePage([noteQueryResponse()]);
+		const evaluate = page.evaluate.bind(page);
+		page.evaluate = ((fn: unknown, arg: unknown) =>
+			arg === VALIDATE_URL
+				? validate()
+				: evaluate(fn as never, arg)) as Page["evaluate"];
+		const ctx = makeCtx(
+			page,
+			harness,
+			["profile", "notes"],
+			structuredClone(seed),
+		);
+		await assert.rejects(collectAllStreams(ctx), (error: unknown) => {
+			const failure = error as Error & { code?: string; retryable?: boolean };
+			assert.equal(failure.code, code, name);
+			assert.equal(failure.retryable, retryable, name);
+			assert.ok(failure.message.startsWith(`${code}:`), failure.message);
+			return true;
+		});
+		assert.deepEqual(harness.events, [], `${name}: no RECORD or STATE`);
+		assert.deepEqual(ctx.state, seed, `${name}: prior cursor kept`);
+	});
+}
+
+for (const { name, folders, notes, hint, reason } of [
+	{
+		name: "an unrecognized folders response",
+		folders: {},
+		notes: [] as unknown[],
+		hint: { action: "retry_on_connector_upgrade", retryable: false },
+		reason: "icloud_invalid_query_response",
+	},
+	{
+		name: "a folders HTTP 401",
+		folders: { status: 401, json: null },
+		notes: [] as unknown[],
+		hint: { action: "manual_action_required", retryable: false },
+		reason: "icloud_auth_failed",
+	},
+	{
+		name: "a folders HTTP 403 and a permanently malformed note",
+		folders: { status: 403, json: null },
+		notes: [
+			{
+				recordName: "note-bad",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({ TitleEncrypted: { value: "/w==" } }),
+			},
+		],
+		hint: { action: "manual_action_required", retryable: false },
+		reason: "icloud_auth_failed",
+	},
+	{
+		name: "a folders HTTP 503 and a permanently malformed note",
+		folders: { status: 503, json: null },
+		notes: [
+			{
+				recordName: "note-bad",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({ TitleEncrypted: { value: "/w==" } }),
+			},
+		],
+		hint: { action: "retry_by_runtime", retryable: true },
+		reason: "icloud_http_error",
+	},
+]) {
+	test(`collectAllStreams: notes withheld after ${name} carry the folders cause`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+		const ctx = makeCtx(
+			makeFakePage([
+				{ stream: "folders", response: folders },
+				{
+					stream: "notes",
+					response: {
+						records: [...noteQueryResponse().records, ...notes],
+					},
+				},
+			]),
+			harness,
+			["notes"],
+			structuredClone(seed),
+		);
+		await collectAllStreams(ctx);
+
+		assert.equal(harness.emitted.length, 0, name);
+		assert.equal(
+			harness.protocolMessages.some((message) => message.type === "STATE"),
+			false,
+			`${name}: no checkpoint`,
+		);
+		assert.deepEqual(ctx.state, seed, `${name}: prior cursor kept`);
+		const skip = harness.protocolMessages.find(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+		);
+		assert.ok(skip && skip.type === "SKIP_RESULT", name);
+		assert.deepEqual(skip.recovery_hint, hint, name);
+		assert.equal(diagnosticField(skip, "dependency_stream"), "folders", name);
+		assert.equal(diagnosticField(skip, "dependency_reason"), reason, name);
+	});
+}
+
+test("collectAllStreams: a query that resolves after its timeout changes nothing, during or after a later collection", async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+	const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+	const late = {
+		records: [
+			{
+				recordName: "note-late",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({
+					TitleEncrypted: { value: b64("Late") },
+				}),
+			},
+		],
+	};
+	let releaseLate: (value: unknown) => void = () => undefined;
+	let notesQueries = 0;
+	const page = makeFakePage([]);
+	const evaluate = page.evaluate.bind(page);
+	page.evaluate = ((fn: unknown, arg: unknown) => {
+		const evalBody = (arg as { evalBody?: { query?: unknown } } | undefined)
+			?.evalBody;
+		if (evalBody === undefined) return evaluate(fn as never, arg);
+		if (!JSON.stringify(evalBody.query).includes('"recents"')) {
+			return Promise.resolve({ status: 200, json: folderQueryResponse() });
+		}
+		notesQueries += 1;
+		if (notesQueries === 1) {
+			return Promise.resolve({
+				status: 200,
+				json: noteQueryResponse({ continuationMarker: "page-2" }),
+			});
+		}
+		if (notesQueries === 2) {
+			return new Promise((resolve) => {
+				releaseLate = resolve;
+			});
+		}
+		return Promise.resolve({ status: 200, json: noteQueryResponse() });
+	}) as Page["evaluate"];
+	const settle = async (collection: Promise<void>) => {
+		let done = false;
+		const tracked = collection.then(() => {
+			done = true;
+		});
+		for (let tick = 0; tick < 200 && !done; tick += 1) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			t.mock.timers.tick(1000);
+		}
+		assert.equal(done, true, "collection settles");
+		await tracked;
+	};
+
+	const timedOut = makeRecordingEmit(validateRecord);
+	const timedOutCtx = makeCtx(page, timedOut, ["notes"], structuredClone(seed));
+	await settle(collectAllStreams(timedOutCtx));
+	const timedOutSkip = timedOut.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(timedOutSkip && timedOutSkip.type === "SKIP_RESULT");
+	assert.deepEqual(timedOutSkip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+
+	const later = makeRecordingEmit(validateRecord);
+	const laterCtx = makeCtx(page, later, ["notes"], structuredClone(seed));
+	await settle(collectAllStreams(laterCtx));
+	const timedOutEvents = structuredClone(timedOut.events);
+	const laterEvents = structuredClone(later.events);
+
+	releaseLate({ status: 200, json: late });
+	for (let turn = 0; turn < 5; turn += 1) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+
+	assert.deepEqual(
+		timedOut.events,
+		timedOutEvents,
+		"no late message in the timed-out run",
+	);
+	assert.deepEqual(
+		later.events,
+		laterEvents,
+		"no late message in the later run",
+	);
+	assert.equal(
+		[...timedOut.emitted, ...later.emitted].some(
+			(record) => record.data.id === "note-late",
+		),
+		false,
+	);
+	assert.deepEqual(timedOutCtx.state, seed, "timed-out run state unchanged");
+	assert.deepEqual(laterCtx.state, seed, "later run state unchanged");
+	assert.equal(notesQueries, 3);
+});
