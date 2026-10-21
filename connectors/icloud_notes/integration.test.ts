@@ -1694,6 +1694,25 @@ test("collectAllStreams: throws when the CloudKit config cannot be resolved (aut
 	await assert.rejects(collectAllStreams(ctx), /icloud_auth_failed/);
 });
 
+test("collectAllStreams: an empty stream selection makes no page request", async () => {
+	let pageCalls = 0;
+	const page = {
+		evaluate: () => {
+			pageCalls += 1;
+			return Promise.resolve(null);
+		},
+		url: () => {
+			pageCalls += 1;
+			return "https://www.icloud.com/notes";
+		},
+	} as unknown as Page;
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(makeCtx(page, harness, []));
+	assert.equal(pageCalls, 0);
+	assert.deepEqual(harness.protocolMessages, []);
+	assert.deepEqual(harness.emitted, []);
+});
+
 test("iCloud sign-in keeps one Patchright tab and collection reuses the authenticated page", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
@@ -1758,11 +1777,57 @@ test("iCloud sign-in keeps one Patchright tab and collection reuses the authenti
 		assert.equal(openedPages, 0);
 		assert.equal(context.pages().length, 1);
 		assert.equal(new URL(page.url()).origin, "https://www.icloud.com");
+		const cloudKitQueries: string[] = [];
+		await context.route("https://p00-ckdatabasews.icloud.com/**", (route) => {
+			const request = route.request();
+			const hasSession = Boolean(
+				request.headers().cookie?.includes("icloud-fixture-session=live"),
+			);
+			const indexName = (
+				JSON.parse(request.postData() ?? "{}") as {
+					query?: { filterBy?: { fieldValue?: { value?: string } }[] };
+				}
+			).query?.filterBy?.[0]?.fieldValue?.value;
+			cloudKitQueries.push(`${indexName}:${hasSession ? "session" : "none"}`);
+			return route.fulfill({
+				status: hasSession ? 200 : 401,
+				headers: {
+					"access-control-allow-credentials": "true",
+					"access-control-allow-origin": "https://www.icloud.com",
+				},
+				contentType: "application/json",
+				body: JSON.stringify(
+					indexName === "parentless"
+						? folderQueryResponse()
+						: noteQueryResponse(),
+				),
+			});
+		});
+		const validateCallsBeforeCollection = validateCalls;
 		const harness = makeRecordingEmit(validateRecord);
-		await collectAllStreams(makeCtx(page, harness, []));
+		await collectAllStreams(makeCtx(page, harness, ["notes"]));
 		assert.ok(
-			validateCalls >= 2,
-			"session establishment probes the page; an empty stream selection makes no collection request",
+			validateCalls > validateCallsBeforeCollection,
+			"collection resolves CloudKit from the authenticated page",
+		);
+		assert.deepEqual(
+			cloudKitQueries,
+			["parentless:session", "recents:session"],
+			"both CloudKit queries carry the session cookie set during sign-in",
+		);
+		assert.deepEqual(
+			harness.emitted.map((record) => ({
+				stream: record.stream,
+				id: record.data.id,
+				folder_name: record.data.folder_name,
+			})),
+			[{ stream: "notes", id: "note-1", folder_name: "Work" }],
+		);
+		assert.ok(
+			harness.protocolMessages.some(
+				(message) => message.type === "STATE" && message.stream === "notes",
+			),
+			"the collected notes stream checkpoints",
 		);
 		assert.equal(context.pages().length, 1);
 		await context.close();

@@ -2324,7 +2324,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/icloud_notes/integration.test.ts",
-			line: 2012,
+			line: 2077,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "permanently malformed note test: runs collection once per revision in order, as consecutive scheduled runs would",
