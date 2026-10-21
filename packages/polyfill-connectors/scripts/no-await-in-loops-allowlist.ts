@@ -2275,14 +2275,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/icloud_notes/parsers.test.ts",
-			line: 640,
+			line: 652,
 			column: 20,
 			category: "test_assertion_sequencing",
 			note: "browser decompression parity: decodes each vector per format and compares with Node's zlib output in order",
 		},
 		{
 			path: "connectors/icloud_notes/parsers.ts",
-			line: 285,
+			line: 289,
 			column: 24,
 			category: "bounded_retry_polling",
 			note: "decodeNoteBody(): tries each of the three compression formats in order and stops at the first that decodes",

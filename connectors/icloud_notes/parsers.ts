@@ -133,6 +133,7 @@ type MessageWalk =
 	| { kind: "WALKED"; runs: string[]; recognized: boolean }
 	| { kind: "UNDECODABLE"; cause: NoteBodyUndecodableCause };
 
+/** Read a tag or length: an unsigned value that must fit 32 bits. */
 function readVarint(
 	bytes: Uint8Array,
 	offset: number,
@@ -142,8 +143,20 @@ function readVarint(
 		if (offset >= bytes.length) return null;
 		const byte = bytes[offset++];
 		if (byte === undefined) return null;
+		// The fifth byte may only carry the top four bits of a 32-bit value.
+		if (shift === 28 && (byte & 0x70) !== 0) return null;
 		value |= (byte & 0x7f) << shift;
 		if ((byte & 0x80) === 0) return [value >>> 0, offset];
+	}
+	return null;
+}
+
+/** Skip a scalar varint field value, which may use up to ten bytes (int64). */
+function skipVarint(bytes: Uint8Array, offset: number): number | null {
+	for (let length = 0; length < 10; length += 1) {
+		const byte = bytes[offset + length];
+		if (byte === undefined) return null;
+		if ((byte & 0x80) === 0) return offset + length + 1;
 	}
 	return null;
 }
@@ -159,9 +172,9 @@ function parseProtobuf(bytes: Uint8Array): ProtobufField[] | null {
 		const wireType = tag[0] & 7;
 		if (fieldNumber === 0) return null;
 		if (wireType === 0) {
-			const value = readVarint(bytes, offset);
-			if (!value) return null;
-			offset = value[1];
+			const next = skipVarint(bytes, offset);
+			if (next === null) return null;
+			offset = next;
 		} else if (wireType === 1 || wireType === 5) {
 			offset += wireType === 1 ? 8 : 4;
 			if (offset > bytes.length) return null;
@@ -188,36 +201,24 @@ function parseProtobuf(bytes: Uint8Array): ProtobufField[] | null {
 
 function decodeUtf8(bytes: Uint8Array): string | null {
 	try {
-		const value = new TextDecoder("utf-8", {
+		return new TextDecoder("utf-8", {
 			fatal: true,
 			ignoreBOM: true,
 		}).decode(bytes);
-		for (const character of value) {
-			const codePoint = character.codePointAt(0);
-			if (
-				codePoint !== undefined &&
-				((codePoint < 0x20 &&
-					codePoint !== 0x09 &&
-					codePoint !== 0x0a &&
-					codePoint !== 0x0d) ||
-					(codePoint >= 0x7f && codePoint <= 0x9f))
-			) {
-				return null;
-			}
-		}
-		return value;
 	} catch {
 		return null;
 	}
 }
 
-/** Paragraph rule shared with the legacy script: control characters (line
- *  feeds, tabs) end a run, and the runs are later joined with one line feed.
- *  The object-replacement marker U+FFFC is ordinary text and stays. */
-function splitTextRuns(value: string): string[] {
+/** Rendering rule shared with the legacy script, applied to each text field:
+ *  control characters (line feeds, tabs, vertical tabs, escapes) end a run,
+ *  empty runs are dropped, and runs that are only attachment placeholders
+ *  (U+FFFC) carry no text. The runs are later joined with one line feed. A
+ *  U+FFFC inside a longer run is ordinary text and stays. */
+function renderTextRuns(value: string): string[] {
 	return value
 		.split(/[\u0000-\u001F\u007F-\u009F]/)
-		.filter((run) => run.length > 0);
+		.filter((run) => run.length > 0 && !/^\uFFFC+$/.test(run));
 }
 
 function walkMessage(
@@ -239,13 +240,16 @@ function walkMessage(
 				return { kind: "UNDECODABLE", cause: "body_text_invalid_utf8" };
 			}
 			recognized = true;
-			runs.push(...splitTextRuns(text));
+			runs.push(...renderTextRuns(text));
 		} else if (field.fieldNumber === shape.childField && shape.child) {
 			if (field.wireType !== 2 || !field.value) {
 				return { kind: "UNDECODABLE", cause: "body_text_wrong_wire_type" };
 			}
 			const child = walkMessage(field.value, shape.child);
 			if (child.kind === "UNDECODABLE") return child;
+			if (field.value.length > 0 && !child.recognized) {
+				return { kind: "UNDECODABLE", cause: "body_structure_unrecognized" };
+			}
 			recognized = true;
 			runs.push(...child.runs);
 		} else if (shape.metadataFields?.includes(field.fieldNumber)) {

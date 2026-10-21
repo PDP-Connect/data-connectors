@@ -170,9 +170,21 @@ function encodeBodyText(text: string): Buffer {
 	return encodeLengthDelimitedField(1, value);
 }
 
+function encodeVarint(value: number): Buffer {
+	const bytes: number[] = [];
+	let rest = value;
+	while (rest >= 0x80) {
+		bytes.push((rest & 0x7f) | 0x80);
+		rest = Math.floor(rest / 0x80);
+	}
+	bytes.push(rest);
+	return Buffer.from(bytes);
+}
+
 function encodeLengthDelimitedField(fieldNumber: number, value: Buffer): Buffer {
 	return Buffer.concat([
-		Buffer.from([(fieldNumber << 3) | 2, value.length]),
+		encodeVarint((fieldNumber << 3) | 2),
+		encodeVarint(value.length),
 		value,
 	]);
 }
@@ -736,6 +748,111 @@ test("structured body: rich-text paragraphs, marker and trailing line feed", asy
 			const result = await readBody(encodeStructuredBodyText(text));
 			assert.equal(result.record?.text_content, expected);
 		}),
+	);
+});
+
+test("structured body: texts longer than one length byte are exact", async () => {
+	await Promise.all(
+		[127, 128, 300, 20_000].map(async (length) => {
+			const text = `${"é".repeat(length / 2)}`;
+			const result = await readBody(encodeStructuredBodyText(text));
+			assert.equal(result.record?.text_content, text, `${length} bytes`);
+		}),
+	);
+});
+
+test("structured body: control characters are paragraph breaks, not decode failures", async () => {
+	await Promise.all(
+		[
+			["line1\u000Bline2", "line1\nline2"],
+			["line1\u000Cline2", "line1\nline2"],
+			["line1\u001Bline2", "line1\nline2"],
+			["line1\u007Fline2", "line1\nline2"],
+			["line1\u0085line2", "line1\nline2"],
+			["tab\tseparated", "tab\nseparated"],
+			["blank\n\n\nlines", "blank\nlines"],
+		].map(async ([text, expected]) => {
+			const result = await readBody(encodeStructuredBodyText(text as string));
+			assert.equal(result.record?.text_content, expected, JSON.stringify(text));
+			assert.deepEqual(result.unavailableFields, []);
+		}),
+	);
+});
+
+test("structured body: attachment placeholders carry no text but inline markers stay", async () => {
+	assert.deepEqual(
+		decodeNoteBodyBytes(encodeStructuredBodyText("￼")),
+		{ kind: "ABSENT" },
+	);
+	assert.deepEqual(
+		decodeNoteBodyBytes(encodeStructuredBodyText("Before\n￼\nAfter")),
+		decoded("Before\nAfter"),
+	);
+	assert.deepEqual(
+		decodeNoteBodyBytes(encodeStructuredBodyText("￼Photo description")),
+		decoded("￼Photo description"),
+	);
+});
+
+test("structured body: a note shaped like a real Apple Notes document decodes", async () => {
+	// Document { 2: version varint, 3: Note { 2: text with line feeds,
+	// 3: substring metadata, 5: attribute runs, 6: ten-byte int64 varint } }
+	const note = Buffer.concat([
+		textRun("Title\n\nPara one\nhi"),
+		encodeLengthDelimitedField(3, Buffer.from([0x08, 0x01])),
+		encodeLengthDelimitedField(5, Buffer.from([0x08, 0x05, 0x10, 0x01])),
+		Buffer.from([0x30, ...Array(9).fill(0xff), 0x01]),
+	]);
+	const document = Buffer.concat([
+		Buffer.from([0x10, 0x03]),
+		encodeLengthDelimitedField(3, note),
+	]);
+	const result = await readBody(encodeLengthDelimitedField(2, document));
+	assert.equal(result.record?.text_content, "Title\nPara one\nhi");
+	assert.deepEqual(result.unavailableFields, []);
+});
+
+test("structured body: a recognized parent over an unrecognized child is undecodable, not empty", async () => {
+	const cases: [string, Buffer][] = [
+		[
+			"document with only an unknown field",
+			encodeLengthDelimitedField(
+				2,
+				encodeLengthDelimitedField(9, Buffer.from("whatever")),
+			),
+		],
+		[
+			"note moved to another field number",
+			encodeLengthDelimitedField(
+				2,
+				Buffer.concat([
+					Buffer.from([0x10, 0x00]),
+					encodeLengthDelimitedField(4, textRun("hidden text")),
+				]),
+			),
+		],
+	];
+	await Promise.all(
+		cases.map(async ([name, body]) => {
+			const result = await readBody(body);
+			assert.equal(result.record?.text_content, null, name);
+			assert.deepEqual(
+				result.unavailableFields.map(({ reason }) => reason),
+				["body_structure_unrecognized"],
+				name,
+			);
+		}),
+	);
+});
+
+test("structured body: a length that overflows 32 bits is malformed, not truncated", async () => {
+	const result = await readBody(
+		Buffer.from([0x0a, 0x83, 0x80, 0x80, 0x80, 0x10, 0x41, 0x42, 0x43]),
+	);
+	assert.equal(result.record?.text_content, null);
+	assert.deepEqual(
+		result.unavailableFields.map(({ reason }) => reason),
+		["body_protobuf_malformed"],
 	);
 });
 

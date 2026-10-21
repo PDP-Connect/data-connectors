@@ -1785,8 +1785,14 @@ test("collectAllStreams: an undecodable body withholds the row and the checkpoin
 		0x12, 0x06, 0x1a, 0x04, 0x10, 0x01, 0x1a, 0x00,
 	]);
 	// Same note: a short run after a long one, in a readable structure.
-	const field = (fieldNumber: number, value: Buffer) =>
-		Buffer.concat([Buffer.from([(fieldNumber << 3) | 2, value.length]), value]);
+	// Values stay under 128 bytes, so each length is one varint byte.
+	const field = (fieldNumber: number, value: Buffer) => {
+		assert.ok(value.length < 0x80);
+		return Buffer.concat([
+			Buffer.from([(fieldNumber << 3) | 2, value.length]),
+			value,
+		]);
+	};
 	const repaired = field(
 		2,
 		field(
