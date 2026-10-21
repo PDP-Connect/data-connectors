@@ -5,8 +5,10 @@
  * Real-browser fixture for `connector-runtime-remote-ownership.test.ts`. It
  * runs through `runConnector` against a browser attached with
  * `PDPP_REMOTE_OWNERSHIP_FIXTURE_REMOTE_CDP_URL`, and does what a connector
- * does in someone else's browser: load a page, make a request, open a genuine
- * provider popup from its own page, and either finish or fail.
+ * does in someone else's browser: load a page, make a request, open a blank
+ * popup from its own page, then navigate it after the popup event. This gives
+ * attached-CDP HAR a chance to capture the request (issue #523). The connector
+ * then either finishes or fails.
  *
  * `PDPP_OWNERSHIP_FIXTURE_BASE_URL` points at the test's loopback server.
  * `/open-user-tab` makes the test open a tab in the same browser through its

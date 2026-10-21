@@ -153,13 +153,13 @@ export interface AcquireIsolatedBrowserOptions {
 	 * be missing from the HAR under load. A missing popup request in a scenario
 	 * HAR alone does not prove a connector defect; see
 	 * https://github.com/PDP-Connect/data-connectors/issues/523.
-	 * Other known gaps, unexercised as of this change: `recordHar` does NOT capture
-	 * WebSocket frames, and a page's native download flow can bypass HAR capture
-	 * entirely. Checked against the connector fleet
-	 * (2026-08-21): zero of the 45 connectors use WebSocket/EventSource/SSE,
-	 * and none drive a browser download. Both gaps are real limitations of
-	 * this driver, left unaddressed because nothing currently exercises them
-	 * — not because they were solved.
+	 * Other known gaps from the 2026-08-21 connector-fleet audit: `recordHar`
+	 * does NOT capture WebSocket frames, and a page's native download flow can
+	 * bypass HAR capture entirely. At that audit, zero of the 45 connectors used
+	 * WebSocket/EventSource/SSE, and none drove a browser download. Both gaps
+	 * are real limitations of this driver, left unaddressed because none of the
+	 * audited connectors exercised them. Both capture gaps remain
+	 * unresolved.
 	 */
 	harRecording?: { path: string };
 	headless?: boolean;
