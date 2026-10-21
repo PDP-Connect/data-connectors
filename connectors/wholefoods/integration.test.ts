@@ -776,7 +776,12 @@ test("HTTP product links and cross-origin redirects cannot supply nutrition", as
 						visits += 1;
 						return Promise.resolve(null);
 					},
-					url: () => finalUrl,
+					// Only the product tile is redirected; the search answers
+					// from Whole Foods.
+					url: () =>
+						visits === 3
+							? finalUrl
+							: "https://www.wholefoodsmarket.com/search?text=organic+bananas",
 				} as unknown as Page;
 				assert.equal(
 					await lookupFlat(shape, "DEMO_KEY", "Organic Bananas"),
@@ -3791,6 +3796,283 @@ test("a tile linked by a relative and an absolute href is one tile", async () =>
 			"Apples",
 		);
 		assert.equal(visited.filter((u) => u.includes("/product/")).length, 6);
+	} finally {
+		restore();
+	}
+});
+
+// ─── Round 8: subject-scoped, lossless evidence (F1-F8) ───────────────────
+//
+// Each test is one failing input from the design review of 7138d906d, run
+// through the whole lookup. Pages are synthetic, as above.
+
+const AMAZON_APPLES_NO_PANEL =
+	'<html><body><span id="productTitle">Apples</span></body></html>';
+const APPLES_PANEL =
+	"<div><h3>Nutrition Facts</h3><p>Calories 52 Total Fat 0.2g Total Carbohydrate 14g Protein 0.3g</p></div>";
+const ldNode8 = (node: Record<string, unknown>) =>
+	`<script type="application/ld+json">${JSON.stringify(node)}</script>`;
+/** Amazon answers `amazonHtml`; Whole Foods search lists `tiles`; each tile
+ *  path serves its page. */
+const site8 = (
+	amazonHtml: string,
+	tiles: Record<string, string>,
+	finalUrlFor?: (url: string) => string,
+) =>
+	scriptedBrowser(
+		(url) => {
+			if (isAmazon(url)) return amazonHtml;
+			if (url.includes("/search?")) {
+				return Object.keys(tiles)
+					.map((path) => `<a href="${path}">tile</a>`)
+					.join("");
+			}
+			const path = new URL(url).pathname;
+			return tiles[path] ?? "<html><body>gone</body></html>";
+		},
+		finalUrlFor,
+	);
+
+test("F1: a recommendation's rendered panel is not the main heading's panel", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_APPLES_NO_PANEL, {
+				"/product/apples":
+					"<html><body><h1>Apples</h1><aside><h2>Recommended Pears</h2><div><h3>Nutrition Facts</h3><p>Calories 95 Total Fat 0g Total Carbohydrate 25g Protein 1g</p></div></aside></body></html>",
+			}),
+			"Apples",
+		);
+		assert.notEqual(outcome.status, "matched");
+	} finally {
+		restore();
+	}
+});
+
+test("F1: a hidden or inert panel is not observed", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcomes = await Promise.all(
+			[
+				(panel: string) => `<div hidden>${panel}</div>`,
+				(panel: string) => `<template>${panel}</template>`,
+				(panel: string) => `<div style="display:none">${panel}</div>`,
+			].map((wrap) =>
+				typedLookup(
+					site8(AMAZON_APPLES_NO_PANEL, {
+						"/product/apples": `<html><body><h1>Apples</h1>${wrap(APPLES_PANEL)}</body></html>`,
+					}),
+					"Apples",
+				),
+			),
+		);
+		assert.deepEqual(
+			outcomes.map((outcome) => outcome.status === "matched"),
+			[false, false, false],
+		);
+	} finally {
+		restore();
+	}
+});
+
+test("F2: a URL-tied node named otherwise lends its GTIN to no one", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_APPLES_NO_PANEL, {
+				"/product/apples": `<html><head>${ldNode8({ "@type": "Product", name: "Pears", url: "/product/apples", gtin12: "036000291452" })}</head><body><h1>Apples</h1>${APPLES_PANEL}</body></html>`,
+			}),
+			"Apples",
+		);
+		// The page contradicts itself; nothing on it is Apples' with a Pears barcode.
+		assert.equal(outcome.status, "error");
+		assert.equal((outcome as { cause: string }).cause, "identity_conflict");
+	} finally {
+		restore();
+	}
+});
+
+test("F3: a partial Amazon panel with no calories row still blocks a USDA text match", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await typedLookup(
+			scriptedBrowser((url) =>
+				isAmazon(url)
+					? '<html><body><span id="productTitle">Banana Peppers</span><div id="nic-nutrition-facts">Total Fat 1g Total Carbohydrate 3g Protein 1g</div></body></html>'
+					: NO_PAGE_SOURCE(),
+			),
+			"Banana Peppers",
+		);
+		assert.equal(outcome.status, "error");
+		assert.equal((outcome as { cause: string }).cause, "panel_partial");
+	} finally {
+		restore();
+	}
+});
+
+test("F3: a partial Whole Foods panel with no calories row still blocks a USDA text match", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_PRODUCT_NO_PANEL, {
+				"/product/banana-peppers": `<html><body>${ldNode8({ "@type": "Product", name: "Banana Peppers" })}<h1>Banana Peppers</h1><div><h3>Nutrition Facts</h3><div>Total Fat 1g Total Carbohydrate 3g Protein 1g</div></div></body></html>`,
+			}),
+			"Banana Peppers",
+		);
+		assert.equal(outcome.status, "error");
+		assert.equal((outcome as { cause: string }).cause, "panel_partial");
+	} finally {
+		restore();
+	}
+});
+
+test("F5: partial structured nutrition does not hide a complete rendered panel of the same subject", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_APPLES_NO_PANEL, {
+				"/product/apples": `<html><body>${ldNode8({ "@type": "Product", name: "Apples", nutrition: { "@type": "NutritionInformation", calories: "52" } })}<h1>Apples</h1><div><h3>Nutrition Facts</h3><p>Calories 52 Total Fat 0.2g Total Carbohydrate 14g Protein 0.3g</p></div></body></html>`,
+			}),
+			"Apples",
+		);
+		assert.equal(outcome.status, "matched");
+		if (outcome.status !== "matched") return;
+		assert.equal(outcome.facts.source, "wholefoods_product_page");
+		assert.equal(outcome.facts.carbsG, 14);
+		assert.equal(outcome.facts.confidence, "medium");
+	} finally {
+		restore();
+	}
+});
+
+test("F6: a name-bound Whole Foods GTIN on a page with no nutrition drives an exact USDA lookup at medium", async () => {
+	const queries: string[] = [];
+	const restore = stubUsdaByType(
+		{ exact: { foods: [usdaApple({ gtinUpc: "012345678905", foodNutrients: usdaCoreNutrients })] } },
+		queries,
+	);
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_APPLES_NO_PANEL, {
+				"/product/apples": `<html><body>${ldNode8({ "@type": "Product", name: "Apples", gtin12: "012345678905" })}<h1>Apples</h1></body></html>`,
+			}),
+			"Apples",
+		);
+		assert.ok(queries.includes("gtinUpc:012345678905"));
+		assert.equal(outcome.status, "matched");
+		if (outcome.status !== "matched") return;
+		assert.equal(outcome.facts.usdaMatchMethod, "upc");
+		assert.equal(outcome.facts.confidence, "medium");
+	} finally {
+		restore();
+	}
+});
+
+test("F6 guard: a Whole Foods GTIN never binds a later tile by barcode", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_APPLES_NO_PANEL, {
+				"/product/apples": `<html><body>${ldNode8({ "@type": "Product", name: "Apples", gtin12: "012345678905" })}<h1>Apples</h1></body></html>`,
+				"/product/other": `<html><body>${ldNode8({ "@type": "Product", name: "Some Other Thing", gtin12: "012345678905" })}<h1>Some Other Thing</h1>${APPLES_PANEL}</body></html>`,
+			}),
+			"Apples",
+		);
+		assert.notEqual(outcome.status, "matched");
+	} finally {
+		restore();
+	}
+});
+
+test("F7: one tile whose read throws does not strand a later bound tile", async () => {
+	const restore = stubUsda([]);
+	const inner = site8(AMAZON_APPLES_NO_PANEL, {
+		"/product/a": "<html><body></body></html>",
+		"/product/b": `<html><body><h1>Apples</h1>${APPLES_PANEL}</body></html>`,
+	});
+	const page = {
+		...inner,
+		content: inner.content,
+		url: inner.url,
+		locator: inner.locator,
+		goto: async (url: string) => {
+			if (url.endsWith("/product/a")) throw new Error("net::ERR_CONNECTION_RESET");
+			return inner.goto(url);
+		},
+	} as unknown as Page;
+	try {
+		const outcome = await typedLookup(page, "Apples");
+		assert.equal(outcome.status, "matched");
+		if (outcome.status !== "matched") return;
+		assert.equal(outcome.facts.calories, 52);
+	} finally {
+		restore();
+	}
+});
+
+test("F8: a search that ends off Whole Foods is not a no-results answer", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await typedLookup(
+			scriptedBrowser(
+				(url) => (isAmazon(url) ? AMAZON_PRODUCT_NO_PANEL : "<html><body>No results</body></html>"),
+				(url) => (url.includes("/search?") ? "https://example.com/error" : url),
+			),
+			"Banana Peppers",
+		);
+		assert.notEqual(outcome.status, "matched");
+	} finally {
+		restore();
+	}
+});
+
+test("F8: a tile or an Amazon page redirected off its site to a 404 is not 'no page'", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	const browser = (offSite: (url: string) => boolean): Page => {
+		let current = "about:blank";
+		return {
+			content: async () =>
+				isAmazon(current)
+					? AMAZON_PRODUCT_NO_PANEL
+					: current.includes("/search?")
+						? '<a href="/product/banana-peppers">b</a>'
+						: "<html><body>Not found</body></html>",
+			goto: async (url: string) => {
+				current = url;
+				return offSite(url) ? { ok: () => false, status: () => 404 } : null;
+			},
+			locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
+			url: () => (offSite(current) ? "https://example.com/404" : current),
+		} as unknown as Page;
+	};
+	try {
+		const tile = await typedLookup(browser((url) => url.includes("/product/")), "Banana Peppers");
+		assert.notEqual(tile.status, "matched");
+		const amazon = await typedLookup(browser(isAmazon), "Banana Peppers");
+		assert.notEqual(amazon.status, "matched");
+	} finally {
+		restore();
+	}
+});
+
+test("a bound Amazon page with a UPC and no panel still lends its ingredients to the exact USDA match", async () => {
+	const restore = stubUsdaByType({
+		exact: { foods: [usdaApple({ gtinUpc: "012345678905", foodNutrients: usdaCoreNutrients })] },
+	});
+	try {
+		const outcome = await typedLookup(
+			scriptedBrowser((url) =>
+				isAmazon(url)
+					? '<html><body><span id="productTitle">Apples</span><div id="detailBullets_feature_div"><li>UPC: 012345678905</li></div><div id="ingredients_feature_div">Ingredients: apples</div></body></html>'
+					: NO_PAGE_SOURCE(),
+			),
+			"Apples",
+		);
+		assert.equal(outcome.status, "matched");
+		if (outcome.status !== "matched") return;
+		assert.equal(outcome.facts.usdaMatchMethod, "upc");
+		assert.equal(outcome.facts.ingredients, "apples");
+		assert.equal(outcome.facts.upc, "012345678905");
 	} finally {
 		restore();
 	}

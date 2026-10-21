@@ -3,9 +3,10 @@
 
 // The one owner of "is this page, panel, order or barcode about the thing I
 // asked for?". Pure: no I/O and no DOM. Parsers read a page into an
-// observation that carries ALL the identity evidence on it; the two functions
-// here, `bindProduct` and `bindOrder`, decide. No other file compares ids,
-// names, GTINs or order tokens.
+// observation that carries ALL the evidence on it; `bindProduct` and
+// `bindOrder` decide, and `onSourceSite` says whether a response came from
+// the source at all. No other file compares ids, names,
+// GTINs, order tokens or origins.
 //
 // Fuzzy USDA text matching (`bestUsdaMatch`) also compares names. It stays
 // outside this module on purpose: it is an approximation, labelled
@@ -41,6 +42,7 @@ export type BindingCause =
 	| "order_id_mismatch"
 	| "order_id_sources_disagree"
 	| "ambiguous_main_product"
+	| "subject_sources_disagree"
 	| "no_identity_evidence";
 
 export type Binding =
@@ -49,8 +51,9 @@ export type Binding =
 	| { readonly kind: "UNKNOWN"; readonly cause: BindingCause };
 
 const bound = (via: Via): Binding => ({ kind: "BOUND", via });
-const unknown = (cause: BindingCause): Binding => ({ kind: "UNKNOWN", cause });
-const OTHER: Binding = { kind: "OTHER" };
+// Typed as literals so they are both a `Binding` and a `ProductBinding`.
+const unknown = (cause: BindingCause) => ({ kind: "UNKNOWN", cause }) as const;
+const OTHER = { kind: "OTHER" } as const;
 
 const VIA_STRENGTH: Record<Via, number> = {
 	content_id: 3,
@@ -180,16 +183,28 @@ export function gtinQueryForms(raw: unknown): string[] {
 	];
 }
 
-// ─── Names and sizes ───────────────────────────────────────────────────────
+// ─── Names and package sizes ───────────────────────────────────────────────
 
-type Dimension = "mass" | "volume" | "count";
+type Measure = "mass" | "volume";
 export interface Size {
-	readonly dimension: Dimension;
-	/** In the dimension's base unit: grams, millilitres, or units. */
+	readonly dimension: Measure;
+	/** In the dimension's base unit: grams or millilitres. */
 	readonly amount: number;
 }
 
-const SIZE_UNITS: Record<string, { dimension: Dimension; factor: number }> = {
+/** What a name says about the package, as two independent constraints: how
+ *  many units it holds ("6 pack", "12 ct", "1 dozen") and how much one unit
+ *  holds ("12 fl oz", "1 lb"). Each list holds every amount the name states,
+ *  sorted, so the order a name writes them in does not matter. */
+export interface PackageSize {
+	readonly counts: readonly number[];
+	readonly quantities: readonly Size[];
+}
+
+const SIZE_UNITS: Record<
+	string,
+	{ dimension: Measure | "count"; factor: number }
+> = {
 	g: { dimension: "mass", factor: 1 },
 	kg: { dimension: "mass", factor: 1000 },
 	oz: { dimension: "mass", factor: 28.3495 },
@@ -218,20 +233,26 @@ export interface NormalizedName {
 	/** Lowercase words, punctuation and store-brand prefix dropped. "organic"
 	 *  is kept: organic and plain are different products. */
 	readonly base: string;
-	/** The last size stated in the name, or null. */
-	readonly size: Size | null;
+	/** Every package size stated in the name. */
+	readonly pack: PackageSize;
 }
 
 /** The one normalizer for product names, used for both sides of every name
  *  comparison and for search queries. */
 export function normalizeName(raw: string | null | undefined): NormalizedName {
 	let text = (raw ?? "").replace(BRAND_PREFIX_RE, "");
-	let size: Size | null = null;
+	const counts: number[] = [];
+	const quantities: Size[] = [];
 	text = text.replace(SIZE_RE, (_match, amount: string, unit: string) => {
 		const key = unit.toLowerCase().replace(/\./g, "").replace(/\s+/g, " ");
 		const known = SIZE_UNITS[key];
-		if (known) {
-			size = { dimension: known.dimension, amount: Number(amount) * known.factor };
+		if (known?.dimension === "count") {
+			counts.push(Number(amount) * known.factor);
+		} else if (known) {
+			quantities.push({
+				dimension: known.dimension,
+				amount: Number(amount) * known.factor,
+			});
 		}
 		return " ";
 	});
@@ -240,30 +261,68 @@ export function normalizeName(raw: string | null | undefined): NormalizedName {
 		.replace(/['’]/g, "")
 		.replace(/[^a-z0-9]+/g, " ")
 		.trim();
-	return { base, size };
+	counts.sort((a, b) => a - b);
+	quantities.sort(
+		(a, b) => a.dimension.localeCompare(b.dimension) || a.amount - b.amount,
+	);
+	return { base, pack: { counts, quantities } };
 }
 
-/** Two sizes disagree when both are stated and differ in dimension or by more
- *  than rounding. A size on one side only does not disagree. */
-function sizesDisagree(left: Size | null, right: Size | null): boolean {
-	if (left === null || right === null) return false;
-	if (left.dimension !== right.dimension) return true;
-	return Math.abs(left.amount - right.amount) / Math.max(left.amount, right.amount) > 0.03;
+/** Two amounts are one amount when they differ by no more than rounding. */
+const sameAmount = (left: number, right: number): boolean =>
+	left === right || Math.abs(left - right) / Math.max(left, right) <= 0.03;
+
+/** Two packages disagree when both names state the same constraint (the
+ *  count, or the per-unit quantity) and the stated amounts differ. A
+ *  constraint stated on one side only does not disagree. */
+function packagesDisagree(left: PackageSize, right: PackageSize): boolean {
+	const countsDiffer =
+		left.counts.length > 0 &&
+		right.counts.length > 0 &&
+		(left.counts.length !== right.counts.length ||
+			left.counts.some((count, i) => !sameAmount(count, right.counts[i] ?? 0)));
+	const quantitiesDiffer =
+		left.quantities.length > 0 &&
+		right.quantities.length > 0 &&
+		(left.quantities.length !== right.quantities.length ||
+			left.quantities.some((size, i) => {
+				const other = right.quantities[i];
+				return (
+					other === undefined ||
+					size.dimension !== other.dimension ||
+					!sameAmount(size.amount, other.amount)
+				);
+			}));
+	return countsDiffer || quantitiesDiffer;
 }
 
-/** Same base name and no size disagreement. */
+/** Same base name and no package disagreement. */
 function sameProductName(
 	left: string | null | undefined,
 	right: string | null | undefined,
 ): boolean {
 	const a = normalizeName(left);
 	const b = normalizeName(right);
-	return a.base !== "" && a.base === b.base && !sizesDisagree(a.size, b.size);
+	return a.base !== "" && a.base === b.base && !packagesDisagree(a.pack, b.pack);
 }
 
 // ─── Observations ──────────────────────────────────────────────────────────
+//
+// An observation is what one page shows, lossless and unjudged: every subject
+// on it (heading, JSON-LD node, rendered panel) with its own scope, and every
+// panel as the rows it states, partial panels included. Parsers produce them;
+// only this module decides which of it is about the requested product.
 
-/** Everything an Amazon /dp page says about which ASIN it is. */
+/** What a page says about a product besides its panel rows. A bound page's
+ *  details decorate a USDA match of the same product, panel or not. */
+export type ProductDetails = Pick<
+	NutritionFacts,
+	"allergens" | "category" | "highlights" | "ingredients" | "rawNutritionText"
+>;
+
+/** Everything an Amazon /dp page says about which ASIN it is, and the
+ *  product evidence it shows. The page has one product, so its panel and
+ *  barcode belong to whatever ASIN the page binds to. */
 export interface AmazonProductObservation {
 	readonly finalUrl: string;
 	/** `href` of the canonical link. */
@@ -272,6 +331,13 @@ export interface AmazonProductObservation {
 	readonly input: string | null;
 	/** `data-asin` of the main product element. */
 	readonly dataAsin: string | null;
+	/** The barcode the page states, normalized, or null. */
+	readonly gtin: string | null;
+	/** The nutrition panel as the page states it (partial or complete), or
+	 *  null when the page states no nutrition row. */
+	readonly panel: NutritionFacts | null;
+	/** Ingredients, allergens and the like, or null when the page states none. */
+	readonly details: ProductDetails | null;
 }
 
 /** One Product node of a Whole Foods page's JSON-LD, with its own facts. */
@@ -285,15 +351,28 @@ export interface ProductNode {
 	readonly facts: NutritionFacts | null;
 }
 
+/** A rendered Nutrition Facts panel and where the page shows it. `scope` is
+ *  read from the smallest rendered element that holds the panel and a product
+ *  heading:
+ *  - `main_heading`: that element holds the page's h1, so the panel is shown
+ *    for the h1's product;
+ *  - `other_heading`: it holds only another heading (a recommendation card),
+ *    so the panel is that product's;
+ *  - `no_heading`: no product heading holds it. */
+export interface RenderedPanel {
+	readonly facts: NutritionFacts;
+	readonly scope: "main_heading" | "other_heading" | "no_heading";
+}
+
 /** Everything a Whole Foods product page says about what it is. */
 export interface WholeFoodsProductObservation {
 	readonly canonicalUrl: string | null;
-	/** The visible heading: what the rendered panel belongs to. */
+	/** The rendered h1: what the page shows itself to be. */
 	readonly h1: string | null;
 	/** Every Product node on the page, recommendations included. */
 	readonly products: readonly ProductNode[];
-	/** The rendered Nutrition Facts panel, with no identity of its own. */
-	readonly panel: NutritionFacts | null;
+	/** Every rendered Nutrition Facts panel that states a row, with its scope. */
+	readonly panels: readonly RenderedPanel[];
 }
 
 export interface OrderObservation {
@@ -324,22 +403,33 @@ export type MainSubject =
 	| {
 			readonly kind: "SUBJECT";
 			readonly identity: SubjectIdentity;
+			/** Every name the page gives this subject (the h1 and the tied
+			 *  node's name). A request binds by name only if it matches each. */
+			readonly names: readonly string[];
 			/** The h1, when the page has one (may differ from the node's name). */
 			readonly heading: string | null;
 			/** The name of the node chosen as the page's Product, tied or not. */
 			readonly nodeName: string | null;
-			/** Facts that belong to `identity`, or null when the page has none. */
-			readonly facts: NutritionFacts | null;
+			/** Every panel that belongs to `identity`: the tied node's own
+			 *  nutrition first, then the rendered panels shown for it. Partial
+			 *  panels are kept; which one is usable is acceptance's decision. */
+			readonly panels: readonly NutritionFacts[];
 	  }
-	| { readonly kind: "AMBIGUOUS"; readonly heading: string | null };
+	| { readonly kind: "AMBIGUOUS"; readonly heading: string | null }
+	/** The node tied to the page by URL names another product than the h1:
+	 *  the page contradicts itself, so neither may lend the other anything. */
+	| { readonly kind: "CONFLICT"; readonly heading: string | null };
 
-/** Choose what a Whole Foods page is about, and which facts and GTIN belong to
- *  it. The main Product node is the one whose `url`/`@id` equals the canonical
- *  or final URL, else the one whose name equals the h1, else the only Product
- *  node; with several and no tie
- *  it is AMBIGUOUS. A node supplies its GTIN and its nutrition only if it is
- *  tied to the page by URL or by name. A rendered panel belongs to the h1
- *  subject. Nothing is borrowed across subjects.
+/** Choose what a Whole Foods page is about, and which panels and GTIN belong
+ *  to it. The main Product node is the one whose `url`/`@id` equals the
+ *  canonical or final URL, else the one whose name equals the h1, else the
+ *  only Product node; with several and no tie it is AMBIGUOUS. A URL-tied node
+ *  whose name is not the h1's is a CONFLICT. A node supplies its GTIN and its
+ *  nutrition only if it is tied to the page. A rendered panel belongs to the
+ *  h1 subject only when the h1 scopes it; with no h1, a panel no heading
+ *  scopes belongs to a URL-tied node, or to the page's unnamed subject when
+ *  the page has no node (which binds to nothing: it has no identity).
+ *  Nothing is borrowed across subjects.
  *
  *  One relaxation: a sole node on a page with no h1 has nothing
  *  visible to contradict it, so it releases its OWN nutrition (the nutrition
@@ -368,54 +458,59 @@ export function mainSubject(
 	);
 	let node: ProductNode | null = null;
 	let tied = true;
-	let sole = false;
-	if (byUrl.length === 1) node = byUrl[0] ?? null;
-	else if (byUrl.length > 1) return { kind: "AMBIGUOUS", heading };
+	if (byUrl.length === 1) {
+		node = byUrl[0] ?? null;
+		if (
+			heading !== null &&
+			node?.name &&
+			!sameProductName(node.name, heading)
+		) {
+			return { kind: "CONFLICT", heading };
+		}
+	} else if (byUrl.length > 1) return { kind: "AMBIGUOUS", heading };
 	else if (byName.length === 1) node = byName[0] ?? null;
 	else if (byName.length > 1) return { kind: "AMBIGUOUS", heading };
 	else if (obs.products.length === 1) {
 		node = obs.products[0] ?? null;
 		tied = false;
-		sole = true;
 	} else if (obs.products.length > 1) return { kind: "AMBIGUOUS", heading };
 
-	if (sole && heading === null && node !== null) {
+	if (!tied && heading === null && node !== null) {
 		const gtin = normalizeGtin(node.gtin);
-		if (node.facts) {
-			return {
-				kind: "SUBJECT",
-				identity: { name: node.name, gtin },
-				heading,
-				nodeName: node.name,
-				facts: node.facts,
-			};
-		}
 		// A rendered panel with no h1 and no tied node has no subject.
+		const identity =
+			node.facts || obs.panels.length === 0
+				? { name: node.name, gtin }
+				: { name: null, gtin: null };
 		return {
 			kind: "SUBJECT",
-			identity: obs.panel ? { name: null, gtin: null } : { name: node.name, gtin },
+			identity,
+			names: identity.name ? [identity.name] : [],
 			heading,
 			nodeName: node.name,
-			facts: null,
+			panels: node.facts ? [node.facts] : [],
 		};
 	}
-	const gtin = node !== null && tied ? normalizeGtin(node.gtin) : null;
-	if (node?.facts && tied) {
-		return {
-			kind: "SUBJECT",
-			identity: { name: node.name ?? heading, gtin },
-			heading,
-			nodeName: node.name,
-			facts: node.facts,
-		};
-	}
-	const name = heading ?? (tied ? (node?.name ?? null) : null);
+	const own = tied ? node : null;
+	const gtin = own ? normalizeGtin(own.gtin) : null;
+	const name = heading ?? own?.name ?? null;
+	const shown = obs.panels
+		.filter((panel) =>
+			heading !== null
+				? panel.scope === "main_heading"
+				: panel.scope === "no_heading" &&
+					(own !== null || obs.products.length === 0),
+		)
+		.map((panel) => ({ ...panel.facts, productName: name, upc: gtin }));
 	return {
 		kind: "SUBJECT",
 		identity: { name, gtin },
+		names: [heading, own?.name].filter(
+			(value): value is string => typeof value === "string" && value !== "",
+		),
 		heading,
 		nodeName: node?.name ?? null,
-		facts: obs.panel ? { ...obs.panel, productName: name, upc: gtin } : null,
+		panels: [...(own?.facts ? [own.facts] : []), ...shown],
 	};
 }
 
@@ -429,7 +524,51 @@ type ProductObservation =
 	| { readonly source: "amazon"; readonly obs: AmazonProductObservation }
 	| { readonly source: "wholefoods"; readonly obs: WholeFoodsProductObservation; readonly finalUrl: string };
 
-/** Does this observation describe the requested product?
+/** What a bound page shows about the requested product, and only that: its
+ *  name, its barcode and every panel proven to be its own (partial ones
+ *  included), each panel's confidence capped by what bound it. A GTIN here is
+ *  identity evidence for an exact lookup; it is not a request GTIN. */
+export interface BoundProduct {
+	readonly name: string | null;
+	readonly gtin: string | null;
+	readonly panels: readonly NutritionFacts[];
+	readonly details: ProductDetails | null;
+}
+
+/** A panel's descriptive fields. */
+const detailsOf = (panel: NutritionFacts | undefined): ProductDetails | null =>
+	panel
+		? {
+				allergens: panel.allergens,
+				category: panel.category,
+				highlights: panel.highlights,
+				ingredients: panel.ingredients,
+				rawNutritionText: panel.rawNutritionText,
+			}
+		: null;
+
+export type ProductBinding =
+	| { readonly kind: "BOUND"; readonly via: Via; readonly product: BoundProduct }
+	| { readonly kind: "OTHER" }
+	| { readonly kind: "UNKNOWN"; readonly cause: BindingCause };
+
+/** A BOUND result carrying the product, its panels capped by `via`. */
+function boundProduct(via: Via, product: BoundProduct): ProductBinding {
+	return {
+		kind: "BOUND",
+		via,
+		product: {
+			...product,
+			panels: product.panels.map((panel) => ({
+				...panel,
+				confidence: capConfidence(panel.confidence, via),
+			})),
+		},
+	};
+}
+
+/** Does this observation describe the requested product? A BOUND result
+ *  carries the one value callers may use: the product as the page shows it.
  *
  *  Amazon /dp/<asin> (first match wins)
  *   1 origin is not amazon.com                           UNKNOWN untrusted_origin
@@ -441,19 +580,21 @@ type ProductObservation =
  *
  *  Whole Foods tile (first match wins)
  *   1 origin is not wholefoodsmarket.com                 UNKNOWN untrusted_origin
- *   2 main subject AMBIGUOUS, h1 is not the request      OTHER
+ *   2 main subject AMBIGUOUS or CONFLICT, h1 is not the request  OTHER
  *     main subject AMBIGUOUS otherwise                   UNKNOWN ambiguous_main_product
+ *     main subject CONFLICT otherwise                    UNKNOWN subject_sources_disagree
  *   3 node and h1 names differ, h1 is not the request    OTHER
  *   4 both GTINs known, equal                            BOUND gtin (no stronger than the
  *                                                        binding that supplied the request's GTIN)
  *   5 both GTINs known, unequal                          OTHER (beats any name match)
- *   6 at most one GTIN; same base name; size compatible  BOUND name
+ *   6 at most one GTIN; every name the page gives the
+ *     subject has the request's base name and package     BOUND name
  *   7 otherwise a different name                         OTHER
  *   8 no usable name or id                               UNKNOWN no_identity_evidence */
 export function bindProduct(
 	requested: RequestedProduct,
 	observation: ProductObservation,
-): Binding {
+): ProductBinding {
 	return observation.source === "amazon"
 		? bindAmazon(requested, observation.obs)
 		: bindWholeFoods(requested, observation.obs, observation.finalUrl);
@@ -462,7 +603,7 @@ export function bindProduct(
 function bindAmazon(
 	requested: RequestedProduct,
 	obs: AmazonProductObservation,
-): Binding {
+): ProductBinding {
 	if (parseUrl(obs.finalUrl)?.origin !== AMAZON_ORIGIN) {
 		return unknown("untrusted_origin");
 	}
@@ -478,25 +619,39 @@ function bindAmazon(
 	if (new Set(all).size > 1) return unknown("asin_sources_disagree");
 	if (all.length === 0) return unknown("no_identity_evidence");
 	if (all[0] !== requested.asin) return unknown("asin_mismatch");
-	return content.length > 0 ? bound("content_id") : bound("url");
+	const gtin = normalizeGtin(obs.gtin);
+	return boundProduct(content.length > 0 ? "content_id" : "url", {
+		name: null,
+		gtin,
+		panels: obs.panel ? [{ ...obs.panel, upc: gtin }] : [],
+		details: obs.details,
+	});
 }
 
 function bindWholeFoods(
 	requested: RequestedProduct,
 	obs: WholeFoodsProductObservation,
 	finalUrl: string,
-): Binding {
+): ProductBinding {
 	if (parseUrl(finalUrl)?.origin !== WHOLE_FOODS_ORIGIN) {
 		return unknown("untrusted_origin");
 	}
 	const subject = mainSubject(obs, finalUrl);
-	if (subject.kind === "AMBIGUOUS") {
-		// An h1 that is not the request settles it before any ambiguity does:
-		// several nodes under another product's h1 are not this product.
-		return subject.heading !== null &&
+	if (subject.kind !== "SUBJECT") {
+		// An h1 that is not the request settles it before any ambiguity or
+		// conflict does: several nodes, or a disagreeing node, under another
+		// product's h1 are not this product.
+		if (
+			subject.heading !== null &&
 			!sameProductName(subject.heading, requested.name)
-			? OTHER
-			: unknown("ambiguous_main_product");
+		) {
+			return OTHER;
+		}
+		return unknown(
+			subject.kind === "AMBIGUOUS"
+				? "ambiguous_main_product"
+				: "subject_sources_disagree",
+		);
 	}
 	const { identity, heading, nodeName } = subject;
 	// The h1 is what the page shows; a node about something else (a
@@ -512,16 +667,39 @@ function bindWholeFoods(
 	if (identity.name === null && identity.gtin === null) {
 		return unknown("no_identity_evidence");
 	}
+	const product = {
+		...identity,
+		panels: subject.panels,
+		details: detailsOf(subject.panels[0]),
+	};
 	const requestedGtin = gtin14(requested.boundGtin);
 	const subjectGtin = gtin14(identity.gtin);
 	if (requestedGtin !== null && subjectGtin !== null) {
 		// Bound by the barcode, but the barcode itself came from a binding.
 		return requestedGtin === subjectGtin
-			? bound(weakerVia("gtin", requested.boundGtinVia))
+			? boundProduct(weakerVia("gtin", requested.boundGtinVia), product)
 			: OTHER;
 	}
 	if (identity.name === null) return unknown("no_identity_evidence");
-	return sameProductName(identity.name, requested.name) ? bound("name") : OTHER;
+	return subject.names.every((name) => sameProductName(name, requested.name))
+		? boundProduct("name", product)
+		: OTHER;
+}
+
+/** Is a response's final URL on the site (or, for `wholefoods_search`, the
+ *  search page) it was asked of? A response that ended anywhere else says
+ *  nothing about the source, neither what it shows nor that something is
+ *  absent. */
+export function onSourceSite(
+	site: "amazon" | "wholefoods" | "wholefoods_search",
+	finalUrl: string,
+): boolean {
+	const url = parseUrl(finalUrl);
+	if (site === "amazon") return url?.origin === AMAZON_ORIGIN;
+	return (
+		url?.origin === WHOLE_FOODS_ORIGIN &&
+		(site === "wholefoods" || url.pathname.replace(/\/+$/, "") === "/search")
+	);
 }
 
 /** Does a barcode observed on another record (a USDA food) name the same

@@ -102,7 +102,9 @@ export const orderItemsSchema = z.object({
  *       error     navigation_failed    a page read threw
  *       error     unrecognized_page    a 200 page that is not a known product/search page
  *       error     identity_conflict    a page that cannot be this product: another ASIN,
- *                                      order or origin, or an ambiguous main product
+ *                                      order or origin, an ambiguous main product, or
+ *                                      a product page whose structured data and
+ *                                      heading name different products
  *       error     identity_unbound     a page with no identity evidence to bind it
  *       error     panel_partial        this product's panel was seen but not fully read
  *       error     usda_request_failed  the USDA lookup failed

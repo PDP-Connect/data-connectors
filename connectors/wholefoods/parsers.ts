@@ -15,7 +15,9 @@ import {
 	resolveWholeFoodsUrl,
 	type AmazonProductObservation,
 	type OrderObservation,
+	type ProductDetails,
 	type ProductNode,
+	type RenderedPanel,
 	type WholeFoodsProductObservation,
 } from "./binding.ts";
 import type {
@@ -1215,34 +1217,106 @@ function parseJsonLdScripts(document: Document): unknown[] {
 	return parsed;
 }
 
-/** The rendered "Nutrition Facts" panel, with no identity of its own: it
- *  belongs to the page's heading subject, which `mainSubject` decides. */
-function renderedPanel(document: Document): NutritionFacts | null {
-	const headings = [...document.querySelectorAll("h2, h3, h4, span, div")];
-	const nutritionHeading = headings.find((el) =>
-		NUTRITION_HEADING_RE.test(textOf(el).trim()),
+/** Headings that name a part of a product page, not a product. */
+const SECTION_HEADING_RE =
+	/^(?:nutrition(?:\s+(?:facts|information|info))?|ingredients?|allergens?|contains|details|product details|description|about(?: this item)?|highlights)\s*:?$/i;
+/** `compareDocumentPosition` bit: the argument follows the element. */
+const FOLLOWS = 4;
+const PRODUCT_HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
+const PANEL_LABEL_SELECTOR = "h2, h3, h4, span, div";
+
+/** The rendered elements that label a Nutrition Facts panel: each is the
+ *  innermost element whose text holds the label, so two panels on one page
+ *  are two labels. */
+function panelLabelsOf(document: Document): Element[] {
+	const labelling = renderedAll(document, PANEL_LABEL_SELECTOR).filter((el) =>
+		NUTRITION_HEADING_RE.test(textOf(el)),
 	);
-	if (!nutritionHeading) {
-		return null;
-	}
-	const container =
-		nutritionHeading.closest("div, section, article") ??
-		nutritionHeading.parentElement;
-	const containerText = container ? textOf(container) : "";
-	const headingAt = containerText.search(NUTRITION_HEADING_RE);
-	const allText = cutPanelEnd(
-		headingAt === -1 ? containerText : containerText.slice(headingAt),
+	return labelling.filter(
+		(el) => !labelling.some((other) => other !== el && el.contains(other)),
 	);
-	const calories = readCalories(allText);
-	if (calories === null) {
-		return null;
+}
+
+/** The panel's text from its label to its structural end. */
+function panelTextFrom(container: Element): string {
+	const text = textOf(container);
+	const headingAt = text.search(NUTRITION_HEADING_RE);
+	return cutPanelEnd(headingAt === -1 ? text : text.slice(headingAt));
+}
+
+/** The element that holds a label's panel: the label's nearest block, widened
+ *  until it holds a row, but never to an element that holds another panel's
+ *  label. */
+function panelContainer(label: Element, labels: readonly Element[]): Element {
+	const first =
+		label.closest("div, section, article") ?? label.parentElement ?? label;
+	let container = first;
+	while (
+		readCalories(panelTextFrom(container)) === null &&
+		readPanelRows(panelTextFrom(container)).size === 0
+	) {
+		const parent = container.parentElement;
+		if (
+			!parent ||
+			parent.tagName.toUpperCase() === "BODY" ||
+			labels.some((other) => other !== label && parent.contains(other))
+		) {
+			return first;
+		}
+		container = parent;
 	}
-	const rows = readPanelRows(allText);
-	const servingSizeMatch = SERVING_SIZE_RE.exec(allText);
-	const servingsMatch = SERVINGS_PER_CONTAINER_RE.exec(allText);
-	const servingsPerContainerRaw = servingsMatch?.[1] ?? servingsMatch?.[2];
-	const nutrient = (key: string): number | null =>
-		amountOf(rows.get(key) ?? null);
+	return container;
+}
+
+/** Where the page shows a panel: the smallest rendered element that holds the
+ *  panel and a product heading decides (see `RenderedPanel.scope`). Inside
+ *  the panel's own container only a heading before its label counts: one
+ *  after it ("Serving size") is part of the panel. */
+function panelScope(
+	container: Element,
+	label: Element,
+	mainHeading: Element | null,
+): RenderedPanel["scope"] {
+	for (let node: Element | null = container; node; node = node.parentElement) {
+		const headings = renderedAll(node, PRODUCT_HEADING_SELECTOR).filter(
+			(heading) => {
+				const text = textOf(heading).trim();
+				return (
+					text !== "" &&
+					!NUTRITION_HEADING_RE.test(text) &&
+					!SECTION_HEADING_RE.test(text) &&
+					!(
+						container.contains(heading) &&
+						(heading.compareDocumentPosition(label) & FOLLOWS) === 0
+					)
+				);
+			},
+		);
+		if (headings.length > 0) {
+			return mainHeading !== null && node.contains(mainHeading)
+				? "main_heading"
+				: "other_heading";
+		}
+	}
+	return "no_heading";
+}
+
+/** Every rendered "Nutrition Facts" panel that states at least one row, as
+ *  the rows it states (a partial panel stays partial), with where the page
+ *  shows it. A panel has no identity of its own; `mainSubject` decides whose
+ *  it is from its scope. */
+function renderedPanels(
+	document: Document,
+	mainHeading: Element | null,
+): RenderedPanel[] {
+	const labels = panelLabelsOf(document);
+	// One panel per container, read from its first label.
+	const containers = new Map<Element, Element>();
+	for (const label of labels) {
+		const container = panelContainer(label, labels);
+		if (!containers.has(container)) containers.set(container, label);
+	}
+	const headings = [...document.querySelectorAll(PANEL_LABEL_SELECTOR)];
 	const sectionText = (heading: RegExp): string | null => {
 		const el = headings.find((candidate) =>
 			heading.test(textOf(candidate).trim()),
@@ -1271,62 +1345,75 @@ function renderedPanel(document: Document): NutritionFacts | null {
 		const label = textOf(element).trim();
 		return label && !/home|whole foods/i.test(label) ? [label] : [];
 	});
-	return {
-		...emptyNutritionDetails(),
-		addedSugarG: nutrient("Includes Added Sugars"),
-		allergens: sectionText(/allergen|contains/i),
-		calciumMg: nutrient("Calcium"),
-		calories,
-		carbsG: nutrient("Total Carbohydrate"),
-		category: breadcrumbCategory,
-		cholesterolMg: nutrient("Cholesterol"),
-		confidence: "high",
-		coreStated: coreStatedOf({
-			calories: { bound: "exact", amount: calories },
-			carbs: rows.get("Total Carbohydrate") ?? null,
-			fat: rows.get("Total Fat") ?? null,
-			protein: rows.get("Protein") ?? null,
-		}),
-		fatG: nutrient("Total Fat"),
-		fiberG: nutrient("Dietary Fiber"),
-		highlights,
-		ingredients: sectionText(/^ingredients$/i),
-		ironMg: nutrient("Iron"),
-		potassiumMg: nutrient("Potassium"),
-		proteinG: nutrient("Protein"),
-		rawNutritionText: allText.slice(0, 1000),
-		saturatedFatG: nutrient("Saturated Fat"),
-		servingSize: servingSizeMatch?.[1]?.trim() ?? null,
-		servingsPerContainer: servingsPerContainerRaw
-			? Number.parseFloat(servingsPerContainerRaw)
-			: null,
-		sodiumMg: nutrient("Sodium"),
-		source: "wholefoods_product_page",
-		sugarG: nutrient("Total Sugars"),
-		transFatG: nutrient("Trans Fat"),
-		upc: null,
-		vitaminDMcg: nutrient("Vitamin D"),
-		productName: null,
-	};
+	return [...containers].flatMap(([container, label]) => {
+		const allText = panelTextFrom(container);
+		const calories = readCalories(allText);
+		const rows = readPanelRows(allText);
+		if (calories === null && rows.size === 0) return [];
+		const servingSizeMatch = SERVING_SIZE_RE.exec(allText);
+		const servingsMatch = SERVINGS_PER_CONTAINER_RE.exec(allText);
+		const servingsPerContainerRaw = servingsMatch?.[1] ?? servingsMatch?.[2];
+		const nutrient = (key: string): number | null =>
+			amountOf(rows.get(key) ?? null);
+		const facts: NutritionFacts = {
+			...emptyNutritionDetails(),
+			addedSugarG: nutrient("Includes Added Sugars"),
+			allergens: sectionText(/allergen|contains/i),
+			calciumMg: nutrient("Calcium"),
+			calories,
+			carbsG: nutrient("Total Carbohydrate"),
+			category: breadcrumbCategory,
+			cholesterolMg: nutrient("Cholesterol"),
+			confidence: "high",
+			coreStated: coreStatedOf({
+				calories: calories === null ? null : { bound: "exact", amount: calories },
+				carbs: rows.get("Total Carbohydrate") ?? null,
+				fat: rows.get("Total Fat") ?? null,
+				protein: rows.get("Protein") ?? null,
+			}),
+			fatG: nutrient("Total Fat"),
+			fiberG: nutrient("Dietary Fiber"),
+			highlights,
+			ingredients: sectionText(/^ingredients$/i),
+			ironMg: nutrient("Iron"),
+			potassiumMg: nutrient("Potassium"),
+			proteinG: nutrient("Protein"),
+			rawNutritionText: allText.slice(0, 1000),
+			saturatedFatG: nutrient("Saturated Fat"),
+			servingSize: servingSizeMatch?.[1]?.trim() ?? null,
+			servingsPerContainer: servingsPerContainerRaw
+				? Number.parseFloat(servingsPerContainerRaw)
+				: null,
+			sodiumMg: nutrient("Sodium"),
+			source: "wholefoods_product_page",
+			sugarG: nutrient("Total Sugars"),
+			transFatG: nutrient("Trans Fat"),
+			upc: null,
+			vitaminDMcg: nutrient("Vitamin D"),
+			productName: null,
+		};
+		return [{ facts, scope: panelScope(container, label, mainHeading) }];
+	});
 }
 
 /**
  * Read a Whole Foods product page into an observation: the canonical URL, the
- * visible heading, every Product node (each with the facts of its own
- * `nutrition`) and the rendered panel. It does not decide what the page is
- * about; `mainSubject` and `bindProduct` do.
+ * rendered heading, every Product node (each with the facts of its own
+ * `nutrition`) and every rendered panel with its scope. It does not decide
+ * what the page is about; `mainSubject` and `bindProduct` do.
  */
 export function readWholeFoodsProductPage(
 	html: string,
 ): WholeFoodsProductObservation {
 	const { document } = parseHTML(html);
 	const selectors = IDENTITY_SELECTORS.wholeFoods;
+	const heading = renderedFirst(document, selectors.heading);
 	return {
 		canonicalUrl:
 			document.querySelector(selectors.canonical)?.getAttribute("href") ?? null,
-		h1: textOf(document.querySelector(selectors.heading)).trim() || null,
+		h1: textOf(heading).trim() || null,
 		products: productNodes(parseJsonLdScripts(document)),
-		panel: renderedPanel(document),
+		panels: renderedPanels(document, heading),
 	};
 }
 
@@ -1344,11 +1431,21 @@ function panelText(container: Element | null): string {
 }
 
 /** Port of the frozen legacy data connector's Amazon product-page nutrition
- *  parser. Callers supply captured HTML in tests; this function has no I/O. */
+ *  parser. Callers supply captured HTML in tests; this function has no I/O.
+ *  Null when the page states no nutrition row and no UPC. A panel without a
+ *  calories row is still returned, as the rows it states. */
 export function parseAmazonProductNutritionDom(
 	html: string,
 ): NutritionFacts | null {
-	const { document } = parseHTML(html);
+	const read = readAmazonNutrition(parseHTML(html).document);
+	return read.statesRows || read.facts.upc ? read.facts : null;
+}
+
+/** The Amazon panel as the page states it, and whether it states any row. */
+function readAmazonNutrition(document: Document): {
+	facts: NutritionFacts;
+	statesRows: boolean;
+} {
 	const bodyText = textOf(document.body);
 	const table = document.querySelector(
 		'#nic-nutrition-facts, #nutritionFacts, #nutritionalInformation_feature_div, [data-component="nutritionFacts"]',
@@ -1375,7 +1472,6 @@ export function parseAmazonProductNutritionDom(
 		),
 	);
 	const amazonUpc = normalizeGtin(upcMatch?.[1]);
-	if (calories === null && !amazonUpc) return null;
 	const rows = readPanelRows(rowsText);
 	const get = (key: string): number | null => amountOf(rows.get(key) ?? null);
 	const ingredientsNode = document.querySelector(
@@ -1394,7 +1490,7 @@ export function parseAmazonProductNutritionDom(
 		.exec(allText)?.[1]
 		?.trim();
 	const servings = /(\d+\.?\d*)\s*servings?\s*per/i.exec(allText)?.[1];
-	return {
+	const facts: NutritionFacts = {
 		...emptyNutritionDetails(),
 		addedSugarG: get("Includes Added Sugars"),
 		allergens: allergenMatch?.[1]?.trim() ?? null,
@@ -1426,22 +1522,39 @@ export function parseAmazonProductNutritionDom(
 		upc: amazonUpc,
 		vitaminDMcg: get("Vitamin D"),
 	};
+	return { facts, statesRows: calories !== null || rows.size > 0 };
+}
+
+/** The descriptive fields an Amazon page states, or null when it states
+ *  none. */
+function amazonDetails(facts: NutritionFacts): ProductDetails | null {
+	const details = {
+		allergens: facts.allergens,
+		category: facts.category,
+		highlights: facts.highlights,
+		ingredients: facts.ingredients,
+		rawNutritionText: facts.rawNutritionText || null,
+	};
+	return details.allergens || details.ingredients || details.rawNutritionText
+		? details
+		: null;
 }
 
 /** What an Amazon /dp page says about which ASIN it is (the positions in
- *  `IDENTITY_SELECTORS.amazon`), plus the panel it shows and whether it shows a
- *  product title. Deciding whether the page is the requested product is
- *  `bindProduct`'s job. */
+ *  `IDENTITY_SELECTORS.amazon`), the barcode and panel it shows (each on its
+ *  own: a barcode with no panel, or a panel without calories, is still what
+ *  the page says), and whether it shows a product title. Deciding whether the
+ *  page is the requested product is `bindProduct`'s job. */
 export function readAmazonProductPage(
 	html: string,
 	finalUrl: string,
 ): {
 	observation: AmazonProductObservation;
-	facts: NutritionFacts | null;
 	hasProductTitle: boolean;
 } {
 	const { document } = parseHTML(html);
 	const selectors = IDENTITY_SELECTORS.amazon;
+	const nutrition = readAmazonNutrition(document);
 	return {
 		observation: {
 			finalUrl,
@@ -1451,8 +1564,10 @@ export function readAmazonProductPage(
 			dataAsin:
 				document.querySelector(selectors.dataAsin)?.getAttribute("data-asin") ??
 				null,
+			gtin: nutrition.facts.upc,
+			panel: nutrition.statesRows ? nutrition.facts : null,
+			details: amazonDetails(nutrition.facts),
 		},
-		facts: parseAmazonProductNutritionDom(html),
 		hasProductTitle: document.querySelector(selectors.title) !== null,
 	};
 }

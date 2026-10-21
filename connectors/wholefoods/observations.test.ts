@@ -73,6 +73,9 @@ test("an Amazon page reports every authoritative ASIN position, and chooses noth
 		canonical: "https://www.amazon.com/Some-Name/dp/B012345678",
 		input: "B012345678",
 		dataAsin: "B012345678",
+		gtin: null,
+		panel: null,
+		details: null,
 	});
 	assert.equal(read.hasProductTitle, true);
 });
@@ -88,7 +91,10 @@ test("a Whole Foods page reports every Product node, the canonical URL, the h1 a
 		obs.products.map((node) => node.name),
 		["Organic Apples", "Organic Pears"],
 	);
-	assert.equal(obs.panel?.calories, 95);
+	assert.deepEqual(
+		obs.panels.map((panel) => [panel.scope, panel.facts.calories]),
+		[["main_heading", 95]],
+	);
 	// Choosing is binding.ts's job: the h1 ties to the Pears node, so the
 	// Apples recommendation lends nothing, and the panel is the h1 subject's.
 	const subject = mainSubject(obs);
@@ -108,4 +114,47 @@ test("the convenience parser for tests is not reachable from production code", (
 		const source = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
 		assert.equal(/parseWholeFoodsProductPageDom/.test(source), false, file);
 	}
+});
+
+test("a Whole Foods page reports every rendered panel with its scope, partial ones included", () => {
+	const scopes = (body: string) =>
+		readWholeFoodsProductPage(`<html><body>${body}</body></html>`).panels.map(
+			(panel) => [panel.scope, panel.facts.coreStated.join(",")],
+		);
+	const full = "<p>Calories 52 Total Fat 0.2g Total Carbohydrate 14g Protein 0.3g</p>";
+	// The main panel and a recommendation card's panel are both observed, each
+	// with its own scope, whichever comes first.
+	assert.deepEqual(
+		scopes(`<aside><div><h2>Recommended Pears</h2><h3>Nutrition Facts</h3>${full}</div></aside><h1>Apples</h1><div><h3>Nutrition Facts</h3>${full}</div>`),
+		[
+			["other_heading", "calories,carbs,fat,protein"],
+			["main_heading", "calories,carbs,fat,protein"],
+		],
+	);
+	// A section heading and a heading inside the panel are not products.
+	assert.deepEqual(
+		scopes(`<h1>Apples</h1><section><h2>Nutrition</h2><div><h3>Nutrition Facts</h3><h4>Serving size 1 apple</h4>${full}</div></section>`),
+		[["main_heading", "calories,carbs,fat,protein"]],
+	);
+	// A panel with no calories row is kept as the rows it states.
+	assert.deepEqual(
+		scopes("<h1>Apples</h1><div><h3>Nutrition Facts</h3><p>Total Fat 1g Protein 1g</p></div>"),
+		[["main_heading", "fat,protein"]],
+	);
+	// No product heading anywhere.
+	assert.deepEqual(scopes(`<div><h3>Nutrition Facts</h3>${full}</div>`), [
+		["no_heading", "calories,carbs,fat,protein"],
+	]);
+	// A heading with no row is not a panel.
+	assert.deepEqual(scopes("<h1>Apples</h1><div><h3>Nutrition Facts</h3><p>Serving size 1 apple</p></div>"), []);
+});
+
+test("an Amazon page reports its barcode and a calorie-less panel separately", () => {
+	const read = readAmazonProductPage(
+		'<html><body><span id="productTitle">x</span><div id="detailBullets_feature_div"><li>UPC: 012345678905</li></div><div id="nic-nutrition-facts">Total Fat 1g Total Carbohydrate 3g Protein 1g</div></body></html>',
+		"https://www.amazon.com/dp/B012345678",
+	);
+	assert.equal(read.observation.gtin, "012345678905");
+	assert.deepEqual(read.observation.panel?.coreStated, ["carbs", "fat", "protein"]);
+	assert.equal(read.observation.panel?.calories, null);
 });

@@ -530,7 +530,7 @@
 							"no_match",
 							null
 						],
-						"description": "Stable reason code for a non-matched row; null on a matched row. blocked: robot_check (a captcha or robot check). error: http_error (a page answered HTTP 4xx/5xx other than 404/410), navigation_failed (a page read threw), unrecognized_page (a 200 page that is not a known product or search page), identity_conflict (a page that cannot be this product: another ASIN, order or origin, or an ambiguous main product), identity_unbound (a page with no identity evidence to bind it to this product), panel_partial (this product's panel was seen but not fully read), usda_request_failed (the USDA lookup failed). not_found: no_match (every source answered and none had a usable panel). When several sources fail, robot_check wins, otherwise the first failure."
+						"description": "Stable reason code for a non-matched row; null on a matched row. blocked: robot_check (a captcha or robot check). error: http_error (a page answered HTTP 4xx/5xx other than 404/410), navigation_failed (a page read threw), unrecognized_page (a 200 page that is not a known product or search page), identity_conflict (a page that cannot be this product: another ASIN, order or origin, an ambiguous main product, or a product page whose structured data and heading name different products), identity_unbound (a page with no identity evidence to bind it to this product), panel_partial (this product's panel was seen but not fully read), usda_request_failed (the USDA lookup failed). not_found: no_match (every source answered and none had a usable panel). When several sources fail, robot_check wins, otherwise the first failure."
 					}
 				},
 				"required": [

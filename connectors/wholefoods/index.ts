@@ -60,15 +60,18 @@ import {
 } from "./parsers.ts";
 import {
 	type BindingCause,
+	type BoundProduct,
 	bindGtin,
 	bindOrder,
 	bindProduct,
 	capConfidence,
 	gtinQueryForms,
 	isUnbound,
-	mainSubject,
 	normalizeName,
+	onSourceSite,
+	type ProductDetails,
 	type Via,
+	WHOLE_FOODS_ORIGIN,
 } from "./binding.ts";
 import {
 	type AcceptedNutrition,
@@ -78,6 +81,7 @@ import {
 	type NutritionNoMatch,
 	type PageReadFailure,
 	type PageSourceEvidence,
+	selectNutrition,
 } from "./nutrition-acceptance.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
@@ -104,7 +108,6 @@ const POLITE_DELAY_MS = 800;
 // walk sends one progress message per page.
 const MAX_SEARCH_PAGES = 250;
 const USDA_MIN_TEXT_SCORE = 0.4;
-const WHOLE_FOODS_ORIGIN = "https://www.wholefoodsmarket.com";
 
 const AMAZON_ORDER_HISTORY_URL = "https://www.amazon.com/gp/css/homepage.html";
 const AMAZON_SEARCH_BASE =
@@ -596,10 +599,11 @@ const unusable = (cause: BindingCause): PageReadFailure => ({
 /** Look up one ordered product's nutrition, following the legacy source
  *  order: Amazon product page, Whole Foods product pages, then UPC-first/text
  *  USDA. A page is bound to the request by `binding.ts` before anything on it
- *  (facts, name, UPC) is used. The result is `NutritionLookup`: an accepted
- *  observation, or a status and cause with no facts. Either way the caller
- *  writes the product's one row. Whether an observation may be emitted is
- *  `acceptNutrition`'s decision. */
+ *  is used, and only the BOUND value (the product's name, barcode and own
+ *  panels) is used. The result is `NutritionLookup`: an accepted observation,
+ *  or a status and cause with no facts. Either way the caller writes the
+ *  product's one row. Whether an observation may be emitted is
+ *  `nutrition-acceptance.ts`'s decision. */
 async function lookupNutritionForProduct(
 	page: Page,
 	usdaApiKey: string,
@@ -617,16 +621,23 @@ async function lookupNutritionForProduct(
 	// this binds a Whole Foods tile by barcode; a GTIN read from a tile never
 	// becomes one, however that tile was bound.
 	let amazonGtin: { gtin: string; via: Via } | null = null;
-	// The weakest binding of the facts and the GTIN this lookup rests on.
-	let candidateVia: Via | null = null;
-	let candidate: NutritionFacts | null = null;
+	// What bound pages showed that was not emitted, kept for USDA: the GTIN
+	// the exact lookup uses (Amazon's, else the first bound tile's; a
+	// conclusion built on it is no stronger than `via`), and the latest bound
+	// page's details (allergens, ingredients, category), which decorate a
+	// USDA match.
+	const kept: {
+		usdaGtin: { gtin: string; via: Via } | null;
+		decoration: ProductDetails | null;
+	} = { usdaGtin: null, decoration: null };
 	// What the page sources said about this product's panel (see
 	// `PageSourceEvidence`), the one value that gates a fuzzy USDA match. An
-	// answer is positive evidence: a bound product page, a 404/410 for a page
-	// that does not exist, a page the binding says is a different product, a
-	// search result list or its no-results message. A captcha, a 5xx, a thrown
-	// error, a page that cannot be bound to the request and a 200 page that
-	// shows no product are not answers. `failure` names the strongest one.
+	// answer is positive evidence: a bound product page, a 404/410 on the
+	// source's own site for a page that does not exist, a page the binding
+	// says is a different product, a search result list or its no-results
+	// message. A captcha, a 5xx, a thrown error, a response that ended off the
+	// source's site, a page that cannot be bound to the request and a 200 page
+	// that shows no product are not answers. `failure` names the strongest one.
 	let evidence: PageSourceEvidence = "none";
 	let failure: PageReadFailure | null = null;
 	const unable = (reason: PageReadFailure) => {
@@ -647,17 +658,69 @@ async function lookupNutritionForProduct(
 			: usdaFailed
 				? { status: "error", cause: "usda_request_failed" }
 				: { status: "not_found", cause: "no_match" });
-	// A source showed some core rows of this product, but not a full panel.
-	const sawPartialPanel = (facts: NutritionFacts | null) => {
-		if (facts && facts.coreStated.length > 0 && evidence === "none") {
+	/** Use a bound product: its first emittable panel, or else record what it
+	 *  showed. Some core rows of this product but not a full panel are a
+	 *  partial read, never "no panel". */
+	const take = (product: BoundProduct, via: Via): AcceptedNutrition | null => {
+		const accepted = selectNutrition(product.panels, evidence);
+		if (accepted) return accepted;
+		if (
+			evidence === "none" &&
+			product.panels.some((panel) => panel.coreStated.length > 0)
+		) {
 			evidence = "partial";
 		}
+		kept.decoration = product.details ?? kept.decoration;
+		if (product.gtin && kept.usdaGtin === null) {
+			kept.usdaGtin = { gtin: product.gtin, via };
+		}
+		return null;
 	};
-	// A bound observation's facts, with confidence capped by what bound them.
-	const boundFacts = (facts: NutritionFacts, via: Via): NutritionFacts => ({
-		...facts,
-		confidence: capConfidence(facts.confidence, via),
-	});
+	/** Read one Whole Foods tile. Its failure is this tile's: it is recorded
+	 *  and the walk goes on to the next tile. */
+	const readTile = async (productUrl: string): Promise<AcceptedNutrition | null> => {
+		try {
+			const status = await navigateAndSettle(page, productUrl, undefined, true);
+			const html = await page.content();
+			if (isBlockedPage(html)) {
+				unable({ status: "blocked", cause: "robot_check" });
+				return null;
+			}
+			const finalUrl = page.url();
+			if (!onSourceSite("wholefoods", finalUrl)) {
+				unable(unusable("untrusted_origin"));
+			} else if (isGone(status)) {
+				// This tile's page is gone; the other tiles still count.
+			} else if (status !== null && status >= 400) {
+				unable({ status: "error", cause: "http_error" });
+			} else {
+				const binding = bindProduct(
+					{
+						...requested,
+						boundGtin: amazonGtin?.gtin ?? null,
+						boundGtinVia: amazonGtin?.via ?? null,
+					},
+					{ source: "wholefoods", obs: readWholeFoodsProductPage(html), finalUrl },
+				);
+				if (binding.kind === "UNKNOWN") {
+					unable(unusable(binding.cause));
+				} else if (binding.kind === "BOUND") {
+					const accepted = take(binding.product, binding.via);
+					if (accepted) return accepted;
+					if (
+						binding.product.panels.length === 0 &&
+						!hasProductPageEvidence(html)
+					) {
+						unable({ status: "error", cause: "unrecognized_page" });
+					}
+				}
+				// OTHER: a readable page for another product, an answer.
+			}
+		} catch {
+			unable({ status: "error", cause: "navigation_failed" });
+		}
+		return null;
+	};
 	try {
 		const status = await navigateAndSettle(
 			page,
@@ -668,6 +731,8 @@ async function lookupNutritionForProduct(
 		const amazonHtml = await page.content();
 		if (isBlockedPage(amazonHtml)) {
 			unable({ status: "blocked", cause: "robot_check" });
+		} else if (!onSourceSite("amazon", page.url())) {
+			unable(unusable("untrusted_origin"));
 		} else if (isGone(status)) {
 			// No page for this ASIN: nothing to read, and nothing wrong.
 		} else if (status !== null && status >= 400) {
@@ -683,15 +748,13 @@ async function lookupNutritionForProduct(
 				// page, not even a UPC, may be taken.
 				unable(unusable(binding.kind === "UNKNOWN" ? binding.cause : "no_identity_evidence"));
 			} else {
-				candidate = read.facts ? boundFacts(read.facts, binding.via) : null;
-				candidateVia = candidate ? binding.via : null;
-				if (candidate?.upc) {
-					amazonGtin = { gtin: candidate.upc, via: binding.via };
+				const { product } = binding;
+				if (product.gtin) {
+					amazonGtin = { gtin: product.gtin, via: binding.via };
 				}
-				const direct = acceptNutrition(candidate, evidence);
+				const direct = take(product, binding.via);
 				if (direct) return matched(direct);
-				sawPartialPanel(candidate);
-				if (!(candidate || read.hasProductTitle)) {
+				if (!(product.panels.length > 0 || product.gtin || read.hasProductTitle)) {
 					unable({ status: "error", cause: "unrecognized_page" });
 				}
 			}
@@ -710,6 +773,10 @@ async function lookupNutritionForProduct(
 			const searchHtml = await page.content();
 			if (isBlockedPage(searchHtml)) {
 				unable({ status: "blocked", cause: "robot_check" });
+			} else if (!onSourceSite("wholefoods", page.url())) {
+				// A search that ended anywhere else is not the source's answer:
+				// neither its links nor its "no results" text are evidence.
+				unable(unusable("untrusted_origin"));
 			} else if (searchStatus !== null && searchStatus >= 400) {
 				unable({ status: "error", cause: "http_error" });
 			} else {
@@ -717,65 +784,21 @@ async function lookupNutritionForProduct(
 					0,
 					MAX_WHOLE_FOODS_TILES,
 				);
-				if (productUrls.length) {
-					for (const productUrl of productUrls) {
-						const productStatus = await navigateAndSettle(
-							page,
-							productUrl,
-							undefined,
-							true,
-						);
-						const productHtml = await page.content();
-						if (isBlockedPage(productHtml)) {
-							unable({ status: "blocked", cause: "robot_check" });
-						} else if (isGone(productStatus)) {
-							// This tile's page is gone; the other tiles still count.
-						} else if (productStatus !== null && productStatus >= 400) {
-							unable({ status: "error", cause: "http_error" });
-						} else {
-							const finalUrl = page.url();
-							const observation = readWholeFoodsProductPage(productHtml);
-							const binding = bindProduct(
-								{
-									...requested,
-									boundGtin: amazonGtin?.gtin ?? null,
-									boundGtinVia: amazonGtin?.via ?? null,
-								},
-								{ source: "wholefoods", obs: observation, finalUrl },
-							);
-							if (binding.kind === "UNKNOWN") {
-								unable(unusable(binding.cause));
-								continue;
-							}
-							if (binding.kind === "OTHER") {
-								// A readable page for another product: an answer.
-								continue;
-							}
-							const subject = mainSubject(observation, finalUrl);
-							const facts =
-								subject.kind === "SUBJECT" && subject.facts
-									? boundFacts(subject.facts, binding.via)
-									: null;
-							const verified = acceptNutrition(facts, evidence);
-							if (verified) return matched(verified);
-							if (facts) {
-								sawPartialPanel(facts);
-								candidate = {
-									...facts,
-									upc: facts.upc ?? candidate?.upc ?? null,
-								};
-								candidateVia = binding.via;
-							} else if (!hasProductPageEvidence(productHtml)) {
-								unable({ status: "error", cause: "unrecognized_page" });
-							}
-						}
-					}
-				} else if (
-					!/\b(?:0|no)\s+(?:products|results)\b|no matching products/i.test(
-						searchHtml,
+				for (const productUrl of productUrls) {
+					const accepted = await readTile(productUrl);
+					if (accepted) return matched(accepted);
+				}
+				if (
+					productUrls.length === 0 &&
+					!(
+						onSourceSite("wholefoods_search", page.url()) &&
+						/\b(?:0|no)\s+(?:products|results)\b|no matching products/i.test(
+							searchHtml,
+						)
 					)
 				) {
-					// Neither tiles nor a no-results message: not a search page we know.
+					// Neither tiles nor a no-results message on the search page:
+					// not a search page we know.
 					unable({ status: "error", cause: "unrecognized_page" });
 				}
 			}
@@ -784,32 +807,31 @@ async function lookupNutritionForProduct(
 		unable({ status: "error", cause: "navigation_failed" });
 	}
 	try {
+		const { usdaGtin: exact, decoration: own } = kept;
 		const usda = await lookupUsdaNutrition(
 			usdaApiKey,
 			name,
-			candidate?.upc ?? null,
-			candidateVia,
+			exact?.gtin ?? null,
+			exact?.via ?? null,
 		);
 		if (usda) {
 			const merged = acceptNutrition(
 				{
 					...usda,
-					allergens: candidate?.allergens ?? null,
-					category: candidate?.category ?? [],
-					highlights: candidate?.highlights ?? [],
-					ingredients: candidate?.ingredients ?? usda.ingredients ?? null,
-					rawNutritionText: candidate?.rawNutritionText ?? null,
-					upc: candidate?.upc ?? usda.upc,
+					allergens: own?.allergens ?? null,
+					category: own?.category ?? [],
+					highlights: own?.highlights ?? [],
+					ingredients: own?.ingredients ?? usda.ingredients ?? null,
+					rawNutritionText: own?.rawNutritionText ?? null,
+					upc: exact?.gtin ?? usda.upc,
 				},
 				evidence,
 			);
 			if (merged) return matched(merged);
 		}
-		const own = acceptNutrition(candidate, evidence);
-		return own ? matched(own) : noMatch(false);
+		return noMatch(false);
 	} catch {
-		const own = acceptNutrition(candidate, evidence);
-		return own ? matched(own) : noMatch(true);
+		return noMatch(true);
 	}
 }
 

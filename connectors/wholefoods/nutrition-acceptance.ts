@@ -59,6 +59,21 @@ export function acceptNutrition(
 	return { ...facts, accepted: true as const };
 }
 
+/** The first of a bound product's panels that may be emitted, or null. The
+ *  panels are every observation proven to be this product's; a complete one
+ *  wins whatever else the page shows (a partial structured panel does not
+ *  hide a complete rendered one). */
+export function selectNutrition(
+	panels: readonly NutritionFacts[],
+	pages: PageSourceEvidence,
+): AcceptedNutrition | null {
+	for (const panel of panels) {
+		const accepted = acceptNutrition(panel, pages);
+		if (accepted) return accepted;
+	}
+	return null;
+}
+
 /** The outcome of one product's nutrition lookup, as a split a type can
  *  enforce: a `matched` outcome carries the accepted observation and nothing
  *  else; every other outcome carries a status and a cause code and no facts.
@@ -70,7 +85,7 @@ export function acceptNutrition(
  *  | error     | http_error          | a page answered HTTP 4xx/5xx (not 404/410)       |
  *  | error     | navigation_failed   | a page read threw                                |
  *  | error     | unrecognized_page   | a 200 page that is not a known product/search page |
- *  | error     | identity_conflict   | a page that cannot be this product: another ASIN, order or origin, or an ambiguous main product |
+ *  | error     | identity_conflict   | a page that cannot be this product: another ASIN, order or origin, an ambiguous main product, or a product page whose structured data and heading name different products |
  *  | error     | identity_unbound    | a page with no identity evidence to bind it to this product |
  *  | error     | panel_partial       | this product's panel was seen but not fully read |
  *  | error     | usda_request_failed | the USDA lookup failed                           |
