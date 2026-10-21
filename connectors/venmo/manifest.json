@@ -9,7 +9,7 @@
 	},
 	"connector_key": "venmo",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-	"version": "0.2.24",
+	"version": "0.2.25",
 	"display_name": "Venmo",
 	"brand": {
 		"icon": "icon.svg",
@@ -278,7 +278,7 @@
 						"enum": ["pay", "charge"]
 					},
 					"amount_cents": {
-						"type": "integer"
+						"type": ["integer", "null"]
 					},
 					"audience": {
 						"type": ["string", "null"],
@@ -363,7 +363,8 @@
 		}
 	],
 	"reason_display_messages": {
-		"friends_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo friends, so some friends haven't been collected yet. Nothing was lost \u2014 the next run picks up where this one stopped",
-		"transactions_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo transactions, so older transactions haven't been collected yet. Nothing was lost \u2014 the next run picks up where this one stopped"
+		"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
+		"transactions_deferred_page_budget": "We stopped after reading 400 pages of your Venmo transactions. A saved position lets later runs resume older history after refreshing recent activity. A large volume of new activity may delay that backfill",
+		"transactions_schema_blocked": "A Venmo transaction could not be validated. The unread history after that record will be retried"
 	}
 }
