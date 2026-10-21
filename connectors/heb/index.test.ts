@@ -3800,6 +3800,65 @@ function quantityRowsFixture(quantities: readonly string[]): string {
 	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
 }
 
+test("processListOrder retains unreadable quantities without inventing a shortfall", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = quantityRowsFixture(["Qty: 2", "Qty: unavailable", "Qty: 1"]);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000005",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const itemCountTallies: OrderItemTally[] = [];
+		const { deps, emitted } = makeRecordingDeps({
+			itemCountTallies,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+		const diagnosticLines: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ orderId: "HEB000000000005", itemCount: 6 }),
+		);
+
+		const items = emitted.filter((record) => record.stream === "order_items");
+		assert.deepEqual(
+			items.map((record) => record.data.quantity),
+			[2, null, 1],
+			"all three real parser-to-emitter rows survive, including the unreadable quantity",
+		);
+		assert.equal(
+			progressMessages.includes(
+				"An order's item count did not match its details",
+			),
+			false,
+			"the known subtotal of three is not a proven shortfall against six",
+		);
+		assert.deepEqual(
+			itemCountTallies,
+			[],
+			"an unreadable quantity excludes the order from the run-level unit tally",
+		);
+		assert.ok(
+			diagnosticLines.includes(
+				'[heb-diagnostic] item_count_reconciliation {"card_units":6,"product_rows":3,"fulfilled_units":"unknown","fractional_qty_rows":0,"unparsed_qty_rows":1,"whole_qty_rows":2,"reason":"unit_and_row_counts_differ"}',
+			),
+			"unreadable quantities are reported positively and not mistaken for fractions",
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
 const repeat = (text: string, times: number): string[] =>
 	Array.from({ length: times }, () => text);
 
