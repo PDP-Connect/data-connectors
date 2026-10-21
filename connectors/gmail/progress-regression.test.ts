@@ -127,6 +127,8 @@ function mailbox(rows: FetchMessageObject[], uidNext: number, exists = 1200) {
 		/** A UID that SEARCH still reports but FETCH no longer returns. */
 		phantomSearchUid: null as number | null,
 		bodyText: "saved snippet",
+		/** How fetchOne answers: the part, the part as NIL, or no message. */
+		bodyReply: "part" as "part" | "nil-part" | "no-message",
 	};
 	const inRange = (range: string, uid: number) =>
 		range.split(",").some((part) => {
@@ -181,12 +183,14 @@ function mailbox(rows: FetchMessageObject[], uidNext: number, exists = 1200) {
 				throw new Error("temporary body transport failure");
 			}
 			const row = rows.find((r) => r.uid === n);
-			return row
-				? {
-						...row,
-						bodyParts: new Map([["1", Buffer.from(control.bodyText)]]),
-					}
-				: false;
+			if (!row || control.bodyReply === "no-message") return false;
+			return {
+				...row,
+				bodyParts:
+					control.bodyReply === "nil-part"
+						? new Map([["1", null]])
+						: new Map([["1", Buffer.from(control.bodyText)]]),
+			};
 		},
 		async *fetch(range: string) {
 			ranges.push(range);
@@ -1240,4 +1244,93 @@ test("attachments: a missing BODYSTRUCTURE is not an empty part list; the UID st
 		state = r.state;
 		assert.equal(coverageOf(r, "attachments"), undefined);
 	}
+});
+
+for (const variant of [
+	"missing BODYSTRUCTURE",
+	"BODY[1] NIL",
+	"no message",
+] as const) {
+	test(`scope: an unavailable body (${variant}) on a catch-up revisit writes nothing and stays owed`, async () => {
+		const full = dated(10, MAY);
+		const rows = [full];
+		const m = mailbox(rows, 101);
+		const scope = (iso: string | undefined) =>
+			new Map<string, StreamRequest>(
+				["messages", "message_bodies"].map((name) => [
+					name,
+					{ name, ...(iso ? { time_range: { until: iso } } : {}) },
+				]),
+			);
+		const first = await run(m, {}, scope(undefined));
+		assert.deepEqual(
+			ofStream(first, "messages").map((x) => x.data.snippet),
+			["saved snippet"],
+		);
+		const narrowed = await run(
+			m,
+			first.state,
+			scope("2026-02-01T00:00:00.000Z"),
+		);
+		if (variant === "missing BODYSTRUCTURE") {
+			const { bodyStructure: _s, ...bare } = full;
+			rows[0] = bare as FetchMessageObject;
+		} else if (variant === "BODY[1] NIL") {
+			m.control.bodyReply = "nil-part";
+		} else {
+			m.control.bodyReply = "no-message";
+		}
+		const revisit = await run(m, narrowed.state, scope(undefined));
+		assert.deepEqual(
+			ofStream(revisit, "messages"),
+			[],
+			"no messages row replaces the stored one",
+		);
+		assert.deepEqual(
+			ofStream(revisit, "message_bodies"),
+			[],
+			"no body row replaces the stored one",
+		);
+		assert.ok(
+			progressOf(revisit).debt.some((d) => d.uid === 10),
+			"the UID stays owed",
+		);
+		// The provider answers normally again: the owed UID is repaired.
+		rows[0] = full;
+		m.control.bodyReply = "part";
+		const repaired = await run(m, revisit.state, scope(undefined));
+		assert.deepEqual(
+			ofStream(repaired, "messages").map((x) => x.data.snippet),
+			["saved snippet"],
+		);
+	});
+}
+
+test("scope: the delta pass never rewrites a stored row when the change arrives without BODYSTRUCTURE", async () => {
+	const full = dated(10, MAR);
+	const rows = [full];
+	const m = mailbox(rows, 101);
+	(m.box as { highestModseq?: bigint }).highestModseq = 50n;
+	const first = await run(m, {}, ["messages"]);
+	assert.deepEqual(
+		ofStream(first, "messages").map((x) => x.data.snippet),
+		["saved snippet"],
+	);
+	const { bodyStructure: _s, ...bare } = full;
+	rows[0] = bare as FetchMessageObject;
+	(m.box as { highestModseq?: bigint }).highestModseq = 60n;
+	const delta = await run(m, first.state, ["messages"]);
+	assert.deepEqual(
+		ofStream(delta, "messages"),
+		[],
+		"no row with an unknown snippet",
+	);
+	const allMail = (
+		delta.state.messages as { all_mail: { highest_modseq: unknown } }
+	).all_mail;
+	assert.equal(
+		String(allMail.highest_modseq),
+		"50",
+		"the change is held for a later run",
+	);
 });

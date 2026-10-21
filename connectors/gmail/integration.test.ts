@@ -350,6 +350,10 @@ function makeMsg(
 		envelope,
 		internalDate: new Date("2026-04-20T10:00:05.000Z"),
 		size: 1024,
+		// Gmail returns BODYSTRUCTURE whenever it is requested. This default is
+		// an affirmatively bodyless message; without any structure the parts
+		// are unknown and processMessage writes nothing (see processMessage).
+		bodyStructure: { type: "multipart/mixed", childNodes: [] },
 		...overrides,
 	};
 }
@@ -4550,10 +4554,12 @@ test("processMessage: missing X-GM-MSGID is terminal and emits nothing", async (
 	// satisfy exactOptionalPropertyTypes).
 	const { emailId: _emailId, ...rest } = makeMsg();
 	const processed = await processMessage(deps, rest);
-	// No X-GM-MSGID and no BODYSTRUCTURE: the parts can never be enumerated,
-	// so attachments are terminal too (a durable shortfall in the ledger).
-	const terminal = { kind: "terminal", reason: "missing_message_id" };
-	assert.deepEqual(processed, { messages: terminal, attachments: terminal });
+	// The BODYSTRUCTURE shows no attachment parts, so attachments owe nothing.
+	// (Without a structure they would be terminal; see progress-regression.)
+	assert.deepEqual(processed, {
+		messages: { kind: "terminal", reason: "missing_message_id" },
+		attachments: { kind: "covered" },
+	});
 	assert.equal(emitted.length, 0);
 });
 

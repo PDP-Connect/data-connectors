@@ -1411,10 +1411,20 @@ export async function processMessage(
 		);
 
 	const selection = selectBodyParts(msg.bodyStructure, wantBodies);
+	// No BODYSTRUCTURE means the body parts are unknown, not absent: nothing
+	// can be read, and nothing is written in place of stored content.
 	const { bodyHtmlFull, bodyTextFull, snippet, fetchFailed, failureClass } =
-		wantBodies || wantMessages
-			? await deps.fetchBodies(msg, selection, wantBodies, wantMessages)
-			: { bodyHtmlFull: null, bodyTextFull: null, snippet: null };
+		(wantBodies || wantMessages) && !msg.bodyStructure
+			? {
+					bodyHtmlFull: null,
+					bodyTextFull: null,
+					snippet: null,
+					fetchFailed: true,
+					failureClass: "bodystructure_unavailable",
+				}
+			: wantBodies || wantMessages
+				? await deps.fetchBodies(msg, selection, wantBodies, wantMessages)
+				: { bodyHtmlFull: null, bodyTextFull: null, snippet: null };
 
 	// Any lane can reach a message whose rows are already stored: a catch-up,
 	// a retry, or the replay of a page whose run failed after its records
@@ -2422,14 +2432,24 @@ async function fetchBodies(
 			{ bodyParts: parts },
 			{ uid: true },
 		);
-		const plainBuf =
-			selection.plainPart && bodyResp
-				? (bodyResp.bodyParts?.get(selection.plainPart) ?? null)
-				: null;
+		// A part we asked for and did not get back is unavailable, not empty.
+		// Only a returned Buffer (zero-length included) proves the content.
+		const unavailable = (failureClass: string): FetchedBodies => ({
+			...empty,
+			fetchFailed: true,
+			failureClass,
+		});
+		if (!bodyResp) return unavailable("body_message_unavailable");
+		const returned = (key: string): Buffer | undefined => {
+			const value = bodyResp.bodyParts?.get(key);
+			return Buffer.isBuffer(value) ? value : undefined;
+		};
+		const plainBuf = selection.plainPart ? returned(selection.plainPart) : null;
 		const htmlBuf =
-			selection.htmlPart && bodyResp
-				? (bodyResp.bodyParts?.get(selection.htmlPart) ?? null)
-				: null;
+			selection.htmlPart && wantBodies ? returned(selection.htmlPart) : null;
+		if (plainBuf === undefined || htmlBuf === undefined) {
+			return unavailable("body_part_unavailable");
+		}
 		return decodeFetchedBodies(
 			plainBuf,
 			htmlBuf,
@@ -4206,9 +4226,10 @@ export async function runDeltaPass(
 		) {
 			continue;
 		}
-		// No envelope means no safe record to write. Skipping preserves the
-		// stored row; emitting would blank it.
-		if (!msg.envelope) {
+		// No envelope, or no BODYSTRUCTURE (the snippet's part is unknown),
+		// means no safe whole record to write. Skipping preserves the stored
+		// row; emitting would blank fields. The change is held for a later run.
+		if (!(msg.envelope && msg.bodyStructure)) {
 			skippedAnyMessage = true;
 			continue;
 		}

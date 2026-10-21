@@ -78,6 +78,7 @@ function makeMsg(uid: number): FetchMessageObject {
 		envelope,
 		internalDate: new Date("2026-04-20T10:00:05.000Z"),
 		size: 1024,
+		bodyStructure: { type: "multipart/mixed", childNodes: [] },
 	} as FetchMessageObject;
 }
 
