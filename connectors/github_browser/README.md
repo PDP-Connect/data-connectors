@@ -10,7 +10,7 @@ All six streams keep their legacy aggregate envelopes and stable primary keys
 | profile | Validated profile identity, page navigation and readable nested collections establish singleton presence. Unreadable pinned repository, organization or achievement entries withhold the snapshot; no self inventory coverage or deletes. |
 | repositories | Readable, unique entries across every page, plus an exact repository counter matching distinct rows or explicit pagination end without a conflicting counter. |
 | starred | Readable, unique entries across every page, plus an exact Stars counter matching distinct rows or explicit pagination end without a conflicting counter. |
-| events | Validated REST pages followed through an observed Link header without rel=next, or an empty page. Window: up to 300 events from the past 90 days. |
+| events | Validated, distinct REST rows on every page of one walk, ending on a bound Link header without rel=next, or an empty first page. Window: up to 300 events from the past 90 days. |
 | history | Stable Search total_count, incomplete_results=false, validated distinct rows for both types. Exact total matching completes ordinary searches; totals above 1,000 require exactly 1,000 distinct items in the documented per-type window. An earlier API end does not prove that window complete. |
 | contributions | Every requested view's exact heading total matches the sum of distinct day counts; four-view/date-window checks still apply. |
 
@@ -19,13 +19,30 @@ observations are not the same as observing an absent Link header. Invalid,
 duplicate, redirected, failed, or incomplete API responses withhold the inventory
 snapshot. Abbreviated counters cannot establish exact totals.
 
+Every Link relation must name the request's own endpoint and selection. GitHub
+names a user's list by account id (`/user/<id>/starred` for
+`/users/<login>/starred`). The only supported continuation is the next page
+number. The walk then requests its own owner-bound URL for that page, not the
+header's target. The account id itself cannot be checked against the login,
+so it selects nothing; only the login URL is requested. An absent Link header
+ends only a first page; on a later page, only a `prev` link without `next` or
+`last` ends the walk. A skipped page, a cursor, another login path or endpoint, a
+changed selection, or unreadable or uncaptured metadata stops the walk and
+withholds the snapshot. Search history also needs every identity in its stable
+window when the walk ends.
+
 Starred inventories can also use REST enumeration through an observed Link end
 or an empty first page. Its distinct repository identities must match the browser
 rows. Every validated exact counter from the primary and fallback routes remains
 binding; conflicting counters or a row-count mismatch withhold the snapshot.
 
-`InventoryEvidence` owns completeness for repository/starred inventories and all
-three embedded profile collections. Profile layout parsing supplies located, absent
+One `InventoryEvidence` instance owns each inventory walk: repositories, starred
+(browser and REST), events, each history search type, and each embedded profile
+collection. It issues every request, so a walker can't name or skip a page. It
+also records every page observation and decides the end proof. Walkers only
+report what they observed. Evidence is append-only: the first negative
+observation is the verdict, no later page, total or enumeration clears it, and
+the walk issues no further request. Profile layout parsing supplies located, absent
 or ambiguous boundaries and accounts for surviving candidates across the profile,
 including candidates outside the selected region. A heading only locates content;
 it cannot prove an empty collection. A heading without a located region remains

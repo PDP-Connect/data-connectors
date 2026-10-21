@@ -4,9 +4,9 @@
 import { parseHTML } from "linkedom";
 import { z } from "zod";
 import { eventRecord } from "../github/parsers.ts";
-import { type CollectionBoundary, InventoryEvidence, type InventoryTerminalProof } from "./inventory-evidence.ts";
+import { type CollectionBoundary, type Continuation, InventoryEvidence, type InventoryTerminalProof } from "./inventory-evidence.ts";
 import type { BrowserPageObservation } from "./page-evidence.ts";
-import { inspectInventoryEnd } from "./page-evidence.ts";
+import { type InventoryEndResult, inspectInventoryEnd } from "./page-evidence.ts";
 import type {
 	LegacyContributionDay,
 	LegacyContributions,
@@ -545,11 +545,11 @@ interface ProfileCollectionFailure {
 	cause: string;
 }
 
-function profileCollectionFailure(collection: ProfileCollectionFailure["collection"], ids: string[], section: Omit<Section, "entries">, rejected: number): ProfileCollectionFailure | null {
-	const evidence = new InventoryEvidence();
-	evidence.addPage(ids, section.entriesComplete, rejected);
-	evidence.addBoundary(section.boundary);
-	const cause = evidence.decide(ids.length, null);
+function profileCollectionFailure(profileUrl: string, collection: ProfileCollectionFailure["collection"], ids: string[], section: Omit<Section, "entries">, rejected: number): ProfileCollectionFailure | null {
+	const evidence = new InventoryEvidence(profileUrl);
+	evidence.observePage({ ids, rowsComplete: section.entriesComplete, rejectedRows: rejected,
+		continuation: InventoryEvidence.boundaryEnd(section.boundary) });
+	const cause = evidence.decide(ids.length);
 	return cause === null ? null : { collection, cause };
 }
 
@@ -651,7 +651,7 @@ export function parseProfilePage(
 		repositoryName(link.getAttribute("href")) !== null &&
 		link.closest(PROFILE_NON_COLLECTION_SELECTOR) === null &&
 		!pinnedRoots.some(root => root.contains(link))).length;
-	const pinsFailure = profileCollectionFailure("pinnedRepositories", (row.pinnedRepositories ?? []).map(pin => pin.fullName), {
+	const pinsFailure = profileCollectionFailure(profileUrl, "pinnedRepositories", (row.pinnedRepositories ?? []).map(pin => pin.fullName), {
 		boundary: pinnedBoundary,
 		entriesComplete: !pinnedRoots.some(isUnreadable),
 	}, rejectedEntries);
@@ -682,7 +682,7 @@ export function parseProfilePage(
 		}
 	}
 
-	const organizationsFailure = profileCollectionFailure("organizations", (row.organizations ?? []).map(org => org.login), organizations, rejectedEntries - beforeOrganizations);
+	const organizationsFailure = profileCollectionFailure(profileUrl, "organizations", (row.organizations ?? []).map(org => org.login), organizations, rejectedEntries - beforeOrganizations);
 	if (organizationsFailure !== null) unreadableFields.push("organizations");
 	const beforeAchievements = rejectedEntries;
 
@@ -705,7 +705,7 @@ export function parseProfilePage(
 			row.achievements.push({ name, ...(iconUrl === undefined ? {} : { iconUrl }) });
 		}
 	}
-	const achievementsFailure = profileCollectionFailure("achievements", (row.achievements ?? []).map(badge => badge.name), achievements, rejectedEntries - beforeAchievements);
+	const achievementsFailure = profileCollectionFailure(profileUrl, "achievements", (row.achievements ?? []).map(badge => badge.name), achievements, rejectedEntries - beforeAchievements);
 	if (achievementsFailure !== null) unreadableFields.push("achievements");
 	if (rejectedEntries > 0) unreadableFields.push("collectionEntries");
 	const collectionFailures = [pinsFailure, organizationsFailure, achievementsFailure].filter(
@@ -854,7 +854,7 @@ export function inspectInventoryPage(
 	parsedRows: number,
 	rejectedRows: number,
 	noProgress = false,
-): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; terminalProof: InventoryTerminalProof; nextUrl: string | null; reason: string } {
+): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; terminalProof: InventoryTerminalProof; nextUrl: string | null; reason: string; continuation: Continuation } {
 	const { document } = parseHTML(page.html);
 	const tab = stream === "repositories" ? "repositories" : "stars";
 	const list = stream === "repositories" ? document.querySelector("#user-repositories-list") : starredList(document);
@@ -956,7 +956,15 @@ export function inspectInventoryPage(
 	const exactTotals = trusted ? values.filter((value): value is number => value !== null) : [];
 	return { valid: result.complete || result.reason === "remaining_continuation",
 		complete: result.complete, total, exactTotals, totalConflict: trusted && counterAmbiguous,
-		terminalProof, nextUrl: result.nextUrl, reason: result.reason };
+		terminalProof, nextUrl: result.nextUrl, reason: result.reason, continuation: inventoryContinuation(result) };
+}
+
+function inventoryContinuation(result: InventoryEndResult): Continuation {
+	if (result.nextUrl !== null) return { kind: "next", url: result.nextUrl };
+	if (result.complete) return { kind: "end" };
+	if (result.reason === "terminal_unverified") return { kind: "unproven" };
+	if (result.reason === "wrong_navigation" || result.reason === "wrong_owner") return { kind: "unbound", reason: result.reason };
+	return { kind: "unknown", reason: result.reason };
 }
 
 export function parseContributionHtml(html: string): {

@@ -8,6 +8,7 @@ import { collectGitHubBrowser } from "./collector.ts";
 import type { BrowserCollectionPort } from "./collector.ts";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { BrowserServices } from "./types.ts";
+import { githubLink } from "./api-link-fixture.ts";
 
 const fixture = async (name: string) => JSON.parse(await readFile(new URL(`./__fixtures__/synthetic/${name}`, import.meta.url), "utf8"));
 const secret = "Bearer private-token https://example.test/?token=secret";
@@ -51,16 +52,16 @@ for (const [cause, change] of [
   if ("status" in change) assert.equal(failure(result).status, change.status);
  });
 }
-for (const cause of ["source_request_failed", "total_drift", "malformed_rows", "duplicate_rows", "end_not_proven"] as const) {
+for (const cause of ["source_request_failed", "source_total_changed", "discarded_rows", "duplicate_rows", "no_progress"] as const) {
  test(`history preserves counts after prior page: ${cause}`, async () => {
   const item = (await fixture("history-issue.json")).items[0];
   let calls = 0;
   const result = await collect(async url => {
    if (url.includes("type%3Apr")) return response(url, body());
-   if (++calls === 1) return response(url, body([item], 3));
+   if (++calls === 1) return response(url, body([item], 3), { link: githubLink(url, true) });
    if (cause === "source_request_failed") throw new Error(secret);
-   if (cause === "total_drift") return response(url, body([], 4));
-   if (cause === "malformed_rows") return response(url, body([{}], 3));
+   if (cause === "source_total_changed") return response(url, body([], 4));
+   if (cause === "discarded_rows") return response(url, body([{}], 3));
    if (cause === "duplicate_rows") return response(url, body([item], 3));
    return response(url, body([], 3), { link: null });
   });

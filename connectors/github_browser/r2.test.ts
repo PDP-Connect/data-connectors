@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { collectGitHubBrowser } from "./collector.ts";
+import { githubLink } from "./api-link-fixture.ts";
 import { parseProfilePage } from "./parsers.ts";
 import { inspectInventoryEnd } from "./page-evidence.ts";
 import type { BrowserServices } from "./types.ts";
@@ -52,7 +53,7 @@ test("300 events withhold the legacy snapshot without completion at the cap", as
  let calls = 0;
  const result = await collect(["events"], {
   fetchPublicJson: async (url) => ({
-   requestedUrl: url, responseUrl: url, status: 200,
+   requestedUrl: url, responseUrl: url, status: 200, link: githubLink(url, true),
    data: Array.from({ length: 100 }, (_, index) => ({ ...source, id: `${calls++}-${index}` })),
   }),
  });
@@ -67,7 +68,7 @@ test("900 of 1000 history rows never acquire completion at an empty tenth page",
   fetchPublicJson: async (url) => {
    const isPr = url.includes("type%3Apr");
    const pageNumber = isPr ? 0 : ++issuePage;
-   return { requestedUrl: url, responseUrl: url, status: 200, data: {
+   return { requestedUrl: url, responseUrl: url, status: 200, link: isPr ? null : githubLink(url, true), data: {
     items: isPr || pageNumber === 10 ? [] : Array.from({ length: 100 }, (_, index) => ({
      ...source, id: pageNumber * 100 + index, number: pageNumber * 100 + index,
     })), total_count: isPr ? 0 : 1000, incomplete_results: false,
@@ -125,15 +126,15 @@ test("profile partial embedded lists withhold singleton snapshots", async () => 
  assert.equal(result.messages.some(m => m.type === "DETAIL_COVERAGE"), false);
 });
 
-for (const link of [null, '<https://api.github.com/example?page=1>; rel="prev"']) {
- test(`events finish on an observed source-end Link: ${link}`, async () => {
+for (const pages of [1, 2]) {
+ test(`events finish on an observed source-end Link after ${pages} page(s)`, async () => {
   const event = JSON.parse(await fixture("events.json"))[0];
   let calls = 0;
   const result = await collect(["events"], { fetchPublicJson: async url => {
    calls += 1;
-   return { requestedUrl: url, responseUrl: url, status: 200, link, data: [event] };
+   return { requestedUrl: url, responseUrl: url, status: 200, link: githubLink(url, calls < pages), data: [{ ...event, id: String(calls) }] };
   } });
-  assert.equal(calls, 1);
+  assert.equal(calls, pages);
   assert.equal(result.records.length, 1);
   assert.match(String(result.records[0]?.data.windowDescription), /300.*90 days/);
   assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE"));
@@ -145,7 +146,7 @@ test("events follow short pages while rel=next remains and withhold unread conti
  const result = await collect(["events"], { fetchPublicJson: async url => {
   calls += 1;
   return { requestedUrl: url, responseUrl: url, status: 200,
-   link: `<https://api.github.com/users/sample-user/events/public?per_page=100&page=${calls + 1}>; rel="next"`,
+   link: githubLink(url, true),
    data: [{ ...event, id: String(calls) }] };
  } });
  assert.equal(calls, 3);
@@ -169,7 +170,8 @@ for (const end of ["link", "empty", "cap", "unread"] as const) {
    const last = end === "link" ? 2 : end === "empty" ? 1 : 10;
    const size = end === "empty" ? 0 : end === "unread" ? 1 : 100;
    return { requestedUrl: url, responseUrl: url, status: 200,
-    link: end === "cap" ? undefined : pr || pageNumber === last && (end === "link" || end === "empty") ? null : '<https://api.github.com/search/issues?page=99>; rel="next"',
+    // GitHub's capped tenth search page links back with neither next nor last.
+    link: pr ? null : githubLink(url, !(pageNumber === last && end !== "unread")),
     data: { total_count: pr ? 0 : 1500, incomplete_results: false,
      items: pr ? [] : Array.from({ length: size }, (_, i) => ({ ...source, id: pageNumber * 100 + i, number: pageNumber * 100 + i })) } };
   } }, prior);

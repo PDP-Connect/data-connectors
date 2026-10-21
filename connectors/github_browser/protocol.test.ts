@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { collectGitHubBrowser } from "./collector.ts";
+import { githubLink } from "./api-link-fixture.ts";
 import { parseProfilePage } from "./parsers.ts";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
@@ -372,8 +373,10 @@ test("three full event pages withhold the snapshot without source end evidence",
 			state,
 		},
 		{
-			fetchPublicJson: async (url: string) =>
-				apiObservation(url, pages[page++]),
+			fetchPublicJson: async (url: string) => ({
+				...apiObservation(url, pages[page++]),
+				link: githubLink(url, true),
+			}),
 			now: () => new Date("2026-01-01T00:00:00Z"),
 			openPage: async (url) => pageObservation(url, profile),
 			sleep: async () => {},
@@ -415,7 +418,7 @@ test("history exact source total of 1,000 can prove completeness", async () => {
 						incomplete_results: false,
 					});
 				const page = issuePage++;
-				return apiObservation(url, {
+				return Object.assign(apiObservation(url, {
 					items: Array.from({ length: 100 }, (_, index) => ({
 						...source,
 						id: page * 100 + index + 1,
@@ -425,7 +428,7 @@ test("history exact source total of 1,000 can prove completeness", async () => {
 					})),
 					total_count: 1000,
 					incomplete_results: false,
-				});
+				}), { link: githubLink(url, page < 9) });
 			},
 			now: () => new Date("2026-01-01T00:00:00Z"),
 			openPage: async (url) => pageObservation(url, profile),

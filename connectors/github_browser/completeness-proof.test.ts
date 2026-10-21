@@ -217,15 +217,17 @@ test("profile withholding retains the collection and evidence failure", async ()
 	assert.equal(diagnostics?.cause, "unclaimed_candidates");
 });
 
-test("InventoryEvidence cannot complete from a caller label without positive end evidence", () => {
-	const evidence = new InventoryEvidence();
-	evidence.addPage(["a"], true, 0);
-	evidence.addEnd({ nextUrl: null, reason: "terminal_list", terminalProof: null });
-	assert.equal(evidence.decide(1, null), "terminal_unverified");
-	evidence.addEnd({ nextUrl: "https://github.com/sample-user?page=2&tab=repositories", reason: "remaining_continuation", terminalProof: "disabled_next" });
-	assert.equal(evidence.decide(1, null), "terminal_unverified");
-	evidence.addEnd({ nextUrl: null, reason: "terminal_list", terminalProof: "disabled_next" });
-	assert.equal(evidence.decide(1, null), null);
+test("InventoryEvidence ends a walk only on the last page's own positive end evidence", () => {
+	const url = "https://github.com/sample-user?page=1&tab=repositories";
+	const evidence = new InventoryEvidence(url);
+	evidence.observePage({ ids: ["a"], rowsComplete: true, rejectedRows: 0, continuation: { kind: "unproven" } });
+	assert.equal(evidence.decide(1), "terminal_unverified");
+	// A walk that has ended accepts no later page, so no page can supply its proof.
+	evidence.observePage({ ids: [], rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } });
+	assert.equal(evidence.decide(1), "observation_after_end");
+	const ended = new InventoryEvidence(url);
+	ended.observePage({ ids: ["a"], rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } });
+	assert.equal(ended.decide(1), null);
 });
 
 for (const link of ["unreadable", '<https://api.github.com/users/sample-user/events/public?page=2>; rel="continue"']) {
@@ -237,10 +239,11 @@ for (const link of ["unreadable", '<https://api.github.com/users/sample-user/eve
 			const page = new URL(url).searchParams.get("page");
 			return { link, data: Array.from({ length: 100 }, (_, i) => ({ ...event, id: `${page}-${i}` })) };
 		});
-		assert.equal(calls, 3);
+		// Unknown metadata ends the walk; it may not consume further pages.
+		assert.equal(calls, 1);
 		const diagnostics = result.messages[0]?.diagnostics;
 		assert.ok(typeof diagnostics === "object" && diagnostics !== null && "cause" in diagnostics);
-		assert.equal(diagnostics.cause, "end_not_proven");
+		assert.equal(diagnostics.cause, "unreadable_pagination");
 		assert.deepEqual(result.records, []);
 		assert.deepEqual(result.state, { events: prior });
 		assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);

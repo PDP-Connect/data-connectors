@@ -242,94 +242,72 @@ export async function collectGitHubBrowser(
 		if (!wants.has(stream)) continue;
 		await runIsolated(stream, async () => {
 			let covered = 0;
-			const evidence = new InventoryEvidence();
-			let failure: string | null = "page_limit_reached";
-			let url = inventoryUrl(username, stream, 1);
-			for (let pageNumber = 1; pageNumber <= INVENTORY_PAGE_LIMIT; pageNumber += 1) {
+			const evidence = new InventoryEvidence(inventoryUrl(username, stream, 1), { pages: INVENTORY_PAGE_LIMIT });
+			const counts = () => ({ considered: evidence.expectedTotal ?? evidence.identities.size, covered });
+			for (let request = evidence.next; request !== null; request = evidence.next) {
 				const inspect = (page: BrowserPageObservation, parsed: ReturnType<typeof inventoryRows>) => {
 					const { distinct, noProgress } = evidence.previewPage(parsed.rows.map(row => row.id));
-					return inspectInventoryPage(page, stream, username, pageNumber, distinct, parsed.rejectedRows, noProgress);
+					return inspectInventoryPage(page, stream, username, request.page, distinct, parsed.rejectedRows, noProgress);
 				};
-				let page = await sourceRequest(() => services.openPage(url), { considered: evidence.expectedTotal ?? evidence.identities.size, covered });
+				let page = await sourceRequest(() => services.openPage(request.url), counts());
 				let parsed = inventoryRows(stream, page.html);
 				let proof = inspect(page, parsed);
-				evidence.add(proof);
-				if (stream === "starred" && pageNumber === 1 && (proof.reason === "terminal_unverified" || proof.reason === "unreadable_list")) {
+				evidence.addTotals(proof);
+				if (stream === "starred" && request.page === 1 && (proof.reason === "terminal_unverified" || proof.reason === "unreadable_list")) {
+					// The stars route is the same first page; its totals stay binding either way.
 					const primary = { parsed, proof };
-					url = `${GITHUB}/stars/${username}?page=1`;
-					page = await sourceRequest(() => services.openPage(url), { considered: evidence.expectedTotal ?? evidence.identities.size, covered });
+					page = await sourceRequest(() => services.openPage(`${GITHUB}/stars/${username}?page=1`), counts());
 					parsed = inventoryRows(stream, page.html);
 					proof = inspect(page, parsed);
-					evidence.add(proof);
+					evidence.addTotals(proof);
 					// An unreadable alternate route must not discard a readable primary list.
 					if (proof.reason === "unreadable_list" && primary.proof.reason === "terminal_unverified") {
 						parsed = primary.parsed;
 						proof = primary.proof;
 					}
 				}
-				if (proof.reason === "wrong_navigation" || proof.reason === "wrong_owner") {
-					await incomplete(stream, proof.reason); return;
-				}
-				evidence.addPage(parsed.rows.map(row => row.id), parsed.entriesComplete, parsed.rejectedRows);
+				const added = evidence.observePage({ ids: parsed.rows.map(row => row.id),
+					rowsComplete: parsed.entriesComplete, rejectedRows: parsed.rejectedRows, continuation: proof.continuation });
 				for (const row of parsed.rows) {
-					if (await emitEntity(stream, row)) covered += 1;
+					if (added.delete(row.id) && await emitEntity(stream, row)) covered += 1;
 				}
-				if (proof.nextUrl !== null) {
-					url = proof.nextUrl;
-					continue;
-				}
-				failure = proof.reason;
-				if (proof.complete || proof.reason === "terminal_unverified") {
-					failure = null;
-					evidence.addEnd(proof);
-					if (!proof.complete && proof.total === null && stream === "starred") {
-						failure = await sourceRequest(() => inspectStarredRest({ ...services, fetchPublicJson: restUrl => fetchJson(restUrl, { considered: evidence.expectedTotal ?? evidence.identities.size, covered }) }, username, evidence.identities, evidence), { considered: evidence.expectedTotal ?? evidence.identities.size, covered });
-					}
-				}
-				break;
 			}
-			const reason = evidence.decide(covered, failure);
-			const counts = { considered: evidence.expectedTotal ?? evidence.identities.size, covered };
-			if (reason === null) await complete(stream, counts);
-			else await incomplete(stream, reason, counts);
+			// Without an exact total, the REST list is the independent enumeration.
+			if (stream === "starred" && evidence.decide(covered) === "terminal_unverified") {
+				evidence.reconcile(await sourceRequest(() => enumerateStarredRest(
+					restUrl => fetchJson(restUrl, counts()), username), counts()));
+			}
+			const reason = evidence.decide(covered);
+			if (reason === null) await complete(stream, counts());
+			else await incomplete(stream, reason, counts());
 		});
 	}
 
 	if (wants.has("events")) {
 		await runIsolated("events", async () => {
-			const seen = new Set<string>();
+			const evidence = new InventoryEvidence(`${API}/users/${username}/events/public?per_page=100&page=1`, { pages: 3 });
 			let considered = 0;
 			let covered = 0;
-			let valid = true;
-			for (let page = 1; page <= 3; page += 1) {
-				const url = `${API}/users/${username}/events/public?per_page=100&page=${page}`;
-				const response = await fetchJson(url, { considered, covered });
-				if (!apiResponseMatches(response, url) || !Array.isArray(response.data))
+			for (let request = evidence.next; request !== null; request = evidence.next) {
+				const response = await fetchJson(request.url, { considered, covered });
+				if (!Array.isArray(response.data)) {
+					evidence.fail("invalid_events_response");
 					break;
+				}
 				considered += response.data.length;
-				for (const raw of response.data) {
-					const parsed = parseLegacyEventPageItem(raw);
-					const event = parsed.row;
-					if (!parsed.complete) valid = false;
-					if (event === null || seen.has(event.id)) {
-						valid = false;
-						continue;
-					}
-					seen.add(event.id);
-					if (await emitEntity("events", event)) covered += 1;
-					else valid = false;
+				const events = response.data.map(raw => parseLegacyEventPageItem(raw));
+				const rows = events.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
+				const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: events.every(parsed => parsed.complete),
+					rejectedRows: events.length - rows.length,
+					continuation: inspectApiWindow(response.link, request.url, response.data.length) });
+				for (const event of rows) {
+					if (added.delete(event.id) && await emitEntity("events", event)) covered += 1;
 				}
-				const window = inspectApiWindow(response.link);
-				if (window.kind === "ended" || (page === 1 && response.data.length === 0 && response.link === undefined)) {
-					if (valid) await complete("events", { considered, covered });
-					else await incomplete("events", "invalid_or_duplicate_rows", { considered, covered });
-					return;
-				}
-				if (response.data.length === 0) break;
 			}
-			const counts = { considered, covered };
 			// Neither a short page nor our loop limit establishes the source end.
-			await incomplete("events", !valid ? "invalid_or_duplicate_rows" : "end_not_proven", counts);
+			const reason = evidence.decide(covered);
+			if (reason === null) await complete("events", { considered, covered });
+			else await incomplete("events", reason, { considered, covered });
 		});
 	}
 
@@ -461,27 +439,29 @@ export async function collectGitHubBrowser(
 	async function collectHistoryType(
 		type: "issue" | "pr",
 	): Promise<HistoryTypeResult> {
-		let expectedTotal: number | null = null;
-		let considered = 0;
+		const query = encodeURIComponent(`author:${username} ${type === "pr" ? "type:pr" : "type:issue"}`);
+		// The API caps this search window, not the underlying authored history.
+		const window = HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT;
+		const evidence = new InventoryEvidence(
+			`${API}/search/issues?q=${query}&sort=created&order=desc&per_page=${HISTORY_PAGE_SIZE}&page=1`,
+			{ pages: HISTORY_PAGE_LIMIT, window },
+		);
 		let covered = 0;
-		const failed = (cause: string, status?: number): HistoryTypeResult => ({
-			failure: { origin: "source", cause, considered, covered, ...(status === undefined ? {} : { status }) },
-			capped, considered, covered,
-		});
 		let capped = false;
-		const seen = new Set<string>();
-		for (let page = 1; page <= HISTORY_PAGE_LIMIT; page += 1) {
-			const kind = type === "pr" ? "type:pr" : "type:issue";
-			const query = encodeURIComponent(`author:${username} ${kind}`);
-			const url = `${API}/search/issues?q=${query}&sort=created&order=desc&per_page=${HISTORY_PAGE_SIZE}&page=${page}`;
+		const counts = () => ({ considered: evidence.expectedTotal ?? evidence.identities.size, covered });
+		for (let request = evidence.next; request !== null; request = evidence.next) {
+			if (request.page > 1) await services.sleep(6500);
 			let response: Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>;
-			try { response = await fetchJson(url, { considered, covered }); }
+			try { response = await fetchJson(request.url, counts()); }
 			catch (error) {
 				if (!(error instanceof CollectionError)) throw error;
-				return { failure: error.failure, capped, considered, covered };
+				return { failure: error.failure, capped, ...counts() };
 			}
 			const body = asRecord(response.data);
-			if (body?.incomplete_results === true) return failed("search_incomplete_results");
+			if (body?.incomplete_results === true) {
+				evidence.fail("search_incomplete_results");
+				break;
+			}
 			if (
 				body === null ||
 				!Array.isArray(body.items) ||
@@ -489,37 +469,25 @@ export async function collectGitHubBrowser(
 				typeof body.total_count !== "number" ||
 				!Number.isInteger(body.total_count) ||
 				body.total_count < 0
-			)
-				return failed("malformed_search_response");
-			if (expectedTotal !== null && body.total_count !== expectedTotal) return failed("total_drift");
-			expectedTotal = body.total_count;
-			considered = Math.max(considered, body.total_count);
-			if (body.total_count > HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT) {
-				capped = true;
+			) {
+				evidence.fail("malformed_search_response");
+				break;
 			}
-			let invalid: "malformed_rows" | "duplicate_rows" | null = null;
-			for (const raw of body.items) {
-				const parsed = parseLegacyHistoryPageItem(raw, type);
-				const item = parsed.row;
-				if (!parsed.complete) invalid ??= "malformed_rows";
-				if (item === null || seen.has(item.id)) {
-					invalid ??= item === null ? "malformed_rows" : "duplicate_rows";
-					continue;
-				}
-				seen.add(item.id);
-				if (await emitEntity("history", item)) covered += 1;
-				else invalid ??= "malformed_rows";
+			evidence.addTotals({ exactTotals: [body.total_count], totalConflict: false });
+			capped ||= body.total_count > window;
+			const items = body.items.map(raw => parseLegacyHistoryPageItem(raw, type));
+			const rows = items.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
+			// The walk ends on GitHub's Link end, and decide() then requires every
+			// identity in the stable window. Short pages and our page budget prove nothing.
+			const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: items.every(parsed => parsed.complete),
+				rejectedRows: items.length - rows.length,
+				continuation: inspectApiWindow(response.link, request.url, body.items.length) });
+			for (const item of rows) {
+				if (added.delete(item.id) && await emitEntity("history", item)) covered += 1;
 			}
-			if (invalid !== null) return failed(invalid);
-			// The API caps this search window, not the underlying authored history.
-			// Short pages and our page budget are never completion evidence.
-			if (seen.size === Math.min(expectedTotal, HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT)) {
-				return { failure: null, capped, considered, covered };
-			}
-			if (body.items.length === 0 || inspectApiWindow(response.link).kind === "ended") break;
-			if (page < HISTORY_PAGE_LIMIT) await services.sleep(6500);
 		}
-		return failed("end_not_proven");
+		const cause = evidence.decide(covered);
+		return { failure: cause === null ? null : { origin: "source", cause, ...counts() }, capped, ...counts() };
 	}
 }
 
@@ -561,34 +529,25 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /** REST supplies enumeration evidence; browser rows remain the emitted payload. */
-async function inspectStarredRest(
-	services: BrowserServices,
+async function enumerateStarredRest(
+	fetchPublicJson: BrowserServices["fetchPublicJson"],
 	username: string,
-	browserRepos: ReadonlySet<string>,
-	evidence: InventoryEvidence,
-): Promise<string | null> {
-	const seen = new Set<string>();
-	for (let page = 1; page <= INVENTORY_PAGE_LIMIT; page += 1) {
-		const url = `${API}/users/${username}/starred?per_page=100&page=${page}`;
-		const response = await services.fetchPublicJson(url);
-		if (!apiResponseMatches(response, url) || !Array.isArray(response.data))
-			return "invalid_starred_rest_response";
-		for (const raw of response.data) {
+): Promise<InventoryEvidence> {
+	const rest = new InventoryEvidence(`${API}/users/${username}/starred?per_page=100&page=1`, { pages: INVENTORY_PAGE_LIMIT });
+	for (let request = rest.next; request !== null; request = rest.next) {
+		const response = await fetchPublicJson(request.url);
+		if (!Array.isArray(response.data)) {
+			rest.fail("invalid_starred_rest_response");
+			break;
+		}
+		const ids = response.data.flatMap(raw => {
 			const repo = asRecord(raw);
 			const name = repo?.full_name;
-			if (typeof name !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(name) ||
-				repo?.html_url !== `${GITHUB}/${name}` || seen.has(repo.html_url))
-				return "invalid_or_duplicate_rows";
-			seen.add(repo.html_url as string);
-		}
-		const window = inspectApiWindow(response.link);
-		if (window.kind === "ended" || (page === 1 && response.data.length === 0 && response.link === undefined)) {
-			evidence.addEnumeration(seen.size);
-			if (seen.size !== browserRepos.size) return "total_mismatch";
-			if (Array.from(seen).some(repo => !browserRepos.has(repo))) return "repository_mismatch";
-			return null;
-		}
-		if (window.kind !== "next" || response.data.length === 0) break;
+			return typeof name === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(name) &&
+				repo?.html_url === `${GITHUB}/${name}` ? [`${GITHUB}/${name}`] : [];
+		});
+		rest.observePage({ ids, rowsComplete: true, rejectedRows: response.data.length - ids.length,
+			continuation: inspectApiWindow(response.link, request.url, response.data.length) });
 	}
-	return "end_not_proven";
+	return rest;
 }
