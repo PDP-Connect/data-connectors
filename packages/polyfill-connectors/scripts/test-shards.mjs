@@ -13,11 +13,17 @@ export function selectTestShard(files, rawShard) {
 	}
 	const index = Number(match[1]) - 1;
 	const count = Number(match[2]);
-	if (!Number.isSafeInteger(index) || !Number.isSafeInteger(count) || index >= count) {
+	if (
+		!Number.isSafeInteger(index) ||
+		!Number.isSafeInteger(count) ||
+		index >= count
+	) {
 		throw new Error(
 			`TEST_SHARD index must be between 1 and its count, got ${JSON.stringify(rawShard)}`,
 		);
 	}
 
-	return [...files].sort().filter((_, fileIndex) => fileIndex % count === index);
+	return [...files]
+		.sort()
+		.filter((_, fileIndex) => fileIndex % count === index);
 }
