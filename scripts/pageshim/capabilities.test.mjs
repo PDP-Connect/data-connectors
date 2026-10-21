@@ -167,8 +167,8 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			browser: ["page_script_evaluation", "page_navigation"],
 		},
 		oura_browser: {
-			network: ["same_origin_page_fetch"],
-			browser: ["page_script_evaluation", "page_navigation"],
+			network: ["same_origin_page_fetch", "host_http_request"],
+			browser: ["page_script_evaluation", "page_navigation", "host_http_request"],
 		},
 		strava_browser: {
 			network: ["same_origin_page_fetch", "host_http_request"],
