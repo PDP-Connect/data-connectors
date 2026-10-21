@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -443,5 +444,94 @@ describe("respondViaTerminal manual_action", () => {
 			io,
 		);
 		assert.equal(out, null);
+	});
+});
+
+// These run the handler in a child process because the defect is the process
+// itself staying alive: the losing channel of the terminal/file-drop race kept
+// a timer or a raw-mode stdin listener open, so scenario-record printed its
+// summary and then hung until the 30-minute interaction timeout.
+describe("handleInteraction releases the losing channel", () => {
+	const HANDLER_URL = new URL("./interaction-handler.ts", import.meta.url).href;
+
+	// The child fakes a raw-mode TTY on its piped stdin, starts an OTP
+	// interaction with a 60 s timeout, then either types the code (terminal
+	// wins) or drops a response file (file drop wins). It never ends stdin, so
+	// a listener left on it also keeps the child alive.
+	function runChild(winner: "terminal" | "file"): Promise<{
+		code: number | null;
+		elapsedMs: number;
+		stdout: string;
+	}> {
+		const request_id = withFreshRequestId(`release_${winner}`);
+		const code = [
+			`import { writeFileSync } from "node:fs";`,
+			`import { tmpdir } from "node:os";`,
+			`import { join } from "node:path";`,
+			`const rawModes = [];`,
+			`Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });`,
+			`process.stdin.setRawMode = (mode) => { rawModes.push(mode); return process.stdin; };`,
+			`const { handleInteraction } = await import(${JSON.stringify(HANDLER_URL)});`,
+			`const pending = handleInteraction({ kind: "otp", message: "code", request_id: ${JSON.stringify(request_id)}, timeout_seconds: 60 }, { connectorName: "test" });`,
+			`setTimeout(() => {`,
+			winner === "terminal"
+				? `  process.stdin.emit("data", Buffer.from("123456\\r"));`
+				: `  writeFileSync(join(tmpdir(), "pdpp-interaction-${request_id}.response.json"), JSON.stringify({ status: "success", data: { code: "654321" } }));`,
+			`}, 200);`,
+			`const out = await pending;`,
+			`console.log(JSON.stringify({ status: out.status, code: out.data?.code, rawModes }));`,
+		].join("\n");
+		const started = Date.now();
+		return new Promise((resolve, reject) => {
+			const child = spawn(
+				process.execPath,
+				["--import", "tsx", "--input-type=module", "-e", code],
+				{ stdio: ["pipe", "pipe", "ignore"] },
+			);
+			let stdout = "";
+			child.stdout.on("data", (chunk: Buffer) => {
+				stdout += chunk.toString("utf8");
+			});
+			const killer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+			child.on("error", reject);
+			child.on("exit", (exitCode) => {
+				clearTimeout(killer);
+				resolve({ code: exitCode, elapsedMs: Date.now() - started, stdout });
+			});
+		});
+	}
+
+	// The prompt itself also writes to stdout; the result is the last line.
+	function lastJsonLine(stdout: string) {
+		return JSON.parse(stdout.trim().split("\n").at(-1) ?? "");
+	}
+
+	test("a typed or pasted terminal answer lets the process exit", async () => {
+		const result = await runChild("terminal");
+		assert.equal(
+			result.code,
+			0,
+			`child did not exit on its own: ${result.stdout}`,
+		);
+		assert.ok(result.elapsedMs < 15_000, `child lived ${result.elapsedMs} ms`);
+		const out = lastJsonLine(result.stdout);
+		// The code and Enter arrive in one chunk, as a paste does.
+		assert.equal(out.status, "success");
+		assert.equal(out.code, "123456");
+		assert.deepEqual(out.rawModes, [true, false]);
+	});
+
+	test("a file drop that wins restores the terminal and lets the process exit", async () => {
+		const result = await runChild("file");
+		assert.equal(
+			result.code,
+			0,
+			`child did not exit on its own: ${result.stdout}`,
+		);
+		assert.ok(result.elapsedMs < 15_000, `child lived ${result.elapsedMs} ms`);
+		const out = lastJsonLine(result.stdout);
+		assert.equal(out.status, "success");
+		assert.equal(out.code, "654321");
+		assert.deepEqual(out.rawModes, [true, false]);
 	});
 });

@@ -4655,17 +4655,17 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/interaction-handler.ts",
-			line: 89,
+			line: 96,
 			column: 4,
 			category: "dependent_file_cursor",
 			note: "access(): sequential file/dir walk, incremental byte-offset read, or one-way fs mutation",
 		},
 		{
 			path: "src/interaction-handler.ts",
-			line: 214,
+			line: 257,
 			column: 18,
 			category: "bounded_retry_polling",
-			note: "promptStdin(): retry/backoff/poll loop gated on the prior attempt's outcome",
+			note: "ask(): retry/backoff/poll loop gated on the prior attempt's outcome",
 		},
 		{
 			path: "src/local-device-runtime.ts",
