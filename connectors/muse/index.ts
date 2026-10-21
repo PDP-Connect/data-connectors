@@ -327,13 +327,32 @@ export function pageGateway(page: ScriptRunner): MuseGateway {
 
 // ─── Session ────────────────────────────────────────────────────────────
 
+/**
+ * Runs scripts in the page's MAIN world. The app's React fiber keys are expando properties on its
+ * DOM nodes, which an isolated world (patchright's default for evaluate) cannot see, so the
+ * gateway client is only reachable from the main world.
+ */
+export function mainWorld(page: Page): ScriptRunner {
+	const target = page as unknown as {
+		evaluate(
+			expression: string,
+			arg: undefined,
+			options: undefined,
+			isolatedContext: false,
+		): Promise<unknown>;
+	};
+	return {
+		evaluate: (script) => target.evaluate(script, undefined, undefined, false),
+	};
+}
+
 /** Whether this page is muse.ai with the app's gateway client loaded. Never navigates. */
 export async function hasMuseSession(page: ScriptRunner): Promise<boolean> {
 	return (await isOnMuse(page)) && (await locateGateway(page));
 }
 
 async function openMuse(page: Page): Promise<void> {
-	if (!(await isOnMuse(page))) {
+	if (!(await isOnMuse(mainWorld(page)))) {
 		await page.goto(MUSE_HOME_URL, { waitUntil: "domcontentloaded" });
 	}
 }
@@ -342,7 +361,9 @@ export async function probeMuseSession({
 	page,
 }: ProbeSessionArgs): Promise<boolean> {
 	await openMuse(page);
-	return (await isOnMuse(page)) && (await waitForGateway(page));
+	return (
+		(await isOnMuse(mainWorld(page))) && (await waitForGateway(mainWorld(page)))
+	);
 }
 
 export async function ensureMuseSession({
@@ -356,7 +377,11 @@ export async function ensureMuseSession({
 	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
 >): Promise<void> {
 	await openMuse(page);
-	if ((await isOnMuse(page)) && (await waitForGateway(page))) return;
+	if (
+		(await isOnMuse(mainWorld(page))) &&
+		(await waitForGateway(mainWorld(page)))
+	)
+		return;
 	const ready = await manualBrowserLogin({
 		assist,
 		...(capture ? { capture } : {}),
@@ -364,8 +389,8 @@ export async function ensureMuseSession({
 		isProbeSuccessful: (isLive: boolean) => isLive,
 		message: MUSE_LOGIN_MESSAGE,
 		page,
-		probe: () => hasMuseSession(page),
-		readinessProbe: hasMuseSession,
+		probe: () => hasMuseSession(mainWorld(page)),
+		readinessProbe: (p: Page) => hasMuseSession(mainWorld(p)),
 		readinessProbeOnHandoffPage: true,
 		sendInteraction,
 		timeoutSeconds: 1800,
@@ -1092,10 +1117,11 @@ export async function collectMuseWith(
 export async function collectMuse(ctx: BrowserCollectContext): Promise<void> {
 	if (ctx.requested.size === 0) return;
 	await openMuse(ctx.page);
-	if (!(await isOnMuse(ctx.page)) || !(await waitForGateway(ctx.page))) {
+	const main = mainWorld(ctx.page);
+	if (!(await isOnMuse(main)) || !(await waitForGateway(main))) {
 		throw authFailure();
 	}
-	await collectMuseWith(ctx, pageGateway(ctx.page));
+	await collectMuseWith(ctx, pageGateway(main));
 }
 
 // Guarded so `import "./index.ts"` in tests doesn't spin up the runtime.
