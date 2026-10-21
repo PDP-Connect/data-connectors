@@ -3609,3 +3609,189 @@ test("nutrition reports progress once per product", async () => {
 		restore();
 	}
 });
+
+// ─── Round 7: the relaxed tie, GTIN laundering, off-origin tiles ──────────
+//
+// Synthetic pages, as in round 6; the USDA response is a saved real shape
+// where one is needed.
+
+const PANEL95 =
+	"<div><h2>Nutrition Facts</h2><p>Calories 95 Total Fat 0.2g Total Carbohydrate 25g Protein 0.6g</p></div>";
+const ldNode = (node: unknown) =>
+	`<script type="application/ld+json">${JSON.stringify(node)}</script>`;
+const tileSearch = (...hrefs: string[]) =>
+	`<html><body>${hrefs.map((h) => `<div data-testid="product-tile"><a href="${h}">t</a></div>`).join("")}</body></html>`;
+const fullSite = (
+	amazon: string,
+	tiles: string[],
+	productFor: (url: string) => string,
+	visited: string[] = [],
+) => {
+	let current = "";
+	return {
+		content: async () =>
+			isAmazon(current)
+				? amazon
+				: current.includes("/search?")
+					? tileSearch(...tiles)
+					: productFor(current),
+		goto: async (url: string) => {
+			current = url;
+			visited.push(url);
+			return null;
+		},
+		locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
+		url: () => current,
+	} as unknown as Page;
+};
+const APPLES_NODE = { "@type": "Product", name: "Apples", gtin12: "111111111117" };
+
+test("a Pears panel under a title element is not Apples, with or without an h1", async () => {
+	const restore = stubUsda([]);
+	try {
+		const titles = ['<div class="product-title">Pears</div>', "<h1>Pears</h1>"];
+		const outcomes = await Promise.all(
+			titles.map(async (title) => ({
+				title,
+				outcome: await typedLookup(
+					fullSite(AMAZON_PRODUCT_NO_PANEL, ["/product/pears"], () =>
+						`<html><body>${title}${PANEL95}${ldNode(APPLES_NODE)}</body></html>`,
+					),
+					"Apples",
+				),
+			})),
+		);
+		for (const { title, outcome } of outcomes) {
+			assert.notEqual(outcome.status, "matched", title);
+		}
+	} finally {
+		restore();
+	}
+});
+
+test("a rendered panel with no title and no tied node has no subject, so it is taken by no one", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await typedLookup(
+			fullSite(AMAZON_PRODUCT_NO_PANEL, ["/product/x"], () =>
+				`<html><body>${PANEL95}${ldNode(APPLES_NODE)}</body></html>`,
+			),
+			"Apples",
+		);
+		assert.equal(outcome.status, "error");
+		assert.equal((outcome as { cause: string }).cause, "identity_unbound");
+	} finally {
+		restore();
+	}
+});
+
+test("with no title, a sole node still releases its OWN nutrition and GTIN", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await typedLookup(
+			fullSite(AMAZON_PRODUCT_NO_PANEL, ["/product/x"], () =>
+				`<html><body>${ldNode({ ...APPLES_NODE, nutrition: { "@type": "NutritionInformation", calories: "52", proteinContent: "0.3 g", carbohydrateContent: "14 g", fatContent: "0.2 g" } })}</body></html>`,
+			),
+			"Apples",
+		);
+		assert.equal(outcome.status, "matched");
+		if (outcome.status !== "matched") return;
+		assert.equal(outcome.facts.calories, 52);
+		assert.equal(outcome.facts.upc, "111111111117");
+	} finally {
+		restore();
+	}
+});
+
+test("a GTIN read from a name-bound tile is not a bound GTIN for the next tile", async () => {
+	const restore = stubUsda([]);
+	try {
+		const first = `<html><body><h1>Organic Bananas</h1><div><h2>Nutrition Facts</h2><p>Calories 105</p></div>${ldNode({ "@type": "Product", name: "Organic Bananas", gtin12: "012345678905" })}</body></html>`;
+		const second = `<html><body><h1>Banana Bread Mix</h1>${ldNode({ "@type": "Product", name: "Banana Bread Mix", gtin12: "012345678905", nutrition: { "@type": "NutritionInformation", calories: "200", proteinContent: "3 g", carbohydrateContent: "40 g", fatContent: "2 g" } })}</body></html>`;
+		const outcome = await typedLookup(
+			fullSite(AMAZON_PRODUCT_NO_PANEL, ["/product/a", "/product/b"], (url) =>
+				url.endsWith("/a") ? first : second,
+			),
+			"Organic Bananas",
+		);
+		assert.notEqual(outcome.status, "matched");
+	} finally {
+		restore();
+	}
+});
+
+test("a GTIN bound to Amazon only by URL binds a tile at medium, not high", async () => {
+	const restore = stubUsda([]);
+	try {
+		const tile = `<html><body><h1>Some Different Name</h1>${ldNode({ "@type": "Product", name: "Some Different Name", gtin12: "012345678905", nutrition: { "@type": "NutritionInformation", calories: "105", proteinContent: "1.3 g", carbohydrateContent: "27 g", fatContent: "0.4 g" } })}</body></html>`;
+		const outcome = await typedLookup(
+			fullSite(AMAZON_UPC_PAGE, ["/product/x"], () => tile),
+		);
+		assert.equal(outcome.status, "matched");
+		if (outcome.status !== "matched") return;
+		assert.equal(outcome.facts.confidence, "medium");
+	} finally {
+		restore();
+	}
+});
+
+test("an off-origin search link is not a read of this product, so the USDA fallback survives", async () => {
+	const restore = stubUsda([
+		usdaApple({ gtinUpc: null, foodNutrients: usdaCoreNutrients }),
+	]);
+	const visited: string[] = [];
+	try {
+		const outcome = await typedLookup(
+			fullSite(
+				AMAZON_PRODUCT_NO_PANEL,
+				["https://www.amazon.com/dp/B000000001", "/product/pears"],
+				() => `<html><body><h1>Pears</h1>${PANEL95}</body></html>`,
+				visited,
+			),
+			"Apples",
+		);
+		assert.deepEqual(
+			visited.filter((u) => u.includes("/dp/B000000001")),
+			[],
+		);
+		assert.equal(outcome.status, "matched");
+		if (outcome.status !== "matched") return;
+		assert.equal(outcome.facts.source, "usda_fdc");
+	} finally {
+		restore();
+	}
+});
+
+test("untied nodes under a heading that is not the request are another product, not an ambiguity", async () => {
+	const restore = stubUsda([
+		usdaApple({ gtinUpc: null, foodNutrients: usdaCoreNutrients }),
+	]);
+	try {
+		const page = `<html><body><h1>Pears</h1>${PANEL95}${ldNode([{ "@type": "Product", name: "365 Pear Halves" }, { "@type": "Product", name: "Kiwi" }])}</body></html>`;
+		const outcome = await typedLookup(
+			fullSite(AMAZON_PRODUCT_NO_PANEL, ["/product/pears"], () => page),
+			"Apples",
+		);
+		assert.equal(outcome.status, "matched");
+	} finally {
+		restore();
+	}
+});
+
+test("a tile linked by a relative and an absolute href is one tile", async () => {
+	const restore = stubUsda([]);
+	const visited: string[] = [];
+	try {
+		const hrefs = Array.from({ length: 6 }, (_, i) => [
+			`/product/p${i}`,
+			`https://www.wholefoodsmarket.com/product/p${i}`,
+		]).flat();
+		await typedLookup(
+			fullSite(AMAZON_PRODUCT_NO_PANEL, hrefs, () => "<html><body><h1>Other</h1></body></html>", visited),
+			"Apples",
+		);
+		assert.equal(visited.filter((u) => u.includes("/product/")).length, 6);
+	} finally {
+		restore();
+	}
+});

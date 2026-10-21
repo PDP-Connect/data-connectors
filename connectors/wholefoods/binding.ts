@@ -52,6 +52,20 @@ const bound = (via: Via): Binding => ({ kind: "BOUND", via });
 const unknown = (cause: BindingCause): Binding => ({ kind: "UNKNOWN", cause });
 const OTHER: Binding = { kind: "OTHER" };
 
+const VIA_STRENGTH: Record<Via, number> = {
+	content_id: 3,
+	gtin: 3,
+	url: 1,
+	name: 1,
+};
+
+/** The weaker of two bindings: a conclusion rests on its weakest link. */
+export function weakerVia(left: Via, right: Via | null): Via {
+	return right === null || VIA_STRENGTH[left] <= VIA_STRENGTH[right]
+		? left
+		: right;
+}
+
 /** `no_identity_evidence` is the UNBOUND arm; every other cause is a CONFLICT. */
 export const isUnbound = (cause: BindingCause): boolean =>
 	cause === "no_identity_evidence";
@@ -97,7 +111,16 @@ export const IDENTITY_SELECTORS = {
 // ─── Origins ───────────────────────────────────────────────────────────────
 
 const AMAZON_ORIGIN = "https://www.amazon.com";
-const WHOLE_FOODS_ORIGIN = "https://www.wholefoodsmarket.com";
+export const WHOLE_FOODS_ORIGIN = "https://www.wholefoodsmarket.com";
+
+/** A search-result link as an absolute Whole Foods URL, or null when it
+ *  points anywhere else. A link off Whole Foods is not a read of the product
+ *  and is dropped where tiles are collected. Two spellings of one path
+ *  (relative and absolute) resolve to the same URL, so they are one tile. */
+export function resolveWholeFoodsUrl(href: string): URL | null {
+	const url = parseUrl(new URL(href, WHOLE_FOODS_ORIGIN).href);
+	return url?.origin === WHOLE_FOODS_ORIGIN ? url : null;
+}
 
 function parseUrl(raw: string | null | undefined): URL | null {
 	if (!raw) return null;
@@ -167,6 +190,8 @@ const SIZE_UNITS: Record<string, { dimension: Dimension; factor: number }> = {
 	ml: { dimension: "volume", factor: 1 },
 	l: { dimension: "volume", factor: 1000 },
 	"fl oz": { dimension: "volume", factor: 29.5735 },
+	fz: { dimension: "volume", factor: 29.5735 },
+	dozen: { dimension: "count", factor: 12 },
 	gal: { dimension: "volume", factor: 3785.41 },
 	ct: { dimension: "count", factor: 1 },
 	count: { dimension: "count", factor: 1 },
@@ -176,7 +201,7 @@ const SIZE_UNITS: Record<string, { dimension: Dimension; factor: number }> = {
 	packs: { dimension: "count", factor: 1 },
 };
 const SIZE_RE =
-	/(\d+(?:\.\d+)?)\s*(fl\.?\s*oz|oz|lbs?|kg|g|ml|l|gal|ct|count|each|pk|packs?)\b\.?/gi;
+	/(\d+(?:\.\d+)?)\s*(fl\.?\s*oz|fz|oz|lbs?|kg|g|ml|l|gal|ct|count|each|dozen|pk|packs?)\b\.?/gi;
 /** Store-brand prefixes, including the comma forms ("Whole Foods Market, ..."). */
 const BRAND_PREFIX_RE =
 	/^(?:365\s+(?:by\s+)?whole\s+foods\s+market|whole\s+foods\s+market|365\s+everyday\s+value)\s*,?\s*/i;
@@ -204,6 +229,7 @@ export function normalizeName(raw: string | null | undefined): NormalizedName {
 	});
 	const base = text
 		.toLowerCase()
+		.replace(/['’]/g, "")
 		.replace(/[^a-z0-9]+/g, " ")
 		.trim();
 	return { base, size };
@@ -275,6 +301,8 @@ export interface RequestedProduct {
 	readonly asin: string;
 	readonly name: string;
 	readonly boundGtin: string | null;
+	/** What bound `boundGtin`: a conclusion that rests on it is no stronger. */
+	readonly boundGtinVia: Via | null;
 }
 
 // ─── Main subject of a Whole Foods page ────────────────────────────────────
@@ -295,14 +323,20 @@ export type MainSubject =
 			/** Facts that belong to `identity`, or null when the page has none. */
 			readonly facts: NutritionFacts | null;
 	  }
-	| { readonly kind: "AMBIGUOUS" };
+	| { readonly kind: "AMBIGUOUS"; readonly heading: string | null };
 
 /** Choose what a Whole Foods page is about, and which facts and GTIN belong to
  *  it. The main Product node is the one whose `url`/`@id` equals the canonical
  *  or final URL, else the one whose name equals the h1, else the only Product
- *  node; with several and no tie it is AMBIGUOUS. A node supplies its GTIN and
- *  its nutrition only if it is tied to the page. A rendered panel belongs to
- *  the h1 subject. Nothing is borrowed across subjects. */
+ *  node; with several and no tie
+ *  it is AMBIGUOUS. A node supplies its GTIN and its nutrition only if it is
+ *  tied to the page by URL or by name. A rendered panel belongs to the h1
+ *  subject. Nothing is borrowed across subjects.
+ *
+ *  One relaxation: a sole node on a page with no h1 has nothing
+ *  visible to contradict it, so it releases its OWN nutrition (the nutrition
+ *  inside that node) and its identity. It never releases a rendered panel, and
+ *  a panel with no h1 and no tied node has no subject. */
 export function mainSubject(
 	obs: WholeFoodsProductObservation,
 	finalUrl: string | null = null,
@@ -324,17 +358,37 @@ export function mainSubject(
 	);
 	let node: ProductNode | null = null;
 	let tied = true;
+	let sole = false;
 	if (byUrl.length === 1) node = byUrl[0] ?? null;
-	else if (byUrl.length > 1) return { kind: "AMBIGUOUS" };
+	else if (byUrl.length > 1) return { kind: "AMBIGUOUS", heading };
 	else if (byName.length === 1) node = byName[0] ?? null;
-	else if (byName.length > 1) return { kind: "AMBIGUOUS" };
+	else if (byName.length > 1) return { kind: "AMBIGUOUS", heading };
 	else if (obs.products.length === 1) {
 		node = obs.products[0] ?? null;
-		// With no visible heading there is nothing for the sole node to
-		// contradict; with one, an unrelated node is not tied to the page.
-		tied = heading === null;
-	} else if (obs.products.length > 1) return { kind: "AMBIGUOUS" };
+		tied = false;
+		sole = true;
+	} else if (obs.products.length > 1) return { kind: "AMBIGUOUS", heading };
 
+	if (sole && heading === null && node !== null) {
+		const gtin = normalizeGtin(node.gtin);
+		if (node.facts) {
+			return {
+				kind: "SUBJECT",
+				identity: { name: node.name, gtin },
+				heading,
+				nodeName: node.name,
+				facts: node.facts,
+			};
+		}
+		// A rendered panel with no h1 and no tied node has no subject.
+		return {
+			kind: "SUBJECT",
+			identity: obs.panel ? { name: null, gtin: null } : { name: node.name, gtin },
+			heading,
+			nodeName: node.name,
+			facts: null,
+		};
+	}
 	const gtin = node !== null && tied ? normalizeGtin(node.gtin) : null;
 	if (node?.facts && tied) {
 		return {
@@ -345,15 +399,13 @@ export function mainSubject(
 			facts: node.facts,
 		};
 	}
-	const name = heading ?? node?.name ?? null;
+	const name = heading ?? (tied ? (node?.name ?? null) : null);
 	return {
 		kind: "SUBJECT",
 		identity: { name, gtin },
 		heading,
 		nodeName: node?.name ?? null,
-		facts: obs.panel
-			? { ...obs.panel, productName: name, upc: gtin }
-			: null,
+		facts: obs.panel ? { ...obs.panel, productName: name, upc: gtin } : null,
 	};
 }
 
@@ -379,9 +431,11 @@ type ProductObservation =
  *
  *  Whole Foods tile (first match wins)
  *   1 origin is not wholefoodsmarket.com                 UNKNOWN untrusted_origin
- *   2 main subject AMBIGUOUS                             UNKNOWN ambiguous_main_product
+ *   2 main subject AMBIGUOUS, h1 is not the request      OTHER
+ *     main subject AMBIGUOUS otherwise                   UNKNOWN ambiguous_main_product
  *   3 node and h1 names differ, h1 is not the request    OTHER
- *   4 both GTINs known, equal                            BOUND gtin
+ *   4 both GTINs known, equal                            BOUND gtin (no stronger than the
+ *                                                        binding that supplied the request's GTIN)
  *   5 both GTINs known, unequal                          OTHER (beats any name match)
  *   6 at most one GTIN; same base name; size compatible  BOUND name
  *   7 otherwise a different name                         OTHER
@@ -426,7 +480,14 @@ function bindWholeFoods(
 		return unknown("untrusted_origin");
 	}
 	const subject = mainSubject(obs, finalUrl);
-	if (subject.kind === "AMBIGUOUS") return unknown("ambiguous_main_product");
+	if (subject.kind === "AMBIGUOUS") {
+		// An h1 that is not the request settles it before any ambiguity does:
+		// several nodes under another product's h1 are not this product.
+		return subject.heading !== null &&
+			!sameProductName(subject.heading, requested.name)
+			? OTHER
+			: unknown("ambiguous_main_product");
+	}
 	const { identity, heading, nodeName } = subject;
 	// The h1 is what the page shows; a node about something else (a
 	// recommendation) does not make the page that something else.
@@ -444,7 +505,10 @@ function bindWholeFoods(
 	const requestedGtin = gtin14(requested.boundGtin);
 	const subjectGtin = gtin14(identity.gtin);
 	if (requestedGtin !== null && subjectGtin !== null) {
-		return requestedGtin === subjectGtin ? bound("gtin") : OTHER;
+		// Bound by the barcode, but the barcode itself came from a binding.
+		return requestedGtin === subjectGtin
+			? bound(weakerVia("gtin", requested.boundGtinVia))
+			: OTHER;
 	}
 	if (identity.name === null) return unknown("no_identity_evidence");
 	return sameProductName(identity.name, requested.name) ? bound("name") : OTHER;

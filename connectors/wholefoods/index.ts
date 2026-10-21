@@ -607,7 +607,16 @@ async function lookupNutritionForProduct(
 	productId = "B012345678",
 ): Promise<NutritionLookup> {
 	const query = normalizeName(name).base;
-	const requested = { asin: productId, name, boundGtin: null as string | null };
+	const requested = {
+		asin: productId,
+		name,
+		boundGtin: null as string | null,
+		boundGtinVia: null as Via | null,
+	};
+	// The GTIN a BOUND Amazon observation supplied, and what bound it. Only
+	// this binds a Whole Foods tile by barcode; a GTIN read from a tile never
+	// becomes one, however that tile was bound.
+	let amazonGtin: { gtin: string; via: Via } | null = null;
 	// The weakest binding of the facts and the GTIN this lookup rests on.
 	let candidateVia: Via | null = null;
 	let candidate: NutritionFacts | null = null;
@@ -676,6 +685,9 @@ async function lookupNutritionForProduct(
 			} else {
 				candidate = read.facts ? boundFacts(read.facts, binding.via) : null;
 				candidateVia = candidate ? binding.via : null;
+				if (candidate?.upc) {
+					amazonGtin = { gtin: candidate.upc, via: binding.via };
+				}
 				const direct = acceptNutrition(candidate, evidence);
 				if (direct) return matched(direct);
 				sawPartialPanel(candidate);
@@ -707,15 +719,9 @@ async function lookupNutritionForProduct(
 				);
 				if (productUrls.length) {
 					for (const productUrl of productUrls) {
-						const resolvedUrl = new URL(productUrl, WHOLE_FOODS_ORIGIN);
-						if (resolvedUrl.origin !== WHOLE_FOODS_ORIGIN) {
-							// This tile is not ours to open; the others still count.
-							unable(unusable("untrusted_origin"));
-							continue;
-						}
 						const productStatus = await navigateAndSettle(
 							page,
-							resolvedUrl.href,
+							productUrl,
 							undefined,
 							true,
 						);
@@ -730,7 +736,11 @@ async function lookupNutritionForProduct(
 							const finalUrl = page.url();
 							const observation = readWholeFoodsProductPage(productHtml);
 							const binding = bindProduct(
-								{ ...requested, boundGtin: candidate?.upc ?? null },
+								{
+									...requested,
+									boundGtin: amazonGtin?.gtin ?? null,
+									boundGtinVia: amazonGtin?.via ?? null,
+								},
 								{ source: "wholefoods", obs: observation, finalUrl },
 							);
 							if (binding.kind === "UNKNOWN") {

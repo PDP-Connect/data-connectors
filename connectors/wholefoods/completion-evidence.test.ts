@@ -14,8 +14,8 @@ import {
 	mapUsdaNutrients,
 	parseAmazonProductNutritionDom,
 	parseOrderDetailDom,
-	parseWholeFoodsProductPageDom,
 } from "./parsers.ts";
+import { parseWholeFoodsProductPageDom } from "./test-support.ts";
 import { acceptNutrition, type NutritionNoMatch } from "./nutrition-acceptance.ts";
 import { nutritionSchema, validateRecord } from "./schemas.ts";
 

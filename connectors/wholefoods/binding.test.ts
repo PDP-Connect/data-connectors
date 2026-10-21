@@ -27,10 +27,17 @@ import {
 
 const ASIN = "B012345678";
 const OTHER_ASIN = "B087654321";
-const request = (overrides: Partial<{ name: string; boundGtin: string | null }> = {}) => ({
+const request = (
+	overrides: Partial<{
+		name: string;
+		boundGtin: string | null;
+		boundGtinVia: "content_id" | "url" | "name" | null;
+	}> = {},
+) => ({
 	asin: ASIN,
 	name: "Organic Apples",
 	boundGtin: null,
+	boundGtinVia: null,
 	...overrides,
 });
 
@@ -309,4 +316,60 @@ test("a USDA barcode binds to the request's GTIN only when they are the same pro
 	assert.deepEqual(bindGtin("012345678905", "036000291452"), { kind: "OTHER" });
 	assert.deepEqual(bindGtin("012345678905", null), { kind: "UNKNOWN", cause: "no_identity_evidence" });
 	assert.deepEqual(bindGtin(null, "012345678905"), { kind: "UNKNOWN", cause: "no_identity_evidence" });
+});
+
+// ─── Round 7: untied sole nodes, ambiguity under another h1, GTIN strength ─
+
+test("the relaxed tie releases a sole node's own facts only; a rendered panel needs a tied node", () => {
+	const panel = { calories: 95 } as never;
+	const own = { calories: 52 } as never;
+	// No title: the sole node's own nutrition is released with its identity.
+	const ownFacts = mainSubject({ canonicalUrl: null, h1: null, products: [node({ name: "Apples", gtin: "111111111117", facts: own })], panel });
+	assert.equal(ownFacts.kind === "SUBJECT" && ownFacts.facts, own);
+	// No title: a rendered panel is not released to an untied sole node, and
+	// takes neither its name nor its GTIN.
+	const rendered = mainSubject({ canonicalUrl: null, h1: null, products: [node({ name: "Apples", gtin: "111111111117" })], panel });
+	assert.equal(rendered.kind === "SUBJECT" && rendered.facts, null);
+	assert.equal(rendered.kind === "SUBJECT" && rendered.identity.name, null);
+	assert.equal(rendered.kind === "SUBJECT" && rendered.identity.gtin, null);
+	assert.deepEqual(
+		bindProduct(request({ name: "Apples" }), wf({ panel, products: [node({ name: "Apples", gtin: "111111111117" })] })),
+		{ kind: "UNKNOWN", cause: "no_identity_evidence" },
+	);
+});
+
+test("a title that is not the request settles it as OTHER before any ambiguity", () => {
+	assert.deepEqual(
+		bindProduct(
+			request({ name: "Apples" }),
+			wf({ h1: "Pears", products: [node({ name: "365 Pear Halves" }), node({ name: "Kiwi" })] }),
+		),
+		{ kind: "OTHER" },
+	);
+	// Ambiguity still matters when the title could be the request.
+	assert.deepEqual(
+		bindProduct(
+			request({ name: "Apples" }),
+			wf({ h1: "Apples", products: [node({ name: "Pears" }), node({ name: "Kiwi" })] }),
+		),
+		{ kind: "UNKNOWN", cause: "ambiguous_main_product" },
+	);
+});
+
+test("a GTIN binding is only as strong as the binding that supplied the GTIN", () => {
+	const page = wf({ h1: "Organic Apples", products: [node({ gtin: "012345678905" })] });
+	const asked = (boundGtinVia: "content_id" | "url" | "name" | null) =>
+		bindProduct(request({ boundGtin: "012345678905", boundGtinVia }), page);
+	assert.deepEqual(asked("content_id"), { kind: "BOUND", via: "gtin" });
+	assert.deepEqual(asked("url"), { kind: "BOUND", via: "url" });
+	assert.deepEqual(asked("name"), { kind: "BOUND", via: "name" });
+});
+
+test("the name normalizer reads FZ and dozen, and ignores apostrophes", () => {
+	assert.equal(normalizeName("Organic Whole Milk, 64 FZ").size?.dimension, "volume");
+	assert.equal(normalizeName("Organic Whole Milk, 64 FZ").size?.amount, normalizeName("Organic Whole Milk, 64 fl oz").size?.amount);
+	assert.equal(normalizeName("Large Brown Eggs, 1 Dozen").size?.amount, 12);
+	assert.equal(normalizeName("Siggi's Skyr").base, normalizeName("Siggis Skyr").base);
+	// None of this loosens a match: different words still differ.
+	assert.notEqual(normalizeName("Siggi's Skyr").base, normalizeName("Skyr").base);
 });

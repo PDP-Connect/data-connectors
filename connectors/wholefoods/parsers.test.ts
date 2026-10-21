@@ -24,10 +24,10 @@ import {
 	parseOrderDetailDom,
 	parseOrderSearchPageDom,
 	parseUsdaFood,
-	parseWholeFoodsProductPageDom,
 	parseWholeFoodsSearchResultDom,
 	scoreUsdaMatch,
 } from "./parsers.ts";
+import { parseWholeFoodsProductPageDom } from "./test-support.ts";
 import type { UsdaFood } from "./types.ts";
 
 // ─── Profile ────────────────────────────────────────────────────────────
@@ -377,7 +377,7 @@ test("parseWholeFoodsSearchResultDom extracts the first product tile link", () =
 	const html = `<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>`;
 	assert.equal(
 		parseWholeFoodsSearchResultDom(html),
-		"/product/organic-bananas",
+		"https://www.wholefoodsmarket.com/product/organic-bananas",
 	);
 });
 

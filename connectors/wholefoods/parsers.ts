@@ -11,8 +11,8 @@
 import { parseHTML } from "linkedom";
 import {
 	IDENTITY_SELECTORS,
-	mainSubject,
 	normalizeGtin,
+	resolveWholeFoodsUrl,
 	type AmazonProductObservation,
 	type OrderObservation,
 	type ProductNode,
@@ -1330,18 +1330,6 @@ export function readWholeFoodsProductPage(
 	};
 }
 
-/**
- * The facts a Whole Foods product page states about its main subject, or null.
- * Convenience over `readWholeFoodsProductPage` + `mainSubject`; callers that
- * must know whether the page is the requested product bind it first.
- */
-export function parseWholeFoodsProductPageDom(
-	html: string,
-): NutritionFacts | null {
-	const subject = mainSubject(readWholeFoodsProductPage(html));
-	return subject.kind === "SUBJECT" ? subject.facts : null;
-}
-
 /** The text of a panel container without its ingredient and important-
  *  information sections. */
 function panelText(container: Element | null): string {
@@ -1495,11 +1483,14 @@ export function parseWholeFoodsSearchResultDoms(html: string): string[] {
 	return [...links].flatMap((link) => {
 		const href = link.getAttribute("href");
 		if (!href || link.closest("header, footer, nav, aside")) return [];
-		// One tile is one path: the same product linked twice (image and title,
-		// or with tracking parameters) is visited once.
-		const path = href.replace(/[?#].*$/, "");
+		// A link off Whole Foods is not a read of this product; it is dropped
+		// here. One tile is one resolved path: relative and absolute spellings,
+		// or tracking parameters, are visited once.
+		const url = resolveWholeFoodsUrl(href);
+		if (!url) return [];
+		const path = url.pathname.replace(/\/+$/, "");
 		if (seen.has(path)) return [];
 		seen.add(path);
-		return [href];
+		return [url.href];
 	});
 }

@@ -96,9 +96,16 @@ test("a Whole Foods page reports every Product node, the canonical URL, the h1 a
 	assert.equal(subject.kind === "SUBJECT" && subject.identity.gtin, null);
 	assert.equal(
 		bindProduct(
-			{ asin: "B012345678", name: "Organic Pears", boundGtin: null },
+			{ asin: "B012345678", name: "Organic Pears", boundGtin: null, boundGtinVia: null },
 			{ source: "wholefoods", obs, finalUrl: "https://www.wholefoodsmarket.com/product/organic-pears" },
 		).kind,
 		"BOUND",
 	);
+});
+
+test("the convenience parser for tests is not reachable from production code", () => {
+	for (const file of ["index.ts", "parsers.ts", "binding.ts"]) {
+		const source = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+		assert.equal(/parseWholeFoodsProductPageDom/.test(source), false, file);
+	}
 });
