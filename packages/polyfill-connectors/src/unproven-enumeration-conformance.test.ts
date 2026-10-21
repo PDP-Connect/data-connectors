@@ -119,7 +119,10 @@ test("every unproven stream gets its own portable SKIP_RESULT, and retryability 
 				stream: "a",
 				reason: "inventory_not_proven_complete",
 				message: "a unproven",
-				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 			},
 			{
 				type: "SKIP_RESULT",

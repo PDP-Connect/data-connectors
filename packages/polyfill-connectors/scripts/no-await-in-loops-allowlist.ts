@@ -1834,7 +1834,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/github_browser/protocol.test.ts",
-			line: 269,
+			line: 284,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "Run each incomplete search case before checking its stream outcome.",
@@ -4606,7 +4606,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 2251,
+			line: 2273,
 			column: 7,
 			category: "shared_mutable_accumulator",
 			note: "closeBrowserContextPagesExcept(): loop body mutates a shared closed accumulator the next iteration reads",
@@ -4725,7 +4725,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 1316,
+			line: 1321,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "run(): report each unsupported bounded stream's SKIP_RESULT before collection starts",

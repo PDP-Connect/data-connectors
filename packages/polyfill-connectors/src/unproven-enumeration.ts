@@ -47,9 +47,7 @@ export function isUnprovenEnumerationSkip(
 }
 
 /** Whether the connector's hint says a later run can finish the enumeration. */
-export function unprovenEnumerationRetryable(
-	skip: SkipResultMessage,
-): boolean {
+export function unprovenEnumerationRetryable(skip: SkipResultMessage): boolean {
 	const hint = skip.recovery_hint;
 	return typeof hint === "object" && hint !== null && hint.retryable === true;
 }
