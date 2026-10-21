@@ -16,9 +16,20 @@ import {
 	parseOrderDetailDom,
 	parseWholeFoodsProductPageDom,
 } from "./parsers.ts";
+import { acceptNutrition } from "./nutrition-acceptance.ts";
 import { nutritionSchema, validateRecord } from "./schemas.ts";
 
-test("nutrition outcomes survive production keying and schema validation", async () => {
+const AMAZON_PANEL = `<html><body><div id="nic-nutrition-facts">Calories 150 Total Fat 8g Total Carbohydrate 37g Protein 3g</div></body></html>`;
+
+function acceptedAmazonRow() {
+	const facts = acceptNutrition(parseAmazonProductNutritionDom(AMAZON_PANEL), {
+		degraded: false,
+	});
+	assert.ok(facts);
+	return buildNutritionRecord("B012345678", "Source product", facts);
+}
+
+test("accepted nutrition survives production keying and schema validation", async () => {
 	const wire: any[] = [];
 	const runtime = makeEmitRecord({
 		requested: new Map([["nutrition", {}]]) as never,
@@ -30,19 +41,23 @@ test("nutrition outcomes survive production keying and schema validation", async
 		isTombstone: undefined,
 		timeRangeFieldFor: () => null,
 	});
-	for (const outcome of ["not_found", "error", "blocked"] as const) {
-		await runtime.emit(
-			"nutrition",
-			buildNutritionRecord("B012345678", "Source product", outcome),
-		);
-	}
-	assert.equal(runtime.counters.totalEmitted, 3);
+	await runtime.emit("nutrition", acceptedAmazonRow());
+	assert.equal(runtime.counters.totalEmitted, 1);
 	assert.equal(runtime.counters.totalSkipped, 0);
 	assert.ok(
 		wire.every(
 			(message) => message.type === "RECORD" && message.key === "B012345678",
 		),
 	);
+});
+
+test("rows from older connector versions with a failure source still validate", () => {
+	// The connector no longer builds these, but they may still be stored. The
+	// schema keeps the failure sources so reading them back is not a break.
+	for (const source of ["not_found", "error", "blocked"] as const) {
+		const stored = { ...acceptedAmazonRow(), source, calories: null };
+		assert.equal(validateRecord("nutrition", stored).ok, true, source);
+	}
 });
 
 test("unproven order totals and absent quantity stay unknown", () => {
@@ -120,7 +135,7 @@ test("USDA absent serving units never imply grams", () => {
 		},
 		"text",
 	);
-	assert.equal(facts.servingSize, null);
+	assert.equal(facts.servingSize, "per 100 g");
 	assert.equal(facts.calories, 100);
 });
 
@@ -129,7 +144,9 @@ test("nutrition parsing retains the legacy script's expanded nutrition payload",
 		<script type="application/ld+json">{"@type":"Product","gtin12":"012345678905","category":"Produce","ingredients":"Apples","nutrition":{"@type":"NutritionInformation","calories":"52","proteinContent":"0.3 g","carbohydrateContent":"14 g","fatContent":"0.2 g","saturatedFatContent":"0 g","transFatContent":"0 g","cholesterolContent":"0 mg","fiberContent":"2.4 g","sugarContent":"10 g","sodiumContent":"1 mg","potassiumContent":"107 mg","calciumContent":"6 mg","ironContent":"0.1 mg","vitaminDContent":"0 mcg"}}</script>
 	</head><body></body></html>`);
 	assert.ok(facts);
-	const row = buildNutritionRecord("B012345678", "Apples", facts);
+	const accepted = acceptNutrition(facts, { degraded: false });
+	assert.ok(accepted);
+	const row = buildNutritionRecord("B012345678", "Apples", accepted);
 	assert.deepEqual(
 		{
 			calories: row.calories,
@@ -253,7 +270,7 @@ test("duplicate ASIN lines without source line identity are never silently merge
 });
 
 test("nutrition key must agree with its source product identity", () => {
-	const record = buildNutritionRecord("B012345678", "Source product", "error");
+	const record = acceptedAmazonRow();
 	assert.equal(
 		nutritionSchema.safeParse({ ...record, id: "B087654321" }).success,
 		false,

@@ -56,6 +56,9 @@ export interface OrderDetail {
 	status?: "Cancelled" | null;
 }
 
+/** The rows every Nutrition Facts panel carries. */
+export type CoreNutritionRow = "calories" | "carbs" | "fat" | "protein";
+
 /** Nutrition facts extracted from either the Whole Foods product page or
  *  the USDA FoodData Central API, normalized to one shape regardless of
  *  source. Fields absent from the source are `null`, never guessed. */
@@ -68,6 +71,10 @@ export interface NutritionFacts {
 	category: string[];
 	cholesterolMg: number | null;
 	confidence: "high" | "medium" | "low";
+	/** Core rows the source stated: a row stated only as a bound ("<1 g") is
+	 *  stated and has a null amount; a row the source does not carry is not
+	 *  stated. A missing row is never read as zero. */
+	coreStated: readonly CoreNutritionRow[];
 	fdcId: number | null;
 	fatG: number | null;
 	fiberG: number | null;

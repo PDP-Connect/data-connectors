@@ -42,9 +42,6 @@ const CALORIES_RE = /Calories[:\s]*(\d+)/i;
 const SERVING_SIZE_RE = /Serving [Ss]ize[:\s]*([^\n]+)/;
 const SERVINGS_PER_CONTAINER_RE =
 	/(\d+(?:\.\d+)?)\s*servings?\s*per\s*container|servings?\s*per\s*container[:\s]*(\d+(?:\.\d+)?)/i;
-const NUTRIENT_PATTERN_SOURCE =
-	"(Total Fat|Saturated Fat|Trans Fat|Cholesterol|Sodium|Total Carbohydrate|Dietary Fiber|Added Sugars|Includes Added Sugars|Sugars|Protein|Potassium|Calcium|Iron|Vitamin D)[:\\s]*(\\d+\\.?\\d*)\\s*(mcg|mg|µg|μg|ug|g)?(?![A-Za-z])";
-
 type NutritionDetails = Pick<
 	NutritionFacts,
 	| "addedSugarG"
@@ -52,6 +49,7 @@ type NutritionDetails = Pick<
 	| "calciumMg"
 	| "category"
 	| "cholesterolMg"
+	| "coreStated"
 	| "fdcId"
 	| "highlights"
 	| "ingredients"
@@ -74,6 +72,7 @@ function emptyNutritionDetails(): NutritionDetails {
 		calciumMg: null,
 		category: [],
 		cholesterolMg: null,
+		coreStated: [],
 		fdcId: null,
 		highlights: [],
 		ingredients: null,
@@ -118,7 +117,21 @@ const ENERGY_UNIT_ALIASES = new Set([
 	"kilocalorie",
 	"kilocalories",
 ]);
-const AMOUNT_RE = /^\s*(\d+(?:\.\d+)?|\.\d+)\s*([^\d\s].*?)?\s*$/;
+/** A source states a row in one of two ways: an amount, or only an upper
+ *  bound ("<1 g"). A bound is a stated row, but it has no amount, so it is
+ *  never written as a number. */
+type Stated =
+	| { readonly bound: "exact"; readonly amount: number }
+	| { readonly bound: "less_than"; readonly limit: number };
+
+const amountOf = (stated: Stated | null): number | null =>
+	stated?.bound === "exact" ? stated.amount : null;
+
+/** `<`, `≤` or "less than", an amount, then an optional unit. */
+const STATED_AMOUNT_RE =
+	/^[\s:]*(<|≤|less than\s)?\s*(\d+(?:\.\d+)?|\.\d+)\s*([^\d\s]*)/i;
+/** Vitamin D: 1 mcg is 40 IU, the one unambiguous IU factor a panel row uses. */
+const VITAMIN_D_IU_PER_MCG = 40;
 /** GTIN-8, GTIN-12 (UPC-A), GTIN-13 and GTIN-14 are the only barcode lengths. */
 const GTIN_LENGTHS = new Set([8, 12, 13, 14]);
 
@@ -130,30 +143,49 @@ function convertMass(value: number, from: MassUnit, to: MassUnit): number {
 	return roundAmount((value * MG_PER_UNIT[from]) / MG_PER_UNIT[to]);
 }
 
-/** A mass amount as the field's own unit. A bare number is already in that
- *  unit; a unit the field cannot hold is withheld (null), never relabelled. */
-function massAmount(
-	raw: unknown,
-	target: MassUnit,
-): number | null {
-	if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
-	if (typeof raw !== "string") return null;
-	const match = AMOUNT_RE.exec(raw);
-	if (!match?.[1]) return null;
-	const value = Number.parseFloat(match[1]);
-	if (!match[2]) return value;
-	const unit = MASS_UNIT_ALIASES[match[2].trim().toLowerCase()];
-	return unit ? convertMass(value, unit, target) : null;
+/** Read "<bound> <amount> <unit>" at the start of `text` as the row's own
+ *  unit. A bare number is already in that unit. A percentage, or a unit the
+ *  row cannot hold, states no amount, so the row is not stated (null) rather
+ *  than relabelled. */
+function statedMass(text: string, target: MassUnit): Stated | null {
+	const match = STATED_AMOUNT_RE.exec(text);
+	if (!match?.[2]) return null;
+	const value = Number.parseFloat(match[2]);
+	const unitText = (match[3] ?? "").toLowerCase();
+	let amount: number;
+	if (unitText === "") {
+		amount = value;
+	} else if (unitText === "iu" && target === "mcg") {
+		amount = roundAmount(value / VITAMIN_D_IU_PER_MCG);
+	} else {
+		const unit = MASS_UNIT_ALIASES[unitText];
+		if (!unit) return null;
+		amount = convertMass(value, unit, target);
+	}
+	return match[1] ? { bound: "less_than", limit: amount } : { bound: "exact", amount };
 }
 
-/** Energy as kilocalories. Kilojoules and other units are withheld. */
-function energyKcal(raw: unknown): number | null {
-	if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+/** A structured (JSON-LD) mass value: a number, or the same text a panel row
+ *  has. Absent or unreadable means not stated. */
+function structuredMass(raw: unknown, target: MassUnit): Stated | null {
+	if (typeof raw === "number") {
+		return Number.isFinite(raw) ? { bound: "exact", amount: raw } : null;
+	}
+	return typeof raw === "string" ? statedMass(raw, target) : null;
+}
+
+/** Energy as kilocalories. Kilojoules and other units are not stated here.
+ *  Energy needs an amount: an upper bound on calories is not a reading. */
+function structuredEnergy(raw: unknown): Stated | null {
+	if (typeof raw === "number") {
+		return Number.isFinite(raw) ? { bound: "exact", amount: raw } : null;
+	}
 	if (typeof raw !== "string") return null;
-	const match = AMOUNT_RE.exec(raw);
-	if (!match?.[1]) return null;
-	return ENERGY_UNIT_ALIASES.has((match[2] ?? "").trim().toLowerCase())
-		? Number.parseFloat(match[1])
+	const match = STATED_AMOUNT_RE.exec(raw);
+	if (!match?.[2] || match[1]) return null;
+	const unit = (match[3] ?? "").toLowerCase().replace(/\.$/, "");
+	return ENERGY_UNIT_ALIASES.has(unit)
+		? { bound: "exact", amount: Number.parseFloat(match[2]) }
 		: null;
 }
 
@@ -174,65 +206,58 @@ export function sameGtin(left: unknown, right: unknown): boolean {
 	return a !== null && b !== null && a.replace(/^0+/, "") === b.replace(/^0+/, "");
 }
 
-/** Unit each panel row is stored in. */
-const PANEL_UNIT: Record<string, MassUnit> = {
-	"Total Fat": "g",
-	"Saturated Fat": "g",
-	"Trans Fat": "g",
-	Cholesterol: "mg",
-	Sodium: "mg",
-	"Total Carbohydrate": "g",
-	"Dietary Fiber": "g",
-	"Total Sugars": "g",
-	"Includes Added Sugars": "g",
-	Protein: "g",
-	Potassium: "mg",
-	Calcium: "mg",
-	Iron: "mg",
-	"Vitamin D": "mcg",
-};
+/** Panel rows and the unit each is stored in. Longer labels come first so
+ *  "Includes Added Sugars" is never read as "Sugars". */
+const PANEL_ROWS: readonly (readonly [label: string, key: string, unit: MassUnit])[] = [
+	["Includes Added Sugars", "Includes Added Sugars", "g"],
+	["Added Sugars", "Includes Added Sugars", "g"],
+	["Total Sugars", "Total Sugars", "g"],
+	["Total Fat", "Total Fat", "g"],
+	["Saturated Fat", "Saturated Fat", "g"],
+	["Trans Fat", "Trans Fat", "g"],
+	["Total Carbohydrate", "Total Carbohydrate", "g"],
+	["Dietary Fiber", "Dietary Fiber", "g"],
+	["Cholesterol", "Cholesterol", "mg"],
+	["Sodium", "Sodium", "mg"],
+	["Sugars", "Total Sugars", "g"],
+	["Protein", "Protein", "g"],
+	["Potassium", "Potassium", "mg"],
+	["Calcium", "Calcium", "mg"],
+	["Iron", "Iron", "mg"],
+	["Vitamin D", "Vitamin D", "mcg"],
+];
+const PANEL_LABEL_RE = new RegExp(
+	PANEL_ROWS.map(([label]) => label).join("|"),
+	"gi",
+);
+const PANEL_ROW_BY_LABEL = new Map(
+	PANEL_ROWS.map(([label, key, unit]) => [label.toLowerCase(), { key, unit }]),
+);
 
-/** Read the rows of a rendered nutrition panel as `row name -> amount in that
- *  row's unit`. The first occurrence of a row wins. */
-function readPanelAmounts(panelText: string): Map<string, number> {
-	const amounts = new Map<string, number>();
-	const pattern = new RegExp(NUTRIENT_PATTERN_SOURCE, "gi");
-	let match: RegExpExecArray | null = pattern.exec(panelText);
-	while (match) {
-		const label = titleCase((match[1] ?? "").toLowerCase());
-		const key =
-			label === "Sugars"
-				? "Total Sugars"
-				: label === "Added Sugars"
-					? "Includes Added Sugars"
-					: label;
-		const target = PANEL_UNIT[key];
-		if (target && !amounts.has(key) && match[2]) {
-			const value = massAmount(`${match[2]}${match[3] ?? ""}`, target);
-			if (value !== null) amounts.set(key, value);
-		}
-		match = pattern.exec(panelText);
-	}
-	return amounts;
+/** Read a rendered nutrition panel one row at a time. Amazon renders the
+ *  panel with no separators ("Total Fat12g20%Sodium480mg"), so a row's value
+ *  is the text between its label and the next label, never a search across
+ *  the whole text. The first occurrence of a row that states an amount wins;
+ *  a percentage of daily value states none. */
+function readPanelRows(panelText: string): Map<string, Stated> {
+	const labels = [...panelText.matchAll(PANEL_LABEL_RE)];
+	const rows = new Map<string, Stated>();
+	labels.forEach((label, index) => {
+		const row = PANEL_ROW_BY_LABEL.get(label[0].toLowerCase());
+		if (!row || rows.has(row.key)) return;
+		const start = label.index + label[0].length;
+		const end = labels[index + 1]?.index ?? panelText.length;
+		const stated = statedMass(panelText.slice(start, end), row.unit);
+		if (stated) rows.set(row.key, stated);
+	});
+	return rows;
 }
 
-function titleCase(label: string): string {
-	return label.replace(/\b\w/g, (c) => c.toUpperCase());
-}
+const CORE_ROWS = ["calories", "carbs", "fat", "protein"] as const;
+type CoreRow = (typeof CORE_ROWS)[number];
 
-/** The acceptance rule for a nutrition observation. A stored nutrition row is
- *  replaced wholesale by the next one emitted under its key, so only an
- *  observation that states every core row of a Nutrition Facts panel
- *  (calories, fat, carbohydrate, protein) may be emitted. An empty or partly
- *  rendered observation says nothing about the product and must not displace
- *  facts that were read before. */
-export function hasCoreNutrition(facts: NutritionFacts): boolean {
-	return (
-		typeof facts.calories === "number" &&
-		typeof facts.fatG === "number" &&
-		typeof facts.carbsG === "number" &&
-		typeof facts.proteinG === "number"
-	);
+function coreStatedOf(stated: Record<CoreRow, Stated | null>): CoreRow[] {
+	return CORE_ROWS.filter((row) => stated[row] !== null);
 }
 
 const IN_STORE_ITEM_LIST_SELECTOR = "#f3_food_ItemList";
@@ -625,11 +650,16 @@ const ORDER_ID_TOKEN_RE = /\b\d{3}-\d{7}-\d{7}\b/g;
 const AMAZON_ORIGIN = "https://www.amazon.com";
 
 /** The one rule that ties a fetched order-detail page to the order that was
- *  requested. A page belongs to the order when the final URL is on amazon.com
- *  and the order id it carries, or else the order id the page itself shows,
- *  is the requested one; any other order id on either surface rejects it.
- *  A page with neither is unbound and is rejected too: a redirect to another
- *  order, or to a cancellation page, must never be read as this order. */
+ *  requested. The final URL must be on https://www.amazon.com (a redirect to
+ *  any other host, bare amazon.com included, fails closed). Then:
+ *  - a URL that names another order rejects the page;
+ *  - a URL that names the requested order accepts it, provided the page does
+ *    not show order ids that exclude it;
+ *  - a URL that names no order accepts the page only if every order id the
+ *    page shows is the requested one.
+ *  A page with no order id on either surface is unbound and is rejected: a
+ *  redirect to another order, or to a cancellation page, must never be read as
+ *  this order. */
 export function orderDetailBelongsTo(
 	orderId: string,
 	finalUrl: string,
@@ -648,7 +678,8 @@ export function orderDetailBelongsTo(
 	if (urlOrderId !== undefined && urlOrderId !== orderId) return false;
 	const shownIds: string[] = html.match(ORDER_ID_TOKEN_RE) ?? [];
 	if (shownIds.length > 0 && !shownIds.includes(orderId)) return false;
-	return urlOrderId === orderId || shownIds.includes(orderId);
+	if (urlOrderId === orderId) return true;
+	return shownIds.length > 0 && shownIds.every((id) => id === orderId);
 }
 
 /**
@@ -880,61 +911,120 @@ const USDA_NUTRIENT_ID = {
 	vitaminD: 1114,
 } as const;
 
-/** USDA branded-food nutrients are per 100 g. A serving stated in grams
- *  scales them to that serving, as the legacy `mapUSDANutrients` did. A
- *  serving in any other unit (millilitres, pieces) cannot be converted
- *  without a density, so the values stay on the per-100 g basis and carry no
- *  serving label: a label would present unconverted values as per-serving. */
-const USDA_GRAM_UNITS = new Set(["g", "grm"]);
+/** One USDA search result as the connector uses it, from the wire shape.
+ *  Foundation foods omit `servingSize`, `servingSizeUnit`, `gtinUpc` and
+ *  `brandOwner` entirely, so an absent key becomes null here and nowhere
+ *  else. A result that is not a food with an id and a description, and any
+ *  nutrient entry without a numeric id and value, is dropped. */
+export function parseUsdaFood(raw: unknown): UsdaFood | null {
+	if (typeof raw !== "object" || raw === null) return null;
+	const food = raw as Record<string, unknown>;
+	if (typeof food.fdcId !== "number" || typeof food.description !== "string") {
+		return null;
+	}
+	const text = (value: unknown) => (typeof value === "string" ? value : null);
+	const nutrients = Array.isArray(food.foodNutrients) ? food.foodNutrients : [];
+	return {
+		brandName: text(food.brandName),
+		brandOwner: text(food.brandOwner),
+		description: food.description,
+		fdcId: food.fdcId,
+		foodNutrients: nutrients.flatMap((entry: unknown) => {
+			const nutrient = entry as Record<string, unknown> | null;
+			return typeof nutrient?.nutrientId === "number" &&
+				typeof nutrient.value === "number" &&
+				Number.isFinite(nutrient.value)
+				? [{ nutrientId: nutrient.nutrientId, value: nutrient.value }]
+				: [];
+		}),
+		gtinUpc: text(food.gtinUpc),
+		ingredients: text(food.ingredients),
+		servingSize:
+			typeof food.servingSize === "number" && food.servingSize > 0
+				? food.servingSize
+				: null,
+		servingSizeUnit: text(food.servingSizeUnit),
+	};
+}
+
+/** FoodData Central energy: Branded and most Foundation foods report 1008;
+ *  Foundation foods that derive energy report only 2047 or 2048 (Atwater). */
+const USDA_ENERGY_IDS = [1008, 2047, 2048] as const;
+/** USDA nutrient values are per 100 g, or per 100 ml for a food whose serving
+ *  is stated in millilitres. */
+const USDA_SERVING_BASIS: Record<string, "g" | "ml"> = {
+	g: "g",
+	grm: "g",
+	ml: "ml",
+	mlt: "ml",
+};
 
 /** Map a matched USDA food's nutrients to the connector's typed nutrition
- *  shape. */
+ *  shape. A serving stated in grams or millilitres scales the per-100 values
+ *  to that serving, as the legacy `mapUSDANutrients` did for grams. With no
+ *  such serving the values stay per 100 g and say so in the serving label,
+ *  so no source leaves "per 100" to be inferred from a null. A nutrient the
+ *  food does not report is not stated; it is never read as zero. */
 export function mapUsdaNutrients(
 	food: UsdaFood,
 	matchMethod: UsdaMatchMethod,
 ): NutritionFacts {
-	const servingInGrams =
-		food.servingSize !== null &&
-		food.servingSizeUnit !== null &&
-		USDA_GRAM_UNITS.has(food.servingSizeUnit.toLowerCase())
-			? food.servingSize
-			: null;
-	const scale = (servingInGrams ?? 100) / 100;
-	const getRaw = (id: number): number | null => {
-		const n = food.foodNutrients.find((fn) => fn.nutrientId === id);
-		return n ? n.value : null;
-	};
+	const basis =
+		food.servingSize !== null && food.servingSizeUnit !== null
+			? USDA_SERVING_BASIS[food.servingSizeUnit.toLowerCase()]
+			: undefined;
+	const scale = basis && food.servingSize !== null ? food.servingSize / 100 : 1;
+	const reported = (id: number): number | null =>
+		food.foodNutrients.find((nutrient) => nutrient.nutrientId === id)?.value ??
+		null;
 	const get = (id: number): number | null => {
-		const raw = getRaw(id);
+		const raw = reported(id);
 		return raw === null ? null : Math.round(raw * scale * 100) / 100;
 	};
+	const energyId = USDA_ENERGY_IDS.find((id) => reported(id) !== null);
+	const calories = energyId === undefined ? null : get(energyId);
+	const fat = get(USDA_NUTRIENT_ID.fat);
+	const carbs = get(USDA_NUTRIENT_ID.carbs);
+	const protein = get(USDA_NUTRIENT_ID.protein);
+	const stated = (value: number | null): Stated | null =>
+		value === null ? null : { bound: "exact", amount: value };
 	return {
 		...emptyNutritionDetails(),
 		addedSugarG: get(USDA_NUTRIENT_ID.addedSugar),
 		allergens: null,
 		calciumMg: get(USDA_NUTRIENT_ID.calcium),
-		calories: get(USDA_NUTRIENT_ID.calories),
-		carbsG: get(USDA_NUTRIENT_ID.carbs),
+		calories,
+		carbsG: carbs,
 		category: [],
 		cholesterolMg: get(USDA_NUTRIENT_ID.cholesterol),
 		confidence: matchMethod === "upc" ? "high" : "medium",
+		coreStated: coreStatedOf({
+			calories: stated(calories),
+			carbs: stated(carbs),
+			fat: stated(fat),
+			protein: stated(protein),
+		}),
 		fdcId: food.fdcId,
-		fatG: get(USDA_NUTRIENT_ID.fat),
+		fatG: fat,
 		fiberG: get(USDA_NUTRIENT_ID.fiber),
 		highlights: [],
 		ingredients: food.ingredients || null,
 		ironMg: get(USDA_NUTRIENT_ID.iron),
 		potassiumMg: get(USDA_NUTRIENT_ID.potassium),
-		proteinG: get(USDA_NUTRIENT_ID.protein),
+		proteinG: protein,
 		rawNutritionText: null,
 		saturatedFatG: get(USDA_NUTRIENT_ID.saturatedFat),
-		servingSize: servingInGrams !== null ? `${servingInGrams}g` : null,
+		servingSize:
+			basis && food.servingSize !== null
+				? `${food.servingSize}${basis}`
+				: "per 100 g",
 		servingsPerContainer: null,
 		sodiumMg: get(USDA_NUTRIENT_ID.sodium),
 		source: "usda_fdc",
 		sugarG: get(USDA_NUTRIENT_ID.sugar),
 		transFatG: get(USDA_NUTRIENT_ID.transFat),
-		upc: normalizeGtin(food.gtinUpc),
+		// A text match is another product: its GTIN is not this product's.
+		upc: matchMethod === "upc" ? normalizeGtin(food.gtinUpc) : null,
 		usdaBrand: food.brandOwner,
 		usdaDescription: food.description,
 		usdaMatchMethod: matchMethod,
@@ -1064,37 +1154,44 @@ export function parseWholeFoodsProductPageDom(
 	const nutritionHeading = headings.find((el) =>
 		NUTRITION_HEADING_RE.test(textOf(el).trim()),
 	);
-	const structuredFacts = (): NutritionFacts | null =>
-		ldNutrition
-			? {
-					...emptyNutritionDetails(),
-					calciumMg: massAmount(ldNutrition.calciumContent, "mg"),
-					calories: energyKcal(ldNutrition.calories),
-					carbsG: massAmount(ldNutrition.carbohydrateContent, "g"),
-					category,
-					cholesterolMg: massAmount(ldNutrition.cholesterolContent, "mg"),
-					confidence: "high",
-					fatG: massAmount(ldNutrition.fatContent, "g"),
-					fiberG: massAmount(ldNutrition.fiberContent, "g"),
-					ingredients: productIngredients,
-					ironMg: massAmount(ldNutrition.ironContent, "mg"),
-					potassiumMg: massAmount(ldNutrition.potassiumContent, "mg"),
-					productName,
-					proteinG: massAmount(ldNutrition.proteinContent, "g"),
-					saturatedFatG: massAmount(ldNutrition.saturatedFatContent, "g"),
-					servingSize:
-						typeof ldNutrition.servingSize === "string"
-							? ldNutrition.servingSize
-							: null,
-					servingsPerContainer: null,
-					sodiumMg: massAmount(ldNutrition.sodiumContent, "mg"),
-					source: "wholefoods_structured_data",
-					sugarG: massAmount(ldNutrition.sugarContent, "g"),
-					transFatG: massAmount(ldNutrition.transFatContent, "g"),
-					upc: productUpc,
-					vitaminDMcg: massAmount(ldNutrition.vitaminDContent, "mcg"),
-				}
-			: null;
+	const structuredFacts = (): NutritionFacts | null => {
+		if (!ldNutrition) return null;
+		const mass = (field: string, unit: MassUnit) =>
+			structuredMass(ldNutrition[field], unit);
+		const calories = structuredEnergy(ldNutrition.calories);
+		const carbs = mass("carbohydrateContent", "g");
+		const fat = mass("fatContent", "g");
+		const protein = mass("proteinContent", "g");
+		return {
+			...emptyNutritionDetails(),
+			calciumMg: amountOf(mass("calciumContent", "mg")),
+			calories: amountOf(calories),
+			carbsG: amountOf(carbs),
+			category,
+			cholesterolMg: amountOf(mass("cholesterolContent", "mg")),
+			confidence: "high",
+			coreStated: coreStatedOf({ calories, carbs, fat, protein }),
+			fatG: amountOf(fat),
+			fiberG: amountOf(mass("fiberContent", "g")),
+			ingredients: productIngredients,
+			ironMg: amountOf(mass("ironContent", "mg")),
+			potassiumMg: amountOf(mass("potassiumContent", "mg")),
+			productName,
+			proteinG: amountOf(protein),
+			saturatedFatG: amountOf(mass("saturatedFatContent", "g")),
+			servingSize:
+				typeof ldNutrition.servingSize === "string"
+					? ldNutrition.servingSize
+					: null,
+			servingsPerContainer: null,
+			sodiumMg: amountOf(mass("sodiumContent", "mg")),
+			source: "wholefoods_structured_data",
+			sugarG: amountOf(mass("sugarContent", "g")),
+			transFatG: amountOf(mass("transFatContent", "g")),
+			upc: productUpc,
+			vitaminDMcg: amountOf(mass("vitaminDContent", "mcg")),
+		};
+	};
 	if (ldNutrition && !nutritionHeading) {
 		return structuredFacts();
 	}
@@ -1110,17 +1207,12 @@ export function parseWholeFoodsProductPageDom(
 	if (!caloriesMatch) {
 		return structuredFacts();
 	}
-	const nutrients = readPanelAmounts(allText);
+	const rows = readPanelRows(allText);
 	const servingSizeMatch = SERVING_SIZE_RE.exec(allText);
 	const servingsMatch = SERVINGS_PER_CONTAINER_RE.exec(allText);
 	const servingsPerContainerRaw = servingsMatch?.[1] ?? servingsMatch?.[2];
-	const nutrient = (...keys: string[]): number | null => {
-		for (const key of keys) {
-			const value = nutrients.get(key);
-			if (value !== undefined) return value;
-		}
-		return null;
-	};
+	const nutrient = (key: string): number | null =>
+		amountOf(rows.get(key) ?? null);
 	const sectionText = (heading: RegExp): string | null => {
 		const el = headings.find((candidate) =>
 			heading.test(textOf(candidate).trim()),
@@ -1149,32 +1241,39 @@ export function parseWholeFoodsProductPageDom(
 		const label = textOf(element).trim();
 		return label && !/home|whole foods/i.test(label) ? [label] : [];
 	});
+	const calories = Number.parseInt(caloriesMatch[1] ?? "", 10);
 	return {
 		...emptyNutritionDetails(),
-		addedSugarG: nutrient("Includes Added Sugars", "Added Sugars"),
+		addedSugarG: nutrient("Includes Added Sugars"),
 		allergens: sectionText(/allergen|contains/i),
 		calciumMg: nutrient("Calcium"),
-		calories: Number.parseInt(caloriesMatch[1] ?? "", 10),
-		carbsG: nutrients.get("Total Carbohydrate") ?? null,
+		calories,
+		carbsG: nutrient("Total Carbohydrate"),
 		category: breadcrumbCategory,
 		cholesterolMg: nutrient("Cholesterol"),
 		confidence: "high",
-		fatG: nutrients.get("Total Fat") ?? null,
-		fiberG: nutrients.get("Dietary Fiber") ?? null,
+		coreStated: coreStatedOf({
+			calories: { bound: "exact", amount: calories },
+			carbs: rows.get("Total Carbohydrate") ?? null,
+			fat: rows.get("Total Fat") ?? null,
+			protein: rows.get("Protein") ?? null,
+		}),
+		fatG: nutrient("Total Fat"),
+		fiberG: nutrient("Dietary Fiber"),
 		highlights,
 		ingredients: sectionText(/^ingredients$/i),
 		ironMg: nutrient("Iron"),
 		potassiumMg: nutrient("Potassium"),
-		proteinG: nutrients.get("Protein") ?? null,
+		proteinG: nutrient("Protein"),
 		rawNutritionText: allText.slice(0, 1000),
 		saturatedFatG: nutrient("Saturated Fat"),
 		servingSize: servingSizeMatch?.[1]?.trim() ?? null,
 		servingsPerContainer: servingsPerContainerRaw
 			? Number.parseFloat(servingsPerContainerRaw)
 			: null,
-		sodiumMg: nutrients.get("Sodium") ?? null,
+		sodiumMg: nutrient("Sodium"),
 		source: "wholefoods_product_page",
-		sugarG: nutrients.get("Total Sugars") ?? null,
+		sugarG: nutrient("Total Sugars"),
 		transFatG: nutrient("Trans Fat"),
 		upc: productUpc,
 		vitaminDMcg: nutrient("Vitamin D"),
@@ -1195,8 +1294,12 @@ export function parseAmazonProductNutritionDom(
 	const important = document.querySelector(
 		"#importantInformation, #important-information",
 	);
-	const nutritionText = textOf(table ?? important);
-	const allText = table ? nutritionText : textOf(important);
+	// #nic-nutrition-facts holds the nutrient rows only; Calories and the
+	// serving size sit in the enclosing expander, so that is the panel's scope
+	// (the legacy script widens it the same way).
+	const panel =
+		table?.closest('.a-expander-content, [class*="nicSection"]') ?? table;
+	const allText = textOf(panel ?? important);
 	const caloriesMatch = CALORIES_RE.exec(allText);
 	const upcMatch = /(?:UPC|ASIN|GTIN)[:\s]*([\d-]{8,14})/i.exec(
 		textOf(
@@ -1207,8 +1310,8 @@ export function parseAmazonProductNutritionDom(
 	);
 	const amazonUpc = normalizeGtin(upcMatch?.[1]);
 	if (!caloriesMatch && !amazonUpc) return null;
-	const nutrientValues = readPanelAmounts(allText);
-	const get = (key: string): number | null => nutrientValues.get(key) ?? null;
+	const rows = readPanelRows(allText);
+	const get = (key: string): number | null => amountOf(rows.get(key) ?? null);
 	const ingredientsNode = document.querySelector(
 		'#ingredients_feature_div, [data-component="ingredients"]',
 	);
@@ -1221,19 +1324,28 @@ export function parseAmazonProductNutritionDom(
 		/Contains[:\s]*([^.\n]+(?:wheat|milk|soy|eggs?|fish|shellfish|tree nuts?|peanuts?|sesame)[^.\n]*)/i.exec(
 			bodyText,
 		);
-	const serving = /Serving size[:\s]*([^\n]+)/i.exec(allText)?.[1]?.trim();
+	const calories = caloriesMatch
+		? Number.parseInt(caloriesMatch[1] ?? "", 10)
+		: null;
+	const serving = /Serving size[:\s]*([^\n]+?)(?=\s*Calories|\n|$)/i
+		.exec(allText)?.[1]
+		?.trim();
 	const servings = /(\d+\.?\d*)\s*servings?\s*per/i.exec(allText)?.[1];
 	return {
 		...emptyNutritionDetails(),
 		addedSugarG: get("Includes Added Sugars"),
 		allergens: allergenMatch?.[1]?.trim() ?? null,
 		calciumMg: get("Calcium"),
-		calories: caloriesMatch
-			? Number.parseInt(caloriesMatch[1] ?? "", 10)
-			: null,
+		calories,
 		carbsG: get("Total Carbohydrate"),
 		cholesterolMg: get("Cholesterol"),
 		confidence: "medium",
+		coreStated: coreStatedOf({
+			calories: calories === null ? null : { bound: "exact", amount: calories },
+			carbs: rows.get("Total Carbohydrate") ?? null,
+			fat: rows.get("Total Fat") ?? null,
+			protein: rows.get("Protein") ?? null,
+		}),
 		fatG: get("Total Fat"),
 		fiberG: get("Dietary Fiber"),
 		ingredients,

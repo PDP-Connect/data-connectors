@@ -18,12 +18,14 @@ import {
 	hasOrderSearchEmptyState,
 	isCancelledOrderDetail,
 	mapUsdaNutrients,
+	orderDetailBelongsTo,
 	parseAmazonProductNutritionDom,
 	parseAmazonProfileDom,
 	parseDollarsToCents,
 	parseOrderDateIso,
 	parseOrderDetailDom,
 	parseOrderSearchPageDom,
+	parseUsdaFood,
 	parseWholeFoodsProductPageDom,
 	parseWholeFoodsSearchResultDom,
 	scoreUsdaMatch,
@@ -336,7 +338,7 @@ test("mapUsdaNutrients falls back to per-100g scale when servingSize is absent",
 	});
 	const facts = mapUsdaNutrients(food, "text");
 	assert.equal(facts.calories, 89);
-	assert.equal(facts.servingSize, null);
+	assert.equal(facts.servingSize, "per 100 g");
 });
 
 // ─── Nutrition: Whole Foods product page ──────────────────────────────────
@@ -587,19 +589,6 @@ test("text-panel units are normalized to the field's unit", () => {
 	assert.equal(facts?.proteinG, 1.3);
 });
 
-test("USDA serving in a non-gram unit is not labelled as the per-serving basis", () => {
-	const facts = mapUsdaNutrients(
-		usdaFood({
-			foodNutrients: [{ nutrientId: 1008, value: 40 }],
-			servingSize: 240,
-			servingSizeUnit: "ml",
-		}),
-		"text",
-	);
-	assert.equal(facts.calories, 40);
-	assert.equal(facts.servingSize, null);
-});
-
 test("USDA gram serving aliases scale and label the serving", () => {
 	const facts = mapUsdaNutrients(
 		usdaFood({
@@ -620,4 +609,231 @@ test("Amazon panel units are normalized and a non-GTIN id is not a UPC", () => {
 	</body></html>`);
 	assert.equal(facts?.sodiumMg, 500);
 	assert.equal(facts?.upc, null);
+});
+
+// ─── Round 2: panel rows, stated core rows, USDA shapes ───────────────────
+
+// Amazon renders the panel with no separators ("Total Fat12g20%Sodium480mg…").
+// Legacy keeps Calories outside #nic-nutrition-facts, in the enclosing
+// expander, and reads the panel from that wider scope.
+const RUN_TOGETHER_ROWS =
+	"10%Total Fat8g25%Saturated Fat5gTrans Fat0gCholesterol5mg2%Sodium160mg7%Total Carbohydrate37g13%Dietary Fiber4g14%Sugars11gProtein3gVitamin D2mcg10%";
+
+test("Amazon run-together panel: every row keeps its whole value", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories250% Daily Value*15%Total Fat12g20%Sodium480mg21%Total Carbohydrate31g11%Sugars14gProtein22gVitamin D2mcg10%</div></body></html>`,
+	);
+	assert.equal(facts?.calories, 250);
+	assert.equal(facts?.fatG, 12);
+	assert.equal(facts?.sodiumMg, 480);
+	assert.equal(facts?.carbsG, 31);
+	assert.equal(facts?.sugarG, 14);
+	assert.equal(facts?.proteinG, 22);
+	assert.equal(facts?.vitaminDMcg, 2);
+});
+
+test("Amazon run-together panel: a row before the next label is not truncated", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content">Calories150% Daily Value*<div id="nic-nutrition-facts">${RUN_TOGETHER_ROWS}</div></div></body></html>`,
+	);
+	assert.equal(facts?.saturatedFatG, 5);
+	assert.equal(facts?.transFatG, 0);
+	assert.equal(facts?.cholesterolMg, 5);
+	assert.equal(facts?.fiberG, 4);
+	assert.equal(facts?.proteinG, 3);
+});
+
+test("Amazon panel: Calories outside #nic-nutrition-facts are read from the enclosing expander", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content">Serving size 1 cup (240g) Calories150% Daily Value*<div id="nic-nutrition-facts">${RUN_TOGETHER_ROWS}</div></div></body></html>`,
+	);
+	assert.equal(facts?.calories, 150);
+	assert.equal(facts?.fatG, 8);
+	assert.equal(facts?.carbsG, 37);
+	assert.deepEqual([...(facts?.coreStated ?? [])].sort(), [
+		"calories",
+		"carbs",
+		"fat",
+		"protein",
+	]);
+});
+
+test("rendered Whole Foods run-together panel keeps every row's whole value", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		`<html><body><div><h3>Nutrition Facts</h3><div>Calories250% Daily Value*15%Total Fat12g20%Sodium480mg21%Total Carbohydrate31g11%Sugars14gProtein22gVitamin D2mcg10%</div></div></body></html>`,
+	);
+	assert.equal(facts?.proteinG, 22);
+	assert.equal(facts?.sugarG, 14);
+	assert.equal(facts?.fatG, 12);
+});
+
+test("a '<1g' row is stated with no amount, so a core row is not lost and not invented", () => {
+	const amazon = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories 15 Total Fat 0g Sodium 140mg Total Carbohydrate 3g Sugars 2g Protein <1g</div></body></html>`,
+	);
+	assert.equal(amazon?.proteinG, null);
+	assert.ok(amazon?.coreStated.includes("protein"));
+	const structured = parseWholeFoodsProductPageDom(
+		ld(
+			'{"@type":"Product","name":"Apples","nutrition":{"@type":"NutritionInformation","calories":"95 calories","fatContent":"<1 g","carbohydrateContent":"25 g","proteinContent":"0.5 g"}}',
+		),
+	);
+	assert.equal(structured?.fatG, null);
+	assert.ok(structured?.coreStated.includes("fat"));
+});
+
+test("a core row that was never stated is not counted as stated", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories 15 Total Fat 0g Total Carbohydrate 3g</div></body></html>`,
+	);
+	assert.ok(!facts?.coreStated.includes("protein"));
+});
+
+test("panel percentages and IU are not read as mass amounts", () => {
+	const percent = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g Calcium 20% Iron 6% Vitamin D 10%</div></body></html>`,
+	);
+	assert.equal(percent?.calciumMg, null);
+	assert.equal(percent?.ironMg, null);
+	assert.equal(percent?.vitaminDMcg, null);
+	const iu = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g Vitamin D 100 IU</div></body></html>`,
+	);
+	assert.equal(iu?.vitaminDMcg, 2.5);
+});
+
+// Real USDA FoodData Central search results (Foundation foods): servingSize,
+// servingSizeUnit, gtinUpc and brandOwner keys are absent, and energy is
+// reported as nutrient 2047/2048 rather than 1008.
+const foundationFood = (nutrients: { nutrientId: number; value: number }[]) => {
+	const food = parseUsdaFood({
+		fdcId: 2710824,
+		description: "Avocado, Hass, peeled, raw",
+		dataType: "Foundation",
+		foodNutrients: nutrients,
+	});
+	assert.ok(food);
+	return food;
+};
+
+test("parseUsdaFood fills the keys a Foundation food omits with null and drops unusable entries", () => {
+	const food = parseUsdaFood({
+		fdcId: 1,
+		description: "Onions, yellow, raw",
+		dataType: "Foundation",
+		foodNutrients: [
+			{ nutrientId: 1008, value: 38 },
+			{ nutrientId: "1003", value: 1 },
+			{ nutrientId: 1004 },
+			null,
+		],
+	});
+	assert.deepEqual(food, {
+		brandName: null,
+		brandOwner: null,
+		description: "Onions, yellow, raw",
+		fdcId: 1,
+		foodNutrients: [{ nutrientId: 1008, value: 38 }],
+		gtinUpc: null,
+		ingredients: null,
+		servingSize: null,
+		servingSizeUnit: null,
+	});
+	assert.equal(parseUsdaFood({ description: "no id" }), null);
+	assert.equal(parseUsdaFood("food"), null);
+});
+
+test("a Foundation food with absent keys maps without throwing and reads energy from 2047", () => {
+	const facts = mapUsdaNutrients(
+		foundationFood([
+			{ nutrientId: 2047, value: 223 },
+			{ nutrientId: 2048, value: 206 },
+			{ nutrientId: 1003, value: 1.81 },
+			{ nutrientId: 1004, value: 20.3 },
+			{ nutrientId: 1005, value: 8.32 },
+		]),
+		"text",
+	);
+	assert.equal(facts.calories, 223);
+	assert.deepEqual([...facts.coreStated].sort(), [
+		"calories",
+		"carbs",
+		"fat",
+		"protein",
+	]);
+	assert.equal(facts.servingSize, "per 100 g");
+	assert.equal(facts.upc, null);
+});
+
+test("energy falls back from 1008 to 2047 to 2048", () => {
+	const energyOf = (ids: number[]) =>
+		mapUsdaNutrients(
+			foundationFood(ids.map((nutrientId) => ({ nutrientId, value: nutrientId }))),
+			"text",
+		).calories;
+	assert.equal(energyOf([1008, 2047, 2048]), 1008);
+	assert.equal(energyOf([2047, 2048]), 2047);
+	assert.equal(energyOf([2048]), 2048);
+});
+
+test("a USDA core nutrient absent from the food is not stated, a stated zero is", () => {
+	const facts = mapUsdaNutrients(
+		foundationFood([
+			{ nutrientId: 1008, value: 0 },
+			{ nutrientId: 1004, value: 0 },
+			{ nutrientId: 1005, value: 3.57 },
+		]),
+		"text",
+	);
+	assert.deepEqual([...facts.coreStated].sort(), ["calories", "carbs", "fat"]);
+	assert.equal(facts.proteinG, null);
+});
+
+test("USDA values on a per-100 ml basis scale to a millilitre serving and label unscaled values with their basis", () => {
+	const millilitres = mapUsdaNutrients(
+		usdaFood({
+			foodNutrients: [{ nutrientId: 1008, value: 40 }],
+			servingSize: 240,
+			servingSizeUnit: "ml",
+		}),
+		"text",
+	);
+	assert.equal(millilitres.calories, 96);
+	assert.equal(millilitres.servingSize, "240ml");
+	const unknownUnit = mapUsdaNutrients(
+		usdaFood({
+			foodNutrients: [{ nutrientId: 1008, value: 40 }],
+			servingSize: 2,
+			servingSizeUnit: "oz",
+		}),
+		"text",
+	);
+	assert.equal(unknownUnit.calories, 40);
+	assert.equal(unknownUnit.servingSize, "per 100 g");
+});
+
+test("a text-matched USDA food never lends its GTIN to the product", () => {
+	const food = usdaFood({ gtinUpc: "012345678905" });
+	assert.equal(mapUsdaNutrients(food, "text").upc, null);
+	assert.equal(mapUsdaNutrients(food, "upc").upc, "012345678905");
+});
+
+test("an order id from the URL is the only binding when the page shows several ids", () => {
+	const html = '<span>111-1111111-1111111</span><span>222-2222222-2222222</span>';
+	assert.equal(
+		orderDetailBelongsTo(
+			"111-1111111-1111111",
+			"https://www.amazon.com/your-orders/order-details",
+			html,
+		),
+		false,
+	);
+	assert.equal(
+		orderDetailBelongsTo(
+			"111-1111111-1111111",
+			"https://www.amazon.com/your-orders/order-details?orderID=111-1111111-1111111",
+			html,
+		),
+		true,
+	);
 });

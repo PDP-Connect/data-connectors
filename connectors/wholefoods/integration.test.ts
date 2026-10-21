@@ -274,6 +274,8 @@ test("buildNutritionRecord shape passes schema validation for both sources", asy
 	await harness.emitRecord(
 		"nutrition",
 		buildNutritionRecord("B01ABCDEFG", "Organic Bananas", {
+			accepted: true as const,
+			coreStated: ["calories", "carbs", "fat", "protein"] as const,
 			addedSugarG: null,
 			allergens: null,
 			calciumMg: null,
@@ -311,7 +313,7 @@ test("buildNutritionRecord shape passes schema validation for both sources", asy
 	assert.equal(harness.emitted[0]?.data.product_id, "B01ABCDEFG");
 });
 
-test("observed blocked lookup emits a blocked nutrition row when USDA finds no match", async () => {
+test("a blocked lookup with no USDA match is reported as blocked and builds no row", async () => {
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = (async () =>
 		new Response(JSON.stringify({ foods: [] }), {
@@ -326,34 +328,9 @@ test("observed blocked lookup emits a blocked nutrition row when USDA finds no m
 			"Organic Bananas",
 		);
 		assert.equal(outcome, "blocked");
-		const harness = makeRecordingEmit(validateRecord);
-		await harness.emitRecord(
-			"nutrition",
-			buildNutritionRecord("B01ABCDEFG", "Organic Bananas", outcome),
-		);
-		assert.equal(harness.emitted[0]?.data.source, "blocked");
-		assert.equal(harness.emitted[0]?.data.calories, null);
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
-});
-
-test("legacy nutrition outcome rows remain valid for not_found, error, and blocked", async () => {
-	const harness = makeRecordingEmit(validateRecord);
-	for (const source of ["not_found", "error", "blocked"] as const) {
-		await harness.emitRecord(
-			"nutrition",
-			buildNutritionRecord("B01ABCDEFG", "Organic Bananas", source),
-		);
-	}
-	assert.deepEqual(
-		harness.emitted.map((record) => record.data.source),
-		["not_found", "error", "blocked"],
-	);
-	assert.deepEqual(
-		harness.emitted.map((record) => record.data.calories),
-		[null, null, null],
-	);
 });
 
 test("HTTP 403 CAPTCHA body is blocked after inspection", async () => {
@@ -2371,6 +2348,290 @@ test("collectOrders emits the nutrition row when the lookup reads the core panel
 		assert.equal(rows.length, 1);
 		assert.equal(rows[0]?.data.calories, 52);
 		assert.equal(rows[0]?.data.upc, "012345678905");
+	} finally {
+		restore();
+	}
+});
+
+// ─── Round 2: real USDA shapes, degraded refreshes, UPC forms ─────────────
+
+import { readFileSync } from "node:fs";
+
+const readFixture = (name: string): { foods: Record<string, unknown>[] } =>
+	JSON.parse(
+		readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), "utf8"),
+	);
+
+/** Serve saved USDA search responses by the dataType the connector asks for. */
+function stubUsdaByType(
+	responses: { Branded?: unknown; Foundation?: unknown; exact?: unknown },
+	queries: string[] = [],
+): () => void {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async (input: RequestInfo | URL) => {
+		const url = new URL(String(input));
+		const query = url.searchParams.get("query") ?? "";
+		queries.push(query);
+		const type = url.searchParams.get("dataType");
+		const body = query.startsWith("gtinUpc:")
+			? (responses.exact ?? { foods: [] })
+			: ((type === "Branded" || type === "Foundation"
+					? responses[type]
+					: undefined) ?? { foods: [] });
+		return new Response(JSON.stringify(body), { status: 200 });
+	}) as typeof fetch;
+	return () => {
+		globalThis.fetch = originalFetch;
+	};
+}
+
+const NO_PAGE_SOURCE = () => "<html><body>No matching products</body></html>";
+
+test("real Foundation shapes: banana peppers match the pepper, with energy from 2047", async () => {
+	const restore = stubUsdaByType({
+		Foundation: readFixture("usda-foundation-banana-peppers.json"),
+	});
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser(NO_PAGE_SOURCE),
+			"DEMO_KEY",
+			"Banana Peppers",
+		);
+		assert.notEqual(typeof outcome, "string");
+		if (typeof outcome === "string") return;
+		assert.match(outcome.usdaDescription ?? "", /^Peppers, banana/);
+		assert.equal(outcome.calories, 23.9);
+		assert.equal(outcome.upc, null);
+		assert.equal(outcome.servingSize, "per 100 g");
+	} finally {
+		restore();
+	}
+});
+
+test("real Foundation shapes: Hass avocado reads energy from 2047", async () => {
+	const restore = stubUsdaByType({
+		Foundation: readFixture("usda-foundation-hass-avocado.json"),
+	});
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser(NO_PAGE_SOURCE),
+			"DEMO_KEY",
+			"Organic Hass Avocado",
+		);
+		assert.equal(typeof outcome === "string" ? null : outcome.calories, 223);
+	} finally {
+		restore();
+	}
+});
+
+test("an incomplete best USDA match withholds instead of promoting a different food", async () => {
+	const foundation = readFixture("usda-foundation-banana-peppers.json");
+	// The pepper loses its protein row; the overripe bananas stay complete.
+	const pepper = foundation.foods[0] as { foodNutrients: { nutrientId: number }[] };
+	pepper.foodNutrients = pepper.foodNutrients.filter(
+		(nutrient) => nutrient.nutrientId !== 1003,
+	);
+	const restore = stubUsdaByType({ Foundation: foundation });
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser(NO_PAGE_SOURCE),
+			"DEMO_KEY",
+			"Banana Peppers",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("real Branded shapes: a gram serving scales, the label names it, no GTIN is lent", async () => {
+	const restore = stubUsdaByType({
+		Branded: readFixture("usda-branded-banana-peppers.json"),
+	});
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser(NO_PAGE_SOURCE),
+			"DEMO_KEY",
+			"Banana Peppers",
+		);
+		assert.notEqual(typeof outcome, "string");
+		if (typeof outcome === "string") return;
+		assert.equal(outcome.servingSize, "28g");
+		assert.equal(outcome.carbsG, 1);
+		assert.equal(outcome.upc, null);
+	} finally {
+		restore();
+	}
+});
+
+test("a blocked page source never lets a USDA text match stand in for the product", async () => {
+	const restore = stubUsdaByType({
+		Branded: readFixture("usda-branded-banana-peppers.json"),
+	});
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.startsWith("https://www.amazon.com/")
+					? '<html><title>Robot Check</title><form action="validateCaptcha"></form></html>'
+					: NO_PAGE_SOURCE(),
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.equal(outcome, "blocked");
+	} finally {
+		restore();
+	}
+});
+
+test("an HTTP-failed page source never lets a USDA text match stand in for the product", async () => {
+	const restore = stubUsdaByType({
+		Branded: readFixture("usda-branded-banana-peppers.json"),
+	});
+	let current = "";
+	const page = {
+		content: async () => NO_PAGE_SOURCE(),
+		goto: async (url: string) => {
+			current = url;
+			return url.startsWith("https://www.amazon.com/")
+				? { ok: () => false, status: () => 503 }
+				: null;
+		},
+		locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
+		url: () => current,
+	} as unknown as Page;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			page,
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a page-bound UPC is also queried zero-padded to 14 and 13 digits, as legacy did", async () => {
+	const queries: string[] = [];
+	const restore = stubUsdaByType({}, queries);
+	try {
+		await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.startsWith("https://www.amazon.com/")
+					? AMAZON_UPC_PAGE
+					: NO_PAGE_SOURCE(),
+			),
+			"DEMO_KEY",
+			"Apples",
+			"B012345678",
+		);
+		assert.deepEqual(
+			queries.filter((query) => query.startsWith("gtinUpc:")),
+			[
+				"gtinUpc:012345678905",
+				"gtinUpc:00012345678905",
+				"gtinUpc:0012345678905",
+			],
+		);
+	} finally {
+		restore();
+	}
+});
+
+test("a padded exact GTIN match is a UPC match", async () => {
+	const restore = stubUsdaByType({
+		exact: { foods: [usdaApple({ gtinUpc: "00012345678905", foodNutrients: usdaCoreNutrients })] },
+	});
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.startsWith("https://www.amazon.com/")
+					? AMAZON_UPC_PAGE
+					: NO_PAGE_SOURCE(),
+			),
+			"DEMO_KEY",
+			"Apples",
+			"B012345678",
+		);
+		assert.equal(
+			typeof outcome === "string" ? null : outcome.usdaMatchMethod,
+			"upc",
+		);
+	} finally {
+		restore();
+	}
+});
+
+// ─── Store-level: good -> degraded -> recovered ───────────────────────────
+
+const AMAZON_FULL_PANEL =
+	'<html><body><div id="nic-nutrition-facts">Calories 150 Total Fat 8g Total Carbohydrate 37g Protein 3g</div></body></html>';
+
+function degradingSite(
+	amazonPage: () => string,
+	searchPages: string[],
+): Page {
+	let current = "";
+	let currentUrl = "";
+	return {
+		content: () => Promise.resolve(current),
+		goto: (url: string) => {
+			currentUrl = url;
+			const parsed = new URL(url);
+			if (parsed.hostname === "www.wholefoodsmarket.com") {
+				current = NO_PAGE_SOURCE();
+			} else if (parsed.pathname.startsWith("/dp/")) {
+				current = amazonPage();
+			} else if (parsed.pathname.includes("search")) {
+				const pageNum = Number(parsed.searchParams.get("page") ?? "1");
+				current = searchPages[pageNum - 1] ?? "";
+			} else {
+				current = ordersWithIdentity(
+					parsed.searchParams.get("orderID") ?? "",
+					DETAIL_HTML,
+				);
+			}
+			return Promise.resolve(null);
+		},
+		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
+		url: () => currentUrl,
+	} as unknown as Page;
+}
+
+test("a degraded refresh emits nothing for a product the previous run read from its page", async () => {
+	// The USDA text match is another brand's "Bananas, raw".
+	const restore = stubUsda([
+		usdaApple({
+			description: "Bananas, raw",
+			gtinUpc: null,
+			foodNutrients: usdaCoreNutrients,
+		}),
+	]);
+	let amazon = AMAZON_FULL_PANEL;
+	const nutritionRows = async () => {
+		const { harness } = await runCollectOrders(
+			degradingSite(() => amazon, [ONE_ROW_SEARCH]),
+			["nutrition"],
+		);
+		return harness.emitted.filter((r) => r.stream === "nutrition");
+	};
+	try {
+		const good = await nutritionRows();
+		assert.equal(good.length, 1);
+		assert.equal(good[0]?.data.source, "amazon_product_page");
+		assert.equal(good[0]?.data.calories, 150);
+
+		amazon =
+			'<html><title>Robot Check</title><form action="validateCaptcha"></form></html>';
+		assert.deepEqual(await nutritionRows(), []);
+
+		amazon = AMAZON_FULL_PANEL;
+		const recovered = await nutritionRows();
+		assert.equal(recovered.length, 1);
+		assert.equal(recovered[0]?.data.source, "amazon_product_page");
 	} finally {
 		restore();
 	}
