@@ -19,10 +19,10 @@ import { z } from "zod";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
 
 // Module-scoped regexes (Biome useTopLevelRegex).
-// Venmo user/story/payment ids are decimal numeric strings of varying
-// length (observed 18-19 digits for user ids; story/payment ids similar).
-// Treated as opaque numeric-string ids rather than a fixed-width pattern,
-// since no documented source pins the exact width and a too-tight regex
+// Venmo user/story ids are decimal numeric strings of varying length
+// (observed 18-19 digits for user ids; story ids similar). Payment ids may
+// also be alphanumeric. Treat numeric ids as opaque strings without a fixed
+// width since no documented source pins the exact width and a too-tight regex
 // would reject legitimate ids the first time Venmo's id space grows.
 const NUMERIC_ID_RE = /^\d+$/;
 // Live payment stories also use opaque alphanumeric payment ids; story/user ids remain numeric.
@@ -90,7 +90,7 @@ export const transactionsSchema = z.object({
 	// Venmo's own vocabulary: "pay" (sent) or "charge" (requested). Open
 	// vocabulary — see makeValidateRecord's enum-drift retention policy.
 	payment_type: z.enum(["pay", "charge"]),
-	amount_cents: z.number().int(),
+	amount_cents: z.number().int().nullable(),
 	audience: z.enum(["private", "friends", "public"]).nullable(),
 	status: z
 		.enum(["settled", "cancelled", "pending", "failed", "expired"])

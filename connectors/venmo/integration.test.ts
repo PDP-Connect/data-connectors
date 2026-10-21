@@ -17,6 +17,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, test } from "node:test";
 import type { Page } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -44,7 +45,7 @@ const EMITTED_AT = "2026-08-10T00:00:00.000Z";
 /** Skips the real 500ms PAGE_DELAY_MS pacing in tests that need a multi-page result but aren't testing pacing itself. */
 const NO_DELAY = (): Promise<void> => Promise.resolve();
 
-/** `id` must be a numeric string — real Venmo story/payment ids are decimal digit runs (see schemas.ts NUMERIC_ID_RE). */
+/** Story `id` must be numeric; payment ids may be alphanumeric (see schemas.ts). */
 function story(id: string, dateCreated: string, amount = 10) {
 	return {
 		id,
@@ -147,6 +148,7 @@ function makeCtx(
 	ctx: BrowserCollectContext;
 	emitted: ReturnType<typeof makeRecordingEmit>["emitted"];
 	messages: ReturnType<typeof makeRecordingEmit>["protocolMessages"];
+	skipped: ReturnType<typeof makeRecordingEmit>["skipped"];
 } {
 	const harness = makeRecordingEmit(validateRecord);
 	const requested = new Map(requestedStreams.map((s) => [s, { name: s }]));
@@ -168,7 +170,12 @@ function makeCtx(
 		sendInteraction: () => Promise.reject(new Error("not used")),
 		state: priorState,
 	} as BrowserCollectContext;
-	return { ctx, emitted: harness.emitted, messages: harness.protocolMessages };
+	return {
+		ctx,
+		emitted: harness.emitted,
+		messages: harness.protocolMessages,
+		skipped: harness.skipped,
+	};
 }
 
 // ─── collectTransactions: pagination, cursor, coverage ─────────────────────
@@ -306,14 +313,408 @@ test("collectTransactions: an empty first page stops immediately with zero recor
 	assert.equal(result.latestSeenAt, null);
 });
 
-// F6 (regression, fixed): `before_id` pages backward with no documented
-// forward/`after_id` counterpart. Persisting it across runs would resume
-// the *next* run deeper into old history and permanently hide new
-// transactions added at the head since the last run. So a prior run's
-// `before_id` in STATE must never be read back, regardless of how the
-// prior run ended (exhaustion, page cap, anything) — every run starts at
-// the head.
-test("collectTransactions: prior STATE.before_id is never read — every run starts at the head", async () => {
+test("schema-rejected transactions do not increase coverage or set the latest date", async () => {
+	const invalid = story("4801", "2026-07-03T00:00:00Z");
+	invalid.payment.actor.id = "invalid-user-id";
+	const valid = story("4802", "2026-07-02T00:00:00Z");
+	const { fetchPath } = makeScriptedFetch({
+		[`/stories/target-or-actor/${OWNER_ID}`]: [
+			{ body: { data: [invalid, valid] } },
+			{ body: { data: [] } },
+		],
+	});
+	const { ctx, emitted, skipped, messages } = makeCtx({}, ["transactions"]);
+	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.equal(skipped.length, 1);
+	assert.deepEqual(
+		emitted.map((entry) => entry.data.id),
+		[valid.id],
+	);
+	const coverage = messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "transactions",
+	);
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, 2);
+	assert.equal(coverage.covered, 1);
+	const state = messages.find(
+		(message) => message.type === "STATE" && message.stream === "transactions",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.deepEqual(state.cursor, {
+		last_seen_date_created: valid.date_created,
+	});
+});
+
+test("unselected transactions do not count or block older history", async () => {
+	const unselectedInvalid = story("4810", "2026-07-03T00:00:00Z");
+	unselectedInvalid.payment.actor.id = "invalid-user-id";
+	const unselectedValid = story("4811", "2026-07-04T00:00:00Z");
+	const selected = story("4812", "2026-07-02T00:00:00Z");
+	const { fetchPath } = makeScriptedFetch({
+		[`/stories/target-or-actor/${OWNER_ID}`]: [
+			{ body: { data: [unselectedInvalid, unselectedValid, selected] } },
+			{ body: { data: [] } },
+		],
+	});
+	const { ctx } = makeCtx({}, ["transactions"]);
+	ctx.isRecordSelected = (_stream, record) => record.id === selected.id;
+	const result = await collectTransactions(ctx, fetchPath, OWNER_ID, NO_DELAY);
+	assert.equal(result.covered, 1);
+	assert.equal(result.latestSeenAt, selected.date_created);
+	assert.equal(result.blockedByRejected, false);
+});
+
+test("schema-rejected friends do not enter the fingerprint checkpoint", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		[`/users/${OWNER_ID}/friends`]: [
+			{
+				body: {
+					data: [
+						{ id: "5101", profile_picture_url: "not-a-url" },
+						{ id: "5102", username: "valid" },
+					],
+				},
+			},
+			{ body: { data: [] } },
+		],
+	});
+	const { ctx, emitted, skipped, messages } = makeCtx({}, ["friends"]);
+	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.equal(skipped.length, 1);
+	assert.deepEqual(
+		emitted.map((entry) => entry.data.id),
+		["5102"],
+	);
+	const coverage = messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "friends",
+	);
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, 2);
+	assert.equal(coverage.covered, 1);
+	const state = messages.find(
+		(message) => message.type === "STATE" && message.stream === "friends",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.deepEqual(
+		Object.keys((state.cursor as { fingerprints: object }).fingerprints),
+		["5102"],
+	);
+});
+
+test("schema-rejected profile does not replace its prior fingerprint checkpoint", async () => {
+	const invalidAccount = { ...accountUser(), profile_picture_url: "not-a-url" };
+	const fetchPath = makeScriptedFetch({});
+	const { ctx, skipped, messages } = makeCtx(
+		{ profile: { fingerprints: { prior: "fingerprint" } } },
+		["profile"],
+	);
+	await collectAllStreams(
+		ctx,
+		fetchPath.fetchPath,
+		OWNER_ID,
+		invalidAccount,
+		NO_DELAY,
+	);
+	assert.equal(skipped.length, 1);
+	assert.equal(
+		messages.filter((message) => message.type === "STATE").length,
+		0,
+	);
+	const coverage = messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+	);
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, 1);
+	assert.equal(coverage.covered, 0);
+});
+
+test("malformed 200 inventory envelopes fail before replacing prior state", async () => {
+	await Promise.all(
+		[{}, { data: null }, { data: {} }, { data: [null] }].map(async (body) => {
+			const friendsFetch = makeScriptedFetch({
+				[`/users/${OWNER_ID}/friends`]: [{ body }],
+			});
+			const friends = makeCtx(
+				{ friends: { fingerprints: { prior: "fingerprint" } } },
+				["friends"],
+			);
+			await assert.rejects(
+				collectAllStreams(
+					friends.ctx,
+					friendsFetch.fetchPath,
+					OWNER_ID,
+					accountUser(),
+					NO_DELAY,
+				),
+				/venmo_invalid_response/,
+			);
+			assert.equal(
+				friends.messages.filter((message) => message.type === "STATE").length,
+				0,
+			);
+
+			const transactionsFetch = makeScriptedFetch({
+				[`/stories/target-or-actor/${OWNER_ID}`]: [{ body }],
+			});
+			const transactions = makeCtx(
+				{ transactions: { last_seen_date_created: "2026-01-01T00:00:00Z" } },
+				["transactions"],
+			);
+			await assert.rejects(
+				collectAllStreams(
+					transactions.ctx,
+					transactionsFetch.fetchPath,
+					OWNER_ID,
+					accountUser(),
+					NO_DELAY,
+				),
+				/venmo_invalid_response/,
+			);
+			assert.equal(
+				transactions.messages.filter((message) => message.type === "STATE")
+					.length,
+				0,
+			);
+		}),
+	);
+});
+
+test("an empty data array remains a genuine exhausted inventory", async () => {
+	const fetchPath = makeScriptedFetch({
+		[`/users/${OWNER_ID}/friends`]: [{ body: { data: [] } }],
+		[`/stories/target-or-actor/${OWNER_ID}`]: [{ body: { data: [] } }],
+	});
+	const { ctx, messages } = makeCtx({}, ["friends", "transactions"]);
+	await collectAllStreams(
+		ctx,
+		fetchPath.fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	assert.equal(
+		messages.filter((message) => message.type === "STATE").length,
+		2,
+	);
+});
+
+test("a malformed account envelope fails without replacing profile state", async () => {
+	const fetchPath = makeScriptedFetch({
+		"/account": [{ body: { data: null } }],
+	});
+	const { ctx, messages } = makeCtx(
+		{ profile: { fingerprints: { prior: "fingerprint" } } },
+		["profile"],
+	);
+	await assert.rejects(
+		collectAllStreams(ctx, fetchPath.fetchPath, OWNER_ID, null, NO_DELAY),
+		/venmo_invalid_response/,
+	);
+	assert.equal(
+		messages.filter((message) => message.type === "STATE").length,
+		0,
+	);
+});
+
+test("a non-empty page without a final story id fails instead of claiming exhaustion", async () => {
+	const fetchPath = makeScriptedFetch({
+		[`/stories/target-or-actor/${OWNER_ID}`]: [
+			{
+				body: {
+					data: [story("4901", "2026-07-02T00:00:00Z"), { payment: null }],
+				},
+			},
+		],
+	});
+	const { ctx, messages } = makeCtx({}, ["transactions"]);
+	await assert.rejects(
+		collectAllStreams(
+			ctx,
+			fetchPath.fetchPath,
+			OWNER_ID,
+			accountUser(),
+			NO_DELAY,
+		),
+		/venmo_pagination_stalled/,
+	);
+	assert.equal(
+		messages.filter((message) => message.type === "STATE").length,
+		0,
+	);
+});
+
+test("a repeated before_id fails after the second page", async () => {
+	const fetchPath = makeScriptedFetch({
+		[`/stories/target-or-actor/${OWNER_ID}`]: [
+			{ body: { data: [story("4902", "2026-07-02T00:00:00Z")] } },
+			{ body: { data: [story("4902", "2026-07-02T00:00:00Z")] } },
+		],
+	});
+	const { ctx, messages } = makeCtx({}, ["transactions"]);
+	await assert.rejects(
+		collectAllStreams(
+			ctx,
+			fetchPath.fetchPath,
+			OWNER_ID,
+			accountUser(),
+			NO_DELAY,
+		),
+		/venmo_pagination_stalled/,
+	);
+	assert.equal(fetchPath.calls.length, 2);
+	assert.equal(
+		messages.filter((message) => message.type === "STATE").length,
+		0,
+	);
+});
+
+test("a capped run saves an older-history position while the next run refreshes the head", async () => {
+	const pageSize = 50;
+	const history = Array.from(
+		{ length: MAX_TRANSACTION_PAGES * pageSize + pageSize },
+		(_, index) => story(String(100_000 + index), "2026-01-01T00:00:00Z"),
+	).reverse();
+	const firstFetch = makeStatefulVenmoFetch(history);
+	const first = makeCtx({}, ["transactions"]);
+	await collectAllStreams(
+		first.ctx,
+		firstFetch.fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	assert.equal(firstFetch.calls.length, MAX_TRANSACTION_PAGES);
+	const firstState = first.messages.find(
+		(message) => message.type === "STATE" && message.stream === "transactions",
+	);
+	assert.ok(firstState && firstState.type === "STATE");
+	const firstCursor = firstState.cursor as Record<string, unknown>;
+	assert.equal(typeof firstCursor.backfill_before_id, "string");
+	assert.equal(typeof firstCursor.head_anchor_id, "string");
+
+	const newHead = story("900000", "2026-02-01T00:00:00Z");
+	const secondFetch = makeStatefulVenmoFetch([newHead, ...history]);
+	const second = makeCtx({ transactions: firstCursor }, ["transactions"]);
+	await collectAllStreams(
+		second.ctx,
+		secondFetch.fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	assert.ok(!secondFetch.calls[0]?.includes("before_id"));
+	assert.ok(
+		secondFetch.calls.some((call) =>
+			call.includes(`before_id=${firstCursor.backfill_before_id}`),
+		),
+		"the second run must resume the unread older tail",
+	);
+	const secondIds = new Set(second.emitted.map((entry) => entry.data.id));
+	assert.ok(secondIds.has(newHead.id));
+	assert.ok(secondIds.has(history.at(-1)?.id));
+	assert.ok(secondFetch.calls.length <= MAX_TRANSACTION_PAGES);
+});
+
+test("a capped head refresh keeps the prior anchor when it has not reached it", async () => {
+	const pages = Array.from({ length: MAX_TRANSACTION_PAGES }, (_, index) => ({
+		body: { data: [story(String(90_000 - index), "2026-07-02T00:00:00Z")] },
+	}));
+	const { fetchPath } = makeScriptedFetch({
+		[`/stories/target-or-actor/${OWNER_ID}`]: pages,
+	});
+	const priorCursor = {
+		backfill_before_id: "1000",
+		head_anchor_id: "2000",
+		last_seen_date_created: "2026-07-01T00:00:00Z",
+	};
+	const { ctx } = makeCtx({ transactions: priorCursor }, ["transactions"]);
+	const result = await collectTransactions(ctx, fetchPath, OWNER_ID, NO_DELAY);
+	assert.equal(result.truncated, true);
+	assert.equal(result.backfillBeforeId, priorCursor.backfill_before_id);
+	assert.equal(result.headAnchorId, priorCursor.head_anchor_id);
+});
+
+test("a rejected backfill record keeps its position for a later retry", async () => {
+	const head = Array.from({ length: 50 }, (_, index) =>
+		story(String(7000 + index), "2026-07-02T00:00:00Z"),
+	).reverse();
+	const invalid = story("6000", "2026-07-01T00:00:00Z");
+	invalid.payment.actor.id = "invalid-user-id";
+	const tail = story("5999", "2026-06-30T00:00:00Z");
+	const backfillBeforeId = head.at(-1)?.id;
+	const headAnchorId = head[0]?.id;
+	assert.ok(backfillBeforeId && headAnchorId);
+	const priorCursor = {
+		backfill_before_id: backfillBeforeId,
+		head_anchor_id: headAnchorId,
+		last_seen_date_created: "2026-07-02T00:00:00Z",
+	};
+	const firstFetch = makeStatefulVenmoFetch([...head, invalid, tail]);
+	const first = makeCtx({ transactions: priorCursor }, ["transactions"]);
+	await collectAllStreams(
+		first.ctx,
+		firstFetch.fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	const firstState = first.messages.find(
+		(message) => message.type === "STATE" && message.stream === "transactions",
+	);
+	assert.ok(firstState && firstState.type === "STATE");
+	assert.equal(
+		(firstState.cursor as Record<string, unknown>).backfill_before_id,
+		backfillBeforeId,
+	);
+	assert.equal(first.skipped.length, 1);
+	assert.ok(
+		first.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "transactions_schema_blocked",
+		),
+	);
+
+	const corrected = story("6000", "2026-07-01T00:00:00Z");
+	const secondFetch = makeStatefulVenmoFetch([...head, corrected, tail]);
+	const second = makeCtx(
+		{ transactions: firstState.cursor as Record<string, unknown> },
+		["transactions"],
+	);
+	await collectAllStreams(
+		second.ctx,
+		secondFetch.fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	assert.ok(second.emitted.some((entry) => entry.data.id === corrected.id));
+	const secondState = second.messages.find(
+		(message) => message.type === "STATE" && message.stream === "transactions",
+	);
+	assert.ok(secondState && secondState.type === "STATE");
+	assert.ok(
+		!("backfill_before_id" in (secondState.cursor as Record<string, unknown>)),
+	);
+});
+
+test("friends page-budget message discloses the recurring capped window", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { reason_display_messages: Record<string, string> };
+	const message = manifest.reason_display_messages.friends_deferred_page_budget;
+	assert.ok(message);
+	assert.match(message, /older friends may remain uncollected/i);
+	assert.doesNotMatch(message, /next run picks up where this one stopped/i);
+});
+
+// Legacy bare `before_id` state must not bypass the head refresh. The
+// resumable `backfill_before_id` is a separate position reached only after
+// reading from the head on this run.
+test("collectTransactions: legacy STATE.before_id is ignored at the head", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [
 			{ body: { data: [story("5001", "2026-04-01T00:00:00Z")] } },
@@ -332,7 +733,7 @@ test("collectTransactions: prior STATE.before_id is never read — every run sta
 	assert.equal(emitted.length, 1);
 });
 
-test("collectAllStreams: transactions STATE never carries a before_id key — only last_seen_date_created", async () => {
+test("collectAllStreams: an exhausted walk omits the legacy before_id and backfill position", async () => {
 	const TRANSACTIONS_PAGE_SIZE = 50;
 	const fullPage = Array.from({ length: TRANSACTIONS_PAGE_SIZE }, (_, i) =>
 		story(String(7000 + i), "2026-01-01T00:00:00Z"),
@@ -351,7 +752,10 @@ test("collectAllStreams: transactions STATE never carries a before_id key — on
 	assert.ok(state && state.type === "STATE");
 	assert.ok(
 		!("before_id" in (state.cursor as Record<string, unknown>)),
-		"STATE must not persist a before_id cursor across runs",
+		"STATE must not persist a legacy before_id cursor",
+	);
+	assert.ok(
+		!("backfill_before_id" in (state.cursor as Record<string, unknown>)),
 	);
 	assert.equal(
 		(state.cursor as { last_seen_date_created?: string | null })
@@ -439,10 +843,9 @@ test("collectTransactions: two runs over exact-multiple-of-50 history — run2 s
 	);
 });
 
-// Page-cap exhaustion (MAX_TRANSACTION_PAGES) must be equally safe: even
-// when a run stops because it hit the page cap rather than an empty/partial
-// page, nothing is persisted that would make the next run skip the head.
-test("collectTransactions: hitting the page cap still starts the next run at the head", async () => {
+// A capped walk may save a separate backfill position, but a legacy bare
+// before_id still cannot redirect the next run away from the head.
+test("collectTransactions: a capped walk still ignores a legacy before_id", async () => {
 	const PAGE_SIZE = 50;
 	const fullPage = (offset: number) =>
 		Array.from({ length: PAGE_SIZE }, (_, i) =>
@@ -487,7 +890,7 @@ test("collectTransactions: hitting the page cap still starts the next run at the
 	await collectTransactions(ctx2.ctx, fetchPath2, OWNER_ID, NO_DELAY);
 	assert.ok(
 		!calls2[0]?.includes("before_id"),
-		"a page-cap-exhausted run must not leave a cursor for the next run",
+		"a legacy cursor must not redirect the next run",
 	);
 });
 
@@ -682,7 +1085,7 @@ test("collectAllStreams: a capped Venmo friends walk is partial and holds its fi
 	assert.deepEqual(state.cursor, { fingerprints: { prior: "fingerprint" } });
 });
 
-test("collectAllStreams: a capped Venmo transactions walk normalizes its held date checkpoint", async () => {
+test("collectAllStreams: a capped Venmo transactions walk advances the head date and saves backfill", async () => {
 	const page = Array.from({ length: 50 }, (_, i) =>
 		story(String(40_000 + i), "2026-01-01T00:00:00Z"),
 	);
@@ -691,7 +1094,18 @@ test("collectAllStreams: a capped Venmo transactions walk normalizes its held da
 			{
 				length: MAX_TRANSACTION_PAGES,
 			},
-			() => ({ body: { data: page } }),
+			(_, pageIndex) => ({
+				body: {
+					data: page.map((item, itemIndex) => ({
+						...item,
+						id: String(40_000 + pageIndex * page.length + itemIndex),
+						payment: {
+							...item.payment,
+							id: String(90_000 + pageIndex * page.length + itemIndex),
+						},
+					})),
+				},
+			}),
 		),
 	});
 	const { ctx, messages } = makeCtx(
@@ -718,7 +1132,11 @@ test("collectAllStreams: a capped Venmo transactions walk normalizes its held da
 	);
 	assert.ok(state && state.type === "STATE");
 	assert.deepEqual(state.cursor, {
-		last_seen_date_created: "2020-01-01T00:00:00Z",
+		last_seen_date_created: "2026-01-01T00:00:00Z",
+		head_anchor_id: "40000",
+		backfill_before_id: String(
+			40_000 + MAX_TRANSACTION_PAGES * page.length - 1,
+		),
 	});
 });
 

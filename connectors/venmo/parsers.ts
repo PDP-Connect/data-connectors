@@ -23,9 +23,11 @@ export function normalizeVenmoDate(
 }
 
 /** Venmo's `amount` is a float in major units (dollars); PDPP records integer cents. */
-export function dollarsToCents(amount: number | null | undefined): number {
-	if (typeof amount !== "number" || Number.isNaN(amount)) {
-		return 0;
+export function dollarsToCents(
+	amount: number | null | undefined,
+): number | null {
+	if (typeof amount !== "number" || !Number.isFinite(amount)) {
+		return null;
 	}
 	return Math.round(amount * 100);
 }

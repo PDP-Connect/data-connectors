@@ -37,10 +37,12 @@ test("dollarsToCents rounds floating-point drift instead of truncating (25.005 -
 	assert.equal(dollarsToCents(25.005), 2501);
 });
 
-test("dollarsToCents returns 0 for a missing or NaN amount rather than throwing", () => {
-	assert.equal(dollarsToCents(null), 0);
-	assert.equal(dollarsToCents(undefined), 0);
-	assert.equal(dollarsToCents(Number.NaN), 0);
+test("dollarsToCents returns null for missing or non-finite amounts", () => {
+	assert.equal(dollarsToCents(null), null);
+	assert.equal(dollarsToCents(undefined), null);
+	assert.equal(dollarsToCents(Number.NaN), null);
+	assert.equal(dollarsToCents(Number.POSITIVE_INFINITY), null);
+	assert.equal(dollarsToCents(Number.NEGATIVE_INFINITY), null);
 });
 
 test("userRecord maps every documented field and passes the friends schema", () => {
@@ -119,6 +121,23 @@ test("transactionRecord converts a pay story to a valid record, correctly derivi
 		"owner is the actor (sender) on a pay story",
 	);
 	assert.equal(validateRecord("transactions", record).ok, true);
+});
+
+test("transactionRecord preserves an unknown payment amount as null", () => {
+	const missingAmountPayment = { ...RAW_PAY_STORY.payment };
+	delete missingAmountPayment.amount;
+	for (const payment of [
+		{ ...RAW_PAY_STORY.payment, amount: null },
+		missingAmountPayment,
+	]) {
+		const record = transactionRecord(
+			{ ...RAW_PAY_STORY, payment },
+			"1234567890123456789",
+		);
+		assert.ok(record);
+		assert.equal(record.amount_cents, null);
+		assert.equal(validateRecord("transactions", record).ok, true);
+	}
 });
 
 test("transactionRecord normalizes zone-less dates and retains alphanumeric payment ids", () => {
