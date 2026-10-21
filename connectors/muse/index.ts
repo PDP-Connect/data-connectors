@@ -813,21 +813,6 @@ async function hydrateChat(
 	};
 }
 
-/** Whether chat.history also says the chat does not exist. */
-async function chatGone(
-	gateway: MuseGateway,
-	sessionId: string,
-): Promise<boolean> {
-	try {
-		await call(gateway, "chat.history", { limit: 1, session_id: sessionId });
-		return false;
-	} catch (error) {
-		if (error instanceof MuseRpcError && error.code === "not_found")
-			return true;
-		throw error;
-	}
-}
-
 /** The chat's current transcript revision from a one-message read; null when unknown. */
 async function readRevision(
 	gateway: MuseGateway,
@@ -843,10 +828,73 @@ async function readRevision(
 /** Whether a chat's parent record was emitted, and so whether its messages may follow. */
 type ParentOutcome =
 	| { kind: "emitted" }
-	/** The chat no longer exists. */
+	/** Absent from a fully read inventory and not found by sessions.get. */
 	| { kind: "gone" }
-	/** No honest parent record could be emitted: the chat stays a gap. */
-	| { kind: "blocked"; errorClass: string; message: string };
+	/** No honest parent record could be emitted this run. */
+	| { kind: "blocked"; reason: string };
+
+/**
+ * A run could not emit some chats' parent records. Nothing about those chats
+ * (no message, gap or coverage key) may be emitted, and the host must keep
+ * their pending gaps, so the messages stream fails for the run with no
+ * DETAIL_COVERAGE: Collection Profile 5.6, "A missing coverage report or an
+ * unaccounted required key makes that parent checkpoint ineligible to
+ * commit", and 5.8 (a failed stream commits no checkpoint). Emitting no
+ * coverage is what leaves the earlier gaps pending: the protocol rule that a
+ * still-failing gap key is re-emitted applies to keys a coverage message
+ * accounts for, and this run accounts for none.
+ */
+class ParentsBlocked extends StreamFailure {
+	constructor(reasons: readonly string[]) {
+		super(
+			`${reasons.length} Muse chats could not have their conversation record emitted this run (${[...new Set(reasons)].join(", ")}); their messages stay pending and nothing was checkpointed.`,
+		);
+	}
+}
+
+/**
+ * The conversation record of a chat the inventory did not list, read with
+ * sessions.get and emitted before its messages. `absentFromCompleteInventory`
+ * says this run read both views of sessions.list to their end without the
+ * chat: only then can a sessions.get not-found mean the chat is gone.
+ */
+async function parentFromSessionsGet(
+	ctx: MuseCtx,
+	gateway: MuseGateway,
+	tally: TextTally,
+	sessionId: string,
+	absentFromCompleteInventory: boolean,
+	counts: { unsafe: number },
+): Promise<ParentOutcome> {
+	let raw: unknown;
+	try {
+		raw = await call(gateway, "sessions.get", { id: sessionId });
+	} catch (error) {
+		if (!(error instanceof MuseRpcError) || !PER_ITEM_RPC_CODES.has(error.code))
+			throw error;
+		// A not-found alone may be temporary: it never clears a gap by itself.
+		return absentFromCompleteInventory
+			? { kind: "gone" }
+			: { kind: "blocked", reason: "muse_parent_not_found" };
+	}
+	const session = parseSessionGet(raw);
+	if (session === null || session.session_id !== sessionId) {
+		throw new StreamFailure(
+			"Muse's sessions.get came back in a shape the connector cannot read; nothing was checkpointed.",
+		);
+	}
+	// Without the archived flag the record would have to guess it.
+	if (typeof session.archived !== "boolean") {
+		return { kind: "blocked", reason: "muse_parent_archived_unknown" };
+	}
+	const built = buildConversationRecord(session, session.archived);
+	if (built.replaced > 0) {
+		counts.unsafe += 1;
+		return { kind: "blocked", reason: "muse_parent_unsafe_text" };
+	}
+	await emitBuilt(ctx, tally, CONVERSATIONS, built);
+	return { kind: "emitted" };
+}
 
 /** DETAIL_GAP_RECOVERED for each gap an earlier run left for this chat. */
 async function resolvePendingGaps(
@@ -912,6 +960,7 @@ async function hydrateChats(
 	const revisions = new Map<string, number | null>();
 	const gaps: string[] = [];
 	const gone = new Set<string>();
+	const blocked: string[] = [];
 	for (const [index, sessionId] of required.entries()) {
 		await ctx.progress(`Reading chat ${index + 1} of ${required.length}`, {
 			stream: MESSAGES,
@@ -927,14 +976,12 @@ async function hydrateChats(
 			await resolvePendingGaps(ctx, pending, sessionId);
 			continue;
 		}
-		const outcome: HistoryOutcome =
-			parent.kind === "blocked"
-				? {
-						kind: "gap",
-						errorClass: parent.errorClass,
-						message: parent.message,
-					}
-				: await hydrateChat(ctx, gateway, tally, sessionId);
+		if (parent.kind === "blocked") {
+			// No parent record this run: nothing about this chat is emitted.
+			blocked.push(parent.reason);
+			continue;
+		}
+		const outcome = await hydrateChat(ctx, gateway, tally, sessionId);
 		if (outcome.kind === "hydrated") {
 			hydrated.push(sessionId);
 			revisions.set(sessionId, outcome.revision);
@@ -952,6 +999,7 @@ async function hydrateChats(
 		});
 		gaps.push(sessionId);
 	}
+	if (blocked.length > 0) throw new ParentsBlocked(blocked);
 	await emitDetailCoverage(ctx, {
 		stream: MESSAGES,
 		stateStream: CONVERSATIONS,
@@ -1018,8 +1066,11 @@ export async function runChatStreams(
 	//   message record, gap or coverage.
 	// - A recovery-only run fetches each gapped chat with sessions.get and
 	//   emits its conversation record right before that chat's messages or
-	//   gap. A chat that is gone resolves its gap (DETAIL_GAP_RECOVERED);
-	//   one whose parent cannot be emitted honestly stays a gap.
+	//   gap. A chat whose parent cannot be emitted (not found, archived flag
+	//   unknown, unsafe text) gets nothing emitted at all and fails messages
+	//   for the run (see ParentsBlocked); its gap stays pending. A gap is
+	//   resolved as gone only in a normal run, for a chat absent from both
+	//   fully read views and not found by sessions.get.
 	if (wantMessages && !wantConversations) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
@@ -1033,53 +1084,7 @@ export async function runChatStreams(
 	}
 	if (ctx.recoveryOnly) {
 		if (pending.size === 0) return;
-		let unsafeParents = 0;
-		const emitParent = async (sessionId: string): Promise<ParentOutcome> => {
-			let raw: unknown;
-			try {
-				raw = await call(gateway, "sessions.get", { id: sessionId });
-			} catch (error) {
-				if (
-					!(error instanceof MuseRpcError) ||
-					!PER_ITEM_RPC_CODES.has(error.code)
-				)
-					throw error;
-				// Gone only when its history is gone too.
-				return (await chatGone(gateway, sessionId))
-					? { kind: "gone" }
-					: {
-							kind: "blocked",
-							errorClass: "muse_parent_not_found",
-							message: "sessions.get did not find the chat",
-						};
-			}
-			const session = parseSessionGet(raw);
-			if (session === null || session.session_id !== sessionId) {
-				throw new StreamFailure(
-					"Muse's sessions.get came back in a shape the connector cannot read; nothing was checkpointed.",
-				);
-			}
-			// Without the archived flag the record would have to guess it; the
-			// chat waits for a normal run, which knows its list view.
-			if (typeof session.archived !== "boolean") {
-				return {
-					kind: "blocked",
-					errorClass: "muse_parent_archived_unknown",
-					message: "sessions.get did not say whether the chat is archived",
-				};
-			}
-			const built = buildConversationRecord(session, session.archived);
-			if (built.replaced > 0) {
-				unsafeParents += 1;
-				return {
-					kind: "blocked",
-					errorClass: "muse_parent_unsafe_text",
-					message: "the chat's title or snippet is not storable text",
-				};
-			}
-			await emitBuilt(ctx, tally, CONVERSATIONS, built);
-			return { kind: "emitted" };
-		};
+		const counts = { unsafe: 0 };
 		try {
 			await hydrateChats(
 				ctx,
@@ -1087,21 +1092,16 @@ export async function runChatStreams(
 				tally,
 				[...pending.keys()],
 				pending,
-				emitParent,
+				(id) => parentFromSessionsGet(ctx, gateway, tally, id, false, counts),
 			);
 		} catch (error) {
-			await failStreams(ctx, [CONVERSATIONS, MESSAGES], error);
-			return;
-		}
-		if (unsafeParents > 0) {
-			await failStreams(
-				ctx,
-				[CONVERSATIONS],
-				new StreamFailure(
-					`${unsafeParents} Muse conversation records hold text that cannot be stored; they were not imported and their messages stay pending.`,
-					false,
-				),
-			);
+			// A blocked parent fails messages (no coverage, gaps stay pending);
+			// an unsafe parent fails conversations too.
+			const streams =
+				error instanceof ParentsBlocked && counts.unsafe === 0
+					? [MESSAGES]
+					: [CONVERSATIONS, MESSAGES];
+			await failStreams(ctx, streams, error);
 		}
 		return;
 	}
@@ -1159,19 +1159,27 @@ export async function runChatStreams(
 					changed.push(c.id);
 			}
 			const changedIds = new Set(changed);
-			// The list was read to its end: a gapped chat that is not in it no
-			// longer exists, so its gaps are resolved instead of read again.
-			for (const id of pending.keys()) {
-				if (!listedIds.has(id)) await resolvePendingGaps(ctx, pending, id);
-			}
-			// Retry earlier gaps first, then every chat that changed.
+			// Retry earlier gaps first, then every chat that changed. A gapped
+			// chat the inventory did not list gets its parent from sessions.get
+			// (it may have moved between the two views during the walk); it is
+			// gone only when that also does not find it, since both views were
+			// read to their end (listSessions throws otherwise).
 			const required = [
-				...[...pending.keys()].filter(
-					(id) => listedIds.has(id) && !changedIds.has(id),
-				),
+				...[...pending.keys()].filter((id) => !changedIds.has(id)),
 				...changed,
 			];
-			hydrated = await hydrateChats(ctx, gateway, tally, required, pending);
+			const counts = { unsafe: 0 };
+			hydrated = await hydrateChats(
+				ctx,
+				gateway,
+				tally,
+				required,
+				pending,
+				(id) =>
+					listedIds.has(id)
+						? Promise.resolve<ParentOutcome>({ kind: "emitted" })
+						: parentFromSessionsGet(ctx, gateway, tally, id, true, counts),
+			);
 			for (const id of changed) {
 				const revision = hydrated.get(id);
 				const updatedMs = chats.find((c) => c.id === id)?.updatedMs ?? null;

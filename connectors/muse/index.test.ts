@@ -98,9 +98,17 @@ function fakeGateway(overrides: Record<string, Handler> = {}) {
 		"sessions.list": (p) =>
 			p.view === "archived" ? fixture("sessions-archived") : SESSIONS,
 		"chat.history": (p) => historyFor(String(p.session_id)),
-		"sessions.get": (p) => ({
-			session: (SESSIONS.sessions as Json[]).find((s) => s.session_id === p.id),
-		}),
+		"sessions.get": (p) => {
+			const session = (SESSIONS.sessions as Json[]).find(
+				(s) => s.session_id === p.id,
+			);
+			if (!session)
+				throw new MuseRpcError(
+					"not_found",
+					"muse_rpc_failed: sessions.get not_found",
+				);
+			return { session };
+		},
 		"activity.list": (p) =>
 			p.before == null ? fixture("activity") : { days: [] },
 		"goals.list": (p) =>
@@ -439,8 +447,9 @@ test("the next run reads only chats that changed, plus pending gaps", async () =
 	);
 	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
 	assert.deepEqual(cov?.required_keys, [MAIN_CHAT]);
-	// Round 7: the gapped chat is not in the complete list: it is gone, so its
-	// gap is resolved instead of read again as a parentless child.
+	// The gapped chat is absent from both fully read views and sessions.get
+	// does not find it either: it is gone, so its gap is resolved.
+	assert.ok(calls.some((c) => c.method === "sessions.get"));
 	assert.deepEqual(
 		h.of("DETAIL_GAP_RECOVERED").map((x) => x.m.gap_id),
 		["g1"],
@@ -528,16 +537,19 @@ test("round 6 #3: a recovery-only run emits each gapped chat's parent before its
 			.map((x) => x.index),
 	);
 	assert.ok((parent[0]?.index ?? Infinity) < firstChild);
-	const cov = h.of("DETAIL_COVERAGE", "messages")[0];
-	assert.ok(cov && (parent[0]?.index ?? Infinity) < cov.index);
-	// Round 7: MAIN_CHAT is gone (sessions.get and chat.history both say
-	// not found): its gap is resolved, no parentless gap is emitted.
-	assert.deepEqual(cov.m.required_keys, [SIDE_CHAT]);
-	assert.deepEqual(cov.m.gap_keys ?? [], []);
+	// Round 8: MAIN_CHAT's parent cannot be emitted (sessions.get does not
+	// find it, and a not-found alone never proves it gone): nothing about it
+	// is emitted, its gap is not resolved, and messages fails with no
+	// coverage so the host keeps the gap pending.
+	assert.equal(h.of("DETAIL_COVERAGE").length, 0);
 	assert.equal(h.of("DETAIL_GAP").length, 0);
 	assert.deepEqual(
 		h.of("DETAIL_GAP_RECOVERED").map((x) => x.m.gap_id),
-		[`g-${SIDE_CHAT}`, `g-${MAIN_CHAT}`],
+		[`g-${SIDE_CHAT}`],
+	);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["messages"],
 	);
 	// Without conversations in scope, messages is skipped (Collection Profile 5.1).
 	const only = fakeGateway();
@@ -618,16 +630,20 @@ test("round 7: recovery keeps the real archived flag, and never guesses it", asy
 		});
 		const h = recoveryFor(SIDE_CHAT);
 		await collectMuseWith(h.ctx, gateway);
-		// No parent with a guessed flag, and so no children: the chat stays a gap.
+		// No parent with a guessed flag, and so nothing about the chat: no
+		// record, gap or coverage; messages fails and the gap stays pending.
 		assert.equal(h.of("RECORD").length, 0);
 		assert.equal(
 			calls.some((c) => c.method === "chat.history"),
 			false,
 		);
-		assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
-			SIDE_CHAT,
-		]);
+		assert.equal(h.of("DETAIL_GAP").length, 0);
+		assert.equal(h.of("DETAIL_COVERAGE").length, 0);
 		assert.equal(h.of("DETAIL_GAP_RECOVERED").length, 0);
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["messages"],
+		);
 	}
 });
 
@@ -640,12 +656,11 @@ test("round 7: recovery never emits an unsafe parent record silently", async () 
 	const h = recoveryFor(SIDE_CHAT);
 	await collectMuseWith(h.ctx, gateway);
 	assert.equal(h.of("RECORD").length, 0);
-	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
-		SIDE_CHAT,
-	]);
+	assert.equal(h.of("DETAIL_GAP").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE").length, 0);
 	assert.deepEqual(
 		h.failures.map((f) => f.stream),
-		["conversations"],
+		["conversations", "messages"],
 	);
 });
 
@@ -1679,5 +1694,106 @@ test("round 7: an unknown final revision is not proof the chat did not change", 
 	assert.equal(
 		((h.states("conversations")[0]?.chats ?? {}) as Json)[SIDE_CHAT],
 		undefined,
+	);
+});
+
+test("round 8 #2: two not-founds in recovery never clear a pending gap", async () => {
+	const nf = (m: string) => () => {
+		throw new MuseRpcError("not_found", `muse_rpc_failed: ${m} not_found`);
+	};
+	const { gateway } = fakeGateway({
+		"sessions.get": nf("sessions.get"),
+		"chat.history": nf("chat.history"),
+	});
+	const h = recoveryFor(SIDE_CHAT);
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.of("DETAIL_GAP_RECOVERED").length, 0);
+	assert.equal(h.of("DETAIL_GAP").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE").length, 0);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["messages"],
+	);
+});
+
+test("round 8 #3: a pending chat absent from the inventory is read through sessions.get, not recovered", async () => {
+	// The chat moved between views during the walk: neither view lists it,
+	// but sessions.get still finds it.
+	const moved = "33333333-3333-4333-8333-333333333333";
+	const base = (SESSIONS.sessions as Json[])[1] ?? {};
+	const { gateway, calls } = fakeGateway({
+		"sessions.get": (p) => {
+			if (p.id !== moved)
+				throw new MuseRpcError(
+					"not_found",
+					"muse_rpc_failed: sessions.get not_found",
+				);
+			return { session: { ...base, session_id: moved, archived: true } };
+		},
+	});
+	const h = harness({
+		streams: ["conversations", "messages"],
+		detailGaps: [
+			{
+				gap_id: "g-moved",
+				status: "pending",
+				stream: "messages",
+				record_key: moved,
+				detail_locator: { kind: "muse.chat_history", chat_id: moved },
+			},
+		],
+	});
+	await collectMuseWith(h.ctx, gateway);
+	assert.ok(
+		calls.some(
+			(c) => c.method === "chat.history" && c.params.session_id === moved,
+		),
+	);
+	const parent = h
+		.of("RECORD", "conversations")
+		.find((x) => (x.m.data as Json).id === moved);
+	assert.ok(parent);
+	assert.equal((parent.m.data as Json).archived, true);
+	const recovered = h.of("DETAIL_GAP_RECOVERED");
+	assert.deepEqual(
+		recovered.map((x) => x.m.gap_id),
+		["g-moved"],
+	);
+	const lastMovedMessage = Math.max(
+		...h
+			.of("RECORD", "messages")
+			.filter((x) => (x.m.data as Json).session_id === moved)
+			.map((x) => x.index),
+	);
+	assert.ok(parent.index < lastMovedMessage);
+	assert.ok((recovered[0]?.index ?? -1) > lastMovedMessage);
+});
+
+test("round 8 #3: an incomplete inventory recovers nothing", async () => {
+	const { gateway } = fakeGateway({
+		"sessions.list": (p) =>
+			p.view === "archived" ? { sessions: [], has_more: true } : SESSIONS,
+	});
+	const h = harness({
+		streams: ["conversations", "messages"],
+		detailGaps: [
+			{
+				gap_id: "g-x",
+				status: "pending",
+				stream: "messages",
+				record_key: "44444444-4444-4444-8444-444444444444",
+				detail_locator: {
+					kind: "muse.chat_history",
+					chat_id: "44444444-4444-4444-8444-444444444444",
+				},
+			},
+		],
+	});
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.of("DETAIL_GAP_RECOVERED").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE").length, 0);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["conversations", "messages"],
 	);
 });
