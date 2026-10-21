@@ -986,3 +986,32 @@ test("scope: the flag/label delta pass never reads or emits a message outside th
 		"the out-of-range message's body is never read",
 	);
 });
+
+test("scope: an excluded envelope-less delta change does not spend the hold-back budget", async () => {
+	const { envelope: _drop, ...noEnvelope } = dated(20, MAR);
+	const m = mailbox([dated(10, JAN), noEnvelope as FetchMessageObject], 101);
+	const scope = until("2026-02-01T00:00:00.000Z");
+	(m.box as { highestModseq?: bigint }).highestModseq = 50n;
+	let state = (await run(m, {}, scope)).state;
+	for (const modseq of [60n, 70n]) {
+		(m.box as { highestModseq?: bigint }).highestModseq = modseq;
+		const r = await run(m, state, scope);
+		state = r.state;
+		const allMail = (
+			state.messages as {
+				all_mail: { highest_modseq: unknown; delta_holdback_runs: number };
+			}
+		).all_mail;
+		assert.equal(
+			String(allMail.highest_modseq),
+			String(modseq),
+			"the cursor advances past an excluded change",
+		);
+		assert.equal(
+			allMail.delta_holdback_runs,
+			0,
+			"an excluded change is not a failure",
+		);
+	}
+	assert.equal(m.bodyReads.get(20) ?? 0, 0);
+});

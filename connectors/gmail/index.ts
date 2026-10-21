@@ -4079,14 +4079,9 @@ export async function runDeltaPass(
 		if (!String(msg.emailId ?? "")) {
 			continue;
 		}
-		// No envelope means no safe record to write. Skipping preserves the
-		// stored row; emitting would blank it.
-		if (!msg.envelope) {
-			skippedAnyMessage = true;
-			continue;
-		}
-		// The same admission the walk applies, before any body I/O: a change
-		// to a message outside the stream's scope is not this run's to collect.
+		// Admission comes first, before any failure is classified or any body
+		// I/O happens: a change outside the stream's scope is not this run's to
+		// collect, and it must not spend the hold-back budget below.
 		if (
 			!messageInStreamScope(
 				requested,
@@ -4096,6 +4091,12 @@ export async function runDeltaPass(
 				requested.get("messages")?.time_range,
 			)
 		) {
+			continue;
+		}
+		// No envelope means no safe record to write. Skipping preserves the
+		// stored row; emitting would blank it.
+		if (!msg.envelope) {
+			skippedAnyMessage = true;
 			continue;
 		}
 		deltaMetas.push(msg);
