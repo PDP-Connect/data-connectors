@@ -54,16 +54,23 @@
  * run. `dropUnseenIds()` runs after each full scan so deleted notes/folders
  * don't stay gated forever.
  *
+ * Failure recovery: each stream failure carries the recovery hint of its own
+ * cause. A transient page, transport or pagination failure asks for a runtime
+ * retry. A source row this connector cannot represent (for example invalid
+ * UTF-8) fails the same way on every retry of that revision, so its hint is
+ * `not_retriable`. The stream still emits no STATE, because STATE on a
+ * full-inventory stream claims every row. The next scheduled run reads the
+ * source again and checkpoints once the row is readable.
+ *
  * Folder projection: `folder_id` remains the CloudKit recordName foreign
  * key. `folder_name` carries the legacy display name, resolved from the
  * folders stream fetched as a notes projection dependency. A note row is
  * uncovered when a referenced folder does not resolve to a readable name.
  *
- * KNOWN LIMITATION: note body text (`text_content`) comes from a
- * byte-heuristic decode of `TextDataEncrypted`
- * (`parsers.ts#extractNoteText`), ported verbatim from the legacy script.
- * It is not a real Apple Notes protobuf parse — see that function's doc
- * comment for what it can and cannot recover.
+ * Note body text (`text_content`) is decoded from the recognized Apple Notes
+ * protobuf structure by `parsers.ts#decodeNoteBody`. Paragraph runs join with
+ * a line feed as in the legacy script. A body that cannot be decoded withholds
+ * the row and records its cause; it never becomes empty text.
  *
  * Synthetic query and parser fixtures cover collection behavior. A live
  * account run is separate and only occurs when a signed-in profile exists.
@@ -97,7 +104,10 @@ import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	createConnectorFailure,
+	runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import type { FieldOmission as ParsedFieldOmission } from "./parsers.ts";
 import {
@@ -123,6 +133,39 @@ const READINESS_DEADLINE = Symbol("icloud readiness deadline");
 const READINESS_OPERATION_TIMEOUT = Symbol(
 	"icloud readiness operation timeout",
 );
+/** Playwright's evaluate has no deadline. Without this bound, one page call
+ *  that never settles would hold collection open and report nothing. */
+const PAGE_CALL_TIMEOUT_MS = 60_000;
+
+class PageCallTimeout extends Error {}
+
+/** Stop waiting for a page call after PAGE_CALL_TIMEOUT_MS. The call itself is
+ *  not cancelled. The caller gets a timeout failure instead of waiting forever:
+ *  a timed-out query fails only its stream, and collection continues. */
+async function withinPageCallTimeout<T>(
+	call: Promise<T>,
+	label: string,
+): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			call,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(
+					() =>
+						reject(
+							new PageCallTimeout(
+								`icloud_page_unresponsive: the ${label} page call did not settle within ${PAGE_CALL_TIMEOUT_MS} ms`,
+							),
+						),
+					PAGE_CALL_TIMEOUT_MS,
+				);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 async function withinReadinessBudget<T>(
 	startOperation: () => Promise<T>,
@@ -164,29 +207,47 @@ interface ProgressExtra {
 }
 
 export const ICLOUD_NOTES_RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited|icloud_readiness_exhausted/i;
+	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited|icloud_readiness_exhausted|icloud_page_unresponsive/i;
 
 type StreamName = "folders" | "notes" | "profile";
 type FieldOmission = ParsedFieldOmission;
 type OmittedRowDiagnostic = {
 	row_index: number;
+	record_id?: string;
 	field_count: number;
 	field_omissions: FieldOmission[];
 	row_reason?: string;
 };
 
+type RecoveryHint =
+	| { action: "retry_by_runtime"; retryable: true }
+	| { action: "manual_action_required"; retryable: false }
+	| { action: "retry_on_connector_upgrade"; retryable: false }
+	| { action: "not_retriable"; retryable: false };
+
+/** Why a stream or the run failed. The cause is kept, including a failed
+ *  dependency stream, until recoveryHintFor turns it into a recovery hint. */
+type FailureCause =
+	| { kind: "transient" }
+	| { kind: "auth_rejected" }
+	| { kind: "unrecognized_response" }
+	| { kind: "unrepresentable_rows" }
+	| { kind: "dependency"; stream: StreamName; failure: QueryFailure };
+
 interface QueryFailure {
 	reason:
 		| "icloud_auth_failed"
 		| "icloud_http_error"
+		| "icloud_invalid_config_response"
 		| "icloud_invalid_query_response"
 		| "icloud_navigation_changed"
 		| "icloud_no_progress"
 		| "icloud_omitted_rows"
+		| "icloud_page_unresponsive"
 		| "icloud_rate_limited"
 		| "icloud_readiness_exhausted";
 	message: string;
-	retryable: boolean;
+	cause: FailureCause;
 	pageCount: number;
 	rowsSeen?: number;
 	sourceRowsSeen?: number;
@@ -204,10 +265,12 @@ const QUERY_FAILURE_REASON_CODES: Record<
 > = {
 	icloud_auth_failed: "icloud_auth_failed",
 	icloud_http_error: "icloud_http_error",
+	icloud_invalid_config_response: "icloud_invalid_config_response",
 	icloud_invalid_query_response: "icloud_invalid_query_response",
 	icloud_navigation_changed: "icloud_navigation_changed",
 	icloud_no_progress: "icloud_no_progress",
 	icloud_omitted_rows: "icloud_omitted_rows",
+	icloud_page_unresponsive: "icloud_page_unresponsive",
 	icloud_rate_limited: "icloud_rate_limited",
 	icloud_readiness_exhausted: "icloud_readiness_exhausted",
 };
@@ -272,11 +335,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *  session. `ensureSession` establishes the session but returns void (the
  *  runtime's `EnsureSessionArgs` contract), so collect() re-probes the same
  *  validate endpoint once, cheaply, against the now-live cookie. */
-async function resolveCloudKitConfig(
-	page: Page,
-): Promise<CloudKitConfigLive | null> {
-	const result = (await page
-		.evaluate(async (url) => {
+type ConfigResolution =
+	| { kind: "live"; config: CloudKitConfigLive }
+	| { kind: "failed"; failure: QueryFailure };
+
+function configFailure(
+	failure: Pick<QueryFailure, "cause" | "reason">,
+	detail: string,
+): ConfigResolution {
+	return {
+		kind: "failed",
+		failure: {
+			...failure,
+			message: `${failure.reason}: could not resolve the CloudKit config (${detail})`,
+			pageCount: 0,
+		},
+	};
+}
+
+async function resolveCloudKitConfig(page: Page): Promise<ConfigResolution> {
+	let timedOut = false;
+	const result = (await withinPageCallTimeout(
+		page.evaluate(async (url) => {
 			try {
 				const res = await fetch(url, {
 					method: "POST",
@@ -293,14 +373,31 @@ async function resolveCloudKitConfig(
 			} catch (err) {
 				return { status: 0, json: { error: String(err) } };
 			}
-		}, VALIDATE_URL)
-		.catch(() => ({ status: 0, json: null }))) as CloudKitFetchResult;
-	if (
-		result.status !== 200 ||
-		!isRecord(result.json) ||
-		Object.hasOwn(result.json, "error")
-	) {
-		return null;
+		}, VALIDATE_URL),
+		"validate",
+	).catch((error: unknown) => {
+		timedOut = error instanceof PageCallTimeout;
+		return { status: 0, json: null };
+	})) as CloudKitFetchResult;
+	if (timedOut) {
+		return configFailure(
+			{ reason: "icloud_page_unresponsive", cause: { kind: "transient" } },
+			`the validate page call did not settle within ${PAGE_CALL_TIMEOUT_MS} ms`,
+		);
+	}
+	const invalid = (): ConfigResolution =>
+		configFailure(
+			statusFailure(200, "icloud_invalid_config_response"),
+			"HTTP 200 with an unrecognized body",
+		);
+	if (result.status !== 200) {
+		return configFailure(
+			statusFailure(result.status, "icloud_invalid_config_response"),
+			`HTTP ${result.status || "network error"}`,
+		);
+	}
+	if (!isRecord(result.json) || Object.hasOwn(result.json, "error")) {
+		return invalid();
 	}
 	const data = result.json as CloudKitValidateResponse;
 	const dsid = data.dsInfo?.dsid;
@@ -310,23 +407,24 @@ async function resolveCloudKitConfig(
 		typeof dsid !== "string" &&
 		!(typeof dsid === "number" && Number.isSafeInteger(dsid) && dsid >= 0)
 	) {
-		return null;
+		return invalid();
 	}
 	const accountId = profileSchema.shape.id.safeParse(String(dsid));
-	if (!accountId.success) return null;
+	if (!accountId.success) return invalid();
 	if (typeof ckBaseUrl !== "string" || ckBaseUrl.length === 0) {
-		return null;
+		return invalid();
 	}
 	// Reuse this response; do not fetch a profile or synthesize an Apple ID
 	// fallback. Missing, blank, or unreadable names remain omitted.
 	const userName = profileSchema.shape.user_name.safeParse(data.dsInfo?.fullName);
-	return {
+	const config: CloudKitConfigLive = {
 		dsid: accountId.data,
 		ckBaseUrl,
 		...(userName.success && userName.data !== undefined
 			? { userName: userName.data }
 			: {}),
 	};
+	return { kind: "live", config };
 }
 
 function queryUrl(config: CloudKitConfigLive): string {
@@ -334,15 +432,21 @@ function queryUrl(config: CloudKitConfigLive): string {
 }
 
 async function readPageUrl(page: Page): Promise<string> {
-	return page.evaluate(() => window.location.href, "icloud-notes-location");
+	return withinPageCallTimeout(
+		page.evaluate(() => window.location.href, "icloud-notes-location"),
+		"location",
+	);
 }
 
 /** Observational owner probe for PageShim; never enters credentials. */
 export async function probeICloudNotesSession(page: Page): Promise<boolean> {
 	const before = await readPageUrl(page);
 	if (!isICloudNotesUrl(before)) return false;
-	const config = await resolveCloudKitConfig(page);
-	return config !== null && remainsInICloudNotes(await readPageUrl(page), before);
+	const resolution = await resolveCloudKitConfig(page);
+	return (
+		resolution.kind === "live" &&
+		remainsInICloudNotes(await readPageUrl(page), before)
+	);
 }
 
 function isICloudNotesUrl(value: string): boolean {
@@ -369,28 +473,31 @@ async function cloudKitQuery(
 	body: Record<string, unknown>,
 ): Promise<CloudKitFetchResult> {
 	try {
-		return (await page.evaluate(
-			async ({ evalUrl, evalBody }) => {
-				try {
-					const res = await fetch(evalUrl, {
-						method: "POST",
-						credentials: "include",
-						headers: { "Content-Type": "text/plain" },
-						body: JSON.stringify(evalBody),
-					});
-					const status = res.status;
-					let json: unknown = null;
+		return (await withinPageCallTimeout(
+			page.evaluate(
+				async ({ evalUrl, evalBody }) => {
 					try {
-						json = await res.json();
-					} catch {
-						json = null;
+						const res = await fetch(evalUrl, {
+							method: "POST",
+							credentials: "include",
+							headers: { "Content-Type": "text/plain" },
+							body: JSON.stringify(evalBody),
+						});
+						const status = res.status;
+						let json: unknown = null;
+						try {
+							json = await res.json();
+						} catch {
+							json = null;
+						}
+						return { status, json };
+					} catch (err) {
+						return { status: 0, json: { error: String(err) } };
 					}
-					return { status, json };
-				} catch (err) {
-					return { status: 0, json: { error: String(err) } };
-				}
-			},
-			{ evalUrl: url, evalBody: body },
+				},
+				{ evalUrl: url, evalBody: body },
+			),
+			"CloudKit query",
 		)) as CloudKitFetchResult;
 	} catch (err) {
 		return { status: 0, json: { error: String(err) } };
@@ -457,23 +564,56 @@ function queryResponse(
 	return { records: value.records, nextMarker: value.continuationMarker };
 }
 
+/** The one place a failure cause becomes a recovery hint. A transient page or
+ *  transport failure can succeed on retry. An unrepresentable source revision
+ *  fails the same way until the source changes, so it asks for no retry. A
+ *  dependency failure takes the hint of the dependency's own cause. */
+function recoveryHintFor(cause: FailureCause): RecoveryHint {
+	switch (cause.kind) {
+		case "transient":
+			return { action: "retry_by_runtime", retryable: true };
+		case "auth_rejected":
+			return { action: "manual_action_required", retryable: false };
+		case "unrecognized_response":
+			return { action: "retry_on_connector_upgrade", retryable: false };
+		case "unrepresentable_rows":
+			return { action: "not_retriable", retryable: false };
+		case "dependency":
+			return recoveryHintFor(cause.failure.cause);
+	}
+}
+
+/** Classify a CloudKit or setup response status. Status 0 is a network
+ *  failure; status 200 reaches here only with an unrecognized body. */
+function statusFailure(
+	status: number,
+	invalidReason:
+		| "icloud_invalid_config_response"
+		| "icloud_invalid_query_response",
+): Pick<QueryFailure, "cause" | "reason"> {
+	if (status === 429) {
+		return { reason: "icloud_rate_limited", cause: { kind: "transient" } };
+	}
+	if (status === 401 || status === 403) {
+		return { reason: "icloud_auth_failed", cause: { kind: "auth_rejected" } };
+	}
+	if (status === 0 || status >= 500) {
+		return { reason: "icloud_http_error", cause: { kind: "transient" } };
+	}
+	return {
+		reason: status === 200 ? invalidReason : "icloud_http_error",
+		cause: { kind: "unrecognized_response" },
+	};
+}
+
 function queryFailure(
 	status: number,
 	stream: StreamName,
 	pageCount: number,
 ): QueryFailure {
-	const reason: QueryFailure["reason"] =
-		status === 429
-			? "icloud_rate_limited"
-			: status === 401 || status === 403
-				? "icloud_auth_failed"
-				: status === 200
-					? "icloud_invalid_query_response"
-					: "icloud_http_error";
 	return {
-		reason,
+		...statusFailure(status, "icloud_invalid_query_response"),
 		message: `iCloud Notes ${stream} query did not return a valid page (HTTP ${status || "network error"}); the stream was not checkpointed.`,
-		retryable: status === 0 || status === 429 || status >= 500,
 		pageCount,
 	};
 }
@@ -503,7 +643,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_navigation_changed",
 					message: `The iCloud Notes page changed during the ${stream} scan; its results were not checkpointed.`,
-					retryable: true,
+					cause: { kind: "transient" },
 					pageCount,
 				},
 				pageCount,
@@ -528,7 +668,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_navigation_changed",
 					message: `The iCloud Notes page changed during the ${stream} scan; its results were not checkpointed.`,
-					retryable: true,
+					cause: { kind: "transient" },
 					pageCount,
 				},
 				pageCount,
@@ -583,7 +723,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_no_progress",
 					message: `iCloud Notes ${stream} pagination repeated a continuation marker; the stream was not checkpointed.`,
-					retryable: true,
+					cause: { kind: "transient" },
 					pageCount,
 				},
 				pageCount,
@@ -596,7 +736,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_omitted_rows",
 					message: `iCloud Notes returned ${malformedRows} malformed, unidentified, or duplicate ${stream} row(s); the stream was not checkpointed.`,
-					retryable: false,
+					cause: { kind: "unrepresentable_rows" },
 					pageCount,
 					omittedRows: malformedRows,
 				},
@@ -624,7 +764,7 @@ async function walkQueryPages(
 				failure: {
 					reason: "icloud_no_progress",
 					message: `iCloud Notes ${stream} pagination returned no new rows while a continuation remained; the stream was not checkpointed.`,
-					retryable: true,
+					cause: { kind: "transient" },
 					pageCount,
 				},
 				pageCount,
@@ -663,10 +803,16 @@ async function emitStreamFailure(
 		stream,
 		reason: "inventory_not_proven_complete",
 		message: failure.message,
-		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		recovery_hint: recoveryHintFor(failure.cause),
 		diagnostics: {
 			source_reason: QUERY_FAILURE_REASON_CODES[failure.reason],
-			source_retryable: failure.retryable,
+			...(failure.cause.kind === "dependency"
+				? {
+						dependency_stream: failure.cause.stream,
+						dependency_reason:
+							QUERY_FAILURE_REASON_CODES[failure.cause.failure.reason],
+					}
+				: {}),
 			page_count: failure.pageCount,
 			...(failure.rowsSeen === undefined
 				? {}
@@ -862,7 +1008,7 @@ function omittedRowsFailure(
 	return {
 		reason: "icloud_omitted_rows",
 		message: `iCloud Notes could not fully read or represent ${count} ${stream} row(s); the stream was not checkpointed.`,
-		retryable: false,
+		cause: { kind: "unrepresentable_rows" },
 		pageCount,
 		omittedRows: count,
 		...(fieldOmissions.length === 0
@@ -871,6 +1017,24 @@ function omittedRowsFailure(
 		...(omittedRowDiagnostics.length === 0
 			? {}
 			: { omittedRowDiagnostics: omittedRowDiagnostics.slice() }),
+	};
+}
+
+/** Identify a withheld row by its source record id, so the rejected revision
+ *  can be found again; `row_index` alone changes as other rows change. */
+function omittedRow(
+	record: CloudKitRecord,
+	rowIndex: number,
+	fieldOmissions: FieldOmission[],
+	rowReason?: string,
+): OmittedRowDiagnostic {
+	const recordId = resolveCloudKitRecordId(record);
+	return {
+		row_index: rowIndex,
+		...(recordId === null ? {} : { record_id: recordId }),
+		field_count: fieldOmissions.length,
+		field_omissions: fieldOmissions,
+		...(rowReason === undefined ? {} : { row_reason: rowReason }),
 	};
 }
 
@@ -955,10 +1119,14 @@ export async function collectAllStreams(
 	const progress = widenProgress(ctx.progress);
 	const pageUrl = await requireNotesPage(page);
 
-	const config = await resolveCloudKitConfig(page);
-	if (!config) {
-		throw new Error("icloud_auth_failed: could not resolve CloudKit config");
+	const resolution = await resolveCloudKitConfig(page);
+	if (resolution.kind === "failed") {
+		const { failure } = resolution;
+		throw createConnectorFailure(failure.reason, failure.message, {
+			retryable: recoveryHintFor(failure.cause).retryable,
+		});
 	}
+	const { config } = resolution;
 	if (!remainsInICloudNotes(await readPageUrl(page), pageUrl)) {
 		throw new Error(
 			"icloud_navigation_changed: page changed while resolving CloudKit owner",
@@ -985,7 +1153,7 @@ export async function collectAllStreams(
 				reason: "icloud_navigation_changed",
 				message:
 					"The iCloud Notes page changed before the profile could be checkpointed.",
-				retryable: true,
+				cause: { kind: "transient" },
 				pageCount: 1,
 			});
 		}
@@ -994,6 +1162,7 @@ export async function collectAllStreams(
 	const needsFolders = requested.has("folders") || requested.has("notes");
 	let folderWalk: QueryWalk | null = null;
 	let folderScanComplete = false;
+	let folderFailure: QueryFailure | undefined;
 	const folderNames = new Map<string, string>();
 	const unavailableFolderIds = new Set<string>();
 
@@ -1025,12 +1194,9 @@ export async function collectAllStreams(
 				};
 				fieldOmissions.push(omission);
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: 1,
-					field_omissions: [omission],
-					row_reason: "unavailable_fields",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, [omission], "unavailable_fields"),
+				);
 				continue;
 			}
 			if (recordType.value !== "Folder") {
@@ -1044,32 +1210,29 @@ export async function collectAllStreams(
 			const built = result.record;
 			if (built === null) {
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: result.unavailableFields.length,
-					field_omissions: result.unavailableFields,
-					row_reason: "record_identity_unavailable",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(
+						record,
+						rowIndex,
+						result.unavailableFields,
+						"record_identity_unavailable",
+					),
+				);
 				continue;
 			}
 			if (result.unavailableFields.length > 0) {
 				omitted += 1;
 				unavailableFolderIds.add(built.id);
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: result.unavailableFields.length,
-					field_omissions: result.unavailableFields,
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, result.unavailableFields),
+				);
 			}
 			if (!validateRecord("folders", built).ok) {
 				if (result.unavailableFields.length === 0) {
 					omitted += 1;
-					omittedRowDiagnostics.push({
-						row_index: rowIndex,
-						field_count: 0,
-						field_omissions: [],
-						row_reason: "record_schema_invalid",
-					});
+					omittedRowDiagnostics.push(
+						omittedRow(record, rowIndex, [], "record_schema_invalid"),
+					);
 				}
 				continue;
 			}
@@ -1077,6 +1240,14 @@ export async function collectAllStreams(
 		}
 		folderScanComplete =
 			omitted === 0 && hasBoundEndProof(folderWalk, pageUrl, config, "folders");
+		folderFailure = withFieldOmissions(
+			folderWalk.failure,
+			"folders",
+			omitted,
+			folderWalk.pageCount,
+			fieldOmissions,
+			omittedRowDiagnostics,
+		);
 
 		if (requested.has("folders")) {
 			const cursor = openFingerprintCursor(state.folders, {
@@ -1101,20 +1272,13 @@ export async function collectAllStreams(
 				if (result.unavailableFields.length === 0) covered += 1;
 			}
 			let failure =
-				withFieldOmissions(
-					folderWalk.failure,
-					"folders",
-					omitted,
-					folderWalk.pageCount,
-					fieldOmissions,
-					omittedRowDiagnostics,
-				) ??
+				folderFailure ??
 				(!remainsInICloudNotes(await readPageUrl(page), pageUrl)
 					? {
 							reason: "icloud_navigation_changed",
 							message:
 								"The iCloud Notes page changed before the folders stream could be checkpointed.",
-							retryable: true,
+							cause: { kind: "transient" },
 							pageCount: folderWalk.pageCount,
 						}
 					: null);
@@ -1183,12 +1347,9 @@ export async function collectAllStreams(
 				};
 				fieldOmissions.push(omission);
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: 1,
-					field_omissions: [omission],
-					row_reason: "unavailable_fields",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, [omission], "unavailable_fields"),
+				);
 				continue;
 			}
 			if (recordType.value !== "Note") {
@@ -1211,12 +1372,9 @@ export async function collectAllStreams(
 				};
 				fieldOmissions.push(omission);
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: 1,
-					field_omissions: [omission],
-					row_reason: "unavailable_fields",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, [omission], "unavailable_fields"),
+				);
 				continue;
 			}
 			const result = await readNoteRecord(record, folderNames, {
@@ -1227,35 +1385,33 @@ export async function collectAllStreams(
 			const built = result.record;
 			if (built === null) {
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: result.unavailableFields.length,
-					field_omissions: result.unavailableFields,
-					row_reason:
-						built === null
-							? "record_identity_unavailable"
-							: "record_schema_invalid",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(
+						record,
+						rowIndex,
+						result.unavailableFields,
+						"record_identity_unavailable",
+					),
+				);
 				continue;
 			}
 			if (result.unavailableFields.length > 0) {
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: result.unavailableFields.length,
-					field_omissions: result.unavailableFields,
-					row_reason: "unavailable_fields",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(
+						record,
+						rowIndex,
+						result.unavailableFields,
+						"unavailable_fields",
+					),
+				);
 				continue;
 			}
 			if (!validateRecord("notes", built).ok) {
 				omitted += 1;
-				omittedRowDiagnostics.push({
-					row_index: rowIndex,
-					field_count: 0,
-					field_omissions: [],
-					row_reason: "record_schema_invalid",
-				});
+				omittedRowDiagnostics.push(
+					omittedRow(record, rowIndex, [], "record_schema_invalid"),
+				);
 				continue;
 			}
 			if (cursor.shouldEmit(built)) {
@@ -1281,6 +1437,28 @@ export async function collectAllStreams(
 						omittedRowDiagnostics,
 					)
 				: null);
+		// Notes withheld because the folders inventory failed fail for the
+		// folders cause, unless the notes query itself failed. Precedence follows
+		// the pipeline: notes query, then folders, then note representation.
+		if (
+			failure &&
+			walk.failure === undefined &&
+			folderFailure !== undefined &&
+			fieldOmissions.some(
+				(omission) =>
+					omission.reason === "folder_projection_incomplete" ||
+					omission.reason === "folder_name_unavailable",
+			)
+		) {
+			failure = {
+				...failure,
+				cause: {
+					kind: "dependency",
+					stream: "folders",
+					failure: folderFailure,
+				},
+			};
+		}
 		if (failure) {
 			failure = {
 				...failure,
@@ -1296,7 +1474,7 @@ export async function collectAllStreams(
 				reason: "icloud_navigation_changed",
 				message:
 					"The iCloud Notes page changed before the notes stream could be checkpointed.",
-				retryable: true,
+				cause: { kind: "transient" },
 				pageCount: walk.pageCount,
 			};
 		}

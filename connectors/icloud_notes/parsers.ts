@@ -6,42 +6,33 @@
  * they unit-test in isolation — the CloudKit fetch loop and browser
  * lifecycle live in index.ts.
  *
- * KNOWN LIMITATION — heuristic note-body decode: `extractNoteText` is a
- * byte-heuristic port of the legacy `connectors/apple/icloud-notes-playwright.js`
- * `extractTextFromProtobuf`/`extractCleanText`, faithfully preserved, NOT a
- * real Apple Notes protobuf parse. `TextDataEncrypted` holds a
- * compressed protobuf-encoded rich-text document (the same on-disk format
- * Apple Notes uses locally). This function decompresses the bytes and then
- * regex-scans for runs of printable text, joining them with newlines. It
- * will drop structural information (checklists, tables, formatting,
- * attachment placeholders) and can occasionally include protobuf field
- * names or other non-prose bytes that happen to look like a printable run.
- * It is a best-effort legacy behavior being carried forward, not a design
- * choice made fresh for this connector. A real protobuf schema for Apple
- * Notes' format is not publicly documented by Apple; reverse-engineered
- * community schemas exist but adopting one is out of scope for this cut.
+ * Note bodies are compressed protobuf rich-text documents. One decoder
+ * (`decodeNoteBodyBytes`) reads only the recognized text fields and returns
+ * DECODED, ABSENT or UNDECODABLE with a recorded cause. Apple does not
+ * publish the rich-text schema, so formatting and attachment metadata are
+ * skipped and any malformed recognized field is undecodable, never empty.
  */
 
 import type { CloudKitFieldValue, CloudKitRecord } from "./types.ts";
 
 // ─── Base64 / timestamp helpers ─────────────────────────────────────────
 
-/** Decode a CloudKit base64 field value (titles, snippets) to UTF-8 text.
- *  Returns null for absent/non-string input — never throws. Empty strings
- *  decode to empty strings and remain source data. */
+/** Decode a CloudKit base64 field value (titles, snippets, folder names) to
+ *  UTF-8 text with the same strict decoder as note bodies. Returns null for
+ *  absent/non-string input, invalid base64 and invalid UTF-8 — never throws,
+ *  and never replaces invalid bytes with U+FFFD. Empty strings decode to
+ *  empty strings and remain source data. */
 export function decodeBase64Text(value: unknown): string | null {
 	if (typeof value !== "string" || !isBase64(value)) {
 		return null;
 	}
-	try {
-		return new TextDecoder("utf-8", { ignoreBOM: true }).decode(base64Bytes(value));
-	} catch {
-		return null;
-	}
+	return decodeUtf8(base64Bytes(value));
 }
 
 function base64Bytes(value: string): Uint8Array {
-	return Uint8Array.from(atob(value.replace(/=+$/, "")), (char) => char.charCodeAt(0));
+	return Uint8Array.from(atob(value.replace(/=+$/, "")), (char) =>
+		char.charCodeAt(0),
+	);
 }
 
 function isBase64(value: string): boolean {
@@ -50,8 +41,13 @@ function isBase64(value: string): boolean {
 		return false;
 	}
 	try {
-		return btoa(atob(value.replace(/=+$/, ""))).replace(/=+$/, "") === value.replace(/=+$/, "");
-	} catch { return false; }
+		return (
+			btoa(atob(value.replace(/=+$/, ""))).replace(/=+$/, "") ===
+			value.replace(/=+$/, "")
+		);
+	} catch {
+		return false;
+	}
 }
 
 /** CloudKit timestamps are epoch milliseconds. Returns null for anything
@@ -64,7 +60,7 @@ export function epochMsToIso(value: unknown): string | null {
 	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-// ─── Heuristic note-body text extraction (ported from legacy) ──────────
+// ─── Note-body rich-text decoding ──────────────────────────────────────
 
 const DECOMPRESS_FORMATS = ["gzip", "deflate", "deflate-raw"] as const;
 type DecompressFormat = (typeof DECOMPRESS_FORMATS)[number];
@@ -75,71 +71,232 @@ export async function decompressBytes(
 ): Promise<Uint8Array | null> {
 	try {
 		const input = new Uint8Array(bytes);
-		const stream = new Blob([input]).stream().pipeThrough(new DecompressionStream(format));
+		const stream = new Blob([input])
+			.stream()
+			.pipeThrough(new DecompressionStream(format));
 		return new Uint8Array(await new Response(stream).arrayBuffer());
 	} catch {
 		return null;
 	}
 }
 
-/** Printable run length ≥4, ASCII or extended Unicode. Mirrors the legacy
- *  `/[\x20-\x7E -￿]{4,}/g` extraction pattern exactly. */
-const PRINTABLE_RUN_RE = /[\x20-\x7E -￿]{4,}/g;
-/** "Looks like prose" character class used to score each printable run,
- *  mirroring the legacy connector's clean-text heuristic. */
-const CLEAN_CHAR_RE = /[a-zA-Z0-9 .,;:!?'"()\-\n\r\t‘’“”…–—]/g;
-const CLEAN_RATIO_THRESHOLD = 0.6;
+type ProtobufField = {
+	fieldNumber: number;
+	wireType: number;
+	/** Present only for length-delimited (wire type 2) fields. */
+	value?: Uint8Array;
+};
 
-/** Scan decompressed bytes for runs of human-readable text. Same heuristic
- *  as legacy `extractCleanText`: a run of ≥4 printable characters counts as
- *  prose only if >60% of its characters are common prose/punctuation. */
-export function extractCleanText(decompressed: Uint8Array): string | null {
-	const fullText = new TextDecoder("utf-8", { ignoreBOM: true }).decode(decompressed);
+/** Why a body that exists could not be turned into text. Each value is the
+ *  `reason` recorded on the withheld `text_content` field. */
+export type NoteBodyUndecodableCause =
+	| "body_base64_invalid"
+	| "body_not_compressed"
+	| "body_protobuf_malformed"
+	| "body_structure_unrecognized"
+	| "body_text_invalid_utf8"
+	| "body_text_wrong_wire_type";
+
+/** The one outcome of decoding a note body. Undecodable is never empty and
+ *  never text: callers withhold the field and record the cause. */
+export type NoteBodyDecode =
+	| { kind: "DECODED"; text: string }
+	| { kind: "ABSENT" }
+	| { kind: "UNDECODABLE"; cause: NoteBodyUndecodableCause };
+
+type ProtobufMessage = "note_body" | "note_document" | "rich_text";
+
+/** The recognized Apple Notes body structure. Apple publishes no schema, so
+ *  only these fields are read: everything else is formatting or attachment
+ *  metadata and never contributes text. */
+interface MessageShape {
+	/** Field holding a UTF-8 text run. */
+	textField?: number;
+	/** Field holding a nested message that may carry text. */
+	childField?: number;
+	child?: ProtobufMessage;
+	/** Fields that prove the structure but never carry body text. */
+	metadataFields?: readonly number[];
+}
+
+const MESSAGE_SHAPES: Record<ProtobufMessage, MessageShape> = {
+	note_body: { textField: 1, childField: 2, child: "note_document" },
+	note_document: { childField: 3, child: "rich_text" },
+	rich_text: { textField: 2, metadataFields: [3] },
+};
+
+type MessageWalk =
+	| { kind: "WALKED"; runs: string[]; recognized: boolean }
+	| { kind: "UNDECODABLE"; cause: NoteBodyUndecodableCause };
+
+/** Read a tag or length: an unsigned value that must fit 32 bits. */
+function readVarint(
+	bytes: Uint8Array,
+	offset: number,
+): [number, number] | null {
+	let value = 0;
+	for (let shift = 0; shift < 35; shift += 7) {
+		if (offset >= bytes.length) return null;
+		const byte = bytes[offset++];
+		if (byte === undefined) return null;
+		// The fifth byte may only carry the top four bits of a 32-bit value.
+		if (shift === 28 && (byte & 0x70) !== 0) return null;
+		value |= (byte & 0x7f) << shift;
+		if ((byte & 0x80) === 0) return [value >>> 0, offset];
+	}
+	return null;
+}
+
+/** Skip a scalar varint field value, which may use up to ten bytes (int64). */
+function skipVarint(bytes: Uint8Array, offset: number): number | null {
+	for (let length = 0; length < 10; length += 1) {
+		const byte = bytes[offset + length];
+		if (byte === undefined) return null;
+		if ((byte & 0x80) === 0) return offset + length + 1;
+	}
+	return null;
+}
+
+function parseProtobuf(bytes: Uint8Array): ProtobufField[] | null {
+	const fields: ProtobufField[] = [];
+	let offset = 0;
+	while (offset < bytes.length) {
+		const tag = readVarint(bytes, offset);
+		if (!tag || tag[0] === 0) return null;
+		offset = tag[1];
+		const fieldNumber = tag[0] >>> 3;
+		const wireType = tag[0] & 7;
+		if (fieldNumber === 0) return null;
+		if (wireType === 0) {
+			const next = skipVarint(bytes, offset);
+			if (next === null) return null;
+			offset = next;
+		} else if (wireType === 1 || wireType === 5) {
+			offset += wireType === 1 ? 8 : 4;
+			if (offset > bytes.length) return null;
+		} else if (wireType === 2) {
+			const length = readVarint(bytes, offset);
+			if (!length) return null;
+			offset = length[1];
+			const end = offset + length[0];
+			if (end > bytes.length) return null;
+			fields.push({
+				fieldNumber,
+				wireType,
+				value: bytes.subarray(offset, end),
+			});
+			offset = end;
+			continue;
+		} else {
+			return null;
+		}
+		fields.push({ fieldNumber, wireType });
+	}
+	return fields;
+}
+
+/** The one UTF-8 decoder for bodies and mapped text: invalid bytes are null,
+ *  never replacement characters. */
+function decodeUtf8(bytes: Uint8Array): string | null {
+	try {
+		return new TextDecoder("utf-8", {
+			fatal: true,
+			ignoreBOM: true,
+		}).decode(bytes);
+	} catch {
+		return null;
+	}
+}
+
+/** Rendering rule shared with the legacy script, applied to each text field:
+ *  control characters (line feeds, tabs, vertical tabs, escapes) end a run,
+ *  empty runs are dropped, and runs that are only attachment placeholders
+ *  (U+FFFC) carry no text. The runs are later joined with one line feed. A
+ *  U+FFFC inside a longer run is ordinary text and stays. */
+function renderTextRuns(value: string): string[] {
+	return value
+		.split(/[\u0000-\u001F\u007F-\u009F]/)
+		.filter((run) => run.length > 0 && !/^\uFFFC+$/.test(run));
+}
+
+/** Append one at a time: a body can hold more runs than a call can take as
+ *  spread arguments. */
+function appendRuns(target: string[], runs: readonly string[]): void {
+	for (const run of runs) target.push(run);
+}
+
+function walkMessage(
+	bytes: Uint8Array,
+	message: ProtobufMessage,
+): MessageWalk {
+	const fields = parseProtobuf(bytes);
+	if (!fields) return { kind: "UNDECODABLE", cause: "body_protobuf_malformed" };
+	const shape = MESSAGE_SHAPES[message];
 	const runs: string[] = [];
-	for (const match of fullText.matchAll(PRINTABLE_RUN_RE)) {
-		const run = match[0];
-		const cleanCount = (run.match(CLEAN_CHAR_RE) ?? []).length;
-		if (cleanCount / run.length > CLEAN_RATIO_THRESHOLD) {
-			runs.push(run);
+	let recognized = false;
+	for (const field of fields) {
+		if (field.fieldNumber === shape.textField) {
+			if (field.wireType !== 2 || !field.value) {
+				return { kind: "UNDECODABLE", cause: "body_text_wrong_wire_type" };
+			}
+			const text = decodeUtf8(field.value);
+			if (text === null) {
+				return { kind: "UNDECODABLE", cause: "body_text_invalid_utf8" };
+			}
+			recognized = true;
+			appendRuns(runs, renderTextRuns(text));
+		} else if (field.fieldNumber === shape.childField && shape.child) {
+			if (field.wireType !== 2 || !field.value) {
+				return { kind: "UNDECODABLE", cause: "body_text_wrong_wire_type" };
+			}
+			const child = walkMessage(field.value, shape.child);
+			if (child.kind === "UNDECODABLE") return child;
+			if (field.value.length > 0 && !child.recognized) {
+				return { kind: "UNDECODABLE", cause: "body_structure_unrecognized" };
+			}
+			recognized = true;
+			appendRuns(runs, child.runs);
+		} else if (shape.metadataFields?.includes(field.fieldNumber)) {
+			recognized = true;
 		}
 	}
-	return runs.length > 0 ? runs.join("\n") : null;
+	return { kind: "WALKED", runs, recognized };
+}
+
+/** Decode a decompressed note body. The recognized structure is the only
+ *  source of text, so metadata bytes and length prefixes cannot leak in and
+ *  short or non-Latin runs cannot be filtered out. */
+export function decodeNoteBodyBytes(bytes: Uint8Array): NoteBodyDecode {
+	if (bytes.length === 0) return { kind: "ABSENT" };
+	const walk = walkMessage(bytes, "note_body");
+	if (walk.kind === "UNDECODABLE") return walk;
+	if (!walk.recognized) {
+		return { kind: "UNDECODABLE", cause: "body_structure_unrecognized" };
+	}
+	return walk.runs.length === 0
+		? { kind: "ABSENT" }
+		: { kind: "DECODED", text: walk.runs.join("\n") };
 }
 
 /** Decode a note's `TextDataEncrypted` field (base64 of a compressed
- *  protobuf blob) to a best-effort text preview. Tries gzip, then raw
- *  deflate, then zlib deflate — the legacy connector tried the same three
- *  formats in the same order because the compression Apple's client uses
- *  is not documented and has been observed to vary. Returns null if the
- *  input can't be decoded under any tried format or contains no
- *  extractable prose. */
-type NoteTextExtraction =
-	| { kind: "READ"; value: string }
-	| { kind: "EXPLICIT_EMPTY" }
-	| { kind: "UNAVAILABLE"; reason: "body_text_unreadable" };
-
-async function readCompressedNoteText(base64Data: string): Promise<NoteTextExtraction> {
+ *  protobuf blob). Tries gzip, then zlib deflate, then raw deflate. */
+export async function decodeNoteBody(
+	base64Data: string,
+): Promise<NoteBodyDecode> {
 	let bytes: Uint8Array;
 	try {
 		bytes = base64Bytes(base64Data);
 	} catch {
-		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+		return { kind: "UNDECODABLE", cause: "body_base64_invalid" };
 	}
 	for (const format of DECOMPRESS_FORMATS) {
 		const decompressed = await decompressBytes(bytes, format);
 		if (!decompressed) {
 			continue;
 		}
-		const text = extractCleanText(decompressed);
-		return text ? { kind: "READ", value: text } : { kind: "EXPLICIT_EMPTY" };
+		return decodeNoteBodyBytes(decompressed);
 	}
-	return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
-}
-
-export async function extractNoteText(base64Data: unknown): Promise<string | null> {
-	if (typeof base64Data !== "string" || base64Data.length === 0) return null;
-	const result = await readCompressedNoteText(base64Data);
-	return result.kind === "READ" ? result.value : null;
+	return { kind: "UNDECODABLE", cause: "body_not_compressed" };
 }
 
 // ─── CloudKit field access ───────────────────────────────────────────────
@@ -280,8 +437,11 @@ function textField(
 	if (raw.value === null) return explicitEmpty(null);
 	if (typeof raw.value !== "string")
 		return unavailable("expected_base64_text", raw.value);
+	if (!isBase64(raw.value)) {
+		return unavailable("invalid_base64_text", raw.value);
+	}
 	const value = decodeBase64Text(raw.value);
-	if (value === null) return unavailable("invalid_base64_text", raw.value);
+	if (value === null) return unavailable("invalid_utf8_text", raw.value);
 	return value.length === 0 ? explicitEmpty("") : read(value);
 }
 
@@ -454,12 +614,9 @@ async function bodyTextField(
 		return unavailable("expected_base64_body", raw.value);
 	if (!isBase64(raw.value))
 		return unavailable("invalid_base64_body", raw.value);
-	const extraction = await readCompressedNoteText(raw.value);
-	if (extraction.kind === "UNAVAILABLE")
-		return unavailable(extraction.reason, raw.value);
-	return extraction.kind === "EXPLICIT_EMPTY"
-		? explicitEmpty(null)
-		: read(extraction.value);
+	const body = await decodeNoteBody(raw.value);
+	if (body.kind === "UNDECODABLE") return unavailable(body.cause, raw.value);
+	return body.kind === "ABSENT" ? explicitEmpty(null) : read(body.text);
 }
 
 function collectUnavailableFields(
@@ -622,7 +779,9 @@ export async function buildNoteRecord(
 	record: CloudKitRecord,
 	folderNames: ReadonlyMap<string, string> = new Map(),
 ): Promise<NoteRecord | null> {
-	return (await readNoteRecord(record, folderNames, { folderScanComplete: true })).record;
+	return (
+		await readNoteRecord(record, folderNames, { folderScanComplete: true })
+	).record;
 }
 
 /** Build a `folders` stream record from a raw CloudKit `Folder` record.

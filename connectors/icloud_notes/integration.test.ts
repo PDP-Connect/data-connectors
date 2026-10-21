@@ -18,6 +18,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 import { chromium } from "patchright";
 import type { Page } from "playwright";
 import type {
@@ -504,7 +505,9 @@ test("collectAllStreams: refuses malformed successful envelopes and does not che
 					(message) =>
 						message.type === "SKIP_RESULT" &&
 						message.stream === stream &&
-						(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_invalid_query_response"),
+						message.reason === "inventory_not_proven_complete" &&
+						diagnosticField(message, "source_reason") ===
+							"icloud_invalid_query_response",
 				),
 				"malformed envelopes must leave a durable stream gap",
 			);
@@ -534,7 +537,8 @@ test("collectAllStreams: a failed folder query leaves notes withheld without a f
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "notes" &&
-				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_omitted_rows"),
+				message.reason === "inventory_not_proven_complete" &&
+				diagnosticField(message, "source_reason") === "icloud_omitted_rows",
 		),
 	);
 	assert.equal(
@@ -609,7 +613,8 @@ test("collectAllStreams: repeated continuation markers stop as a gap", async () 
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_no_progress"),
+				message.reason === "inventory_not_proven_complete" &&
+				diagnosticField(message, "source_reason") === "icloud_no_progress",
 		),
 	);
 	assert.equal(
@@ -734,11 +739,17 @@ test("collectAllStreams: unknown recordType withholds both streams and preserves
 			`${stream} must be withheld`,
 		);
 		assert.equal(skip.reason, "inventory_not_proven_complete");
-		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		// The same unreadable discriminator fails every retry of this revision.
+		assert.deepEqual(skip.recovery_hint, {
+			action: "not_retriable",
+			retryable: false,
+		});
 		assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
 		assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
 			{
 				row_index: 0,
+				record_id:
+					stream === "folders" ? "folder-unknown-type" : "note-missing-type",
 				field_count: 1,
 				field_omissions: [{ field: "recordType", reason, source_shape: shape }],
 				row_reason: "unavailable_fields",
@@ -871,7 +882,11 @@ test("collectAllStreams: unreadable mapped fields are reported and veto both str
 							IsPinned: { value: {} },
 							Attachments: { value: "unreadable" },
 							CreationDate: {},
-							TextDataEncrypted: { value: 42 },
+							TextDataEncrypted: {
+								value: gzipSync(Buffer.from([0x00, 0xff, 0xfe])).toString(
+									"base64",
+								),
+							},
 						}),
 					},
 					{
@@ -957,8 +972,8 @@ test("collectAllStreams: unreadable mapped fields are reported and veto both str
 					},
 					{
 						field: "text_content",
-						reason: "expected_base64_body",
-						source_shape: { type: "number" },
+						reason: "body_protobuf_malformed",
+						source_shape: { type: "string", length: 32 },
 					},
 					{
 						field: "title",
@@ -1136,11 +1151,16 @@ test("collectAllStreams: malformed Deleted controls withhold rows and preserve s
 	);
 	assert.ok(skip && skip.type === "SKIP_RESULT");
 	assert.equal(skip.reason, "inventory_not_proven_complete");
-		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
-		assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
+	// The same malformed control fails every retry of this revision.
+	assert.deepEqual(skip.recovery_hint, {
+		action: "not_retriable",
+		retryable: false,
+	});
+	assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
 	assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
 		{
 			row_index: 0,
+			record_id: "note-deleted-wrapper-malformed",
 			field_count: 1,
 			field_omissions: [
 				{
@@ -1153,6 +1173,7 @@ test("collectAllStreams: malformed Deleted controls withhold rows and preserve s
 		},
 		{
 			row_index: 1,
+			record_id: "note-deleted-value-malformed",
 			field_count: 1,
 			field_omissions: [
 				{
@@ -1278,7 +1299,8 @@ test("collectAllStreams: rejected schema rows produce an omission gap and cannot
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_omitted_rows"),
+				message.reason === "inventory_not_proven_complete" &&
+				diagnosticField(message, "source_reason") === "icloud_omitted_rows",
 		),
 	);
 	assert.equal(
@@ -1505,7 +1527,6 @@ test("collectAllStreams: pending readiness evaluations are bounded and cannot st
 	);
 });
 
-
 for (const locationRead of [1, 2, 3, 4]) {
 	test(`collectAllStreams: location read ${locationRead} never settling stays within the readiness deadline`, async (t) => {
 		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
@@ -1515,8 +1536,12 @@ for (const locationRead of [1, 2, 3, 4]) {
 		let reloads = 0;
 		const page = makeFakePage([], undefined, {
 			readyState: "loading",
-			onValidate: () => { validations += 1; },
-			onReload: () => { reloads += 1; },
+			onValidate: () => {
+				validations += 1;
+			},
+			onReload: () => {
+				reloads += 1;
+			},
 		});
 		const evaluate = page.evaluate.bind(page);
 		page.evaluate = ((_fn: unknown, arg: unknown) => {
@@ -1526,20 +1551,32 @@ for (const locationRead of [1, 2, 3, 4]) {
 			return evaluate(_fn as never, arg);
 		}) as Page["evaluate"];
 		let settled = false;
-		const collection = assert.rejects(
-			collectAllStreams(makeCtx(page, harness, ["notes"])),
-			/icloud_readiness_exhausted/,
-		).then(() => { settled = true; });
+		const collection = assert
+			.rejects(
+				collectAllStreams(makeCtx(page, harness, ["notes"])),
+				/icloud_readiness_exhausted/,
+			)
+			.then(() => {
+				settled = true;
+			});
 		for (let elapsed = 0; elapsed <= 20_000 && !settled; elapsed += 1000) {
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			if (elapsed < 20_000) t.mock.timers.tick(1000);
 		}
-		assert.equal(settled, true, "location reads must not escape the shared 20 s deadline");
+		assert.equal(
+			settled,
+			true,
+			"location reads must not escape the shared 20 s deadline",
+		);
 		await collection;
 		assert.ok(Date.now() <= 20_000);
 		assert.ok(reads >= locationRead);
 		assert.equal(validations, 0);
-		assert.equal(reloads, 0, "an unreadable current route must never be reloaded");
+		assert.equal(
+			reloads,
+			0,
+			"an unreadable current route must never be reloaded",
+		);
 		assert.equal(harness.events.length, 0);
 	});
 
@@ -1548,25 +1585,42 @@ for (const locationRead of [1, 2, 3, 4]) {
 		let reads = 0;
 		let reloads = 0;
 		const page = makeFakePage([folderQueryResponse()], undefined, {
-			...(locationRead === 4 ? { readyState: "loading", readyStateAfterWait: "loading" } : {}),
-			onReload: () => { reloads += 1; },
+			...(locationRead === 4
+				? { readyState: "loading", readyStateAfterWait: "loading" }
+				: {}),
+			onReload: () => {
+				reloads += 1;
+			},
 			reloadReadyState: "complete",
 		});
 		const evaluate = page.evaluate.bind(page);
 		let probes = 0;
 		page.evaluate = ((fn: unknown, arg: unknown) => {
 			if (arg === "icloud-notes-location" && ++reads === locationRead) {
-				return Promise.reject(new Error("Execution context was destroyed, most likely because of a navigation"));
+				return Promise.reject(
+					new Error(
+						"Execution context was destroyed, most likely because of a navigation",
+					),
+				);
 			}
 			if (arg === undefined && ++probes > 1) {
-				return Promise.resolve({ href: "https://www.icloud.com/notes", readyState: "complete", blocked: false });
+				return Promise.resolve({
+					href: "https://www.icloud.com/notes",
+					readyState: "complete",
+					blocked: false,
+				});
 			}
 			return evaluate(fn as never, arg);
 		}) as Page["evaluate"];
 		await collectAllStreams(makeCtx(page, harness, ["folders"]));
-		assert.ok(reads > locationRead, "the transient location failure must retry");
+		assert.ok(
+			reads > locationRead,
+			"the transient location failure must retry",
+		);
 		assert.equal(reloads, locationRead === 4 ? 0 : 1);
-		assert.ok(harness.protocolMessages.some((message) => message.type === "STATE"));
+		assert.ok(
+			harness.protocolMessages.some((message) => message.type === "STATE"),
+		);
 	});
 }
 
@@ -1574,7 +1628,9 @@ test("collectAllStreams: location failure followed by navigation away vetoes rec
 	const harness = makeRecordingEmit(validateRecord);
 	let reloads = 0;
 	const page = makeFakePage([], undefined, {
-		onReload: () => { reloads += 1; },
+		onReload: () => {
+			reloads += 1;
+		},
 	}) as Page & { setUrl: (url: string) => void };
 	const evaluate = page.evaluate.bind(page);
 	let reads = 0;
@@ -1585,7 +1641,10 @@ test("collectAllStreams: location failure followed by navigation away vetoes rec
 		}
 		return evaluate(fn as never, arg);
 	}) as Page["evaluate"];
-	await assert.rejects(collectAllStreams(makeCtx(page, harness, ["notes"])), /icloud_wrong_page/);
+	await assert.rejects(
+		collectAllStreams(makeCtx(page, harness, ["notes"])),
+		/icloud_wrong_page/,
+	);
 	assert.equal(reloads, 0);
 	assert.equal(harness.events.length, 0);
 });
@@ -1606,7 +1665,9 @@ test("collectAllStreams: navigation change vetoes a terminal query response", as
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_navigation_changed"),
+				message.reason === "inventory_not_proven_complete" &&
+				diagnosticField(message, "source_reason") ===
+					"icloud_navigation_changed",
 		),
 	);
 });
@@ -1616,19 +1677,40 @@ test("collectAllStreams: throws when the CloudKit config cannot be resolved (aut
 	const page = {
 		evaluate: (_fn: unknown, arg: unknown): Promise<unknown> =>
 			Promise.resolve(
-				arg === "icloud-notes-location" ? "https://www.icloud.com/notes" : arg === undefined
-					? {
-							href: "https://www.icloud.com/notes",
-							readyState: "complete",
-							blocked: false,
-						}
-					: { status: 401, json: null },
+				arg === "icloud-notes-location"
+					? "https://www.icloud.com/notes"
+					: arg === undefined
+						? {
+								href: "https://www.icloud.com/notes",
+								readyState: "complete",
+								blocked: false,
+							}
+						: { status: 401, json: null },
 			),
 		url: () => "https://www.icloud.com/notes",
 	} as unknown as Page;
 	const ctx = makeCtx(page, harness, ["notes"]);
 
 	await assert.rejects(collectAllStreams(ctx), /icloud_auth_failed/);
+});
+
+test("collectAllStreams: an empty stream selection makes no page request", async () => {
+	let pageCalls = 0;
+	const page = {
+		evaluate: () => {
+			pageCalls += 1;
+			return Promise.resolve(null);
+		},
+		url: () => {
+			pageCalls += 1;
+			return "https://www.icloud.com/notes";
+		},
+	} as unknown as Page;
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(makeCtx(page, harness, []));
+	assert.equal(pageCalls, 0);
+	assert.deepEqual(harness.protocolMessages, []);
+	assert.deepEqual(harness.emitted, []);
 });
 
 test("iCloud sign-in keeps one Patchright tab and collection reuses the authenticated page", async () => {
@@ -1695,15 +1777,743 @@ test("iCloud sign-in keeps one Patchright tab and collection reuses the authenti
 		assert.equal(openedPages, 0);
 		assert.equal(context.pages().length, 1);
 		assert.equal(new URL(page.url()).origin, "https://www.icloud.com");
+		const cloudKitQueries: string[] = [];
+		await context.route("https://p00-ckdatabasews.icloud.com/**", (route) => {
+			const request = route.request();
+			const hasSession = Boolean(
+				request.headers().cookie?.includes("icloud-fixture-session=live"),
+			);
+			const indexName = (
+				JSON.parse(request.postData() ?? "{}") as {
+					query?: { filterBy?: { fieldValue?: { value?: string } }[] };
+				}
+			).query?.filterBy?.[0]?.fieldValue?.value;
+			cloudKitQueries.push(`${indexName}:${hasSession ? "session" : "none"}`);
+			return route.fulfill({
+				status: hasSession ? 200 : 401,
+				headers: {
+					"access-control-allow-credentials": "true",
+					"access-control-allow-origin": "https://www.icloud.com",
+				},
+				contentType: "application/json",
+				body: JSON.stringify(
+					indexName === "parentless"
+						? folderQueryResponse()
+						: noteQueryResponse(),
+				),
+			});
+		});
+		const validateCallsBeforeCollection = validateCalls;
 		const harness = makeRecordingEmit(validateRecord);
-		await collectAllStreams(makeCtx(page, harness, []));
+		await collectAllStreams(makeCtx(page, harness, ["notes"]));
 		assert.ok(
-			validateCalls >= 2,
-			"session establishment probes the page; an empty stream selection makes no collection request",
+			validateCalls > validateCallsBeforeCollection,
+			"collection resolves CloudKit from the authenticated page",
+		);
+		assert.deepEqual(
+			cloudKitQueries,
+			["parentless:session", "recents:session"],
+			"both CloudKit queries carry the session cookie set during sign-in",
+		);
+		assert.deepEqual(
+			harness.emitted.map((record) => ({
+				stream: record.stream,
+				id: record.data.id,
+				folder_name: record.data.folder_name,
+			})),
+			[{ stream: "notes", id: "note-1", folder_name: "Work" }],
+		);
+		assert.ok(
+			harness.protocolMessages.some(
+				(message) => message.type === "STATE" && message.stream === "notes",
+			),
+			"the collected notes stream checkpoints",
 		);
 		assert.equal(context.pages().length, 1);
 		await context.close();
 	} finally {
 		await browser.close();
 	}
+});
+
+test("collectAllStreams: invalid UTF-8 in a title, snippet or folder name withholds the row and the checkpoint until a repaired retry re-emits it", async () => {
+	// "/w==" is valid base64 for the one byte 0xFF, which is not UTF-8.
+	const INVALID_UTF8 = "/w==";
+	const note = (fields: Record<string, unknown>) => ({
+		records: [
+			{
+				recordName: "note-text",
+				recordType: "Note",
+				fields: readableEmptyNoteFields(fields),
+			},
+		],
+	});
+	const folder = (title: string) => ({
+		records: [
+			{
+				recordName: "folder-text",
+				recordType: "Folder",
+				fields: { TitleEncrypted: { value: title } },
+			},
+		],
+	});
+	const notesPage = (response: unknown) => makeNotePage([response]);
+	const foldersPage = (response: unknown) =>
+		makeFakePage([{ stream: "folders", response }]);
+	const cases = [
+		{
+			stream: "notes",
+			field: "title",
+			page: notesPage,
+			seed: noteQueryResponse(),
+			broken: note({ TitleEncrypted: { value: INVALID_UTF8 } }),
+			repaired: note({ TitleEncrypted: { value: b64("Repaired title") } }),
+			emitted: { id: "note-text", value: "Repaired title" },
+		},
+		{
+			stream: "notes",
+			field: "snippet",
+			page: notesPage,
+			seed: noteQueryResponse(),
+			broken: note({ SnippetEncrypted: { value: INVALID_UTF8 } }),
+			repaired: note({ SnippetEncrypted: { value: b64("Repaired snippet") } }),
+			emitted: { id: "note-text", value: "Repaired snippet" },
+		},
+		{
+			stream: "folders",
+			field: "name",
+			page: foldersPage,
+			seed: folderQueryResponse(),
+			broken: folder(INVALID_UTF8),
+			repaired: folder(b64("Repaired folder")),
+			emitted: { id: "folder-text", value: "Repaired folder" },
+		},
+	];
+	const stateOf = (harness: ReturnType<typeof makeRecordingEmit>, stream: string) =>
+		harness.protocolMessages.find(
+			(message) => message.type === "STATE" && message.stream === stream,
+		);
+	await Promise.all(
+		cases.map(async ({ stream, field, page, seed, broken, repaired, emitted }) => {
+			const previous = makeRecordingEmit(validateRecord);
+			await collectAllStreams(makeCtx(page(seed), previous, [stream]));
+			const previousState = stateOf(previous, stream);
+			assert.ok(previousState && previousState.type === "STATE", field);
+			const seeded = { [stream]: previousState.cursor };
+
+			const failed = makeRecordingEmit(validateRecord);
+			const failedCtx = makeCtx(page(broken), failed, [stream], seeded);
+			await collectAllStreams(failedCtx);
+			assert.equal(failed.emitted.length, 0, `${field}: no row`);
+			assert.equal(stateOf(failed, stream), undefined, `${field}: no checkpoint`);
+			assert.deepEqual(failedCtx.state, seeded, `${field}: prior cursor kept`);
+			const skip = failed.protocolMessages.find(
+				(message) => message.type === "SKIP_RESULT" && message.stream === stream,
+			);
+			assert.ok(skip && skip.type === "SKIP_RESULT", field);
+			assert.deepEqual(
+				(
+					diagnosticField(skip, "field_omissions") as {
+						field: string;
+						reason: string;
+					}[]
+				).map((omission) => ({ field: omission.field, reason: omission.reason })),
+				[{ field, reason: "invalid_utf8_text" }],
+			);
+
+			const retry = makeRecordingEmit(validateRecord);
+			await collectAllStreams(makeCtx(page(repaired), retry, [stream], seeded));
+			assert.deepEqual(
+				retry.emitted.map((record) => ({
+					id: record.data.id,
+					value: record.data[field],
+				})),
+				[emitted],
+			);
+			assert.ok(stateOf(retry, stream), `${field}: repaired retry checkpoints`);
+		}),
+	);
+});
+
+test("collectAllStreams: an undecodable body withholds the row and the checkpoint until a repaired retry re-emits it", async () => {
+	const noteWithBody = (decompressedBody: Buffer) => ({
+		records: [
+			{
+				recordName: "note-body-only",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({
+					TitleEncrypted: { value: b64("Body under repair") },
+					TextDataEncrypted: {
+						value: gzipSync(decompressedBody).toString("base64"),
+					},
+				}),
+			},
+		],
+	});
+	// note_body 2 -> note_document 3 -> rich_text { text as varint, empty metadata }
+	const wrongWireType = Buffer.from([
+		0x12, 0x06, 0x1a, 0x04, 0x10, 0x01, 0x1a, 0x00,
+	]);
+	// Same note: a short run after a long one, in a readable structure.
+	// Values stay under 128 bytes, so each length is one varint byte.
+	const field = (fieldNumber: number, value: Buffer) => {
+		assert.ok(value.length < 0x80);
+		return Buffer.concat([
+			Buffer.from([(fieldNumber << 3) | 2, value.length]),
+			value,
+		]);
+	};
+	const repaired = field(
+		2,
+		field(
+			3,
+			Buffer.concat([
+				field(2, Buffer.from("First paragraph")),
+				field(2, Buffer.from("hi")),
+			]),
+		),
+	);
+
+	const previous = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([noteQueryResponse()]), previous, ["notes"]),
+	);
+	const previousState = previous.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "notes",
+	);
+	assert.ok(previousState && previousState.type === "STATE");
+	const seed = { notes: previousState.cursor };
+
+	const broken = makeRecordingEmit(validateRecord);
+	const brokenCtx = makeCtx(
+		makeNotePage([noteWithBody(wrongWireType)]),
+		broken,
+		["notes"],
+		seed,
+	);
+	await collectAllStreams(brokenCtx);
+	assert.equal(broken.emitted.length, 0, "an undecodable body emits no row");
+	assert.equal(
+		broken.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+		"an undecodable body vetoes the notes checkpoint",
+	);
+	assert.deepEqual(brokenCtx.state, seed, "the prior cursor stays untouched");
+	const skip = broken.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.deepEqual(
+		(
+			diagnosticField(skip, "field_omissions") as {
+				field: string;
+				reason: string;
+			}[]
+		).map(({ field, reason }) => ({ field, reason })),
+		[{ field: "text_content", reason: "body_text_wrong_wire_type" }],
+	);
+
+	const retry = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([noteWithBody(repaired)]), retry, ["notes"], seed),
+	);
+	assert.deepEqual(
+		retry.emitted.map((record) => ({
+			id: record.data.id,
+			text_content: record.data.text_content,
+		})),
+		[{ id: "note-body-only", text_content: "First paragraph\nhi" }],
+	);
+	assert.ok(
+		retry.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		"a decodable body lets the notes checkpoint advance",
+	);
+});
+
+test("collectAllStreams: a permanently malformed note is not retried as the same revision, never checkpoints false coverage, and emits once repaired", async () => {
+	// "/w==" is valid base64 for the one byte 0xFF, which is not UTF-8.
+	const INVALID_UTF8 = "/w==";
+	const good = (title: string) => ({
+		recordName: "note-good",
+		recordType: "Note",
+		fields: readableEmptyNoteFields({ TitleEncrypted: { value: b64(title) } }),
+	});
+	const bad = (titleValue: string) => ({
+		recordName: "note-bad",
+		recordType: "Note",
+		fields: readableEmptyNoteFields({ TitleEncrypted: { value: titleValue } }),
+	});
+	const notesStateOf = (harness: ReturnType<typeof makeRecordingEmit>) =>
+		harness.protocolMessages.find(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		);
+
+	const healthy = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeNotePage([{ records: [good("Good v0"), bad(b64("Bad v0"))] }]),
+			healthy,
+			["notes"],
+		),
+	);
+	const healthyState = notesStateOf(healthy);
+	assert.ok(healthyState && healthyState.type === "STATE");
+	const seed = { notes: healthyState.cursor };
+
+	// The bad note's bytes stay identical on every run. The healthy note
+	// changes on every run.
+	for (const revision of ["Good v1", "Good v2", "Good v3"]) {
+		const run = makeRecordingEmit(validateRecord);
+		const ctx = makeCtx(
+			makeNotePage([{ records: [good(revision), bad(INVALID_UTF8)] }]),
+			run,
+			["notes"],
+			structuredClone(seed),
+		);
+		await collectAllStreams(ctx);
+
+		assert.deepEqual(
+			run.emitted.map((record) => ({
+				id: record.data.id,
+				title: record.data.title,
+			})),
+			[{ id: "note-good", title: revision }],
+			`${revision}: the changed healthy note emits; the malformed note does not`,
+		);
+		assert.ok(
+			!JSON.stringify(run.emitted).includes("�"),
+			`${revision}: no replacement-character text`,
+		);
+		assert.equal(
+			notesStateOf(run),
+			undefined,
+			`${revision}: no checkpoint claims complete inventory`,
+		);
+		assert.deepEqual(ctx.state, seed, `${revision}: prior cursor kept`);
+		const skip = run.protocolMessages.find(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+		);
+		assert.ok(skip && skip.type === "SKIP_RESULT", revision);
+		assert.deepEqual(
+			skip.recovery_hint,
+			{ action: "not_retriable", retryable: false },
+			`${revision}: an unchanged malformed revision is not offered for automatic retry`,
+		);
+		assert.deepEqual(
+			(
+				diagnosticField(skip, "omitted_row_diagnostics") as {
+					record_id?: string;
+					field_omissions: { field: string; reason: string }[];
+				}[]
+			).map((row) => ({
+				record_id: row.record_id,
+				fields: row.field_omissions.map(({ field, reason }) => ({
+					field,
+					reason,
+				})),
+			})),
+			[
+				{
+					record_id: "note-bad",
+					fields: [{ field: "title", reason: "invalid_utf8_text" }],
+				},
+			],
+			`${revision}: the rejected row is identified by its record id`,
+		);
+	}
+
+	// The source repairs the bad note: both notes emit and the stream
+	// checkpoints, after which the next run is a fixed point.
+	const repaired = makeRecordingEmit(validateRecord);
+	const repairedCtx = makeCtx(
+		makeNotePage([{ records: [good("Good v3"), bad(b64("Bad v1"))] }]),
+		repaired,
+		["notes"],
+		seed,
+	);
+	await collectAllStreams(repairedCtx);
+	assert.deepEqual(
+		repaired.emitted
+			.map((record) => ({ id: record.data.id, title: record.data.title }))
+			.sort((left, right) => String(left.id).localeCompare(String(right.id))),
+		[
+			{ id: "note-bad", title: "Bad v1" },
+			{ id: "note-good", title: "Good v3" },
+		],
+	);
+	const repairedState = notesStateOf(repaired);
+	assert.ok(repairedState && repairedState.type === "STATE");
+	assert.equal(
+		repaired.protocolMessages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+
+	const steady = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeNotePage([{ records: [good("Good v3"), bad(b64("Bad v1"))] }]),
+			steady,
+			["notes"],
+			{ notes: repairedState.cursor },
+		),
+	);
+	assert.equal(steady.emitted.length, 0, "converged: nothing re-emits");
+	assert.ok(notesStateOf(steady), "converged: the checkpoint holds");
+});
+
+test("collectAllStreams: notes withheld by a transient folders failure keep the folders retry hint", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const ctx = makeCtx(
+		makeFakePage([
+			{ stream: "folders", response: { status: 503, json: null } },
+			{ stream: "notes", response: noteQueryResponse() },
+		]),
+		harness,
+		["notes"],
+	);
+	await collectAllStreams(ctx);
+
+	assert.equal(harness.emitted.length, 0);
+	const skip = harness.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.deepEqual(
+		(
+			diagnosticField(skip, "field_omissions") as {
+				field: string;
+				reason: string;
+			}[]
+		).map(({ field, reason }) => ({ field, reason })),
+		[{ field: "folder_name", reason: "folder_projection_incomplete" }],
+	);
+	assert.deepEqual(
+		skip.recovery_hint,
+		{ action: "retry_by_runtime", retryable: true },
+		"the folders outage is transient, so the notes it withheld stay retryable",
+	);
+});
+
+for (const phase of ["validate", "query page 2", "location read"] as const) {
+	test(`collectAllStreams: a ${phase} that never settles after readiness ends in a bounded failure`, async (t) => {
+		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+		const harness = makeRecordingEmit(validateRecord);
+		const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+		let validated = false;
+		let notesQueries = 0;
+		const page = makeNotePage([
+			noteQueryResponse({ continuationMarker: "page-2" }),
+			noteQueryResponse(),
+		]);
+		const evaluate = page.evaluate.bind(page);
+		page.evaluate = ((fn: unknown, arg: unknown) => {
+			const evalBody = (arg as { evalBody?: { query?: unknown } } | undefined)
+				?.evalBody;
+			const isNotesQuery =
+				evalBody !== undefined &&
+				JSON.stringify(evalBody.query).includes('"recents"');
+			if (isNotesQuery) notesQueries += 1;
+			const pending =
+				(phase === "validate" && arg === VALIDATE_URL) ||
+				(phase === "query page 2" && isNotesQuery && notesQueries === 2) ||
+				(phase === "location read" &&
+					validated &&
+					arg === "icloud-notes-location");
+			if (arg === VALIDATE_URL) validated = true;
+			if (pending) return new Promise(() => {});
+			return evaluate(fn as never, arg);
+		}) as Page["evaluate"];
+		const ctx = makeCtx(page, harness, ["notes"], structuredClone(seed));
+		const run: { outcome: "pending" | "resolved" | Error } = {
+			outcome: "pending",
+		};
+		const collection = collectAllStreams(ctx).then(
+			() => {
+				run.outcome = "resolved";
+			},
+			(error: Error) => {
+				run.outcome = error;
+			},
+		);
+		for (let tick = 0; tick < 200 && run.outcome === "pending"; tick += 1) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			t.mock.timers.tick(1000);
+		}
+		assert.notEqual(run.outcome, "pending", `${phase}: collection settles`);
+		await collection;
+		assert.equal(
+			harness.protocolMessages.some(
+				(message) => message.type === "STATE" && message.stream === "notes",
+			),
+			false,
+			`${phase}: no notes checkpoint`,
+		);
+		assert.deepEqual(ctx.state, seed, `${phase}: prior cursor kept`);
+		if (phase === "query page 2") {
+			assert.equal(run.outcome, "resolved");
+			const skip = harness.protocolMessages.find(
+				(message) =>
+					message.type === "SKIP_RESULT" && message.stream === "notes",
+			);
+			assert.ok(skip && skip.type === "SKIP_RESULT");
+			assert.equal(diagnosticField(skip, "source_reason"), "icloud_http_error");
+			assert.deepEqual(skip.recovery_hint, {
+				action: "retry_by_runtime",
+				retryable: true,
+			});
+		} else {
+			assert.ok(run.outcome instanceof Error, `${phase}: collection fails`);
+			assert.match(run.outcome.message, /icloud_page_unresponsive/);
+		}
+	});
+}
+
+for (const { name, validate, code, retryable } of [
+	{
+		name: "a network failure",
+		validate: () => Promise.resolve({ status: 0, json: null }),
+		code: "icloud_http_error",
+		retryable: true,
+	},
+	{
+		name: "HTTP 429",
+		validate: () => Promise.resolve({ status: 429, json: {} }),
+		code: "icloud_rate_limited",
+		retryable: true,
+	},
+	{
+		name: "HTTP 503",
+		validate: () => Promise.resolve({ status: 503, json: {} }),
+		code: "icloud_http_error",
+		retryable: true,
+	},
+	{
+		name: "a rejected page call",
+		validate: () =>
+			Promise.reject(new Error("Execution context was destroyed")),
+		code: "icloud_http_error",
+		retryable: true,
+	},
+	{
+		name: "HTTP 401",
+		validate: () => Promise.resolve({ status: 401, json: {} }),
+		code: "icloud_auth_failed",
+		retryable: false,
+	},
+	{
+		name: "HTTP 403",
+		validate: () => Promise.resolve({ status: 403, json: {} }),
+		code: "icloud_auth_failed",
+		retryable: false,
+	},
+	{
+		name: "a malformed 200 response",
+		validate: () => Promise.resolve({ status: 200, json: { dsInfo: {} } }),
+		code: "icloud_invalid_config_response",
+		retryable: false,
+	},
+]) {
+	test(`collectAllStreams: a validate that returns ${name} fails with its own cause`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+		const page = makeNotePage([noteQueryResponse()]);
+		const evaluate = page.evaluate.bind(page);
+		page.evaluate = ((fn: unknown, arg: unknown) =>
+			arg === VALIDATE_URL
+				? validate()
+				: evaluate(fn as never, arg)) as Page["evaluate"];
+		const ctx = makeCtx(
+			page,
+			harness,
+			["profile", "notes"],
+			structuredClone(seed),
+		);
+		await assert.rejects(collectAllStreams(ctx), (error: unknown) => {
+			const failure = error as Error & { code?: string; retryable?: boolean };
+			assert.equal(failure.code, code, name);
+			assert.equal(failure.retryable, retryable, name);
+			assert.ok(failure.message.startsWith(`${code}:`), failure.message);
+			return true;
+		});
+		assert.deepEqual(harness.events, [], `${name}: no RECORD or STATE`);
+		assert.deepEqual(ctx.state, seed, `${name}: prior cursor kept`);
+	});
+}
+
+for (const { name, folders, notes, hint, reason } of [
+	{
+		name: "an unrecognized folders response",
+		folders: {},
+		notes: [] as unknown[],
+		hint: { action: "retry_on_connector_upgrade", retryable: false },
+		reason: "icloud_invalid_query_response",
+	},
+	{
+		name: "a folders HTTP 401",
+		folders: { status: 401, json: null },
+		notes: [] as unknown[],
+		hint: { action: "manual_action_required", retryable: false },
+		reason: "icloud_auth_failed",
+	},
+	{
+		name: "a folders HTTP 403 and a permanently malformed note",
+		folders: { status: 403, json: null },
+		notes: [
+			{
+				recordName: "note-bad",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({ TitleEncrypted: { value: "/w==" } }),
+			},
+		],
+		hint: { action: "manual_action_required", retryable: false },
+		reason: "icloud_auth_failed",
+	},
+	{
+		name: "a folders HTTP 503 and a permanently malformed note",
+		folders: { status: 503, json: null },
+		notes: [
+			{
+				recordName: "note-bad",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({ TitleEncrypted: { value: "/w==" } }),
+			},
+		],
+		hint: { action: "retry_by_runtime", retryable: true },
+		reason: "icloud_http_error",
+	},
+]) {
+	test(`collectAllStreams: notes withheld after ${name} carry the folders cause`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+		const ctx = makeCtx(
+			makeFakePage([
+				{ stream: "folders", response: folders },
+				{
+					stream: "notes",
+					response: {
+						records: [...noteQueryResponse().records, ...notes],
+					},
+				},
+			]),
+			harness,
+			["notes"],
+			structuredClone(seed),
+		);
+		await collectAllStreams(ctx);
+
+		assert.equal(harness.emitted.length, 0, name);
+		assert.equal(
+			harness.protocolMessages.some((message) => message.type === "STATE"),
+			false,
+			`${name}: no checkpoint`,
+		);
+		assert.deepEqual(ctx.state, seed, `${name}: prior cursor kept`);
+		const skip = harness.protocolMessages.find(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+		);
+		assert.ok(skip && skip.type === "SKIP_RESULT", name);
+		assert.deepEqual(skip.recovery_hint, hint, name);
+		assert.equal(diagnosticField(skip, "dependency_stream"), "folders", name);
+		assert.equal(diagnosticField(skip, "dependency_reason"), reason, name);
+	});
+}
+
+test("collectAllStreams: a query that resolves after its timeout changes nothing, during or after a later collection", async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+	const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+	const late = {
+		records: [
+			{
+				recordName: "note-late",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({
+					TitleEncrypted: { value: b64("Late") },
+				}),
+			},
+		],
+	};
+	let releaseLate: (value: unknown) => void = () => undefined;
+	let notesQueries = 0;
+	const page = makeFakePage([]);
+	const evaluate = page.evaluate.bind(page);
+	page.evaluate = ((fn: unknown, arg: unknown) => {
+		const evalBody = (arg as { evalBody?: { query?: unknown } } | undefined)
+			?.evalBody;
+		if (evalBody === undefined) return evaluate(fn as never, arg);
+		if (!JSON.stringify(evalBody.query).includes('"recents"')) {
+			return Promise.resolve({ status: 200, json: folderQueryResponse() });
+		}
+		notesQueries += 1;
+		if (notesQueries === 1) {
+			return Promise.resolve({
+				status: 200,
+				json: noteQueryResponse({ continuationMarker: "page-2" }),
+			});
+		}
+		if (notesQueries === 2) {
+			return new Promise((resolve) => {
+				releaseLate = resolve;
+			});
+		}
+		return Promise.resolve({ status: 200, json: noteQueryResponse() });
+	}) as Page["evaluate"];
+	const settle = async (collection: Promise<void>) => {
+		let done = false;
+		const tracked = collection.then(() => {
+			done = true;
+		});
+		for (let tick = 0; tick < 200 && !done; tick += 1) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			t.mock.timers.tick(1000);
+		}
+		assert.equal(done, true, "collection settles");
+		await tracked;
+	};
+
+	const timedOut = makeRecordingEmit(validateRecord);
+	const timedOutCtx = makeCtx(page, timedOut, ["notes"], structuredClone(seed));
+	await settle(collectAllStreams(timedOutCtx));
+	const timedOutSkip = timedOut.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(timedOutSkip && timedOutSkip.type === "SKIP_RESULT");
+	assert.deepEqual(timedOutSkip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+
+	const later = makeRecordingEmit(validateRecord);
+	const laterCtx = makeCtx(page, later, ["notes"], structuredClone(seed));
+	await settle(collectAllStreams(laterCtx));
+	const timedOutEvents = structuredClone(timedOut.events);
+	const laterEvents = structuredClone(later.events);
+
+	releaseLate({ status: 200, json: late });
+	for (let turn = 0; turn < 5; turn += 1) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+
+	assert.deepEqual(
+		timedOut.events,
+		timedOutEvents,
+		"no late message in the timed-out run",
+	);
+	assert.deepEqual(
+		later.events,
+		laterEvents,
+		"no late message in the later run",
+	);
+	assert.equal(
+		[...timedOut.emitted, ...later.emitted].some(
+			(record) => record.data.id === "note-late",
+		),
+		false,
+	);
+	assert.deepEqual(timedOutCtx.state, seed, "timed-out run state unchanged");
+	assert.deepEqual(laterCtx.state, seed, "later run state unchanged");
+	assert.equal(notesQueries, 3);
 });
