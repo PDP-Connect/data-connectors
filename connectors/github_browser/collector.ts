@@ -4,6 +4,7 @@
 import type {
 	EmittedMessage,
 	RecordData,
+	StreamFailureOptions,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { InventoryEvidence } from "./inventory-evidence.ts";
 import { fullInventoryCoverage } from "./inventory-coverage.ts";
@@ -32,11 +33,18 @@ const API = "https://api.github.com";
 const INVENTORY_PAGE_LIMIT = 60;
 const HISTORY_PAGE_SIZE = 100;
 const HISTORY_PAGE_LIMIT = 10;
+/** A source request threw; the stream's inventory was never read. */
+const SOURCE_REQUEST_FAILED = "source_request_failed";
 
 export interface BrowserCollectionPort {
 	emit(message: EmittedMessage): Promise<void>;
 	emitRecord(stream: string, record: RecordData): Promise<void>;
 	progress(message: string): Promise<void>;
+	reportStreamFailure?(
+		stream: string,
+		message: string,
+		options?: StreamFailureOptions,
+	): Promise<void>;
 	requested: ReadonlySet<string>;
 	state: Record<string, unknown>;
 }
@@ -124,6 +132,7 @@ export async function collectGitHubBrowser(
 		stream: string,
 		reason: string,
 		counts?: CoverageCounts,
+		detail: Record<string, unknown> = {},
 	): Promise<void> => {
 		if (stream === "profile") {
 			await context.emit({ type: "SKIP_RESULT", stream, reason: "github_browser_incomplete", message: `GitHub did not return a complete result for this stream: ${reason}.`, diagnostics: { cause: reason },
@@ -131,10 +140,25 @@ export async function collectGitHubBrowser(
 			return;
 		}
 		// Inventory snapshots are withheld until their source window is complete.
-		await context.emit(fullInventoryCoverage(stream, {
+		const skip = fullInventoryCoverage(stream, {
 			kind: "enumerated", complete: false,
 			considered: counts?.considered ?? 0, covered: counts?.covered ?? 0,
-		}, reason));
+		}, reason);
+		// A request that threw (navigation, HTTP status, rate limit, transport)
+		// never read the inventory: a failed read, not an unproven enumeration.
+		if (reason === SOURCE_REQUEST_FAILED && skip.type === "SKIP_RESULT") {
+			const message = `GitHub requests for this stream failed: ${reason}.`;
+			const failure = {
+				recoveryHint: { action: "retry_by_runtime", retryable: true },
+				diagnostics: { ...asRecord(skip.diagnostics), ...detail },
+			};
+			if (context.reportStreamFailure)
+				await context.reportStreamFailure(stream, message, failure);
+			else await context.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed",
+				message, recovery_hint: failure.recoveryHint, diagnostics: failure.diagnostics });
+			return;
+		}
+		await context.emit(skip);
 	};
 	const emitEntity = async (stream: string, data: object): Promise<boolean> => {
 		const record = data as RecordData;
@@ -151,8 +175,13 @@ export async function collectGitHubBrowser(
 	): Promise<void> => {
 		try {
 			await work();
-		} catch {
-			await incomplete(stream, "source_request_failed");
+		} catch (error) {
+			// Only GitHub's own status code reaches diagnostics; browser error
+			// text can name URLs.
+			const status = error instanceof Error
+				? /^github_browser_http_(\d{3})$/u.exec(error.message)?.[1] : undefined;
+			await incomplete(stream, SOURCE_REQUEST_FAILED, undefined,
+				status === undefined ? {} : { source_error: `http_${status}` });
 		}
 	};
 
@@ -301,6 +330,7 @@ export async function collectGitHubBrowser(
 			let considered = 0;
 			let rejected = 0;
 			let sourceFailed = false;
+			let requestFailed = false;
 			const openContributionPage =
 				services.openContributionPage ?? services.openPage;
 			for (let offset = 0; offset < 4; offset += 1) {
@@ -313,6 +343,7 @@ export async function collectGitHubBrowser(
 					page = await openContributionPage(url);
 				} catch {
 					sourceFailed = true;
+					requestFailed = true;
 					continue;
 				}
 				if (
@@ -374,9 +405,11 @@ export async function collectGitHubBrowser(
 			) {
 				await incomplete(
 					"contributions",
-					sourceFailed
-						? "year_view_unavailable"
-						: "date_coverage_or_shape_mismatch",
+					requestFailed
+						? SOURCE_REQUEST_FAILED
+						: sourceFailed
+							? "year_view_unavailable"
+							: "date_coverage_or_shape_mismatch",
 					{ considered, covered },
 				);
 				return;
@@ -389,9 +422,11 @@ export async function collectGitHubBrowser(
 		await runIsolated("history", async () => {
 			let issueResult: HistoryTypeResult;
 			let prResult: HistoryTypeResult;
+			let requestFailed = false;
 			try {
 				issueResult = await collectHistoryType("issue");
 			} catch {
+				requestFailed = true;
 				issueResult = {
 					complete: false,
 					capped: false,
@@ -402,6 +437,7 @@ export async function collectGitHubBrowser(
 			try {
 				prResult = await collectHistoryType("pr");
 			} catch {
+				requestFailed = true;
 				prResult = {
 					complete: false,
 					capped: false,
@@ -417,7 +453,7 @@ export async function collectGitHubBrowser(
 			) {
 				await incomplete(
 					"history",
-					"search_incomplete",
+					requestFailed ? SOURCE_REQUEST_FAILED : "search_incomplete",
 					{ considered, covered },
 				);
 				return;

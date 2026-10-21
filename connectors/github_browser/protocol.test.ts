@@ -685,3 +685,86 @@ test(`overlapping contribution views ${countConflict ? "withhold conflicting cou
 });
 
 }
+
+// A GitHub request that throws (navigation, an HTTP status such as the
+// unauthenticated REST rate limit, transport) never read the inventory. It is
+// a failed read reported through reportStreamFailure, not an unproven
+// enumeration (Collection Profile 5.5).
+for (const { stream, services } of [
+	{
+		stream: "events",
+		services: {
+			fetchPublicJson: async (): Promise<never> => {
+				throw new Error("github_browser_http_429");
+			},
+		},
+	},
+	{
+		stream: "history",
+		services: {
+			fetchPublicJson: async (): Promise<never> => {
+				throw new Error("github_browser_http_403");
+			},
+		},
+	},
+	{
+		stream: "contributions",
+		services: {
+			openContributionPage: async (): Promise<never> => {
+				throw new Error("net::ERR_TIMED_OUT at https://github.com/sample-user");
+			},
+		},
+	},
+] as const) {
+	test(`a ${stream} request that throws is a reported stream failure, not an unproven inventory`, async () => {
+		const profile = await readFixture("profile.html");
+		const messages: Array<{ type: string; stream?: string; reason?: string }> = [];
+		const reports: Array<{ stream: string; message: string; options: unknown }> = [];
+		await collectGitHubBrowser(
+			{
+				emit: async (message) => {
+					messages.push(message);
+				},
+				emitRecord: async () => {},
+				progress: async () => {},
+				reportStreamFailure: async (failed, message, options) => {
+					reports.push({ stream: failed, message, options });
+				},
+				requested: new Set([stream]),
+				state: {},
+			},
+			{
+				fetchPublicJson: async (url) => apiObservation(url, []),
+				now: () => new Date("2026-01-01T00:00:00Z"),
+				openPage: async (url) => pageObservation(url, profile),
+				sleep: async () => {},
+				...services,
+			},
+		);
+		assert.equal(
+			messages.some((message) => message.type === "SKIP_RESULT"),
+			false,
+			"no unproven-enumeration SKIP_RESULT",
+		);
+		assert.equal(reports.length, 1);
+		assert.equal(reports[0]?.stream, stream);
+		assert.equal(
+			reports[0]?.message,
+			"GitHub requests for this stream failed: source_request_failed.",
+		);
+		const options = reports[0]?.options as {
+			recoveryHint: unknown;
+			diagnostics: Record<string, unknown>;
+		};
+		assert.deepEqual(options.recoveryHint, {
+			action: "retry_by_runtime",
+			retryable: true,
+		});
+		assert.equal(options.diagnostics.reason, "source_request_failed");
+		assert.equal(
+			options.diagnostics.source_error,
+			stream === "events" ? "http_429" : undefined,
+		);
+		assert.doesNotMatch(JSON.stringify(reports), /https:\/\/github\.com/u);
+	});
+}
