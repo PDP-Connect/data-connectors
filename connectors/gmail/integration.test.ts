@@ -860,14 +860,20 @@ test("processMessage: refuses hydration when source-reported size exceeds the bo
 		wantBodies: false,
 		wantMessages: false,
 	});
-	await processMessage(deps, makeMsg({ bodyStructure: oversize }));
+	const outcome = await processMessage(
+		deps,
+		makeMsg({ bodyStructure: oversize }),
+	);
 
-	const attachment = emitted.find((record) => record.stream === "attachments");
-	assert.ok(attachment, "expected too_large attachment metadata");
-	assert.equal(attachment.data.hydration_status, "too_large");
-	assert.equal(attachment.data.blob_ref, null);
-	assert.equal(attachment.data.content_sha256, null);
-	assert.equal(typeof attachment.data.hydration_error, "string");
+	// Only a hydrated part writes a record; an over-cap part stays owed.
+	assert.equal(
+		emitted.some((record) => record.stream === "attachments"),
+		false,
+	);
+	assert.deepEqual(outcome.attachments, {
+		kind: "failed",
+		failure: "attachment_unhydrated",
+	});
 	assert.equal(
 		fetchAttachment.mock.callCount(),
 		0,
@@ -923,12 +929,17 @@ test("processMessage: refuses hydration when streamed bytes overshoot the cap (u
 		wantBodies: false,
 		wantMessages: false,
 	});
-	await processMessage(deps, makeAttachmentMsg());
+	const outcome = await processMessage(deps, makeAttachmentMsg());
 
-	const attachment = emitted.find((record) => record.stream === "attachments");
-	assert.ok(attachment, "expected too_large attachment metadata");
-	assert.equal(attachment.data.hydration_status, "too_large");
-	assert.equal(attachment.data.blob_ref, null);
+	// Only a hydrated part writes a record; an over-cap part stays owed.
+	assert.equal(
+		emitted.some((record) => record.stream === "attachments"),
+		false,
+	);
+	assert.deepEqual(outcome.attachments, {
+		kind: "failed",
+		failure: "attachment_unhydrated",
+	});
 	assert.equal(
 		uploadBlob.mock.callCount(),
 		1,
@@ -3974,51 +3985,21 @@ test("recoverServedAttachmentGaps: an unclassified plain blob failure remains re
 		false,
 		"a failed hydration must not acknowledge the served gap as recovered",
 	);
-	assert.ok(
-		failedAttachment,
-		"the failed attachment record must still be emitted",
-	);
+	assert.ok(failedAttachment, "hydration ran and failed");
 	assert.equal(failedAttachment.hydration_status, "failed");
+	// A failed served attempt writes no record (the part may be stored
+	// hydrated). It re-defers the served gap under its lease, and the
+	// re-deferral records WHY as a bounded class: the 2026-08 Gmail incident
+	// left 5 gaps terminal after 37-117 retries with no recorded cause.
 	assert.deepEqual(attachmentCoverage.gapKeys, [failedAttachment.id]);
-	assert.deepEqual(attachmentCoverage.failedRecords, [
-		{ failureClass: "unclassified_failed", record: failedAttachment },
-	]);
-	const [failedCoverageRecord] = attachmentCoverage.failedRecords;
-	assert.ok(
-		failedCoverageRecord,
-		"failed recovery records must be retained for detail-gap emission",
+	assert.deepEqual(attachmentCoverage.failedRecords, []);
+	const redeferral = emitHarness.protocolMessages.find(
+		(msg) =>
+			msg.type === "DETAIL_GAP" && msg.record_key === failedAttachment?.id,
 	);
-	// A served-recovery attempt that fails again on a retry (attempt N of an
-	// already-terminal-bound gap) must still record WHY — a bounded, non-secret
-	// failure class — not just increment attempt_count with no evidence. This
-	// is the exact class of defect behind the 2026-08 Gmail 5-row incident: 5
-	// `temporary_unavailable` attachment gaps reached terminal status after
-	// 37-117 retries with `last_error_json` permanently null, because this
-	// recovery-retry path recorded an attempt but never a cause.
-	assert.deepEqual(
-		buildAttachmentDetailGap(
-			failedCoverageRecord.record,
-			failedCoverageRecord.failureClass,
-		),
-		{
-			type: "DETAIL_GAP",
-			stream: "attachments",
-			parent_stream: "messages",
-			record_key: failedAttachment.id,
-			status: "pending",
-			reason: "temporary_unavailable",
-			detail_locator: {
-				kind: "gmail.attachment_detail",
-				message_id: failedAttachment.message_id,
-				part_index: failedAttachment.part_index,
-				attachment_id: failedAttachment.id,
-			},
-			retryable: true,
-			reference_only: true,
-			detail: { class: "unclassified_failed" },
-			last_error: { class: "unclassified_failed" },
-		},
-	);
+	assert.ok(redeferral?.type === "DETAIL_GAP");
+	assert.deepEqual(redeferral.last_error, { class: "unclassified_failed" });
+	assert.equal(redeferral.retryable, true);
 	assert.equal(
 		JSON.stringify(summary).includes("private unclassified blob failure"),
 		false,
@@ -5549,8 +5530,9 @@ test("emitMessagesPass: accumulates honest coverage across hydrated, gap, and un
 	assert.deepEqual(coverage.requiredKeys, ["ok:1", "bad:1", "big:1"]);
 	assert.deepEqual(coverage.hydratedKeys, ["ok:1"]);
 	assert.deepEqual(coverage.gapKeys, ["bad:1"]);
-	// too_large stays required, unaccounted. The failed part writes no record.
-	assert.equal(emitted.filter((r) => r.stream === "attachments").length, 2);
+	// too_large stays required, unaccounted. Only the hydrated part writes a
+	// record.
+	assert.equal(emitted.filter((r) => r.stream === "attachments").length, 1);
 
 	// DETAIL_COVERAGE: covered = hydrated only (no unaccounted keys claimed).
 	assert.deepEqual(buildAttachmentDetailCoverageMessage(coverage), {
@@ -7579,6 +7561,7 @@ for (const rejection of ["false", "throw"] as const) {
 						message_id: "invalid",
 						part_index: "invalid",
 						size_bytes: -1,
+						hydration_status: "hydrated",
 					});
 					return hydratedResult(attachment);
 				},

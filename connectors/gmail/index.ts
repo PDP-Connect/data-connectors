@@ -579,6 +579,19 @@ export function attachmentCoverageFullyCredited(
 	return coverage.requiredKeys.every((key) => credited.has(key));
 }
 
+/**
+ * The one settlement rule for attachment records, on every path (walk,
+ * served recovery, recovery-only): only a hydrated part writes a record.
+ * A part may already be stored hydrated (a sibling's retry, a lowered size
+ * cap, or the replay of a run that failed after its records landed), and a
+ * whole-record upsert of a failed, too_large or deferred attempt would
+ * replace its blob reference. An unsuccessful attempt leaves an obligation
+ * instead: a retry DETAIL_GAP, or retry debt.
+ */
+function writesAttachmentRecord(record: AttachmentRecord): boolean {
+	return record.hydration_status === "hydrated";
+}
+
 /** Fresh, empty accumulator for one attachments detail pass. */
 export function makeAttachmentDetailCoverage(): AttachmentDetailCoverage {
 	return {
@@ -1071,17 +1084,19 @@ async function emitAttachmentRecords(
 		};
 		const hydration = await deps.hydrateAttachment(msg, a);
 		const hydrated = hydration.record;
-		if (hydrated.hydration_status === "failed") {
-			// A failed hydration writes no record: this part may already be
-			// stored hydrated (a retry of a sibling, or the replay of a failed
-			// run), and a whole-record upsert with no blob would destroy it. Its
-			// retry DETAIL_GAP, emitted with the run's gaps, accounts for it.
+		if (!writesAttachmentRecord(hydrated)) {
+			// Only a hydrated part writes a record (see writesAttachmentRecord).
+			// A failed part is held by its retry DETAIL_GAP, emitted with the
+			// run's gaps; a too_large or deferred part stays owed as debt.
 			if (deps.attachmentCoverage) {
 				recordAttachmentCoverage(
 					deps.attachmentCoverage,
 					hydrated,
 					hydration.failure,
 				);
+			}
+			if (hydrated.hydration_status !== "failed") {
+				owed ??= "attachment_unhydrated";
 			}
 			continue;
 		}
@@ -1097,13 +1112,6 @@ async function emitAttachmentRecords(
 				emitted === false &&
 				(await emitRejectedAttachmentGap(msg, identity, deps.emitProtocol));
 			if (emitted === false && !gapEmitted) owed = "attachment_emit_rejected";
-			else if (
-				emitted !== false &&
-				(hydrated.hydration_status === "too_large" ||
-					hydrated.hydration_status === "deferred")
-			) {
-				owed ??= "attachment_unhydrated";
-			}
 			if (deps.attachmentCoverage) {
 				recordAttachmentCoverage(
 					deps.attachmentCoverage,
@@ -2833,6 +2841,48 @@ async function settleServedAttachmentRecoveryAttempt(
 	hydration: AttachmentHydrationResult,
 ): Promise<void> {
 	const hydrated = hydration.record;
+	if (!writesAttachmentRecord(hydrated)) {
+		// No record over a part that may be stored hydrated: re-defer the served
+		// gap under its lease, which accounts for the key in this run.
+		let deferred = false;
+		try {
+			await deps.emitProtocol(
+				buildServedAttachmentRecoveryDeferredGap(
+					gap,
+					hydrated.hydration_status === "failed"
+						? attachmentHydrationFailureClass(hydration.failure)
+						: "attachment_unhydrated",
+				),
+			);
+			deferred = true;
+		} catch {
+			// A failed protocol write leaves no durable retry obligation.
+		}
+		if (deps.attachmentCoverage) {
+			recordAttachmentCoverage(
+				deps.attachmentCoverage,
+				hydrated,
+				hydration.failure,
+				false,
+				deferred,
+			);
+		}
+		if (hydrated.hydration_status === "failed") {
+			state.hydrationFailed += 1;
+			if (hydration.failure) {
+				state.attachmentHydrationFailureOutcome[hydration.failure.stage] += 1;
+			} else {
+				state.attachmentHydrationFailureOutcome.unclassified_failed += 1;
+			}
+		}
+		await emitServedAttachmentRecoveryProgress(deps.emitProtocol, {
+			admitted: state.admitted,
+			metadataLookups: state.metadataLookups,
+			phase: "settled",
+			recovered: state.recovered,
+		});
+		return;
+	}
 	let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
 	let emitFailure: { error: unknown } | undefined;
 	let gapEmitted = false;
@@ -2888,14 +2938,6 @@ async function settleServedAttachmentRecoveryAttempt(
 			state.recovered += 1;
 		}
 	}
-	if (hydrated.hydration_status === "failed") {
-		state.hydrationFailed += 1;
-		if (hydration.failure) {
-			state.attachmentHydrationFailureOutcome[hydration.failure.stage] += 1;
-		} else {
-			state.attachmentHydrationFailureOutcome.unclassified_failed += 1;
-		}
-	}
 	// Emit bounded, non-secret progress as each admitted attempt settles so a
 	// long single hydration is visible before the whole recovery lane ends.
 	await emitServedAttachmentRecoveryProgress(deps.emitProtocol, {
@@ -2908,10 +2950,8 @@ async function settleServedAttachmentRecoveryAttempt(
 
 function buildServedAttachmentRecoveryDeferredGap(
 	gap: DetailGapStartEntry,
-	errorClass:
-		| "attachment_lookup_miss"
-		| "attachment_record_rejected"
-		| "run_cap_deferred",
+	/** A bounded, non-secret class; never raw error text. */
+	errorClass: string,
 ): EmittedMessage {
 	const locator =
 		gap.detail_locator &&
@@ -4829,10 +4869,18 @@ export async function runAllMailPasses(
 	// (`validateDetailCoverageAgainstManifest`).
 
 	if (page && ledger.historicalStreams.includes("attachments")) {
-		// A failed hydration writes no record, so the emit tally cannot see it.
+		// Only hydrated parts write records, so the emit tally sees only those.
+		// Failed and unhydrated (too_large, deferred) parts come from coverage.
 		const failed = attachmentCoverage?.failedRecords.length ?? 0;
+		const unhydrated = attachmentCoverage
+			? attachmentCoverage.requiredKeys.length -
+				attachmentCoverage.hydratedKeys.length -
+				attachmentCoverage.gapKeys.length -
+				attachmentCoverage.unlocatedKeys.length
+			: 0;
 		attachmentSummary.failed += failed;
-		attachmentSummary.remaining_historical_gaps += failed;
+		attachmentSummary.too_large += unhydrated;
+		attachmentSummary.remaining_historical_gaps += failed + unhydrated;
 		gmailDiagnostic("attachment_backfill_summary", { ...attachmentSummary });
 		await emit({
 			type: "PROGRESS",

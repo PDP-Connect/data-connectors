@@ -758,3 +758,80 @@ test("the attachments inventory claim waits for forward work the ledger could no
 		"no claim while forward work is held",
 	);
 });
+
+test("served recovery never overwrites a stored hydrated part with a failed record", async () => {
+	const m = mailbox([attachmentMessage(10, "a", [16])], 101);
+	const landed: Loose[] = [];
+	// Run 1 hydrates a:1 (the record lands), then fails before its STATE.
+	await assert.rejects(() =>
+		run(m, {}, requested(["attachments"]), {
+			wrapEmitRecord: (real) => async (stream, data, keyField) => {
+				const accepted = (await real(stream, data, keyField)) === true;
+				if (accepted && stream === "attachments") landed.push(data);
+				return accepted;
+			},
+			failWrite: (line) =>
+				line.includes('"type":"STATE"') && line.includes('"stream":"messages"'),
+		}),
+	);
+	assert.equal(
+		landed.find((e) => e.id === "a:1")?.hydration_status,
+		"hydrated",
+	);
+	(m.client as unknown as { download: () => Promise<never> }).download =
+		async () => {
+			throw new Error("temporary download error");
+		};
+	// Run 2 replays the page; the download fails, so only a gap is written.
+	const replay = await run(m, {}, requested(["attachments"]));
+	assert.equal(recordKeys(replay, "attachments").length, 0);
+	const gap = events(replay, "DETAIL_GAP").find((e) => e.record_key === "a:1");
+	assert.ok(gap);
+	// Run 3 is served that gap and the download fails again.
+	const served = servedGap({
+		gapId: String(gap.gap_id ?? "host-gap-1"),
+		messageId: "a",
+		partIndex: 1,
+		leaseId: "lease-1",
+	});
+	const retry = await run(m, replay.state, requested(["attachments"]), {
+		detailGaps: [served],
+	});
+	assert.equal(
+		events(retry, "RECORD").some((e) => e.key === "a:1"),
+		false,
+		"a failed served attempt writes no record over the stored part",
+	);
+	assert.ok(
+		events(retry, "DETAIL_GAP").some((e) => e.gap_id === served.gap_id),
+		"the served gap is re-deferred under its lease instead",
+	);
+});
+
+test("a lowered size cap never overwrites a stored hydrated part with too_large", async () => {
+	const savedCap = process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+	try {
+		process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = "20";
+		const m = mailbox([attachmentMessage(10, "a", [16, 30])], 101);
+		const first = await run(m, {}, requested(["attachments"]));
+		assert.equal(
+			(events(first, "RECORD").find((e) => e.key === "a:1")?.data as Loose)
+				?.hydration_status,
+			"hydrated",
+		);
+		process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = "10";
+		const retry = await run(m, first.state, requested(["attachments"]));
+		assert.equal(
+			events(retry, "RECORD").some(
+				(e) =>
+					e.key === "a:1" && (e.data as Loose).hydration_status !== "hydrated",
+			),
+			false,
+			"an over-cap reattempt writes no record over the stored part",
+		);
+	} finally {
+		if (savedCap === undefined)
+			delete process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+		else process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = savedCap;
+	}
+});
