@@ -15888,7 +15888,7 @@
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "Oura",
 				"runtime_requirements": {
 					"bindings": {
@@ -16223,7 +16223,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.41",
+				"version": "0.1.42",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
