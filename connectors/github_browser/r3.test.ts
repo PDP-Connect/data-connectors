@@ -48,7 +48,7 @@ for (const stream of ["repositories", "starred"] as const) {
   ["no evidence", "", false],
   ["abbreviated total", count("1.2k"), false],
   ["explicit disabled next", terminal, true],
-  ["pagination without next", '<div class="pagination"><span class="current">1</span></div>', true],
+  ["pagination without next", '<div class="pagination"><span class="current">1</span></div>', false],
   ["empty layout is not an end", '<div class="blankslate">Empty</div>', false],
  ] as const) {
   test(`${stream}: ${label}`, async () => {
@@ -248,6 +248,8 @@ for (const [label, data, link, complete] of [
  ["observed missing Link", [restRepo], null, true],
  ["last-page Link", [restRepo], '<https://api.github.com/users/sample-user/starred?page=1>; rel="prev"', true],
  ["unobserved Link", [restRepo], undefined, false],
+ ["unrecognized Link relation", [restRepo], '<https://api.github.com/users/sample-user/starred?page=2>; rel="continue"', false],
+ ["malformed Link", [restRepo], "unreadable", false],
  ["wrong count", [], null, false],
  ["wrong repository", [{ full_name: "sample-user/other", html_url: "https://github.com/sample-user/other" }], null, false],
  ["malformed repository", [{ full_name: "sample-user/demo" }], null, false],

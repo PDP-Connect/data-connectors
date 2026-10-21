@@ -4,7 +4,7 @@
 import { parseHTML } from "linkedom";
 import { z } from "zod";
 import { eventRecord } from "../github/parsers.ts";
-import { type CollectionBoundary, InventoryEvidence } from "./inventory-evidence.ts";
+import { type CollectionBoundary, InventoryEvidence, type InventoryTerminalProof } from "./inventory-evidence.ts";
 import type { BrowserPageObservation } from "./page-evidence.ts";
 import { inspectInventoryEnd } from "./page-evidence.ts";
 import type {
@@ -549,7 +549,7 @@ function profileCollectionFailure(collection: ProfileCollectionFailure["collecti
 	const evidence = new InventoryEvidence();
 	evidence.addPage(ids, section.entriesComplete, rejected);
 	evidence.addBoundary(section.boundary);
-	const cause = evidence.decide(ids.length, false, null);
+	const cause = evidence.decide(ids.length, null);
 	return cause === null ? null : { collection, cause };
 }
 
@@ -854,7 +854,7 @@ export function inspectInventoryPage(
 	parsedRows: number,
 	rejectedRows: number,
 	noProgress = false,
-): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; nextUrl: string | null; reason: string } {
+): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; terminalProof: InventoryTerminalProof; nextUrl: string | null; reason: string } {
 	const { document } = parseHTML(page.html);
 	const tab = stream === "repositories" ? "repositories" : "stars";
 	const list = stream === "repositories" ? document.querySelector("#user-repositories-list") : starredList(document);
@@ -930,24 +930,34 @@ export function inspectInventoryPage(
 			!!url.hash || Array.from(url.searchParams.keys()).some(key =>
 				!["tab", "page", "after"].includes(key) || url.searchParams.getAll(key).length !== 1);
 	});
-	const ambiguous = counterAmbiguous || foreignPagination || paginators.length > 1 || nextControls.length > 1 ||
+	const unknownTargets = Array.from(pagination?.querySelectorAll("a[href]") ?? []).some(link => {
+		if (link.closest(OVERLAY_SELECTOR) !== null || link === next ||
+			link.matches('[disabled], [aria-disabled="true"], .disabled')) return false;
+		const href = githubUrl(link.getAttribute("href"));
+		if (href === null) return true;
+		const url = new URL(href);
+		// Numbered back/current links are harmless; cursors and forward links need a known control.
+		const targetPage = Number(url.searchParams.get("page"));
+		return url.searchParams.has("after") || !Number.isInteger(targetPage) || targetPage < 1 || targetPage > pageNumber;
+	});
+	const ambiguous = unknownTargets || counterAmbiguous || foreignPagination || paginators.length > 1 || nextControls.length > 1 ||
 		(next !== null && !disabled && nextUrl === null);
 	const renderComplete = list !== null && !isUnreadable(list) && countersReady &&
 		paginators.every(node => !isUnreadable(node));
-	const terminal = pagination !== null && (disabled || next === null);
+	const terminalProof: InventoryTerminalProof = total !== null && total === parsedRows
+		? "exact_count" : disabled ? "disabled_next" : null;
 	const result = inspectInventoryEnd({
 		page, username, stream, pageNumber, parsedRows, rejectedRows, noProgress,
 		explicitEmpty: false, hasRecognizedList: list !== null, renderComplete,
 		hasUnknownContinuation: ambiguous,
-		terminalProof: total !== null ? (total === parsedRows ? "exact_count" : null)
-			: terminal ? "disabled_next" : null,
+		terminalProof,
 		nextUrl,
 	});
 	const trusted = countersReady && result.reason !== "wrong_navigation" && result.reason !== "wrong_owner";
 	const exactTotals = trusted ? values.filter((value): value is number => value !== null) : [];
 	return { valid: result.complete || result.reason === "remaining_continuation",
 		complete: result.complete, total, exactTotals, totalConflict: trusted && counterAmbiguous,
-		nextUrl: result.nextUrl, reason: result.reason };
+		terminalProof, nextUrl: result.nextUrl, reason: result.reason };
 }
 
 export function parseContributionHtml(html: string): {

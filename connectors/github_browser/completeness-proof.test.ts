@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseHTML } from "linkedom";
+import { InventoryEvidence } from "./inventory-evidence.ts";
 import { collectGitHubBrowser } from "./collector.ts";
 import { inspectInventoryPage, parseProfilePage } from "./parsers.ts";
 
@@ -32,6 +33,24 @@ for (const stream of ["repositories", "starred"] as const) {
 	const tab = stream === "repositories" ? "repositories" : "stars";
 	const list = (names: string[], changed = false) => `<ul id="${stream === "repositories" ? "user-repositories-list" : "user-starred-repos"}">${names.map(name => `<li><h3><a href="/sample-user/${name}">${name}</a></h3><p${stream === "repositories" ? ' itemprop="description"' : ""}>${changed ? "Changed" : "Original"}</p></li>`).join("")}</ul>`;
 	const next = (page: number) => `<div class="pagination"><a class="next_page" rel="next" href="/sample-user?page=${page}&tab=${tab}">Next</a></div>`;
+	for (const scenario of ["missing", "absent", "renamed", "numbered", "disabled-with-forward", "short"] as const) {
+		test(`${stream} withholds inventory after ${scenario} Next control without a total`, async () => {
+			const result = await collect(stream, url => {
+				if (url.endsWith("github.com/")) return owner;
+				const first = new URL(url).searchParams.get("page") === "1";
+				const forward = `<a class="continue_page" href="/sample-user?page=2&tab=${tab}">${scenario === "numbered" ? "2" : "Continue"}</a>`;
+				let pagination = '<div class="pagination"></div>';
+				if (scenario === "absent") pagination = "";
+				if (scenario === "disabled-with-forward") pagination = terminal.replace("</div>", forward + "</div>");
+				if (scenario === "renamed" || scenario === "numbered") pagination = `<div class="pagination">${forward}</div>`;
+				return owner + list(scenario === "short" && first ? ["a", "b"] : [first ? "a" : "c"]) +
+					(scenario === "short" && first ? next(2) : pagination);
+			});
+			assert.deepEqual(result.records, []);
+			assert.deepEqual(result.messages.map(message => [message.type, message.reason]), [["SKIP_RESULT", "inventory_not_proven_complete"]]);
+			assert.deepEqual(result.state, { [stream]: prior });
+		});
+	}
 	for (const scenario of ["overlap", "contradiction", "repeated", "empty", "earlier-overlap", "exact-total-overlap"] as const) {
 		test(`${stream} preserves prior snapshot after ${scenario} with explicit terminal pagination`, async () => {
 			const result = await collect(stream, url => {
@@ -196,4 +215,15 @@ test("profile withholding retains the collection and evidence failure", async ()
 	const diagnostics = (result.messages[0] as { diagnostics?: { collection?: string; cause?: string } }).diagnostics;
 	assert.equal(diagnostics?.collection, "organizations");
 	assert.equal(diagnostics?.cause, "unclaimed_candidates");
+});
+
+test("InventoryEvidence cannot complete from a caller label without positive end evidence", () => {
+	const evidence = new InventoryEvidence();
+	evidence.addPage(["a"], true, 0);
+	evidence.addEnd({ nextUrl: null, reason: "terminal_list", terminalProof: null });
+	assert.equal(evidence.decide(1, null), "terminal_unverified");
+	evidence.addEnd({ nextUrl: "https://github.com/sample-user?page=2&tab=repositories", reason: "remaining_continuation", terminalProof: "disabled_next" });
+	assert.equal(evidence.decide(1, null), "terminal_unverified");
+	evidence.addEnd({ nextUrl: null, reason: "terminal_list", terminalProof: "disabled_next" });
+	assert.equal(evidence.decide(1, null), null);
 });

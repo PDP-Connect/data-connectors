@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+export type InventoryTerminalProof = "disabled_next" | "exact_count" | null;
+
 export interface CollectionBoundary {
 	kind: "located" | "absent" | "ambiguous";
 	unclaimedCandidates: number;
@@ -14,6 +16,18 @@ export class InventoryEvidence {
 	private pages = 0;
 	private rowFailure: string | null = null;
 	private boundaryProven = false;
+	private terminalProven = false;
+
+	/** Missing controls and short pages are not source-end observations. */
+	static terminalReason(proof: InventoryTerminalProof): "terminal_unverified" | "terminal_list" {
+		return proof === null ? "terminal_unverified" : "terminal_list";
+	}
+
+	/** Only a validated page with positive end evidence may end a walk. */
+	addEnd(page: { nextUrl: string | null; reason: string; terminalProof: InventoryTerminalProof }): void {
+		this.terminalProven ||= page.nextUrl === null && page.reason === "terminal_list" &&
+			InventoryEvidence.terminalReason(page.terminalProof) === "terminal_list";
+	}
 
 	get identities(): ReadonlySet<string> {
 		return this.seen;
@@ -49,8 +63,15 @@ export class InventoryEvidence {
 		this.conflict ||= evidence.totalConflict || this.totals.size > 1;
 	}
 
-	addEnumeration(total: number): void {
+	addEnumeration(total: number, end: { link: string | null | undefined; explicitEmpty: boolean }): boolean {
+		// An observed absent Link header or a recognized backward-only window is
+		// source-end evidence. Missing metadata and unknown relations are not.
+		const links = end.link?.split(",");
+		const backwardOnly = links !== undefined && links.length > 0 && links.every(link =>
+			/^\s*<https:\/\/api\.github\.com\/[^<>]+>;\s*rel=(?:"(?:prev|first)"|prev|first)\s*$/u.test(link));
+		if (!end.explicitEmpty && end.link !== null && !backwardOnly) return false;
 		this.add({ exactTotals: [total], totalConflict: false });
+		return true;
 	}
 
 	get expectedTotal(): number | null {
@@ -58,7 +79,7 @@ export class InventoryEvidence {
 	}
 
 	/** Only the final distinct inventory can be compared against every route. */
-	decide(covered: number, endProven: boolean, failure: string | null): string | null {
+	decide(covered: number, failure: string | null): string | null {
 		const distinct = this.seen.size;
 		if (this.conflict) return "source_total_changed";
 		if (this.rowFailure !== null) return this.rowFailure;
@@ -66,6 +87,6 @@ export class InventoryEvidence {
 			return "total_mismatch";
 		if (covered !== distinct) return "coverage_mismatch";
 		if (failure !== null) return failure;
-		return endProven || this.boundaryProven || this.expectedTotal === distinct ? null : "terminal_unverified";
+		return this.terminalProven || this.boundaryProven || this.expectedTotal === distinct ? null : "terminal_unverified";
 	}
 }

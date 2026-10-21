@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { parseHTML } from "linkedom";
+import { InventoryEvidence, type InventoryTerminalProof } from "./inventory-evidence.ts";
 
 export interface BrowserPageObservation {
 	readonly requestedUrl: string;
@@ -21,7 +22,7 @@ export interface InventoryEndEvidence {
 	readonly hasRecognizedList: boolean;
 	readonly renderComplete: boolean;
 	readonly hasUnknownContinuation: boolean;
-	readonly terminalProof: "disabled_next" | "exact_count" | null;
+	readonly terminalProof: InventoryTerminalProof;
 	readonly nextUrl: string | null;
 }
 
@@ -78,9 +79,8 @@ export function inspectInventoryEnd(
 	}
 	if (evidence.rejectedRows > 0)
 		return { complete: false, nextUrl: null, reason: "discarded_rows" };
-	if (evidence.terminalProof === null)
-		return { complete: false, nextUrl: null, reason: "terminal_unverified" };
-	return { complete: true, nextUrl: null, reason: "terminal_list" };
+	const reason = InventoryEvidence.terminalReason(evidence.terminalProof);
+	return { complete: reason === "terminal_list", nextUrl: null, reason };
 }
 
 function isExpectedRequest(

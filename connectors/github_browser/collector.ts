@@ -242,7 +242,6 @@ export async function collectGitHubBrowser(
 		await runIsolated(stream, async () => {
 			let covered = 0;
 			const evidence = new InventoryEvidence();
-			let endProven = false;
 			let failure: string | null = "page_limit_reached";
 			let url = inventoryUrl(username, stream, 1);
 			for (let pageNumber = 1; pageNumber <= INVENTORY_PAGE_LIMIT; pageNumber += 1) {
@@ -281,15 +280,14 @@ export async function collectGitHubBrowser(
 				failure = proof.reason;
 				if (proof.complete || proof.reason === "terminal_unverified") {
 					failure = null;
-					endProven = proof.complete;
-					if (!endProven && proof.total === null && stream === "starred") {
+					evidence.addEnd(proof);
+					if (!proof.complete && proof.total === null && stream === "starred") {
 						failure = await sourceRequest(() => inspectStarredRest({ ...services, fetchPublicJson: restUrl => fetchJson(restUrl, { considered: evidence.expectedTotal ?? evidence.identities.size, covered }) }, username, evidence.identities, evidence), { considered: evidence.expectedTotal ?? evidence.identities.size, covered });
-						endProven = failure === null;
 					}
 				}
 				break;
 			}
-			const reason = evidence.decide(covered, endProven, failure);
+			const reason = evidence.decide(covered, failure);
 			const counts = { considered: evidence.expectedTotal ?? evidence.identities.size, covered };
 			if (reason === null) await complete(stream, counts);
 			else await incomplete(stream, reason, counts);
@@ -588,8 +586,7 @@ async function inspectStarredRest(
 				return "invalid_or_duplicate_rows";
 			seen.add(repo.html_url as string);
 		}
-		if ((page === 1 && response.data.length === 0) || apiWindowEnded(response.link)) {
-			evidence.addEnumeration(seen.size);
+		if (evidence.addEnumeration(seen.size, { link: response.link, explicitEmpty: page === 1 && response.data.length === 0 })) {
 			if (seen.size !== browserRepos.size) return "total_mismatch";
 			if (Array.from(seen).some(repo => !browserRepos.has(repo))) return "repository_mismatch";
 			return null;

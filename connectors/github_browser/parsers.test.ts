@@ -109,7 +109,7 @@ test("current GitHub empty state alone does not certify an inventory", async () 
 			0,
 			0,
 		),
-		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, nextUrl: null, reason: "terminal_unverified" },
+		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, terminalProof: null, nextUrl: null, reason: "terminal_unverified" },
 	);
 });
 
@@ -535,7 +535,7 @@ test("current GitHub starred empty state with filter menus has no rows to discar
 			parsed.rows.length,
 			parsed.rejectedRows,
 		),
-		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, nextUrl: null, reason: "terminal_unverified" },
+		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, terminalProof: null, nextUrl: null, reason: "terminal_unverified" },
 	);
 });
 
@@ -562,7 +562,7 @@ test("a rendered repository row without optional slots omits those fields and co
 			inventoryObservation("repositories", owned, 1),
 			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
 		),
-		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, nextUrl: null, reason: "terminal_unverified" },
+		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, terminalProof: null, nextUrl: null, reason: "terminal_unverified" },
 	);
 	const terminal = owned +
 		'<div class="paginate-container"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
@@ -571,7 +571,7 @@ test("a rendered repository row without optional slots omits those fields and co
 			inventoryObservation("repositories", terminal, 1),
 			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
 		),
-		{ valid: true, complete: true, total: null, exactTotals: [], totalConflict: false, nextUrl: null, reason: "terminal_list" },
+		{ valid: true, complete: true, total: null, exactTotals: [], totalConflict: false, terminalProof: "disabled_next", nextUrl: null, reason: "terminal_list" },
 	);
 });
 
@@ -645,7 +645,7 @@ test("owner repository tab counters remain authoritative inside the site header"
 		"repositories", "sample-user", 1, 0, 0,
 	);
 	assert.deepEqual(inspect(header(tab("0"))), {
-		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, nextUrl: null, reason: "terminal_list",
+		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, terminalProof: "exact_count", nextUrl: null, reason: "terminal_list",
 	});
 	assert.equal(inspect(header(tab("0") + tab("0"))).complete, true);
 	assert.equal(inspect(header(tab("0") + tab("1"))).totalConflict, true);
@@ -684,7 +684,7 @@ test("All stars totals are exact, owner-bound, unfiltered and reconciled with pr
 		"starred", "sample-user", 1, 0, 0,
 	);
 	assert.deepEqual(inspect(allStars("0")), {
-		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, nextUrl: null, reason: "terminal_list",
+		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, terminalProof: "exact_count", nextUrl: null, reason: "terminal_list",
 	});
 	assert.equal(inspect(allStars("0") + allStars("0") + profileTab("0")).complete, true);
 	for (const navigation of [
