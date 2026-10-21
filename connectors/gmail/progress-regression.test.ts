@@ -964,3 +964,25 @@ test("scope: widening until by less than a millisecond still catches up the boun
 	);
 	assert.deepEqual(collectedIds(widened), ["a"]);
 });
+
+test("scope: the flag/label delta pass never reads or emits a message outside the stream's range", async () => {
+	const m = mailbox([dated(10, JAN), dated(20, MAR)], 101);
+	const scope = until("2026-02-01T00:00:00.000Z");
+	(m.box as { highestModseq?: bigint }).highestModseq = 50n;
+	const first = await run(m, {}, scope);
+	assert.deepEqual(collectedIds([first]), ["a"]);
+	// Both messages change flags; the next run's delta pass sees both.
+	(m.box as { highestModseq?: bigint }).highestModseq = 60n;
+	m.bodyReads.clear();
+	const delta = await run(m, first.state, scope);
+	assert.deepEqual(
+		collectedIds([delta]),
+		["a"],
+		"only the in-range change is re-emitted",
+	);
+	assert.equal(
+		m.bodyReads.get(20) ?? 0,
+		0,
+		"the out-of-range message's body is never read",
+	);
+});

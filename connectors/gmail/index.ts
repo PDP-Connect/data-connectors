@@ -1262,6 +1262,25 @@ function outsideResources(
 }
 
 /**
+ * The one admission rule for a message on a stream: inside the given time
+ * range and not excluded by the stream's resources. Every lane (walk,
+ * catch-up, debt retry, delta) asks this before any body I/O.
+ */
+function messageInStreamScope(
+	requested: ReadonlyMap<string, StreamRequest>,
+	stream: string,
+	key: string,
+	receivedAt: string,
+	range: { since?: string; until?: string } | undefined,
+): boolean {
+	return (
+		requested.has(stream) &&
+		isInTimeRange(receivedAt, range) &&
+		!outsideResources(requested, stream, key)
+	);
+}
+
+/**
  * Emit the per-stream records for one Gmail message.
  *
  * Invariants (tested in integration.test.ts):
@@ -1320,9 +1339,22 @@ export async function processMessage(
 	);
 	const wantBodies =
 		deps.wantBodies &&
-		!outsideResources(deps.requested, "message_bodies", gmMsgid);
+		messageInStreamScope(
+			deps.requested,
+			"message_bodies",
+			gmMsgid,
+			receivedAt,
+			deps.timeRange,
+		);
 	const wantMessages =
-		deps.wantMessages && !outsideResources(deps.requested, "messages", gmMsgid);
+		deps.wantMessages &&
+		messageInStreamScope(
+			deps.requested,
+			"messages",
+			gmMsgid,
+			receivedAt,
+			deps.timeRange,
+		);
 
 	const selection = selectBodyParts(msg.bodyStructure, wantBodies);
 	const { bodyHtmlFull, bodyTextFull, snippet, fetchFailed, failureClass } =
@@ -4051,6 +4083,19 @@ export async function runDeltaPass(
 		// stored row; emitting would blank it.
 		if (!msg.envelope) {
 			skippedAnyMessage = true;
+			continue;
+		}
+		// The same admission the walk applies, before any body I/O: a change
+		// to a message outside the stream's scope is not this run's to collect.
+		if (
+			!messageInStreamScope(
+				requested,
+				"messages",
+				String(msg.emailId),
+				perMessageInternalDateToIso(msg.internalDate, () => receivedAtFallback),
+				requested.get("messages")?.time_range,
+			)
+		) {
 			continue;
 		}
 		deltaMetas.push(msg);
