@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { describe } from "node:test";
 import vm from "node:vm";
+import { readTarGzEntries } from "../packages/connector-installer-core/tar-stream.mjs";
 
 const root = join(dirname(new URL(import.meta.url).pathname), "..");
 const PINNED_ARCHIVE = join(
@@ -19,15 +20,34 @@ const OURA_VERSION = readdirSync(join(root, "artifacts/oura-playwright"), { with
   .map((entry) => entry.name.replace("oura-playwright-", ""))
   .sort((a, b) => { const [x, y] = [a, b].map((v) => v.split(".").map(Number)); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2]; })
   .at(-1);
-test("retains the Oura archive used by legacy clients until F2", () => {
-  assert.equal(existsSync(PINNED_ARCHIVE), true);
-});
-
-const script = readFileSync(
-  join(root, `artifacts/oura-playwright/oura-playwright-${OURA_VERSION}/script.js`),
-  "utf8",
+const pinnedSource = readFileSync(
+  join(root, "artifacts/oura-playwright/oura-playwright-3.1.2/script.js"), "utf8",
 );
 
+async function readRetainedScript(buffer, expectedScript) {
+  const entries = await readTarGzEntries(buffer, { maxUnpackedBytes: 4 * 1024 * 1024 });
+  const scriptEntry = entries.find((entry) => entry.path.replace(/^\.\//, "") === "script.js");
+  assert.ok(scriptEntry, "retained archive must contain script.js");
+  const script = scriptEntry.buffer.toString("utf8");
+  assert.equal(script, expectedScript, "retained archive must match its versioned source");
+  return script;
+}
+
+const retainedScript = await readRetainedScript(readFileSync(PINNED_ARCHIVE), pinnedSource);
+const newestScript = readFileSync(
+  join(root, `artifacts/oura-playwright/oura-playwright-${OURA_VERSION}/script.js`), "utf8",
+);
+
+test("retained archive behavior target uses the pinned script bytes", () => {
+  assert.equal(retainedScript, pinnedSource);
+});
+
+test("retained archive refuses corrupt or mismatched bytes despite healthy source", async () => {
+  await assert.rejects(() => readRetainedScript(Buffer.from("corrupt archive"), pinnedSource));
+  await assert.rejects(() => readRetainedScript(readFileSync(PINNED_ARCHIVE), `${pinnedSource}\nchanged`), /must match/);
+});
+
+function registerBehaviorTests(script, { redaction }) {
 const credentialSource = (start, end) => {
   const startAt = script.indexOf(start);
   const endAt = script.indexOf(end, startAt);
@@ -300,6 +320,7 @@ test("does not propagate raw portal application-list failure text", async () => 
   assertPayloadsHide(payloads, canary);
 });
 
+if (redaction) {
 test("does not propagate a raw OAuth redirect error into its failure reason", async () => {
   // The first canary is rejected by a character/length filter; the other two
   // pass it, so only an allowlist of OAuth codes keeps them out.
@@ -336,6 +357,8 @@ test("reports a standard OAuth authorization error code from the redirect", asyn
     },
   );
 });
+
+}
 
 test("marks a 50-page cursor cap as degraded while retaining collected rows", async () => {
   const { data } = await runConnector({
@@ -738,6 +761,9 @@ test("without a contact email the registration API is skipped", async () => {
   assert.ok(state.domCalls.length > 0);
 });
 
+// Redaction was added in 3.1.3. Keep those version-specific checks on the
+// newest source; the pinned 3.1.2 suite above proves its collection behavior.
+if (redaction) {
 test("a failed navigation to the OAuth authorize URL logs a fixed class, not the URL", async () => {
   // Load only the navigation helpers; the rest of the script starts the flow.
   const helpersEnd = script.indexOf("const currentUrl = async () => {");
@@ -884,3 +910,9 @@ for (const native of [false, true]) {
     if (!native) assert.ok(output.some((line) => /Document-start veil not installed \(\w+\)/.test(line)), output.join("\n"));
   });
 }
+
+}
+}
+
+describe("retained Oura 3.1.2 archive", () => registerBehaviorTests(retainedScript, { redaction: false }));
+describe(`newest Oura ${OURA_VERSION} source`, () => registerBehaviorTests(newestScript, { redaction: true }));

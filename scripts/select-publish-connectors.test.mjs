@@ -218,6 +218,20 @@ test("a root developer script does not change non-PageShim artifact identity", a
   }
 });
 
+test("installer npm pack file lists do not change connector artifact identity", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    for (const path of ["package.json", "packages/connector-installer-core/package.json"]) {
+      repo.write(path, JSON.stringify({ files: ["index.mjs"] }));
+      const after = repo.commit(`change ${path} pack list`);
+      assert.equal(await artifactInputHash({ commit: after, manifest: "oura", cwd: repo.dir }), before);
+    }
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("a polyfill package test script does not change artifact identity, a dependency does", async () => {
   const repo = makeRepo();
   try {
