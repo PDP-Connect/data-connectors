@@ -829,12 +829,11 @@ async function readRevision(
 type ParentOutcome =
 	| { kind: "emitted" }
 	/**
-	 * Absent from a fully read inventory and not found by sessions.get. The
-	 * chat looks deleted, but deletion is never inferred: its pending gap is
-	 * emitted again (not resolved) and counted as a gap key this run.
+	 * No honest parent record could be emitted this run: sessions.get does not
+	 * find the chat (even when it is absent from both fully read list views;
+	 * deletion is never inferred), its archived flag is unknown, or its text
+	 * is not storable.
 	 */
-	| { kind: "absent" }
-	/** No honest parent record could be emitted this run. */
 	| { kind: "blocked"; reason: string };
 
 /**
@@ -850,26 +849,26 @@ type ParentOutcome =
  */
 class ParentsBlocked extends StreamFailure {
 	constructor(reasons: readonly string[]) {
+		const kinds = [...new Set(reasons)];
 		super(
-			`${reasons.length} Muse chats could not have their conversation record emitted this run (${[...new Set(reasons)].join(", ")}); their messages stay pending and nothing was checkpointed.`,
+			`muse_rpc_failed: ${reasons.length} pending Muse ${reasons.length === 1 ? "chat" : "chats"} could not be found or read as a conversation (${kinds.join(", ")}); ${reasons.length === 1 ? "its parent" : "their parents"} cannot be emitted, so messages stay pending and nothing was checkpointed.`,
+			true,
 		);
 	}
 }
 
 /**
- * The conversation record of a chat the inventory did not list, read with
- * sessions.get and emitted before its messages. `absentFromCompleteInventory`
- * says this run read both views of sessions.list to their end without the
- * chat: only then is a sessions.get not-found "absent" (its pending gap is
- * re-emitted, never resolved) instead of a blocked parent that fails the
- * stream.
+ * The conversation record of a gapped chat this run did not list (every
+ * chat in a recovery-only run, and in a normal run one that moved or went
+ * away), read with sessions.get and emitted before its messages. Anything
+ * short of an honest record is a blocked parent (see ParentsBlocked); the
+ * same rule holds in both runs.
  */
 async function parentFromSessionsGet(
 	ctx: MuseCtx,
 	gateway: MuseGateway,
 	tally: TextTally,
 	sessionId: string,
-	absentFromCompleteInventory: boolean,
 	counts: { unsafe: number },
 ): Promise<ParentOutcome> {
 	let raw: unknown;
@@ -878,10 +877,9 @@ async function parentFromSessionsGet(
 	} catch (error) {
 		if (!(error instanceof MuseRpcError) || !PER_ITEM_RPC_CODES.has(error.code))
 			throw error;
-		// A not-found alone may be temporary: it never clears a gap by itself.
-		return absentFromCompleteInventory
-			? { kind: "absent" }
-			: { kind: "blocked", reason: "muse_parent_not_found" };
+		// A not-found never clears a gap (deletion is never inferred), and
+		// without a parent record nothing about the chat may be emitted.
+		return { kind: "blocked", reason: "muse_parent_not_found" };
 	}
 	const session = parseSessionGet(raw);
 	if (session === null || session.session_id !== sessionId) {
@@ -965,7 +963,6 @@ async function hydrateChats(
 	const hydrated: string[] = [];
 	const revisions = new Map<string, number | null>();
 	const gaps: string[] = [];
-	const absent = new Set<string>();
 	const blocked: string[] = [];
 	for (const [index, sessionId] of required.entries()) {
 		await ctx.progress(`Reading chat ${index + 1} of ${required.length}`, {
@@ -975,34 +972,6 @@ async function hydrateChats(
 		const parent: ParentOutcome = beforeChat
 			? await beforeChat(sessionId)
 			: { kind: "emitted" };
-		if (parent.kind === "absent") {
-			// Never resolved without a full history read (deletion is never
-			// inferred): the still-failing gap is emitted again and accounted
-			// for as a gap key. Protocol rule 4 ("Every key in gapKeys needs a
-			// DETAIL_GAP in this same run. Including an item whose gap was
-			// already pending from an earlier run and still fails now: emit the
-			// gap again") and Collection Profile 5.6 (a gap key is accounted by
-			// a matching DETAIL_GAP for the same stream, key and parent
-			// boundary). Only a chat with a pending gap reaches here, and that
-			// gap was recorded by a run that emitted the chat's conversation
-			// record before it; 5.6 asks for the gap and coverage, not for the
-			// parent record again, so the re-emitted gap refers to that parent.
-			absent.add(sessionId);
-			await emitDetailGap(ctx, {
-				stream: MESSAGES,
-				parentStream: CONVERSATIONS,
-				recordKey: sessionId,
-				reason: "temporary_unavailable",
-				locator: { kind: "muse.chat_history", chat_id: sessionId },
-				error: {
-					class: "muse_chat_not_found",
-					message:
-						"the chat is in no chat list view and sessions.get does not find it",
-				},
-			});
-			gaps.push(sessionId);
-			continue;
-		}
 		if (parent.kind === "blocked") {
 			// No parent record this run: nothing about this chat is emitted.
 			blocked.push(parent.reason);
@@ -1027,15 +996,7 @@ async function hydrateChats(
 		gaps.push(sessionId);
 	}
 	if (blocked.length > 0) throw new ParentsBlocked(blocked);
-	if (absent.size > 0) {
-		connectorDiagnostic("muse", "absent_chats_left_pending", {
-			count: absent.size,
-		});
-		await ctx.progress(
-			`${absent.size} earlier-unread Muse ${absent.size === 1 ? "chat was" : "chats were"} not found; ${absent.size === 1 ? "its gap stays" : "their gaps stay"} pending and nothing was resolved`,
-			{ stream: MESSAGES, count: absent.size },
-		);
-	}
+
 	await emitDetailCoverage(ctx, {
 		stream: MESSAGES,
 		stateStream: CONVERSATIONS,
@@ -1102,12 +1063,12 @@ export async function runChatStreams(
 	//   message record, gap or coverage.
 	// - A recovery-only run fetches each gapped chat with sessions.get and
 	//   emits its conversation record right before that chat's messages or
-	//   gap. A chat whose parent cannot be emitted (not found, archived flag
-	//   unknown, unsafe text) gets nothing emitted at all and fails messages
-	//   for the run (see ParentsBlocked); its gap stays pending. A gap is
-	//   never resolved without a full history read of that chat; deletion is
-	//   never inferred, even for a chat absent from both fully read views
-	//   and not found by sessions.get (its pending gap is emitted again).
+	//   gap. In both kinds of run, a chat whose parent cannot be emitted (not
+	//   found, even when absent from both fully read views; archived flag
+	//   unknown; unsafe text) gets nothing emitted at all and fails messages
+	//   for the run, retryable, with no coverage (see ParentsBlocked); its
+	//   gap stays pending. A gap is resolved only after a full history read
+	//   of that chat: deletion is never inferred.
 	if (wantMessages && !wantConversations) {
 		await ctx.emit({
 			type: "SKIP_RESULT",
@@ -1129,7 +1090,7 @@ export async function runChatStreams(
 				tally,
 				[...pending.keys()],
 				pending,
-				(id) => parentFromSessionsGet(ctx, gateway, tally, id, false, counts),
+				(id) => parentFromSessionsGet(ctx, gateway, tally, id, counts),
 			);
 		} catch (error) {
 			// A blocked parent fails messages (no coverage, gaps stay pending);
@@ -1189,6 +1150,7 @@ export async function runChatStreams(
 			}))
 			.sort((a, b) => (a.updatedMs ?? 0) - (b.updatedMs ?? 0));
 		let hydrated: Map<string, number | null>;
+		const counts = { unsafe: 0 };
 		try {
 			const changed: string[] = [];
 			for (const c of chats) {
@@ -1204,7 +1166,6 @@ export async function runChatStreams(
 				...[...pending.keys()].filter((id) => !changedIds.has(id)),
 				...changed,
 			];
-			const counts = { unsafe: 0 };
 			hydrated = await hydrateChats(
 				ctx,
 				gateway,
@@ -1214,7 +1175,7 @@ export async function runChatStreams(
 				(id) =>
 					listedIds.has(id)
 						? Promise.resolve<ParentOutcome>({ kind: "emitted" })
-						: parentFromSessionsGet(ctx, gateway, tally, id, true, counts),
+						: parentFromSessionsGet(ctx, gateway, tally, id, counts),
 			);
 			for (const id of changed) {
 				const revision = hydrated.get(id);
@@ -1230,12 +1191,18 @@ export async function runChatStreams(
 				}
 			}
 		} catch (error) {
-			await failStreams(
-				ctx,
-				[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
-				error,
-			);
-			return;
+			// A blocked parent fails messages only (no coverage, gaps stay
+			// pending); the conversation inventory itself was read in full and
+			// its chat marks have not moved. Anything else fails both.
+			if (!(error instanceof ParentsBlocked) || counts.unsafe > 0) {
+				await failStreams(
+					ctx,
+					[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
+					error,
+				);
+				return;
+			}
+			await failStreams(ctx, [MESSAGES], error);
 		}
 		// A time-ranged run reads only part of each chat: it records no marks.
 		if (ctx.requested.get(MESSAGES)?.time_range) {

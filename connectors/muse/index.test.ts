@@ -147,6 +147,7 @@ interface HarnessOptions {
 function harness(options: HarnessOptions = {}) {
 	const emitted: EmittedMessage[] = [];
 	const failures: Array<{ stream: string; message: string }> = [];
+	const retryables = new Map<string, boolean | undefined>();
 	const streams = options.streams ?? ALL_STREAMS;
 	const requested = new Map<string, StreamScope>(
 		streams.map((name) => [name, { name }]),
@@ -170,8 +171,9 @@ function harness(options: HarnessOptions = {}) {
 		},
 		progress: async () => undefined,
 		recoveryOnly: options.recoveryOnly ?? false,
-		reportStreamFailure: async (stream, message) => {
+		reportStreamFailure: async (stream, message, opts) => {
 			failures.push({ stream, message });
+			retryables.set(stream, opts?.retryable);
 		},
 		requested,
 		state: options.state ?? {},
@@ -184,7 +186,8 @@ function harness(options: HarnessOptions = {}) {
 		of("RECORD", stream).map(({ m }) => m.data as Json);
 	const states = (stream: string) =>
 		of("STATE", stream).map(({ m }) => m.cursor as Json);
-	return { ctx, emitted, failures, of, records, states };
+	const retryable = (stream: string) => retryables.get(stream);
+	return { ctx, emitted, failures, of, records, retryable, states };
 }
 
 test("a full run reads every stream through read methods only and follows the protocol", async () => {
@@ -445,23 +448,15 @@ test("the next run reads only chats that changed, plus pending gaps", async () =
 			[MAIN_CHAT, 50],
 		],
 	);
-	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
-	assert.deepEqual(cov?.required_keys, [
-		"11111111-1111-4111-8111-111111111111",
-		MAIN_CHAT,
-	]);
-	assert.deepEqual(cov?.gap_keys, ["11111111-1111-4111-8111-111111111111"]);
-	// Round 9: the gapped chat is absent from both fully read views and
-	// sessions.get does not find it. Deletion is never inferred: its gap is
-	// not resolved (no DETAIL_GAP_RECOVERED without a full history read), and
-	// with no parent record nothing about it is emitted, so it stays pending.
+	// Round 11: the gapped chat is absent from both fully read views and
+	// sessions.get does not find it. Its parent cannot be emitted, so nothing
+	// about it is emitted (no gap, no recovery, no coverage entry) and
+	// messages fails for the run, retryable, with no coverage: no checkpoint
+	// moves and the gap stays pending with the host.
 	assert.ok(calls.some((c) => c.method === "sessions.get"));
 	assert.equal(h.of("DETAIL_GAP_RECOVERED").length, 0);
-	// Round 10: its still-failing gap is re-emitted and accounted for.
-	assert.deepEqual(
-		h.of("DETAIL_GAP").map((x) => [x.m.record_key, x.m.reason]),
-		[["11111111-1111-4111-8111-111111111111", "temporary_unavailable"]],
-	);
+	assert.equal(h.of("DETAIL_GAP").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "messages").length, 0);
 	assert.equal(
 		calls.some(
 			(c) =>
@@ -470,12 +465,21 @@ test("the next run reads only chats that changed, plus pending gaps", async () =
 		),
 		false,
 	);
-	assert.deepEqual(h.failures, []);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["messages"],
+	);
+	assert.equal(h.retryable("messages"), true);
+	assert.match(
+		h.failures[0]?.message ?? "",
+		/^muse_rpc_failed: .*could not be found/,
+	);
+	// conversations completes; the chat marks do not move for this run.
 	assert.deepEqual(h.states("conversations")[0], {
 		version: 2,
 		chats: {
 			[SIDE_CHAT]: { updated_at_ms: 1792610689000, transcript_revision: 31 },
-			[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
+			[MAIN_CHAT]: { updated_at_ms: 1792600000000, transcript_revision: 31 },
 		},
 	});
 });
@@ -1839,21 +1843,18 @@ test("round 9: DETAIL_GAP_RECOVERED is emitted only after a full history read", 
 		],
 	});
 	await collectMuseWith(h.ctx, gateway);
-	// Only the chat read in full is recovered; the absent one gets its gap
-	// re-emitted (round 10) and is a required and gap key of the coverage.
+	// Only the chat read in full is recovered. The absent one's parent cannot
+	// be emitted (round 11): no gap or coverage entry for it, no coverage at
+	// all, and messages fails for the run, retryable.
 	assert.deepEqual(
 		h.of("DETAIL_GAP_RECOVERED").map((x) => x.m.gap_id),
 		["g-side"],
 	);
-	const gaps = h.of("DETAIL_GAP", "messages");
+	assert.equal(h.of("DETAIL_GAP").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "messages").length, 0);
 	assert.deepEqual(
-		gaps.map((x) => [x.m.record_key, (x.m.detail_locator as Json).kind]),
-		[[absent, "muse.chat_history"]],
+		h.failures.map((f) => f.stream),
+		["messages"],
 	);
-	const covMsg = h.of("DETAIL_COVERAGE", "messages")[0];
-	const cov = covMsg?.m;
-	assert.ok((covMsg?.index ?? -1) > (gaps[0]?.index ?? Infinity));
-	assert.ok((cov?.required_keys as string[]).includes(absent));
-	assert.deepEqual(cov?.gap_keys, [absent]);
-	assert.equal(h.states("conversations").length, 1);
+	assert.equal(h.retryable("messages"), true);
 });
