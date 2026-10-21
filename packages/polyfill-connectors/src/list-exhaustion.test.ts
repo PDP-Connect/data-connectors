@@ -742,3 +742,263 @@ test("only own keys on plain objects count; inherited, hidden and symbol keys ar
 	});
 	check("full_inventory", read({ stop: plain }), "complete");
 });
+
+test("every count field rejects nonfinite, unsafe, negative and fractional numbers", () => {
+	const fixtures = [
+		read(),
+		read({
+			stop: end({
+				rule: "declared_total",
+				declaredTotal: 30,
+				continuationVisible: false,
+			}),
+		}),
+		read({
+			stop: end({
+				rule: "continuation_consumed",
+				dataReadable: true,
+				continuationSeenBefore: true,
+				continuationVisible: false,
+				renderedAtEnd: 30,
+				sourceItemsAtEnd: 30,
+			}),
+		}),
+		read({
+			stop: end({
+				rule: "source_end_marker",
+				dataReadable: true,
+				markerPresent: true,
+				continuationVisible: false,
+				renderedAtEnd: 30,
+				sourceItemsAtEnd: 30,
+			}),
+		}),
+		read({
+			requested: "window",
+			traversal: { ordering: "snapshot" },
+			stop: end({
+				rule: "window_boundary",
+				intervalBounded: true,
+				ordering: "snapshot",
+				oldPagesInARow: 3,
+				required: 3,
+			}),
+		}),
+	];
+	for (const [index, fixture] of fixtures.entries()) {
+		const claim = index === 4 ? "checkpoint_window" : "full_inventory";
+		check(claim, fixture, index === 4 ? "window_complete" : "complete");
+		// Traversal/accounting are shared shapes; exercise them only once.
+		const records =
+			index === 0
+				? (["traversal", "accounting", "end"] as const)
+				: (["end"] as const);
+		for (const section of records) {
+			const source =
+				section === "end"
+					? (fixture.stop as Extract<ListStop, { kind: "end" }>).end
+					: fixture[section];
+			for (const [key, value] of Object.entries(source)) {
+				if (typeof value !== "number") continue;
+				for (const bad of [
+					Number.NaN,
+					Infinity,
+					-Infinity,
+					Number.MAX_SAFE_INTEGER + 1,
+					-1,
+					0.5,
+				]) {
+					const changed = { ...source, [key]: bad };
+					const input =
+						section === "end"
+							? { ...fixture, stop: end(asEnd(changed)) }
+							: { ...fixture, [section]: changed };
+					assert.deepEqual(
+						settle(claim, asRead(input)),
+						{
+							claim,
+							outcome: "unproven",
+							reason: "invalid_facts",
+						},
+						`${index}.${section}.${key}: ${bad}`,
+					);
+				}
+			}
+		}
+	}
+});
+
+test("remaining end rules cannot hide a changed epoch or skipped middle page", () => {
+	const fixtures: [CoverageClaim, ListRead<unknown>, Settlement["outcome"]][] =
+		[
+			[
+				"full_inventory",
+				read({
+					stop: end({
+						rule: "continuation_consumed",
+						dataReadable: true,
+						continuationSeenBefore: true,
+						continuationVisible: false,
+						renderedAtEnd: 30,
+						sourceItemsAtEnd: null,
+					}),
+				}),
+				"complete",
+			],
+			[
+				"full_inventory",
+				read({
+					stop: end({
+						rule: "source_end_marker",
+						dataReadable: true,
+						markerPresent: true,
+						continuationVisible: false,
+						renderedAtEnd: 30,
+						sourceItemsAtEnd: 30,
+					}),
+				}),
+				"complete",
+			],
+			[
+				"full_inventory",
+				read({
+					accounting: { rawItems: 0, distinctKeys: 0 },
+					stop: end({
+						rule: "source_empty",
+						dataReadable: true,
+						sourceSaidEmpty: true,
+					}),
+				}),
+				"verified_empty",
+			],
+			[
+				"checkpoint_window",
+				read({
+					requested: "window",
+					traversal: { ordering: "snapshot" },
+					stop: end({
+						rule: "window_boundary",
+						intervalBounded: true,
+						ordering: "snapshot",
+						oldPagesInARow: 3,
+						required: 3,
+					}),
+				}),
+				"window_complete",
+			],
+			[
+				"checkpoint_window",
+				read({
+					requested: "bounded",
+					stop: end({
+						rule: "bounded_request",
+						bound: "resource_filter",
+						reached: true,
+					}),
+				}),
+				"bounded_complete",
+			],
+		];
+	for (const [claim, fixture, outcome] of fixtures) {
+		check(claim, fixture, outcome);
+		for (const [key, reason] of [
+			["epochChanges", "epoch_changed"],
+			["pagesSkippedUnaccounted", "chain_unproven"],
+		] as const) {
+			check(
+				claim,
+				{ ...fixture, traversal: { ...fixture.traversal, [key]: 1 } },
+				"unproven",
+				reason,
+			);
+		}
+	}
+});
+
+test("required keys at each data level cannot be supplied by a prototype", () => {
+	const fixture = read();
+	const records = [
+		{ value: fixture, wrap: (value: object) => asRead(value) },
+		{
+			value: fixture.traversal,
+			wrap: (value: object) => asRead({ ...fixture, traversal: value }),
+		},
+		{
+			value: fixture.accounting,
+			wrap: (value: object) => asRead({ ...fixture, accounting: value }),
+		},
+		{
+			value: TERMINAL,
+			wrap: (value: object) => read({ stop: end(asEnd(value)) }),
+		},
+	];
+	for (const { value, wrap } of records) {
+		// Positive control: the same own fields on a null prototype are valid.
+		check(
+			"full_inventory",
+			wrap(Object.assign(Object.create(null), value)),
+			"complete",
+		);
+		for (const [key, inherited] of Object.entries(value)) {
+			const own: Record<string, unknown> = { ...value };
+			delete own[key];
+			check(
+				"full_inventory",
+				wrap(Object.assign(Object.create({ [key]: inherited }), own)),
+				"unproven",
+				"invalid_facts",
+			);
+			check(
+				"full_inventory",
+				wrap(Object.assign(Object.create(null), own)),
+				"unproven",
+				"invalid_facts",
+			);
+		}
+	}
+});
+
+test("reflective traps return closed unproven results without exposing private payloads", () => {
+	const canary = "PRIVATE-adversarial-cursor-key-row";
+	const fail = (): never => {
+		throw new Error(canary);
+	};
+	const revoked = Proxy.revocable(read(), {});
+	revoked.revoke();
+	const inputs = [
+		revoked.proxy,
+		new Proxy(read(), { getPrototypeOf: fail }),
+		new Proxy(read(), { ownKeys: fail }),
+		{ ...read(), traversal: new Proxy(read().traversal, { get: fail }) },
+		{
+			...read(),
+			accounting: new Proxy(read().accounting, {
+				getOwnPropertyDescriptor: fail,
+			}),
+		},
+		read({ stop: end(new Proxy(TERMINAL, { get: fail })) }),
+	];
+	for (const input of inputs) {
+		const got = settle("full_inventory", input);
+		assert.deepEqual(got, {
+			claim: "full_inventory",
+			outcome: "unproven",
+			reason: "invalid_facts",
+		});
+		assert.ok(Object.isFrozen(got));
+		assert.ok(!JSON.stringify(got).includes(canary));
+	}
+	// Items are opaque payloads, not facts: even a throwing row is never read.
+	const input = {
+		...read(),
+		items: [
+			new Proxy(
+				{ key: canary, cursor: canary, row: canary },
+				{ get: fail, ownKeys: fail },
+			),
+		],
+	};
+	const got = settle("full_inventory", input);
+	assert.equal(got.outcome, "complete");
+	assert.ok(!JSON.stringify(publicDiagnostics(got, input)).includes(canary));
+});
