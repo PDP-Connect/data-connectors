@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { collectGitHubBrowser } from "./collector.ts";
+import { githubLink } from "./api-link-fixture.ts";
 import { parseContributionHtml } from "./parsers.ts";
 import { fullInventoryCoverage } from "./inventory-coverage.ts";
 import type { BrowserServices } from "./types.ts";
@@ -49,7 +50,7 @@ for (const stream of ["repositories", "starred"] as const) {
   ["no evidence", "", false],
   ["abbreviated total", count("1.2k"), false],
   ["explicit disabled next", terminal, true],
-  ["pagination without next", '<div class="pagination"><span class="current">1</span></div>', true],
+  ["pagination without next", '<div class="pagination"><span class="current">1</span></div>', false],
   ["empty layout is not an end", '<div class="blankslate">Empty</div>', false],
  ] as const) {
   test(`${stream}: ${label}`, async () => {
@@ -159,7 +160,8 @@ for (const evidence of ["match", "mismatch", "absent"] as const) {
   const source = JSON.parse(await fixture("history-issue.json")).items[0];
   const result = await run("history", { fetchPublicJson: async url => {
    const pr = url.includes("type%3Apr");
-   return { requestedUrl: url, responseUrl: url, status: 200, data: {
+   // A single-page search has no Link header.
+   return { requestedUrl: url, responseUrl: url, status: 200, link: null, data: {
     items: pr ? [] : [source], incomplete_results: false,
     ...(evidence === "absent" ? {} : { total_count: pr ? 0 : evidence === "match" ? 1 : 2 }),
    } };
@@ -247,8 +249,10 @@ test("starred: empty REST first page proves a zero-star snapshot without a count
 });
 for (const [label, data, link, complete] of [
  ["observed missing Link", [restRepo], null, true],
- ["last-page Link", [restRepo], '<https://api.github.com/users/sample-user/starred?page=1>; rel="prev"', true],
+ ["foreign prev-only Link on the first page", [restRepo], '<https://api.github.com/users/sample-user/starred?page=1>; rel="prev"', false],
  ["unobserved Link", [restRepo], undefined, false],
+ ["unrecognized Link relation", [restRepo], '<https://api.github.com/users/sample-user/starred?page=2>; rel="continue"', false],
+ ["malformed Link", [restRepo], "unreadable", false],
  ["wrong count", [], null, false],
  ["wrong repository", [{ full_name: "sample-user/other", html_url: "https://github.com/sample-user/other" }], null, false],
  ["malformed repository", [{ full_name: "sample-user/demo" }], null, false],
@@ -273,7 +277,7 @@ test("starred: REST continuation is read before completion", async () => {
    const first = new URL(url).searchParams.get("page") === "1";
    return { requestedUrl: url, responseUrl: url, status: 200,
     data: first ? [restRepo] : [{ full_name: "sample-user/other", html_url: "https://github.com/sample-user/other" }],
-    link: first ? '<https://api.github.com/users/sample-user/starred?per_page=100&page=2>; rel="next"' : null };
+    link: githubLink(url, 2) };
   },
  });
  assert.equal(urls.length, 2);
@@ -320,9 +324,9 @@ for (const counter of [false, true]) {
 
 for (const [label, primary, fallback, restExpected, completes] of [
  ["unreadable primary conflicts survive readable fallback", starCount(1) + starCount(2), starRows + terminal, false, false],
- ["unreadable fallback conflicts survive REST end", starRows, starCount(1) + starCount(2), true, false],
+ ["unreadable fallback conflicts withhold before any REST request", starRows, starCount(1) + starCount(2), false, false],
  ["agreeing unreadable primary totals allow complete fallback", starCount(1) + starCount(1), starRows + starCount(1) + terminal, false, true],
- ["agreeing unreadable fallback totals allow REST end", starRows, starCount(1) + starCount(1), true, true],
+ ["agreeing unreadable fallback totals prove the end without REST", starRows, starCount(1) + starCount(1), false, true],
 ] as const) {
  test(`starred evidence accumulator: ${label}`, async () => {
   let restCalled = false;

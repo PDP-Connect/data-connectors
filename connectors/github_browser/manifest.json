@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.3.9",
+	"version": "0.3.10",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -611,7 +611,7 @@
 		{
 			"name": "history",
 			"required": true,
-			"description": "One legacy aggregate snapshot of authored issues and pull requests. At or above 1,000 results per type, readable rows are retained without completion.",
+			"description": "One legacy aggregate snapshot of authored issues and pull requests. Each type completes after exactly min(stable total_count, 1000) valid distinct items; totals above 1000 describe a bounded search window. Otherwise the snapshot and checkpoint are withheld.",
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
