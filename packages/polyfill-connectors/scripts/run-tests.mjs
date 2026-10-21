@@ -8,6 +8,7 @@
 import { glob } from "node:fs/promises";
 import { runTestCommands, testCommands } from "./test-dispatch.mjs";
 import { EXCLUDED_TESTS, NAMESPACE_TESTS } from "./test-lanes.mjs";
+import { selectTestShard } from "./test-shards.mjs";
 
 // Gate B finding B2 restored the other 7 previously-excluded semantic/
 // conformance tests (vendored @pdpp/reference-contract now carries an
@@ -67,14 +68,20 @@ for (const pattern of patterns) {
 }
 
 if (args.includes("--list")) {
-	console.log(files.join("\n"));
-	process.exit(0);
+	console.log(selectTestShard(files, process.env.TEST_SHARD).join("\n"));
+} else {
+	let shardFiles;
+	try {
+		shardFiles = selectTestShard(files, process.env.TEST_SHARD);
+	} catch (error) {
+		console.error(error.message);
+		process.exit(2);
+	}
+	const commands = testCommands(
+		shardFiles,
+		lane === "namespaces" ? "1" : rawConcurrency,
+	);
+	const env =
+		lane === undefined ? process.env : { ...process.env, TEST_LANE: lane };
+	process.exit((await runTestCommands(commands, env)) ? 0 : 1);
 }
-
-const commands = testCommands(
-	files,
-	lane === "namespaces" ? "1" : rawConcurrency,
-);
-const env =
-	lane === undefined ? process.env : { ...process.env, TEST_LANE: lane };
-process.exit((await runTestCommands(commands, env)) ? 0 : 1);

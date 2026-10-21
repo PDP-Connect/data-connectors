@@ -4214,7 +4214,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "scripts/run-tests.mjs",
-			line: 59,
+			line: 60,
 			column: 2,
 			category: "dependent_file_cursor",
 			note: "collectTestFiles(): sequential glob() per fixed test-directory pattern; trivial fixed-size loop over 5 patterns, no reason to parallelize",
@@ -4844,21 +4844,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/test-runner-contract.test.ts",
-			line: 163,
+			line: 183,
 			column: 3,
 			category: "dependent_file_cursor",
 			note: "Vitest registry guard: consume each runner glob before advancing to the next pattern",
 		},
 		{
 			path: "src/test-runner-contract.test.ts",
-			line: 183,
+			line: 203,
 			column: 32,
 			category: "test_assertion_sequencing",
 			note: "Vitest registry guard: verify each registered file exists before reading and checking its import",
 		},
 		{
 			path: "src/test-runner-contract.test.ts",
-			line: 246,
+			line: 266,
 			column: 3,
 			category: "dependent_file_cursor",
 			note: "NAMESPACE_TESTS guard: sequential glob() per runner pattern, the same fixed-size loop run-tests.mjs uses",
