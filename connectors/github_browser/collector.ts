@@ -32,6 +32,7 @@ const API = "https://api.github.com";
 const INVENTORY_PAGE_LIMIT = 60;
 const HISTORY_PAGE_SIZE = 100;
 const HISTORY_PAGE_LIMIT = 10;
+const SEARCH_SPACING_MS = 6500;
 
 export interface BrowserCollectionPort {
 	emit(message: EmittedMessage): Promise<void>;
@@ -98,6 +99,7 @@ export async function collectGitHubBrowser(
 		},
 	};
 	const snapshotId = (stream: string): string => `${username}:${stream}`;
+	let searchRequests = 0;
 	const pending = new Map<string, RecordData[]>();
 	const flushed = new Map<string, boolean>();
 	const flush = async (stream: string, allowEmpty = false): Promise<boolean> => {
@@ -189,7 +191,11 @@ export async function collectGitHubBrowser(
 			await work();
 		} catch (error) {
 			if (error instanceof OutputFailure) throw error.original;
-			await incomplete(stream, isTimeout(error) ? "source_read_timeout" : "source_request_failed");
+			try {
+				await incomplete(stream, isTimeout(error) ? "source_read_timeout" : "source_request_failed");
+			} catch (reportError) {
+				throw reportError instanceof OutputFailure ? reportError.original : reportError;
+			}
 		}
 	};
 
@@ -486,6 +492,14 @@ export async function collectGitHubBrowser(
 		});
 	}
 
+	// One Search budget for the run: issue and PR queries share GitHub's
+	// 10-requests-a-minute limit, so every request after the first waits 6.5 s.
+	async function readSearch(url: string): Promise<ApiRead> {
+		if (searchRequests > 0) await services.sleep(SEARCH_SPACING_MS);
+		searchRequests += 1;
+		return readApi(services, url);
+	}
+
 	async function collectHistoryType(
 		type: "issue" | "pr",
 	): Promise<HistoryTypeResult> {
@@ -500,7 +514,7 @@ export async function collectGitHubBrowser(
 			const kind = type === "pr" ? "type:pr" : "type:issue";
 			const query = encodeURIComponent(`author:${username} ${kind}`);
 			const url = `${API}/search/issues?q=${query}&sort=created&order=desc&per_page=${HISTORY_PAGE_SIZE}&page=${page}`;
-			const read = await readApi(services, url);
+			const read = await readSearch(url);
 			if (read.failure !== null) {
 				failure = read.failure;
 				break;
@@ -545,14 +559,17 @@ export async function collectGitHubBrowser(
 			}
 			if (invalid) break;
 			// The API caps this search window, not the underlying authored history.
-			// Short pages and our page budget are never completion evidence.
-			if (expectedTotal === seen.size ||
-				(capped && (apiWindowEnded(response.link) || seen.size === HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT))) {
+			// Only validated unique rows reaching the window target complete the
+			// type. Short pages, our page budget and an absent next Link are never
+			// completion evidence.
+			if (seen.size === Math.min(expectedTotal, HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT)) {
 				completeType = true;
 				break;
 			}
-			if (body.items.length === 0 || apiWindowEnded(response.link)) break;
-			if (page < HISTORY_PAGE_LIMIT) await services.sleep(6500);
+			if (body.items.length === 0 || apiWindowEnded(response.link)) {
+				failure = "search_ended_before_total";
+				break;
+			}
 		}
 		return { complete: completeType, capped, considered, covered, failure };
 	}

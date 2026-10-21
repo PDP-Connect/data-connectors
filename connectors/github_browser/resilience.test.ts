@@ -234,28 +234,118 @@ test("a search total that changes between pages names search_total_changed", asy
 	assert.equal(skipCause(skips.get("history")), "search_incomplete: search_total_changed");
 });
 
-// The Search API serves at most 1,000 results per query. A complete read of
-// that window completes the snapshot, and the state says the window is bounded.
-test("a search window capped at 1,000 results completes with bounded_window set", async () => {
-	const { messages, outcome } = await collectToSink(() => ({}), base => ({
-		fetchPublicJson: async url => {
-			if (!isIssueSearch(url)) return base.fetchPublicJson(url);
-			const page = Number(new URL(url).searchParams.get("page"));
-			const template = ((await base.fetchPublicJson(url.replace(/page=\d+/u, "page=1"))).data as {
-				items: Array<Record<string, unknown>>;
-			}).items[0];
-			const items = Array.from({ length: 100 }, (_unused, index) => {
-				const id = (page - 1) * 100 + index + 1;
-				return { ...template, id, number: id, html_url: `https://github.com/sample-user/sample-repo/issues/${id}` };
-			});
-			return searchAnswer(url, { items, total_count: 1001, incomplete_results: false },
-				page < 10 ? '<https://api.github.com/x?page=2>; rel="next"' : null);
+// The Search API serves at most 1,000 results per query, 10 requests a minute.
+// A fake clock and quota model it: sleep advances the clock, and the 11th
+// Search request inside 60 seconds answers 403.
+const SEARCH_WINDOW = 1000;
+type SearchPlan = Record<"issue" | "pr", {
+	total: number;
+	// Rows served per page; defaults to the whole window in 100-row pages.
+	pages?: readonly number[];
+	// Link header served on the last page; defaults to none (window ended).
+	lastLink?: string | null;
+}>;
+
+function searchQuota(plan: SearchPlan) {
+	let clock = 0;
+	const requestTimes: number[] = [];
+	return {
+		requests: () => requestTimes.length,
+		services: (base: BrowserServices): Partial<BrowserServices> => ({
+			now: () => new Date(clock),
+			sleep: async ms => { clock += ms; },
+			fetchPublicJson: async url => {
+				if (!url.includes("/search/issues")) return base.fetchPublicJson(url);
+				requestTimes.push(clock);
+				if (requestTimes.filter(time => clock - time < 60_000).length > 10)
+					return { requestedUrl: url, responseUrl: url, status: 403, link: null, data: null };
+				const type = url.includes("type%3Apr") ? "pr" : "issue";
+				const page = Number(new URL(url).searchParams.get("page"));
+				const { total, pages, lastLink = null } = plan[type];
+				const sizes = pages ?? Array.from({ length: Math.ceil(Math.min(total, SEARCH_WINDOW) / 100) },
+					(_unused, index) => Math.min(100, Math.min(total, SEARCH_WINDOW) - index * 100));
+				const template = ((await base.fetchPublicJson(url.replace(/page=\d+/u, "page=1").replace("type%3Apr", "type%3Aissue"))).data as {
+					items: Array<Record<string, unknown>>;
+				}).items[0];
+				const items = Array.from({ length: sizes[page - 1] ?? 0 }, (_unused, index) => {
+					const id = (type === "pr" ? 100_000 : 0) + (page - 1) * 100 + index + 1;
+					const row = { ...template, id, number: id, html_url: `https://github.com/sample-user/sample-repo/issues/${id}` };
+					return type === "pr" ? { ...row, draft: false, pull_request: { merged_at: null } } : row;
+				});
+				return searchAnswer(url, { items, total_count: total, incomplete_results: false },
+					page < sizes.length ? '<https://api.github.com/x?page=2>; rel="next"' : lastLink);
+			},
+		}),
+	};
+}
+
+const historyOutput = (messages: Array<Record<string, unknown>>) => ({
+	record: messages.find(message => message.type === "RECORD" && message.stream === "history")?.record as
+		{ issues: unknown[]; pullRequests: unknown[] } | undefined,
+	state: messages.find(message => message.type === "STATE" && message.stream === "history"),
+	coverage: messages.find(message => message.type === "DETAIL_COVERAGE" && message.stream === "history"),
+	skips: skipsFor(messages, "history"),
+});
+
+test("a search window capped at 1,000 results completes with all 1,000 rows and bounded_window set", async () => {
+	const quota = searchQuota({ issue: { total: 1001 }, pr: { total: 1 } });
+	const { messages, outcome } = await collectToSink(() => ({}), quota.services);
+	assert.equal(outcome, null);
+	const { record, state, coverage, skips } = historyOutput(messages);
+	assert.equal(skips.length, 0);
+	assert.equal(record?.issues.length, 1000);
+	assert.equal(record?.pullRequests.length, 1);
+	assert.equal((state?.cursor as { bounded_window?: boolean }).bounded_window, true);
+	assert.ok(coverage);
+	assert.equal(quota.requests(), 11);
+});
+
+for (const [name, issue] of [
+	["an empty first page", { total: 1001, pages: [0] }],
+	["one page of 100", { total: 1001, pages: [100] }],
+	["nine pages", { total: 1001, pages: Array.from({ length: 9 }, () => 100) }],
+] as const) {
+	test(`a capped search that ends early (${name}) is withheld`, async () => {
+		const quota = searchQuota({ issue, pr: { total: 1 } });
+		const { messages, outcome } = await collectToSink(() => ({}), quota.services);
+		assert.equal(outcome, null);
+		const { record, state, coverage, skips } = historyOutput(messages);
+		assert.equal(record, undefined);
+		assert.equal(state, undefined);
+		assert.equal(coverage, undefined);
+		assert.equal(skips.length, 1);
+		assert.equal(skipCause(skips[0]), "search_incomplete: search_ended_before_total");
+	});
+}
+
+test("Search requests are paced across the issue and PR queries", async () => {
+	for (const plan of [
+		{ issue: { total: 1001 }, pr: { total: 1 } },
+		{ issue: { total: 1 }, pr: { total: 1001 } },
+	] satisfies SearchPlan[]) {
+		const quota = searchQuota(plan);
+		const { messages, outcome } = await collectToSink(() => ({}), quota.services);
+		assert.equal(outcome, null);
+		const { record, skips } = historyOutput(messages);
+		assert.equal(skips.length, 0, JSON.stringify(skips));
+		assert.equal((record?.issues.length ?? 0) + (record?.pullRequests.length ?? 0), 1001);
+		assert.equal(quota.requests(), 11);
+	}
+});
+
+test("a source read that fails and then a rejected terminal write surfaces the original sink error", async () => {
+	const sinkError = new Error("sink down");
+	const { outcome } = await collectToSink(() => ({
+		emit: async message => {
+			if (message.type === "SKIP_RESULT" && message.stream === "repositories") throw sinkError;
+		},
+	}), () => ({
+		openPage: async url => {
+			if (url.includes("tab=repositories")) throw new Error("connection reset");
+			return (await fixtureServices()).openPage(url);
 		},
 	}));
-	assert.equal(outcome, null);
-	assert.equal(skipsFor(messages, "history").length, 0);
-	const state = messages.find(message => message.type === "STATE" && message.stream === "history");
-	assert.equal((state?.cursor as { bounded_window?: boolean }).bounded_window, true);
+	assert.equal(outcome, sinkError);
 });
 
 test("fetchPublicJson returns a non-2xx status instead of throwing", async () => {
