@@ -51,6 +51,7 @@ const DATA = {
 	},
 	goals: {
 		user_goal: { goals: [], warnings: [], pagination: { has_next_page: false } },
+		completed: { goals: [], warnings: [], pagination: { has_next_page: false } },
 		assistant_tracking: {
 			goals: [{ goal_id: "goal_000000000001", source: "assistant_tracking", slug: "stretch", title: "Stretch daily", status: "active", summary: "Synthetic summary", description: "Synthetic description", momentum: "", momentum_status: "on_track", created_at: "2026-10-20T10:05:35Z", updated_at: "2026-10-21T10:06:42Z", last_activity_at: "2026-10-21T10:07:49Z", pushable: true, emoji: "*", sort_order: 0, is_thread: false }],
 			warnings: [],
@@ -98,7 +99,7 @@ function mountGateway(data) {
 			case "activity.list":
 				return params && params.before ? { days: [] } : data.activity;
 			case "goals.list":
-				return data.goals[params.source];
+				return data.goals[params.source || params.status];
 			case "tasks.list":
 				return data.tasks;
 			case "fs.list":

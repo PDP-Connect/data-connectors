@@ -177,7 +177,7 @@ test("activity fixture: ids stay unique when one message logs several activities
 
 test("goals fixtures: empty user goals and one tracked goal", () => {
 	const empty = parseGoals(fixture("goals"));
-	assert.deepEqual(empty, { goals: [], hasNextPage: false });
+	assert.deepEqual(empty, { goals: [], hasNextPage: false, nextCursor: null });
 	const tracked = parseGoals(fixture("goals-tracking"));
 	assert.ok(tracked?.goals[0]);
 	const r = buildGoalRecord(tracked.goals[0], "assistant_tracking").record;

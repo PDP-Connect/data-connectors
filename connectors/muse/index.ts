@@ -82,8 +82,8 @@ import {
 	parseLibrary,
 	parseRawText,
 	parseSchedules,
-	parseSessions,
-	sessionsListContinues,
+	parseSessionGet,
+	parseSessionsPage,
 	TextTally,
 	uniqueEvents,
 	zonedIsoToIso,
@@ -118,7 +118,16 @@ export const ACTIVITY_CAPABILITIES = [
 	"ACTIVITY_FEED_GOALS",
 	"ACTIVITY_FEED_PEER_CONVERSATIONS",
 ] as const;
-const GOAL_SOURCES = ["user_goal", "assistant_tracking"] as const;
+/** The three goals.list calls the app makes. */
+const GOAL_VARIANTS: ReadonlyArray<Record<string, string>> = [
+	{ source: "user_goal" },
+	{ source: "assistant_tracking" },
+	{ status: "completed" },
+];
+const MAX_GOAL_PAGES = 200;
+/** sessions.list page size, and pages per view before the walk fails. */
+export const SESSIONS_LIMIT = 100;
+const MAX_SESSION_PAGES = 1_000;
 
 /** Gateway client lookups before the app counts as not signed in / not loaded. */
 const GATEWAY_WAIT_ATTEMPTS = 20;
@@ -141,6 +150,7 @@ export interface ScriptRunner {
 /** The only gateway methods this connector may call. All are reads. */
 export const READ_METHODS: ReadonlySet<string> = new Set([
 	"sessions.list",
+	"sessions.get",
 	"chat.history",
 	"activity.list",
 	"goals.list",
@@ -577,33 +587,57 @@ interface ListedSession {
 	archivedView: boolean;
 }
 
+/**
+ * Every chat, active then archived, read page by page as the app does:
+ * `{ limit }`, then `{ limit, cursor: <next_cursor> }`, until an answer has
+ * no next_cursor. A repeated cursor, a page cap, or has_more with no cursor
+ * fails the list; nothing is checkpointed from a list that did not end.
+ */
 async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
 	const out: ListedSession[] = [];
 	const seen = new Set<string>();
 	for (const archivedView of [false, true]) {
-		const raw = await call(
-			gateway,
-			"sessions.list",
-			archivedView ? { view: "archived" } : {},
-		);
-		const sessions = parseSessions(raw);
-		if (sessions === null) {
-			throw new StreamFailure(
-				`Muse's ${archivedView ? "archived " : ""}chat list came back in a shape the connector cannot read; nothing was checkpointed.`,
+		const label = archivedView ? "archived chat list" : "chat list";
+		const cursors = new Set<string>();
+		let cursor: string | null = null;
+		for (let pageIndex = 0; ; pageIndex++) {
+			if (pageIndex >= MAX_SESSION_PAGES) {
+				throw new StreamFailure(
+					`Muse's ${label} is longer than ${MAX_SESSION_PAGES} pages; nothing was checkpointed.`,
+					false,
+				);
+			}
+			const params: Record<string, unknown> = {
+				limit: SESSIONS_LIMIT,
+				...(archivedView ? { view: "archived" } : {}),
+				...(cursor === null ? {} : { cursor }),
+			};
+			const page = parseSessionsPage(
+				await call(gateway, "sessions.list", params),
 			);
-		}
-		// The app never pages this list; the observed answer is the whole list
-		// with no paging field. An answer with any paging field cannot be
-		// proven complete, so nothing is checkpointed.
-		if (sessionsListContinues(raw)) {
-			throw new StreamFailure(
-				`Muse's ${archivedView ? "archived " : ""}chat list came back with paging fields the app never uses; it cannot be proven complete and nothing was checkpointed.`,
-			);
-		}
-		for (const session of sessions) {
-			if (seen.has(session.session_id)) continue;
-			seen.add(session.session_id);
-			out.push({ session, archivedView });
+			if (page === null) {
+				throw new StreamFailure(
+					`Muse's ${label} came back in a shape the connector cannot read; nothing was checkpointed.`,
+				);
+			}
+			for (const session of page.sessions) {
+				if (seen.has(session.session_id)) continue;
+				seen.add(session.session_id);
+				out.push({ session, archivedView });
+			}
+			if (page.moreWithoutCursor) {
+				throw new StreamFailure(
+					`Muse's ${label} says more chats follow but gives no cursor to read them; nothing was checkpointed.`,
+				);
+			}
+			if (page.nextCursor === null) break; // the source's end signal
+			if (cursors.has(page.nextCursor)) {
+				throw new StreamFailure(
+					`Muse's ${label} repeated a page cursor; nothing was checkpointed.`,
+				);
+			}
+			cursors.add(page.nextCursor);
+			cursor = page.nextCursor;
 		}
 	}
 	return out;
@@ -638,6 +672,7 @@ async function hydrateChat(
 	let unsafe = 0;
 	let revision: number | null = null;
 	let revisionMoved = false;
+	let revisionUnseen = false;
 	const finish = (): HistoryOutcome =>
 		notFinal > 0
 			? {
@@ -689,8 +724,12 @@ async function hydrateChat(
 				message: "chat.history came back in an unreadable shape",
 			};
 		}
+		// Compare known revisions only: a continuation page that omits it says
+		// nothing about a change (a final probe below checks the chat then).
 		if (pageIndex === 0) revision = page.transcriptRevision;
-		else if (page.transcriptRevision !== revision) revisionMoved = true;
+		else if (page.transcriptRevision === null) revisionUnseen = true;
+		else if (revision !== null && page.transcriptRevision !== revision)
+			revisionMoved = true;
 		const fresh = uniqueEvents(page.events).filter(
 			(e) => !seen.has(e.message_id),
 		);
@@ -707,7 +746,26 @@ async function hydrateChat(
 			}
 			await emitBuilt(ctx, tally, MESSAGES, built);
 		}
-		if (!page.hasMore) return finish(); // the source's end signal
+		if (!page.hasMore) {
+			// the source's end signal. When a continuation page did not report
+			// the revision, one more first-page read confirms the chat did not
+			// change while it was walked.
+			if (revisionUnseen && revision !== null) {
+				let latest: number | null;
+				try {
+					latest = await readRevision(gateway, sessionId);
+				} catch (error) {
+					if (
+						!(error instanceof MuseRpcError) ||
+						!PER_ITEM_RPC_CODES.has(error.code)
+					)
+						throw error;
+					latest = Number.NaN; // the chat went away: not unchanged
+				}
+				if (latest !== null && latest !== revision) revisionMoved = true;
+			}
+			return finish();
+		}
 		if (fresh.length === 0) {
 			return {
 				kind: "gap",
@@ -740,6 +798,18 @@ async function hydrateChat(
 		errorClass: "muse_history_page_cap",
 		message: `chat history is longer than ${MAX_HISTORY_PAGES} pages`,
 	};
+}
+
+/** The chat's current transcript revision from a one-message read; null when unknown. */
+async function readRevision(
+	gateway: MuseGateway,
+	sessionId: string,
+): Promise<number | null> {
+	const raw = await call(gateway, "chat.history", {
+		limit: 1,
+		session_id: sessionId,
+	});
+	return parseHistory(raw)?.transcriptRevision ?? null;
 }
 
 /** A message gap the host carried over from an earlier run. */
@@ -782,6 +852,7 @@ async function hydrateChats(
 	tally: TextTally,
 	required: readonly string[],
 	pending: ReadonlyMap<string, readonly PendingGap[]> = new Map(),
+	beforeChat?: (sessionId: string) => Promise<void>,
 ): Promise<Map<string, number | null>> {
 	const hydrated: string[] = [];
 	const revisions = new Map<string, number | null>();
@@ -790,6 +861,8 @@ async function hydrateChats(
 		await ctx.progress(`Reading chat ${index + 1} of ${required.length}`, {
 			stream: MESSAGES,
 		});
+		// The chat's parent record, when the caller emits it here.
+		if (beforeChat) await beforeChat(sessionId);
 		const outcome = await hydrateChat(ctx, gateway, tally, sessionId);
 		if (outcome.kind === "hydrated") {
 			hydrated.push(sessionId);
@@ -870,22 +943,61 @@ export async function runChatStreams(
 		? pendingMessageGaps(ctx)
 		: new Map<string, PendingGap[]>();
 
-	// Parent records (Collection Profile 5.6 "parent before children"):
+	// Parent records come before their children:
 	// - A normal run with conversations in scope emits every conversation
 	//   record below, before any message record, gap or coverage.
-	// - A recovery-only run (START.recovery_only) must run gap recovery and
-	//   return before any list-phase fetch, so it cannot list chats to emit
-	//   their records. Each gapped chat's conversation record was emitted by
-	//   the run that recorded the gap.
-	// - A messages-only request leaves conversations out of START.scope;
-	//   emitting conversation records would put records outside the
-	//   requested scope (6.1 item 4). Messages carry session_id for the join.
+	// - A recovery-only run fetches each gapped chat with sessions.get and
+	//   emits its conversation record right before that chat's messages or
+	//   gap (and so before the coverage).
+	// - A messages-only request does not have conversations in START.scope.
+	//   Collection Profile 5.1: "A connector MUST emit records only for
+	//   streams in scope.streams ... It MUST NOT silently broaden scope", and
+	//   6.1 item 4: a conforming connector "Emits records only within
+	//   START.scope". The profile places no requirement that a child stream
+	//   be collected with its parent stream, so messages are collected alone
+	//   and carry session_id for the join; no conversation record is emitted.
 	if (ctx.recoveryOnly) {
 		if (pending.size === 0) return;
+		const emitParent = async (sessionId: string): Promise<void> => {
+			if (!wantConversations) return;
+			let raw: unknown;
+			try {
+				raw = await call(gateway, "sessions.get", { id: sessionId });
+			} catch (error) {
+				// A chat that no longer exists has no parent to emit; its read
+				// below gaps it. Anything else stops the recovery pass.
+				if (error instanceof MuseRpcError && PER_ITEM_RPC_CODES.has(error.code))
+					return;
+				throw error;
+			}
+			const session = parseSessionGet(raw);
+			if (session === null || session.session_id !== sessionId) {
+				throw new StreamFailure(
+					"Muse's sessions.get came back in a shape the connector cannot read; nothing was checkpointed.",
+				);
+			}
+			await emitBuilt(
+				ctx,
+				tally,
+				CONVERSATIONS,
+				buildConversationRecord(session, session.archived === true),
+			);
+		};
 		try {
-			await hydrateChats(ctx, gateway, tally, [...pending.keys()], pending);
+			await hydrateChats(
+				ctx,
+				gateway,
+				tally,
+				[...pending.keys()],
+				pending,
+				emitParent,
+			);
 		} catch (error) {
-			await failStreams(ctx, [MESSAGES], error);
+			await failStreams(
+				ctx,
+				[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
+				error,
+			);
 		}
 		return;
 	}
@@ -1162,31 +1274,54 @@ export async function runGoals(
 	await ctx.progress("Reading goals", { stream: GOALS });
 	try {
 		const seen = new Set<string>();
-		let incomplete = false;
-		for (const source of GOAL_SOURCES) {
-			const page = parseGoals(await call(gateway, "goals.list", { source }));
-			if (page === null) {
-				throw new StreamFailure(
-					`Muse's ${source} goals came back in a shape the connector cannot read; nothing was checkpointed.`,
-				);
+		for (const variant of GOAL_VARIANTS) {
+			const label = Object.values(variant).join(" ");
+			const cursors = new Set<string>();
+			let cursor: string | null = null;
+			for (let pageIndex = 0; ; pageIndex++) {
+				if (pageIndex >= MAX_GOAL_PAGES) {
+					throw new StreamFailure(
+						`Muse's ${label} goals are longer than ${MAX_GOAL_PAGES} pages; nothing was checkpointed.`,
+						false,
+					);
+				}
+				const params =
+					cursor === null ? { ...variant } : { ...variant, cursor };
+				const page = parseGoals(await call(gateway, "goals.list", params));
+				if (page === null) {
+					throw new StreamFailure(
+						`Muse's ${label} goals came back in a shape the connector cannot read; nothing was checkpointed.`,
+					);
+				}
+				for (const goal of page.goals) {
+					if (seen.has(goal.goal_id)) continue;
+					seen.add(goal.goal_id);
+					await emitBuilt(
+						ctx,
+						tally,
+						GOALS,
+						buildGoalRecord(goal, variant.source ?? null),
+					);
+				}
+				if (!page.hasNextPage) break; // the source's end signal
+				// The next page is asked with `cursor`, the parameter sessions.list
+				// uses. An answer that says more goals follow but carries no cursor
+				// gives nothing to follow: guessing could re-read page one and claim
+				// completeness, so the stream fails visibly instead.
+				if (page.nextCursor === null) {
+					throw new StreamFailure(
+						`Muse reports more ${label} goals than one page holds but gives no cursor for the next page; the goals list is not checkpointed as complete.`,
+						false,
+					);
+				}
+				if (cursors.has(page.nextCursor)) {
+					throw new StreamFailure(
+						`Muse's ${label} goals repeated a page cursor; nothing was checkpointed.`,
+					);
+				}
+				cursors.add(page.nextCursor);
+				cursor = page.nextCursor;
 			}
-			for (const goal of page.goals) {
-				if (seen.has(goal.goal_id)) continue;
-				seen.add(goal.goal_id);
-				await emitBuilt(ctx, tally, GOALS, buildGoalRecord(goal, source));
-			}
-			// The app has no known next-page parameter for goals.list (none is
-			// observed in its bundle or live traffic), so a page that says more
-			// goals follow cannot be read to the end. Guessing a parameter could
-			// re-read page one and claim completeness; the stream fails visibly
-			// instead and is never checkpointed as complete.
-			if (page.hasNextPage) incomplete = true;
-		}
-		if (incomplete) {
-			throw new StreamFailure(
-				"Muse reports more goals than one page holds, and the connector cannot read the next page; the goals list is not checkpointed as complete.",
-				false,
-			);
 		}
 		await closeFullInventory(ctx, tally, GOALS, seen.size);
 	} catch (error) {

@@ -98,6 +98,9 @@ function fakeGateway(overrides: Record<string, Handler> = {}) {
 		"sessions.list": (p) =>
 			p.view === "archived" ? fixture("sessions-archived") : SESSIONS,
 		"chat.history": (p) => historyFor(String(p.session_id)),
+		"sessions.get": (p) => ({
+			session: (SESSIONS.sessions as Json[]).find((s) => s.session_id === p.id),
+		}),
 		"activity.list": (p) =>
 			p.before == null ? fixture("activity") : { days: [] },
 		"goals.list": (p) =>
@@ -464,14 +467,89 @@ test("a recovery-only run retries pending gaps and nothing else", async () => {
 		],
 	});
 	await collectMuseWith(h.ctx, gateway);
+	// No list walk: the gapped chat's own parent, then its messages.
 	assert.deepEqual(
 		calls.map((c) => c.method),
-		["chat.history"],
+		["sessions.get", "chat.history"],
 	);
 	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.hydrated_keys, [
 		SIDE_CHAT,
 	]);
 	assert.equal(h.of("STATE").length, 0);
+});
+
+test("round 6 #3: a recovery-only run emits each gapped chat's parent before its messages", async () => {
+	const { gateway } = fakeGateway({
+		// MAIN_CHAT is gone: no parent to emit, and its read gaps it.
+		"sessions.get": (p) => {
+			if (p.id === MAIN_CHAT)
+				throw new MuseRpcError(
+					"not_found",
+					"muse_rpc_failed: sessions.get not_found",
+				);
+			return {
+				session: (SESSIONS.sessions as Json[]).find(
+					(s) => s.session_id === p.id,
+				),
+			};
+		},
+		"chat.history": (p) => {
+			if (p.session_id === MAIN_CHAT)
+				throw new MuseRpcError(
+					"not_found",
+					"muse_rpc_failed: chat.history not_found",
+				);
+			return historyFor(String(p.session_id));
+		},
+	});
+	const gap = (id: string) => ({
+		gap_id: `g-${id}`,
+		status: "pending" as const,
+		stream: "messages",
+		record_key: id,
+		detail_locator: { kind: "muse.chat_history", chat_id: id },
+	});
+	const h = harness({
+		recoveryOnly: true,
+		detailGaps: [gap(SIDE_CHAT), gap(MAIN_CHAT)],
+	});
+	await collectMuseWith(h.ctx, gateway);
+	const parent = h.of("RECORD", "conversations");
+	assert.deepEqual(
+		parent.map((x) => (x.m.data as Json).id),
+		[SIDE_CHAT],
+	);
+	const firstChild = Math.min(
+		...h
+			.of("RECORD", "messages")
+			.filter((x) => (x.m.data as Json).session_id === SIDE_CHAT)
+			.map((x) => x.index),
+	);
+	assert.ok((parent[0]?.index ?? Infinity) < firstChild);
+	const cov = h.of("DETAIL_COVERAGE", "messages")[0];
+	assert.ok(cov && (parent[0]?.index ?? Infinity) < cov.index);
+	assert.deepEqual(cov.m.gap_keys, [MAIN_CHAT]);
+	// Without conversations in scope, no parent is fetched or emitted (5.1).
+	const only = fakeGateway();
+	const m = harness({
+		recoveryOnly: true,
+		streams: ["messages"],
+		detailGaps: [gap(SIDE_CHAT)],
+	});
+	await collectMuseWith(m.ctx, only.gateway);
+	assert.deepEqual(
+		only.calls.map((c) => c.method),
+		["chat.history"],
+	);
+	assert.equal(m.of("RECORD", "conversations").length, 0);
+});
+
+test("round 6 #3: a messages-only request emits no conversation records (Collection Profile 5.1)", async () => {
+	const { gateway } = fakeGateway();
+	const h = harness({ streams: ["messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.of("RECORD", "conversations").length, 0);
+	assert.equal(h.records("messages").length, 6);
 });
 
 test("a failed chat list fails conversations and messages without a checkpoint", async () => {
@@ -778,38 +856,86 @@ test("a gateway error becomes a retryable muse_rpc_failed error", async () => {
 
 // ─── Review round 4 ─────────────────────────────────────────────────────
 
-test("finding 1: a chat list answer with any paging field is not checkpointed", async () => {
-	for (const extra of [
-		{ has_more: true },
-		{ has_more: false },
-		{ next_cursor: "c2" },
-		{ next_cursor: null },
-		{ cursor: "c2" },
-		{ pagination: { has_next_page: true } },
+/** sessions.list paged like the live API: `limit`, then `cursor`. */
+function pagedSessions(
+	pages: Record<string, unknown>,
+	archived: Json = { sessions: [] },
+): (p: Json) => unknown {
+	return (p) => {
+		if (p.view === "archived") return archived;
+		const key = typeof p.cursor === "string" ? p.cursor : "first";
+		const page = pages[key];
+		if (!page) throw new Error(`unexpected cursor ${String(p.cursor)}`);
+		return page;
+	};
+}
+
+test("round 6 #1: sessions.list is read page by page until an answer has no next_cursor", async () => {
+	const [main, side] = SESSIONS.sessions as Json[];
+	const params: Json[] = [];
+	const pages = pagedSessions({
+		first: { sessions: [main], next_cursor: "c1" },
+		// Explicit terminal values end the list too.
+		c1: { sessions: [main, side], next_cursor: null, has_more: false },
+	});
+	const { gateway } = fakeGateway({
+		"sessions.list": (p) => {
+			params.push(p);
+			return pages(p);
+		},
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(params, [
+		{ limit: 100 },
+		{ limit: 100, cursor: "c1" },
+		{ limit: 100, view: "archived" },
+	]);
+	assert.deepEqual(h.failures, []);
+	// Deduplicated by session_id.
+	assert.deepEqual(
+		h.records("conversations").map((r) => r.id),
+		SESSION_IDS,
+	);
+	assert.equal(h.states("conversations").length, 1);
+});
+
+test("round 6 #1: a chat list walk that cannot reach its end is not checkpointed", async () => {
+	const [main] = SESSIONS.sessions as Json[];
+	for (const pages of [
+		// The cursor repeats.
+		{
+			first: { sessions: [main], next_cursor: "c1" },
+			c1: { sessions: [], next_cursor: "c1" },
+		},
+		// More, with nothing to follow.
+		{ first: { sessions: [main], has_more: true } },
 	]) {
-		const { gateway } = fakeGateway({
-			"sessions.list": (p) =>
-				p.view === "archived"
-					? fixture("sessions-archived")
-					: { ...SESSIONS, ...extra },
-		});
+		const { gateway } = fakeGateway({ "sessions.list": pagedSessions(pages) });
 		const h = harness({ streams: ["conversations", "messages"] });
 		await collectMuseWith(h.ctx, gateway);
 		assert.deepEqual(
 			h.failures.map((f) => f.stream),
 			["conversations", "messages"],
-			JSON.stringify(extra),
 		);
 		assert.equal(h.states("conversations").length, 0);
 		assert.equal(h.of("DETAIL_COVERAGE").length, 0);
-		assert.equal(h.records("conversations").length, 0);
 	}
-	// The observed shape, `{ sessions }` alone, is the whole list.
-	const { gateway } = fakeGateway();
+	// The archived view pages the same way.
+	const { gateway, calls } = fakeGateway({
+		"sessions.list": pagedSessions(
+			{ first: { sessions: [main] } },
+			{ sessions: [], next_cursor: "a1" },
+		),
+	});
 	const h = harness({ streams: ["conversations"] });
 	await collectMuseWith(h.ctx, gateway);
-	assert.deepEqual(h.failures, []);
-	assert.equal(h.states("conversations").length, 1);
+	// The archived answer repeats for every cursor: a repeated cursor fails it.
+	assert.ok(calls.some((c) => c.params.cursor === "a1"));
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["conversations"],
+	);
 });
 
 /** The history of `chat` with its first event changed by `edit`. */
@@ -1259,4 +1385,111 @@ test("round 5 #2: a chat whose revision moves between pages is a gap, not a mark
 		((h.states("conversations")[0]?.chats ?? {}) as Json)[SIDE_CHAT],
 		undefined,
 	);
+});
+
+test("round 6 #2: a continuation page without a revision is unknown, not a change", async () => {
+	const side = pagedHistory(120);
+	const calls: Json[] = [];
+	const { gateway } = fakeGateway({
+		"chat.history": (p) => {
+			if (p.session_id !== SIDE_CHAT) return historyFor(String(p.session_id));
+			calls.push(p);
+			const page = side(p) as Json;
+			if (typeof p.before_seq === "number") delete page.transcript_revision;
+			return page;
+		},
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(
+		h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys ?? [],
+		[],
+	);
+	assert.deepEqual(
+		((h.states("conversations")[0]?.chats ?? {}) as Json)[SIDE_CHAT],
+		{ updated_at_ms: 1792610689000, transcript_revision: 31 },
+	);
+	// One first-page read at the end confirms the revision.
+	assert.equal(calls.at(-1)?.limit, 1);
+});
+
+test("round 6 #2: a chat that changed during the walk is caught by the final revision read", async () => {
+	const side = pagedHistory(120);
+	const { gateway } = fakeGateway({
+		"chat.history": (p) => {
+			if (p.session_id !== SIDE_CHAT) return historyFor(String(p.session_id));
+			const page = side(p) as Json;
+			if (typeof p.before_seq === "number") delete page.transcript_revision;
+			if (p.limit === 1) page.transcript_revision = 32;
+			return page;
+		},
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
+		SIDE_CHAT,
+	]);
+});
+
+test("round 6 #5: goals are read for all three app variants and follow the page cursor", async () => {
+	const params: Json[] = [];
+	const goal = (id: string) => ({
+		...((fixture("goals-tracking").goals as Json[])[0] ?? {}),
+		goal_id: id,
+	});
+	const { gateway } = fakeGateway({
+		"goals.list": (p) => {
+			params.push(p);
+			if (p.status === "completed")
+				return {
+					goals: [goal("goal_done")],
+					warnings: [],
+					pagination: { has_next_page: false },
+				};
+			if (p.source === "assistant_tracking" && p.cursor === undefined)
+				return {
+					goals: [goal("goal_a")],
+					warnings: [],
+					pagination: { has_next_page: true, next_cursor: "g2" },
+				};
+			if (p.source === "assistant_tracking")
+				return {
+					goals: [goal("goal_a"), goal("goal_b")],
+					warnings: [],
+					pagination: { has_next_page: false },
+				};
+			return fixture("goals");
+		},
+	});
+	const h = harness({ streams: ["goals"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(params, [
+		{ source: "user_goal" },
+		{ source: "assistant_tracking" },
+		{ source: "assistant_tracking", cursor: "g2" },
+		{ status: "completed" },
+	]);
+	assert.deepEqual(
+		h.records("goals").map((r) => r.id),
+		["goal_a", "goal_b", "goal_done"],
+	);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.states("goals").length, 1);
+});
+
+test("round 6 #5: a goals cursor that repeats fails the stream", async () => {
+	const { gateway } = fakeGateway({
+		"goals.list": () => ({
+			goals: [],
+			warnings: [],
+			pagination: { has_next_page: true, end_cursor: "same" },
+		}),
+	});
+	const h = harness({ streams: ["goals"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["goals"],
+	);
+	assert.equal(h.states("goals").length, 0);
 });

@@ -124,30 +124,52 @@ export type MuseSession = z.infer<typeof sessionSchema>;
 
 const sessionsResponseSchema = z.object({ sessions: z.array(z.unknown()) });
 
-/**
- * Whether a sessions.list answer carries any paging field. The app never
- * pages this list: it sends no paging parameter, and its answer is observed
- * as `{ sessions }` alone. An answer with a has_more, cursor, next-page or
- * pagination field (even a terminal-looking one) is not the observed shape,
- * and the connector has no observed way to follow it, so it cannot prove
- * the list complete.
- */
-export function sessionsListContinues(raw: unknown): boolean {
-	if (typeof raw !== "object" || raw === null) return false;
-	return PAGING_KEYS.some((key) => Object.hasOwn(raw, key));
+const cursorValue = z.union([z.string(), z.number()]).nullable().optional();
+
+const sessionsPagingSchema = z.object({
+	next_cursor: cursorValue,
+	has_more: z.boolean().nullable().optional(),
+});
+
+export interface SessionsPage {
+	sessions: MuseSession[];
+	/** The cursor for the next page; null when the answer says the list ended. */
+	nextCursor: string | null;
+	/** has_more:true with no cursor to follow: the list cannot be read to its end. */
+	moreWithoutCursor: boolean;
 }
 
-const PAGING_KEYS = [
-	"has_more",
-	"hasMore",
-	"next_cursor",
-	"nextCursor",
-	"cursor",
-	"next_page_token",
-	"next",
-	"next_offset",
-	"pagination",
-] as const;
+/**
+ * One sessions.list page. Observed live: `{ limit }` answers
+ * `{ sessions, next_cursor }`, the next page is asked with `cursor`, and the
+ * last page has no next_cursor (without `limit`, one answer holds the whole
+ * list and no next_cursor). An absent or null next_cursor, or has_more:false,
+ * ends the list.
+ */
+export function parseSessionsPage(raw: unknown): SessionsPage | null {
+	const sessions = parseSessions(raw);
+	const paging = sessionsPagingSchema.safeParse(raw);
+	if (sessions === null || !paging.success) return null;
+	const cursor = paging.data.next_cursor;
+	const nextCursor =
+		cursor === undefined || cursor === null || cursor === ""
+			? null
+			: String(cursor);
+	return {
+		sessions,
+		nextCursor,
+		moreWithoutCursor: nextCursor === null && paging.data.has_more === true,
+	};
+}
+
+/** The session of a sessions.get answer (`{ session }` or the session itself), or null. */
+export function parseSessionGet(raw: unknown): MuseSession | null {
+	const wrapped = z.object({ session: z.unknown() }).safeParse(raw);
+	const parsed = sessionSchema.safeParse(
+		wrapped.success ? wrapped.data.session : raw,
+	);
+	return parsed.success ? parsed.data : null;
+}
 
 /** Every session of one sessions.list answer, or null when any is unreadable. */
 export function parseSessions(raw: unknown): MuseSession[] | null {
@@ -393,12 +415,20 @@ export type MuseGoal = z.infer<typeof goalSchema>;
 
 const goalsResponseSchema = z.object({
 	goals: z.array(z.unknown()),
-	pagination: z.object({ has_next_page: z.boolean() }),
+	pagination: z.object({
+		has_next_page: z.boolean(),
+		next_cursor: cursorValue,
+		end_cursor: cursorValue,
+		cursor: cursorValue,
+	}),
+	next_cursor: cursorValue,
 });
 
 export interface GoalsPage {
 	goals: MuseGoal[];
 	hasNextPage: boolean;
+	/** The cursor the answer gives for its next page, if any. */
+	nextCursor: string | null;
 }
 
 export function parseGoals(raw: unknown): GoalsPage | null {
@@ -410,12 +440,23 @@ export function parseGoals(raw: unknown): GoalsPage | null {
 		if (!g.success) return null;
 		goals.push(g.data);
 	}
-	return { goals, hasNextPage: parsed.data.pagination.has_next_page };
+	const { pagination } = parsed.data;
+	const cursor = [
+		pagination.next_cursor,
+		pagination.end_cursor,
+		pagination.cursor,
+		parsed.data.next_cursor,
+	].find((c) => c !== undefined && c !== null && c !== "");
+	return {
+		goals,
+		hasNextPage: pagination.has_next_page,
+		nextCursor: cursor === undefined || cursor === null ? null : String(cursor),
+	};
 }
 
 export function buildGoalRecord(
 	g: MuseGoal,
-	requestedSource: string,
+	requestedSource: string | null,
 ): { record: RecordData; replaced: number } {
 	const t = new TextScope();
 	const record: RecordData = {
