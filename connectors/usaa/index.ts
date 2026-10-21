@@ -84,12 +84,13 @@ import {
 	buildCreditCardBillingStatsRecord,
 	buildInboxMessageRecord,
 	creditCardId,
+	hasCsvTransactionHeader,
 	hashId,
 	isoDate,
 	mmddyyyy,
 	BACKFILL_17MO as PARSERS_BACKFILL_17MO,
 	INCREMENTAL_OVERLAP_MS as PARSERS_INCREMENTAL_OVERLAP_MS,
-	parseCsv,
+	parseCsvWithIntegrity,
 	resolveAccountIdForRef,
 	rowsToTransactions,
 } from "./parsers.ts";
@@ -2480,6 +2481,7 @@ export async function tryExportLadder(
 }
 
 interface CsvTransactionEmitResult {
+	malformedCsv?: true;
 	dataRows: number;
 	latest: string | null;
 	usableCount: number;
@@ -2496,7 +2498,8 @@ export async function emitCsvTransactions(
 	fingerprintCursor?: FingerprintCursor,
 ): Promise<CsvTransactionEmitResult> {
 	const text = await readFile(csvPath, "utf8");
-	const rows = parseCsv(text);
+	const { rows, malformed: malformedQuotes } = parseCsvWithIntegrity(text);
+	const malformed = malformedQuotes || !hasCsvTransactionHeader(rows[0]);
 	const txnAccountId = a.account_id_raw || a.last_four || "unknown";
 	const txns = rowsToTransactions(rows, {
 		accountId: txnAccountId,
@@ -2510,10 +2513,13 @@ export async function emitCsvTransactions(
 	// by account ordinal (never the account number / last-four) so the run does
 	// not look complete. The caller also refuses to advance this account's
 	// transaction cursor on this outcome, so a parser fix can recover the gap.
-	// `rows.length` is the raw parsed line count; we report data-row count
-	// (rows beyond the header) to keep the number meaningful.
-	const dataRows = Math.max(0, rows.length - 1);
-	if (txns.length === 0) {
+	// Count only tokenized logical data rows. Syntax/header integrity is
+	// separate evidence; each usable row also requires a real calendar date
+	// and valid safe-integer amount before deriving its transaction identity.
+	const dataRows = rows
+		.slice(1)
+		.filter((row) => row.some((field) => field.trim())).length;
+	if (txns.length === 0 && !malformed) {
 		await deps.emit({
 			type: "SKIP_RESULT",
 			stream: "transactions",
@@ -2526,6 +2532,25 @@ export async function emitCsvTransactions(
 				account_ordinal: accountOrdinal,
 				account_total: accountTotal,
 				data_rows: dataRows,
+			},
+		});
+	}
+	if (malformed || (txns.length > 0 && txns.length < dataRows)) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "csv_partial_parse",
+			message: malformed
+				? `CSV syntax or required header was malformed for account ${accountOrdinal}/${accountTotal}; no complete account coverage can be claimed`
+				: `CSV left ${dataRows - txns.length} unparsed row(s) for account ${accountOrdinal}/${accountTotal}`,
+			diagnostics: {
+				account_ordinal: accountOrdinal,
+				account_total: accountTotal,
+				data_rows: dataRows,
+				usable_rows: txns.length,
+				...(malformed
+					? { malformed_csv: true }
+					: { unparsed_rows: dataRows - txns.length }),
 			},
 		});
 	}
@@ -2561,7 +2586,12 @@ export async function emitCsvTransactions(
 			}
 		})
 		.catch((): undefined => undefined);
-	return { dataRows, latest, usableCount: txns.length };
+	return {
+		dataRows,
+		latest,
+		usableCount: txns.length,
+		...(malformed ? { malformedCsv: true as const } : {}),
+	};
 }
 
 /**
@@ -2575,7 +2605,7 @@ export async function emitCsvTransactions(
  *   - `no_activity`: the source gave a real, source-limited "nothing here"
  *     answer — either the export dialog explicitly reported "no
  *     transactions" (`exportEmpty`) or the export downloaded a headers-only
- *     CSV with zero data rows (a dormant account's steady state). Both
+ *     CSV with a recognized date/amount header and zero data rows. Both
  *     count as covered, never as a failure.
  *   - `gap`: the export ladder was exhausted without a download, or the
  *     downloaded CSV had data rows but none parsed to a usable transaction
@@ -2597,7 +2627,7 @@ export type AccountTransactionOutcome =
 
 /** Build the retryable DETAIL_GAP for a USAA transaction account whose CSV
  *  export failed this run — the ladder produced no download, or the CSV had
- *  data rows but none parsed usable (a headers-only CSV is NOT a gap; see
+ *  data rows but none parsed usable (a recognized headers-only CSV is NOT a gap; see
  *  `classifyCsvTransactionResult`). `record_key` is the account id — the
  *  next run's detail pass retries exactly this account. Mirrors chase's
  *  `buildAccountDetailGap` (reference_only, retryable, pending) so the
@@ -2826,35 +2856,35 @@ export interface AccountTransactionResult {
 }
 
 /**
- * Classify a downloaded-and-parsed CSV into the account's per-run detail
- * outcome + cursor decision. Pure — exported so the coverage classification
- * is testable without driving the Playwright export flow. The distinction
- * that matters (`csvResult` comes straight from `emitCsvTransactions`):
- *   - `usableCount > 0`: real transactions parsed → `hydrated`; the cursor
- *     advances to the latest parsed date (or the window start).
- *   - `usableCount === 0 && dataRows === 0`: the export produced a
- *     headers-only CSV — the source genuinely had no transactions for the
- *     window. A dormant account exports exactly this every run, so it is
- *     the same source-limited answer as the explicit "nothing to export"
- *     dialog → `no_activity` (covered), NEVER a gap. Classifying it as a
- *     gap would pin a pending retryable DETAIL_GAP on a healthy dormant
- *     account forever (permanent Degraded).
- *   - `usableCount === 0 && dataRows > 0`: data rows were present but none
- *     parsed to a usable transaction (header mismatch / unparseable rows)
- *     → genuine parse trouble, a retryable `gap` so a parser fix can
- *     recover it next run. (`emitCsvTransactions` already emitted the
- *     matching `csv_no_usable_transactions` SKIP_RESULT.)
- * In both zero-usable cases `last_date` stays at the prior watermark
- * (possibly null → the caller writes no cursor entry), preserving the
- * pre-coverage behavior of never advancing the cursor on a run that parsed
- * nothing.
+ * Classify the real parser result before advancing an account watermark.
+ * Malformed syntax/header or any unusable sibling leaves a gap, even when
+ * valid siblings emitted. Usable rows have unambiguous CSV fields, a strict
+ * calendar date and a real safe-integer amount before identity derivation.
+ * Only a recognized, syntactically valid header with no data rows proves
+ * no_activity. An empty download or unsupported header does not.
+ * Complete usable rows may advance the cursor; every gap and no_activity
+ * retain the prior watermark. Downstream selection is not a parse failure.
  */
 export function classifyCsvTransactionResult(
 	accountId: string,
 	priorLastDate: string | null,
 	usedSince: string | null,
-	csvResult: { dataRows: number; latest: string | null; usableCount: number },
+	csvResult: CsvTransactionEmitResult,
 ): AccountTransactionResult {
+	if (
+		csvResult.malformedCsv ||
+		(csvResult.usableCount > 0 && csvResult.usableCount < csvResult.dataRows)
+	) {
+		return {
+			last_date: priorLastDate,
+			outcome: {
+				accountId,
+				kind: "gap",
+				reason: "temporary_unavailable",
+				errorClass: "csv_partial_parse",
+			},
+		};
+	}
 	if (csvResult.usableCount > 0) {
 		return {
 			last_date: csvResult.latest || usedSince || null,
