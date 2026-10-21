@@ -566,6 +566,19 @@ export interface AttachmentDetailCoverage {
 	requiredKeys: string[];
 }
 
+/**
+ * Whether every required key has an outcome the host can credit: hydrated,
+ * or backed by a DETAIL_GAP this run. An accepted too_large or deferred key,
+ * or a rejection with no retry locator, has neither, so a claim carrying it
+ * would block the checkpoint on every run.
+ */
+export function attachmentCoverageFullyCredited(
+	coverage: AttachmentDetailCoverage,
+): boolean {
+	const credited = new Set([...coverage.hydratedKeys, ...coverage.gapKeys]);
+	return coverage.requiredKeys.every((key) => credited.has(key));
+}
+
 /** Fresh, empty accumulator for one attachments detail pass. */
 export function makeAttachmentDetailCoverage(): AttachmentDetailCoverage {
 	return {
@@ -1136,6 +1149,8 @@ export interface PerMessageDeps {
 	emitRecord: EmitRecordFn;
 	/** False once the shared IMAP connection can no longer run commands. */
 	connectionUsable?: () => boolean;
+	/** The UID may already have stored rows (catch-up or retry), not first sight. */
+	revisit?: boolean;
 	fetchBodies: FetchBodiesFn;
 	hydrateAttachment: HydrateAttachmentFn;
 	nowIso: () => string;
@@ -1362,10 +1377,19 @@ export async function processMessage(
 			? await deps.fetchBodies(msg, selection, wantBodies, wantMessages)
 			: { bodyHtmlFull: null, bodyTextFull: null, snippet: null };
 
+	// A revisit (catch-up or retry) may reach a message whose rows are
+	// already stored. A failed body read must not overwrite them with empty
+	// values; the UID stays owed instead.
+	const degraded = deps.revisit === true && fetchFailed === true;
 	if (deps.wantBodies && !wantBodies) {
 		outcome.message_bodies = { kind: "out_of_scope" };
 	}
-	if (wantBodies) {
+	if (wantBodies && degraded) {
+		outcome.message_bodies = {
+			kind: "failed",
+			failure: failureClass ?? "body_fetch_failed",
+		};
+	} else if (wantBodies) {
 		// A body that could not be captured leaves its own DETAIL_GAP, which
 		// accounts for it; the ledger only needs to know the UID was handled.
 		await emitMessageBody(deps, {
@@ -1387,7 +1411,12 @@ export async function processMessage(
 	if (deps.wantMessages && !wantMessages) {
 		outcome.messages = { kind: "out_of_scope" };
 	}
-	if (wantMessages) {
+	if (wantMessages && degraded) {
+		outcome.messages = {
+			kind: "failed",
+			failure: failureClass ?? "body_fetch_failed",
+		};
+	} else if (wantMessages) {
 		const emitted = await deps.emitRecord(
 			"messages",
 			buildMessageRecord({
@@ -2919,9 +2948,15 @@ async function processServedAttachmentRecoveryGap(
 	state: ServedAttachmentRecoveryState,
 	byteBudget: number,
 ): Promise<ServedAttachmentRecoveryStop> {
-	// The walk already recovered this gap in this run. Touching it again would
-	// re-download the bytes, and a rejection would re-defer a settled gap.
-	if (state.recoveredAttachmentGapIds.has(gap.gap_id)) {
+	// The walk already handled this key in this run: it recovered the gap, or
+	// it attempted the attachment and left its own outcome (a gap for the same
+	// key, or ledger debt). A second attempt would re-download the bytes and
+	// could re-defer a gap the walk already settled.
+	if (
+		state.recoveredAttachmentGapIds.has(gap.gap_id) ||
+		(typeof gap.record_key === "string" &&
+			deps.attachmentCoverage?.requiredKeys.includes(gap.record_key) === true)
+	) {
 		return false;
 	}
 	if (state.admitted > 0 && state.admittedBytesTotal >= byteBudget) {
@@ -4535,14 +4570,12 @@ export async function runAllMailPasses(
 	if (ledger.resetReason) {
 		gmailDiagnostic("progress_ledger_reset", { reason: ledger.resetReason });
 	}
-	// Served recovery and an attachment-only history page would both spend this
-	// run's attachment byte budget. Recovery goes first; the page waits a run.
+	// Served recovery and an attachment-only history page share this run's
+	// attachment bytes: the page gets half its budget while gaps are served.
+	// It still admits at least one UID, so recovery can never starve it.
 	const attachmentOnlyPage =
 		ledger.historicalStreams.length === 1 &&
 		ledger.historicalStreams[0] === "attachments";
-	if (servedAttachmentRecoveryRequested && attachmentOnlyPage) {
-		ledger.skipHistorical();
-	}
 
 	const historical = ledger.historical;
 	let historicalMetas = await collectLaneMetadata(
@@ -4554,9 +4587,12 @@ export async function runAllMailPasses(
 	if (historical && attachmentOnlyPage) {
 		// An attachment-only page is sized by attachment bytes, not UIDs. A page
 		// shared with other streams keeps the UID window, as before.
+		const budget = resolveAttachmentBackfillPageByteBudget();
 		const plan = planAttachmentBackfillPage(
 			historicalMetas,
-			resolveAttachmentBackfillPageByteBudget(),
+			servedAttachmentRecoveryRequested
+				? Math.max(1, Math.floor(budget / 2))
+				: budget,
 			historical.end,
 		);
 		if (plan.backfillMetas.length < historicalMetas.length) {
@@ -4710,12 +4746,13 @@ export async function runAllMailPasses(
 		// the run's range. One settle per distinct range.
 		const groups = new Map<
 			string,
-			{ range: TimeBand; streams: MessageStream[] }
+			{ range: TimeBand; revisit: boolean; streams: MessageStream[] }
 		>();
 		for (const stream of streams) {
 			const range = ledger.timeRangeFor(msg.uid, stream);
-			const key = JSON.stringify(range);
-			const group = groups.get(key) ?? { range, streams: [] };
+			const revisit = !ledger.isFirstSight(msg.uid, stream);
+			const key = JSON.stringify([range, revisit]);
+			const group = groups.get(key) ?? { range, revisit, streams: [] };
 			group.streams.push(stream);
 			groups.set(key, group);
 		}
@@ -4736,6 +4773,7 @@ export async function runAllMailPasses(
 						),
 						emitRecord: emitRecordWithSummary,
 						timeRange: group.range,
+						revisit: group.revisit,
 						wantBodies: group.streams.includes("message_bodies"),
 						wantMessages: group.streams.includes("messages"),
 					},
@@ -4819,7 +4857,8 @@ export async function runAllMailPasses(
 	await emitAttachmentDetailCoverage(
 		attachmentCoverage,
 		commit.attachmentsInventoryComplete &&
-			attachmentCoverage?.localEmitRejected !== true,
+			attachmentCoverage !== undefined &&
+			attachmentCoverageFullyCredited(attachmentCoverage),
 	);
 	// One matching DETAIL_GAP per failed attachment, so the commit-gate can
 	// credit each gap_keys entry against a durable pending gap.

@@ -682,6 +682,19 @@ export class GmailProgressLedger {
 	}
 
 	/**
+	 * Whether `stream` sees `uid` for the first time this run. History and
+	 * forward lanes are disjoint and never revisit a UID; catch-up and debt
+	 * retries can reach a UID whose rows are already stored.
+	 */
+	isFirstSight(uid: number, stream: LedgerStream): boolean {
+		const owed = this.retried.some(
+			(d) => d.uid === uid && d.streams.includes(stream),
+		);
+		const lane = this.laneOf(stream, uid);
+		return !owed && (lane === "history" || lane === "forward");
+	}
+
+	/**
 	 * The time range `stream` must apply to `uid`: its band on catch-up. A UID
 	 * the stream also owes as retry debt applies the full run range, so the
 	 * retry is never settled as out of the narrower band.
@@ -714,14 +727,6 @@ export class GmailProgressLedger {
 			throw new Error("gmail_progress_invalid_page_end");
 		}
 		this.history = { start: this.history.start, end: endUid };
-	}
-
-	/** Give up this run's historical page before any of it is consumed. */
-	skipHistorical(): void {
-		if (this.expected.size > 0) {
-			throw new Error("gmail_progress_page_already_consumed");
-		}
-		this.history = null;
 	}
 
 	/**

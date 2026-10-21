@@ -7102,12 +7102,17 @@ test("production attachment caller: a rejection with no retry locator becomes le
 		gapWritesFail = false;
 		const servedRedeferred = await run(legacyComplete, true, true);
 		assert.ok(servedRedeferred.state);
-		const redeferral = servedRedeferred.messages.filter(
+		// The attachment-only history page now runs beside served recovery, and
+		// it reaches UID 321 first. The walk writes the key's retry gap (the
+		// same gap identity as the served one), so recovery leaves the key alone
+		// this run: one gap, no second attempt.
+		const gaps = servedRedeferred.messages.filter(
 			(m) => m.type === "DETAIL_GAP",
 		);
-		assert.equal(redeferral.length, 1);
-		assert.ok(redeferral[0]?.type === "DETAIL_GAP");
-		assert.equal(redeferral[0].gap_id, "already-durable");
+		assert.equal(gaps.length, 1);
+		assert.ok(gaps[0]?.type === "DETAIL_GAP");
+		assert.equal(gaps[0].record_key, "abc123:1");
+		assert.deepEqual(servedRedeferred.attempted, ["abc123:1"], "one attempt");
 	} finally {
 		process.stdout.write = originalWrite;
 		globalThis.fetch = originalFetch;

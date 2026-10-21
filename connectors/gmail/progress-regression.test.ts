@@ -1015,3 +1015,67 @@ test("scope: an excluded envelope-less delta change does not spend the hold-back
 	}
 	assert.equal(m.bodyReads.get(20) ?? 0, 0);
 });
+
+test("attachments: the inventory claim is withheld while an accepted too_large key has no outcome", async () => {
+	const prior = process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+	process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = "10";
+	try {
+		const m = mailbox([attachmentMessage(10)], 101);
+		const runs = await runUntilStable(m, {}, ["attachments"]);
+		const again = await run(m, last(runs).state, ["attachments"]);
+		for (const r of [...runs, again]) {
+			const cov = coverageOf(r, "attachments") as
+				| {
+						required_keys: string[];
+						hydrated_keys: string[];
+						gap_keys?: string[];
+				  }
+				| undefined;
+			if (!cov) continue;
+			const credited = new Set([...cov.hydrated_keys, ...(cov.gap_keys ?? [])]);
+			assert.deepEqual(
+				cov.required_keys.filter((k) => !credited.has(k)),
+				[],
+				"a claim never carries a key the host cannot credit",
+			);
+		}
+	} finally {
+		if (prior === undefined) delete process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+		else process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = prior;
+	}
+});
+
+test("scope: a catch-up revisit never overwrites a stored snippet when the body read fails", async () => {
+	const m = mailbox([dated(10, "2026-01-05T00:00:00.000Z")], 101);
+	const first = await run(m, {}, until("2026-01-10T00:00:00.000Z"));
+	assert.deepEqual(
+		ofStream(first, "messages").map((x) => x.data.snippet),
+		["saved snippet"],
+	);
+	const narrowed = await run(m, first.state, until("2026-01-01T00:00:00.000Z"));
+	// Widening back owes [Jan 1, Jan 10) again, over a UID already stored.
+	m.control.failBodyReadAfter = 0;
+	const revisit = await run(
+		m,
+		narrowed.state,
+		until("2026-01-10T00:00:00.000Z"),
+	);
+	assert.equal(
+		ofStream(revisit, "messages").some((x) => x.data.snippet === null),
+		false,
+		"no row is written with a lost snippet",
+	);
+	m.control.failBodyReadAfter = Number.POSITIVE_INFINITY;
+	const recovered = await runUntilCaughtUp(
+		m,
+		revisit.state,
+		until("2026-01-10T00:00:00.000Z"),
+	);
+	assert.deepEqual(
+		recovered.flatMap((r) =>
+			ofStream(r, "messages").map((x) => x.data.snippet),
+		),
+		["saved snippet"],
+		"the revisit completes once the body read works",
+	);
+});

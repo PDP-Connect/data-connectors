@@ -254,7 +254,45 @@ const progressOf = (r: RunResult) =>
 		}
 	).progress;
 
-test("served attachment gaps preempt an attachment-only history page, and served recovery still runs", async () => {
+test("a served gap that never resolves cannot starve the attachment-only history", async () => {
+	const rows = () => [
+		attachmentMessage(300, "aa300"),
+		attachmentMessage(450, "aa450"),
+	];
+	let state: Record<string, unknown> = ledgerState(
+		{ attachments: { through: 250, coveredFrom: 500, next: 600 } },
+		600,
+	);
+	// The served gap names a message that no longer exists: every run looks it
+	// up, misses, and re-defers it.
+	const gap = servedGap({
+		gapId: "gap-miss",
+		leaseId: "lease-miss",
+		messageId: "dead01",
+		partIndex: 1,
+	});
+	for (let i = 0; i < 4; i += 1) {
+		const r = await run(
+			mailbox(rows(), 600),
+			state,
+			requested(["attachments"]),
+			{
+				detailGaps: [gap],
+			},
+		);
+		state = r.state;
+	}
+	const lane = (
+		state.messages as { progress: { streams: Record<string, Lane> } }
+	).progress.streams.attachments;
+	assert.equal(
+		(lane?.through ?? 0) + 1 >= (lane?.coveredFrom ?? 0),
+		true,
+		"the history completes",
+	);
+});
+
+test("served attachment gaps share the run with an attachment-only history page, and served recovery still runs", async () => {
 	const rows = () => [
 		attachmentMessage(300, "aa300"),
 		attachmentMessage(321, "fedcba01"),
@@ -274,41 +312,21 @@ test("served attachment gaps preempt an attachment-only history page, and served
 	const r = await run(m, prior, requested(["attachments"]), {
 		detailGaps: [gap],
 	});
-	assert.deepEqual(m.ranges, [], "no historical (or forward) FETCH this run");
+	// A served gap no longer vetoes the history page: the page runs on a
+	// shared byte budget, so the history cannot starve behind recovery.
+	assert.deepEqual(m.ranges, ["251:499"], "the history page still runs");
+	assert.ok(
+		(progressOf(r).streams.attachments?.through ?? 0) > 250,
+		"the attachments history advances",
+	);
+	// The walk hydrates the served part and recovers its gap, so served
+	// recovery does not download it a second time.
 	assert.deepEqual(
-		progressOf(r).streams.attachments,
-		{ through: 250, coveredFrom: 500, next: 600, scope: {} },
-		"the attachments history waits a run",
+		[...m.downloads].sort(),
+		["300:1", "321:1"],
+		"each part once",
 	);
-	assert.deepEqual(m.lookups, ["fedcba01"], "X-GM-MSGID lookup");
-	assert.deepEqual(m.downloads, ["321:1"], "only the served part hydrates");
-	assert.deepEqual(recordKeys(r, "attachments"), ["fedcba01:1"]);
 	assert.deepEqual(recoveredGapIds(r), ["gap-served-old"]);
-	const summary = events(r, "PROGRESS").find(
-		(e) => e.attachment_recovery_outcome !== undefined,
-	);
-	assert.deepEqual(summary?.attachment_recovery_outcome, {
-		admitted: 1,
-		admitted_bytes: 16,
-		attempted: 1,
-		hydration_failed: 0,
-		lookup_miss: 0,
-		metadata_lookups: 1,
-		object: "attachment_recovery_outcome",
-		recovered: 1,
-		run_cap_deferred: 0,
-		served: 1,
-	});
-	assert.deepEqual(summary?.attachment_hydration_failure_outcome, {
-		blob_upload_http_4xx: 0,
-		blob_upload_http_5xx: 0,
-		blob_upload_integrity_failed: 0,
-		blob_upload_invalid_response: 0,
-		blob_upload_transport_failed: 0,
-		imap_download_failed: 0,
-		object: "attachment_hydration_failure_outcome",
-		unclassified_failed: 0,
-	});
 
 	// Control: the same state with no served gaps walks the page.
 	const control = mailbox(rows(), 600);
@@ -373,12 +391,13 @@ test("recoveryOnly=true recovers served gaps and runs no walk", async () => {
 		"recovery progress is still reported",
 	);
 
-	// Control: without recoveryOnly the same run walks the forward lane.
+	// Control: without recoveryOnly the same run walks the history page and
+	// the forward lane.
 	const control = mailbox(rows(), 700);
 	const walked = await run(control, prior, requested(["attachments"]), {
 		detailGaps: [gap],
 	});
-	assert.deepEqual(control.ranges, ["600:699"]);
+	assert.deepEqual(control.ranges, ["251:499", "600:699"]);
 	assert.ok(events(walked, "STATE").some((e) => e.stream === "messages"));
 });
 
