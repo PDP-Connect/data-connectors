@@ -440,12 +440,16 @@ export async function handleInteraction(
 	// we only ever reach this point when msg.request_id is a string. Falling
 	// back to the generated `id` keeps the envelope valid even if a future
 	// caller relaxes that upstream contract.
+	const status = normalizeStatus(response.status);
 	const out: InteractionResponse = {
 		type: "INTERACTION_RESPONSE",
 		request_id: msg.request_id ?? id,
-		status: normalizeStatus(response.status),
+		status,
 	};
-	if (response.data !== undefined) {
+	// `data` may be present only for `success` (collection-profile §5.4): a
+	// response file that says failed/cancelled but still carries data must not
+	// produce an envelope the runtime rejects.
+	if (status === "success" && response.data !== undefined) {
 		out.data = response.data;
 	}
 	if (response.error !== undefined) {

@@ -333,6 +333,21 @@ describe("handleInteraction envelope shape", () => {
 		assert.equal(out.error?.code, "user_aborted");
 	});
 
+	test("a non-success response file drops its data from the envelope", async () => {
+		await Promise.all(
+			["failed", "cancelled", "timeout"].map(async (status) => {
+				const request_id = withFreshRequestId(`data_${status}`);
+				dropResponse(request_id, { status, data: { code: "123456" } });
+				const out = await handleInteraction(
+					{ kind: "otp", message: "code", request_id, timeout_seconds: 60 },
+					{ connectorName: "test" },
+				);
+				assert.notEqual(out.status, "success");
+				assert.equal(out.data, undefined, `${status} kept data`);
+			}),
+		);
+	});
+
 	test("preserves cancelled status when owner explicitly cancels", async () => {
 		const request_id = withFreshRequestId("cancel");
 		dropResponse(request_id, { status: "cancelled" });
