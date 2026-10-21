@@ -864,6 +864,11 @@ export async function runOnPageShim(
 					...(deferredCoverage ? {
 						code: String(skip.reason),
 						recovery_hint: { action: "retry_by_runtime", retryable: true },
+					} : skip.reason === PORTABLE_ENUMERATION_FAILURE_REASON &&
+						typeof hint?.action === "string" && typeof hint.retryable === "boolean" ? {
+						// A failed stream keeps the connector's code and recovery hint.
+						code: PORTABLE_ENUMERATION_FAILURE_REASON,
+						recovery_hint: { action: hint.action, retryable: hint.retryable },
 					} : {}),
 				});
 				return;

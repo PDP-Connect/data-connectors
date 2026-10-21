@@ -707,6 +707,64 @@ test("coverage receipts distinguish incomplete inventory, complete runs, and rea
 	}
 });
 
+// A stream failure reported with the portable reason, as a raw SKIP_RESULT or
+// through ctx.reportStreamFailure, is the same partial outcome as an unproven
+// enumeration: with no records the thin host still gets a result with the
+// failed scope omitted and its error, never a run error or an empty success.
+test("a zero-record portable stream failure completes as a scoped partial result", {
+	timeout: 180_000,
+}, async () => {
+	await mkdir(root, { recursive: true });
+	for (const mode of ["skip", "report"]) {
+		const bundle = join(root, `stream-failure-${mode}.js`);
+		await buildPageshim({
+			connector: "strava_browser",
+			entryPoint: new URL("./test-fixtures/stream-failure-runtime.ts", import.meta.url).pathname,
+			outfile: bundle,
+			extraDefines: { PAGESHIM_STREAM_FAILURE_MODE: JSON.stringify(mode) },
+		});
+		for (const sibling of [false, true]) {
+			for (const resultStreaming of [false, true]) {
+				const label = `${mode}, sibling=${sibling}, streaming=${resultStreaming}`;
+				const run = await runHarness({
+					bundle, fixtures,
+					scopes: sibling ? ["chatgpt.conversations", "chatgpt.memories"] : ["chatgpt.conversations"],
+					resultStreaming,
+					resultSpoolDirectory: join(root, `stream-failure-${mode}-${sibling}-${resultStreaming}`),
+				});
+				assertCleanRun(run);
+				assert.deepEqual(run.ret, { ok: true }, label);
+				assert.equal(run.data.error, undefined, label);
+				assert.match(run.data.status, /^Partial:/, label);
+				const done = resultStreaming ? run.streamDone : run.result;
+				assert.deepEqual(done.errors, [{
+					errorClass: "partial",
+					reason: "The conversations list failed to load.",
+					disposition: "omitted",
+					scope: "chatgpt.conversations",
+					phase: "collect",
+					code: "stream_collection_failed",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+				}], label);
+				const scope = async (name) => resultStreaming
+					? (run.streamScopeFiles[name] === undefined ? undefined
+						: JSON.parse(await readFile(run.streamScopeFiles[name], "utf8")))
+					: run.result[name];
+				if (sibling) {
+					assert.deepEqual(await scope("chatgpt.memories"), { records: [{ id: "m1" }] }, label);
+					assert.deepEqual(run.states["chatgpt.memories"], { done: true }, label);
+				}
+				// The failed stream never becomes a checkpointed (proven-empty) scope.
+				assert.equal(run.states["chatgpt.conversations"], undefined, label);
+				const failed = await scope("chatgpt.conversations");
+				if (failed !== undefined) assert.deepEqual(failed, { records: [] }, label);
+				if (resultStreaming && !sibling)
+					assert.deepEqual(failed, { records: [] }, `${label}: the thin host gets the omitted scope`);
+			}
+		}
+	}
+});
+
 test("fixture CORS retains explicit headers and supports credentialed cross-origin fetch without cookies", {
 	timeout: 180_000,
 }, async () => {
