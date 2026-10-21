@@ -7,8 +7,8 @@
  * `PDPP_REMOTE_OWNERSHIP_FIXTURE_REMOTE_CDP_URL`, and does what a connector
  * does in someone else's browser: load a page, make a request, open a blank
  * popup from its own page, then navigate it after the popup event. This gives
- * attached-CDP HAR a chance to capture the request (issue #523). The connector
- * then either finishes or fails.
+ * attached-CDP HAR a chance to capture the request; see README.md's "Attached
+ * CDP HAR recording" section and issue #523. The connector then finishes or fails.
  *
  * `PDPP_OWNERSHIP_FIXTURE_BASE_URL` points at the test's loopback server.
  * `/open-user-tab` makes the test open a tab in the same browser through its
@@ -55,7 +55,7 @@ async function collectOnPreservedPage(
 		page.waitForEvent("popup"),
 		page.click("#provider"),
 	]);
-	// Navigate after the popup event so the attached HAR recorder can observe this request.
+	// Navigate after the popup event; see README.md's attached CDP HAR section.
 	await popup.goto(new URL("/provider", baseUrl).toString(), {
 		waitUntil: "load",
 	});
@@ -100,7 +100,7 @@ runConnector({
 			page.waitForEvent("popup"),
 			page.click("#provider"),
 		]);
-		// Navigate after the popup event so the attached HAR recorder can observe this request.
+		// Navigate after the popup event; see README.md's attached CDP HAR section.
 		await popup.goto(new URL("/provider", baseUrl).toString(), {
 			waitUntil: "load",
 		});

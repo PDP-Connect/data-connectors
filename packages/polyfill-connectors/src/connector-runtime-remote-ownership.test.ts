@@ -252,7 +252,7 @@ test("connector runs attached to an external browser close only their own pages"
 		);
 
 		if (run.record) {
-			// Attached CDP HAR can miss a popup's first navigation; see the Known gap in browser-launch.ts (#523).
+			// Attached CDP HAR can miss a popup's first navigation; see README.md's "Attached CDP HAR recording" section (#523).
 			// Direct window.open(providerUrl) under attached-CDP HAR recording is not covered here; #523 owns its regression test.
 			const har = JSON.parse(await readFile(harPath, "utf8")) as {
 				log: { entries: { request: { url: string } }[] };
