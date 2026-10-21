@@ -754,7 +754,8 @@ test("structured body: rich-text paragraphs, marker and trailing line feed", asy
 test("structured body: texts longer than one length byte are exact", async () => {
 	await Promise.all(
 		[127, 128, 300, 20_000].map(async (length) => {
-			const text = `${"é".repeat(length / 2)}`;
+			const text = "é".repeat(length >> 1) + (length % 2 ? "a" : "");
+			assert.equal(Buffer.byteLength(text), length);
 			const result = await readBody(encodeStructuredBodyText(text));
 			assert.equal(result.record?.text_content, text, `${length} bytes`);
 		}),
