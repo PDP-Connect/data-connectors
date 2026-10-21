@@ -91,10 +91,9 @@ export const VENMO_PASSWORD_SCREEN_TIMEOUT = "venmo_password_screen_timeout";
 /**
  * Fault-class name for a login that never settled while the page still shows
  * the password step with an EMPTY password field — see
- * {@link loginWithSavedCredentials}. Distinct from
- * {@link VENMO_SCORING_CHALLENGE} on purpose: Venmo loads reCAPTCHA v3 on
- * healthy sign-ins too, so "the script is present" must not outrank "the page
- * shows the password was not kept" (live run, 2026-10-21). Not retryable by
+ * {@link loginWithSavedCredentials}. Venmo loads reCAPTCHA v3 on healthy
+ * sign-ins too, so "the script is present" must not outrank "the page shows
+ * the password was not kept" (live run, 2026-10-21). Not retryable by
  * omission from `VENMO_RETRYABLE_PATTERN`: Log in was clicked, so a password
  * may have gone out (B4).
  */
@@ -111,22 +110,6 @@ export const VENMO_SMS_OFFER_SEND_CODE_UNAVAILABLE =
 /** Venmo accepted Send code but did not render a usable OTP input within the bound. */
 export const VENMO_SMS_OFFER_CODE_INPUT_TIMEOUT =
 	"venmo_sms_offer_code_input_timeout";
-
-/**
- * Venmo refused the sign-in on an INVISIBLE bot score, not on the credential.
- *
- * reCAPTCHA Enterprise v3 renders no widget and no checkbox — it scores the
- * session and returns a verdict the page acts on silently. So the visible-frame
- * detector ({@link CAPTCHA_FRAME_SELECTOR}) correctly finds nothing, no error
- * copy is rendered, and the submit control simply stays in its loading state.
- * That signature is identical to a slow provider unless it is named.
- *
- * Deliberately NOT the ordinary `captcha` handoff vocabulary: that path asks
- * the owner to solve something. There is nothing to solve here — v3 scores the
- * browser, so an owner staring at the same automated session changes nothing.
- * Conflating the two would send them to a challenge that does not exist.
- */
-export const VENMO_SCORING_CHALLENGE = "venmo_invisible_scoring_challenge";
 
 /**
  * This connector's classifying fault-class names — single source of truth,
@@ -153,7 +136,6 @@ export const VENMO_DECLARED_REASON_TOKENS: ReadonlySet<string> = new Set([
 	VENMO_PASSWORD_SCREEN_TIMEOUT,
 	VENMO_PASSWORD_FIELD_EMPTY_AFTER_SUBMIT,
 	VENMO_PASSWORD_SUBMIT_STALLED,
-	VENMO_SCORING_CHALLENGE,
 	VENMO_SMS_OFFER_CHECKBOX_UNAVAILABLE,
 	VENMO_SMS_OFFER_SEND_CODE_UNAVAILABLE,
 	VENMO_SMS_OFFER_CODE_INPUT_TIMEOUT,
@@ -1965,21 +1947,15 @@ async function unsettledVenmoLoginError(
 			`${VENMO_PASSWORD_SUBMIT_STALLED}: Venmo still showed the password step ${postSubmitSettleTimeoutMs}ms after one Log in click, with no completed sign-in or verification step. The browser trace is needed to identify why it did not advance.`,
 		);
 	}
-	// An INVISIBLE scoring challenge is the one cause we can name here, and
-	// naming it changes what the owner does about it. reCAPTCHA Enterprise v3
-	// renders no widget and no checkbox — it scores the session silently — so
-	// the settle poll's visible-frame check cannot see it and no error copy
-	// appears on the page. Left unnamed, its signature is indistinguishable from a slow
-	// provider, which sends the owner looking for a network problem that is
-	// not there. Proven live on run_1787785348388: `_GRECAPTCHA` was written
-	// one second before the password submit and the request never completed.
-	if (await pageLoadedInvisibleScoringChallenge(page)) {
-		return new Error(
-			`${VENMO_SCORING_CHALLENGE}: Venmo scored this sign-in with an invisible reCAPTCHA Enterprise v3 check and never completed it within ${postSubmitSettleTimeoutMs}ms. There is no challenge to solve — v3 scores the browser itself, so retrying unattended will not clear it.`,
-		);
-	}
+	// Venmo's reCAPTCHA Enterprise v3 script is reported as context only. It
+	// loads on successful sign-ins too, so its presence does not show that a
+	// score blocked this one. On 2026-10-21 a stall reported as a v3 verdict
+	// was really an empty password submit.
+	const scoringContext = (await pageLoadedInvisibleScoringChallenge(page))
+		? " Venmo's background reCAPTCHA v3 check was loaded; it also loads on successful sign-ins, so it does not show the cause."
+		: "";
 	return new Error(
-		`venmo_login_did_not_complete: no sign-in outcome within ${postSubmitSettleTimeoutMs}ms`,
+		`venmo_login_did_not_complete: no sign-in outcome within ${postSubmitSettleTimeoutMs}ms.${scoringContext}`,
 	);
 }
 
