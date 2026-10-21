@@ -4,8 +4,9 @@
 import { parseHTML } from "linkedom";
 import { z } from "zod";
 import { eventRecord } from "../github/parsers.ts";
+import { type CollectionBoundary, type Continuation, InventoryEvidence, type InventoryTerminalProof } from "./inventory-evidence.ts";
 import type { BrowserPageObservation } from "./page-evidence.ts";
-import { inspectInventoryEnd } from "./page-evidence.ts";
+import { type InventoryEndResult, inspectInventoryEnd } from "./page-evidence.ts";
 import type {
 	LegacyContributionDay,
 	LegacyContributions,
@@ -237,6 +238,46 @@ function listEmptyStates(list: Element | null, rows: Element[]): Element[] {
 
 const STARRED_CARD_SELECTOR = "div.col-12.d-block.width-full.border-bottom";
 
+// The repository a link may stand for. Query strings, fragments and a trailing
+// slash do not make an owner/repository path chrome. An unreadable destination
+// cannot prove it is chrome either, so it counts as a target of its own.
+function linkedRepository(link: Element): string | null {
+	try {
+		const url = new URL(link.getAttribute("href") ?? "", "https://github.com");
+		return url.origin === "https://github.com" ? repositoryName(url.pathname) : null;
+	} catch {
+		return `unreadable:${link.getAttribute("href") ?? ""}`;
+	}
+}
+const ENTRY_CANDIDATE = `li, [role='listitem'], ${STARRED_CARD_SELECTOR}`;
+
+// One entry boundary for every supported row shape. A row claims its entry only
+// when it has one primary identity, no nested entry candidate, and no other
+// repository link except in its description or fork-parent line, outside its
+// overlays. Otherwise the whole row is rejected, so no entry hides in a claimed row.
+function primaryIdentity(source: Element, description: Element | null): Element | null {
+	const visible = (selector: string) => Array.from(source.querySelectorAll(selector)).filter((node) => !insideOverlay(node, source));
+	// Hidden content and lazy fragments (whose loading or error template GitHub swaps
+	// in later, such as a repository's sparkline) are not row content, so their
+	// headings name nothing. Nested entries and links still count inside them.
+	const rendered = (selector: string) => visible(selector).filter((node) => {
+		const deferred = node.closest("[hidden], include-fragment, poll-include-fragment");
+		return deferred === null || !source.contains(deferred);
+	});
+	const links = rendered("h3 a[href]");
+	const identity = links[0] ?? null;
+	const own = identity === null ? null : linkedRepository(identity);
+	const auxiliary = (link: Element) => description?.contains(link) === true ||
+		(link.parentElement !== null && forkParent(link.parentElement) !== undefined);
+	// Another link to the row's own repository cannot hide a second entry.
+	const unclaimed = visible("a[href]").some((link) => {
+		const target = linkedRepository(link);
+		return target !== null && target !== own && !auxiliary(link);
+	});
+	return rendered("h3").length === 1 && links.length === 1 && visible(ENTRY_CANDIDATE).length === 0 && !unclaimed
+		? identity : null;
+}
+
 // Rows are the entries of the lists inside the container, or list items placed
 // directly in a wrapper. Wrappers, toolbars, pagination and empty states
 // between them are not rows; an entry that is not an ordinary row still counts,
@@ -270,10 +311,10 @@ function unaccountedRepositories(list: Element | null, rows: Element[], entriesO
 	// strings and fragments do not make an owner/repository path ordinary chrome.
 	const repositoryTarget = (link: Element): boolean => {
 		if (!link.matches("a[href]")) return false;
+		if (entriesOnly) return linkedRepository(link) !== null;
 		try {
 			const url = new URL(link.getAttribute("href") ?? "", "https://github.com");
-			return url.origin === "https://github.com" && (entriesOnly
-				? repositoryName(url.pathname) !== null : url.pathname.split("/").filter(Boolean).length === 2);
+			return url.origin === "https://github.com" && url.pathname.split("/").filter(Boolean).length === 2;
 		} catch {
 			return true; // An unreadable destination cannot prove entry-free chrome.
 		}
@@ -411,10 +452,12 @@ function contributionHeading(document: Document): Element | null {
 }
 
 const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6, [role='heading']";
+const PROFILE_PROSE_SELECTOR = "article, .p-note, .user-profile-bio";
+const PROFILE_NON_COLLECTION_SELECTOR = `${PROFILE_PROSE_SELECTOR}, ${OVERLAY_SELECTOR}, .vcard-details, [itemprop="worksFor"], .js-yearly-contributions, #js-contribution-activity, .contribution-activity-listing`;
 
 function headingsMatching(document: Document, pattern: RegExp): Element[] {
 	return Array.from(document.querySelectorAll(HEADING_SELECTOR)).filter((heading) =>
-		pattern.test(text(heading)) && heading.closest(OVERLAY_SELECTOR) === null);
+		pattern.test(text(heading)) && heading.closest(PROFILE_NON_COLLECTION_SELECTOR) === null);
 }
 
 // A section is what follows its heading up to the next heading. A heading
@@ -473,13 +516,29 @@ const ACHIEVEMENT_HOOKS = `${ACHIEVEMENT_CARD}, img.achievement-badge-sidebar, .
 interface Section {
 	// Entries found, if the section could be located at all.
 	entries: Element[] | null;
-	// The section is present but its content cannot be certified.
-	unreadable: boolean;
+	// Layout and candidate observations; InventoryEvidence decides readiness.
+	boundary: CollectionBoundary;
+	entriesComplete: boolean;
 }
 
-// Locate a section by its heading text. Without a heading, leftover markup
-// that looks like the section keeps its entries readable but uncertified; with
-// no trace of it, only the profile structure decides if it is absent.
+function profileCandidates(document: Document, selector: string): Element[] {
+	return Array.from(document.querySelectorAll(selector)).filter(node =>
+		node.closest(PROFILE_NON_COLLECTION_SELECTOR) === null);
+}
+
+// One boundary observation for pins, organizations and achievements. A heading
+// without a located region is ambiguous even when all known hooks disappeared.
+function observeCollectionBoundary(headings: Element[], nodes: Element[], candidates: Element[], structure: boolean): CollectionBoundary {
+	return {
+		kind: headings.length > 0 ? (nodes.length > 0 ? "located" : "ambiguous") :
+			structure && candidates.length === 0 ? "absent" : "ambiguous",
+		unclaimedCandidates: candidates.filter(candidate => !nodes.some(node =>
+			node === candidate || node.contains(candidate) || candidate.contains(node))).length,
+	};
+}
+
+// Headings select a region; they do not establish completeness or emptiness.
+// Account for surviving hooks across the profile even when a heading survives.
 function locateSection(
 	document: Document,
 	heading: RegExp,
@@ -489,10 +548,14 @@ function locateSection(
 	structure: boolean,
 ): Section {
 	const headings = headingsMatching(document, heading);
+	const surviving = profileCandidates(document, hooks);
 	if (headings.length === 0) {
-		if (document.querySelector(hooks) !== null)
-			return { entries: anchorsIn([document.documentElement], fallbackSelector), unreadable: true };
-		return { entries: null, unreadable: !structure };
+		return {
+			entries: surviving.length === 0 ? null : profileCandidates(document, fallbackSelector)
+				.filter(node => !node.parentElement?.closest(fallbackSelector)),
+			boundary: observeCollectionBoundary(headings, [], surviving, structure),
+			entriesComplete: true,
+		};
 	}
 	const nodes = headings.flatMap(sectionNodes);
 	const entries = anchorsIn(nodes, entrySelector);
@@ -511,8 +574,23 @@ function locateSection(
 	}));
 	return {
 		entries,
-		unreadable: nodes.some(isUnreadable) || leftover.length > 0 || !accounted,
+		boundary: observeCollectionBoundary(headings, nodes, surviving, structure),
+		entriesComplete: !nodes.some(isUnreadable) && leftover.length === 0 && accounted,
 	};
+}
+
+// The same owner decides collection completeness for embedded and paged lists.
+interface ProfileCollectionFailure {
+	collection: "pinnedRepositories" | "organizations" | "achievements";
+	cause: string;
+}
+
+function profileCollectionFailure(profileUrl: string, collection: ProfileCollectionFailure["collection"], ids: string[], section: Omit<Section, "entries">, rejected: number): ProfileCollectionFailure | null {
+	const evidence = new InventoryEvidence(profileUrl);
+	evidence.observePage({ ids, rowsComplete: section.entriesComplete, rejectedRows: rejected,
+		continuation: InventoryEvidence.boundaryEnd(section.boundary) });
+	const cause = evidence.decide(ids.length);
+	return cause === null ? null : { collection, cause };
 }
 
 export function parseProfileHtml(
@@ -525,13 +603,13 @@ export function parseProfileHtml(
 export function parseProfilePage(
 	html: string,
 	profileUrl: string,
-): ParsedItem<ProfileRow> & { rejectedEntries: number } {
+): ParsedItem<ProfileRow> & { rejectedEntries: number; collectionsComplete: boolean; collectionFailures: ProfileCollectionFailure[] } {
 	const { document } = parseHTML(html);
 	const username = sourceText(document.querySelector("span.p-nickname"));
 	const unreadableFields: string[] = [];
 	let rejectedEntries = 0;
 	if (!username || !/^[a-zA-Z0-9-]{1,39}$/u.test(username))
-		return { row: null, complete: false, unreadableFields: ["username"], rejectedEntries };
+		return { row: null, complete: false, unreadableFields: ["username"], rejectedEntries, collectionsComplete: false, collectionFailures: [] };
 
 	const row: ProfileRow = { username, profileUrl };
 	const structure = hasProfileStructure(document);
@@ -567,14 +645,12 @@ export function parseProfilePage(
 	recordField(row, "contributionsLastYear", countMatch?.[1] ? toInt(countMatch[1]) : undefined, unreadableFields);
 
 	const pinnedHeadings = headingsMatching(document, /^(?:pinned|popular repositories)\b/iu);
-	const pinnedContainer = document.querySelector(".js-pinned-items-reorder-container, ol.pinned-items-reorder-list");
+	const pinnedContainer = profileCandidates(document, ".js-pinned-items-reorder-container, ol.pinned-items-reorder-list")[0] ?? null;
 	const pinnedRoots = pinnedHeadings.length > 0
-		? pinnedHeadings.flatMap(sectionNodes)
+		? pinnedHeadings.flatMap(sectionNodes).filter(node =>
+			node.closest(PROFILE_NON_COLLECTION_SELECTOR) === null &&
+			(pinnedContainer === null || pinnedContainer.contains(node)))
 		: pinnedContainer === null ? [] : [pinnedContainer];
-	if (pinnedHeadings.length === 0 && (pinnedContainer !== null || !structure))
-		unreadableFields.push("pinnedRepositories");
-	if (pinnedRoots.some(isUnreadable) && !unreadableFields.includes("pinnedRepositories"))
-		unreadableFields.push("pinnedRepositories");
 	if (pinnedRoots.length > 0 || pinnedHeadings.length > 0) {
 		row.pinnedRepositories = [];
 		const pinnedRows = cardRows(pinnedRoots);
@@ -593,7 +669,7 @@ export function parseProfilePage(
 			const data = classifyRow(item, (node) => node === link ||
 				node.matches('p.pinned-item-desc, [itemprop="programmingLanguage"], a[href$="/stargazers"], a[href$="/forks"], span.Label'));
 			const pinnedLayout = renderedRow(item,
-				item.matches("li") && item.querySelector(".pinned-item-list-item") !== null &&
+				item.matches("li") && (item.matches(".pinned-item-list-item") || item.querySelector(".pinned-item-list-item") !== null) &&
 					item.querySelector("p.pinned-item-desc") !== null && item.querySelector("p.f6") !== null,
 				data);
 			const unreadableSlots: string[] = pinnedLayout ? [] : ["card"];
@@ -607,14 +683,22 @@ export function parseProfilePage(
 		}
 	}
 
-	// Renamed headings/containers cannot make surviving repository entries vanish.
-	const unclaimedPins = Array.from(document.querySelectorAll("a[href]")).filter((link) =>
-		repositoryName(link.getAttribute("href")) !== null && link.closest(OVERLAY_SELECTOR) === null &&
-		!siteChrome(link, pinnedContainer) && !pinnedRoots.some((root) => root.contains(link)));
-	if (unclaimedPins.length > 0) unreadableFields.push("pinnedRepositories");
+	// README, bio and activity links are not pin candidates. Surviving pin
+	// markup still exposes entries when the heading or outer card classes change.
+	const pinnedCandidates = profileCandidates(document, ".js-pinned-items-reorder-container, ol.pinned-items-reorder-list, .pinned-item-list-item, .js-pinned-item-list-item, .pinned-item-list-item-content, .pinned-item-desc, .pinned-item-meta");
+	const pinnedBoundary = observeCollectionBoundary(pinnedHeadings, pinnedRoots, pinnedCandidates, structure);
+	pinnedBoundary.unclaimedCandidates += Array.from(pinnedContainer?.querySelectorAll("a[href]") ?? []).filter(link =>
+		repositoryName(link.getAttribute("href")) !== null &&
+		link.closest(PROFILE_NON_COLLECTION_SELECTOR) === null &&
+		!pinnedRoots.some(root => root.contains(link))).length;
+	const pinsFailure = profileCollectionFailure(profileUrl, "pinnedRepositories", (row.pinnedRepositories ?? []).map(pin => pin.fullName), {
+		boundary: pinnedBoundary,
+		entriesComplete: !pinnedRoots.some(isUnreadable),
+	}, rejectedEntries);
+	if (pinsFailure !== null) unreadableFields.push("pinnedRepositories");
+	const beforeOrganizations = rejectedEntries;
 
 	const organizations = locateSection(document, /^organizations?\b/iu, "a[href]", ORGANIZATION_HOOKS, '.avatar-group-item, a[href^="/orgs/"]', structure);
-	if (organizations.unreadable) unreadableFields.push("organizations");
 	if (organizations.entries !== null) {
 		row.organizations = [];
 		for (const link of organizations.entries) {
@@ -638,8 +722,11 @@ export function parseProfilePage(
 		}
 	}
 
+	const organizationsFailure = profileCollectionFailure(profileUrl, "organizations", (row.organizations ?? []).map(org => org.login), organizations, rejectedEntries - beforeOrganizations);
+	if (organizationsFailure !== null) unreadableFields.push("organizations");
+	const beforeAchievements = rejectedEntries;
+
 	const achievements = locateSection(document, /^achievements?\b/iu, `a[href], ${ACHIEVEMENT_CARD}`, ACHIEVEMENT_HOOKS, ACHIEVEMENT_CARD, structure);
-	if (achievements.unreadable) unreadableFields.push("achievements");
 	if (achievements.entries !== null) {
 		row.achievements = [];
 		const seenAchievements = new Set<string>();
@@ -658,8 +745,13 @@ export function parseProfilePage(
 			row.achievements.push({ name, ...(iconUrl === undefined ? {} : { iconUrl }) });
 		}
 	}
+	const achievementsFailure = profileCollectionFailure(profileUrl, "achievements", (row.achievements ?? []).map(badge => badge.name), achievements, rejectedEntries - beforeAchievements);
+	if (achievementsFailure !== null) unreadableFields.push("achievements");
 	if (rejectedEntries > 0) unreadableFields.push("collectionEntries");
-	return { row, complete: unreadableFields.length === 0, unreadableFields, rejectedEntries };
+	const collectionFailures = [pinsFailure, organizationsFailure, achievementsFailure].filter(
+		(failure): failure is ProfileCollectionFailure => failure !== null);
+	return { row, complete: unreadableFields.length === 0, unreadableFields, rejectedEntries,
+		collectionsComplete: collectionFailures.length === 0, collectionFailures };
 }
 
 export function parseRepositoriesHtml(html: string): RepositoryRow[] {
@@ -675,7 +767,7 @@ export function parseRepositoriesPage(html: string): ParsedInventory<RepositoryR
 	let rejectedRows = 0;
 	const seen = new Set<string>();
 	for (const [index, source] of sourceRows.entries()) {
-		const link = source.querySelector("h3 a");
+		const link = primaryIdentity(source, source.querySelector('p[itemprop="description"]'));
 		const repo = repositoryName(link?.getAttribute("href") ?? null);
 		const name = sourceText(link);
 		if (!repo || !name) {
@@ -739,16 +831,7 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 	let rejectedRows = 0;
 	const seen = new Set<string>();
 	for (const [index, source] of sourceRows.entries()) {
-		const headings = Array.from(source.querySelectorAll("h3")).filter((node) => !insideOverlay(node, source));
-		const links = Array.from(source.querySelectorAll("h3 a[href]")).filter((node) => !insideOverlay(node, source));
-		// A card is one entry only when it has one primary identity. Nested
-		// cards and extra headings cannot disappear inside an accounted row.
-		if (headings.length !== 1 || links.length !== 1 ||
-			Array.from(source.querySelectorAll(STARRED_CARD_SELECTOR)).some((node) => !insideOverlay(node, source))) {
-			rejectedRows += 1;
-			continue;
-		}
-		const link = links[0] ?? null;
+		const link = primaryIdentity(source, source.querySelector("p"));
 		const repo = repositoryName(link?.getAttribute("href") ?? null);
 		const fullName = sourceText(link);
 		if (!repo || !fullName) {
@@ -795,7 +878,7 @@ export function inspectInventoryPage(
 	parsedRows: number,
 	rejectedRows: number,
 	noProgress = false,
-): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; nextUrl: string | null; reason: string } {
+): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; terminalProof: InventoryTerminalProof; nextUrl: string | null; reason: string; continuation: Continuation; linkedPage?: number } {
 	const { document } = parseHTML(page.html);
 	const tab = stream === "repositories" ? "repositories" : "stars";
 	const list = stream === "repositories" ? document.querySelector("#user-repositories-list") : starredList(document);
@@ -856,10 +939,20 @@ export function inspectInventoryPage(
 	const paginators = Array.from(candidates).filter(node =>
 		!Array.from(candidates).some(other => other !== node && other.contains(node)));
 	const pagination = paginators.length === 1 ? paginators[0] : null;
+	// A numbered pager marks the next page number rel=next as well as the Next control.
+	// Several next controls are one continuation only when they name the same target.
 	const nextControls = Array.from(pagination?.querySelectorAll('[rel~="next"], .next_page') ?? [])
 		.filter(node => node.closest(OVERLAY_SELECTOR) === null);
+	const isDisabled = (node: Element) => node.matches('[disabled], [aria-disabled="true"], .disabled');
+	const sameTarget = (href: string | null) => {
+		if (href === null) return null;
+		const url = new URL(href);
+		url.searchParams.sort();
+		return url.href;
+	};
+	const nextTargets = new Set(nextControls.map(node => isDisabled(node) ? "disabled" : sameTarget(githubUrl(node.getAttribute("href")))));
 	const next = nextControls[0] ?? null;
-	const disabled = next?.matches('[disabled], [aria-disabled="true"], .disabled') ?? false;
+	const disabled = next !== null && isDisabled(next);
 	const nextUrl = next !== null && !disabled ? githubUrl(next.getAttribute("href")) : null;
 	const foreignPagination = Array.from(pagination?.querySelectorAll("a[href]") ?? []).filter(link =>
 		link.closest(OVERLAY_SELECTOR) === null).some(link => {
@@ -871,24 +964,46 @@ export function inspectInventoryPage(
 			!!url.hash || Array.from(url.searchParams.keys()).some(key =>
 				!["tab", "page", "after"].includes(key) || url.searchParams.getAll(key).length !== 1);
 	});
-	const ambiguous = counterAmbiguous || foreignPagination || paginators.length > 1 || nextControls.length > 1 ||
+	// Numbered links say which pages exist. Back links are harmless; forward links are
+	// accepted only beside an enabled Next, and the walk may not end before the highest
+	// page any page linked to. Cursors and unnumbered targets remain unknown.
+	let linkedPage: number | undefined;
+	const unknownTargets = Array.from(pagination?.querySelectorAll("a[href]") ?? []).some(link => {
+		if (link.closest(OVERLAY_SELECTOR) !== null || nextControls.includes(link) || isDisabled(link)) return false;
+		const href = githubUrl(link.getAttribute("href"));
+		if (href === null) return true;
+		const url = new URL(href);
+		const targetPage = Number(url.searchParams.get("page"));
+		if (url.searchParams.has("after") || !Number.isInteger(targetPage) || targetPage < 1) return true;
+		linkedPage = Math.max(linkedPage ?? 0, targetPage);
+		return targetPage > pageNumber && nextUrl === null;
+	});
+	const ambiguous = unknownTargets || counterAmbiguous || foreignPagination || paginators.length > 1 || nextTargets.size > 1 ||
 		(next !== null && !disabled && nextUrl === null);
 	const renderComplete = list !== null && !isUnreadable(list) && countersReady &&
 		paginators.every(node => !isUnreadable(node));
-	const terminal = pagination !== null && (disabled || next === null);
+	const terminalProof = InventoryEvidence.terminalProof({ disabledNext: disabled, total, distinct: parsedRows });
 	const result = inspectInventoryEnd({
 		page, username, stream, pageNumber, parsedRows, rejectedRows, noProgress,
 		explicitEmpty: false, hasRecognizedList: list !== null, renderComplete,
 		hasUnknownContinuation: ambiguous,
-		terminalProof: total !== null ? (total === parsedRows ? "exact_count" : null)
-			: terminal ? "disabled_next" : null,
+		terminalProof,
 		nextUrl,
 	});
 	const trusted = countersReady && result.reason !== "wrong_navigation" && result.reason !== "wrong_owner";
 	const exactTotals = trusted ? values.filter((value): value is number => value !== null) : [];
 	return { valid: result.complete || result.reason === "remaining_continuation",
 		complete: result.complete, total, exactTotals, totalConflict: trusted && counterAmbiguous,
-		nextUrl: result.nextUrl, reason: result.reason };
+		terminalProof, nextUrl: result.nextUrl, reason: result.reason, continuation: inventoryContinuation(result),
+		...(linkedPage === undefined ? {} : { linkedPage }) };
+}
+
+function inventoryContinuation(result: InventoryEndResult): Continuation {
+	if (result.nextUrl !== null) return { kind: "next", url: result.nextUrl };
+	if (result.complete) return { kind: "end" };
+	if (result.reason === "terminal_unverified") return { kind: "unproven" };
+	if (result.reason === "wrong_navigation" || result.reason === "wrong_owner") return { kind: "unbound", reason: result.reason };
+	return { kind: "unknown", reason: result.reason };
 }
 
 export function parseContributionHtml(html: string): {

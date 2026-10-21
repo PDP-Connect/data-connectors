@@ -58,15 +58,21 @@ function stub(orderId: string, expectedItemCount: number): OrderStub {
 
 function pageServing(htmlByOrder: Record<string, string>): Page {
 	let current = "";
+	let currentUrl = "";
 	return {
 		content: () => Promise.resolve(current),
 		goto: (url: string) => {
-			current =
-				htmlByOrder[new URL(url).searchParams.get("orderID") ?? ""] ?? "";
+			currentUrl = url;
+			const orderId = new URL(url).searchParams.get("orderID") ?? "";
+			// The fixture is one captured page; each order shows its own id.
+			current = (htmlByOrder[orderId] ?? "").replaceAll(
+				"000-0000000-0000000",
+				orderId,
+			);
 			return Promise.resolve(null);
 		},
 		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
-		url: () => "https://www.amazon.com/fopo/order-details",
+		url: () => currentUrl,
 	} as unknown as Page;
 }
 
@@ -74,7 +80,6 @@ async function runOrders(stubs: OrderStub[], html: Record<string, string>) {
 	const harness = makeRecordingEmit(validateRecord);
 	const progressUpdates: { message: string; details?: unknown }[] = [];
 	await connector.collectOrderStubs({
-		credentials: {},
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		ordersCursor: openFingerprintCursor(undefined),
@@ -128,7 +133,7 @@ test("equal units do not hide a search product the detail page lacks", () => {
 	);
 });
 
-test("a count mismatch on order 2 delivers all 3 orders and reports one progress warning", async () => {
+test("a count mismatch withholds order 2 and its items, then continues", async () => {
 	const harness = await runOrders([stub(A, 3), stub(B, 9), stub(C, 3)], {
 		[A]: FIXTURE,
 		[B]: FIXTURE,
@@ -137,11 +142,11 @@ test("a count mismatch on order 2 delivers all 3 orders and reports one progress
 	const orders = harness.emitted.filter((r) => r.stream === "orders");
 	assert.deepEqual(
 		orders.map((r) => r.data.id),
-		[A, B, C],
+		[A, C],
 	);
 	assert.equal(
 		harness.emitted.filter((r) => r.stream === "order_items").length,
-		9,
+		6,
 	);
 	assert.equal(
 		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
@@ -224,10 +229,8 @@ test("an online row without an ASIN keeps its order, omits the item record, and 
 	);
 	assert.deepEqual(
 		orders.map((record) => record.data.id),
-		[A, B],
+		[B],
 	);
-	assert.equal(orders[0]?.data.item_count, null);
-	assert.equal(orders[0]?.data.total_cents, null);
 	assert.equal(itemRecords.length, 3);
 	assert.ok(itemRecords.every((record) => record.data.order_id === B));
 	const warning = harness.protocolMessages.find((message) => {
