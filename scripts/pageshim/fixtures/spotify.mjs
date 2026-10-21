@@ -60,7 +60,7 @@ export const pageshimCase = {
 	exportSummary: { count: 9, label: "records", details: { playlists: 1, playlist_items: 1, saved_tracks: 1, profile: 1, recently_played_contexts: 1, top_artists: 2, top_tracks: 2 } },
 	emptyExportSummary: { count: 0, label: "records", details: Object.fromEntries(streams.map((stream) => [stream, 0])) },
 	partialErrors: [
-		{ errorClass: "partial", reason: "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.", disposition: "degraded", scope: "spotify.recently_played_contexts", phase: "collect" },
-		...["top_artists", "top_tracks"].map((stream) => ({ errorClass: "partial", reason: "The connector requests at most 100 ranking rows per time window; rows beyond that bound are unobserved, so no full-scan state was saved.", disposition: "degraded", scope: "spotify." + stream, phase: "collect" })),
+		{ errorClass: "partial", reason: "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.", disposition: "degraded", scope: "spotify.recently_played_contexts", phase: "collect", code: "inventory_not_proven_complete", recovery_hint: { action: "retry_by_runtime", retryable: true } },
+		...["top_artists", "top_tracks"].map((stream) => ({ errorClass: "partial", reason: "The connector requests at most 100 ranking rows per time window; rows beyond that bound are unobserved, so no full-scan state was saved.", disposition: "degraded", scope: "spotify." + stream, phase: "collect", code: "inventory_not_proven_complete", recovery_hint: { action: "retry_by_runtime", retryable: true } })),
 	],
 };

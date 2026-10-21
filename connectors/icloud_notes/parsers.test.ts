@@ -798,7 +798,7 @@ test("structured body: rich-text paragraphs, marker and trailing line feed", asy
 					"First paragraph\nSecond paragraph",
 				],
 				["￼Photo description", "￼Photo description"],
-				["Final line\n", "Final line"],
+				["Final line\n", "Final line\n"],
 				[["ok", "猫", "📝"], "ok\n猫\n📝"],
 			] as const
 		).map(async ([text, expected]) => {
@@ -822,45 +822,68 @@ test("structured body: texts longer than one length byte are exact", async () =>
 test("structured body: many short runs decode without exceeding argument limits", async () => {
 	const lines = Array.from({ length: 200_000 }, () => "a");
 	const expected = lines.join("\n");
-	// One text field split into 200,000 runs, and 200,000 text fields.
+	// One text field with 200,000 lines, and 200,000 text fields.
 	await Promise.all(
-		[
-			encodeStructuredBodyText(`${expected}\n`),
-			encodeStructuredBodyText(lines),
-		].map(async (body) => {
+		([
+			[encodeStructuredBodyText(`${expected}\n`), `${expected}\n`],
+			[encodeStructuredBodyText(lines), expected],
+		] as const).map(async ([body, text]) => {
 			const result = await readBody(body);
 			assert.deepEqual(result.unavailableFields, []);
-			assert.equal(result.record?.text_content, expected);
+			assert.equal(result.record?.text_content, text);
 		}),
 	);
 });
 
-test("structured body: control characters are paragraph breaks, not decode failures", async () => {
-	await Promise.all(
-		[
-			["line1\u000Bline2", "line1\nline2"],
-			["line1\u000Cline2", "line1\nline2"],
-			["line1\u001Bline2", "line1\nline2"],
-			["line1\u007Fline2", "line1\nline2"],
-			["line1\u0085line2", "line1\nline2"],
-			["tab\tseparated", "tab\nseparated"],
-			["blank\n\n\nlines", "blank\nlines"],
-		].map(async ([text, expected]) => {
-			const result = await readBody(encodeStructuredBodyText(text as string));
-			assert.equal(result.record?.text_content, expected, JSON.stringify(text));
-			assert.deepEqual(result.unavailableFields, []);
-		}),
-	);
+test("structured body: valid whitespace survives real-shape note fields exactly", async () => {
+	await Promise.all([
+		"alpha\n\nbeta\tgamma",
+		"a\r\nb\r\n",
+		"Final line\n",
+		"\n  indented\ttext  \n",
+		"\n\t\r\n",
+		"",
+		"\uFEFF猫\u00A0\u2003\u2028\u2029\u3000📝\n",
+		"Shopping\n\n• apples\n\t• green\n1. milk\n2. bread\n",
+	].map(async (text) => {
+		const result = await readBody(
+			structuredBody(
+				textRun(text),
+				encodeLengthDelimitedField(3, Buffer.from([0x08, 0x01])),
+			),
+		);
+		assert.equal(result.record?.text_content, text, JSON.stringify(text));
+		assert.deepEqual(result.unavailableFields, []);
+	}));
+});
+
+test("structured body: forbidden controls withhold the entire field with a cause", async () => {
+	await Promise.all([
+		"\u0000",
+		"\u000B",
+		"\u000C",
+		"\u001B",
+		"\u007F",
+		"\u0085",
+	].map(async (control) => {
+		const result = await readBody(
+			structuredBody(textRun("safe"), textRun(`a${control}b`)),
+		);
+		assert.equal(result.record?.text_content, null);
+		assert.deepEqual(
+			result.unavailableFields.map(({ reason }) => reason),
+			["body_text_forbidden_control"],
+		);
+	}));
 });
 
 test("structured body: attachment placeholders carry no text but inline markers stay", async () => {
-	assert.deepEqual(
-		decodeNoteBodyBytes(encodeStructuredBodyText("￼")),
-		{ kind: "ABSENT" },
-	);
+	assert.deepEqual(decodeNoteBodyBytes(encodeStructuredBodyText("￼")), {
+		kind: "ABSENT",
+	});
 	assert.deepEqual(
 		decodeNoteBodyBytes(encodeStructuredBodyText("Before\n￼\nAfter")),
-		decoded("Before\nAfter"),
+		decoded("Before\n￼\nAfter"),
 	);
 	assert.deepEqual(
 		decodeNoteBodyBytes(encodeStructuredBodyText("￼Photo description")),
@@ -882,7 +905,7 @@ test("structured body: a note shaped like a real Apple Notes document decodes", 
 		encodeLengthDelimitedField(3, note),
 	]);
 	const result = await readBody(encodeLengthDelimitedField(2, document));
-	assert.equal(result.record?.text_content, "Title\nPara one\nhi");
+	assert.equal(result.record?.text_content, "Title\n\nPara one\nhi");
 	assert.deepEqual(result.unavailableFields, []);
 });
 
