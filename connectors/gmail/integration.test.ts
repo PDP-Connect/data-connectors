@@ -7754,6 +7754,55 @@ test("recoverServedAttachmentGaps: a gap the walk already recovered this run is 
 	);
 });
 
+test("recordAttachmentCoverage: an accepted too_large key is promoted by a later retry locator, not held by a later unlocated rejection", () => {
+	const promoted = makeAttachmentDetailCoverage();
+	recordAttachmentCoverage(promoted, coverageRecord("too_large"));
+	recordAttachmentCoverage(promoted, coverageRecord("deferred"), null, false, true);
+	assert.deepEqual(promoted.gapKeys, ["abc123:1"], "a durable locator beats an unaccounted outcome");
+	const landed = makeAttachmentDetailCoverage();
+	recordAttachmentCoverage(landed, coverageRecord("too_large"));
+	recordAttachmentCoverage(landed, coverageRecord("deferred"), null, false, false);
+	assert.equal(landed.localEmitRejected, false, "the accepted record landed, so nothing is lost");
+	assert.deepEqual(landed.requiredKeys, ["abc123:1"]);
+	assert.deepEqual(landed.gapKeys, []);
+});
+
+test("attachment coverage across lanes: a walk hydration survives a rejected served recovery of the same key", async () => {
+	const coverage = makeAttachmentDetailCoverage();
+	const walk = makeHarness({
+		attachmentCoverage: coverage,
+		hydrateAttachment: statusStampingHydrator({ "abc456:1": "hydrated" }),
+		requested: makeRequested(["attachments"]),
+		wantBodies: false,
+		wantMessages: false,
+	});
+	const message = makeServedRecoveryMsg({ attachments: [16], emailId: "abc456", uid: 6001 });
+	await processMessage(walk.deps, message);
+	assert.deepEqual(coverage.hydratedKeys, ["abc456:1"]);
+	const served = makeRecordingEmit();
+	await recoverServedAttachmentGaps(
+		{
+			search: mock.fn(() => Promise.resolve([6001])),
+			fetchOne: mock.fn(() => Promise.resolve(message)),
+		},
+		{
+			attachmentCoverage: coverage,
+			detailGaps: [makeServedRecoveryGap({ gapId: "gap-cross", leaseId: "lease-cross", messageId: "abc456", partIndex: 1 })],
+			emitProtocol: served.emit,
+			emitRecord: async () => false,
+			hydrateAttachment: async (_message, attachment) => hydratedResult({
+				...attachment,
+				hydration_status: "hydrated",
+				hydration_error: null,
+			}),
+		},
+	);
+	const fact = buildAttachmentDetailCoverageMessage(coverage);
+	assert.deepEqual(fact.hydrated_keys, ["abc456:1"]);
+	assert.deepEqual(fact.gap_keys ?? [], [], "the outcome sets never overlap");
+	assert.equal(coverage.localEmitRejected, false);
+});
+
 function realResourceEmitter(requested: Map<string, StreamRequest>, emit: RecordingHarness["emit"]) {
 	const filters = new Map<string, Set<string> | null>();
 	for (const [name, scope] of requested) filters.set(name, resourceSet(scope));

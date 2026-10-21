@@ -572,10 +572,64 @@ export function makeAttachmentDetailCoverage(): AttachmentDetailCoverage {
 }
 
 /**
+ * One attachment key's outcome in this run, ranked by how well it is
+ * accounted. A key reached twice (a message re-observed across pages, the walk
+ * and served recovery) keeps its best outcome, so the outcome sets never
+ * overlap (the runtime rejects that) and a later attempt can only help:
+ *
+ *   unlocated (rejected, no retry locator)  < unaccounted (too_large/deferred)
+ *     < gap / failed (durable retry locator)  < hydrated
+ *
+ * `unlocated` is below `unaccounted` because an accepted too_large/deferred
+ * record landed and loses nothing, while a rejection without a locator leaves
+ * an obligation nobody will retry.
+ */
+type AttachmentKeyOutcome =
+	| "unlocated"
+	| "unaccounted"
+	| "gap"
+	| "failed"
+	| "hydrated";
+
+const ATTACHMENT_OUTCOME_RANK: Record<AttachmentKeyOutcome, number> = {
+	unlocated: 0,
+	unaccounted: 1,
+	gap: 2,
+	failed: 2,
+	hydrated: 3,
+};
+
+function attachmentKeyOutcome(
+	coverage: AttachmentDetailCoverage,
+	key: string,
+): AttachmentKeyOutcome | null {
+	if (!coverage.requiredKeys.includes(key)) return null;
+	if (coverage.hydratedKeys.includes(key)) return "hydrated";
+	if (coverage.failedRecords.some((f) => f.record.id === key)) return "failed";
+	if (coverage.gapKeys.includes(key)) return "gap";
+	if (coverage.unlocatedKeys.includes(key)) return "unlocated";
+	return "unaccounted";
+}
+
+function clearAttachmentKeyOutcome(
+	coverage: AttachmentDetailCoverage,
+	key: string,
+): void {
+	coverage.hydratedKeys = coverage.hydratedKeys.filter((k) => k !== key);
+	coverage.gapKeys = coverage.gapKeys.filter((k) => k !== key);
+	coverage.failedRecords = coverage.failedRecords.filter(
+		(f) => f.record.id !== key,
+	);
+	coverage.unlocatedKeys = coverage.unlocatedKeys.filter((k) => k !== key);
+}
+
+/**
  * Record one attempted attachment hydration into the coverage accumulator by
  * its terminal `hydration_status`. A `deferred` status (never hydrated this
  * run) is still a considered key but has no terminal outcome bucket, so it
  * counts only toward the denominator. Pure: mutates the passed accumulator.
+ * The single owner of every attachment credit decision (see
+ * `AttachmentKeyOutcome`).
  *
  * `failure` is the same `AttachmentHydrationFailure | null` the hydrator
  * already computes for aggregate telemetry — passed through here so a
@@ -590,69 +644,29 @@ export function recordAttachmentCoverage(
 	/** A rejected emission whose retry DETAIL_GAP was written this run. */
 	retryLocatorEmitted = false,
 ): void {
-	const key = record.id;
-	const outcome: "hydrated" | "gap" | "failed" | "unaccounted" | "unlocated" =
-		!locallyEmitted
-			? retryLocatorEmitted
-				? "gap"
-				: "unlocated"
-			: record.hydration_status === "hydrated"
-				? "hydrated"
-				: record.hydration_status === "failed"
-					? "failed"
-					: "unaccounted";
-	if (
-		locallyEmitted &&
-		!["hydrated", "failed", "too_large", "deferred"].includes(
-			record.hydration_status,
-		)
+	const outcome = attachmentOutcomeOf(
+		record,
+		locallyEmitted,
+		retryLocatorEmitted,
+	);
+	const prior = attachmentKeyOutcome(coverage, record.id);
+	if (prior === null) {
+		coverage.requiredKeys.push(record.id);
+	} else if (
+		ATTACHMENT_OUTCOME_RANK[outcome] > ATTACHMENT_OUTCOME_RANK[prior]
 	) {
-		throw new Error(
-			`Unhandled attachment hydration status: ${String(record.hydration_status)}`,
-		);
-	}
-	// The runtime rejects a DETAIL_COVERAGE whose required_keys repeats a key,
-	// or whose outcome sets overlap. The same attachment id can legitimately
-	// reach this accumulator twice in a run (a message re-observed across
-	// pages, the walk and served recovery), so each key is recorded once and a
-	// later attempt can only improve its outcome: hydrated beats a gap, and any
-	// accounted outcome beats a rejection that left no retry locator.
-	if (coverage.requiredKeys.includes(key)) {
-		const hydrated = coverage.hydratedKeys.includes(key);
-		const unlocated = coverage.unlocatedKeys.includes(key);
-		if (outcome === "hydrated" && !hydrated) {
-			coverage.gapKeys = coverage.gapKeys.filter((k) => k !== key);
-			coverage.failedRecords = coverage.failedRecords.filter(
-				(f) => f.record.id !== key,
-			);
-			coverage.unlocatedKeys = coverage.unlocatedKeys.filter((k) => k !== key);
-			coverage.hydratedKeys.push(key);
-		} else if (unlocated && (outcome === "gap" || outcome === "failed")) {
-			coverage.unlocatedKeys = coverage.unlocatedKeys.filter((k) => k !== key);
-			recordAttachmentOutcome(coverage, record, failure, outcome);
-		}
-		coverage.localEmitRejected = coverage.unlocatedKeys.length > 0;
+		clearAttachmentKeyOutcome(coverage, record.id);
+	} else {
 		return;
 	}
-	coverage.requiredKeys.push(key);
-	recordAttachmentOutcome(coverage, record, failure, outcome);
-	coverage.localEmitRejected = coverage.unlocatedKeys.length > 0;
-}
-
-function recordAttachmentOutcome(
-	coverage: AttachmentDetailCoverage,
-	record: AttachmentRecord,
-	failure: AttachmentHydrationFailure | null,
-	outcome: "hydrated" | "gap" | "failed" | "unaccounted" | "unlocated",
-): void {
 	switch (outcome) {
 		case "hydrated":
 			coverage.hydratedKeys.push(record.id);
-			return;
+			break;
 		case "gap":
 			// The rejected emission already wrote its own retry DETAIL_GAP.
 			coverage.gapKeys.push(record.id);
-			return;
+			break;
 		case "failed":
 			coverage.gapKeys.push(record.id);
 			// Retain the record so a matching DETAIL_GAP is emitted for this key.
@@ -662,17 +676,41 @@ function recordAttachmentOutcome(
 				failureClass: attachmentHydrationFailureClass(failure),
 				record,
 			});
-			return;
+			break;
 		case "unlocated":
 			// Rejected with no retry locator: the obligation stays uncredited and
 			// holds the cursors that could pass it.
 			coverage.unlocatedKeys.push(record.id);
-			return;
+			break;
 		case "unaccounted":
 			// too_large is a deployment cap (may change); deferred is not attempted
 			// this run. Neither justifies a permanent skip or a gap claim, so the
 			// key stays required with no outcome.
-			return;
+			break;
+	}
+	coverage.localEmitRejected = coverage.unlocatedKeys.length > 0;
+}
+
+function attachmentOutcomeOf(
+	record: AttachmentRecord,
+	locallyEmitted: boolean,
+	retryLocatorEmitted: boolean,
+): AttachmentKeyOutcome {
+	if (!locallyEmitted) return retryLocatorEmitted ? "gap" : "unlocated";
+	switch (record.hydration_status) {
+		case "hydrated":
+			return "hydrated";
+		case "failed":
+			return "failed";
+		case "too_large":
+		case "deferred":
+			return "unaccounted";
+		default: {
+			const unhandledStatus: never = record.hydration_status;
+			throw new Error(
+				`Unhandled attachment hydration status: ${unhandledStatus}`,
+			);
+		}
 	}
 }
 
