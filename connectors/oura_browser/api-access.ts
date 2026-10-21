@@ -15,6 +15,8 @@ const PORTAL_SESSION_SETTLE_MS = 45_000;
 const PORTAL_SESSION_POLL_MS = 2_000;
 const PORTAL_SETTLE_MS = 1_500;
 const PORTAL_SETTLE_TIMEOUT_MS = 15_000;
+const PORTAL_SESSION_READS = 3;
+const PORTAL_SESSION_READ_MS = 500;
 
 export const OURA_LOGIN_URL = APPLICATIONS;
 
@@ -45,24 +47,25 @@ type PortalSession =
 
 type Interact = (url: string, message: string, ready: () => Promise<boolean>) => Promise<void>;
 
+/**
+ * One read of the portal session. Routes are tried in order of authority. The
+ * first route that answers JSON decides. A route the portal does not serve
+ * (404, 405 or a page instead of JSON) passes to the next route. A route that
+ * fails ends the read as "unknown", so a fallback can never overrule it.
+ */
 async function portalSession(page: Page): Promise<PortalSession> {
 	try {
 		if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
 			return { status: "unknown" };
 		return await page.evaluate(async (): Promise<PortalSession> => {
 			if (location.origin !== "https://developer.ouraring.com") return { status: "unknown" };
-			// A route the portal does not serve (404 or a page, not JSON) says
-			// nothing. A route that fails leaves the session unknown, even if the
-			// other route answers that nobody is signed in.
-			let answered = false;
-			let failed = false;
 			for (const route of ["/api/auth/get-session", "/api/auth/session"]) {
 				const response = await fetch(route, { credentials: "include" }).catch(() => null);
-				if (!response || (!response.ok && response.status !== 404)) { failed = true; continue; }
-				if (!response.ok) continue;
+				if (!response) return { status: "unknown" };
+				if (response.status === 404 || response.status === 405) continue;
+				if (!response.ok) return { status: "unknown" };
 				const value: unknown = await response.json().catch(() => undefined);
 				if (value === undefined) continue;
-				answered = true;
 				if (value && typeof value === "object" && "user" in value) {
 					const user = value.user;
 					if (user && typeof user === "object" && "email" in user && typeof user.email === "string" && user.email) {
@@ -72,10 +75,22 @@ async function portalSession(page: Page): Promise<PortalSession> {
 						return { status: "signed_in", email: user.email, account };
 					}
 				}
+				return { status: "signed_out" };
 			}
-			return { status: answered && !failed ? "signed_out" : "unknown" };
+			return { status: "unknown" };
 		});
 	} catch { return { status: "unknown" }; }
+}
+
+/** The portal session after brief retries of an unknown read on the portal. */
+async function settledPortalSession(page: Page): Promise<PortalSession> {
+	let session = await portalSession(page);
+	for (let attempt = 0; attempt < PORTAL_SESSION_READS && session.status === "unknown" &&
+		(await page.evaluate(() => location.origin).catch(() => "")) === PORTAL; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, PORTAL_SESSION_READ_MS));
+		session = await portalSession(page);
+	}
+	return session;
 }
 
 async function portalSignedIn(page: Page): Promise<boolean> {
@@ -294,7 +309,7 @@ async function reusableCachedAccess(page: Page, session: PortalSession): Promise
 export async function probeOuraCachedApiAccess(page: Page): Promise<string | null> {
 	try {
 		if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL) return null;
-		return (await reusableCachedAccess(page, await portalSession(page)))?.accessToken ?? null;
+		return (await reusableCachedAccess(page, await settledPortalSession(page)))?.accessToken ?? null;
 	} catch { return null; }
 }
 
@@ -391,19 +406,22 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 		});
 	} else if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
 		await page.goto(APPLICATIONS, { waitUntil: "domcontentloaded" });
+	// The owner is asked to sign in at most once here.
+	let prompted = false;
 	const signIn = async () => {
+		prompted = true;
 		await interact(APPLICATIONS, "Sign in to the Oura Developer Portal, then continue.", async () => {
 			await advanceOuraSignIn(page);
 			return portalSignedIn(page);
 		});
-		return portalSession(page);
+		return settledPortalSession(page);
 	};
-	let session = await portalSession(page);
+	let session = await settledPortalSession(page);
 	// The cached token is judged only against a session the portal confirms.
 	if (session.status === "unknown") session = await signIn();
 	const cached = await reusableCachedAccess(page, session);
 	if (cached) return cached;
-	if (session.status !== "signed_in") session = await signIn();
+	if (session.status !== "signed_in" && !prompted) session = await signIn();
 	if (session.status !== "signed_in") throw new Error("oura_portal_session_unconfirmed");
 	// Another account's grant, or an unbound one, must not outlive this sign-in.
 	// This account's grant stays until a new grant replaces it.
@@ -422,7 +440,7 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 				await advanceOuraSignIn(page);
 				return portalSignedIn(page);
 			});
-		session = await portalSession(page);
+		session = await settledPortalSession(page);
 		if (session.status !== "signed_in") throw new Error("oura_portal_session_unconfirmed");
 		owner = session;
 		app = await applicationAfterSessionSettles(page, owner.email, interact);

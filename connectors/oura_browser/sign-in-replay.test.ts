@@ -298,3 +298,36 @@ test("Oura page replay keeps this account's grant when its refresh fails and aut
 		assert.equal((await storedToken(page) as { refreshToken?: string } | null)?.refreshToken, "kept-refresh");
 	}, false, true);
 });
+
+test("Oura page replay lets get-session decide; a failing fallback route does not block cookie-less reuse", { timeout: 60_000 }, async () => {
+	await withReplay(false, async (page, state) => {
+		await seedToken(page, "cached-access", signedInAccount);
+		await page.route(`${portal}/api/auth/session`, (route) => route.fulfill({ status: 500, body: "" }));
+		const token = await ensureOuraApiAccess(page, async () => { throw new Error("sign-in requested"); });
+		assert.deepEqual(token, { accessToken: "cached-access", account: signedInAccount });
+		assert.equal(state.appRequests(), 0);
+	});
+});
+
+test("Oura page replay settles a get-session read that fails once, without prompting", { timeout: 60_000 }, async () => {
+	await withReplay(false, async (page) => {
+		await seedToken(page, "cached-access", signedInAccount);
+		let failures = 0;
+		await page.route(`${portal}/api/auth/get-session`, (route) =>
+			failures++ === 0 ? route.fulfill({ status: 503, body: "" }) : route.fallback());
+		const token = await ensureOuraApiAccess(page, async () => { throw new Error("sign-in requested"); });
+		assert.deepEqual(token, { accessToken: "cached-access", account: signedInAccount });
+		assert.ok(failures >= 2);
+	}, false, true);
+});
+
+test("Oura page replay asks for sign-in once when the portal session stays unreadable", { timeout: 60_000 }, async () => {
+	await withReplay(false, async (page) => {
+		await seedToken(page, "previous-access", accountKey("previous@example.test"));
+		await page.route(new RegExp(`^${portal}/api/auth/(?:get-session|session)$`), (request) => request.fulfill({ status: 404, body: "" }));
+		let prompts = 0;
+		await assert.rejects(ensureOuraApiAccess(page, async () => { prompts++; }), /oura_portal_session_unconfirmed/);
+		assert.equal(prompts, 1);
+		assert.equal((await storedToken(page))?.accessToken, "previous-access", "an unconfirmed session removes nothing");
+	}, false, true);
+});
