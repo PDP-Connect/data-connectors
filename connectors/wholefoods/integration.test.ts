@@ -809,11 +809,17 @@ async function runCollectOrders(
 	page: Page,
 	requested: string[],
 ): Promise<{
-	failures: Array<{ stream: string; message: string; retryable: unknown }>;
+	failures: Array<{
+		kind: "read_failed" | "unproven";
+		stream: string;
+		message: string;
+		retryable: unknown;
+	}>;
 	harness: ReturnType<typeof makeRecordingEmit>;
 }> {
 	const harness = makeRecordingEmit(validateRecord);
 	const failures: Array<{
+		kind: "read_failed" | "unproven";
 		stream: string;
 		message: string;
 		retryable: unknown;
@@ -827,6 +833,7 @@ async function runCollectOrders(
 				message.reason === "inventory_not_proven_complete"
 			) {
 				failures.push({
+					kind: "unproven",
 					stream: message.stream,
 					message: message.message ?? "",
 					retryable:
@@ -839,9 +846,15 @@ async function runCollectOrders(
 		emitRecord: harness.emitRecord,
 		page,
 		progress: noProgress,
-		reportStreamFailure: (_stream, _message, options) => {
+		reportStreamFailure: (stream, message, options) => {
 			// Genuine runtime failure reporting is distinct from inventory incompleteness.
 			assert.equal(options?.retryable, true);
+			failures.push({
+				kind: "read_failed",
+				stream,
+				message,
+				retryable: options?.retryable,
+			});
 			return Promise.resolve();
 		},
 		requested: new Map(requested.map((stream) => [stream, {}])) as never,
@@ -1201,6 +1214,8 @@ test("collectOrders reports every requested stream failed when the search naviga
 	);
 	assert.match(failures[0]?.message ?? "", /navigation_failed: TimeoutError/);
 	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
+	// A failed navigation is a failed read, never an unproven enumeration.
+	assert.deepEqual(new Set(failures.map((failure) => failure.kind)), new Set(["read_failed"]));
 	assert.deepEqual(stateStreams(harness), []);
 });
 
@@ -1220,6 +1235,7 @@ test("collectOrders reports a detail navigation timeout as a stream failure with
 		["orders", true],
 		["nutrition", true],
 	]);
+	assert.deepEqual(new Set(failures.map((failure) => failure.kind)), new Set(["read_failed"]));
 	assert.deepEqual(stateStreams(harness), []);
 });
 
@@ -1229,6 +1245,7 @@ test("collectOrders reports a search HTTP 503 as a stream failure", async () => 
 		["orders"],
 	);
 	assert.deepEqual(failedStreams(failures), [["orders", true]]);
+	assert.deepEqual(failures.map((failure) => failure.kind), ["read_failed"]);
 });
 
 test("collectOrders keeps an HTTP 403 search response a plain error, not a stream failure", async () => {
