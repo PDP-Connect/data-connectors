@@ -112,19 +112,21 @@ export class InventoryEvidence {
 	 * readable primary, and neither route may erase identities or page obligations.
 	 */
 	observeRoutes<T extends PageObservation>(primary: T, alternate?: T): { selected: T; added: Set<string> } {
+		if (alternate === undefined) return { selected: primary, added: this.observePage(primary) };
 		this.retain(primary);
-		if (alternate !== undefined) this.retain(alternate);
-		const selected = alternate === undefined ||
-			(alternate.continuation.kind === "unknown" && alternate.continuation.reason === "unreadable_list" && primary.continuation.kind === "unproven")
+		this.retain(alternate);
+		const selected = alternate.continuation.kind === "unknown" && alternate.continuation.reason === "unreadable_list" && primary.continuation.kind === "unproven"
 			? primary : alternate;
 		const added = this.observePage(selected);
-		if (primary.rejectedRows > 0 || (alternate?.rejectedRows ?? 0) > 0) this.fail("discarded_rows");
 		return { selected, added };
 	}
 
 	/** Page facts survive route selection, independently of which rows are published. */
 	private retain(page: PageObservation): void {
-		if (page.continuation.kind === "unbound") return;
+		if (page.continuation.kind === "unbound") {
+			this.fail(page.continuation.reason);
+			return;
+		}
 		for (const id of page.ids) this.observed.add(id);
 		this.addTotals({ exactTotals: page.exactTotals ?? [], totalConflict: page.totalConflict ?? false });
 		if (page.lastPage !== undefined) {
@@ -133,6 +135,11 @@ export class InventoryEvidence {
 		}
 		this.linkedPage = Math.max(this.linkedPage, page.linkedPage ?? 0);
 		if (page.continuation.kind === "next") this.requests.add(page.continuation.url);
+		// A missing list permits another route; contradictions in a recognized list
+		// remain binding even when its payload is not selected.
+		const missingList = page.continuation.kind === "unknown" && page.continuation.reason === "unreadable_list";
+		if (page.rejectedRows > 0 || (!page.rowsComplete && !missingList)) this.fail("discarded_rows");
+		if (page.continuation.kind === "unknown" && !missingList) this.fail(page.continuation.reason);
 	}
 
 	/**

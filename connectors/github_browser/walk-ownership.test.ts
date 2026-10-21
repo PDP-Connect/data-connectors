@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { collectGitHubBrowser } from "./collector.ts";
-import { type Continuation, InventoryEvidence } from "./inventory-evidence.ts";
+import { type Continuation, InventoryEvidence, type PageObservation } from "./inventory-evidence.ts";
 
 const owner = '<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>';
 const prior = { fetched_at: "2025-12-01T00:00:00Z" };
@@ -290,6 +290,63 @@ test("a terminal starred fallback cannot drop an identity observed on the primar
 		: inventoryPage("starred", ["a", "b"]));
 	assertWithheld(result, "starred");
 	assert.equal(cause(result), "identity_mismatch");
+});
+
+test("a starred fallback cannot erase a primary page that claims empty beside a readable row", async () => {
+	const result = await collect("starred", () => ({ link: null, data: [] }), url => url.pathname.startsWith("/stars/")
+		? inventoryPage("starred", ["a"], disabledNext)
+		: inventoryPage("starred", ["a"]).replace("</ul>", '</ul><div class="blankslate">No starred repositories</div>'));
+	assertWithheld(result, "starred");
+	assert.equal(cause(result), "discarded_rows");
+});
+
+test("an alternate cannot erase an unbound primary observation at the walk interface", () => {
+	const evidence = new InventoryEvidence("https://github.com/sample-user?page=1&tab=stars");
+	evidence.observeRoutes(
+		{ ids: [], rowsComplete: false, rejectedRows: 0, continuation: { kind: "unbound", reason: "wrong_owner" } },
+		{ ids: ["a"], rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } },
+	);
+	assert.equal(evidence.decide(1), "wrong_owner");
+});
+
+test("generated alternate-route sequences cannot clear a negative source observation", () => {
+	const negatives: Array<{ page: PageObservation; reason: string }> = [
+		{ page: { ids: [], rowsComplete: false, rejectedRows: 0, continuation: { kind: "unbound", reason: "wrong_owner" } }, reason: "wrong_owner" },
+		{ page: { ids: ["a"], rowsComplete: true, rejectedRows: 0, continuation: { kind: "unknown", reason: "unknown_continuation" } }, reason: "unknown_continuation" },
+		{ page: { ids: ["a"], rowsComplete: false, rejectedRows: 0, continuation: { kind: "unproven" } }, reason: "discarded_rows" },
+	];
+	for (const { page, reason } of negatives) {
+		for (const witness of ["end", "total", "reconcile"] as const) {
+			const evidence = new InventoryEvidence("https://github.com/sample-user?page=1&tab=stars");
+			evidence.observeRoutes(page, { ids: ["a"], rowsComplete: true, rejectedRows: 0, continuation: { kind: witness === "end" ? "end" : "unproven" } });
+			if (witness === "total") evidence.addTotals({ exactTotals: [1], totalConflict: false });
+			if (witness === "reconcile") {
+				const independent = new InventoryEvidence("https://api.github.com/users/sample-user/starred?page=1");
+				independent.observePage({ ids: ["a"], rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } });
+				evidence.reconcile(independent);
+			}
+			assert.equal(evidence.decide(1), reason, `${reason} was erased by ${witness}`);
+		}
+	}
+	// A missing list is availability evidence, rather than a contradictory recognized list.
+	const absent = new InventoryEvidence("https://github.com/sample-user?page=1&tab=stars");
+	absent.observeRoutes(
+		{ ids: [], rowsComplete: false, rejectedRows: 0, continuation: { kind: "unknown", reason: "unreadable_list" } },
+		{ ids: ["a"], rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } },
+	);
+	assert.equal(absent.decide(1), null);
+});
+
+test("page floors remain binding when advertised only by the non-selected route", () => {
+	const page: PageObservation = { ids: ["a"], rowsComplete: true, rejectedRows: 0, continuation: { kind: "unproven" } };
+	for (const missingAlternate of [false, true]) {
+		const evidence = new InventoryEvidence("https://github.com/sample-user?page=1&tab=stars");
+		if (missingAlternate) evidence.observeRoutes(page,
+			{ ids: [], rowsComplete: false, rejectedRows: 0, linkedPage: 2, continuation: { kind: "unknown", reason: "unreadable_list" } });
+		else evidence.observeRoutes({ ...page, linkedPage: 2 }, { ...page, continuation: { kind: "end" } });
+		evidence.addTotals({ exactTotals: [1], totalConflict: false });
+		assert.equal(evidence.decide(1), "end_before_linked_page");
+	}
 });
 
 for (const stream of ["repositories", "starred"] as const) {

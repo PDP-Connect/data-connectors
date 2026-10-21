@@ -71,6 +71,8 @@ lower bound on that inventory. A smaller alternate payload cannot publish unless
 later pages account for the missing identities. Payloads from partial routes are
 not unioned. The same invariant check rejects cursor-bearing successors, including
 a Next URL that also has a numeric page, before the walk issues another request.
+An unavailable list permits a readable alternate. Contradictions in a recognized
+list and unbound responses remain failures even when another payload is selected.
 For repositories/starred, evidence stays binding across routes and pages. Rejected
 entries, duplicate identities (even unchanged rows), and later pages
 without new identities remain failures even if a later page or counter looks complete.
