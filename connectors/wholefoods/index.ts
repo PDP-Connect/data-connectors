@@ -46,6 +46,7 @@ import {
 	mapUsdaNutrients,
 	mergeProductIds,
 	ORDER_DETAIL_READY_SELECTOR,
+	OrderDetailUnreadableError,
 	orderDetailUnitCount,
 	parseAmazonProfileDom,
 	parseDollarsToCents,
@@ -56,7 +57,7 @@ import {
 	readAmazonProductPage,
 	readOrderObservation,
 	readWholeFoodsProductPage,
-	parseWholeFoodsSearchResultDoms,
+	readWholeFoodsSearchPage,
 } from "./parsers.ts";
 import {
 	type BindingCause,
@@ -74,13 +75,15 @@ import {
 	WHOLE_FOODS_ORIGIN,
 } from "./binding.ts";
 import {
+	type AbsenceProof,
 	type AcceptedNutrition,
 	acceptNutrition,
 	hasCoreNutrition,
 	type NutritionLookup,
-	type NutritionNoMatch,
+	noMatch,
 	type PageReadFailure,
-	type PageSourceEvidence,
+	pageEvidence,
+	type SourceAnswer,
 	selectNutrition,
 } from "./nutrition-acceptance.ts";
 import { validateRecord } from "./schemas.ts";
@@ -306,6 +309,21 @@ async function walkSearchPages(
 				"Whole Foods order search returned no recognizable results or empty-state evidence",
 			);
 		}
+		// The page served must be the page requested, on the last page too. A
+		// page already read (an earlier page, or the same rows again) is
+		// rejected before its rows are added: adding them again would inflate
+		// the item counts of orders read so far. A page that skipped ahead is
+		// unread source rows, so they are kept, and the skip is reported after.
+		const servedOtherPage = () =>
+			new OrderEnumerationUnprovenError(
+				"Whole Foods order pagination served a different page than requested",
+			);
+		if (selectedPage !== null && selectedPage < pageNum) throw servedOtherPage();
+		if (rowSignature && rowSignature === previousRowSignature) {
+			throw new OrderEnumerationUnprovenError(
+				"Whole Foods order pagination repeated a page",
+			);
+		}
 		for (const stub of pageStubs) {
 			if (seen.has(stub.orderId)) {
 				const existing = stubs.find((s) => s.orderId === stub.orderId);
@@ -325,18 +343,7 @@ async function walkSearchPages(
 			count: stubs.length,
 			stream: "orders",
 		});
-		// The page served must be the page requested, on the last page too: a
-		// terminal page that skipped ahead leaves the pages between unread.
-		if (selectedPage !== null && selectedPage !== pageNum) {
-			throw new OrderEnumerationUnprovenError(
-				"Whole Foods order pagination served a different page than requested",
-			);
-		}
-		if (rowSignature && rowSignature === previousRowSignature) {
-			throw new OrderEnumerationUnprovenError(
-				"Whole Foods order pagination repeated a page",
-			);
-		}
+		if (selectedPage !== null && selectedPage > pageNum) throw servedOtherPage();
 		if (hasNextPage && pageNum === MAX_SEARCH_PAGES) {
 			throw new OrderEnumerationUnprovenError(
 				"Whole Foods order search exceeded the page limit before reaching the end",
@@ -630,54 +637,48 @@ async function lookupNutritionForProduct(
 		usdaGtin: { gtin: string; via: Via } | null;
 		decoration: ProductDetails | null;
 	} = { usdaGtin: null, decoration: null };
-	// What the page sources said about this product's panel (see
-	// `PageSourceEvidence`), the one value that gates a fuzzy USDA match. An
-	// answer is positive evidence: a bound product page, a 404/410 on the
-	// source's own site for a page that does not exist, a page the binding
-	// says is a different product, a search result list or its no-results
-	// message. A captcha, a 5xx, a thrown error, a response that ended off the
-	// source's site, a page that cannot be bound to the request and a 200 page
-	// that shows no product are not answers. `failure` names the strongest one.
-	let evidence: PageSourceEvidence = "none";
-	let failure: PageReadFailure | null = null;
-	const unable = (reason: PageReadFailure) => {
-		evidence = "unknown";
-		if (failure === null || (failure.status !== "blocked" && reason.status === "blocked")) {
-			failure = reason;
-		}
+	// One answer per source read (see `SourceAnswer`). They alone decide
+	// whether a fuzzy USDA match may stand in and why there is no match.
+	const answers: SourceAnswer[] = [];
+	const unable = (failure: PageReadFailure) => {
+		answers.push({ kind: "unknown", failure });
+	};
+	const absent = (proof: AbsenceProof) => {
+		answers.push({ kind: "proven_absent", proof });
 	};
 	const matched = (facts: AcceptedNutrition): NutritionLookup => ({
 		status: "matched",
 		facts,
 	});
-	// Why there is no match: a failed read, a partial panel, or nothing found.
-	const noMatch = (usdaFailed: boolean): NutritionNoMatch =>
-		failure ??
-		(evidence === "partial"
-			? { status: "error", cause: "panel_partial" }
-			: usdaFailed
-				? { status: "error", cause: "usda_request_failed" }
-				: { status: "not_found", cause: "no_match" });
-	/** Use a bound product: its first emittable panel, or else record what it
-	 *  showed. Some core rows of this product but not a full panel are a
-	 *  partial read, never "no panel". */
-	const take = (product: BoundProduct, via: Via): AcceptedNutrition | null => {
-		const accepted = selectNutrition(product.panels, evidence);
+	/** Use a bound product: its first emittable panel, or else answer what
+	 *  the page showed. Some core rows of this product are a partial read; a
+	 *  panel whose owner is unresolved, or a page not recognised as a product
+	 *  page, proves nothing; only a recognised page with no panel at all
+	 *  proves absence. */
+	const take = (
+		product: BoundProduct,
+		via: Via,
+		recognised: boolean,
+	): AcceptedNutrition | null => {
+		const accepted = selectNutrition(product.panels, pageEvidence(answers));
 		if (accepted) return accepted;
-		if (
-			evidence === "none" &&
-			product.panels.some((panel) => panel.coreStated.length > 0)
-		) {
-			evidence = "partial";
-		}
 		kept.decoration = product.details ?? kept.decoration;
 		if (product.gtin && kept.usdaGtin === null) {
 			kept.usdaGtin = { gtin: product.gtin, via };
 		}
+		if (product.panels.some((panel) => panel.coreStated.length > 0)) {
+			answers.push({ kind: "panel" });
+		} else if (product.unresolvedPanels > 0) {
+			unable({ status: "error", cause: "panel_unresolved" });
+		} else if (!(recognised || product.panels.length > 0)) {
+			unable({ status: "error", cause: "unrecognized_page" });
+		} else {
+			absent("page_without_panel");
+		}
 		return null;
 	};
-	/** Read one Whole Foods tile. Its failure is this tile's: it is recorded
-	 *  and the walk goes on to the next tile. */
+	/** Read one Whole Foods tile into one answer. Its failure is this tile's:
+	 *  the walk goes on to the next tile. */
 	const readTile = async (productUrl: string): Promise<AcceptedNutrition | null> => {
 		try {
 			const status = await navigateAndSettle(page, productUrl, undefined, true);
@@ -690,7 +691,7 @@ async function lookupNutritionForProduct(
 			if (!onSourceSite("wholefoods", finalUrl)) {
 				unable(unusable("untrusted_origin"));
 			} else if (isGone(status)) {
-				// This tile's page is gone; the other tiles still count.
+				absent("gone");
 			} else if (status !== null && status >= 400) {
 				unable({ status: "error", cause: "http_error" });
 			} else {
@@ -704,17 +705,11 @@ async function lookupNutritionForProduct(
 				);
 				if (binding.kind === "UNKNOWN") {
 					unable(unusable(binding.cause));
-				} else if (binding.kind === "BOUND") {
-					const accepted = take(binding.product, binding.via);
-					if (accepted) return accepted;
-					if (
-						binding.product.panels.length === 0 &&
-						!hasProductPageEvidence(html)
-					) {
-						unable({ status: "error", cause: "unrecognized_page" });
-					}
+				} else if (binding.kind === "OTHER") {
+					absent("other_product");
+				} else {
+					return take(binding.product, binding.via, hasProductPageEvidence(html));
 				}
-				// OTHER: a readable page for another product, an answer.
 			}
 		} catch {
 			unable({ status: "error", cause: "navigation_failed" });
@@ -734,7 +729,7 @@ async function lookupNutritionForProduct(
 		} else if (!onSourceSite("amazon", page.url())) {
 			unable(unusable("untrusted_origin"));
 		} else if (isGone(status)) {
-			// No page for this ASIN: nothing to read, and nothing wrong.
+			absent("gone");
 		} else if (status !== null && status >= 400) {
 			unable({ status: "error", cause: "http_error" });
 		} else {
@@ -752,11 +747,12 @@ async function lookupNutritionForProduct(
 				if (product.gtin) {
 					amazonGtin = { gtin: product.gtin, via: binding.via };
 				}
-				const direct = take(product, binding.via);
+				const direct = take(
+					product,
+					binding.via,
+					product.gtin !== null || read.hasProductTitle,
+				);
 				if (direct) return matched(direct);
-				if (!(product.panels.length > 0 || product.gtin || read.hasProductTitle)) {
-					unable({ status: "error", cause: "unrecognized_page" });
-				}
 			}
 		}
 	} catch {
@@ -780,26 +776,27 @@ async function lookupNutritionForProduct(
 			} else if (searchStatus !== null && searchStatus >= 400) {
 				unable({ status: "error", cause: "http_error" });
 			} else {
-				const productUrls = parseWholeFoodsSearchResultDoms(searchHtml).slice(
-					0,
-					MAX_WHOLE_FOODS_TILES,
-				);
-				for (const productUrl of productUrls) {
+				const search = readWholeFoodsSearchPage(searchHtml);
+				const visited = search.urls.slice(0, MAX_WHOLE_FOODS_TILES);
+				for (const productUrl of visited) {
 					const accepted = await readTile(productUrl);
 					if (accepted) return matched(accepted);
 				}
-				if (
-					productUrls.length === 0 &&
-					!(
-						onSourceSite("wholefoods_search", page.url()) &&
-						/\b(?:0|no)\s+(?:products|results)\b|no matching products/i.test(
-							searchHtml,
-						)
-					)
-				) {
-					// Neither tiles nor a no-results message on the search page:
-					// not a search page we know.
-					unable({ status: "error", cause: "unrecognized_page" });
+				if (search.urls.length > visited.length) {
+					// The walk stopped at its budget: the results it did not read
+					// may hold this product's panel.
+					unable({ status: "error", cause: "search_incomplete" });
+				} else if (search.urls.length === 0) {
+					if (
+						search.showsEmptyState &&
+						onSourceSite("wholefoods_search", page.url())
+					) {
+						absent("visible_empty_search");
+					} else {
+						// Neither tiles nor a rendered no-results message on the
+						// search page: not a search page we know.
+						unable({ status: "error", cause: "unrecognized_page" });
+					}
 				}
 			}
 		}
@@ -825,13 +822,13 @@ async function lookupNutritionForProduct(
 					rawNutritionText: own?.rawNutritionText ?? null,
 					upc: exact?.gtin ?? usda.upc,
 				},
-				evidence,
+				pageEvidence(answers),
 			);
 			if (merged) return matched(merged);
 		}
-		return noMatch(false);
+		return noMatch(answers, false);
 	} catch {
-		return noMatch(true);
+		return noMatch(answers, true);
 	}
 }
 
@@ -952,7 +949,17 @@ function readOrderDetail(html: string): OrderDetail {
 			"Whole Foods order detail has no item or cancellation evidence",
 		);
 	}
-	const detail = parseOrderDetailDom(html);
+	let detail: OrderDetail;
+	try {
+		detail = parseOrderDetailDom(html);
+	} catch (error) {
+		// A row the source rendered malformed is this order's failure, not the
+		// run's: later orders are still read.
+		if (error instanceof OrderDetailUnreadableError) {
+			throw new OrderEnumerationUnprovenError(error.message, { cause: error });
+		}
+		throw error;
+	}
 	if (detail.items.length === 0 && !isCancelledOrderDetail(html)) {
 		throw new OrderEnumerationUnprovenError(
 			"Whole Foods order detail rendered no items and no cancellation evidence",

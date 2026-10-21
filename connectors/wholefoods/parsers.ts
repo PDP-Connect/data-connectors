@@ -18,6 +18,7 @@ import {
 	type ProductDetails,
 	type ProductNode,
 	type RenderedPanel,
+	type ScopedDetail,
 	type WholeFoodsProductObservation,
 } from "./binding.ts";
 import type {
@@ -335,6 +336,16 @@ const IN_STORE_QTY_RE =
 
 /** Elements that show an order-detail page has finished rendering: legacy
  *  item grid, cancelled order, sign-in form, in-store list, or delivery items. */
+/** An order detail the source rendered but whose rows cannot be read (a
+ *  product row with no name). It is that order's failure: callers translate
+ *  it into a recoverable per-order failure, unlike an unexpected error. */
+export class OrderDetailUnreadableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "OrderDetailUnreadableError";
+	}
+}
+
 export const ORDER_DETAIL_READY_SELECTOR =
 	'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], form[name="signIn"], #f3_food_ItemList, #line-items, [id$="-item-grid-row"]';
 
@@ -686,7 +697,7 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		const sourceName = textOf(anchor ?? title).trim();
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
 		if (productId && sourceName.length < 3) {
-			throw new Error("Whole Foods order item has no source product name");
+			throw new OrderDetailUnreadableError("Whole Foods order item has no source product name");
 		}
 		// A grid container with no title and no link is an empty shell, not a
 		// row: counting it would fabricate an item and hide that nothing was read.
@@ -758,7 +769,7 @@ function parseDeliveryOrderItems(document: Document): OrderDetailItem[] | null {
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
 		const linkedName = textOf(anchor).replace(WHITESPACE_RE, " ").trim();
 		if (productId && !linkedName) {
-			throw new Error("Whole Foods delivery item has no source product name");
+			throw new OrderDetailUnreadableError("Whole Foods delivery item has no source product name");
 		}
 		const rowText = textOf(row).replace(WHITESPACE_RE, " ").trim();
 		// An empty row element is a shell, not an item.
@@ -829,7 +840,7 @@ function parseInStoreItems(document: Document): OrderDetailItem[] | null {
 			.replace(WHITESPACE_RE, " ")
 			.trim();
 		if (name.length < 3) {
-			throw new Error("Whole Foods in-store order row has no item name");
+			throw new OrderDetailUnreadableError("Whole Foods in-store order row has no item name");
 		}
 		const rowText = textOf(row).replace(WHITESPACE_RE, " ");
 		const qty = IN_STORE_QTY_RE.exec(rowText);
@@ -1268,11 +1279,11 @@ function panelContainer(label: Element, labels: readonly Element[]): Element {
 	return container;
 }
 
-/** Where the page shows a panel: the smallest rendered element that holds the
- *  panel and a product heading decides (see `RenderedPanel.scope`). Inside
- *  the panel's own container only a heading before its label counts: one
- *  after it ("Serving size") is part of the panel. */
-function panelScope(
+/** Where the page shows a panel or a detail: the smallest rendered element
+ *  that holds it and a product heading decides (see `RenderedPanel.scope`).
+ *  Inside its own container only a heading before its label counts: one
+ *  after it ("Serving size") is part of it. */
+function scopeOf(
 	container: Element,
 	label: Element,
 	mainHeading: Element | null,
@@ -1316,35 +1327,6 @@ function renderedPanels(
 		const container = panelContainer(label, labels);
 		if (!containers.has(container)) containers.set(container, label);
 	}
-	const headings = [...document.querySelectorAll(PANEL_LABEL_SELECTOR)];
-	const sectionText = (heading: RegExp): string | null => {
-		const el = headings.find((candidate) =>
-			heading.test(textOf(candidate).trim()),
-		);
-		return (
-			textOf(el?.nextElementSibling).trim() ||
-			textOf(el?.parentElement?.querySelector("p, div:last-child")).trim() ||
-			null
-		);
-	};
-	const highlights = [
-		...document.querySelectorAll<HTMLElement>(
-			'[class*="badge"], [class*="diet"], [data-testid*="badge"]',
-		),
-	].flatMap((element) => {
-		const label = textOf(element).trim();
-		return /organic|gluten.?free|vegan|non.?gmo|kosher|paleo|keto/i.test(label)
-			? [label]
-			: [];
-	});
-	const breadcrumbCategory = [
-		...document.querySelectorAll<HTMLElement>(
-			'nav[aria-label*="breadcrumb" i] a, .breadcrumb a',
-		),
-	].flatMap((element) => {
-		const label = textOf(element).trim();
-		return label && !/home|whole foods/i.test(label) ? [label] : [];
-	});
 	return [...containers].flatMap(([container, label]) => {
 		const allText = panelTextFrom(container);
 		const calories = readCalories(allText);
@@ -1358,11 +1340,12 @@ function renderedPanels(
 		const facts: NutritionFacts = {
 			...emptyNutritionDetails(),
 			addedSugarG: nutrient("Includes Added Sugars"),
-			allergens: sectionText(/allergen|contains/i),
+			// Allergens, ingredients, badges and categories are observed on
+			// their own, with their own scope; binding adds the ones that are
+			// this product's.
 			calciumMg: nutrient("Calcium"),
 			calories,
 			carbsG: nutrient("Total Carbohydrate"),
-			category: breadcrumbCategory,
 			cholesterolMg: nutrient("Cholesterol"),
 			confidence: "high",
 			coreStated: coreStatedOf({
@@ -1373,8 +1356,6 @@ function renderedPanels(
 			}),
 			fatG: nutrient("Total Fat"),
 			fiberG: nutrient("Dietary Fiber"),
-			highlights,
-			ingredients: sectionText(/^ingredients$/i),
 			ironMg: nutrient("Iron"),
 			potassiumMg: nutrient("Potassium"),
 			proteinG: nutrient("Protein"),
@@ -1392,15 +1373,71 @@ function renderedPanels(
 			vitaminDMcg: nutrient("Vitamin D"),
 			productName: null,
 		};
-		return [{ facts, scope: panelScope(container, label, mainHeading) }];
+		return [{ facts, scope: scopeOf(container, label, mainHeading) }];
+	});
+}
+
+/** Section labels whose following block states a product detail. */
+const DETAIL_SECTIONS: readonly (readonly [ScopedDetail["field"], RegExp])[] = [
+	["allergens", /^(?:allergens?|contains)\b/i],
+	["ingredients", /^ingredients:?$/i],
+];
+const BADGE_SELECTOR = '[class*="badge"], [class*="diet"], [data-testid*="badge"]';
+const BADGE_RE = /organic|gluten.?free|vegan|non.?gmo|kosher|paleo|keto/i;
+
+/** Every rendered allergen, ingredient and badge statement on the page, each
+ *  with where the page shows it. Like a panel, a detail has no identity of its
+ *  own: `mainSubject` releases only the ones scoped to the bound product. */
+function scopedDetails(
+	document: Document,
+	mainHeading: Element | null,
+): ScopedDetail[] {
+	const fieldOf = (el: Element) =>
+		DETAIL_SECTIONS.find(([, re]) => re.test(textOf(el).trim()))?.[0];
+	const labelled = renderedAll(document, PANEL_LABEL_SELECTOR).filter(fieldOf);
+	// The innermost label only: a wrapper whose text starts with the label is
+	// not the label.
+	const labels = labelled.filter(
+		(el) => !labelled.some((other) => other !== el && el.contains(other)),
+	);
+	const sections = labels.flatMap((el) => {
+		const label = textOf(el).trim();
+		const field = fieldOf(el);
+		if (!field) return [];
+		const text =
+			textOf(el.nextElementSibling).trim() ||
+			textOf(el.parentElement?.querySelector("p, div:last-child")).trim();
+		return text && text !== label
+			? [{ field, text, scope: scopeOf(el, el, mainHeading) }]
+			: [];
+	});
+	const badges = renderedAll(document, BADGE_SELECTOR).flatMap((el) => {
+		const text = textOf(el).trim();
+		return BADGE_RE.test(text)
+			? [{ field: "highlight" as const, text, scope: scopeOf(el, el, mainHeading) }]
+			: [];
+	});
+	return [...sections, ...badges];
+}
+
+/** The page's breadcrumb categories: where the site files the page, not a
+ *  statement inside it. */
+function breadcrumbCategories(document: Document): string[] {
+	return renderedAll(
+		document,
+		'nav[aria-label*="breadcrumb" i] a, .breadcrumb a',
+	).flatMap((element) => {
+		const label = textOf(element).trim();
+		return label && !/home|whole foods/i.test(label) ? [label] : [];
 	});
 }
 
 /**
  * Read a Whole Foods product page into an observation: the canonical URL, the
  * rendered heading, every Product node (each with the facts of its own
- * `nutrition`) and every rendered panel with its scope. It does not decide
- * what the page is about; `mainSubject` and `bindProduct` do.
+ * `nutrition`), every rendered panel and detail with its scope, and the
+ * breadcrumb categories. It does not decide what the page is about;
+ * `mainSubject` and `bindProduct` do.
  */
 export function readWholeFoodsProductPage(
 	html: string,
@@ -1414,6 +1451,8 @@ export function readWholeFoodsProductPage(
 		h1: textOf(heading).trim() || null,
 		products: productNodes(parseJsonLdScripts(document)),
 		panels: renderedPanels(document, heading),
+		details: scopedDetails(document, heading),
+		categories: breadcrumbCategories(document),
 	};
 }
 
@@ -1579,10 +1618,38 @@ export function parseWholeFoodsSearchResultDom(html: string): string | null {
 	return parseWholeFoodsSearchResultDoms(html)[0] ?? null;
 }
 
+/** A search page's own "no results" message. */
+const SEARCH_EMPTY_RE =
+	/\b(?:0|no)\s+(?:products|results)\b|no matching products/i;
+
+/** What a Whole Foods search page shows: its rendered result links, and
+ *  whether it renders its own empty-state message. Text in a script, a
+ *  template or a hidden element is not shown, so it is neither. */
+export function readWholeFoodsSearchPage(html: string): {
+	urls: string[];
+	showsEmptyState: boolean;
+} {
+	const { document } = parseHTML(html);
+	return {
+		urls: searchResultLinks(document),
+		showsEmptyState: renderedAll(document, "body, body *").some((el) =>
+			SEARCH_EMPTY_RE.test(
+				[...el.childNodes]
+					.filter((node) => node.nodeType === 3)
+					.map((node) => node.textContent ?? "")
+					.join(" "),
+			),
+		),
+	};
+}
+
 /** Return product links in document order so callers can verify each page's
  * identity and continue past related products. */
 export function parseWholeFoodsSearchResultDoms(html: string): string[] {
-	const { document } = parseHTML(html);
+	return searchResultLinks(parseHTML(html).document);
+}
+
+function searchResultLinks(document: Document): string[] {
 	// Product tiles in the results grid; a link elsewhere on the page (the
 	// header, a recommendations carousel) is not a result for this search.
 	const grid = document.querySelectorAll<HTMLAnchorElement>(
@@ -1597,7 +1664,9 @@ export function parseWholeFoodsSearchResultDoms(html: string): string[] {
 	const seen = new Set<string>();
 	return [...links].flatMap((link) => {
 		const href = link.getAttribute("href");
-		if (!href || link.closest("header, footer, nav, aside")) return [];
+		if (!href || link.closest("header, footer, nav, aside") || !isRendered(link)) {
+			return [];
+		}
 		// A link off Whole Foods is not a read of this product; it is dropped
 		// here. One tile is one resolved path: relative and absolute spellings,
 		// or tracking parameters, are visited once.

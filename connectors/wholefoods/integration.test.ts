@@ -4077,3 +4077,239 @@ test("a bound Amazon page with a UPC and no panel still lends its ingredients to
 		restore();
 	}
 });
+
+// ─── Round 9: one source answer per read; descriptors are scoped (N1-N7) ──
+//
+// Each test is one failing input from the design review of f50a9b4ac.
+
+const PEPPERS_PANEL =
+	"<div><h3>Nutrition Facts</h3><p>Calories 20 Total Fat 1g Total Carbohydrate 3g Protein 1g</p></div>";
+const RECOMMENDED_PEARS_DETAILS =
+	'<aside><h2>Recommended Pears</h2><div><h3>Allergens</h3><p>Peanuts</p></div><div><h3>Ingredients</h3><p>peanuts</p></div><span class="badge">Vegan</span></aside>';
+
+test("N1: a recommendation's allergens, ingredients and badges are not the bound product's", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcomes = await Promise.all(
+			[
+				`<html><body>${RECOMMENDED_PEARS_DETAILS}<h1>Apples</h1>${APPLES_PANEL}</body></html>`,
+				`<html><body><h1>Apples</h1>${APPLES_PANEL}${RECOMMENDED_PEARS_DETAILS}</body></html>`,
+				`<html><body><h1>Apples</h1>${APPLES_PANEL}<div hidden><h3>Ingredients</h3><p>peanuts</p><span class="badge">Vegan</span></div></body></html>`,
+			].map((html) =>
+				typedLookup(site8(AMAZON_APPLES_NO_PANEL, { "/product/apples": html }), "Apples"),
+			),
+		);
+		for (const outcome of outcomes) {
+			assert.equal(outcome.status, "matched");
+			if (outcome.status !== "matched") continue;
+			assert.equal(outcome.facts.calories, 52);
+			assert.equal(outcome.facts.allergens, null);
+			assert.equal(outcome.facts.ingredients, null);
+			assert.deepEqual(outcome.facts.highlights, []);
+		}
+	} finally {
+		restore();
+	}
+});
+
+test("N1: the bound product's own details are kept, and a recommendation's never decorate an exact USDA match", async () => {
+	const restore = stubUsdaByType({
+		exact: { foods: [usdaApple({ gtinUpc: "012345678905", foodNutrients: usdaCoreNutrients })] },
+	});
+	try {
+		const own = await typedLookup(
+			site8(AMAZON_APPLES_NO_PANEL, {
+				"/product/apples": `<html><body><h1>Apples</h1>${APPLES_PANEL}<div><h3>Ingredients</h3><p>apples</p></div>${RECOMMENDED_PEARS_DETAILS}</body></html>`,
+			}),
+			"Apples",
+		);
+		assert.equal(own.status === "matched" && own.facts.ingredients, "apples");
+		const exact = await typedLookup(
+			site8(AMAZON_APPLES_NO_PANEL, {
+				"/product/apples": `<html><body>${ldNode8({ "@type": "Product", name: "Apples", gtin12: "012345678905" })}<h1>Apples</h1><div><h3>Nutrition Facts</h3><p>Calories 52</p></div>${RECOMMENDED_PEARS_DETAILS}</body></html>`,
+			}),
+			"Apples",
+		);
+		assert.equal(exact.status, "matched");
+		if (exact.status !== "matched") return;
+		assert.equal(exact.facts.usdaMatchMethod, "upc");
+		assert.equal(exact.facts.allergens, null);
+		assert.deepEqual(exact.facts.highlights, []);
+	} finally {
+		restore();
+	}
+});
+
+test("N2: a script or hidden 'No results' text is not the source's empty state", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcomes = await Promise.all(
+			[
+				'<html><body><script>const emptyLabel = "No products";</script></body></html>',
+				'<html><body><div hidden>No results</div></body></html>',
+				'<html><body><div style="display:none"><p>0 results</p></div><div class="spinner">Loading</div></body></html>',
+			].map((searchHtml) =>
+				typedLookup(
+					scriptedBrowser((url) => (isAmazon(url) ? AMAZON_PRODUCT_NO_PANEL : searchHtml)),
+					"Banana Peppers",
+				),
+			),
+		);
+		assert.deepEqual(
+			outcomes.map((outcome) => [outcome.status, (outcome as { cause?: string }).cause]),
+			[
+				["error", "unrecognized_page"],
+				["error", "unrecognized_page"],
+				["error", "unrecognized_page"],
+			],
+		);
+	} finally {
+		restore();
+	}
+});
+
+test("N2 control: a visible empty state on the search page still lets the text fallback run", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await typedLookup(
+			scriptedBrowser((url) =>
+				isAmazon(url) ? AMAZON_PRODUCT_NO_PANEL : "<html><body><p>No results for banana peppers</p></body></html>",
+			),
+			"Banana Peppers",
+		);
+		assert.equal(outcome.status, "matched");
+		assert.equal(outcome.status === "matched" && outcome.facts.usdaMatchMethod, "text");
+	} finally {
+		restore();
+	}
+});
+
+test("N3: a walk cut off by the tile budget is unfinished, not 'no panel'", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	const tiles: Record<string, string> = {};
+	for (let i = 0; i < 8; i += 1) {
+		tiles[`/product/other-${i}`] = `<html><body>${ldNode8({ "@type": "Product", name: `Other Thing ${i}` })}<h1>Other Thing ${i}</h1></body></html>`;
+	}
+	tiles["/product/banana-peppers"] = `<html><body>${ldNode8({ "@type": "Product", name: "Banana Peppers" })}<h1>Banana Peppers</h1>${PEPPERS_PANEL}</body></html>`;
+	try {
+		const outcome = await typedLookup(site8(AMAZON_PRODUCT_NO_PANEL, tiles), "Banana Peppers");
+		assert.equal(outcome.status, "error");
+		assert.equal((outcome as { cause: string }).cause, "search_incomplete");
+	} finally {
+		restore();
+	}
+});
+
+const N4_PAGE = `<html><body><script type="application/ld+json">{"@type":"Product","name":"Banana Peppers","url":"/product/banana-peppers"}</script><section><h2>Banana Peppers</h2>${PEPPERS_PANEL}</section></body></html>`;
+
+test("N4: a panel the binding cannot attribute is unresolved, not absent (with and without a USDA text match)", async () => {
+	const withText = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_PRODUCT_NO_PANEL, { "/product/banana-peppers": N4_PAGE }),
+			"Banana Peppers",
+		);
+		assert.equal(outcome.status, "error");
+		assert.equal((outcome as { cause: string }).cause, "panel_unresolved");
+	} finally {
+		withText();
+	}
+	const none = stubUsda([]);
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_PRODUCT_NO_PANEL, { "/product/banana-peppers": N4_PAGE }),
+			"Banana Peppers",
+		);
+		assert.equal(outcome.status, "error");
+		assert.equal((outcome as { cause: string }).cause, "panel_unresolved");
+	} finally {
+		none();
+	}
+});
+
+test("N4 control: a recommendation's h2 panel is never the product's facts", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await typedLookup(
+			site8(AMAZON_PRODUCT_NO_PANEL, {
+				"/product/banana-peppers": `<html><body>${ldNode8({ "@type": "Product", name: "Banana Peppers" })}<h1>Banana Peppers</h1><aside><h2>Recommended Pears</h2>${PEPPERS_PANEL}</aside></body></html>`,
+			}),
+			"Banana Peppers",
+		);
+		assert.notEqual(outcome.status, "matched");
+		assert.notEqual(outcome.status, "not_found");
+	} finally {
+		restore();
+	}
+});
+
+// ─── N6, N7: order recovery ───────────────────────────────────────────────
+
+const asinN = (i: number) => `B00000000${i}`;
+const tenItemDetail = (orderId: string) =>
+	ordersWithIdentity(
+		orderId,
+		Array.from(
+			{ length: 10 },
+			(_, i) => `<div data-component="purchasedItemsRightGrid"><a href="/dp/${asinN(i)}">Item ${i}</a><span>Qty: 1</span></div>`,
+		).join(""),
+	);
+
+test("N6: a repeated search page changes no partial order count", async () => {
+	const page1 = searchPage(
+		1,
+		Array.from({ length: 10 }, (_, i) => [ORDER_A, asinN(i)] as [string, string]),
+		true,
+	);
+	const { failures, harness } = await runCollectOrders(
+		redirectingOrdersSite([page1, page1], (orderId) => ({
+			html: tenItemDetail(orderId),
+			finalOrderId: orderId,
+		})),
+		["orders", "order_items"],
+	);
+	assert.ok(failures.length > 0);
+	assert.deepEqual(stateStreams(harness), []);
+	const orders = harness.emitted.filter((r) => r.stream === "orders");
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.data.item_count, 10);
+	assert.equal(harness.emitted.filter((r) => r.stream === "order_items").length, 10);
+});
+
+const MALFORMED_DETAIL = (orderId: string) =>
+	ordersWithIdentity(
+		orderId,
+		'<div data-component="purchasedItemsRightGrid"><div data-component="itemTitle"><a href="/dp/B01ABCDEFG"></a></div></div>',
+	);
+test("N7: a malformed detail is that order's failure; the next readable order is still delivered", async () => {
+	const twoOrders = (lastPageSignal: boolean) => {
+		const html = searchPage(
+			1,
+			[
+				[ORDER_A, "B01ABCDEFG"],
+				[ORDER_B, "B012345678"],
+			],
+			false,
+		);
+		return lastPageSignal ? html : html.replace('<li class="a-disabled a-last">Next</li>', "");
+	};
+	const runs = await Promise.all(
+		[true, false].map((lastPageSignal) =>
+			runCollectOrders(
+				redirectingOrdersSite([twoOrders(lastPageSignal)], (orderId) => ({
+					html: orderId === ORDER_A ? MALFORMED_DETAIL(orderId) : ordersWithIdentity(orderId, DETAIL_HTML),
+					finalOrderId: orderId,
+				})),
+				["orders", "order_items"],
+			),
+		),
+	);
+	for (const { failures, harness } of runs) {
+		assert.ok(failures.length > 0);
+		assert.deepEqual(stateStreams(harness), []);
+		assert.deepEqual(
+			harness.emitted.filter((r) => r.stream === "orders").map((r) => r.data.id),
+			[ORDER_B],
+		);
+	}
+});

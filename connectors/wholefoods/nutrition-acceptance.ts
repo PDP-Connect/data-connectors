@@ -9,9 +9,9 @@
 //   - it does not state the core rows of a Nutrition Facts panel, so it would
 //     blank facts read earlier; and
 //   - it is a fuzzy USDA text match, which names another product, made while
-//     the product's own pages could still be speaking for it: one was blocked,
-//     failed or was not recognised, or one showed part of this product's panel.
-//     That is a degraded or partial read of this product, not "no panel".
+//     the product's own pages could still be speaking for it: unless every
+//     page source proved it has no panel (`SourceAnswer`), the read is
+//     degraded, partial or unfinished, not "no panel".
 // The connector keeps no per-key record of which source produced the stored
 // row, so the second rule is stated against what this run's page sources said.
 
@@ -33,16 +33,69 @@ export function hasCoreNutrition(facts: NutritionFacts): boolean {
 	);
 }
 
-/** What this run's page sources (Amazon product page, Whole Foods search and
- *  product pages) said about THIS product's panel, when none of them gave a
- *  complete one:
- *  - `none`: every page source answered and none showed a core row, so the
- *    product has no panel on the pages;
- *  - `partial`: a source showed some core rows for this product but not all,
- *    a partial render of a panel that may have been complete before;
- *  - `unknown`: a source was blocked, failed, or showed no recognisable
- *    product, so its silence says nothing. */
+/** What one source read (the Amazon product page, the Whole Foods search, one
+ *  Whole Foods tile) said about THIS product's panel. Every read yields
+ *  exactly one answer; a complete panel is emitted at once and needs none.
+ *  - `panel`: the read showed some core rows of this product's own panel, but
+ *    not all: a partial render of a panel that may have been complete;
+ *  - `proven_absent`: the read proves there is no panel there, by `proof`;
+ *  - `unknown`: the read proves nothing (blocked, failed, ended off-site,
+ *    unbound, unfinished, a panel whose owner is unresolved, an empty state
+ *    that is not rendered). Its silence says nothing. */
+export type SourceAnswer =
+	| { readonly kind: "panel" }
+	| { readonly kind: "proven_absent"; readonly proof: AbsenceProof }
+	| { readonly kind: "unknown"; readonly failure: PageReadFailure };
+
+/** The only ways a read proves absence:
+ *  - `gone`: the source's own 404/410 for the page;
+ *  - `page_without_panel`: a rendered page bound to this product that shows
+ *    no panel at all (not even one whose owner is unresolved);
+ *  - `other_product`: a readable page bound to another product;
+ *  - `visible_empty_search`: the search page's own rendered empty state.
+ *  A search walk is complete only when every result was read: a walk cut
+ *  short by the tile budget adds an `unknown` answer. */
+export type AbsenceProof =
+	| "gone"
+	| "page_without_panel"
+	| "other_product"
+	| "visible_empty_search";
+
+/** What all of this run's page sources said, reduced:
+ *  - `none`: every consulted source is `proven_absent`, so the product has no
+ *    panel on the pages; only then may a fuzzy USDA text match stand in;
+ *  - `partial`: a source showed part of this product's panel;
+ *  - `unknown`: a source answered `unknown`. */
 export type PageSourceEvidence = "none" | "partial" | "unknown";
+
+export function pageEvidence(
+	answers: readonly SourceAnswer[],
+): PageSourceEvidence {
+	if (answers.some((answer) => answer.kind === "unknown")) return "unknown";
+	if (answers.some((answer) => answer.kind === "panel")) return "partial";
+	return "none";
+}
+
+/** Why there is no match: the strongest unresolved read (a robot check wins,
+ *  otherwise the first), else a partial panel, else a failed USDA request,
+ *  else nothing found. `not_found` needs every source proven absent. */
+export function noMatch(
+	answers: readonly SourceAnswer[],
+	usdaFailed: boolean,
+): NutritionNoMatch {
+	const failures = answers.flatMap((answer) =>
+		answer.kind === "unknown" ? [answer.failure] : [],
+	);
+	const failure =
+		failures.find((reason) => reason.status === "blocked") ?? failures[0];
+	if (failure) return failure;
+	if (pageEvidence(answers) === "partial") {
+		return { status: "error", cause: "panel_partial" };
+	}
+	return usdaFailed
+		? { status: "error", cause: "usda_request_failed" }
+		: { status: "not_found", cause: "no_match" };
+}
 
 /** A nutrition observation that may be emitted. `acceptNutrition` is the only
  *  way to obtain one, and row building takes nothing else. */
@@ -88,8 +141,10 @@ export function selectNutrition(
  *  | error     | identity_conflict   | a page that cannot be this product: another ASIN, order or origin, an ambiguous main product, or a product page whose structured data and heading name different products |
  *  | error     | identity_unbound    | a page with no identity evidence to bind it to this product |
  *  | error     | panel_partial       | this product's panel was seen but not fully read |
+ *  | error     | panel_unresolved    | a bound page shows a panel that cannot be proven this product's |
+ *  | error     | search_incomplete   | the search listed more results than the walk reads |
  *  | error     | usda_request_failed | the USDA lookup failed                           |
- *  | not_found | no_match            | every source answered; none had a usable panel   |
+ *  | not_found | no_match            | every source proved it has no usable panel       |
  *
  *  When several sources fail, `robot_check` wins; otherwise the first failure. */
 export type NutritionNoMatch =
@@ -103,6 +158,8 @@ export type NutritionNoMatch =
 				| "identity_conflict"
 				| "identity_unbound"
 				| "panel_partial"
+				| "panel_unresolved"
+				| "search_incomplete"
 				| "usda_request_failed";
 	  }
 	| { readonly status: "not_found"; readonly cause: "no_match" };

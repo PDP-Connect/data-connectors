@@ -194,8 +194,9 @@ export interface Size {
 
 /** What a name says about the package, as two independent constraints: how
  *  many units it holds ("6 pack", "12 ct", "1 dozen") and how much one unit
- *  holds ("12 fl oz", "1 lb"). Each list holds every amount the name states,
- *  sorted, so the order a name writes them in does not matter. */
+ *  holds ("12 fl oz", "1 lb"). Each list holds every distinct amount the
+ *  name states, sorted, so the order a name writes them in does not matter
+ *  and one amount written in two units is one amount. */
 export interface PackageSize {
 	readonly counts: readonly number[];
 	readonly quantities: readonly Size[];
@@ -265,7 +266,25 @@ export function normalizeName(raw: string | null | undefined): NormalizedName {
 	quantities.sort(
 		(a, b) => a.dimension.localeCompare(b.dimension) || a.amount - b.amount,
 	);
-	return { base, pack: { counts, quantities } };
+	return {
+		base,
+		pack: {
+			counts: oneOfEach(counts, (a, b) => sameAmount(a, b)),
+			quantities: oneOfEach(
+				quantities,
+				(a, b) => a.dimension === b.dimension && sameAmount(a.amount, b.amount),
+			),
+		},
+	};
+}
+
+/** A sorted list with each run of equivalent values kept once: "12 fl oz
+ *  (355 ml)" states one quantity twice, not two quantities. */
+function oneOfEach<T>(sorted: readonly T[], same: (a: T, b: T) => boolean): T[] {
+	return sorted.filter((value, i) => {
+		const previous = sorted[i - 1];
+		return previous === undefined || !same(previous, value);
+	});
 }
 
 /** Two amounts are one amount when they differ by no more than rounding. */
@@ -361,7 +380,16 @@ export interface ProductNode {
  *  - `no_heading`: no product heading holds it. */
 export interface RenderedPanel {
 	readonly facts: NutritionFacts;
-	readonly scope: "main_heading" | "other_heading" | "no_heading";
+	readonly scope: Scope;
+}
+export type Scope = "main_heading" | "other_heading" | "no_heading";
+
+/** One rendered allergen, ingredient or badge statement and where the page
+ *  shows it (scoped like a panel). */
+export interface ScopedDetail {
+	readonly field: "allergens" | "ingredients" | "highlight";
+	readonly text: string;
+	readonly scope: Scope;
 }
 
 /** Everything a Whole Foods product page says about what it is. */
@@ -373,6 +401,10 @@ export interface WholeFoodsProductObservation {
 	readonly products: readonly ProductNode[];
 	/** Every rendered Nutrition Facts panel that states a row, with its scope. */
 	readonly panels: readonly RenderedPanel[];
+	/** Every rendered allergen, ingredient and badge statement, with its scope. */
+	readonly details: readonly ScopedDetail[];
+	/** The breadcrumb categories the site files the page under. */
+	readonly categories: readonly string[];
 }
 
 export interface OrderObservation {
@@ -414,6 +446,13 @@ export type MainSubject =
 			 *  nutrition first, then the rendered panels shown for it. Partial
 			 *  panels are kept; which one is usable is acceptance's decision. */
 			readonly panels: readonly NutritionFacts[];
+			/** This subject's descriptive details: the tied node's own, then the
+			 *  rendered ones shown for it, and the page's categories. */
+			readonly details: ProductDetails | null;
+			/** Rendered panels on the page that are not released to this
+			 *  subject. Their owner is unresolved, so the page cannot prove
+			 *  this product has no panel. */
+			readonly unreleasedPanels: number;
 	  }
 	| { readonly kind: "AMBIGUOUS"; readonly heading: string | null }
 	/** The node tied to the page by URL names another product than the h1:
@@ -489,19 +528,41 @@ export function mainSubject(
 			heading,
 			nodeName: node.name,
 			panels: node.facts ? [node.facts] : [],
+			details: ((details) => (statesAny(details) ? details : null))(
+				subjectDetails(node.facts, [], []),
+			),
+			unreleasedPanels: obs.panels.length,
 		};
 	}
 	const own = tied ? node : null;
 	const gtin = own ? normalizeGtin(own.gtin) : null;
 	const name = heading ?? own?.name ?? null;
-	const shown = obs.panels
-		.filter((panel) =>
-			heading !== null
-				? panel.scope === "main_heading"
-				: panel.scope === "no_heading" &&
-					(own !== null || obs.products.length === 0),
-		)
-		.map((panel) => ({ ...panel.facts, productName: name, upc: gtin }));
+	// What the page shows for this subject: under the h1, or, with no h1,
+	// under no heading on a page whose node is tied (or that has no node).
+	const releases = (scope: Scope) =>
+		heading !== null
+			? scope === "main_heading"
+			: scope === "no_heading" && (own !== null || obs.products.length === 0);
+	const details = subjectDetails(
+		own?.facts ?? null,
+		obs.details.filter((detail) => releases(detail.scope)),
+		obs.categories,
+	);
+	const released = obs.panels.filter((panel) => releases(panel.scope));
+	const shown = released.map((panel) => ({
+		...panel.facts,
+		allergens: details.allergens,
+		category: [...details.category],
+		highlights: [...details.highlights],
+		ingredients: details.ingredients,
+		productName: name,
+		upc: gtin,
+	}));
+	const panels = [...(own?.facts ? [own.facts] : []), ...shown];
+	const withText = {
+		...details,
+		rawNutritionText: panels[0]?.rawNutritionText ?? null,
+	};
 	return {
 		kind: "SUBJECT",
 		identity: { name, gtin },
@@ -510,9 +571,41 @@ export function mainSubject(
 		),
 		heading,
 		nodeName: node?.name ?? null,
-		panels: [...(own?.facts ? [own.facts] : []), ...shown],
+		panels,
+		details: statesAny(withText) ? withText : null,
+		unreleasedPanels: obs.panels.length - released.length,
 	};
 }
+
+/** A subject's details: its node's own (ingredients, category), else the
+ *  rendered ones released to it and the page's categories. */
+function subjectDetails(
+	nodeFacts: NutritionFacts | null,
+	shown: readonly ScopedDetail[],
+	categories: readonly string[],
+): ProductDetails {
+	const first = (field: ScopedDetail["field"]) =>
+		shown.find((detail) => detail.field === field)?.text ?? null;
+	const nodeCategory = nodeFacts?.category ?? [];
+	return {
+		allergens: first("allergens"),
+		category: nodeCategory.length > 0 ? nodeCategory : [...categories],
+		highlights: shown
+			.filter((detail) => detail.field === "highlight")
+			.map((detail) => detail.text),
+		ingredients: nodeFacts?.ingredients ?? first("ingredients"),
+		rawNutritionText: null,
+	};
+}
+
+const statesAny = (details: ProductDetails): boolean =>
+	Boolean(
+		details.allergens ||
+			details.ingredients ||
+			details.rawNutritionText ||
+			details.highlights.length > 0 ||
+			details.category.length > 0,
+	);
 
 // ─── bindProduct ───────────────────────────────────────────────────────────
 
@@ -533,19 +626,10 @@ export interface BoundProduct {
 	readonly gtin: string | null;
 	readonly panels: readonly NutritionFacts[];
 	readonly details: ProductDetails | null;
+	/** Panels the bound page shows whose owner is unresolved: not proven this
+	 *  product's, so not used, and not proof that it has none either. */
+	readonly unresolvedPanels: number;
 }
-
-/** A panel's descriptive fields. */
-const detailsOf = (panel: NutritionFacts | undefined): ProductDetails | null =>
-	panel
-		? {
-				allergens: panel.allergens,
-				category: panel.category,
-				highlights: panel.highlights,
-				ingredients: panel.ingredients,
-				rawNutritionText: panel.rawNutritionText,
-			}
-		: null;
 
 export type ProductBinding =
 	| { readonly kind: "BOUND"; readonly via: Via; readonly product: BoundProduct }
@@ -625,6 +709,7 @@ function bindAmazon(
 		gtin,
 		panels: obs.panel ? [{ ...obs.panel, upc: gtin }] : [],
 		details: obs.details,
+		unresolvedPanels: 0,
 	});
 }
 
@@ -670,7 +755,8 @@ function bindWholeFoods(
 	const product = {
 		...identity,
 		panels: subject.panels,
-		details: detailsOf(subject.panels[0]),
+		details: subject.details,
+		unresolvedPanels: subject.unreleasedPanels,
 	};
 	const requestedGtin = gtin14(requested.boundGtin);
 	const subjectGtin = gtin14(identity.gtin);

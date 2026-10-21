@@ -107,8 +107,10 @@ export const orderItemsSchema = z.object({
  *                                      heading name different products
  *       error     identity_unbound     a page with no identity evidence to bind it
  *       error     panel_partial        this product's panel was seen but not fully read
+ *       error     panel_unresolved     a bound page shows a panel not proven this product's
+ *       error     search_incomplete    the search listed more results than were read
  *       error     usda_request_failed  the USDA lookup failed
- *       not_found no_match             every source answered; none had a usable panel
+ *       not_found no_match             every source proved it has no usable panel
  *
  * `status` and `cause` are optional here so rows stored before they existed
  * (no status, `source` = not_found/error/blocked for a failure) still
@@ -132,6 +134,8 @@ const CAUSES_BY_STATUS = {
 		"identity_conflict",
 		"identity_unbound",
 		"panel_partial",
+		"panel_unresolved",
+		"search_incomplete",
 		"usda_request_failed",
 	],
 	not_found: ["no_match"],
@@ -144,6 +148,8 @@ const NUTRITION_CAUSES = [
 	"identity_conflict",
 	"identity_unbound",
 	"panel_partial",
+	"panel_unresolved",
+	"search_incomplete",
 	"usda_request_failed",
 	"no_match",
 ] as const;

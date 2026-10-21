@@ -153,7 +153,7 @@ const wf = (
 ) => ({
 	source: "wholefoods" as const,
 	finalUrl,
-	obs: { canonicalUrl: null, h1: null, products: [], panels: [], ...obs },
+	obs: { canonicalUrl: null, h1: null, products: [], panels: [], details: [], categories: [], ...obs },
 });
 
 test("wholefoods row 1: a final URL off wholefoodsmarket.com is untrusted", () => {
@@ -256,14 +256,14 @@ test("main subject: url tie, then name tie, then the only node; a node borrows n
 	const apples = node({ name: "Apples", urls: ["https://www.wholefoodsmarket.com/product/apples"] });
 	const pears = node({ name: "Pears", gtin: "036000291452" });
 	const byUrl = mainSubject(
-		{ canonicalUrl: "https://www.wholefoodsmarket.com/product/apples", h1: null, products: [pears, apples], panels: [] },
+		{ canonicalUrl: "https://www.wholefoodsmarket.com/product/apples", h1: null, products: [pears, apples], panels: [], details: [], categories: [] },
 	);
 	assert.equal(byUrl.kind === "SUBJECT" && byUrl.identity.name, "Apples");
-	const byName = mainSubject({ canonicalUrl: null, h1: "Pears", products: [apples, pears], panels: [] });
+	const byName = mainSubject({ canonicalUrl: null, h1: "Pears", products: [apples, pears], panels: [], details: [], categories: [] });
 	assert.equal(byName.kind === "SUBJECT" && byName.identity.gtin, "036000291452");
 	// The only node is untied when the page shows a different heading: its GTIN
 	// is not lent to the page.
-	const untied = mainSubject({ canonicalUrl: null, h1: "Pears", products: [node({ name: "Apples", gtin: "012345678905" })], panels: [] });
+	const untied = mainSubject({ canonicalUrl: null, h1: "Pears", products: [node({ name: "Apples", gtin: "012345678905" })], panels: [], details: [], categories: [] });
 	assert.equal(untied.kind === "SUBJECT" && untied.identity.gtin, null);
 	assert.equal(untied.kind === "SUBJECT" && untied.identity.name, "Pears");
 });
@@ -335,11 +335,11 @@ test("the relaxed tie releases a sole node's own facts only; a rendered panel ne
 	const panels = [{ facts: { calories: 95 } as never, scope: "no_heading" as const }];
 	const own = { calories: 52 } as never;
 	// No title: the sole node's own nutrition is released with its identity.
-	const ownFacts = mainSubject({ canonicalUrl: null, h1: null, products: [node({ name: "Apples", gtin: "111111111117", facts: own })], panels });
+	const ownFacts = mainSubject({ canonicalUrl: null, h1: null, products: [node({ name: "Apples", gtin: "111111111117", facts: own })], panels, details: [], categories: [] });
 	assert.deepEqual(ownFacts.kind === "SUBJECT" && ownFacts.panels, [own]);
 	// No title: a rendered panel is not released to an untied sole node, and
 	// takes neither its name nor its GTIN.
-	const rendered = mainSubject({ canonicalUrl: null, h1: null, products: [node({ name: "Apples", gtin: "111111111117" })], panels });
+	const rendered = mainSubject({ canonicalUrl: null, h1: null, products: [node({ name: "Apples", gtin: "111111111117" })], panels, details: [], categories: [] });
 	assert.deepEqual(rendered.kind === "SUBJECT" && rendered.panels, []);
 	assert.equal(rendered.kind === "SUBJECT" && rendered.identity.name, null);
 	assert.equal(rendered.kind === "SUBJECT" && rendered.identity.gtin, null);
@@ -418,6 +418,8 @@ test("a relative canonical or node URL ties the node to the page", () => {
 				node({ name: "Organic Apples", urls: ["/product/organic-apples"], gtin: "012345678905" }),
 			],
 			panels: [],
+			details: [],
+			categories: [],
 		},
 		"https://www.wholefoodsmarket.com/product/organic-apples?ref=search",
 	);
@@ -517,4 +519,26 @@ test("a bound Amazon product carries the page's barcode and panel, capped by the
 		binding.product.panels.map((panel) => [panel.calories, panel.confidence, panel.upc]),
 		[[150, "medium", "012345678905"]],
 	);
+});
+
+// ─── Round 9: one quantity stated twice is one constraint (N5) ─────────────
+
+test("N5: a dual-unit annotation of one quantity is that quantity, in either direction", () => {
+	for (const [left, right] of [
+		["Water 6 pack 12 fl oz (355 ml)", "Water 6 pack 12 fl oz"],
+		["Water 6 pack 12 fl oz", "Water 6 pack 12 fl oz (355 ml)"],
+		["Water 6 pack (6 ct) 12 fl oz", "Water 6 pack 12 fl oz"],
+	] as const) {
+		assert.equal(bindProduct(request({ name: left }), wf({ h1: right })).kind, "BOUND", `${left} / ${right}`);
+	}
+});
+
+test("N5: genuinely different counts or quantities still differ", () => {
+	for (const [left, right] of [
+		["Water 6 pack 12 fl oz (500 ml)", "Water 6 pack 12 fl oz"],
+		["Water 6 pack 12 fl oz", "Water 12 pack 12 fl oz (355 ml)"],
+		["Water 6 pack 12 fl oz", "Water 6 pack 16 fl oz"],
+	] as const) {
+		assert.equal(bindProduct(request({ name: left }), wf({ h1: right })).kind, "OTHER", `${left} / ${right}`);
+	}
 });
