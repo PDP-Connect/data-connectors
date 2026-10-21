@@ -1,150 +1,120 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+// Native filesystem safety and lock-entry refusal contracts. OCI tests use
+// the in-process fixture registry; nothing contacts GHCR.
+
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix, win32 } from "node:path";
 import test, { after } from "node:test";
-
 import {
-  DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
-  defaultArtifactCertificateIdentityResolver,
-  defaultIndexCertificateIdentityResolver,
-  fetchBinary,
-  fetchResolvedArtifact,
-  generateLock,
-  installFromLock,
-  loadConnectorIndex,
-  pruneInstalled,
-  resolveConnectorArtifacts,
-  toAnchoredIdentityPattern,
-  toPortableArtifactPath,
-  verifyInstalled,
-} from "./index.mjs";
+  FixtureRegistry,
+  PINNED_IDENTITY,
+  createFixtureVerifier,
+  createSigner,
+  ociLockEntry,
+  publishArtifact,
+} from "./oci-fixture.mjs";
+import { fetchResolvedArtifact, installFromLock, pruneInstalled, toPortableArtifactPath, verifyInstalled } from "./index.mjs";
 
-const VANA_LEGACY_CERTIFICATE_IDENTITY =
-  "https://github.com/vana-com/data-connectors/.github/workflows/publish-connectors.yml@refs/heads/main";
-
-const tempDirs = [];
-
-after(() => {
-  for (const dir of tempDirs) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-function createTempDir(prefix) {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-function sha256(buffer) {
-  return `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
-}
-
-function createArtifact(root, files) {
-  const bundleDir = join(root, "bundle");
-  const artifactPath = join(root, "artifact.tgz");
-  mkdirSync(bundleDir, { recursive: true });
-  for (const [path, content] of Object.entries(files)) {
-    const target = join(bundleDir, path);
-    mkdirSync(join(target, ".."), { recursive: true });
-    writeFileSync(target, content);
-  }
-  execFileSync("tar", ["-czf", artifactPath, "-C", bundleDir, "."]);
-  return { artifactPath, artifactBuffer: readFileSync(artifactPath) };
-}
-
-function baseEntry(overrides = {}) {
+function fixtureOptions(registry, signer) {
   return {
-    connectorId: "synthetic-profile",
-    company: "Synthetic",
-    version: "1.0.0",
-    name: "Synthetic profile",
-    description: "Synthetic contract fixture",
-    publishedAt: "2026-07-30T00:00:00.000Z",
-    sourceTag: "test",
-    sourceCommit: "a".repeat(40),
-    releaseId: "test",
-    artifactPath: "artifact.tgz",
-    artifactUrl: "https://example.test/artifact.tgz",
-    ...overrides,
+    ociScheme: "http",
+    allowedOciRegistries: new Set([registry.registry]),
+    ociCertificateIdentityResolver: () => PINNED_IDENTITY,
+    sigstoreVerifier: createFixtureVerifier(signer),
+    retryOptions: { jitter: false, sleep: async () => {}, onRetry: () => {} },
   };
 }
 
-function pdppFixture(overrides = {}) {
-  const root = createTempDir("pdpp-artifact-test-");
-  const manifestPath = overrides.manifestPath ?? "profile/collection-profile.json";
-  const entrypointPath = overrides.entrypointPath ?? "dist/collection-profile.cjs";
-  const provenancePath = overrides.provenancePath ?? "provenance.json";
-  const manifestBuffer = Buffer.from('{"version":"1.0.0","profileVersion":"1"}\n');
-  const entrypointBuffer = Buffer.from("export default {};\n");
-  const provenanceBuffer = Buffer.from('{"upstream":{"commit":"test"}}\n');
-  const safeFixturePath = (path, fallback) =>
-    typeof path === "string" &&
-    path !== "." &&
-    !path.startsWith("/") &&
-    !/^[A-Za-z]:/.test(path) &&
-    !path.includes("\\") &&
-    !path.includes("\0") &&
-    !path.split("/").includes("..")
-      ? path
-      : fallback;
-  const artifact = createArtifact(root, {
-    [safeFixturePath(manifestPath, "profile/collection-profile.json")]: manifestBuffer,
-    [safeFixturePath(entrypointPath, "dist/collection-profile.cjs")]: entrypointBuffer,
-    [safeFixturePath(provenancePath, "provenance.json")]: provenanceBuffer,
-  });
-  const entry = baseEntry({
-    artifactKind: "pdpp-collection-profile",
-    manifestPath,
-    entrypointPath,
-    artifactSha256: sha256(artifact.artifactBuffer),
-    manifestSha256: sha256(manifestBuffer),
-    entrypointSha256: sha256(entrypointBuffer),
-    provenancePath,
-    provenanceSha256: sha256(provenanceBuffer),
-    ...overrides,
-  });
-  return { root, entry, manifestBuffer, entrypointBuffer, provenanceBuffer };
+async function withRegistry(run) {
+  const registry = await new FixtureRegistry({}).start();
+  try {
+    return await run(registry);
+  } finally {
+    await registry.stop();
+  }
 }
 
-function legacyFixture() {
-  const root = createTempDir("legacy-artifact-test-");
-  const manifestBuffer = Buffer.from(
-    '{"connector_id":"legacy-connector","version":"1.0.0","name":"Legacy"}\n',
-  );
-  const scriptBuffer = Buffer.from("module.exports = {};\n");
-  const artifact = createArtifact(root, {
-    "manifest.json": manifestBuffer,
-    "script.js": scriptBuffer,
+test("a lock entry that is not a signed OCI Collection Profile is refused before any request", async () => {
+  await withRegistry(async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-refuse-"));
+    const { oci: _oci, ...withoutOci } = ociLockEntry(registry, digest);
+    const { artifactKind: _kind, ...withoutKind } = ociLockEntry(registry, digest);
+
+    try {
+      for (const [label, entry, pattern] of [
+        ["no oci block", withoutOci, /has no oci block/],
+        ["no artifact kind", withoutKind, /Unsupported artifact kind "undefined"/],
+        ["another artifact kind", ociLockEntry(registry, digest, { artifactKind: "legacy" }), /Unsupported artifact kind "legacy"/],
+        ["an escaping manifest path", ociLockEntry(registry, digest, { manifestPath: "../manifest.json" }), /Invalid pdpp manifest path/],
+        ["an absolute entrypoint path", ociLockEntry(registry, digest, { entrypointPath: "/dist/collection-profile.mjs" }), /Invalid pdpp entrypoint path/],
+        ["a backslash provenance path", ociLockEntry(registry, digest, { provenancePath: "dist\\provenance.json" }), /Invalid pdpp provenance path/],
+      ]) {
+        registry.requests.length = 0;
+        await assert.rejects(
+          () =>
+            installFromLock({
+              lock: { connectors: [entry] },
+              source: null,
+              installRoot,
+              layout: "snapshot",
+              ...fixtureOptions(registry, signer),
+            }),
+          pattern,
+          label
+        );
+        assert.deepEqual(registry.requests, [], `${label}: refused before any registry request`);
+      }
+      assert.deepEqual(readdirSync(installRoot), [], "nothing is written for a refused entry");
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
   });
-  const entry = baseEntry({
-    connectorId: "legacy-connector",
-    name: "Legacy",
-    artifactSha256: sha256(artifact.artifactBuffer),
-    manifestSha256: sha256(manifestBuffer),
-    scriptSha256: sha256(scriptBuffer),
-    sourceFiles: {
-      metadata: "synthetic/legacy-connector.json",
-      script: "synthetic/legacy-connector.js",
-    },
+});
+
+test("an index source is refused rather than ignored", async () => {
+  await withRegistry(async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    const entry = ociLockEntry(registry, digest);
+    const source = { mode: "local", rootDir: tmpdir() };
+    registry.requests.length = 0;
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(source, entry, fixtureOptions(registry, signer)),
+      /index sources are not supported/
+    );
+    for (const run of [installFromLock, verifyInstalled]) {
+      await assert.rejects(
+        () =>
+          run({
+            lock: { connectors: [entry] },
+            source,
+            installRoot: join(tmpdir(), "never-written"),
+            layout: "snapshot",
+            ...fixtureOptions(registry, signer),
+          }),
+        /index sources are not supported/
+      );
+    }
+    assert.deepEqual(registry.requests, []);
   });
-  return { root, entry, manifestBuffer, scriptBuffer };
+});
+
+const temporaryRoots = [];
+after(() => {
+  for (const root of temporaryRoots) rmSync(root, { recursive: true, force: true });
+});
+
+function createTempDir(prefix) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  temporaryRoots.push(root);
+  return root;
 }
 
 test("normalizes extracted artifact paths to the portable POSIX contract", () => {
@@ -166,305 +136,6 @@ test("normalizes extracted artifact paths to the portable POSIX contract", () =>
     toPortableArtifactPath(posixRelativePath, posix.sep),
     "profile/collection-profile.json",
   );
-});
-
-// Injected rather than installed as the global fetch, so a test cannot leak
-// its routes into another test that runs at the same time.
-function routedFetch(routes) {
-  return async (url) => {
-    const route = routes[String(url)];
-    if (!route) {
-      return new Response("not found\n", { status: 404, statusText: "Not Found" });
-    }
-    return new Response(route);
-  };
-}
-
-// Production hands sigstore an anchored pattern, not the bare identity, so this
-// asserts on the pattern the resolver-selected identity must produce. The real
-// matching behaviour is covered against @sigstore/verify in signer-identity.test.mjs.
-function artifactVerifierFor(expectedCertificateIdentityURI) {
-  return async (_bundle, _payloadBuffer, options) => {
-    assert.equal(
-      options.certificateIdentityURI,
-      toAnchoredIdentityPattern(expectedCertificateIdentityURI),
-    );
-  };
-}
-
-async function fetchRemoteLegacyArtifactWithIdentity({
-  artifactUrl,
-  resolver,
-  expectedCertificateIdentityURI,
-  entryOverrides = {},
-}) {
-  const fixture = legacyFixture();
-  const bundleUrl = `${artifactUrl}.sigstore.json`;
-  const entry = {
-    ...fixture.entry,
-    artifactPath: null,
-    artifactUrl,
-    artifactSignature: {
-      type: "sigstoreBundle",
-      bundleUrl,
-    },
-    ...entryOverrides,
-  };
-
-  return fetchResolvedArtifact(
-    { mode: "remote", doc: { connectors: { [entry.connectorId]: [entry] } } },
-    entry,
-    {
-      artifactCertificateIdentityResolver: resolver,
-      fetchImpl: routedFetch({
-        [artifactUrl]: readFileSync(join(fixture.root, "artifact.tgz")),
-        [bundleUrl]: Buffer.from("{}\n"),
-      }),
-      sigstoreVerifier: artifactVerifierFor(expectedCertificateIdentityURI),
-    },
-  );
-}
-
-test("accepts a PDPP Collection Profile bundle and records its discriminated lock entry", async () => {
-  const fixture = pdppFixture();
-  writeFileSync(
-    join(fixture.root, "connector-index.json"),
-    JSON.stringify({ connectors: { [fixture.entry.connectorId]: [fixture.entry] } }),
-  );
-  const source = await loadConnectorIndex({ fromLocal: fixture.root });
-  const resolution = await resolveConnectorArtifacts({
-    dependencies: { connectors: { [fixture.entry.connectorId]: "1.0.0" } },
-    source,
-  });
-  assert.equal(resolution.resolved[0].entrypointPath, fixture.entry.entrypointPath);
-  assert.deepEqual(resolution.resolved[0].entrypointBuffer, fixture.entrypointBuffer);
-
-  const lock = await generateLock({
-    dependencies: { connectors: { [fixture.entry.connectorId]: "1.0.0" } },
-    source,
-    generatedAt: "2026-07-30T00:00:00.000Z",
-  });
-  assert.deepEqual(lock.connectors[0].artifactKind, "pdpp-collection-profile");
-  assert.deepEqual(lock.connectors[0].entrypointPath, fixture.entry.entrypointPath);
-  assert.equal(lock.connectors[0].scriptSha256, undefined);
-});
-
-test("rejects a PDPP bundle whose declared entrypoint is missing", async () => {
-  const fixture = pdppFixture();
-  fixture.entry.entrypointPath = "dist/missing.cjs";
-  await assert.rejects(
-    () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
-    /Artifact missing dist\/missing\.cjs/,
-  );
-});
-
-test("runtime enforces the portable bundle-path contract", async (t) => {
-  const invalidPaths = [
-    [".", false],
-    ["dist/\0profile.cjs", false],
-    ["/outside.cjs", false],
-    ["C:relative.cjs", false],
-    ["C:/outside.cjs", false],
-    ["dist\\outside.cjs", false],
-    ["dist/../outside.cjs", false],
-  ];
-  const cases = [
-    ["manifestPath", "profile/collection-profile.json"],
-    ["entrypointPath", "dist/collection-profile.cjs"],
-    ["provenancePath", "provenance.json"],
-  ];
-  for (const [field, validPath] of cases) {
-    for (const [path, accepted] of [[validPath, true], ...invalidPaths]) {
-      await t.test(`${field}=${JSON.stringify(path)}`, async () => {
-        const fixture = pdppFixture({ [field]: path });
-        const fetch = () =>
-          fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry);
-        if (accepted) {
-          await assert.doesNotReject(fetch);
-          return;
-        }
-        await assert.rejects(
-          fetch,
-          /Invalid pdpp .* path/i,
-        );
-      });
-    }
-  }
-});
-
-test("rejects link entries before unpacking a PDPP artifact", async () => {
-  const fixture = pdppFixture();
-  symlinkSync(
-    "dist/collection-profile.cjs",
-    join(fixture.root, "bundle", "linked-entrypoint.cjs"),
-  );
-  execFileSync("tar", ["-czf", join(fixture.root, "artifact.tgz"), "-C", join(fixture.root, "bundle"), "."]);
-  fixture.entry.artifactSha256 = sha256(readFileSync(join(fixture.root, "artifact.tgz")));
-  const artifactTempDirsBefore = new Set(
-    readdirSync(tmpdir()).filter((name) => name.startsWith("connector-artifact-")),
-  );
-  await assert.rejects(
-    () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
-    /Artifact contains unsupported archive entry type "l"/,
-  );
-  const artifactTempDirsAfter = new Set(
-    readdirSync(tmpdir()).filter((name) => name.startsWith("connector-artifact-")),
-  );
-  assert.deepEqual(artifactTempDirsAfter, artifactTempDirsBefore);
-});
-
-test("rejects FIFO archive entries before extraction and cleans up", async () => {
-  const fixture = pdppFixture();
-  execFileSync("mkfifo", [join(fixture.root, "bundle", "payload.fifo")]);
-  execFileSync("tar", ["-czf", join(fixture.root, "artifact.tgz"), "-C", join(fixture.root, "bundle"), "."]);
-  fixture.entry.artifactSha256 = sha256(readFileSync(join(fixture.root, "artifact.tgz")));
-  const artifactTempDirsBefore = new Set(
-    readdirSync(tmpdir()).filter((name) => name.startsWith("connector-artifact-")),
-  );
-  await assert.rejects(
-    () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
-    /Artifact contains unsupported archive entry type "p"/,
-  );
-  const artifactTempDirsAfter = new Set(
-    readdirSync(tmpdir()).filter((name) => name.startsWith("connector-artifact-")),
-  );
-  assert.deepEqual(artifactTempDirsAfter, artifactTempDirsBefore);
-});
-
-test("rejects artifact, manifest, entrypoint, and provenance digest mismatches", async (t) => {
-  for (const field of ["artifactSha256", "manifestSha256", "entrypointSha256", "provenanceSha256"]) {
-    await t.test(field, async () => {
-      const fixture = pdppFixture({ [field]: `sha256:${"0".repeat(64)}` });
-      await assert.rejects(
-        () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
-        /checksum mismatch/,
-      );
-    });
-  }
-});
-
-test("fails closed for unknown artifact kinds", async () => {
-  const fixture = pdppFixture({ artifactKind: "unrecognized-artifact" });
-  await assert.rejects(
-    () => fetchResolvedArtifact({ mode: "local", rootDir: fixture.root }, fixture.entry),
-    /Unsupported artifact kind "unrecognized-artifact"/,
-  );
-});
-
-test("legacy bundle resolution and both legacy install layouts remain unchanged", async () => {
-  const fixture = legacyFixture();
-  const source = { mode: "local", rootDir: fixture.root, doc: { connectors: { [fixture.entry.connectorId]: [fixture.entry] } } };
-  const dependencies = { connectors: { [fixture.entry.connectorId]: "1.0.0" } };
-  const lock = await generateLock({ dependencies, source, generatedAt: "2026-07-30T00:00:00.000Z" });
-  assert.equal(lock.connectors[0].artifactKind, undefined);
-  assert.equal(lock.connectors[0].scriptSha256, fixture.entry.scriptSha256);
-  const fetched = await fetchResolvedArtifact(source, fixture.entry);
-  assert.deepEqual(fetched, {
-    manifest: JSON.parse(fixture.manifestBuffer),
-    manifestBuffer: fixture.manifestBuffer,
-    scriptBuffer: fixture.scriptBuffer,
-    schemaFiles: [],
-    assetFiles: [],
-    readme: null,
-    checksums: {
-      artifact: fixture.entry.artifactSha256,
-      manifest: fixture.entry.manifestSha256,
-      script: fixture.entry.scriptSha256,
-    },
-  });
-
-  const resolution = await resolveConnectorArtifacts({ dependencies, source });
-  assert.deepEqual(resolution.resolved[0], {
-    connectorId: fixture.entry.connectorId,
-    constraint: "1.0.0",
-    entry: fixture.entry,
-    ...fetched,
-  });
-
-  const snapshotRoot = join(fixture.root, "snapshot");
-  await installFromLock({ lock, source, installRoot: snapshotRoot, layout: "snapshot" });
-  assert.deepEqual(readFileSync(join(snapshotRoot, "manifests", "legacy-connector.json")), fixture.manifestBuffer);
-  assert.deepEqual(readFileSync(join(snapshotRoot, "scripts", "legacy-connector.js")), fixture.scriptBuffer);
-  assert.equal((await verifyInstalled({ lock, source, installRoot: snapshotRoot, layout: "snapshot" })).ok, true);
-
-  const sourceRoot = join(fixture.root, "source");
-  await installFromLock({ lock, source, installRoot: sourceRoot, layout: "source" });
-  assert.deepEqual(readFileSync(join(sourceRoot, "synthetic", "legacy-connector.json")), fixture.manifestBuffer);
-  assert.deepEqual(readFileSync(join(sourceRoot, "synthetic", "legacy-connector.js")), fixture.scriptBuffer);
-});
-
-test("remote artifact verification defaults to the PDP workflow identity", async () => {
-  const artifact = await fetchRemoteLegacyArtifactWithIdentity({
-    artifactUrl:
-      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz",
-    expectedCertificateIdentityURI: DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
-  });
-
-  assert.equal(artifact.manifest.connector_id, "legacy-connector");
-});
-
-test("remote artifact verification accepts a caller-mapped legacy Vana signer", async () => {
-  const artifactUrl =
-    "https://github.com/vana-com/data-connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz";
-  const resolverCalls = [];
-  const artifact = await fetchRemoteLegacyArtifactWithIdentity({
-    artifactUrl,
-    expectedCertificateIdentityURI: VANA_LEGACY_CERTIFICATE_IDENTITY,
-    resolver: ({ artifactUrl: url, entry }) => {
-      resolverCalls.push({ artifactUrl: url, connectorId: entry.connectorId });
-      if (new URL(url).hostname === "github.com" && url.includes("/vana-com/data-connectors/")) {
-        return VANA_LEGACY_CERTIFICATE_IDENTITY;
-      }
-      return null;
-    },
-  });
-
-  assert.equal(artifact.manifest.connector_id, "legacy-connector");
-  assert.deepEqual(resolverCalls, [{ artifactUrl, connectorId: "legacy-connector" }]);
-});
-
-test("remote artifact verification rejects a caller-selected wrong signer", async () => {
-  await assert.rejects(
-    () =>
-      fetchRemoteLegacyArtifactWithIdentity({
-        artifactUrl:
-          "https://github.com/vana-com/data-connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz",
-        resolver: () => DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
-        expectedCertificateIdentityURI: VANA_LEGACY_CERTIFICATE_IDENTITY,
-      }),
-    /signature verification failed: Expected values to be strictly equal/,
-  );
-});
-
-test("remote artifact verification fails closed when caller policy rejects the artifact origin", async () => {
-  await assert.rejects(
-    () =>
-      fetchRemoteLegacyArtifactWithIdentity({
-        artifactUrl:
-          "https://evil.example/connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz",
-        resolver: ({ artifactUrl: url }) => {
-          if (new URL(url).hostname === "github.com") {
-            return VANA_LEGACY_CERTIFICATE_IDENTITY;
-          }
-          return null;
-        },
-        expectedCertificateIdentityURI: VANA_LEGACY_CERTIFICATE_IDENTITY,
-      }),
-    /No trusted Sigstore certificate identity configured/,
-  );
-});
-
-test("remote artifact verification ignores identity metadata supplied by the connector index", async () => {
-  await fetchRemoteLegacyArtifactWithIdentity({
-    artifactUrl:
-      "https://github.com/PDP-Connect/data-connectors/releases/download/connectors-test/legacy-connector-1.0.0.tgz",
-    expectedCertificateIdentityURI: DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
-    entryOverrides: {
-      certificateIdentityURI:
-        "https://github.com/attacker/data-connectors/.github/workflows/publish.yml@refs/heads/main",
-    },
-  });
-  assert.equal(defaultArtifactCertificateIdentityResolver(), DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY);
 });
 
 test("pruning preserves configured link subtrees and removes only unpreserved links", () => {
@@ -496,313 +167,4 @@ test("pruning preserves configured link subtrees and removes only unpreserved li
   );
   assert.equal(existsSync(join(installRoot, "remove-link")), false);
   assert.equal(readFileSync(externalFile, "utf8"), "outside\n");
-});
-
-test("PDPP collection profiles install, verify, and report tampering without a legacy projection", async () => {
-  const fixture = pdppFixture();
-  const source = { mode: "local", rootDir: fixture.root, doc: { connectors: { [fixture.entry.connectorId]: [fixture.entry] } } };
-  const lock = await generateLock({
-    dependencies: { connectors: { [fixture.entry.connectorId]: "1.0.0" } },
-    source,
-  });
-  const installRoot = join(fixture.root, "install");
-  const expectedRoot = join(installRoot, "collection-profiles", fixture.entry.connectorId);
-  const result = await installFromLock({ lock, source, installRoot, layout: "snapshot" });
-  assert.deepEqual(result.expectedPaths, [
-    `collection-profiles/${fixture.entry.connectorId}/${fixture.entry.manifestPath}`,
-    `collection-profiles/${fixture.entry.connectorId}/${fixture.entry.entrypointPath}`,
-    `collection-profiles/${fixture.entry.connectorId}/${fixture.entry.provenancePath}`,
-  ]);
-  assert.deepEqual(readFileSync(join(expectedRoot, fixture.entry.manifestPath)), fixture.manifestBuffer);
-  assert.deepEqual(readFileSync(join(expectedRoot, fixture.entry.entrypointPath)), fixture.entrypointBuffer);
-  assert.deepEqual(readFileSync(join(expectedRoot, fixture.entry.provenancePath)), fixture.provenanceBuffer);
-  assert.equal(existsSync(join(installRoot, "scripts", `${fixture.entry.connectorId}.js`)), false);
-  assert.equal((await verifyInstalled({ lock, source, installRoot, layout: "snapshot" })).ok, true);
-
-  for (const relativePath of [fixture.entry.manifestPath, fixture.entry.entrypointPath, fixture.entry.provenancePath]) {
-    const installed = join(expectedRoot, relativePath);
-    writeFileSync(installed, "tampered\n");
-    const verification = await verifyInstalled({ lock, source, installRoot, layout: "snapshot" });
-    assert.equal(verification.ok, false);
-    assert.deepEqual(verification.mismatched, [
-      `collection-profiles/${fixture.entry.connectorId}/${relativePath}`,
-    ]);
-    await installFromLock({ lock, source, installRoot, layout: "snapshot" });
-  }
-  assert.equal((await verifyInstalled({ lock, source, installRoot, layout: "snapshot" })).ok, true);
-
-  const sourceRoot = join(fixture.root, "source-install");
-  await installFromLock({ lock, source, installRoot: sourceRoot, layout: "source" });
-  assert.equal((await verifyInstalled({ lock, source, installRoot: sourceRoot, layout: "source" })).ok, true);
-});
-
-test("retries a transient 5xx artifact fetch and returns the eventual bytes", async () => {
-  const payload = Buffer.from("connector-tarball-bytes");
-  const calls = [];
-  const delays = [];
-  const logs = [];
-  const responses = [
-    { ok: false, status: 504, statusText: "Gateway Time-out" },
-    {
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      arrayBuffer: async () => payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength),
-    },
-  ];
-  const fetchImpl = async url => {
-    calls.push(url);
-    return responses[calls.length - 1];
-  };
-
-  const originalWarn = console.warn;
-  console.warn = (message) => logs.push(message);
-  let bytes;
-  try {
-    bytes = await fetchBinary("https://example.invalid/connector.tgz", {
-      fetchImpl,
-      jitter: false,
-      sleep: async (ms) => delays.push(ms),
-    });
-  } finally {
-    console.warn = originalWarn;
-  }
-
-  assert.deepEqual(bytes, payload);
-  assert.equal(calls.length, 2, "the 504 must be retried, not surfaced");
-  assert.deepEqual(delays, [1000]);
-  assert.match(logs[0], /returned 504; retrying in 1000ms \(attempt 2\/6\)/);
-});
-
-test("honors retry-after without delaying the test", async () => {
-  const calls = [];
-  const delays = [];
-  const retries = [];
-  const fetchImpl = async () => {
-    calls.push(true);
-    if (calls.length === 1) {
-      return {
-        ok: false,
-        status: 429,
-        statusText: "Too Many Requests",
-        headers: { "retry-after": "4" },
-      };
-    }
-    return {
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer,
-    };
-  };
-
-  await fetchBinary("https://example.invalid/connector.tgz", {
-    fetchImpl,
-    jitter: false,
-    sleep: async (ms) => delays.push(ms),
-    onRetry: (event) => retries.push(event),
-  });
-
-  assert.deepEqual(delays, [4000]);
-  assert.equal(retries[0].retryAfterMs, 4000);
-});
-
-test("retries a network error and gives up loudly after the bounded attempts", async () => {
-  const calls = [];
-  const fetchImpl = async url => {
-    calls.push(url);
-    throw new Error("ECONNRESET");
-  };
-
-  await assert.rejects(
-    fetchBinary("https://example.invalid/connector.tgz", {
-      fetchImpl,
-      attempts: 3,
-      baseDelayMs: 0,
-    }),
-    /ECONNRESET/
-  );
-  assert.equal(calls.length, 3, "a network error is retried up to the bound");
-});
-
-test("does not retry a 404, which no later attempt can fix", async () => {
-  const calls = [];
-  const fetchImpl = async url => {
-    calls.push(url);
-    return { ok: false, status: 404, statusText: "Not Found" };
-  };
-
-  await assert.rejects(
-    fetchBinary("https://example.invalid/missing.tgz", {
-      fetchImpl,
-      baseDelayMs: 0,
-    }),
-    /404 Not Found/
-  );
-  assert.equal(calls.length, 1, "a 4xx must fail on the first attempt");
-});
-
-// --- Connector index signer identity -------------------------------------
-//
-// The index and the artifacts it names are two separate signatures. A third
-// party publishing its own index needs to nominate the signer for BOTH; an
-// artifact resolver alone leaves the index pinned to the PDP-Connect default.
-//
-// These use a fake fetch and a fake Sigstore verifier. They exercise which
-// identity the module enforces — policy plumbing — not real certificate
-// validation. No Fulcio or Rekor interaction occurs.
-
-const THIRD_PARTY_INDEX_IDENTITY =
-  "https://github.com/example-org/their-connectors/.github/workflows/release.yml@refs/heads/main";
-
-function remoteIndexFixture(indexUrl) {
-  const doc = {
-    connectors: {},
-    signature: { type: "sigstoreBundle", bundleUrl: `${indexUrl}.sigstore.json` },
-  };
-  return { doc, bytes: Buffer.from(JSON.stringify(doc)) };
-}
-
-// Records the identity the module asked to enforce, and accepts only `expected`.
-// The module hands sigstore an anchored pattern (see toAnchoredIdentityPattern),
-// so this both proves the anchoring happened and logs the readable identity the
-// surrounding tests assert on.
-function recordingIndexVerifier(expected, log) {
-  return async (_bundle, _payloadBuffer, options) => {
-    const received = options.certificateIdentityURI;
-    assert.match(
-      received,
-      /^\^.*\$$/,
-      "the index signer identity must reach sigstore as an anchored pattern",
-    );
-    log.push(unanchorIdentityPattern(received));
-    if (expected === undefined || received !== toAnchoredIdentityPattern(expected)) {
-      throw new Error("certificate identity mismatch");
-    }
-  };
-}
-
-// Inverse of toAnchoredIdentityPattern, so the log records the readable identity.
-function unanchorIdentityPattern(pattern) {
-  return pattern.slice(1, -1).replace(/\\(.)/g, "$1");
-}
-
-async function loadRemoteIndexWithIdentity({ indexUrl, accepts, log, ...options }) {
-  const { bytes } = remoteIndexFixture(indexUrl);
-  return loadConnectorIndex({
-    fetchImpl: routedFetch({
-      [indexUrl]: bytes,
-      [`${indexUrl}.sigstore.json`]: Buffer.from("{}\n"),
-    }),
-    indexUrl,
-    sigstoreVerifier: recordingIndexVerifier(accepts, log),
-    ...options,
-  });
-}
-
-test("remote index verification defaults to the PDP workflow identity", async () => {
-  const indexUrl = "https://example.invalid/default/connector-index.json";
-  const log = [];
-  const source = await loadRemoteIndexWithIdentity({
-    indexUrl,
-    accepts: DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
-    log,
-  });
-  assert.equal(source.signatureVerified, true);
-  assert.deepEqual(log, [DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY]);
-  assert.equal(defaultIndexCertificateIdentityResolver(), DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY);
-});
-
-test("remote index verification accepts a caller-selected third-party signer", async () => {
-  const indexUrl = "https://example.invalid/third-party/connector-index.json";
-  const log = [];
-  const source = await loadRemoteIndexWithIdentity({
-    indexUrl,
-    accepts: THIRD_PARTY_INDEX_IDENTITY,
-    log,
-    indexCertificateIdentityResolver: ({ indexUrl: url }) => {
-      assert.equal(url, indexUrl);
-      return THIRD_PARTY_INDEX_IDENTITY;
-    },
-  });
-  assert.equal(source.signatureVerified, true);
-  assert.deepEqual(log, [THIRD_PARTY_INDEX_IDENTITY]);
-});
-
-test("remote index verification rejects a caller-selected wrong signer", async () => {
-  const indexUrl = "https://example.invalid/wrong/connector-index.json";
-  const log = [];
-  await assert.rejects(
-    loadRemoteIndexWithIdentity({
-      indexUrl,
-      accepts: THIRD_PARTY_INDEX_IDENTITY,
-      log,
-      indexCertificateIdentityResolver: () =>
-        "https://github.com/someone-else/repo/.github/workflows/release.yml@refs/heads/main",
-    }),
-    /signature verification failed/,
-  );
-});
-
-test("the artifact resolver alone does not redirect index trust", async () => {
-  // The C1 defect: supplying only artifactCertificateIdentityResolver left the
-  // index pinned to the PDP-Connect identity, so a third-party index could not
-  // be loaded at all.
-  const indexUrl = "https://example.invalid/artifact-only/connector-index.json";
-  const log = [];
-  await assert.rejects(
-    loadRemoteIndexWithIdentity({
-      indexUrl,
-      accepts: THIRD_PARTY_INDEX_IDENTITY,
-      log,
-      artifactCertificateIdentityResolver: () => THIRD_PARTY_INDEX_IDENTITY,
-    }),
-    /signature verification failed/,
-  );
-  assert.deepEqual(log, [DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY]);
-});
-
-test("index identity resolution fails closed before any signature is checked", async () => {
-  const indexUrl = "https://example.invalid/fail-closed/connector-index.json";
-  for (const empty of [null, "", undefined]) {
-    const log = [];
-    await assert.rejects(
-      loadRemoteIndexWithIdentity({
-        indexUrl,
-        // A verifier that would accept anything, to prove it is never reached.
-        accepts: undefined,
-        log,
-        indexCertificateIdentityResolver: () => empty,
-      }),
-      /No trusted Sigstore certificate identity configured for connector index/,
-    );
-    assert.deepEqual(log, [], "verification must not run without a trusted identity");
-  }
-});
-
-test("index identity metadata supplied by the index itself is ignored", async () => {
-  const indexUrl = "https://example.invalid/self-nominated/connector-index.json";
-  const log = [];
-  const doc = {
-    connectors: {},
-    // An attacker-controlled index nominating its own signer.
-    certificateIdentityURI: THIRD_PARTY_INDEX_IDENTITY,
-    signature: {
-      type: "sigstoreBundle",
-      bundleUrl: `${indexUrl}.sigstore.json`,
-      certificateIdentityURI: THIRD_PARTY_INDEX_IDENTITY,
-    },
-  };
-  await assert.rejects(
-    loadConnectorIndex({
-      fetchImpl: routedFetch({
-        [indexUrl]: Buffer.from(JSON.stringify(doc)),
-        [`${indexUrl}.sigstore.json`]: Buffer.from("{}\n"),
-      }),
-      indexUrl,
-      sigstoreVerifier: recordingIndexVerifier(THIRD_PARTY_INDEX_IDENTITY, log),
-    }),
-    /signature verification failed/,
-  );
-  assert.deepEqual(log, [DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY]);
 });
