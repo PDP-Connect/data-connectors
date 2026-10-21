@@ -2197,3 +2197,77 @@ test("collectAllStreams: notes withheld by a transient folders failure keep the 
 		"the folders outage is transient, so the notes it withheld stay retryable",
 	);
 });
+
+for (const phase of ["validate", "query page 2", "location read"] as const) {
+	test(`collectAllStreams: a ${phase} that never settles after readiness ends in a bounded failure`, async (t) => {
+		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+		const harness = makeRecordingEmit(validateRecord);
+		const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+		let validated = false;
+		let notesQueries = 0;
+		const page = makeNotePage([
+			noteQueryResponse({ continuationMarker: "page-2" }),
+			noteQueryResponse(),
+		]);
+		const evaluate = page.evaluate.bind(page);
+		page.evaluate = ((fn: unknown, arg: unknown) => {
+			const evalBody = (arg as { evalBody?: { query?: unknown } } | undefined)
+				?.evalBody;
+			const isNotesQuery =
+				evalBody !== undefined &&
+				JSON.stringify(evalBody.query).includes('"recents"');
+			if (isNotesQuery) notesQueries += 1;
+			const pending =
+				(phase === "validate" && arg === VALIDATE_URL) ||
+				(phase === "query page 2" && isNotesQuery && notesQueries === 2) ||
+				(phase === "location read" &&
+					validated &&
+					arg === "icloud-notes-location");
+			if (arg === VALIDATE_URL) validated = true;
+			if (pending) return new Promise(() => {});
+			return evaluate(fn as never, arg);
+		}) as Page["evaluate"];
+		const ctx = makeCtx(page, harness, ["notes"], structuredClone(seed));
+		const run: { outcome: "pending" | "resolved" | Error } = {
+			outcome: "pending",
+		};
+		const collection = collectAllStreams(ctx).then(
+			() => {
+				run.outcome = "resolved";
+			},
+			(error: Error) => {
+				run.outcome = error;
+			},
+		);
+		for (let tick = 0; tick < 200 && run.outcome === "pending"; tick += 1) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			t.mock.timers.tick(1000);
+		}
+		assert.notEqual(run.outcome, "pending", `${phase}: collection settles`);
+		await collection;
+		assert.equal(
+			harness.protocolMessages.some(
+				(message) => message.type === "STATE" && message.stream === "notes",
+			),
+			false,
+			`${phase}: no notes checkpoint`,
+		);
+		assert.deepEqual(ctx.state, seed, `${phase}: prior cursor kept`);
+		if (phase === "query page 2") {
+			assert.equal(run.outcome, "resolved");
+			const skip = harness.protocolMessages.find(
+				(message) =>
+					message.type === "SKIP_RESULT" && message.stream === "notes",
+			);
+			assert.ok(skip && skip.type === "SKIP_RESULT");
+			assert.equal(diagnosticField(skip, "source_reason"), "icloud_http_error");
+			assert.deepEqual(skip.recovery_hint, {
+				action: "retry_by_runtime",
+				retryable: true,
+			});
+		} else {
+			assert.ok(run.outcome instanceof Error, `${phase}: collection fails`);
+			assert.match(run.outcome.message, /icloud_page_unresponsive/);
+		}
+	});
+}

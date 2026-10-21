@@ -130,6 +130,38 @@ const READINESS_DEADLINE = Symbol("icloud readiness deadline");
 const READINESS_OPERATION_TIMEOUT = Symbol(
 	"icloud readiness operation timeout",
 );
+/** Playwright's evaluate has no deadline. Without this bound, one page call
+ *  that never settles would hold collection open and report nothing. */
+const PAGE_CALL_TIMEOUT_MS = 60_000;
+
+class PageCallTimeout extends Error {}
+
+/** Stop waiting for a page call after PAGE_CALL_TIMEOUT_MS. The call itself is
+ *  not cancelled; the run ends with a reported failure instead of hanging. */
+async function withinPageCallTimeout<T>(
+	call: Promise<T>,
+	label: string,
+): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			call,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(
+					() =>
+						reject(
+							new PageCallTimeout(
+								`icloud_page_unresponsive: the ${label} page call did not settle within ${PAGE_CALL_TIMEOUT_MS} ms`,
+							),
+						),
+					PAGE_CALL_TIMEOUT_MS,
+				);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 async function withinReadinessBudget<T>(
 	startOperation: () => Promise<T>,
@@ -171,7 +203,7 @@ interface ProgressExtra {
 }
 
 export const ICLOUD_NOTES_RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited|icloud_readiness_exhausted/i;
+	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited|icloud_readiness_exhausted|icloud_page_unresponsive/i;
 
 type StreamName = "folders" | "notes" | "profile";
 type FieldOmission = ParsedFieldOmission;
@@ -293,8 +325,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function resolveCloudKitConfig(
 	page: Page,
 ): Promise<CloudKitConfigLive | null> {
-	const result = (await page
-		.evaluate(async (url) => {
+	const result = (await withinPageCallTimeout(
+		page.evaluate(async (url) => {
 			try {
 				const res = await fetch(url, {
 					method: "POST",
@@ -311,8 +343,12 @@ async function resolveCloudKitConfig(
 			} catch (err) {
 				return { status: 0, json: { error: String(err) } };
 			}
-		}, VALIDATE_URL)
-		.catch(() => ({ status: 0, json: null }))) as CloudKitFetchResult;
+		}, VALIDATE_URL),
+		"validate",
+	).catch((error: unknown) => {
+		if (error instanceof PageCallTimeout) throw error;
+		return { status: 0, json: null };
+	})) as CloudKitFetchResult;
 	if (
 		result.status !== 200 ||
 		!isRecord(result.json) ||
@@ -352,7 +388,10 @@ function queryUrl(config: CloudKitConfigLive): string {
 }
 
 async function readPageUrl(page: Page): Promise<string> {
-	return page.evaluate(() => window.location.href, "icloud-notes-location");
+	return withinPageCallTimeout(
+		page.evaluate(() => window.location.href, "icloud-notes-location"),
+		"location",
+	);
 }
 
 /** Observational owner probe for PageShim; never enters credentials. */
@@ -387,28 +426,31 @@ async function cloudKitQuery(
 	body: Record<string, unknown>,
 ): Promise<CloudKitFetchResult> {
 	try {
-		return (await page.evaluate(
-			async ({ evalUrl, evalBody }) => {
-				try {
-					const res = await fetch(evalUrl, {
-						method: "POST",
-						credentials: "include",
-						headers: { "Content-Type": "text/plain" },
-						body: JSON.stringify(evalBody),
-					});
-					const status = res.status;
-					let json: unknown = null;
+		return (await withinPageCallTimeout(
+			page.evaluate(
+				async ({ evalUrl, evalBody }) => {
 					try {
-						json = await res.json();
-					} catch {
-						json = null;
+						const res = await fetch(evalUrl, {
+							method: "POST",
+							credentials: "include",
+							headers: { "Content-Type": "text/plain" },
+							body: JSON.stringify(evalBody),
+						});
+						const status = res.status;
+						let json: unknown = null;
+						try {
+							json = await res.json();
+						} catch {
+							json = null;
+						}
+						return { status, json };
+					} catch (err) {
+						return { status: 0, json: { error: String(err) } };
 					}
-					return { status, json };
-				} catch (err) {
-					return { status: 0, json: { error: String(err) } };
-				}
-			},
-			{ evalUrl: url, evalBody: body },
+				},
+				{ evalUrl: url, evalBody: body },
+			),
+			"CloudKit query",
 		)) as CloudKitFetchResult;
 	} catch (err) {
 		return { status: 0, json: { error: String(err) } };
