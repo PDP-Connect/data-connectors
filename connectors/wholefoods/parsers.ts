@@ -38,7 +38,6 @@ const PACK_SUFFIX_RE =
 const BRAND_PREFIX_RE = /^(365\s+by\s+)?Whole\s+Foods\s+Market\s*/i;
 const GENERIC_PREFIX_RE = /^(Organic|365\s+Everyday\s+Value)\s*/i;
 const NUTRITION_HEADING_RE = /nutrition\s*facts/i;
-const CALORIES_RE = /Calories[:\s]*(\d+)/i;
 const SERVING_SIZE_RE = /Serving [Ss]ize[:\s]*([^\n]+)/;
 const SERVINGS_PER_CONTAINER_RE =
 	/(\d+(?:\.\d+)?)\s*servings?\s*per\s*container|servings?\s*per\s*container[:\s]*(\d+(?:\.\d+)?)/i;
@@ -127,9 +126,40 @@ type Stated =
 const amountOf = (stated: Stated | null): number | null =>
 	stated?.bound === "exact" ? stated.amount : null;
 
-/** `<`, `≤` or "less than", an amount, then an optional unit. */
-const STATED_AMOUNT_RE =
-	/^[\s:]*(<|≤|less than\s)?\s*(\d+(?:\.\d+)?|\.\d+)\s*([^\d\s]*)/i;
+/** An amount as a panel states it: plain, with a decimal part, or with
+ *  thousands separators ("1,200"). A number that runs into more digits or a
+ *  further separator ("12,5") is not an amount this reader can trust. */
+const AMOUNT_SOURCE =
+	"((?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?|\\.\\d+)(?!\\d|[.,]\\d)";
+/** `<`, `≤` or "less than", an amount, an optional unit (letters only, so
+ *  "2g*" and "10 g." keep their unit), and a percent sign if one follows. */
+const STATED_AMOUNT_RE = new RegExp(
+	`^[\\s:]*(<|≤|less than\\s)?\\s*${AMOUNT_SOURCE}\\s*([A-Za-zµμ]*)\\s*(%)?`,
+	"i",
+);
+const CALORIES_LABEL_RE = /Calories[:\s]*/gi;
+const AMOUNT_AT_START_RE = new RegExp(`^${AMOUNT_SOURCE}`);
+
+const parseAmount = (text: string): number => Number.parseFloat(text.replace(/,/g, ""));
+
+/** The number after a "Calories" label, if it is a clean amount. */
+function readCalories(text: string): number | null {
+	for (const label of text.matchAll(CALORIES_LABEL_RE)) {
+		const amount = AMOUNT_AT_START_RE.exec(
+			text.slice(label.index + label[0].length),
+		);
+		if (amount?.[1]) return parseAmount(amount[1]);
+	}
+	return null;
+}
+
+/** Cut a container's text where its ingredients begin, so ingredient prose is
+ *  never read as a panel row. */
+function beforeIngredients(text: string): string {
+	const at = text.search(/Ingredients?\s*:/i);
+	return at === -1 ? text : text.slice(0, at);
+}
+
 /** Vitamin D: 1 mcg is 40 IU, the one unambiguous IU factor a panel row uses. */
 const VITAMIN_D_IU_PER_MCG = 40;
 /** GTIN-8, GTIN-12 (UPC-A), GTIN-13 and GTIN-14 are the only barcode lengths. */
@@ -149,9 +179,9 @@ function convertMass(value: number, from: MassUnit, to: MassUnit): number {
  *  than relabelled. */
 function statedMass(text: string, target: MassUnit): Stated | null {
 	const match = STATED_AMOUNT_RE.exec(text);
-	if (!match?.[2]) return null;
-	const value = Number.parseFloat(match[2]);
-	const unitText = (match[3] ?? "").toLowerCase();
+	if (!match?.[2] || match[4]) return null;
+	const value = parseAmount(match[2]);
+	const unitText = resolveUnit(match[3] ?? "");
 	let amount: number;
 	if (unitText === "") {
 		amount = value;
@@ -163,6 +193,24 @@ function statedMass(text: string, target: MassUnit): Stated | null {
 		amount = convertMass(value, unit, target);
 	}
 	return match[1] ? { bound: "less_than", limit: amount } : { bound: "exact", amount };
+}
+
+/** Units a panel row can state, longest first. */
+const PANEL_UNITS = ["mcg", "mg", "µg", "μg", "ug", "iu", "g"] as const;
+
+/** The unit in the letters that follow an amount. Amazon renders the panel
+ *  with no separators, so a unit can run into the next word ("3gIngredients"):
+ *  a known unit directly followed by a capital is that unit. */
+function resolveUnit(letters: string): string {
+	const lower = letters.toLowerCase();
+	if (lower in MASS_UNIT_ALIASES || lower === "iu" || lower === "") return lower;
+	for (const unit of PANEL_UNITS) {
+		const next = letters[unit.length];
+		if (lower.startsWith(unit) && next !== undefined && /[A-Z]/.test(next)) {
+			return unit;
+		}
+	}
+	return lower;
 }
 
 /** A structured (JSON-LD) mass value: a number, or the same text a panel row
@@ -182,10 +230,9 @@ function structuredEnergy(raw: unknown): Stated | null {
 	}
 	if (typeof raw !== "string") return null;
 	const match = STATED_AMOUNT_RE.exec(raw);
-	if (!match?.[2] || match[1]) return null;
-	const unit = (match[3] ?? "").toLowerCase().replace(/\.$/, "");
-	return ENERGY_UNIT_ALIASES.has(unit)
-		? { bound: "exact", amount: Number.parseFloat(match[2]) }
+	if (!match?.[2] || match[1] || match[4]) return null;
+	return ENERGY_UNIT_ALIASES.has((match[3] ?? "").toLowerCase())
+		? { bound: "exact", amount: parseAmount(match[2]) }
 		: null;
 }
 
@@ -240,7 +287,7 @@ const PANEL_ROW_BY_LABEL = new Map(
  *  the whole text. The first occurrence of a row that states an amount wins;
  *  a percentage of daily value states none. */
 function readPanelRows(panelText: string): Map<string, Stated> {
-	const labels = [...panelText.matchAll(PANEL_LABEL_RE)];
+	const labels = panelLabels(panelText);
 	const rows = new Map<string, Stated>();
 	labels.forEach((label, index) => {
 		const row = PANEL_ROW_BY_LABEL.get(label[0].toLowerCase());
@@ -251,6 +298,18 @@ function readPanelRows(panelText: string): Map<string, Stated> {
 		if (stated) rows.set(row.key, stated);
 	});
 	return rows;
+}
+
+/** Label occurrences that start a row. A label inside a longer word
+ *  ("Environ" holds "iron") is not one; in the run-together render a label
+ *  directly after a unit's last letter and starting with a capital
+ *  ("5mgIron") is. */
+function panelLabels(panelText: string) {
+	return [...panelText.matchAll(PANEL_LABEL_RE)].filter((label) => {
+		const previous = panelText[label.index - 1];
+		if (previous === undefined || !/[A-Za-z]/.test(previous)) return true;
+		return /[gG]/.test(previous) && /[A-Z]/.test(label[0][0] ?? "");
+	});
 }
 
 const CORE_ROWS = ["calories", "carbs", "fat", "protein"] as const;
@@ -1017,7 +1076,9 @@ export function mapUsdaNutrients(
 		servingSize:
 			basis && food.servingSize !== null
 				? `${food.servingSize}${basis}`
-				: "per 100 g",
+				: food.servingSizeUnit === null
+					? "per 100 g"
+					: "per 100 g or 100 ml",
 		servingsPerContainer: null,
 		sodiumMg: get(USDA_NUTRIENT_ID.sodium),
 		source: "usda_fdc",
@@ -1202,9 +1263,9 @@ export function parseWholeFoodsProductPageDom(
 	const container =
 		nutritionHeading.closest("div, section, article") ??
 		nutritionHeading.parentElement;
-	const allText = container ? textOf(container) : "";
-	const caloriesMatch = CALORIES_RE.exec(allText);
-	if (!caloriesMatch) {
+	const allText = container ? beforeIngredients(textOf(container)) : "";
+	const calories = readCalories(allText);
+	if (calories === null) {
 		return structuredFacts();
 	}
 	const rows = readPanelRows(allText);
@@ -1241,7 +1302,6 @@ export function parseWholeFoodsProductPageDom(
 		const label = textOf(element).trim();
 		return label && !/home|whole foods/i.test(label) ? [label] : [];
 	});
-	const calories = Number.parseInt(caloriesMatch[1] ?? "", 10);
 	return {
 		...emptyNutritionDetails(),
 		addedSugarG: nutrient("Includes Added Sugars"),
@@ -1281,6 +1341,19 @@ export function parseWholeFoodsProductPageDom(
 	};
 }
 
+/** The text of a panel container without its ingredient and important-
+ *  information sections. */
+function panelText(container: Element | null): string {
+	if (!container) return "";
+	const copy = container.cloneNode(true) as Element;
+	for (const section of copy.querySelectorAll(
+		'#ingredients_feature_div, [data-component="ingredients"], #importantInformation, #important-information',
+	)) {
+		section.remove();
+	}
+	return textOf(copy);
+}
+
 /** Port of the frozen legacy data connector's Amazon product-page nutrition
  *  parser. Callers supply captured HTML in tests; this function has no I/O. */
 export function parseAmazonProductNutritionDom(
@@ -1299,8 +1372,8 @@ export function parseAmazonProductNutritionDom(
 	// (the legacy script widens it the same way).
 	const panel =
 		table?.closest('.a-expander-content, [class*="nicSection"]') ?? table;
-	const allText = textOf(panel ?? important);
-	const caloriesMatch = CALORIES_RE.exec(allText);
+	const allText = beforeIngredients(panelText(panel ?? important));
+	const calories = readCalories(allText);
 	const upcMatch = /(?:UPC|ASIN|GTIN)[:\s]*([\d-]{8,14})/i.exec(
 		textOf(
 			document.querySelector(
@@ -1309,7 +1382,7 @@ export function parseAmazonProductNutritionDom(
 		),
 	);
 	const amazonUpc = normalizeGtin(upcMatch?.[1]);
-	if (!caloriesMatch && !amazonUpc) return null;
+	if (calories === null && !amazonUpc) return null;
 	const rows = readPanelRows(allText);
 	const get = (key: string): number | null => amountOf(rows.get(key) ?? null);
 	const ingredientsNode = document.querySelector(
@@ -1324,9 +1397,6 @@ export function parseAmazonProductNutritionDom(
 		/Contains[:\s]*([^.\n]+(?:wheat|milk|soy|eggs?|fish|shellfish|tree nuts?|peanuts?|sesame)[^.\n]*)/i.exec(
 			bodyText,
 		);
-	const calories = caloriesMatch
-		? Number.parseInt(caloriesMatch[1] ?? "", 10)
-		: null;
 	const serving = /Serving size[:\s]*([^\n]+?)(?=\s*Calories|\n|$)/i
 		.exec(allText)?.[1]
 		?.trim();

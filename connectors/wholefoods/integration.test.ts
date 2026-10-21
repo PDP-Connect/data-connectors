@@ -689,7 +689,7 @@ test("a rendered product without nutrition and an empty USDA result emits not_fo
 		content: () =>
 			Promise.resolve(
 				visits === 1
-					? "<html><body>No nutrition here</body></html>"
+					? '<html><body><span id="productTitle">Organic Bananas</span></body></html>'
 					: visits === 2
 						? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
 						: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Organic Bananas"}</script></body></html>',
@@ -2386,6 +2386,12 @@ function stubUsdaByType(
 }
 
 const NO_PAGE_SOURCE = () => "<html><body>No matching products</body></html>";
+/** Amazon answers with a real product page that has no panel; Whole Foods
+ *  finds no matching product. */
+const withAmazonProductPage = (url: string) =>
+	url.startsWith("https://www.amazon.com/")
+		? '<html><body><span id="productTitle">Product</span></body></html>'
+		: NO_PAGE_SOURCE();
 
 test("real Foundation shapes: banana peppers match the pepper, with energy from 2047", async () => {
 	const restore = stubUsdaByType({
@@ -2393,7 +2399,7 @@ test("real Foundation shapes: banana peppers match the pepper, with energy from 
 	});
 	try {
 		const outcome = await lookupNutritionForProduct(
-			scriptedBrowser(NO_PAGE_SOURCE),
+			scriptedBrowser(withAmazonProductPage),
 			"DEMO_KEY",
 			"Banana Peppers",
 		);
@@ -2414,7 +2420,7 @@ test("real Foundation shapes: Hass avocado reads energy from 2047", async () => 
 	});
 	try {
 		const outcome = await lookupNutritionForProduct(
-			scriptedBrowser(NO_PAGE_SOURCE),
+			scriptedBrowser(withAmazonProductPage),
 			"DEMO_KEY",
 			"Organic Hass Avocado",
 		);
@@ -2434,7 +2440,7 @@ test("an incomplete best USDA match withholds instead of promoting a different f
 	const restore = stubUsdaByType({ Foundation: foundation });
 	try {
 		const outcome = await lookupNutritionForProduct(
-			scriptedBrowser(NO_PAGE_SOURCE),
+			scriptedBrowser(withAmazonProductPage),
 			"DEMO_KEY",
 			"Banana Peppers",
 		);
@@ -2450,7 +2456,7 @@ test("real Branded shapes: a gram serving scales, the label names it, no GTIN is
 	});
 	try {
 		const outcome = await lookupNutritionForProduct(
-			scriptedBrowser(NO_PAGE_SOURCE),
+			scriptedBrowser(withAmazonProductPage),
 			"DEMO_KEY",
 			"Banana Peppers",
 		);
@@ -2628,6 +2634,166 @@ test("a degraded refresh emits nothing for a product the previous run read from 
 			'<html><title>Robot Check</title><form action="validateCaptcha"></form></html>';
 		assert.deepEqual(await nutritionRows(), []);
 
+		amazon = AMAZON_FULL_PANEL;
+		const recovered = await nutritionRows();
+		assert.equal(recovered.length, 1);
+		assert.equal(recovered[0]?.data.source, "amazon_product_page");
+	} finally {
+		restore();
+	}
+});
+
+// ─── Round 3: page health from positive evidence ──────────────────────────
+
+const AMAZON_PRODUCT_NO_PANEL =
+	'<html><body><span id="productTitle">Banana Peppers</span></body></html>';
+const AMAZON_UNKNOWN_200 =
+	"<html><body><h1>Hmm, something went sideways</h1></body></html>";
+
+/** Like `scriptedBrowser`, with an HTTP status per URL. */
+function statusBrowser(
+	htmlFor: (url: string) => string,
+	statusFor: (url: string) => number | null,
+): Page {
+	let current = "about:blank";
+	return {
+		content: async () => htmlFor(current),
+		goto: async (url: string) => {
+			current = url;
+			const status = statusFor(url);
+			return status === null
+				? null
+				: { ok: () => status < 400, status: () => status };
+		},
+		locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
+		url: () => current,
+	} as unknown as Page;
+}
+
+const brandedPeppers = () => ({
+	Branded: readFixture("usda-branded-banana-peppers.json"),
+});
+
+const isAmazon = (url: string) => url.startsWith("https://www.amazon.com/");
+
+test("a 200 Amazon page with no product evidence leaves the product unchecked, so USDA text stays out", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				isAmazon(url) ? AMAZON_UNKNOWN_200 : NO_PAGE_SOURCE(),
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a 404 ASIN page is an answer: the USDA fallback still runs", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			statusBrowser(
+				(url) => (isAmazon(url) ? AMAZON_UNKNOWN_200 : NO_PAGE_SOURCE()),
+				(url) => (isAmazon(url) ? 404 : null),
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.notEqual(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a real Amazon product page with no panel is an answer: the USDA fallback still runs", async () => {
+	// Accepted limitation: a page that renders as a product but has lost its
+	// panel is indistinguishable from a product that never had one.
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				isAmazon(url) ? AMAZON_PRODUCT_NO_PANEL : NO_PAGE_SOURCE(),
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.notEqual(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a Whole Foods product page 404 does not poison the product", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			statusBrowser(
+				(url) =>
+					isAmazon(url)
+						? AMAZON_PRODUCT_NO_PANEL
+						: url.includes("/search?")
+							? '<a href="/product/banana-peppers">Banana Peppers</a>'
+							: "<html><body>Not found</body></html>",
+				(url) => (url.includes("/product/") ? 404 : null),
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.notEqual(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a Whole Foods product page that is not a recognisable product leaves the product unchecked", async () => {
+	const restore = stubUsdaByType(brandedPeppers());
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				isAmazon(url)
+					? AMAZON_PRODUCT_NO_PANEL
+					: url.includes("/search?")
+						? '<a href="/product/banana-peppers">Banana Peppers</a>'
+						: "<html><body>Please wait while we check your browser</body></html>",
+			),
+			"DEMO_KEY",
+			"Banana Peppers",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a good -> interstitial -> recovered refresh never swaps in another brand's facts", async () => {
+	const restore = stubUsda([
+		usdaApple({
+			description: "Bananas, raw",
+			gtinUpc: null,
+			foodNutrients: usdaCoreNutrients,
+		}),
+	]);
+	let amazon = AMAZON_FULL_PANEL;
+	const nutritionRows = async () => {
+		const { harness } = await runCollectOrders(
+			degradingSite(() => amazon, [ONE_ROW_SEARCH]),
+			["nutrition"],
+		);
+		return harness.emitted.filter((r) => r.stream === "nutrition");
+	};
+	try {
+		assert.equal((await nutritionRows()).length, 1);
+		amazon = AMAZON_UNKNOWN_200;
+		assert.deepEqual(await nutritionRows(), []);
 		amazon = AMAZON_FULL_PANEL;
 		const recovered = await nutritionRows();
 		assert.equal(recovered.length, 1);

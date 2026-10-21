@@ -567,6 +567,14 @@ function hasProductPageEvidence(html: string): boolean {
 	);
 }
 
+function hasAmazonProductEvidence(html: string): boolean {
+	return /\bid=["'](?:productTitle|dp)["']/i.test(html);
+}
+
+/** An ASIN or product URL the site says does not exist. That is an answer
+ *  about the product ("no page"), not a failure to answer. */
+const isGone = (status: number | null) => status === 404 || status === 410;
+
 async function lookupNutritionForProduct(
 	page: Page,
 	usdaApiKey: string,
@@ -574,19 +582,22 @@ async function lookupNutritionForProduct(
 	productId = "B012345678",
 ): Promise<NutritionOutcome> {
 	const query = cleanProductName(name);
-	let sourceOutcome: "not_found" | "error" | "blocked" = "error";
 	let candidate: NutritionFacts | null = null;
-	// A page source that was blocked, answered with an HTTP error or threw has
-	// not said "no panel here"; `failure` keeps the strongest such cause.
-	let failure: "blocked" | "error" | null = null;
+	// The one page-source health value. `unanswered` is why a page read could
+	// not say anything about this product, or null when every read did. An
+	// answer is positive evidence: a rendered product page, a 404/410 for a
+	// page that does not exist, a search result list or its no-results
+	// message. A captcha, a 5xx, a thrown error and a 200 page that shows no
+	// product are not answers. Nothing less than an answer from every page
+	// source lets a fuzzy USDA match stand in for the product.
+	let unanswered: "blocked" | "error" | null = null;
+	const unable = (kind: "blocked" | "error") => {
+		if (unanswered !== "blocked") unanswered = kind;
+	};
 	const pages = {
 		get degraded() {
-			return failure !== null;
+			return unanswered !== null;
 		},
-	};
-	const failed = (kind: "blocked" | "error") => {
-		sourceOutcome = kind;
-		if (failure !== "blocked") failure = kind;
 	};
 	try {
 		const status = await navigateAndSettle(
@@ -597,17 +608,19 @@ async function lookupNutritionForProduct(
 		);
 		const amazonHtml = await page.content();
 		if (isBlockedPage(amazonHtml)) {
-			failed("blocked");
+			unable("blocked");
+		} else if (isGone(status)) {
+			// No page for this ASIN: nothing to read, and nothing wrong.
 		} else if (status !== null && status >= 400) {
-			failed("error");
+			unable("error");
 		} else {
 			candidate = parseAmazonProductNutritionDom(amazonHtml);
 			const direct = acceptNutrition(candidate, pages);
 			if (direct) return direct;
-			sourceOutcome = candidate ? "not_found" : "error";
+			if (!(candidate || hasAmazonProductEvidence(amazonHtml))) unable("error");
 		}
 	} catch {
-		failed("error");
+		unable("error");
 	}
 	try {
 		if (query.length >= 3) {
@@ -619,9 +632,9 @@ async function lookupNutritionForProduct(
 			);
 			const searchHtml = await page.content();
 			if (isBlockedPage(searchHtml)) {
-				failed("blocked");
+				unable("blocked");
 			} else if (searchStatus !== null && searchStatus >= 400) {
-				failed("error");
+				unable("error");
 			} else {
 				const productUrls = [
 					...new Set(parseWholeFoodsSearchResultDoms(searchHtml)),
@@ -642,9 +655,11 @@ async function lookupNutritionForProduct(
 						);
 						const productHtml = await page.content();
 						if (isBlockedPage(productHtml)) {
-							failed("blocked");
+							unable("blocked");
+						} else if (isGone(productStatus)) {
+							// This tile's page is gone; the other tiles still count.
 						} else if (productStatus !== null && productStatus >= 400) {
-							failed("error");
+							unable("error");
 						} else {
 							const finalUrl = new URL(page.url());
 							if (finalUrl.origin !== WHOLE_FOODS_ORIGIN) {
@@ -673,7 +688,7 @@ async function lookupNutritionForProduct(
 								sameUpc || sameName ? acceptNutrition(facts, pages) : null;
 							if (verified) return verified;
 							if (facts && !sameUpc && !sameName) {
-								sourceOutcome = "not_found";
+								// A readable page for another product: an answer.
 								continue;
 							}
 							if (facts) {
@@ -681,23 +696,23 @@ async function lookupNutritionForProduct(
 									...facts,
 									upc: facts.upc ?? candidate?.upc ?? null,
 								};
+							} else if (!hasProductPageEvidence(productHtml)) {
+								unable("error");
 							}
-							sourceOutcome = hasProductPageEvidence(productHtml)
-								? "not_found"
-								: "error";
 						}
 					}
 				} else if (
-					/\b(?:0|no)\s+(?:products|results)\b|no matching products/i.test(
+					!/\b(?:0|no)\s+(?:products|results)\b|no matching products/i.test(
 						searchHtml,
 					)
 				) {
-					sourceOutcome = "not_found";
+					// Neither tiles nor a no-results message: not a search page we know.
+					unable("error");
 				}
 			}
 		}
 	} catch {
-		failed("error");
+		unable("error");
 	}
 	try {
 		const usda = await lookupUsdaNutrition(
@@ -720,9 +735,9 @@ async function lookupNutritionForProduct(
 			);
 			if (merged) return merged;
 		}
-		return acceptNutrition(candidate, pages) ?? failure ?? sourceOutcome;
+		return acceptNutrition(candidate, pages) ?? unanswered ?? "not_found";
 	} catch {
-		return acceptNutrition(candidate, pages) ?? failure ?? "error";
+		return acceptNutrition(candidate, pages) ?? unanswered ?? "error";
 	}
 }
 

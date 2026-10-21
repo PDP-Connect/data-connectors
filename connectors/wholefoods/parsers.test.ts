@@ -809,7 +809,7 @@ test("USDA values on a per-100 ml basis scale to a millilitre serving and label 
 		"text",
 	);
 	assert.equal(unknownUnit.calories, 40);
-	assert.equal(unknownUnit.servingSize, "per 100 g");
+	assert.equal(unknownUnit.servingSize, "per 100 g or 100 ml");
 });
 
 test("a text-matched USDA food never lends its GTIN to the product", () => {
@@ -835,5 +835,80 @@ test("an order id from the URL is the only binding when the page shows several i
 			html,
 		),
 		true,
+	);
+});
+
+// ─── Round 3: units, labels, scope and numbers ────────────────────────────
+
+const panelOf = (rows: string) =>
+	`<html><body><div id="nic-nutrition-facts">${rows}</div></body></html>`;
+
+test("a row marker or punctuation after the unit does not un-state the row", () => {
+	for (const fat of ["2g*", "2g†", "2g,", "2 g."]) {
+		const facts = parseAmazonProductNutritionDom(
+			panelOf(`Calories 100 Total Fat ${fat} Total Carbohydrate 10g Protein 3g`),
+		);
+		assert.equal(facts?.fatG, 2, fat);
+		assert.ok(facts?.coreStated.includes("fat"), fat);
+	}
+});
+
+test("a label inside a longer word is not a row", () => {
+	const facts = parseAmazonProductNutritionDom(
+		panelOf("Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g Environ 5mg"),
+	);
+	assert.equal(facts?.ironMg, null);
+	const glued = parseAmazonProductNutritionDom(
+		panelOf("Calories100% Daily Value*Total Fat2gTotal Carbohydrate10gProtein3gIron5mg"),
+	);
+	assert.equal(glued?.ironMg, 5);
+	assert.equal(glued?.proteinG, 3);
+});
+
+test("ingredient text in the panel's container never supplies a row", () => {
+	const inline = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content"><div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g</div>Ingredients: water, salt, sodium 5mg</div></body></html>`,
+	);
+	assert.equal(inline?.sodiumMg, null);
+	const section = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content"><div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g</div><div id="ingredients_feature_div">Ingredients: sodium 5mg</div></div></body></html>`,
+	);
+	assert.equal(section?.sodiumMg, null);
+});
+
+test("a number with a thousands separator is read whole; an unclean number is not stated", () => {
+	const calories = parseAmazonProductNutritionDom(
+		panelOf("Calories 1,200 Total Fat 2g Total Carbohydrate 10g Protein 3g Sodium 1,200mg"),
+	);
+	assert.equal(calories?.calories, 1200);
+	assert.equal(calories?.sodiumMg, 1200);
+	const unclean = parseAmazonProductNutritionDom(
+		panelOf("Calories 100 Total Fat 12,5g Total Carbohydrate 10g Protein 3g"),
+	);
+	assert.equal(unclean?.fatG, null);
+	assert.ok(!unclean?.coreStated.includes("fat"));
+});
+
+test("a glued unit followed by prose is still the unit", () => {
+	const facts = parseAmazonProductNutritionDom(
+		panelOf("Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3gIngredients"),
+	);
+	assert.equal(facts?.proteinG, 3);
+});
+
+test("a USDA serving in an unrecognised unit does not claim a per-100 g basis", () => {
+	const facts = mapUsdaNutrients(
+		usdaFood({
+			foodNutrients: [{ nutrientId: 1008, value: 40 }],
+			servingSize: 2,
+			servingSizeUnit: "oz",
+		}),
+		"text",
+	);
+	assert.equal(facts.servingSize, "per 100 g or 100 ml");
+	assert.equal(
+		mapUsdaNutrients(usdaFood({ foodNutrients: [{ nutrientId: 1008, value: 40 }] }), "text")
+			.servingSize,
+		"per 100 g",
 	);
 });
