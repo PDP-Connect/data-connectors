@@ -21923,7 +21923,6 @@
 						"venmo_password_screen_timeout",
 						"venmo_password_field_empty_after_submit",
 						"venmo_password_submit_stalled",
-						"venmo_invisible_scoring_challenge",
 						"venmo_sms_offer_checkbox_unavailable",
 						"venmo_sms_offer_send_code_unavailable",
 						"venmo_sms_offer_code_input_timeout"

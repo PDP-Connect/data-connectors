@@ -2420,13 +2420,12 @@ test("ensureVenmoSession: a login that never settles fails as incomplete, never 
 	});
 });
 
-// (2d) The real 2026-08-26 production failure. Venmo scored the automated
-// browser with reCAPTCHA Enterprise v3 — invisible, no widget, no checkbox, no
-// error copy — and simply never completed the login. Reported as a generic
-// timeout it is indistinguishable from a slow provider, which sends the owner
-// hunting a network fault that does not exist. It must name the mechanism, and
-// it must NOT route to the ordinary captcha handoff: there is nothing to solve.
-test("ensureVenmoSession: an invisible v3 scoring challenge is named, not reported as a generic timeout", async () => {
+// (2d) Venmo's reCAPTCHA v3 script loads on successful sign-ins too, so a
+// stall with it loaded is still an unexplained timeout. The script is named as
+// context, never as the proven cause, and retrying is not declared futile. It
+// must not route to the captcha handoff either: there is nothing visible to
+// solve. (A 2026-10-21 stall reported as a v3 verdict was an empty password.)
+test("ensureVenmoSession: a stall with the v3 script loaded is a timeout with the script as context", async () => {
 	await withVenmoCredentials(async () => {
 		const { page } = makeTwoStepVenmoPage({
 			deadProbesAfterSubmit: Number.MAX_SAFE_INTEGER,
@@ -2444,15 +2443,16 @@ test("ensureVenmoSession: an invisible v3 scoring challenge is named, not report
 				sendInteraction,
 			}),
 			(error: Error) => {
+				assert.match(error.message, /^venmo_login_did_not_complete:/);
 				assert.match(
 					error.message,
-					/^venmo_invisible_scoring_challenge:/,
-					"a v3 score-block must name itself; a bare timeout blames the network for a bot verdict",
+					/reCAPTCHA v3 check was loaded/,
+					"the loaded script is reported as context",
 				);
-				assert.match(
+				assert.doesNotMatch(
 					error.message,
-					/retrying unattended will not clear it/,
-					"the message must say the retry is futile — otherwise the scheduler and the owner both keep trying",
+					/will not clear|scored this sign-in/,
+					"presence of the script does not prove a score blocked the sign-in",
 				);
 				return true;
 			},
