@@ -90,7 +90,11 @@ import {
 	toLabelsArray,
 	updateThreadAggregate,
 } from "./parsers.ts";
-import { validateRecord } from "./schemas.ts";
+import {
+	GMAIL_MESSAGE_ID_RE,
+	PART_INDEX_RE,
+	validateRecord,
+} from "./schemas.ts";
 import type {
 	AllMailCursor,
 	AttachmentAllMailCursor,
@@ -543,6 +547,13 @@ export interface AttachmentDetailCoverage {
 	 * `last_error_json` stays null forever (the 2026-08 Gmail 5-row defect).
 	 */
 	failedRecords: FailedAttachmentRecord[];
+	/**
+	 * True while any required key was rejected without an emitted retry
+	 * locator and no later attempt in this run accounted for it. Such a key
+	 * holds both cursors. Derived from `unlocatedKeys`.
+	 */
+	localEmitRejected: boolean;
+	unlocatedKeys: string[];
 	gapKeys: string[];
 	hydratedKeys: string[];
 	requiredKeys: string[];
@@ -550,7 +561,66 @@ export interface AttachmentDetailCoverage {
 
 /** Fresh, empty accumulator for one attachments detail pass. */
 export function makeAttachmentDetailCoverage(): AttachmentDetailCoverage {
-	return { failedRecords: [], gapKeys: [], hydratedKeys: [], requiredKeys: [] };
+	return {
+		failedRecords: [],
+		gapKeys: [],
+		hydratedKeys: [],
+		localEmitRejected: false,
+		requiredKeys: [],
+		unlocatedKeys: [],
+	};
+}
+
+/**
+ * One attachment key's outcome in this run, ranked by how well it is
+ * accounted. A key reached twice (a message re-observed across pages, the walk
+ * and served recovery) keeps its best outcome, so the outcome sets never
+ * overlap (the runtime rejects that) and a later attempt can only help:
+ *
+ *   unlocated (rejected, no retry locator)  < unaccounted (too_large/deferred)
+ *     < gap / failed (durable retry locator)  < hydrated
+ *
+ * `unlocated` is below `unaccounted` because an accepted too_large/deferred
+ * record landed and loses nothing, while a rejection without a locator leaves
+ * an obligation nobody will retry.
+ */
+type AttachmentKeyOutcome =
+	| "unlocated"
+	| "unaccounted"
+	| "gap"
+	| "failed"
+	| "hydrated";
+
+const ATTACHMENT_OUTCOME_RANK: Record<AttachmentKeyOutcome, number> = {
+	unlocated: 0,
+	unaccounted: 1,
+	gap: 2,
+	failed: 2,
+	hydrated: 3,
+};
+
+function attachmentKeyOutcome(
+	coverage: AttachmentDetailCoverage,
+	key: string,
+): AttachmentKeyOutcome | null {
+	if (!coverage.requiredKeys.includes(key)) return null;
+	if (coverage.hydratedKeys.includes(key)) return "hydrated";
+	if (coverage.failedRecords.some((f) => f.record.id === key)) return "failed";
+	if (coverage.gapKeys.includes(key)) return "gap";
+	if (coverage.unlocatedKeys.includes(key)) return "unlocated";
+	return "unaccounted";
+}
+
+function clearAttachmentKeyOutcome(
+	coverage: AttachmentDetailCoverage,
+	key: string,
+): void {
+	coverage.hydratedKeys = coverage.hydratedKeys.filter((k) => k !== key);
+	coverage.gapKeys = coverage.gapKeys.filter((k) => k !== key);
+	coverage.failedRecords = coverage.failedRecords.filter(
+		(f) => f.record.id !== key,
+	);
+	coverage.unlocatedKeys = coverage.unlocatedKeys.filter((k) => k !== key);
 }
 
 /**
@@ -558,6 +628,8 @@ export function makeAttachmentDetailCoverage(): AttachmentDetailCoverage {
  * its terminal `hydration_status`. A `deferred` status (never hydrated this
  * run) is still a considered key but has no terminal outcome bucket, so it
  * counts only toward the denominator. Pure: mutates the passed accumulator.
+ * The single owner of every attachment credit decision (see
+ * `AttachmentKeyOutcome`).
  *
  * `failure` is the same `AttachmentHydrationFailure | null` the hydrator
  * already computes for aggregate telemetry — passed through here so a
@@ -568,23 +640,33 @@ export function recordAttachmentCoverage(
 	coverage: AttachmentDetailCoverage,
 	record: AttachmentRecord,
 	failure: AttachmentHydrationFailure | null = null,
+	locallyEmitted = true,
+	/** A rejected emission whose retry DETAIL_GAP was written this run. */
+	retryLocatorEmitted = false,
 ): void {
-	// The runtime rejects a DETAIL_COVERAGE whose required_keys repeats a key.
-	// The same attachment id can legitimately reach this accumulator twice in a
-	// run -- a message re-observed across pages, or a retry re-walking a
-	// partially hydrated thread -- so pushing unconditionally turns an ordinary
-	// duplicate observation into a hard run failure ("invalid
-	// DETAIL_COVERAGE.required_keys: duplicate key"), which is what took Gmail
-	// out on 2026-08-17. Record each key once; the terminal-outcome buckets
-	// below are already keyed by the same id and stay consistent with it.
-	if (coverage.requiredKeys.includes(record.id)) {
+	const outcome = attachmentOutcomeOf(
+		record,
+		locallyEmitted,
+		retryLocatorEmitted,
+	);
+	const prior = attachmentKeyOutcome(coverage, record.id);
+	if (prior === null) {
+		coverage.requiredKeys.push(record.id);
+	} else if (
+		ATTACHMENT_OUTCOME_RANK[outcome] > ATTACHMENT_OUTCOME_RANK[prior]
+	) {
+		clearAttachmentKeyOutcome(coverage, record.id);
+	} else {
 		return;
 	}
-	coverage.requiredKeys.push(record.id);
-	switch (record.hydration_status) {
+	switch (outcome) {
 		case "hydrated":
 			coverage.hydratedKeys.push(record.id);
-			return;
+			break;
+		case "gap":
+			// The rejected emission already wrote its own retry DETAIL_GAP.
+			coverage.gapKeys.push(record.id);
+			break;
 		case "failed":
 			coverage.gapKeys.push(record.id);
 			// Retain the record so a matching DETAIL_GAP is emitted for this key.
@@ -594,13 +676,35 @@ export function recordAttachmentCoverage(
 				failureClass: attachmentHydrationFailureClass(failure),
 				record,
 			});
-			return;
+			break;
+		case "unlocated":
+			// Rejected with no retry locator: the obligation stays uncredited and
+			// holds the cursors that could pass it.
+			coverage.unlocatedKeys.push(record.id);
+			break;
+		case "unaccounted":
+			// too_large is a deployment cap (may change); deferred is not attempted
+			// this run. Neither justifies a permanent skip or a gap claim, so the
+			// key stays required with no outcome.
+			break;
+	}
+	coverage.localEmitRejected = coverage.unlocatedKeys.length > 0;
+}
+
+function attachmentOutcomeOf(
+	record: AttachmentRecord,
+	locallyEmitted: boolean,
+	retryLocatorEmitted: boolean,
+): AttachmentKeyOutcome {
+	if (!locallyEmitted) return retryLocatorEmitted ? "gap" : "unlocated";
+	switch (record.hydration_status) {
+		case "hydrated":
+			return "hydrated";
+		case "failed":
+			return "failed";
 		case "too_large":
 		case "deferred":
-			// Unaccounted: required-only outcomes that stay in denominator but no
-			// outcome bucket. too_large is a deployment cap (may change); deferred is
-			// not attempted this run. Neither justifies permanent skip or gap claim.
-			return;
+			return "unaccounted";
 		default: {
 			const unhandledStatus: never = record.hydration_status;
 			throw new Error(
@@ -744,7 +848,7 @@ async function emitAttachmentDetailCoverage(
  * attempts and a permanently-null `last_error_json`).
  */
 export function buildAttachmentDetailGap(
-	attachment: AttachmentRecord,
+	attachment: Pick<AttachmentRecord, "id" | "message_id" | "part_index">,
 	failureClass?: string,
 ): DetailGapMessage {
 	return buildDetailGap({
@@ -914,6 +1018,66 @@ function findRecoveredAttachmentDetailGaps(
 	return matches;
 }
 
+/** Only a known resource mismatch is an exclusion; missing identity remains debt. */
+export function attachmentOutsideResourceScope(
+	requested: ReadonlyMap<string, StreamRequest> | undefined,
+	attachment: AttachmentRecord,
+): boolean {
+	if (typeof attachment.id !== "string" || attachment.id.trim().length === 0) {
+		return false;
+	}
+	const scope = requested?.get("attachments");
+	if (!scope) return false;
+	// Same resourceSet/String(id) semantics as Gmail's actual emitter.
+	const resources = resourceSet(scope);
+	return resources !== null && !resources.has(String(attachment.id));
+}
+
+/**
+ * Say why this run commits no checkpoint: an attachment emission was rejected
+ * and no retry locator could be written, so every cursor that could pass it
+ * is held and the same window replays next run.
+ */
+async function reportAttachmentCheckpointHold(
+	emitFn: (msg: EmittedMessage) => Promise<void>,
+): Promise<void> {
+	gmailDiagnostic("attachment_checkpoint_held", {
+		reason: "attachment_emit_rejected_without_retry_locator",
+	});
+	await emitFn({
+		type: "PROGRESS",
+		stream: "attachments",
+		message:
+			"An attachment could not be saved, so this sync will retry the same messages next time",
+	});
+}
+
+/** Retain retry identity independently of the rejected record's schema. */
+async function emitRejectedAttachmentGap(
+	message: FetchMessageObject,
+	identity: Pick<AttachmentRecord, "id" | "message_id" | "part_index">,
+	emitProtocol: PerMessageDeps["emitProtocol"],
+): Promise<boolean> {
+	if (
+		typeof identity.message_id !== "string" ||
+		!GMAIL_MESSAGE_ID_RE.test(identity.message_id) ||
+		identity.message_id !== message.emailId ||
+		typeof identity.part_index !== "string" ||
+		!PART_INDEX_RE.test(identity.part_index) ||
+		identity.id !== `${identity.message_id}:${identity.part_index}`
+	)
+		return false;
+	try {
+		await emitProtocol(
+			buildAttachmentDetailGap(identity, "attachment_record_rejected"),
+		);
+		return true;
+	} catch {
+		// A failed protocol write leaves no durable retry obligation.
+		return false;
+	}
+}
+
 async function emitAttachmentRecords(
 	deps: PerMessageDeps,
 	msg: FetchMessageObject,
@@ -925,18 +1089,39 @@ async function emitAttachmentRecords(
 	const recoveredAttachmentGapIds =
 		deps.recoveredAttachmentGapIds ?? new Set<string>();
 	for (const a of attachments) {
+		if (attachmentOutsideResourceScope(deps.requested, a)) continue;
+		// Capture identity before hydration or validation can alter the record.
+		const identity = {
+			id: a.id,
+			message_id: a.message_id,
+			part_index: a.part_index,
+		};
 		const hydration = await deps.hydrateAttachment(msg, a);
 		const hydrated = hydration.record;
-		// Record the outcome BEFORE emitting so the coverage denominator counts
-		// every attempt even if the emit is scope-filtered downstream.
-		if (deps.attachmentCoverage) {
-			recordAttachmentCoverage(
-				deps.attachmentCoverage,
-				hydrated,
-				hydration.failure,
-			);
+		let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
+		let emitFailure: { error: unknown } | undefined;
+		let gapEmitted = false;
+		try {
+			emitted = await deps.emitRecord("attachments", { ...hydrated });
+		} catch (error) {
+			emitFailure = { error };
+		} finally {
+			gapEmitted =
+				emitted === false &&
+				(await emitRejectedAttachmentGap(msg, identity, deps.emitProtocol));
+			if (deps.attachmentCoverage) {
+				recordAttachmentCoverage(
+					deps.attachmentCoverage,
+					emitted === false ? { ...a, ...identity } : hydrated,
+					hydration.failure,
+					emitted !== false,
+					gapEmitted,
+				);
+			}
 		}
-		const emitted = await deps.emitRecord("attachments", { ...hydrated });
+		// A durable gap makes this rejection safe to continue past, including
+		// the remaining parts of this message. Otherwise preserve the failure.
+		if (emitFailure && !gapEmitted) throw emitFailure.error;
 		// Only `hydrated` may acknowledge a served gap as recovered. Unaccounted
 		// statuses (too_large, deferred) have no durable DETAIL_GAP, so there is
 		// nothing to recover.
@@ -2800,17 +2985,46 @@ async function settleServedAttachmentRecoveryAttempt(
 		emitRecord: EmitRecordFn;
 	},
 	state: ServedAttachmentRecoveryState,
+	gap: DetailGapStartEntry,
 	hydration: AttachmentHydrationResult,
 ): Promise<void> {
 	const hydrated = hydration.record;
-	if (deps.attachmentCoverage) {
-		recordAttachmentCoverage(
-			deps.attachmentCoverage,
-			hydrated,
-			hydration.failure,
-		);
+	let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
+	let emitFailure: { error: unknown } | undefined;
+	let gapEmitted = false;
+	try {
+		emitted = await deps.emitRecord("attachments", { ...hydrated });
+	} catch (error) {
+		emitFailure = { error };
+	} finally {
+		// The host credits a required key only against a gap it settled in this
+		// run. Leaving the served gap untouched would leave this key unaccounted
+		// on every run, so a rejected emission re-defers the served gap under
+		// its own lease, as a lookup miss does.
+		if (emitted === false) {
+			try {
+				await deps.emitProtocol(
+					buildServedAttachmentRecoveryDeferredGap(
+						gap,
+						"attachment_record_rejected",
+					),
+				);
+				gapEmitted = true;
+			} catch {
+				// A failed protocol write leaves no durable retry obligation.
+			}
+		}
+		if (deps.attachmentCoverage) {
+			recordAttachmentCoverage(
+				deps.attachmentCoverage,
+				hydrated,
+				hydration.failure,
+				emitted !== false,
+				gapEmitted,
+			);
+		}
 	}
-	const emitted = await deps.emitRecord("attachments", { ...hydrated });
+	if (emitFailure && !gapEmitted) throw emitFailure.error;
 	if (emitted && hydrated.hydration_status === "hydrated") {
 		const recoveredGaps = findRecoveredAttachmentDetailGaps(
 			deps.detailGaps,
@@ -2850,7 +3064,10 @@ async function settleServedAttachmentRecoveryAttempt(
 
 function buildServedAttachmentRecoveryDeferredGap(
 	gap: DetailGapStartEntry,
-	errorClass: "attachment_lookup_miss" | "run_cap_deferred",
+	errorClass:
+		| "attachment_lookup_miss"
+		| "attachment_record_rejected"
+		| "run_cap_deferred",
 ): EmittedMessage {
 	const locator =
 		gap.detail_locator &&
@@ -2899,10 +3116,16 @@ async function processServedAttachmentRecoveryGap(
 		emitProtocol: (msg: EmittedMessage) => Promise<void>;
 		emitRecord: EmitRecordFn;
 		hydrateAttachment: HydrateAttachmentFn;
+		requested?: ReadonlyMap<string, StreamRequest>;
 	},
 	state: ServedAttachmentRecoveryState,
 	byteBudget: number,
 ): Promise<ServedAttachmentRecoveryStop> {
+	// The walk already recovered this gap in this run. Touching it again would
+	// re-download the bytes, and a rejection would re-defer a settled gap.
+	if (state.recoveredAttachmentGapIds.has(gap.gap_id)) {
+		return false;
+	}
 	if (state.admitted > 0 && state.admittedBytesTotal >= byteBudget) {
 		return "byte_budget";
 	}
@@ -2967,6 +3190,8 @@ async function processServedAttachmentRecoveryGap(
 		return false;
 	}
 
+	if (attachmentOutsideResourceScope(deps.requested, attachment)) return false;
+
 	const attachmentBytes =
 		typeof attachment.size_bytes === "number"
 			? attachment.size_bytes
@@ -2992,7 +3217,7 @@ async function processServedAttachmentRecoveryGap(
 	});
 
 	const hydration = await deps.hydrateAttachment(loadedMessage, attachment);
-	await settleServedAttachmentRecoveryAttempt(deps, state, hydration);
+	await settleServedAttachmentRecoveryAttempt(deps, state, gap, hydration);
 	return false;
 }
 
@@ -3004,6 +3229,7 @@ export async function recoverServedAttachmentGaps(
 		emitProtocol: (msg: EmittedMessage) => Promise<void>;
 		emitRecord: EmitRecordFn;
 		hydrateAttachment: HydrateAttachmentFn;
+		requested?: ReadonlyMap<string, StreamRequest>;
 		recoveredAttachmentGapIds?: Set<string>;
 	},
 ): Promise<ServedAttachmentRecoverySummary> {
@@ -3047,6 +3273,7 @@ export async function recoverServedAttachmentGaps(
 		emitProtocol: deps.emitProtocol,
 		emitRecord: deps.emitRecord,
 		hydrateAttachment: deps.hydrateAttachment,
+		...(deps.requested ? { requested: deps.requested } : {}),
 	};
 
 	for (const [index, gap] of servedGaps.entries()) {
@@ -3087,6 +3314,7 @@ async function recoverServedAttachmentGapsIfRequested(
 		emitProtocol: (msg: EmittedMessage) => Promise<void>;
 		emitRecord: EmitRecordFn;
 		hydrateAttachment: HydrateAttachmentFn;
+		requested?: ReadonlyMap<string, StreamRequest>;
 		recoveredAttachmentGapIds: Set<string>;
 	},
 ): Promise<void> {
@@ -3101,6 +3329,7 @@ async function recoverServedAttachmentGapsIfRequested(
 		emitProtocol: deps.emitProtocol,
 		emitRecord: deps.emitRecord,
 		hydrateAttachment: deps.hydrateAttachment,
+		...(deps.requested ? { requested: deps.requested } : {}),
 		recoveredAttachmentGapIds: deps.recoveredAttachmentGapIds,
 	});
 	const { attachment_hydration_failure_outcome, ...attachmentRecoveryOutcome } =
@@ -3139,13 +3368,16 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 	recoveryOnly?: boolean;
 	session: AllMailSession;
 }): Promise<void> {
+	const attachmentCoverage =
+		args.attachmentCoverage ?? makeAttachmentDetailCoverage();
 	if (args.recoveryOnly === true) {
 		await recoverServedAttachmentGapsIfRequested(args.client, {
-			attachmentCoverage: args.attachmentCoverage,
+			attachmentCoverage,
 			detailGaps: args.deps.detailGaps,
 			emitProtocol: args.emit,
 			emitRecord: args.deps.emitRecord,
 			hydrateAttachment: args.hydrateAttachment,
+			requested: args.deps.requested,
 			recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
 		});
 		return;
@@ -3159,11 +3391,12 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 		servedAttachmentDetailGaps(args.deps.detailGaps).length > 0;
 	if (servedAttachmentRecoveryRequested) {
 		await recoverServedAttachmentGapsIfRequested(args.client, {
-			attachmentCoverage: args.attachmentCoverage,
+			attachmentCoverage,
 			detailGaps: args.deps.detailGaps,
 			emitProtocol: args.emit,
 			emitRecord: args.deps.emitRecord,
 			hydrateAttachment: args.hydrateAttachment,
+			requested: args.deps.requested,
 			recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
 		});
 		return;
@@ -3204,10 +3437,8 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 		const backfillSummary = createAttachmentBackfillSummary();
 		await emitMessagesPass(
 			{
-				...(args.attachmentCoverage
-					? { attachmentCoverage: args.attachmentCoverage }
-					: {}),
-				emitProtocol: emit,
+				attachmentCoverage,
+				emitProtocol: args.emit,
 				emitProgress: (m) => emit({ ...m, stream: "attachments" }),
 				emitRecord: async (stream, data, keyField): Promise<boolean> => {
 					const emitted = await args.deps.emitRecord(stream, data, keyField);
@@ -3220,7 +3451,12 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 				hydrateAttachment: args.hydrateAttachment,
 				recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
 				nowIso,
-				requested: new Map([["attachments", { name: "attachments" }]]),
+				requested: new Map([
+					[
+						"attachments",
+						args.deps.requested.get("attachments") ?? { name: "attachments" },
+					],
+				]),
 				timeRange: args.deps.requested.get("attachments")?.time_range,
 				wantBodies: false,
 				wantMessages: false,
@@ -3239,6 +3475,10 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 				backfillSummary.failed +
 				backfillSummary.unavailable_skipped,
 		});
+		if (attachmentCoverage.localEmitRejected) {
+			await reportAttachmentCheckpointHold(args.emit);
+			return;
+		}
 		await args.emit({
 			type: "STATE",
 			stream: "attachments",
@@ -4764,6 +5004,12 @@ export async function runAllMailPasses(
 		fetchBodiesBound,
 	);
 
+	// Replay both walks if any rejection still lacks an emitted retry locator.
+	if (attachmentCoverage?.localEmitRejected) {
+		await reportAttachmentCheckpointHold(emit);
+		return;
+	}
+
 	if (messageHistoryRequested && historicalFetchRange) {
 		const historicalPageEndUid = Number(historicalFetchRange.split(":")[1]);
 		// Sums BOTH passes, like the `message_bodies` DETAIL_COVERAGE above: the
@@ -4885,10 +5131,11 @@ export async function runAllMailPasses(
 
 // ─── emitRecord factory ─────────────────────────────────────────────────
 
-function makeEmitRecord(
+export function makeEmitRecord(
 	resFilters: Map<string, Set<string> | null>,
 	emittedAt: string,
 	incTotal: () => void,
+	write: (msg: EmittedMessage) => Promise<void> = emit,
 ): EmitRecordFn {
 	return async (
 		stream: string,
@@ -4908,7 +5155,7 @@ function makeEmitRecord(
 		// Validate record against schema.
 		const validation = validateRecord(stream, data);
 		if (!validation.ok) {
-			await emit({
+			await write({
 				type: "SKIP_RESULT",
 				stream,
 				reason: "schema_validation_failed",
@@ -4918,7 +5165,7 @@ function makeEmitRecord(
 			return false;
 		}
 
-		await emit({
+		await write({
 			type: "RECORD",
 			stream,
 			key: canonical,
