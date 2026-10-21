@@ -13,6 +13,7 @@
  * skipped and any malformed recognized field is undecodable, never empty.
  */
 
+import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
 import type { CloudKitFieldValue, CloudKitRecord } from "./types.ts";
 
 // ─── Base64 / timestamp helpers ─────────────────────────────────────────
@@ -95,6 +96,7 @@ export type NoteBodyUndecodableCause =
 	| "body_protobuf_malformed"
 	| "body_structure_unrecognized"
 	| "body_text_invalid_utf8"
+	| "body_text_forbidden_control"
 	| "body_text_wrong_wire_type";
 
 /** The one outcome of decoding a note body. Undecodable is never empty and
@@ -208,15 +210,10 @@ function decodeUtf8(bytes: Uint8Array): string | null {
 	}
 }
 
-/** Rendering rule shared with the legacy script, applied to each text field:
- *  control characters (line feeds, tabs, vertical tabs, escapes) end a run,
- *  empty runs are dropped, and runs that are only attachment placeholders
- *  (U+FFFC) carry no text. The runs are later joined with one line feed. A
- *  U+FFFC inside a longer run is ordinary text and stays. */
+/** Each protobuf text field is source text: preserve whitespace and empty
+ *  fields. A field containing only attachment placeholders carries no text. */
 function renderTextRuns(value: string): string[] {
-	return value
-		.split(/[\u0000-\u001F\u007F-\u009F]/)
-		.filter((run) => run.length > 0 && !/^\uFFFC+$/.test(run));
+	return /^\uFFFC+$/.test(value) ? [] : [value];
 }
 
 /** Append one at a time: a body can hold more runs than a call can take as
@@ -225,10 +222,7 @@ function appendRuns(target: string[], runs: readonly string[]): void {
 	for (const run of runs) target.push(run);
 }
 
-function walkMessage(
-	bytes: Uint8Array,
-	message: ProtobufMessage,
-): MessageWalk {
+function walkMessage(bytes: Uint8Array, message: ProtobufMessage): MessageWalk {
 	const fields = parseProtobuf(bytes);
 	if (!fields) return { kind: "UNDECODABLE", cause: "body_protobuf_malformed" };
 	const shape = MESSAGE_SHAPES[message];
@@ -242,6 +236,12 @@ function walkMessage(
 			const text = decodeUtf8(field.value);
 			if (text === null) {
 				return { kind: "UNDECODABLE", cause: "body_text_invalid_utf8" };
+			}
+			// Match the text schema: TAB, LF and CR are representable;
+			// other C0/C1 controls withhold the field instead of rewriting it.
+			const safe = safeTextPreview(text);
+			if (safe.kind !== "text" && safe.kind !== "empty") {
+				return { kind: "UNDECODABLE", cause: "body_text_forbidden_control" };
 			}
 			recognized = true;
 			appendRuns(runs, renderTextRuns(text));

@@ -1935,6 +1935,67 @@ test("collectAllStreams: invalid UTF-8 in a title, snippet or folder name withho
 	);
 });
 
+test("collectAllStreams: exact note whitespace checkpoints, forbidden controls retain the prior cursor", async () => {
+	const field = (number: number, value: Buffer) => {
+		assert.ok(value.length < 128);
+		return Buffer.concat([
+			Buffer.from([(number << 3) | 2, value.length]),
+			value,
+		]);
+	};
+	const sourceText = "Title\n\n• apples\n\t• green\r\n1. milk\n";
+	const response = (text: string) => ({
+		records: [
+			{
+				recordName: "note-whitespace",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({
+					TextDataEncrypted: {
+						value: gzipSync(
+							field(2, field(3, field(2, Buffer.from(text)))),
+						).toString("base64"),
+					},
+				}),
+			},
+		],
+	});
+	const valid = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([response(sourceText)]), valid, ["notes"]),
+	);
+	assert.equal(valid.emitted[0]?.data.text_content, sourceText);
+	const state = valid.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "notes",
+	);
+	assert.ok(state && state.type === "STATE");
+	const seed = { notes: state.cursor };
+	const invalid = makeRecordingEmit(validateRecord);
+	const ctx = makeCtx(
+		makeNotePage([response(`${sourceText}\u0000`)]),
+		invalid,
+		["notes"],
+		structuredClone(seed),
+	);
+	await collectAllStreams(ctx);
+	assert.equal(invalid.emitted.length, 0);
+	assert.equal(
+		invalid.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+	);
+	assert.deepEqual(ctx.state, seed);
+	const skip = invalid.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.deepEqual(
+		(diagnosticField(skip, "field_omissions") as { field: string; reason: string }[])
+			.map(({ field, reason }) => ({ field, reason })),
+		[{ field: "text_content", reason: "body_text_forbidden_control" }],
+	);
+});
+
 test("collectAllStreams: an undecodable body withholds the row and the checkpoint until a repaired retry re-emits it", async () => {
 	const noteWithBody = (decompressedBody: Buffer) => ({
 		records: [
