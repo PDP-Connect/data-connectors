@@ -75,6 +75,12 @@ export interface StreamProgress {
 	scope?: TimeBand;
 	/** Bands owed for already covered UIDs, oldest first. */
 	catchup?: CatchupPass[];
+	/**
+	 * Covered UIDs whose record could not be enumerated (a terminal outcome).
+	 * The cursor passes them, but they are never revisited in this epoch, so
+	 * the stream cannot claim a complete inventory while this is non-zero.
+	 */
+	shortfall?: number;
 }
 
 export interface RetryDebt {
@@ -215,6 +221,7 @@ function validStream(v: unknown, uidnext: number): v is StreamProgress {
 		s.next <= uidnext &&
 		s.through < s.next &&
 		(s.scope === undefined || validBand(s.scope)) &&
+		(s.shortfall === undefined || integer(s.shortfall)) &&
 		(s.catchup === undefined ||
 			(Array.isArray(s.catchup) &&
 				s.catchup.length <= MAX_CATCHUP_PASSES &&
@@ -847,6 +854,7 @@ export class GmailProgressLedger {
 				}
 				if (o.kind !== "out_of_scope") counts.considered += 1;
 				if (o.kind === "covered") counts.covered += 1;
+				if (o.kind === "terminal") s.shortfall = (s.shortfall ?? 0) + 1;
 			}
 			// Debt retries count toward this run's evidence for the stream.
 			for (const d of this.retried) {
@@ -856,6 +864,7 @@ export class GmailProgressLedger {
 				if (!o || o.kind === "out_of_scope" || o.kind === "absent") continue;
 				counts.considered += 1;
 				if (o.kind === "covered") counts.covered += 1;
+				if (o.kind === "terminal") s.shortfall = (s.shortfall ?? 0) + 1;
 			}
 			if (this.history && this.historicalStreams.includes(stream)) {
 				const end = Math.min(historyEnd, s.coveredFrom - 1);
@@ -914,6 +923,8 @@ export class GmailProgressLedger {
 				historyComplete.attachments === true &&
 				// Forward work the run could not account is unwalked inventory.
 				(streams.attachments?.next ?? 0) >= this.uidnext &&
+				// A UID whose parts could not be enumerated is never revisited.
+				!(streams.attachments?.shortfall ?? 0) &&
 				!debt.some((d) => d.streams.includes("attachments")),
 			unaccounted: [...unaccounted].sort((a, b) => a - b),
 		};
@@ -954,6 +965,7 @@ export class GmailProgressLedger {
 				}
 				if (o.kind !== "out_of_scope") counts.considered += 1;
 				if (o.kind === "covered") counts.covered += 1;
+				if (o.kind === "terminal") s.shortfall = (s.shortfall ?? 0) + 1;
 			}
 			through = uid;
 		}

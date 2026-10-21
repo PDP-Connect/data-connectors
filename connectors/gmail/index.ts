@@ -1358,10 +1358,23 @@ export async function processMessage(
 	const gmMsgid = String(msg.emailId ?? "");
 	const gmThrid = String(msg.threadId ?? "");
 	if (!gmMsgid) {
-		return Object.assign(
+		Object.assign(
 			outcome,
 			sameOutcome(deps, { kind: "terminal", reason: "missing_message_id" }),
 		);
+		// With no record key the parts cannot be stored, but a message with no
+		// attachment parts leaves nothing unenumerated for that stream.
+		if (
+			deps.requested.has("attachments") &&
+			decodeBodystructureForAttachments(
+				msg.bodyStructure,
+				"unidentified",
+				deps.nowIso(),
+			).length === 0
+		) {
+			outcome.attachments = { kind: "covered" };
+		}
+		return outcome;
 	}
 
 	const env = msg.envelope ?? {};

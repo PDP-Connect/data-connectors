@@ -1177,3 +1177,26 @@ test("replay: a failed run keeps its records but not its STATE; the replay never
 		["saved snippet"],
 	);
 });
+
+test("attachments: a message whose parts cannot be enumerated blocks the inventory claim across restarts", async () => {
+	const { emailId: _id, ...noId } = attachmentMessage(10);
+	const m = mailbox([noId as FetchMessageObject], 101);
+	let state: Record<string, unknown> = {};
+	for (let i = 0; i < 3; i += 1) {
+		const r = await run(m, state, ["messages", "attachments"]);
+		state = r.state;
+		assert.equal(
+			coverageOf(r, "attachments"),
+			undefined,
+			`run ${i}: no claim over an unenumerable part`,
+		);
+	}
+	// Control: an ID-less message with no attachment parts does not block it.
+	const { emailId: _id2, ...plain } = message(10);
+	const c = mailbox([plain as FetchMessageObject], 101);
+	const runs = await runUntilStable(c, {}, ["messages", "attachments"]);
+	assert.ok(
+		coverageOf(last(runs), "attachments"),
+		"a message without parts leaves nothing unenumerated",
+	);
+});

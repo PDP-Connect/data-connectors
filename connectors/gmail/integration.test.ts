@@ -4549,8 +4549,11 @@ test("processMessage: missing X-GM-MSGID is terminal and emits nothing", async (
 	// satisfy exactOptionalPropertyTypes).
 	const { emailId: _emailId, ...rest } = makeMsg();
 	const processed = await processMessage(deps, rest);
-	const terminal = { kind: "terminal", reason: "missing_message_id" };
-	assert.deepEqual(processed, { messages: terminal, attachments: terminal });
+	// This message has no attachment parts, so attachments owe nothing.
+	assert.deepEqual(processed, {
+		messages: { kind: "terminal", reason: "missing_message_id" },
+		attachments: { kind: "covered" },
+	});
 	assert.equal(emitted.length, 0);
 });
 
