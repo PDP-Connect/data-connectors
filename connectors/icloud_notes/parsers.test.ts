@@ -819,6 +819,22 @@ test("structured body: texts longer than one length byte are exact", async () =>
 	);
 });
 
+test("structured body: many short runs decode without exceeding argument limits", async () => {
+	const lines = Array.from({ length: 200_000 }, () => "a");
+	const expected = lines.join("\n");
+	// One text field split into 200,000 runs, and 200,000 text fields.
+	await Promise.all(
+		[
+			encodeStructuredBodyText(`${expected}\n`),
+			encodeStructuredBodyText(lines),
+		].map(async (body) => {
+			const result = await readBody(body);
+			assert.deepEqual(result.unavailableFields, []);
+			assert.equal(result.record?.text_content, expected);
+		}),
+	);
+});
+
 test("structured body: control characters are paragraph breaks, not decode failures", async () => {
 	await Promise.all(
 		[

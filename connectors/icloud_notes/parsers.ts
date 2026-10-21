@@ -219,6 +219,12 @@ function renderTextRuns(value: string): string[] {
 		.filter((run) => run.length > 0 && !/^\uFFFC+$/.test(run));
 }
 
+/** Append one at a time: a body can hold more runs than a call can take as
+ *  spread arguments. */
+function appendRuns(target: string[], runs: readonly string[]): void {
+	for (const run of runs) target.push(run);
+}
+
 function walkMessage(
 	bytes: Uint8Array,
 	message: ProtobufMessage,
@@ -238,7 +244,7 @@ function walkMessage(
 				return { kind: "UNDECODABLE", cause: "body_text_invalid_utf8" };
 			}
 			recognized = true;
-			runs.push(...renderTextRuns(text));
+			appendRuns(runs, renderTextRuns(text));
 		} else if (field.fieldNumber === shape.childField && shape.child) {
 			if (field.wireType !== 2 || !field.value) {
 				return { kind: "UNDECODABLE", cause: "body_text_wrong_wire_type" };
@@ -249,7 +255,7 @@ function walkMessage(
 				return { kind: "UNDECODABLE", cause: "body_structure_unrecognized" };
 			}
 			recognized = true;
-			runs.push(...child.runs);
+			appendRuns(runs, child.runs);
 		} else if (shape.metadataFields?.includes(field.fieldNumber)) {
 			recognized = true;
 		}

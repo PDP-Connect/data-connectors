@@ -2282,7 +2282,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/icloud_notes/parsers.ts",
-			line: 287,
+			line: 293,
 			column: 24,
 			category: "bounded_retry_polling",
 			note: "decodeNoteBody(): tries each of the three compression formats in order and stops at the first that decodes",
