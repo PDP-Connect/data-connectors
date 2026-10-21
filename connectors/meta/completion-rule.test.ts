@@ -189,6 +189,9 @@ function setup(streams: string[], followingPages: unknown[] = []) {
 				reason: "stream_collection_failed",
 				message,
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				...(options?.diagnostics === undefined
+					? {}
+					: { diagnostics: options.diagnostics }),
 			});
 		},
 		requestDetailGapPage: async () => [],
@@ -229,12 +232,15 @@ test("completion rule: unavailable posts and child likes report retryable stream
 	);
 });
 
-test("completion rule: incomplete inventory emits retryable skip without a failure callback", async () => {
+test("completion rule: a failed posts read without a failure callback fails the run as stream_collection_failed", async () => {
 	const { ctx, harness } = setup(["posts"]);
 	delete ctx.reportStreamFailure;
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
-	assert.ok(harness.protocolMessages.some(message => message.type === "SKIP_RESULT" &&
-		message.reason === "inventory_not_proven_complete" && isRetryable(message)));
+	await assert.rejects(
+		collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK),
+		{ code: "stream_collection_failed", retryable: true },
+	);
+	assert.equal(harness.protocolMessages.some(message => message.type === "SKIP_RESULT" &&
+		message.reason === "inventory_not_proven_complete"), false);
 });
 
 test("completion rule: missing ads controls skip only the ads stream as unproven", async () => {
@@ -533,6 +539,22 @@ test("completion rule: a non-meta error inside the posts walk fails posts and po
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
 		false,
+	);
+	// The read itself failed: a stream failure, not an unproven list.
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && message.reason),
+		["stream_collection_failed", "stream_collection_failed"],
+	);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && [message.message, message.diagnostics]),
+		[
+			["The posts read failed before the source's end.", { items_read: 0, source_reason: "read_failed" }],
+			["The post_likes read failed before the source's end.", { items_read: 0, source_reason: "read_failed" }],
+		],
 	);
 });
 
@@ -874,8 +896,14 @@ async function sourceRun(options: {
   }
   return Promise.resolve(null);
  }) as Page["goto"];
- await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
- return result.harness;
+ // A signed-out or challenged session ends the run; the caller asserts it.
+ let sessionFailure: Error | null = null;
+ await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK)
+  .catch((error: unknown) => {
+   if (error instanceof Error && error.message.startsWith("meta_session_required:")) sessionFailure = error;
+   else throw error;
+  });
+ return Object.assign(result.harness, { sessionFailure: sessionFailure as Error | null });
 }
 
 for (const stream of ["posts", "following"] as const) {
@@ -968,15 +996,17 @@ for (const stream of ["posts", "following"] as const) {
 
 for (const challenge of ["dom", "body", "late"] as const) {
  for (const empty of [false, true]) {
-  test(`authentication veto blocks whole run, keeps upserts: ${challenge}, empty=${empty}`, async () => {
+  test(`authentication veto ends the run as a session failure, keeps upserts: ${challenge}, empty=${empty}`, async () => {
    const harness = await sourceRun({stream: "posts", extraStreams: ["post_likes", "following"],
     challenge, empty, total: empty ? 0 : 1, likeCount: 1,
     pageInfo: {has_next_page: false}, followingEnd: false});
    assert.equal(harness.protocolMessages.some(m => m.type === "STATE" || m.type === "DETAIL_COVERAGE"), false);
    assert.equal(harness.emitted.length, empty ? 0 : 3);
-   for (const stream of ["posts", "post_likes", "following"]) {
-    assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === stream && isRetryable(m)));
-   }
+   // A sign-in or challenge wall is not an unproven list: no stream-scoped
+   // skip, the run fails with the session error.
+   assert.equal(harness.sessionFailure?.message,
+    "meta_session_required: Instagram signed out or requested a challenge during this run");
+   assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT"), false);
   });
  }
 }
@@ -1022,7 +1052,8 @@ for (const {name, total, identity, challenge, complete} of [
   assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), complete);
   assert.equal(harness.protocolMessages.some(m => m.type === "DETAIL_COVERAGE"), complete);
   assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" &&
-   m.reason === "inventory_not_proven_complete" && isRetryable(m)), !complete);
+   m.reason === "inventory_not_proven_complete" && isRetryable(m)), !complete && !challenge);
+  assert.equal(harness.sessionFailure !== null, Boolean(challenge));
  });
 }
 
@@ -1044,8 +1075,9 @@ for (const {name, total, viewerOwner, envelopeOwner, challenge, complete} of [
    assert.equal(harness.protocolMessages.some(m => m.type === "STATE" && m.stream === stream), complete);
    assert.equal(harness.protocolMessages.some(m => m.type === "DETAIL_COVERAGE" && m.stream === stream), complete);
    assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === stream &&
-    m.reason === "inventory_not_proven_complete" && isRetryable(m)), !complete);
+    m.reason === "inventory_not_proven_complete" && isRetryable(m)), !complete && !challenge);
   }
+  assert.equal(harness.sessionFailure !== null, Boolean(challenge));
  });
 }
 
