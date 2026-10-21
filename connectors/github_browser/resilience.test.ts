@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectGitHubBrowser } from "./collector.ts";
+import { type BrowserCollectionPort, collectGitHubBrowser } from "./collector.ts";
 import { fetchPublicJson } from "./index.ts";
 import type { BrowserServices } from "./types.ts";
 
@@ -124,6 +124,138 @@ test("a profile page read past the bridge timeout withholds only the profile", a
 	assert.equal(records.has("profile"), false);
 	assert.equal(skipCause(skips.get("profile")), "source_read_timeout");
 	assert.equal(records.size, 5);
+});
+
+// A failed read withholds the stream. A failed write to the output does not
+// belong to the stream: it must reach the caller, and must not be reported as a
+// withheld source.
+async function collectToSink(
+	port: (messages: Array<Record<string, unknown>>) => Partial<BrowserCollectionPort>,
+	overrides: (base: BrowserServices) => Partial<BrowserServices> = () => ({}),
+) {
+	const base = await fixtureServices();
+	const messages: Array<Record<string, unknown>> = [];
+	const state: Record<string, unknown> = {};
+	const outcome = await collectGitHubBrowser({
+		requested: new Set(ALL), state, progress: async () => {},
+		emitRecord: async (stream, record) => { messages.push({ type: "RECORD", stream, record }); },
+		emit: async message => { messages.push(message as unknown as Record<string, unknown>); },
+		...port(messages),
+	}, { ...base, ...overrides(base) }).then(() => null, (error: unknown) => error);
+	return { messages, state, outcome };
+}
+
+const skipsFor = (messages: Array<Record<string, unknown>>, stream: string) =>
+	messages.filter(message => message.type === "SKIP_RESULT" && message.stream === stream);
+
+test("a rejected record write reaches the caller and is not reported as a withheld source", async () => {
+	const { messages, outcome } = await collectToSink(() => ({
+		emitRecord: async stream => { if (stream === "events") throw new Error("sink down"); },
+	}));
+	assert.match(String((outcome as Error | null)?.message), /sink down/u);
+	assert.equal(skipsFor(messages, "events").length, 0);
+});
+
+test("a rejected STATE write reaches the caller and leaves the cursor unchanged", async () => {
+	const { messages, state, outcome } = await collectToSink(() => ({
+		emit: async message => {
+			if (message.type === "STATE" && message.stream === "profile") throw new Error("sink down");
+		},
+	}));
+	assert.match(String((outcome as Error | null)?.message), /sink down/u);
+	assert.equal(skipsFor(messages, "profile").length, 0);
+	assert.equal(state.profile, undefined);
+});
+
+test("a rejected coverage write reaches the caller and is not reported as a withheld source", async () => {
+	const { messages, outcome } = await collectToSink(() => ({
+		emit: async message => {
+			if (message.type === "DETAIL_COVERAGE" && message.stream === "events") throw new Error("sink down");
+		},
+	}));
+	assert.match(String((outcome as Error | null)?.message), /sink down/u);
+	assert.equal(skipsFor(messages, "events").length, 0);
+});
+
+test("a contributions year read past the bridge timeout is reported as a timeout", async () => {
+	const { records, skips } = await collect(base => ({
+		openContributionPage: async url => {
+			if (url.includes("from=")) throw new Error(BRIDGE_TIMEOUT);
+			return base.openPage(url);
+		},
+	}));
+	assert.equal(records.has("contributions"), false);
+	assert.equal(skipCause(skips.get("contributions")), "source_read_timeout");
+	assert.equal(records.size, 5);
+});
+
+const searchAnswer = (url: string, data: unknown, link: string | null = null) =>
+	({ requestedUrl: url, responseUrl: url, status: 200, link, data });
+const isIssueSearch = (url: string) => url.includes("/search/issues") && url.includes("type%3Aissue");
+
+test("a 200 search answer that is not JSON names invalid_api_response", async () => {
+	const { records, skips } = await collect(base => ({
+		fetchPublicJson: async url => isIssueSearch(url) ? searchAnswer(url, null) : base.fetchPublicJson(url),
+	}));
+	assert.equal(records.has("history"), false);
+	assert.equal(skipCause(skips.get("history")), "search_incomplete: invalid_api_response");
+});
+
+test("a search answer of the wrong shape names invalid_api_response", async () => {
+	const { skips } = await collect(base => ({
+		fetchPublicJson: async url => isIssueSearch(url)
+			? searchAnswer(url, { items: "none", total_count: 1, incomplete_results: false })
+			: base.fetchPublicJson(url),
+	}));
+	assert.equal(skipCause(skips.get("history")), "search_incomplete: invalid_api_response");
+});
+
+test("a search answer with incomplete_results names incomplete_search_results", async () => {
+	const { skips } = await collect(base => ({
+		fetchPublicJson: async url => isIssueSearch(url)
+			? searchAnswer(url, { items: [], total_count: 0, incomplete_results: true })
+			: base.fetchPublicJson(url),
+	}));
+	assert.equal(skipCause(skips.get("history")), "search_incomplete: incomplete_search_results");
+});
+
+test("a search total that changes between pages names search_total_changed", async () => {
+	const { skips } = await collect(base => ({
+		fetchPublicJson: async url => {
+			if (!isIssueSearch(url)) return base.fetchPublicJson(url);
+			const first = await base.fetchPublicJson(url.replace(/page=\d+/u, "page=1"));
+			const items = (first.data as { items: unknown[] }).items;
+			return url.endsWith("page=1")
+				? searchAnswer(url, { items, total_count: items.length + 50, incomplete_results: false },
+					'<https://api.github.com/x?page=2>; rel="next"')
+				: searchAnswer(url, { items: [], total_count: items.length + 51, incomplete_results: false });
+		},
+	}));
+	assert.equal(skipCause(skips.get("history")), "search_incomplete: search_total_changed");
+});
+
+// The Search API serves at most 1,000 results per query. A complete read of
+// that window completes the snapshot, and the state says the window is bounded.
+test("a search window capped at 1,000 results completes with bounded_window set", async () => {
+	const { messages, outcome } = await collectToSink(() => ({}), base => ({
+		fetchPublicJson: async url => {
+			if (!isIssueSearch(url)) return base.fetchPublicJson(url);
+			const page = Number(new URL(url).searchParams.get("page"));
+			const template = ((await base.fetchPublicJson(url.replace(/page=\d+/u, "page=1"))).data as {
+				items: Array<Record<string, unknown>>;
+			}).items[0];
+			const items = Array.from({ length: 100 }, (_unused, index) => {
+				const id = (page - 1) * 100 + index + 1;
+				return { ...template, id, number: id, html_url: `https://github.com/sample-user/sample-repo/issues/${id}` };
+			});
+			return searchAnswer(url, { items, total_count: 1001, incomplete_results: false },
+				page < 10 ? '<https://api.github.com/x?page=2>; rel="next"' : null);
+		},
+	}));
+	assert.equal(outcome, null);
+	assert.equal(skipsFor(messages, "history").length, 0);
+	const state = messages.find(message => message.type === "STATE" && message.stream === "history");
+	assert.equal((state?.cursor as { bounded_window?: boolean }).bounded_window, true);
 });
 
 test("fetchPublicJson returns a non-2xx status instead of throwing", async () => {

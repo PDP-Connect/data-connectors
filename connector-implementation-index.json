@@ -9983,7 +9983,7 @@
 					{
 						"name": "events",
 						"required": true,
-						"description": "One legacy aggregate snapshot of public events. A full 300-event cap is partial and never advances completion.",
+						"description": "One legacy aggregate snapshot of public events. Complete means GitHub's public events window (up to 300 events from the past 90 days) was read to its end; the snapshot states that window.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10060,7 +10060,7 @@
 					{
 						"name": "contributions",
 						"required": true,
-						"description": "One legacy aggregate of contribution days and available summaries. Missing or blocked year views retain readable days without completion; completion requires all four views.",
+						"description": "One legacy aggregate of contribution days and available summaries. A missing, blocked or unreadable year view withholds the whole snapshot; completion requires all four views.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10155,7 +10155,7 @@
 					{
 						"name": "history",
 						"required": true,
-						"description": "One legacy aggregate snapshot of authored issues and pull requests. At or above 1,000 results per type, readable rows are retained without completion.",
+						"description": "One legacy aggregate snapshot of authored issues and pull requests. The Search API serves at most 1,000 results per type; a complete read of that window completes the snapshot, and the state records bounded_window when a type has more results.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
