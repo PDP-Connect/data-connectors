@@ -100,6 +100,8 @@ export const VENMO_PASSWORD_SCREEN_TIMEOUT = "venmo_password_screen_timeout";
  */
 export const VENMO_PASSWORD_FIELD_EMPTY_AFTER_SUBMIT =
 	"venmo_password_field_empty_after_submit";
+/** The filled password screen stayed in place after one submit; no authentication outcome was observed. */
+export const VENMO_PASSWORD_SUBMIT_STALLED = "venmo_password_submit_stalled";
 /** The SMS offer rendered, but its Remember this device control was not usable. */
 export const VENMO_SMS_OFFER_CHECKBOX_UNAVAILABLE =
 	"venmo_sms_offer_checkbox_unavailable";
@@ -150,6 +152,7 @@ export const VENMO_DECLARED_REASON_TOKENS: ReadonlySet<string> = new Set([
 	VENMO_ORIGIN_NAVIGATION_FAILED,
 	VENMO_PASSWORD_SCREEN_TIMEOUT,
 	VENMO_PASSWORD_FIELD_EMPTY_AFTER_SUBMIT,
+	VENMO_PASSWORD_SUBMIT_STALLED,
 	VENMO_SCORING_CHALLENGE,
 	VENMO_SMS_OFFER_CHECKBOX_UNAVAILABLE,
 	VENMO_SMS_OFFER_SEND_CODE_UNAVAILABLE,
@@ -1501,7 +1504,7 @@ async function requestManualLoginForChallenge({
 	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
 > & {
 	/**
-	 * Replays the full saved-credential sign-in once the owner clears the
+	 * Resumes saved-credential sign-in on the page the owner reached after the
 	 * challenge. Absent for handoffs raised where no credential exists.
 	 */
 	readonly replaySignIn?: (
@@ -1552,7 +1555,7 @@ function challengeHandoffMessage(
 }
 
 /**
- * Resume a pre-credential challenge by REPLAYING THE WHOLE SIGN-IN.
+ * Resume a pre-credential challenge from the page the owner reached.
  *
  * The first version of this filled username+password and returned `true`,
  * leaving the form sitting UNSUBMITTED while `waitForManualLogin` probed it.
@@ -1564,10 +1567,9 @@ function challengeHandoffMessage(
  * post-submit verify — each of which exists because a real run once failed
  * without it.
  *
- * Re-entering `loginWithSavedCredentials` is the smallest COMPLETE correction.
- * The challenge handoff is raised from the top of that function, so calling it
- * again after the owner clears the check re-runs the identical proven sequence
- * instead of a second, thinner copy that would drift from it.
+ * Re-entering `loginWithSavedCredentials` preserves the common submit and
+ * verification path. Its replay entry skips navigation and accepts either an
+ * identifier screen or the password screen reached after a solved CAPTCHA.
  *
  * Nothing here reports liveness — see `waitForManualLogin`'s doc for why
  * nothing probes after a handoff. This only decides whether a failure
@@ -1948,6 +1950,21 @@ async function unsettledVenmoLoginError(
 			`${VENMO_PASSWORD_FIELD_EMPTY_AFTER_SUBMIT}: Venmo still showed the password step with an empty password field ${postSubmitSettleTimeoutMs}ms after Log in was clicked. The form did not keep the password, or Venmo cleared it; look for a "Required" or wrong-password message on the page.`,
 		);
 	}
+	// A filled password screen that remains on the identity host is observable;
+	// the presence of Venmo's v3 script cannot prove that its score caused it.
+	const heldPassword = await visibleVenmoPasswordInput(page)
+		.inputValue({ timeout: 1000 })
+		.catch((): null => null);
+	if (
+		isVenmoSignInUrl(page.url()) &&
+		!(await locatorIsVisible(page.locator(STEP_ONE_SUBMIT_SELECTOR).first())) &&
+		heldPassword !== null &&
+		heldPassword !== ""
+	) {
+		return new Error(
+			`${VENMO_PASSWORD_SUBMIT_STALLED}: Venmo still showed the password step ${postSubmitSettleTimeoutMs}ms after one Log in click, with no completed sign-in or verification step. The browser trace is needed to identify why it did not advance.`,
+		);
+	}
 	// An INVISIBLE scoring challenge is the one cause we can name here, and
 	// naming it changes what the owner does about it. reCAPTCHA Enterprise v3
 	// renders no widget and no checkbox — it scores the session silently — so
@@ -2002,18 +2019,40 @@ async function loginWithSavedCredentials({
 	username: string;
 }): Promise<OwnerHandoffComplete | VenmoAccountProbeResult> {
 	const assistHooks = venmoAssistHooks({ assist, completeAssistance });
-	await page
-		.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
-		.catch((): undefined => undefined);
+	// A completed owner handoff can leave Venmo on the identifier step, the
+	// password step, or an authenticated page. A new navigation would discard
+	// the state produced by the CAPTCHA the owner just solved.
+	if (
+		attempt === 1 &&
+		!isVenmoSignInUrl(page.url()) &&
+		!(await locatorIsVisible(page.locator(USERNAME_SELECTOR).first())) &&
+		!(await locatorIsVisible(visibleVenmoPasswordInput(page)))
+	) {
+		return OWNER_HANDOFF_COMPLETE;
+	}
+	if (attempt === 0) {
+		await page
+			.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+			.catch((): undefined => undefined);
+	}
 	await captureLoginState(capture, page, "venmo-login-page");
 	await checkpoint("venmo-signin-loaded");
 
+	// A one-screen form has both fields and still needs its identifier filled.
+	// Only the password-only screen proves the identifier step already finished.
+	const resumeOnPasswordStep =
+		attempt === 1 &&
+		!(await locatorIsVisible(page.locator(STEP_ONE_SUBMIT_SELECTOR).first())) &&
+		!(await locatorIsVisible(page.locator(USERNAME_SELECTOR).first())) &&
+		(await locatorIsVisible(visibleVenmoPasswordInput(page)));
 	const userIn = page.locator(USERNAME_SELECTOR).first();
-	const usernameAppeared = await userIn
-		.waitFor({ state: "attached", timeout: 10_000 })
-		.then((): true => true)
-		.catch((): false => false);
-	if (!usernameAppeared) {
+	const usernameAppeared = resumeOnPasswordStep
+		? false
+		: await userIn
+				.waitFor({ state: "visible", timeout: 10_000 })
+				.then((): true => true)
+				.catch((): false => false);
+	if (!(resumeOnPasswordStep || usernameAppeared)) {
 		// On the REPLAY (attempt 1) the owner has already been asked once and the
 		// form still is not here: a genuinely unrecognized page, not a cleared bot
 		// check. Nothing probes here either — see waitForManualLogin's doc — so
@@ -2026,8 +2065,10 @@ async function loginWithSavedCredentials({
 			...assistHooks,
 			...(capture ? { capture } : {}),
 			page,
-			reason: "sign-in form did not render",
-			// Replay the whole sign-in after the owner clears the check. `attempt`
+			reason: (await hasVenmoCaptcha(page))
+				? "captcha"
+				: "sign-in form did not render",
+			// Resume on the owner's current page after the check. `attempt`
 			// bounds it: the replay runs with attempt=1, whose challenge branch no
 			// longer re-arms, so a provider trading bot checks cannot loop.
 			...(attempt === 0
@@ -2063,7 +2104,9 @@ async function loginWithSavedCredentials({
 			sendInteraction,
 		});
 	}
-	await userIn.fill(username);
+	if (usernameAppeared) {
+		await userIn.fill(username);
+	}
 
 	// Two-step flow, submit 1 of 2: `fillVenmoPassword` may click Venmo's `Next`
 	// control to reach the password screen. That click sends the IDENTIFIER, not
