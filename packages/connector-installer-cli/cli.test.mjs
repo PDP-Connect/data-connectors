@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -176,4 +176,19 @@ test("verify reports an `ok:false` result as a failed process", async () => {
   } finally {
     await registry.stop();
   }
+});
+
+test("an explicit OCI pull refuses an escaping connector ID before installing", async () => {
+  await withTempDir(async (dir) => {
+    const installRoot = join(dir, "install");
+    const result = await runCli([
+      "install", "--oci", `ghcr.io/pdp-connect/connector/ynab@sha256:${"a".repeat(64)}`,
+      "--connector-id", "../outside", "--install-root", installRoot,
+      "--layout", "snapshot", "--prune",
+    ]);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /invalid connector id/i);
+    assert.equal(existsSync(installRoot), false);
+    assert.equal(existsSync(join(dir, "outside")), false);
+  });
 });

@@ -2,16 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, relative, resolve as resolvePath, sep } from "node:path";
 
 import { readTarGzEntries } from "./tar-stream.mjs";
 
@@ -93,6 +98,34 @@ function validateArchiveMemberPath(memberPath) {
   validateRelativeArtifactPath(trimmedPath, "archive member path");
 }
 
+function lockEntries(lock) {
+  if (!lock || typeof lock !== "object" || Array.isArray(lock) ||
+      !Object.hasOwn(lock, "connectors") || !Array.isArray(lock.connectors)) {
+    throw new Error("Invalid lock: connectors must be an explicit array");
+  }
+  return lock.connectors;
+}
+
+function isPortableDestinationSegment(segment) {
+  return /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(segment) &&
+    !segment.endsWith(".") &&
+    !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment);
+}
+
+function validateConnectorId(connectorId) {
+  if (typeof connectorId !== "string" || !isPortableDestinationSegment(connectorId)) {
+    throw new Error(`Invalid connector id "${connectorId}"`);
+  }
+  return connectorId;
+}
+
+function validateDestinationPath(path, label = "install destination path") {
+  if (typeof path !== "string" || !path.split("/").every(isPortableDestinationSegment)) {
+    throw new Error(`Invalid ${label.toLowerCase()} "${path}"`);
+  }
+  return path;
+}
+
 /**
  * Read one lock entry into the shape the OCI pipeline consumes, or refuse it.
  *
@@ -108,10 +141,13 @@ function validateArchiveMemberPath(memberPath) {
  * either fetches the wrong repository or moves every install root.
  *
  * The three paths are install DESTINATIONS under that root, so they are held
- * to the same relative-path rule as an archive member.
+ * to the portable canonical destination rule before any registry request.
  */
 function normalizeLockEntry(entry) {
-  const connectorId = entry?.connectorId;
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new Error("Invalid lock connector entry");
+  }
+  const connectorId = validateConnectorId(entry.connectorId);
   const oci = entry?.oci;
   if (!oci || typeof oci !== "object") {
     throw new Error(
@@ -126,9 +162,9 @@ function normalizeLockEntry(entry) {
     connectorKey: entry.connectorKey ?? null,
     version: entry.version,
     artifactKind: entry.artifactKind,
-    manifestPath: validateRelativeArtifactPath(entry.manifestPath, "PDPP manifest path"),
-    entrypointPath: validateRelativeArtifactPath(entry.entrypointPath, "PDPP entrypoint path"),
-    provenancePath: validateRelativeArtifactPath(entry.provenancePath, "PDPP provenance path"),
+    manifestPath: validateDestinationPath(entry.manifestPath, "PDPP manifest path"),
+    entrypointPath: validateDestinationPath(entry.entrypointPath, "PDPP entrypoint path"),
+    provenancePath: validateDestinationPath(entry.provenancePath, "PDPP provenance path"),
     oci: {
       registry: oci.registry ?? DEFAULT_OCI_REGISTRY_NAME,
       repository: oci.repository ?? null,
@@ -530,7 +566,7 @@ async function fetchOciArtifact(entry, options = {}) {
   };
 }
 
-function buildPdppCollectionProfileWrites(installRoot, resolved) {
+function buildPdppCollectionProfileWrites(resolved) {
   const artifactRoot = `collection-profiles/${resolved.connectorId}`;
   const writes = [
     {
@@ -558,24 +594,21 @@ function buildPdppCollectionProfileWrites(installRoot, resolved) {
     })),
   ];
 
-  return writes.map((write) => ({
-    ...write,
-    absolutePath: join(installRoot, write.relativePath),
-  }));
+  return writes;
 }
 
 // A Collection Profile installs into the same `collection-profiles/<id>/`
 // subtree under either layout name, so both are accepted and mean the same.
-function buildInstallWrites(layout, installRoot, resolved) {
+function buildInstallWrites(layout, resolved) {
   if (layout === "snapshot" || layout === "source") {
-    return buildPdppCollectionProfileWrites(installRoot, resolved);
+    return buildPdppCollectionProfileWrites(resolved);
   }
   throw new Error(`Unsupported install layout "${layout}"`);
 }
 
 async function fetchLockArtifacts({ lock, source, ...options }) {
   assertNoIndexSource(source);
-  const normalizedEntries = (lock.connectors ?? []).map(normalizeLockEntry);
+  const normalizedEntries = lockEntries(lock).map(normalizeLockEntry);
   const resolved = [];
 
   for (const entry of normalizedEntries) {
@@ -592,11 +625,92 @@ async function fetchLockArtifacts({ lock, source, ...options }) {
 }
 
 function expectedWritesForLock({ installRoot, layout, resolved }) {
-  return resolved.flatMap((entry) => buildInstallWrites(layout, installRoot, entry));
+  return destinationPlan(installRoot, resolved.flatMap((entry) => buildInstallWrites(layout, entry)));
 }
 
-function ensureParentDir(path) {
-  mkdirSync(dirname(path), { recursive: true });
+// Every OCI destination meets here. Identity is portable and case-folded
+// for collisions, but the original canonical spelling is used for every effect.
+function destinationPlan(installRoot, writes) {
+  const root = resolvePath(installRoot);
+  const identities = new Set();
+  const directorySpellings = new Map();
+  const plan = writes.map(({ relativePath, ...write }) => {
+    validateDestinationPath(relativePath);
+    const absolutePath = resolvePath(root, relativePath);
+    if (!absolutePath.startsWith(`${root}${sep}`)) {
+      throw new Error(`Install destination escapes root: ${relativePath}`);
+    }
+    const segments = relativePath.split("/");
+    for (let i = 1; i < segments.length; i += 1) {
+      const directory = segments.slice(0, i).join("/");
+      const identity = directory.toLowerCase();
+      const previous = directorySpellings.get(identity);
+      if (previous !== undefined && previous !== directory) {
+        throw new Error(`Install destination case collision: ${directory}`);
+      }
+      directorySpellings.set(identity, directory);
+    }
+    const identity = relativePath.toLowerCase();
+    if (identities.has(identity)) throw new Error(`Duplicate install destination: ${relativePath}`);
+    identities.add(identity);
+    return { ...write, relativePath, absolutePath };
+  });
+  for (const write of plan) {
+    const segments = write.relativePath.toLowerCase().split("/");
+    for (let i = 1; i < segments.length; i += 1) {
+      if (identities.has(segments.slice(0, i).join("/"))) {
+        throw new Error(`Install destination conflict: ${write.relativePath}`);
+      }
+    }
+  }
+  assertDestinationTree(root);
+  for (const write of plan) assertDestinationTree(write.absolutePath, root);
+  return plan;
+}
+
+function assertDestinationTree(path, root = path) {
+  const paths = [root];
+  let current = root;
+  for (const segment of relative(root, path).split(sep).filter(Boolean)) {
+    current = join(current, segment);
+    paths.push(current);
+  }
+  for (const candidate of paths) {
+    if (candidate !== root) {
+      let names = [];
+      try { names = readdirSync(dirname(candidate)); } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      const name = basename(candidate);
+      if (names.some((actual) => actual !== name && actual.toLowerCase() === name.toLowerCase())) {
+        throw new Error(`Noncanonical install destination case alias: ${candidate}`);
+      }
+    }
+    let stat;
+    try { stat = lstatSync(candidate); } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) throw new Error(`Refusing symbolic link destination: ${candidate}`);
+    if (candidate !== path || candidate === root) {
+      if (!stat.isDirectory()) throw new Error(`Install destination parent is not a directory: ${candidate}`);
+    } else if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error(`Install destination is not a single regular file: ${candidate}`);
+    }
+  }
+}
+
+function openDestination(installRoot, write, flags) {
+  const root = resolvePath(installRoot);
+  assertDestinationTree(write.absolutePath, root);
+  // O_NOFOLLOW also covers replacement of the leaf after the tree preflight.
+  const fd = openSync(write.absolutePath, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const stat = fstatSync(fd);
+  if (!stat.isFile() || stat.nlink !== 1) {
+    closeSync(fd);
+    throw new Error(`Install destination is not a single regular file: ${write.relativePath}`);
+  }
+  return fd;
 }
 
 function removeUnexpectedEntries(installRoot, expectedPaths, preserveTopLevel = []) {
@@ -650,6 +764,7 @@ export function pruneInstalled({
   expectedPaths,
   preserveTopLevel = [],
 }) {
+  destinationPlan(installRoot, expectedPaths.map((relativePath) => ({ relativePath })));
   removeUnexpectedEntries(installRoot, expectedPaths, preserveTopLevel);
   return {
     installRoot,
@@ -671,8 +786,14 @@ export async function installFromLock({
   const expectedPaths = writes.map((write) => write.relativePath);
 
   for (const write of writes) {
-    ensureParentDir(write.absolutePath);
-    writeFileSync(write.absolutePath, write.buffer);
+    assertDestinationTree(write.absolutePath, resolvePath(installRoot));
+    mkdirSync(dirname(write.absolutePath), { recursive: true });
+    const fd = openDestination(installRoot, write, constants.O_WRONLY | constants.O_CREAT);
+    try {
+      // Opening without O_TRUNC lets us check regular-file identity first.
+      writeFileSync(fd, write.buffer);
+      ftruncateSync(fd, write.buffer.length);
+    } finally { closeSync(fd); }
   }
 
   if (prune) {
@@ -723,7 +844,9 @@ export async function verifyInstalled({
       continue;
     }
 
-    const currentChecksum = sha256Buffer(readFileSync(write.absolutePath));
+    const fd = openDestination(installRoot, write, constants.O_RDONLY);
+    let currentChecksum;
+    try { currentChecksum = sha256Buffer(readFileSync(fd)); } finally { closeSync(fd); }
     const expectedChecksum = sha256Buffer(write.buffer);
     if (currentChecksum !== expectedChecksum) {
       mismatched.push(write.relativePath);
