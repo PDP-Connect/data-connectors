@@ -196,7 +196,7 @@ test("gmail all mail: owner text is plain; UID cursors go to a diagnostic line",
 			diagnostics.some(
 				(l) =>
 					l.startsWith("[gmail-diagnostic] message_fetch_range ") &&
-					l.includes('"uid_range"') &&
+					l.includes('"historical":"1:500"') &&
 					l.includes('"mailbox":"[Gmail]/All Mail"'),
 			),
 			"fetch range and mailbox moved to the diagnostic line",
@@ -285,10 +285,11 @@ test("gmail all mail: a negative EXISTS fails closed", async () => {
 	);
 });
 
-test("gmail all mail: a shrinking mailbox within one UID epoch throws", async () => {
-	// Mirrors Jellyfin's decreasing-total guard. Inside a single UIDVALIDITY the
-	// UID space is stable, so a smaller count is deletion or a server bug — either
-	// way it is a fact about the data that must not pass silently.
+test("gmail all mail: a shrinking mailbox within one UID epoch keeps collecting", async () => {
+	// EXISTS is the mailbox's current inventory count. Owners delete and
+	// expunge mail without any UIDVALIDITY change, so a smaller count is
+	// ordinary. It is disclosed as the current total and persisted, and it
+	// never blocks collection (it used to throw on every later run).
 	const priorState = {
 		messages: {
 			all_mail: {
@@ -299,11 +300,17 @@ test("gmail all mail: a shrinking mailbox within one UID epoch throws", async ()
 			},
 		},
 	};
-
-	await assert.rejects(
-		() => runPass({ exists: 900 }, priorState),
-		/gmail_all_mail_exists_decreased: 900 < 1200/,
-		"a mailbox that lost 300 messages must be surfaced, not absorbed",
+	const { inventory, state } = await runPass({ exists: 900 }, priorState);
+	assert.equal(
+		(inventory?.all_mail_inventory as { all_mail_exists?: number } | undefined)
+			?.all_mail_exists,
+		900,
+	);
+	assert.equal(
+		(state?.cursor as { all_mail?: { exists?: number } } | undefined)?.all_mail
+			?.exists,
+		900,
+		"the current count is persisted",
 	);
 });
 

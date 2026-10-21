@@ -91,6 +91,14 @@ import {
 	updateThreadAggregate,
 } from "./parsers.ts";
 import {
+	GmailProgressLedger,
+	LEDGER_STREAMS,
+	type LedgerCommit,
+	type LedgerStream,
+	MAX_RETRY_DEBT,
+	type UidOutcome,
+} from "./progress-ledger.ts";
+import {
 	GMAIL_MESSAGE_ID_RE,
 	PART_INDEX_RE,
 	validateRecord,
@@ -152,9 +160,6 @@ const BLOB_UPLOAD_ENV_ERROR =
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES_ENV = "PDPP_GMAIL_MAX_ATTACHMENT_BYTES";
 const POSITIVE_INTEGER_PATTERN = /^\d+$/;
-export const DEFAULT_ATTACHMENT_BACKFILL_WINDOW_UIDS = 500;
-const ATTACHMENT_BACKFILL_WINDOW_UIDS_ENV =
-	"PDPP_GMAIL_ATTACHMENT_BACKFILL_WINDOW_UIDS";
 // Live-incident floor (gmail-attachment-convergence-0809): sustained Gmail
 // IMAP attachment-transfer throughput measured at ~4.65 KB/s across four
 // different attachment sizes over a 2-hour window (general HTTPS from the
@@ -739,52 +744,16 @@ export function buildAttachmentDetailCoverageMessage(
 }
 
 /**
- * Whether this run walked a boundary that can support an attachments coverage
- * claim at all.
- *
- * `attachments` has no enumeration of its own: an attachment is only ever
- * discovered by decoding the BODYSTRUCTURE of a message the run already
- * fetched. Its denominator is therefore inherited from whatever slice of the
- * mailbox the run walked — and on an ordinary scheduled run that slice is the
- * incremental forward window plus the MODSEQ delta, i.e. a CHANGE FEED, not an
- * inventory.
- *
- * That is exactly the apple_contacts `contactsBoundaryEstablished` situation
- * (`connectors/apple_contacts/index.ts`), and it needs the same answer. A quiet
- * 16-minute run that observes no new mail decodes no attachment parts and would
- * otherwise emit `considered: 0, covered: 0` — numbers that are trivially
- * self-consistent and read downstream as "this stream is proven complete",
- * when the honest statement is "this run proved nothing about the mailbox".
- * Worse, the two are indistinguishable to the gate: a stream that has walked
- * almost nothing and a stream that is genuinely fully collected emit the
- * identical fact. Withholding is what keeps those two apart.
- *
- * The one boundary that does justify a whole-stream claim is a COMPLETED
- * historical `messages` walk: the historical pass fetches every UID below the
- * forward floor and `processMessage` decodes attachments for each one, so once
- * `messages.backfill.completed_at` is set, every message in All Mail has had
- * its attachment parts enumerated. Until then the mailbox below the resume
- * point is simply unwalked, and no count taken above it describes it.
- *
- * Emitting nothing leaves the stream honestly unproven (the coherence
- * contract's `checkpoint_only`/`no_proof_strategy` -> axis `unknown`) rather
- * than falsely complete. `unknown` is a worse-looking verdict than a green
- * `0/0` and that is the point: it is the true one, and it is the verdict an
- * owner can act on.
- */
-export function attachmentsCoverageBoundaryEstablished(session: {
-	messagesBackfill: MessagesBackfillCursor;
-}): boolean {
-	return (
-		typeof session.messagesBackfill.completed_at === "string" &&
-		session.messagesBackfill.completed_at !== ""
-	);
-}
-
-/**
  * Emit the per-run attachments DETAIL_COVERAGE after the detail lane settles —
- * but only when the run established a boundary that can support the claim
- * (see `attachmentsCoverageBoundaryEstablished`).
+ * but only when the run established a boundary that can support the claim.
+ *
+ * `attachments` has no enumeration of its own: an attachment is found only by
+ * decoding the BODYSTRUCTURE of a message the run fetched. On an ordinary run
+ * that slice is a change feed (new mail plus deltas), not an inventory, and a
+ * quiet run would report a self-consistent `0/0` that reads as "proven
+ * complete". So the claim needs the attachments stream's OWN completed walk in
+ * `GmailProgressLedger` (`attachmentsInventoryComplete`), never another
+ * stream's completion stamp. Until then the stream stays honestly `unknown`.
  *
  * Extracted from `runAllMailPasses` to keep that orchestrator under the
  * cognitive-complexity ceiling (authoring guide §"Rules the tooling enforces").
@@ -801,7 +770,7 @@ async function emitAttachmentDetailCoverage(
 		// simply has no denominator worth reporting, and says so by staying quiet.
 		gmailDiagnostic("attachment_coverage_withheld", {
 			reason:
-				"historical messages walk has not completed; attachment counts describe an incremental window, not the mailbox",
+				"attachment history walk incomplete or an attachment is still owed; counts describe this run, not the mailbox",
 		});
 		await emit({
 			type: "PROGRESS",
@@ -1033,25 +1002,6 @@ export function attachmentOutsideResourceScope(
 	return resources !== null && !resources.has(String(attachment.id));
 }
 
-/**
- * Say why this run commits no checkpoint: an attachment emission was rejected
- * and no retry locator could be written, so every cursor that could pass it
- * is held and the same window replays next run.
- */
-async function reportAttachmentCheckpointHold(
-	emitFn: (msg: EmittedMessage) => Promise<void>,
-): Promise<void> {
-	gmailDiagnostic("attachment_checkpoint_held", {
-		reason: "attachment_emit_rejected_without_retry_locator",
-	});
-	await emitFn({
-		type: "PROGRESS",
-		stream: "attachments",
-		message:
-			"An attachment could not be saved, so this sync will retry the same messages next time",
-	});
-}
-
 /** Retain retry identity independently of the rejected record's schema. */
 async function emitRejectedAttachmentGap(
 	message: FetchMessageObject,
@@ -1078,14 +1028,19 @@ async function emitRejectedAttachmentGap(
 	}
 }
 
+/**
+ * Emit this message's attachment records. Returns false when a rejected
+ * emission could not leave a retry locator, so the attachment is still owed.
+ */
 async function emitAttachmentRecords(
 	deps: PerMessageDeps,
 	msg: FetchMessageObject,
 	attachments: readonly AttachmentRecord[],
-): Promise<void> {
+): Promise<boolean> {
 	if (!deps.requested.has("attachments") || attachments.length === 0) {
-		return;
+		return true;
 	}
+	let accounted = true;
 	const recoveredAttachmentGapIds =
 		deps.recoveredAttachmentGapIds ?? new Set<string>();
 	for (const a of attachments) {
@@ -1109,6 +1064,7 @@ async function emitAttachmentRecords(
 			gapEmitted =
 				emitted === false &&
 				(await emitRejectedAttachmentGap(msg, identity, deps.emitProtocol));
+			if (emitted === false && !gapEmitted) accounted = false;
 			if (deps.attachmentCoverage) {
 				recordAttachmentCoverage(
 					deps.attachmentCoverage,
@@ -1144,6 +1100,7 @@ async function emitAttachmentRecords(
 			});
 		}
 	}
+	return accounted;
 }
 
 /**
@@ -1175,7 +1132,8 @@ export interface PerMessageDeps {
 	emitProgress: ProgressEmitter;
 	emitProtocol: (msg: EmittedMessage) => Promise<void>;
 	emitRecord: EmitRecordFn;
-	failOnError?: boolean;
+	/** False once the shared IMAP connection can no longer run commands. */
+	connectionUsable?: () => boolean;
 	fetchBodies: FetchBodiesFn;
 	hydrateAttachment: HydrateAttachmentFn;
 	nowIso: () => string;
@@ -1273,11 +1231,41 @@ async function emitMessageBody(
 }
 
 /**
+ * What one message produced for each stream it was asked to collect. The
+ * progress ledger reads only this; it never infers outcomes from protocol.
+ */
+type MessageStream = "messages" | "message_bodies" | "attachments";
+export type MessageOutcome = Partial<Record<MessageStream, UidOutcome>>;
+
+function sameOutcome(
+	deps: Pick<PerMessageDeps, "requested" | "wantBodies" | "wantMessages">,
+	outcome: UidOutcome,
+): MessageOutcome {
+	return {
+		...(deps.wantMessages ? { messages: outcome } : {}),
+		...(deps.wantBodies ? { message_bodies: outcome } : {}),
+		...(deps.requested.has("attachments") ? { attachments: outcome } : {}),
+	};
+}
+
+/** True when the stream's requested resources exclude this record key. */
+function outsideResources(
+	requested: ReadonlyMap<string, StreamRequest>,
+	stream: string,
+	key: string,
+): boolean {
+	const scope = requested.get(stream);
+	const resources = scope ? resourceSet(scope) : null;
+	return resources !== null && !resources.has(key);
+}
+
+/**
  * Emit the per-stream records for one Gmail message.
  *
  * Invariants (tested in integration.test.ts):
- *   1. No X-GM-MSGID → skip silently (return false).
- *   2. time_range filter skips out-of-range messages.
+ *   1. No X-GM-MSGID → terminal for every requested stream: the message
+ *      cannot be represented, and retrying cannot change that.
+ *   2. time_range filter → out_of_scope.
  *   3. Emit order within a single message: message_bodies → messages →
  *      attachments. The per-message order matters because downstream
  *      consumers rely on bodies being present before the messages row
@@ -1290,37 +1278,35 @@ async function emitMessageBody(
  *      refetchable after the UID cursor advances past it. A genuinely
  *      bodyless message emits `body_source: "empty"` with no gap.
  *
- *      Note this is NOT the destructive-overwrite case `runDeltaPass`
- *      guards against: a UID this function processes is visited here
- *      exactly once, ever (the forward/historical UID walk never revisits a
- *      UID) — there is no prior `messages` record for this gmMsgid to
- *      protect, so `snippet: null` on a failed fetch is an honest "unknown
- *      yet", not a loss. `runDeltaPass` is the only pass that can re-visit
- *      an ALREADY-stored message, which is why its failure handling differs
- *      (skip-and-gap instead of null).
+ *      Not a destructive overwrite: the progress ledger hands a UID to this
+ *      function once per stream (its lanes are disjoint, and debt retries
+ *      only the streams that failed), so there is no earlier `messages` row
+ *      for this message to protect. `runDeltaPass` is the only pass that
+ *      re-visits a stored message, which is why it skips-and-gaps instead.
  *
- * Returns true if the message produced any emits (or would have, modulo
- * scope). Returns false when skipped by an early filter so the caller
- * can skip progress accounting.
+ * A thrown error means the message was not fully collected; the caller turns
+ * it into retry debt.
  */
 export async function processMessage(
 	deps: PerMessageDeps,
 	msg: FetchMessageObject,
-): Promise<boolean> {
+	/** Filled in as each stream settles, so a caller can tell what a throw left. */
+	outcome: MessageOutcome = {},
+): Promise<MessageOutcome> {
 	// Gmail-specific IDs via imapflow: msg.emailId = X-GM-MSGID; msg.threadId = X-GM-THRID.
 	const gmMsgid = String(msg.emailId ?? "");
 	const gmThrid = String(msg.threadId ?? "");
 	if (!gmMsgid) {
-		if (deps.failOnError) {
-			await emitHistoricalMessageSkip(deps, msg.uid);
-		}
-		return false;
+		return Object.assign(
+			outcome,
+			sameOutcome(deps, { kind: "terminal", reason: "missing_message_id" }),
+		);
 	}
 
 	const env = msg.envelope ?? {};
 	const receivedAt = perMessageInternalDateToIso(msg.internalDate, deps.nowIso);
 	if (!isInTimeRange(receivedAt, deps.timeRange)) {
-		return false;
+		return Object.assign(outcome, sameOutcome(deps, { kind: "out_of_scope" }));
 	}
 	const dateHeader = env.date ? new Date(env.date).toISOString() : null;
 	const flagsArr = toFlagsArray(msg.flags);
@@ -1330,12 +1316,24 @@ export async function processMessage(
 		gmMsgid,
 		receivedAt,
 	);
+	const wantBodies =
+		deps.wantBodies &&
+		!outsideResources(deps.requested, "message_bodies", gmMsgid);
+	const wantMessages =
+		deps.wantMessages && !outsideResources(deps.requested, "messages", gmMsgid);
 
-	const selection = selectBodyParts(msg.bodyStructure, deps.wantBodies);
+	const selection = selectBodyParts(msg.bodyStructure, wantBodies);
 	const { bodyHtmlFull, bodyTextFull, snippet, fetchFailed, failureClass } =
-		await deps.fetchBodies(msg, selection, deps.wantBodies, deps.wantMessages);
+		wantBodies || wantMessages
+			? await deps.fetchBodies(msg, selection, wantBodies, wantMessages)
+			: { bodyHtmlFull: null, bodyTextFull: null, snippet: null };
 
-	if (deps.wantBodies) {
+	if (deps.wantBodies && !wantBodies) {
+		outcome.message_bodies = { kind: "out_of_scope" };
+	}
+	if (wantBodies) {
+		// A body that could not be captured leaves its own DETAIL_GAP, which
+		// accounts for it; the ledger only needs to know the UID was handled.
 		await emitMessageBody(deps, {
 			bodies: {
 				bodyHtmlFull,
@@ -1349,10 +1347,14 @@ export async function processMessage(
 			selection,
 			uid: typeof msg.uid === "number" ? msg.uid : undefined,
 		});
+		outcome.message_bodies = { kind: "covered" };
 	}
 
-	if (deps.wantMessages) {
-		await deps.emitRecord(
+	if (deps.wantMessages && !wantMessages) {
+		outcome.messages = { kind: "out_of_scope" };
+	}
+	if (wantMessages) {
+		const emitted = await deps.emitRecord(
 			"messages",
 			buildMessageRecord({
 				attachmentsCount: attachments.length,
@@ -1368,63 +1370,107 @@ export async function processMessage(
 				snippet,
 			}),
 		);
+		// A schema rejection already emitted its SKIP_RESULT. The same input
+		// is rejected on every retry, so it is terminal, not debt.
+		outcome.messages =
+			emitted === false
+				? { kind: "terminal", reason: "messages_record_rejected" }
+				: { kind: "covered" };
 	}
 
-	await emitAttachmentRecords(deps, msg, attachments);
-	return true;
+	if (deps.requested.has("attachments")) {
+		const accounted = await emitAttachmentRecords(deps, msg, attachments);
+		outcome.attachments = accounted
+			? { kind: "covered" }
+			: { kind: "failed", failure: "attachment_emit_rejected" };
+	}
+	return outcome;
+}
+
+/** A bounded, non-secret class for a per-message failure. */
+export function messageFailureClass(err: unknown): string {
+	if (isImapTransientError(err)) return "transient_transport";
+	if (err instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(err.name)) {
+		return err.name === "Error" ? "message_processing_failed" : err.name;
+	}
+	return "message_processing_failed";
+}
+
+/**
+ * Collect one message and turn a thrown error into a retryable outcome.
+ *
+ * Two failures still end the run, because no later command can succeed:
+ * an attachment stall (`onStall` already closed the shared connection) and
+ * any failure that left the IMAP connection unusable. Every other failure is
+ * this message's alone; it becomes retry debt and the walk moves on.
+ */
+export async function settleMessage(
+	deps: PerMessageDeps,
+	msg: FetchMessageObject,
+): Promise<MessageOutcome> {
+	const outcome: MessageOutcome = {};
+	try {
+		return await processMessage(deps, msg, outcome);
+	} catch (perMsgErr) {
+		if (
+			perMsgErr instanceof AttachmentStallTimeoutError ||
+			deps.connectionUsable?.() === false
+		) {
+			throw perMsgErr;
+		}
+		const emsg =
+			perMsgErr instanceof Error
+				? (perMsgErr.stack ?? perMsgErr.message)
+				: String(perMsgErr);
+		process.stderr.write(
+			`[gmail] per-message error at UID ${String(msg.uid)}: ${emsg}\n`,
+		);
+		// Streams that settled before the throw keep their outcome, so a retry
+		// never re-emits (and possibly degrades) a record that already landed.
+		return {
+			...sameOutcome(deps, {
+				kind: "failed",
+				failure: messageFailureClass(perMsgErr),
+			}),
+			...outcome,
+		};
+	}
 }
 
 /**
  * Phase B driver: iterate metas, emit records, report progress every
- * FETCH_MSG_PROGRESS rows. Per-message errors are logged to stderr and
- * swallowed so a single bad message doesn't halt the whole pass.
+ * FETCH_MSG_PROGRESS rows. Per-message failures become retryable outcomes
+ * (see `settleMessage`), so one bad message does not halt the pass.
  */
 export async function emitMessagesPass(
 	deps: PerMessageDeps,
 	metas: readonly FetchMessageObject[],
+	onOutcome?: (msg: FetchMessageObject, outcome: MessageOutcome) => void,
 ): Promise<{ considered: number; covered: number }> {
-	let count = 0;
+	let considered = 0;
+	let covered = 0;
 	for (const msg of metas) {
-		try {
-			const processed = await processMessage(deps, msg);
-			if (!processed) {
-				continue;
-			}
-			count += 1;
-			if (count % FETCH_MSG_PROGRESS === 0) {
-				await deps.emitProgress({
-					type: "PROGRESS",
-					stream: "messages",
-					message: `Fetched ${count} messages`,
-					count,
-					total: metas.length,
-				});
-			}
-		} catch (perMsgErr) {
-			if (perMsgErr instanceof AttachmentStallTimeoutError) {
-				// NOT an ordinary per-message failure: `onStall` has already closed
-				// the shared IMAP connection (imapflow has no per-command cancel),
-				// so every later command in this run — including the next message
-				// in this very loop — would throw a confusing "connection closed"
-				// error instead of the real cause. Propagate instead of swallowing
-				// so the run ends cleanly through the normal uncaught-rejection path.
-				throw perMsgErr;
-			}
-			if (deps.failOnError) {
-				await emitHistoricalMessageSkip(deps, msg.uid);
-				continue;
-			}
-			const emsg =
-				perMsgErr instanceof Error
-					? (perMsgErr.stack ?? perMsgErr.message)
-					: String(perMsgErr);
-			process.stderr.write(
-				`[gmail] per-message error at UID ${String(msg.uid)}: ${emsg}\n`,
-			);
-			// Continue with next message; don't let one bad record halt the whole run.
+		const outcome = await settleMessage(deps, msg);
+		onOutcome?.(msg, outcome);
+		const kinds = Object.values(outcome).map((o) => o.kind);
+		if (kinds.length === 0 || kinds.every((k) => k === "out_of_scope")) {
+			continue;
+		}
+		considered += 1;
+		if (kinds.every((k) => k === "covered" || k === "out_of_scope")) {
+			covered += 1;
+		}
+		if (covered > 0 && covered % FETCH_MSG_PROGRESS === 0) {
+			await deps.emitProgress({
+				type: "PROGRESS",
+				stream: "messages",
+				message: `Fetched ${covered} messages`,
+				count: covered,
+				total: metas.length,
+			});
 		}
 	}
-	return { considered: metas.length, covered: count };
+	return { considered, covered };
 }
 
 /**
@@ -1448,12 +1494,16 @@ export async function emitMessagesPass(
 async function emitAllMailInventoryDisclosure(
 	emitFn: (msg: EmittedMessage) => Promise<void>,
 	session: AllMailSession,
-	historicalCursor: MessagesBackfillCursor,
-	forwardFloorUid: number,
+	position: { through: number; complete: boolean },
 ): Promise<void> {
-	const backfilledThroughUid = historicalCursor.backfilled_through_uid ?? 0;
+	const backfilledThroughUid = position.through;
+	const forwardFloorUid = Math.max(0, (session.uidnext ?? 1) - 1);
 	gmailDiagnostic("all_mail_historical_walk", {
 		exists_total: session.existsTotal,
+		...(session.priorExistsTotal !== undefined &&
+		session.priorExistsTotal !== session.existsTotal
+			? { prior_exists_total: session.priorExistsTotal }
+			: {}),
 		backfilled_through_uid: backfilledThroughUid,
 		forward_floor_uid: forwardFloorUid,
 	});
@@ -1465,24 +1515,9 @@ async function emitAllMailInventoryDisclosure(
 			all_mail_exists: session.existsTotal,
 			backfilled_through_uid: backfilledThroughUid,
 			forward_floor_uid: forwardFloorUid,
-			historical_backfill_complete: historicalCursor.completed_at !== null,
+			historical_backfill_complete: position.complete,
 			uidvalidity: session.uidvalidityNum,
 		},
-	});
-}
-
-/** Record a bounded terminal outcome so a poison UID cannot replay forever. */
-async function emitHistoricalMessageSkip(
-	deps: PerMessageDeps,
-	uid: number | undefined,
-): Promise<void> {
-	await deps.emitProtocol({
-		type: "SKIP_RESULT",
-		stream: "messages",
-		reason: "historical_message_unaccounted",
-		message:
-			"A Gmail historical message could not be represented; the UID was recorded as a terminal gap.",
-		diagnostics: { uid: typeof uid === "number" ? uid : null },
 	});
 }
 
@@ -1775,15 +1810,13 @@ interface AllMailSession {
  * `validateTotalRecordCount`: a silently absent total that reads as success is
  * precisely the bug this contract exists to prevent.
  *
- * `priorTotal` is compared only WITHIN a UIDVALIDITY epoch (the caller passes
- * `undefined` across a re-key). A decrease inside one epoch is real deletion or
- * a server bug and must throw rather than pass quietly. Across a re-key the UID
- * space was rebuilt, so a different count is expected and is not loss.
+ * EXISTS is the mailbox's CURRENT inventory count, not a cursor. Owners delete
+ * and expunge mail without any UIDVALIDITY change, so a smaller count than the
+ * last run is ordinary. Rejecting it blocked every later sync until the
+ * mailbox regrew. Progress is owned by UIDs in `GmailProgressLedger`; a
+ * removed UID is simply absent from the next FETCH.
  */
-function validateExistsTotal(
-	value: unknown,
-	priorTotal: number | undefined,
-): number {
+function validateExistsTotal(value: unknown): number {
 	if (value === undefined || value === null) {
 		throw new Error(
 			"gmail_all_mail_exists_missing: SELECT reported no EXISTS for All Mail",
@@ -1800,11 +1833,6 @@ function validateExistsTotal(
 	}
 	if (value < 0) {
 		throw new Error("gmail_all_mail_exists_negative");
-	}
-	if (priorTotal !== undefined && value < priorTotal) {
-		throw new Error(
-			`gmail_all_mail_exists_decreased: ${value} < ${priorTotal}`,
-		);
 	}
 	return value;
 }
@@ -1895,18 +1923,14 @@ function deriveAllMailSession(
 	const priorMessagesBackfill: MessagesBackfillCursor =
 		messagesState.backfill ?? {};
 	const priorUidvalidity = priorAllMail.uidvalidity;
-	// Only compare EXISTS against a prior recorded in the SAME UID epoch. A
-	// UIDVALIDITY change means the mailbox was re-keyed, so the old count
-	// describes a different UID space and a lower new count is not loss —
-	// exactly the re-key-vs-deletion distinction the messages cursor already
-	// draws above. Comparing across the boundary would turn every legitimate
-	// re-key into a spurious throw.
+	// The prior EXISTS is meaningful only in the SAME UID epoch; it is kept for
+	// the inventory disclosure, never as a bound on the current count.
 	const priorExistsTotal =
 		priorUidvalidity === uidvalidityNum &&
 		typeof priorAllMail.exists === "number"
 			? priorAllMail.exists
 			: undefined;
-	const existsTotal = validateExistsTotal(mailbox.exists, priorExistsTotal);
+	const existsTotal = validateExistsTotal(mailbox.exists);
 	const attachmentBackfill =
 		priorAttachmentAllMail.uidvalidity === uidvalidityNum
 			? priorAttachmentAllMail
@@ -2316,38 +2340,6 @@ async function fetchBodies(
 	}
 }
 
-export function selectAllMailFetchRange(
-	session: { fullResync: boolean; priorUidnext: number },
-	_requested: Map<string, StreamRequest>,
-): string | null {
-	// Range is determined purely by the persisted forward cursor:
-	//   - Full resync (no prior uidvalidity, or it changed): no forward range;
-	//     historical work selects its own bounded UID page.
-	//   - Incremental: priorUidnext:* — only UIDs we haven't seen yet.
-	//
-	// The earlier behavior forced 1:* whenever the run scope included
-	// `attachments`. Rationale at the time was: enable attachment
-	// backfill when a user first turns the stream on. The cost was real:
-	// every Gmail sync re-scanned the entire mailbox forever, not just
-	// the once-after-enabling pass.
-	//
-	// The correct shape is to treat backfill as an explicit, per-stream
-	// operation rather than an implicit side effect of stream selection.
-	// For new attachments on new messages — the common case — the
-	// incremental range already covers them: new UIDs land in `metas`
-	// and `processMessage` emits attachment records for them
-	// (lines 357-361).
-	//
-	// Historical attachment recovery is still bounded by the dedicated
-	// attachment backfill cursor, but a pending attachment detail backlog also
-	// activates that path so a healthy-looking messages cursor does not hide
-	// durable attachment work.
-	if (session.fullResync) {
-		return null;
-	}
-	return `${session.priorUidnext}:*`;
-}
-
 export const DEFAULT_MESSAGES_BACKFILL_WINDOW_UIDS = 500;
 const MESSAGES_BACKFILL_WINDOW_UIDS_ENV =
 	"PDPP_GMAIL_MESSAGES_BACKFILL_WINDOW_UIDS";
@@ -2369,234 +2361,6 @@ export function resolveMessagesBackfillWindowUids(
 		return DEFAULT_MESSAGES_BACKFILL_WINDOW_UIDS;
 	}
 	return normalizeMessagesBackfillWindowUids(Number(raw));
-}
-
-/**
- * Select one historical message work unit. The unit is a UID interval, not a
- * positional page: Gmail UIDs may contain holes, but a successful fetch of the
- * interval accounts for those holes and lets the cursor advance to the exact
- * admitted interval end.
- */
-export function selectMessagesBackfillFetchRange(args: {
-	messagesBackfill: MessagesBackfillCursor;
-	maxWindowUids?: number;
-	uidnext: number | undefined;
-	uidvalidity?: number;
-}): string | null {
-	const cursor = args.messagesBackfill;
-	const sameEpoch =
-		args.uidvalidity === undefined || cursor.uidvalidity === args.uidvalidity;
-	const backfilledThrough = sameEpoch
-		? (cursor.backfilled_through_uid ?? 0)
-		: 0;
-	const targetUid = sameEpoch
-		? (cursor.target_uid ?? Math.max(0, (args.uidnext ?? 1) - 1))
-		: Math.max(0, (args.uidnext ?? 1) - 1);
-	const startUid = Math.max(1, backfilledThrough + 1);
-	if (startUid > targetUid) {
-		return null;
-	}
-	const windowUids = normalizeMessagesBackfillWindowUids(args.maxWindowUids);
-	return `${startUid}:${Math.min(targetUid, startUid + windowUids - 1)}`;
-}
-
-/**
- * Decide the ceiling the historical walk must reach on THIS run.
- *
- * The band defect this closes
- * ---------------------------
- * The two pointers divide one UID space, so they must MEET: every UID below
- * `forward_uidnext` that the forward pass did not actually walk has to fall
- * inside the historical walk's remit, or it belongs to neither walk and is
- * never fetched.
- *
- * The old rule was `prior.target_uid ?? priorEnd` — once written, the ceiling
- * only ever copied itself forward. Meanwhile the forward watermark advanced on
- * every run with new mail. So the ceiling froze at the mailbox's size on the
- * day the backfill started while the resume point climbed away from it, and the
- * interval between them reopened continuously and grew without bound. Repairing
- * the stored value (as `scripts/repair/gmail-backfill-target-extend.ts` did)
- * fixed one instance of the gap and not the mechanism: the very next run with
- * new mail reopened it.
- *
- * The rule here instead ties the ceiling to the ONE fact that makes the band
- * provably empty: the historical walk must own everything up to where the
- * forward walk genuinely resumes from. `forwardFloorUid` is that point minus
- * one — the last UID the forward pass will NOT fetch on the next run.
- *
- * Why this cannot rewind or thrash
- * --------------------------------
- *   - It only ever RAISES: `Math.max` against the prior ceiling. A ceiling that
- *     could fall would re-open `completed_at` on a finished walk and, worse,
- *     let `backfilled_through_uid` sit above its own target.
- *   - It never touches `backfilled_through_uid`. Progress through the mailbox
- *     (~150k UIDs on the live instance) is preserved exactly; raising a ceiling
- *     adds `new - old` UIDs of work and re-walks nothing already done.
- *   - It is bounded per run. The ceiling rises to a watermark the mailbox
- *     already passed, never to a live `uidnext` that moves while we walk, so
- *     the walk converges on a fixed target instead of chasing the mailbox
- *     forever. Termination is preserved: each run consumes a bounded page and
- *     the ceiling only gains the UIDs that arrived since the last run.
- */
-export function resolveMessagesBackfillTargetUid(args: {
-	forwardFloorUid: number;
-	prior: MessagesBackfillCursor;
-}): number {
-	const priorEnd = args.prior.backfilled_through_uid ?? 0;
-	const priorTarget = args.prior.target_uid ?? priorEnd;
-	// Monotonic by construction: the ceiling is a high-water mark, never a
-	// setting. A ceiling that fell below `backfilled_through_uid` would make the
-	// walk's own recorded progress illegal against its target.
-	return Math.max(priorTarget, args.forwardFloorUid);
-}
-
-export function advanceMessagesBackfillCursor(args: {
-	now: string;
-	pageEndUid: number;
-	/**
-	 * The cursor for this run, whose `target_uid` is the ceiling already raised
-	 * to meet the forward watermark by `resolveMessagesBackfillTargetUid`. The
-	 * ceiling is read from here rather than passed separately so there is exactly
-	 * one source of truth for it.
-	 */
-	prior: MessagesBackfillCursor;
-}): Required<MessagesBackfillCursor> {
-	const priorEnd = args.prior.backfilled_through_uid ?? 0;
-	const targetUid = args.prior.target_uid ?? priorEnd;
-	if (args.pageEndUid < priorEnd) {
-		throw new Error("messages backfill cursor must not regress");
-	}
-	if (args.pageEndUid > targetUid) {
-		throw new Error("messages backfill page must not pass its target");
-	}
-	return {
-		backfilled_through_uid: args.pageEndUid,
-		completed_at: args.pageEndUid >= targetUid ? args.now : null,
-		target_uid: targetUid,
-		uidvalidity: args.prior.uidvalidity ?? 0,
-	};
-}
-
-export function isAttachmentBackfillRequested(
-	streamsToBackfill: readonly string[] | undefined,
-): boolean {
-	return (
-		Array.isArray(streamsToBackfill) &&
-		streamsToBackfill.includes("attachments")
-	);
-}
-
-function hasPendingAttachmentBacklog(
-	detailGaps: readonly DetailGapStartEntry[] | undefined,
-): boolean {
-	return (
-		Array.isArray(detailGaps) &&
-		detailGaps.some(
-			(gap) => gap.stream === "attachments" && gap.status === "pending",
-		)
-	);
-}
-
-/**
- * True when the attachments All Mail cursor made real prior progress
- * (`backfilled_through_uid > 0`, so a run genuinely opted in and scanned at
- * least one page) but stalled short of the mailbox's current UID range with
- * `completed_at` still unset. Deliberately excludes a fresh/never-started
- * cursor (`backfilled_through_uid` 0 or absent): a connector that has never
- * been asked to backfill attachments must not have this signal alone force
- * one on every future scheduled run — that stays opt-in via
- * `streamsToBackfill` or a pending detail gap. This only catches the case
- * where backfill started, then the trigger that was driving it (an explicit
- * `streamsToBackfill` request) stopped arriving before the cursor reached
- * `completed_at`, leaving the cursor permanently stuck with no pending gaps
- * to signal it. Mirrors the range math in `selectAttachmentBackfillFetchRange`
- * without requiring a full session object, so the trigger and the range
- * selector agree on what "done" means.
- */
-function hasIncompleteAttachmentBackfill(args: {
-	attachmentBackfill?: AttachmentAllMailCursor | undefined;
-	priorUidnext?: number | undefined;
-}): boolean {
-	const cursor = args.attachmentBackfill;
-	if (!cursor || cursor.completed_at) {
-		return false;
-	}
-	const backfilledThrough = cursor.backfilled_through_uid ?? 0;
-	if (backfilledThrough <= 0) {
-		return false;
-	}
-	if (args.priorUidnext === undefined) {
-		return false;
-	}
-	const endUid = Math.max(0, args.priorUidnext - 1);
-	return backfilledThrough < endUid;
-}
-
-/**
- * Historical attachment backfill should run when the operator asked for it,
- * when the runtime hands the connector pending attachment detail gaps, or
- * when the attachments All Mail cursor already made progress and then
- * stalled. The gap check alone is not enough: a durable per-attachment gap
- * only exists once an attachment has been attempted and failed, so a cursor
- * that started backfilling (e.g. via a one-time `streamsToBackfill` request)
- * and then stopped receiving that request has zero pending gaps and would
- * otherwise look healthy forever, even though the overwhelming majority of
- * the mailbox was never scanned for attachments at all. The gap check is
- * still the recovery-first seam: durable attachment backlog should not look
- * healthy just because the ordinary messages cursor is current.
- */
-export function shouldBackfillAttachments(args: {
-	attachmentBackfill?: AttachmentAllMailCursor | undefined;
-	detailGaps?: readonly DetailGapStartEntry[] | undefined;
-	priorUidnext?: number | undefined;
-	streamsToBackfill?: readonly string[] | undefined;
-}): boolean {
-	return (
-		isAttachmentBackfillRequested(args.streamsToBackfill) ||
-		hasPendingAttachmentBacklog(args.detailGaps) ||
-		hasIncompleteAttachmentBackfill({
-			attachmentBackfill: args.attachmentBackfill,
-			priorUidnext: args.priorUidnext,
-		})
-	);
-}
-
-export function selectAttachmentBackfillFetchRange(session: {
-	attachmentBackfill: AttachmentAllMailCursor;
-	maxWindowUids?: number;
-	priorUidnext: number;
-}): string | null {
-	const backfilledThrough =
-		session.attachmentBackfill.backfilled_through_uid ?? 0;
-	const startUid = Math.max(1, backfilledThrough + 1);
-	const endUid = Math.max(0, session.priorUidnext - 1);
-	if (startUid > endUid) {
-		return null;
-	}
-	const maxWindowUids = normalizeAttachmentBackfillWindowUids(
-		session.maxWindowUids,
-	);
-	const windowEndUid = Math.min(endUid, startUid + maxWindowUids - 1);
-	return `${startUid}:${windowEndUid}`;
-}
-
-export function resolveAttachmentBackfillWindowUids(
-	env: NodeJS.ProcessEnv = process.env,
-): number {
-	const value = env[ATTACHMENT_BACKFILL_WINDOW_UIDS_ENV];
-	if (!(value && POSITIVE_INTEGER_PATTERN.test(value))) {
-		return DEFAULT_ATTACHMENT_BACKFILL_WINDOW_UIDS;
-	}
-	return normalizeAttachmentBackfillWindowUids(Number(value));
-}
-
-function normalizeAttachmentBackfillWindowUids(
-	value: number | undefined,
-): number {
-	if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
-		return value;
-	}
-	return DEFAULT_ATTACHMENT_BACKFILL_WINDOW_UIDS;
 }
 
 // ─── Historical attachment backfill: byte-cost-bounded page sizing ────────
@@ -3355,168 +3119,6 @@ async function recoverServedAttachmentGapsIfRequested(
 	});
 }
 
-export async function runAttachmentBackfillAndRecoveryPass(args: {
-	allMail: ListResponse;
-	attachmentBackfillRequested: boolean;
-	attachmentCoverage: AttachmentDetailCoverage | undefined;
-	client: GmailAttachmentBackfillClient;
-	deps: AllMailDeps;
-	fetchBodiesBound: FetchBodiesFn;
-	hydrateAttachment: HydrateAttachmentFn;
-	emit: (msg: EmittedMessage) => Promise<void>;
-	recoveredAttachmentGapIds: Set<string>;
-	recoveryOnly?: boolean;
-	session: AllMailSession;
-}): Promise<void> {
-	const attachmentCoverage =
-		args.attachmentCoverage ?? makeAttachmentDetailCoverage();
-	if (args.recoveryOnly === true) {
-		await recoverServedAttachmentGapsIfRequested(args.client, {
-			attachmentCoverage,
-			detailGaps: args.deps.detailGaps,
-			emitProtocol: args.emit,
-			emitRecord: args.deps.emitRecord,
-			hydrateAttachment: args.hydrateAttachment,
-			requested: args.deps.requested,
-			recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
-		});
-		return;
-	}
-
-	if (!args.attachmentBackfillRequested) {
-		return;
-	}
-
-	const servedAttachmentRecoveryRequested =
-		servedAttachmentDetailGaps(args.deps.detailGaps).length > 0;
-	if (servedAttachmentRecoveryRequested) {
-		await recoverServedAttachmentGapsIfRequested(args.client, {
-			attachmentCoverage,
-			detailGaps: args.deps.detailGaps,
-			emitProtocol: args.emit,
-			emitRecord: args.deps.emitRecord,
-			hydrateAttachment: args.hydrateAttachment,
-			requested: args.deps.requested,
-			recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
-		});
-		return;
-	}
-
-	const attachmentBackfillRange = selectAttachmentBackfillFetchRange({
-		...args.session,
-		maxWindowUids: resolveAttachmentBackfillWindowUids(),
-	});
-	if (attachmentBackfillRange) {
-		// Probe metadata (cheap: envelope + BODYSTRUCTURE, no body/attachment
-		// bytes transferred) across the coarse range to learn each UID's known
-		// attachment byte cost, then trim to a byte-cost-bounded page. The
-		// durable cursor below only advances to the trimmed page's end UID,
-		// not the coarse range's end — so a page that stops well short of the
-		// coarse ceiling still commits correctly and the next run picks up
-		// where this page left off.
-		const probeMetas = await collectMetadata(
-			args.client,
-			attachmentBackfillRange,
-		);
-		const byteBudget = resolveAttachmentBackfillPageByteBudget();
-		const { backfillMetas, backfillWindowEndUid } = planAttachmentBackfillPage(
-			probeMetas,
-			byteBudget,
-			Number(attachmentBackfillRange.split(":")[1]),
-		);
-		gmailDiagnostic("attachment_backfill_start", {
-			uid_range: `${attachmentBackfillRange.split(":")[0]}:${backfillWindowEndUid}`,
-			mailbox: args.allMail.path,
-			byte_budget: byteBudget,
-		});
-		await args.emit({
-			type: "PROGRESS",
-			stream: "attachments",
-			message: "Downloading attachments from older messages",
-		});
-		const backfillSummary = createAttachmentBackfillSummary();
-		await emitMessagesPass(
-			{
-				attachmentCoverage,
-				emitProtocol: args.emit,
-				emitProgress: (m) => emit({ ...m, stream: "attachments" }),
-				emitRecord: async (stream, data, keyField): Promise<boolean> => {
-					const emitted = await args.deps.emitRecord(stream, data, keyField);
-					if (stream === "attachments" && emitted === true) {
-						addAttachmentBackfillRecordToSummary(backfillSummary, data);
-					}
-					return emitted === true;
-				},
-				fetchBodies: args.fetchBodiesBound,
-				hydrateAttachment: args.hydrateAttachment,
-				recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
-				nowIso,
-				requested: new Map([
-					[
-						"attachments",
-						args.deps.requested.get("attachments") ?? { name: "attachments" },
-					],
-				]),
-				timeRange: args.deps.requested.get("attachments")?.time_range,
-				wantBodies: false,
-				wantMessages: false,
-			},
-			backfillMetas,
-		);
-		gmailDiagnostic("attachment_backfill_summary", { ...backfillSummary });
-		await args.emit({
-			type: "PROGRESS",
-			stream: "attachments",
-			message: attachmentBackfillProgressMessage(backfillSummary),
-			count: backfillSummary.hydrated,
-			total:
-				backfillSummary.hydrated +
-				backfillSummary.too_large +
-				backfillSummary.failed +
-				backfillSummary.unavailable_skipped,
-		});
-		if (attachmentCoverage.localEmitRejected) {
-			await reportAttachmentCheckpointHold(args.emit);
-			return;
-		}
-		await args.emit({
-			type: "STATE",
-			stream: "attachments",
-			cursor: {
-				all_mail: {
-					uidvalidity: args.session.uidvalidityNum,
-					backfilled_through_uid: backfillWindowEndUid,
-					completed_at:
-						backfillWindowEndUid >= Math.max(0, args.session.priorUidnext - 1)
-							? nowIso()
-							: null,
-				},
-			},
-		});
-	} else {
-		const emptySummary = createAttachmentBackfillSummary();
-		gmailDiagnostic("attachment_backfill_summary", { ...emptySummary });
-		await args.emit({
-			type: "PROGRESS",
-			stream: "attachments",
-			message: attachmentBackfillProgressMessage(emptySummary),
-			count: 0,
-			total: 0,
-		});
-		await args.emit({
-			type: "STATE",
-			stream: "attachments",
-			cursor: {
-				all_mail: {
-					uidvalidity: args.session.uidvalidityNum,
-					backfilled_through_uid: Math.max(0, args.session.priorUidnext - 1),
-					completed_at: nowIso(),
-				},
-			},
-		});
-	}
-}
-
 /**
  * Plan one historical attachment backfill page from probe metadata: sort
  * ascending by UID (IMAP fetch responses are not guaranteed to arrive in
@@ -4269,11 +3871,16 @@ export function validateAttachmentHydrationPreflight(args: {
 	env?: NodeJS.ProcessEnv;
 	detailGaps?: readonly DetailGapStartEntry[] | undefined;
 	requested: Map<string, StreamRequest>;
-	streamsToBackfill?: readonly string[] | undefined;
 }): string | null {
 	const env = args.env ?? process.env;
+	// Attachments in scope, or any pending attachment gap the runtime may
+	// serve for recovery. Broader than the served-gap filter on purpose: a
+	// missing upload config is better reported before the run than during it.
 	const hydrationRequested =
-		args.requested.has("attachments") || shouldBackfillAttachments(args);
+		args.requested.has("attachments") ||
+		(args.detailGaps ?? []).some(
+			(gap) => gap.stream === "attachments" && gap.status === "pending",
+		);
 	if (!hydrationRequested) {
 		return null;
 	}
@@ -4502,67 +4109,103 @@ export async function runDeltaPass(
 
 // ─── Threads pass ───────────────────────────────────────────────────────
 
-async function runThreadsPass(
-	client: Pick<ImapFlow, "fetch">,
-	fetchRange: string,
+/** X-GM-THRID terms per SEARCH; Gmail evaluates the OR server-side. */
+const THREAD_SEARCH_BATCH = 50;
+/** Member UIDs per FETCH when rebuilding threads. */
+const THREAD_MEMBER_FETCH_BATCH = 500;
+
+const THREAD_MEMBER_QUERY: ExtendedFetchQuery = {
+	uid: true,
+	threadId: true,
+	emailId: true,
+	envelope: true,
+	flags: true,
+	internalDate: true,
+	// Needed for per-thread labels + has_attachments aggregation.
+	labels: true,
+	bodyStructure: true,
+};
+
+/**
+ * Rebuild each named thread from its complete X-GM-THRID membership and emit
+ * the rows whose fingerprint moved.
+ *
+ * A bounded UID page only says WHICH threads to rebuild. It never supplies a
+ * thread's members: a thread that spans pages has a fragment on each one, and
+ * a row built from a fragment would replace the whole conversation under the
+ * same key. A member expunged between SEARCH and FETCH is simply absent.
+ */
+export async function rebuildThreads(
+	client: Pick<ImapFlow, "fetch" | "search">,
+	/** The page messages whose threads to rebuild; each is a known member. */
+	seeds: readonly Pick<FetchMessageObject, "uid" | "threadId">[],
 	emitRecord: EmitRecordFn,
 	cursor: FingerprintCursor,
-): Promise<number> {
+): Promise<void> {
+	const ids = [
+		...new Set(seeds.map((m) => String(m.threadId ?? "")).filter(Boolean)),
+	];
+	if (ids.length === 0) return;
 	await emit({
 		type: "PROGRESS",
 		stream: "threads",
 		message: "Deriving threads from All Mail",
 	});
-	const threadAgg = new Map<string, ThreadAggregate>();
-	const threadQuery: ExtendedFetchQuery = {
-		uid: true,
-		threadId: true,
-		emailId: true,
-		envelope: true,
-		flags: true,
-		internalDate: true,
-		// Needed for per-thread labels + has_attachments aggregation.
-		labels: true,
-		bodyStructure: true,
-	};
-	for await (const msg of client.fetch(fetchRange, threadQuery, {
-		uid: true,
-	})) {
-		const tid = String(msg.threadId ?? "");
-		if (!tid) {
-			continue;
-		}
-		const env = msg.envelope ?? {};
-		const rcv = internalDateToIso(msg.internalDate);
-		const msgHasAttachments =
-			decodeBodystructureForAttachments(
-				msg.bodyStructure,
-				String(msg.emailId ?? tid),
-				rcv,
-			).length > 0;
-		const next = updateThreadAggregate(threadAgg.get(tid), {
-			flagsArr: toFlagsArray(msg.flags),
-			hasAttachments: msgHasAttachments,
-			labels: toLabelsArray(msg.labels),
-			participants: envelopeParticipants(env),
-			receivedAt: rcv,
-			subject: env.subject || null,
-			threadId: tid,
-		});
-		threadAgg.set(tid, next);
+	// The seeds are members we already hold; SEARCH adds the members outside
+	// this page. A seed is never dropped because SEARCH did not echo it.
+	const memberUids = new Set<number>(
+		seeds.filter((m) => m.threadId).map((m) => m.uid),
+	);
+	for (let i = 0; i < ids.length; i += THREAD_SEARCH_BATCH) {
+		const batch = ids.slice(i, i + THREAD_SEARCH_BATCH);
+		const query =
+			batch.length === 1
+				? { threadId: batch[0] }
+				: { or: batch.map((threadId) => ({ threadId })) };
+		const uids = await client.search(query, { uid: true });
+		for (const uid of uids || []) memberUids.add(uid);
 	}
-	await emitChangedThreads(threadAgg.values(), cursor, emitRecord);
-	return threadAgg.size;
+	const wanted = new Set(ids);
+	const aggregates = new Map<string, ThreadAggregate>();
+	const sorted = [...memberUids].sort((a, b) => a - b);
+	for (let i = 0; i < sorted.length; i += THREAD_MEMBER_FETCH_BATCH) {
+		const range = sorted.slice(i, i + THREAD_MEMBER_FETCH_BATCH).join(",");
+		for await (const msg of client.fetch(range, THREAD_MEMBER_QUERY, {
+			uid: true,
+		})) {
+			const tid = String(msg.threadId ?? "");
+			if (!wanted.has(tid)) continue;
+			const env = msg.envelope ?? {};
+			const rcv = internalDateToIso(msg.internalDate);
+			const msgHasAttachments =
+				decodeBodystructureForAttachments(
+					msg.bodyStructure,
+					String(msg.emailId ?? tid),
+					rcv,
+				).length > 0;
+			aggregates.set(
+				tid,
+				updateThreadAggregate(aggregates.get(tid), {
+					flagsArr: toFlagsArray(msg.flags),
+					hasAttachments: msgHasAttachments,
+					labels: toLabelsArray(msg.labels),
+					participants: envelopeParticipants(env),
+					receivedAt: rcv,
+					subject: env.subject || null,
+					threadId: tid,
+				}),
+			);
+		}
+	}
+	await emitChangedThreads(aggregates.values(), cursor, emitRecord);
 }
 
 /**
  * Gate every aggregated thread through the shared fingerprint cursor and
  * emit only the records whose semantic shape moved since the prior run.
- * Pruning stale ids is the caller's responsibility — `runThreadsPass`
- * receives one bounded UID range per scheduled run. Threads with empty ids are
- * silently dropped: the upstream IMAP loop already filters them. The caller
- * deliberately does not prune stale fingerprints on bounded pages; pruning is
- * only sound after the historical high-water boundary is complete.
+ * Every aggregate passed in is a whole thread (see `rebuildThreads`). The
+ * caller deliberately does not prune stale fingerprints on bounded pages;
+ * pruning is only sound after the historical high-water boundary is complete.
  *
  * Exported so the two-pass churn invariant can be exercised without
  * standing up an IMAP fixture.
@@ -4623,7 +4266,8 @@ interface AllMailDeps {
 	emittedAt: string;
 	recoveryOnly?: boolean;
 	requested: Map<string, StreamRequest>;
-	streamsToBackfill?: readonly string[] | undefined;
+	/** Test seam; production uploads through the runtime blob endpoint. */
+	uploadBodyBlob?: UploadBodyBlobFn;
 }
 
 // `mailbox` + `close` on top of the attachment-backfill client's
@@ -4631,12 +4275,64 @@ interface AllMailDeps {
 // `getMailboxLock` is deliberately excluded: `main()` acquires the lock
 // before calling into this function, so this function never needs it.
 type GmailAllMailClient = GmailAttachmentBackfillClient &
-	Pick<ImapFlow, "close" | "download" | "mailbox">;
+	Pick<ImapFlow, "close" | "download" | "mailbox"> &
+	Partial<Pick<ImapFlow, "usable">>;
+
+/** Ledger streams in a run's scope, in ledger order. */
+function requestedLedgerStreams(
+	requested: ReadonlyMap<string, StreamRequest>,
+): Set<LedgerStream> {
+	return new Set(LEDGER_STREAMS.filter((s) => requested.has(s)));
+}
+
+/** Open the progress ledger from prior STATE and this run's SELECT. */
+function openProgressLedger(
+	state: Record<string, unknown>,
+	session: AllMailSession,
+	uidnext: number,
+	requested: ReadonlyMap<string, StreamRequest>,
+): GmailProgressLedger {
+	const messagesState = (state.messages ?? {}) as PriorMessagesState & {
+		progress?: unknown;
+	};
+	const attachmentsBackfill = session.attachmentBackfill;
+	return new GmailProgressLedger({
+		persisted: messagesState.progress,
+		legacy: {
+			forwardUidnext: session.priorUidnext,
+			messagesBackfillThrough: session.messagesBackfill.backfilled_through_uid,
+			// Only a same-epoch attachments cursor is attachment evidence.
+			attachmentsBackfillThrough:
+				attachmentsBackfill.uidvalidity === session.uidvalidityNum
+					? attachmentsBackfill.backfilled_through_uid
+					: undefined,
+		},
+		fullResync: session.fullResync,
+		uidvalidity: session.uidvalidityNum,
+		uidnext,
+		requested: requestedLedgerStreams(requested),
+		windowUids: resolveMessagesBackfillWindowUids(),
+	});
+}
+
+/** Fetch one lane's metadata, or nothing when the ledger planned no lane. */
+async function collectLaneMetadata(
+	client: Pick<ImapFlow, "fetch" | "search">,
+	range: string | null,
+	sinceDate: string | null,
+	sinceIso: string | null,
+): Promise<FetchMessageObject[]> {
+	return range ? collectMetadata(client, range, sinceDate, sinceIso) : [];
+}
 
 /**
- * Drive Pass 1 (new messages or full resync), Pass 2 (flag/label deltas),
- * threads aggregation, and the final STATE emit — all inside the mailbox
- * lock. The list-mailbox lookup happens in `main()` before entering here.
+ * Drive the threads pass, the message pass, served attachment recovery, the
+ * flag/label delta pass, and the final STATE — all inside the mailbox lock.
+ * The list-mailbox lookup happens in `main()` before entering here.
+ *
+ * `GmailProgressLedger` decides every range, cursor, coverage count,
+ * continuation and completeness claim. This function only performs the I/O
+ * the ledger names and reports one outcome per (UID, stream) back to it.
  */
 export async function runAllMailPasses(
 	client: GmailAllMailClient,
@@ -4654,63 +4350,19 @@ export async function runAllMailPasses(
 		fail("missing UIDVALIDITY on All Mail mailbox");
 		return;
 	}
+	if (session.uidnext === undefined) {
+		fail("missing UIDNEXT on All Mail mailbox");
+		return;
+	}
 
-	// Forward progress and historical progress are separate. A first run has no
-	// forward range: it receives one bounded historical UID page below.
 	const timeRange =
 		deps.requested.get("messages")?.time_range ||
 		deps.requested.get("attachments")?.time_range;
-	const messageHistoryRequested =
-		deps.requested.has("messages") ||
-		deps.requested.has("message_bodies") ||
-		deps.requested.has("attachments") ||
-		deps.requested.has("threads");
-	const forwardFetchRange = selectAllMailFetchRange(session, deps.requested);
-	// Where the forward walk resumes on the NEXT run, and therefore the last UID
-	// it will not fetch. The historical walk must own everything up to here or
-	// the interval between the two belongs to neither (see
-	// `resolveMessagesBackfillTargetUid`).
-	//
-	// On a full resync there is no forward range at all: the forward watermark
-	// below is written from the live `uidnext` without a single UID having been
-	// walked, so the ENTIRE mailbox below it is historical work and the ceiling
-	// must say so. Reading the same `session.uidnext` the watermark is written
-	// from is what keeps the two pointers describing one space.
-	const forwardFloorUid = Math.max(
-		0,
-		(session.uidnext ?? session.priorUidnext) - 1,
-	);
-	const historicalTargetUid = resolveMessagesBackfillTargetUid({
-		forwardFloorUid,
-		prior: session.messagesBackfill,
-	});
-	const historicalCursor: MessagesBackfillCursor = {
-		...session.messagesBackfill,
-		backfilled_through_uid:
-			session.messagesBackfill.backfilled_through_uid ?? 0,
-		completed_at: session.messagesBackfill.completed_at ?? null,
-		target_uid: historicalTargetUid,
-		uidvalidity: session.uidvalidityNum,
-	};
-	const historicalFetchRange = messageHistoryRequested
-		? selectMessagesBackfillFetchRange({
-				messagesBackfill: historicalCursor,
-				uidnext: session.uidnext,
-				uidvalidity: session.uidvalidityNum,
-				maxWindowUids: resolveMessagesBackfillWindowUids(),
-			})
-		: null;
 	// Parse declared collection_scope.since into IMAP date format (day-granular)
 	// for the bounded SINCE search criterion, and keep the exact ISO for
 	// post-filtering to honor time-of-day precision.
 	const sinceDate = timeRange?.since ? isoToImapDate(timeRange.since) : null;
 	const sinceIso = timeRange?.since ?? null;
-	const attachmentBackfillRequested = shouldBackfillAttachments({
-		attachmentBackfill: session.attachmentBackfill,
-		detailGaps: deps.detailGaps,
-		priorUidnext: session.priorUidnext,
-		streamsToBackfill: deps.streamsToBackfill,
-	});
 	const servedAttachmentRecoveryRequested =
 		servedAttachmentDetailGaps(deps.detailGaps).length > 0;
 	const fetchBodiesBound: FetchBodiesFn = (
@@ -4757,107 +4409,150 @@ export async function runAllMailPasses(
 		progressMinIntervalMs: resolveAttachmentProgressMinIntervalMs(),
 		uploadBlob: buildRuntimeBlobUploader(),
 	});
-	// Accumulate honest attachments detail-coverage across BOTH the primary pass
-	// and the historical backfill pass below, so a single DETAIL_COVERAGE can
-	// report considered-vs-hydrated for every attachment this run attempted.
-	// Only when `attachments` is in scope — otherwise no hydration attempts run
-	// and there is no denominator to report.
+	// One attachments detail-coverage accumulator for every attachment this run
+	// attempts (walk and served recovery), so a single DETAIL_COVERAGE reports
+	// considered-vs-hydrated for all of them.
 	const wantsAttachments =
-		deps.requested.has("attachments") ||
-		attachmentBackfillRequested ||
-		servedAttachmentRecoveryRequested;
+		deps.requested.has("attachments") || servedAttachmentRecoveryRequested;
 	const attachmentCoverage = wantsAttachments
 		? makeAttachmentDetailCoverage()
 		: undefined;
 	const recoveredAttachmentGapIds = new Set<string>();
+	const recoverServed = () =>
+		recoverServedAttachmentGapsIfRequested(client, {
+			attachmentCoverage,
+			detailGaps: deps.detailGaps,
+			emitProtocol: emit,
+			emitRecord: deps.emitRecord,
+			hydrateAttachment,
+			requested: deps.requested,
+			recoveredAttachmentGapIds,
+		});
 
 	if (deps.recoveryOnly === true) {
 		if (servedAttachmentRecoveryRequested) {
-			await runAttachmentBackfillAndRecoveryPass({
-				allMail,
-				attachmentBackfillRequested,
-				attachmentCoverage,
-				client,
-				deps,
-				emit,
-				fetchBodiesBound,
-				hydrateAttachment,
-				recoveredAttachmentGapIds,
-				recoveryOnly: true,
-				session,
-			});
+			await recoverServed();
 			// Recovery-only mode touches exactly the served gaps it was handed and
 			// returns before the ordinary Gmail walk, so it never establishes a
 			// mailbox boundary — its counts describe a retry list, not an inventory.
 			// It still emits its DETAIL_GAPs below; only the coverage CLAIM is
-			// withheld (see `attachmentsCoverageBoundaryEstablished`).
+			// withheld.
 			await emitAttachmentDetailCoverage(attachmentCoverage, false);
 			await emitAttachmentDetailGaps(attachmentCoverage);
 		}
 		return;
 	}
 
-	let fetchProgressMessage = "No new messages to fetch";
-	if (historicalFetchRange) {
-		fetchProgressMessage = "Fetching older messages";
-	} else if (forwardFetchRange) {
-		fetchProgressMessage = "Fetching new messages";
+	const ledger = openProgressLedger(
+		state,
+		session,
+		session.uidnext,
+		deps.requested,
+	);
+	if (ledger.resetReason) {
+		gmailDiagnostic("progress_ledger_reset", { reason: ledger.resetReason });
 	}
+	// Served recovery and an attachment-only history page would both spend this
+	// run's attachment byte budget. Recovery goes first; the page waits a run.
+	const attachmentOnlyPage =
+		ledger.historicalStreams.length === 1 &&
+		ledger.historicalStreams[0] === "attachments";
+	if (servedAttachmentRecoveryRequested && attachmentOnlyPage) {
+		ledger.skipHistorical();
+	}
+
+	const historical = ledger.historical;
+	let historicalMetas = await collectLaneMetadata(
+		client,
+		historical ? `${historical.start}:${historical.end}` : null,
+		sinceDate,
+		sinceIso,
+	);
+	if (historical && attachmentOnlyPage) {
+		// An attachment-only page is sized by attachment bytes, not UIDs. A page
+		// shared with other streams keeps the UID window, as before.
+		const plan = planAttachmentBackfillPage(
+			historicalMetas,
+			resolveAttachmentBackfillPageByteBudget(),
+			historical.end,
+		);
+		if (plan.backfillMetas.length < historicalMetas.length) {
+			ledger.limitHistorical(plan.backfillWindowEndUid);
+			historicalMetas = plan.backfillMetas;
+		}
+	}
+	const forward = ledger.forward;
+	const forwardMetas = await collectLaneMetadata(
+		client,
+		forward ? `${forward.start}:${forward.end}` : null,
+		sinceDate,
+		sinceIso,
+	);
+	const debtUids = ledger.debtUids;
+	const debtMetas = await collectLaneMetadata(
+		client,
+		debtUids.length > 0 ? debtUids.join(",") : null,
+		sinceDate,
+		sinceIso,
+	);
+	ledger.recordAbsentDebt(new Set(debtMetas.map((m) => m.uid)));
+	const byUid = new Map<number, FetchMessageObject>();
+	for (const m of [...historicalMetas, ...forwardMetas, ...debtMetas]) {
+		if (ledger.expect(m.uid).length > 0) byUid.set(m.uid, m);
+	}
+	const metas = [...byUid.values()].sort((a, b) => a.uid - b.uid);
+
+	const page = ledger.historical;
 	gmailDiagnostic("message_fetch_range", {
-		kind: historicalFetchRange
-			? "historical"
-			: forwardFetchRange
-				? "forward"
-				: "none",
-		uid_range: historicalFetchRange ?? forwardFetchRange ?? undefined,
+		historical: page ? `${page.start}:${page.end}` : null,
+		forward: forward ? `${forward.start}:${forward.end}` : null,
+		debt_uids: debtUids.length,
 		mailbox: allMail.path,
 	});
+	let fetchProgressMessage = "No new messages to fetch";
+	if (page) {
+		fetchProgressMessage = "Fetching older messages";
+	} else if (forward) {
+		fetchProgressMessage = "Fetching new messages";
+	}
 	await emit({ type: "PROGRESS", message: fetchProgressMessage });
+	await emit({
+		type: "PROGRESS",
+		stream: "messages",
+		message: `Collected ${metas.length} headers; beginning body pass`,
+	});
+	await emitAllMailInventoryDisclosure(emit, session, ledger.position);
 
-	// Phase A: pull all metadata into an array up-front.
-	// Phase B: for each metadata row, do any additional IMAP commands
-	// (body fetches) we need — we cannot issue other IMAP commands WHILE the
-	// outer fetch iterator is still open, because imapflow multiplexes one
-	// command at a time over a single connection and a nested call hangs the
-	// outer iterator.
-	// THREADS stream first (parent-first convention, Tranche C 2026-04-23).
-	// Threads is derived from its own `1:*` IMAP fetch that aggregates by
-	// thread_id — it doesn't depend on the per-message body pass below, so
-	// emitting it first gives downstream consumers the parent record before
-	// any message records arrive. The cost is one extra IMAP round-trip
-	// before the message pass can start; that's already how it ran anyway
-	// (this fetch happened at the end before the reorder), so no throughput
-	// change.
+	// THREADS first (parent-first convention, Tranche C 2026-04-23), so
+	// downstream consumers get the parent record before its messages.
 	if (deps.requested.has("threads")) {
 		// Per-thread fingerprint cursor via the shared helper. The prior STATE
 		// shape (`state.threads.thread_fingerprints`) predates the helper's
 		// default `fingerprints` key, so the prior map is decoded by the
-		// gmail-local reader and handed in via `priorFingerprints`. The
-		// cursor still seeds its next map from the prior so threads we skip
-		// emitting carry their fingerprint forward unchanged.
+		// gmail-local reader and handed in via `priorFingerprints`.
 		const threadCursor = openFingerprintCursor(state, {
 			priorFingerprints: readPriorThreadFingerprints(state),
 		});
-		const threadRanges = [historicalFetchRange, forwardFetchRange].filter(
-			(range): range is string => range !== null,
+		const threadMetas = metas.filter((m) =>
+			ledger.expect(m.uid).includes("threads"),
 		);
-		let historicalThreadItemsConsidered = 0;
-		for (const threadRange of threadRanges) {
-			const considered = await runThreadsPass(
-				client,
-				threadRange,
-				deps.emitRecord,
-				threadCursor,
-			);
-			if (threadRange === historicalFetchRange) {
-				historicalThreadItemsConsidered = considered;
-			}
+		let threadFailure: string | null = null;
+		try {
+			await rebuildThreads(client, threadMetas, deps.emitRecord, threadCursor);
+		} catch (error) {
+			if (client.usable === false) throw error;
+			threadFailure = messageFailureClass(error);
 		}
-		// The threads STATE cursor carries the next-run fingerprint map.
-		// Emitted here (inside the mailbox lock) so it's persisted right
-		// after the threads pass and before the messages pass; if the
-		// messages pass crashes, the threads cursor still holds and we
-		// don't re-emit every thread on retry.
+		for (const m of threadMetas) {
+			const outcome: UidOutcome = !m.threadId
+				? { kind: "terminal", reason: "missing_thread_id" }
+				: threadFailure
+					? { kind: "failed", failure: threadFailure }
+					: { kind: "covered" };
+			ledger.record(m.uid, ["threads"], outcome);
+		}
+		// The threads STATE carries only the next-run fingerprint map; thread
+		// PROGRESS lives in the ledger with every other stream.
 		await emit({
 			type: "STATE",
 			stream: "threads",
@@ -4866,133 +4561,112 @@ export async function runAllMailPasses(
 				thread_fingerprints: threadCursor.toState(),
 			},
 		});
-		if (historicalFetchRange) {
-			const historicalPageEndUid = Number(historicalFetchRange.split(":")[1]);
-			await emit(
-				buildDetailCoverageMessage({
-					considered: historicalThreadItemsConsidered,
-					covered: historicalThreadItemsConsidered,
-					hydratedKeys: [],
-					requiredKeys: [],
-					stateStream: "threads",
-					stream: "threads",
-				}),
-			);
-			if (historicalPageEndUid < historicalTargetUid) {
-				await emitHistoricalContinuationSkip(emit, "threads", {
-					boundary: String(historicalCursor.uidvalidity),
-					considered: historicalThreadItemsConsidered,
-					covered: historicalThreadItemsConsidered,
-					slice_start: Number(historicalFetchRange.split(":")[0]),
-					slice_end: historicalPageEndUid,
-				});
-			}
-		}
 	}
 
-	const historicalMetas: FetchMessageObject[] = [];
-	const forwardMetas: FetchMessageObject[] = [];
-	const metas: FetchMessageObject[] = [];
-	if (historicalFetchRange) {
-		historicalMetas.push(
-			...(await collectMetadata(
-				client,
-				historicalFetchRange,
-				sinceDate,
-				sinceIso,
-			)),
-		);
-	}
-	if (forwardFetchRange) {
-		forwardMetas.push(
-			...(await collectMetadata(
-				client,
-				forwardFetchRange,
-				sinceDate,
-				sinceIso,
-			)),
-		);
-	}
-	metas.push(...historicalMetas, ...forwardMetas);
-	await emit({
-		type: "PROGRESS",
-		stream: "messages",
-		message: `Collected ${metas.length} headers; beginning body pass`,
-	});
-	await emitAllMailInventoryDisclosure(
-		emit,
-		session,
-		historicalCursor,
-		forwardFloorUid,
-	);
 	const perMessageDeps: PerMessageDeps = {
 		...(attachmentCoverage ? { attachmentCoverage } : {}),
+		// The walk recovers a served gap it hydrates, so served recovery below
+		// does not download the same part again.
+		detailGaps: deps.detailGaps,
+		connectionUsable: () => client.usable !== false,
 		emitProtocol: emit,
 		emitProgress: (m) => emit(m),
 		emitRecord: deps.emitRecord,
-		failOnError: false,
 		fetchBodies: fetchBodiesBound,
 		hydrateAttachment,
 		recoveredAttachmentGapIds,
 		nowIso,
-		uploadBodyBlob: buildRuntimeBlobUploader(),
+		uploadBodyBlob: deps.uploadBodyBlob ?? buildRuntimeBlobUploader(),
 		requested: deps.requested,
 		timeRange,
-		wantBodies: deps.requested.has("message_bodies"),
-		wantMessages: deps.requested.has("messages"),
+		wantBodies: false,
+		wantMessages: false,
 	};
-	const historicalMessageCoverage = await emitMessagesPass(
-		{ ...perMessageDeps, failOnError: historicalFetchRange !== null },
-		historicalMetas,
-	);
-	const forwardMessageCoverage = await emitMessagesPass(
-		perMessageDeps,
-		forwardMetas,
-	);
+	// Operator-facing tally of the attachment records this run emitted.
+	const attachmentSummary = createAttachmentBackfillSummary();
+	const emitRecordWithSummary: EmitRecordFn = async (
+		stream,
+		data,
+		keyField,
+	): Promise<boolean> => {
+		const emitted = (await deps.emitRecord(stream, data, keyField)) !== false;
+		if (stream === "attachments" && emitted) {
+			addAttachmentBackfillRecordToSummary(attachmentSummary, data);
+		}
+		return emitted;
+	};
+	let processed = 0;
+	for (const msg of metas) {
+		const streams = ledger
+			.expect(msg.uid)
+			.filter((s): s is MessageStream => s !== "threads");
+		if (streams.length === 0) continue;
+		const outcome = await settleMessage(
+			{
+				...perMessageDeps,
+				requested: new Map(
+					[...deps.requested].filter(
+						([name]) =>
+							!isLedgerStreamName(name) ||
+							(name !== "threads" && streams.includes(name)),
+					),
+				),
+				emitRecord: emitRecordWithSummary,
+				wantBodies: streams.includes("message_bodies"),
+				wantMessages: streams.includes("messages"),
+			},
+			msg,
+		);
+		for (const s of streams) {
+			ledger.record(
+				msg.uid,
+				[s],
+				outcome[s] ?? { kind: "failed", failure: "outcome_missing" },
+			);
+		}
+		if (
+			Object.values(outcome).some(
+				(o) => o.kind === "terminal" && o.reason === "missing_message_id",
+			)
+		) {
+			await emitUnrepresentableMessageSkip(msg.uid);
+		}
+		processed += 1;
+		if (processed % FETCH_MSG_PROGRESS === 0) {
+			await emit({
+				type: "PROGRESS",
+				stream: "messages",
+				message: `Fetched ${processed} messages`,
+				count: processed,
+				total: metas.length,
+			});
+		}
+	}
 	// `message_bodies` deliberately emits NO DETAIL_COVERAGE. The manifest
 	// declares it `state_stream: messages`, i.e. a static single-parent detail
 	// stream, and such a stream's checkpoint status is projected from the
 	// declared parent's own commit outcome — the runtime rejects the run
 	// outright if it emits coverage of its own
 	// (`validateDetailCoverageAgainstManifest`).
-	//
-	// It could not honestly emit one anyway. The numbers available here are the
-	// *parent* pass's considered/covered — how many MESSAGES were walked, not
-	// how many bodies were hydrated against a per-key denominator. Re-reporting
-	// the parent's counts under the body stream's name is the `covered ==
-	// considered` fabrication this codebase has worked to eliminate: it would
-	// claim every walked message proved a body, including the ones whose body
-	// fetch was skipped or failed. `attachments` is the contrast — it earns its
-	// coverage from a real attempt-per-key tally (see
-	// `emitAttachmentDetailCoverage`), which is why it may emit at all.
 
-	await runAttachmentBackfillAndRecoveryPass({
-		allMail,
-		attachmentBackfillRequested,
-		attachmentCoverage,
-		client,
-		deps,
-		emit,
-		fetchBodiesBound,
-		hydrateAttachment,
-		recoveredAttachmentGapIds,
-		recoveryOnly: false,
-		session,
-	});
+	if (page && ledger.historicalStreams.includes("attachments")) {
+		gmailDiagnostic("attachment_backfill_summary", { ...attachmentSummary });
+		await emit({
+			type: "PROGRESS",
+			stream: "attachments",
+			message: attachmentBackfillProgressMessage(attachmentSummary),
+			count: attachmentSummary.hydrated,
+			total:
+				attachmentSummary.hydrated +
+				attachmentSummary.too_large +
+				attachmentSummary.failed +
+				attachmentSummary.unavailable_skipped,
+		});
+	}
 
-	// Emit the per-run attachments coverage report after every attachments
-	// record (primary pass + historical backfill) has settled and before the
-	// messages STATE cursor commits — the ordering the progress-evidence
-	// contract expects (records, then DETAIL_COVERAGE, then STATE).
-	await emitAttachmentDetailCoverage(
-		attachmentCoverage,
-		attachmentsCoverageBoundaryEstablished(session),
-	);
-	// Then one matching DETAIL_GAP per failed attachment, so the commit-gate can
-	// credit each gap_keys entry against a durable pending gap. Without this the
-	// gate aborts an otherwise-successful run and the messages cursor never
-	// advances, re-fetching the same window every run.
-	await emitAttachmentDetailGaps(attachmentCoverage);
+	if (servedAttachmentRecoveryRequested) {
+		await recoverServed();
+	}
 
 	// Pass 2: detect flag/label changes on already-seen messages (incremental only)
 	const { skippedAnyMessage: deltaPassSkippedAnyMessage } = await runDeltaPass(
@@ -5004,105 +4678,35 @@ export async function runAllMailPasses(
 		fetchBodiesBound,
 	);
 
-	// Replay both walks if any rejection still lacks an emitted retry locator.
-	if (attachmentCoverage?.localEmitRejected) {
-		await reportAttachmentCheckpointHold(emit);
-		return;
+	const commit = ledger.commit(nowIso());
+	if (commit.unaccounted.length > 0) {
+		gmailDiagnostic("progress_debt_full", {
+			held_uids: commit.unaccounted.length,
+			max_debt: MAX_RETRY_DEBT,
+		});
 	}
 
-	if (messageHistoryRequested && historicalFetchRange) {
-		const historicalPageEndUid = Number(historicalFetchRange.split(":")[1]);
-		// Sums BOTH passes, like the `message_bodies` DETAIL_COVERAGE above: the
-		// forward pass runs in the same call to `runAllMailPasses` and emits its
-		// own `messages` records via the same shared `emitRecord`, so the raw
-		// collected-record count already includes them. Reporting only
-		// `historicalMessageCoverage` undercounted the denominator against that
-		// total every scheduled run with new mail waiting alongside a pending
-		// historical backfill.
-		//
-		// Both emissions below MUST read these same two numbers. The runtime's
-		// `isHealthyBoundedContinuation` accepts a bounded page only when the
-		// continuation's considered/covered are identical to the DETAIL_COVERAGE
-		// fact's — it binds a continuation to complete *same-page* facts, and the
-		// summing above is what defines "the page" here. Feeding the continuation
-		// historical-only counts desyncs the pair by exactly the forward-pass
-		// count, the identity check fails, and the stream degrades to a
-		// retryable_gap instead of deriving complete. The sibling `threads`
-		// emission never desyncs precisely because it feeds one variable to both.
-		const messagesCoverage = {
-			considered:
-				historicalMessageCoverage.considered +
-				forwardMessageCoverage.considered,
-			covered:
-				historicalMessageCoverage.covered + forwardMessageCoverage.covered,
-		};
-		await emit(
-			buildDetailCoverageMessage({
-				considered: messagesCoverage.considered,
-				covered: messagesCoverage.covered,
-				hydratedKeys: [],
-				requiredKeys: [],
-				stateStream: "messages",
-				stream: "messages",
-			}),
-		);
-		if (historicalPageEndUid < historicalTargetUid) {
-			await emitHistoricalContinuationSkip(emit, "messages", {
-				boundary: String(historicalCursor.uidvalidity),
-				considered: messagesCoverage.considered,
-				covered: messagesCoverage.covered,
-				slice_start: Number(historicalFetchRange.split(":")[0]),
-				slice_end: historicalPageEndUid,
-			});
-		}
+	// Records, then DETAIL_COVERAGE, then STATE — the order the
+	// progress-evidence contract expects. The attachments claim is made only
+	// when every attachment in All Mail has been enumerated, none is owed, and
+	// no key from this run is left without an outcome or a retry locator.
+	await emitAttachmentDetailCoverage(
+		attachmentCoverage,
+		commit.attachmentsInventoryComplete &&
+			attachmentCoverage?.localEmitRejected !== true,
+	);
+	// One matching DETAIL_GAP per failed attachment, so the commit-gate can
+	// credit each gap_keys entry against a durable pending gap.
+	await emitAttachmentDetailGaps(attachmentCoverage);
+
+	await emitPageEvidence(commit, "threads", "threads");
+	if (commit.compatStream && commit.compatStream !== "threads") {
+		await emitPageEvidence(commit, commit.compatStream, "messages");
 	}
 
-	// Keep the cursor value (possibly string if out of safe-integer range) on STATE.
-	let nextMessagesBackfill: MessagesBackfillCursor | null = null;
-	if (messageHistoryRequested) {
-		if (historicalFetchRange) {
-			nextMessagesBackfill = advanceMessagesBackfillCursor({
-				now: nowIso(),
-				pageEndUid: Number(historicalFetchRange.split(":")[1]),
-				prior: historicalCursor,
-			});
-		} else if (historicalCursor.completed_at === null) {
-			nextMessagesBackfill = advanceMessagesBackfillCursor({
-				now: nowIso(),
-				pageEndUid: historicalTargetUid,
-				prior: historicalCursor,
-			});
-		} else {
-			// A completed walk with no fetch range left. This is reachable only when
-			// the ceiling did NOT move — `historicalTargetUid` is raised before the
-			// range is selected, so any reopened band yields a non-null range and is
-			// handled by the branch above. With an unchanged ceiling this cursor is
-			// already at its target, so carrying it forward is exact.
-			nextMessagesBackfill = historicalCursor;
-		}
-	}
-	const nextForwardUidnext = session.uidnext;
-	const nextUidnext =
-		nextMessagesBackfill && nextMessagesBackfill.completed_at === null
-			? (nextMessagesBackfill.backfilled_through_uid ?? 0) + 1
-			: nextForwardUidnext;
 	// Advancing to the mailbox's CURRENT highestModseq is only correct when
-	// `runDeltaPass` covered every change since `priorModseq` — otherwise a
-	// skipped message's flag/label change falls permanently behind the new
-	// floor (see `runDeltaPass`'s doc comment: `changedSince` only re-surfaces
-	// a message whose modseq moves AGAIN, which this run's skip does nothing
-	// to cause). Holding the floor at `priorModseq` repeats this run's
-	// `changedSince` window next run; the messages that already succeeded
-	// re-emit byte-identically and ingest no-ops them.
-	//
-	// That hold-back is bounded (`resolveDeltaCursorAdvance`,
-	// `DELTA_HOLDBACK_RUN_LIMIT`): one message that fails PERSISTENTLY (a
-	// malformed MIME structure, a message the server always errors on) must
-	// not stall `highest_modseq` forever and grow every later run's
-	// `changedSince` set without bound. `delta_holdback_runs` tracks the
-	// consecutive held-back streak; once it would reach the limit, the
-	// cursor advances anyway and the streak resets — the message's retryable
-	// DETAIL_GAP (already emitted by `runDeltaPass`) keeps the miss visible.
+	// `runDeltaPass` covered every change since `priorModseq`; the bound on
+	// that hold-back lives in `resolveDeltaCursorAdvance`.
 	const { highestModseq: nextHighestModseq, holdbackRuns: nextHoldbackRuns } =
 		resolveDeltaCursorAdvance({
 			liveHighestModseq: session.highestModseqCursor ?? null,
@@ -5116,17 +4720,68 @@ export async function runAllMailPasses(
 		cursor: {
 			all_mail: {
 				uidvalidity: session.uidvalidityNum,
-				uidnext: nextUidnext,
-				forward_uidnext: nextForwardUidnext,
+				uidnext: commit.compat.uidnext,
+				forward_uidnext: commit.compat.forward_uidnext,
 				highest_modseq: nextHighestModseq,
 				delta_holdback_runs: nextHoldbackRuns,
-				// Carry the mailbox's own EXISTS forward so the next run in this epoch
-				// can prove the inventory did not shrink underneath us.
+				// The mailbox's current EXISTS: an inventory count, not a cursor.
 				exists: session.existsTotal,
 			},
-			...(nextMessagesBackfill ? { backfill: nextMessagesBackfill } : {}),
+			backfill: commit.compat.backfill,
+			progress: commit.state,
 		},
 	});
+}
+
+/** Make a terminal, unrepresentable UID visible; it is never retried. */
+async function emitUnrepresentableMessageSkip(uid: number): Promise<void> {
+	await emit({
+		type: "SKIP_RESULT",
+		stream: "messages",
+		reason: "historical_message_unaccounted",
+		message:
+			"A Gmail message could not be represented; the UID was recorded as a terminal gap.",
+		diagnostics: { uid },
+	});
+}
+
+function isLedgerStreamName(name: string): name is LedgerStream {
+	return (LEDGER_STREAMS as readonly string[]).includes(name);
+}
+
+/**
+ * Emit one stream's bounded-page evidence: its DETAIL_COVERAGE and, while
+ * history remains, the continuation that binds to the same two numbers. The
+ * runtime accepts a bounded page only when the continuation's counts are
+ * identical to the coverage fact's, so both read one ledger value.
+ */
+async function emitPageEvidence(
+	commit: LedgerCommit,
+	ledgerStream: LedgerStream,
+	stream: "messages" | "threads",
+): Promise<void> {
+	const page = commit.historyPage[ledgerStream];
+	const counts = commit.coverage[ledgerStream];
+	if (!(page && counts)) return;
+	await emit(
+		buildDetailCoverageMessage({
+			considered: counts.considered,
+			covered: counts.covered,
+			hydratedKeys: [],
+			requiredKeys: [],
+			stateStream: stream,
+			stream,
+		}),
+	);
+	if (commit.continuation[ledgerStream]) {
+		await emitHistoricalContinuationSkip(emit, stream, {
+			boundary: String(commit.state.uidvalidity),
+			considered: counts.considered,
+			covered: counts.covered,
+			slice_start: page.start,
+			slice_end: page.end,
+		});
+	}
 }
 
 // ─── emitRecord factory ─────────────────────────────────────────────────
@@ -5211,7 +4866,6 @@ async function main(): Promise<void> {
 	const preflightError = validateAttachmentHydrationPreflight({
 		detailGaps: startMsg.detail_gaps,
 		requested,
-		streamsToBackfill: startMsg.streamsToBackfill,
 	});
 	if (preflightError) {
 		fail(preflightError);
@@ -5264,7 +4918,6 @@ async function main(): Promise<void> {
 				detailGaps: startMsg.detail_gaps,
 				recoveryOnly,
 				requested,
-				streamsToBackfill: startMsg.streamsToBackfill,
 			});
 		} finally {
 			lock.release();
