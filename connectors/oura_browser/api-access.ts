@@ -34,35 +34,52 @@ export interface OuraApiAccess {
 	account: string;
 }
 
-/** The signed-in portal account: its email and a key that does not reveal it. */
-interface PortalAccount {
-	email: string;
-	account: string;
-}
+/**
+ * What the portal says about its session. "unknown" covers a failed read and
+ * a page off the portal, and it never counts as "signed_out".
+ */
+type PortalSession =
+	| { status: "signed_in"; email: string; account: string }
+	| { status: "signed_out" }
+	| { status: "unknown" };
 
 type Interact = (url: string, message: string, ready: () => Promise<boolean>) => Promise<void>;
 
-async function portalAccount(page: Page): Promise<PortalAccount | null> {
-	if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
-		return null;
-	return page.evaluate(async () => {
-		if (location.origin !== "https://developer.ouraring.com") return null;
-		for (const route of ["/api/auth/get-session", "/api/auth/session"]) {
-			const response = await fetch(route, { credentials: "include" });
-			if (!response.ok) continue;
-			const value: unknown = await response.json().catch(() => null);
-			if (value && typeof value === "object" && "user" in value) {
-				const user = value.user;
-				if (user && typeof user === "object" && "email" in user && typeof user.email === "string" && user.email) {
-					// The key goes into collection state, so it is a digest, not the email.
-					const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(user.email.trim().toLowerCase()));
-					const account = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-					return { email: user.email, account };
+async function portalSession(page: Page): Promise<PortalSession> {
+	try {
+		if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
+			return { status: "unknown" };
+		return await page.evaluate(async (): Promise<PortalSession> => {
+			if (location.origin !== "https://developer.ouraring.com") return { status: "unknown" };
+			// A route the portal does not serve (404 or a page, not JSON) says
+			// nothing. A route that fails leaves the session unknown, even if the
+			// other route answers that nobody is signed in.
+			let answered = false;
+			let failed = false;
+			for (const route of ["/api/auth/get-session", "/api/auth/session"]) {
+				const response = await fetch(route, { credentials: "include" }).catch(() => null);
+				if (!response || (!response.ok && response.status !== 404)) { failed = true; continue; }
+				if (!response.ok) continue;
+				const value: unknown = await response.json().catch(() => undefined);
+				if (value === undefined) continue;
+				answered = true;
+				if (value && typeof value === "object" && "user" in value) {
+					const user = value.user;
+					if (user && typeof user === "object" && "email" in user && typeof user.email === "string" && user.email) {
+						// Collection state stores this pseudonymous key, not the email.
+						const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(user.email.trim().toLowerCase()));
+						const account = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+						return { status: "signed_in", email: user.email, account };
+					}
 				}
 			}
-		}
-		return null;
-	});
+			return { status: answered && !failed ? "signed_out" : "unknown" };
+		});
+	} catch { return { status: "unknown" }; }
+}
+
+async function portalSignedIn(page: Page): Promise<boolean> {
+	return (await portalSession(page)).status === "signed_in";
 }
 
 async function cachedToken(page: Page): Promise<TokenEntry | null> {
@@ -243,17 +260,20 @@ async function pkce(page: Page): Promise<{ challenge: string; state: string; ver
 }
 
 export async function probeOuraPortalSession(page: Page): Promise<boolean> {
-	try { return Boolean(await portalAccount(page)); } catch { return false; }
+	return portalSignedIn(page);
 }
 
 /**
- * A cached token reads only the account that authorized it. When the portal
- * shows another signed-in account, the token is not reusable. With no visible
- * portal session, no other account is present, so a bound token stays usable.
+ * A cached token reads only the account that authorized it. It is reusable
+ * when the portal shows that account signed in, or when the portal answers
+ * that nobody is signed in: the profile still holds no other account's
+ * session. An unreadable session could hide another account, so it never
+ * permits reuse.
  */
-async function reusableCachedAccess(page: Page, signedIn: PortalAccount | null): Promise<OuraApiAccess | null> {
+async function reusableCachedAccess(page: Page, session: PortalSession): Promise<OuraApiAccess | null> {
 	const cached = await cachedToken(page);
-	if (!cached || (signedIn && signedIn.account !== cached.account)) return null;
+	if (!cached || session.status === "unknown" ||
+		(session.status === "signed_in" && session.account !== cached.account)) return null;
 	if (cached.expiresAt > Date.now() + 600_000) {
 		const status = await tokenStatus(page, cached.accessToken).catch(() => 0);
 		if (status !== 401 && status !== 403) return { accessToken: cached.accessToken, account: cached.account };
@@ -274,8 +294,7 @@ async function reusableCachedAccess(page: Page, signedIn: PortalAccount | null):
 export async function probeOuraCachedApiAccess(page: Page): Promise<string | null> {
 	try {
 		if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL) return null;
-		const signedIn = await portalAccount(page).catch(() => null);
-		return (await reusableCachedAccess(page, signedIn))?.accessToken ?? null;
+		return (await reusableCachedAccess(page, await portalSession(page)))?.accessToken ?? null;
 	} catch { return null; }
 }
 
@@ -321,7 +340,7 @@ async function advanceOuraSignIn(page: Page, email?: string): Promise<void> {
 	}, email).catch(() => {});
 }
 
-async function authorizeWithUser(page: Page, interact: Interact, owner: PortalAccount,
+async function authorizeWithUser(page: Page, interact: Interact, owner: { email: string; account: string },
 	clientId: string, clientSecret: string, autoAllow: boolean): Promise<TokenEntry> {
 	const proof = await pkce(page);
 	const url = new URL(AUTHORIZE);
@@ -368,24 +387,28 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 		const current = await page.evaluate(() => location.href);
 		await interact(current, "Finish signing in to Oura.", async () => {
 			await advanceOuraSignIn(page);
-			return Boolean(await portalAccount(page));
+			return portalSignedIn(page);
 		});
 	} else if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
 		await page.goto(APPLICATIONS, { waitUntil: "domcontentloaded" });
-	// An unreadable portal session shows no other account, the same as no session.
-	let owner = await portalAccount(page).catch(() => null);
-	const cached = await reusableCachedAccess(page, owner);
-	if (cached) return cached;
-	// The entry left here cannot serve this account; another account's grant must not outlive it.
-	await forgetToken(page);
-	if (!owner) {
+	const signIn = async () => {
 		await interact(APPLICATIONS, "Sign in to the Oura Developer Portal, then continue.", async () => {
 			await advanceOuraSignIn(page);
-			return Boolean(await portalAccount(page));
+			return portalSignedIn(page);
 		});
-		owner = await portalAccount(page);
-	}
-	if (!owner) throw new Error("oura_portal_session_unconfirmed");
+		return portalSession(page);
+	};
+	let session = await portalSession(page);
+	// The cached token is judged only against a session the portal confirms.
+	if (session.status === "unknown") session = await signIn();
+	const cached = await reusableCachedAccess(page, session);
+	if (cached) return cached;
+	if (session.status !== "signed_in") session = await signIn();
+	if (session.status !== "signed_in") throw new Error("oura_portal_session_unconfirmed");
+	// Another account's grant, or an unbound one, must not outlive this sign-in.
+	// This account's grant stays until a new grant replaces it.
+	if ((await cachedToken(page))?.account !== session.account) await forgetToken(page);
+	let owner = session;
 	let app = await applicationAfterSessionSettles(page, owner.email, interact);
 	if (!app) {
 		await page.evaluate(async () => {
@@ -397,10 +420,11 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 		await interact(`${PORTAL}/signin?callbackUrl=%2Fapplications`, "Sign in to Oura again to restore your Developer Portal session.",
 			async () => {
 				await advanceOuraSignIn(page);
-				return Boolean(await portalAccount(page));
+				return portalSignedIn(page);
 			});
-		owner = await portalAccount(page);
-		if (!owner) throw new Error("oura_portal_session_unconfirmed");
+		session = await portalSession(page);
+		if (session.status !== "signed_in") throw new Error("oura_portal_session_unconfirmed");
+		owner = session;
 		app = await applicationAfterSessionSettles(page, owner.email, interact);
 		if (!app) throw new Error("oura_portal_session_unconfirmed");
 	}

@@ -265,3 +265,36 @@ test("Oura page replay probe rejects a cached token bound to another signed-in a
 		assert.equal(await probeOuraCachedApiAccess(page), "cached-access");
 	}, false, true);
 });
+
+test("Oura page replay does not reuse another account's token while the portal session is unreadable", { timeout: 60_000 }, async () => {
+	await withReplay(false, async (page, state) => {
+		await seedToken(page, "previous-access", accountKey("previous@example.test"));
+		await page.route(`${portal}/api/auth/get-session`, (route) => route.fulfill({ status: 500, body: "" }));
+		let signInPrompts = 0;
+		const token = await ensureOuraApiAccess(page, async (url, _message, ready) => {
+			if (url === apps) {
+				signInPrompts++;
+				await page.unroute(`${portal}/api/auth/get-session`);
+				assert.equal(await ready(), true);
+				return;
+			}
+			await completeSignIn(page, url, ready);
+		});
+		assert.equal(signInPrompts, 1, "an unreadable session asks for sign-in before any reuse");
+		assert.deepEqual(token, { accessToken: "synthetic-access", account: signedInAccount });
+		assert.equal(state.authorizeAttempts(), 1);
+	}, false, true);
+});
+
+test("Oura page replay keeps this account's grant when its refresh fails and authorization does not finish", { timeout: 60_000 }, async () => {
+	await withReplay(false, async (page) => {
+		await page.evaluate(({ key, entry }) => localStorage.setItem(key, JSON.stringify(entry)), {
+			key: STORAGE_KEY,
+			entry: { accessToken: "expired-access", refreshToken: "kept-refresh", expiresAt: Date.now() - 1000,
+				clientId: "synthetic-app", clientSecret: "synthetic-secret", account: signedInAccount },
+		});
+		// The replay's token endpoint accepts only authorization codes, so the refresh fails.
+		await assert.rejects(ensureOuraApiAccess(page, async () => { throw new Error("owner_left"); }), /owner_left/);
+		assert.equal((await storedToken(page) as { refreshToken?: string } | null)?.refreshToken, "kept-refresh");
+	}, false, true);
+});
