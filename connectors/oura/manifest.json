@@ -198,6 +198,10 @@
 						"type": ["integer", "null"],
 						"x_pdpp_role": "amount"
 					},
+					"timestamp": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
 					"temperature_deviation": {
 						"type": ["number", "null"]
 					},
@@ -221,7 +225,8 @@
 			"incremental": true,
 			"query": {
 				"range_filters": {
-					"day": ["gte", "gt", "lte", "lt"]
+					"day": ["gte", "gt", "lte", "lt"],
+					"timestamp": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
@@ -253,6 +258,10 @@
 					"score": {
 						"type": ["integer", "null"],
 						"x_pdpp_role": "amount"
+					},
+					"timestamp": {
+						"type": ["string", "null"],
+						"format": "date-time"
 					},
 					"active_calories": {
 						"type": ["integer", "null"]
@@ -304,7 +313,8 @@
 			"incremental": true,
 			"query": {
 				"range_filters": {
-					"day": ["gte", "gt", "lte", "lt"]
+					"day": ["gte", "gt", "lte", "lt"],
+					"timestamp": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
