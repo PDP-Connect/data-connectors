@@ -112,6 +112,11 @@ import {
 	isOutsideTimeRange,
 	timeRangeUnsupportedReason,
 } from "./time-range.ts";
+import {
+	isUnprovenEnumerationSkip,
+	portableUnprovenEnumerationSkip,
+	unprovenEnumerationRetryable,
+} from "./unproven-enumeration.ts";
 
 // ─── Protocol message shapes (re-exported from connector-runtime-protocol.ts) ──
 //
@@ -1381,12 +1386,29 @@ export function runConnector(config: RunConnectorConfig): void {
 					})
 				: emit(msg);
 
+		// §5.5 and §5.8: an enumeration the connector could not prove complete
+		// goes out as the portable `stream_collection_failed` SKIP_RESULT, and the
+		// run ends failed with the same code, as `reportStreamFailure` does. The
+		// connector's own cause stays in `diagnostics.original_reason`.
+		const emitConnectorMessage = (msg: EmittedMessage): Promise<void> => {
+			if (!isUnprovenEnumerationSkip(msg)) {
+				return emitWithBoundedCheckpoints(msg);
+			}
+			const skip = portableUnprovenEnumerationSkip(msg);
+			reportedStreamFailure ??= {
+				message: skip.message,
+				retryable: unprovenEnumerationRetryable(skip),
+				stream: skip.stream,
+			};
+			return emitWithBoundedCheckpoints(skip);
+		};
+
 		const baseCtx: BaseCollectContext = {
 			scope: startMsg.scope,
 			state: startMsg.state ?? {},
 			requested,
 			credentials,
-			emit: emitWithBoundedCheckpoints,
+			emit: emitConnectorMessage,
 			emitRecord: emitRecord.emit,
 			isRecordSelected: emitRecord.isSelected,
 			assist,

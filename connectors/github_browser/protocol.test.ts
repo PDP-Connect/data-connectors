@@ -176,6 +176,7 @@ test("real runtime preserves selected aggregate contracts before DONE", async ()
 		"history",
 	];
 	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
 		cwd: new URL("../../packages/polyfill-connectors/", import.meta.url)
 			.pathname,
 		entrypoint: new URL("./protocol-runtime-fixture.ts", import.meta.url)
@@ -185,7 +186,6 @@ test("real runtime preserves selected aggregate contracts before DONE", async ()
 			scope: { streams: streams.map((name) => ({ name })) },
 		},
 	});
-	assert.equal(result.code, 0);
 	const records = result.messages.filter(
 		(message) => message.type === "RECORD",
 	);
@@ -197,9 +197,24 @@ test("real runtime preserves selected aggregate contracts before DONE", async ()
 		if (message.type !== "RECORD") continue;
 		assert.equal(message.data.id, message.key);
 	}
+	// starred and contributions are not proven complete: Collection Profile
+	// 5.5 and 5.8 end that run failed with the portable stream failure, and the
+	// streams that were proven keep their records.
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => `${message.stream}:${message.reason}`)
+			.sort(),
+		["contributions:stream_collection_failed", "starred:stream_collection_failed"],
+	);
+	assert.equal(result.code, 1);
 	const done = result.messages.at(-1);
 	assert.equal(done?.type, "DONE");
-	if (done?.type === "DONE") assert.equal(done.records_emitted, records.length);
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(done.error?.code, "stream_collection_failed");
+		assert.equal(done.records_emitted, records.length);
+	}
 });
 
 test("inventory follows next link and rejects an unproven empty page", async () => {
