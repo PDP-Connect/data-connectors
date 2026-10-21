@@ -838,10 +838,10 @@ export async function runHarness({
 
 		if (loginAfterMs === Number.POSITIVE_INFINITY) {
 			harnessLoggedIn = false;
-			fixtures.setLoggedIn(false); // the user never signs in
+			await fixtures.setLoggedIn(false, target); // the user never signs in
 		} else if (loginAfterMs > 0) {
 			harnessLoggedIn = false;
-			fixtures.setLoggedIn(false);
+			await fixtures.setLoggedIn(false, target);
 			loginTimer = setTimeout(() => {
 				log.push("[user] signs in");
 				harnessLoggedIn = true;
@@ -850,7 +850,7 @@ export async function runHarness({
 			}, loginAfterMs);
 		} else {
 			harnessLoggedIn = true;
-			fixtures.setLoggedIn(true);
+			await fixtures.setLoggedIn(true, target);
 		}
 
 		const started = Date.now();
