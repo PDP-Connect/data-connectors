@@ -25,10 +25,78 @@ import type {
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { makeEmitRecord } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { collectLinkedIn, ensureLinkedInSession } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
+
+test("resource selection keeps a proved LinkedIn inventory successful without claiming a global checkpoint", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const ctx = buildCtx(["skills"], recording, (path) => {
+		if (!path.includes("memberIdentity=")) return routeVoyagerPath(path);
+		const response = structuredClone(DASH_PROFILE_RESPONSE);
+		const profile = response.elements[0];
+		assert.ok(profile);
+		Object.assign(profile, { entityUrn: "urn:li:fsd_profile:12", publicIdentifier: "anon-member" });
+		profile.profileSkills.elements.push({ entityUrn: "urn:li:skill:other", endorsementCount: 1, name: "Other" });
+		profile.profileSkills.paging.total = 2;
+		profile.profileSkills.paging.count = 2;
+		return response;
+	});
+	ctx.requested.set("skills", { name: "skills", resources: ["urn:li:skill:distributed-systems"] });
+	const messages: EmittedMessage[] = [];
+	const gate = makeEmitRecord({ requested: ctx.requested, emit: async (message) => { messages.push(message); },
+		emittedAt: EMITTED_AT, validateRecord, isTombstone: undefined, timeRangeFieldFor: () => null });
+	ctx.emitRecord = gate.emit;
+	ctx.isRecordSelected = gate.isSelected;
+	await collectLinkedIn(ctx);
+	assert.deepEqual(messages.filter(message => message.type === "RECORD").map(message => message.data.id), ["urn:li:skill:distributed-systems"]);
+	assert.deepEqual(skipResults(recording), []);
+	assert.equal(recording.protocolMessages.some(message => message.type === "STATE"), false);
+});
+
+for (const status of [401, 403, 429, 503]) {
+	test(`section-only dash failure preserves HTTP ${status} as a failed read or rejected session`, async () => {
+		const recording = makeRecordingEmit(validateRecord);
+		const ctx = buildCtx(["experience"], recording, (path) => path.includes("memberIdentity=")
+			? { _error: `http_${status}` } : routeVoyagerPath(path));
+		if (status === 401 || status === 403) {
+			await assert.rejects(collectLinkedIn(ctx), /linkedin_session_dead:/);
+			assert.deepEqual(skipResults(recording), []);
+		} else {
+			await collectLinkedIn(ctx);
+			assert.deepEqual(skipResults(recording).map(skip => ({ reason: skip.reason, hint: skip.recovery_hint })), [{
+				reason: "stream_collection_failed", hint: { action: "retry_by_runtime", retryable: true },
+			}]);
+		}
+		assert.equal(recording.protocolMessages.some(message => message.type === "STATE"), false);
+	});
+}
+
+test("resource selection of connections does not become missing enrichment", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const ctx = buildCtx(["connections"], recording, (path) => {
+		if (path.includes("connectionsSummary")) return { ...PROOF_SUMMARY, numConnections: 2 };
+		if (path.includes("/connections?")) {
+			const start = new URL(path, "https://www.linkedin.com").searchParams.get("start");
+			return { elements: start === "0" ? [CONNECTIONS_PAGE_1.elements[0], { connectedMember: "urn:li:fsd_profile:conn-2", createdAt: 1_700_000_000_000 }] : [] };
+		}
+		if (path.includes("profiles?ids=")) return { results: { ...RESOLVED_PROFILES.results,
+			"urn:li:fsd_profile:conn-2": { ...RESOLVED_PROFILES.results["urn:li:fsd_profile:conn-1"], publicIdentifier: "other" } } };
+		return routeVoyagerPath(path);
+	});
+	ctx.requested.set("connections", { name: "connections", resources: ["urn:li:fsd_profile:conn-1"] });
+	const messages: EmittedMessage[] = [];
+	const gate = makeEmitRecord({ requested: ctx.requested, emit: async (message) => { messages.push(message); },
+		emittedAt: EMITTED_AT, validateRecord, isTombstone: undefined, timeRangeFieldFor: () => null });
+	ctx.emitRecord = gate.emit;
+	ctx.isRecordSelected = gate.isSelected;
+	await collectLinkedIn(ctx);
+	assert.deepEqual(messages.filter(message => message.type === "RECORD").map(message => message.data.id), ["urn:li:fsd_profile:conn-1"]);
+	assert.deepEqual(skipResults(recording), []);
+	assert.equal(recording.protocolMessages.some(message => message.type === "STATE"), false);
+});
 
 const ME_RESPONSE = {
 	plainId: 12,

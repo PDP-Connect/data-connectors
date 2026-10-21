@@ -101,6 +101,22 @@ const FAST_ADS_CLOCK = {
 };
 const FAST_PROFILE_CLOCK = { sleep: async (): Promise<void> => undefined };
 
+for (const blocked of [false, true]) {
+ test(`missing initial identity classifies authentication before emitting inventory failures: blocked=${blocked}`, async () => {
+  const {ctx, harness, failures} = setup(["posts", "following"]);
+  ctx.page.evaluate = ((fn: unknown) => Promise.resolve(String(fn).includes("verificationCode") ? blocked : null)) as Page["evaluate"];
+  if (blocked) {
+   await assert.rejects(collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK), /meta_session_required:/);
+   assert.deepEqual(failures, []);
+   assert.equal(harness.protocolMessages.some(message => message.type === "SKIP_RESULT"), false);
+  } else {
+   await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+   assert.deepEqual(failures, ["posts", "following"]);
+  }
+  assert.equal(harness.protocolMessages.some(message => message.type === "STATE"), false);
+ });
+}
+
 function setup(streams: string[], followingPages: unknown[] = []) {
 	const harness = makeRecordingEmit(validateRecord);
 	const failures: string[] = [];

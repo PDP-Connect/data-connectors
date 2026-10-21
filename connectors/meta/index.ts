@@ -2704,11 +2704,7 @@ export async function collectAllStreams(
 				(stream) => requested.has(stream),
 			);
 			for (const stream of unavailable) {
-				await reportCollectionFailure(
-					ctx,
-					stream,
-					"Instagram authenticated profile data was unavailable; this stream was not proven complete.",
-				);
+				await queueInventoryResult(ctx, stream, 0, false, undefined, "authenticated_profile_unavailable");
 			}
 		}
 
@@ -2868,7 +2864,7 @@ export async function collectAllStreams(
 		}
 		// A signed-out or challenged session is the run's failure, not a list
 		// that failed to prove its end: end the run as a session failure.
-		if (authentication.blocked && pending.length > 0) {
+		if (authentication.blocked) {
 			throw new Error(
 				"meta_session_required: Instagram signed out or requested a challenge during this run",
 			);

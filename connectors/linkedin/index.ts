@@ -202,6 +202,7 @@ function isFetchError<T>(
 interface DashProfileResult {
 	profile: VoyagerProfileElement | null;
 	source: DashProfileSource;
+	failure?: string;
 }
 
 function hasRecognizedProfileField(profile: Record<string, unknown>): boolean {
@@ -254,6 +255,9 @@ async function fetchDashProfile(
 			capture,
 			`dash-profile-${decorationId.split("-").pop()}`,
 		);
+		if (isFetchError(result) && isRejectedSession(result._error)) {
+			return { profile: null, source: "unavailable", failure: result._error };
+		}
 		if (!isFetchError(result) && Array.isArray(result.elements)) {
 			for (const candidate of result.elements) {
 				if (isRecord(candidate) && hasRecognizedProfileField(candidate)) {
@@ -278,7 +282,13 @@ async function fetchDashProfile(
 			return { profile: profile as VoyagerProfileElement, source: "basic" };
 		}
 	}
-	return { profile: null, source: "unavailable" };
+	return { profile: null, source: "unavailable",
+		...(isFetchError(basic) ? { failure: basic._error } : {}),
+	};
+}
+
+function isRejectedSession(error: string): boolean {
+	return /^http_40[13]$/u.test(error);
 }
 
 interface ConnectionsResult {
@@ -758,6 +768,9 @@ export async function collectLinkedIn(
 		);
 	}
 	const dashProfile = dashProfileResult.profile;
+	if (dashProfileResult.failure && isRejectedSession(dashProfileResult.failure)) {
+		throw new Error("linkedin_session_dead: LinkedIn rejected the profile read; manual login required in the connector's browser profile");
+	}
 
 	// The profile count is the owner-bound source summary, independent of
 	// connection enumeration or enrichment proof. Reuse the summary reads
@@ -816,6 +829,7 @@ export async function collectLinkedIn(
 					dashProfileResult.source === "unavailable"
 						? "dashProfileUnavailable"
 						: "profileFieldsUnavailable",
+				...(dashProfileResult.failure ? { readFailure: "read_failed" as const } : {}),
 			},
 		);
 	}
@@ -828,7 +842,7 @@ export async function collectLinkedIn(
 				? collectionAt(dashProfile, section.key)
 				: unavailable("source_unavailable");
 		if (items.kind !== "read") {
-			await emitUnavailableSection(section.stream, emit);
+			await emitUnavailableSection(section.stream, sink, dashProfileResult.failure);
 			continue;
 		}
 		await emitRows(sink, section.stream, section.build(items.value), {
@@ -890,7 +904,8 @@ export async function collectLinkedIn(
 			(urn) => resolvedProfiles.get(urn)?.profile,
 			(urn) => resolution.permanentlyMissingUrns.has(urn),
 		);
-		const emittedUrns = new Set(rows.records.filter((row) => ctx.isRecordSelected?.("connections", row) ?? true).map((row) => row.id));
+		// Provider inventory proof includes readable rows the owner excluded.
+		const emittedUrns = new Set(rows.records.map((row) => row.id));
 		const withheldCount = elements.length - emittedUrns.size;
 		const evidenceReason = withheldCount > 0 ? "linkedin_connection_enrichment_incomplete" :
 			connectionEvidence({
@@ -904,7 +919,7 @@ export async function collectLinkedIn(
 		// fetch) means the read did not complete.
 		const readFailure = connectionsComplete || terminationReason !== "page_error"
 			? undefined
-			: /^http_40[13]$/u.test(connectionsResult.error ?? "")
+			: isRejectedSession(connectionsResult.error ?? "")
 				? "session_rejected" as const
 				: "read_failed" as const;
 		await emitRows(
@@ -1009,7 +1024,9 @@ async function emitRows(
 		);
 	}
 	const selectedCount = rows.records.filter((record) => sink.isRecordSelected?.(stream, record) ?? true).length;
-	if (options.enumerated && rows.covered === rows.considered && selectedCount === rows.records.length) {
+	if (options.enumerated && rows.covered === rows.considered) {
+		// The requested subset is complete, but cannot certify a global cursor.
+		if (selectedCount !== rows.records.length) return;
 		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
 		await sink.emit({ type: "STATE", stream, cursor: { full_scan_at: new Date().toISOString() } });
 		return;
@@ -1066,9 +1083,17 @@ function coverageMessage(
 
 async function emitUnavailableSection(
 	stream: string,
-	emit: (message: EmittedMessage) => Promise<void>,
+	sink: StreamSink,
+	failure?: string,
 ): Promise<void> {
-	await emit({
+	if (failure) {
+		const message = `LinkedIn ${stream} read failed: ${failure}`;
+		const recoveryHint = { action: "retry_by_runtime", retryable: true };
+		if (sink.reportStreamFailure) await sink.reportStreamFailure(stream, message, { recoveryHint, retryable: true });
+		else await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message, recovery_hint: recoveryHint });
+		return;
+	}
+	await sink.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason: "linkedin_enumeration_unproven",
