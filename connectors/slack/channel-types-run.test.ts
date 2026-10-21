@@ -176,6 +176,7 @@ function positionalChannels(argv: readonly string[]): string[] {
 }
 
 async function runWithFakeSlackdump(options: {
+	streams?: readonly string[];
 	root?: string;
 	state?: Record<string, unknown>;
 	finalizedChannels?: string[];
@@ -233,7 +234,7 @@ async function runWithFakeSlackdump(options: {
 				type: "START",
 				...(options.state ? { state: options.state } : {}),
 				scope: {
-					streams: [
+					streams: options.streams ? options.streams.map(name => ({ name })) : [
 						{
 							name: "messages",
 							...(options.grantChannels === undefined
@@ -736,4 +737,20 @@ test("unfinished allowed history stays visible while excluded history is omitted
 		(gap.diagnostics as { inventory_count: number }).inventory_count,
 		2,
 	);
+});
+
+for (const stream of ["channels", "channel_stats"]) {
+	test(`${stream}-only collect does not emit a messages checkpoint`, async () => {
+		const outcome = await runWithFakeSlackdump({ streams: [stream] });
+		assert.equal(outcome.done?.status, "succeeded");
+		assert.equal(Object.hasOwn(outcome.state, "messages"), false);
+		assert.equal(Object.hasOwn(outcome.state, stream), true);
+		assert.equal(outcome.recordChannels(stream).length, LISTING.length);
+	});
+}
+test("requested messages collect retains its checkpoint", async () => {
+	const outcome = await runWithFakeSlackdump({ streams: ["messages"] });
+	assert.equal(outcome.done?.status, "succeeded");
+	assert.equal(Object.hasOwn(outcome.state, "messages"), true);
+	assert.equal(outcome.recordChannels("messages").length, LISTING.length);
 });

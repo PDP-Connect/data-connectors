@@ -10,7 +10,11 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, before, test } from "node:test";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
+	runChannelsStream,
+	pruneRequestedFingerprintCursors,
+	emitStateCheckpoints,
 	runDmReadStatesStream,
 	runOptionalStream,
 	runRemindersStream,
@@ -559,3 +563,59 @@ test("runDmReadStatesStream: a scope that names no DM asks about none and declar
 	assert.equal(captured.records.length, 0);
 	assert.equal(captured.considered[0]?.considered, 0);
 });
+
+for (const failure of ["prepare", "iteration"] as const) {
+	test(`channel ${failure} failure preserves unseen fingerprints and suppresses checkpoints`, async () => {
+		const db = new DatabaseSync(":memory:");
+		try {
+			seedChannel(db, "C01", { id: "C01", name: "general", is_channel: true });
+			const captured: Captured = { considered: [], records: [] };
+			const deps = fakeDeps(db, captured, ["channels", "channel_stats"]);
+			const prior = openFingerprintCursor(undefined, { excludeFromFingerprint: [] });
+			prior.shouldEmit({ id: "CUNSEEN", name: "previous" });
+			const priorState = prior.toState();
+			const cursor = openFingerprintCursor({ fingerprints: priorState }, { excludeFromFingerprint: [] });
+			deps.fingerprintCursors.set("channels", cursor);
+			const prepare = db.prepare.bind(db);
+			deps.db = new Proxy(db, {
+				get(target, key) {
+					if (key === "prepare") return (sql: string) => {
+						if (failure === "prepare") throw new Error("synthetic prepare failure");
+						const statement = prepare(sql);
+						return {
+							iterate() {
+								const rows = statement.iterate();
+								return (function* () {
+									const first = rows.next();
+									assert.equal(first.done, false);
+									yield first.value;
+									throw new Error("synthetic mid-scan failure");
+								})();
+							},
+						};
+					};
+					const value = Reflect.get(target, key, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+			await runChannelsStream(deps);
+			assert.deepEqual([...deps.failedStreams].sort(), ["channel_stats", "channels"]);
+			assert.equal(captured.records.filter(r => r.stream === "channels").length, failure === "iteration" ? 1 : 0);
+			assert.equal(captured.records.filter(r => r.stream === "channel_stats").length, failure === "iteration" ? 1 : 0);
+			assert.deepEqual(captured.considered, []);
+			pruneRequestedFingerprintCursors(deps.requested, deps.failedStreams, deps.fingerprintCursors);
+			assert.equal(cursor.toState().CUNSEEN, priorState.CUNSEEN);
+			const messages: EmittedMessage[] = [];
+			emitStateCheckpoints({
+				archivePath: "/synthetic/archive", baseArchiveResumedAt: {},
+				channelLastTs: {}, committedMaxTs: null,
+				emit: async message => { messages.push(message); },
+				failedStreams: deps.failedStreams, fingerprintCursors: deps.fingerprintCursors,
+				observedChannelIds: [], requested: deps.requested, scopedArchiveResumedAt: {},
+			});
+			assert.equal(messages.some(m => m.type === "STATE" && (m.stream === "channels" || m.stream === "channel_stats")), false);
+		} finally {
+			db.close();
+		}
+	});
+}

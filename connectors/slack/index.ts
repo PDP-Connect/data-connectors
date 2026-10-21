@@ -2960,6 +2960,9 @@ export async function runChannelsStream(deps: StreamDeps): Promise<void> {
 	} catch {
 		// A failed archive enumeration is not an empty archive. Leave coverage
 		// unmeasured so the shared projection exposes the exact run failure.
+		for (const stream of ["channels", "channel_stats"]) {
+			if (deps.requested.has(stream)) markEnumerationFailed(deps, stream);
+		}
 		return;
 	}
 	const observedOn = deps.emittedAt.slice(0, 10);
@@ -2972,6 +2975,9 @@ export async function runChannelsStream(deps: StreamDeps): Promise<void> {
 			nextRow = rowIterator.next();
 		} catch {
 			// A mid-scan read failure cannot prove that the inventory was complete.
+			for (const stream of ["channels", "channel_stats"]) {
+				if (deps.requested.has(stream)) markEnumerationFailed(deps, stream);
+			}
 			return;
 		}
 		if (nextRow.done) {
@@ -3624,7 +3630,12 @@ export interface StateEmitDeps {
  *   marker for visibility.
  */
 export function emitStateCheckpoints(deps: StateEmitDeps): void {
-	if (!deps.failedStreams.has("messages")) {
+	if (
+		(deps.requested.has("messages") ||
+			deps.requested.has("reactions") ||
+			deps.requested.has("message_attachments")) &&
+		!deps.failedStreams.has("messages")
+	) {
 		deps.emit({
 			type: "STATE",
 			stream: "messages",
