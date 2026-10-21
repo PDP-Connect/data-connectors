@@ -8,11 +8,18 @@ const json = (value, status = 200) => ({
 let loggedIn = true;
 export const setLoggedIn = (value) => { loggedIn = value; };
 export const bodyText = "Synthetic iCloud note: café and prose text.";
+// A note body is a protobuf Document: field 2 holds { 2: version, 3: Note { 2: text } }.
+const lengthDelimited = (fieldNumber, value) =>
+	Buffer.concat([Buffer.from([(fieldNumber << 3) | 2, value.length]), value]);
+const noteBody = lengthDelimited(2, Buffer.concat([
+	Buffer.from([0x10, 0x03]),
+	lengthDelimited(3, lengthDelimited(2, Buffer.from(bodyText))),
+]));
 const notes = [gzipSync, deflateSync, deflateRawSync].map((compress, index) => ({
 	recordName: "note-" + index, recordType: "Note",
 	fields: {
 		TitleEncrypted: { value: Buffer.from("Synthetic " + index).toString("base64") },
-		TextDataEncrypted: { value: compress(Buffer.from(bodyText)).toString("base64") },
+		TextDataEncrypted: { value: compress(noteBody).toString("base64") },
 		Folder: { value: { recordName: "folder-1" } },
 	},
 }));
