@@ -370,6 +370,24 @@ export async function hasMuseSession(page: ScriptRunner): Promise<boolean> {
 	return (await isOnMuse(page)) && (await locateGateway(page));
 }
 
+const PROBE_ATTEMPTS = 3;
+const PROBE_WAIT_MS = 1_000;
+
+/**
+ * Session probe for hosts that pass a page (the mobile PageShim host). It
+ * never navigates, so repeating it while the owner signs in is safe, and it
+ * waits only a few seconds for the app's gateway client.
+ */
+export async function probeMuseSessionOnPage(page: Page): Promise<boolean> {
+	const main = mainWorld(page);
+	if (!(await isOnMuse(main))) return false;
+	for (let attempt = 0; attempt < PROBE_ATTEMPTS; attempt++) {
+		if (await locateGateway(main)) return true;
+		await politeDelay(PROBE_WAIT_MS);
+	}
+	return false;
+}
+
 async function openMuse(page: Page): Promise<void> {
 	if (!(await isOnMuse(mainWorld(page)))) {
 		await page.goto(MUSE_HOME_URL, { waitUntil: "domcontentloaded" });

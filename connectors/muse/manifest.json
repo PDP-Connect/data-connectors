@@ -11,10 +11,6 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
 	"version": "0.1.0",
 	"display_name": "Muse (Meta)",
-	"brand": {
-		"icon": "icon.svg",
-		"background_color": "#0866FF"
-	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
@@ -587,5 +583,18 @@
 			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "scheduled_window"
 		}
-	]
+	],
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "muse",
+			"login_url": "https://muse.ai/",
+			"login_message": "Sign in to Muse, then return here.",
+			"collect_export": "collectMuse",
+			"probe_export": "probeMuseSessionOnPage",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
+	}
 }

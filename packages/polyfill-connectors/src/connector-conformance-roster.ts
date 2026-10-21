@@ -93,6 +93,9 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	github_browser: { testFile: "connectors/github_browser/protocol.test.ts" },
 	groupme: { testFile: "connectors/groupme/collection.test.ts" },
 	meta: { testFile: "connectors/meta/integration.test.ts" },
+	// Tier development. Collects through the signed-in muse.ai app's own
+	// gateway client; the oracle is the collection protocol test.
+	muse: { testFile: "connectors/muse/index.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
 	// not scaffold: it parses a
 	// genuine Netflix export rather than emitting a SKIP_RESULT placeholder.
