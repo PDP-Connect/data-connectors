@@ -4295,3 +4295,101 @@ test("nutritionCoverageRecoveryHint retries only the causes a rerun can clear", 
 		retry,
 	);
 });
+
+test("resolveOrderDetail: latched manual repair respects the 99/100 detail boundary", async () => {
+	await Promise.all(
+		[99, 100].map(async (initialAttempts) => {
+			const flags: RunFlags = {
+				detailAttempts: initialAttempts,
+				isManualRun: true,
+				manualRepairAttempted: false,
+				sessionRepairRequired: true,
+			};
+			const base = makeSessionRepairPageStub({
+				htmlSequence: [LIVE_ORDERS_HTML],
+				detailHtmlAfterRepair: DETAIL_HTML,
+			});
+			const navigations: string[] = [];
+			let interactions = 0;
+			const page = new Proxy(base, {
+				get(target, prop): unknown {
+					if (prop === "goto") {
+						return (url: string, options?: Parameters<Page["goto"]>[1]) => {
+							navigations.push(url);
+							return target.goto(url, options);
+						};
+					}
+					return Reflect.get(target, prop);
+				},
+			});
+			const send = fakeSendInteraction();
+			const deps = immediateRepairDeps((request) => {
+				interactions += 1;
+				return send(request);
+			});
+			const result = await resolveOrderDetail(
+				page,
+				flags,
+				"HEB1000000001",
+				deps,
+			);
+			assert.equal(
+				flags.detailAttempts,
+				100,
+				"repair must never fetch detail 101",
+			);
+			if (initialAttempts === 100) {
+				assert.equal(result.status, "deferred");
+				assert.equal(result.failureKind, "deferred_budget");
+				assert.equal(interactions, 0);
+				assert.deepEqual(navigations, []);
+				assert.equal(flags.manualRepairAttempted, false);
+				assert.equal(flags.sessionRepairRequired, true);
+			} else {
+				assert.equal(result.status, "hydrated");
+				assert.equal(interactions, 1);
+				assert.equal(
+					navigations.filter((url) => url.includes("/order-history/")).length,
+					1,
+				);
+				assert.equal(flags.manualRepairAttempted, true);
+				assert.equal(flags.sessionRepairRequired, false);
+			}
+		}),
+	);
+});
+
+test("resolveOrderDetail: failed repair at 99 does not spend a detail or retry repair", async () => {
+	const flags: RunFlags = {
+		detailAttempts: 99,
+		isManualRun: true,
+		manualRepairAttempted: false,
+		sessionRepairRequired: true,
+	};
+	let interactions = 0;
+	const deps = immediateRepairDeps(() => {
+		interactions += 1;
+		return Promise.reject(new Error("synthetic repair declined"));
+	});
+	const first = await resolveOrderDetail(
+		NEVER_CALLED_PAGE,
+		flags,
+		"HEB1000000001",
+		deps,
+	);
+	assert.equal(first.status, "deferred");
+	assert.equal(first.failureKind, "session_repair_required");
+	assert.equal(flags.detailAttempts, 99);
+	assert.equal(flags.manualRepairAttempted, true);
+	assert.equal(flags.sessionRepairRequired, true);
+	const second = await resolveOrderDetail(
+		NEVER_CALLED_PAGE,
+		flags,
+		"HEB1000000002",
+		deps,
+	);
+	assert.equal(second.status, "deferred");
+	assert.equal(second.failureKind, "session_repair_required");
+	assert.equal(flags.detailAttempts, 99);
+	assert.equal(interactions, 1);
+});
