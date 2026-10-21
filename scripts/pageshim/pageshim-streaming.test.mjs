@@ -663,6 +663,9 @@ test("coverage receipts distinguish incomplete inventory, complete runs, and rea
 		{ name: "complete", type: "DETAIL_COVERAGE", considered: 1, covered: 1, required_keys: ["a"], hydrated_keys: ["a"], complete: true },
 		{ name: "failure", type: "DETAIL_COVERAGE", considered: 2, covered: 1, failure: true },
 		{ name: "zero-inventory", type: "SKIP_RESULT", reason: "inventory_not_proven_complete", empty: true },
+		// The desktop runtime's other unproven-enumeration cause: one readable
+		// record and no coverage diagnostics is still partial, never Complete!.
+		{ name: "linkedin-cause", type: "SKIP_RESULT", reason: "linkedin_enumeration_unproven" },
 	];
 	await mkdir(root, { recursive: true });
 	for (const resultStreaming of [false, true]) {

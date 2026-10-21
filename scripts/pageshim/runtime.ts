@@ -21,6 +21,11 @@ import {
 	withholdsBoundedProgress,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
+import {
+	isUnprovenEnumerationSkip,
+	PORTABLE_ENUMERATION_FAILURE_REASON,
+	portableUnprovenEnumerationSkip,
+} from "../../packages/polyfill-connectors/src/unproven-enumeration.ts";
 
 /** Set by build.mjs: the connector directory whose manifest declares the streams. */
 declare const PAGESHIM_CONNECTOR_MANIFEST: string | undefined;
@@ -74,12 +79,16 @@ function hasUncoveredInventory(value: Record<string, unknown>): boolean {
 		(Array.isArray(required) && required.some((key) => !hydrated.has(key)));
 }
 
+/** Whether a SKIP_RESULT leaves requested inventory uncollected. A
+ *  connector's unproven-enumeration cause reaches this predicate already
+ *  mapped to the portable `stream_collection_failed` reason by the shared
+ *  owner (see the SKIP_RESULT case below), as on the desktop runtime. */
 function isIncompleteInventory(msg: Msg): boolean {
 	const diagnostics = msg.diagnostics;
 	return hasUncoveredInventory(msg) ||
 		(diagnostics !== null && typeof diagnostics === "object" &&
 			hasUncoveredInventory(diagnostics as Record<string, unknown>)) ||
-		msg.reason === "inventory_not_proven_complete" ||
+		msg.reason === PORTABLE_ENUMERATION_FAILURE_REASON ||
 		/(^|_)(partial|bounded|incomplete|truncated|deferred|unconfirmed)(_|$)/.test(String(msg.reason)) ||
 		/(^|_)(budget_reached|limit_reached|stopped_early)$/.test(String(msg.reason));
 }
@@ -818,20 +827,26 @@ export async function runOnPageShim(
 				return;
 			}
 			case "SKIP_RESULT": {
-				const stream = String(msg.stream);
+				// The desktop runtime's single owner maps a connector's
+				// unproven-enumeration cause to the portable stream failure first.
+				const skip: Msg = isUnprovenEnumerationSkip(msg)
+					? portableUnprovenEnumerationSkip(msg)
+					: msg;
+				const stream = String(skip.stream);
 				skippedStreams.add(stream);
-				if (isIncompleteInventory(msg)) uncoveredStreams.add(stream);
-				const hint = msg.recovery_hint as
+				const incomplete = isIncompleteInventory(skip);
+				if (incomplete) uncoveredStreams.add(stream);
+				const hint = skip.recovery_hint as
 					| { action?: unknown; retryable?: unknown }
 					| undefined;
 				const deferredCoverage =
-					String(msg.reason).endsWith("_deferred") &&
+					String(skip.reason).endsWith("_deferred") &&
 					hint?.action === "retry_by_runtime" &&
 					hint.retryable === true;
 				// Intentional omissions and failed windows cannot advance coverage.
 				// A capped, retryable prefix can resume from its acknowledged rows.
 				if (!deferredCoverage) checkpointBlockedStreams.add(stream);
-				const reason = String(msg.message ?? msg.reason).slice(
+				const reason = String(skip.message ?? skip.reason).slice(
 					0,
 					ERROR_TEXT_MAX_UNITS,
 				);
@@ -839,8 +854,7 @@ export async function runOnPageShim(
 					// Failed or deferred coverage leaves requested data uncollected.
 					// Other skips remain intentional omissions.
 					errorClass:
-						(msg.reason === "stream_collection_failed" || deferredCoverage ||
-							isIncompleteInventory(msg))
+						deferredCoverage || incomplete
 							? "partial"
 							: inferErrorClass(reason),
 					reason,
@@ -848,7 +862,7 @@ export async function runOnPageShim(
 					scope: `${prefix}${stream}`,
 					phase: "collect",
 					...(deferredCoverage ? {
-						code: String(msg.reason),
+						code: String(skip.reason),
 						recovery_hint: { action: "retry_by_runtime", retryable: true },
 					} : {}),
 				});

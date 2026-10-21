@@ -37,11 +37,16 @@ export type SkipResultMessage = Extract<
 	{ type: "SKIP_RESULT" }
 >;
 
-export function isUnprovenEnumerationSkip(
-	message: EmittedMessage,
-): message is SkipResultMessage {
+/** Whether a message is a connector's unproven-enumeration SKIP_RESULT. Takes
+ *  any message shape, so the desktop runtime and PageShim share this one
+ *  predicate. */
+export function isUnprovenEnumerationSkip(message: {
+	type: string;
+	reason?: unknown;
+}): message is SkipResultMessage {
 	return (
 		message.type === "SKIP_RESULT" &&
+		typeof message.reason === "string" &&
 		UNPROVEN_ENUMERATION_CAUSES.has(message.reason)
 	);
 }
