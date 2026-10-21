@@ -1044,18 +1044,21 @@ async function emitRejectedAttachmentGap(
 }
 
 /**
- * Emit this message's attachment records. Returns false when a rejected
- * emission could not leave a retry locator, so the attachment is still owed.
+ * Emit this message's attachment records. Returns the reason an attachment
+ * is still owed, or null when every one has a creditable outcome: hydrated,
+ * or a DETAIL_GAP. An accepted too_large or deferred record has neither, and
+ * a rejected emission without a retry locator has neither; both stay owed as
+ * retry debt so no later run can claim the inventory complete over them.
  */
 async function emitAttachmentRecords(
 	deps: PerMessageDeps,
 	msg: FetchMessageObject,
 	attachments: readonly AttachmentRecord[],
-): Promise<boolean> {
+): Promise<string | null> {
 	if (!deps.requested.has("attachments") || attachments.length === 0) {
-		return true;
+		return null;
 	}
-	let accounted = true;
+	let owed: string | null = null;
 	const recoveredAttachmentGapIds =
 		deps.recoveredAttachmentGapIds ?? new Set<string>();
 	for (const a of attachments) {
@@ -1079,7 +1082,14 @@ async function emitAttachmentRecords(
 			gapEmitted =
 				emitted === false &&
 				(await emitRejectedAttachmentGap(msg, identity, deps.emitProtocol));
-			if (emitted === false && !gapEmitted) accounted = false;
+			if (emitted === false && !gapEmitted) owed = "attachment_emit_rejected";
+			else if (
+				emitted !== false &&
+				(hydrated.hydration_status === "too_large" ||
+					hydrated.hydration_status === "deferred")
+			) {
+				owed ??= "attachment_unhydrated";
+			}
 			if (deps.attachmentCoverage) {
 				recordAttachmentCoverage(
 					deps.attachmentCoverage,
@@ -1115,7 +1125,7 @@ async function emitAttachmentRecords(
 			});
 		}
 	}
-	return accounted;
+	return owed;
 }
 
 /**
@@ -1149,8 +1159,6 @@ export interface PerMessageDeps {
 	emitRecord: EmitRecordFn;
 	/** False once the shared IMAP connection can no longer run commands. */
 	connectionUsable?: () => boolean;
-	/** The UID may already have stored rows (catch-up or retry), not first sight. */
-	revisit?: boolean;
 	fetchBodies: FetchBodiesFn;
 	hydrateAttachment: HydrateAttachmentFn;
 	nowIso: () => string;
@@ -1308,17 +1316,12 @@ function messageInStreamScope(
  *      that references them.
  *   4. wantBodies / wantMessages / requested.has("attachments") each
  *      gate their own stream; disabling one doesn't suppress siblings.
- *   5. Body-fetch failure still emits the messages record with a null
- *      snippet — never silently drops the envelope — but ALSO emits a
- *      durable retryable DETAIL_GAP on `message_bodies`, so the body stays
- *      refetchable after the UID cursor advances past it. A genuinely
- *      bodyless message emits `body_source: "empty"` with no gap.
- *
- *      Not a destructive overwrite: the progress ledger hands a UID to this
- *      function once per stream (its lanes are disjoint, and debt retries
- *      only the streams that failed), so there is no earlier `messages` row
- *      for this message to protect. `runDeltaPass` is the only pass that
- *      re-visits a stored message, which is why it skips-and-gaps instead.
+ *   5. A failed body read writes nothing for messages or message_bodies:
+ *      both are reported failed and the UID becomes retry debt. Rows for
+ *      this message may already be stored (a catch-up, a retry, or the
+ *      replay of a page whose run failed after its records landed), and a
+ *      whole-record upsert with an empty snippet or body would destroy
+ *      them. A genuinely bodyless message emits `body_source: "empty"`.
  *
  * A thrown error means the message was not fully collected; the caller turns
  * it into retry debt.
@@ -1377,10 +1380,11 @@ export async function processMessage(
 			? await deps.fetchBodies(msg, selection, wantBodies, wantMessages)
 			: { bodyHtmlFull: null, bodyTextFull: null, snippet: null };
 
-	// A revisit (catch-up or retry) may reach a message whose rows are
-	// already stored. A failed body read must not overwrite them with empty
-	// values; the UID stays owed instead.
-	const degraded = deps.revisit === true && fetchFailed === true;
+	// Any lane can reach a message whose rows are already stored: a catch-up,
+	// a retry, or the replay of a page whose run failed after its records
+	// landed. A failed body read must never overwrite them with empty values,
+	// so it writes nothing and the UID stays owed as retry debt.
+	const degraded = fetchFailed === true;
 	if (deps.wantBodies && !wantBodies) {
 		outcome.message_bodies = { kind: "out_of_scope" };
 	}
@@ -1442,10 +1446,9 @@ export async function processMessage(
 	}
 
 	if (deps.requested.has("attachments")) {
-		const accounted = await emitAttachmentRecords(deps, msg, attachments);
-		outcome.attachments = accounted
-			? { kind: "covered" }
-			: { kind: "failed", failure: "attachment_emit_rejected" };
+		const owed = await emitAttachmentRecords(deps, msg, attachments);
+		outcome.attachments =
+			owed === null ? { kind: "covered" } : { kind: "failed", failure: owed };
 	}
 	return outcome;
 }
@@ -4746,13 +4749,12 @@ export async function runAllMailPasses(
 		// the run's range. One settle per distinct range.
 		const groups = new Map<
 			string,
-			{ range: TimeBand; revisit: boolean; streams: MessageStream[] }
+			{ range: TimeBand; streams: MessageStream[] }
 		>();
 		for (const stream of streams) {
 			const range = ledger.timeRangeFor(msg.uid, stream);
-			const revisit = !ledger.isFirstSight(msg.uid, stream);
-			const key = JSON.stringify([range, revisit]);
-			const group = groups.get(key) ?? { range, revisit, streams: [] };
+			const key = JSON.stringify(range);
+			const group = groups.get(key) ?? { range, streams: [] };
 			group.streams.push(stream);
 			groups.set(key, group);
 		}
@@ -4773,7 +4775,6 @@ export async function runAllMailPasses(
 						),
 						emitRecord: emitRecordWithSummary,
 						timeRange: group.range,
-						revisit: group.revisit,
 						wantBodies: group.streams.includes("message_bodies"),
 						wantMessages: group.streams.includes("messages"),
 					},

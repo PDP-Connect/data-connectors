@@ -408,20 +408,23 @@ test("guard: a schema-rejected message is terminal and visible, and the walk mov
 	);
 });
 
-test("guard: a persistent body-fetch failure leaves a body gap and does not hold the lane", async () => {
-	const m = mailbox([message(100)], 301);
+test("guard: a persistent body-fetch failure becomes debt and does not hold the lane", async () => {
+	const m = mailbox([message(100), message(200)], 301);
 	m.control.failBodyReadAfter = 0;
 	const r = await run(m, {}, ["messages", "message_bodies"]);
 	assert.equal(progressOf(r).streams.messages?.through, 300);
 	assert.equal(progressOf(r).streams.message_bodies?.through, 300);
-	assert.ok(
-		r.protocol.some(
-			(e) => e.type === "DETAIL_GAP" && e.stream === "message_bodies",
-		),
+	assert.deepEqual(
+		progressOf(r).debt.map((d) => [d.uid, d.streams]),
+		[
+			[100, ["messages", "message_bodies"]],
+			[200, ["messages", "message_bodies"]],
+		],
 	);
 	assert.deepEqual(
-		ofStream(r, "messages").map((x) => x.data.snippet),
-		[null],
+		ofStream(r, "messages"),
+		[],
+		"no row is written with a lost snippet",
 	);
 });
 
@@ -1077,5 +1080,85 @@ test("scope: a catch-up revisit never overwrites a stored snippet when the body 
 		),
 		["saved snippet"],
 		"the revisit completes once the body read works",
+	);
+});
+
+test("attachments: an unresolved too_large part stays owed across runs, so no later run claims the inventory", async () => {
+	const prior = process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+	process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = "10";
+	try {
+		const m = mailbox([attachmentMessage(10)], 101);
+		let state: Record<string, unknown> = {};
+		const claims: unknown[] = [];
+		for (let i = 0; i < 4; i += 1) {
+			const r = await run(m, state, ["attachments"]);
+			state = r.state;
+			const cov = coverageOf(r, "attachments");
+			if (cov) claims.push(cov);
+		}
+		assert.deepEqual(
+			claims,
+			[],
+			"a quiet later run must not claim 0/0 over the owed part",
+		);
+		assert.ok(
+			progressOf({ state } as RunResult).debt.some(
+				(d) => d.uid === 10 && d.streams.includes("attachments"),
+			),
+			"the part is durable debt",
+		);
+		// Raising the cap lets the next retry resolve it.
+		delete process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+		const retried = await run(m, state, ["attachments"]);
+		assert.ok(
+			ofStream(retried, "attachments").some(
+				(x) => x.data.hydration_status !== "too_large",
+			),
+			"the owed part is retried under the new cap",
+		);
+	} finally {
+		if (prior === undefined) delete process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+		else process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = prior;
+	}
+});
+
+test("replay: a failed run keeps its records but not its STATE; the replay never overwrites a saved snippet", async () => {
+	const m = mailbox([message(10), message(20)], 101);
+	// Run A collects UID 10, then UID 20 breaks the connection: the run fails,
+	// its records are durable, its STATE is discarded.
+	let breakAt20 = true;
+	const failing = await run(m, {}, ["messages"], {
+		async emitRecord(_stream, data) {
+			if (breakAt20 && data.id === "14") {
+				(m.client as { usable: boolean }).usable = false;
+				throw new Error("connection lost");
+			}
+			return true;
+		},
+	}).catch(() => null);
+	assert.equal(failing, null, "run A fails");
+	breakAt20 = false;
+	(m.client as { usable: boolean }).usable = true;
+	// Run B replays the same page from the old STATE; UID 10's body read fails.
+	m.control.failBodyReadAfter = 0;
+	const replay = await run(m, {}, ["messages"]);
+	assert.equal(
+		ofStream(replay, "messages").some(
+			(x) => x.data.id === "a" && x.data.snippet === null,
+		),
+		false,
+		"the replay does not overwrite UID 10's saved snippet with null",
+	);
+	assert.ok(
+		progressOf(replay).debt.some((d) => d.uid === 10),
+		"UID 10 stays owed",
+	);
+	m.control.failBodyReadAfter = Number.POSITIVE_INFINITY;
+	const recovered = await run(m, replay.state, ["messages"]);
+	assert.deepEqual(
+		ofStream(recovered, "messages")
+			.filter((x) => x.data.id === "a")
+			.map((x) => x.data.snippet),
+		["saved snippet"],
 	);
 });
