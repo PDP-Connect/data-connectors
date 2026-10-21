@@ -24,10 +24,11 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
@@ -737,5 +738,101 @@ describe("P2-1 — version agreement", () => {
 			result.stderr.trim(),
 			`config.version is '9.9.9' but the profile says '${profile.version}'`,
 		);
+	});
+});
+
+describe("brand.icon stays inside the assets staging root", () => {
+	// Copies the tracked tree so the real builder can run against a hostile
+	// manifest without editing connectors/ in place. The builder resolves its
+	// repository from its own location and needs a git HEAD for provenance.
+	function copyRepoTree(target) {
+		rmSync(target, { recursive: true, force: true });
+		mkdirSync(target, { recursive: true });
+		const files = execFileSync("git", ["ls-files", "-z"], {
+			cwd: repoRoot,
+			maxBuffer: 64 * 1024 * 1024,
+		})
+			.toString("utf8")
+			.split("\0")
+			.filter(Boolean);
+		for (const file of files) {
+			mkdirSync(dirname(join(target, file)), { recursive: true });
+			cpSync(join(repoRoot, file), join(target, file));
+		}
+		symlinkSync(join(repoRoot, "node_modules"), join(target, "node_modules"), "dir");
+		execFileSync("git", ["init", "-q"], { cwd: target });
+		execFileSync(
+			"git",
+			["-c", "user.name=fixture", "-c", "user.email=fixture@invalid", "commit", "-q", "--allow-empty", "-m", "fixture"],
+			{ cwd: target },
+		);
+		return target;
+	}
+
+	it("refuses a parent-segment brand.icon before anything is written outside the staging root", () => {
+		const tree = copyRepoTree(join(workspace, "icon-escape-tree"));
+		const manifestPath = join(tree, "connectors", "github_browser", "manifest.json");
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+		// From connectors/github_browser this resolves to the workspace root, so
+		// the source exists and the staging write lands outside the output root.
+		const iconRelative = "../../../escape-source.svg";
+		manifest.brand = { ...manifest.brand, icon: iconRelative };
+		writeFileSync(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
+		const source = join(workspace, "escape-source.svg");
+		writeFileSync(source, "<svg/>\n");
+
+		const out = join(workspace, "icon-escape-out", "deep", "out");
+		const escapedWrite = resolve(join(out, ".staging", "assets"), iconRelative);
+		const result = spawnSync(
+			process.execPath,
+			[
+				join(tree, "scripts", "build-connector-oci-artifact.mjs"),
+				"--connector",
+				"github_browser",
+				"--out",
+				out,
+				"--esbuild",
+				esbuildLib,
+			],
+			{ encoding: "utf8", cwd: tree, timeout: 300_000 },
+		);
+
+		assert.equal(
+			existsSync(escapedWrite),
+			false,
+			`the builder wrote ${escapedWrite} outside the assets staging root`,
+		);
+		assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+		assert.match(result.stderr, /brand\.icon/);
+		assert.equal(readFileSync(source, "utf8"), "<svg/>\n");
+	});
+
+	it("refuses a brand.icon that is a symlink rather than a regular file", () => {
+		const tree = copyRepoTree(join(workspace, "icon-symlink-tree"));
+		const connectorDirectory = join(tree, "connectors", "github_browser");
+		const manifestPath = join(connectorDirectory, "manifest.json");
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+		manifest.brand = { ...manifest.brand, icon: "linked-icon.svg" };
+		writeFileSync(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
+		symlinkSync(join(connectorDirectory, "icon.svg"), join(connectorDirectory, "linked-icon.svg"));
+
+		const out = join(workspace, "icon-symlink-out");
+		const result = spawnSync(
+			process.execPath,
+			[
+				join(tree, "scripts", "build-connector-oci-artifact.mjs"),
+				"--connector",
+				"github_browser",
+				"--out",
+				out,
+				"--esbuild",
+				esbuildLib,
+			],
+			{ encoding: "utf8", cwd: tree, timeout: 300_000 },
+		);
+
+		assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+		assert.match(result.stderr, /non-regular brand\.icon linked-icon\.svg/);
+		assert.equal(existsSync(join(out, "assets.tar.gz")), false);
 	});
 });

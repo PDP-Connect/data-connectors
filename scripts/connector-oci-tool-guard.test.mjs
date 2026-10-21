@@ -12,6 +12,31 @@ import { assertNoUnbundledNativeDependency } from "./connector-oci-tool-guard.mj
 const manifests = join(dirname(fileURLToPath(import.meta.url)), "..", "connectors");
 
 describe("host-provisioned external tools", () => {
+
+  test("refuses normalized nested parent escapes and opaque module-relative access", (t) => {
+    for (const source of [
+      'new URL("./nested/../../asset.toml", import.meta.url);',
+      'new URL("nested/../../asset.toml", import.meta.url);',
+      'new URL("./%2e%2e/asset.toml", import.meta.url);',
+      'new URL(assetPath, import.meta.url);',
+      'new URL(`./${name}.toml`, import.meta.url);',
+    ]) {
+      assert.throws(() => assertNoUnbundledNativeDependency(
+        "fixture", {}, fixture(t, source),
+      ), /install root|unanalyzable/, source);
+    }
+  });
+
+  test("accepts normalized safe literal module-relative assets", (t) => {
+    for (const source of [
+      'new URL("./nested/../asset.toml", import.meta.url);',
+      'new URL("./nested/asset.toml", import.meta.url);',
+    ]) {
+      assert.doesNotThrow(() => assertNoUnbundledNativeDependency(
+        "fixture", {}, fixture(t, source),
+      ), source);
+    }
+  });
   function fixture(t, source = "process.env.FOO_BIN;") {
     const directory = mkdtempSync(join(tmpdir(), "connector-host-tool-"));
     t.after(() => rmSync(directory, { recursive: true, force: true }));

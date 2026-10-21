@@ -29,15 +29,28 @@ import { join } from "node:path";
  * version of this check read a top-level profile.external_tools, which no
  * manifest has, so its bundled-tool refusal never fired.
  */
-/**
- * `new URL(<specifier>, import.meta.url)` where the specifier climbs out of the
- * module's directory. Any of the three string quotes, any spacing between the
- * tokens, and a leading `./` are the same read, so all of them are refused. A
- * template literal with an interpolation still starts with the literal `../`,
- * which is enough to know it climbs out.
- */
-const MODULE_RELATIVE_ESCAPE =
-	/new\s+URL\s*\(\s*(["'`])((?:\.\/)*\.\.\/(?:(?!\1)[^\\]|\\.)*)\1\s*,\s*import\s*\.\s*meta\s*\.\s*url\b/;
+// Entry-point guard only: do not evaluate unknown operands or scan imports.
+const MODULE_RELATIVE_URL =
+	/new\s+URL\s*\(\s*((?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|[^,;]+?)\s*,\s*import\s*\.\s*meta\s*\.\s*url\b/g;
+
+function assertSafeModuleRelativeAssets(connectorKey, source) {
+	for (const match of source.matchAll(MODULE_RELATIVE_URL)) {
+		const expression = match[1].trim();
+		const quote = expression[0];
+		const literal = ['"', "'", '`'].includes(quote) && expression.at(-1) === quote;
+		const value = literal ? expression.slice(1, -1) : expression;
+		if (!literal || value.includes(quote) || value.includes('\\') || (quote === '`' && value.includes('${'))) {
+			throw new Error(`${connectorKey} reads '${value}' relative to its module; unanalyzable asset may escape the install root.`);
+		}
+		const root = new URL('file:///installed/code/');
+		const resolved = new URL(value, new URL('collection-profile.mjs', root));
+		// URL resolution normalizes literal and percent-encoded dot segments.
+		if (resolved.protocol !== root.protocol || resolved.host !== root.host ||
+			!resolved.pathname.startsWith(root.pathname)) {
+			throw new Error(`${connectorKey} reads '${value}' relative to its module, which escapes the install root once the entrypoint is flattened.`);
+		}
+	}
+}
 
 export function assertNoUnbundledNativeDependency(connectorKey, profile, connectorDirectory) {
 	const externalTools = profile.runtime_requirements?.external_tools ?? [];
@@ -70,11 +83,5 @@ export function assertNoUnbundledNativeDependency(connectorKey, profile, connect
 		}
 	}
 
-	const escapingAsset = source.match(MODULE_RELATIVE_ESCAPE);
-	if (escapingAsset) {
-		throw new Error(
-			`${connectorKey} reads '${escapingAsset[2]}' relative to its module, which escapes the install root once the ` +
-				"entrypoint is flattened to code/collection-profile.mjs. The bundler must rewrite that specifier first (design §1.3).",
-		);
-	}
+	assertSafeModuleRelativeAssets(connectorKey, source);
 }

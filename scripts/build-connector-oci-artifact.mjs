@@ -42,13 +42,15 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readFileSync,
 	readdirSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	classifyExternals,
@@ -155,6 +157,35 @@ function assertSafeMembers(members) {
 			throw new Error(`Parent traversal: ${member}`);
 		if (member.includes("\\")) throw new Error(`Backslash: ${member}`);
 		if (member.includes("\0")) throw new Error(`NUL: ${member}`);
+	}
+}
+
+/**
+ * Refuses a manifest asset path before anything is read or written under it.
+ *
+ * The brand icon used to be joined under the staging root and only checked by
+ * the final archive walk. A parent-segment path wrote outside that root, and
+ * the walk never saw the file. The raw path is refused for `..` and absolute
+ * forms, the resolved source must be a regular file that really lives under
+ * the connector directory, and symlinks are refused the same way filesUnder
+ * refuses them inside the archive.
+ */
+function assertContainedAssetSource(label, relativePath, root) {
+	if (typeof relativePath !== "string" || relativePath === "" || isAbsolute(relativePath)) {
+		throw new Error(`${label} must be a relative path, got '${relativePath}'`);
+	}
+	if (relativePath.includes("\\") || relativePath.includes("\0") || relativePath.split("/").includes("..")) {
+		throw new Error(`${label} ${relativePath} escapes its connector directory`);
+	}
+	const source = join(root, relativePath);
+	if (!existsSync(source)) {
+		throw new Error(`Manifest declares ${label} ${relativePath}, missing at ${source}`);
+	}
+	if (!lstatSync(source).isFile()) {
+		throw new Error(`Refusing non-regular ${label} ${relativePath}`);
+	}
+	if (!realpathSync(source).startsWith(`${realpathSync(root)}/`)) {
+		throw new Error(`${label} ${relativePath} resolves outside its connector directory`);
 	}
 }
 
@@ -351,10 +382,8 @@ async function main() {
 	let assetsTarball = null;
 	const iconRelative = profile.brand?.icon;
 	if (iconRelative) {
+		assertContainedAssetSource("brand.icon", iconRelative, connectorDirectory);
 		const iconSource = join(connectorDirectory, iconRelative);
-		if (!existsSync(iconSource)) {
-			throw new Error(`Manifest declares brand.icon ${iconRelative}, missing at ${iconSource}`);
-		}
 		const assetsStaging = join(staging, "assets");
 		mkdirSync(join(assetsStaging, dirname(iconRelative)), { recursive: true });
 		writeFileSync(join(assetsStaging, iconRelative), readFileSync(iconSource));
