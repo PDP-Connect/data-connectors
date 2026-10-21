@@ -7668,6 +7668,61 @@ test("recoverServedAttachmentGaps: a rejected emission re-defers its served gap 
 	assert.equal(coverage.localEmitRejected, false);
 });
 
+function coverageRecord(status: AttachmentRecord["hydration_status"]): AttachmentRecord {
+	return {
+		blob_ref: null,
+		content_id: null,
+		content_sha256: null,
+		content_type: "application/pdf",
+		encoding: null,
+		filename: "a.pdf",
+		hydration_error: null,
+		hydration_status: status,
+		id: "abc123:1",
+		is_inline: false,
+		message_id: "abc123",
+		message_received_at: FROZEN_NOW,
+		part_index: "1",
+		size_bytes: 16,
+	};
+}
+
+test("recordAttachmentCoverage: a key visited twice keeps one outcome set (walk gap, then served hydration)", () => {
+	const coverage = makeAttachmentDetailCoverage();
+	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, true);
+	assert.deepEqual(coverage.gapKeys, ["abc123:1"]);
+	recordAttachmentCoverage(coverage, coverageRecord("hydrated"));
+	// The host rejects a DETAIL_COVERAGE whose outcome sets overlap.
+	assert.deepEqual(coverage.requiredKeys, ["abc123:1"]);
+	assert.deepEqual(coverage.hydratedKeys, ["abc123:1"]);
+	assert.deepEqual(coverage.gapKeys, []);
+	assert.deepEqual(buildAttachmentDetailCoverageMessage(coverage).gap_keys ?? [], []);
+});
+
+test("recordAttachmentCoverage: a later rejection cannot downgrade an accepted hydration", () => {
+	const coverage = makeAttachmentDetailCoverage();
+	recordAttachmentCoverage(coverage, coverageRecord("hydrated"));
+	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, true);
+	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, false);
+	assert.deepEqual(coverage.hydratedKeys, ["abc123:1"]);
+	assert.deepEqual(coverage.gapKeys, []);
+	assert.equal(coverage.localEmitRejected, false);
+});
+
+test("recordAttachmentCoverage: a rejection without a locator is cleared by a later accounted attempt", () => {
+	const coverage = makeAttachmentDetailCoverage();
+	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, false);
+	assert.equal(coverage.localEmitRejected, true, "an unlocated rejection holds the cursors");
+	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, true);
+	assert.equal(coverage.localEmitRejected, false, "a same-run retry locator releases the hold");
+	assert.deepEqual(coverage.gapKeys, ["abc123:1"]);
+	const second = makeAttachmentDetailCoverage();
+	recordAttachmentCoverage(second, coverageRecord("deferred"), null, false, false);
+	recordAttachmentCoverage(second, coverageRecord("hydrated"));
+	assert.equal(second.localEmitRejected, false);
+	assert.deepEqual(second.hydratedKeys, ["abc123:1"]);
+});
+
 function realResourceEmitter(requested: Map<string, StreamRequest>, emit: RecordingHarness["emit"]) {
 	const filters = new Map<string, Set<string> | null>();
 	for (const [name, scope] of requested) filters.set(name, resourceSet(scope));
