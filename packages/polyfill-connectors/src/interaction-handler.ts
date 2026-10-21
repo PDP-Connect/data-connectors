@@ -26,6 +26,7 @@ import { access, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { notify } from "./ntfy.ts";
 
 const UNSAFE_ID = /[^a-zA-Z0-9_.-]/g;
@@ -95,8 +96,11 @@ async function waitForFile(
 		try {
 			await access(path, fsConstants.R_OK);
 			const raw = await readFile(path, "utf8");
+			// Parse before unlinking: a responder still writing the file leaves
+			// partial JSON, and deleting it then would lose the answer.
+			const response = JSON.parse(raw) as InteractionResponseInner;
 			await unlink(path).catch((): undefined => undefined);
-			return JSON.parse(raw) as InteractionResponseInner;
+			return response;
 		} catch {
 			await sleepUnlessAborted(1500, signal);
 		}
@@ -178,7 +182,11 @@ function promptStdinMasked(
 		process.stdout.write(question);
 		stdin.setRawMode(true);
 		stdin.resume();
-		let buffer = "";
+		// Code points, so Backspace removes a whole character (not half of a
+		// surrogate pair), and a decoder that keeps a multi-byte character
+		// split across two chunks intact.
+		const chars: string[] = [];
+		const decoder = new StringDecoder("utf8");
 		// Restore the terminal and release stdin on every way out, including a
 		// file drop winning the race (`signal`): a raw-mode listener left on
 		// stdin keeps the process alive after the run ends.
@@ -194,9 +202,9 @@ function promptStdinMasked(
 		// A chunk can hold several keystrokes (a pasted code followed by
 		// Enter arrives as one chunk), so handle it one character at a time.
 		const onData = (chunk: Buffer) => {
-			for (const ch of chunk.toString("utf8")) {
+			for (const ch of decoder.write(chunk)) {
 				if (ch === "\r" || ch === "\n") {
-					finish(buffer);
+					finish(chars.join(""));
 					return;
 				}
 				if (ch === "\u0003") {
@@ -207,13 +215,12 @@ function promptStdinMasked(
 					return;
 				}
 				if (ch === "\u007f" || ch === "\b") {
-					if (buffer.length > 0) {
-						buffer = buffer.slice(0, -1);
+					if (chars.pop() !== undefined) {
 						process.stdout.write("\b \b");
 					}
 					continue;
 				}
-				buffer += ch;
+				chars.push(ch);
 				process.stdout.write("*");
 			}
 		};
@@ -386,14 +393,19 @@ export async function handleInteraction(
 	// a single interaction, but it would collide with a second prompt later
 	// in the same run).
 	const terminalAbort = new AbortController();
-	const terminalPromise: Promise<InteractionResponseInner | null> =
+	// A terminal that cannot answer (no prompt for this message shape, or a
+	// prompt error) must not win the race: it would cancel the interaction
+	// while the file drop could still answer it.
+	const neverAnswers = new Promise<InteractionResponseInner>(() => {
+		/* never resolves */
+	});
+	const terminalPromise: Promise<InteractionResponseInner> =
 		process.stdin.isTTY && terminalHandled
-			? respondViaTerminal(msg, PROCESS_STDIO, terminalAbort.signal).catch(
-					(): null => null,
+			? respondViaTerminal(msg, PROCESS_STDIO, terminalAbort.signal).then(
+					(answer) => answer ?? neverAnswers,
+					(): Promise<InteractionResponseInner> => neverAnswers,
 				)
-			: new Promise<InteractionResponseInner | null>(() => {
-					/* never resolves */
-				});
+			: neverAnswers;
 
 	const fileAbort = new AbortController();
 	const filePromise = waitForFile(respPath, timeoutMs, fileAbort.signal);
