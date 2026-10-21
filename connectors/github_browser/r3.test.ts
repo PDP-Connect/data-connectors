@@ -276,7 +276,7 @@ test("starred: REST continuation is read before completion", async () => {
    const first = new URL(url).searchParams.get("page") === "1";
    return { requestedUrl: url, responseUrl: url, status: 200,
     data: first ? [restRepo] : [{ full_name: "sample-user/other", html_url: "https://github.com/sample-user/other" }],
-    link: githubLink(url, first) };
+    link: githubLink(url, 2) };
   },
  });
  assert.equal(urls.length, 2);

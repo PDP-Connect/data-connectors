@@ -375,7 +375,7 @@ test("three full event pages withhold the snapshot without source end evidence",
 		{
 			fetchPublicJson: async (url: string) => ({
 				...apiObservation(url, pages[page++]),
-				link: githubLink(url, true),
+				link: githubLink(url, 5),
 			}),
 			now: () => new Date("2026-01-01T00:00:00Z"),
 			openPage: async (url) => pageObservation(url, profile),
@@ -428,7 +428,7 @@ test("history exact source total of 1,000 can prove completeness", async () => {
 					})),
 					total_count: 1000,
 					incomplete_results: false,
-				}), { link: githubLink(url, page < 9) });
+				}), { link: githubLink(url, 10) });
 			},
 			now: () => new Date("2026-01-01T00:00:00Z"),
 			openPage: async (url) => pageObservation(url, profile),

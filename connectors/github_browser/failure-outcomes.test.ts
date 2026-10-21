@@ -58,7 +58,7 @@ for (const cause of ["source_request_failed", "source_total_changed", "discarded
   let calls = 0;
   const result = await collect(async url => {
    if (url.includes("type%3Apr")) return response(url, body());
-   if (++calls === 1) return response(url, body([item], 3), { link: githubLink(url, true) });
+   if (++calls === 1) return response(url, body([item], 3), { link: githubLink(url, 3) });
    if (cause === "source_request_failed") throw new Error(secret);
    if (cause === "source_total_changed") return response(url, body([], 4));
    if (cause === "discarded_rows") return response(url, body([{}], 3));

@@ -21,11 +21,17 @@ export type Continuation =
 	/** The page is not the requested page of this inventory; its rows are not evidence. */
 	| { kind: "unbound"; reason: string };
 
-export interface PageObservation {
+export interface PageObservation extends PageEvidence {
 	ids: readonly string[];
 	rowsComplete: boolean;
 	rejectedRows: number;
+}
+
+/** What a page's metadata says about the walk, beyond its own rows. */
+export interface PageEvidence {
 	continuation: Continuation;
+	/** The last page number the source advertised on this page. It binds the whole walk. */
+	lastPage?: number;
 }
 
 /**
@@ -43,6 +49,7 @@ export class InventoryEvidence {
 	private pages = 0;
 	private failure: string | null = null;
 	private endProven = false;
+	private lastPage: number | null = null;
 
 	/**
 	 * `first` is the first request of the walk. A one-page collection that is
@@ -115,10 +122,18 @@ export class InventoryEvidence {
 		}
 		if (noProgress) this.fail("no_progress");
 		this.pages += 1;
+		if (page.lastPage !== undefined) {
+			if (this.lastPage !== null && this.lastPage !== page.lastPage) this.fail("pagination_bound_changed");
+			this.lastPage ??= page.lastPage;
+		}
 		if (continuation.kind === "unknown") this.fail(continuation.reason);
-		else if (continuation.kind === "end") this.endProven = true;
-		else if (continuation.kind === "next") {
-			if (request.page >= this.pageLimit) this.fail("page_limit_reached");
+		else if (continuation.kind === "end") {
+			// An end proves the walk complete only at the last page any page advertised.
+			if (this.lastPage !== null && request.page !== this.lastPage) this.fail("end_before_advertised_last");
+			this.endProven = true;
+		} else if (continuation.kind === "next") {
+			if (this.lastPage !== null && request.page >= this.lastPage) this.fail("continuation_beyond_advertised_last");
+			else if (request.page >= this.pageLimit) this.fail("page_limit_reached");
 			else this.request = { url: continuation.url, page: request.page + 1 };
 		}
 		return added;

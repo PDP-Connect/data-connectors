@@ -43,24 +43,26 @@ function assertWithheld(result: Awaited<ReturnType<typeof collect>>, stream: str
 const cause = (result: Awaited<ReturnType<typeof collect>>) =>
 	(result.messages[0]?.diagnostics as { cause?: string } | undefined)?.cause;
 
-// Each API walk, with the request path GitHub serves and a page of two distinct rows.
+// Each API walk, with the request path GitHub serves and two distinct rows per page
+// of a list that is `pages` pages long.
 const walks = {
 	events: {
 		path: "/users/sample-user/events/public", alias: "/user/1001/events/public", selection: "per_page=100",
-		rows: (page: number) => [{ ...event, id: `${page}-a` }, { ...event, id: `${page}-b` }],
-		html: owner,
+		rows: (page: number, _pages = 2) => [{ ...event, id: `${page}-a` }, { ...event, id: `${page}-b` }],
+		html: (_pages = 2) => owner,
 	},
 	starred: {
 		path: "/users/sample-user/starred", alias: "/user/1001/starred", selection: "per_page=100",
-		rows: (page: number) => [`r${page}a`, `r${page}b`].map(name => ({ full_name: `sample-user/${name}`, html_url: `https://github.com/sample-user/${name}` })),
+		rows: (page: number, _pages = 2) => [`r${page}a`, `r${page}b`].map(name => ({ full_name: `sample-user/${name}`, html_url: `https://github.com/sample-user/${name}` })),
 		// Browser rows without a counter or pagination need the REST enumeration.
-		html: owner + `<ul id="user-starred-repos">${["r1a", "r1b", "r2a", "r2b"].map(name => `<li><h3><a href="/sample-user/${name}">${name}</a></h3></li>`).join("")}</ul>`,
+		html: (pages = 2) => owner + `<ul id="user-starred-repos">${Array.from({ length: pages }, (_, i) => [`r${i + 1}a`, `r${i + 1}b`]).flat()
+			.map(name => `<li><h3><a href="/sample-user/${name}">${name}</a></h3></li>`).join("")}</ul>`,
 	},
 	history: {
 		path: "/search/issues", alias: "/search/issues", selection: "q=author%3Asample-user+type%3Aissue&sort=created&order=desc&per_page=100",
-		rows: (page: number) => ({ total_count: 4, incomplete_results: false,
+		rows: (page: number, pages = 2) => ({ total_count: pages * 2, incomplete_results: false,
 			items: [1, 2].map(i => ({ ...issue, id: page * 10 + i, number: page * 10 + i })) }),
-		html: owner,
+		html: (_pages = 2) => owner,
 	},
 } as const;
 type Walk = keyof typeof walks;
@@ -82,7 +84,7 @@ function api(walk: Walk, firstLink: (spec: (typeof walks)[Walk]) => string | nul
 for (const walk of Object.keys(walks) as Walk[]) {
 	const spec = walks[walk];
 	test(`${walk} follows GitHub's real id-aliased Link through a bound terminal page`, async () => {
-		const result = await collect(walk, api(walk, s => `<${API}${s.alias}?${s.selection}&page=2>; rel="next", <${API}${s.alias}?${s.selection}&page=2>; rel="last"`), spec.html);
+		const result = await collect(walk, api(walk, s => `<${API}${s.alias}?${s.selection}&page=2>; rel="next", <${API}${s.alias}?${s.selection}&page=2>; rel="last"`), spec.html());
 		assert.equal(result.records.length, 1);
 		assert.deepEqual(result.messages.map(message => message.type), ["STATE", "DETAIL_COVERAGE"]);
 		// The walk requests its own owner-bound successor, not the header's id alias.
@@ -99,7 +101,7 @@ for (const walk of Object.keys(walks) as Walk[]) {
 		["first-only header", (s: typeof spec) => `<${API}${s.alias}?${s.selection}&page=1>; rel="first"`],
 	] as const) {
 		test(`${walk} never certifies a walk whose page names a ${label} continuation`, async () => {
-			const result = await collect(walk, api(walk, next), spec.html);
+			const result = await collect(walk, api(walk, next), spec.html());
 			assertWithheld(result, walk);
 			assert.equal(result.requests.filter(url => !url.includes("type%3Apr")).length, 1);
 		});
@@ -113,7 +115,7 @@ for (const walk of Object.keys(walks) as Walk[]) {
 		["last without next", `<${API}${spec.alias}?${spec.selection}&page=1>; rel="last"`],
 	] as const) {
 		test(`${walk} keeps ${label} pagination evidence after a later terminal page`, async () => {
-			const result = await collect(walk, api(walk, () => link), spec.html);
+			const result = await collect(walk, api(walk, () => link), spec.html());
 			assertWithheld(result, walk);
 			assert.equal(result.requests.filter(url => !url.includes("type%3Apr")).length, 1);
 			assert.match(String(cause(result)), /pagination/u);
@@ -128,7 +130,7 @@ for (const walk of Object.keys(walks) as Walk[]) {
 			? { link: null, data: { total_count: 0, incomplete_results: false, items: [] } }
 			: url.searchParams.get("page") === "1"
 				? { link: `<${API}${spec.alias}?${spec.selection}&page=2>; rel="next"`, data: spec.rows(1) }
-				: { link: "unreadable", data: spec.rows(2) }, spec.html);
+				: { link: "unreadable", data: spec.rows(2) }, spec.html());
 		assertWithheld(result, walk);
 		assert.equal(cause(result), "unreadable_pagination");
 	});
@@ -158,6 +160,18 @@ test("InventoryEvidence is append-only: no later event erases an unknown or ambi
 		["source_total_changed", e => e.addTotals({ exactTotals: [1, 2], totalConflict: false })],
 		["malformed_search_response", e => e.fail("malformed_search_response")],
 		["page_limit_reached", e => e.observePage(page(["a"], { kind: "next", url: `${start}&x` }))],
+		["end_before_advertised_last", e => {
+			e.observePage({ ...page(["a"], { kind: "next", url: `${start}&x` }), lastPage: 3 });
+			e.observePage(page(["b"], { kind: "end" }));
+		}],
+		["pagination_bound_changed", e => {
+			e.observePage({ ...page(["a"], { kind: "next", url: `${start}&x` }), lastPage: 3 });
+			e.observePage({ ...page(["b"], { kind: "next", url: `${start}&y` }), lastPage: 4 });
+		}],
+		["continuation_beyond_advertised_last", e => {
+			e.observePage({ ...page(["a"], { kind: "next", url: `${start}&x` }), lastPage: 2 });
+			e.observePage(page(["b"], { kind: "next", url: `${start}&y` }));
+		}],
 	];
 	const positives: Array<[string, (evidence: InventoryEvidence) => void]> = [
 		["end page", e => e.observePage(page(["z"], { kind: "end" }))],
@@ -188,3 +202,55 @@ test("InventoryEvidence cannot be certified by abandoning a walk mid-way", () =>
 	evidence.addTotals({ exactTotals: [1], totalConflict: false });
 	assert.equal(evidence.decide(1), "walk_incomplete");
 });
+
+// The last page a header advertises is walk evidence; a later page may not discard it.
+function linked(walk: Walk, pages: number, header: (page: number, target: (n: number) => string) => string | null) {
+	const spec = walks[walk];
+	return (url: URL): Api => {
+		if (url.searchParams.get("q")?.includes("type:pr")) return { link: null, data: { total_count: 0, incomplete_results: false, items: [] } };
+		const page = Number(url.searchParams.get("page"));
+		return { link: header(page, n => `<${API}${spec.alias}?${spec.selection}&page=${n}>`), data: spec.rows(page, pages) };
+	};
+}
+
+for (const walk of Object.keys(walks) as Walk[]) {
+	const spec = walks[walk];
+	// Two pages of rows that agree with every count, but page 1 advertised a third page.
+	test(`${walk} withholds a walk that ends before the last page it advertised`, async () => {
+		const result = await collect(walk, linked(walk, 2, (page, target) => page === 1
+			? `${target(2)}; rel="next", ${target(3)}; rel="last"`
+			: `${target(1)}; rel="prev", ${target(1)}; rel="first"`), spec.html(2));
+		assertWithheld(result, walk);
+		assert.equal(cause(result), "end_before_advertised_last");
+	});
+	test(`${walk} withholds a walk whose advertised last page changes`, async () => {
+		const result = await collect(walk, linked(walk, 3, (page, target) => page === 1
+			? `${target(2)}; rel="next", ${target(3)}; rel="last"`
+			: `${target(1)}; rel="prev", ${target(3)}; rel="next", ${target(4)}; rel="last", ${target(1)}; rel="first"`), spec.html(3));
+		assertWithheld(result, walk);
+		assert.equal(cause(result), "pagination_bound_changed");
+		assert.equal(result.requests.filter(url => !url.includes("type%3Apr")).length, 2);
+	});
+	test(`${walk} publishes GitHub's real three-page walk through its advertised last page`, async () => {
+		const result = await collect(walk, linked(walk, 3, (page, target) => page < 3
+			? [...(page > 1 ? [`${target(page - 1)}; rel="prev"`] : []), `${target(page + 1)}; rel="next"`, `${target(3)}; rel="last"`,
+				...(page > 1 ? [`${target(1)}; rel="first"`] : [])].join(", ")
+			: `${target(2)}; rel="prev", ${target(1)}; rel="first"`), spec.html(3));
+		assert.equal(result.records.length, 1);
+		assert.deepEqual(result.messages.map(message => message.type), ["STATE", "DETAIL_COVERAGE"]);
+	});
+}
+
+// A nested entry inside a claimed row is a candidate the parser must account for.
+for (const stream of ["starred", "repositories"] as const) {
+	for (const nested of ["li", 'div role="listitem"', "article", "h4", 'div role="row"'] as const) {
+		test(`${stream} withholds a terminal inventory hiding a nested ${nested} entry`, async () => {
+			const tag = nested.split(" ")[0];
+			const row = (name: string, extra = "") => `<li><h3><a href="/sample-user/${name}">${name}</a></h3>${extra}</li>`;
+			const list = `<ul id="${stream === "starred" ? "user-starred-repos" : "user-repositories-list"}">${row("first", `<ul><${nested}><a href="/sample-user/second">second</a></${tag}></ul>`)}</ul>`;
+			const terminal = '<div class="pagination"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
+			const result = await collect(stream, () => ({ link: null, data: [] }), owner + list + terminal);
+			assertWithheld(result, stream);
+		});
+	}
+}

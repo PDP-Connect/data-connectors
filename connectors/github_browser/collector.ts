@@ -299,7 +299,7 @@ export async function collectGitHubBrowser(
 				const rows = events.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
 				const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: events.every(parsed => parsed.complete),
 					rejectedRows: events.length - rows.length,
-					continuation: inspectApiWindow(response.link, request.url, response.data.length) });
+					...inspectApiWindow(response.link, request.url, response.data.length) });
 				for (const event of rows) {
 					if (added.delete(event.id) && await emitEntity("events", event)) covered += 1;
 				}
@@ -481,7 +481,7 @@ export async function collectGitHubBrowser(
 			// identity in the stable window. Short pages and our page budget prove nothing.
 			const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: items.every(parsed => parsed.complete),
 				rejectedRows: items.length - rows.length,
-				continuation: inspectApiWindow(response.link, request.url, body.items.length) });
+				...inspectApiWindow(response.link, request.url, body.items.length) });
 			for (const item of rows) {
 				if (added.delete(item.id) && await emitEntity("history", item)) covered += 1;
 			}
@@ -547,7 +547,7 @@ async function enumerateStarredRest(
 				repo?.html_url === `${GITHUB}/${name}` ? [`${GITHUB}/${name}`] : [];
 		});
 		rest.observePage({ ids, rowsComplete: true, rejectedRows: response.data.length - ids.length,
-			continuation: inspectApiWindow(response.link, request.url, response.data.length) });
+			...inspectApiWindow(response.link, request.url, response.data.length) });
 	}
 	return rest;
 }

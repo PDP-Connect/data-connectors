@@ -238,6 +238,39 @@ function listEmptyStates(list: Element | null, rows: Element[]): Element[] {
 
 const STARRED_CARD_SELECTOR = "div.col-12.d-block.width-full.border-bottom";
 
+// The repository a link may stand for. Query strings, fragments and a trailing
+// slash do not make an owner/repository path chrome. An unreadable destination
+// cannot prove it is chrome either, so it counts as a target of its own.
+function linkedRepository(link: Element): string | null {
+	try {
+		const url = new URL(link.getAttribute("href") ?? "", "https://github.com");
+		return url.origin === "https://github.com" ? repositoryName(url.pathname) : null;
+	} catch {
+		return `unreadable:${link.getAttribute("href") ?? ""}`;
+	}
+}
+const ENTRY_CANDIDATE = `li, [role='listitem'], ${STARRED_CARD_SELECTOR}`;
+
+// One entry boundary for every supported row shape. A row claims its entry only
+// when it has one primary identity, no nested entry candidate, and no other
+// repository link except in its description or fork-parent line, outside its
+// overlays. Otherwise the whole row is rejected, so no entry hides in a claimed row.
+function primaryIdentity(source: Element, description: Element | null): Element | null {
+	const visible = (selector: string) => Array.from(source.querySelectorAll(selector)).filter((node) => !insideOverlay(node, source));
+	const links = visible("h3 a[href]");
+	const identity = links[0] ?? null;
+	const own = identity === null ? null : linkedRepository(identity);
+	const auxiliary = (link: Element) => description?.contains(link) === true ||
+		(link.parentElement !== null && forkParent(link.parentElement) !== undefined);
+	// Another link to the row's own repository cannot hide a second entry.
+	const unclaimed = visible("a[href]").some((link) => {
+		const target = linkedRepository(link);
+		return target !== null && target !== own && !auxiliary(link);
+	});
+	return visible("h3").length === 1 && links.length === 1 && visible(ENTRY_CANDIDATE).length === 0 && !unclaimed
+		? identity : null;
+}
+
 // Rows are the entries of the lists inside the container, or list items placed
 // directly in a wrapper. Wrappers, toolbars, pagination and empty states
 // between them are not rows; an entry that is not an ordinary row still counts,
@@ -271,10 +304,10 @@ function unaccountedRepositories(list: Element | null, rows: Element[], entriesO
 	// strings and fragments do not make an owner/repository path ordinary chrome.
 	const repositoryTarget = (link: Element): boolean => {
 		if (!link.matches("a[href]")) return false;
+		if (entriesOnly) return linkedRepository(link) !== null;
 		try {
 			const url = new URL(link.getAttribute("href") ?? "", "https://github.com");
-			return url.origin === "https://github.com" && (entriesOnly
-				? repositoryName(url.pathname) !== null : url.pathname.split("/").filter(Boolean).length === 2);
+			return url.origin === "https://github.com" && url.pathname.split("/").filter(Boolean).length === 2;
 		} catch {
 			return true; // An unreadable destination cannot prove entry-free chrome.
 		}
@@ -727,14 +760,7 @@ export function parseRepositoriesPage(html: string): ParsedInventory<RepositoryR
 	let rejectedRows = 0;
 	const seen = new Set<string>();
 	for (const [index, source] of sourceRows.entries()) {
-		const headings = Array.from(source.querySelectorAll("h3")).filter((node) => !insideOverlay(node, source));
-		const links = Array.from(source.querySelectorAll("h3 a[href]")).filter((node) => !insideOverlay(node, source));
-		if (headings.length !== 1 || links.length !== 1 ||
-			Array.from(source.querySelectorAll("li, [role='listitem']")).some((node) => !insideOverlay(node, source))) {
-			rejectedRows += 1;
-			continue;
-		}
-		const link = links[0] ?? null;
+		const link = primaryIdentity(source, source.querySelector('p[itemprop="description"]'));
 		const repo = repositoryName(link?.getAttribute("href") ?? null);
 		const name = sourceText(link);
 		if (!repo || !name) {
@@ -798,16 +824,7 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 	let rejectedRows = 0;
 	const seen = new Set<string>();
 	for (const [index, source] of sourceRows.entries()) {
-		const headings = Array.from(source.querySelectorAll("h3")).filter((node) => !insideOverlay(node, source));
-		const links = Array.from(source.querySelectorAll("h3 a[href]")).filter((node) => !insideOverlay(node, source));
-		// A card is one entry only when it has one primary identity. Nested
-		// cards and extra headings cannot disappear inside an accounted row.
-		if (headings.length !== 1 || links.length !== 1 ||
-			Array.from(source.querySelectorAll(STARRED_CARD_SELECTOR)).some((node) => !insideOverlay(node, source))) {
-			rejectedRows += 1;
-			continue;
-		}
-		const link = links[0] ?? null;
+		const link = primaryIdentity(source, source.querySelector("p"));
 		const repo = repositoryName(link?.getAttribute("href") ?? null);
 		const fullName = sourceText(link);
 		if (!repo || !fullName) {

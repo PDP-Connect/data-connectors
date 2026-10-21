@@ -28,7 +28,9 @@ so it selects nothing; only the login URL is requested. An absent Link header
 ends only a first page; on a later page, only a `prev` link without `next` or
 `last` ends the walk. A skipped page, a cursor, another login path or endpoint, a
 changed selection, or unreadable or uncaptured metadata stops the walk and
-withholds the snapshot. Search history also needs every identity in its stable
+withholds the snapshot. A `last` page that any page advertises binds the whole
+walk: a later page that advertises a different last page, ends early, or
+continues past it withholds the snapshot. Search history also needs every identity in its stable
 window when the walk ends.
 
 Starred inventories can also use REST enumeration through an observed Link end
@@ -47,6 +49,11 @@ or ambiguous boundaries and accounts for surviving candidates across the profile
 including candidates outside the selected region. A heading only locates content;
 it cannot prove an empty collection. A heading without a located region remains
 ambiguous. Rejected or unclaimed candidates block publication.
+Repository and starred rows share one entry boundary. A row claims its entry only
+with one heading identity, no nested list item, `role="listitem"` element or
+starred card, and no other repository link except in its description or
+"Forked from" line, outside its overlays. Otherwise the whole row is rejected,
+so no entry can hide inside an accounted row.
 For repositories/starred, evidence stays binding across routes and pages. Rejected
 entries, duplicate identities (even unchanged rows), and later pages
 without new identities remain failures even if a later page or counter looks complete.

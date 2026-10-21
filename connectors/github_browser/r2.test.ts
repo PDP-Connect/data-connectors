@@ -53,7 +53,7 @@ test("300 events withhold the legacy snapshot without completion at the cap", as
  let calls = 0;
  const result = await collect(["events"], {
   fetchPublicJson: async (url) => ({
-   requestedUrl: url, responseUrl: url, status: 200, link: githubLink(url, true),
+   requestedUrl: url, responseUrl: url, status: 200, link: githubLink(url, 5),
    data: Array.from({ length: 100 }, (_, index) => ({ ...source, id: `${calls++}-${index}` })),
   }),
  });
@@ -68,7 +68,7 @@ test("900 of 1000 history rows never acquire completion at an empty tenth page",
   fetchPublicJson: async (url) => {
    const isPr = url.includes("type%3Apr");
    const pageNumber = isPr ? 0 : ++issuePage;
-   return { requestedUrl: url, responseUrl: url, status: 200, link: isPr ? null : githubLink(url, true), data: {
+   return { requestedUrl: url, responseUrl: url, status: 200, link: isPr ? null : githubLink(url, 10), data: {
     items: isPr || pageNumber === 10 ? [] : Array.from({ length: 100 }, (_, index) => ({
      ...source, id: pageNumber * 100 + index, number: pageNumber * 100 + index,
     })), total_count: isPr ? 0 : 1000, incomplete_results: false,
@@ -132,7 +132,7 @@ for (const pages of [1, 2]) {
   let calls = 0;
   const result = await collect(["events"], { fetchPublicJson: async url => {
    calls += 1;
-   return { requestedUrl: url, responseUrl: url, status: 200, link: githubLink(url, calls < pages), data: [{ ...event, id: String(calls) }] };
+   return { requestedUrl: url, responseUrl: url, status: 200, link: githubLink(url, pages), data: [{ ...event, id: String(calls) }] };
   } });
   assert.equal(calls, pages);
   assert.equal(result.records.length, 1);
@@ -146,7 +146,7 @@ test("events follow short pages while rel=next remains and withhold unread conti
  const result = await collect(["events"], { fetchPublicJson: async url => {
   calls += 1;
   return { requestedUrl: url, responseUrl: url, status: 200,
-   link: githubLink(url, true),
+   link: githubLink(url, 5),
    data: [{ ...event, id: String(calls) }] };
  } });
  assert.equal(calls, 3);
@@ -171,7 +171,7 @@ for (const end of ["link", "empty", "cap", "unread"] as const) {
    const size = end === "empty" ? 0 : end === "unread" ? 1 : 100;
    return { requestedUrl: url, responseUrl: url, status: 200,
     // GitHub's capped tenth search page links back with neither next nor last.
-    link: pr ? null : githubLink(url, !(pageNumber === last && end !== "unread")),
+    link: pr ? null : githubLink(url, last),
     data: { total_count: pr ? 0 : 1500, incomplete_results: false,
      items: pr ? [] : Array.from({ length: size }, (_, i) => ({ ...source, id: pageNumber * 100 + i, number: pageNumber * 100 + i })) } };
   } }, prior);

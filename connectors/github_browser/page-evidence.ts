@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { parseHTML } from "linkedom";
-import { type Continuation, type InventoryTerminalProof } from "./inventory-evidence.ts";
+import { type InventoryTerminalProof, type PageEvidence } from "./inventory-evidence.ts";
 
 export interface BrowserPageObservation {
 	readonly requestedUrl: string;
@@ -214,26 +214,27 @@ function validSelection(url: URL, starsRoute: boolean): boolean {
  * the only supported continuation is the immediate successor page. The walk then
  * requests its own owner-bound successor, never the header's target. GitHub names
  * the owner by account id in Link targets: `/user/<id>/x` for `/users/<login>/x`.
+ * A bound `last` relation is reported too; it binds every later page of the walk.
  */
-export function inspectApiWindow(link: string | null | undefined, request: string, rows: number): Continuation {
+export function inspectApiWindow(link: string | null | undefined, request: string, rows: number): PageEvidence {
 	const current = new URL(request);
 	const page = pageNumber(current);
-	if (page === null) return { kind: "unknown", reason: "unbound_request" };
+	if (page === null) return { continuation: { kind: "unknown", reason: "unbound_request" } };
 	// Uncaptured headers prove nothing, but an empty first page has nothing to continue.
-	if (link === undefined) return page === 1 && rows === 0 ? { kind: "end" } : { kind: "unknown", reason: "unobserved_pagination" };
+	if (link === undefined) return page === 1 && rows === 0 ? { continuation: { kind: "end" } } : { continuation: { kind: "unknown", reason: "unobserved_pagination" } };
 	// GitHub omits Link only when every result fits on the first page.
-	if (link === null) return page === 1 ? { kind: "end" } : { kind: "unknown", reason: "missing_pagination" };
+	if (link === null) return page === 1 ? { continuation: { kind: "end" } } : { continuation: { kind: "unknown", reason: "missing_pagination" } };
 	const relations = new Map<string, number>();
 	let endpoint: string | null = null;
 	for (const segment of link.split(",")) {
 		const match = /^\s*<([^<>]+)>;\s*rel=(?:"(next|prev|first|last)"|(next|prev|first|last))\s*$/u.exec(segment);
 		const relation = match?.[2] ?? match?.[3];
-		if (match === null || relation === undefined || relations.has(relation)) return { kind: "unknown", reason: "unreadable_pagination" };
+		if (match === null || relation === undefined || relations.has(relation)) return { continuation: { kind: "unknown", reason: "unreadable_pagination" } };
 		let target: URL;
-		try { target = new URL(match[1] ?? ""); } catch { return { kind: "unknown", reason: "unreadable_pagination" }; }
+		try { target = new URL(match[1] ?? ""); } catch { return { continuation: { kind: "unknown", reason: "unreadable_pagination" } }; }
 		const targetPage = boundPage(target, current);
 		if (targetPage === null || (endpoint ?? target.pathname) !== target.pathname)
-			return { kind: "unknown", reason: "foreign_pagination" };
+			return { continuation: { kind: "unknown", reason: "foreign_pagination" } };
 		endpoint = target.pathname;
 		relations.set(relation, targetPage);
 	}
@@ -243,17 +244,17 @@ export function inspectApiWindow(link: string | null | undefined, request: strin
 	const last = relations.get("last");
 	if ((next !== undefined && next !== page + 1) || (prev !== undefined && prev !== page - 1) ||
 		(first !== undefined && first !== 1) || (last !== undefined && last < (next ?? page)))
-		return { kind: "unknown", reason: "non_adjacent_pagination" };
+		return { continuation: { kind: "unknown", reason: "non_adjacent_pagination" } };
 	if (next !== undefined) {
 		const successor = new URL(current);
 		successor.searchParams.set("page", String(next));
-		return { kind: "next", url: successor.href };
+		return { continuation: { kind: "next", url: successor.href }, ...(last === undefined ? {} : { lastPage: last }) };
 	}
 	// GitHub ends a list with a header only on a later page that links back with
 	// neither next nor last. A first page with a header always has a successor.
 	if (last !== undefined || prev === undefined)
-		return { kind: "unknown", reason: "unproven_pagination_end" };
-	return { kind: "end" };
+		return { continuation: { kind: "unknown", reason: "unproven_pagination_end" } };
+	return { continuation: { kind: "end" } };
 }
 
 /** The page a Link target names, if it selects exactly what the request selects. */

@@ -787,6 +787,49 @@ test("starred cards reject multiple repository identities and nested candidate c
 	}
 });
 
+// Every candidate a parser sees is claimed or rejected; none hides inside a claimed row.
+for (const stream of ["starred", "repositories"] as const) {
+	for (const nested of ["li", 'div role="listitem"', "article", "h4", 'div role="row"'] as const) {
+		test(`${stream} rows reject a nested ${nested} entry whose heading drifted`, () => {
+			const tag = nested.split(" ")[0];
+			const item = `<${nested}><a href="/sample-owner/second">sample-owner/second</a></${tag}>`;
+			const row = `<li><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3><ul>${item}</ul><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></li>`;
+			const parsed = stream === "starred"
+				? parseStarredPage(`<turbo-frame id="user-starred-repos"><ul>${row}</ul></turbo-frame>`)
+				: parseRepositoriesPage(`<div id="user-repositories-list"><ul>${row}</ul></div>`);
+			assert.equal(parsed.entriesComplete, false);
+			assert.equal(parsed.rejectedRows, 1);
+			assert.deepEqual(parsed.rows, []);
+		});
+	}
+}
+
+// One definition of a repository link: query strings and fragments do not make a
+// second entry chrome, and another link to the row's own repository is not an entry.
+for (const stream of ["starred", "repositories"] as const) {
+	const parse = (extra: string) => {
+		const row = `<li><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3>${extra}<relative-time datetime="2026-10-19T00:00:00Z"></relative-time></li>`;
+		return stream === "starred"
+			? parseStarredPage(`<turbo-frame id="user-starred-repos"><ul>${row}</ul></turbo-frame>`)
+			: parseRepositoriesPage(`<div id="user-repositories-list"><ul>${row}</ul></div>`);
+	};
+	for (const href of ["/sample-owner/second?tab=readme", "/sample-owner/second#readme"]) {
+		test(`${stream} rows reject a second entry link carrying ${href.includes("?") ? "a query" : "a fragment"}`, () => {
+			const parsed = parse(`<div><a href="${href}">second</a></div>`);
+			assert.equal(parsed.entriesComplete, false);
+			assert.equal(parsed.rejectedRows, 1);
+		});
+	}
+	for (const href of ["https://github.com/sample-owner/demo", "/sample-owner/demo/", "/sample-owner/demo#readme"]) {
+		test(`${stream} rows keep their entry beside another link to the same repository: ${href}`, () => {
+			const parsed = parse(`<a href="${href}"><img alt="" src="https://avatars.githubusercontent.com/u/1"></a>`);
+			assert.equal(parsed.rejectedRows, 0);
+			assert.equal(parsed.entriesComplete, true);
+			assert.equal(parsed.rows[0]?.id, "https://github.com/sample-owner/demo");
+		});
+	}
+}
+
 test("starred card accepts fork-parent and description links plus overlay headings", async () => {
 	const parsed = parseStarredPage(await fixture("starred-card-with-auxiliary-links.html"));
 	assert.equal(parsed.complete, true);

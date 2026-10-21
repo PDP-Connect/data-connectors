@@ -135,7 +135,7 @@ test("API pagination requires recognized source-end evidence bound to the reques
 	const request = (page: number) => `https://api.github.com/users/sample-user/starred?per_page=100&page=${page}`;
 	const target = (page: number, path = "/user/1001/starred", selection = "per_page=100") => `<https://api.github.com${path}?${selection}&page=${page}>`;
 	const unknown = (link: string | null | undefined, page: number, reason: string) =>
-		assert.deepEqual(inspectApiWindow(link, request(page), 1), { kind: "unknown", reason }, String(link));
+		assert.deepEqual(inspectApiWindow(link, request(page), 1), { continuation: { kind: "unknown", reason } }, String(link));
 	for (const link of ["", "unreadable", `${target(2)}; rel="continue"`, `${target(2)}; rel="next", unreadable`, `${target(2)}; rel="next", ${target(2)}; rel="next"`])
 		unknown(link, 1, "unreadable_pagination");
 	unknown(undefined, 1, "unobserved_pagination");
@@ -154,10 +154,11 @@ test("API pagination requires recognized source-end evidence bound to the reques
 		`${target(2)}; rel="next", ${target(9, "/user/1002/starred")}; rel="last"`,
 		'<https://api.github.com.example/user/1001/starred?per_page=100&page=2>; rel="next"',
 	]) unknown(link, 1, "foreign_pagination");
-	assert.deepEqual(inspectApiWindow(undefined, request(1), 0), { kind: "end" });
-	assert.deepEqual(inspectApiWindow(null, request(1), 1), { kind: "end" });
-	assert.deepEqual(inspectApiWindow(`${target(1)}; rel="prev", ${target(1)}; rel="first"`, request(2), 1), { kind: "end" });
+	assert.deepEqual(inspectApiWindow(undefined, request(1), 0), { continuation: { kind: "end" } });
+	assert.deepEqual(inspectApiWindow(null, request(1), 1), { continuation: { kind: "end" } });
+	assert.deepEqual(inspectApiWindow(`${target(1)}; rel="prev", ${target(1)}; rel="first"`, request(2), 1), { continuation: { kind: "end" } });
 	// The successor is the walk's own owner-bound request, not the header's alias target.
-	assert.deepEqual(inspectApiWindow(`${target(2)}; rel="next", ${target(4)}; rel="last"`, request(1), 1), { kind: "next", url: request(2) });
-	assert.deepEqual(inspectApiWindow(`${target(2, "/users/sample-user/starred")}; rel="next"`, request(1), 1), { kind: "next", url: request(2) });
+	// The advertised last page is reported, not discarded; it binds the rest of the walk.
+	assert.deepEqual(inspectApiWindow(`${target(2)}; rel="next", ${target(4)}; rel="last"`, request(1), 1), { continuation: { kind: "next", url: request(2) }, lastPage: 4 });
+	assert.deepEqual(inspectApiWindow(`${target(2, "/users/sample-user/starred")}; rel="next"`, request(1), 1), { continuation: { kind: "next", url: request(2) } });
 });
