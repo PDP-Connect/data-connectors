@@ -24,8 +24,14 @@ or an empty first page. Its distinct repository identities must match the browse
 rows. Every validated exact counter from the primary and fallback routes remains
 binding; conflicting counters or a row-count mismatch withhold the snapshot.
 
-`InventoryEvidence` owns the final repositories/starred decision across routes and
-pages. Rejected entries, duplicate identities (even unchanged rows), and later pages
+`InventoryEvidence` owns completeness for repository/starred inventories and all
+three embedded profile collections. Profile layout parsing supplies located, absent
+or ambiguous boundaries and accounts for surviving candidates across the profile,
+including candidates outside the selected region. A heading only locates content;
+it cannot prove an empty collection. A heading without a located region remains
+ambiguous. Rejected or unclaimed candidates block publication.
+For repositories/starred, evidence stays binding across routes and pages. Rejected
+entries, duplicate identities (even unchanged rows), and later pages
 without new identities remain failures even if a later page or counter looks complete.
 An empty first page can prove an empty inventory; an empty later page cannot repair
 an interrupted traversal. Events, history and contribution calendars retain their
@@ -37,7 +43,10 @@ Incomplete inventories emit no RECORD, STATE or self DETAIL_COVERAGE and derive
 no deletes, preserving the prior snapshot. The retryable
 `inventory_not_proven_complete` SKIP_RESULT is supplied by a connector-local
 compatibility helper (TODO #418). Incomplete profile collections also withhold RECORD and STATE and emit the retryable `github_browser_incomplete` SKIP_RESULT. Absent optional scalars remain omitted. Profile presence is not an inventory claim.
-The skip message and diagnostics include the specific source withholding reason.
+Skip diagnostics retain the safe cause, source or sink origin, and coverage counts.
+API failures also retain the HTTP status when available. A failed history type
+stops the search; profile failures identify the collection and evidence cause. Raw exception messages
+are excluded.
 
 PageShim's six-scope and streaming gates use internally consistent source totals
 and explicit pagination evidence. The separate failed-starred-stream regression

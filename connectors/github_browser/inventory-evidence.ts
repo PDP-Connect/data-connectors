@@ -1,6 +1,11 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+export interface CollectionBoundary {
+	kind: "located" | "absent" | "ambiguous";
+	unclaimedCandidates: number;
+}
+
 /** Evidence survives route replacement and unreadable lists for the whole run. */
 export class InventoryEvidence {
 	private readonly totals = new Set<number>();
@@ -8,6 +13,7 @@ export class InventoryEvidence {
 	private readonly seen = new Set<string>();
 	private pages = 0;
 	private rowFailure: string | null = null;
+	private boundaryProven = false;
 
 	get identities(): ReadonlySet<string> {
 		return this.seen;
@@ -29,6 +35,13 @@ export class InventoryEvidence {
 		}
 		if (noProgress) this.rowFailure ??= "no_progress";
 		this.pages += 1;
+	}
+
+	/** Layout observations never certify a collection without candidate accounting. */
+	addBoundary(boundary: CollectionBoundary): void {
+		if (boundary.unclaimedCandidates > 0) this.rowFailure ??= "unclaimed_candidates";
+		if (boundary.kind === "ambiguous") this.rowFailure ??= "ambiguous_boundary";
+		this.boundaryProven ||= boundary.kind !== "ambiguous";
 	}
 
 	add(evidence: { exactTotals: readonly number[]; totalConflict: boolean }): void {
@@ -53,6 +66,6 @@ export class InventoryEvidence {
 			return "total_mismatch";
 		if (covered !== distinct) return "coverage_mismatch";
 		if (failure !== null) return failure;
-		return endProven || this.expectedTotal === distinct ? null : "terminal_unverified";
+		return endProven || this.boundaryProven || this.expectedTotal === distinct ? null : "terminal_unverified";
 	}
 }

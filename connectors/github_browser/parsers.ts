@@ -4,6 +4,7 @@
 import { parseHTML } from "linkedom";
 import { z } from "zod";
 import { eventRecord } from "../github/parsers.ts";
+import { type CollectionBoundary, InventoryEvidence } from "./inventory-evidence.ts";
 import type { BrowserPageObservation } from "./page-evidence.ts";
 import { inspectInventoryEnd } from "./page-evidence.ts";
 import type {
@@ -412,10 +413,11 @@ function contributionHeading(document: Document): Element | null {
 
 const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6, [role='heading']";
 const PROFILE_PROSE_SELECTOR = "article, .p-note, .user-profile-bio";
+const PROFILE_NON_COLLECTION_SELECTOR = `${PROFILE_PROSE_SELECTOR}, ${OVERLAY_SELECTOR}, .vcard-details, [itemprop="worksFor"], .js-yearly-contributions, #js-contribution-activity, .contribution-activity-listing`;
 
 function headingsMatching(document: Document, pattern: RegExp): Element[] {
 	return Array.from(document.querySelectorAll(HEADING_SELECTOR)).filter((heading) =>
-		pattern.test(text(heading)) && heading.closest(`${OVERLAY_SELECTOR}, ${PROFILE_PROSE_SELECTOR}`) === null);
+		pattern.test(text(heading)) && heading.closest(PROFILE_NON_COLLECTION_SELECTOR) === null);
 }
 
 // A section is what follows its heading up to the next heading. A heading
@@ -474,13 +476,29 @@ const ACHIEVEMENT_HOOKS = `${ACHIEVEMENT_CARD}, img.achievement-badge-sidebar, .
 interface Section {
 	// Entries found, if the section could be located at all.
 	entries: Element[] | null;
-	// The section is present but its content cannot be certified.
-	unreadable: boolean;
+	// Layout and candidate observations; InventoryEvidence decides readiness.
+	boundary: CollectionBoundary;
+	entriesComplete: boolean;
 }
 
-// Locate a section by its heading text. Without a heading, leftover markup
-// that looks like the section keeps its entries readable but uncertified; with
-// no trace of it, only the profile structure decides if it is absent.
+function profileCandidates(document: Document, selector: string): Element[] {
+	return Array.from(document.querySelectorAll(selector)).filter(node =>
+		node.closest(PROFILE_NON_COLLECTION_SELECTOR) === null);
+}
+
+// One boundary observation for pins, organizations and achievements. A heading
+// without a located region is ambiguous even when all known hooks disappeared.
+function observeCollectionBoundary(headings: Element[], nodes: Element[], candidates: Element[], structure: boolean): CollectionBoundary {
+	return {
+		kind: headings.length > 0 ? (nodes.length > 0 ? "located" : "ambiguous") :
+			structure && candidates.length === 0 ? "absent" : "ambiguous",
+		unclaimedCandidates: candidates.filter(candidate => !nodes.some(node =>
+			node === candidate || node.contains(candidate) || candidate.contains(node))).length,
+	};
+}
+
+// Headings select a region; they do not establish completeness or emptiness.
+// Account for surviving hooks across the profile even when a heading survives.
 function locateSection(
 	document: Document,
 	heading: RegExp,
@@ -490,12 +508,14 @@ function locateSection(
 	structure: boolean,
 ): Section {
 	const headings = headingsMatching(document, heading);
+	const surviving = profileCandidates(document, hooks);
 	if (headings.length === 0) {
-		const inProfile = (node: Element) => node.closest(`${PROFILE_PROSE_SELECTOR}, ${OVERLAY_SELECTOR}`) === null;
-		if (Array.from(document.querySelectorAll(hooks)).some(inProfile))
-			return { entries: Array.from(document.querySelectorAll(fallbackSelector)).filter(inProfile)
-				.filter(node => !node.parentElement?.closest(fallbackSelector)), unreadable: true };
-		return { entries: null, unreadable: !structure };
+		return {
+			entries: surviving.length === 0 ? null : profileCandidates(document, fallbackSelector)
+				.filter(node => !node.parentElement?.closest(fallbackSelector)),
+			boundary: observeCollectionBoundary(headings, [], surviving, structure),
+			entriesComplete: true,
+		};
 	}
 	const nodes = headings.flatMap(sectionNodes);
 	const entries = anchorsIn(nodes, entrySelector);
@@ -514,8 +534,23 @@ function locateSection(
 	}));
 	return {
 		entries,
-		unreadable: nodes.some(isUnreadable) || leftover.length > 0 || !accounted,
+		boundary: observeCollectionBoundary(headings, nodes, surviving, structure),
+		entriesComplete: !nodes.some(isUnreadable) && leftover.length === 0 && accounted,
 	};
+}
+
+// The same owner decides collection completeness for embedded and paged lists.
+interface ProfileCollectionFailure {
+	collection: "pinnedRepositories" | "organizations" | "achievements";
+	cause: string;
+}
+
+function profileCollectionFailure(collection: ProfileCollectionFailure["collection"], ids: string[], section: Omit<Section, "entries">, rejected: number): ProfileCollectionFailure | null {
+	const evidence = new InventoryEvidence();
+	evidence.addPage(ids, section.entriesComplete, rejected);
+	evidence.addBoundary(section.boundary);
+	const cause = evidence.decide(ids.length, false, null);
+	return cause === null ? null : { collection, cause };
 }
 
 export function parseProfileHtml(
@@ -528,13 +563,13 @@ export function parseProfileHtml(
 export function parseProfilePage(
 	html: string,
 	profileUrl: string,
-): ParsedItem<ProfileRow> & { rejectedEntries: number } {
+): ParsedItem<ProfileRow> & { rejectedEntries: number; collectionsComplete: boolean; collectionFailures: ProfileCollectionFailure[] } {
 	const { document } = parseHTML(html);
 	const username = sourceText(document.querySelector("span.p-nickname"));
 	const unreadableFields: string[] = [];
 	let rejectedEntries = 0;
 	if (!username || !/^[a-zA-Z0-9-]{1,39}$/u.test(username))
-		return { row: null, complete: false, unreadableFields: ["username"], rejectedEntries };
+		return { row: null, complete: false, unreadableFields: ["username"], rejectedEntries, collectionsComplete: false, collectionFailures: [] };
 
 	const row: ProfileRow = { username, profileUrl };
 	const structure = hasProfileStructure(document);
@@ -570,17 +605,12 @@ export function parseProfilePage(
 	recordField(row, "contributionsLastYear", countMatch?.[1] ? toInt(countMatch[1]) : undefined, unreadableFields);
 
 	const pinnedHeadings = headingsMatching(document, /^(?:pinned|popular repositories)\b/iu);
-	const pinnedContainer = Array.from(document.querySelectorAll(".js-pinned-items-reorder-container, ol.pinned-items-reorder-list"))
-		.find(node => node.closest(`${OVERLAY_SELECTOR}, ${PROFILE_PROSE_SELECTOR}`) === null) ?? null;
+	const pinnedContainer = profileCandidates(document, ".js-pinned-items-reorder-container, ol.pinned-items-reorder-list")[0] ?? null;
 	const pinnedRoots = pinnedHeadings.length > 0
 		? pinnedHeadings.flatMap(sectionNodes).filter(node =>
-			node.closest(PROFILE_PROSE_SELECTOR) === null &&
+			node.closest(PROFILE_NON_COLLECTION_SELECTOR) === null &&
 			(pinnedContainer === null || pinnedContainer.contains(node)))
 		: pinnedContainer === null ? [] : [pinnedContainer];
-	if (pinnedHeadings.length === 0 && (pinnedContainer !== null || !structure))
-		unreadableFields.push("pinnedRepositories");
-	if (pinnedRoots.some(isUnreadable) && !unreadableFields.includes("pinnedRepositories"))
-		unreadableFields.push("pinnedRepositories");
 	if (pinnedRoots.length > 0 || pinnedHeadings.length > 0) {
 		row.pinnedRepositories = [];
 		const pinnedRows = cardRows(pinnedRoots);
@@ -615,18 +645,20 @@ export function parseProfilePage(
 
 	// README, bio and activity links are not pin candidates. Surviving pin
 	// markup still exposes entries when the heading or outer card classes change.
-	const pinnedCandidates = Array.from(document.querySelectorAll(".pinned-item-list-item, .js-pinned-item-list-item, .pinned-item-list-item-content, .pinned-item-desc, .pinned-item-meta"));
-	const unclaimedMarkers = pinnedCandidates.some(node =>
-		node.closest(`${OVERLAY_SELECTOR}, ${PROFILE_PROSE_SELECTOR}`) === null &&
-		!pinnedRoots.some(root => root.contains(node)));
-	const unclaimedLinks = Array.from(pinnedContainer?.querySelectorAll("a[href]") ?? []).some(link =>
+	const pinnedCandidates = profileCandidates(document, ".js-pinned-items-reorder-container, ol.pinned-items-reorder-list, .pinned-item-list-item, .js-pinned-item-list-item, .pinned-item-list-item-content, .pinned-item-desc, .pinned-item-meta");
+	const pinnedBoundary = observeCollectionBoundary(pinnedHeadings, pinnedRoots, pinnedCandidates, structure);
+	pinnedBoundary.unclaimedCandidates += Array.from(pinnedContainer?.querySelectorAll("a[href]") ?? []).filter(link =>
 		repositoryName(link.getAttribute("href")) !== null &&
-		link.closest(`${OVERLAY_SELECTOR}, ${PROFILE_PROSE_SELECTOR}`) === null &&
-		!pinnedRoots.some(root => root.contains(link)));
-	if (unclaimedMarkers || unclaimedLinks) unreadableFields.push("pinnedRepositories");
+		link.closest(PROFILE_NON_COLLECTION_SELECTOR) === null &&
+		!pinnedRoots.some(root => root.contains(link))).length;
+	const pinsFailure = profileCollectionFailure("pinnedRepositories", (row.pinnedRepositories ?? []).map(pin => pin.fullName), {
+		boundary: pinnedBoundary,
+		entriesComplete: !pinnedRoots.some(isUnreadable),
+	}, rejectedEntries);
+	if (pinsFailure !== null) unreadableFields.push("pinnedRepositories");
+	const beforeOrganizations = rejectedEntries;
 
 	const organizations = locateSection(document, /^organizations?\b/iu, "a[href]", ORGANIZATION_HOOKS, '.avatar-group-item, a[href^="/orgs/"]', structure);
-	if (organizations.unreadable) unreadableFields.push("organizations");
 	if (organizations.entries !== null) {
 		row.organizations = [];
 		for (const link of organizations.entries) {
@@ -650,8 +682,11 @@ export function parseProfilePage(
 		}
 	}
 
+	const organizationsFailure = profileCollectionFailure("organizations", (row.organizations ?? []).map(org => org.login), organizations, rejectedEntries - beforeOrganizations);
+	if (organizationsFailure !== null) unreadableFields.push("organizations");
+	const beforeAchievements = rejectedEntries;
+
 	const achievements = locateSection(document, /^achievements?\b/iu, `a[href], ${ACHIEVEMENT_CARD}`, ACHIEVEMENT_HOOKS, ACHIEVEMENT_CARD, structure);
-	if (achievements.unreadable) unreadableFields.push("achievements");
 	if (achievements.entries !== null) {
 		row.achievements = [];
 		const seenAchievements = new Set<string>();
@@ -670,8 +705,13 @@ export function parseProfilePage(
 			row.achievements.push({ name, ...(iconUrl === undefined ? {} : { iconUrl }) });
 		}
 	}
+	const achievementsFailure = profileCollectionFailure("achievements", (row.achievements ?? []).map(badge => badge.name), achievements, rejectedEntries - beforeAchievements);
+	if (achievementsFailure !== null) unreadableFields.push("achievements");
 	if (rejectedEntries > 0) unreadableFields.push("collectionEntries");
-	return { row, complete: unreadableFields.length === 0, unreadableFields, rejectedEntries };
+	const collectionFailures = [pinsFailure, organizationsFailure, achievementsFailure].filter(
+		(failure): failure is ProfileCollectionFailure => failure !== null);
+	return { row, complete: unreadableFields.length === 0, unreadableFields, rejectedEntries,
+		collectionsComplete: collectionFailures.length === 0, collectionFailures };
 }
 
 export function parseRepositoriesHtml(html: string): RepositoryRow[] {

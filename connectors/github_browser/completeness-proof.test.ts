@@ -115,3 +115,85 @@ for (const section of ["organizations", "achievements"] as const) {
 		});
 	}
 }
+
+for (const section of ["organizations", "achievements", "pinnedRepositories"] as const) {
+	test(`surviving ${section} heading cannot certify entries hidden behind a nested heading`, async () => {
+		const { document } = parseHTML(await readFile(new URL("./__fixtures__/synthetic/profile-pinned-listitem-current-github.html", import.meta.url), "utf8"));
+		const selector = section === "organizations" ? '.avatar-group-item' : section === "achievements" ? 'a[href*="achievement="]' : '.js-pinned-items-reorder-container';
+		for (const entry of Array.from(document.querySelectorAll(selector))) {
+			const wrapper = document.createElement("div");
+			wrapper.innerHTML = '<h3>Memberships</h3>';
+			entry.replaceWith(wrapper);
+			wrapper.append(entry);
+		}
+		const html = document.toString();
+		const parsed = parseProfilePage(html, "https://github.com/sample-user");
+		assert.equal(parsed.complete, false);
+		const result = await collect("profile", () => html);
+		assert.deepEqual(result.records, []);
+		assert.deepEqual(result.messages.map(message => [message.type, message.reason]), [["SKIP_RESULT", "github_browser_incomplete"]]);
+		assert.deepEqual(result.state, { profile: prior });
+	});
+}
+
+test("history manifest publishes the same bounded-window contract as collection", async () => {
+	const manifest = JSON.parse(await readFile(new URL("./manifest.json", import.meta.url), "utf8"));
+	const description = manifest.streams.find((stream: { name: string }) => stream.name === "history").description;
+	assert.match(description, /min\(stable total_count, 1000\)/u);
+	assert.match(description, /withheld/iu);
+	assert.doesNotMatch(description, /without completion/iu);
+});
+
+for (const section of ["organizations", "achievements", "pinnedRepositories"] as const) {
+	test(`a rendered profile with truly empty ${section} still publishes`, async () => {
+		const { document } = parseHTML(await readFile(new URL("./__fixtures__/synthetic/profile-pinned-listitem-current-github.html", import.meta.url), "utf8"));
+		const selector = section === "organizations" ? '.avatar-group-item' : section === "achievements" ? 'a[href*="achievement="]' : '.js-pinned-items-reorder-container';
+		for (const node of Array.from(document.querySelectorAll(selector))) node.remove();
+		const title = section === "pinnedRepositories" ? "Popular repositories" : section;
+		for (const heading of Array.from(document.querySelectorAll("h2"))) {
+			if (heading.textContent?.trim().toLowerCase() === title.toLowerCase()) heading.remove();
+		}
+		const html = document.toString();
+		assert.equal(parseProfilePage(html, "https://github.com/sample-user").collectionsComplete, true);
+		const result = await collect("profile", () => html);
+		assert.equal(result.records.length, 1);
+		assert.deepEqual(result.messages.map(message => message.type), ["STATE"]);
+	});
+}
+
+for (const region of ["company", "activity"] as const) {
+	test(`organization mentions in ${region} are separate from membership entries`, async () => {
+		const { document } = parseHTML(await readFile(new URL("./__fixtures__/synthetic/profile-pinned-listitem-current-github.html", import.meta.url), "utf8"));
+		const mention = '<a class="user-mention" data-hovercard-type="organization" href="https://github.com/sample-company">@sample-company</a>';
+		if (region === "company") document.querySelector(".vcard-details")!.innerHTML = `<li itemprop="worksFor">${mention}</li>`;
+		else document.querySelector("main")!.innerHTML += `<div id="js-contribution-activity"><div class="contribution-activity-listing">Joined ${mention}</div></div>`;
+		const html = document.toString();
+		assert.equal(parseProfilePage(html, "https://github.com/sample-user").collectionsComplete, true);
+		const result = await collect("profile", () => html);
+		assert.equal(result.records.length, 1);
+	});
+}
+
+for (const section of ["organizations", "achievements", "pinnedRepositories"] as const) {
+	test(`a ${section} heading without a located region stays ambiguous`, async () => {
+		const { document } = parseHTML(await readFile(new URL("./__fixtures__/synthetic/profile-pinned-listitem-current-github.html", import.meta.url), "utf8"));
+		const selector = section === "organizations" ? '.avatar-group-item' : section === "achievements" ? 'a[href*="achievement="]' : '.js-pinned-items-reorder-container';
+		for (const node of Array.from(document.querySelectorAll(selector))) node.remove();
+		const result = await collect("profile", () => document.toString());
+		assert.deepEqual(result.records, []);
+		assert.deepEqual(result.state, { profile: prior });
+	});
+}
+
+test("profile withholding retains the collection and evidence failure", async () => {
+	const { document } = parseHTML(await readFile(new URL("./__fixtures__/synthetic/profile-pinned-listitem-current-github.html", import.meta.url), "utf8"));
+	const entry = document.querySelector('.avatar-group-item')!;
+	const wrapper = document.createElement("div");
+	wrapper.innerHTML = '<h3>Memberships</h3>';
+	entry.replaceWith(wrapper);
+	wrapper.append(entry);
+	const result = await collect("profile", () => document.toString());
+	const diagnostics = (result.messages[0] as { diagnostics?: { collection?: string; cause?: string } }).diagnostics;
+	assert.equal(diagnostics?.collection, "organizations");
+	assert.equal(diagnostics?.cause, "unclaimed_candidates");
+});
