@@ -10,6 +10,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { checkLegacyScopes } from "./generate-legacy-scopes.mjs";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export function checkFrozenLegacyShapes(directory = root) {
@@ -48,6 +50,7 @@ export function checkFrozenLegacyShapes(directory = root) {
 			.digest("hex");
 		assert.equal(actual, expected, `${path} changed from its frozen bytes`);
 	}
+	checkLegacyScopes(directory);
 	return { files: referenced.size, scopes: ids.size };
 }
 

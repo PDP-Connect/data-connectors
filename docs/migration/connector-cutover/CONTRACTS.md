@@ -16,7 +16,7 @@ Base: `main` at `20bba85`.
 - `connectors/<key>/` at the repository root is the only home of PDPP Collection Profile implementations. It holds the code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures.
 - `packages/polyfill-connectors` holds only the reusable runtime, libraries, and dev tools. It holds no connector-specific code.
 - The legacy Playwright format is removed: `*-playwright.{js,json}`, `registry.json`, the legacy runner, skills, scripts, and workflows. This happens only for scopes whose replacement parity is proven and whose Vana-owned binding exists.
-- `scope-catalog.json` and `SCOPES.md` are Vana DPv2 contracts. They are NEVER regenerated from PDPP manifests, in any phase: they are frozen with their exact IDs and shapes, or handed over to the Vana owner. Public bindings and projectors are Vana-owned.
+- The original `scope-catalog.json` and frozen `SCOPES.md` snapshots are Vana DPv2 contracts. They are NEVER regenerated from PDPP manifests, in any phase: they are frozen with their exact IDs and shapes, or handed over to the Vana owner. Public bindings and projectors are Vana-owned.
 - No alias loader, dual discovery, or compatibility runtime exists. A legacy identifier that changed is recorded only as data in the capability map.
 
 ## Decisions
@@ -29,7 +29,7 @@ Flat `platform.scope` strings (for example `claude.conversations` and `instagram
 - The Vana stack owns the compatibility implementation, likely a shared `unity-surfaces` package used by app.vana.org, Desktop, and the embedded Personal Server runtime, which consume one generated contract. Context Gateway (ODL's commercial wrapper) does not own or define it, and Vana takes no dependency on Context Gateway. Data Gateway remains the issued-grant ledger, not the owner of connector fulfillment.
 - Vana derives the protected scope set from production issued-scope records (Context Gateway `connect_sessions.canonical_scopes` as evidence, and Data Gateway `grants.scopes` / `grant_registration_history.scopes`), not from all 54 catalog entries.
 - This repo keeps only connector-side evidence: which PDPP connector streams and fields can produce each legacy payload. That evidence lives in the cutover report, not in product code here.
-- The cutover does not rename any published scope ID. The legacy `scope-catalog.json` and `SCOPES.md` snapshots were removed from the current tree with the frozen release lane. Existing immutable releases and commit-pinned copies retain their original bytes; removing the current-tree copies does not delete those contracts. This repository no longer publishes or regenerates them.
+- The cutover does not rename any published scope ID. The former `scope-catalog.json` and frozen `SCOPES.md` snapshots were removed with the release lane. The root `SCOPES.md` is now generated only from `legacy-shapes.json` and its schemas; it does not restore the old catalog or publishing lane. Immutable releases and commit-pinned copies retain their original bytes.
 
 **D1. Identity.** The connector key (`anthropic`, `meta`, `shopify`, `youtube`, `icloud_notes`, ...) is the PDPP implementation identity: directory, manifest `connector_key`, and OCI name. It is not a public DPv2 scope prefix. The earlier proposal to rename public scopes (`claude.*`→`anthropic.*`, etc.) is WITHDRAWN (see the ownership boundary above).
 

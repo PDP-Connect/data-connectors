@@ -29,7 +29,7 @@ const write = (dir, path, data) =>
 function sandbox(t) {
 	const dir = mkdtempSync(join(tmpdir(), "legacy-contracts-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
-	const paths = new Set([permanentPins]);
+	const paths = new Set([permanentPins, "SCOPES.md"]);
 	for (const pins of [permanentPins]) {
 		for (const path of Object.keys(read(root, pins).sha256)) paths.add(path);
 	}
@@ -81,3 +81,9 @@ for (const pins of [permanentPins]) {
 		});
 	}
 }
+
+test("permanent lane rejects drifted generated scope documentation", (t) => {
+	const dir = sandbox(t);
+	writeFileSync(join(dir, "SCOPES.md"), "# Drifted scope documentation\n");
+	assert.throws(() => checkFrozenLegacyShapes(dir), /SCOPES\.md is stale/);
+});

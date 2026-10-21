@@ -57,9 +57,10 @@
     "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check",
     "connector-stdout-console:check": "node --import tsx ./packages/polyfill-connectors/scripts/check-connector-stdout-console.ts",
     "legacy-shapes:check": "node ./scripts/check-frozen-legacy-contracts.mjs",
-    "legacy-shapes:test": "scripts/test-sandbox/test-sandbox -- node --test ./scripts/frozen-legacy-contracts.test.mjs",
+    "legacy-shapes:test": "scripts/test-sandbox/test-sandbox -- node --test ./scripts/frozen-legacy-contracts.test.mjs ./scripts/generate-legacy-scopes.test.mjs",
     "legacy-retention:check": "node ./scripts/check-legacy-retention.mjs",
-    "legacy-retention:test": "npm run legacy-retention:check && scripts/test-sandbox/test-sandbox -- node --test ./scripts/legacy-retention.test.mjs"
+    "legacy-retention:test": "npm run legacy-retention:check && scripts/test-sandbox/test-sandbox -- node --test ./scripts/legacy-retention.test.mjs",
+    "legacy-shapes:generate": "node ./scripts/generate-legacy-scopes.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",

@@ -35,7 +35,7 @@ const digest = (dir, path) =>
 function sandbox(t) {
 	const dir = mkdtempSync(join(tmpdir(), "legacy-contracts-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
-	const paths = new Set([permanentPins, temporaryPins]);
+	const paths = new Set([permanentPins, temporaryPins, "SCOPES.md"]);
 	for (const pins of [permanentPins, temporaryPins]) {
 		for (const path of Object.keys(read(root, pins).sha256)) paths.add(path);
 	}

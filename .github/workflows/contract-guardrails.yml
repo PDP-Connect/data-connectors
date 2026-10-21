@@ -24,7 +24,7 @@ jobs:
       - name: Check packed library manifest projection
         run: npm run polyfill-library-metadata:check
 
-      - name: Check permanent frozen scope IDs and schemas
+      - name: Check permanent frozen scope IDs, schemas and generated docs
         run: npm run legacy-shapes:check && npm run legacy-shapes:test
 
       - name: Test temporary release metadata and fixture proofs (remove with F10)
