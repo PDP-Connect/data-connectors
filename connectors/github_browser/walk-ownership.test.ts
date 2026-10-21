@@ -349,6 +349,37 @@ test("page floors remain binding when advertised only by the non-selected route"
 	}
 });
 
+test("generated route continuations retain both existence and terminal page promises", () => {
+	const start = "https://github.com/sample-user?page=1&tab=stars";
+	const observation = (kind: "next" | "end" | "unproven" | "missing"): PageObservation => ({
+		ids: kind === "missing" ? [] : ["a"], rowsComplete: kind !== "missing", rejectedRows: 0,
+		continuation: kind === "next" ? { kind, url: "https://github.com/stars/sample-user?page=2" }
+			: kind === "missing" ? { kind: "unknown", reason: "unreadable_list" } : { kind },
+	});
+	for (const primary of ["next", "end", "unproven"] as const) {
+		for (const alternate of ["next", "end", "unproven", "missing"] as const) {
+			for (const witness of ["total", "reconcile"] as const) {
+				const evidence = new InventoryEvidence(start);
+				evidence.observeRoutes(observation(primary), observation(alternate));
+				const needsSecondPage = primary === "next" || alternate === "next";
+				const endsOnFirstPage = primary === "end" || alternate === "end";
+				const selectedNext = (alternate === "missing" ? primary : alternate) === "next";
+				const shouldComplete = !(needsSecondPage && endsOnFirstPage) && (!needsSecondPage || selectedNext);
+				if (needsSecondPage && endsOnFirstPage) assert.equal(evidence.next, null, "conflicting page promises must stop before IO");
+				if (evidence.next !== null) evidence.observePage({ ids: ["b"], rowsComplete: true, rejectedRows: 0, continuation: { kind: "unproven" } });
+				const ids = Array.from(evidence.identities);
+				if (witness === "total") evidence.addTotals({ exactTotals: [ids.length], totalConflict: false });
+				else {
+					const independent = new InventoryEvidence("https://api.github.com/users/sample-user/starred?page=1");
+					independent.observePage({ ids, rowsComplete: true, rejectedRows: 0, continuation: { kind: "end" } });
+					evidence.reconcile(independent);
+				}
+				assert.equal(evidence.decide(ids.length) === null, shouldComplete, JSON.stringify({ primary, alternate, witness }));
+			}
+		}
+	}
+});
+
 for (const stream of ["repositories", "starred"] as const) {
 	for (const starsRoute of stream === "starred" ? [false, true] : [false]) {
 		for (const total of [undefined, 1]) {

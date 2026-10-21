@@ -73,6 +73,8 @@ not unioned. The same invariant check rejects cursor-bearing successors, includi
 a Next URL that also has a numeric page, before the walk issues another request.
 An unavailable list permits a readable alternate. Contradictions in a recognized
 list and unbound responses remain failures even when another payload is selected.
+Each route's Next proves another page exists; each explicit end binds the last
+page to the current page. Conflicting promises stop the walk before another request.
 For repositories/starred, evidence stays binding across routes and pages. Rejected
 entries, duplicate identities (even unchanged rows), and later pages
 without new identities remain failures even if a later page or counter looks complete.

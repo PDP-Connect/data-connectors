@@ -115,7 +115,7 @@ export class InventoryEvidence {
 		if (alternate === undefined) return { selected: primary, added: this.observePage(primary) };
 		this.retain(primary);
 		this.retain(alternate);
-		const selected = alternate.continuation.kind === "unknown" && alternate.continuation.reason === "unreadable_list" && primary.continuation.kind === "unproven"
+		const selected = alternate.continuation.kind === "unknown" && alternate.continuation.reason === "unreadable_list"
 			? primary : alternate;
 		const added = this.observePage(selected);
 		return { selected, added };
@@ -134,7 +134,14 @@ export class InventoryEvidence {
 			this.lastPage ??= page.lastPage;
 		}
 		this.linkedPage = Math.max(this.linkedPage, page.linkedPage ?? 0);
-		if (page.continuation.kind === "next") this.requests.add(page.continuation.url);
+		const pageNumber = this.request?.page ?? this.pages;
+		if (page.continuation.kind === "next") {
+			this.requests.add(page.continuation.url);
+			this.linkedPage = Math.max(this.linkedPage, pageNumber + 1);
+		} else if (page.continuation.kind === "end") {
+			if (this.lastPage !== null && this.lastPage !== pageNumber) this.fail("end_before_advertised_last");
+			this.lastPage ??= pageNumber;
+		}
 		// A missing list permits another route; contradictions in a recognized list
 		// remain binding even when its payload is not selected.
 		const missingList = page.continuation.kind === "unknown" && page.continuation.reason === "unreadable_list";
