@@ -687,3 +687,74 @@ for (const rejection of ["false", "schema", "throw"] as const) {
 		});
 	}
 }
+
+test("a retried attachment UID never overwrites a hydrated sibling with a failed record", async () => {
+	const savedCap = process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+	process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = "20";
+	try {
+		// Part 1 (16 bytes) hydrates; part 2 (30 bytes) is over the cap, so the
+		// UID stays owed and is retried with both parts.
+		const m = mailbox([attachmentMessage(10, "a", [16, 30])], 101);
+		const first = await run(m, {}, requested(["attachments"]));
+		const a1 = events(first, "RECORD").find((e) => e.key === "a:1") as
+			| { data: { hydration_status: string; blob_ref: unknown } }
+			| undefined;
+		assert.equal(a1?.data.hydration_status, "hydrated");
+		assert.deepEqual(
+			progressOf(first).debt.map((d) => d.uid),
+			[10],
+		);
+		// The retry's download of part 1 fails transiently.
+		(m.client as unknown as { download: () => Promise<never> }).download =
+			async () => {
+				throw new Error("temporary download error");
+			};
+		const second = await run(m, first.state, requested(["attachments"]));
+		const overwritten = events(second, "RECORD").find(
+			(e) =>
+				e.key === "a:1" &&
+				(e.data as { hydration_status?: string }).hydration_status !==
+					"hydrated",
+		);
+		assert.equal(
+			overwritten,
+			undefined,
+			"the stored hydrated part is not replaced",
+		);
+		assert.ok(
+			events(second, "DETAIL_GAP").some((e) => e.record_key === "a:1"),
+			"the failed reattempt leaves a retry locator instead",
+		);
+	} finally {
+		if (savedCap === undefined)
+			delete process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
+		else process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = savedCap;
+	}
+});
+
+test("the attachments inventory claim waits for forward work the ledger could not account", async () => {
+	const row = attachmentMessage(201, "c9");
+	(row.envelope as { date?: unknown }).date = "malformed provider date";
+	const m = mailbox([row], 202);
+	const state = ledgerState(
+		{
+			attachments: { through: 200, coveredFrom: 201, next: 201 },
+			message_bodies: { through: 200, coveredFrom: 201, next: 201 },
+		},
+		201,
+	);
+	(state.messages as { progress: { debt: unknown[] } }).progress.debt =
+		Array.from({ length: 200 }, (_, i) => ({
+			uid: i + 1,
+			streams: ["message_bodies"],
+			attempts: 1,
+			failure: "unreadable",
+		}));
+	const r = await run(m, state, requested(["attachments"]));
+	assert.equal(progressOf(r).streams.attachments?.next, 201, "UID 201 is held");
+	assert.equal(
+		attachmentCoverage(r),
+		undefined,
+		"no claim while forward work is held",
+	);
+});

@@ -1071,6 +1071,20 @@ async function emitAttachmentRecords(
 		};
 		const hydration = await deps.hydrateAttachment(msg, a);
 		const hydrated = hydration.record;
+		if (hydrated.hydration_status === "failed") {
+			// A failed hydration writes no record: this part may already be
+			// stored hydrated (a retry of a sibling, or the replay of a failed
+			// run), and a whole-record upsert with no blob would destroy it. Its
+			// retry DETAIL_GAP, emitted with the run's gaps, accounts for it.
+			if (deps.attachmentCoverage) {
+				recordAttachmentCoverage(
+					deps.attachmentCoverage,
+					hydrated,
+					hydration.failure,
+				);
+			}
+			continue;
+		}
 		let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
 		let emitFailure: { error: unknown } | undefined;
 		let gapEmitted = false;
@@ -4815,6 +4829,10 @@ export async function runAllMailPasses(
 	// (`validateDetailCoverageAgainstManifest`).
 
 	if (page && ledger.historicalStreams.includes("attachments")) {
+		// A failed hydration writes no record, so the emit tally cannot see it.
+		const failed = attachmentCoverage?.failedRecords.length ?? 0;
+		attachmentSummary.failed += failed;
+		attachmentSummary.remaining_historical_gaps += failed;
 		gmailDiagnostic("attachment_backfill_summary", { ...attachmentSummary });
 		await emit({
 			type: "PROGRESS",

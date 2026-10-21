@@ -607,15 +607,15 @@ test("processMessage: a served gap whose attachment fails hydration AGAIN is nev
 
 	await processMessage(harness.deps, makeAttachmentMsg());
 
-	const attachment = harness.emitted.find(
-		(record) => record.stream === "attachments",
-	);
-	assert.ok(
-		attachment,
-		"expected the failed attachment metadata to still emit",
+	// A failed hydration writes no record (a stored copy may be hydrated);
+	// the failure is held by its retry gap instead.
+	assert.equal(
+		harness.emitted.some((record) => record.stream === "attachments"),
+		false,
+		"a failed hydration must not overwrite the part's stored record",
 	);
 	assert.equal(
-		attachment.data.hydration_status,
+		attachmentCoverage.failedRecords[0]?.record.hydration_status,
 		"failed",
 		"hydration must have actually failed for this probe to be valid",
 	);
@@ -646,7 +646,7 @@ test("processMessage: a served gap whose attachment fails hydration AGAIN is nev
 	);
 });
 
-test("processMessage: emits bounded failed attachment metadata without fake blob ids", async () => {
+test("processMessage: a failed hydration writes no record and keeps a bounded retry gap", async () => {
 	const hydrateAttachment = makeAttachmentHydrator({
 		connectorId: "https://registry.pdpp.dev/connectors/gmail",
 		fetchAttachment: () =>
@@ -654,7 +654,9 @@ test("processMessage: emits bounded failed attachment metadata without fake blob
 		uploadBlob: () =>
 			Promise.reject(new Error("should not upload when download fails")),
 	});
+	const coverage = makeAttachmentDetailCoverage();
 	const { deps, emitted } = makeHarness({
+		attachmentCoverage: coverage,
 		hydrateAttachment,
 		requested: makeRequested(["attachments"]),
 		wantBodies: false,
@@ -663,14 +665,24 @@ test("processMessage: emits bounded failed attachment metadata without fake blob
 
 	await processMessage(deps, makeAttachmentMsg());
 
-	const attachment = emitted.find((record) => record.stream === "attachments");
-	assert.ok(attachment, "expected failed attachment metadata");
-	assert.equal(attachment.data.id, "gmmsgid-1111:2");
-	assert.equal(attachment.data.blob_ref, null);
-	assert.equal(attachment.data.content_sha256, null);
-	assert.equal(attachment.data.hydration_status, "failed");
-	assert.equal(typeof attachment.data.hydration_error, "string");
-	assert.ok(String(attachment.data.hydration_error).length <= 240);
+	// The part may already be stored hydrated (a sibling's retry, or the replay
+	// of a failed run). A record with no blob would destroy that copy.
+	assert.equal(
+		emitted.some((record) => record.stream === "attachments"),
+		false,
+	);
+	assert.deepEqual(coverage.gapKeys, ["gmmsgid-1111:2"]);
+	const failed = coverage.failedRecords[0];
+	assert.ok(failed);
+	assert.equal(failed.record.blob_ref, null);
+	assert.equal(failed.record.content_sha256, null);
+	assert.ok(String(failed.record.hydration_error).length <= 240);
+	const gap = buildAttachmentDetailGap(failed.record, failed.failureClass);
+	assert.equal(gap.record_key, "gmmsgid-1111:2");
+	assert.ok(
+		String(gap.last_error?.class).length <= 64,
+		"only a bounded class crosses",
+	);
 });
 
 test("processMessage: rerun hydration preserves attachment identity and idempotent blob identity", async () => {
@@ -5189,7 +5201,7 @@ test("backfill mode: rerunning the same historical UID is idempotent and the sum
 	assert.equal(blobRefBlobId(attachments[0]), blobRefBlobId(attachments[1]));
 });
 
-test("backfill mode: a failed historical attachment fetch is counted as a remaining historical gap, not silently dropped", async () => {
+test("backfill mode: a failed historical attachment fetch is kept as a retry gap, not silently dropped", async () => {
 	const hydrateAttachment = makeAttachmentHydrator({
 		connectorId: "https://registry.pdpp.dev/connectors/gmail",
 		fetchAttachment: () =>
@@ -5197,35 +5209,25 @@ test("backfill mode: a failed historical attachment fetch is counted as a remain
 		uploadBlob: () =>
 			Promise.reject(new Error("should not be called when fetch fails")),
 	});
+	const coverage = makeAttachmentDetailCoverage();
 	const { deps, emitted } = makeHarness({
+		attachmentCoverage: coverage,
 		hydrateAttachment,
 		requested: makeRequested(["attachments"]),
 		wantBodies: false,
 		wantMessages: false,
 	});
 
-	const summary = createAttachmentBackfillSummary();
-	const originalEmitRecord = deps.emitRecord;
-	deps.emitRecord = async (stream, data, _keyField) => {
-		await originalEmitRecord(stream, data);
-		if (stream === "attachments") {
-			addAttachmentBackfillRecordToSummary(summary, data);
-		}
-	};
-
 	await emitMessagesPass(deps, [makeAttachmentMsg()]);
 
-	const attachmentRecord = emitted.find((r) => r.stream === "attachments");
-	assert.ok(
-		attachmentRecord,
-		"failed historical attachment must still emit a record so the gap is visible",
+	// No record is written for the failed part; the failure is a retry gap,
+	// which the run emits with its other gaps and counts for the operator.
+	assert.equal(
+		emitted.some((r) => r.stream === "attachments"),
+		false,
 	);
-	assert.equal(attachmentRecord.data.hydration_status, "failed");
-	// The summary counts this as a remaining gap so the operator must
-	// re-run before claiming completeness.
-	assert.equal(summary.failed, 1);
-	assert.equal(summary.hydrated, 0);
-	assert.equal(summary.remaining_historical_gaps, 1);
+	assert.deepEqual(coverage.gapKeys, ["gmmsgid-1111:2"]);
+	assert.equal(coverage.failedRecords.length, 1);
 });
 
 // ─── redactEmailForProgress ─────────────────────────────────────────────
@@ -5547,8 +5549,8 @@ test("emitMessagesPass: accumulates honest coverage across hydrated, gap, and un
 	assert.deepEqual(coverage.requiredKeys, ["ok:1", "bad:1", "big:1"]);
 	assert.deepEqual(coverage.hydratedKeys, ["ok:1"]);
 	assert.deepEqual(coverage.gapKeys, ["bad:1"]);
-	// too_large stays required, unaccounted.
-	assert.equal(emitted.filter((r) => r.stream === "attachments").length, 3);
+	// too_large stays required, unaccounted. The failed part writes no record.
+	assert.equal(emitted.filter((r) => r.stream === "attachments").length, 2);
 
 	// DETAIL_COVERAGE: covered = hydrated only (no unaccounted keys claimed).
 	assert.deepEqual(buildAttachmentDetailCoverageMessage(coverage), {
@@ -6960,6 +6962,24 @@ test("attachment coverage across lanes: a walk hydration survives a rejected ser
 	assert.equal(coverage.localEmitRejected, false);
 });
 
+/** A runtime blob endpoint that accepts every upload and echoes its digest. */
+const stubBlobEndpoint = (async (_url: unknown, init?: RequestInit) => {
+	const bytes = Buffer.from(
+		await new Response(init?.body as BodyInit).arrayBuffer(),
+	);
+	const sha256 = createHash("sha256").update(bytes).digest("hex");
+	return new Response(
+		JSON.stringify({
+			object: "blob",
+			blob_id: `blob-${sha256.slice(0, 12)}`,
+			mime_type: "application/pdf",
+			sha256,
+			size_bytes: bytes.byteLength,
+		}),
+		{ status: 201, headers: { "content-type": "application/json" } },
+	);
+}) as typeof fetch;
+
 function realResourceEmitter(
 	requested: Map<string, StreamRequest>,
 	emit: RecordingHarness["emit"],
@@ -7184,17 +7204,23 @@ test("production attachment caller: a rejection with no retry locator becomes le
 		}
 		return true;
 	}) as typeof process.stdout.write;
-	// All transport seams are offline. Hydration success is covered above;
-	// this caller test isolates whether a rejected record is retried at all.
-	globalThis.fetch = async () => {
-		throw new Error("offline fixture");
-	};
+	// Hydration succeeds (a stub blob endpoint and IMAP part), so the record
+	// reaches the emitter and its rejection is what this test exercises. A
+	// failed hydration writes no record at all.
+	globalThis.fetch = stubBlobEndpoint;
+	const originalRsUrl = process.env.PDPP_RS_URL;
+	const originalOwnerToken = process.env.PDPP_OWNER_TOKEN;
+	process.env.PDPP_RS_URL = "http://rs.test";
+	process.env.PDPP_OWNER_TOKEN = "test-owner-token";
 	try {
 		const client = {
 			close: mock.fn(),
-			download: async () => {
-				throw new Error("offline fixture");
-			},
+			download: async () => ({
+				meta: { contentType: "application/pdf" },
+				content: (async function* () {
+					yield Buffer.from("pdf-bytes");
+				})(),
+			}),
 			fetchOne: async () => message,
 			search: async () => [321],
 			mailbox: {
@@ -7338,6 +7364,10 @@ test("production attachment caller: a rejection with no retry locator becomes le
 	} finally {
 		process.stdout.write = originalWrite;
 		globalThis.fetch = originalFetch;
+		if (originalRsUrl === undefined) delete process.env.PDPP_RS_URL;
+		else process.env.PDPP_RS_URL = originalRsUrl;
+		if (originalOwnerToken === undefined) delete process.env.PDPP_OWNER_TOKEN;
+		else process.env.PDPP_OWNER_TOKEN = originalOwnerToken;
 	}
 });
 
@@ -7361,17 +7391,23 @@ test("persistent attachment rejection advances messages checkpoints with durable
 		}
 		return true;
 	}) as typeof process.stdout.write;
-	// All transport seams are offline. Hydration success is covered above;
-	// this caller test isolates whether a rejected record is retried at all.
-	globalThis.fetch = async () => {
-		throw new Error("offline fixture");
-	};
+	// Hydration succeeds (a stub blob endpoint and IMAP part), so the record
+	// reaches the emitter and its rejection is what this test exercises. A
+	// failed hydration writes no record at all.
+	globalThis.fetch = stubBlobEndpoint;
+	const originalRsUrl = process.env.PDPP_RS_URL;
+	const originalOwnerToken = process.env.PDPP_OWNER_TOKEN;
+	process.env.PDPP_RS_URL = "http://rs.test";
+	process.env.PDPP_OWNER_TOKEN = "test-owner-token";
 	try {
 		const client = {
 			close: mock.fn(),
-			download: async () => {
-				throw new Error("offline fixture");
-			},
+			download: async () => ({
+				meta: { contentType: "application/pdf" },
+				content: (async function* () {
+					yield Buffer.from("pdf-bytes");
+				})(),
+			}),
 			fetchOne: async () => message,
 			search: async () => [321],
 			mailbox: {
@@ -7520,6 +7556,10 @@ test("persistent attachment rejection advances messages checkpoints with durable
 	} finally {
 		process.stdout.write = originalWrite;
 		globalThis.fetch = originalFetch;
+		if (originalRsUrl === undefined) delete process.env.PDPP_RS_URL;
+		else process.env.PDPP_RS_URL = originalRsUrl;
+		if (originalOwnerToken === undefined) delete process.env.PDPP_OWNER_TOKEN;
+		else process.env.PDPP_OWNER_TOKEN = originalOwnerToken;
 	}
 });
 

@@ -912,6 +912,8 @@ export class GmailProgressLedger {
 			attachmentsInventoryComplete:
 				this.requested.has("attachments") &&
 				historyComplete.attachments === true &&
+				// Forward work the run could not account is unwalked inventory.
+				(streams.attachments?.next ?? 0) >= this.uidnext &&
 				!debt.some((d) => d.streams.includes("attachments")),
 			unaccounted: [...unaccounted].sort((a, b) => a - b),
 		};

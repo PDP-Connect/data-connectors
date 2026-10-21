@@ -458,11 +458,17 @@ test("guard: the attachment inventory claim arrives once a multi-page walk compl
 	);
 	const next = await run(m, last(runs).state, ["attachments"]);
 	assert.ok(coverageOf(next, "attachments"), "later runs keep the claim");
-	const keys = runs.flatMap((r) =>
-		ofStream(r, "attachments").map((x) => x.data.id),
-	);
+	// Hydration has no blob endpoint here, so each part ends as a retry gap
+	// (a failed hydration writes no record). The walk reached UID 1000.
 	assert.ok(
-		keys.includes("3e8:2"),
+		runs.some((r) =>
+			r.protocol.some(
+				(e) =>
+					e.type === "DETAIL_GAP" &&
+					e.stream === "attachments" &&
+					e.record_key === "3e8:2",
+			),
+		),
 		"the attachment past the first page was enumerated",
 	);
 });
@@ -1110,11 +1116,20 @@ test("attachments: an unresolved too_large part stays owed across runs, so no la
 		// Raising the cap lets the next retry resolve it.
 		delete process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
 		const retried = await run(m, state, ["attachments"]);
+		// No blob endpoint here, so the retry under the new cap fails
+		// hydration: it leaves a retry gap, and the UID is no longer owed.
 		assert.ok(
-			ofStream(retried, "attachments").some(
-				(x) => x.data.hydration_status !== "too_large",
+			retried.protocol.some(
+				(e) =>
+					e.type === "DETAIL_GAP" &&
+					e.stream === "attachments" &&
+					e.record_key === "a:2",
 			),
 			"the owed part is retried under the new cap",
+		);
+		assert.equal(
+			progressOf(retried).debt.some((d) => d.uid === 10),
+			false,
 		);
 	} finally {
 		if (prior === undefined) delete process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
