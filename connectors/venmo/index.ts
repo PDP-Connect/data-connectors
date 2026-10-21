@@ -49,7 +49,7 @@
  *     card authorizations/ATM withdrawals/disbursements share the same
  *     `/stories` feed but carry no `payment` object in the documented
  *     shape and are intentionally not modeled — see parsers.ts
- *     transactionRecord.
+ *     parseTransactionStory.
  *
  * Tested surfaces: fixture-driven only (pilot-fixture.test.ts,
  * parsers.test.ts, schemas.test.ts, integration.test.ts,
@@ -83,7 +83,7 @@ import {
 	API_BASE,
 	normalizeVenmoDate,
 	profileRecord,
-	transactionRecord,
+	parseTransactionStory,
 	userRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -93,6 +93,15 @@ const FRIENDS_PAGE_SIZE = 200;
 const TRANSACTIONS_PAGE_SIZE = 50;
 export const MAX_FRIENDS_PAGES = 200;
 export const MAX_TRANSACTION_PAGES = 400;
+const HEAD_REFRESH_PAGES_WITH_PENDING_WORK = 100;
+const MAX_HEAD_GAPS = 4;
+
+/** Unread story IDs between before_id and end_id; start_id anchors fresh refreshes. */
+interface HeadGap {
+	start_id: string;
+	before_id: string;
+	end_id: string;
+}
 
 /**
  * `venmo_transport_error` (collect()'s page-fetch, see `makePageFetch` below)
@@ -416,18 +425,26 @@ async function emitTransactionsPage(
 	accepted: number;
 	firstSafeId: string | null;
 	firstRejectedIndex: number | null;
+	rejectionReason: string | null;
 	latestSeenAt: string | null;
 }> {
 	let accepted = 0;
 	let firstSafeId: string | null = null;
 	let firstRejectedIndex: number | null = null;
+	let rejectionReason: string | null = null;
 	let latestSeenAt: string | null = null;
 	for (const [index, story] of stories.entries()) {
-		const record = transactionRecord(story, ownerId);
-		if (!record) {
+		const parsed = parseTransactionStory(story, ownerId);
+		if (parsed.kind === "unsupported") {
 			firstSafeId ??= typeof story.id === "string" ? story.id : null;
 			continue;
 		}
+		if (parsed.kind === "invalid") {
+			firstRejectedIndex ??= index;
+			rejectionReason ??= parsed.reason;
+			continue;
+		}
+		const { record } = parsed;
 		const selected = ctx.isRecordSelected?.("transactions", record) ?? true;
 		const schemaAccepted = selected
 			? validateRecord("transactions", record).ok
@@ -439,6 +456,7 @@ async function emitTransactionsPage(
 		}
 		if (!schemaAccepted) {
 			firstRejectedIndex ??= index;
+			rejectionReason ??= "schema_invalid";
 			continue;
 		}
 		firstSafeId ??= story.id;
@@ -452,7 +470,13 @@ async function emitTransactionsPage(
 			latestSeenAt = createdAt;
 		}
 	}
-	return { accepted, firstSafeId, firstRejectedIndex, latestSeenAt };
+	return {
+		accepted,
+		firstSafeId,
+		firstRejectedIndex,
+		rejectionReason,
+		latestSeenAt,
+	};
 }
 
 export async function collectTransactions(
@@ -466,7 +490,9 @@ export async function collectTransactions(
 	considered: number;
 	covered: number;
 	headAnchorId: string | null;
+	headGaps: HeadGap[];
 	latestSeenAt: string | null;
+	rejectionReason: string | null;
 	truncated: boolean;
 }> {
 	const progress = ctx.progress as VenmoProgress;
@@ -485,19 +511,39 @@ export async function collectTransactions(
 		typeof prior.head_anchor_id === "string" && prior.head_anchor_id
 			? prior.head_anchor_id
 			: null;
+	const headGaps: HeadGap[] =
+		prior.version === 2 && Array.isArray(prior.head_gaps)
+			? prior.head_gaps
+					.filter(
+						(gap): gap is HeadGap =>
+							gap !== null &&
+							typeof gap === "object" &&
+							!Array.isArray(gap) &&
+							typeof gap.start_id === "string" &&
+							gap.start_id.length > 0 &&
+							typeof gap.before_id === "string" &&
+							gap.before_id.length > 0 &&
+							typeof gap.end_id === "string" &&
+							gap.end_id.length > 0,
+					)
+					.slice(0, MAX_HEAD_GAPS)
+			: [];
 	let totalSeen = 0;
 	let totalAccepted = 0;
 	let pagesFetched = 0;
 	let latestSeenAt: string | null = null;
 	let firstHeadSafeId: string | null = null;
+	let rejectionReason: string | null = null;
 
 	const fetchAndEmitPage = async (
 		beforeId: string | undefined,
 		seenBeforeIds: Set<string>,
+		stopAtId?: string,
 	): Promise<
 		| (Awaited<ReturnType<typeof emitTransactionsPage>> & {
 				stories: VenmoStory[];
 				lastStoryId: string;
+				reachedStop: boolean;
 		  })
 		| null
 	> => {
@@ -508,23 +554,35 @@ export async function collectTransactions(
 			cursor_present: Boolean(beforeId),
 			total_seen: totalSeen,
 		});
-		const stories = await fetchTransactionsPage(fetchPath, ownerId, beforeId);
+		const fetched = await fetchTransactionsPage(fetchPath, ownerId, beforeId);
 		pagesFetched += 1;
-		if (stories.length === 0) {
+		if (fetched.length === 0) {
 			return null;
 		}
-		const lastStoryId = stories.at(-1)?.id;
+		const stopIndex = stopAtId
+			? fetched.findIndex((story) => story.id === stopAtId)
+			: -1;
+		const reachedStop = stopIndex >= 0;
+		const stories = reachedStop ? fetched.slice(0, stopIndex) : fetched;
+		const lastStoryId = fetched.at(-1)?.id ?? "";
+		const finalStory = fetched.at(-1);
+		const finalOutcome = finalStory
+			? parseTransactionStory(finalStory, ownerId)
+			: null;
+		const missingSupportedId =
+			!lastStoryId &&
+			finalOutcome?.kind === "invalid" &&
+			finalOutcome.reason === "missing_id";
 		if (
-			typeof lastStoryId !== "string" ||
-			lastStoryId.length === 0 ||
-			seenBeforeIds.has(lastStoryId)
+			!reachedStop &&
+			((!lastStoryId && !missingSupportedId) || seenBeforeIds.has(lastStoryId))
 		) {
 			throw new Error(
 				"venmo_pagination_stalled [endpoint /stories/target-or-actor/{id}]",
 			);
 		}
 		const page = await emitTransactionsPage(ctx, stories, ownerId);
-		seenBeforeIds.add(lastStoryId);
+		if (lastStoryId) seenBeforeIds.add(lastStoryId);
 		totalSeen += stories.length;
 		totalAccepted += page.accepted;
 		if (
@@ -538,10 +596,10 @@ export async function collectTransactions(
 			phase: "page",
 			item_count: page.accepted,
 			total_seen: totalSeen,
-			cursor_present: stories.length === TRANSACTIONS_PAGE_SIZE,
+			cursor_present: !reachedStop && fetched.length === TRANSACTIONS_PAGE_SIZE,
 		});
 		await delay(PAGE_DELAY_MS);
-		return { ...page, stories, lastStoryId };
+		return { ...page, stories, lastStoryId, reachedStop };
 	};
 
 	const safeBeforeRejected = (
@@ -558,18 +616,26 @@ export async function collectTransactions(
 		return previous;
 	};
 
-	// `before_id` only pages backward. Refresh from the head on every run;
-	// the separate backfill position is used only after reaching last run's
-	// head anchor, so new transactions cannot be hidden by older-history work.
+	// Refresh the head, then advance an old head gap and the tail independently.
+	// A burst can create a new gap while an older gap is still in progress.
 	let headBeforeId: string | undefined;
 	let headExhausted = false;
 	let headReachedAnchor = false;
 	let blockedByRejected = false;
+	const headStopId =
+		headGaps[0]?.start_id ?? priorHeadAnchor ?? priorBackfill ?? undefined;
 	const headSeenIds = new Set<string>();
 	const headWalk = await walkPagesWithCeiling({
-		maxPages: MAX_TRANSACTION_PAGES,
+		maxPages:
+			priorBackfill || headGaps.length > 0
+				? HEAD_REFRESH_PAGES_WITH_PENDING_WORK
+				: MAX_TRANSACTION_PAGES,
 		fetchPage: async () => {
-			const page = await fetchAndEmitPage(headBeforeId, headSeenIds);
+			const page = await fetchAndEmitPage(
+				headBeforeId,
+				headSeenIds,
+				headStopId,
+			);
 			if (!page) {
 				headExhausted = true;
 				return false;
@@ -577,6 +643,7 @@ export async function collectTransactions(
 			firstHeadSafeId ??= page.firstSafeId;
 			if (page.firstRejectedIndex !== null) {
 				blockedByRejected = true;
+				rejectionReason ??= page.rejectionReason;
 				headBeforeId = safeBeforeRejected(
 					page.stories,
 					page.firstRejectedIndex,
@@ -585,11 +652,7 @@ export async function collectTransactions(
 				return false;
 			}
 			headBeforeId = page.lastStoryId;
-			if (
-				priorBackfill &&
-				priorHeadAnchor &&
-				page.stories.some((story) => story.id === priorHeadAnchor)
-			) {
+			if (page.reachedStop) {
 				headReachedAnchor = true;
 				return false;
 			}
@@ -598,52 +661,143 @@ export async function collectTransactions(
 	});
 
 	let backfillBeforeId = priorBackfill;
-	let truncated = headWalk.truncated;
+	const newestHeadGap = headGaps[0];
 	if (headExhausted) {
 		backfillBeforeId = null;
-	} else if (!priorBackfill) {
+		headGaps.length = 0;
+	} else if (!priorBackfill && headGaps.length === 0 && !headStopId) {
 		if (headWalk.truncated || blockedByRejected) {
 			backfillBeforeId = headBeforeId ?? null;
 		}
-	} else if (headReachedAnchor && !blockedByRejected) {
-		const remainingPages = MAX_TRANSACTION_PAGES - pagesFetched;
-		if (remainingPages > 0) {
-			let backfillBefore = priorBackfill;
-			let backfillExhausted = false;
-			const backfillSeenIds = new Set([backfillBefore]);
-			const backfillWalk = await walkPagesWithCeiling({
-				maxPages: remainingPages,
+	} else if (headReachedAnchor && newestHeadGap && firstHeadSafeId) {
+		// The next refresh only needs to reach this run's newest safe story.
+		newestHeadGap.start_id = firstHeadSafeId;
+	} else if (
+		!blockedByRejected &&
+		!headReachedAnchor &&
+		headBeforeId &&
+		headStopId &&
+		firstHeadSafeId
+	) {
+		headGaps.unshift({
+			start_id: firstHeadSafeId,
+			before_id: headBeforeId,
+			end_id: headStopId,
+		});
+		while (headGaps.length > MAX_HEAD_GAPS) {
+			const older = headGaps.pop();
+			const newer = headGaps.at(-1);
+			if (older && newer) newer.end_id = older.end_id;
+		}
+	}
+
+	// Complete as many pending intervals as the allocated share permits.
+	let gapBlocked = false;
+	const advanceHeadGaps = async (pageBudget: number): Promise<void> => {
+		const endAtPage = pagesFetched + pageBudget;
+		while (headGaps.length > 0 && pagesFetched < endAtPage && !gapBlocked) {
+			const oldestGap = headGaps.at(-1);
+			if (!oldestGap) break;
+			let gapBefore = oldestGap.before_id;
+			let gapDone = false;
+			const gapSeenIds = new Set([gapBefore]);
+			await walkPagesWithCeiling({
+				maxPages: endAtPage - pagesFetched,
 				fetchPage: async () => {
-					const page = await fetchAndEmitPage(backfillBefore, backfillSeenIds);
+					const page = await fetchAndEmitPage(
+						gapBefore,
+						gapSeenIds,
+						oldestGap.end_id,
+					);
 					if (!page) {
-						backfillExhausted = true;
+						gapDone = true;
 						return false;
 					}
 					if (page.firstRejectedIndex !== null) {
 						blockedByRejected = true;
-						backfillBefore =
+						gapBlocked = true;
+						rejectionReason ??= page.rejectionReason;
+						gapBefore =
 							safeBeforeRejected(
 								page.stories,
 								page.firstRejectedIndex,
-								backfillBefore,
-							) ?? backfillBefore;
+								gapBefore,
+							) ?? gapBefore;
 						return false;
 					}
-					backfillBefore = page.lastStoryId;
+					if (page.reachedStop) {
+						gapDone = true;
+						return false;
+					}
+					gapBefore = page.lastStoryId;
 					return true;
 				},
 			});
-			backfillBeforeId = backfillExhausted ? null : backfillBefore;
-			truncated = backfillWalk.truncated;
-		} else {
-			truncated = true;
+			if (gapDone) headGaps.pop();
+			else oldestGap.before_id = gapBefore;
 		}
+	};
+	if (!headExhausted && headGaps.length > 0) {
+		const reserveForBackfill = priorBackfill ? 100 : 0;
+		await advanceHeadGaps(
+			Math.min(
+				200,
+				Math.max(0, MAX_TRANSACTION_PAGES - pagesFetched - reserveForBackfill),
+			),
+		);
 	}
-	const headAnchorId = backfillBeforeId
-		? priorBackfill && (blockedByRejected || !headReachedAnchor)
-			? priorHeadAnchor
-			: (firstHeadSafeId ?? priorHeadAnchor)
-		: null;
+
+	if (
+		!headExhausted &&
+		priorBackfill &&
+		backfillBeforeId &&
+		pagesFetched < MAX_TRANSACTION_PAGES
+	) {
+		let backfillExhausted = false;
+		let backfillBefore = backfillBeforeId;
+		const backfillSeenIds = new Set([backfillBefore]);
+		await walkPagesWithCeiling({
+			maxPages: MAX_TRANSACTION_PAGES - pagesFetched,
+			fetchPage: async () => {
+				const page = await fetchAndEmitPage(backfillBefore, backfillSeenIds);
+				if (!page) {
+					backfillExhausted = true;
+					return false;
+				}
+				if (page.firstRejectedIndex !== null) {
+					blockedByRejected = true;
+					rejectionReason ??= page.rejectionReason;
+					backfillBefore =
+						safeBeforeRejected(
+							page.stories,
+							page.firstRejectedIndex,
+							backfillBefore,
+						) ?? backfillBefore;
+					return false;
+				}
+				backfillBefore = page.lastStoryId;
+				return true;
+			},
+		});
+		backfillBeforeId = backfillExhausted ? null : backfillBefore;
+	}
+	if (
+		!headExhausted &&
+		!backfillBeforeId &&
+		headGaps.length > 0 &&
+		!gapBlocked
+	) {
+		await advanceHeadGaps(MAX_TRANSACTION_PAGES - pagesFetched);
+	}
+	const truncated =
+		Boolean(backfillBeforeId || headGaps.length > 0) && !blockedByRejected;
+	const headAnchorId =
+		backfillBeforeId || headGaps.length > 0
+			? (headGaps[0]?.start_id ??
+				(blockedByRejected
+					? (priorHeadAnchor ?? firstHeadSafeId)
+					: (firstHeadSafeId ?? priorHeadAnchor)))
+			: null;
 
 	return {
 		backfillBeforeId,
@@ -651,7 +805,9 @@ export async function collectTransactions(
 		considered: totalSeen + (truncated ? 1 : 0),
 		covered: totalAccepted,
 		headAnchorId,
+		headGaps,
 		latestSeenAt,
+		rejectionReason,
 		truncated,
 	};
 }
@@ -796,7 +952,9 @@ export async function collectAllStreams(
 			considered,
 			covered,
 			headAnchorId,
+			headGaps,
 			latestSeenAt,
+			rejectionReason,
 			truncated,
 		} = await collectTransactions(ctx, fetchPath, ownerId, delay);
 		const priorCursor = ctx.state.transactions;
@@ -812,7 +970,7 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream: "transactions",
 				reason: "transactions_deferred_page_budget",
-				message: `Venmo transactions stopped at the ${MAX_TRANSACTION_PAGES}-page limit with more rows still listed`,
+				message: `Venmo has more transaction history than this run could read; saved positions will resume it in later runs (limit ${MAX_TRANSACTION_PAGES} pages per run)`,
 				diagnostics: {
 					page_limit: MAX_TRANSACTION_PAGES,
 					total_seen: considered - 1,
@@ -821,12 +979,17 @@ export async function collectAllStreams(
 			});
 		}
 		if (blockedByRejected) {
+			const reason =
+				rejectionReason === "missing_id"
+					? "missing story id"
+					: rejectionReason === "missing_date_created"
+						? "missing date_created"
+						: "schema validation failed";
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "transactions",
 				reason: "transactions_schema_blocked",
-				message:
-					"Venmo returned a transaction that did not pass shape validation; older history will be retried",
+				message: `Venmo returned a supported payment with ${reason}; this page will be retried after Venmo corrects it`,
 			});
 		}
 		const normalizedPrior =
@@ -843,10 +1006,14 @@ export async function collectAllStreams(
 			stream: "transactions",
 			cursor: {
 				last_seen_date_created: nextLatestSeenAt,
-				...(backfillBeforeId && headAnchorId
+				...((backfillBeforeId || headGaps.length > 0) && headAnchorId
 					? {
-							backfill_before_id: backfillBeforeId,
+							version: 2,
+							...(backfillBeforeId
+								? { backfill_before_id: backfillBeforeId }
+								: {}),
 							head_anchor_id: headAnchorId,
+							...(headGaps.length > 0 ? { head_gaps: headGaps } : {}),
 						}
 					: {}),
 			},
