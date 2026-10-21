@@ -21,6 +21,7 @@ import {
 	normalizeGtin,
 	normalizeName,
 	type ProductNode,
+	resolveWholeFoodsUrl,
 	sameGtin,
 	type WholeFoodsProductObservation,
 } from "./binding.ts";
@@ -372,4 +373,53 @@ test("the name normalizer reads FZ and dozen, and ignores apostrophes", () => {
 	assert.equal(normalizeName("Siggi's Skyr").base, normalizeName("Siggis Skyr").base);
 	// None of this loosens a match: different words still differ.
 	assert.notEqual(normalizeName("Siggi's Skyr").base, normalizeName("Skyr").base);
+});
+
+// ─── Review nits: row 3 on its own, relative URLs, malformed links ─────────
+
+test("wholefoods row 3: a URL-tied node with its own facts, named as the request, under another product's h1, is OTHER", () => {
+	// The node's own nutrition would carry its own name (the request); the h1
+	// says the page is something else, so nothing on it is the request's.
+	assert.deepEqual(
+		bindProduct(
+			request(),
+			wf({
+				h1: "Organic Pears",
+				products: [
+					node({
+						name: "Organic Apples",
+						urls: ["https://www.wholefoodsmarket.com/product/organic-apples"],
+						facts: { calories: 52 } as never,
+					}),
+				],
+			}),
+		),
+		{ kind: "OTHER" },
+	);
+});
+
+test("a relative canonical or node URL ties the node to the page", () => {
+	const tied = mainSubject(
+		{
+			canonicalUrl: "/product/organic-apples",
+			h1: null,
+			products: [
+				node({ name: "Recommended Pears" }),
+				node({ name: "Organic Apples", urls: ["/product/organic-apples"], gtin: "012345678905" }),
+			],
+			panel: null,
+		},
+		"https://www.wholefoodsmarket.com/product/organic-apples?ref=search",
+	);
+	assert.equal(tied.kind, "SUBJECT");
+	assert.equal(tied.kind === "SUBJECT" && tied.identity.gtin, "012345678905");
+});
+
+test("a malformed or off-origin search link resolves to nothing instead of throwing", () => {
+	assert.equal(resolveWholeFoodsUrl("https://[bad/product/x"), null);
+	assert.equal(resolveWholeFoodsUrl("https://www.amazon.com/dp/B000000001"), null);
+	assert.equal(
+		resolveWholeFoodsUrl("/product/organic-apples")?.href,
+		"https://www.wholefoodsmarket.com/product/organic-apples",
+	);
 });

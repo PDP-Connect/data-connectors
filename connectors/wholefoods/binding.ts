@@ -118,21 +118,29 @@ export const WHOLE_FOODS_ORIGIN = "https://www.wholefoodsmarket.com";
  *  and is dropped where tiles are collected. Two spellings of one path
  *  (relative and absolute) resolve to the same URL, so they are one tile. */
 export function resolveWholeFoodsUrl(href: string): URL | null {
-	const url = parseUrl(new URL(href, WHOLE_FOODS_ORIGIN).href);
+	const url = parseUrl(href, WHOLE_FOODS_ORIGIN);
 	return url?.origin === WHOLE_FOODS_ORIGIN ? url : null;
 }
 
-function parseUrl(raw: string | null | undefined): URL | null {
+/** A URL, resolved against `base` when it is relative, or null when it does
+ *  not parse. */
+function parseUrl(
+	raw: string | null | undefined,
+	base?: string | null,
+): URL | null {
 	if (!raw) return null;
 	try {
-		return new URL(raw);
+		return new URL(raw, base ?? undefined);
 	} catch {
 		return null;
 	}
 }
 
-const pathOf = (raw: string | null | undefined): string | null => {
-	const url = parseUrl(raw);
+const pathOf = (
+	raw: string | null | undefined,
+	base?: string | null,
+): string | null => {
+	const url = parseUrl(raw, base);
 	return url ? url.pathname.replace(/\/+$/, "") : null;
 };
 
@@ -341,15 +349,17 @@ export function mainSubject(
 	obs: WholeFoodsProductObservation,
 	finalUrl: string | null = null,
 ): MainSubject {
+	// Relative JSON-LD and canonical URLs are relative to the page.
+	const base = finalUrl ?? WHOLE_FOODS_ORIGIN;
 	const here = new Set(
-		[pathOf(obs.canonicalUrl), pathOf(finalUrl)].filter(
+		[pathOf(obs.canonicalUrl, base), pathOf(finalUrl)].filter(
 			(path): path is string => path !== null,
 		),
 	);
 	const heading = obs.h1;
 	const byUrl = obs.products.filter((node) =>
 		node.urls.some((url) => {
-			const path = pathOf(url);
+			const path = pathOf(url, base);
 			return path !== null && here.has(path);
 		}),
 	);
