@@ -97,7 +97,8 @@ function fakeGateway(overrides: Record<string, Handler> = {}) {
 		"sessions.list": (p) =>
 			p.view === "archived" ? fixture("sessions-archived") : SESSIONS,
 		"chat.history": (p) => historyFor(String(p.session_id)),
-		"activity.list": () => fixture("activity"),
+		"activity.list": (p) =>
+			p.before == null ? fixture("activity") : { days: [] },
 		"goals.list": (p) =>
 			p.source === "assistant_tracking"
 				? fixture("goals-tracking")
@@ -269,14 +270,75 @@ test("a full run reads every stream through read methods only and follows the pr
 	}
 });
 
-test("a chat with older history than one page is a DETAIL_GAP, not a complete chat", async () => {
+/** A chat of `count` events (seq 1..count) served newest first, paged by before_seq like the app. */
+function pagedHistory(count: number) {
+	const template = (fixture("history").chat_events as Json[])[0] ?? {};
+	const all = Array.from({ length: count }, (_, i) => ({
+		...template,
+		message_id: `m-${i + 1}`,
+		seq: i + 1,
+		occurred_at_ms: 1792608185077 + i * 1000,
+	}));
+	return (p: Json) => {
+		const before = typeof p.before_seq === "number" ? p.before_seq : Infinity;
+		const older = all.filter((e) => e.seq < before);
+		const page = older.slice(-Number(p.limit));
+		return {
+			channel: "all",
+			chat_events: page,
+			has_more: older.length > page.length,
+			transcript_revision: 31,
+		};
+	};
+}
+
+test("chat.history pages back with before_seq until has_more is false", async () => {
+	const params: Json[] = [];
+	const side = pagedHistory(120);
 	const { gateway } = fakeGateway({
+		"chat.history": (p) => {
+			params.push(p);
+			return p.session_id === SIDE_CHAT
+				? side(p)
+				: historyFor(String(p.session_id));
+		},
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(
+		params.filter((p) => p.session_id === SIDE_CHAT),
+		[
+			{ limit: 50, session_id: SIDE_CHAT },
+			{ limit: 50, session_id: SIDE_CHAT, before_seq: 71 },
+			{ limit: 50, session_id: SIDE_CHAT, before_seq: 21 },
+		],
+	);
+	assert.equal(
+		h.records("messages").filter((r) => r.session_id === SIDE_CHAT).length,
+		120,
+	);
+	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
+	assert.deepEqual(cov?.hydrated_keys, [SIDE_CHAT, MAIN_CHAT]);
+	assert.equal(h.of("DETAIL_GAP").length, 0);
+	assert.deepEqual(h.states("conversations")[0], {
+		version: 1,
+		messages_read_through_ms: 1792612428000,
+	});
+});
+
+test("a chat.history page that repeats is a DETAIL_GAP, not a complete chat", async () => {
+	const { gateway, calls } = fakeGateway({
 		"chat.history": (p) =>
 			historyFor(String(p.session_id), p.session_id === SIDE_CHAT),
 	});
 	const h = harness({ streams: ["conversations", "messages"] });
 	await collectMuseWith(h.ctx, gateway);
 
+	// The second page added nothing new: the walk stops after two calls.
+	assert.equal(
+		calls.filter((c) => c.params.session_id === SIDE_CHAT).length,
+		2,
+	);
 	// What was read is still emitted.
 	assert.equal(h.records("messages").length, 6);
 	const gaps = h.of("DETAIL_GAP", "messages");
@@ -300,29 +362,22 @@ test("a chat with older history than one page is a DETAIL_GAP, not a complete ch
 	});
 });
 
-test("the first page is asked for with a larger limit, and the app's own size if refused", async () => {
-	const seen: unknown[] = [];
+test("a chat.history cursor that does not move back is a DETAIL_GAP", async () => {
+	let n = 0;
 	const { gateway } = fakeGateway({
 		"chat.history": (p) => {
-			seen.push(p.limit);
-			return historyFor(String(p.session_id));
+			if (p.session_id !== SIDE_CHAT) return historyFor(String(p.session_id));
+			n += 1;
+			// New ids every page, but the same seqs: the cursor never moves.
+			const h = historyFor(`${SIDE_CHAT}-${n}`, true);
+			return h;
 		},
 	});
-	const refusing: MuseGateway = {
-		async call(method, params) {
-			if (method === "chat.history" && params.limit !== 50) {
-				const { MuseRpcError } = await import("./index.ts");
-				throw new MuseRpcError("rpc_error", "muse_rpc_failed: limit");
-			}
-			return gateway.call(method, params);
-		},
-	};
 	const h = harness({ streams: ["messages"] });
-	await collectMuseWith(h.ctx, refusing);
-	assert.deepEqual(seen, [50, 50]);
-	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.hydrated_keys, [
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(n, 2);
+	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
 		SIDE_CHAT,
-		MAIN_CHAT,
 	]);
 });
 
@@ -422,7 +477,7 @@ function activityPages(count: number) {
 	};
 }
 
-test("activities page back with before until a short page", async () => {
+test("activities page back with before until a page with no days", async () => {
 	const params: Json[] = [];
 	const pages = activityPages(ACTIVITY_LIMIT + 5);
 	const { gateway } = fakeGateway({
@@ -434,9 +489,15 @@ test("activities page back with before until a short page", async () => {
 	const h = harness({ streams: ["activities"] });
 	await collectMuseWith(h.ctx, gateway);
 	assert.equal(h.records("activities").length, ACTIVITY_LIMIT + 5);
-	assert.equal(params.length, 2);
-	assert.equal(params[0]?.before, undefined);
+	assert.equal(params.length, 3);
+	assert.deepEqual(params[0], {
+		limit: 30,
+		before: null,
+		capabilities: ["ACTIVITY_FEED_GOALS", "ACTIVITY_FEED_PEER_CONVERSATIONS"],
+	});
+	// The oldest timestamp string, unchanged.
 	assert.equal(params[1]?.before, "2026-01-31T11:31:00Z");
+	assert.equal(params[2]?.before, "2026-01-31T11:26:00Z");
 	assert.deepEqual(h.states("activities")[0], {
 		version: 1,
 		newest_timestamp: "2026-01-31T12:00:00.000Z",

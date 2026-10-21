@@ -27,13 +27,12 @@
  *   - conversations: sessions.list {} plus {view:"archived"}; each answer is
  *     the whole list (no paging in the observed shape).
  *   - messages: chat.history per chat, child of conversations with
- *     parent_detail_accounting. The paging parameter for older pages is not
- *     established (the app spreads an opaque cursor into the params), so the
- *     connector reads one page per chat with a larger limit and, when the
- *     answer still says has_more, emits what it read plus a DETAIL_GAP for
- *     that chat instead of claiming it complete.
- *   - activities: activity.list {limit, before}, newest first, until an empty
- *     or short page or the saved watermark.
+ *     parent_detail_accounting, paged back like the app does (`before_seq` =
+ *     the smallest `seq` on the page) until `has_more: false`. A chat whose
+ *     walk fails, repeats or stops moving back gets a DETAIL_GAP.
+ *   - activities: activity.list {limit, before, capabilities}, newest first;
+ *     `before` is the oldest activity's timestamp string as returned. Ends on
+ *     a page with no activity, or at the saved watermark.
  *   - goals: goals.list per source; complete only on has_next_page false.
  *   - scheduled_tasks: tasks.list {} (whole list).
  *   - memory_files: fs.list {path:""} then fs.raw for each memory file.
@@ -101,13 +100,18 @@ const MEMORY_FILES = "memory_files";
 const FILES = "files";
 const CONNECTED_APPS = "connected_apps";
 
-/** The app asks for 50; a larger first page covers more chats without paging. */
-export const HISTORY_LIMIT = 200;
-const HISTORY_FALLBACK_LIMIT = 50;
+/** The app's own page size for chat.history. */
+export const HISTORY_LIMIT = 50;
+const MAX_HISTORY_PAGES = 2_000;
 export const ACTIVITY_LIMIT = 30;
 const MAX_ACTIVITY_PAGES = 500;
 export const LIBRARY_LIMIT = 48;
 const MAX_LIBRARY_PAGES = 500;
+/** What the web app sends with activity.list. */
+export const ACTIVITY_CAPABILITIES = [
+	"ACTIVITY_FEED_GOALS",
+	"ACTIVITY_FEED_PEER_CONVERSATIONS",
+] as const;
 const GOAL_SOURCES = ["user_goal", "assistant_tracking"] as const;
 
 /** Gateway client lookups before the app counts as not signed in / not loaded. */
@@ -485,58 +489,89 @@ type HistoryOutcome =
 	| { kind: "hydrated" }
 	| { kind: "gap"; errorClass: string; message: string };
 
-/** Read one chat's messages and emit them; say whether the chat is complete. */
+/**
+ * Read one chat's messages and emit them; say whether the chat is complete.
+ * Pages back exactly as the app does: `before_seq` is the smallest `seq` on
+ * the current page, until the source answers `has_more: false`.
+ */
 async function hydrateChat(
 	ctx: MuseCtx,
 	gateway: MuseGateway,
 	tally: TextTally,
 	sessionId: string,
 ): Promise<HistoryOutcome> {
-	let raw: unknown;
-	try {
+	const seen = new Set<string>();
+	let cursor: number | null = null;
+	for (let pageIndex = 0; pageIndex < MAX_HISTORY_PAGES; pageIndex++) {
+		const params: Record<string, unknown> = {
+			limit: HISTORY_LIMIT,
+			session_id: sessionId,
+		};
+		if (cursor !== null) params.before_seq = cursor;
+		let raw: unknown;
 		try {
-			raw = await call(gateway, "chat.history", {
-				limit: HISTORY_LIMIT,
-				session_id: sessionId,
-			});
+			raw = await call(gateway, "chat.history", params);
 		} catch (error) {
-			// A gateway that refuses the larger page still serves the app's own size.
-			if (!(error instanceof MuseRpcError) || error.code !== "rpc_error")
-				throw error;
-			raw = await call(gateway, "chat.history", {
-				limit: HISTORY_FALLBACK_LIMIT,
-				session_id: sessionId,
-			});
+			if (isAuthError(error)) throw error;
+			return {
+				kind: "gap",
+				errorClass: "muse_history_failed",
+				message: "chat.history failed",
+			};
 		}
-	} catch (error) {
-		if (isAuthError(error)) throw error;
-		return {
-			kind: "gap",
-			errorClass: "muse_history_failed",
-			message: "chat.history failed",
-		};
+		const page = parseHistory(raw);
+		if (page === null) {
+			return {
+				kind: "gap",
+				errorClass: "muse_history_unreadable",
+				message: "chat.history came back in an unreadable shape",
+			};
+		}
+		const fresh = uniqueEvents(page.events).filter(
+			(e) => !seen.has(e.message_id),
+		);
+		for (const event of fresh) {
+			seen.add(event.message_id);
+			await emitBuilt(
+				ctx,
+				tally,
+				MESSAGES,
+				buildMessageRecord(event, sessionId),
+			);
+		}
+		if (!page.hasMore) return { kind: "hydrated" }; // the source's end signal
+		if (fresh.length === 0) {
+			return {
+				kind: "gap",
+				errorClass: "muse_history_page_repeated",
+				message: "chat.history returned no new messages while has_more",
+			};
+		}
+		let smallest: number | null = null;
+		for (const e of page.events) {
+			if (typeof e.seq !== "number" || !Number.isFinite(e.seq)) {
+				return {
+					kind: "gap",
+					errorClass: "muse_history_no_seq",
+					message: "chat.history event without seq; cannot page back",
+				};
+			}
+			if (smallest === null || e.seq < smallest) smallest = e.seq;
+		}
+		if (smallest === null || (cursor !== null && smallest >= cursor)) {
+			return {
+				kind: "gap",
+				errorClass: "muse_history_cursor_stuck",
+				message: "chat.history paging cursor did not move back",
+			};
+		}
+		cursor = smallest;
 	}
-	const page = parseHistory(raw);
-	if (page === null) {
-		return {
-			kind: "gap",
-			errorClass: "muse_history_unreadable",
-			message: "chat.history came back in an unreadable shape",
-		};
-	}
-	for (const event of uniqueEvents(page.events)) {
-		await emitBuilt(ctx, tally, MESSAGES, buildMessageRecord(event, sessionId));
-	}
-	if (page.hasMore) {
-		// Older pages exist, and the parameter that reads them is not
-		// established: do not claim this chat complete.
-		return {
-			kind: "gap",
-			errorClass: "muse_history_paging_unverified",
-			message: "chat has older messages than one page holds",
-		};
-	}
-	return { kind: "hydrated" };
+	return {
+		kind: "gap",
+		errorClass: "muse_history_page_cap",
+		message: `chat history is longer than ${MAX_HISTORY_PAGES} pages`,
+	};
 }
 
 /** Message gaps the host carried over from earlier runs, by chat id. */
@@ -735,6 +770,7 @@ export async function runActivities(
 	const seen = new Set<string>();
 	let newest = prior;
 	let before: string | null = null;
+	let beforeIso: string | null = null;
 	try {
 		for (let pageIndex = 0; ; pageIndex++) {
 			if (pageIndex >= MAX_ACTIVITY_PAGES) {
@@ -743,8 +779,11 @@ export async function runActivities(
 					false,
 				);
 			}
-			const params: Record<string, unknown> = { limit: ACTIVITY_LIMIT };
-			if (before !== null) params.before = before;
+			const params: Record<string, unknown> = {
+				limit: ACTIVITY_LIMIT,
+				before,
+				capabilities: [...ACTIVITY_CAPABILITIES],
+			};
 			const items = parseActivities(
 				await call(gateway, "activity.list", params),
 			);
@@ -753,18 +792,23 @@ export async function runActivities(
 					"Muse's activity log came back in a shape the connector cannot read; nothing was checkpointed.",
 				);
 			}
-			if (items.length === 0) break; // the source's end: an empty page
+			// The source's end: a page with no days, so no time to page back from.
+			if (items.length === 0) break;
 			const fresh = items.filter((a) => !seen.has(activityId(a)));
 			if (fresh.length === 0) {
 				throw new StreamFailure(
 					"Muse's activity log returned the same page again; older activity was not read and nothing was checkpointed.",
 				);
 			}
-			let oldestRaw: string | null = null;
-			let oldestIso: string | null = null;
 			for (const a of fresh) {
 				seen.add(activityId(a));
 				await emitBuilt(ctx, tally, ACTIVITIES, buildActivityRecord(a));
+			}
+			// The oldest activity across all days of the page; its timestamp
+			// string, unchanged, is the next before.
+			let oldestRaw: string | null = null;
+			let oldestIso: string | null = null;
+			for (const a of items) {
 				const iso = zonedIsoToIso(a.timestamp);
 				if (iso === null) continue;
 				if (newest === null || iso > newest) newest = iso;
@@ -773,16 +817,16 @@ export async function runActivities(
 					oldestRaw = a.timestamp;
 				}
 			}
+			if (oldestRaw === null || oldestIso === null) break;
 			// Reached activity a complete earlier walk already emitted.
-			if (stopAt !== null && oldestIso !== null && oldestIso <= stopAt) break;
-			// Fewer items than asked for: the source has no older ones.
-			if (items.length < ACTIVITY_LIMIT) break;
-			if (oldestRaw === null) {
+			if (stopAt !== null && oldestIso <= stopAt) break;
+			if (beforeIso !== null && oldestIso >= beforeIso) {
 				throw new StreamFailure(
-					"Muse's activity page had no readable time to page back from; nothing was checkpointed.",
+					"Muse's activity log did not page back to older activity; nothing was checkpointed.",
 				);
 			}
 			before = oldestRaw;
+			beforeIso = oldestIso;
 		}
 	} catch (error) {
 		await failStreams(ctx, [ACTIVITIES], error);
