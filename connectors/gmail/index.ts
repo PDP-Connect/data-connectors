@@ -3083,6 +3083,11 @@ async function processServedAttachmentRecoveryGap(
 	state: ServedAttachmentRecoveryState,
 	byteBudget: number,
 ): Promise<ServedAttachmentRecoveryStop> {
+	// The walk already recovered this gap in this run. Touching it again would
+	// re-download the bytes, and a rejection would re-defer a settled gap.
+	if (state.recoveredAttachmentGapIds.has(gap.gap_id)) {
+		return false;
+	}
 	if (state.admitted > 0 && state.admittedBytesTotal >= byteBudget) {
 		return "byte_budget";
 	}

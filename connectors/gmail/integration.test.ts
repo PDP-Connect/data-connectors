@@ -7723,6 +7723,37 @@ test("recordAttachmentCoverage: a rejection without a locator is cleared by a la
 	assert.deepEqual(second.hydratedKeys, ["abc123:1"]);
 });
 
+test("recoverServedAttachmentGaps: a gap the walk already recovered this run is not attempted again", async () => {
+	const message = makeServedRecoveryMsg({ attachments: [16], emailId: "abc456", uid: 6001 });
+	const harness = makeRecordingEmit();
+	let emits = 0;
+	const summary = await recoverServedAttachmentGaps(
+		{
+			search: mock.fn(() => Promise.resolve([6001])),
+			fetchOne: mock.fn(() => Promise.resolve(message)),
+		},
+		{
+			attachmentCoverage: makeAttachmentDetailCoverage(),
+			detailGaps: [makeServedRecoveryGap({ gapId: "gap-walked", leaseId: "lease-walked", messageId: "abc456", partIndex: 1 })],
+			emitProtocol: harness.emit,
+			emitRecord: async () => { emits += 1; return false; },
+			hydrateAttachment: async (_message, attachment) => hydratedResult({
+				...attachment,
+				hydration_status: "hydrated",
+				hydration_error: null,
+			}),
+			recoveredAttachmentGapIds: new Set(["gap-walked"]),
+		},
+	);
+	assert.equal(emits, 0, "no second hydration or emission");
+	assert.equal(summary.attempted, 0);
+	assert.deepEqual(
+		harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP" || m.type === "DETAIL_GAP_ATTEMPTED"),
+		[],
+		"a recovered gap is neither re-attempted nor re-deferred under its lease",
+	);
+});
+
 function realResourceEmitter(requested: Map<string, StreamRequest>, emit: RecordingHarness["emit"]) {
 	const filters = new Map<string, Set<string> | null>();
 	for (const [name, scope] of requested) filters.set(name, resourceSet(scope));
