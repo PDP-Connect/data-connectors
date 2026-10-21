@@ -257,7 +257,14 @@ const ENTRY_CANDIDATE = `li, [role='listitem'], ${STARRED_CARD_SELECTOR}`;
 // overlays. Otherwise the whole row is rejected, so no entry hides in a claimed row.
 function primaryIdentity(source: Element, description: Element | null): Element | null {
 	const visible = (selector: string) => Array.from(source.querySelectorAll(selector)).filter((node) => !insideOverlay(node, source));
-	const links = visible("h3 a[href]");
+	// Hidden content and lazy fragments (whose loading or error template GitHub swaps
+	// in later, such as a repository's sparkline) are not row content, so their
+	// headings name nothing. Nested entries and links still count inside them.
+	const rendered = (selector: string) => visible(selector).filter((node) => {
+		const deferred = node.closest("[hidden], include-fragment, poll-include-fragment");
+		return deferred === null || !source.contains(deferred);
+	});
+	const links = rendered("h3 a[href]");
 	const identity = links[0] ?? null;
 	const own = identity === null ? null : linkedRepository(identity);
 	const auxiliary = (link: Element) => description?.contains(link) === true ||
@@ -267,7 +274,7 @@ function primaryIdentity(source: Element, description: Element | null): Element 
 		const target = linkedRepository(link);
 		return target !== null && target !== own && !auxiliary(link);
 	});
-	return visible("h3").length === 1 && links.length === 1 && visible(ENTRY_CANDIDATE).length === 0 && !unclaimed
+	return rendered("h3").length === 1 && links.length === 1 && visible(ENTRY_CANDIDATE).length === 0 && !unclaimed
 		? identity : null;
 }
 
@@ -871,7 +878,7 @@ export function inspectInventoryPage(
 	parsedRows: number,
 	rejectedRows: number,
 	noProgress = false,
-): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; terminalProof: InventoryTerminalProof; nextUrl: string | null; reason: string; continuation: Continuation } {
+): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; terminalProof: InventoryTerminalProof; nextUrl: string | null; reason: string; continuation: Continuation; linkedPage?: number } {
 	const { document } = parseHTML(page.html);
 	const tab = stream === "repositories" ? "repositories" : "stars";
 	const list = stream === "repositories" ? document.querySelector("#user-repositories-list") : starredList(document);
@@ -932,10 +939,20 @@ export function inspectInventoryPage(
 	const paginators = Array.from(candidates).filter(node =>
 		!Array.from(candidates).some(other => other !== node && other.contains(node)));
 	const pagination = paginators.length === 1 ? paginators[0] : null;
+	// A numbered pager marks the next page number rel=next as well as the Next control.
+	// Several next controls are one continuation only when they name the same target.
 	const nextControls = Array.from(pagination?.querySelectorAll('[rel~="next"], .next_page') ?? [])
 		.filter(node => node.closest(OVERLAY_SELECTOR) === null);
+	const isDisabled = (node: Element) => node.matches('[disabled], [aria-disabled="true"], .disabled');
+	const sameTarget = (href: string | null) => {
+		if (href === null) return null;
+		const url = new URL(href);
+		url.searchParams.sort();
+		return url.href;
+	};
+	const nextTargets = new Set(nextControls.map(node => isDisabled(node) ? "disabled" : sameTarget(githubUrl(node.getAttribute("href")))));
 	const next = nextControls[0] ?? null;
-	const disabled = next?.matches('[disabled], [aria-disabled="true"], .disabled') ?? false;
+	const disabled = next !== null && isDisabled(next);
 	const nextUrl = next !== null && !disabled ? githubUrl(next.getAttribute("href")) : null;
 	const foreignPagination = Array.from(pagination?.querySelectorAll("a[href]") ?? []).filter(link =>
 		link.closest(OVERLAY_SELECTOR) === null).some(link => {
@@ -947,17 +964,21 @@ export function inspectInventoryPage(
 			!!url.hash || Array.from(url.searchParams.keys()).some(key =>
 				!["tab", "page", "after"].includes(key) || url.searchParams.getAll(key).length !== 1);
 	});
+	// Numbered links say which pages exist. Back links are harmless; forward links are
+	// accepted only beside an enabled Next, and the walk may not end before the highest
+	// page any page linked to. Cursors and unnumbered targets remain unknown.
+	let linkedPage: number | undefined;
 	const unknownTargets = Array.from(pagination?.querySelectorAll("a[href]") ?? []).some(link => {
-		if (link.closest(OVERLAY_SELECTOR) !== null || link === next ||
-			link.matches('[disabled], [aria-disabled="true"], .disabled')) return false;
+		if (link.closest(OVERLAY_SELECTOR) !== null || nextControls.includes(link) || isDisabled(link)) return false;
 		const href = githubUrl(link.getAttribute("href"));
 		if (href === null) return true;
 		const url = new URL(href);
-		// Numbered back/current links are harmless; cursors and forward links need a known control.
 		const targetPage = Number(url.searchParams.get("page"));
-		return url.searchParams.has("after") || !Number.isInteger(targetPage) || targetPage < 1 || targetPage > pageNumber;
+		if (url.searchParams.has("after") || !Number.isInteger(targetPage) || targetPage < 1) return true;
+		linkedPage = Math.max(linkedPage ?? 0, targetPage);
+		return targetPage > pageNumber && nextUrl === null;
 	});
-	const ambiguous = unknownTargets || counterAmbiguous || foreignPagination || paginators.length > 1 || nextControls.length > 1 ||
+	const ambiguous = unknownTargets || counterAmbiguous || foreignPagination || paginators.length > 1 || nextTargets.size > 1 ||
 		(next !== null && !disabled && nextUrl === null);
 	const renderComplete = list !== null && !isUnreadable(list) && countersReady &&
 		paginators.every(node => !isUnreadable(node));
@@ -973,7 +994,8 @@ export function inspectInventoryPage(
 	const exactTotals = trusted ? values.filter((value): value is number => value !== null) : [];
 	return { valid: result.complete || result.reason === "remaining_continuation",
 		complete: result.complete, total, exactTotals, totalConflict: trusted && counterAmbiguous,
-		terminalProof, nextUrl: result.nextUrl, reason: result.reason, continuation: inventoryContinuation(result) };
+		terminalProof, nextUrl: result.nextUrl, reason: result.reason, continuation: inventoryContinuation(result),
+		...(linkedPage === undefined ? {} : { linkedPage }) };
 }
 
 function inventoryContinuation(result: InventoryEndResult): Continuation {

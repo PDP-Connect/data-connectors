@@ -32,6 +32,8 @@ export interface PageEvidence {
 	continuation: Continuation;
 	/** The last page number the source advertised on this page. It binds the whole walk. */
 	lastPage?: number;
+	/** The highest page number this page links to. That page exists, so the walk may not end before it. */
+	linkedPage?: number;
 }
 
 /**
@@ -50,6 +52,7 @@ export class InventoryEvidence {
 	private failure: string | null = null;
 	private endProven = false;
 	private lastPage: number | null = null;
+	private linkedPage = 0;
 
 	/**
 	 * `first` is the first request of the walk. A one-page collection that is
@@ -126,10 +129,12 @@ export class InventoryEvidence {
 			if (this.lastPage !== null && this.lastPage !== page.lastPage) this.fail("pagination_bound_changed");
 			this.lastPage ??= page.lastPage;
 		}
+		this.linkedPage = Math.max(this.linkedPage, page.linkedPage ?? 0);
 		if (continuation.kind === "unknown") this.fail(continuation.reason);
 		else if (continuation.kind === "end") {
 			// An end proves the walk complete only at the last page any page advertised.
 			if (this.lastPage !== null && request.page !== this.lastPage) this.fail("end_before_advertised_last");
+			if (request.page < this.linkedPage) this.fail("end_before_linked_page");
 			this.endProven = true;
 		} else if (continuation.kind === "next") {
 			if (this.lastPage !== null && request.page >= this.lastPage) this.fail("continuation_beyond_advertised_last");

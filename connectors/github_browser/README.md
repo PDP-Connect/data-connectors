@@ -52,8 +52,18 @@ ambiguous. Rejected or unclaimed candidates block publication.
 Repository and starred rows share one entry boundary. A row claims its entry only
 with one heading identity, no nested list item, `role="listitem"` element or
 starred card, and no other repository link except in its description or
-"Forked from" line, outside its overlays. Otherwise the whole row is rejected,
-so no entry can hide inside an accounted row.
+"Forked from" line, outside its overlays. Headings inside hidden content or a lazy
+fragment (whose loading or error template GitHub swaps in later, such as a
+repository's sparkline) do not count, but nested entries and links there still
+do. Otherwise the whole row is rejected, so no entry can hide inside
+an accounted row.
+
+Browser pagination continues only through an enabled Next control. Numbered page
+links may sit beside it: several next controls must name the same page, and the
+walk may not end before the highest page any page linked to. Forward numbered
+links without an enabled Next withhold the snapshot. GitHub paginates stars lists
+longer than one page with `after=` cursors, which are not followed yet, so those
+lists are withheld; a single page of stars publishes.
 For repositories/starred, evidence stays binding across routes and pages. Rejected
 entries, duplicate identities (even unchanged rows), and later pages
 without new identities remain failures even if a later page or counter looks complete.

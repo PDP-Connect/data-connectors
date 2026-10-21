@@ -168,6 +168,10 @@ test("InventoryEvidence is append-only: no later event erases an unknown or ambi
 			e.observePage({ ...page(["a"], { kind: "next", url: `${start}&x` }), lastPage: 3 });
 			e.observePage({ ...page(["b"], { kind: "next", url: `${start}&y` }), lastPage: 4 });
 		}],
+		["end_before_linked_page", e => {
+			e.observePage({ ...page(["a"], { kind: "next", url: `${start}&x` }), linkedPage: 3 });
+			e.observePage(page(["b"], { kind: "end" }));
+		}],
 		["continuation_beyond_advertised_last", e => {
 			e.observePage({ ...page(["a"], { kind: "next", url: `${start}&x` }), lastPage: 2 });
 			e.observePage(page(["b"], { kind: "next", url: `${start}&y` }));

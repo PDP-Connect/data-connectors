@@ -267,7 +267,8 @@ export async function collectGitHubBrowser(
 					}
 				}
 				const added = evidence.observePage({ ids: parsed.rows.map(row => row.id),
-					rowsComplete: parsed.entriesComplete, rejectedRows: parsed.rejectedRows, continuation: proof.continuation });
+					rowsComplete: parsed.entriesComplete, rejectedRows: parsed.rejectedRows, continuation: proof.continuation,
+					...(proof.linkedPage === undefined ? {} : { linkedPage: proof.linkedPage }) });
 				for (const row of parsed.rows) {
 					if (added.delete(row.id) && await emitEntity(stream, row)) covered += 1;
 				}
