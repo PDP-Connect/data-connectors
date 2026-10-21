@@ -8,6 +8,7 @@
  */
 
 import assert from "node:assert/strict";
+import { isUtf8 } from "node:buffer";
 import { test } from "node:test";
 import {
 	deflateRawSync,
@@ -76,6 +77,56 @@ test("decodeBase64Text: null for absent or non-string input and preserves an emp
 	assert.equal(decodeBase64Text(""), "");
 	assert.equal(decodeBase64Text("!!!"), null);
 	assert.equal(decodeBase64Text(42), null);
+});
+
+test("decodeBase64Text: invalid UTF-8 is not text, and an encoded U+FFFD is", async () => {
+	// "/w==" is valid base64 for the one byte 0xFF, which is not UTF-8.
+	assert.equal(decodeBase64Text("/w=="), null);
+	assert.equal(
+		decodeBase64Text(Buffer.from([0x41, 0xc3, 0x28]).toString("base64")),
+		null,
+	);
+	// A replacement character the source really encoded is source text.
+	assert.equal(
+		decodeBase64Text(Buffer.from("a\uFFFDb", "utf-8").toString("base64")),
+		"a\uFFFDb",
+	);
+});
+
+test("readNoteRecord and readFolderRecord: invalid UTF-8 in a title, snippet or folder name withholds that field", async () => {
+	const INVALID_UTF8 = "/w==";
+	const note = await readNoteRecord({
+		recordName: "note-invalid-text",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: INVALID_UTF8 },
+			SnippetEncrypted: { value: INVALID_UTF8 },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [] },
+			TextDataEncrypted: { value: "" },
+		},
+	});
+	assert.equal(note.record?.title, null);
+	assert.equal(note.record?.snippet, null);
+	assert.deepEqual(
+		note.unavailableFields
+			.filter(({ field }) => field === "title" || field === "snippet")
+			.map(({ field, reason }) => `${field}:${reason}`)
+			.sort(),
+		["snippet:invalid_utf8_text", "title:invalid_utf8_text"],
+	);
+	const folder = readFolderRecord({
+		recordName: "folder-invalid-title",
+		recordType: "Folder",
+		fields: { TitleEncrypted: { value: INVALID_UTF8 } },
+	});
+	assert.deepEqual(
+		folder.unavailableFields.map(({ field, reason }) => ({ field, reason })),
+		[{ field: "name", reason: "invalid_utf8_text" }],
+	);
 });
 
 // ─── epochMsToIso ────────────────────────────────────────────────────────
@@ -651,9 +702,10 @@ test("browser decoder byte parity with Node across gzip, deflate and raw-deflate
 			const compressed = compress(vector);
 			const decoded = await decompressBytes(compressed, format);
 			assert.deepEqual(decoded, new Uint8Array(decompress(compressed)));
+			// Strict: invalid UTF-8 is not text, never replacement characters.
 			assert.equal(
 				decodeBase64Text(vector.toString("base64")),
-				vector.toString("utf-8"),
+				isUtf8(vector) ? vector.toString("utf-8") : null,
 			);
 			assert.deepEqual(
 				await decodeNoteBody(compressed.toString("base64")),

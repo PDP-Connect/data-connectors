@@ -1765,6 +1765,105 @@ test("iCloud sign-in keeps one Patchright tab and collection reuses the authenti
 	}
 });
 
+test("collectAllStreams: invalid UTF-8 in a title, snippet or folder name withholds the row and the checkpoint until a repaired retry re-emits it", async () => {
+	// "/w==" is valid base64 for the one byte 0xFF, which is not UTF-8.
+	const INVALID_UTF8 = "/w==";
+	const note = (fields: Record<string, unknown>) => ({
+		records: [
+			{
+				recordName: "note-text",
+				recordType: "Note",
+				fields: readableEmptyNoteFields(fields),
+			},
+		],
+	});
+	const folder = (title: string) => ({
+		records: [
+			{
+				recordName: "folder-text",
+				recordType: "Folder",
+				fields: { TitleEncrypted: { value: title } },
+			},
+		],
+	});
+	const notesPage = (response: unknown) => makeNotePage([response]);
+	const foldersPage = (response: unknown) =>
+		makeFakePage([{ stream: "folders", response }]);
+	const cases = [
+		{
+			stream: "notes",
+			field: "title",
+			page: notesPage,
+			seed: noteQueryResponse(),
+			broken: note({ TitleEncrypted: { value: INVALID_UTF8 } }),
+			repaired: note({ TitleEncrypted: { value: b64("Repaired title") } }),
+			emitted: { id: "note-text", text: "Repaired title" },
+		},
+		{
+			stream: "notes",
+			field: "snippet",
+			page: notesPage,
+			seed: noteQueryResponse(),
+			broken: note({ SnippetEncrypted: { value: INVALID_UTF8 } }),
+			repaired: note({ SnippetEncrypted: { value: b64("Repaired snippet") } }),
+			emitted: { id: "note-text", text: "Repaired snippet" },
+		},
+		{
+			stream: "folders",
+			field: "name",
+			page: foldersPage,
+			seed: folderQueryResponse(),
+			broken: folder(INVALID_UTF8),
+			repaired: folder(b64("Repaired folder")),
+			emitted: { id: "folder-text", text: "Repaired folder" },
+		},
+	];
+	const stateOf = (harness: ReturnType<typeof makeRecordingEmit>, stream: string) =>
+		harness.protocolMessages.find(
+			(message) => message.type === "STATE" && message.stream === stream,
+		);
+	await Promise.all(
+		cases.map(async ({ stream, field, page, seed, broken, repaired, emitted }) => {
+			const previous = makeRecordingEmit(validateRecord);
+			await collectAllStreams(makeCtx(page(seed), previous, [stream]));
+			const previousState = stateOf(previous, stream);
+			assert.ok(previousState && previousState.type === "STATE", field);
+			const seeded = { [stream]: previousState.cursor };
+
+			const failed = makeRecordingEmit(validateRecord);
+			const failedCtx = makeCtx(page(broken), failed, [stream], seeded);
+			await collectAllStreams(failedCtx);
+			assert.equal(failed.emitted.length, 0, `${field}: no row`);
+			assert.equal(stateOf(failed, stream), undefined, `${field}: no checkpoint`);
+			assert.deepEqual(failedCtx.state, seeded, `${field}: prior cursor kept`);
+			const skip = failed.protocolMessages.find(
+				(message) => message.type === "SKIP_RESULT" && message.stream === stream,
+			);
+			assert.ok(skip && skip.type === "SKIP_RESULT", field);
+			assert.deepEqual(
+				(
+					diagnosticField(skip, "field_omissions") as {
+						field: string;
+						reason: string;
+					}[]
+				).map((omission) => ({ field: omission.field, reason: omission.reason })),
+				[{ field, reason: "invalid_utf8_text" }],
+			);
+
+			const retry = makeRecordingEmit(validateRecord);
+			await collectAllStreams(makeCtx(page(repaired), retry, [stream], seeded));
+			assert.deepEqual(
+				retry.emitted.map((record) => ({
+					id: record.data.id,
+					text: record.data[field],
+				})),
+				[emitted],
+			);
+			assert.ok(stateOf(retry, stream), `${field}: repaired retry checkpoints`);
+		}),
+	);
+});
+
 test("collectAllStreams: an undecodable body withholds the row and the checkpoint until a repaired retry re-emits it", async () => {
 	const noteWithBody = (decompressedBody: Buffer) => ({
 		records: [

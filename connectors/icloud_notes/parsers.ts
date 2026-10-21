@@ -17,20 +17,16 @@ import type { CloudKitFieldValue, CloudKitRecord } from "./types.ts";
 
 // ─── Base64 / timestamp helpers ─────────────────────────────────────────
 
-/** Decode a CloudKit base64 field value (titles, snippets) to UTF-8 text.
- *  Returns null for absent/non-string input — never throws. Empty strings
- *  decode to empty strings and remain source data. */
+/** Decode a CloudKit base64 field value (titles, snippets, folder names) to
+ *  UTF-8 text with the same strict decoder as note bodies. Returns null for
+ *  absent/non-string input, invalid base64 and invalid UTF-8 — never throws,
+ *  and never replaces invalid bytes with U+FFFD. Empty strings decode to
+ *  empty strings and remain source data. */
 export function decodeBase64Text(value: unknown): string | null {
 	if (typeof value !== "string" || !isBase64(value)) {
 		return null;
 	}
-	try {
-		return new TextDecoder("utf-8", { ignoreBOM: true }).decode(
-			base64Bytes(value),
-		);
-	} catch {
-		return null;
-	}
+	return decodeUtf8(base64Bytes(value));
 }
 
 function base64Bytes(value: string): Uint8Array {
@@ -199,6 +195,8 @@ function parseProtobuf(bytes: Uint8Array): ProtobufField[] | null {
 	return fields;
 }
 
+/** The one UTF-8 decoder for bodies and mapped text: invalid bytes are null,
+ *  never replacement characters. */
 function decodeUtf8(bytes: Uint8Array): string | null {
 	try {
 		return new TextDecoder("utf-8", {
@@ -433,8 +431,11 @@ function textField(
 	if (raw.value === null) return explicitEmpty(null);
 	if (typeof raw.value !== "string")
 		return unavailable("expected_base64_text", raw.value);
+	if (!isBase64(raw.value)) {
+		return unavailable("invalid_base64_text", raw.value);
+	}
 	const value = decodeBase64Text(raw.value);
-	if (value === null) return unavailable("invalid_base64_text", raw.value);
+	if (value === null) return unavailable("invalid_utf8_text", raw.value);
 	return value.length === 0 ? explicitEmpty("") : read(value);
 }
 
