@@ -110,6 +110,9 @@ export const VENMO_SMS_OFFER_SEND_CODE_UNAVAILABLE =
 /** Venmo accepted Send code but did not render a usable OTP input within the bound. */
 export const VENMO_SMS_OFFER_CODE_INPUT_TIMEOUT =
 	"venmo_sms_offer_code_input_timeout";
+/** A second challenge appeared after a saved-credential replay; the first owner handoff cannot complete it. */
+export const VENMO_LOGIN_CHALLENGE_DURING_REPLAY =
+	"venmo_login_challenge_during_replay";
 
 /**
  * This connector's classifying fault-class names — single source of truth,
@@ -139,6 +142,7 @@ export const VENMO_DECLARED_REASON_TOKENS: ReadonlySet<string> = new Set([
 	VENMO_SMS_OFFER_CHECKBOX_UNAVAILABLE,
 	VENMO_SMS_OFFER_SEND_CODE_UNAVAILABLE,
 	VENMO_SMS_OFFER_CODE_INPUT_TIMEOUT,
+	VENMO_LOGIN_CHALLENGE_DURING_REPLAY,
 ]);
 
 const HOME_URL = "https://venmo.com/";
@@ -1320,6 +1324,11 @@ async function waitForManualLogin({
 	// (F2). That keeps the existing "hand the owner a real sign-in page, not
 	// about:blank" guarantee intact while no longer destroying the one screen
 	// the handoff is asking them to act on.
+	if (manualPromptSuppressed) {
+		throw new Error(
+			`${VENMO_LOGIN_CHALLENGE_DURING_REPLAY}: a new sign-in challenge needs owner action after the first handoff`,
+		);
+	}
 	if (!isVenmoSignInUrl(page.url())) {
 		await page
 			.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
@@ -1341,12 +1350,6 @@ async function waitForManualLogin({
 	// blank-surface failure into either a usable screen or an honest message.
 	// It never navigates, so the captcha/OTP state-preservation guarantee above
 	// is untouched.
-	if (manualPromptSuppressed) {
-		// Defence in depth: no path may prompt twice in one run, including the
-		// direct callers that do not route through requestManualLoginForChallenge.
-		// Nothing probes here either — see this function's doc.
-		return OWNER_HANDOFF_COMPLETE;
-	}
 	const painted = await waitForActionableHandoffSurface(
 		page,
 		HANDOFF_PAINT_TIMEOUT_MS,
@@ -1495,10 +1498,9 @@ async function requestManualLoginForChallenge({
 	readonly reason: string;
 }): Promise<OwnerHandoffComplete> {
 	if (manualPromptSuppressed) {
-		// Inside a replay: the owner has already been asked once for this run.
-		// Nothing probes here either — see waitForManualLogin's doc — so there is
-		// nothing left to do but report that the (single) handoff is over.
-		return OWNER_HANDOFF_COMPLETE;
+		throw new Error(
+			`${VENMO_LOGIN_CHALLENGE_DURING_REPLAY}: ${reason} appeared after the first owner handoff`,
+		);
 	}
 	return await waitForManualLogin({
 		...(assist ? { assist } : {}),
@@ -1581,7 +1583,11 @@ async function resumeSignInAfterChallenge(
 		// Before submission there is nothing to preserve: the replay simply did not
 		// find a form, and the caller's fallback (report the handoff as over,
 		// unverified) is the honest answer.
-		if (submitted) {
+		if (
+			submitted ||
+			(error instanceof Error &&
+				error.message.startsWith(VENMO_LOGIN_CHALLENGE_DURING_REPLAY))
+		) {
 			throw error;
 		}
 	}
@@ -1798,13 +1804,59 @@ async function handleVenmoOtpIfPresent(
 			reason: "verification code input layout changed or is unsupported",
 		});
 	}
+	const validationBeforeSubmit = await venmoOtpValidationState(page);
 	await clickVenmoLoginSubmit(page).catch((): boolean => false);
-	await waitForVenmoOtpSubmit(args);
+	await waitForVenmoOtpSubmit(args, validationBeforeSubmit);
 	await captureLoginState(capture, page, "venmo-otp-after-submit");
 	// The code was submitted — real automation the owner could not do
 	// themselves — but collection, not this probe, is the next liveness
 	// authority: see this function's doc.
 	return OWNER_HANDOFF_COMPLETE;
+}
+
+const OTP_REJECTION_TEXT_RE = /incorrect|invalid|expired|wrong/i;
+const OTP_VALIDATION_READ_TIMEOUT_MS = 250;
+
+/** Only validation attached to the OTP input can reject this submission. */
+async function venmoOtpValidationState(
+	page: Page,
+): Promise<{ invalid: boolean; errorText: string }[]> {
+	return await Promise.all(
+		(await usableVenmoOtpInputs(page)).map(async (input) => {
+			const [invalid, describedBy] = await Promise.all([
+				input
+					.getAttribute("aria-invalid", {
+						timeout: OTP_VALIDATION_READ_TIMEOUT_MS,
+					})
+					.catch((): null => null),
+				input
+					.getAttribute("aria-describedby", {
+						timeout: OTP_VALIDATION_READ_TIMEOUT_MS,
+					})
+					.catch((): null => null),
+			]);
+			const descriptions = await Promise.all(
+				(describedBy ?? "")
+					.split(/\s+/)
+					.filter(Boolean)
+					.map(async (id) => {
+						const escapedId = id
+							.replaceAll("\\", "\\\\")
+							.replaceAll('"', '\\"');
+						return await page
+							.locator(`[id="${escapedId}"]`)
+							.innerText({ timeout: OTP_VALIDATION_READ_TIMEOUT_MS })
+							.catch((): string => "");
+					}),
+			);
+			return {
+				invalid: invalid === "true",
+				errorText: descriptions
+					.filter((text) => OTP_REJECTION_TEXT_RE.test(text))
+					.join(" "),
+			};
+		}),
+	);
 }
 
 /**
@@ -1819,7 +1871,10 @@ async function handleVenmoOtpIfPresent(
  * An unchanged input alone is not a rejection: it can persist during the XHR.
  * A bounded wait expiring says the login is incomplete, not session_expired.
  */
-async function waitForVenmoOtpSubmit(args: ManualHandoff): Promise<void> {
+async function waitForVenmoOtpSubmit(
+	args: ManualHandoff,
+	validationBeforeSubmit: Awaited<ReturnType<typeof venmoOtpValidationState>>,
+): Promise<void> {
 	const { page, postSubmitSettleTimeoutMs = POST_SUBMIT_SETTLE_TIMEOUT_MS } =
 		args;
 	const deadline = Date.now() + postSubmitSettleTimeoutMs;
@@ -1828,14 +1883,15 @@ async function waitForVenmoOtpSubmit(args: ManualHandoff): Promise<void> {
 			await requestManualLoginForChallenge({ ...args, reason: "captcha" });
 			return;
 		}
-		const bodyText = await page
-			.locator("body")
-			.innerText()
-			.catch((): string => "");
-		if (
-			/incorrect|invalid|expired|wrong|try again/i.test(bodyText) &&
-			(await hasUsableVenmoOtpInput(page))
-		) {
+		const validationNow = await venmoOtpValidationState(page);
+		const rejected = validationNow.some((current, index) => {
+			const previous = validationBeforeSubmit[index];
+			return (
+				(current.invalid && !previous?.invalid) ||
+				(current.errorText !== "" && current.errorText !== previous?.errorText)
+			);
+		});
+		if (rejected) {
 			await requestManualLoginForChallenge({
 				...args,
 				reason: "verification code was not accepted",

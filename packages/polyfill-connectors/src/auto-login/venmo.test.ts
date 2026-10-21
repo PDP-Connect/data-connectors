@@ -1597,7 +1597,13 @@ test("ensureVenmoSession: a rendered but disabled code box never asks the owner 
 
 /** Distinct DOM-like fields reject unusable fills and enforce maxlength. */
 function otpFields(
-	specs: { visible?: boolean; enabled?: boolean; maxlength?: number }[],
+	specs: {
+		visible?: boolean;
+		enabled?: boolean;
+		maxlength?: number;
+		invalid?: () => boolean;
+		describedBy?: string;
+	}[],
 ): { locator: Locator; values: string[] } {
 	const values = specs.map(() => "");
 	const fields = specs.map(
@@ -1607,12 +1613,19 @@ function otpFields(
 					visible: spec.visible ?? true,
 					enabled: spec.enabled ?? true,
 				}),
-				getAttribute: (name: string): Promise<string | null> =>
-					Promise.resolve(
+				getAttribute: (name: string): Promise<string | null> => {
+					if (name === "aria-invalid") {
+						return Promise.resolve(spec.invalid?.() ? "true" : null);
+					}
+					if (name === "aria-describedby") {
+						return Promise.resolve(spec.describedBy ?? null);
+					}
+					return Promise.resolve(
 						name === "maxlength" && spec.maxlength !== undefined
 							? String(spec.maxlength)
 							: null,
-					),
+					);
+				},
 				fill: (value: string): Promise<void> => {
 					if (spec.visible === false || spec.enabled === false) {
 						return Promise.reject(new Error("cannot fill unusable field"));
@@ -4280,10 +4293,12 @@ test("waitForManualLogin: a surface that never paints still reaches the owner, w
  * reached the fields, which is the step that was missing.
  */
 function makePageWithChallengeThenForm({
+	captchaAfterOtpSubmit = false,
 	passwordOnlyAfterReveal = false,
 	transportFaultAfterSubmit = false,
 	unrecognizedVerificationAfterSubmit = false,
 }: {
+	captchaAfterOtpSubmit?: boolean;
 	passwordOnlyAfterReveal?: boolean;
 	transportFaultAfterSubmit?: boolean;
 	/**
@@ -4312,9 +4327,13 @@ function makePageWithChallengeThenForm({
 	const absent = makeLocator({ count: 0, visible: false });
 	const submitClicks: string[] = [];
 	const gotoUrls: string[] = [];
+	const otp = otpFields([{ maxlength: 6 }]);
 	let currentUrl = "https://venmo.com/";
 	const submit = makeSubmitRecordingLocator(() => {
 		submitClicks.push("click");
+		if (captchaAfterOtpSubmit) {
+			currentUrl = "https://id.venmo.com/signin";
+		}
 		if (passwordOnlyAfterReveal) {
 			currentUrl = "https://venmo.com/";
 		}
@@ -4370,10 +4389,24 @@ function makePageWithChallengeThenForm({
 			if (selector === "body") {
 				return makeLocator({
 					innerText:
-						unrecognizedVerificationAfterSubmit && submitClicks.length > 0
-							? "Enter the code we texted you to finish signing in."
-							: "",
+						captchaAfterOtpSubmit && submitClicks.length === 1
+							? "Enter the verification code we sent."
+							: unrecognizedVerificationAfterSubmit && submitClicks.length > 0
+								? "Enter the code we texted you to finish signing in."
+								: "",
 				});
+			}
+			if (captchaAfterOtpSubmit && selector.includes("recaptcha")) {
+				return makeLocator({
+					count: submitClicks.length > 1 ? 1 : 0,
+					visible: submitClicks.length > 1,
+				});
+			}
+			if (
+				captchaAfterOtpSubmit &&
+				(selector.includes("otp") || selector.includes("code"))
+			) {
+				return submitClicks.length === 1 ? otp.locator : absent;
 			}
 			// Before the owner clears the interstitial there is no form at all —
 			// exactly what the captured DataDome DOM contains.
@@ -4408,6 +4441,43 @@ function makePageWithChallengeThenForm({
 		submitClicks,
 	};
 }
+
+test("a CAPTCHA after challenge replay and OTP submit cannot complete a suppressed handoff", async () => {
+	const { page, reveal, submitClicks } = makePageWithChallengeThenForm({
+		captchaAfterOtpSubmit: true,
+	});
+	const kinds: string[] = [];
+	await assert.rejects(
+		ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "pw-stored",
+				VENMO_USERNAME: "user-stored",
+			},
+			page,
+			sendInteraction: (request) => {
+				kinds.push(request.kind);
+				if (request.kind === "manual_action") {
+					reveal();
+				}
+				return Promise.resolve({
+					value: request.kind === "otp" ? "123456" : "success",
+				} as InteractionResponse);
+			},
+		}),
+		(error: Error) => {
+			assert.match(error.message, /venmo_login_challenge_during_replay/);
+			assert.equal(
+				VENMO_RETRYABLE_PATTERN.test(error.message),
+				false,
+				"a submitted password and OTP must not be retried automatically",
+			);
+			return true;
+		},
+	);
+	assert.deepEqual(kinds, ["manual_action", "otp"]);
+	assert.equal(submitClicks.length, 2, "password and OTP were both submitted");
+	assert.equal(page.url(), "https://id.venmo.com/signin");
+});
 
 /** A visible, enabled locator that records every click — used to prove submit happened. */
 function makeSubmitRecordingLocator(onClick: () => void): Locator {
@@ -4835,6 +4905,15 @@ function makePendingIdentityPage(
 	outcome: "otp" | "captcha" | "complete" | "pending",
 	otpOutcome: "complete" | "pending" | "rejected" | "captcha" = "complete",
 	otpDelayMs = 5,
+	{
+		keepOtpInputWhileVerifying = false,
+		missingOtpDescription = false,
+		staleOtpError = false,
+	}: {
+		keepOtpInputWhileVerifying?: boolean;
+		missingOtpDescription?: boolean;
+		staleOtpError?: boolean;
+	} = {},
 ) {
 	const { page } = makeOtpDecisionPage({ bodyText: "" });
 	const baseLocator = page.locator.bind(page);
@@ -4844,7 +4923,14 @@ function makePendingIdentityPage(
 	let destroyed = false;
 	let postSubmitProbes = 0;
 	let otpSubmittedAt = 0;
-	const fields = otpFields([{ maxlength: 6 }]);
+	const descriptionReadTimeouts: (number | undefined)[] = [];
+	const fields = otpFields([
+		{
+			maxlength: 6,
+			invalid: () => stage === "rejected" || staleOtpError,
+			...(missingOtpDescription ? { describedBy: "otp-error" } : {}),
+		},
+	]);
 	page.url = () => url;
 	// biome-ignore lint/suspicious/useAwait: mirrors Playwright's Promise-returning signature
 	page.goto = async (target) => {
@@ -4877,18 +4963,30 @@ function makePendingIdentityPage(
 			: { kind: "dead" };
 	}) as Page["evaluate"];
 	page.locator = ((selector: string) => {
+		if (selector === '[id="otp-error"]') {
+			const missing = makeLocator({ count: 0 });
+			missing.innerText = ((options?: { timeout?: number }) => {
+				descriptionReadTimeouts.push(options?.timeout);
+				return Promise.reject(new Error("description was removed"));
+			}) as Locator["innerText"];
+			return missing;
+		}
 		if (selector === "body") {
 			return makeLocator({
 				innerText:
 					stage === "rejected"
 						? "Incorrect or expired verification code. Try again."
-						: stage === "otp"
-							? "Enter the code we sent"
+						: stage === "otp" || stage === "verifying"
+							? staleOtpError
+								? "Enter the code we sent. Previous code was incorrect. Try again."
+								: "Enter the code we sent. Need help? Try again."
 							: "",
 			});
 		}
 		if (selector.includes("otp") || selector.includes("code")) {
-			return stage === "otp" || stage === "rejected"
+			return stage === "otp" ||
+				stage === "rejected" ||
+				(stage === "verifying" && keepOtpInputWhileVerifying)
 				? fields.locator
 				: makeLocator({ count: 0, visible: false });
 		}
@@ -4928,7 +5026,63 @@ function makePendingIdentityPage(
 		get postSubmitProbes() {
 			return postSubmitProbes;
 		},
+		descriptionReadTimeouts,
 	};
+}
+
+test("OTP validation reads bound a missing described error element", async () => {
+	const fake = makePendingIdentityPage("otp", "complete", 50, {
+		keepOtpInputWhileVerifying: true,
+		missingOtpDescription: true,
+	});
+	const kinds: string[] = [];
+	await ensureVenmoSession({
+		credentials: {
+			VENMO_USERNAME: "test-user",
+			VENMO_PASSWORD: "test-password",
+		},
+		page: fake.page,
+		postSubmitSettleTimeoutMs: 300,
+		sendInteraction: (request) => {
+			kinds.push(request.kind);
+			return Promise.resolve({ value: "123456" } as InteractionResponse);
+		},
+	});
+	assert.deepEqual(kinds, ["otp"]);
+	assert.equal(fake.page.url(), "https://venmo.com/");
+	assert.ok(fake.descriptionReadTimeouts.length > 0);
+	assert.ok(
+		fake.descriptionReadTimeouts.every(
+			(timeout) => timeout !== undefined && timeout <= 250,
+		),
+		"a detached validation region must not outlive the verification deadline",
+	);
+});
+
+for (const staleOtpError of [false, true]) {
+	test(`OTP verification ignores ${staleOtpError ? "a previous field error" : "unrelated help copy"} while a visible code input persists`, async () => {
+		const fake = makePendingIdentityPage("otp", "complete", 50, {
+			keepOtpInputWhileVerifying: true,
+			staleOtpError,
+		});
+		const kinds: string[] = [];
+		const result = await ensureVenmoSession({
+			credentials: {
+				VENMO_USERNAME: "test-user",
+				VENMO_PASSWORD: "test-password",
+			},
+			page: fake.page,
+			postSubmitSettleTimeoutMs: 300,
+			sendInteraction: (request) => {
+				kinds.push(request.kind);
+				return Promise.resolve({ value: "123456" } as InteractionResponse);
+			},
+		});
+		assert.equal(result, null);
+		assert.equal(fake.page.url(), "https://venmo.com/");
+		assert.deepEqual(kinds, ["otp"]);
+		assert.equal(fake.destroyed, false);
+	});
 }
 
 test("pending identity XHR survives until a delayed OTP is filled", async () => {
