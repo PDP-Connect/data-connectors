@@ -13,8 +13,8 @@
  *   - `profile`       — the Amazon account's name/email (the scope is advertised).
  *   - `orders`        — one record per Whole Foods order.
  *   - `order_items`   — one record per line item within an order.
- *   - `nutrition`     — one outcome per unique product, including observed
- *                       not_found/error/blocked results.
+ *   - `nutrition`     — one record per unique product whose nutrition was read
+ *                       in full. A failed or incomplete lookup emits no row.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";

@@ -527,7 +527,7 @@ test("Whole Foods search resolves a relative product link before reading facts",
 					? "<html><body>No nutrition panel</body></html>"
 					: visited.length === 2
 						? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
-						: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Organic Bananas","nutrition":{"@type":"NutritionInformation","calories":"105 calories"}}</script></body></html>',
+						: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Organic Bananas","nutrition":{"@type":"NutritionInformation","calories":"105 calories","proteinContent":"1.3 g","carbohydrateContent":"27 g","fatContent":"0.4 g"}}</script></body></html>',
 			),
 		// biome-ignore lint/suspicious/noExplicitAny: scripted Page navigation captures the actual URL supplied to Playwright.
 		goto: ((url: string) => {
@@ -568,7 +568,12 @@ test("UPC from a scrubbed Amazon fixture routes USDA lookup before text matching
 						gtinUpc: "012345678905",
 						servingSize: 100,
 						servingSizeUnit: "g",
-						foodNutrients: [{ nutrientId: 1008, value: 52 }],
+						foodNutrients: [
+							{ nutrientId: 1008, value: 52 },
+							{ nutrientId: 1003, value: 0.3 },
+							{ nutrientId: 1005, value: 14 },
+							{ nutrientId: 1004, value: 0.2 },
+						],
 					},
 				],
 			}),
@@ -629,7 +634,12 @@ test("USDA-only nutrition preserves USDA ingredients", async () => {
 						ingredients: "Apples",
 						servingSize: 100,
 						servingSizeUnit: "g",
-						foodNutrients: [{ nutrientId: 1008, value: 52 }],
+						foodNutrients: [
+							{ nutrientId: 1008, value: 52 },
+							{ nutrientId: 1003, value: 0.3 },
+							{ nutrientId: 1005, value: 14 },
+							{ nutrientId: 1004, value: 0.2 },
+						],
 					},
 				],
 			}),
@@ -672,8 +682,8 @@ test("Whole Foods search skips a first tile whose product identity differs", asy
 			currentUrl.includes("/search?")
 				? '<a href="/product/pears">Organic Pears</a><a href="/product/apples">Organic Apples</a>'
 				: currentUrl.endsWith("/product/pears")
-					? '<script type="application/ld+json">{"@type":"Product","name":"Organic Pears","nutrition":{"@type":"NutritionInformation","calories":"95"}}</script>'
-					: '<script type="application/ld+json">{"@type":"Product","name":"Organic Apples","nutrition":{"@type":"NutritionInformation","calories":"52"}}</script>',
+					? '<script type="application/ld+json">{"@type":"Product","name":"Organic Pears","nutrition":{"@type":"NutritionInformation","calories":"95","proteinContent":"0.6 g","carbohydrateContent":"25 g","fatContent":"0.2 g"}}</script>'
+					: '<script type="application/ld+json">{"@type":"Product","name":"Organic Apples","nutrition":{"@type":"NutritionInformation","calories":"52","proteinContent":"0.3 g","carbohydrateContent":"14 g","fatContent":"0.2 g"}}</script>',
 		goto: async (url: string) => {
 			currentUrl = url;
 			return null;
@@ -954,9 +964,11 @@ const DETAIL_HTML = `<html><body><div data-component="purchasedItemsRightGrid"><
 /** Serves search pages and order details by URL. */
 function ordersSite(searchPages: string[], detailHtml: string): Page {
 	let current = "";
+	let currentUrl = "";
 	return {
 		content: () => Promise.resolve(current),
 		goto: (url: string) => {
+			currentUrl = url;
 			const parsed = new URL(url);
 			if (parsed.pathname.includes("search")) {
 				const pageNum = Number(parsed.searchParams.get("page") ?? "1");
@@ -967,7 +979,7 @@ function ordersSite(searchPages: string[], detailHtml: string): Page {
 			return Promise.resolve(null);
 		},
 		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
-		url: () => "https://www.amazon.com/your-orders/search",
+		url: () => currentUrl,
 	} as unknown as Page;
 }
 
@@ -1708,9 +1720,11 @@ function ordersSiteByOrder(
 	visited: string[],
 ): Page {
 	let current = "";
+	let currentUrl = "";
 	return {
 		content: () => Promise.resolve(current),
 		goto: (url: string) => {
+			currentUrl = url;
 			const parsed = new URL(url);
 			if (parsed.pathname.includes("search")) {
 				const pageNum = Number(parsed.searchParams.get("page") ?? "1");
@@ -1723,7 +1737,7 @@ function ordersSiteByOrder(
 			return Promise.resolve(null);
 		},
 		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
-		url: () => "https://www.amazon.com/your-orders/search",
+		url: () => currentUrl,
 	} as unknown as Page;
 }
 
@@ -1888,6 +1902,7 @@ function siteWithFailingSecondDetail(failure: DeliveryFailure): {
 } {
 	const visited: string[] = [];
 	let current = "";
+	let currentUrl = "";
 	let failNext = false;
 	const noEnd = searchPage(
 		1,
@@ -1900,6 +1915,7 @@ function siteWithFailingSecondDetail(failure: DeliveryFailure): {
 	const page = {
 		content: () => Promise.resolve(current),
 		goto: (url: string) => {
+			currentUrl = url;
 			const parsed = new URL(url);
 			if (parsed.pathname.includes("search")) {
 				current = noEnd;
@@ -1932,7 +1948,7 @@ function siteWithFailingSecondDetail(failure: DeliveryFailure): {
 						: Promise.resolve(),
 			}),
 		}),
-		url: () => "https://www.amazon.com/your-orders/search",
+		url: () => currentUrl,
 	} as unknown as Page;
 	return { page, visited };
 }
@@ -1989,4 +2005,313 @@ test("partial delivery reports the streams, then still raises a signed-out detai
 	);
 	assert.deepEqual(failures, ["orders", "order_items"]);
 	assert.deepEqual(stateStreams(harness), []);
+});
+
+// ─── Nutrition acceptance: absent data never replaces present data ────────
+
+const CORE_PANEL =
+	'"calories":"52","proteinContent":"0.3 g","carbohydrateContent":"14 g","fatContent":"0.2 g"';
+const AMAZON_UPC_PAGE =
+	'<html><body><div id="detailBullets_feature_div"><li>UPC: 012345678905</li></div></body></html>';
+
+/** Scripted browser: `pages` maps a URL predicate to the HTML served. */
+function scriptedBrowser(
+	htmlFor: (url: string) => string,
+	finalUrlFor: (url: string) => string = (url) => url,
+): Page {
+	let current = "about:blank";
+	return {
+		content: async () => htmlFor(current),
+		goto: async (url: string) => {
+			current = url;
+			return null;
+		},
+		locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
+		url: () => finalUrlFor(current),
+	} as unknown as Page;
+}
+
+function stubUsda(
+	foods: unknown[],
+	queries: string[] = [],
+): () => void {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async (input: RequestInfo | URL) => {
+		queries.push(new URL(String(input)).searchParams.get("query") ?? "");
+		return new Response(JSON.stringify({ foods }), { status: 200 });
+	}) as typeof fetch;
+	return () => {
+		globalThis.fetch = originalFetch;
+	};
+}
+
+const usdaApple = (overrides: Record<string, unknown> = {}) => ({
+	fdcId: 42,
+	description: "Apples, raw",
+	brandName: null,
+	brandOwner: null,
+	gtinUpc: "012345678905",
+	servingSize: 100,
+	servingSizeUnit: "g",
+	foodNutrients: [],
+	...overrides,
+});
+
+const usdaCoreNutrients = [
+	{ nutrientId: 1008, value: 52 },
+	{ nutrientId: 1003, value: 0.3 },
+	{ nutrientId: 1005, value: 14 },
+	{ nutrientId: 1004, value: 0.2 },
+];
+
+test("a UPC-matched USDA food with no nutrients is not a nutrition observation", async () => {
+	const restore = stubUsda([usdaApple({ foodNutrients: [] })]);
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.startsWith("https://www.amazon.com/")
+					? AMAZON_UPC_PAGE
+					: "<html><body>No matching products</body></html>",
+			),
+			"DEMO_KEY",
+			"Apples",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a text-matched USDA food with no nutrients is not a nutrition observation", async () => {
+	const restore = stubUsda([usdaApple({ gtinUpc: null, foodNutrients: [] })]);
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser(() => "<html><body>No matching products</body></html>"),
+			"DEMO_KEY",
+			"Apples",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("an Amazon panel that shows only calories cannot replace stored nutrition", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.startsWith("https://www.amazon.com/")
+					? '<html><body><div id="nic-nutrition-facts">Nutrition Facts Calories 150</div></body></html>'
+					: "<html><body>No matching products</body></html>",
+			),
+			"DEMO_KEY",
+			"Apples",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+test("a UPC-first USDA hit with empty nutrients falls through to the text search", async () => {
+	const queries: string[] = [];
+	const restore = stubUsda([], queries);
+	let served = 0;
+	globalThis.fetch = (async (input: RequestInfo | URL) => {
+		const query = new URL(String(input)).searchParams.get("query") ?? "";
+		queries.push(query);
+		served += 1;
+		return new Response(
+			JSON.stringify({
+				foods: [
+					query.startsWith("gtinUpc:")
+						? usdaApple({ foodNutrients: [] })
+						: usdaApple({ foodNutrients: usdaCoreNutrients }),
+				],
+			}),
+			{ status: 200 },
+		);
+	}) as typeof fetch;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.startsWith("https://www.amazon.com/")
+					? AMAZON_UPC_PAGE
+					: "<html><body>No matching products</body></html>",
+			),
+			"DEMO_KEY",
+			"Apples",
+			"B012345678",
+		);
+		assert.ok(served >= 2, "an empty exact hit must not end the lookup");
+		assert.equal(typeof outcome === "string" ? null : outcome.calories, 52);
+		assert.equal(
+			typeof outcome === "string" ? null : outcome.usdaMatchMethod,
+			"text",
+		);
+	} finally {
+		restore();
+	}
+});
+
+test("a USDA result whose GTIN differs from the queried UPC is not a UPC match", async () => {
+	const restore = stubUsda([
+		usdaApple({ gtinUpc: "999999999999", foodNutrients: usdaCoreNutrients }),
+	]);
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.startsWith("https://www.amazon.com/")
+					? AMAZON_UPC_PAGE
+					: "<html><body>No matching products</body></html>",
+			),
+			"DEMO_KEY",
+			"Apples",
+			"B012345678",
+		);
+		assert.notEqual(typeof outcome, "string");
+		assert.equal(
+			typeof outcome === "string" ? null : outcome.usdaMatchMethod,
+			"text",
+		);
+		assert.equal(
+			typeof outcome === "string" ? null : outcome.confidence,
+			"medium",
+		);
+	} finally {
+		restore();
+	}
+});
+
+test("a product page without a GTIN never queries USDA by the string 'undefined'", async () => {
+	const queries: string[] = [];
+	const restore = stubUsda([], queries);
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.includes("/search?")
+					? '<a href="/product/apples">Apples</a>'
+					: url.includes("/product/apples")
+						? '<script type="application/ld+json">{"@type":"Product","name":"Apples","nutrition":{"@type":"NutritionInformation","calories":"52"}}</script>'
+						: "<html><body>no panel</body></html>",
+			),
+			"DEMO_KEY",
+			"Apples",
+		);
+		assert.equal(typeof outcome, "string");
+		assert.deepEqual(
+			queries.filter((query) => query.includes("undefined")),
+			[],
+		);
+	} finally {
+		restore();
+	}
+});
+
+test("nutrition from another Product node on the page cannot be attributed to the requested product", async () => {
+	const restore = stubUsda([]);
+	try {
+		const outcome = await lookupNutritionForProduct(
+			scriptedBrowser((url) =>
+				url.includes("/search?")
+					? '<a href="/product/apples">Apples</a>'
+					: url.includes("/product/apples")
+						? `<script type="application/ld+json">[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears","nutrition":{"@type":"NutritionInformation",${CORE_PANEL}}}]</script>`
+						: "<html><body>no panel</body></html>",
+			),
+			"DEMO_KEY",
+			"Apples",
+		);
+		assert.equal(typeof outcome, "string");
+	} finally {
+		restore();
+	}
+});
+
+// ─── Order identity: the returned detail must be the requested order ──────
+
+const ORDER_OTHER = "999-9999999-9999999";
+const ordersWithIdentity = (orderId: string, body: string) =>
+	`<html><body><span data-orderid="${orderId}"></span>${body}</body></html>`;
+
+function redirectingOrdersSite(
+	searchPages: string[],
+	servedFor: (requestedOrderId: string) => { html: string; finalOrderId: string },
+): Page {
+	let current = "";
+	let finalUrl = "https://www.amazon.com/your-orders/search";
+	return {
+		content: () => Promise.resolve(current),
+		goto: (url: string) => {
+			const parsed = new URL(url);
+			if (parsed.pathname.includes("search")) {
+				const pageNum = Number(parsed.searchParams.get("page") ?? "1");
+				current = searchPages[pageNum - 1] ?? "";
+				finalUrl = url;
+			} else {
+				const served = servedFor(parsed.searchParams.get("orderID") ?? "");
+				current = served.html;
+				finalUrl = `https://www.amazon.com/your-orders/order-details?orderID=${served.finalOrderId}`;
+			}
+			return Promise.resolve(null);
+		},
+		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
+		url: () => finalUrl,
+	} as unknown as Page;
+}
+
+const ONE_ROW_SEARCH = searchPage(1, [[ORDER_A, "B012345678"]], false);
+
+test("a detail page for a different order is never emitted under the requested order id", async () => {
+	const { failures, harness } = await runCollectOrders(
+		redirectingOrdersSite([ONE_ROW_SEARCH], () => ({
+			html: ordersWithIdentity(ORDER_OTHER, DETAIL_HTML),
+			finalOrderId: ORDER_OTHER,
+		})),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(harness.emitted, []);
+	assert.ok(failures.length > 0);
+});
+
+test("a page showing another order's id is rejected even when the URL kept the requested id", async () => {
+	const { harness } = await runCollectOrders(
+		redirectingOrdersSite([ONE_ROW_SEARCH], () => ({
+			html: ordersWithIdentity(ORDER_OTHER, DETAIL_HTML),
+			finalOrderId: ORDER_A,
+		})),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(harness.emitted, []);
+});
+
+test("a cancellation page for a different order does not cancel the requested order", async () => {
+	const { harness } = await runCollectOrders(
+		redirectingOrdersSite([ONE_ROW_SEARCH], () => ({
+			html: ordersWithIdentity(
+				ORDER_OTHER,
+				'<div data-component="cancelled">This order was cancelled</div>',
+			),
+			finalOrderId: ORDER_OTHER,
+		})),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(harness.emitted, []);
+});
+
+test("a detail page that shows the requested order id is accepted", async () => {
+	const { harness } = await runCollectOrders(
+		redirectingOrdersSite([ONE_ROW_SEARCH], (orderId) => ({
+			html: ordersWithIdentity(orderId, DETAIL_HTML),
+			finalOrderId: orderId,
+		})),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(
+		harness.emitted.map((r) => r.stream),
+		["orders", "order_items"],
+	);
 });

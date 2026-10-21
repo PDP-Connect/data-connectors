@@ -18,6 +18,7 @@ import {
 	hasOrderSearchEmptyState,
 	isCancelledOrderDetail,
 	mapUsdaNutrients,
+	parseAmazonProductNutritionDom,
 	parseAmazonProfileDom,
 	parseDollarsToCents,
 	parseOrderDateIso,
@@ -496,4 +497,127 @@ test("a hidden empty-orders element is not an empty state", () => {
 		hasOrderSearchEmptyState('<div class="no-orders">No orders</div>'),
 		true,
 	);
+});
+
+// ─── Nutrition: identity binding, units and basis ─────────────────────────
+
+const LD_NUTRITION_95 =
+	'"nutrition":{"@type":"NutritionInformation","calories":"95"}';
+
+function ld(json: string): string {
+	return `<html><head><script type="application/ld+json">${json}</script></head><body></body></html>`;
+}
+
+test("JSON-LD nutrition belongs to the Product node that holds it, not to the first named node", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ld(
+			`[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears",${LD_NUTRITION_95}}]`,
+		),
+	);
+	assert.equal(facts?.calories, 95);
+	assert.equal(facts?.productName, "Pears");
+	assert.equal(facts?.upc, null);
+});
+
+test("JSON-LD @graph keeps nutrition, name and gtin from one Product node", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ld(
+			`{"@graph":[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears","gtin13":"2222222222222",${LD_NUTRITION_95}}]}`,
+		),
+	);
+	assert.equal(facts?.productName, "Pears");
+	assert.equal(facts?.upc, "2222222222222");
+});
+
+test("a Product without a GTIN has a null UPC, never the string 'undefined'", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ld(`{"@type":"Product","name":"Apples",${LD_NUTRITION_95}}`),
+	);
+	assert.equal(facts?.upc, null);
+});
+
+test("GTINs are validated and normalized to digits", () => {
+	const upcOf = (gtin: string) =>
+		parseWholeFoodsProductPageDom(
+			ld(
+				`{"@type":"Product","name":"Apples","gtin12":"${gtin}",${LD_NUTRITION_95}}`,
+			),
+		)?.upc;
+	assert.equal(upcOf("0-12345-67890-5"), "012345678905");
+	assert.equal(upcOf("not-a-code"), null);
+	assert.equal(upcOf("12345"), null);
+});
+
+test("structured nutrition units are normalized to the field's unit", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ld(
+			'{"@type":"Product","name":"Apples","nutrition":{"@type":"NutritionInformation","calories":"95 kcal","sodiumContent":"0.5 g","fatContent":"500 mg","vitaminDContent":"5 µg","potassiumContent":"0.1 g","proteinContent":"2"}}',
+		),
+	);
+	assert.equal(facts?.calories, 95);
+	assert.equal(facts?.sodiumMg, 500);
+	assert.equal(facts?.fatG, 0.5);
+	assert.equal(facts?.vitaminDMcg, 5);
+	assert.equal(facts?.potassiumMg, 100);
+	assert.equal(facts?.proteinG, 2);
+});
+
+test("structured nutrition with an unsupported unit is withheld, not relabelled", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ld(
+			'{"@type":"Product","name":"Apples","nutrition":{"@type":"NutritionInformation","calories":"398 kJ","sodiumContent":"3 oz","fatContent":"2 g"}}',
+		),
+	);
+	assert.equal(facts?.calories, null);
+	assert.equal(facts?.sodiumMg, null);
+	assert.equal(facts?.fatG, 2);
+});
+
+test("text-panel units are normalized to the field's unit", () => {
+	const facts = parseWholeFoodsProductPageDom(`<html><body><div>
+      <h3>Nutrition Facts</h3>
+      <div>Serving size 1 cup
+      Calories 105
+      Total Fat 500 mg
+      Sodium 0.5 g
+      Protein 1.3g
+      </div></div></body></html>`);
+	assert.equal(facts?.fatG, 0.5);
+	assert.equal(facts?.sodiumMg, 500);
+	assert.equal(facts?.proteinG, 1.3);
+});
+
+test("USDA serving in a non-gram unit is not labelled as the per-serving basis", () => {
+	const facts = mapUsdaNutrients(
+		usdaFood({
+			foodNutrients: [{ nutrientId: 1008, value: 40 }],
+			servingSize: 240,
+			servingSizeUnit: "ml",
+		}),
+		"text",
+	);
+	assert.equal(facts.calories, 40);
+	assert.equal(facts.servingSize, null);
+});
+
+test("USDA gram serving aliases scale and label the serving", () => {
+	const facts = mapUsdaNutrients(
+		usdaFood({
+			foodNutrients: [{ nutrientId: 1008, value: 100 }],
+			servingSize: 30,
+			servingSizeUnit: "GRM",
+		}),
+		"text",
+	);
+	assert.equal(facts.calories, 30);
+	assert.equal(facts.servingSize, "30g");
+});
+
+test("Amazon panel units are normalized and a non-GTIN id is not a UPC", () => {
+	const facts = parseAmazonProductNutritionDom(`<html><body>
+		<div id="detailBullets_feature_div"><li>ASIN: 0123456789</li></div>
+		<div id="nic-nutrition-facts">Nutrition Facts Calories 150 Sodium 0.5 g Total Fat 5g</div>
+	</body></html>`);
+	assert.equal(facts?.sodiumMg, 500);
+	assert.equal(facts?.upc, null);
 });

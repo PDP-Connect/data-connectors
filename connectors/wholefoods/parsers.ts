@@ -43,7 +43,7 @@ const SERVING_SIZE_RE = /Serving [Ss]ize[:\s]*([^\n]+)/;
 const SERVINGS_PER_CONTAINER_RE =
 	/(\d+(?:\.\d+)?)\s*servings?\s*per\s*container|servings?\s*per\s*container[:\s]*(\d+(?:\.\d+)?)/i;
 const NUTRIENT_PATTERN_SOURCE =
-	"(Total Fat|Saturated Fat|Trans Fat|Cholesterol|Sodium|Total Carbohydrate|Dietary Fiber|Added Sugars|Includes Added Sugars|Sugars|Protein|Potassium|Calcium|Iron|Vitamin D)[:\\s]*(\\d+\\.?\\d*)";
+	"(Total Fat|Saturated Fat|Trans Fat|Cholesterol|Sodium|Total Carbohydrate|Dietary Fiber|Added Sugars|Includes Added Sugars|Sugars|Protein|Potassium|Calcium|Iron|Vitamin D)[:\\s]*(\\d+\\.?\\d*)\\s*(mcg|mg|µg|μg|ug|g)?(?![A-Za-z])";
 
 type NutritionDetails = Pick<
 	NutritionFacts,
@@ -88,6 +88,151 @@ function emptyNutritionDetails(): NutritionDetails {
 		usdaMatchMethod: null,
 		vitaminDMcg: null,
 	};
+}
+
+// ─── Nutrition: units, GTINs and the acceptance rule ──────────────────────
+
+type MassUnit = "g" | "mg" | "mcg";
+
+const MG_PER_UNIT: Record<MassUnit, number> = { g: 1000, mg: 1, mcg: 0.001 };
+const MASS_UNIT_ALIASES: Record<string, MassUnit> = {
+	g: "g",
+	gram: "g",
+	grams: "g",
+	mg: "mg",
+	milligram: "mg",
+	milligrams: "mg",
+	mcg: "mcg",
+	ug: "mcg",
+	µg: "mcg",
+	μg: "mcg",
+	microgram: "mcg",
+	micrograms: "mcg",
+};
+const ENERGY_UNIT_ALIASES = new Set([
+	"",
+	"cal",
+	"calorie",
+	"calories",
+	"kcal",
+	"kilocalorie",
+	"kilocalories",
+]);
+const AMOUNT_RE = /^\s*(\d+(?:\.\d+)?|\.\d+)\s*([^\d\s].*?)?\s*$/;
+/** GTIN-8, GTIN-12 (UPC-A), GTIN-13 and GTIN-14 are the only barcode lengths. */
+const GTIN_LENGTHS = new Set([8, 12, 13, 14]);
+
+function roundAmount(value: number): number {
+	return Math.round(value * 1e6) / 1e6;
+}
+
+function convertMass(value: number, from: MassUnit, to: MassUnit): number {
+	return roundAmount((value * MG_PER_UNIT[from]) / MG_PER_UNIT[to]);
+}
+
+/** A mass amount as the field's own unit. A bare number is already in that
+ *  unit; a unit the field cannot hold is withheld (null), never relabelled. */
+function massAmount(
+	raw: unknown,
+	target: MassUnit,
+): number | null {
+	if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+	if (typeof raw !== "string") return null;
+	const match = AMOUNT_RE.exec(raw);
+	if (!match?.[1]) return null;
+	const value = Number.parseFloat(match[1]);
+	if (!match[2]) return value;
+	const unit = MASS_UNIT_ALIASES[match[2].trim().toLowerCase()];
+	return unit ? convertMass(value, unit, target) : null;
+}
+
+/** Energy as kilocalories. Kilojoules and other units are withheld. */
+function energyKcal(raw: unknown): number | null {
+	if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+	if (typeof raw !== "string") return null;
+	const match = AMOUNT_RE.exec(raw);
+	if (!match?.[1]) return null;
+	return ENERGY_UNIT_ALIASES.has((match[2] ?? "").trim().toLowerCase())
+		? Number.parseFloat(match[1])
+		: null;
+}
+
+/** A real barcode as digits, or null. Hyphens and spaces are formatting. */
+export function normalizeGtin(raw: unknown): string | null {
+	if (typeof raw !== "string" && typeof raw !== "number") return null;
+	const compact = String(raw).replace(/[\s-]/g, "");
+	return /^\d+$/.test(compact) && GTIN_LENGTHS.has(compact.length)
+		? compact
+		: null;
+}
+
+/** Two barcodes name the same product when they agree once padding zeros
+ *  (UPC-A inside GTIN-13/14) are ignored. */
+export function sameGtin(left: unknown, right: unknown): boolean {
+	const a = normalizeGtin(left);
+	const b = normalizeGtin(right);
+	return a !== null && b !== null && a.replace(/^0+/, "") === b.replace(/^0+/, "");
+}
+
+/** Unit each panel row is stored in. */
+const PANEL_UNIT: Record<string, MassUnit> = {
+	"Total Fat": "g",
+	"Saturated Fat": "g",
+	"Trans Fat": "g",
+	Cholesterol: "mg",
+	Sodium: "mg",
+	"Total Carbohydrate": "g",
+	"Dietary Fiber": "g",
+	"Total Sugars": "g",
+	"Includes Added Sugars": "g",
+	Protein: "g",
+	Potassium: "mg",
+	Calcium: "mg",
+	Iron: "mg",
+	"Vitamin D": "mcg",
+};
+
+/** Read the rows of a rendered nutrition panel as `row name -> amount in that
+ *  row's unit`. The first occurrence of a row wins. */
+function readPanelAmounts(panelText: string): Map<string, number> {
+	const amounts = new Map<string, number>();
+	const pattern = new RegExp(NUTRIENT_PATTERN_SOURCE, "gi");
+	let match: RegExpExecArray | null = pattern.exec(panelText);
+	while (match) {
+		const label = titleCase((match[1] ?? "").toLowerCase());
+		const key =
+			label === "Sugars"
+				? "Total Sugars"
+				: label === "Added Sugars"
+					? "Includes Added Sugars"
+					: label;
+		const target = PANEL_UNIT[key];
+		if (target && !amounts.has(key) && match[2]) {
+			const value = massAmount(`${match[2]}${match[3] ?? ""}`, target);
+			if (value !== null) amounts.set(key, value);
+		}
+		match = pattern.exec(panelText);
+	}
+	return amounts;
+}
+
+function titleCase(label: string): string {
+	return label.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** The acceptance rule for a nutrition observation. A stored nutrition row is
+ *  replaced wholesale by the next one emitted under its key, so only an
+ *  observation that states every core row of a Nutrition Facts panel
+ *  (calories, fat, carbohydrate, protein) may be emitted. An empty or partly
+ *  rendered observation says nothing about the product and must not displace
+ *  facts that were read before. */
+export function hasCoreNutrition(facts: NutritionFacts): boolean {
+	return (
+		typeof facts.calories === "number" &&
+		typeof facts.fatG === "number" &&
+		typeof facts.carbsG === "number" &&
+		typeof facts.proteinG === "number"
+	);
 }
 
 const IN_STORE_ITEM_LIST_SELECTOR = "#f3_food_ItemList";
@@ -476,6 +621,36 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 	return { items, orderDateRaw: detailOrderDate(document) };
 }
 
+const ORDER_ID_TOKEN_RE = /\b\d{3}-\d{7}-\d{7}\b/g;
+const AMAZON_ORIGIN = "https://www.amazon.com";
+
+/** The one rule that ties a fetched order-detail page to the order that was
+ *  requested. A page belongs to the order when the final URL is on amazon.com
+ *  and the order id it carries, or else the order id the page itself shows,
+ *  is the requested one; any other order id on either surface rejects it.
+ *  A page with neither is unbound and is rejected too: a redirect to another
+ *  order, or to a cancellation page, must never be read as this order. */
+export function orderDetailBelongsTo(
+	orderId: string,
+	finalUrl: string,
+	html: string,
+): boolean {
+	let url: URL;
+	try {
+		url = new URL(finalUrl);
+	} catch {
+		return false;
+	}
+	if (url.origin !== AMAZON_ORIGIN) return false;
+	const urlOrderId = [...url.searchParams].find(
+		([key]) => key.toLowerCase() === "orderid",
+	)?.[1];
+	if (urlOrderId !== undefined && urlOrderId !== orderId) return false;
+	const shownIds: string[] = html.match(ORDER_ID_TOKEN_RE) ?? [];
+	if (shownIds.length > 0 && !shownIds.includes(orderId)) return false;
+	return urlOrderId === orderId || shownIds.includes(orderId);
+}
+
 /**
  * Delivery orders at `/uff/your-account/order-details` use `#line-items` and
  * one `*-item-grid-row` element per search row. The captured rows have a
@@ -705,20 +880,26 @@ const USDA_NUTRIENT_ID = {
 	vitaminD: 1114,
 } as const;
 
+/** USDA branded-food nutrients are per 100 g. A serving stated in grams
+ *  scales them to that serving, as the legacy `mapUSDANutrients` did. A
+ *  serving in any other unit (millilitres, pieces) cannot be converted
+ *  without a density, so the values stay on the per-100 g basis and carry no
+ *  serving label: a label would present unconverted values as per-serving. */
+const USDA_GRAM_UNITS = new Set(["g", "grm"]);
+
 /** Map a matched USDA food's nutrients to the connector's typed nutrition
- *  shape. USDA branded-food nutrients are per 100g; scaled to per-serving
- *  using the food's own `servingSize`, same as the legacy `mapUSDANutrients`.
- *  A food with no `servingSize` reports per-100g (scale 1) rather than
- *  guessing a serving size. */
+ *  shape. */
 export function mapUsdaNutrients(
 	food: UsdaFood,
 	matchMethod: UsdaMatchMethod,
 ): NutritionFacts {
-	const servingG =
-		food.servingSizeUnit?.toLowerCase() === "g" && food.servingSize !== null
+	const servingInGrams =
+		food.servingSize !== null &&
+		food.servingSizeUnit !== null &&
+		USDA_GRAM_UNITS.has(food.servingSizeUnit.toLowerCase())
 			? food.servingSize
-			: 100;
-	const scale = servingG / 100;
+			: null;
+	const scale = (servingInGrams ?? 100) / 100;
 	const getRaw = (id: number): number | null => {
 		const n = food.foodNutrients.find((fn) => fn.nutrientId === id);
 		return n ? n.value : null;
@@ -747,16 +928,13 @@ export function mapUsdaNutrients(
 		proteinG: get(USDA_NUTRIENT_ID.protein),
 		rawNutritionText: null,
 		saturatedFatG: get(USDA_NUTRIENT_ID.saturatedFat),
-		servingSize:
-			food.servingSize !== null && food.servingSizeUnit
-				? `${food.servingSize}${food.servingSizeUnit}`
-				: null,
+		servingSize: servingInGrams !== null ? `${servingInGrams}g` : null,
 		servingsPerContainer: null,
 		sodiumMg: get(USDA_NUTRIENT_ID.sodium),
 		source: "usda_fdc",
 		sugarG: get(USDA_NUTRIENT_ID.sugar),
 		transFatG: get(USDA_NUTRIENT_ID.transFat),
-		upc: food.gtinUpc,
+		upc: normalizeGtin(food.gtinUpc),
 		usdaBrand: food.brandOwner,
 		usdaDescription: food.description,
 		usdaMatchMethod: matchMethod,
@@ -770,36 +948,61 @@ interface JsonLdNode {
 	[key: string]: unknown;
 }
 
-function findInJsonLd<T>(
-	node: unknown,
-	predicate: (n: JsonLdNode) => T | null,
-): T | null {
-	if (!node || typeof node !== "object") {
-		return null;
-	}
+/** Every object in a JSON-LD document, containers (arrays, `@graph`) and
+ *  nested values included, in document order. */
+function jsonLdObjects(node: unknown, out: JsonLdNode[] = []): JsonLdNode[] {
+	if (!node || typeof node !== "object") return out;
 	if (Array.isArray(node)) {
-		for (const item of node) {
-			const found = findInJsonLd(item, predicate);
-			if (found !== null) {
-				return found;
-			}
-		}
-		return null;
+		for (const item of node) jsonLdObjects(item, out);
+		return out;
 	}
-	const obj = node as JsonLdNode;
-	const direct = predicate(obj);
-	if (direct !== null) {
-		return direct;
+	out.push(node as JsonLdNode);
+	for (const value of Object.values(node)) jsonLdObjects(value, out);
+	return out;
+}
+
+function jsonLdTypes(node: JsonLdNode): string[] {
+	const type = node["@type"];
+	return (Array.isArray(type) ? type : [type]).flatMap((entry) =>
+		typeof entry === "string" ? [entry.replace(/^.*[/:]/, "")] : [],
+	);
+}
+
+/** The `nutrition` object a Product node carries itself. */
+function nutritionOf(product: JsonLdNode): JsonLdNode | null {
+	const nutrition = product.nutrition;
+	const candidate = Array.isArray(nutrition) ? nutrition[0] : nutrition;
+	return candidate && typeof candidate === "object"
+		? (candidate as JsonLdNode)
+		: null;
+}
+
+/** The one Product node a page's structured data speaks for. The nutrition,
+ *  name, GTIN, category and ingredients all come from this node, so they
+ *  describe one entity. A node holding nutrition is preferred; with none,
+ *  the first Product still names the page for the rendered panel. A document
+ *  with no Product but a single standalone NutritionInformation node keeps
+ *  that nutrition with no identity. */
+function selectProductEvidence(documents: unknown[]): {
+	product: JsonLdNode | null;
+	nutrition: JsonLdNode | null;
+} {
+	const objects = documents.flatMap((doc) => jsonLdObjects(doc));
+	const products = objects.filter((node) => jsonLdTypes(node).includes("Product"));
+	const withNutrition = products.find((node) => nutritionOf(node) !== null);
+	if (withNutrition) {
+		return { product: withNutrition, nutrition: nutritionOf(withNutrition) };
 	}
-	for (const value of Object.values(obj)) {
-		if (value && typeof value === "object") {
-			const found = findInJsonLd(value, predicate);
-			if (found !== null) {
-				return found;
-			}
-		}
+	if (products.length > 0) {
+		return { product: products[0] ?? null, nutrition: null };
 	}
-	return null;
+	const standalone = objects.filter((node) =>
+		jsonLdTypes(node).includes("NutritionInformation"),
+	);
+	return {
+		product: null,
+		nutrition: standalone.length === 1 ? (standalone[0] ?? null) : null,
+	};
 }
 
 function parseJsonLdScripts(document: Document): unknown[] {
@@ -818,17 +1021,6 @@ function parseJsonLdScripts(document: Document): unknown[] {
 	return parsed;
 }
 
-function numOrNull(v: unknown): number | null {
-	if (v === null || v === undefined) {
-		return null;
-	}
-	const n =
-		typeof v === "number"
-			? v
-			: Number.parseFloat(String(v).replace(/[^\d.]/g, ""));
-	return Number.isFinite(n) ? n : null;
-}
-
 /**
  * Parse a Whole Foods product page for nutrition facts. Tries JSON-LD
  * `NutritionInformation` structured data first (high confidence, machine
@@ -841,24 +1033,13 @@ export function parseWholeFoodsProductPageDom(
 	html: string,
 ): NutritionFacts | null {
 	const { document } = parseHTML(html);
-	const ldNodes = parseJsonLdScripts(document);
-	const ldNutrition = findInJsonLd(ldNodes, (n) => {
-		if (n["@type"] === "NutritionInformation" || n.nutrition) {
-			return (n.nutrition ?? n) as JsonLdNode;
-		}
-		return null;
-	});
-	const productInfo = findInJsonLd(ldNodes, (n) =>
-		["gtin12", "gtin13", "gtin", "gtin8", "name", "nutrition"].some(
-			(field) => n[field],
-		)
-			? n
-			: null,
-	);
+	const { product: productInfo, nutrition: ldNutrition } =
+		selectProductEvidence(parseJsonLdScripts(document));
 	const productUpc = productInfo
-		? String(
+		? normalizeGtin(
 				productInfo.gtin12 ??
 					productInfo.gtin13 ??
+					productInfo.gtin14 ??
 					productInfo.gtin ??
 					productInfo.gtin8,
 			)
@@ -887,31 +1068,31 @@ export function parseWholeFoodsProductPageDom(
 		ldNutrition
 			? {
 					...emptyNutritionDetails(),
-					calciumMg: numOrNull(ldNutrition.calciumContent),
-					calories: numOrNull(ldNutrition.calories),
-					carbsG: numOrNull(ldNutrition.carbohydrateContent),
+					calciumMg: massAmount(ldNutrition.calciumContent, "mg"),
+					calories: energyKcal(ldNutrition.calories),
+					carbsG: massAmount(ldNutrition.carbohydrateContent, "g"),
 					category,
-					cholesterolMg: numOrNull(ldNutrition.cholesterolContent),
+					cholesterolMg: massAmount(ldNutrition.cholesterolContent, "mg"),
 					confidence: "high",
-					fatG: numOrNull(ldNutrition.fatContent),
-					fiberG: numOrNull(ldNutrition.fiberContent),
+					fatG: massAmount(ldNutrition.fatContent, "g"),
+					fiberG: massAmount(ldNutrition.fiberContent, "g"),
 					ingredients: productIngredients,
-					ironMg: numOrNull(ldNutrition.ironContent),
-					potassiumMg: numOrNull(ldNutrition.potassiumContent),
+					ironMg: massAmount(ldNutrition.ironContent, "mg"),
+					potassiumMg: massAmount(ldNutrition.potassiumContent, "mg"),
 					productName,
-					proteinG: numOrNull(ldNutrition.proteinContent),
-					saturatedFatG: numOrNull(ldNutrition.saturatedFatContent),
+					proteinG: massAmount(ldNutrition.proteinContent, "g"),
+					saturatedFatG: massAmount(ldNutrition.saturatedFatContent, "g"),
 					servingSize:
 						typeof ldNutrition.servingSize === "string"
 							? ldNutrition.servingSize
 							: null,
 					servingsPerContainer: null,
-					sodiumMg: numOrNull(ldNutrition.sodiumContent),
+					sodiumMg: massAmount(ldNutrition.sodiumContent, "mg"),
 					source: "wholefoods_structured_data",
-					sugarG: numOrNull(ldNutrition.sugarContent),
-					transFatG: numOrNull(ldNutrition.transFatContent),
+					sugarG: massAmount(ldNutrition.sugarContent, "g"),
+					transFatG: massAmount(ldNutrition.transFatContent, "g"),
 					upc: productUpc,
-					vitaminDMcg: numOrNull(ldNutrition.vitaminDContent),
+					vitaminDMcg: massAmount(ldNutrition.vitaminDContent, "mcg"),
 				}
 			: null;
 	if (ldNutrition && !nutritionHeading) {
@@ -929,21 +1110,7 @@ export function parseWholeFoodsProductPageDom(
 	if (!caloriesMatch) {
 		return structuredFacts();
 	}
-	const nutrients = new Map<string, number>();
-	const nutrientPattern = new RegExp(NUTRIENT_PATTERN_SOURCE, "gi");
-	let m: RegExpExecArray | null = nutrientPattern.exec(allText);
-	while (m) {
-		let key = m[1] ?? "";
-		if (/^sugars$/i.test(key)) {
-			key = "Total Sugars";
-		} else if (/^added sugars$/i.test(key)) {
-			key = "Includes Added Sugars";
-		}
-		if (!nutrients.has(key) && m[2]) {
-			nutrients.set(key, Number.parseFloat(m[2]));
-		}
-		m = nutrientPattern.exec(allText);
-	}
+	const nutrients = readPanelAmounts(allText);
 	const servingSizeMatch = SERVING_SIZE_RE.exec(allText);
 	const servingsMatch = SERVINGS_PER_CONTAINER_RE.exec(allText);
 	const servingsPerContainerRaw = servingsMatch?.[1] ?? servingsMatch?.[2];
@@ -1038,21 +1205,9 @@ export function parseAmazonProductNutritionDom(
 			),
 		),
 	);
-	if (!caloriesMatch && !upcMatch) return null;
-	const nutrientValues = new Map<string, number>();
-	const pattern = new RegExp(NUTRIENT_PATTERN_SOURCE, "gi");
-	let match: RegExpExecArray | null = pattern.exec(allText);
-	while (match) {
-		const key = /^sugars$/i.test(match[1] ?? "")
-			? "Total Sugars"
-			: /^added sugars$/i.test(match[1] ?? "")
-				? "Includes Added Sugars"
-				: (match[1] ?? "");
-		if (key && !nutrientValues.has(key) && match[2]) {
-			nutrientValues.set(key, Number.parseFloat(match[2]));
-		}
-		match = pattern.exec(allText);
-	}
+	const amazonUpc = normalizeGtin(upcMatch?.[1]);
+	if (!caloriesMatch && !amazonUpc) return null;
+	const nutrientValues = readPanelAmounts(allText);
 	const get = (key: string): number | null => nutrientValues.get(key) ?? null;
 	const ingredientsNode = document.querySelector(
 		'#ingredients_feature_div, [data-component="ingredients"]',
@@ -1093,7 +1248,7 @@ export function parseAmazonProductNutritionDom(
 		source: "amazon_product_page",
 		sugarG: get("Total Sugars"),
 		transFatG: get("Trans Fat"),
-		upc: upcMatch?.[1]?.replaceAll("-", "") ?? null,
+		upc: amazonUpc,
 		vitaminDMcg: get("Vitamin D"),
 	};
 }

@@ -58,15 +58,21 @@ function stub(orderId: string, expectedItemCount: number): OrderStub {
 
 function pageServing(htmlByOrder: Record<string, string>): Page {
 	let current = "";
+	let currentUrl = "";
 	return {
 		content: () => Promise.resolve(current),
 		goto: (url: string) => {
-			current =
-				htmlByOrder[new URL(url).searchParams.get("orderID") ?? ""] ?? "";
+			currentUrl = url;
+			const orderId = new URL(url).searchParams.get("orderID") ?? "";
+			// The fixture is one captured page; each order shows its own id.
+			current = (htmlByOrder[orderId] ?? "").replaceAll(
+				"000-0000000-0000000",
+				orderId,
+			);
 			return Promise.resolve(null);
 		},
 		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
-		url: () => "https://www.amazon.com/fopo/order-details",
+		url: () => currentUrl,
 	} as unknown as Page;
 }
 

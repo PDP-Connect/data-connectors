@@ -41,12 +41,14 @@ import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fi
 import {
 	bestUsdaMatch,
 	cleanProductName,
+	hasCoreNutrition,
 	hasOrderDetailEvidence,
 	hasOrderSearchEmptyState,
 	isCancelledOrderDetail,
 	mapUsdaNutrients,
 	mergeProductIds,
 	ORDER_DETAIL_READY_SELECTOR,
+	orderDetailBelongsTo,
 	orderDetailUnitCount,
 	parseAmazonProfileDom,
 	parseAmazonProductNutritionDom,
@@ -56,6 +58,7 @@ import {
 	parseOrderSearchPageDom,
 	parseWholeFoodsProductPageDom,
 	parseWholeFoodsSearchResultDoms,
+	sameGtin,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
@@ -68,6 +71,7 @@ import type {
 	OrderStub,
 	ProfileRecord,
 	UsdaFood,
+	UsdaMatchMethod,
 } from "./types.ts";
 
 const USDA_DEMO_KEY = "DEMO_KEY";
@@ -478,56 +482,77 @@ async function usdaSearch(
 	return json.foods;
 }
 
-/** Look up USDA nutrition for a product name via Branded text search, then
- *  Foundation text search (better for produce/staples). No UPC is available
- *  at this call site — the Amazon order-detail page never exposes one, only
- *  a UPC recovered from a scraped Whole Foods/USDA response would (the
- *  legacy connector's UPC-first path only ever fired when a prior lookup
- *  had already surfaced one) — so this ports the legacy `lookupUSDA`'s text
- *  fallback path only. Returns null when no confident match exists rather
- *  than guessing. */
+/** Look up USDA nutrition: an exact UPC match first when a UPC is known, then
+ *  Branded text search, then Foundation text search (better for produce and
+ *  staples). A UPC match counts only when USDA returns that same GTIN. Only a
+ *  food whose nutrients pass the acceptance rule is a result: a matched food
+ *  with no or partial nutrients is skipped so the lookup continues to the
+ *  next source. Returns null when no confident match exists rather than
+ *  guessing. */
 async function lookupUsdaNutrition(
 	apiKey: string,
 	name: string,
 	upc: string | null,
 ): Promise<NutritionFacts | null> {
+	const usable = (food: UsdaFood, method: UsdaMatchMethod) => {
+		const facts = mapUsdaNutrients(food, method);
+		return hasCoreNutrition(facts) ? facts : null;
+	};
 	if (upc) {
 		const exact = await usdaSearch(apiKey, {
 			pageSize: "1",
 			query: `gtinUpc:${upc}`,
 		});
 		const match = exact[0];
-		if (match) return mapUsdaNutrients(match, "upc");
+		const facts = match && sameGtin(match.gtinUpc, upc) ? usable(match, "upc") : null;
+		if (facts) return facts;
 	}
 	const cleaned = cleanProductName(name);
 	if (!cleaned || cleaned.length < 3) {
 		return null;
 	}
+	const hasNutrients = (food: UsdaFood) => usable(food, "text") !== null;
 	const branded = await usdaSearch(apiKey, {
 		dataType: "Branded",
 		pageSize: "5",
 		query: cleaned,
 	});
-	const brandedMatch = bestUsdaMatch(cleaned, branded, USDA_MIN_TEXT_SCORE);
+	const brandedMatch = bestUsdaMatch(
+		cleaned,
+		branded.filter(hasNutrients),
+		USDA_MIN_TEXT_SCORE,
+	);
 	if (brandedMatch) {
-		return mapUsdaNutrients(brandedMatch, "text");
+		return usable(brandedMatch, "text");
 	}
 	const foundation = await usdaSearch(apiKey, {
 		dataType: "Foundation",
 		pageSize: "5",
 		query: cleaned,
 	});
-	const foundationMatch = bestUsdaMatch(cleaned, foundation, 0.3);
-	if (foundationMatch) {
-		return mapUsdaNutrients(foundationMatch, "text");
-	}
-	return null;
+	const foundationMatch = bestUsdaMatch(
+		cleaned,
+		foundation.filter(hasNutrients),
+		0.3,
+	);
+	return foundationMatch ? usable(foundationMatch, "text") : null;
 }
 
 /** Follow the legacy source order: Amazon product page, Whole Foods product
  *  page, then UPC-first/text USDA. A failed lookup returns an outcome for
  *  diagnostics, but callers withhold that key so a refresh cannot erase facts. */
-type NutritionOutcome = NutritionFacts | "not_found" | "error" | "blocked";
+type NutritionFailure = "not_found" | "error" | "blocked";
+type NutritionOutcome = AcceptedNutrition | NutritionFailure;
+
+/** A nutrition observation that passed `hasCoreNutrition`. The only way to
+ *  obtain one is `accepted`, so nothing else reaches a nutrition row. */
+type AcceptedNutrition = NutritionFacts & { readonly accepted: true };
+
+function accepted(facts: NutritionFacts | null): AcceptedNutrition | null {
+	return facts && hasCoreNutrition(facts)
+		? { ...facts, accepted: true as const }
+		: null;
+}
 
 function isBlockedPage(html: string): boolean {
 	return /(?:validateCaptcha|captchacharacters|Sorry, we just need to make sure|<title>[^<]*(?:robot|captcha|blocked|denied)[^<]*<\/title>)/i.test(
@@ -550,11 +575,6 @@ async function lookupNutritionForProduct(
 	const query = cleanProductName(name);
 	let sourceOutcome: "not_found" | "error" | "blocked" = "error";
 	let candidate: NutritionFacts | null = null;
-	const hasMajorMacros = (facts: NutritionFacts) =>
-		typeof facts.calories === "number" ||
-		typeof facts.proteinG === "number" ||
-		typeof facts.fatG === "number" ||
-		typeof facts.carbsG === "number";
 	try {
 		const status = await navigateAndSettle(
 			page,
@@ -569,7 +589,8 @@ async function lookupNutritionForProduct(
 			sourceOutcome = "error";
 		} else {
 			candidate = parseAmazonProductNutritionDom(amazonHtml);
-			if (candidate && hasMajorMacros(candidate)) return candidate;
+			const direct = accepted(candidate);
+			if (direct) return direct;
 			sourceOutcome = candidate ? "not_found" : "error";
 		}
 	} catch {
@@ -633,8 +654,8 @@ async function lookupNutritionForProduct(
 							const sameName = Boolean(
 								actualName && expectedName && actualName === expectedName,
 							);
-							if (facts && hasMajorMacros(facts) && (sameUpc || sameName))
-								return facts;
+							const verified = sameUpc || sameName ? accepted(facts) : null;
+							if (verified) return verified;
 							if (facts && !sameUpc && !sameName) {
 								sourceOutcome = "not_found";
 								continue;
@@ -669,7 +690,7 @@ async function lookupNutritionForProduct(
 			candidate?.upc ?? null,
 		);
 		if (usda) {
-			return {
+			const merged = accepted({
 				...usda,
 				allergens: candidate?.allergens ?? null,
 				category: candidate?.category ?? [],
@@ -677,22 +698,21 @@ async function lookupNutritionForProduct(
 				ingredients: candidate?.ingredients ?? usda.ingredients ?? null,
 				rawNutritionText: candidate?.rawNutritionText ?? null,
 				upc: candidate?.upc ?? usda.upc,
-			};
+			});
+			if (merged) return merged;
 		}
-		return candidate && hasMajorMacros(candidate) ? candidate : sourceOutcome;
+		return accepted(candidate) ?? sourceOutcome;
 	} catch {
-		return candidate && hasMajorMacros(candidate)
-			? candidate
-			: sourceOutcome === "blocked"
-				? "blocked"
-				: "error";
+		return (
+			accepted(candidate) ?? (sourceOutcome === "blocked" ? "blocked" : "error")
+		);
 	}
 }
 
 function buildNutritionRecord(
 	productId: string,
 	name: string,
-	facts: NutritionOutcome,
+	facts: NutritionFacts | NutritionFailure,
 ): NutritionRecord {
 	if (typeof facts === "string") {
 		return {
@@ -770,13 +790,13 @@ function buildNutritionRecord(
 
 /** What `collectOrderStubs` could not prove. */
 interface OrderCollectionOutcome {
-	/** Orders whose detail item list matched neither search count. Their items
-	 *  were delivered, but no end of the item list was observed, so
-	 *  `order_items` and `nutrition` are not complete. */
+	/** Orders whose detail item list matched neither search count. Neither the
+	 *  order nor its items were emitted, because no end of the item list was
+	 *  observed, so `orders`, `order_items` and `nutrition` are not complete. */
 	unverifiedCountOrders: number;
 	/** The first detail page that gave no readable evidence, with how many
 	 *  orders were skipped for that reason. Their records are missing, so no
-	 *  stream may finish. The remaining orders were still delivered. */
+	 *  stream may finish. The remaining orders were still read. */
 	unreadable: { count: number; first: OrderEnumerationUnprovenError } | null;
 }
 
@@ -803,10 +823,10 @@ function readOrderDetail(html: string): OrderDetail {
 }
 
 /** Fetch, verify and emit every discovered order. Auth and readability
- *  failures still end the run. A detail whose item count cannot be
- *  reconciled with the search count does not: the order and its items are
- *  delivered, progress reports how many orders were unverified, and the
- *  caller reports the item-derived streams as failed. */
+ *  failures still end the run. A detail that is not the requested order's, or
+ *  whose item count cannot be reconciled with the search count, does not: the
+ *  order and its items are withheld, progress reports how many orders were
+ *  unverified, and the caller reports the order-derived streams as failed. */
 async function collectOrderStubs({
 	credentials,
 	emit,
@@ -819,7 +839,6 @@ async function collectOrderStubs({
 	wantsItems,
 	wantsNutrition,
 	wantsOrders,
-	withFinishingState: _withFinishingState = true,
 }: {
 	credentials: BrowserCollectContext["credentials"];
 	emit: BrowserCollectContext["emit"];
@@ -832,15 +851,13 @@ async function collectOrderStubs({
 	wantsItems: boolean;
 	wantsNutrition: boolean;
 	wantsOrders: boolean;
-	/** False when the order list has no end evidence: the records are still
-	 *  delivered, but neither stream may finish with a STATE. */
-	withFinishingState?: boolean;
 }): Promise<OrderCollectionOutcome> {
 	const usdaApiKey = credentials.USDA_API_KEY || USDA_DEMO_KEY;
 	let unverifiedCountOrders = 0;
 	let unreadable = null as OrderCollectionOutcome["unreadable"];
-	// Every source-backed item is considered. A record for each product
-	// makes the legacy coverage counts derivable from outcome rows.
+	// Every source-backed item is considered. Only a product whose lookup
+	// produced accepted nutrition gets a row; the rest are counted in the
+	// coverage diagnostic and leave any stored row untouched.
 	const consideredProductIds = new Set<string>();
 	const nutritionCoverage = {
 		blocked: 0,
@@ -871,6 +888,13 @@ async function collectOrderStubs({
 			if (isBlockedPage(html) || /<form[^>]*name=["']signIn["']/i.test(html)) {
 				throw new Error(
 					`Whole Foods order ${stub.orderId} detail was blocked or signed out`,
+				);
+			}
+			// The page must be the requested order's before any of its rows,
+			// dates or cancellation status are read as that order's.
+			if (!orderDetailBelongsTo(stub.orderId, page.url(), html)) {
+				throw new OrderEnumerationUnprovenError(
+					"Whole Foods order detail was not the requested order",
 				);
 			}
 			detail = readOrderDetail(html);
@@ -1160,7 +1184,6 @@ async function deliverPartialStubs(
 		wantsItems: ctx.requested.has("order_items"),
 		wantsNutrition: ctx.requested.has("nutrition"),
 		wantsOrders: ctx.requested.has("orders"),
-		withFinishingState: false,
 	});
 }
 

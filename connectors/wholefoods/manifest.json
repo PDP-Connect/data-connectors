@@ -294,10 +294,10 @@
 		{
 			"name": "nutrition",
 			"required": false,
-			"description": "Nutrition facts or observed lookup outcome per unique product. Sources are Amazon, Whole Foods, and USDA FoodData Central. Joins to `order_items` on `product_id`.",
+			"description": "Nutrition facts per unique product. Sources are Amazon, Whole Foods, and USDA FoodData Central. Joins to `order_items` on `product_id`.",
 			"display": {
 				"label": "Nutrition facts",
-				"detail": "Nutrition facts when found, or a not found, blocked, or error outcome when lookup fails."
+				"detail": "Nutrition facts when a lookup reads a complete panel. A lookup that fails or finds only part of a panel adds no row and leaves stored facts as they are."
 			},
 			"semantics": "mutable_state",
 			"schema": {
