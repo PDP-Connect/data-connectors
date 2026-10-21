@@ -113,41 +113,69 @@ for (const cause of [
 	});
 }
 
-test("every unproven stream gets its own portable SKIP_RESULT, and retryability follows the hint", async () => {
+// DONE carries one retryable bit and one message for the whole run. Both are
+// derived from the set of failed streams, never from the order they reported
+// in: retryable is true when any failed stream is retryable, and the message
+// names the streams in sorted order.
+const upgradeOnlyCause = {
+	type: "SKIP_RESULT",
+	stream: "a",
+	reason: "inventory_not_proven_complete",
+	message: "a unproven",
+	recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+};
+const retryableReport = {
+	type: "REPORT_STREAM_FAILURE",
+	stream: "b",
+	message: "b page failed",
+	options: { retryable: true },
+};
+
+for (const [label, aFirst] of [
+	["A then B", true],
+	["B then A", false],
+] as const) {
+	test(`every failed stream gets its own portable SKIP_RESULT and DONE does not depend on report order: ${label}`, async () => {
+		const { messages } = await wire(
+			["a", "b"],
+			aFirst
+				? [upgradeOnlyCause, retryableReport]
+				: [retryableReport, upgradeOnlyCause],
+		);
+		assert.deepEqual(
+			skips(messages)
+				.map((m) => `${m.stream}:${m.reason}`)
+				.sort(),
+			["a:stream_collection_failed", "b:stream_collection_failed"],
+		);
+		const done = doneOf(messages);
+		assert.deepEqual(
+			{ status: done.status, error: done.error },
+			{
+				status: "failed",
+				error: {
+					code: "stream_collection_failed",
+					message:
+						"stream collection failed: a: a unproven (also failed: b)",
+					retryable: true,
+				},
+			},
+			"a retry can make progress on b, whichever stream reported first",
+		);
+	});
+}
+
+test("DONE is not retryable when no failed stream is retryable", async () => {
 	const { messages } = await wire(
 		["a", "b"],
 		[
-			{
-				type: "SKIP_RESULT",
-				stream: "a",
-				reason: "inventory_not_proven_complete",
-				message: "a unproven",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-			},
-			{
-				type: "SKIP_RESULT",
-				stream: "b",
-				reason: "inventory_not_proven_complete",
-				message: "b unproven",
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
-			},
+			{ ...retryableReport, options: { retryable: false } },
+			upgradeOnlyCause,
 		],
 	);
-	assert.deepEqual(
-		skips(messages).map((m) => `${m.stream}:${m.reason}`),
-		["a:stream_collection_failed", "b:stream_collection_failed"],
-	);
 	const done = doneOf(messages);
-	assert.equal(done.status, "failed");
 	assert.equal(done.error?.code, "stream_collection_failed");
-	assert.equal(
-		done.error?.retryable,
-		false,
-		"the first reported failure decides, as with reportStreamFailure",
-	);
+	assert.equal(done.error?.retryable, false);
 });
 
 test("a skip that is not an unproven enumeration passes through and the run still succeeds", async () => {

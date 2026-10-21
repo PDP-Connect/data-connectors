@@ -197,6 +197,40 @@ export function createConnectorFailure(
 
 type Credentials = Record<string, string>;
 
+interface StreamFailureRecord {
+	/** The first message reported for the stream. */
+	message: string;
+	/** Whether any report for the stream said a retry can make progress. */
+	retryable: boolean;
+}
+
+/**
+ * The failed DONE for a run that reported stream failures, independent of
+ * the order the streams reported in.
+ *
+ * DONE carries one `retryable` bit for the whole run, and each stream's
+ * `retryable` is only the connector's claim (Collection Profile 5.11). The
+ * bit is true when ANY failed stream is retryable, because a retry can then
+ * make progress on that stream; it is false only when no failed stream can
+ * gain from a retry. The message names the failed streams in sorted order and
+ * quotes the first message reported for the first of them, so the same set of
+ * failures always yields the same DONE.
+ */
+function streamFailureDone(
+	failures: ReadonlyMap<string, StreamFailureRecord>,
+): { message: string; retryable: boolean } | null {
+	const streams = [...failures.keys()].sort();
+	const [first, ...others] = streams;
+	if (first === undefined) return null;
+	const firstFailure = failures.get(first);
+	return {
+		message: `stream collection failed: ${first}: ${firstFailure?.message ?? ""}${
+			others.length === 0 ? "" : ` (also failed: ${others.join(", ")})`
+		}`,
+		retryable: [...failures.values()].some((failure) => failure.retryable),
+	};
+}
+
 export interface StreamFailureOptions {
 	diagnostics?: Record<string, unknown>;
 	recoveryHint?: { action: string; retryable?: boolean };
@@ -1016,11 +1050,22 @@ export function runConnector(config: RunConnectorConfig): void {
 
 	let observedCounters: { totalEmitted: number; totalSkipped: number } | null =
 		null;
-	let reportedStreamFailure: {
-		message: string;
-		retryable: boolean;
-		stream: string;
-	} | null = null;
+	// Every stream failure this run reported, by stream. DONE is derived from
+	// the whole set (see `streamFailureDone`), never from report order.
+	const reportedStreamFailures = new Map<string, StreamFailureRecord>();
+	const recordStreamFailure = (
+		stream: string,
+		message: string,
+		retryable: boolean,
+	): void => {
+		const prior = reportedStreamFailures.get(stream);
+		reportedStreamFailures.set(
+			stream,
+			prior === undefined
+				? { message, retryable }
+				: { message: prior.message, retryable: prior.retryable || retryable },
+		);
+	};
 
 	const observationsDeclared =
 		config.protocolCapabilities?.includes(OBSERVATION_CAPABILITY) ?? false;
@@ -1283,7 +1328,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		}
 		const retryable =
 			(options.retryable ?? options.recoveryHint?.retryable) === true;
-		reportedStreamFailure ??= { message: normalizedMessage, retryable, stream };
+		recordStreamFailure(stream, normalizedMessage, retryable);
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
@@ -1413,11 +1458,11 @@ export function runConnector(config: RunConnectorConfig): void {
 				return emitWithBoundedCheckpoints(msg);
 			}
 			const skip = portableUnprovenEnumerationSkip(msg);
-			reportedStreamFailure ??= {
-				message: skip.message,
-				retryable: unprovenEnumerationRetryable(skip),
-				stream: skip.stream,
-			};
+			recordStreamFailure(
+				skip.stream,
+				skip.message,
+				unprovenEnumerationRetryable(skip),
+			);
 			return emitWithBoundedCheckpoints(skip);
 		};
 
@@ -1477,17 +1522,18 @@ export function runConnector(config: RunConnectorConfig): void {
 				...(resolveDeferredCredentials ? { resolveDeferredCredentials } : {}),
 				collect,
 				baseCtx,
-				runFailed: () => reportedStreamFailure !== null,
+				runFailed: () => reportedStreamFailures.size > 0,
 				retryablePattern,
 			});
 		} else {
 			await collect(baseCtx);
 		}
 
-		if (reportedStreamFailure) {
+		const streamFailure = streamFailureDone(reportedStreamFailures);
+		if (streamFailure) {
 			emitFailed(
-				`stream collection failed: ${reportedStreamFailure.stream}: ${reportedStreamFailure.message}`,
-				reportedStreamFailure.retryable,
+				streamFailure.message,
+				streamFailure.retryable,
 				emitRecord.counters.totalEmitted,
 				"stream_collection_failed",
 			);
