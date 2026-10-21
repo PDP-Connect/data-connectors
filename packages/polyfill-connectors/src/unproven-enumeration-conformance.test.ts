@@ -16,6 +16,9 @@
  */
 
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
@@ -165,4 +168,73 @@ test("a skip that is not an unproven enumeration passes through and the run stil
 	);
 	assert.equal(doneOf(messages).status, "succeeded");
 	assert.equal(code, 0);
+});
+
+// The runtime's browser cleanup must agree with the terminal result: a run that
+// ends failed because of a reported stream failure keeps its failure evidence.
+async function browserRun(
+	messages: readonly unknown[],
+): Promise<{ done: Done; captureRuns: string[] }> {
+	const root = mkdtempSync(join(tmpdir(), "unproven-enumeration-capture-"));
+	try {
+		const result = await runConnectorProtocolSubprocess({
+			allowFailedDone: true,
+			cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+			entrypoint: fileURLToPath(
+				new URL(
+					"./__fixtures__/unproven-enumeration-browser-connector.ts",
+					import.meta.url,
+				),
+			),
+			env: {
+				PDPP_BROWSER_HEADLESS: "1",
+				PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: undefined,
+				PDPP_BROWSER_SURFACE_REQUIRED: undefined,
+				PDPP_CAPTURE_FIXTURES: undefined,
+				PDPP_CAPTURE_ON_FAILURE: "1",
+				PDPP_CAPTURE_ROOT_DIR: root,
+				PDPP_TEST_MESSAGES: JSON.stringify(messages),
+			},
+			start: { scope: { streams: [{ name: "s" }] }, type: "START" },
+			timeoutMs: 90_000,
+		});
+		const connectorRoot = join(
+			root,
+			"unproven-enumeration-browser-fixture",
+			"raw",
+		);
+		return {
+			captureRuns: existsSync(connectorRoot) ? readdirSync(connectorRoot) : [],
+			done: doneOf(result.messages),
+		};
+	} finally {
+		rmSync(root, { force: true, recursive: true });
+	}
+}
+
+test("a browser run that reports an unproven enumeration keeps its failure capture", async () => {
+	const unproven = await browserRun([
+		{
+			type: "SKIP_RESULT",
+			stream: "s",
+			reason: "inventory_not_proven_complete",
+			message: "The source stopped before the end of the list.",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		},
+	]);
+	assert.equal(unproven.done.status, "failed");
+	assert.equal(unproven.done.error?.code, "stream_collection_failed");
+	assert.equal(
+		unproven.captureRuns.length,
+		1,
+		"the failed run's raw capture is retained",
+	);
+
+	const clean = await browserRun([]);
+	assert.equal(clean.done.status, "succeeded");
+	assert.deepEqual(
+		clean.captureRuns,
+		[],
+		"a clean run's raw capture is deleted, so the difference above is the failure policy",
+	);
 });

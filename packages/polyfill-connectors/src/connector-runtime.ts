@@ -1459,6 +1459,7 @@ export function runConnector(config: RunConnectorConfig): void {
 				...(resolveDeferredCredentials ? { resolveDeferredCredentials } : {}),
 				collect,
 				baseCtx,
+				runFailed: () => reportedStreamFailure !== null,
 				retryablePattern,
 			});
 		} else {
@@ -1859,6 +1860,8 @@ async function runInBrowser(args: {
 	resolveDeferredCredentials?: () => Promise<Credentials>;
 	collect: BrowserConnectorConfig["collect"];
 	baseCtx: BaseCollectContext;
+	/** True once a stream failure is on record: collect returning normally is then not a clean run. */
+	runFailed: () => boolean;
 	retryablePattern: RegExp;
 }): Promise<void> {
 	const {
@@ -1875,6 +1878,7 @@ async function runInBrowser(args: {
 		resolveDeferredCredentials,
 		collect,
 		baseCtx,
+		runFailed,
 		retryablePattern,
 	} = args;
 	const {
@@ -2035,9 +2039,13 @@ async function runInBrowser(args: {
 		// clean run, and capture.finalize() can scrub the raw dir in
 		// PDPP_CAPTURE_ON_FAILURE mode. Anything thrown after this point (only
 		// release/page-close) is treated as benign teardown.
-		tracer.markSucceeded();
-		baseCtx.capture?.markSucceeded?.();
-		runSucceeded = true;
+		// A reported stream failure ends the run failed, so its trace, capture and
+		// page keep the failure policy even though collect returned.
+		if (!runFailed()) {
+			tracer.markSucceeded();
+			baseCtx.capture?.markSucceeded?.();
+			runSucceeded = true;
+		}
 	} catch (err) {
 		if (page) {
 			await captureBrowserPage(baseCtx.capture, page, "runtime-error");
