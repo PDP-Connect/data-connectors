@@ -1753,7 +1753,11 @@ export const spotifyPageCollector = async (
 							}
 							const trackPosition = position;
 							position += 1;
-							if (trackData.__typename !== "Track") {
+							// A local file added to a playlist arrives as a LocalTrack row
+							// (inside a LocalTrackResponseWrapper) with flat artist/album
+							// fields and a spotify:local: URI instead of a catalog track.
+							const isLocalTrack = trackData.__typename === "LocalTrack";
+							if (trackData.__typename !== "Track" && !isLocalTrack) {
 								if (["Episode", "PodcastEpisode"].includes(trackData.__typename))
 									continue;
 								throw new Error("spotify_playlist_row_type_unrecognized");
@@ -1762,29 +1766,53 @@ export const spotifyPageCollector = async (
 							if (wanted.has("playlist_items")) childTrackCount += 1;
 							if (!wanted.has("playlist_items")) continue;
 							try {
-								const artistNames = requireField(
-									sourceArtists(trackData.artists, "playlist_track_artists"),
-									"spotify_playlist",
-								);
 								const trackUri = requireField(
 									readString(trackData.uri, "playlist_track_uri"),
 									"spotify_playlist",
 								);
+								if (
+									isLocalTrack &&
+									(trackUri === null || !trackUri.startsWith("spotify:local:"))
+								) {
+									throw new Error(
+										"spotify_playlist_field_unavailable:playlist_local_track_uri_malformed",
+									);
+								}
 								const trackName = requireField(
 									readString(trackData.name, "playlist_track_name"),
 									"spotify_playlist",
 								);
-								const album = sourceContainer(
-									trackData.albumOfTrack,
-									"album",
-									"spotify_playlist",
-								);
-								const albumName = requireField(
-									readString(child(album, "name"), "playlist_album_name"),
-									"spotify_playlist",
-								);
+								let artistNames: string[];
+								let albumName: string | null;
+								if (isLocalTrack) {
+									const localArtist = requireField(
+										readString(trackData.artistName, "playlist_track_artists"),
+										"spotify_playlist",
+									);
+									artistNames = localArtist ? [localArtist] : [];
+									albumName = requireField(
+										readString(trackData.albumName, "playlist_album_name"),
+										"spotify_playlist",
+									);
+								} else {
+									artistNames = requireField(
+										sourceArtists(trackData.artists, "playlist_track_artists"),
+										"spotify_playlist",
+									);
+									const album = sourceContainer(
+										trackData.albumOfTrack,
+										"album",
+										"spotify_playlist",
+									);
+									albumName = requireField(
+										readString(child(album, "name"), "playlist_album_name"),
+										"spotify_playlist",
+									);
+								}
 								const durationContainer = sourceContainer(
-									trackData.trackDuration,
+									isLocalTrack
+										? trackData.localTrackDuration
+										: trackData.trackDuration,
 									"duration",
 									"spotify_playlist",
 								);
