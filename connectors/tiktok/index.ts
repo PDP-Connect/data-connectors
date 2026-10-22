@@ -124,6 +124,8 @@ const REQUEST_TIMEOUT_MS = 20_000;
 /** How long the web app may take to make a request of its own. */
 const CLIENT_WAIT_MS = 15_000;
 const POLL_INTERVAL_MS = 500;
+/** How long the session probe waits for the page's own first request. */
+const PROBE_CLIENT_WAIT_MS = 10_000;
 /** Ids kept per incremental list: a later run stops at the first of them. */
 const HEAD_IDS = 20;
 /** /api/user/list/ scene numbers used by TikTok's web app. */
@@ -425,9 +427,22 @@ export type SessionState = "signed_in" | "signed_out" | "unknown";
  */
 export async function readSessionState(
 	page: TikTokPage,
+	delay: (ms: number) => Promise<void> = realDelay,
 ): Promise<SessionState> {
-	const status = await watch(page);
+	let status = await watch(page);
 	if (!status || status.wrongPage === true) return "unknown";
+	// A page that just loaded may not have finished its own first request, so
+	// the reader holds no client parameters yet. Wait for it (bounded, no
+	// navigation) instead of reading "no answer" as a missing session.
+	for (
+		let waited = 0;
+		status?.client !== true && waited < PROBE_CLIENT_WAIT_MS;
+		waited += POLL_INTERVAL_MS
+	) {
+		await delay(POLL_INTERVAL_MS);
+		status = await watch(page);
+		if (!status || status.wrongPage === true) return "unknown";
+	}
 	const result = await fetchApi(page, "/passport/account/info/v2/", {});
 	if (result?.kind !== "response") return "unknown";
 	if (result.status === 401) return "signed_out";
@@ -454,10 +469,10 @@ export async function checkTikTokSession(
 	page: TikTokPage,
 	delay: (ms: number) => Promise<void> = realDelay,
 ): Promise<SessionState> {
-	const first = await readSessionState(page);
+	const first = await readSessionState(page, delay);
 	if (first !== "unknown") return first;
 	await prepareReader(page, delay);
-	return readSessionState(page);
+	return readSessionState(page, delay);
 }
 
 export async function ensureTikTokSession(

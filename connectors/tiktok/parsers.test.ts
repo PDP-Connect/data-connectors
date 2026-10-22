@@ -653,3 +653,25 @@ test("the collection list sends the app's appId and publicOnly", async () => {
 	assert.equal(call?.params.appId, "1988");
 	assert.equal(call?.params.publicOnly, "false");
 });
+
+test("the session probe waits for the page's first request instead of reading it as signed out", async () => {
+	const { calls, gotos, page } = fakePage(standardAnswer);
+	let watches = 0;
+	const slowPage: TikTokPage = {
+		...page,
+		evaluate: async (script, arg, options, isolated) => {
+			if (!GET_CALL.test(script)) {
+				watches += 1;
+				return { client: watches > 3, transport: null };
+			}
+			return page.evaluate(script, arg, options, isolated);
+		},
+	};
+	assert.equal(await checkTikTokSession(slowPage, noDelay.delay), "signed_in");
+	assert.ok(watches > 3);
+	assert.deepEqual(gotos, []);
+	assert.deepEqual(
+		calls.map((c) => c.path),
+		["/passport/account/info/v2/"],
+	);
+});
