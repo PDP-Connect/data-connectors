@@ -1,10 +1,10 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-/** Oura's browser-session profile. The PAT profile remains `oura`; this
- * profile uses the authenticated cloud.ouraring.com account endpoint. */
+/** Oura's owner-app browser profile. The PAT profile remains `oura`. */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import type { APIResponse } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import type {
   BrowserCollectContext,
@@ -14,12 +14,12 @@ import type {
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
+import { ensureOuraApiAccess, type OuraApiAccess, probeOuraPortalSession, probeOuraSignInInProgress, readOuraCachedAccess } from "./api-access.ts";
 
-const HOME = "https://cloud.ouraring.com/";
-const ORIGIN = new URL(HOME).origin;
+const API = "https://api.ouraring.com/v2/usercollection";
 // Include today in the initial 90-day snapshot.
 const INITIAL_LOOKBACK_DAYS = 89;
-const MAX_WINDOW_DAYS = 90;
+const MUTABLE_OVERLAP_DAYS = 2;
 const CHUNK_DAYS = 30;
 
 interface DailySleep {
@@ -57,6 +57,7 @@ interface DailyReadiness {
   day: string;
   id: string;
   score?: number | null;
+  timestamp?: string | null;
   temperature_deviation?: number | null;
   temperature_trend_deviation?: number | null;
 }
@@ -73,6 +74,7 @@ interface DailyActivity {
   medium_activity_time?: number | null;
   resting_time?: number | null;
   score?: number | null;
+  timestamp?: string | null;
   sedentary_time?: number | null;
   steps?: number | null;
   target_calories?: number | null;
@@ -86,102 +88,82 @@ interface OuraDailyData {
   sleeps?: SleepSession[];
 }
 
-async function hasOuraSessionOnCurrentPage(page: BrowserCollectContext["page"]): Promise<boolean> {
-  try {
-    if (new URL(page.url()).origin !== ORIGIN) return false;
-  } catch {
-    return false;
-  }
-  return page.evaluate(async () => {
-    try {
-      if (location.origin !== "https://cloud.ouraring.com") return false;
-      return (await fetch("/api/me", { credentials: "include" })).ok;
-    } catch {
-      return false;
-    }
-  });
-}
-
-async function hasOuraSession(page: BrowserCollectContext["page"]): Promise<boolean> {
-  if (new URL(page.url()).origin !== ORIGIN) {
-    await page.goto(HOME, { waitUntil: "domcontentloaded" });
-  }
-  return hasOuraSessionOnCurrentPage(page);
-}
-
-export async function probeOuraBrowserSession(
-  page: BrowserCollectContext["page"]
-): Promise<boolean> {
-  return page.evaluate(async () => {
-    try {
-      if (location.origin !== "https://cloud.ouraring.com") return false;
-      return (await fetch("/api/me", { credentials: "include" })).ok;
-    } catch {
-      return false;
-    }
-  });
+export async function probeOuraBrowserSession(page: BrowserCollectContext["page"]): Promise<boolean> {
+  return (await probeOuraSignInInProgress(page)) || probeOuraPortalSession(page);
 }
 
 export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> {
-  const { assist, capture, completeAssistance, page, sendInteraction } = args;
-  if (await hasOuraSession(page)) return;
-  await page.goto(`${HOME}user/sign-in`, { waitUntil: "domcontentloaded" });
-  const ready = await manualBrowserLogin({
-    assist,
-    capture,
-    completeAssistance,
-    isProbeSuccessful: (ok) => ok === true,
-    message: "Sign in to Oura in the secure browser, then continue. PDPP will verify the session before collecting.",
-    page,
-    probe: () => hasOuraSession(page),
-    readinessProbe: hasOuraSessionOnCurrentPage,
-    readinessProbeOnHandoffPage: true,
-    sendInteraction,
-    timeoutSeconds: 30 * 60,
+  await ensureOuraApiAccess(args.page, async (url, message, ready) => {
+    if (await args.page.evaluate(() => location.href).catch(() => "") !== url)
+      await args.page.goto(url, { waitUntil: "domcontentloaded" });
+    const ok = await manualBrowserLogin({
+      assist: args.assist,
+      capture: args.capture,
+      completeAssistance: args.completeAssistance,
+      isProbeSuccessful: (value) => value === true,
+      message,
+      page: args.page,
+      probe: ready,
+      readinessProbe: ready,
+      readinessProbeOnHandoffPage: true,
+      sendInteraction: args.sendInteraction,
+      timeoutSeconds: 30 * 60,
+    });
+    if (!ok) throw new Error("oura_authorization_incomplete");
   });
-  if (!ready) throw new Error("oura_session_dead");
 }
 
-async function fetchDailyData(page: BrowserCollectContext["page"], start: string, end: string): Promise<OuraDailyData> {
-  return page.evaluate(
-    async ({ start, end }) => {
-      if (location.origin !== "https://cloud.ouraring.com") throw new Error("oura_auth_failed: wrong browser origin");
-      const query = new URLSearchParams({ start, end });
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30_000);
-      try {
-        const response = await fetch(`/api/account/daily-data?${query}`, {
-          credentials: "include",
-          headers: { Accept: "application/json" },
-          signal: controller.signal,
-        });
-        if (response.status === 401 || response.status === 403) throw new Error("oura_auth_failed");
-        if (!response.ok) throw new Error(`oura_internal_api_${response.status}`);
-        const payload: unknown = await response.json();
-        if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-          throw new Error("oura_internal_api_invalid_payload");
+interface CollectionResult<T> {
+  rows: T[];
+  complete: boolean;
+}
+
+async function fetchCollection<T extends { id: string; day: string }>(page: BrowserCollectContext["page"], token: string,
+  endpoint: string, start: string, end: string): Promise<CollectionResult<T>> {
+  const rows: T[] = [];
+  const seen = new Set<string>();
+  let nextToken: string | null = null;
+  for (let pages = 0; pages < 50; pages++) {
+    const query = new URLSearchParams({ start_date: start, end_date: addDays(end, 1) });
+    if (nextToken) query.set("next_token", nextToken);
+    let response: APIResponse;
+    try {
+      response = await page.context().request.get(`${API}/${endpoint}?${query}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        timeout: 30_000,
+      });
+    } catch {
+      return { rows, complete: false };
+    }
+    try {
+      if (response.status() === 401 || response.status() === 403) return { rows, complete: false };
+      if (!response.ok()) return { rows, complete: false };
+      const value: unknown = await response.json().catch(() => null);
+      if (!value || typeof value !== "object" || Array.isArray(value)) return { rows, complete: false };
+      const payload = value as Record<string, unknown>;
+      if (!Array.isArray(payload.data)) return { rows, complete: false };
+      let invalidRow = false;
+      for (const row of payload.data) {
+        // A row without an identity or a calendar day cannot be placed in the
+        // inventory, so its page cannot prove the inventory complete.
+        if (!row || typeof row !== "object" || Array.isArray(row) ||
+          typeof row.id !== "string" || !row.id || !isUtcDay(row.day)) {
+          invalidRow = true;
+          continue;
         }
-        const data = payload as Record<string, unknown>;
-        const keys = ["sleeps", "daily_sleeps", "daily_readinesses", "daily_activities"];
-        if (!keys.some((key) => Array.isArray(data[key])) ||
-          keys.some((key) => data[key] !== undefined && !Array.isArray(data[key]))) {
-          throw new Error("oura_internal_api_invalid_payload");
-        }
-        for (const key of keys) {
-          const rows = data[key];
-          if (Array.isArray(rows) && rows.some((row) =>
-            typeof row !== "object" || row === null ||
-            typeof row.id !== "string" || typeof row.day !== "string")) {
-            throw new Error("oura_internal_api_invalid_payload");
-          }
-        }
-        return data as OuraDailyData;
-      } finally {
-        clearTimeout(timeout);
+        rows.push(row as T);
       }
-    },
-    { start, end }
-  );
+      if (invalidRow) return { rows, complete: false };
+      // A terminal next_token is Oura's only source evidence of a complete inventory.
+      if (!("next_token" in payload)) return { rows, complete: false };
+      if (payload.next_token === null) return { rows, complete: true };
+      if (typeof payload.next_token !== "string" || !payload.next_token || seen.has(payload.next_token))
+        return { rows, complete: false };
+      nextToken = payload.next_token;
+      seen.add(nextToken);
+    } finally { await response.dispose().catch(() => {}); }
+  }
+  return { rows, complete: false };
 }
 
 function day(value: string): Date {
@@ -207,35 +189,29 @@ function addDays(value: string, days: number): string {
 }
 
 interface OuraCursor {
+  /** Key of the account whose inventory this cursor describes. */
+  account?: string;
+  api_v2?: true;
   next_day?: string;
-  requested_since?: string;
-  failed_windows?: Array<{ start: string; end: string }>;
-  last_day?: string;
+  refresh_from?: string;
+  requested_since?: string | null;
 }
 
-function startDateFor(ctx: BrowserCollectContext, stream: string, endDate: string): string {
-  const cursor = ctx.state[stream] as OuraCursor | undefined;
-  const requestedSince = requestedUtcDay(ctx.requested.get(stream)?.time_range?.since);
-  if (ctx.collectionMode === "full_refresh") return requestedSince ?? initialStartDate(day(endDate));
-  if (requestedSince) {
-    return cursor?.requested_since === requestedSince && cursor.next_day && cursor.next_day > requestedSince
-      ? cursor.next_day : requestedSince;
-  }
-  return cursor?.next_day ?? (cursor?.last_day ? addDays(cursor.last_day, 1) : initialStartDate(day(endDate)));
+function isUtcDay(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    requestedUtcDay(value) === value;
 }
 
 async function fetchWindow(
-  ctx: BrowserCollectContext,
-  stream: string,
-  startDate: string,
-  endDate: string
-): Promise<{ data: OuraDailyData; failedWindows: Array<{ start: string; end: string }>; completedThrough: string; retryable: boolean }> {
+  ctx: BrowserCollectContext, token: string, stream: string,
+  startDate: string, endDate: string
+): Promise<{ data: OuraDailyData; failedWindows: Array<{ start: string; end: string }> }> {
   const data: OuraDailyData = {};
   const failedWindows: Array<{ start: string; end: string }> = [];
-  let completedThrough = addDays(startDate, -1);
-  let retryable = true;
   let start = day(startDate);
   const end = day(endDate);
+  const endpoints = stream === "sleep" ? ["daily_sleep", "sleep"] :
+    stream === "readiness" ? ["daily_readiness"] : ["daily_activity"];
   while (start <= end) {
     const chunkEnd = new Date(start);
     chunkEnd.setUTCDate(chunkEnd.getUTCDate() + CHUNK_DAYS - 1);
@@ -243,31 +219,37 @@ async function fetchWindow(
     const from = start.toISOString().slice(0, 10);
     const to = chunkEnd.toISOString().slice(0, 10);
     await ctx.progress(`Fetching ${stream}: ${from} to ${to}`, { stream });
-    try {
-      const chunk = await fetchDailyData(ctx.page, from, to);
-      for (const key of ["sleeps", "daily_sleeps", "daily_readinesses", "daily_activities"] as const) {
-        const rows = chunk[key];
-        if (Array.isArray(rows)) data[key] = [...(data[key] ?? []), ...rows] as never;
+    let complete = true;
+    for (const endpoint of endpoints) {
+      try {
+        if (endpoint === "daily_sleep") {
+          const result = await fetchCollection<DailySleep>(ctx.page, token, endpoint, from, to);
+          complete &&= result.complete;
+          data.daily_sleeps = [...(data.daily_sleeps ?? []), ...result.rows];
+        } else if (endpoint === "sleep") {
+          const result = await fetchCollection<SleepSession>(ctx.page, token, endpoint, from, to);
+          complete &&= result.complete;
+          data.sleeps = [...(data.sleeps ?? []), ...result.rows];
+        } else if (endpoint === "daily_readiness") {
+          const result = await fetchCollection<DailyReadiness>(ctx.page, token, endpoint, from, to);
+          complete &&= result.complete;
+          data.daily_readinesses = [...(data.daily_readinesses ?? []), ...result.rows];
+        } else {
+          const result = await fetchCollection<DailyActivity>(ctx.page, token, endpoint, from, to);
+          complete &&= result.complete;
+          data.daily_activities = [...(data.daily_activities ?? []), ...result.rows];
+        }
+      } catch (error) {
+        complete = false;
+        connectorDiagnostic("oura_browser", "collection_failed", { stream, endpoint, from, to,
+          detail: error instanceof Error ? error.message : String(error) });
       }
-      if (failedWindows.length === 0) completedThrough = to;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      if (/\boura_auth_failed\b/.test(detail)) throw error;
-      if (/oura_internal_api_(?:invalid_payload|4(?!29)\d\d)/.test(detail)) retryable = false;
-      failedWindows.push({ start: from, end: to });
-      connectorDiagnostic("oura_browser", "chunk_failed", {
-        stream,
-        from,
-        to,
-        detail,
-        retryable,
-      });
-      await ctx.progress(`Could not fetch Oura ${stream} data for ${from} to ${to}`, { stream });
     }
+    if (!complete) failedWindows.push({ start: from, end: to });
     start = new Date(chunkEnd);
     start.setUTCDate(start.getUTCDate() + 1);
   }
-  return { data, failedWindows, completedThrough, retryable };
+  return { data, failedWindows };
 }
 
 function sleepRecord(session: SleepSession, daily?: DailySleep): RecordData {
@@ -333,6 +315,7 @@ function readinessRecord(row: DailyReadiness): RecordData {
     id: row.id,
     day: row.day,
     score: row.score ?? null,
+    timestamp: row.timestamp ?? null,
     temperature_deviation: row.temperature_deviation ?? null,
     temperature_trend_deviation: row.temperature_trend_deviation ?? null,
     contributors: row.contributors ?? {},
@@ -344,6 +327,7 @@ function activityRecord(row: DailyActivity): RecordData {
     id: row.id,
     day: row.day,
     score: row.score ?? null,
+    timestamp: row.timestamp ?? null,
     active_calories: row.active_calories ?? null,
     total_calories: row.total_calories ?? null,
     steps: row.steps ?? null,
@@ -359,65 +343,94 @@ function activityRecord(row: DailyActivity): RecordData {
   };
 }
 
-export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10);
+/**
+ * Oura sleep sessions carry no daily_sleep id, so a session can share a score
+ * only by day. A day maps to its score only when it has exactly one distinct
+ * score document. A day with more maps to null: no score belongs to its
+ * sessions, and each score stays a daily_score record. Page order cannot
+ * change the result.
+ */
+function dailyScoreByDay(scores: DailySleep[]): Map<string, DailySleep | null> {
+  const byDay = new Map<string, DailySleep | null>();
+  for (const score of scores) {
+    const known = byDay.get(score.day);
+    byDay.set(score.day, known === undefined || known?.id === score.id ? score : null);
+  }
+  return byDay;
+}
+
+export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAccess?: OuraApiAccess): Promise<void> {
+  const access = cachedAccess ?? await readOuraCachedAccess(ctx.page);
+  const today = new Date(Date.now()).toISOString().slice(0, 10);
   for (const stream of ["sleep", "readiness", "activity"] as const) {
     if (!ctx.requested.has(stream)) continue;
-    const previous = ctx.state[stream] as OuraCursor | undefined;
+    const stored = ctx.state[stream] as OuraCursor | undefined;
+    // A cursor written for another account says nothing about this one.
+    const previous = ctx.collectionMode === "full_refresh" || stored?.api_v2 !== true ||
+      stored.account !== access.account ? undefined : stored;
     const requestedSince = requestedUtcDay(ctx.requested.get(stream)?.time_range?.since);
     const rawUntil = ctx.requested.get(stream)?.time_range?.until;
     const until = requestedUtcDay(rawUntil);
-    // Daily records overlap a partial-day bound, so fetch its UTC date and let
-    // the shared range filter decide whether the day is in range.
     const untilTimestamp = rawUntil ? Date.parse(rawUntil) : Number.NaN;
     const untilEnd = until
       ? (untilTimestamp % 86_400_000 === 0 ? addDays(until, -1) : until)
       : today;
-    const requestedEnd = untilEnd < today ? untilEnd : today;
-    const startDate = startDateFor(ctx, stream, today);
-    if (startDate > requestedEnd) continue;
-    const cappedEnd = addDays(startDate, MAX_WINDOW_DAYS - 1);
-    const endDate = cappedEnd < requestedEnd ? cappedEnd : requestedEnd;
-    const { data, failedWindows, completedThrough, retryable } = await fetchWindow(ctx, stream, startDate, endDate);
+    const endDate = untilEnd < today ? untilEnd : today;
+    // An explicit range is collected as one inventory, even when it spans more
+    // than 90 days. A partial range cannot advance STATE, so a fixed cap here
+    // would replay the same prefix forever.
+    const overlapStart = addDays(today, -MUTABLE_OVERLAP_DAYS);
+    let startDate = requestedSince ?? previous?.next_day ?? initialStartDate(day(endDate));
+    if (!requestedSince && previous) {
+      if (overlapStart < startDate) startDate = overlapStart;
+      if (isUtcDay(previous.refresh_from) && previous.refresh_from < startDate)
+        startDate = previous.refresh_from;
+    }
+    if (startDate > endDate) {
+      if (previous && previous.next_day && previous.next_day > endDate &&
+        (!requestedSince || previous.requested_since === requestedSince))
+        await ctx.emit({ type: "STATE", stream, cursor: previous });
+      continue;
+    }
+    const result = await fetchWindow(ctx, access.accessToken, stream, startDate, endDate);
+    const data = result.data;
     let records: RecordData[];
     if (stream === "sleep") {
-      const scores = new Map((data.daily_sleeps ?? []).map((row) => [row.day, row]));
-      const sessions = data.sleeps ?? [];
+      const scores = dailyScoreByDay(data.daily_sleeps ?? []);
       records = [
-        ...sessions.map((row) => sleepRecord(row, scores.get(row.day))),
+        ...(data.sleeps ?? []).map((row) => sleepRecord(row, scores.get(row.day) ?? undefined)),
         ...(data.daily_sleeps ?? []).map(dailyScoreRecord),
       ];
     } else if (stream === "readiness") {
-      const rows = data.daily_readinesses ?? [];
-      records = rows.map(readinessRecord);
+      records = (data.daily_readinesses ?? []).map(readinessRecord);
     } else {
-      const rows = data.daily_activities ?? [];
-      records = rows.map(activityRecord);
+      records = (data.daily_activities ?? []).map(activityRecord);
     }
-    for (const record of records) await ctx.emitRecord(stream, record);
-    if (failedWindows.length > 0) {
-      await ctx.reportStreamFailure?.(
-        stream,
-        `Oura ${stream} failed ${failedWindows.length} data window(s), starting ${failedWindows[0]?.start}; retry will resume at the first gap.`,
-        { retryable }
-      );
+    for (const record of records) {
+      const recordDay = record.day;
+      if (typeof recordDay !== "string" || recordDay < startDate || recordDay > endDate) continue;
+      await ctx.emitRecord(stream, record);
     }
-    if (endDate < requestedEnd) {
+    if (result.failedWindows.length > 0) {
+      const message = `Oura ${stream} did not prove complete coverage of ${startDate} to ${endDate}.`;
       await ctx.emit({
-        type: "SKIP_RESULT", stream, reason: "oura_browser_window_deferred",
-        message: `Oura ${stream} stopped at ${endDate}; later days remain for the next run.`,
-        // Deferred work, not unavailable data: the STATE cursor below resumes at
-        // the next day, so the host must treat this stream as retryable.
+        type: "SKIP_RESULT", stream, reason: "inventory_not_proven_complete",
+        message,
         recovery_hint: { action: "retry_by_runtime", retryable: true },
       });
+      // Desktop needs its runtime failure latch set before DONE; PageShim
+      // derives Partial directly from the inventory skip above.
+      if (ctx.browserSurface) await ctx.reportStreamFailure?.(stream, message, { retryable: true });
+      continue;
     }
     await ctx.emit({
-      type: "STATE",
-      stream,
+      type: "STATE", stream,
       cursor: {
-        next_day: addDays(completedThrough, 1),
-        requested_since: requestedSince ?? previous?.requested_since ?? null,
-        failed_windows: failedWindows,
+        account: access.account,
+        api_v2: true,
+        next_day: addDays(endDate, 1),
+        refresh_from: requestedSince ?? (overlapStart < startDate ? startDate : overlapStart),
+        requested_since: requestedSince ?? null,
       },
     });
   }
@@ -427,11 +440,10 @@ if (isMainModule(import.meta.url)) {
   runConnector({
     name: "oura_browser",
     validateRecord,
-    retryablePattern: /oura_internal_api_(?:429|5\d\d)|fetch failed|network|timeout|aborted/i,
+    retryablePattern: /oura_api_(?:429|5\d\d)|fetch failed|network|timeout|aborted|inventory_not_proven_complete/i,
     browser: { profileName: "oura_browser" },
     ensureSession: ensureOuraSession,
-    probeSession: ({ page }) => hasOuraSession(page),
-    probeSessionIsAuthoritative: true,
+    probeSession: ({ page }) => probeOuraBrowserSession(page),
     collect: collectOuraBrowser,
   });
 }

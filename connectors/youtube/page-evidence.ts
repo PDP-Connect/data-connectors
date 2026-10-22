@@ -24,6 +24,19 @@ export interface ListEndRequest {
 	readonly kind: ListKind;
 	/** The page-local session probe is false when auth was lost after navigation. */
 	readonly sessionPresent?: boolean;
+	/** Latest completed history-list response observed during this traversal. */
+	readonly latestHistoryResponse?: HistoryResponseEvidence | null;
+}
+
+export interface HistoryResponseEvidence {
+	readonly recognized: boolean;
+	readonly hasContinuation: boolean;
+	readonly itemCount?: number;
+	/** Total entries added by correlated continuation responses so far. */
+	readonly continuationItemCount?: number;
+	readonly requestedContinuation: string | null;
+	readonly nextContinuation: string | null;
+	readonly repeatedContinuation: boolean;
 }
 
 export interface ListEnd {
@@ -33,6 +46,11 @@ export interface ListEnd {
 	readonly dataItemCount: number;
 	/** That region had a next-page continuation at page load. */
 	readonly dataHasContinuation: boolean;
+	/** Bounded continuation tokens from the selected history list at page load. */
+	readonly historyBootstrapContinuationTokens?: readonly string[];
+	/** Recognized entry count inside that selected history list. */
+	readonly historyBootstrapItemCount?: number;
+	readonly historyBootstrapRendererCounts?: Readonly<Record<string, number>>;
 	/** The rendered page still shows a next-page continuation. */
 	readonly domHasContinuation: boolean;
 	/** The "N videos" total the page header declares (playlist pages only). */
@@ -50,7 +68,114 @@ export interface ListEnd {
 	 * It vetoes every kind of end evidence.
 	 */
 	readonly pageBlocked: boolean;
+	/** Latest target-list response; bootstrap page data is not terminal evidence. */
+	readonly latestHistoryResponse: HistoryResponseEvidence | null;
 }
+
+type UnknownObject = Record<string, unknown>;
+
+function asObject(value: unknown): UnknownObject | null {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as UnknownObject)
+		: null;
+}
+
+/** Extract continuation facts from one response already correlated to history. */
+export function readHistoryResponseEvidence(
+	value: unknown,
+	requestedContinuation: string | null,
+	previouslyRequested: ReadonlySet<string>,
+): HistoryResponseEvidence {
+	const tokens = new Set<string>();
+	let recognized = false;
+	let hasContinuation = false;
+	let itemCount = 0;
+	let bounded = true;
+	let visited = 0;
+	const visit = (node: unknown): void => {
+		visited += 1;
+		if (visited > 10000) {
+			bounded = false;
+			return;
+		}
+		if (Array.isArray(node)) {
+			for (const child of node) {
+				if (!bounded) break;
+				visit(child);
+			}
+			return;
+		}
+		const object = asObject(node);
+		if (!object) return;
+		for (const [key, child] of Object.entries(object)) {
+			if (ITEM_KEYS_FOR_HISTORY.has(key)) itemCount += 1;
+			if (
+				key === "appendContinuationItemsAction" ||
+				key === "reloadContinuationItemsCommand" ||
+				key === "twoColumnBrowseResultsRenderer" ||
+				key === "singleColumnBrowseResultsRenderer"
+			)
+				recognized = true;
+			if (key === "continuationItemRenderer" && asObject(child)) {
+				hasContinuation = true;
+				const renderer = asObject(child);
+				const endpoint = asObject(renderer?.continuationEndpoint);
+				const command = asObject(endpoint?.continuationCommand);
+				const direct = asObject(renderer?.continuationCommand);
+				const token =
+					typeof command?.token === "string"
+						? command.token
+						: typeof direct?.token === "string"
+							? direct.token
+							: null;
+				if (token && token.length <= 4096) tokens.add(token);
+				else bounded = false;
+			}
+			if (key === "nextContinuationData") {
+				hasContinuation = true;
+				const continuation = asObject(child)?.continuation;
+				if (
+					typeof continuation === "string" &&
+					continuation.length > 0 &&
+					continuation.length <= 4096
+				)
+					tokens.add(continuation);
+				else bounded = false;
+			}
+			if (key === "continuations" && Array.isArray(child) && child.length > 0) {
+				recognized = true;
+				hasContinuation = true;
+			}
+			visit(child);
+			if (!bounded) break;
+		}
+	};
+	visit(value);
+	if (tokens.size > 8) bounded = false;
+	const nextContinuation = tokens.values().next().value ?? null;
+	return {
+		recognized: recognized && bounded,
+		hasContinuation,
+		itemCount,
+		requestedContinuation,
+		nextContinuation,
+		repeatedContinuation:
+			nextContinuation !== null && previouslyRequested.has(nextContinuation),
+	};
+}
+
+const ITEM_KEYS_FOR_HISTORY = new Set([
+	"videoRenderer",
+	"gridVideoRenderer",
+	"playlistVideoRenderer",
+	"playlistPanelVideoRenderer",
+	"compactVideoRenderer",
+	"videoWithContextRenderer",
+	"richItemRenderer",
+	"lockupViewModel",
+	"shortsLockupViewModel",
+	"reelItemRenderer",
+]);
 
 /**
  * True only when the source proves exhaustion: a verified empty list has no
@@ -66,19 +191,31 @@ export function enumerationEnded(
 	discardedRows = 0,
 ): boolean {
 	if (!end || end.pageBlocked !== false) return false;
+	const latestHistoryResponse = end.latestHistoryResponse;
+	const historyResponseIsCurrent = latestHistoryResponse?.recognized === true;
+	if (historyResponseIsCurrent && latestHistoryResponse.repeatedContinuation)
+		return false;
+	const dataHasContinuation = historyResponseIsCurrent
+		? latestHistoryResponse.hasContinuation
+		: end.dataHasContinuation;
+	const historySourceItemCount =
+		end.dataItemCount + (latestHistoryResponse?.continuationItemCount ?? 0);
 	const knownRowsExceedEmitted =
 		(end.domItemCount !== null && end.domItemCount > renderedCount) ||
-		(end.dataReadable && end.dataItemCount > renderedCount);
+		(end.dataReadable && historySourceItemCount > renderedCount);
 	const renderedRowsMissingFromData =
+		!historyResponseIsCurrent &&
 		end.dataReadable &&
 		end.domItemCount !== null &&
 		end.domItemCount > end.dataItemCount;
 	const declaredMismatch =
-		end.declaredTotal !== null && end.declaredTotal !== renderedCount;
+		!historyResponseIsCurrent &&
+		end.declaredTotal !== null &&
+		end.declaredTotal !== renderedCount;
 	if (
 		discardedRows > 0 ||
-		end.domHasContinuation ||
-		end.dataHasContinuation ||
+		(!historyResponseIsCurrent && end.domHasContinuation) ||
+		dataHasContinuation ||
 		knownRowsExceedEmitted ||
 		renderedRowsMissingFromData ||
 		(end.verifiedEmpty &&
@@ -87,6 +224,7 @@ export function enumerationEnded(
 		declaredMismatch
 	)
 		return false;
+	if (historyResponseIsCurrent) return true;
 	if (end.domHasEndMarker || continuationFollowed) return true;
 	if (
 		end.dataReadable &&
@@ -163,9 +301,9 @@ const PAGE_DATA_HELPERS = String.raw`
 		try { return new URL(window.location.href); } catch { return null; }
 	};
 	const onPlaylistIndexPage = () => targetLocation()?.pathname === "/feed/playlists";
-	const onLikedVideosPage = () => {
+	const onPlaylistPage = () => {
 		const url = targetLocation();
-		return url?.pathname === "/playlist" && url.searchParams.get("list") === "LL";
+		return url?.pathname === "/playlist" && Boolean(url.searchParams.get("list"));
 	};
 	const onSubscriptionsPage = () => targetLocation()?.pathname === "/feed/channels";
 	const onTargetRoute = (kind) => {
@@ -187,7 +325,6 @@ const PAGE_DATA_HELPERS = String.raw`
 		'a[href*="accounts.google.com/ServiceLogin"], ytd-consent-bump-v2-lightbox, ytd-consent-bump-v2, #consent-bump, tp-yt-paper-dialog[role="dialog"], ytd-popup-container tp-yt-paper-dialog, [aria-label*="sign in" i], #error-screen, ytd-error-screen, .yt-error-content, ytd-browse[page-subtype="error"]'
 	);
 	const hasDomLoading = (root = document) => {
-		if (root.querySelector("ytd-continuation-item-renderer")) return true;
 		return hasVisibleMatch('.yt-spinner, yt-spinner, tp-yt-paper-spinner, tp-yt-paper-spinner-lite, [aria-busy="true"], [aria-label*="loading" i], #spinner', root);
 	};
 	const hasOnlyBuiltInPlaylistCards = () => {
@@ -240,6 +377,55 @@ const PAGE_DATA_HELPERS = String.raw`
 		const selected = renderers.filter((renderer) => renderer.selected === true);
 		return selected.length === 1 && isObject(selected[0].content) ? selected[0].content : null;
 	};
+	const historyBootstrapFacts = (data) => {
+		const region = listRegion(data);
+		const section = isObject(region?.sectionListRenderer) ? region.sectionListRenderer : null;
+		if (!section) return null;
+		const pending = [section];
+		const seen = new Set();
+		const tokens = new Set();
+		let items = 0;
+		const rendererCounts = {};
+		let hasContinuation = false;
+		let visited = 0;
+		let bounded = true;
+		while (pending.length) {
+			const node = pending.pop();
+			if (Array.isArray(node)) {
+				for (const child of node) pending.push(child);
+				continue;
+			}
+			if (!isObject(node) || seen.has(node)) continue;
+			seen.add(node);
+			visited += 1;
+			if (visited > 10000) { bounded = false; break; }
+			for (const [key, child] of Object.entries(node)) {
+				if (ITEM_KEYS.includes(key)) { items += 1; rendererCounts[key] = (rendererCounts[key] ?? 0) + 1; continue; }
+				if (key === "continuationItemRenderer" && isObject(child)) {
+					hasContinuation = true;
+					const command = child.continuationEndpoint?.continuationCommand ?? child.continuationCommand;
+					if (typeof command?.token === "string" && command.token.length > 0 && command.token.length <= 4096) tokens.add(command.token);
+					else bounded = false;
+				}
+				if (key === "nextContinuationData") {
+					hasContinuation = true;
+					if (typeof child?.continuation === "string" && child.continuation.length > 0 && child.continuation.length <= 4096) tokens.add(child.continuation);
+					else bounded = false;
+				}
+				if (key === "continuations" && Array.isArray(child)) {
+					if (child.length > 0) hasContinuation = true;
+					for (const continuation of child) {
+						const token = continuation?.nextContinuationData?.continuation;
+						if (typeof token === "string" && token.length > 0 && token.length <= 4096) tokens.add(token);
+						else bounded = false;
+					}
+				}
+				if (isObject(child) || Array.isArray(child)) pending.push(child);
+			}
+		}
+		if (tokens.size > 8) bounded = false;
+		return { items, rendererCounts, tokens: bounded ? Array.from(tokens) : [], hasContinuation, bounded };
+	};
 	const hasSelectedTabContent = (data) => {
 		const contents = isObject(data) ? data.contents : null;
 		if (!isObject(contents)) return false;
@@ -253,7 +439,7 @@ const PAGE_DATA_HELPERS = String.raw`
 	const regionFacts = (data, playlistIndex) => {
 		const region = listRegion(data);
 		if (region === null) return null;
-		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data), loading: false, playlistIndexEmpty: false, likedVideosEmpty: false };
+		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data), loading: false, playlistIndexEmpty: false, playlistEmpty: false, historyEmpty: false };
 		const visit = (value) => {
 			if (Array.isArray(value)) {
 				for (const child of value) visit(child);
@@ -295,7 +481,11 @@ const PAGE_DATA_HELPERS = String.raw`
 			const sections = selected.length === 1 ? selected[0].content?.sectionListRenderer?.contents : null;
 			const section = Array.isArray(sections) && sections.length === 1 ? sections[0]?.itemSectionRenderer : null;
 			const sectionContents = section?.contents;
-			facts.likedVideosEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
+			facts.playlistEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
+				isObject(sectionContents[0]?.messageRenderer) &&
+				isRecognizedEmptyText(textFragments(sectionContents[0].messageRenderer).join(" ")) &&
+				!facts.items && !facts.continuation && !facts.loading && !facts.rejectedMessage;
+			facts.historyEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
 				isObject(sectionContents[0]?.messageRenderer) &&
 				isRecognizedEmptyText(textFragments(sectionContents[0].messageRenderer).join(" ")) &&
 				!facts.items && !facts.continuation && !facts.loading && !facts.rejectedMessage;
@@ -310,6 +500,14 @@ const PAGE_DATA_HELPERS = String.raw`
 		}
 		return candidates.map((data) => regionFacts(data, playlistIndex)).filter((facts) => facts !== null);
 	};
+	const historyDataFacts = () => {
+		const candidates = [window.ytInitialData];
+		for (const script of Array.from(document.querySelectorAll("script"))) {
+			const parsed = readJsonText(script.textContent ?? "");
+			if (parsed) candidates.push(parsed);
+		}
+		return candidates.map(historyBootstrapFacts).filter((facts) => facts !== null);
+	};
 `;
 
 const PAGE_READINESS_FUNCTION = `({ content, empty, playlistIndex }) => {
@@ -320,7 +518,7 @@ const PAGE_READINESS_FUNCTION = `({ content, empty, playlistIndex }) => {
 	if (hasEnumerableContent) return "content";
 	const facts = pageDataFacts(Boolean(playlistIndex));
 	if (playlistIndex && onPlaylistIndexPage() && !hasPageWall() && !hasDomLoading() && hasOnlyBuiltInPlaylistCards() && facts.length > 0 && facts.every((f) => f.playlistIndexEmpty)) return "empty";
-	if (!playlistIndex && onLikedVideosPage() && !hasPageWall() && facts.length > 0 && facts.every((f) => f.likedVideosEmpty)) return "empty";
+	if (!playlistIndex && onPlaylistPage() && !hasPageWall() && facts.length > 0 && facts.every((f) => f.playlistEmpty)) return "empty";
 	if (playlistIndex && document.querySelector("yt-lockup-view-model")) return "content";
 	if (!playlistIndex && Array.from(document.querySelectorAll(empty)).some((node) =>
 		isRecognizedEmptyText(node.textContent ?? ""))) return "empty";
@@ -332,6 +530,7 @@ const LIST_END_FUNCTION = `(request) => {
 	const kind = typeof request === "string" ? request : request.kind;
 	const sessionPresent = typeof request === "string" ? true : request.sessionPresent !== false;
 	const facts = pageDataFacts(kind === "playlist-index");
+	const historyFacts = kind === "history" ? historyDataFacts() : [];
 	let declaredTotal = null;
 	if (kind === "playlist") {
 		const nodes = document.querySelectorAll(".yt-content-metadata-view-model__metadata-text, .ytContentMetadataViewModelMetadataText");
@@ -343,7 +542,13 @@ const LIST_END_FUNCTION = `(request) => {
 		}
 	}
 	let domItemCount = null;
-	if (kind === "history") domItemCount = document.querySelectorAll("yt-lockup-view-model").length;
+	if (kind === "history") {
+		domItemCount = Array.from(document.querySelectorAll(
+			"ytd-item-section-renderer yt-lockup-view-model, ytd-item-section-renderer ytd-video-renderer",
+		)).filter((node) =>
+			!node.matches("ytd-video-renderer") || !node.querySelector("yt-lockup-view-model"),
+		).length;
+	}
 	if (kind === "playlist")
 		domItemCount = document.querySelectorAll("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer").length;
 	if (kind === "subscriptions") domItemCount = document.querySelectorAll("ytd-channel-renderer").length;
@@ -366,23 +571,40 @@ const LIST_END_FUNCTION = `(request) => {
 	return {
 		// A region with no recognized entry (an error, an unrelated payload) shows
 		// neither a last page nor a next page, so it is not readable evidence.
-		dataReadable: facts.some((f) => f.items > 0),
-		dataItemCount: facts.reduce((most, f) => Math.max(most, f.items), 0),
-		dataHasContinuation: facts.some((f) => f.continuation),
+		dataReadable: kind === "history"
+			? historyFacts.some((f) => f.bounded && f.items > 0)
+			: facts.some((f) => f.items > 0),
+		dataItemCount: kind === "history"
+			? historyFacts.reduce((most, f) => Math.max(most, f.items), 0)
+			: facts.reduce((most, f) => Math.max(most, f.items), 0),
+		dataHasContinuation: kind === "history"
+			? historyFacts.some((f) => f.hasContinuation)
+			: facts.some((f) => f.continuation),
+		...(kind === "history" ? {
+			historyBootstrapContinuationTokens: historyFacts.flatMap((f) => f.tokens).slice(0, 8),
+			historyBootstrapItemCount: historyFacts.reduce((most, f) => Math.max(most, f.items), 0),
+			historyBootstrapRendererCounts: historyFacts.reduce((most, f) => f.items > most.items ? f : most, { items: 0, rendererCounts: {} }).rendererCounts,
+		} : {}),
 		domHasContinuation: Boolean(document.querySelector(continuationSelector)),
 		declaredTotal,
 		domItemCount,
 		domHasEndMarker: /(?:no more (?:videos|items)|end of (?:the )?list|you(?:'|’)ve reached the end)/i.test(endText),
 		pageBlocked: !sessionPresent || hasPageWall() || hasDomLoading() || !onTargetRoute(kind) ||
 			facts.some((f) => f.rejectedMessage || f.loading),
+		latestHistoryResponse:
+			kind === "history" && typeof request !== "string"
+				? request.latestHistoryResponse ?? null
+				: null,
 		verifiedEmpty: sessionPresent && !hasPageWall() && !hasDomLoading() && facts.length > 0 &&
 			(kind === "playlist-index"
 				? onPlaylistIndexPage() && hasOnlyBuiltInPlaylistCards() && facts.every((f) => f.playlistIndexEmpty)
 				: kind === "playlist"
-					? onLikedVideosPage() && !document.querySelector("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer") && facts.every((f) => f.likedVideosEmpty)
+					? onPlaylistPage() && !document.querySelector("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer") && facts.every((f) => f.playlistEmpty)
 					: kind === "subscriptions"
 						? onSubscriptionsPage() && facts.every((f) => f.selectedTabContent && f.lists > 0 && f.emptyMessage && f.emptyLists === f.lists && f.items === 0 && !f.continuation && !f.loading && !f.rejectedMessage)
-						: false),
+						: kind === "history"
+							? sessionPresent && !hasPageWall() && !hasDomLoading() && onTargetRoute(kind) && facts.every((f) => f.historyEmpty)
+							: false),
 	};
 }`;
 

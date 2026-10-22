@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.2.15",
+				"version": "0.2.17",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.48",
+				"version": "0.2.53",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -948,6 +948,8 @@
 					"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
 					"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
 					"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
+					"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
+					"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
 					"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
 				},
 				"mobile": {
@@ -975,7 +977,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.2",
+				"version": "0.3.6",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -1421,7 +1423,7 @@
 				},
 				"connector_key": "apple-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
-				"version": "0.1.20",
+				"version": "0.1.21",
 				"display_name": "Apple Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -1831,7 +1833,7 @@
 				},
 				"connector_key": "apple-health",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
-				"version": "0.2.3",
+				"version": "0.2.4",
 				"display_name": "Apple Health",
 				"brand": {
 					"icon": "icon.svg",
@@ -3476,7 +3478,7 @@
 				},
 				"connector_key": "apple-photos",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-				"version": "0.1.21",
+				"version": "0.1.22",
 				"display_name": "Apple Photos",
 				"brand": {
 					"icon": "icon.svg",
@@ -3637,7 +3639,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.2.16",
+				"version": "0.2.18",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -4219,6 +4221,7 @@
 					"ambiguous_multi_account_overview": "We couldn't tell which account view to use",
 					"qfx_download_failed": "We couldn't download the transactions file",
 					"qfx_parse_failed": "We couldn't read the transactions file",
+					"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 					"row_exception": "Something went wrong reading one of the rows",
 					"selectors_pending": "Support for this part of the connector isn't complete yet",
 					"statements_scrape_failed": "We couldn't read your statements page"
@@ -4240,7 +4243,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.53",
+				"version": "0.3.1",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -4375,16 +4378,23 @@
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": "string",
+									"description": "Record id: the conversation id and the source node id joined by \":\" (\"<conversation_id>:<node_id>\"). ChatGPT copies message nodes into forked conversations, so a node id can recur across conversations and does not identify a message by itself. Versions before 0.3.0 used the bare node id here; node_id carries that value now."
+								},
+								"node_id": {
+									"type": "string",
+									"description": "The source's node id for this message, unique within its conversation. conversations.current_node is a node id."
 								},
 								"conversation_id": {
 									"type": "string"
 								},
 								"parent_id": {
-									"type": ["string", "null"]
+									"type": ["string", "null"],
+									"description": "Record id (the id of another messages record in this conversation) of the nearest retained ancestor, or null for the root. May name a record that was not emitted when the ancestor is the source's synthetic root."
 								},
 								"children_ids": {
-									"type": "array"
+									"type": "array",
+									"description": "Record ids of the source node's children, including children on other branches that are not emitted."
 								},
 								"role": {
 									"type": ["string", "null"],
@@ -4394,7 +4404,12 @@
 									"type": ["string", "null"],
 									"x_pdpp_role": "primary-title",
 									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
-									"description": "Full message text in the pdpp-safe-escape-v1 encoding. Each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Text whose escaped form exceeds 1048576 characters is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports a message_content_omitted diagnostic count."
+									"description": "Full message text in the pdpp-safe-escape-v1 encoding. For text and multimodal_text bodies it is the string entries of the source parts joined with a newline, as the legacy collector joins them; the other entries are in non_string_parts. Each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Text whose escaped form exceeds 1048576 characters is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports a message_content_omitted diagnostic count."
+								},
+								"non_string_parts": {
+									"type": "array",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "For text and multimodal_text bodies, the entries of the source parts array that are not strings (asset pointers with their size and generation metadata, audio transcripts, any other object), each { index, part } with index the position in parts. content joins only the string parts. Every string inside every entry, at any depth and including object keys, is in the pdpp-safe-escape-v1 encoding (decode it as content is decoded). Empty for other content types."
 								},
 								"content_type": {
 									"type": ["string", "null"]
@@ -4985,7 +5000,7 @@
 				},
 				"connector_key": "claude-code",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-				"version": "0.3.23",
+				"version": "0.3.24",
 				"display_name": "Claude Code",
 				"brand": {
 					"icon": "icon.svg",
@@ -6971,7 +6986,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.7",
+				"version": "0.1.11",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -7004,7 +7019,7 @@
 					},
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Completed a real run on a real iPhone 12 in the Vana mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile and server list; a non-empty message history, desktop and incremental second runs are not verified. The requests were also checked by hand in one signed-in desktop session on 2026-10-08. Discord's terms forbid this kind of account automation, so the owner must accept the account risk described in the connector README before using it."
+						"rationale": "Completed a real run on a real iPhone 12 in a mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile and server list; a non-empty message history, desktop and incremental second runs are not verified. The requests were also checked by hand in one signed-in desktop session on 2026-10-08. Discord's terms forbid this kind of account automation, so the owner must accept the account risk described in the connector README before using it."
 					}
 				},
 				"streams": [
@@ -7431,7 +7446,7 @@
 				},
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.2.23",
+				"version": "0.2.24",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icon.svg",
@@ -7650,7 +7665,7 @@
 				},
 				"connector_key": "fitbit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
-				"version": "0.1.3",
+				"version": "0.1.4",
 				"display_name": "Fitbit",
 				"runtime_requirements": {
 					"bindings": {
@@ -8009,7 +8024,7 @@
 				},
 				"connector_key": "garmin-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/garmin-browser",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "Garmin (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -9666,7 +9681,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.2.32",
+				"version": "0.3.9",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9694,7 +9709,7 @@
 					"human_interaction": ["manual_action"],
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Separate browser-session profile for existing Vana GitHub users. The PAT connector remains the recommended profile for new connections."
+						"rationale": "Separate browser-session profile for existing GitHub users. The PAT connector remains the recommended profile for new connections."
 					},
 					"refresh_policy": {
 						"recommended_mode": "manual",
@@ -9773,6 +9788,12 @@
 											},
 											"stars": {
 												"type": "number"
+											},
+											"forks": {
+												"type": "number"
+											},
+											"forkedFrom": {
+												"type": "string"
 											}
 										},
 										"required": ["fullName"],
@@ -9874,6 +9895,12 @@
 											"forks": {
 												"type": "number"
 											},
+											"forkedFrom": {
+												"type": "string"
+											},
+											"license": {
+												"type": "string"
+											},
 											"visibility": {
 												"type": "string"
 											},
@@ -9936,6 +9963,15 @@
 											"stars": {
 												"type": "number"
 											},
+											"forks": {
+												"type": "number"
+											},
+											"forkedFrom": {
+												"type": "string"
+											},
+											"license": {
+												"type": "string"
+											},
 											"updatedAt": {
 												"type": ["string", "null"]
 											}
@@ -9960,7 +9996,7 @@
 					{
 						"name": "events",
 						"required": true,
-						"description": "Recent public activity events (up to 300 events and GitHub's retention window).",
+						"description": "One legacy aggregate snapshot of public events. A full 300-event cap is partial and never advances completion.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10010,7 +10046,7 @@
 												"type": "boolean"
 											}
 										},
-										"required": ["id", "type", "createdAt", "repo", "isPublic"],
+										"required": ["id", "type", "repo"],
 										"additionalProperties": false
 									}
 								},
@@ -10037,7 +10073,7 @@
 					{
 						"name": "contributions",
 						"required": true,
-						"description": "Contribution graph days and summaries for four year views. A snapshot is emitted only when all four views are complete; missing history reports the stream as incomplete.",
+						"description": "One legacy aggregate of contribution days and available summaries. Missing or blocked year views retain readable days without completion; completion requires all four views.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10132,7 +10168,7 @@
 					{
 						"name": "history",
 						"required": true,
-						"description": "Authored issues and pull requests from GitHub Search, capped at 1,000 results per type.",
+						"description": "One legacy aggregate snapshot of authored issues and pull requests. Each type completes after exactly min(stable total_count, 1000) valid distinct items; totals above 1000 describe a bounded search window. Otherwise the snapshot and checkpoint are withheld.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10316,7 +10352,8 @@
 					}
 				],
 				"reason_display_messages": {
-					"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+					"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
+					"inventory_not_proven_complete": "GitHub did not show that this list was read in full, so the last complete copy was kept."
 				},
 				"mobile": {
 					"pageshim": {
@@ -10343,7 +10380,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.21",
+				"version": "0.2.25",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",
@@ -11020,7 +11057,7 @@
 				},
 				"connector_key": "google-calendar",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-calendar",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Google Calendar",
 				"brand": {
 					"icon": "icon.svg",
@@ -11296,7 +11333,7 @@
 				},
 				"connector_key": "google-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-contacts",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Google Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -11538,7 +11575,7 @@
 				},
 				"connector_key": "google-maps",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Google Maps Timeline Import",
 				"brand": {
 					"icon": "icon.svg",
@@ -11558,7 +11595,7 @@
 					"modality": "manual_or_upload",
 					"manual_or_upload": {
 						"label": "Google Maps Timeline export file",
-						"description": "Export Timeline data from the Google Maps mobile app or Android location settings, then provide the JSON export to PDPP.",
+						"description": "Export Timeline data from the Google Maps mobile app or Android location settings, then upload the JSON export.",
 						"acquisition_methods": [
 							{
 								"label": "Export from Android",
@@ -11590,7 +11627,7 @@
 						"import_dir_env_var": "GOOGLE_MAPS_TIMELINE_DIR",
 						"help_url": "https://support.google.com/maps/answer/6258979?co=GENIE.Platform%3DAndroid&hl=en",
 						"help_text": "Google Maps Timeline points and segments are not exposed by Google's documented Data Portability API. This source imports an owner-provided Timeline export file; no Google account sign-in is used.",
-						"large_file_fallback": "This connector accepts uploads up to the deployment limit shown above. There is currently no alternate upload path for larger files — ask your PDPP operator to raise the deployment limit if your export exceeds it.",
+						"large_file_fallback": "This connector accepts uploads up to the deployment limit shown above. There is currently no alternate upload path for larger files — ask your operator to raise the deployment limit if your export exceeds it.",
 						"validation": {
 							"kind": "google_maps_timeline",
 							"file_backed": true,
@@ -11819,7 +11856,7 @@
 				},
 				"connector_key": "google-maps-data-portability",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Google Maps Data Portability",
 				"brand": {
 					"icon": "icon.svg",
@@ -12226,7 +12263,7 @@
 				},
 				"connector_key": "google-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-				"version": "0.1.21",
+				"version": "0.1.22",
 				"display_name": "Google Takeout",
 				"runtime_requirements": {
 					"bindings": {
@@ -12555,7 +12592,7 @@
 				},
 				"connector_key": "groupme",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-				"version": "0.1.20",
+				"version": "0.1.21",
 				"display_name": "GroupMe",
 				"brand": {
 					"icon": "icon.svg",
@@ -13015,7 +13052,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.17",
+				"version": "0.6.22",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -13380,7 +13417,7 @@
 					{
 						"name": "nutrition",
 						"required": false,
-						"description": "Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Incapsula blocks emit source=blocked with no nutrition values and a session-repair diagnostic. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
+						"description": "Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Unread, loading, mismatched or blocked product responses remain retryable unknown lookups; safely observed product fields are retained. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
 						"display": {
 							"label": "Your H-E-B product nutrition",
 							"detail": "Calories, macros, vitamins/minerals, serving size, ingredients, and allergens for products in your orders."
@@ -13572,6 +13609,7 @@
 					}
 				],
 				"reason_display_messages": {
+					"inventory_not_proven_complete": "H-E-B did not provide enough source evidence to prove this inventory complete. Valid records were kept; the next run will try again",
 					"empty_page_before_max_page": "We hit an empty page of orders before we expected to, so we stopped to check rather than assume we were done",
 					"heb_empty_history_after_prior_orders": "H-E-B reported no order history, but we previously collected orders for this account. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove your history is gone",
 					"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
@@ -13579,7 +13617,7 @@
 					"list_page_shape_check_failed": "The page didn't look like we expected",
 					"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 					"nutrition_source_coverage_incomplete": "We did not mark H-E-B nutrition complete because the order history or order-item detail coverage is incomplete",
-					"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
+					"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Valid records were retained; the unread tail remains unproven",
 					"pagination_exhausted": "We reached the end of the available pages",
 					"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
 					"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
@@ -13611,7 +13649,7 @@
 				},
 				"connector_key": "ical",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Calendar (iCal)",
 				"brand": {
 					"icon": "icon.svg",
@@ -13744,7 +13782,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.22",
+				"version": "0.1.36",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13752,12 +13790,17 @@
 				},
 				"runtime_requirements": {
 					"bindings": {
-						"network": {
-							"required": true
-						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
 						}
+					}
+				},
+				"mobile": {
+					"pageshim": {
+						"entry": "icloud_notes.ts",
+						"scope_prefix": "icloud_notes",
+						"login_url": "https://www.icloud.com/notes"
 					}
 				},
 				"capabilities": {
@@ -13780,11 +13823,44 @@
 				},
 				"streams": [
 					{
+						"name": "profile",
+						"description": "The signed-in iCloud account from the existing session validate response. The optional user_name is dsInfo.fullName, omitted when absent or unreadable; no additional network request or inferred fallback is used.",
+						"display": {
+							"label": "Your iCloud account",
+							"detail": "Account identity and source-stated display name."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The signed-in account's dsInfo.dsid from session validation."
+								},
+								"user_name": {
+									"type": "string",
+									"description": "Source-stated dsInfo.fullName, omitted when absent or unreadable.",
+									"x_pdpp_role": "primary-title"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window",
+						"required": false
+					},
+					{
 						"name": "notes",
-						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index.",
+						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index. The legacy folder-name projection depends on the folders stream; collection fetches that dependency even when only notes are requested.",
 						"display": {
 							"label": "Your iCloud notes",
-							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder assignment, attachment flag, and created/modified timestamps."
+							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder name and assignment, attachment flag, and created/modified timestamps."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -13803,8 +13879,13 @@
 								"folder_id": {
 									"type": ["string", "null"]
 								},
+								"folder_name": {
+									"type": ["string", "null"],
+									"description": "Folder display name from the same folder snapshot; null when there is no folder reference or the referenced folder could not be resolved. Unresolved names are reported in the stream omission details and do not count as covered."
+								},
 								"is_pinned": {
-									"type": "boolean"
+									"type": ["boolean", "null"],
+									"description": "Whether the note is pinned, or null when CloudKit's flag could not be read. Unreadable fields are named in the stream omission gap and do not count as covered."
 								},
 								"created_at": {
 									"type": ["string", "null"],
@@ -13816,7 +13897,8 @@
 									"x_pdpp_role": "event-time"
 								},
 								"has_attachments": {
-									"type": "boolean"
+									"type": ["boolean", "null"],
+									"description": "Whether attachments exist, or null when CloudKit's attachment field could not be read. Unreadable fields are named in the stream omission gap and do not count as covered."
 								},
 								"text_content": {
 									"type": ["string", "null"],
@@ -13873,7 +13955,8 @@
 									"type": "string"
 								},
 								"name": {
-									"type": "string",
+									"type": ["string", "null"],
+									"description": "Folder title, recordName fallback for a valid empty title, or null when the title field could not be read. Unreadable fields are named in the stream omission gap and do not count as covered.",
 									"x_pdpp_role": "primary-title"
 								}
 							},
@@ -13896,7 +13979,15 @@
 					}
 				],
 				"reason_display_messages": {
-					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+					"inventory_not_proven_complete": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
+					"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
+					"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
+					"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
+					"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
+					"icloud_omitted_rows": "Some iCloud Notes fields could not be read or stored. The affected rows are listed in the stream omission details, and the stream was not marked complete.",
+					"icloud_rate_limited": "iCloud Notes temporarily limited requests. Retry collection later.",
+					"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete.",
+					"icloud_readiness_exhausted": "The iCloud Notes page did not become ready within the retry budget. Collection did not start; retry when the Notes page is available."
 				}
 			}
 		},
@@ -13915,7 +14006,7 @@
 				},
 				"connector_key": "imessage",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-				"version": "0.1.20",
+				"version": "0.1.21",
 				"display_name": "iMessage (macOS)",
 				"brand": {
 					"icon": "icon.svg",
@@ -14161,7 +14252,7 @@
 				},
 				"connector_key": "jellyfin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-				"version": "0.2.14",
+				"version": "0.2.15",
 				"display_name": "Jellyfin",
 				"brand": {
 					"icon": "icon.svg",
@@ -14421,7 +14512,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.25",
+				"version": "0.3.33",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14430,10 +14521,25 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
+						}
+					}
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "linkedin",
+						"login_url": "https://www.linkedin.com/login",
+						"login_message": "Sign in to LinkedIn, then return here.",
+						"collect_export": "collectLinkedInPageShim",
+						"probe_export": "probeLinkedInSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
 						}
 					}
 				},
@@ -14497,7 +14603,7 @@
 								},
 								"connection_count": {
 									"type": ["integer", "null"],
-									"description": "From the connections listing's reported total, not the profile payload itself. Null when the connections listing wasn't fetched or reported no total."
+									"description": "Owner-bound connectionsSummary.numConnections, independent of connection enumeration. Falls back to the walked distinct connection count with a diagnostic when the summary is unavailable or fails owner validation; the fallback does not prove inventory completeness."
 								},
 								"profile_picture_url": {
 									"type": ["string", "null"],
@@ -14784,8 +14890,75 @@
 					}
 				],
 				"reason_display_messages": {
+					"linkedin_enumeration_unproven": "LinkedIn cannot verify the full inventory; readable entries are saved without replacing or deleting existing entries",
+					"absent": "LinkedIn did not provide this field",
+					"malformed": "LinkedIn returned this field in an unreadable format",
+					"invalid_value": "LinkedIn returned a value outside the expected format",
+					"source_unavailable": "LinkedIn did not return the source needed for this field",
+					"enrichment_unresolved": "LinkedIn could not resolve a connection's profile details",
+					"walk_unverified": "LinkedIn did not provide enough paging evidence to verify the full list",
+					"source_row_uncovered": "LinkedIn could not verify the source row for this derived field",
+					"withheld_unreadable_fields": "LinkedIn withheld an entry because one or more fields were unreadable",
+					"unreadable_nested_collection": "LinkedIn returned an unreadable nested collection",
+					"malformed_row": "LinkedIn returned an entry in an unreadable format",
+					"no_readable_content": "LinkedIn returned an entry with no readable content",
+					"invalid_record_shape": "LinkedIn returned an entry outside the expected record shape",
+					"id_absent": "LinkedIn did not provide the entry identifier",
+					"id_malformed": "LinkedIn returned the entry identifier in an unreadable format",
+					"id_invalid_value": "LinkedIn returned an entry identifier outside the expected format",
+					"id_source_unavailable": "LinkedIn did not return the source for the entry identifier",
+					"id_enrichment_unresolved": "LinkedIn could not resolve the connection identifier to a profile",
+					"id_walk_unverified": "LinkedIn did not verify the entry identifier in a complete list",
+					"id_source_row_uncovered": "LinkedIn could not verify the source row for the entry identifier",
+					"id_empty": "LinkedIn returned an empty entry identifier",
+					"name_absent": "LinkedIn did not provide the entry name",
+					"name_malformed": "LinkedIn returned the entry name in an unreadable format",
+					"name_invalid_value": "LinkedIn returned an entry name outside the expected format",
+					"name_source_unavailable": "LinkedIn did not return the source for the entry name",
+					"name_enrichment_unresolved": "LinkedIn could not resolve the connection name",
+					"name_walk_unverified": "LinkedIn did not verify the entry name in a complete list",
+					"name_source_row_uncovered": "LinkedIn could not verify the source row for the entry name",
+					"name_empty": "LinkedIn returned an empty entry name",
 					"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
-					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
+					"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
+					"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
+					"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
+					"linkedin_connections_continuation_advertised": "LinkedIn advertised another connections page, so the exact connection count is unavailable",
+					"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
+					"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
+					"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
+					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+					"inventory_not_proven_complete": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
+					"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
+					"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
+					"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
+					"summary_total_invalid": "LinkedIn inventory could not be verified: summary total invalid",
+					"summary_owner_mismatch": "LinkedIn inventory could not be verified: summary owner mismatch",
+					"summary_total_changed": "LinkedIn inventory could not be verified: summary total changed",
+					"collection_malformed": "LinkedIn inventory could not be verified: collection malformed",
+					"collection_paging_invalid": "LinkedIn inventory could not be verified: collection paging invalid",
+					"collection_urn_missing": "LinkedIn inventory could not be verified: collection urn missing",
+					"collection_urn_duplicate": "LinkedIn inventory could not be verified: collection urn duplicate",
+					"collection_total_mismatch": "LinkedIn inventory could not be verified: collection total mismatch",
+					"collection_continuation_advertised": "LinkedIn inventory could not be verified: collection continuation advertised",
+					"skills_nested_unproven": "LinkedIn inventory could not be verified: skills nested unproven",
+					"connection_urn_missing": "LinkedIn inventory could not be verified: connection urn missing",
+					"connection_walk_continuation_advertised": "LinkedIn inventory could not be verified: connection walk continuation advertised",
+					"connection_walk_page_error": "LinkedIn inventory could not be verified: connection walk page error",
+					"connection_walk_malformed_page": "LinkedIn inventory could not be verified: connection walk malformed page",
+					"connection_walk_repeated_page": "LinkedIn inventory could not be verified: connection walk repeated page",
+					"connection_walk_page_budget": "LinkedIn inventory could not be verified: connection walk page budget",
+					"connection_paging_total_mismatch": "LinkedIn inventory could not be verified: connection paging total mismatch",
+					"connection_total_mismatch": "LinkedIn inventory could not be verified: connection total mismatch",
+					"connection_confirmation_missing": "LinkedIn inventory could not be verified: connection confirmation missing",
+					"connection_confirmation_malformed": "LinkedIn inventory could not be verified: connection confirmation malformed",
+					"connection_walk_unavailable": "LinkedIn inventory could not be verified: connection walk unavailable",
+					"experience_nested_collection_malformed": "LinkedIn inventory could not be verified: experience nested collection malformed",
+					"experience_nested_collection_paging_invalid": "LinkedIn inventory could not be verified: experience nested collection paging invalid",
+					"experience_nested_collection_urn_missing": "LinkedIn inventory could not be verified: experience nested collection urn missing",
+					"experience_nested_collection_urn_duplicate": "LinkedIn inventory could not be verified: experience nested collection urn duplicate",
+					"experience_nested_collection_total_mismatch": "LinkedIn inventory could not be verified: experience nested collection total mismatch",
+					"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised"
 				}
 			}
 		},
@@ -14804,7 +14977,7 @@
 				},
 				"connector_key": "loom",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
-				"version": "0.1.20",
+				"version": "0.1.21",
 				"display_name": "Loom",
 				"brand": {
 					"icon": "icon.svg",
@@ -14970,7 +15143,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.25",
+				"version": "0.4.33",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -14979,10 +15152,16 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
 						}
 					}
 				},
@@ -15000,6 +15179,9 @@
 					"public_listing": {
 						"tier": "development"
 					}
+				},
+				"reason_display_messages": {
+					"inventory_not_proven_complete": "Instagram did not show that this list was read in full, so it will be read again next time."
 				},
 				"streams": [
 					{
@@ -15286,7 +15468,16 @@
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					}
-				]
+				],
+				"mobile": {
+					"pageshim": {
+						"entry": "meta.ts",
+						"scope_prefix": "instagram",
+						"login_url": "https://www.instagram.com/accounts/login/",
+						"collect_export": "collectAllStreams",
+						"probe_export": "probeMetaSession"
+					}
+				}
 			}
 		},
 		{
@@ -15304,7 +15495,7 @@
 				},
 				"connector_key": "netflix-export",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Netflix Export",
 				"brand": {
 					"icon": "icon.svg",
@@ -15479,7 +15670,7 @@
 				},
 				"connector_key": "notion",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Notion",
 				"brand": {
 					"icon": "icon.svg",
@@ -15508,7 +15699,7 @@
 								"secret": true,
 								"autocomplete": "off",
 								"help_url": "https://www.notion.so/developers/tokens",
-								"help_text": "Go to Notion Developers (https://www.notion.so/developers/tokens), create a New token with read access, copy the token, and paste it here. The token acts as you in PDPP and accesses all pages in your workspace without requiring manual connections.",
+								"help_text": "Go to Notion Developers (https://www.notion.so/developers/tokens), create a New token with read access, copy the token, and paste it here. The token acts as you and accesses all pages in your workspace without requiring manual connections.",
 								"env": ["NOTION_API_TOKEN"]
 							}
 						]
@@ -15697,7 +15888,7 @@
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.21",
+				"version": "0.1.23",
 				"display_name": "Oura",
 				"runtime_requirements": {
 					"bindings": {
@@ -15886,6 +16077,10 @@
 									"type": ["integer", "null"],
 									"x_pdpp_role": "amount"
 								},
+								"timestamp": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
 								"temperature_deviation": {
 									"type": ["number", "null"]
 								},
@@ -15909,7 +16104,8 @@
 						"incremental": true,
 						"query": {
 							"range_filters": {
-								"day": ["gte", "gt", "lte", "lt"]
+								"day": ["gte", "gt", "lte", "lt"],
+								"timestamp": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -15941,6 +16137,10 @@
 								"score": {
 									"type": ["integer", "null"],
 									"x_pdpp_role": "amount"
+								},
+								"timestamp": {
+									"type": ["string", "null"],
+									"format": "date-time"
 								},
 								"active_calories": {
 									"type": ["integer", "null"]
@@ -15992,7 +16192,8 @@
 						"incremental": true,
 						"query": {
 							"range_filters": {
-								"day": ["gte", "gt", "lte", "lt"]
+								"day": ["gte", "gt", "lte", "lt"],
+								"timestamp": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -16022,17 +16223,21 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.35",
+				"version": "0.1.41",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
 							"required": true,
-							"features": ["same_origin_page_fetch"]
+							"features": ["same_origin_page_fetch", "host_http_request"]
 						},
 						"browser": {
 							"required": true,
-							"features": ["page_script_evaluation", "page_navigation"]
+							"features": [
+								"page_script_evaluation",
+								"page_navigation",
+								"host_http_request"
+							]
 						}
 					}
 				},
@@ -16047,7 +16252,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection reuses the owner’s cloud.ouraring.com browser session. Existing sessions can refresh without a prompt while valid; first collection and expired sessions require the owner to sign in through the browser handoff."
+						"rationale": "Collection uses an owner-created Oura Developer Portal app and scoped API v2 OAuth token. A cached refresh token supports unattended reads; first authorization or a revoked grant requires browser sign-in."
 					},
 					"public_listing": {
 						"tier": "development"
@@ -16056,7 +16261,7 @@
 				"streams": [
 					{
 						"name": "sleep",
-						"description": "Daily sleep sessions and one record per daily sleep score, including score-only days and multiple score documents for one date. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
+						"description": "Daily sleep sessions and one record per daily sleep score, including score-only days and multiple score documents for one date. A session carries its day's score fields only when that day has exactly one score document. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
 						"display": {
 							"label": "Your sleep sessions",
 							"detail": "Per-night: total sleep duration, awake time, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing, and daily score contributors."
@@ -16190,6 +16395,10 @@
 									"type": ["integer", "null"],
 									"x_pdpp_role": "amount"
 								},
+								"timestamp": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
 								"temperature_deviation": {
 									"type": ["number", "null"]
 								},
@@ -16213,7 +16422,8 @@
 						"incremental": true,
 						"query": {
 							"range_filters": {
-								"day": ["gte", "gt", "lte", "lt"]
+								"day": ["gte", "gt", "lte", "lt"],
+								"timestamp": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -16245,6 +16455,10 @@
 								"score": {
 									"type": ["integer", "null"],
 									"x_pdpp_role": "amount"
+								},
+								"timestamp": {
+									"type": ["string", "null"],
+									"format": "date-time"
 								},
 								"active_calories": {
 									"type": ["integer", "null"]
@@ -16296,7 +16510,8 @@
 						"incremental": true,
 						"query": {
 							"range_filters": {
-								"day": ["gte", "gt", "lte", "lt"]
+								"day": ["gte", "gt", "lte", "lt"],
+								"timestamp": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -16308,13 +16523,15 @@
 					}
 				],
 				"reason_display_messages": {
-					"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint."
+					"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
+					"inventory_not_proven_complete": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
 				},
 				"mobile": {
 					"pageshim": {
+						"entry": "oura_browser.ts",
 						"scope_prefix": "oura",
-						"login_url": "https://cloud.ouraring.com/user/sign-in",
-						"login_message": "Sign in to Oura, then return here.",
+						"login_url": "https://developer.ouraring.com/applications",
+						"login_message": "Sign in to the Oura Developer Portal, then return here.",
 						"collect_export": "collectOuraBrowser",
 						"probe_export": "probeOuraBrowserSession",
 						"summary": {
@@ -16339,7 +16556,7 @@
 				},
 				"connector_key": "pocket",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Pocket",
 				"runtime_requirements": {
 					"bindings": {
@@ -16464,7 +16681,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.0",
+				"version": "0.4.1",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -17249,7 +17466,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.26",
+				"version": "0.2.33",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -17357,10 +17574,14 @@
 					}
 				],
 				"reason_display_messages": {
+					"shopify_browser_operation_timeout": "Shop did not respond within the collection time budget. Retry the collection.",
+					"shopify_signed_out_or_blocked": "Sign in to Shop and open your order history before retrying.",
 					"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
 					"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
 					"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",
+					"inventory_not_proven_complete": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
 					"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
+					"shopify_order_rows_unresolved": "Some Shop orders could not be read completely; retry to collect them",
 					"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
 				}
 			}
@@ -19292,7 +19513,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.25",
+				"version": "0.1.37",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -19301,10 +19522,12 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_navigation", "page_script_evaluation"]
 						}
 					}
 				},
@@ -19312,7 +19535,7 @@
 					"human_interaction": ["manual_action"],
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Browser-session replacement for the legacy Spotify connector. Keeps profile, playlists, playlist items, and saved tracks without requiring owners to paste a one-hour public Web API access token."
+						"rationale": "Browser-session replacement for the legacy Spotify connector. Collects profile, playlists, playlist items, saved tracks, recent playback contexts, and bounded top artist and track rankings through the authenticated web player."
 					},
 					"refresh_policy": {
 						"recommended_mode": "manual",
@@ -19490,7 +19713,10 @@
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": ["string", "null"]
+								},
+								"identity_unresolved": {
+									"type": "boolean"
 								},
 								"name": {
 									"type": "string",
@@ -19526,7 +19752,7 @@
 									"type": "array"
 								}
 							},
-							"required": ["id", "name"]
+							"required": ["id", "identity_unresolved", "name"]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "added_at",
@@ -19536,7 +19762,7 @@
 							"resources": true
 						},
 						"required": true,
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["name", "album_name"]
@@ -19549,12 +19775,12 @@
 								"added_at": ["gte", "gt", "lte", "lt"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
 						"name": "profile",
-						"description": "The authenticated Spotify account's own profile, from GET /me.",
+						"description": "The authenticated Spotify account's profile from the web player.",
 						"display": {
 							"label": "Your Spotify profile",
 							"detail": "Account id, display name, follower count."
@@ -19599,10 +19825,177 @@
 						},
 						"coverage_strategy": "singleton_presence",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "recently_played_contexts",
+						"description": "Recently played playback contexts and each context’s last played track. Spotify returns contexts, not individual play events. The connector withholds checkpoint state unless it can verify a request-bound boundary.",
+						"display": {
+							"label": "Recently played contexts",
+							"detail": "Album, playlist, or artist context URI, its most recently played track, and last played time."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"uri": {
+									"type": "string"
+								},
+								"last_played_time": {
+									"type": "integer",
+									"minimum": 0,
+									"x_pdpp_role": "event-time"
+								},
+								"last_played_track_uri": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "uri", "last_played_time"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "last_played_time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"query": {
+							"range_filters": {
+								"last_played_time": ["gt", "gte", "lte", "lt"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "top_artists",
+						"description": "Spotify’s ranked artists for short-term or long-term affinity windows. The connector requests at most 100 ranking rows per window; this is a bounded ranking snapshot, not a full inventory.",
+						"display": {
+							"label": "Your top artists",
+							"detail": "Spotify affinity ranking for each time window, limited to at most 100 rows per window. This is not a full inventory."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"uri": {
+									"type": ["string", "null"]
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"genres": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"popularity": {
+									"type": ["integer", "null"]
+								},
+								"followers": {
+									"type": ["integer", "null"]
+								},
+								"time_range": {
+									"type": "string",
+									"enum": ["short_term", "long_term"]
+								}
+							},
+							"required": ["id", "time_range"]
+						},
+						"primary_key": ["id", "time_range"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "top_tracks",
+						"description": "Spotify’s ranked tracks for short-term or long-term affinity windows. The connector requests at most 100 ranking rows per window; this is a bounded ranking snapshot, not a full inventory.",
+						"display": {
+							"label": "Your top tracks",
+							"detail": "Spotify affinity ranking for each time window, limited to at most 100 rows per window. This is not a full inventory."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"uri": {
+									"type": ["string", "null"]
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"artist_names": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"album_name": {
+									"type": ["string", "null"]
+								},
+								"duration_ms": {
+									"type": ["integer", "null"]
+								},
+								"time_range": {
+									"type": "string",
+									"enum": ["short_term", "long_term"]
+								}
+							},
+							"required": ["id", "time_range"]
+						},
+						"primary_key": ["id", "time_range"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "album_name"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
 					}
 				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "spotify",
+						"collect_export": "spotifyMobileCollect",
+						"probe_export": "probeSpotifyMobileSession",
+						"login_url": "https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+					}
+				},
 				"reason_display_messages": {
-					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync."
+					"inventory_not_proven_complete": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
+					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+					"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
+					"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
+					"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
 				}
 			}
 		},
@@ -19621,7 +20014,7 @@
 				},
 				"connector_key": "steam",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Steam",
 				"brand": {
 					"icon": "icon.svg",
@@ -19680,7 +20073,7 @@
 						"rate_limit_sensitivity": "high",
 						"bot_detection_sensitivity": "low",
 						"background_safe": true,
-						"rationale": "Steam Web API is an API-key connector with no interactive login, so unattended refresh is mechanically safe. Steam does not publish rate limits; PDPP policy is a 250ms per-request floor, honoring Retry-After when supplied, and preserving 429/throttled transient failures for recovery, with 403 treated as an authorization or visibility failure. One-hour polling is conservative to avoid community-reported multi-hour lockouts. Repeated live runs are still outstanding, which public_listing.tier:preview records — auto-enrollment gates on tier, not on refresh mode."
+						"rationale": "Steam Web API is an API-key connector with no interactive login, so unattended refresh is mechanically safe. Steam does not publish rate limits; the connector policy is a 250ms per-request floor, honoring Retry-After when supplied, and preserving 429/throttled transient failures for recovery, with 403 treated as an authorization or visibility failure. One-hour polling is conservative to avoid community-reported multi-hour lockouts. Repeated live runs are still outstanding, which public_listing.tier:preview records — auto-enrollment gates on tier, not on refresh mode."
 					},
 					"public_listing": {
 						"tier": "preview"
@@ -20013,7 +20406,7 @@
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.26",
+				"version": "1.0.27",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
@@ -20220,7 +20613,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.31",
+				"version": "0.1.35",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -20420,7 +20813,7 @@
 				},
 				"connector_key": "twitter-archive",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/twitter-archive",
-				"version": "0.1.20",
+				"version": "0.1.21",
 				"display_name": "Twitter/X Archive",
 				"brand": {
 					"icon": "icon.svg",
@@ -20601,7 +20994,7 @@
 				},
 				"connector_key": "uber",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-				"version": "1.0.22",
+				"version": "1.0.23",
 				"display_name": "Uber",
 				"brand": {
 					"icon": "icon.svg",
@@ -20817,7 +21210,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.15",
+				"version": "0.2.18",
 				"display_name": "USAA",
 				"runtime_requirements": {
 					"bindings": {
@@ -21435,9 +21828,11 @@
 					"credit_card_export_unverified": "We couldn't confirm the credit card export",
 					"csv_no_data_rows": "The transactions file had no rows to import",
 					"csv_no_usable_transactions": "We couldn't find any usable transactions in that file",
+					"csv_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 					"export_affordance_missing": "We couldn't find the export controls on this page — the site may have changed",
 					"export_error": "The export couldn't be downloaded",
 					"export_no_download": "The export didn't produce a downloadable file",
+					"export_window_incomplete": "The export did not cover all of the requested transaction history",
 					"hydrate_crashed": "Something went wrong while loading the page",
 					"inbox_rows_unresolved": "We found inbox messages but couldn't read them — the site may have changed",
 					"pdf_download_click_failed": "We couldn't click the download option for a statement PDF",
@@ -21473,7 +21868,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.19",
+				"version": "0.2.21",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
@@ -21867,7 +22262,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.20",
+				"version": "0.2.21",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
@@ -21907,14 +22302,14 @@
 								"label": "Media folder sync",
 								"platform": "device",
 								"posture": "advanced",
-								"detail": "Zip exports can include media files. When the import run has blob-upload support, PDPP keeps those files as WhatsApp attachment records with blob references."
+								"detail": "Zip exports can include media files. When the import run has blob-upload support, those files are kept as WhatsApp attachment records with blob references."
 							}
 						],
 						"accepted_file_extensions": [".txt", ".zip"],
 						"import_dir_env_var": "WHATSAPP_EXPORT_DIR",
 						"help_url": "https://faq.whatsapp.com/1180414079177245",
 						"help_text": "WhatsApp does not expose personal messages through an account API or OAuth grant. This source imports owner-provided chat export files.",
-						"large_file_fallback": "This connector accepts uploads up to the deployment limit shown above. There is currently no alternate upload path for larger files — ask your PDPP operator to raise the deployment limit if your export exceeds it.",
+						"large_file_fallback": "This connector accepts uploads up to the deployment limit shown above. There is currently no alternate upload path for larger files — ask your operator to raise the deployment limit if your export exceeds it.",
 						"validation": {
 							"kind": "whatsapp_chat_export",
 							"file_backed": true,
@@ -22192,7 +22587,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.31",
+				"version": "0.3.42",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -22202,28 +22597,6 @@
 						"browser": {
 							"required": true
 						}
-					}
-				},
-				"setup": {
-					"modality": "static_secret",
-					"credential_capture": {
-						"kind": "api_key",
-						"label": "USDA FoodData Central API key (optional)",
-						"description": "Optional. A free USDA FoodData Central API key improves nutrition-lookup coverage and rate limits for products the Whole Foods product page does not have nutrition facts for. Leave blank to use the public rate-limited DEMO_KEY.",
-						"submit_label": "Save USDA API key",
-						"fields": [
-							{
-								"name": "usda_api_key",
-								"label": "USDA FoodData Central API key",
-								"type": "password",
-								"required": false,
-								"secret": true,
-								"autocomplete": "off",
-								"help_url": "https://fdc.nal.usda.gov/api-key-signup",
-								"help_text": "Get a free key at https://fdc.nal.usda.gov/api-key-signup. Without one, nutrition lookups use the shared DEMO_KEY, which is more rate-limited.",
-								"env": ["USDA_API_KEY"]
-							}
-						]
 					}
 				},
 				"capabilities": {
@@ -22312,7 +22685,7 @@
 									"type": ["integer", "null"]
 								},
 								"item_count": {
-									"type": "integer"
+									"type": ["integer", "null"]
 								}
 							},
 							"required": ["id", "item_count"]
@@ -22373,6 +22746,15 @@
 								},
 								"unit_price_cents": {
 									"type": ["integer", "null"]
+								},
+								"quantity_unit": {
+									"type": ["string", "null"]
+								},
+								"price_unit": {
+									"type": ["string", "null"]
+								},
+								"line_total_cents": {
+									"type": ["integer", "null"]
 								}
 							},
 							"required": ["id", "order_id", "name", "product_id"]
@@ -22394,10 +22776,10 @@
 					{
 						"name": "nutrition",
 						"required": false,
-						"description": "Nutrition facts or observed lookup outcome per unique product. Sources are the Whole Foods product page and USDA FoodData Central. Joins to `order_items` on `product_id`.",
+						"description": "Nutrition facts per ordered product, read from the Amazon product page and the Whole Foods product pages the order links to, keyed by `product_id` and joinable to `order_items`. A product whose Nutrition Facts panel could not be read, or that has none, has no record: the connector collects only what these pages show, and it does not look nutrition up anywhere else. Records written by connector 0.3.34 may also carry `source` = `usda_fdc`, `not_found`, `error` or `blocked`; this connector writes none of those.",
 						"display": {
 							"label": "Nutrition facts",
-							"detail": "Nutrition facts when found, or a not found, blocked, or error outcome when lookup fails."
+							"detail": "Nutrition facts for each ordered product whose Nutrition Facts panel was read. A product whose panel could not be read has no row."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -22414,11 +22796,14 @@
 									"type": "string",
 									"enum": [
 										"wholefoods_product_page",
+										"wholefoods_structured_data",
+										"amazon_product_page",
 										"usda_fdc",
 										"not_found",
 										"error",
 										"blocked"
-									]
+									],
+									"description": "The page the facts were read from. `usda_fdc`, `not_found`, `error` and `blocked` appear only on records written by connector 0.3.34 or earlier."
 								},
 								"confidence": {
 									"type": "string",
@@ -22450,11 +22835,65 @@
 								},
 								"servings_per_container": {
 									"type": ["number", "null"]
+								},
+								"id": {
+									"type": "string"
+								},
+								"added_sugar_g": {
+									"type": ["number", "null"]
+								},
+								"allergens": {
+									"type": ["string", "null"]
+								},
+								"calcium_mg": {
+									"type": ["number", "null"]
+								},
+								"category": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"cholesterol_mg": {
+									"type": ["number", "null"]
+								},
+								"ingredients": {
+									"type": ["string", "null"]
+								},
+								"iron_mg": {
+									"type": ["number", "null"]
+								},
+								"highlights": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"potassium_mg": {
+									"type": ["number", "null"]
+								},
+								"raw_nutrition_text": {
+									"type": ["string", "null"]
+								},
+								"saturated_fat_g": {
+									"type": ["number", "null"]
+								},
+								"trans_fat_g": {
+									"type": ["number", "null"]
+								},
+								"upc": {
+									"type": ["string", "null"]
+								},
+								"vitamin_d_mcg": {
+									"type": ["number", "null"]
+								},
+								"type": {
+									"type": ["string"]
 								}
 							},
-							"required": ["product_id", "source", "confidence"]
+							"required": ["id", "product_id", "source", "confidence"]
 						},
-						"primary_key": ["product_id"],
+						"primary_key": ["id"],
 						"selection": {
 							"fields": true,
 							"resources": true
@@ -22472,7 +22911,9 @@
 				"reason_display_messages": {
 					"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
 					"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
-					"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history"
+					"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
+					"inventory_not_proven_complete": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh.",
+					"wholefoods_nutrition_unread": "Some Whole Foods products' nutrition panels could not be read, so those products have no nutrition row. Retry to read them."
 				}
 			}
 		},
@@ -22490,7 +22931,7 @@
 				},
 				"connector_key": "whoop",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "WHOOP",
 				"runtime_requirements": {
 					"bindings": {
@@ -22518,7 +22959,7 @@
 					},
 					"public_listing": {
 						"tier": "supported",
-						"rationale": "Live owner testing proved all six streams and checkpointed session reuse; first connection still requires the owner to sign in through the isolated WHOOP browser profile. Promoted to supported by the repository owner for stable parity with the WHOOP connector already shipped in production Vana Desktop."
+						"rationale": "Live owner testing proved all six streams and checkpointed session reuse; first connection still requires the owner to sign in through the isolated WHOOP browser profile. Promoted to supported by the repository owner for stable parity with the WHOOP connector already shipped in the production desktop app."
 					}
 				},
 				"streams": [
@@ -22979,7 +23420,7 @@
 				},
 				"connector_key": "whoop-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop-browser",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "WHOOP (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -23395,7 +23836,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.7",
+				"version": "0.1.11",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -23428,7 +23869,7 @@
 					},
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Completed a real run on a real iPhone 12 in the Vana mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile, posts, likes and bookmarks. Desktop, incremental second runs and Android are not verified. X's terms do not permit automated access; see the connector README for the owner's legal basis and the limits this connector keeps to."
+						"rationale": "Completed a real run on a real iPhone 12 in a mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile, posts, likes and bookmarks. Desktop, incremental second runs and Android are not verified. X's terms do not permit automated access; see the connector README for the owner's legal basis and the limits this connector keeps to."
 					}
 				},
 				"streams": [
@@ -24093,7 +24534,7 @@
 				},
 				"connector_key": "ynab",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-				"version": "0.3.20",
+				"version": "0.3.21",
 				"display_name": "YNAB",
 				"runtime_requirements": {
 					"bindings": {
@@ -25501,7 +25942,14 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.27",
+				"version": "0.2.39",
+				"mobile": {
+					"pageshim": {
+						"entry": "youtube.ts",
+						"scope_prefix": "youtube",
+						"login_url": "https://www.youtube.com/"
+					}
+				},
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",
@@ -25510,10 +25958,16 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
 						}
 					}
 				},
@@ -25529,7 +25983,7 @@
 					},
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Browser replacement for seven Vana legacy YouTube scopes; live authenticated proof is required before promotion."
+						"rationale": "Browser replacement for seven legacy YouTube scopes; live authenticated proof is required before promotion."
 					}
 				},
 				"streams": [
@@ -25561,7 +26015,8 @@
 									"type": ["string", "null"]
 								},
 								"email": {
-									"type": ["string", "null"]
+									"type": ["string", "null"],
+									"description": "Signed-in Google account email, read from the avatar menu's Switch account header; omitted when the menu shows none."
 								},
 								"joined_at": {
 									"type": ["string", "null"]
@@ -25610,10 +26065,10 @@
 					{
 						"name": "subscriptions",
 						"required": false,
-						"description": "Channels visible in the signed-in subscriptions page, up to 20.",
+						"description": "Channels visible in the signed-in subscriptions page.",
 						"display": {
 							"label": "Your subscriptions",
-							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible. Limited to 20."
+							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -25654,7 +26109,7 @@
 								},
 								"subscriber_count_text": {
 									"type": ["string", "null"],
-									"description": "Browser-visible raw subscriber count for legacy projection."
+									"description": "Browser-visible raw subscriber count for legacy projection; omitted when no count text is rendered."
 								}
 							},
 							"required": ["id"]
@@ -25677,10 +26132,10 @@
 					{
 						"name": "playlists",
 						"required": false,
-						"description": "Owner library playlists visible in the browser, up to 50.",
+						"description": "Owner library playlists visible in the browser.",
 						"display": {
 							"label": "Your playlists",
-							"detail": "Playlist titles, URLs and visible header metadata. Limited to 50."
+							"detail": "Playlist titles, URLs and visible header metadata."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -25787,7 +26242,7 @@
 							"resources": true
 						},
 						"incremental": false,
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -25905,10 +26360,10 @@
 					{
 						"name": "watch_history",
 						"required": false,
-						"description": "Most recent 50 visible browser history entries in page order; watch dates have day precision.",
+						"description": "Observed history entries keyed by video and normalized viewing date, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
 						"display": {
 							"label": "Your watch history",
-							"detail": "The latest 50 visible videos in page order. A date is recorded when its section label can be resolved; no watch time is invented."
+							"detail": "Observed viewing dates are upserted by video and viewing date while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -25944,7 +26399,7 @@
 								"position": {
 									"type": "integer",
 									"minimum": 0,
-									"description": "Order on the browser history page, newest first."
+									"description": "Current zero-based position on the observed browser history page, newest first; position can change when videos are re-watched or history changes."
 								},
 								"watched_date": {
 									"type": ["string", "null"],
@@ -25967,7 +26422,7 @@
 							"fields": true,
 							"resources": true
 						},
-						"incremental": false,
+						"incremental": true,
 						"query": {
 							"search": {
 								"lexical_fields": ["description"],
@@ -25982,6 +26437,7 @@
 					}
 				],
 				"reason_display_messages": {
+					"inventory_not_proven_complete": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
 					"page_unreadable": "The signed-in page did not expose a trustworthy record.",
 					"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
 					"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",

@@ -1,6 +1,6 @@
-# Connector hard cutover: contract decisions
+# Historical log: connector hard cutover decisions
 
-Status: lead decisions for the cutover integration branch. The per-scope mapping is in [`capability-map.json`](capability-map.json). A lane that finds evidence against a decision must stop and file a contract-change request in its report. It must not invent a local answer.
+Historical log from the September 2026 cutover. Instructions, consumer descriptions, and rollout gates below record decisions at that time; they are not current operating instructions. The legacy publishing lane is retired. Permanent frozen scope IDs and schema paths live in `legacy-shapes.json`, checked by `npm run legacy-shapes:check`. Release metadata snapshots and fixture proofs belong to `artifacts/legacy-retention/` and are removed with F10. Oura executable artifacts remain until F2; their retirement does not remove these metadata proofs or permanent Oura schema definitions. Use the live manifest and publication checks for current PDPP connector work.
 
 Base: `main` at `20bba85`.
 
@@ -16,7 +16,7 @@ Base: `main` at `20bba85`.
 - `connectors/<key>/` at the repository root is the only home of PDPP Collection Profile implementations. It holds the code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures.
 - `packages/polyfill-connectors` holds only the reusable runtime, libraries, and dev tools. It holds no connector-specific code.
 - The legacy Playwright format is removed: `*-playwright.{js,json}`, `registry.json`, the legacy runner, skills, scripts, and workflows. This happens only for scopes whose replacement parity is proven and whose Vana-owned binding exists.
-- `scope-catalog.json` and `SCOPES.md` are Vana DPv2 contracts. They are NEVER regenerated from PDPP manifests, in any phase: they are frozen with their exact IDs and shapes, or handed over to the Vana owner. Public bindings and projectors are Vana-owned.
+- The original `scope-catalog.json` and frozen `SCOPES.md` snapshots are Vana DPv2 contracts. They are NEVER regenerated from PDPP manifests, in any phase: they are frozen with their exact IDs and shapes, or handed over to the Vana owner. Public bindings and projectors are Vana-owned.
 - No alias loader, dual discovery, or compatibility runtime exists. A legacy identifier that changed is recorded only as data in the capability map.
 
 ## Decisions
@@ -29,7 +29,7 @@ Flat `platform.scope` strings (for example `claude.conversations` and `instagram
 - The Vana stack owns the compatibility implementation, likely a shared `unity-surfaces` package used by app.vana.org, Desktop, and the embedded Personal Server runtime, which consume one generated contract. Context Gateway (ODL's commercial wrapper) does not own or define it, and Vana takes no dependency on Context Gateway. Data Gateway remains the issued-grant ledger, not the owner of connector fulfillment.
 - Vana derives the protected scope set from production issued-scope records (Context Gateway `connect_sessions.canonical_scopes` as evidence, and Data Gateway `grants.scopes` / `grant_registration_history.scopes`), not from all 54 catalog entries.
 - This repo keeps only connector-side evidence: which PDPP connector streams and fields can produce each legacy payload. That evidence lives in the cutover report, not in product code here.
-- The cutover does not rename any published scope ID. The fate of the legacy-derived `scope-catalog.json` and `SCOPES.md` (Vana DPv2 vocabulary that currently lives here) is an open decision: hand them over to the Vana owner, or freeze them. They must not be deleted while consumers pin them.
+- The cutover does not rename any published scope ID. The former `scope-catalog.json` and frozen `SCOPES.md` snapshots were removed with the release lane. The root `SCOPES.md` is now generated only from `legacy-shapes.json` and its schemas; it does not restore the old catalog or publishing lane. Immutable releases and commit-pinned copies retain their original bytes.
 
 **D1. Identity.** The connector key (`anthropic`, `meta`, `shopify`, `youtube`, `icloud_notes`, ...) is the PDPP implementation identity: directory, manifest `connector_key`, and OCI name. It is not a public DPv2 scope prefix. The earlier proposal to rename public scopes (`claude.*`→`anthropic.*`, etc.) is WITHDRAWN (see the ownership boundary above).
 
@@ -55,10 +55,10 @@ Flat `platform.scope` strings (for example `claude.conversations` and `instagram
 
 **D8. Whole Foods.**
 - `profile` stays, because the scope is advertised. It holds the name and email of the Amazon account used for the orders.
-- `nutrition` is a typed stream keyed by `product_id` and replaces the untyped `order_items.nutrition`. The sources are the Whole Foods product page first, then USDA FDC. A USDA key is an optional manifest option, with `DEMO_KEY` rate limits stated.
+- `nutrition` is a typed stream keyed by `product_id` and replaces the untyped `order_items.nutrition`. The sources are the Amazon product page, then the Whole Foods product pages the order links to. A product whose panel cannot be read has no record. The connector does not enrich: the USDA FDC fallback and its optional API key were removed, because a connector collects what the owner's own sources show.
 - Amazon session code that `amazon` and `wholefoods` both need moves into the runtime library (`src/auto-login/amazon.ts` or a sibling). A connector never imports another connector.
 
-**D9. YouTube (superseded 2026-09-23).** The Vana cutover keeps owner-authenticated browser collection as the default `youtube` profile. The previous Takeout-only decision did not preserve the seven legacy browser scopes. The existing import is retained as a separate optional `youtube_takeout` profile and excluded from publication pending review. Browser history is a day-granular, most-recent-50 snapshot in page order; it has no fabricated watch timestamp or incremental timestamp cursor. Browser display labels are retained alongside parsed values only where the legacy projection needs the exact label (subscriber count, duration, view count, and history section). The Takeout history parser continues to share its implementation with `google_takeout.youtube_watch_history`.
+**D9. YouTube (superseded 2026-09-23).** The Vana cutover keeps owner-authenticated browser collection as the default `youtube` profile. The previous Takeout-only decision did not preserve the seven legacy browser scopes. The existing import is retained as a separate optional `youtube_takeout` profile and excluded from publication pending review. Browser history is day-granular and drains in page-order batches of at most 50, resuming from the last-seen video identity. It has no fabricated watch timestamp or timestamp-based cursor. The connector marks the history complete only after source-end evidence; blocked or stalled reads do not checkpoint completion. Browser display labels are retained alongside parsed values only where the legacy projection needs the exact label (subscriber count, duration, view count, and history section). The Takeout history parser continues to share its implementation with `google_takeout.youtube_watch_history`.
 
 **D10. Shop** is implemented from contract and fixtures. It stays `development` until independent live evidence exists.
 

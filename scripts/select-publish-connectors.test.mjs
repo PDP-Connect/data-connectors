@@ -218,6 +218,41 @@ test("a root developer script does not change non-PageShim artifact identity", a
   }
 });
 
+test("installer npm pack file lists do not change connector artifact identity", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    for (const path of ["package.json", "packages/connector-installer-core/package.json"]) {
+      repo.write(path, JSON.stringify({ files: ["index.mjs"] }));
+      const after = repo.commit(`change ${path} pack list`);
+      assert.equal(await artifactInputHash({ commit: after, manifest: "oura", cwd: repo.dir }), before);
+    }
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a polyfill package test script does not change artifact identity, a dependency does", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    repo.write(
+      "packages/polyfill-connectors/package.json",
+      JSON.stringify({ scripts: { test: "../../scripts/test-sandbox/test-sandbox -- node scripts/run-tests.mjs" } }),
+    );
+    const scriptCommit = repo.commit("route the package test script through the sandbox");
+    assert.equal(await artifactInputHash({ commit: scriptCommit, manifest: "oura", cwd: repo.dir }), before);
+    repo.write(
+      "packages/polyfill-connectors/package.json",
+      JSON.stringify({ dependencies: { zod: "4.0.0" } }),
+    );
+    const depCommit = repo.commit("add a runtime dependency");
+    assert.notEqual(await artifactInputHash({ commit: depCommit, manifest: "oura", cwd: repo.dir }), before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("sibling runtime metadata does not change shared SourceDeclaration identity", async () => {
   const repo = makeRepo();
   try {
@@ -632,3 +667,26 @@ test("allowlist comments, formatting, and row order change no artifact hash", as
     rmSync(repo.dir, { recursive: true, force: true });
   }
 });
+
+for (const [label, path, metadata] of [
+  ["installer version", "packages/connector-installer-core/package.json", { version: "0.2.0" }],
+  ["installer dependency", "packages/connector-installer-core/package.json", { dependencies: { tar: "7.5.22" } }],
+  ["installer engine", "packages/connector-installer-core/package.json", { engines: { node: ">=24" } }],
+  ["polyfill engine", "packages/polyfill-connectors/package.json", { engines: { node: ">=24" } }],
+]) {
+  test(`${label} metadata remains an artifact input requiring a version bump`, async () => {
+    const repo = makeRepo();
+    try {
+      const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+      repo.write(path, JSON.stringify(metadata));
+      const after = repo.commit(`change ${label}`);
+      assert.notEqual(await artifactInputHash({ commit: after, manifest: "oura", cwd: repo.dir }), before);
+      await assert.rejects(
+        () => selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
+        (error) => error instanceof PublishSelectionError && /oura shipped artifact content changed/.test(error.message),
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+}

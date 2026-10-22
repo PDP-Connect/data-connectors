@@ -27,7 +27,6 @@ import type {
 	BrowserCollectContext,
 	EmittedMessage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	classifyAdsDialogInPage,
@@ -42,6 +41,7 @@ import { validateRecord } from "./schemas.ts";
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
 const NO_DELAY = (): Promise<void> => Promise.resolve();
 const TEST_POSTS_CLOCK = { sleep: async (): Promise<void> => undefined };
+const TEST_PROFILE_CLOCK = { sleep: async (): Promise<void> => undefined };
 const makeVirtualAdsClock = (): {
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
@@ -87,6 +87,9 @@ type ScriptedPostsPage = {
 	status: number;
 	operationName?: string;
 	fromCurrentPage?: boolean;
+	requestUsername?: string;
+	requestUserId?: string;
+	requestCursor?: string | null;
 } | null;
 
 /** Build a fake Playwright Page whose `evaluate` serves scripted JSON
@@ -114,6 +117,8 @@ function makeFakePage(options: {
 	scrollFailure?: boolean;
 	categoryEmptyMessage?: boolean;
 	challengePage?: boolean;
+	profilePageUser?: unknown;
+	profileEnvelope?: Record<string, unknown>;
 	webInfoUser?: unknown;
 }): {
 	calls: string[];
@@ -133,20 +138,54 @@ function makeFakePage(options: {
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
 	let pendingPostsPredicate: ((value: unknown) => boolean) | null = null;
 	let adsListWait = 0;
+	let activeAdsSurface: "categories" | "advertisers" | "ad_topics" | null = null;
 	let dialogClassificationSequenceIndex = 0;
 	let dialogScrapeCount = 0;
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
 	const responseListeners = new Set<(response: unknown) => void>();
+	const requestListeners = new Set<(request: unknown) => void>();
+	const navigationListeners = new Set<(frame: unknown) => void>();
+	let frameUrl = "https://www.instagram.com/testuser/";
+	let currentNavigationRequest: unknown = null;
+	let page: Page;
+	const mainFrame = {
+		page: () => page,
+		url: () => frameUrl,
+	};
+	let nextPostsCursor: string | null = null;
 	const resolveReadiness = (ready: boolean): Promise<unknown> =>
 		ready
 			? Promise.resolve(true)
 			: Promise.reject(new Error("Timeout while waiting for fake DOM"));
 
 	const resolveNextPostsPage = (): void => {
+		const profilePageUser = options.profilePageUser;
+		const profileResponse = profilePageUser
+			? {
+					json: () =>
+						Promise.resolve({ data: { user: profilePageUser }, ...options.profileEnvelope }),
+					request: () => ({
+						headers: () => ({ "x-fb-friendly-name": "ProfilePageQuery" }),
+						method: () => "POST",
+						postData: () => "fb_api_req_friendly_name=ProfilePageQuery",
+					}),
+					status: () => 200,
+					url: () => "https://www.instagram.com/graphql/query",
+				}
+			: null;
+		if (profileResponse) {
+			for (const listener of responseListeners) listener(profileResponse);
+		}
 		const next = pendingPostsResolve;
 		pendingPostsResolve = null;
 		if (!next) {
 			return;
+		}
+		if (profileResponse) {
+			if (pendingPostsPredicate?.(profileResponse)) {
+				next(profileResponse);
+				return;
+			}
 		}
 		const scripted = postsQueue.shift();
 		if (scripted === undefined || scripted === null) {
@@ -158,20 +197,30 @@ function makeFakePage(options: {
 			return;
 		}
 		const operationName = scripted.operationName ?? "PolarisProfilePostsQuery";
+		const cursor = scripted.requestCursor ?? nextPostsCursor;
+		const variables = {
+			user_id: scripted.requestUserId ?? "u1",
+			username: scripted.requestUsername ?? "testuser",
+			...(cursor ? { after: cursor } : {}),
+		};
+		const request = {
+			frame: () =>
+				scripted.fromCurrentPage === false
+					? { page: () => ({}) as Page, url: () => frameUrl }
+					: mainFrame,
+			headers: () => ({ "x-fb-friendly-name": operationName }),
+			method: () => "POST",
+			postData: () =>
+				`fb_api_req_friendly_name=${operationName}&variables=${encodeURIComponent(JSON.stringify(variables))}`,
+			url: () => "https://www.instagram.com/graphql/query",
+		};
 		const response = {
 			json: () => Promise.resolve(scripted.json),
-			request: () => ({
-				frame: () => ({
-					page: () =>
-						scripted.fromCurrentPage === false ? ({} as Page) : page,
-				}),
-				headers: () => ({ "x-fb-friendly-name": operationName }),
-				method: () => "POST",
-				postData: () => `fb_api_req_friendly_name=${operationName}`,
-			}),
+			request: () => request,
 			status: () => scripted.status,
 			url: () => "https://www.instagram.com/graphql/query",
 		};
+		for (const listener of requestListeners) listener(request);
 		for (const listener of responseListeners) {
 			listener(response);
 		}
@@ -179,10 +228,21 @@ function makeFakePage(options: {
 			next(null);
 			return;
 		}
+		const connection = (
+			scripted.json as {
+				data?: {
+					xdt_api__v1__feed__user_timeline_graphql_connection?: {
+				page_info?: { end_cursor?: string | null };
+					};
+				};
+			}
+		)?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
+		nextPostsCursor = connection?.page_info?.end_cursor ?? null;
 		next(response);
 	};
 
-	const page = {
+	page = {
+		mainFrame: () => mainFrame,
 		url: () =>
 			options.challengePage
 				? "https://www.instagram.com/challenge/"
@@ -194,17 +254,48 @@ function makeFakePage(options: {
 			) {
 				return Promise.reject(new Error("scripted navigation failure"));
 			}
+			frameUrl = url ?? "https://www.instagram.com/testuser/";
+			if (frameUrl.includes("/ads/ad_topics/")) activeAdsSurface = "ad_topics";
+			currentNavigationRequest = {
+				frame: () => mainFrame,
+				isNavigationRequest: () => true,
+				redirectedFrom: () => null,
+				url: () => frameUrl,
+			};
+			for (const listener of requestListeners) listener(currentNavigationRequest);
+			for (const listener of responseListeners) {
+				listener({
+					request: () => currentNavigationRequest,
+					status: () => 200,
+					url: () => frameUrl,
+				});
+			}
+			for (const listener of navigationListeners) listener(mainFrame);
 			resolveNextPostsPage();
 			return Promise.resolve(null);
 		},
-		off: (event: "response", listener: (response: unknown) => void): void => {
+		off: (
+			event: "request" | "response" | "framenavigated",
+			listener: (value: unknown) => void,
+		): void => {
 			if (event === "response") {
-				responseListeners.delete(listener);
+				responseListeners.delete(listener as (response: unknown) => void);
+			} else if (event === "framenavigated") {
+				navigationListeners.delete(listener);
+			} else {
+				requestListeners.delete(listener);
 			}
 		},
-		on: (event: "response", listener: (response: unknown) => void): void => {
+		on: (
+			event: "request" | "response" | "framenavigated",
+			listener: (value: unknown) => void,
+		): void => {
 			if (event === "response") {
-				responseListeners.add(listener);
+				responseListeners.add(listener as (response: unknown) => void);
+			} else if (event === "framenavigated") {
+				navigationListeners.add(listener);
+			} else {
+				requestListeners.add(listener);
 			}
 		},
 		waitForResponse: (predicate: unknown, _opts?: unknown): Promise<unknown> =>
@@ -235,6 +326,7 @@ function makeFakePage(options: {
 				return readiness(false);
 			}
 			if (source.includes("Categories used to reach you")) {
+				activeAdsSurface = "categories";
 				return readiness(options.categoriesAvailable === true);
 			}
 			if (source.includes("View all")) {
@@ -247,6 +339,9 @@ function makeFakePage(options: {
 				source.includes('[role="dialog"] [role="list"]') &&
 				!source.includes('[role="listitem"]')
 			) {
+				if (activeAdsSurface === "categories") {
+					return readiness(options.categoryDestinationReached !== false);
+				}
 				const index = adsListWait++;
 				if (index < 2) {
 					const reached = dialogReachedQueue[0];
@@ -265,6 +360,9 @@ function makeFakePage(options: {
 				source.includes('[role="dialog"] [role="list"]') &&
 				source.includes('[role="listitem"]')
 			) {
+				if (activeAdsSurface === "categories") {
+					return readiness((options.categoryRows?.length ?? 0) > 0);
+				}
 				const index = adsListWait - 1;
 				const ready =
 					index < 2
@@ -295,6 +393,24 @@ function makeFakePage(options: {
 		},
 		evaluate: (fn: unknown, arg?: unknown): Promise<unknown> => {
 			const fnSource = String(fn);
+			if (
+				typeof arg === "object" &&
+				arg !== null &&
+				"token" in arg &&
+				"click" in arg &&
+				"label" in arg
+			) {
+				// Traversal probe: the scripted dialog is already fully expanded, so no
+				// control is offered and the rows read are the scripted category rows.
+				const { label } = arg as { label: string };
+				return Promise.resolve({
+					clicked: false,
+					failed: false,
+					loading: false,
+					rows: label === "View all" ? (options.categoryRows ?? []) : [],
+					visible: false,
+				});
+			}
 			if (fnSource.includes("classifyAdsDialogInPage")) {
 				if (options.dialogClassifications) {
 					const index = Math.min(
@@ -310,7 +426,7 @@ function makeFakePage(options: {
 					uiOnlyPatternSource?: string;
 				};
 				if (args.emptyMessage === "No categories") {
-					const items = options.categoryRows?.map((row) => row.name) ?? [];
+					const items = options.categoryRows?.map((row) => [row.name, row.description].filter(Boolean).join(" ")) ?? [];
 					if (items.length > 0) {
 						return Promise.resolve({
 							complete: options.categoryComplete === true,
@@ -390,7 +506,12 @@ function makeFakePage(options: {
 				return Promise.resolve(options.categoriesAvailable === true);
 			}
 			if (fnSource.includes("Categories used to reach you")) {
+				activeAdsSurface = "categories";
 				return Promise.resolve(options.categoriesAvailable === true);
+			}
+			if (fnSource.includes("Advertisers using your activity")) {
+				activeAdsSurface = "advertisers";
+				return Promise.resolve(true);
 			}
 			if (fnSource.includes("View all")) {
 				return Promise.resolve(undefined);
@@ -431,7 +552,6 @@ const WEB_INFO_USER = {
 	full_name: "Test User",
 	id: "u1",
 	is_private: false,
-	is_verified: false,
 	username: "testuser",
 };
 
@@ -452,6 +572,8 @@ function makeCtx(args: {
 	};
 	fetchScript: Record<string, ScriptedFetch[]>;
 	harness: ReturnType<typeof makeRecordingEmit>;
+	profilePageUser?: unknown;
+	profileEnvelope?: Record<string, unknown>;
 	postsScript?: ScriptedPostsPage[];
 	requestedStreams: string[];
 	webInfoUser?: unknown;
@@ -459,7 +581,9 @@ function makeCtx(args: {
 	const { calls, page } = makeFakePage({
 		...args.pageOptions,
 		fetchScript: args.fetchScript,
+		...(args.profileEnvelope === undefined ? {} : { profileEnvelope: args.profileEnvelope }),
 		...(args.postsScript ? { postsScript: args.postsScript } : {}),
+		...(args.profilePageUser ? { profilePageUser: args.profilePageUser } : {}),
 		webInfoUser:
 			args.webInfoUser === undefined ? WEB_INFO_USER : args.webInfoUser,
 	});
@@ -493,6 +617,7 @@ function makeCtx(args: {
 const EMPTY_POSTS: ScriptedPostsPage = {
 	json: {
 		data: {
+			user: {id: "u1", username: "testuser"},
 			xdt_api__v1__feed__user_timeline_graphql_connection: {
 				edges: [],
 				page_info: { has_next_page: false },
@@ -509,6 +634,14 @@ test("collectAllStreams: unrequested streams emit nothing", async () => {
 	const { calls, ctx } = makeCtx({
 		fetchScript: {},
 		harness,
+		profilePageUser: {
+			follower_count: 12,
+			following_count: 8,
+			id: "u1",
+			is_verified: false,
+			media_count: 3,
+			username: "testuser",
+		},
 		requestedStreams: ["profile"],
 	});
 
@@ -517,6 +650,7 @@ test("collectAllStreams: unrequested streams emit nothing", async () => {
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -548,18 +682,27 @@ test("collectAllStreams: requesting posts+post_likes but not profile emits no pr
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.ok(!harness.emitted.some((e) => e.stream === "profile"));
 });
 
-// ─── Invariant 2: profile emits the web_info-derived record ────────────
+// ─── Invariant 2: profile emits only with observed profile-page evidence ─
 
-test("collectAllStreams: profile stream emits one record from web_info", async () => {
+test("collectAllStreams: profile stream emits only with complete profile-page enrichment", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
 		harness,
+		profilePageUser: {
+			follower_count: 12,
+			following_count: 8,
+			id: "u1",
+			is_verified: false,
+			media_count: 3,
+			username: "testuser",
+		},
 		requestedStreams: ["profile"],
 	});
 
@@ -568,15 +711,45 @@ test("collectAllStreams: profile stream emits one record from web_info", async (
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.emitted[0]?.data.id, "u1");
 	assert.equal(harness.emitted[0]?.data.username, "testuser");
+	assert.equal(harness.emitted[0]?.data.follower_count, 12);
+	assert.equal(harness.emitted[0]?.data.is_verified, false);
 	assert.equal(harness.skipped.length, 0);
 });
 
-test("collectAllStreams: no logged-in user in web_info is a terminal error", async () => {
+test("collectAllStreams: missing profile enrichment emits a partial record with a stream gap", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		profilePageUser: {
+			follower_count: 12,
+			id: "u1",
+			is_verified: false,
+			username: "testuser",
+		},
+		requestedStreams: ["profile"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted[0]?.data.follower_count, 12);
+	assert.deepEqual(unprovenInventories(harness), ["profile"]);
+});
+
+test("collectAllStreams: no authenticated web_info reports a profile gap", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -585,7 +758,15 @@ test("collectAllStreams: no logged-in user in web_info is a terminal error", asy
 		webInfoUser: null,
 	});
 
-	await assert.rejects(collectAllStreams(ctx), /meta_profile_unavailable/);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+	assert.deepEqual(streamFailures(harness), ["profile"]);
+	assert.equal(harness.emitted.length, 0);
 });
 
 // ─── Invariant 3: posts + post_likes split from one paginated walk ──────
@@ -599,6 +780,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 			{
 				json: {
 					data: {
+						user: {id: "u1", username: "testuser"},
 						xdt_api__v1__feed__user_timeline_graphql_connection: {
 							edges: [
 								{
@@ -638,6 +820,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const posts = harness.emitted.filter((e) => e.stream === "posts");
@@ -682,14 +865,18 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 	assert.equal(unkeyedLike.user_id, "");
 	assert.equal(unkeyedLike.id, "");
 	assert.equal(unkeyedLike.pk, "");
-	assert.equal(
-		harness.protocolMessages.some((m) => m.type === "STATE"),
-		false,
-		"posts is incremental: false / full_inventory — it must not claim a cursor via STATE",
+	// The walk ended on the source's own end signal, but
+	// one liker has no source identity: posts completes, post_likes does not.
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((m) => m.type === "STATE")
+			.map((m) => (m as { stream: string }).stream),
+		["posts"],
 	);
+	assert.deepEqual(unprovenInventories(harness), ["post_likes"]);
 });
 
-test("collectAllStreams: posts never emits STATE, requested or not", async () => {
+test("collectAllStreams: an unrequested posts stream never emits STATE", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -703,6 +890,7 @@ test("collectAllStreams: posts never emits STATE, requested or not", async () =>
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(
@@ -719,6 +907,14 @@ test("collectAllStreams: a post_likes-only request does not emit an unrequested 
 		fetchScript: {},
 		harness,
 		postsScript: [EMPTY_POSTS],
+		profilePageUser: {
+			follower_count: 12,
+			following_count: 8,
+			id: "u1",
+			is_verified: false,
+			media_count: 0,
+			username: "testuser",
+		},
 		requestedStreams: ["post_likes"],
 	});
 
@@ -727,6 +923,7 @@ test("collectAllStreams: a post_likes-only request does not emit an unrequested 
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -773,6 +970,7 @@ test("collectAllStreams: posts pagination walks a scroll-triggered second page",
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const posts = harness.emitted.filter((e) => e.stream === "posts");
@@ -797,6 +995,7 @@ test("collectAllStreams: posts request never observed emits a stream skip, not e
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -817,10 +1016,19 @@ test("collectAllStreams: a terminal empty posts fixture completes with zero reco
 			"utf8",
 		),
 	);
+	json.data.user = {id: "u1", username: "testuser"};
 	const { ctx } = makeCtx({
 		fetchScript: {},
 		harness,
 		postsScript: [{ json, status: 200 }],
+		profilePageUser: {
+			follower_count: 12,
+			following_count: 8,
+			id: "u1",
+			is_verified: false,
+			media_count: 0,
+			username: "testuser",
+		},
 		requestedStreams: ["posts", "post_likes"],
 	});
 
@@ -829,6 +1037,7 @@ test("collectAllStreams: a terminal empty posts fixture completes with zero reco
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(harness.emitted, []);
@@ -841,36 +1050,48 @@ test("collectAllStreams: a terminal empty posts fixture completes with zero reco
 	);
 });
 
-test("collectAllStreams: populated posts fixture emits records without empty state", async () => {
-	const harness = makeRecordingEmit(validateRecord);
-	const json = JSON.parse(
+test("collectAllStreams: populated posts fixture emits records and completes only on the source's end signal", async () => {
+	const fixture = JSON.parse(
 		await readFile(
 			new URL("./fixtures/posts.loaded.json", import.meta.url),
 			"utf8",
 		),
 	);
-	const { ctx } = makeCtx({
-		fetchScript: {},
-		harness,
-		postsScript: [{ json, status: 200 }],
-		requestedStreams: ["posts"],
-	});
+	fixture.data.user = {id: "u1", username: "testuser"};
+	const withoutEnd = structuredClone(fixture);
+	delete withoutEnd.data.xdt_api__v1__feed__user_timeline_graphql_connection
+		.page_info;
+	for (const { json, complete } of [
+		{ json: fixture, complete: true },
+		{ json: withoutEnd, complete: false },
+	]) {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx } = makeCtx({
+			fetchScript: {},
+			harness,
+			postsScript: [{ json, status: 200 }],
+			requestedStreams: ["posts"],
+		});
 
-	await collectAllStreams(
-		ctx,
-		NO_DELAY,
-		TEST_POSTS_CLOCK,
-		makeVirtualAdsClock(),
-	);
+		await collectAllStreams(
+			ctx,
+			NO_DELAY,
+			TEST_POSTS_CLOCK,
+			makeVirtualAdsClock(),
+			TEST_PROFILE_CLOCK,
+		);
 
-	assert.equal(
-		harness.emitted.filter((record) => record.stream === "posts").length,
-		1,
-	);
-	assert.equal(
-		harness.protocolMessages.some((message) => message.type === "STATE"),
-		false,
-	);
+		assert.equal(
+			harness.emitted.filter((record) => record.stream === "posts").length,
+			1,
+			"the post row upserts with or without an end signal",
+		);
+		assert.equal(
+			harness.protocolMessages.some((message) => message.type === "STATE"),
+			complete,
+		);
+		assert.deepEqual(unprovenInventories(harness), complete ? [] : ["posts"]);
+	}
 });
 
 test("collectAllStreams: failed posts fixture cannot complete as empty", async () => {
@@ -893,6 +1114,7 @@ test("collectAllStreams: failed posts fixture cannot complete as empty", async (
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.ok(
 		harness.protocolMessages.some(
@@ -927,6 +1149,7 @@ test("collectAllStreams: status fail with empty timeline edges cannot complete",
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -959,6 +1182,7 @@ test("collectAllStreams: an HTTP error carrying empty edges is skipped", async (
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -996,6 +1220,7 @@ test("collectAllStreams: empty responses from unrelated operations or pages are 
 				NO_DELAY,
 				TEST_POSTS_CLOCK,
 				makeVirtualAdsClock(),
+				TEST_PROFILE_CLOCK,
 			);
 			assert.equal(
 				harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -1038,6 +1263,7 @@ test("collectAllStreams: an empty nonterminal timeline does not complete posts",
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -1050,37 +1276,44 @@ test("collectAllStreams: an empty nonterminal timeline does not complete posts",
 	);
 });
 
-test("collectAllStreams: a login challenge cannot turn an empty response into completion", async () => {
-	const harness = makeRecordingEmit(validateRecord);
-	const json = JSON.parse(
+test("collectAllStreams: a login challenge vetoes completion even with same-owner exact-zero evidence", async () => {
+	const ended = JSON.parse(
 		await readFile(
 			new URL("./fixtures/posts.empty.json", import.meta.url),
 			"utf8",
 		),
 	);
-	const { ctx } = makeCtx({
-		fetchScript: {},
-		harness,
-		pageOptions: { challengePage: true },
-		postsScript: [{ json, status: 200 }],
-		requestedStreams: ["posts"],
-	});
+	ended.data.user = {id: "u1", username: "testuser"};
+	const unended = structuredClone(ended);
+	delete unended.data.xdt_api__v1__feed__user_timeline_graphql_connection
+		.page_info;
+	for (const { json, complete } of [
+		{ json: ended, complete: false },
+		{ json: unended, complete: false },
+	]) {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx } = makeCtx({
+			fetchScript: {},
+			harness,
+			pageOptions: { challengePage: true },
+			profilePageUser: {id: "u1", username: "testuser", media_count: 0},
+			postsScript: [{ json, status: 200 }],
+			requestedStreams: ["posts"],
+		});
 
-	await collectAllStreams(
-		ctx,
-		NO_DELAY,
-		TEST_POSTS_CLOCK,
-		makeVirtualAdsClock(),
-	);
-	assert.equal(
-		harness.protocolMessages.some((message) => message.type === "STATE"),
-		false,
-	);
-	assert.ok(
-		harness.protocolMessages.some(
-			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
-		),
-	);
+		await collectAllStreams(
+			ctx,
+			NO_DELAY,
+			TEST_POSTS_CLOCK,
+			makeVirtualAdsClock(),
+			TEST_PROFILE_CLOCK,
+		);
+		assert.equal(
+			harness.protocolMessages.some((message) => message.type === "STATE"),
+			complete,
+		);
+		assert.deepEqual(unprovenInventories(harness), complete ? [] : ["posts"]);
+	}
 });
 
 test("scrapeAdvertisers distinguishes explicit empty, populated, and failed fixtures", async () => {
@@ -1228,6 +1461,8 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						owner: {id: "u1", username: "testuser"},
+						has_more: true,
 						next_max_id: "page2",
 						users: [{ pk: "f1", username: "followed1" }],
 					},
@@ -1235,6 +1470,8 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 				},
 				{
 					json: {
+						owner: {id: "u1", username: "testuser"},
+						has_more: false,
 						next_max_id: null,
 						users: [{ pk: "f2", username: "followed2" }],
 					},
@@ -1251,6 +1488,7 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const following = harness.emitted.filter((e) => e.stream === "following");
@@ -1265,15 +1503,56 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 		),
 		false,
 	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "following",
+		),
+		true,
+	);
 });
 
-test("collectAllStreams: following hitting the page ceiling reports a stream failure instead of silently truncating", async () => {
+test("collectAllStreams: following accepts the record builder's id fallback when id is empty", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {
+			"/api/v1/friendships/u1/following/": [
+				{
+					json: {
+						has_more: false,
+						next_max_id: null,
+						users: [{ id: "", pk: "fallback-id", username: "followed1" }],
+					},
+					status: 200,
+				},
+			],
+		},
+		harness,
+		requestedStreams: ["following"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+
+	assert.deepEqual(
+		harness.emitted.map((record) => record.data.id),
+		["fallback-id"],
+	);
+	assert.deepEqual(streamFailures(harness), []);
+});
+
+test("collectAllStreams: following hitting the page ceiling keeps its rows and is not proven complete instead of silently truncating", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const fetchScript: Record<string, ScriptedFetch[]> = {};
 	// Every page reports a next cursor forever — forces the FOLLOWING_MAX_PAGES ceiling.
 	fetchScript["/api/v1/friendships/u1/following/"] = [
 		{
 			json: {
+				has_more: true,
 				next_max_id: "always-more",
 				users: [{ pk: "f1", username: "followed1" }],
 			},
@@ -1291,12 +1570,14 @@ test("collectAllStreams: following hitting the page ceiling reports a stream fai
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const skip = harness.protocolMessages.find(
-		(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+		(m) =>
+			m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
 	);
-	assert.ok(skip, "expected a stream_collection_failed SKIP_RESULT");
+	assert.ok(skip, "expected an inventory_not_proven_complete SKIP_RESULT");
 	assert.equal((skip as { stream: string }).stream, "following");
 	assert.ok(
 		harness.emitted.some((e) => e.stream === "following"),
@@ -1315,7 +1596,10 @@ const timelinePage = (
 		data: {
 			xdt_api__v1__feed__user_timeline_graphql_connection: {
 				edges: [{ node: { id, taken_at: 100 } }],
-				page_info: { has_next_page: hasNextPage },
+				page_info: {
+					...(hasNextPage ? { end_cursor: `cursor-${id}` } : {}),
+					has_next_page: hasNextPage,
+				},
 			},
 		},
 	},
@@ -1341,12 +1625,24 @@ const recordIndex = (
 		(m) => m.type === "RECORD" && m.stream === stream,
 	);
 
-const failureIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
+/** Streams whose inventory was not proven complete: rows upsert, no STATE. */
+const unprovenInventories = (
+	harness: ReturnType<typeof makeRecordingEmit>,
+): string[] =>
+	harness.protocolMessages
+		.filter(
+			(m) =>
+				m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
+		)
+		.map((m) => String((m as { stream: string }).stream))
+		.sort();
+
+const unprovenIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
 	harness.protocolMessages.findIndex(
-		(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+		(m) => m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
 	);
 
-test("collectAllStreams: a posts timeout after a valid page emits that page, then reports the failure", async () => {
+test("collectAllStreams: a posts timeout after a valid page emits that page, then skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1360,15 +1656,16 @@ test("collectAllStreams: a posts timeout after a valid page emits that page, the
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1"],
 	);
-	assert.deepEqual(streamFailures(harness), ["post_likes", "posts"]);
+	assert.deepEqual(unprovenInventories(harness), ["post_likes", "posts"]);
 	assert.ok(
-		recordIndex(harness, "posts") < failureIndex(harness),
+		recordIndex(harness, "posts") < unprovenIndex(harness),
 		"records are emitted before the failure is reported",
 	);
 	assert.equal(
@@ -1378,7 +1675,7 @@ test("collectAllStreams: a posts timeout after a valid page emits that page, the
 	);
 });
 
-test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then reports the failure", async () => {
+test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1396,21 +1693,22 @@ test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, 
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1", "p2"],
 	);
-	assert.deepEqual(streamFailures(harness), ["posts"]);
-	assert.ok(recordIndex(harness, "posts") < failureIndex(harness));
+	assert.deepEqual(unprovenInventories(harness), ["posts"]);
+	assert.ok(recordIndex(harness, "posts") < unprovenIndex(harness));
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
 	);
 });
 
-test("collectAllStreams: a browser error while advancing posts keeps the earlier page", async () => {
+test("collectAllStreams: a browser error while advancing posts keeps the earlier page and is not proven complete", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1425,17 +1723,18 @@ test("collectAllStreams: a browser error while advancing posts keeps the earlier
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1"],
 	);
-	assert.deepEqual(streamFailures(harness), ["post_likes", "posts"]);
-	assert.ok(recordIndex(harness, "posts") < failureIndex(harness));
+	assert.deepEqual(unprovenInventories(harness), ["post_likes", "posts"]);
+	assert.ok(recordIndex(harness, "posts") < unprovenIndex(harness));
 });
 
-test("collectAllStreams: a first-page posts failure emits nothing and reports the failure", async () => {
+test("collectAllStreams: a first-page posts failure emits nothing and skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1449,19 +1748,21 @@ test("collectAllStreams: a first-page posts failure emits nothing and reports th
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(harness.emitted.filter((e) => e.stream === "posts").length, 0);
-	assert.deepEqual(streamFailures(harness), ["posts"]);
+	assert.deepEqual(unprovenInventories(harness), ["posts"]);
 });
 
-test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then reports the failure", async () => {
+test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						has_more: true,
 						next_max_id: "page2",
 						users: [{ pk: "f1", username: "followed1" }],
 					},
@@ -1479,6 +1780,7 @@ test("collectAllStreams: an HTTP 503 on a later following page emits earlier pag
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -1487,21 +1789,22 @@ test("collectAllStreams: an HTTP 503 on a later following page emits earlier pag
 			.map((e) => e.data.username),
 		["followed1"],
 	);
-	assert.deepEqual(streamFailures(harness), ["following"]);
-	assert.ok(recordIndex(harness, "following") < failureIndex(harness));
+	assert.deepEqual(unprovenInventories(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < unprovenIndex(harness));
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
 	);
 });
 
-test("collectAllStreams: a browser error on a later following page keeps earlier pages", async () => {
+test("collectAllStreams: a browser error on a later following page keeps earlier pages and is not proven complete", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						has_more: true,
 						next_max_id: "page2",
 						users: [{ pk: "f1", username: "followed1" }],
 					},
@@ -1520,6 +1823,7 @@ test("collectAllStreams: a browser error on a later following page keeps earlier
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -1528,11 +1832,11 @@ test("collectAllStreams: a browser error on a later following page keeps earlier
 			.map((e) => e.data.username),
 		["followed1"],
 	);
-	assert.deepEqual(streamFailures(harness), ["following"]);
-	assert.ok(recordIndex(harness, "following") < failureIndex(harness));
+	assert.deepEqual(unprovenInventories(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < unprovenIndex(harness));
 });
 
-test("collectAllStreams: a first-page following failure emits nothing and reports the failure", async () => {
+test("collectAllStreams: a first-page following failure emits nothing and skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1549,29 +1853,33 @@ test("collectAllStreams: a first-page following failure emits nothing and report
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(
 		harness.emitted.filter((e) => e.stream === "following").length,
 		0,
 	);
-	assert.deepEqual(streamFailures(harness), ["following"]);
+	assert.deepEqual(unprovenInventories(harness), ["following"]);
 });
 
 // ─── Invariant 5: ads merges three DOM-scraped lists with a kind discriminator ──
 
-test("collectAllStreams: ads stream merges advertisers/topics/categories with kind discriminator", async () => {
+test("collectAllStreams: ads completes independently when profile web_info is unavailable", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const { page, waitConditions } = makeFakePage({
+	const { calls, page, waitConditions } = makeFakePage({
 		categoriesAvailable: true,
 		categoryComplete: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
-		dialogComplete: [true, true],
+		dialogComplete: [true, true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
-		webInfoUser: WEB_INFO_USER,
+		webInfoUser: null,
 	});
-	const requested = new Map([["ads", { name: "ads" }]]);
+	const requested = new Map([
+		["profile", { name: "profile" }],
+		["ads", { name: "ads" }],
+	]);
 	const harnessCtx: BrowserCollectContext = {
 		assist: async (): Promise<never> => {
 			throw new Error("not implemented");
@@ -1601,6 +1909,7 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const ads = harness.emitted.filter((e) => e.stream === "ads");
@@ -1617,30 +1926,12 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 			condition.includes("Categories used to reach you"),
 		),
 	);
-	assert.equal(harness.skipped.length, 0);
-	assert.deepEqual(
-		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
-		{
-			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			reference_only: true,
-			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			state_stream: "ads",
-			stream: "ads",
-			type: "DETAIL_COVERAGE",
-		},
-	);
-	assert.deepEqual(
-		buildRunSummary(harness.protocolMessages, {
-			connector: "meta",
-			finished_at: EMITTED_AT,
-			started_at: EMITTED_AT,
-			tool_version: "test",
-		}).done.coverage,
-		{ considered: 3, covered: 3, streams: ["ads"] },
-	);
+	assert.deepEqual(streamFailures(harness), ["profile"]);
+	assert.equal(calls.includes("/accounts/web_info/"), true);
+	assertAdsUnproven(harness);
 });
 
-test("collectAllStreams: ads all reached with empty lists emits complete surface coverage", async () => {
+test("collectAllStreams: ads all reached with empty lists stays unproven without a source total", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -1681,40 +1972,46 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(harness.emitted.length, 0);
-	assert.deepEqual(
-		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
-		{
-			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			reference_only: true,
-			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			state_stream: "ads",
-			stream: "ads",
-			type: "DETAIL_COVERAGE",
-		},
-	);
-	assert.deepEqual(
-		buildRunSummary(harness.protocolMessages, {
-			connector: "meta",
-			finished_at: EMITTED_AT,
-			started_at: EMITTED_AT,
-			tool_version: "test",
-		}).done.coverage,
-		{ considered: 3, covered: 3, streams: ["ads"] },
-	);
-	assert.equal(
-		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
-		false,
-	);
+	// Every section read as empty, but the dialogs state no exact total and no
+	// end signal, so the empty list is not proven.
+	assertAdsUnproven(harness);
 });
 
-test("collectAllStreams: nonempty ads without source total emits records but fails completion", async () => {
+test("collectAllStreams: positive advertiser source count vetoes stale empty copy", async () => {
+	const harness = await collectAdsInChromium({
+		ads: htmlPage(
+			advertisersControl(
+				'<div role="dialog"><div role="list" aria-setsize="2"></div><p>No advertisers</p></div>',
+			),
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list" aria-setsize="0"></div><p>No categories</p></div>',
+				),
+			),
+		),
+		adTopics: htmlPage(
+			'<div role="dialog"><div role="list" aria-setsize="0"></div><p>No ad topics</p></div>',
+		),
+	});
+
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"ads layout never earns surface coverage",
+	);
+	assertAdsStreamFailure(harness, "advertisers");
+});
+
+test("collectAllStreams: nonempty ads without source total emits records but is not proven complete", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
+		dialogComplete: [true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -1749,6 +2046,7 @@ test("collectAllStreams: nonempty ads without source total emits records but fai
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(harness.emitted.map((record) => record.data.kind).sort(), [
@@ -1756,20 +2054,8 @@ test("collectAllStreams: nonempty ads without source total emits records but fai
 		"ad_topic",
 		"advertiser",
 	]);
-	const skip = harness.protocolMessages.find(
-		(message) => message.type === "SKIP_RESULT" && message.stream === "ads",
-	);
-	assert.ok(
-		skip?.type === "SKIP_RESULT",
-		"nonempty ads without source total must fail the stream",
-	);
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		harness.protocolMessages.some(
-			(message) => message.type === "STATE" && message.stream === "ads",
-		),
-		false,
-	);
+	// The rows upsert; without a source total the list is not proven.
+	assertAdsUnproven(harness);
 });
 
 test("scrapeAdvertisers waits for items that arrive after the list shell", async () => {
@@ -1911,11 +2197,11 @@ test("scrapeTargetingCategories ignores hidden stale dialogs before the active c
 	}
 });
 
-test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_RESULT", async () => {
+test("collectAllStreams: ads missing a surface keeps its rows and skips only the ads stream", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page, waitRejections } = makeFakePage({
 		categoriesAvailable: false,
-		dialogComplete: [true, true],
+		dialogComplete: [true, true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -1950,52 +2236,82 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
+	// An unreachable optional section never fails the run: the ads rows that
+	// were read still upsert and only the ads stream is skipped, retryably.
 	assert.deepEqual(
-		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
-		{
-			hydrated_keys: ["advertisers", "ad_topics"],
-			reference_only: true,
-			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			state_stream: "ads",
-			stream: "ads",
-			type: "DETAIL_COVERAGE",
-		},
+		harness.emitted.map((record) => record.data.kind).sort(),
+		["ad_topic", "advertiser"],
 	);
-	assert.deepEqual(
-		buildRunSummary(harness.protocolMessages, {
-			connector: "meta",
-			finished_at: EMITTED_AT,
-			started_at: EMITTED_AT,
-			tool_version: "test",
-		}).done.coverage,
-		{ considered: 3, covered: 2, streams: ["ads"] },
-	);
-	const skip = harness.protocolMessages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.stream === "ads",
-	);
-	assert.ok(skip, "partial ads scrape must emit a stream-level SKIP_RESULT");
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		skip.message,
-		"Instagram ads scan could not reach targeting_categories",
-	);
-	assert.deepEqual(skip.recovery_hint, {
-		action: "retry_by_runtime",
-		retryable: true,
-	});
-	assert.equal(
-		harness.protocolMessages.some(
-			(message) => message.type === "STATE" && message.stream === "ads",
-		),
-		false,
-	);
+	assertAdsStreamFailure(harness, "targeting_categories");
+	assert.deepEqual(streamFailures(harness), []);
 	assert.ok(
 		waitRejections.some((condition) => condition.includes("Manage info")),
 		"an unavailable Manage info tab must reject its Playwright-style wait",
 	);
+});
+
+test("collectAllStreams: an unreachable ads section does not fail the run or the other streams", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {
+			"/api/v1/friendships/u1/following/": [
+				{
+					json: {
+						owner: {id: "u1", username: "testuser"},
+						has_more: false,
+						next_max_id: null,
+						users: [{ pk: "f1", username: "followed1" }],
+					},
+					status: 200,
+				},
+			],
+		},
+		harness,
+		pageOptions: {
+			categoriesAvailable: false,
+			dialogComplete: [true, true],
+			dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
+		},
+		requestedStreams: ["following", "ads"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+
+	// The run reports no stream failure, so the runtime ends it DONE succeeded.
+	assert.deepEqual(streamFailures(harness), []);
+	// Ads rows still upsert; the unreachable section becomes a retryable skip
+	// for the ads stream only.
+	assert.deepEqual(
+		harness.emitted
+			.filter((record) => record.stream === "ads")
+			.map((record) => record.data.kind)
+			.sort(),
+		["ad_topic", "advertiser"],
+	);
+	assertAdsStreamFailure(harness, "targeting_categories");
+	// The other stream completes from its own end signal and keeps its STATE.
+	assert.deepEqual(
+		harness.emitted
+			.filter((record) => record.stream === "following")
+			.map((record) => record.data.username),
+		["followed1"],
+	);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((m) => m.type === "STATE")
+			.map((m) => (m as { stream: string }).stream),
+		["following"],
+	);
+	assert.deepEqual(unprovenInventories(harness), ["ads"]);
 });
 
 test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", async () => {
@@ -2039,6 +2355,7 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const skip = harness.protocolMessages.find(
@@ -2049,11 +2366,9 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		skip,
 		"a dialog without its list must not count as a reached surface",
 	);
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		skip.message,
-		"Instagram ads scan could not reach advertisers, ad_topics",
-	);
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.ok(skip.message?.includes("advertisers ("));
+	assert.ok(skip.message?.includes("ad_topics ("));
 });
 
 test("collectAllStreams: successful category clicks without a destination list emit SKIP_RESULT", async () => {
@@ -2096,6 +2411,7 @@ test("collectAllStreams: successful category clicks without a destination list e
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const skip = harness.protocolMessages.find(
@@ -2106,11 +2422,8 @@ test("collectAllStreams: successful category clicks without a destination list e
 		skip,
 		"clicking through without a destination list must not count as reached",
 	);
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		skip.message,
-		"Instagram ads scan could not reach targeting_categories",
-	);
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.ok(skip.message?.includes("targeting_categories ("));
 });
 
 test("collectAllStreams: ads navigation failure reports only a bounded surface step", async () => {
@@ -2134,6 +2447,7 @@ test("collectAllStreams: ads navigation failure reports only a bounded surface s
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const skip = harness.protocolMessages.find(
@@ -2141,8 +2455,8 @@ test("collectAllStreams: ads navigation failure reports only a bounded surface s
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
 	assert.ok(skip);
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(skip.message, "Instagram ads scan could not reach ad_topics");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.ok(skip.message?.includes("ad_topics ("));
 	assert.deepEqual(
 		harness.emitted.map((record) => record.data.kind),
 		["advertiser", "ad_category"],
@@ -2192,11 +2506,14 @@ const advertisersControl = (dialogHtml: string): string => `
 	</script>`;
 
 /** Manage info tab and categories link that run `clickScript` on click. */
-const categoriesControl = (clickScript: string): string => `
+const categoriesControl = (
+	clickScript: string,
+	entry: "button" | "link" = "link",
+): string => `
 	<div role="tab">Manage info</div>
-	<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+	<div role="tabpanel">${entry === "button" ? "<button>Categories used to reach you</button>" : "<div role=\"link\">Categories used to reach you</div>"}</div>
 	<script>
-		document.querySelector('[role="link"]').addEventListener('click', () => {
+		document.querySelector('${entry === "button" ? "[role=tabpanel] button" : "[role=link]"}').addEventListener('click', () => {
 			${clickScript}
 		});
 	</script>`;
@@ -2213,6 +2530,7 @@ const INSTAGRAM_WEB_INFO_HTML = `<html><body><script type="application/json" dat
 async function collectAdsInChromium(pages: {
 	ads: string;
 	adTopics: string;
+	observePath?: (path: string, cookie: string) => void;
 }): Promise<ReturnType<typeof makeRecordingEmit>> {
 	const harness = makeRecordingEmit(validateRecord);
 	const browser = await chromium.launch({ headless: true });
@@ -2229,8 +2547,12 @@ async function collectAdsInChromium(pages: {
 				status: 200,
 			}),
 		);
-		await page.route(ACCOUNTS_CENTER_ROUTE, (route) =>
-			route.fulfill({
+		await page.route(ACCOUNTS_CENTER_ROUTE, (route) => {
+			pages.observePath?.(
+				new URL(route.request().url()).pathname,
+				route.request().headers().cookie ?? "",
+			);
+			return route.fulfill({
 				body: new URL(route.request().url()).pathname.startsWith(
 					"/ads/ad_topics/",
 				)
@@ -2238,8 +2560,8 @@ async function collectAdsInChromium(pages: {
 					: pages.ads,
 				contentType: "text/html",
 				status: 200,
-			}),
-		);
+			});
+		});
 		const ctx: BrowserCollectContext = {
 			assist: async (): Promise<never> => {
 				throw new Error("not implemented");
@@ -2268,6 +2590,7 @@ async function collectAdsInChromium(pages: {
 			NO_DELAY,
 			TEST_POSTS_CLOCK,
 			makeVirtualAdsClock(),
+			TEST_PROFILE_CLOCK,
 		);
 		return harness;
 	} finally {
@@ -2275,26 +2598,62 @@ async function collectAdsInChromium(pages: {
 	}
 }
 
+test("collectAllStreams: opens targeting categories before advertiser and topic pagination", async () => {
+	const requests: Array<{ cookie: string; path: string }> = [];
+	const ads = htmlPage(
+		`<button type="button" aria-label="Advertisers you saw ads from">Advertisers</button>
+		<script>document.querySelector('button').addEventListener('click', () => {
+			document.cookie = 'advertiser=1; path=/';
+			document.body.insertAdjacentHTML('beforeend', '<section role="dialog"><div role="list" aria-setsize="0"></div><p>No advertisers</p></section>');
+		});</script>`,
+		categoriesControl(
+			`document.cookie = 'targeting=1; path=/'; document.body.insertAdjacentHTML('beforeend', '<section role="dialog"><div role="list" aria-setsize="1"><div role="listitem" aria-posinset="1"><span>Sample Category</span><button>Remove</button></div></div></section>');`,
+			"button",
+		),
+	);
+	const harness = await collectAdsInChromium({
+		ads,
+		adTopics: htmlPage(
+			'<section role="dialog"><div role="list"></div><p>No ad topics</p></section>',
+		),
+		observePath: (path, cookie) => requests.push({ path, cookie }),
+	});
+
+	assert.ok(
+		requests.some(
+			({ cookie, path }) => path === "/ads/" && cookie.includes("targeting=1"),
+		) &&
+			requests.some(
+				({ cookie, path }) =>
+					path === "/ads/ad_topics/" && cookie.includes("targeting=1"),
+			),
+		`targeting categories must be clicked before advertiser pagination; visited ${JSON.stringify(requests.map(({ path, cookie }) => ({ path, targetingSeen: cookie.includes("targeting=1") })))}`,
+	);
+	assert.equal(
+		harness.emitted.filter((record) => record.data.kind === "ad_category").length,
+		1,
+	);
+});
+
 function adsCoverage(
 	harness: ReturnType<typeof makeRecordingEmit>,
 ): EmittedMessage | undefined {
-	return harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE");
+	return harness.protocolMessages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "ads",
+	);
 }
 
-function assertAdsStreamFailure(
+/** Ads rows still upsert; an unproven ads scan becomes a retryable skip for
+ * that stream only, never coverage or STATE. */
+function assertAdsUnproven(
 	harness: ReturnType<typeof makeRecordingEmit>,
-	missingSurfaces: string,
-): void {
+): Extract<EmittedMessage, { type: "SKIP_RESULT" }> {
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
-	assert.ok(skip, "an unreached ads surface must fail the ads stream");
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		skip.message,
-		`Instagram ads scan could not reach ${missingSurfaces}`,
-	);
+	assert.ok(skip, "an unproven ads scan must skip the ads stream");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
 	assert.deepEqual(skip.recovery_hint, {
 		action: "retry_by_runtime",
 		retryable: true,
@@ -2305,6 +2664,21 @@ function assertAdsStreamFailure(
 		),
 		false,
 	);
+	assert.equal(adsCoverage(harness), undefined, "layout never earns coverage");
+	return skip;
+}
+
+function assertAdsStreamFailure(
+	harness: ReturnType<typeof makeRecordingEmit>,
+	missingSurfaces: string,
+): void {
+	const skip = assertAdsUnproven(harness);
+	for (const surface of missingSurfaces.split(", ")) {
+		assert.ok(
+			skip.message?.includes(`${surface} (`),
+			`the skip names the unreached ${surface} section`,
+		);
+	}
 }
 
 const ADVERTISERS_UNAVAILABLE = {
@@ -2319,6 +2693,14 @@ const AD_TOPICS_UNAVAILABLE = {
 	step: "destination_list_not_found",
 	surface: "ad_topics",
 } as const;
+// A row read before the dialog failed stays emitted; completion is what fails.
+const CATEGORIES_UNAVAILABLE_AFTER_ROW = {
+	items: [{ description: null, name: "Category A" }],
+	reached: false,
+	step: "destination_list_not_found",
+	surface: "targeting_categories",
+} as const;
+
 const CATEGORIES_UNAVAILABLE = {
 	items: [],
 	reached: false,
@@ -2341,8 +2723,8 @@ test("classifyAdsDialogInPage returns closed states for reviewer fixtures", asyn
 	}> = [
 		{
 			body: '<div role="dialog"><h2>Ad topics</h2><div role="list" style="display:none"><div role="listitem">Travel</div></div></div>',
-			expected: { kind: "unavailable" },
-			name: "hidden list",
+			expected: { kind: "loading" },
+			name: "hidden list holding data",
 		},
 		{
 			body: '<div role="dialog"><div role="progressbar" aria-label="Loading ad topics"></div><div role="list" style="min-height:40px"></div></div>',
@@ -2355,9 +2737,14 @@ test("classifyAdsDialogInPage returns closed states for reviewer fixtures", asyn
 			name: "later populated list without a source total",
 		},
 		{
-			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div>',
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button>Special topic</button></div><div role="listitem"><button>See less</button></div></div></div>',
 			expected: { kind: "unavailable" },
-			name: "ui-only list without an empty message",
+			name: "control-only interface rows without an empty message",
+		},
+		{
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div>',
+			expected: { complete: false, items: ["Special topic", "See less"], kind: "data" },
+			name: "plain-text rows named like interface labels are data",
 		},
 		{
 			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><span style="display:none">Travel</span><button>See less</button></div></div></div>',
@@ -2375,9 +2762,9 @@ test("classifyAdsDialogInPage returns closed states for reviewer fixtures", asyn
 			name: "hidden listitem sibling keeps a visible topic loading",
 		},
 		{
-			body: '<div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div>',
+			body: '<div role="dialog"><div role="list"><div role="listitem"><button>Special topic</button></div><div role="listitem"><button>See less</button></div></div><div>No ad topics</div></div>',
 			expected: { kind: "verified_empty" },
-			name: "live ui-only structure with empty copy",
+			name: "control-only interface rows with empty copy",
 		},
 	];
 	const topicArgs = {
@@ -2406,7 +2793,7 @@ test("classifyAdsDialogInPage returns closed states for reviewer fixtures", asyn
 		await page.setContent(`
 			<html><body>
 				<div role="dialog"><h2>Ad topics</h2><div role="list">
-					<div role="listitem">Special topic</div>
+					<div role="listitem"><button>Special topic</button></div>
 					<div role="listitem"><span id="topic" style="display:none">Travel</span><button>See less</button></div>
 				</div></div>
 			</body></html>`);
@@ -2578,32 +2965,22 @@ test("scrapeAdTopics keeps hidden later list data unavailable", async () => {
 	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
 });
 
-test("scrapeAdTopics collects visible rows when another list row is hidden but cannot complete without a source total", async () => {
+test("scrapeAdTopics keeps visible rows unavailable while another list holds hidden data", async () => {
 	const result = await withAccountsCenterPage(
 		'<html><body><div role="dialog"><div role="list"><div role="listitem">Visible topic</div></div><div role="list" style="display:none"><div role="listitem">Hidden topic</div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
-	assert.deepEqual(result, {
-		items: ["Visible topic"],
-		reached: false,
-		step: "destination_list_not_found",
-		surface: "ad_topics",
-	});
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
 });
 
-test("scrapeAdTopics completes visible rows beside a hidden list when the source total matches", async () => {
+test("scrapeAdTopics keeps visible rows unavailable beside a hidden data list even when the source total matches", async () => {
 	const result = await withAccountsCenterPage(
 		'<html><body><div role="dialog"><div role="list" aria-setsize="1"><div role="listitem">Visible topic</div></div><div role="list" style="display:none"><div role="listitem">Hidden topic</div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
-	assert.deepEqual(result, {
-		items: ["Visible topic"],
-		reached: true,
-		step: null,
-		surface: "ad_topics",
-	});
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
 });
 
 test("scrapeAdTopics keeps a transient topic followed by hidden data unavailable", async () => {
@@ -2679,7 +3056,7 @@ test("scrapeAdTopics ignores hidden list rows and hidden empty marker", async ()
 test("scrapeAdTopics keeps settled UI-only rows without an empty marker unavailable", async () => {
 	const clock = makeVirtualAdsClock();
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div></body></html>',
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem"><button type="button">See less</button></div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, clock),
 	);
 
@@ -2687,9 +3064,23 @@ test("scrapeAdTopics keeps settled UI-only rows without an empty marker unavaila
 	assert.ok(clock.now() >= 2_500, "the UI-only rows settled before rejection");
 });
 
+test("scrapeAdTopics reads plain-text rows named like interface labels as data", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Special topic", "See less"],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "ad_topics",
+	});
+});
+
 test("scrapeAdTopics accepts UI-only rows with an empty marker as verified empty", async () => {
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div></body></html>',
+		'<html><body><div role="dialog"><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem"><button type="button">See less</button></div></div><div>No ad topics</div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
@@ -2703,7 +3094,7 @@ test("scrapeAdTopics accepts UI-only rows with an empty marker as verified empty
 
 test("scrapeAdTopics collects visible real rows alongside UI-only rows but cannot complete without a source total", async () => {
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">Travel</div><div role="listitem">See less</div></div></div></body></html>',
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem">Travel</div><div role="listitem"><button type="button">See less</button></div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
@@ -2717,7 +3108,7 @@ test("scrapeAdTopics collects visible real rows alongside UI-only rows but canno
 
 test("scrapeAdTopics completes real rows alongside UI-only rows when row ARIA positions match", async () => {
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem" aria-posinset="1" aria-setsize="1">Travel</div><div role="listitem">See less</div></div></div></body></html>',
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem" aria-posinset="1" aria-setsize="1">Travel</div><div role="listitem"><button type="button">See less</button></div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
@@ -2731,7 +3122,7 @@ test("scrapeAdTopics completes real rows alongside UI-only rows when row ARIA po
 
 test("scrapeAdTopics keeps unknown control rows unavailable", async () => {
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><button type="button">Manage topic preferences</button></div></div></div></body></html>',
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem"><button type="button">Manage topic preferences</button></div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
@@ -2750,7 +3141,7 @@ test("scrapeAdTopics ignores hidden text beside visible controls", async () => {
 const hiddenTopicRevealPage = (rowAttributes: string): string => `
 	<html><body>
 		<div role="dialog"><h2>Ad topics</h2><div role="list">
-			<div role="listitem">Special topic</div>
+			<div role="listitem"><button type="button">Special topic</button></div>
 			<div role="listitem"${rowAttributes}>
 				<span id="topic" style="display:none">Travel</span><button>See less</button>
 			</div>
@@ -2810,7 +3201,7 @@ test("scrapeAdTopics accepts a visible exact empty marker", async () => {
 
 // ─── scrapeTargetingCategories ───────────────────────────────────────────
 
-test("scrapeTargetingCategories keeps hidden View all without new rows unavailable", async () => {
+test("scrapeTargetingCategories keeps a self-hiding View all without new rows partial", async () => {
 	const result = await withAccountsCenterPage(
 		htmlPage(
 			'<button role="button">View all</button>',
@@ -2834,17 +3225,18 @@ test("scrapeTargetingCategories keeps hidden View all without new rows unavailab
 const expandedCategoriesPage = (
 	firstListAttributes: string,
 	laterListAttributes: string,
+	hiddenCategoryList = "",
 ): string =>
 	htmlPage(
 		categoriesControl(`
 			${insertDialog(`<div role="dialog"><div role="list"${firstListAttributes}><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>`)}
 			document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
 				event.currentTarget.style.display = 'none';
-				document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"${laterListAttributes}><div role="listitem"><span>Category B</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem" style="display:none"><span>Hidden Category</span><button role="button">Remove</button></div></div>');
+				document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"${laterListAttributes}><div role="listitem"><span>Category B</span><button role="button">Remove</button></div></div>${hiddenCategoryList}');
 			});`),
 	);
 
-test("scrapeTargetingCategories collects visible removable rows across all expanded dialog lists but cannot complete without a source total", async () => {
+test("scrapeTargetingCategories collects visible removable rows across all expanded dialog lists and completes once View all is exhausted", async () => {
 	const result = await withAccountsCenterPage(
 		expandedCategoriesPage("", ""),
 		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
@@ -2855,8 +3247,8 @@ test("scrapeTargetingCategories collects visible removable rows across all expan
 			{ description: null, name: "Category A" },
 			{ description: null, name: "Category B" },
 		],
-		reached: false,
-		step: "destination_list_not_found",
+		reached: true,
+		step: null,
 		surface: "targeting_categories",
 	});
 });
@@ -2878,6 +3270,40 @@ test("scrapeTargetingCategories completes expanded dialog lists when each source
 	});
 });
 
+test("scrapeTargetingCategories withholds completion when a hidden category row with data remains after View all", async () => {
+	const result = await withAccountsCenterPage(
+		expandedCategoriesPage("", "", '<div role="list"><div role="listitem" style="display:none"><span>Hidden Category</span><button role="button">Remove</button></div></div>'),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.equal(result.reached, false);
+	assert.equal(result.step, "destination_list_not_found");
+});
+
+test("scrapeTargetingCategories completes categories that carry a description", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(`
+				${insertDialog('<div role="dialog"><div role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+					event.currentTarget.style.display = 'none';
+					document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category B</span><span>Based on activity</span><button role="button">Remove</button></div></div>');
+				});`),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: "Based on activity", name: "Category A" },
+			{ description: "Based on activity", name: "Category B" },
+		],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
 const appendedAfterViewAllPage = (listAttributes: string): string =>
 	htmlPage(
 		categoriesControl(`
@@ -2890,7 +3316,7 @@ const appendedAfterViewAllPage = (listAttributes: string): string =>
 			});`),
 	);
 
-test("scrapeTargetingCategories waits for rows appended after View all hides", async () => {
+test("scrapeTargetingCategories waits for rows appended after View all hides, then completes without a source total", async () => {
 	const result = await withAccountsCenterPage(
 		appendedAfterViewAllPage(""),
 		(page) => scrapeTargetingCategories(page),
@@ -2902,8 +3328,8 @@ test("scrapeTargetingCategories waits for rows appended after View all hides", a
 			{ description: null, name: "Category B" },
 			{ description: null, name: "Category C" },
 		],
-		reached: false,
-		step: "destination_list_not_found",
+		reached: true,
+		step: null,
 		surface: "targeting_categories",
 	});
 });
@@ -2936,10 +3362,10 @@ test("scrapeTargetingCategories returns unavailable when the dialog list is repl
 		(page) => scrapeTargetingCategories(page),
 	);
 
-	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE_AFTER_ROW);
 });
 
-test("scrapeTargetingCategories does not complete while category rows are still busy", async () => {
+test("scrapeTargetingCategories waits out a busy dialog before completing after View all", async () => {
 	const result = await withAccountsCenterPage(
 		htmlPage(
 			categoriesControl(`
@@ -2956,7 +3382,16 @@ test("scrapeTargetingCategories does not complete while category rows are still 
 		(page) => scrapeTargetingCategories(page),
 	);
 
-	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+	assert.deepEqual(result, {
+		items: [
+			{ description: null, name: "Category A" },
+			{ description: null, name: "Category B" },
+			{ description: null, name: "Category C" },
+		],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
 });
 
 test("scrapeTargetingCategories ignores hidden empty categories marker", async () => {
@@ -3046,7 +3481,7 @@ test("scrapeTargetingCategories rejects rows when a visible category error is pr
 		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
 	);
 
-	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE_AFTER_ROW);
 });
 
 test("scrapeTargetingCategories accepts explicit empty categories marker", async () => {
@@ -3110,18 +3545,7 @@ test("collectAllStreams: category View all ignores hidden page-wide buttons afte
 		),
 	});
 
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
-	assert.equal(
-		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
-		false,
-	);
+	assertAdsUnproven(harness);
 	assert.deepEqual(
 		harness.emitted
 			.filter((record) => record.stream === "ads")
@@ -3130,7 +3554,7 @@ test("collectAllStreams: category View all ignores hidden page-wide buttons afte
 	);
 });
 
-test("collectAllStreams: category-only ads reach reports an ads stream failure", async () => {
+test("collectAllStreams: category-only ads reach skips only the ads stream as unproven", async () => {
 	const harness = await collectAdsInChromium({
 		adTopics: BLANK_AD_TOPICS_PAGE,
 		ads: htmlPage(
@@ -3143,14 +3567,11 @@ test("collectAllStreams: category-only ads reach reports an ads stream failure",
 		),
 	});
 
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["targeting_categories"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"ads layout never earns surface coverage",
+	);
 	assert.deepEqual(
 		harness.emitted.map((record) => record.data.kind),
 		["ad_category"],
@@ -3172,18 +3593,15 @@ test("collectAllStreams: settled blank advertiser and ad-topic lists report an a
 	});
 
 	assert.equal(harness.emitted.length, 0);
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["targeting_categories"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"ads layout never earns surface coverage",
+	);
 	assertAdsStreamFailure(harness, "advertisers, ad_topics");
 });
 
-test("collectAllStreams: verified empty ad topics alone reports an ads stream failure", async () => {
+test("collectAllStreams: verified empty ad topics alone skips only the ads stream as unproven", async () => {
 	const harness = await collectAdsInChromium({
 		adTopics: EMPTY_AD_TOPICS_PAGE,
 		ads: htmlPage(
@@ -3197,20 +3615,17 @@ test("collectAllStreams: verified empty ad topics alone reports an ads stream fa
 	});
 
 	assert.equal(harness.emitted.length, 0);
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["ad_topics"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"ads layout never earns surface coverage",
+	);
 	assertAdsStreamFailure(harness, "advertisers, targeting_categories");
 });
 
 // ─── Invariant 6: shape-check catches a drifted record ──────────────────
 
-test("collectAllStreams: a profile record missing username lands in SKIP_RESULT, not RECORD", async () => {
+test("collectAllStreams: profile missing username reports a stream gap without emitting", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	// id present but username absent → profileRecord() itself returns null and
 	// nothing is emitted, so this proves the null-guard rather than schema
@@ -3222,7 +3637,15 @@ test("collectAllStreams: a profile record missing username lands in SKIP_RESULT,
 		webInfoUser: { id: "u1" },
 	});
 
-	await assert.rejects(collectAllStreams(ctx), /meta_profile_unavailable/);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+	assert.deepEqual(streamFailures(harness), ["profile"]);
+	assert.equal(harness.emitted.length, 0);
 });
 
 test("pageShowsLoginOrChallengeControls ignores ordinary profile text and finds real challenge controls", async () => {
@@ -3259,3 +3682,242 @@ test("pageShowsLoginOrChallengeControls ignores ordinary profile text and finds 
 		await browser.close();
 	}
 });
+
+// ─── Live-shaped Accounts Center pages and the profile post-count guard ───
+// Structure observed live 2026-10-16; every name and count is synthetic.
+
+const LIVE_AD_TOPICS_PAGE = (emptyMessage: string): string =>
+	htmlPage(
+		`<div role="dialog">
+			<h2>Ad topics</h2>
+			<h3>Your activity-based topics</h3>
+			${emptyMessage}
+			<h3>Special topics</h3>
+			<div role="list"><div role="listitem"><div role="button"><div><div>Special topics</div><div>Quickly manage if you want to see ads about special topics.</div></div></div></div></div>
+			<h3>Your ad topic choices</h3>
+			<div role="list"><div role="listitem"><div role="button"><div><div>See less</div><div>You haven't chosen any topics to see less of.</div></div></div></div></div>
+		</div>`,
+	);
+
+test("scrapeAdTopics proves the live empty page: interface rows are chrome and the source says there are no activity-based topics", async () => {
+	const result = await withAccountsCenterPage(
+		LIVE_AD_TOPICS_PAGE(
+			"<p>You don't currently have any activity-based topics</p>",
+		),
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [],
+		reached: true,
+		step: "reached_empty",
+		surface: "ad_topics",
+	});
+});
+
+test("scrapeAdTopics does not call the live page empty without the source's empty message", async () => {
+	const result = await withAccountsCenterPage(LIVE_AD_TOPICS_PAGE(""), (page) =>
+		scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.equal(result.reached, false);
+	assert.deepEqual(result.items, []);
+});
+
+const manageInfoAdvertisersPage = (seeMoreScript: string): string => {
+	const rows = (from: number, to: number): string =>
+		Array.from(
+			{ length: to - from + 1 },
+			(_, index) =>
+				`<div role="listitem"><div role="button">Advertiser ${from + index}</div></div>`,
+		).join("");
+	const dialog = `<div role="dialog"><div role="list">${rows(1, 4)}<div role="listitem"><div role="button" id="see-more">See more</div></div></div></div>`;
+	return htmlPage(`
+		<div role="tab">Manage info</div>
+		<div role="tabpanel"><div role="button" id="advertisers-link">Advertisers using your activity or information</div></div>
+		<script>
+			document.querySelector('#advertisers-link').addEventListener('click', () => {
+				document.body.insertAdjacentHTML('beforeend', '${dialog}');
+				document.querySelector('#see-more').addEventListener('click', () => {
+					${seeMoreScript.replace("ROWS", rows(5, 10))}
+				});
+			});
+		</script>`);
+};
+
+test("scrapeAdvertisers opens the live Manage info dialog, expands See more and completes without an ARIA total", async () => {
+	const result = await withAccountsCenterPage(
+		manageInfoAdvertisersPage(`
+			document.querySelector('#see-more').closest('[role="listitem"]').remove();
+			setTimeout(() => document.querySelector('[role="list"]').insertAdjacentHTML('beforeend', 'ROWS'), 300);`),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: Array.from({ length: 10 }, (_, index) => `Advertiser ${index + 1}`),
+		reached: true,
+		step: null,
+		surface: "advertisers",
+	});
+});
+
+test("scrapeAdvertisers stays incomplete when See more stops loading rows", async () => {
+	const result = await withAccountsCenterPage(
+		manageInfoAdvertisersPage(""),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.equal(result.reached, false);
+	assert.equal(result.step, "destination_list_not_found");
+});
+
+test("scrapeAdvertisers reports a missing advertisers link on the Manage info tab", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			'<div role="tab">Manage info</div><div role="tabpanel"><div role="button">Something else</div></div>',
+		),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [],
+		reached: false,
+		step: "control_not_found",
+		surface: "advertisers",
+	});
+});
+
+test("scrapeTargetingCategories completes the live View all screen: the earlier screen stays hidden and Removed categories is interface", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(`
+				${insertDialog('<div role="dialog"><div id="first-screen" role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', () => {
+					document.querySelector('#first-screen').style.display = 'none';
+					document.querySelector('#dialog-view-all').style.display = 'none';
+					document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div><div role="listitem"><span>Category B</span><span>Based on activity</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem"><div role="button">Removed categories</div></div></div>');
+				});`),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: "Based on activity", name: "Category A" },
+			{ description: "Based on activity", name: "Category B" },
+		],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
+test("scrapeTargetingCategories withholds completion when the hidden earlier View all screen holds a category the new screen does not show", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(`
+				${insertDialog('<div role="dialog"><div id="first-screen" role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div><div role="listitem"><span>Category Z</span><span>Based on activity</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', () => {
+					document.querySelector('#first-screen').style.display = 'none';
+					document.querySelector('#dialog-view-all').style.display = 'none';
+					document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div><div role="listitem"><span>Category B</span><span>Based on activity</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem"><div role="button">Removed categories</div></div></div>');
+				});`),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: "Based on activity", name: "Category A" },
+			{ description: "Based on activity", name: "Category Z" },
+			{ description: "Based on activity", name: "Category B" },
+		],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "targeting_categories",
+	});
+});
+
+for (const { label, mediaCount, proven } of [
+	{ label: "a profile that reports posts", mediaCount: 3, proven: false },
+	{ label: "a profile that reports zero posts", mediaCount: 0, proven: true },
+]) {
+	test(`collectAllStreams: an empty timeline for ${label} ${proven ? "completes" : "is not proven empty"}`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx } = makeCtx({
+			fetchScript: {},
+			harness,
+			postsScript: [EMPTY_POSTS],
+			profilePageUser: {
+				follower_count: 12,
+				following_count: 8,
+				id: "u1",
+				is_verified: false,
+				media_count: mediaCount,
+				username: "testuser",
+			},
+			requestedStreams: ["profile", "posts", "post_likes"],
+		});
+
+		await collectAllStreams(
+			ctx,
+			NO_DELAY,
+			TEST_POSTS_CLOCK,
+			makeVirtualAdsClock(),
+			TEST_PROFILE_CLOCK,
+		);
+
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(
+				harness.protocolMessages.some(
+					(message) => message.type === "STATE" && message.stream === stream,
+				),
+				proven,
+				`${stream} STATE`,
+			);
+			assert.equal(
+				harness.protocolMessages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" && message.stream === stream,
+				),
+				!proven,
+				`${stream} SKIP_RESULT`,
+			);
+		}
+	});
+}
+
+
+for (const [label, envelope, complete] of [
+	["valid final", { status: "ok", extensions: { is_final: true } }, true],
+	["failed status", { status: "fail" }, false],
+	["not ok", { ok: false }, false],
+	["GraphQL errors", { errors: [{ message: "incomplete" }] }, false],
+	["partial extension", { extensions: { partial: true } }, false],
+	["nonfinal extension", { extensions: { is_final: false } }, false],
+	["nonfinal envelope", { is_final: false }, false],
+	["partial envelope", { partial: true }, false],
+	["error envelope", { error: "failed" }, false],
+	["malformed errors", { errors: {} }, false],
+	["different owner", { data: { user: { id: "other", username: "testuser", media_count: 0, following_count: 0 } } }, false],
+	["unbound owner", { data: { user: { media_count: 0, following_count: 0 } } }, false],
+] as const) {
+	test(`collectAllStreams: ${label} profile zero counts with empty inventories`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx } = makeCtx({
+			harness, requestedStreams: ["posts", "post_likes", "following"],
+			profilePageUser: { id: "u1", username: "testuser", media_count: 0, following_count: 0 },
+			profileEnvelope: envelope,
+			postsScript: [EMPTY_POSTS],
+			fetchScript: { "/api/v1/friendships/u1/following/": [
+				{ status: 200, json: { status: "ok", users: [], has_more: false, next_max_id: null } },
+			] },
+		});
+		await collectAllStreams(ctx, NO_DELAY, TEST_POSTS_CLOCK, makeVirtualAdsClock(), TEST_PROFILE_CLOCK);
+		assert.equal(harness.emitted.length, 0);
+		for (const stream of ["posts", "post_likes", "following"]) {
+			assert.equal(harness.protocolMessages.some(m => m.type === "STATE" && m.stream === stream), complete, `${stream} STATE`);
+			assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === stream), !complete, `${stream} SKIP_RESULT`);
+		}
+	});
+}

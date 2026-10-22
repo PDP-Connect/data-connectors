@@ -9,7 +9,7 @@
 	},
 	"connector_key": "whoop",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-	"version": "0.1.22",
+	"version": "0.1.23",
 	"display_name": "WHOOP",
 	"runtime_requirements": {
 		"bindings": {
@@ -33,7 +33,7 @@
 		},
 		"public_listing": {
 			"tier": "supported",
-			"rationale": "Live owner testing proved all six streams and checkpointed session reuse; first connection still requires the owner to sign in through the isolated WHOOP browser profile. Promoted to supported by the repository owner for stable parity with the WHOOP connector already shipped in production Vana Desktop."
+			"rationale": "Live owner testing proved all six streams and checkpointed session reuse; first connection still requires the owner to sign in through the isolated WHOOP browser profile. Promoted to supported by the repository owner for stable parity with the WHOOP connector already shipped in the production desktop app."
 		}
 	},
 	"streams": [

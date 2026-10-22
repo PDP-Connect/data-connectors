@@ -80,10 +80,19 @@ function readFileAtCommit(commit, path, { cwd }) {
   }
 }
 
+// npm scripts in either package.json are developer and test commands. The
+// artifact builder reads only dependencies and engines from them, so a new or
+// changed script must not force every connector to take a version bump.
+const SCRIPT_FREE_INPUTS = new Set(["package.json", `${PACKAGE_ROOT}/package.json`]);
+
 function artifactInputContent(path, content) {
-  if (path !== "package.json" || content === null) return content;
+  const installerMetadata = path === "packages/connector-installer-core/package.json";
+  if ((!SCRIPT_FREE_INPUTS.has(path) && !installerMetadata) || content === null) return content;
   const packageMetadata = JSON.parse(content.toString("utf8"));
-  delete packageMetadata.scripts;
+  if (SCRIPT_FREE_INPUTS.has(path)) delete packageMetadata.scripts;
+  // npm's pack allowlist controls the installer tools package, not the OCI
+  // connector builder. Retiring a tool-only file must not release every connector.
+  if (path === "package.json" || installerMetadata) delete packageMetadata.files;
   return Buffer.from(JSON.stringify(packageMetadata));
 }
 

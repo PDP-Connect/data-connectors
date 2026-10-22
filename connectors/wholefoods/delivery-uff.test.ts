@@ -70,7 +70,7 @@ test("delivery detail evidence and readiness match the captured structure", () =
 	);
 });
 
-test("parses all 31 delivery rows without clicking show-all and uses online quantity defaults", () => {
+test("parses all 31 delivery rows without clicking show-all and preserves unknown online quantities", () => {
 	const { items } = parsers.parseOrderDetailDom(FIXTURE);
 	assert.equal(items.length, 31);
 	assert.equal(items.filter((item) => item.productId).length, 31);
@@ -79,14 +79,14 @@ test("parses all 31 delivery rows without clicking show-all and uses online quan
 	assert.equal(items[0]?.productId, "B0TEST0001");
 	assert.equal(items[0]?.quantity, 2);
 	assert.equal(items[0]?.unitPriceDollars, 4.99);
-	assert.equal(items[1]?.quantity, 1);
+	assert.equal(items[1]?.quantity, null);
 	assert.equal(items[1]?.unitPriceDollars, 4.99);
-	assert.equal(parsers.orderDetailUnitCount(items), 32);
+	assert.equal(parsers.orderDetailUnitCount(items), null);
 	assert.equal(connector.orderDetailCountsMatch(STUB, items), true);
 
 	const order = connector.buildOrderRecord(STUB, null, items);
-	assert.equal(order.item_count, 31);
-	assert.equal(order.total_cents, 15968);
+	assert.equal(order.item_count, items.length);
+	assert.equal(order.total_cents, null);
 	validateRecord("orders", order);
 	const records = connector.buildOrderItemRecords(ORDER_ID, items);
 	assert.equal(records.length, 31);
@@ -108,11 +108,10 @@ test("delivery row without a product link remains countable and priced, without 
 	assert.equal(connector.buildOrderItemRecords(ORDER_ID, items).length, 30);
 });
 
-test("delivery count mismatch keeps the order and reports PROGRESS", async () => {
+test("delivery count mismatch withholds same-key rows and reports PROGRESS", async () => {
 	const mismatchStub = { ...STUB, expectedItemCount: 33 };
 	const harness = makeRecordingEmit(validateRecord);
 	await connector.collectOrderStubs({
-		credentials: {},
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		ordersCursor: openFingerprintCursor(undefined),
@@ -126,7 +125,11 @@ test("delivery count mismatch keeps the order and reports PROGRESS", async () =>
 	});
 	assert.equal(
 		harness.emitted.filter((record) => record.stream === "orders").length,
-		1,
+		0,
+	);
+	assert.equal(
+		harness.emitted.filter((record) => record.stream === "order_items").length,
+		0,
 	);
 	const warning = harness.protocolMessages.find((message) => {
 		const progress = message as { type?: string; message?: string };
@@ -146,7 +149,7 @@ test("delivery count mismatch keeps the order and reports PROGRESS", async () =>
 				) &&
 				line.includes('"search_count":33') &&
 				line.includes('"detail_rows":31') &&
-				line.includes('"detail_units":32'),
+				line.includes('"detail_units":null'),
 		),
 		diagnostics.join("\n"),
 	);

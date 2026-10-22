@@ -369,15 +369,27 @@ test("extractFromQfx: skips transactions missing FITID or DTPOSTED", () => {
 	const out = extractFromQfx(parsed);
 	assert.equal(out.transactions.length, 1);
 	assert.equal(out.transactions[0]?.fitid, "OK");
+	assert.deepEqual(out.integrity, {
+		rawCandidateCount: 3,
+		extractedCount: 1,
+		malformedCount: 2,
+		sourceShapeValid: true,
+	});
 });
 
-test("extractFromQfx: empty / unrecognized shape returns empty", () => {
-	assert.deepEqual(extractFromQfx(null), { transactions: [], balance: null });
-	assert.deepEqual(extractFromQfx({}), { transactions: [], balance: null });
-	assert.deepEqual(extractFromQfx({ OFX: { NOTHING: {} } }), {
-		transactions: [],
-		balance: null,
-	});
+test("extractFromQfx: unrecognized shape retains explicit incomplete evidence", () => {
+	for (const input of [null, {}, { OFX: { NOTHING: {} } }]) {
+		assert.deepEqual(extractFromQfx(input), {
+			transactions: [],
+			balance: null,
+			integrity: {
+				rawCandidateCount: 0,
+				extractedCount: 0,
+				malformedCount: 0,
+				sourceShapeValid: false,
+			},
+		});
+	}
 });
 
 // ─── parseDashboardAccountsDom ───────────────────────────────────────────
