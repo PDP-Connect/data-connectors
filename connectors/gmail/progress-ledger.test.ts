@@ -733,3 +733,35 @@ test("ledger: a started catch-up pass survives queue compaction while both bound
 		"passes complete and the next one starts",
 	);
 });
+
+test("ledger: a catch-up UID that is also retried as debt is one coverage observation", () => {
+	const persisted: GmailProgressState = {
+		version: 1,
+		uidvalidity: 123,
+		streams: {
+			messages: {
+				through: 500,
+				coveredFrom: 2001,
+				next: 2001,
+				scope: { until: "2026-02-01T00:00:00.000Z" },
+			},
+		},
+		debt: [
+			{
+				uid: 10,
+				streams: ["messages"],
+				attempts: 2,
+				failure: "body_part_unavailable",
+			},
+		],
+	};
+	const ledger = open({ persisted, uidnext: 2001, streams: ["messages"] });
+	for (const { key } of ledger.catchupSearches) ledger.planCatchup(key, [10]);
+	assert.deepEqual(ledger.debtUids, [10]);
+	assert.deepEqual(ledger.catchupUids, [10]);
+	ledger.expect(10);
+	ledger.record(10, ["messages"], { kind: "covered" });
+	const c = ledger.commit(NOW);
+	assert.deepEqual(c.coverage.messages, { considered: 1, covered: 1 });
+	assert.deepEqual(c.state.debt, []);
+});

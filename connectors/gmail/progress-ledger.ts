@@ -850,6 +850,17 @@ export class GmailProgressLedger {
 		for (const stream of this.requestedStreams()) {
 			const s = progressIn(streams, stream);
 			const counts = { considered: 0, covered: 0 };
+			// One settlement per (UID, stream), however many lanes reached it:
+			// a UID can be both retry debt and part of a catch-up pass.
+			const settled = new Set<number>();
+			const settle = (uid: number, o: UidOutcome) => {
+				if (settled.has(uid)) return;
+				settled.add(uid);
+				if (o.kind === "out_of_scope" || o.kind === "absent") return;
+				counts.considered += 1;
+				if (o.kind === "covered") counts.covered += 1;
+				if (o.kind === "terminal") s.shortfall = (s.shortfall ?? 0) + 1;
+			};
 			// Walk each lane in UID order; a stream's cursor stops at the first
 			// UID it cannot account.
 			let historyEnd = this.history ? this.history.end : s.through;
@@ -868,19 +879,14 @@ export class GmailProgressLedger {
 					else forwardEnd = uid - 1;
 					continue;
 				}
-				if (o.kind !== "out_of_scope") counts.considered += 1;
-				if (o.kind === "covered") counts.covered += 1;
-				if (o.kind === "terminal") s.shortfall = (s.shortfall ?? 0) + 1;
+				settle(uid, o);
 			}
 			// Debt retries count toward this run's evidence for the stream.
 			for (const d of this.retried) {
 				const o = d.streams.includes(stream)
 					? outcome(d.uid, stream)
 					: undefined;
-				if (!o || o.kind === "out_of_scope" || o.kind === "absent") continue;
-				counts.considered += 1;
-				if (o.kind === "covered") counts.covered += 1;
-				if (o.kind === "terminal") s.shortfall = (s.shortfall ?? 0) + 1;
+				if (o) settle(d.uid, o);
 			}
 			if (this.history && this.historicalStreams.includes(stream)) {
 				const end = Math.min(historyEnd, s.coveredFrom - 1);
@@ -890,7 +896,7 @@ export class GmailProgressLedger {
 				}
 			}
 			if (forwardEnd >= s.next) s.next = forwardEnd + 1;
-			this.commitCatchup(stream, s, outcome, addDebt, unaccounted, counts);
+			this.commitCatchup(stream, s, outcome, addDebt, unaccounted, settle);
 			const normalized = normalize(s);
 			streams[stream] = normalized;
 			const done =
@@ -967,7 +973,7 @@ export class GmailProgressLedger {
 		outcome: (uid: number, s: LedgerStream) => UidOutcome | undefined,
 		addDebt: (uid: number, stream: LedgerStream, failure: string) => boolean,
 		unaccounted: Set<number>,
-		counts: StreamCoverage,
+		settle: (uid: number, o: UidOutcome) => void,
 	): void {
 		const passes = s.catchup;
 		const active = passes?.[0];
@@ -993,9 +999,7 @@ export class GmailProgressLedger {
 					held = true;
 					break;
 				}
-				if (o.kind !== "out_of_scope") counts.considered += 1;
-				if (o.kind === "covered") counts.covered += 1;
-				if (o.kind === "terminal") s.shortfall = (s.shortfall ?? 0) + 1;
+				settle(uid, o);
 			}
 			through = uid;
 		}

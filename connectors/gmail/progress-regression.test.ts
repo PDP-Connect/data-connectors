@@ -1627,3 +1627,52 @@ test("evidence: empty flags, labels and header fields are known values", async (
 	);
 	assert.deepEqual(progressOf(r).debt, []);
 });
+
+test("evidence: attachment messages the requested resources exclude need no BODYSTRUCTURE to settle", async () => {
+	const excluded = Array.from({ length: 201 }, (_, i) => {
+		const { bodyStructure: _s, ...bare } = message(i + 1);
+		return bare as FetchMessageObject;
+	});
+	const wanted = message(900);
+	const m = mailbox([...excluded, wanted], 1001, 202);
+	const key = String(wanted.emailId);
+	const scope = new Map<string, StreamRequest>([
+		["messages", { name: "messages", resources: [key] }],
+		["attachments", { name: "attachments", resources: [`${key}:2`] }],
+	]);
+	let state: Record<string, unknown> = {};
+	const written: unknown[] = [];
+	for (let i = 0; i < 3; i += 1) {
+		const r = await run(m, state, scope);
+		state = r.state;
+		written.push(...ofStream(r, "messages").map((x) => x.data.id));
+		assert.deepEqual(progressOf(r).debt, [], `run ${i}: nothing is owed`);
+	}
+	assert.deepEqual(written, [key]);
+});
+
+test("coverage: a UID that is both retry debt and catch-up counts once", async () => {
+	const rows = Array.from({ length: 50 }, (_, i) => dated(i + 1, MAY));
+	const m = mailbox(rows, 3001, 50);
+	m.control.bodyReply = "nil-part";
+	const failed = await run(m, {}, ["messages"]);
+	assert.equal(progressOf(failed).debt.length, 50);
+	// Narrowing settles the first 25 retries as out of scope; 25 stay owed.
+	const narrowed = await run(
+		m,
+		failed.state,
+		new Map([["messages", { name: "messages", time_range: { until: JAN } }]]),
+	);
+	assert.equal(progressOf(narrowed).debt.length, 25);
+	m.control.bodyReply = "part";
+	// Widening again: UIDs 26-50 are both retried debt and catch-up work.
+	const widened = await run(m, narrowed.state, ["messages"]);
+	assert.equal(ofStream(widened, "messages").length, 50);
+	assert.deepEqual(
+		[coverageOf(widened, "messages")].map((c) => [
+			(c as { considered?: number } | undefined)?.considered,
+			(c as { covered?: number } | undefined)?.covered,
+		]),
+		[[50, 50]],
+	);
+});

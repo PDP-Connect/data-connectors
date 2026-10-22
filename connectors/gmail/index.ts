@@ -1599,10 +1599,17 @@ export async function processMessage(
 				: { kind: "covered" };
 	}
 
-	const attachmentsUnavailable = deps.requested.has("attachments")
-		? unavailableFetchItem(msg, "attachments")
-		: null;
-	if (attachmentsUnavailable) {
+	// Resource exclusion needs no FETCH evidence, so it is decided first.
+	const attachmentsExcluded =
+		deps.requested.has("attachments") &&
+		resourcesExcludeMessage(deps.requested, "attachments", gmMsgid);
+	const attachmentsUnavailable =
+		deps.requested.has("attachments") && !attachmentsExcluded
+			? unavailableFetchItem(msg, "attachments")
+			: null;
+	if (attachmentsExcluded) {
+		outcome.attachments = { kind: "out_of_scope" };
+	} else if (attachmentsUnavailable) {
 		// No BODYSTRUCTURE is not an empty part list: the parts are unknown,
 		// so the UID stays owed and a later run reads it again.
 		outcome.attachments = { kind: "failed", failure: attachmentsUnavailable };
