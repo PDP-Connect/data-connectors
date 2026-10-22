@@ -76,17 +76,15 @@ import {
 	type AttachmentHydrationResult,
 	AttachmentStallTimeoutError,
 	type AttachmentTransferProgress,
-	addAttachmentBackfillRecordToSummary,
-	advanceMessagesBackfillCursor,
 	attachmentBackfillPageByteBudget,
-	attachmentsCoverageBoundaryEstablished,
 	attachmentOutsideResourceScope,
 	buildAttachmentDetailCoverageMessage,
+	formatAttachmentBackfillSummary,
+	createAttachmentBackfillSummary,
+	addAttachmentBackfillRecordToSummary,
 	buildAttachmentDetailGap,
 	buildAttachmentTransferProgressMessage,
 	collectMetadata,
-	createAttachmentBackfillSummary,
-	DEFAULT_ATTACHMENT_BACKFILL_WINDOW_UIDS,
 	DEFAULT_ATTACHMENT_PROGRESS_MIN_BYTES,
 	DEFAULT_ATTACHMENT_PROGRESS_MIN_INTERVAL_MS,
 	DEFAULT_ATTACHMENT_STALL_TIMEOUT_MS,
@@ -95,7 +93,6 @@ import {
 	type FetchBodiesFn,
 	type FetchedBodies,
 	fetchAttachmentPart,
-	formatAttachmentBackfillSummary,
 	gmailEmitForTests,
 	type HydrateAttachmentFn,
 	isoToImapDate,
@@ -109,7 +106,6 @@ import {
 	recoverServedAttachmentGaps,
 	redactEmailForProgress,
 	resolveAttachmentBackfillPageByteBudget,
-	resolveAttachmentBackfillWindowUids,
 	resolveAttachmentProgressMinBytes,
 	resolveAttachmentProgressMinIntervalMs,
 	resolveAttachmentRecoveryPageByteBudget,
@@ -118,20 +114,13 @@ import {
 	resolveGmailAddressFromEnv,
 	resolveGmailPasswordFromEnv,
 	resolveMaxAttachmentBytes,
-	resolveMessagesBackfillTargetUid,
 	runAllMailPasses,
-	runAttachmentBackfillAndRecoveryPass,
 	runDeltaPass,
-	selectAllMailFetchRange,
-	selectAttachmentBackfillFetchRange,
-	selectMessagesBackfillFetchRange,
-	shouldBackfillAttachments,
 	trimAttachmentBackfillPageToByteBudget,
 	type UploadBodyBlobFn,
 	validateAttachmentHydrationPreflight,
 } from "./index.ts";
 import type {
-	AttachmentAllMailCursor,
 	AttachmentRecord,
 	ProgressMessage,
 	StreamRequest,
@@ -361,11 +350,47 @@ function makeMsg(
 		envelope,
 		internalDate: new Date("2026-04-20T10:00:05.000Z"),
 		size: 1024,
+		// The requested header fields; an empty block is a known value.
+		headers: Buffer.from(""),
+		// Gmail returns BODYSTRUCTURE whenever it is requested. This default is
+		// an affirmatively bodyless message; without any structure the parts
+		// are unknown and processMessage writes nothing (see processMessage).
+		bodyStructure: { type: "multipart/mixed", childNodes: [] },
 		...overrides,
 	};
 }
 
 // ─── Invariant: parent-before-child (body → envelope → attachments) ──────
+
+test("attachment backfill summary counts non-secret hydration outcomes", () => {
+	const summary = createAttachmentBackfillSummary();
+	addAttachmentBackfillRecordToSummary(summary, {
+		hydration_status: "hydrated",
+	});
+	addAttachmentBackfillRecordToSummary(summary, {
+		hydration_status: "too_large",
+		hydration_error: "size only",
+	});
+	addAttachmentBackfillRecordToSummary(summary, {
+		hydration_status: "failed",
+		hydration_error: "download failed",
+	});
+	addAttachmentBackfillRecordToSummary(summary, {
+		hydration_status: "deferred",
+	});
+
+	assert.deepEqual(summary, {
+		failed: 1,
+		hydrated: 1,
+		remaining_historical_gaps: 3,
+		too_large: 1,
+		unavailable_skipped: 1,
+	});
+	assert.equal(
+		formatAttachmentBackfillSummary(summary),
+		"hydrated=1 too_large=1 failed=1 unavailable_skipped=1 remaining_historical_gaps=3",
+	);
+});
 
 test("processMessage: emits message_bodies BEFORE messages record for the same message", async () => {
 	const { deps, emitted } = makeHarness({
@@ -588,15 +613,15 @@ test("processMessage: a served gap whose attachment fails hydration AGAIN is nev
 
 	await processMessage(harness.deps, makeAttachmentMsg());
 
-	const attachment = harness.emitted.find(
-		(record) => record.stream === "attachments",
-	);
-	assert.ok(
-		attachment,
-		"expected the failed attachment metadata to still emit",
+	// A failed hydration writes no record (a stored copy may be hydrated);
+	// the failure is held by its retry gap instead.
+	assert.equal(
+		harness.emitted.some((record) => record.stream === "attachments"),
+		false,
+		"a failed hydration must not overwrite the part's stored record",
 	);
 	assert.equal(
-		attachment.data.hydration_status,
+		attachmentCoverage.failedRecords[0]?.record.hydration_status,
 		"failed",
 		"hydration must have actually failed for this probe to be valid",
 	);
@@ -627,7 +652,7 @@ test("processMessage: a served gap whose attachment fails hydration AGAIN is nev
 	);
 });
 
-test("processMessage: emits bounded failed attachment metadata without fake blob ids", async () => {
+test("processMessage: a failed hydration writes no record and keeps a bounded retry gap", async () => {
 	const hydrateAttachment = makeAttachmentHydrator({
 		connectorId: "https://registry.pdpp.dev/connectors/gmail",
 		fetchAttachment: () =>
@@ -635,7 +660,9 @@ test("processMessage: emits bounded failed attachment metadata without fake blob
 		uploadBlob: () =>
 			Promise.reject(new Error("should not upload when download fails")),
 	});
+	const coverage = makeAttachmentDetailCoverage();
 	const { deps, emitted } = makeHarness({
+		attachmentCoverage: coverage,
 		hydrateAttachment,
 		requested: makeRequested(["attachments"]),
 		wantBodies: false,
@@ -644,14 +671,24 @@ test("processMessage: emits bounded failed attachment metadata without fake blob
 
 	await processMessage(deps, makeAttachmentMsg());
 
-	const attachment = emitted.find((record) => record.stream === "attachments");
-	assert.ok(attachment, "expected failed attachment metadata");
-	assert.equal(attachment.data.id, "gmmsgid-1111:2");
-	assert.equal(attachment.data.blob_ref, null);
-	assert.equal(attachment.data.content_sha256, null);
-	assert.equal(attachment.data.hydration_status, "failed");
-	assert.equal(typeof attachment.data.hydration_error, "string");
-	assert.ok(String(attachment.data.hydration_error).length <= 240);
+	// The part may already be stored hydrated (a sibling's retry, or the replay
+	// of a failed run). A record with no blob would destroy that copy.
+	assert.equal(
+		emitted.some((record) => record.stream === "attachments"),
+		false,
+	);
+	assert.deepEqual(coverage.gapKeys, ["gmmsgid-1111:2"]);
+	const failed = coverage.failedRecords[0];
+	assert.ok(failed);
+	assert.equal(failed.record.blob_ref, null);
+	assert.equal(failed.record.content_sha256, null);
+	assert.ok(String(failed.record.hydration_error).length <= 240);
+	const gap = buildAttachmentDetailGap(failed.record, failed.failureClass);
+	assert.equal(gap.record_key, "gmmsgid-1111:2");
+	assert.ok(
+		String(gap.last_error?.class).length <= 64,
+		"only a bounded class crosses",
+	);
 });
 
 test("processMessage: rerun hydration preserves attachment identity and idempotent blob identity", async () => {
@@ -794,36 +831,6 @@ test("processMessage: repeated backfill preserves record id, content hash, blob 
 	);
 });
 
-test("attachment backfill summary counts non-secret hydration outcomes", () => {
-	const summary = createAttachmentBackfillSummary();
-	addAttachmentBackfillRecordToSummary(summary, {
-		hydration_status: "hydrated",
-	});
-	addAttachmentBackfillRecordToSummary(summary, {
-		hydration_status: "too_large",
-		hydration_error: "size only",
-	});
-	addAttachmentBackfillRecordToSummary(summary, {
-		hydration_status: "failed",
-		hydration_error: "download failed",
-	});
-	addAttachmentBackfillRecordToSummary(summary, {
-		hydration_status: "deferred",
-	});
-
-	assert.deepEqual(summary, {
-		failed: 1,
-		hydrated: 1,
-		remaining_historical_gaps: 3,
-		too_large: 1,
-		unavailable_skipped: 1,
-	});
-	assert.equal(
-		formatAttachmentBackfillSummary(summary),
-		"hydrated=1 too_large=1 failed=1 unavailable_skipped=1 remaining_historical_gaps=3",
-	);
-});
-
 test("processMessage: refuses hydration when source-reported size exceeds the bounded cap (declared size)", async () => {
 	const fetchAttachment = mock.fn(() =>
 		Promise.reject(
@@ -859,14 +866,20 @@ test("processMessage: refuses hydration when source-reported size exceeds the bo
 		wantBodies: false,
 		wantMessages: false,
 	});
-	await processMessage(deps, makeMsg({ bodyStructure: oversize }));
+	const outcome = await processMessage(
+		deps,
+		makeMsg({ bodyStructure: oversize }),
+	);
 
-	const attachment = emitted.find((record) => record.stream === "attachments");
-	assert.ok(attachment, "expected too_large attachment metadata");
-	assert.equal(attachment.data.hydration_status, "too_large");
-	assert.equal(attachment.data.blob_ref, null);
-	assert.equal(attachment.data.content_sha256, null);
-	assert.equal(typeof attachment.data.hydration_error, "string");
+	// Only a hydrated part writes a record; an over-cap part stays owed.
+	assert.equal(
+		emitted.some((record) => record.stream === "attachments"),
+		false,
+	);
+	assert.deepEqual(outcome.attachments, {
+		kind: "failed",
+		failure: "attachment_unhydrated",
+	});
 	assert.equal(
 		fetchAttachment.mock.callCount(),
 		0,
@@ -922,12 +935,17 @@ test("processMessage: refuses hydration when streamed bytes overshoot the cap (u
 		wantBodies: false,
 		wantMessages: false,
 	});
-	await processMessage(deps, makeAttachmentMsg());
+	const outcome = await processMessage(deps, makeAttachmentMsg());
 
-	const attachment = emitted.find((record) => record.stream === "attachments");
-	assert.ok(attachment, "expected too_large attachment metadata");
-	assert.equal(attachment.data.hydration_status, "too_large");
-	assert.equal(attachment.data.blob_ref, null);
+	// Only a hydrated part writes a record; an over-cap part stays owed.
+	assert.equal(
+		emitted.some((record) => record.stream === "attachments"),
+		false,
+	);
+	assert.deepEqual(outcome.attachments, {
+		kind: "failed",
+		failure: "attachment_unhydrated",
+	});
 	assert.equal(
 		uploadBlob.mock.callCount(),
 		1,
@@ -1673,7 +1691,9 @@ test("validateAttachmentHydrationPreflight: fails attachment hydration before ma
 	);
 });
 
-test("validateAttachmentHydrationPreflight: explicit backfill requires upload config even when attachments stream is not requested", () => {
+test("validateAttachmentHydrationPreflight: no attachment hydration means no upload requirement", () => {
+	// Attachment history is walked whenever attachments are in scope, so there
+	// is no separate opt-in backfill that hydrates outside the requested scope.
 	assert.equal(
 		validateAttachmentHydrationPreflight({
 			env: {
@@ -1681,100 +1701,8 @@ test("validateAttachmentHydrationPreflight: explicit backfill requires upload co
 				GOOGLE_APP_PASSWORD_PDPP: "app-password",
 			},
 			requested: makeRequested(["messages"]),
-			streamsToBackfill: ["attachments"],
 		}),
-		"blob upload unavailable: PDPP_RS_URL and PDPP_OWNER_TOKEN must be provided by the runtime",
-	);
-});
-
-test("shouldBackfillAttachments: pending attachment detail gaps trigger historical backfill without the CLI flag", () => {
-	const attachmentGap: DetailGapStartEntry = {
-		gap_id: "gap-attachment-1",
-		reference_only: true,
-		status: "pending",
-		stream: "attachments",
-	};
-	const messageGap: DetailGapStartEntry = {
-		gap_id: "gap-message-1",
-		reference_only: true,
-		status: "pending",
-		stream: "messages",
-	};
-
-	assert.equal(
-		shouldBackfillAttachments({ detailGaps: [attachmentGap] }),
-		true,
-	);
-	assert.equal(shouldBackfillAttachments({ detailGaps: [messageGap] }), false);
-	assert.equal(
-		shouldBackfillAttachments({ streamsToBackfill: ["attachments"] }),
-		true,
-	);
-});
-
-test("shouldBackfillAttachments: an incomplete attachment cursor triggers backfill with no pending gaps and no CLI flag", () => {
-	// Reproduces the live cin_12407c1afb78d56848fe0b20 state: the attachments
-	// All Mail cursor stalled at backfilled_through_uid=3 (completed_at still
-	// null) while the mailbox's uidnext moved on to 324394 and every attempted
-	// attachment gap already resolved (recovered or terminal, none pending).
-	// With zero pending gaps and no explicit streamsToBackfill, the connector
-	// must still recognize the cursor itself as unfinished — otherwise a
-	// mailbox with 140k+ messages never gets its attachments scanned past the
-	// very first window, forever, on ordinary scheduled runs.
-	const stalledCursor: AttachmentAllMailCursor = {
-		backfilled_through_uid: 3,
-		completed_at: null,
-		uidvalidity: 1,
-	};
-
-	assert.equal(
-		shouldBackfillAttachments({
-			attachmentBackfill: stalledCursor,
-			detailGaps: [],
-			priorUidnext: 324_394,
-		}),
-		true,
-	);
-
-	// A cursor that has actually finished the mailbox's current UID range must
-	// not force a backfill pass on every run.
-	const completedCursor: AttachmentAllMailCursor = {
-		backfilled_through_uid: 324_393,
-		completed_at: "2026-08-26T20:39:04.433Z",
-		uidvalidity: 1,
-	};
-	assert.equal(
-		shouldBackfillAttachments({
-			attachmentBackfill: completedCursor,
-			detailGaps: [],
-			priorUidnext: 324_394,
-		}),
-		false,
-	);
-
-	// No prior cursor at all (first run) and no known uidnext yet: nothing to
-	// compare against, so this signal alone must not force a spurious backfill.
-	assert.equal(shouldBackfillAttachments({ detailGaps: [] }), false);
-
-	// A fresh/never-started cursor (backfilled_through_uid 0, no prior
-	// streamsToBackfill opt-in) must NOT be treated as "incomplete" — this
-	// signal only recovers a cursor that already made progress and then
-	// stalled, not a connector that was simply never asked to backfill
-	// attachments. Regression guard for the fallout this fix caused in
-	// "runAllMailPasses: scheduled runs advance historical pages while
-	// forwarding new mail" before this assertion was added.
-	const freshCursor: AttachmentAllMailCursor = {
-		backfilled_through_uid: 0,
-		completed_at: null,
-		uidvalidity: 123,
-	};
-	assert.equal(
-		shouldBackfillAttachments({
-			attachmentBackfill: freshCursor,
-			detailGaps: [],
-			priorUidnext: 1201,
-		}),
-		false,
+		null,
 	);
 });
 
@@ -1834,89 +1762,6 @@ test("Gmail env aliases prefer Docker names while accepting documented names", (
 	);
 });
 
-test("selectAllMailFetchRange: incremental runs use priorUidnext:* regardless of requested streams", () => {
-	// Incremental sync: fetch range covers only new UIDs we haven't seen yet,
-	// independent of whether the run scope includes attachments. New
-	// messages still hit `processMessage`, which emits attachment records
-	// for any new message that carries them (per-message gate at lines
-	// 357-361 of connectors/gmail/index.ts).
-	assert.equal(
-		selectAllMailFetchRange(
-			{ fullResync: false, priorUidnext: 500 },
-			makeRequested(["messages"]),
-		),
-		"500:*",
-	);
-	assert.equal(
-		selectAllMailFetchRange(
-			{ fullResync: false, priorUidnext: 500 },
-			makeRequested(["attachments"]),
-		),
-		"500:*",
-	);
-	assert.equal(
-		selectAllMailFetchRange(
-			{ fullResync: false, priorUidnext: 500 },
-			makeRequested([
-				"messages",
-				"attachments",
-				"message_bodies",
-				"threads",
-				"labels",
-			]),
-		),
-		"500:*",
-	);
-	// A first run has no forward range: its bounded historical page is planned
-	// separately and must never fall back to a monolithic 1:* walk.
-	assert.equal(
-		selectAllMailFetchRange(
-			{ fullResync: true, priorUidnext: 500 },
-			makeRequested(["attachments"]),
-		),
-		null,
-	);
-	assert.equal(
-		selectAllMailFetchRange(
-			{ fullResync: true, priorUidnext: 500 },
-			makeRequested(["messages"]),
-		),
-		null,
-	);
-});
-
-test("selectMessagesBackfillFetchRange: first and later pages are bounded UID ranges", () => {
-	assert.equal(
-		selectMessagesBackfillFetchRange({
-			messagesBackfill: { uidvalidity: 123, target_uid: 1200 },
-			uidnext: 1300,
-		}),
-		"1:500",
-	);
-	assert.equal(
-		selectMessagesBackfillFetchRange({
-			messagesBackfill: {
-				backfilled_through_uid: 500,
-				uidvalidity: 123,
-				target_uid: 1200,
-			},
-			uidnext: 1300,
-		}),
-		"501:1000",
-	);
-	assert.equal(
-		selectMessagesBackfillFetchRange({
-			messagesBackfill: {
-				backfilled_through_uid: 1000,
-				uidvalidity: 123,
-				target_uid: 1200,
-			},
-			uidnext: 1300,
-		}),
-		"1001:1200",
-	);
-});
-
 /**
  * The reopening-band guards.
  *
@@ -1930,294 +1775,6 @@ test("selectMessagesBackfillFetchRange: first and later pages are bounded UID ra
  * Each behavior is pinned separately below so a mutation to one guard reddens
  * on its own rather than being masked by a sibling.
  */
-test("resolveMessagesBackfillTargetUid: the ceiling rises to meet the forward watermark", () => {
-	// The mechanism defect: a frozen ceiling under a climbing watermark.
-	assert.equal(
-		resolveMessagesBackfillTargetUid({
-			forwardFloorUid: 324_022,
-			prior: {
-				backfilled_through_uid: 150_000,
-				target_uid: 324_020,
-				uidvalidity: 1,
-			},
-		}),
-		324_022,
-		"a watermark that moved past the ceiling must pull the ceiling up, or the gap reopens every run",
-	);
-});
-
-test("resolveMessagesBackfillTargetUid: the ceiling never falls, so backfill progress is never rewound", () => {
-	// A ceiling that could fall would strand `backfilled_through_uid` above its
-	// own target and re-open a finished walk. On the live instance the walk is
-	// ~150k UIDs deep; rewinding would re-fetch every one of them.
-	assert.equal(
-		resolveMessagesBackfillTargetUid({
-			forwardFloorUid: 900,
-			prior: {
-				backfilled_through_uid: 150_000,
-				target_uid: 324_020,
-				uidvalidity: 1,
-			},
-		}),
-		324_020,
-		"a lower forward floor must never lower the ceiling",
-	);
-	assert.equal(
-		resolveMessagesBackfillTargetUid({
-			forwardFloorUid: 0,
-			prior: {
-				backfilled_through_uid: 150_000,
-				target_uid: 324_020,
-				uidvalidity: 1,
-			},
-		}),
-		324_020,
-		"a zero/absent forward floor must not collapse the ceiling",
-	);
-});
-
-test("resolveMessagesBackfillTargetUid: a first run with no stored ceiling adopts the forward floor", () => {
-	// On a full resync the forward pass fetches NOTHING, yet the watermark is
-	// written from the live uidnext. Everything below it is therefore historical
-	// work and the ceiling must say so.
-	assert.equal(
-		resolveMessagesBackfillTargetUid({ forwardFloorUid: 1200, prior: {} }),
-		1200,
-		"an unstarted walk takes the forward floor as its ceiling",
-	);
-});
-
-test("resolveMessagesBackfillTargetUid: a quiet mailbox leaves the ceiling exactly where it was", () => {
-	// Termination guard: when no mail arrived, the ceiling is unchanged, so the
-	// walk converges instead of chasing an ever-rising target forever.
-	const prior = {
-		backfilled_through_uid: 150_000,
-		target_uid: 324_020,
-		uidvalidity: 1,
-	};
-	assert.equal(
-		resolveMessagesBackfillTargetUid({ forwardFloorUid: 324_020, prior }),
-		324_020,
-	);
-	// Idempotent: re-resolving against its own output is a fixed point.
-	assert.equal(
-		resolveMessagesBackfillTargetUid({
-			forwardFloorUid: 324_020,
-			prior: { ...prior, target_uid: 324_020 },
-		}),
-		324_020,
-		"re-resolving must be a fixed point, not a ratchet that keeps finding new work",
-	);
-});
-
-test("advanceMessagesBackfillCursor: an explicit raised ceiling reopens a completed walk without rewinding it", () => {
-	// A walk that finished at 1200 must reopen when the forward watermark has
-	// moved to 1301 — but `backfilled_through_uid` must hold at 1200, not rewind.
-	const completed = {
-		backfilled_through_uid: 1200,
-		completed_at: FROZEN_NOW,
-		target_uid: 1200,
-		uidvalidity: 123,
-	};
-	const reopened = advanceMessagesBackfillCursor({
-		now: FROZEN_NOW,
-		pageEndUid: 1200,
-		prior: { ...completed, target_uid: 1300 },
-	});
-	assert.equal(
-		reopened.target_uid,
-		1300,
-		"the raised ceiling must be persisted",
-	);
-	assert.equal(
-		reopened.backfilled_through_uid,
-		1200,
-		"progress must never rewind when the ceiling rises",
-	);
-	assert.equal(
-		reopened.completed_at,
-		null,
-		"a walk with UIDs left to reach is not complete",
-	);
-});
-
-test("advanceMessagesBackfillCursor: a settled walk under an unchanged ceiling stays settled", () => {
-	// The other half of the reopen rule: without new mail the ceiling does not
-	// move, so a finished walk must stay finished rather than re-scanning.
-	const completed = {
-		backfilled_through_uid: 1200,
-		completed_at: FROZEN_NOW,
-		target_uid: 1200,
-		uidvalidity: 123,
-	};
-	const settled = advanceMessagesBackfillCursor({
-		now: FROZEN_NOW,
-		pageEndUid: 1200,
-		prior: completed,
-	});
-	assert.equal(settled.backfilled_through_uid, 1200);
-	assert.equal(
-		typeof settled.completed_at,
-		"string",
-		"a walk that reached its ceiling stays complete",
-	);
-});
-
-test("advanceMessagesBackfillCursor: the commit honours the raised ceiling carried on the cursor", () => {
-	// The ceiling has exactly one source of truth: `prior.target_uid`, already
-	// raised by `resolveMessagesBackfillTargetUid`. A page that walked into the
-	// reopened band cannot be committed against a STALE ceiling — that is the
-	// half-fix where the repair looks applied but the next run re-reads the old
-	// value and the band reopens.
-	const stale = {
-		backfilled_through_uid: 1200,
-		completed_at: FROZEN_NOW,
-		target_uid: 1200,
-		uidvalidity: 123,
-	};
-	assert.throws(
-		() =>
-			advanceMessagesBackfillCursor({
-				now: FROZEN_NOW,
-				pageEndUid: 1300,
-				prior: stale,
-			}),
-		/must not pass its target/,
-		"a page that walked the reopened band must not be committable against the stale ceiling",
-	);
-	const committed = advanceMessagesBackfillCursor({
-		now: FROZEN_NOW,
-		pageEndUid: 1300,
-		prior: { ...stale, target_uid: 1300 },
-	});
-	assert.equal(
-		committed.target_uid,
-		1300,
-		"the cursor must store the raised ceiling for the next run to read",
-	);
-});
-
-test("advanceMessagesBackfillCursor: a partial page under a reopened ceiling stays incomplete", () => {
-	// A reopened band larger than one page must leave the walk open, so the next
-	// run continues into it rather than declaring the mailbox finished.
-	const partial = advanceMessagesBackfillCursor({
-		now: FROZEN_NOW,
-		pageEndUid: 1700,
-		prior: {
-			backfilled_through_uid: 1200,
-			completed_at: FROZEN_NOW,
-			target_uid: 2000,
-			uidvalidity: 123,
-		},
-	});
-	assert.equal(partial.target_uid, 2000);
-	assert.equal(partial.backfilled_through_uid, 1700);
-	assert.equal(
-		partial.completed_at,
-		null,
-		"the walk has 1701..2000 left and must not report completion",
-	);
-});
-
-test("advanceMessagesBackfillCursor: page completion is monotonic and partial pages stay incomplete", () => {
-	const partial = advanceMessagesBackfillCursor({
-		now: FROZEN_NOW,
-		pageEndUid: 500,
-		prior: { backfilled_through_uid: 0, target_uid: 1200, uidvalidity: 123 },
-	});
-	assert.deepEqual(partial, {
-		backfilled_through_uid: 500,
-		completed_at: null,
-		target_uid: 1200,
-		uidvalidity: 123,
-	});
-
-	assert.throws(
-		() =>
-			advanceMessagesBackfillCursor({
-				now: FROZEN_NOW,
-				pageEndUid: 400,
-				prior: partial,
-			}),
-		/must not regress/,
-	);
-
-	const complete = advanceMessagesBackfillCursor({
-		now: FROZEN_NOW,
-		pageEndUid: 1200,
-		prior: partial,
-	});
-	assert.equal(complete.backfilled_through_uid, 1200);
-	assert.equal(complete.completed_at, FROZEN_NOW);
-});
-
-test("messages backfill cursor resets on UIDVALIDITY change instead of reusing the old epoch", () => {
-	assert.equal(
-		selectMessagesBackfillFetchRange({
-			messagesBackfill: {
-				backfilled_through_uid: 999,
-				uidvalidity: 456,
-				target_uid: 1200,
-			},
-			uidnext: 1300,
-			uidvalidity: 789,
-		}),
-		"1:500",
-		"a cursor from another UIDVALIDITY must restart at UID 1",
-	);
-	assert.equal(
-		selectMessagesBackfillFetchRange({
-			messagesBackfill: {
-				backfilled_through_uid: 999,
-				uidvalidity: 456,
-				target_uid: 1200,
-			},
-			uidnext: 301,
-			uidvalidity: 789,
-		}),
-		"1:300",
-		"a new UIDVALIDITY uses the new mailbox head, not the dead epoch target",
-	);
-});
-
-test("messages backfill interruption replays one bounded page until its STATE boundary is durable", () => {
-	const prior = {
-		backfilled_through_uid: 0,
-		target_uid: 1200,
-		uidvalidity: 123,
-	};
-	const firstAttempt = selectMessagesBackfillFetchRange({
-		messagesBackfill: prior,
-		uidnext: 1300,
-	});
-	const replayAfterInterruption = selectMessagesBackfillFetchRange({
-		messagesBackfill: prior,
-		uidnext: 1300,
-	});
-	assert.equal(firstAttempt, "1:500");
-	assert.equal(replayAfterInterruption, firstAttempt);
-	assert.equal(
-		selectMessagesBackfillFetchRange({
-			messagesBackfill: advanceMessagesBackfillCursor({
-				now: FROZEN_NOW,
-				pageEndUid: 500,
-				prior,
-			}),
-			uidnext: 1300,
-		}),
-		"501:1000",
-	);
-});
-
-test("messages backfill never emits a full-coverage proof for a partial page", () => {
-	const partial = advanceMessagesBackfillCursor({
-		now: FROZEN_NOW,
-		pageEndUid: 500,
-		prior: { backfilled_through_uid: 0, target_uid: 1200, uidvalidity: 123 },
-	});
-	assert.equal(partial.completed_at, null);
-	assert.equal("coverage_condition" in partial, false);
-});
 
 test("runAllMailPasses: first historical page is bounded, durable only at page end, and stays partial", async () => {
 	const originalWrite = globalThis.process.stdout.write;
@@ -2484,11 +2041,10 @@ test("runAllMailPasses: scheduled runs advance historical pages while forwarding
 			},
 			async *fetch(range: string) {
 				fetchRanges.push(range);
-				let ids: number[] = [1];
-				if (range === "1201:*") {
+				// Range-respecting: each page yields a UID inside its own range.
+				let ids: number[] = [Number(range.split(":")[0])];
+				if (range === "1201:1300") {
 					ids = [1250];
-				} else if (range === "1001:1200") {
-					ids = [1001];
 				}
 				for (const uid of ids) {
 					yield makeMsg({ uid, emailId: `msg-${uid}` });
@@ -2535,7 +2091,7 @@ test("runAllMailPasses: scheduled runs advance historical pages while forwarding
 		uidNext = 1301;
 
 		const second = await run({ messages: first });
-		assert.deepEqual(fetchRanges, ["501:1000", "1201:*"]);
+		assert.deepEqual(fetchRanges, ["501:1000", "1201:1300"]);
 		assert.equal((second.all_mail as Record<string, unknown>).uidnext, 1001);
 		assert.equal(
 			(second.all_mail as Record<string, unknown>).forward_uidnext,
@@ -2643,8 +2199,10 @@ test("runAllMailPasses: scheduled runs advance historical pages while forwarding
 			"the historical ceiling must rise to meet the forward watermark, not stay frozen at 1200",
 		);
 
+		// The forward lane already covered 1201..1300, so the history walk stops
+		// below it: no UID is walked twice, and there is no new mail to forward.
 		const third = await run({ messages: second });
-		assert.deepEqual(fetchRanges, ["1001:1300", "1301:*"]);
+		assert.deepEqual(fetchRanges, ["1001:1200"]);
 		assert.equal((third.all_mail as Record<string, unknown>).uidnext, 1301);
 		assert.equal(
 			typeof (third.backfill as Record<string, unknown>).completed_at,
@@ -2804,7 +2362,11 @@ test("runAllMailPasses: a completed historical walk reopens for new mail instead
 });
 
 test("parseDeltaHoldbackRuns: tolerates missing/malformed input, otherwise passes a valid non-negative integer through", () => {
-	assert.equal(parseDeltaHoldbackRuns(undefined), 0, "absent — pre-counter state");
+	assert.equal(
+		parseDeltaHoldbackRuns(undefined),
+		0,
+		"absent — pre-counter state",
+	);
 	assert.equal(parseDeltaHoldbackRuns(null), 0);
 	assert.equal(parseDeltaHoldbackRuns("2"), 0, "non-number");
 	assert.equal(parseDeltaHoldbackRuns(-1), 0, "negative");
@@ -2812,7 +2374,11 @@ test("parseDeltaHoldbackRuns: tolerates missing/malformed input, otherwise passe
 	assert.equal(parseDeltaHoldbackRuns(Number.NaN), 0);
 	assert.equal(parseDeltaHoldbackRuns(Number.POSITIVE_INFINITY), 0);
 	assert.equal(parseDeltaHoldbackRuns(0), 0, "a valid zero passes through");
-	assert.equal(parseDeltaHoldbackRuns(2), 2, "a valid positive integer passes through");
+	assert.equal(
+		parseDeltaHoldbackRuns(2),
+		2,
+		"a valid positive integer passes through",
+	);
 });
 
 test("resolveDeltaCursorAdvance: no skip always advances to the live value and resets the streak to 0, regardless of prior streak", () => {
@@ -2838,7 +2404,7 @@ test("resolveDeltaCursorAdvance: no skip always advances to the live value and r
 	);
 });
 
-test("resolveDeltaCursorAdvance: a skip holds the prior modseq and climbs the streak while under the limit", () => {
+test("resolveDeltaCursorAdvance: a skip holds the prior modseq and climbs the streak", () => {
 	assert.deepEqual(
 		resolveDeltaCursorAdvance({
 			liveHighestModseq: 500,
@@ -2857,48 +2423,43 @@ test("resolveDeltaCursorAdvance: a skip holds the prior modseq and climbs the st
 			skippedAnyMessage: true,
 		}),
 		{ highestModseq: 400, holdbackRuns: 2 },
-		"second held-back run — still under DELTA_HOLDBACK_RUN_LIMIT (3)",
+		"second held-back run",
 	);
 });
 
-test("resolveDeltaCursorAdvance: a skip that would reach the limit advances anyway and resets the streak", () => {
-	assert.deepEqual(
-		resolveDeltaCursorAdvance({
-			liveHighestModseq: 500,
-			priorHoldbackRuns: 2,
-			priorModseq: 400,
-			skippedAnyMessage: true,
-		}),
-		{ highestModseq: 500, holdbackRuns: 0 },
-		"the third consecutive skip hits the limit — advance, don't stall forever",
-	);
-	// Defensive: even a prior streak already past the limit (e.g. the limit
-	// was lowered, or state was hand-edited) never gets stuck.
-	assert.deepEqual(
-		resolveDeltaCursorAdvance({
-			liveHighestModseq: 500,
-			priorHoldbackRuns: 10,
-			priorModseq: 400,
-			skippedAnyMessage: true,
-		}),
-		{ highestModseq: 500, holdbackRuns: 0 },
-	);
+test("resolveDeltaCursorAdvance: an unowned change holds the prior modseq however long it lasts", () => {
+	// Moving past a change nobody owns loses it for good, so no run count
+	// releases the hold; only the ledger taking the change does.
+	for (const priorHoldbackRuns of [2, 10]) {
+		assert.deepEqual(
+			resolveDeltaCursorAdvance({
+				liveHighestModseq: 500,
+				priorHoldbackRuns,
+				priorModseq: 400,
+				skippedAnyMessage: true,
+			}),
+			{ highestModseq: 400, holdbackRuns: priorHoldbackRuns + 1 },
+		);
+	}
 });
 
-// ─── Invariant: a skipped delta message must hold highest_modseq back ───
+/** `[uid, streams]` for each retry-debt entry in a messages STATE cursor. */
+function debtOf(cursor: Record<string, unknown>): [number, string[]][] {
+	const progress = cursor.progress as {
+		debt: { uid: number; streams: string[] }[];
+	};
+	return progress.debt.map((d) => [d.uid, d.streams]);
+}
+
+// ─── Invariant: a skipped delta change has a durable owner ───────────────
 //
-// REGRESSION EVIDENCE. The messages STATE cursor's `highest_modseq` was
-// always written from the mailbox's CURRENT value (`session.highestModseqCursor`),
-// independent of whether `runDeltaPass` actually covered every message that
-// changed since the prior floor. A message skipped this run (failed snippet
-// re-fetch, or the pre-existing envelope-absent skip) therefore fell
-// permanently behind the new floor: `changedSince` on the next run only
-// re-surfaces a message whose modseq moves AGAIN, which may never happen —
-// trading a temporary blank snippet for silently stale labels/read-state
-// forever. `runDeltaPass` now reports `skippedAnyMessage`, and this run's
-// STATE holds `highest_modseq` at the prior value whenever that is true, so
-// the next run's `changedSince` re-covers exactly the same window.
-test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq (and bumps delta_holdback_runs) at the prior value; a later successful run advances both", async () => {
+// REGRESSION EVIDENCE. A change the delta pass sees but cannot apply (failed
+// snippet re-fetch, or an incomplete FETCH) falls permanently behind once
+// `highest_modseq` moves past it: `changedSince` on the next run only
+// re-surfaces a message whose modseq moves AGAIN, which may never happen.
+// The change is therefore owed to the progress ledger as `messages` retry
+// debt before the cursor advances, and the debt retry writes the whole row.
+test("runAllMailPasses: a failed delta snippet re-fetch owes the change as messages debt, and the debt retry lands the full record", async () => {
 	const originalWrite = globalThis.process.stdout.write;
 	const protocolMessages: Record<string, unknown>[] = [];
 	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
@@ -2917,6 +2478,7 @@ test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq (an
 		let highestModseqLive = 100n;
 		let fetchOneOutcome: "fail" | "succeed" = "fail";
 		let deltaLabels = new Set<string>(["\\Inbox"]);
+		let walkYieldsMessage = false;
 		const plainLeaf: MessageStructureObject = {
 			type: "text/plain",
 			encoding: "7bit",
@@ -2959,9 +2521,9 @@ test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq (an
 				_query: unknown,
 				options?: { changedSince?: bigint },
 			) {
-				if (options?.changedSince === undefined) {
-					// The regular forward/historical metadata walk — yield nothing so
-					// this test's only moving part is the delta pass.
+				if (options?.changedSince === undefined && !walkYieldsMessage) {
+					// The first walk yields nothing, so the delta pass is this
+					// test's only moving part until the debt retry.
 					return;
 				}
 				yield makeMsg({
@@ -3018,9 +2580,8 @@ test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq (an
 
 		// Run 2: mail state advances (live highestModseq 100 -> 150) and the
 		// tracked message's snippet re-fetch FAILS. No record for it may emit
-		// (see runDeltaPass's own tests), and — the behavior under test —
-		// highest_modseq must stay at the PRIOR value (100), not jump to the
-		// live 150, or the next run's changedSince would never re-examine it.
+		// (see runDeltaPass's own tests). The change is owed as debt, so the
+		// cursor can advance to the live value without losing it.
 		highestModseqLive = 150n;
 		fetchOneOutcome = "fail";
 		emitted.length = 0;
@@ -3030,55 +2591,51 @@ test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq (an
 			0,
 			"the failed re-fetch emits no messages record this run",
 		);
+		assert.deepEqual(
+			debtOf(afterRun2),
+			[[1, ["messages"]]],
+			"the skipped change is owed as messages debt",
+		);
 		assert.equal(
 			(afterRun2.all_mail as Record<string, unknown>).highest_modseq,
-			100,
-			"a skipped delta message holds highest_modseq at the prior value, not the live one",
+			150,
+			"an owed change does not hold the cursor back",
 		);
 		assert.equal(
 			(afterRun2.all_mail as Record<string, unknown>).delta_holdback_runs,
-			1,
-			"the first held-back run starts the streak at 1",
+			0,
 		);
 
-		// Run 3: same prior floor (100, carried from run 2's held-back STATE) —
-		// this time the re-fetch SUCCEEDS and the tracked message's labels have
-		// also changed since run 1. The full record — new labels AND the fresh
-		// snippet — must land, and with nothing skipped this run,
-		// highest_modseq advances to the live value (still 150).
+		// Run 3: the debt retry reads the message again. This time the read
+		// SUCCEEDS and the labels have also changed since run 1: the full
+		// record (new labels AND the fresh snippet) lands and the debt settles.
+		walkYieldsMessage = true;
 		fetchOneOutcome = "succeed";
 		deltaLabels = new Set<string>(["\\Inbox", "\\Important"]);
 		emitted.length = 0;
 		const afterRun3 = await run({ messages: afterRun2 });
 		const recovered = emitted.find((r) => r.stream === "messages");
-		assert.ok(recovered, "a working re-fetch emits the full record");
+		assert.ok(recovered, "the debt retry emits the full record");
 		assert.equal(recovered.data.snippet, "A fresh real snippet");
 		assert.deepEqual(recovered.data.labels, ["\\Inbox", "\\Important"]);
+		assert.deepEqual(debtOf(afterRun3), [], "the debt settles");
 		assert.equal(
 			(afterRun3.all_mail as Record<string, unknown>).highest_modseq,
 			150,
-			"no skips this run — highest_modseq advances to the live value like before this fix",
-		);
-		assert.equal(
-			(afterRun3.all_mail as Record<string, unknown>).delta_holdback_runs,
-			0,
-			"a success after one held-back run resets the streak to 0",
 		);
 	} finally {
 		globalThis.process.stdout.write = originalWrite;
 	}
 });
 
-// ─── Invariant: the hold-back is bounded, not indefinite ──────────────────
+// ─── Invariant: a persistently failing change stays owed ─────────────────
 //
 // A message that fails its snippet re-fetch EVERY run (malformed MIME, a
 // message the server always errors on) must not stall highest_modseq
-// forever — that would make every later run's changedSince set grow
-// without bound. After DELTA_HOLDBACK_RUN_LIMIT (3) consecutive held-back
-// runs, the cursor advances anyway; the still-failing message's retryable
-// DETAIL_GAP is what keeps the miss visible in coverage once the cursor
-// moves past it, rather than it going silent.
-test("runAllMailPasses: a persistently failing delta snippet re-fetch is held back up to the limit, then the cursor advances with the gap still present", async () => {
+// forever, and it must not go silent either. Its change stays owed as
+// messages debt, and its retryable DETAIL_GAP keeps the miss visible, while
+// the cursor advances every run.
+test("runAllMailPasses: a persistently failing delta snippet re-fetch stays owed as debt and a gap while the cursor advances", async () => {
 	const originalWrite = globalThis.process.stdout.write;
 	const protocolMessages: Record<string, unknown>[] = [];
 	globalThis.process.stdout.write = ((data: string): boolean => {
@@ -3124,14 +2681,7 @@ test("runAllMailPasses: a persistently failing delta snippet re-fetch is held ba
 				},
 			},
 			// biome-ignore lint/suspicious/useAwait: async generator is required by the ImapFlow fetch shape.
-			async *fetch(
-				_range: string,
-				_query: unknown,
-				options?: { changedSince?: bigint },
-			) {
-				if (options?.changedSince === undefined) {
-					return;
-				}
+			async *fetch() {
 				yield makeMsg({
 					uid: 1,
 					emailId: "gmmsgid-persistent-fail",
@@ -3164,62 +2714,40 @@ test("runAllMailPasses: a persistently failing delta snippet re-fetch is held ba
 						?.message_id === "gmmsgid-persistent-fail",
 			);
 
-		// Run 1: baseline (full resync — runDeltaPass is a no-op).
+		// Run 1: baseline (full resync — runDeltaPass is a no-op). The walk's
+		// own body read fails, so the UID is owed from the start.
 		const afterRun1 = await run({});
-		assert.equal((afterRun1.all_mail as Record<string, unknown>).highest_modseq, 100);
 		assert.equal(
-			(afterRun1.all_mail as Record<string, unknown>).delta_holdback_runs,
-			0,
-		);
-
-		// Runs 2 and 3: the message fails again each time. The cursor holds at
-		// the prior value (100) and the streak climbs 1, then 2 — still below
-		// DELTA_HOLDBACK_RUN_LIMIT (3).
-		highestModseqLive = 999n; // the "live" value every held-back run must NOT adopt
-		const afterRun2 = await run({ messages: afterRun1 });
-		assert.equal(
-			(afterRun2.all_mail as Record<string, unknown>).highest_modseq,
+			(afterRun1.all_mail as Record<string, unknown>).highest_modseq,
 			100,
-			"held back — run 1 of persistent failure",
 		);
-		assert.equal(
-			(afterRun2.all_mail as Record<string, unknown>).delta_holdback_runs,
-			1,
-		);
-		assert.ok(gapForThisRun(), "a retryable gap is recorded for the failing message");
+		assert.deepEqual(debtOf(afterRun1), [[1, ["messages"]]]);
 
-		const afterRun3 = await run({ messages: afterRun2 });
-		assert.equal(
-			(afterRun3.all_mail as Record<string, unknown>).highest_modseq,
-			100,
-			"held back — run 2 of persistent failure",
-		);
-		assert.equal(
-			(afterRun3.all_mail as Record<string, unknown>).delta_holdback_runs,
-			2,
-		);
-		assert.ok(gapForThisRun(), "a retryable gap is recorded for the failing message");
-
-		// Run 4: the THIRD consecutive failure. The streak would reach the
-		// limit, so this run advances highest_modseq to the live value anyway
-		// — the cursor must not stall forever — and the streak resets to 0.
-		// The gap for the still-failing message is still present: the miss
-		// stays visible in coverage even though the cursor moved past it.
-		const afterRun4 = await run({ messages: afterRun3 });
-		assert.equal(
-			(afterRun4.all_mail as Record<string, unknown>).highest_modseq,
-			999,
-			"the bound is reached — the cursor advances despite the ongoing failure",
-		);
-		assert.equal(
-			(afterRun4.all_mail as Record<string, unknown>).delta_holdback_runs,
-			0,
-			"hitting the limit resets the streak",
-		);
-		assert.ok(
-			gapForThisRun(),
-			"the still-failing message's gap is kept even as the cursor advances past it",
-		);
+		// Runs 2 to 4: the message fails again each time. The cursor adopts
+		// the live value every run, and the change stays owed and visible.
+		highestModseqLive = 999n;
+		let state = afterRun1;
+		for (const n of [2, 3, 4]) {
+			state = await run({ messages: state });
+			assert.equal(
+				(state.all_mail as Record<string, unknown>).highest_modseq,
+				999,
+				`run ${n}: the cursor advances`,
+			);
+			assert.equal(
+				(state.all_mail as Record<string, unknown>).delta_holdback_runs,
+				0,
+			);
+			assert.deepEqual(
+				debtOf(state),
+				[[1, ["messages"]]],
+				`run ${n}: the change stays owed`,
+			);
+			assert.ok(
+				gapForThisRun(),
+				`run ${n}: a retryable gap is recorded for the failing message`,
+			);
+		}
 	} finally {
 		globalThis.process.stdout.write = originalWrite;
 	}
@@ -3267,8 +2795,9 @@ test("runAllMailPasses: attachments-only scope keeps the bounded message lane an
 			async *fetch(range: string) {
 				fetchRanges.push(range);
 				yield makeMsg({
-					uid: range === "1201:*" ? 1250 : 1,
+					uid: range === "1201:1300" ? 1250 : 1,
 					emailId: "attachment-only-message",
+					bodyStructure: { type: "text/plain", part: "1" },
 				});
 			},
 		};
@@ -3301,7 +2830,7 @@ test("runAllMailPasses: attachments-only scope keeps the bounded message lane an
 
 		uidNext = 1301;
 		const second = await run({ messages: first });
-		assert.deepEqual(fetchRanges, ["501:1000", "1201:*"]);
+		assert.deepEqual(fetchRanges, ["501:1000", "1201:1300"]);
 		assert.equal(
 			(second.all_mail as Record<string, unknown>).forward_uidnext,
 			1301,
@@ -3372,7 +2901,8 @@ test("runAllMailPasses: threads use the bounded page instead of starving until m
 			},
 		);
 
-		assert.deepEqual(fetchRanges, ["1:500", "1:500"]);
+		// One bounded metadata page, then one FETCH of the thread's members.
+		assert.deepEqual(fetchRanges, ["1:500", "1"]);
 		assert.equal(
 			fetchRanges.includes("1:*"),
 			false,
@@ -3559,76 +3089,12 @@ test("runAllMailPasses: interruption during a historical page withholds its curs
 			false,
 			"an interrupted page cannot emit a durable cursor",
 		);
-		assert.equal(
-			selectMessagesBackfillFetchRange({
-				messagesBackfill: { target_uid: 1200, uidvalidity: 123 },
-				uidnext: 1201,
-			}),
-			"1:500",
-			"the unchanged durable cursor replays only the same bounded page",
-		);
 	} finally {
 		globalThis.process.stdout.write = originalWrite;
 	}
 });
 
-test("selectAttachmentBackfillFetchRange: historical range is bounded and independent of messages uidnext cursor", () => {
-	assert.equal(
-		selectAttachmentBackfillFetchRange({
-			attachmentBackfill: { uidvalidity: 123 },
-			priorUidnext: 500,
-		}),
-		"1:499",
-	);
-	assert.equal(
-		selectAttachmentBackfillFetchRange({
-			attachmentBackfill: { backfilled_through_uid: 250, uidvalidity: 123 },
-			maxWindowUids: 100,
-			priorUidnext: 500,
-		}),
-		"251:350",
-	);
-	assert.equal(
-		selectAttachmentBackfillFetchRange({
-			attachmentBackfill: { backfilled_through_uid: 499, uidvalidity: 123 },
-			priorUidnext: 500,
-		}),
-		null,
-	);
-});
-
-test("selectAttachmentBackfillFetchRange: interrupted windows replay until the durable cursor advances", () => {
-	const session = {
-		attachmentBackfill: { backfilled_through_uid: 100, uidvalidity: 123 },
-		maxWindowUids: 50,
-		priorUidnext: 251,
-	};
-	assert.equal(selectAttachmentBackfillFetchRange(session), "101:150");
-
-	// If a run crashes before its STATE is persisted, the durable cursor is
-	// unchanged and the same bounded window is retried. Attachment records are
-	// idempotent/content-addressed, so replay is safer than skipping ahead.
-	assert.equal(selectAttachmentBackfillFetchRange(session), "101:150");
-
-	assert.equal(
-		selectAttachmentBackfillFetchRange({
-			...session,
-			attachmentBackfill: { backfilled_through_uid: 150, uidvalidity: 123 },
-		}),
-		"151:200",
-	);
-});
-
 test("recoverServedAttachmentGaps: a completed historical cursor still drains a served-gap prefix without scanning the mailbox", async () => {
-	assert.equal(
-		selectAttachmentBackfillFetchRange({
-			attachmentBackfill: { backfilled_through_uid: 499, uidvalidity: 123 },
-			priorUidnext: 500,
-		}),
-		null,
-		"the historical attachment cursor is already complete",
-	);
-
 	const oversizedGap: DetailGapStartEntry = {
 		gap_id: "gap-served-oversized",
 		reference_only: true,
@@ -3761,388 +3227,6 @@ test("recoverServedAttachmentGaps: a completed historical cursor still drains a 
 		"the unadmitted gap must not emit an attachment record",
 	);
 	assert.equal(attachments[0]?.data.id, "gmmsgid-recovery:1");
-});
-
-test("runAttachmentBackfillAndRecoveryPass: served gaps preempt historical attachment backfill and keep the cursor unchanged", async () => {
-	const allMail = makeAllMailMailbox();
-	const recoveryMessage = makeServedRecoveryMsg();
-	const runHarness = makeRecordingEmit();
-	const search = mock.fn((query: { emailId?: string }) => {
-		assert.equal(query.emailId, "gmmsgid-recovery");
-		return Promise.resolve([recoveryMessage.uid ?? 321]);
-	});
-	const fetchOne = mock.fn((range: string) => {
-		assert.equal(range, "321");
-		return Promise.resolve(recoveryMessage);
-	});
-	const fetch = mock.fn(
-		(): ReturnType<ImapFlow["fetch"]> => ({
-			[Symbol.asyncDispose]() {
-				return Promise.resolve();
-			},
-			[Symbol.asyncIterator]() {
-				return this;
-			},
-			next() {
-				return Promise.reject(
-					new Error("historical backfill must not run when served gaps exist"),
-				);
-			},
-			return() {
-				return Promise.resolve({ done: true, value: undefined });
-			},
-			throw(error: unknown) {
-				return Promise.reject(error);
-			},
-		}),
-	);
-	const client: Pick<ImapFlow, "fetch" | "fetchOne" | "search"> = {
-		fetch,
-		fetchOne,
-		search,
-	};
-	const attachmentCoverage = makeAttachmentDetailCoverage();
-	const hydrateAttachmentMock = mock.fn(
-		(_msg: FetchMessageObject, attachment: AttachmentRecord) =>
-			Promise.resolve(
-				hydratedResult({
-					...attachment,
-					blob_ref: {
-						blob_id: `blob-${attachment.id}`,
-						mime_type: attachment.content_type ?? "application/octet-stream",
-						sha256: `sha-${attachment.id}`,
-						size_bytes: attachment.size_bytes ?? 0,
-					},
-					content_sha256: `sha-${attachment.id}`,
-					content_type: attachment.content_type,
-					hydration_error: null,
-					hydration_status: "hydrated" as const,
-					size_bytes: attachment.size_bytes,
-				}),
-			),
-	);
-	const servedGap: DetailGapStartEntry = {
-		gap_id: "gap-served-old",
-		reference_only: true,
-		status: "pending",
-		stream: "attachments",
-		record_key: "gmmsgid-recovery:1",
-		detail_locator: {
-			kind: "gmail.attachment_detail",
-			attachment_id: "gmmsgid-recovery:1",
-			message_id: "gmmsgid-recovery",
-			part_index: "1",
-		},
-	};
-
-	await runAttachmentBackfillAndRecoveryPass({
-		allMail,
-		attachmentBackfillRequested: true,
-		attachmentCoverage,
-		client,
-		deps: {
-			detailGaps: [servedGap],
-			emitRecord: mock.fn(() => Promise.resolve(true)),
-			emittedAt: FROZEN_NOW,
-			requested: makeRequested(["attachments"]),
-			streamsToBackfill: [],
-		},
-		emit: runHarness.emit,
-		fetchBodiesBound: mock.fn(() =>
-			Promise.reject(new Error("historical body fetch must not run")),
-		),
-		hydrateAttachment: hydrateAttachmentMock as HydrateAttachmentFn,
-		recoveredAttachmentGapIds: new Set<string>(),
-		session: {
-			attachmentBackfill: { backfilled_through_uid: 250, uidvalidity: 123 },
-			existsTotal: 600,
-			priorExistsTotal: undefined,
-			fullResync: false,
-			highestModseqCursor: null,
-			messagesBackfill: {
-				uidvalidity: 123,
-				backfilled_through_uid: 0,
-				completed_at: null,
-			},
-			priorDeltaHoldbackRuns: 0,
-			priorModseq: null,
-			priorUidnext: 500,
-			uidnext: 600,
-			uidvalidityNum: 123,
-		},
-	});
-
-	assert.equal(
-		search.mock.callCount(),
-		1,
-		"served-gap recovery should use X-GM-MSGID lookup",
-	);
-	assert.equal(
-		fetchOne.mock.callCount(),
-		1,
-		"served-gap recovery should fetch exactly one message",
-	);
-	assert.equal(
-		fetch.mock.callCount(),
-		0,
-		"historical attachment backfill must not run in the served-gap branch",
-	);
-	assert.equal(
-		hydrateAttachmentMock.mock.callCount(),
-		1,
-		"the served attachment should be attempted now",
-	);
-
-	const attachmentCoverageMessage =
-		buildAttachmentDetailCoverageMessage(attachmentCoverage);
-	assert.equal(attachmentCoverageMessage.considered, 1);
-	assert.equal(attachmentCoverageMessage.covered, 1);
-	const recovered = runHarness.protocolMessages.filter(
-		(msg) => msg.type === "DETAIL_GAP_RECOVERED",
-	);
-	assert.deepEqual(
-		recovered.map((msg) => (msg as { gap_id?: string }).gap_id),
-		["gap-served-old"],
-		"the served gap should recover now",
-	);
-	assert.ok(
-		runHarness.protocolMessages.some(
-			(msg) => msg.type === "PROGRESS" && msg.stream === "attachments",
-		),
-		"the served-gap branch should emit its own recovery progress",
-	);
-	const terminalRecoverySummary = runHarness.protocolMessages.find(
-		(msg): msg is ProgressMessage =>
-			msg.type === "PROGRESS" && msg.attachment_recovery_outcome !== undefined,
-	);
-	assert.deepEqual(
-		terminalRecoverySummary?.attachment_recovery_outcome,
-		{
-			admitted: 1,
-			admitted_bytes: 2 * 1024 * 1024,
-			attempted: 1,
-			hydration_failed: 0,
-			lookup_miss: 0,
-			metadata_lookups: 1,
-			object: "attachment_recovery_outcome",
-			recovered: 1,
-			run_cap_deferred: 0,
-			served: 1,
-		},
-		"the existing terminal recovery summary carries the exact aggregate-only outcome",
-	);
-	assert.deepEqual(
-		Object.keys(
-			terminalRecoverySummary?.attachment_recovery_outcome ?? {},
-		).sort(),
-		[
-			"admitted",
-			"admitted_bytes",
-			"attempted",
-			"hydration_failed",
-			"lookup_miss",
-			"metadata_lookups",
-			"object",
-			"recovered",
-			"run_cap_deferred",
-			"served",
-		],
-		"the terminal outcome is an allowlisted aggregate shape, not a carrier for locators, identities, content, or errors",
-	);
-	assert.deepEqual(
-		terminalRecoverySummary?.attachment_hydration_failure_outcome,
-		{
-			blob_upload_http_4xx: 0,
-			blob_upload_http_5xx: 0,
-			blob_upload_integrity_failed: 0,
-			blob_upload_invalid_response: 0,
-			blob_upload_transport_failed: 0,
-			imap_download_failed: 0,
-			unclassified_failed: 0,
-			object: "attachment_hydration_failure_outcome",
-		},
-		"the terminal recovery summary carries the exact aggregate-only hydration failure stages",
-	);
-	assert.deepEqual(
-		Object.keys(
-			terminalRecoverySummary?.attachment_hydration_failure_outcome ?? {},
-		).sort(),
-		[
-			"blob_upload_http_4xx",
-			"blob_upload_http_5xx",
-			"blob_upload_integrity_failed",
-			"blob_upload_invalid_response",
-			"blob_upload_transport_failed",
-			"imap_download_failed",
-			"object",
-			"unclassified_failed",
-		],
-		"the stage outcome cannot become a carrier for keys, locators, provider data, or error content",
-	);
-	assert.equal(
-		runHarness.protocolMessages.some(
-			(msg) => msg.type === "STATE" && msg.stream === "attachments",
-		),
-		false,
-		"the served-gap branch must not advance the historical attachment cursor",
-	);
-	assert.equal(
-		runHarness.protocolMessages.some(
-			(msg) =>
-				msg.type === "PROGRESS" &&
-				msg.stream === "attachments" &&
-				msg.message === "Downloading attachments from older messages",
-		),
-		false,
-		"the historical byte-budget page must not run in the served-gap branch",
-	);
-});
-
-test("runAttachmentBackfillAndRecoveryPass: recoveryOnly=true recovers served gaps and suppresses the forward walk", async () => {
-	const allMail = makeAllMailMailbox();
-	const recoveryMessage = makeServedRecoveryMsg();
-	const runHarness = makeRecordingEmit();
-	const search = mock.fn((query: { emailId?: string }) => {
-		assert.equal(query.emailId, "gmmsgid-recovery");
-		return Promise.resolve([recoveryMessage.uid ?? 321]);
-	});
-	const fetchOne = mock.fn((range: string) => {
-		assert.equal(range, "321");
-		return Promise.resolve(recoveryMessage);
-	});
-	const fetch = mock.fn(
-		(): ReturnType<ImapFlow["fetch"]> => ({
-			[Symbol.asyncDispose]() {
-				return Promise.resolve();
-			},
-			[Symbol.asyncIterator]() {
-				return this;
-			},
-			next() {
-				return Promise.reject(
-					new Error("historical backfill must not run in recoveryOnly mode"),
-				);
-			},
-			return() {
-				return Promise.resolve({ done: true, value: undefined });
-			},
-			throw(error: unknown) {
-				return Promise.reject(error);
-			},
-		}),
-	);
-	const client: Pick<ImapFlow, "fetch" | "fetchOne" | "search"> = {
-		fetch,
-		fetchOne,
-		search,
-	};
-	const attachmentCoverage = makeAttachmentDetailCoverage();
-	const hydrateAttachmentMock = mock.fn(
-		(_msg: FetchMessageObject, attachment: AttachmentRecord) =>
-			Promise.resolve(
-				hydratedResult({
-					...attachment,
-					blob_ref: {
-						blob_id: `blob-${attachment.id}`,
-						mime_type: attachment.content_type ?? "application/octet-stream",
-						sha256: `sha-${attachment.id}`,
-						size_bytes: attachment.size_bytes ?? 0,
-					},
-					content_sha256: `sha-${attachment.id}`,
-					content_type: attachment.content_type,
-					hydration_error: null,
-					hydration_status: "hydrated" as const,
-					size_bytes: attachment.size_bytes,
-				}),
-			),
-	);
-	const servedGap: DetailGapStartEntry = {
-		gap_id: "gap-served-only",
-		reference_only: true,
-		status: "pending",
-		stream: "attachments",
-		record_key: "gmmsgid-recovery:1",
-		detail_locator: {
-			kind: "gmail.attachment_detail",
-			attachment_id: "gmmsgid-recovery:1",
-			message_id: "gmmsgid-recovery",
-			part_index: "1",
-		},
-	};
-
-	await runAttachmentBackfillAndRecoveryPass({
-		allMail,
-		attachmentBackfillRequested: true,
-		attachmentCoverage,
-		client,
-		deps: {
-			detailGaps: [servedGap],
-			emitRecord: mock.fn(() => Promise.resolve(true)),
-			emittedAt: FROZEN_NOW,
-			recoveryOnly: true,
-			requested: makeRequested(["attachments"]),
-			streamsToBackfill: [],
-		},
-		emit: runHarness.emit,
-		fetchBodiesBound: mock.fn(() =>
-			Promise.reject(new Error("historical body fetch must not run")),
-		),
-		hydrateAttachment: hydrateAttachmentMock as HydrateAttachmentFn,
-		recoveredAttachmentGapIds: new Set<string>(),
-		recoveryOnly: true,
-		session: {
-			attachmentBackfill: { backfilled_through_uid: 250, uidvalidity: 123 },
-			existsTotal: 600,
-			priorExistsTotal: undefined,
-			fullResync: false,
-			highestModseqCursor: null,
-			messagesBackfill: {
-				uidvalidity: 123,
-				backfilled_through_uid: 0,
-				completed_at: null,
-			},
-			priorDeltaHoldbackRuns: 0,
-			priorModseq: null,
-			priorUidnext: 500,
-			uidnext: 600,
-			uidvalidityNum: 123,
-		},
-	});
-
-	assert.equal(
-		search.mock.callCount(),
-		1,
-		"served-gap recovery should still look up the message by X-GM-MSGID",
-	);
-	assert.equal(
-		fetchOne.mock.callCount(),
-		1,
-		"served-gap recovery should still fetch exactly one message",
-	);
-	assert.equal(
-		fetch.mock.callCount(),
-		0,
-		"recoveryOnly mode must not enter the historical attachment backfill",
-	);
-	assert.equal(
-		hydrateAttachmentMock.mock.callCount(),
-		1,
-		"the served attachment should still be attempted now",
-	);
-	assert.equal(
-		runHarness.protocolMessages.some(
-			(msg) => msg.type === "PROGRESS" && msg.stream === "attachments",
-		),
-		true,
-		"recoveryOnly mode should still emit the recovery progress",
-	);
-	assert.equal(
-		runHarness.protocolMessages.some(
-			(msg) => msg.type === "STATE" && msg.stream === "attachments",
-		),
-		false,
-		"recoveryOnly mode must not advance the historical attachment cursor",
-	);
 });
 
 test("recoverServedAttachmentGaps: an oversized first candidate admits exactly one lookup, fetch, and hydration", async () => {
@@ -4861,51 +3945,21 @@ test("recoverServedAttachmentGaps: an unclassified plain blob failure remains re
 		false,
 		"a failed hydration must not acknowledge the served gap as recovered",
 	);
-	assert.ok(
-		failedAttachment,
-		"the failed attachment record must still be emitted",
-	);
+	assert.ok(failedAttachment, "hydration ran and failed");
 	assert.equal(failedAttachment.hydration_status, "failed");
+	// A failed served attempt writes no record (the part may be stored
+	// hydrated). It re-defers the served gap under its lease, and the
+	// re-deferral records WHY as a bounded class: the 2026-08 Gmail incident
+	// left 5 gaps terminal after 37-117 retries with no recorded cause.
 	assert.deepEqual(attachmentCoverage.gapKeys, [failedAttachment.id]);
-	assert.deepEqual(attachmentCoverage.failedRecords, [
-		{ failureClass: "unclassified_failed", record: failedAttachment },
-	]);
-	const [failedCoverageRecord] = attachmentCoverage.failedRecords;
-	assert.ok(
-		failedCoverageRecord,
-		"failed recovery records must be retained for detail-gap emission",
+	assert.deepEqual(attachmentCoverage.failedRecords, []);
+	const redeferral = emitHarness.protocolMessages.find(
+		(msg) =>
+			msg.type === "DETAIL_GAP" && msg.record_key === failedAttachment?.id,
 	);
-	// A served-recovery attempt that fails again on a retry (attempt N of an
-	// already-terminal-bound gap) must still record WHY — a bounded, non-secret
-	// failure class — not just increment attempt_count with no evidence. This
-	// is the exact class of defect behind the 2026-08 Gmail 5-row incident: 5
-	// `temporary_unavailable` attachment gaps reached terminal status after
-	// 37-117 retries with `last_error_json` permanently null, because this
-	// recovery-retry path recorded an attempt but never a cause.
-	assert.deepEqual(
-		buildAttachmentDetailGap(
-			failedCoverageRecord.record,
-			failedCoverageRecord.failureClass,
-		),
-		{
-			type: "DETAIL_GAP",
-			stream: "attachments",
-			parent_stream: "messages",
-			record_key: failedAttachment.id,
-			status: "pending",
-			reason: "temporary_unavailable",
-			detail_locator: {
-				kind: "gmail.attachment_detail",
-				message_id: failedAttachment.message_id,
-				part_index: failedAttachment.part_index,
-				attachment_id: failedAttachment.id,
-			},
-			retryable: true,
-			reference_only: true,
-			detail: { class: "unclassified_failed" },
-			last_error: { class: "unclassified_failed" },
-		},
-	);
+	assert.ok(redeferral?.type === "DETAIL_GAP");
+	assert.deepEqual(redeferral.last_error, { class: "unclassified_failed" });
+	assert.equal(redeferral.retryable, true);
 	assert.equal(
 		JSON.stringify(summary).includes("private unclassified blob failure"),
 		false,
@@ -5095,37 +4149,6 @@ test("recoverServedAttachmentGaps: same-message served gaps reuse one lookup", a
 			.filter((msg): msg is ProgressMessage => msg.type === "PROGRESS")
 			.map((msg) => recoveryPhase(msg.message)),
 		["hydrating", "settled", "hydrating", "settled"],
-	);
-});
-
-test("resolveAttachmentBackfillWindowUids: env override must be a positive integer", () => {
-	assert.equal(
-		resolveAttachmentBackfillWindowUids({}),
-		DEFAULT_ATTACHMENT_BACKFILL_WINDOW_UIDS,
-	);
-	assert.equal(
-		resolveAttachmentBackfillWindowUids({
-			PDPP_GMAIL_ATTACHMENT_BACKFILL_WINDOW_UIDS: "1",
-		}),
-		1,
-	);
-	assert.equal(
-		resolveAttachmentBackfillWindowUids({
-			PDPP_GMAIL_ATTACHMENT_BACKFILL_WINDOW_UIDS: "2000",
-		}),
-		2000,
-	);
-	assert.equal(
-		resolveAttachmentBackfillWindowUids({
-			PDPP_GMAIL_ATTACHMENT_BACKFILL_WINDOW_UIDS: "0",
-		}),
-		DEFAULT_ATTACHMENT_BACKFILL_WINDOW_UIDS,
-	);
-	assert.equal(
-		resolveAttachmentBackfillWindowUids({
-			PDPP_GMAIL_ATTACHMENT_BACKFILL_WINDOW_UIDS: "12x",
-		}),
-		DEFAULT_ATTACHMENT_BACKFILL_WINDOW_UIDS,
 	);
 });
 
@@ -5467,7 +4490,7 @@ test("processMessage: wantBodies=false suppresses message_bodies but still emits
 
 // ─── Invariant: all-streams-disabled emits nothing ───────────────────────
 
-test("processMessage: all streams disabled → nothing emitted, but returns true (message was processed)", async () => {
+test("processMessage: all streams disabled → nothing emitted and no stream owes an outcome", async () => {
 	const { deps, emitted } = makeHarness({
 		requested: makeRequested([]), // no 'attachments' requested
 		wantBodies: false,
@@ -5475,34 +4498,38 @@ test("processMessage: all streams disabled → nothing emitted, but returns true
 	});
 	const processed = await processMessage(deps, makeMsg());
 	assert.equal(emitted.length, 0, "no records emitted when all streams off");
-	assert.equal(
-		processed,
-		true,
-		"processed flag still true (message wasn't skipped by early filter)",
-	);
+	assert.deepEqual(processed, {});
 });
 
 // ─── Invariant: early-filter skip (missing X-GM-MSGID) ───────────────────
 
-test("processMessage: missing X-GM-MSGID returns false and emits nothing", async () => {
+test("processMessage: missing X-GM-MSGID is terminal and emits nothing", async () => {
 	const { deps, emitted } = makeHarness({ wantMessages: true });
 	// Build a message without emailId (we omit rather than set undefined to
 	// satisfy exactOptionalPropertyTypes).
 	const { emailId: _emailId, ...rest } = makeMsg();
 	const processed = await processMessage(deps, rest);
-	assert.equal(processed, false);
+	// The BODYSTRUCTURE shows no attachment parts, so attachments owe nothing.
+	// (Without a structure they would be terminal; see progress-regression.)
+	assert.deepEqual(processed, {
+		messages: { kind: "terminal", reason: "missing_message_id" },
+		attachments: { kind: "covered" },
+	});
 	assert.equal(emitted.length, 0);
 });
 
 // ─── Invariant: time_range filter skips out-of-window messages ───────────
 
-test("processMessage: receivedAt outside time_range → false, emits nothing", async () => {
+test("processMessage: receivedAt outside time_range → out_of_scope, emits nothing", async () => {
 	const { deps, emitted } = makeHarness({
 		timeRange: { since: "2030-01-01T00:00:00.000Z" }, // in the future
 		wantMessages: true,
 	});
 	const processed = await processMessage(deps, makeMsg());
-	assert.equal(processed, false);
+	assert.deepEqual(processed, {
+		messages: { kind: "out_of_scope" },
+		attachments: { kind: "out_of_scope" },
+	});
 	assert.equal(emitted.length, 0);
 });
 
@@ -5552,7 +4579,7 @@ function findMessageBodyGap(
 // the failed body as a retryable DETAIL_GAP so it stays refetchable and the
 // stream does not read complete. The cursor may still advance, because the gap is
 // durable and a later run refetches exactly that body.
-test("processMessage: body-fetch FAILURE emits message_bodies plus a retryable DETAIL_GAP", async () => {
+test("processMessage: body-fetch FAILURE writes no body or message row and reports both owed", async () => {
 	const failedFetcher: FetchBodiesFn = (): Promise<FetchedBodies> =>
 		Promise.resolve({
 			bodyHtmlFull: null,
@@ -5567,39 +4594,27 @@ test("processMessage: body-fetch FAILURE emits message_bodies plus a retryable D
 		wantBodies: true,
 		wantMessages: true,
 	});
-	await processMessage(deps, makeMsg());
-
-	// The envelope guarantee is unchanged: we still emit the record rather than
-	// dropping the message.
-	const bodyRecord = emitted.find((r) => r.stream === "message_bodies");
-	assert.ok(bodyRecord);
-	assert.equal(bodyRecord.data.body_text, null);
-	assert.equal(bodyRecord.data.body_html, null);
-
-	// What is new, and what makes the loss recoverable: a durable pending gap
-	// keyed by the message id, so a later run knows exactly which body to refetch.
-	const gap = findMessageBodyGap(protocolMessages);
-	assert.ok(
-		gap,
-		"a failed body fetch must leave a retryable gap, not a silent 'empty' record",
+	const outcome = await processMessage(deps, makeMsg());
+	// Rows for this message may already be stored (a retry, a catch-up, or the
+	// replay of a failed run), and a whole-record upsert with empty content
+	// would destroy them. The failure becomes retry debt with its class.
+	assert.equal(
+		emitted.some((r) => r.stream === "message_bodies"),
+		false,
 	);
 	assert.equal(
-		gap.record_key,
-		String(makeMsg().emailId),
-		"gap must carry the message id so the body can be refetched",
+		emitted.some((r) => r.stream === "messages"),
+		false,
 	);
-	assert.equal(gap.status, "pending");
-	assert.equal(gap.retryable, true);
-	assert.equal(gap.reference_only, true);
-	assert.equal(gap.parent_stream, "messages");
-	const locator = gap.detail_locator as Record<string, unknown>;
-	assert.equal(locator.kind, "gmail.message_body_detail");
-	assert.equal(locator.message_id, String(makeMsg().emailId));
-	assert.equal(
-		gap.last_error?.class,
-		"imap_body_fetch_transient",
-		"gap records WHY, not just that it failed",
-	);
+	assert.equal(findMessageBodyGap(protocolMessages) ?? null, null);
+	assert.deepEqual(outcome.message_bodies, {
+		kind: "failed",
+		failure: "imap_body_fetch_transient",
+	});
+	assert.deepEqual(outcome.messages, {
+		kind: "failed",
+		failure: "imap_body_fetch_transient",
+	});
 });
 
 // The case that must NOT regress: a message that genuinely has no body in scope
@@ -5651,26 +4666,6 @@ test("processMessage: genuinely empty body emits body_source='empty' and NO gap"
 // skip the emit (so the stored record, snippet included, survives
 // untouched) and record a retryable DETAIL_GAP, with no snippet content
 // carried through STATE.
-
-test("processMessage: body-fetch failure still emits the messages record with snippet=null (first-sight message, nothing to protect)", async () => {
-	const { deps, emitted } = makeHarness({
-		fetchBodies: (): Promise<FetchedBodies> =>
-			Promise.resolve({
-				bodyHtmlFull: null,
-				bodyTextFull: null,
-				snippet: null,
-				fetchFailed: true,
-				failureClass: "imap_body_fetch_transient",
-			}),
-		wantMessages: true,
-	});
-	await processMessage(deps, makeMsg());
-	assert.equal(
-		emitted.find((r) => r.stream === "messages")?.data.snippet,
-		null,
-		"a UID the forward/historical walk visits for the first and only time has no prior snippet to protect",
-	);
-});
 
 /** Narrow a captured JSONL protocol stream (see the stdout-capture pattern
  *  used throughout this file, e.g. `runAllMailPasses: first historical
@@ -5891,20 +4886,22 @@ test("processMessage: message.internalDate propagates into messages.received_at"
 	assert.equal(msgRecord.data.received_at, fixed.toISOString());
 });
 
-test("processMessage: missing internalDate falls back to injected nowIso()", async () => {
+test("processMessage: missing internalDate owes the message instead of using the run clock", async () => {
 	const { deps, emitted } = makeHarness({
 		nowIso: (): string => "2026-04-22T12:00:00.000Z",
 		wantMessages: true,
 	});
 	const { internalDate: _internalDate, ...rest } = makeMsg();
-	await processMessage(deps, rest);
-	const msgRecord = emitted.find((r) => r.stream === "messages");
-	assert.ok(msgRecord);
-	assert.equal(
-		msgRecord.data.received_at,
-		"2026-04-22T12:00:00.000Z",
-		"nowIso dep is the clock seam for missing internalDate",
+	const outcome = await processMessage(deps, rest);
+	assert.deepEqual(
+		emitted.filter((r) => r.stream === "messages"),
+		[],
+		"no record with an invented received_at",
 	);
+	assert.deepEqual(outcome.messages, {
+		kind: "failed",
+		failure: "internaldate_unavailable",
+	});
 });
 
 // ─── Invariant: emitMessagesPass isolates per-message errors ─────────────
@@ -5999,6 +4996,7 @@ test("emitMessagesPass: progress includes count and total when metadata count is
 			emailId: `gmmsgid-${i}`,
 			threadId: `gmthrid-${i}`,
 			uid: i + 1,
+			bodyStructure: { type: "text/plain", part: "1" },
 		}),
 	);
 
@@ -6012,11 +5010,10 @@ test("emitMessagesPass: progress includes count and total when metadata count is
 
 // ─── Historical attachment backfill: pin the per-UID hydration shape ────
 //
-// The connector's runAllMailPasses, when START.streamsToBackfill includes
-// "attachments", drives emitMessagesPass over the bounded historical UID
-// window in attachment-only mode (no messages, no bodies), wrapping
-// emitRecord to update the AttachmentBackfillSummary on each
-// `attachments` record. These tests pin that mode without IMAP: a
+// When only attachments still owe history, runAllMailPasses walks the
+// bounded historical page in attachment-only mode (no messages, no bodies)
+// and tallies the AttachmentBackfillSummary from the attachments it
+// hydrates. These tests pin that mode without IMAP: a
 // "historical" UID below priorUidnext is fed through the same code path
 // and we verify hydration, idempotency, and summary accounting.
 // Scope note: this asserts per-UID behavior and summary shape. Window
@@ -6151,7 +5148,7 @@ test("backfill mode: rerunning the same historical UID is idempotent and the sum
 	assert.equal(blobRefBlobId(attachments[0]), blobRefBlobId(attachments[1]));
 });
 
-test("backfill mode: a failed historical attachment fetch is counted as a remaining historical gap, not silently dropped", async () => {
+test("backfill mode: a failed historical attachment fetch is kept as a retry gap, not silently dropped", async () => {
 	const hydrateAttachment = makeAttachmentHydrator({
 		connectorId: "https://registry.pdpp.dev/connectors/gmail",
 		fetchAttachment: () =>
@@ -6159,35 +5156,25 @@ test("backfill mode: a failed historical attachment fetch is counted as a remain
 		uploadBlob: () =>
 			Promise.reject(new Error("should not be called when fetch fails")),
 	});
+	const coverage = makeAttachmentDetailCoverage();
 	const { deps, emitted } = makeHarness({
+		attachmentCoverage: coverage,
 		hydrateAttachment,
 		requested: makeRequested(["attachments"]),
 		wantBodies: false,
 		wantMessages: false,
 	});
 
-	const summary = createAttachmentBackfillSummary();
-	const originalEmitRecord = deps.emitRecord;
-	deps.emitRecord = async (stream, data, _keyField) => {
-		await originalEmitRecord(stream, data);
-		if (stream === "attachments") {
-			addAttachmentBackfillRecordToSummary(summary, data);
-		}
-	};
-
 	await emitMessagesPass(deps, [makeAttachmentMsg()]);
 
-	const attachmentRecord = emitted.find((r) => r.stream === "attachments");
-	assert.ok(
-		attachmentRecord,
-		"failed historical attachment must still emit a record so the gap is visible",
+	// No record is written for the failed part; the failure is a retry gap,
+	// which the run emits with its other gaps and counts for the operator.
+	assert.equal(
+		emitted.some((r) => r.stream === "attachments"),
+		false,
 	);
-	assert.equal(attachmentRecord.data.hydration_status, "failed");
-	// The summary counts this as a remaining gap so the operator must
-	// re-run before claiming completeness.
-	assert.equal(summary.failed, 1);
-	assert.equal(summary.hydrated, 0);
-	assert.equal(summary.remaining_historical_gaps, 1);
+	assert.deepEqual(coverage.gapKeys, ["gmmsgid-1111:2"]);
+	assert.equal(coverage.failedRecords.length, 1);
 });
 
 // ─── redactEmailForProgress ─────────────────────────────────────────────
@@ -6509,8 +5496,9 @@ test("emitMessagesPass: accumulates honest coverage across hydrated, gap, and un
 	assert.deepEqual(coverage.requiredKeys, ["ok:1", "bad:1", "big:1"]);
 	assert.deepEqual(coverage.hydratedKeys, ["ok:1"]);
 	assert.deepEqual(coverage.gapKeys, ["bad:1"]);
-	// too_large stays required, unaccounted.
-	assert.equal(emitted.filter((r) => r.stream === "attachments").length, 3);
+	// too_large stays required, unaccounted. Only the hydrated part writes a
+	// record.
+	assert.equal(emitted.filter((r) => r.stream === "attachments").length, 1);
 
 	// DETAIL_COVERAGE: covered = hydrated only (no unaccounted keys claimed).
 	assert.deepEqual(buildAttachmentDetailCoverageMessage(coverage), {
@@ -7526,35 +6514,6 @@ test("makeAttachmentHydrator: a genuinely oversized part is still refused", asyn
 
 // ─── Coverage honesty: withhold the claim without a boundary ────────────────
 
-test("attachmentsCoverageBoundaryEstablished: only a completed historical messages walk is a boundary", () => {
-	assert.equal(
-		attachmentsCoverageBoundaryEstablished({
-			messagesBackfill: { completed_at: null } as never,
-		}),
-		false,
-		"an in-flight historical walk proves nothing about the mailbox",
-	);
-	assert.equal(
-		attachmentsCoverageBoundaryEstablished({ messagesBackfill: {} as never }),
-		false,
-		"an absent completion is not a boundary",
-	);
-	assert.equal(
-		attachmentsCoverageBoundaryEstablished({
-			messagesBackfill: { completed_at: "" } as never,
-		}),
-		false,
-		"an empty completion stamp is not a boundary",
-	);
-	assert.equal(
-		attachmentsCoverageBoundaryEstablished({
-			messagesBackfill: { completed_at: "2026-08-21T12:40:35.475Z" } as never,
-		}),
-		true,
-		"a completed historical walk has enumerated every message's attachment parts",
-	);
-});
-
 test("processMessage: rejected local attachment emission stays required-only and retries", async () => {
 	const coverage = makeAttachmentDetailCoverage();
 	const first = makeHarness({
@@ -7565,14 +6524,24 @@ test("processMessage: rejected local attachment emission stays required-only and
 		wantMessages: false,
 	});
 	let attempts = 0;
-	first.deps.emitRecord = async () => { attempts += 1; return false; };
+	first.deps.emitRecord = async () => {
+		attempts += 1;
+		return false;
+	};
 	await processMessage(first.deps, makeAttachmentMsg());
 	assert.equal(attempts, 1, "the real message path attempted emission");
 	assert.deepEqual(coverage.requiredKeys, ["gmmsgid-1111:2"]);
-	assert.deepEqual(coverage.hydratedKeys, [], "a rejected record cannot credit hydration");
+	assert.deepEqual(
+		coverage.hydratedKeys,
+		[],
+		"a rejected record cannot credit hydration",
+	);
 	assert.deepEqual(coverage.gapKeys, []);
 	assert.equal(buildAttachmentDetailCoverageMessage(coverage).covered, 0);
-	assert.equal(first.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"), false);
+	assert.equal(
+		first.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+	);
 
 	const retryCoverage = makeAttachmentDetailCoverage();
 	const retry = makeHarness({
@@ -7583,7 +6552,10 @@ test("processMessage: rejected local attachment emission stays required-only and
 		wantMessages: false,
 	});
 	await processMessage(retry.deps, makeAttachmentMsg());
-	assert.equal(retry.emitted.filter((r) => r.stream === "attachments").length, 1);
+	assert.equal(
+		retry.emitted.filter((r) => r.stream === "attachments").length,
+		1,
+	);
 	assert.deepEqual(retryCoverage.hydratedKeys, ["gmmsgid-1111:2"]);
 });
 
@@ -7596,14 +6568,23 @@ test("processMessage: throwing local attachment emission cannot credit hydration
 		wantBodies: false,
 		wantMessages: false,
 	});
-	deps.emitRecord = async () => { throw new Error("local emission failed"); };
-	await assert.rejects(processMessage(deps, makeAttachmentMsg()), /local emission failed/);
+	deps.emitRecord = async () => {
+		throw new Error("local emission failed");
+	};
+	await assert.rejects(
+		processMessage(deps, makeAttachmentMsg()),
+		/local emission failed/,
+	);
 	assert.deepEqual(coverage.requiredKeys, ["gmmsgid-1111:2"]);
 	assert.deepEqual(coverage.hydratedKeys, []);
 });
 
 test("recoverServedAttachmentGaps: rejected emission leaves the served gap unrecovered", async () => {
-	const message = makeServedRecoveryMsg({ attachments: [16], emailId: "gmmsgid-credit", uid: 6000 });
+	const message = makeServedRecoveryMsg({
+		attachments: [16],
+		emailId: "gmmsgid-credit",
+		uid: 6000,
+	});
 	const coverage = makeAttachmentDetailCoverage();
 	const harness = makeRecordingEmit();
 	let attempts = 0;
@@ -7614,25 +6595,42 @@ test("recoverServedAttachmentGaps: rejected emission leaves the served gap unrec
 		},
 		{
 			attachmentCoverage: coverage,
-			detailGaps: [makeServedRecoveryGap({ gapId: "gap-credit", messageId: "gmmsgid-credit", partIndex: 1 })],
+			detailGaps: [
+				makeServedRecoveryGap({
+					gapId: "gap-credit",
+					messageId: "gmmsgid-credit",
+					partIndex: 1,
+				}),
+			],
 			emitProtocol: harness.emit,
-			emitRecord: async () => { attempts += 1; return false; },
-			hydrateAttachment: async (_message, attachment) => hydratedResult({
-				...attachment,
-				hydration_status: "hydrated",
-				hydration_error: null,
-			}),
+			emitRecord: async () => {
+				attempts += 1;
+				return false;
+			},
+			hydrateAttachment: async (_message, attachment) =>
+				hydratedResult({
+					...attachment,
+					hydration_status: "hydrated",
+					hydration_error: null,
+				}),
 		},
 	);
 	assert.equal(attempts, 1);
 	assert.equal(summary.recovered, 0);
 	assert.deepEqual(coverage.requiredKeys, ["gmmsgid-credit:1"]);
 	assert.deepEqual(coverage.hydratedKeys, []);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"), false);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+	);
 });
 
 test("recoverServedAttachmentGaps: a rejected emission re-defers its served gap for this run", async () => {
-	const message = makeServedRecoveryMsg({ attachments: [16], emailId: "abc456", uid: 6001 });
+	const message = makeServedRecoveryMsg({
+		attachments: [16],
+		emailId: "abc456",
+		uid: 6001,
+	});
 	const coverage = makeAttachmentDetailCoverage();
 	const harness = makeRecordingEmit();
 	await recoverServedAttachmentGaps(
@@ -7642,14 +6640,22 @@ test("recoverServedAttachmentGaps: a rejected emission re-defers its served gap 
 		},
 		{
 			attachmentCoverage: coverage,
-			detailGaps: [makeServedRecoveryGap({ gapId: "gap-reject", leaseId: "lease-reject", messageId: "abc456", partIndex: 1 })],
+			detailGaps: [
+				makeServedRecoveryGap({
+					gapId: "gap-reject",
+					leaseId: "lease-reject",
+					messageId: "abc456",
+					partIndex: 1,
+				}),
+			],
 			emitProtocol: harness.emit,
 			emitRecord: async () => false,
-			hydrateAttachment: async (_message, attachment) => hydratedResult({
-				...attachment,
-				hydration_status: "hydrated",
-				hydration_error: null,
-			}),
+			hydrateAttachment: async (_message, attachment) =>
+				hydratedResult({
+					...attachment,
+					hydration_status: "hydrated",
+					hydration_error: null,
+				}),
 		},
 	);
 	// The host credits a required key only against a gap it settled in this
@@ -7659,7 +6665,10 @@ test("recoverServedAttachmentGaps: a rejected emission re-defers its served gap 
 	assert.deepEqual(coverage.hydratedKeys, []);
 	assert.deepEqual(coverage.gapKeys, ["abc456:1"]);
 	const gaps = harness.protocolMessages.filter(
-		(m) => m.type === "DETAIL_GAP" && m.stream === "attachments" && m.record_key === "abc456:1",
+		(m) =>
+			m.type === "DETAIL_GAP" &&
+			m.stream === "attachments" &&
+			m.record_key === "abc456:1",
 	);
 	assert.equal(gaps.length, 1, JSON.stringify(harness.protocolMessages));
 	assert.ok(gaps[0]?.type === "DETAIL_GAP");
@@ -7668,7 +6677,9 @@ test("recoverServedAttachmentGaps: a rejected emission re-defers its served gap 
 	assert.equal(coverage.localEmitRejected, false);
 });
 
-function coverageRecord(status: AttachmentRecord["hydration_status"]): AttachmentRecord {
+function coverageRecord(
+	status: AttachmentRecord["hydration_status"],
+): AttachmentRecord {
 	return {
 		blob_ref: null,
 		content_id: null,
@@ -7689,21 +6700,42 @@ function coverageRecord(status: AttachmentRecord["hydration_status"]): Attachmen
 
 test("recordAttachmentCoverage: a key visited twice keeps one outcome set (walk gap, then served hydration)", () => {
 	const coverage = makeAttachmentDetailCoverage();
-	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, true);
+	recordAttachmentCoverage(
+		coverage,
+		coverageRecord("deferred"),
+		null,
+		false,
+		true,
+	);
 	assert.deepEqual(coverage.gapKeys, ["abc123:1"]);
 	recordAttachmentCoverage(coverage, coverageRecord("hydrated"));
 	// The host rejects a DETAIL_COVERAGE whose outcome sets overlap.
 	assert.deepEqual(coverage.requiredKeys, ["abc123:1"]);
 	assert.deepEqual(coverage.hydratedKeys, ["abc123:1"]);
 	assert.deepEqual(coverage.gapKeys, []);
-	assert.deepEqual(buildAttachmentDetailCoverageMessage(coverage).gap_keys ?? [], []);
+	assert.deepEqual(
+		buildAttachmentDetailCoverageMessage(coverage).gap_keys ?? [],
+		[],
+	);
 });
 
 test("recordAttachmentCoverage: a later rejection cannot downgrade an accepted hydration", () => {
 	const coverage = makeAttachmentDetailCoverage();
 	recordAttachmentCoverage(coverage, coverageRecord("hydrated"));
-	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, true);
-	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, false);
+	recordAttachmentCoverage(
+		coverage,
+		coverageRecord("deferred"),
+		null,
+		false,
+		true,
+	);
+	recordAttachmentCoverage(
+		coverage,
+		coverageRecord("deferred"),
+		null,
+		false,
+		false,
+	);
 	assert.deepEqual(coverage.hydratedKeys, ["abc123:1"]);
 	assert.deepEqual(coverage.gapKeys, []);
 	assert.equal(coverage.localEmitRejected, false);
@@ -7711,20 +6743,50 @@ test("recordAttachmentCoverage: a later rejection cannot downgrade an accepted h
 
 test("recordAttachmentCoverage: a rejection without a locator is cleared by a later accounted attempt", () => {
 	const coverage = makeAttachmentDetailCoverage();
-	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, false);
-	assert.equal(coverage.localEmitRejected, true, "an unlocated rejection holds the cursors");
-	recordAttachmentCoverage(coverage, coverageRecord("deferred"), null, false, true);
-	assert.equal(coverage.localEmitRejected, false, "a same-run retry locator releases the hold");
+	recordAttachmentCoverage(
+		coverage,
+		coverageRecord("deferred"),
+		null,
+		false,
+		false,
+	);
+	assert.equal(
+		coverage.localEmitRejected,
+		true,
+		"an unlocated rejection holds the cursors",
+	);
+	recordAttachmentCoverage(
+		coverage,
+		coverageRecord("deferred"),
+		null,
+		false,
+		true,
+	);
+	assert.equal(
+		coverage.localEmitRejected,
+		false,
+		"a same-run retry locator releases the hold",
+	);
 	assert.deepEqual(coverage.gapKeys, ["abc123:1"]);
 	const second = makeAttachmentDetailCoverage();
-	recordAttachmentCoverage(second, coverageRecord("deferred"), null, false, false);
+	recordAttachmentCoverage(
+		second,
+		coverageRecord("deferred"),
+		null,
+		false,
+		false,
+	);
 	recordAttachmentCoverage(second, coverageRecord("hydrated"));
 	assert.equal(second.localEmitRejected, false);
 	assert.deepEqual(second.hydratedKeys, ["abc123:1"]);
 });
 
 test("recoverServedAttachmentGaps: a gap the walk already recovered this run is not attempted again", async () => {
-	const message = makeServedRecoveryMsg({ attachments: [16], emailId: "abc456", uid: 6001 });
+	const message = makeServedRecoveryMsg({
+		attachments: [16],
+		emailId: "abc456",
+		uid: 6001,
+	});
 	const harness = makeRecordingEmit();
 	let emits = 0;
 	const summary = await recoverServedAttachmentGaps(
@@ -7734,21 +6796,34 @@ test("recoverServedAttachmentGaps: a gap the walk already recovered this run is 
 		},
 		{
 			attachmentCoverage: makeAttachmentDetailCoverage(),
-			detailGaps: [makeServedRecoveryGap({ gapId: "gap-walked", leaseId: "lease-walked", messageId: "abc456", partIndex: 1 })],
+			detailGaps: [
+				makeServedRecoveryGap({
+					gapId: "gap-walked",
+					leaseId: "lease-walked",
+					messageId: "abc456",
+					partIndex: 1,
+				}),
+			],
 			emitProtocol: harness.emit,
-			emitRecord: async () => { emits += 1; return false; },
-			hydrateAttachment: async (_message, attachment) => hydratedResult({
-				...attachment,
-				hydration_status: "hydrated",
-				hydration_error: null,
-			}),
+			emitRecord: async () => {
+				emits += 1;
+				return false;
+			},
+			hydrateAttachment: async (_message, attachment) =>
+				hydratedResult({
+					...attachment,
+					hydration_status: "hydrated",
+					hydration_error: null,
+				}),
 			recoveredAttachmentGapIds: new Set(["gap-walked"]),
 		},
 	);
 	assert.equal(emits, 0, "no second hydration or emission");
 	assert.equal(summary.attempted, 0);
 	assert.deepEqual(
-		harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP" || m.type === "DETAIL_GAP_ATTEMPTED"),
+		harness.protocolMessages.filter(
+			(m) => m.type === "DETAIL_GAP" || m.type === "DETAIL_GAP_ATTEMPTED",
+		),
 		[],
 		"a recovered gap is neither re-attempted nor re-deferred under its lease",
 	);
@@ -7757,12 +6832,32 @@ test("recoverServedAttachmentGaps: a gap the walk already recovered this run is 
 test("recordAttachmentCoverage: an accepted too_large key is promoted by a later retry locator, not held by a later unlocated rejection", () => {
 	const promoted = makeAttachmentDetailCoverage();
 	recordAttachmentCoverage(promoted, coverageRecord("too_large"));
-	recordAttachmentCoverage(promoted, coverageRecord("deferred"), null, false, true);
-	assert.deepEqual(promoted.gapKeys, ["abc123:1"], "a durable locator beats an unaccounted outcome");
+	recordAttachmentCoverage(
+		promoted,
+		coverageRecord("deferred"),
+		null,
+		false,
+		true,
+	);
+	assert.deepEqual(
+		promoted.gapKeys,
+		["abc123:1"],
+		"a durable locator beats an unaccounted outcome",
+	);
 	const landed = makeAttachmentDetailCoverage();
 	recordAttachmentCoverage(landed, coverageRecord("too_large"));
-	recordAttachmentCoverage(landed, coverageRecord("deferred"), null, false, false);
-	assert.equal(landed.localEmitRejected, false, "the accepted record landed, so nothing is lost");
+	recordAttachmentCoverage(
+		landed,
+		coverageRecord("deferred"),
+		null,
+		false,
+		false,
+	);
+	assert.equal(
+		landed.localEmitRejected,
+		false,
+		"the accepted record landed, so nothing is lost",
+	);
 	assert.deepEqual(landed.requiredKeys, ["abc123:1"]);
 	assert.deepEqual(landed.gapKeys, []);
 });
@@ -7776,7 +6871,11 @@ test("attachment coverage across lanes: a walk hydration survives a rejected ser
 		wantBodies: false,
 		wantMessages: false,
 	});
-	const message = makeServedRecoveryMsg({ attachments: [16], emailId: "abc456", uid: 6001 });
+	const message = makeServedRecoveryMsg({
+		attachments: [16],
+		emailId: "abc456",
+		uid: 6001,
+	});
 	await processMessage(walk.deps, message);
 	assert.deepEqual(coverage.hydratedKeys, ["abc456:1"]);
 	const served = makeRecordingEmit();
@@ -7787,14 +6886,22 @@ test("attachment coverage across lanes: a walk hydration survives a rejected ser
 		},
 		{
 			attachmentCoverage: coverage,
-			detailGaps: [makeServedRecoveryGap({ gapId: "gap-cross", leaseId: "lease-cross", messageId: "abc456", partIndex: 1 })],
+			detailGaps: [
+				makeServedRecoveryGap({
+					gapId: "gap-cross",
+					leaseId: "lease-cross",
+					messageId: "abc456",
+					partIndex: 1,
+				}),
+			],
 			emitProtocol: served.emit,
 			emitRecord: async () => false,
-			hydrateAttachment: async (_message, attachment) => hydratedResult({
-				...attachment,
-				hydration_status: "hydrated",
-				hydration_error: null,
-			}),
+			hydrateAttachment: async (_message, attachment) =>
+				hydratedResult({
+					...attachment,
+					hydration_status: "hydrated",
+					hydration_error: null,
+				}),
 		},
 	);
 	const fact = buildAttachmentDetailCoverageMessage(coverage);
@@ -7803,22 +6910,51 @@ test("attachment coverage across lanes: a walk hydration survives a rejected ser
 	assert.equal(coverage.localEmitRejected, false);
 });
 
-function realResourceEmitter(requested: Map<string, StreamRequest>, emit: RecordingHarness["emit"]) {
+/** A runtime blob endpoint that accepts every upload and echoes its digest. */
+const stubBlobEndpoint = (async (_url: unknown, init?: RequestInit) => {
+	const bytes = Buffer.from(
+		await new Response(init?.body as BodyInit).arrayBuffer(),
+	);
+	const sha256 = createHash("sha256").update(bytes).digest("hex");
+	return new Response(
+		JSON.stringify({
+			object: "blob",
+			blob_id: `blob-${sha256.slice(0, 12)}`,
+			mime_type: "application/pdf",
+			sha256,
+			size_bytes: bytes.byteLength,
+		}),
+		{ status: 201, headers: { "content-type": "application/json" } },
+	);
+}) as typeof fetch;
+
+function realResourceEmitter(
+	requested: Map<string, StreamRequest>,
+	emit: RecordingHarness["emit"],
+) {
 	const filters = new Map<string, Set<string> | null>();
 	for (const [name, scope] of requested) filters.set(name, resourceSet(scope));
 	return makeGmailEmitRecord(filters, FROZEN_NOW, () => {}, emit);
 }
 
 test("attachment resources: real emitter excludes unselected keys before hydration and coverage", async () => {
-	const message = makeServedRecoveryMsg({ attachments: [16, 16], emailId: "abc123" });
+	const message = makeServedRecoveryMsg({
+		attachments: [16, 16],
+		emailId: "abc123",
+	});
 	const requested = new Map<string, StreamRequest>([
 		["attachments", { name: "attachments", resources: ["abc123:1"] }],
 	]);
 	const coverage = makeAttachmentDetailCoverage();
 	const hydrated: string[] = [];
-	const hydrate = statusStampingHydrator({ "abc123:1": "hydrated", "abc123:2": "hydrated" });
+	const hydrate = statusStampingHydrator({
+		"abc123:1": "hydrated",
+		"abc123:2": "hydrated",
+	});
 	const harness = makeHarness({
-		requested, attachmentCoverage: coverage, wantMessages: false,
+		requested,
+		attachmentCoverage: coverage,
+		wantMessages: false,
 		hydrateAttachment: async (msg, attachment) => {
 			hydrated.push(attachment.id);
 			return hydrate(msg, attachment);
@@ -7827,31 +6963,58 @@ test("attachment resources: real emitter excludes unselected keys before hydrati
 	harness.deps.emitRecord = realResourceEmitter(requested, harness.emit);
 	await processMessage(harness.deps, message);
 	assert.deepEqual(coverage.requiredKeys, ["abc123:1"]);
-	assert.deepEqual(coverage.hydratedKeys, ["abc123:1"], JSON.stringify(harness.protocolMessages));
+	assert.deepEqual(
+		coverage.hydratedKeys,
+		["abc123:1"],
+		JSON.stringify(harness.protocolMessages),
+	);
 	assert.deepEqual(hydrated, ["abc123:1"]);
 	const result = buildAttachmentDetailCoverageMessage(coverage);
 	assert.equal(result.considered, 1);
-	assert.equal(result.covered, 1, "completed mailbox has no required-only excluded key blocking its checkpoint");
-	assert.equal(harness.protocolMessages.filter((m) => m.type === "RECORD" && m.stream === "attachments").length, 1);
+	assert.equal(
+		result.covered,
+		1,
+		"completed mailbox has no required-only excluded key blocking its checkpoint",
+	);
+	assert.equal(
+		harness.protocolMessages.filter(
+			(m) => m.type === "RECORD" && m.stream === "attachments",
+		).length,
+		1,
+	);
 });
 
 test("served recovery resources: only selected attachment is hydrated, credited and acknowledged", async () => {
-	const message = makeServedRecoveryMsg({ attachments: [16, 16], emailId: "def456", uid: 6000 });
+	const message = makeServedRecoveryMsg({
+		attachments: [16, 16],
+		emailId: "def456",
+		uid: 6000,
+	});
 	const requested = new Map<string, StreamRequest>([
 		["attachments", { name: "attachments", resources: ["def456:1"] }],
 	]);
 	const coverage = makeAttachmentDetailCoverage();
 	const harness = makeRecordingEmit();
 	const hydrated: string[] = [];
-	const hydrate = statusStampingHydrator({ "def456:1": "hydrated", "def456:2": "hydrated" });
+	const hydrate = statusStampingHydrator({
+		"def456:1": "hydrated",
+		"def456:2": "hydrated",
+	});
 	const summary = await recoverServedAttachmentGaps(
-		{ search: mock.fn(() => Promise.resolve([6000])), fetchOne: mock.fn(() => Promise.resolve(message)) },
+		{
+			search: mock.fn(() => Promise.resolve([6000])),
+			fetchOne: mock.fn(() => Promise.resolve(message)),
+		},
 		{
 			requested,
 			attachmentCoverage: coverage,
-			detailGaps: [1, 2].map((partIndex) => makeServedRecoveryGap({
-				gapId: `scope-gap-${partIndex}`, messageId: "def456", partIndex,
-			})),
+			detailGaps: [1, 2].map((partIndex) =>
+				makeServedRecoveryGap({
+					gapId: `scope-gap-${partIndex}`,
+					messageId: "def456",
+					partIndex,
+				}),
+			),
 			emitProtocol: harness.emit,
 			emitRecord: realResourceEmitter(requested, harness.emit),
 			hydrateAttachment: async (msg, attachment) => {
@@ -7864,7 +7027,12 @@ test("served recovery resources: only selected attachment is hydrated, credited 
 	assert.deepEqual(coverage.hydratedKeys, ["def456:1"]);
 	assert.deepEqual(hydrated, ["def456:1"]);
 	assert.equal(summary.recovered, 1);
-	assert.deepEqual(harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP_RECOVERED").map((m) => m.gap_id), ["scope-gap-1"]);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+			.map((m) => m.gap_id),
+		["scope-gap-1"],
+	);
 });
 
 test("selected schema rejection remains required debt with the real resource emitter", async () => {
@@ -7874,17 +7042,28 @@ test("selected schema rejection remains required debt with the real resource emi
 	const coverage = makeAttachmentDetailCoverage();
 	const hydrate = statusStampingHydrator({ "abcdef:2": "hydrated" });
 	const harness = makeHarness({
-		requested, attachmentCoverage: coverage, wantMessages: false,
+		requested,
+		attachmentCoverage: coverage,
+		wantMessages: false,
 		hydrateAttachment: async (msg, attachment) => {
 			const result = await hydrate(msg, attachment);
 			return { ...result, record: { ...result.record, size_bytes: -1 } };
 		},
 	});
 	harness.deps.emitRecord = realResourceEmitter(requested, harness.emit);
-	await processMessage(harness.deps, { ...makeAttachmentMsg(), emailId: "abcdef" });
+	await processMessage(harness.deps, {
+		...makeAttachmentMsg(),
+		emailId: "abcdef",
+	});
 	assert.deepEqual(coverage.requiredKeys, ["abcdef:2"]);
 	assert.deepEqual(coverage.hydratedKeys, []);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "SKIP_RESULT" && m.reason === "schema_validation_failed"), true);
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" && m.reason === "schema_validation_failed",
+		),
+		true,
+	);
 });
 
 test("resource exclusion never hides missing identity or a malformed selected candidate", () => {
@@ -7892,239 +7071,65 @@ test("resource exclusion never hides missing identity or a malformed selected ca
 		["attachments", { name: "attachments", resources: ["abcdef:1"] }],
 	]);
 	for (const id of [undefined, null, "", " ", 123, {}]) {
-		assert.equal(attachmentOutsideResourceScope(requested, { id } as unknown as AttachmentRecord), false);
+		assert.equal(
+			attachmentOutsideResourceScope(requested, {
+				id,
+			} as unknown as AttachmentRecord),
+			false,
+		);
 	}
-	assert.equal(attachmentOutsideResourceScope(requested, { id: "abcdef:1", size_bytes: -1 } as AttachmentRecord), false);
-	assert.equal(attachmentOutsideResourceScope(requested, { id: "abcdef:2" } as AttachmentRecord), true);
+	assert.equal(
+		attachmentOutsideResourceScope(requested, {
+			id: "abcdef:1",
+			size_bytes: -1,
+		} as AttachmentRecord),
+		false,
+	);
+	assert.equal(
+		attachmentOutsideResourceScope(requested, {
+			id: "abcdef:2",
+		} as AttachmentRecord),
+		true,
+	);
 });
-
-for (const lane of ["historical", "served", "recovery-only"] as const) {
- for (const rejectSelected of [false, true]) {
-  test(`production attachment caller preserves resources: ${lane}, schema rejected=${rejectSelected}`, async () => {
-   const message = makeServedRecoveryMsg({attachments:[16,16],emailId:"abc123",uid:321});
-   const requested = new Map<string, StreamRequest>([
-    ["attachments",{name:"attachments",resources:["abc123:1"]}],
-   ]);
-   const coverage = makeAttachmentDetailCoverage();
-   const harness = makeRecordingEmit();
-   const hydrated: string[] = [];
-   const hydrate = statusStampingHydrator({"abc123:1":"hydrated","abc123:2":"hydrated"});
-   const fetchRanges: string[] = [];
-   const client = {
-    search: async () => [321],
-    fetchOne: async () => message,
-    fetch: (range: string) => {
-     assert.equal(range,"251:499","historical metadata fetch uses exact UID boundaries");
-     fetchRanges.push(range);
-     return (async function* () { yield message; })();
-    },
-   } as unknown as Parameters<typeof runAttachmentBackfillAndRecoveryPass>[0]["client"];
-   const served = lane !== "historical";
-   await runAttachmentBackfillAndRecoveryPass({
-    allMail:makeAllMailMailbox(),attachmentBackfillRequested:lane!=="recovery-only",
-    attachmentCoverage:coverage,client,
-    deps:{
-     requested,emittedAt:FROZEN_NOW,
-     emitRecord:realResourceEmitter(requested,harness.emit),
-     ...(served?{detailGaps:[1,2].map(partIndex=>makeServedRecoveryGap({
-      gapId:`caller-gap-${partIndex}`,leaseId:`caller-lease-${partIndex}`,messageId:"abc123",partIndex,
-     }))}:{}),
-    },
-    emit:harness.emit,fetchBodiesBound:defaultFetchBodies,
-    hydrateAttachment:async(msg,attachment)=>{
-     hydrated.push(attachment.id);
-     const result=await hydrate(msg,attachment);
-     return rejectSelected?{...result,record:{...result.record,size_bytes:-1}}:result;
-    },
-    recoveredAttachmentGapIds:new Set<string>(),
-    recoveryOnly:lane==="recovery-only",
-    session:{
-     attachmentBackfill:{backfilled_through_uid:250,uidvalidity:123},
-     existsTotal:600,priorExistsTotal:undefined,fullResync:false,
-     highestModseqCursor:null,
-     messagesBackfill:{uidvalidity:123,backfilled_through_uid:0,completed_at:null},
-     priorDeltaHoldbackRuns:0,priorModseq:null,priorUidnext:500,uidnext:600,uidvalidityNum:123,
-    },
-   });
-   assert.deepEqual(hydrated,["abc123:1"],"lost resource wiring must fail before excluded bytes hydrate");
-   assert.deepEqual(coverage.requiredKeys,["abc123:1"],"excluded sibling is outside denominator");
-   assert.deepEqual(coverage.hydratedKeys,rejectSelected?[]:["abc123:1"],"only actual local acceptance credits hydration");
-   const records=harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="attachments");
-   assert.deepEqual(records.map(m=>m.type==="RECORD"?m.key:null),rejectSelected?[]:["abc123:1"]);
-   const recovered=harness.protocolMessages.filter(m=>m.type==="DETAIL_GAP_RECOVERED");
-   assert.deepEqual(recovered.map(m=>m.gap_id),served&&!rejectSelected?["caller-gap-1"]:[]);
-   if(served){
-    const attempted=harness.protocolMessages.filter(m=>m.type==="DETAIL_GAP_ATTEMPTED");
-    assert.deepEqual(attempted.map(m=>({gap_id:m.gap_id,lease_id:m.lease_id})),[
-     {gap_id:"caller-gap-1",lease_id:"caller-lease-1"},
-     {gap_id:"caller-gap-2",lease_id:"caller-lease-2"},
-    ],"both served attempts retain their exact fixture lease");
-    assert.equal(harness.protocolMessages.some(m=>m.type==="DETAIL_GAP"&&m.record_key==="abc123:2"),false,"excluded served gap is not re-deferred");
-    assert.deepEqual(fetchRanges,[],"served gaps preempt historical fetch");
-   } else {
-    assert.deepEqual(fetchRanges,["251:499"],"exercise exact historical caller range");
-   }
-   if(rejectSelected) assert.ok(harness.protocolMessages.some(m=>m.type==="SKIP_RESULT"&&m.reason==="schema_validation_failed"));
-  });
- }
-}
-
 
 test("unleased served attachment emits no DETAIL_GAP_ATTEMPTED", async () => {
- const message=makeServedRecoveryMsg({attachments:[16],emailId:"abc123",uid:321});
- const requested=new Map<string,StreamRequest>([["attachments",{name:"attachments",resources:["abc123:1"]}]]);
- const harness=makeRecordingEmit();
- const gap=makeServedRecoveryGap({gapId:"unleased-gap",messageId:"abc123",partIndex:1});
- delete gap.lease_id;
- assert.equal(gap.lease_id,undefined);
- await recoverServedAttachmentGaps({
-  search:async()=>[321],fetchOne:async()=>message,
- },{
-  requested,detailGaps:[gap],emitProtocol:harness.emit,
-  emitRecord:realResourceEmitter(requested,harness.emit),
-  hydrateAttachment:statusStampingHydrator({"abc123:1":"hydrated"}),
- });
- assert.equal(harness.protocolMessages.some(m=>m.type==="DETAIL_GAP_ATTEMPTED"),false);
+	const message = makeServedRecoveryMsg({
+		attachments: [16],
+		emailId: "abc123",
+		uid: 321,
+	});
+	const requested = new Map<string, StreamRequest>([
+		["attachments", { name: "attachments", resources: ["abc123:1"] }],
+	]);
+	const harness = makeRecordingEmit();
+	const gap = makeServedRecoveryGap({
+		gapId: "unleased-gap",
+		messageId: "abc123",
+		partIndex: 1,
+	});
+	delete gap.lease_id;
+	assert.equal(gap.lease_id, undefined);
+	await recoverServedAttachmentGaps(
+		{
+			search: async () => [321],
+			fetchOne: async () => message,
+		},
+		{
+			requested,
+			detailGaps: [gap],
+			emitProtocol: harness.emit,
+			emitRecord: realResourceEmitter(requested, harness.emit),
+			hydrateAttachment: statusStampingHydrator({ "abc123:1": "hydrated" }),
+		},
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_ATTEMPTED"),
+		false,
+	);
 });
 
-for (const rejection of ["false", "schema", "throw"] as const) {
-	test(`production attachment caller restart retains rejected debt during incomplete messages backfill: ${rejection}`, async () => {
-		const message = makeServedRecoveryMsg({
-			attachments: [16, 16],
-			emailId: "abc123",
-			uid: 321,
-		});
-		const requested = new Map<string, StreamRequest>([
-			["attachments", { name: "attachments", resources: ["abc123:1"] }],
-		]);
-		const session: Parameters<
-			typeof runAttachmentBackfillAndRecoveryPass
-		>[0]["session"] = {
-			attachmentBackfill: { backfilled_through_uid: 250, uidvalidity: 123 },
-			existsTotal: 600,
-			priorExistsTotal: undefined,
-			fullResync: false,
-			highestModseqCursor: null,
-			messagesBackfill: {
-				uidvalidity: 123,
-				backfilled_through_uid: 0,
-				completed_at: null,
-			},
-			priorDeltaHoldbackRuns: 0,
-			priorModseq: null,
-			priorUidnext: 500,
-			uidnext: 600,
-			uidvalidityNum: 123,
-		};
-		assert.equal(attachmentsCoverageBoundaryEstablished(session), false);
-		const fetchRanges: string[] = [];
-		const client = {
-			fetch: (range: string) => {
-				fetchRanges.push(range);
-				const [start, end] = range.split(":").map(Number);
-				return (async function* () {
-					if (
-						start !== undefined &&
-						end !== undefined &&
-						start <= 321 &&
-						end >= 321
-					)
-						yield message;
-				})();
-			},
-		} as unknown as Parameters<
-			typeof runAttachmentBackfillAndRecoveryPass
-		>[0]["client"];
-		const hydrate = statusStampingHydrator({ "abc123:1": "hydrated" });
-		const run = async (
-			attachmentBackfill: AttachmentAllMailCursor,
-			reject: boolean,
-		) => {
-			const harness = makeRecordingEmit();
-			const coverage = makeAttachmentDetailCoverage();
-			const attempted: string[] = [];
-			const emitRecord = realResourceEmitter(requested, harness.emit);
-			await runAttachmentBackfillAndRecoveryPass({
-				allMail: makeAllMailMailbox(),
-				attachmentBackfillRequested: true,
-				attachmentCoverage: coverage,
-				client,
-				emit: async (m) => {
-					if (reject && m.type === "DETAIL_GAP")
-						throw new Error("gap persistence unavailable");
-					await harness.emit(m);
-				},
-				deps: {
-					requested,
-					emittedAt: FROZEN_NOW,
-					emitRecord: async (stream, data, keyField) => {
-						attempted.push(String(data.id));
-						if (reject && rejection === "throw")
-							throw new Error("local rejection");
-						if (reject && rejection === "false") return false;
-						return (
-							(await emitRecord(
-								stream,
-								reject ? { ...data, size_bytes: -1 } : data,
-								keyField,
-							)) === true
-						);
-					},
-				},
-				fetchBodiesBound: defaultFetchBodies,
-				hydrateAttachment: hydrate,
-				recoveredAttachmentGapIds: new Set<string>(),
-				session: { ...session, attachmentBackfill },
-			});
-			const state = harness.protocolMessages.find(
-				(m) => m.type === "STATE" && m.stream === "attachments",
-			);
-			return { harness, coverage, attempted, state };
-		};
-
-		const first = await run(session.attachmentBackfill, true);
-		assert.deepEqual(first.attempted, ["abc123:1"]);
-		assert.deepEqual(first.coverage.hydratedKeys, []);
-		// Model a restart using only emitted checkpoints, never the prior run's
-		// in-memory accumulator. This is local protocol evidence, not a host commit.
-		const restartCursor =
-			first.state?.type === "STATE"
-				? (first.state.cursor as { all_mail: AttachmentAllMailCursor }).all_mail
-				: session.attachmentBackfill;
-		const retry = await run(restartCursor, false);
-		assert.deepEqual(
-			retry.attempted,
-			["abc123:1"],
-			"restart must revisit the rejected UID",
-		);
-		assert.deepEqual(fetchRanges, ["251:499", "251:499"]);
-		assert.equal(
-			first.state,
-			undefined,
-			"rejected debt withholds the attachment checkpoint",
-		);
-		assert.deepEqual(retry.coverage.hydratedKeys, ["abc123:1"]);
-		assert.ok(
-			retry.state,
-			"successful local emission preserves normal cursor progress",
-		);
-		assert.equal(
-			first.harness.protocolMessages.some(
-				(m) => m.type === "DETAIL_COVERAGE" && m.stream === "attachments",
-			),
-			false,
-			"incomplete history must not claim whole-mailbox attachment coverage",
-		);
-		assert.equal(
-			first.harness.protocolMessages.some(
-				(m) => m.type === "DETAIL_GAP_RECOVERED",
-			),
-			false,
-		);
-	});
-}
-
-test("production attachment caller restart retains messages checkpoint after local rejection", async () => {
+test("production attachment caller: a rejection with no retry locator becomes ledger debt, not a held checkpoint", async () => {
 	const originalWrite = process.stdout.write;
 	const originalFetch = globalThis.fetch;
 	const protocol: EmittedMessage[] = [];
@@ -8147,17 +7152,23 @@ test("production attachment caller restart retains messages checkpoint after loc
 		}
 		return true;
 	}) as typeof process.stdout.write;
-	// All transport seams are offline. Hydration success is covered above;
-	// this caller test isolates whether a rejected record is retried at all.
-	globalThis.fetch = async () => {
-		throw new Error("offline fixture");
-	};
+	// Hydration succeeds (a stub blob endpoint and IMAP part), so the record
+	// reaches the emitter and its rejection is what this test exercises. A
+	// failed hydration writes no record at all.
+	globalThis.fetch = stubBlobEndpoint;
+	const originalRsUrl = process.env.PDPP_RS_URL;
+	const originalOwnerToken = process.env.PDPP_OWNER_TOKEN;
+	process.env.PDPP_RS_URL = "http://rs.test";
+	process.env.PDPP_OWNER_TOKEN = "test-owner-token";
 	try {
 		const client = {
 			close: mock.fn(),
-			download: async () => {
-				throw new Error("offline fixture");
-			},
+			download: async () => ({
+				meta: { contentType: "application/pdf" },
+				content: (async function* () {
+					yield Buffer.from("pdf-bytes");
+				})(),
+			}),
 			fetchOne: async () => message,
 			search: async () => [321],
 			mailbox: {
@@ -8172,7 +7183,9 @@ test("production attachment caller restart retains messages checkpoint after loc
 				ranges.push(range);
 				const [start, end] = range.split(":");
 				const includesUid =
-					Number(start) <= 321 && (end === "*" || Number(end) >= 321);
+					end === undefined
+						? range.split(",").includes("321")
+						: Number(start) <= 321 && (end === "*" || Number(end) >= 321);
 				return (async function* () {
 					if (includesUid) yield message;
 				})();
@@ -8230,249 +7243,82 @@ test("production attachment caller restart retains messages checkpoint after loc
 			),
 			false,
 		);
-		const restartState =
-			first.state?.type === "STATE" ? { messages: first.state.cursor } : {};
-		const retry = await run(restartState, false);
+		// The gap write failed, so the attachment is owed. The ledger records it
+		// as retry debt and the run still commits, instead of holding every
+		// cursor and replaying the whole window.
+		assert.ok(first.state?.type === "STATE", "the run commits");
+		const firstProgress = (
+			first.state.cursor as {
+				progress: { debt: { uid: number; streams: string[] }[] };
+			}
+		).progress;
+		assert.deepEqual(
+			firstProgress.debt.map((d) => [d.uid, d.streams]),
+			[[321, ["attachments"]]],
+		);
+		const retry = await run({ messages: first.state.cursor }, false);
 		assert.deepEqual(
 			retry.attempted,
 			["abc123:1"],
-			"emitted messages checkpoint must not lose rejected debt",
+			"the owed attachment is retried on the next run",
 		);
-		assert.deepEqual(ranges, ["1:500", "1:500"]);
-		assert.equal(first.state, undefined);
-		assert.ok(
-			retry.state,
-			"accepted local emission allows the messages checkpoint again",
+		assert.deepEqual(ranges, ["1:500", "501:1000", "321"]);
+		assert.ok(retry.state?.type === "STATE");
+		assert.deepEqual(
+			(retry.state.cursor as { progress: { debt: unknown[] } }).progress.debt,
+			[],
+			"an accepted emission settles the debt",
 		);
-		const servedRetry = await run(
-			{
-				messages: {
-					all_mail: { uidvalidity: 123, uidnext: 1201, forward_uidnext: 1201 },
-					backfill: {
-						uidvalidity: 123,
-						target_uid: 1200,
-						backfilled_through_uid: 1200,
-						completed_at: FROZEN_NOW,
-					},
+		const legacyComplete = {
+			messages: {
+				all_mail: { uidvalidity: 123, uidnext: 1201, forward_uidnext: 1201 },
+				backfill: {
+					uidvalidity: 123,
+					target_uid: 1200,
+					backfilled_through_uid: 1200,
+					completed_at: FROZEN_NOW,
 				},
 			},
-			true,
-			true,
-		);
+		};
+		const servedRetry = await run(legacyComplete, true, true);
 		assert.deepEqual(servedRetry.attempted, ["abc123:1"]);
-		// A gap served from an earlier run does not account for this run's
-		// required key, so with no gap write possible the checkpoint is held,
-		// and the run says so.
-		assert.equal(servedRetry.state, undefined);
-		assert.ok(
+		// No gap write was possible, so this run makes no attachments claim and
+		// the served gap stays pending in the runtime for the next run.
+		assert.ok(servedRetry.state, "a served rejection does not hold the walk");
+		assert.equal(
 			servedRetry.messages.some(
-				(m) =>
-					m.type === "PROGRESS" &&
-					m.stream === "attachments" &&
-					/retry the same messages/.test(String(m.message)),
+				(m) => m.type === "DETAIL_COVERAGE" && m.stream === "attachments",
 			),
-			"a held checkpoint is reported, not silent",
+			false,
 		);
 		assert.equal(
 			servedRetry.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
 			false,
 		);
 		gapWritesFail = false;
-		const servedRedeferred = await run(
-			{
-				messages: {
-					all_mail: { uidvalidity: 123, uidnext: 1201, forward_uidnext: 1201 },
-					backfill: {
-						uidvalidity: 123,
-						target_uid: 1200,
-						backfilled_through_uid: 1200,
-						completed_at: FROZEN_NOW,
-					},
-				},
-			},
-			true,
-			true,
-		);
-		assert.ok(
-			servedRedeferred.state,
-			"re-deferring the served gap accounts for the key and permits progress",
-		);
-		const redeferral = servedRedeferred.messages.filter(
+		const servedRedeferred = await run(legacyComplete, true, true);
+		assert.ok(servedRedeferred.state);
+		// The attachment-only history page now runs beside served recovery, and
+		// it reaches UID 321 first. The walk writes the key's retry gap (the
+		// same gap identity as the served one), so recovery leaves the key alone
+		// this run: one gap, no second attempt.
+		const gaps = servedRedeferred.messages.filter(
 			(m) => m.type === "DETAIL_GAP",
 		);
-		assert.equal(redeferral.length, 1);
-		assert.ok(redeferral[0]?.type === "DETAIL_GAP");
-		assert.equal(redeferral[0].gap_id, "already-durable");
+		assert.equal(gaps.length, 1);
+		assert.ok(gaps[0]?.type === "DETAIL_GAP");
+		assert.equal(gaps[0].record_key, "abc123:1");
+		assert.deepEqual(servedRedeferred.attempted, ["abc123:1"], "one attempt");
 	} finally {
 		process.stdout.write = originalWrite;
 		globalThis.fetch = originalFetch;
+		if (originalRsUrl === undefined) delete process.env.PDPP_RS_URL;
+		else process.env.PDPP_RS_URL = originalRsUrl;
+		if (originalOwnerToken === undefined) delete process.env.PDPP_OWNER_TOKEN;
+		else process.env.PDPP_OWNER_TOKEN = originalOwnerToken;
 	}
 });
 
-for (const rejection of ["schema", "throw"] as const) {
-	test(`persistent attachment rejection advances historical pages with durable retry debt: ${rejection}`, async () => {
-		const requested = makeRequested(["attachments"]);
-		const messages = [
-			makeServedRecoveryMsg({ attachments: [16], emailId: "abc123", uid: 321 }),
-			makeServedRecoveryMsg({ attachments: [16], emailId: "def456", uid: 701 }),
-			makeServedRecoveryMsg({
-				attachments: [16],
-				emailId: "fed789",
-				uid: 1101,
-			}),
-		];
-		const pending = new Map<string, DetailGapMessage>();
-		const collected: string[] = [];
-		const ranges: string[] = [];
-		const client = {
-			fetch: (range: string) => {
-				ranges.push(range);
-				const [start, end] = range.split(":").map(Number);
-				return (async function* () {
-					for (const msg of messages)
-						if (msg.uid >= start! && msg.uid <= end!) yield msg;
-				})();
-			},
-			search: async () => [321],
-			fetchOne: async () => messages[0],
-		} as unknown as Parameters<
-			typeof runAttachmentBackfillAndRecoveryPass
-		>[0]["client"];
-		let cursor: AttachmentAllMailCursor = {
-			uidvalidity: 123,
-			backfilled_through_uid: 0,
-		};
-		const hydrate = statusStampingHydrator({
-			"abc123:1": "hydrated",
-			"def456:1": "hydrated",
-			"fed789:1": "hydrated",
-		});
-		const run = async (served = false) => {
-			const harness = makeRecordingEmit();
-			const emitProtocol = async (m: EmittedMessage) => {
-				await harness.emit(m);
-				if (m.type === "DETAIL_GAP") pending.set(String(m.record_key), m);
-				if (m.type === "DETAIL_GAP_RECOVERED")
-					pending.delete(String(m.record_key));
-				if (m.type === "STATE")
-					assert.ok(
-						pending.has("abc123:1"),
-						"debt must precede cursor progress",
-					);
-			};
-			const realEmit = realResourceEmitter(requested, emitProtocol);
-			const operation = runAttachmentBackfillAndRecoveryPass({
-				allMail: makeAllMailMailbox(),
-				attachmentBackfillRequested: true,
-				attachmentCoverage: makeAttachmentDetailCoverage(),
-				client,
-				emit: emitProtocol,
-				deps: {
-					requested,
-					emittedAt: FROZEN_NOW,
-					...(served
-						? {
-								detailGaps: [
-									makeServedRecoveryGap({
-										gapId: "persistent",
-										leaseId: "retry",
-										messageId: "abc123",
-										partIndex: 1,
-									}),
-								],
-							}
-						: {}),
-					emitRecord: async (stream, data, key) => {
-						if (data.id === "abc123:1" && rejection === "throw")
-							throw new Error("persistent rejection");
-						const accepted = await realEmit(
-							stream,
-							data.id === "abc123:1" ? { ...data, size_bytes: -1 } : data,
-							key,
-						);
-						if (accepted) collected.push(String(data.id));
-						return accepted === true;
-					},
-				},
-				fetchBodiesBound: defaultFetchBodies,
-				hydrateAttachment: hydrate,
-				recoveredAttachmentGapIds: new Set(),
-				session: {
-					attachmentBackfill: cursor,
-					existsTotal: 1600,
-					priorExistsTotal: undefined,
-					fullResync: false,
-					highestModseqCursor: null,
-					messagesBackfill: {
-						uidvalidity: 123,
-						backfilled_through_uid: 0,
-						completed_at: null,
-					},
-					priorDeltaHoldbackRuns: 0,
-					priorModseq: null,
-					priorUidnext: 1601,
-					uidnext: 1601,
-					uidvalidityNum: 123,
-				},
-			});
-			await operation;
-			const state = harness.protocolMessages.find(
-				(m) => m.type === "STATE" && m.stream === "attachments",
-			);
-			if (!served) {
-				assert.ok(
-					state?.type === "STATE",
-					"durable rejection gap must permit the page checkpoint",
-				);
-				cursor = (state.cursor as { all_mail: AttachmentAllMailCursor })
-					.all_mail;
-			}
-			return harness;
-		};
-		await run();
-		assert.equal(cursor.backfilled_through_uid, 321);
-		await run();
-		await run();
-		assert.deepEqual(ranges, ["1:500", "322:821", "702:1201"]);
-		assert.deepEqual(collected, ["def456:1", "fed789:1"]);
-		assert.equal(cursor.backfilled_through_uid, 1101);
-		const gap = pending.get("abc123:1");
-		assert.ok(gap);
-		assert.equal(gap.retryable, true);
-		assert.equal(gap.status, "pending");
-		assert.deepEqual(gap.detail_locator, {
-			kind: "gmail.attachment_detail",
-			message_id: "abc123",
-			part_index: "1",
-			attachment_id: "abc123:1",
-		});
-		const retry = await run(true);
-		assert.equal(
-			retry.protocolMessages.some((m) => m.type === "DETAIL_GAP_ATTEMPTED"),
-			true,
-		);
-		assert.equal(
-			retry.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
-			false,
-		);
-		const redeferred = retry.protocolMessages.filter(
-			(m) => m.type === "DETAIL_GAP",
-		);
-		assert.equal(
-			redeferred.length,
-			1,
-			"served rejection re-defers its own gap instead of creating a new one",
-		);
-		assert.ok(redeferred[0]?.type === "DETAIL_GAP");
-		assert.equal(redeferred[0].gap_id, "persistent");
-		assert.equal(redeferred[0].lease_id, "retry");
-		assert.deepEqual(redeferred[0].last_error, {
-			class: "attachment_record_rejected",
-		});
-		assert.equal(pending.size, 1);
-		assert.ok(pending.has("abc123:1"));
-	});
-}
 test("persistent attachment rejection advances messages checkpoints with durable retry debt", async () => {
 	const originalWrite = process.stdout.write;
 	const originalFetch = globalThis.fetch;
@@ -8493,17 +7339,23 @@ test("persistent attachment rejection advances messages checkpoints with durable
 		}
 		return true;
 	}) as typeof process.stdout.write;
-	// All transport seams are offline. Hydration success is covered above;
-	// this caller test isolates whether a rejected record is retried at all.
-	globalThis.fetch = async () => {
-		throw new Error("offline fixture");
-	};
+	// Hydration succeeds (a stub blob endpoint and IMAP part), so the record
+	// reaches the emitter and its rejection is what this test exercises. A
+	// failed hydration writes no record at all.
+	globalThis.fetch = stubBlobEndpoint;
+	const originalRsUrl = process.env.PDPP_RS_URL;
+	const originalOwnerToken = process.env.PDPP_OWNER_TOKEN;
+	process.env.PDPP_RS_URL = "http://rs.test";
+	process.env.PDPP_OWNER_TOKEN = "test-owner-token";
 	try {
 		const client = {
 			close: mock.fn(),
-			download: async () => {
-				throw new Error("offline fixture");
-			},
+			download: async () => ({
+				meta: { contentType: "application/pdf" },
+				content: (async function* () {
+					yield Buffer.from("pdf-bytes");
+				})(),
+			}),
 			fetchOne: async () => message,
 			search: async () => [321],
 			mailbox: {
@@ -8592,7 +7444,8 @@ test("persistent attachment rejection advances messages checkpoints with durable
 			["def456:1"],
 			"next page collects healthy later UIDs despite persistent rejection",
 		);
-		assert.deepEqual(ranges, ["1:500", "501:1000", "1201:*"]);
+		// No new mail arrived, so there is no forward lane on the second run.
+		assert.deepEqual(ranges, ["1:500", "501:1000"]);
 		assert.ok(first.state?.type === "STATE");
 		assert.ok(
 			(first.state.cursor as { all_mail: { forward_uidnext: number } }).all_mail
@@ -8651,6 +7504,10 @@ test("persistent attachment rejection advances messages checkpoints with durable
 	} finally {
 		process.stdout.write = originalWrite;
 		globalThis.fetch = originalFetch;
+		if (originalRsUrl === undefined) delete process.env.PDPP_RS_URL;
+		else process.env.PDPP_RS_URL = originalRsUrl;
+		if (originalOwnerToken === undefined) delete process.env.PDPP_OWNER_TOKEN;
+		else process.env.PDPP_OWNER_TOKEN = originalOwnerToken;
 	}
 });
 
@@ -8670,6 +7527,7 @@ for (const rejection of ["false", "throw"] as const) {
 						message_id: "invalid",
 						part_index: "invalid",
 						size_bytes: -1,
+						hydration_status: "hydrated",
 					});
 					return hydratedResult(attachment);
 				},
