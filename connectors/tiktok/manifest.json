@@ -11,10 +11,6 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
 	"version": "0.1.1",
 	"display_name": "TikTok (Browser Sign-In)",
-	"brand": {
-		"icon": "icon.svg",
-		"background_color": "#000000"
-	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
@@ -627,5 +623,18 @@
 		"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
 		"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
 		"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved."
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "tiktok",
+			"login_url": "https://www.tiktok.com/login",
+			"login_message": "Sign in to TikTok, then return here.",
+			"collect_export": "collectTikTok",
+			"probe_export": "probeTikTokSession",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
 	}
 }
