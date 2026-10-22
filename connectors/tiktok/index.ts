@@ -25,11 +25,9 @@
  * app's requests. No signature, token or cookie is read by this code, logged
  * or kept in STATE: the page reports only whether a request left signed.
  *
- * When the page holds no client parameters yet, or its request does not
- * complete at all, the same GET goes once through the browser context's own
- * request client (same cookies, TikTok's constant web client fields, no
- * signatures). If TikTok refuses that unsigned request, the run stops as
- * "unsigned"; it never retries further.
+ * The in-page request is the only transport: an unsigned request from the
+ * owner's session would be a bot signal, so a request the page cannot make or
+ * that does not complete stops the run as tiktok_interrupted (retryable).
  *
  * Session check. Signed in is decided from the account endpoint the
  * collection itself starts with, in the page as it is. The check opens the
@@ -70,7 +68,7 @@
  * CHANGES
  *   v0.1.0 (2026-10-22): first version.
  *   v0.1.1 (2026-10-22): session check never opens /login without a signed-out
- *     answer; host request client fallback; collections end on hasMore.
+ *     answer; collections end on hasMore and send the app's appId/publicOnly.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -170,21 +168,6 @@ export interface TikTokPage {
 		url: string,
 		options?: { waitUntil?: "domcontentloaded" },
 	): Promise<unknown>;
-	/** The browser context's own request client: same cookies, sent by the host. */
-	context(): {
-		request: {
-			get(
-				url: string,
-				options: { failOnStatusCode: boolean; timeout: number },
-			): Promise<HostResponse>;
-		};
-	};
-}
-
-interface HostResponse {
-	headers(): Record<string, string>;
-	status(): number;
-	text(): Promise<string>;
 }
 
 /** The part of the collect context this connector uses. */
@@ -279,16 +262,6 @@ export class TikTokStop extends Error {
 
 type Params = Record<string, string>;
 
-/**
- * Client fields for a request the host sends itself. These are the constant
- * values of TikTok's web app; the per-device fields stay in the page.
- */
-const HOST_CLIENT: Params = {
-	aid: "1988",
-	app_name: "tiktok_web",
-	device_platform: "web_pc",
-};
-
 /** One GET from inside the page, signed by TikTok's own page scripts. */
 async function fetchFromPage(
 	page: TikTokPage,
@@ -305,69 +278,12 @@ async function fetchFromPage(
 }
 
 /**
- * One GET sent by the browser context's own request client: the same
- * cookies, no page signatures. Used only when the in-page request could not
- * be made or did not complete at the network layer; an unsigned refusal then
- * surfaces as the "unsigned" stop.
+ * The in-page request is the only transport. TikTok signs each request in the
+ * page; an unsigned request sent from a person's session is a bot signal, so
+ * a request that cannot be made or does not complete in the page fails the
+ * run (tiktok_interrupted, retryable) and is never re-sent another way.
  */
-async function fetchFromHost(
-	page: TikTokPage,
-	path: AllowedPath,
-	params: Params,
-): Promise<PageApiResult> {
-	const query = new URLSearchParams({ ...HOST_CLIENT, ...params });
-	try {
-		const response = await page
-			.context()
-			.request.get(`${TIKTOK_ORIGIN}${path}?${query.toString()}`, {
-				failOnStatusCode: false,
-				timeout: REQUEST_TIMEOUT_MS,
-			});
-		const text = await response.text();
-		let json: unknown = null;
-		try {
-			json = JSON.parse(text);
-		} catch {
-			json = null;
-		}
-		const headers = response.headers();
-		const retryAfter = Number(headers["retry-after"]);
-		return {
-			kind: "response",
-			status: response.status(),
-			html: /html/i.test(headers["content-type"] ?? ""),
-			empty: text.trim() === "",
-			json,
-			signed: false,
-			transport: "host",
-			retryAfterSeconds: Number.isFinite(retryAfter) ? retryAfter : null,
-		};
-	} catch {
-		return { kind: "network_error", transport: "host" };
-	}
-}
-
-/**
- * The in-page request first. When the page holds no client parameters yet or
- * its request did not complete (no answer at all), the same GET goes once
- * through the host's request client.
- */
-export async function fetchApi(
-	page: TikTokPage,
-	path: AllowedPath,
-	params: Params,
-): Promise<PageApiResult | null> {
-	const inPage = await fetchFromPage(page, path, params);
-	if (
-		inPage !== null &&
-		(inPage.kind === "response" ||
-			inPage.kind === "refused" ||
-			inPage.kind === "wrong_origin")
-	) {
-		return inPage;
-	}
-	return fetchFromHost(page, path, params);
-}
+export const fetchApi = fetchFromPage;
 
 function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 	const delay = options.delay ?? realDelay;
@@ -479,8 +395,8 @@ async function watch(page: TikTokPage): Promise<WatchStatus | null> {
  * Make sure the page is the TikTok web app, and give the app time to make a
  * request of its own so the reader holds its client parameters. Navigates
  * only when the page is not on www.tiktok.com; a page already there is left
- * where it is. Returns whether client parameters were seen (not fatal: the
- * host request client covers a page that has none).
+ * where it is. Returns whether client parameters were seen; without them the
+ * first in-page request fails the run as tiktok_interrupted.
  */
 async function prepareReader(
 	page: TikTokPage,
@@ -923,6 +839,11 @@ export async function collectTikTok(
 						secUid: secUid,
 						count: ITEM_PAGE_SIZE,
 						cursor,
+						// The app's own call carries appId (1988, TikTok web's app
+						// id) and publicOnly; false asks for private collections
+						// too, which the owner's own data includes.
+						appId: "1988",
+						publicOnly: "false",
 					}),
 				);
 				if (!page) {

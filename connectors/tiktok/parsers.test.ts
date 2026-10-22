@@ -214,8 +214,6 @@ interface FakeOptions {
 	watch?: Json;
 	/** The in-page request never completes (as under a strict HAR replay). */
 	pageFails?: boolean;
-	/** The host request client fails too. */
-	hostFails?: boolean;
 }
 
 function fakePage(
@@ -224,11 +222,9 @@ function fakePage(
 ): {
 	calls: Call[];
 	gotos: string[];
-	hostCalls: Call[];
 	page: TikTokPage;
 } {
 	const calls: Call[] = [];
-	const hostCalls: Call[] = [];
 	const gotos: string[] = [];
 	const page: TikTokPage = {
 		evaluate: async (script: string) => {
@@ -248,32 +244,8 @@ function fakePage(
 			gotos.push(url);
 			return null;
 		},
-		context: () => ({
-			request: {
-				get: async (url: string) => {
-					if (options.hostFails) throw new Error("net::ERR_FAILED");
-					const parsed = new URL(url);
-					const params = Object.fromEntries(parsed.searchParams);
-					const call: Call = { path: parsed.pathname, params };
-					hostCalls.push(call);
-					calls.push(call);
-					const result = answer(call, calls.length - 1) as Json;
-					const body =
-						result.kind === "response" && !result.empty
-							? JSON.stringify(result.json)
-							: "";
-					return {
-						status: () => Number(result.status ?? 200),
-						headers: () => ({
-							"content-type": result.html ? "text/html" : "application/json",
-						}),
-						text: async () => body,
-					};
-				},
-			},
-		}),
 	};
-	return { calls, gotos, hostCalls, page };
+	return { calls, gotos, page };
 }
 
 function harness(
@@ -283,7 +255,8 @@ function harness(
 ) {
 	const messages: EmittedMessage[] = [];
 	const records: { stream: string; data: RecordData }[] = [];
-	const failures: { stream: string; message: string }[] = [];
+	const failures: { stream: string; message: string; retryable: boolean }[] =
+		[];
 	const requested = new Map<string, StreamScope>(
 		streams.map((name) => [name, { name } as StreamScope]),
 	);
@@ -302,8 +275,16 @@ function harness(
 				records.push({ stream, data });
 				messages.push({ type: "RECORD", stream, data } as EmittedMessage);
 			},
-			reportStreamFailure: async (stream: string, message: string) => {
-				failures.push({ stream, message });
+			reportStreamFailure: async (
+				stream: string,
+				message: string,
+				options?: { retryable?: boolean },
+			) => {
+				failures.push({
+					stream,
+					message,
+					retryable: options?.retryable === true,
+				});
 			},
 			page,
 			requested,
@@ -632,42 +613,43 @@ test("only an answer that names no account is signed out", async () => {
 		await checkTikTokSession(signedOut.page, noDelay.delay),
 		"signed_out",
 	);
-	const silent = fakePage(standardAnswer, { pageFails: true, hostFails: true });
+	const silent = fakePage(standardAnswer, { pageFails: true });
 	assert.equal(await checkTikTokSession(silent.page, noDelay.delay), "unknown");
 	assert.deepEqual(silent.gotos, []);
 });
 
-test("when in-page requests never complete, the host client reads the same paths in the same order", async () => {
-	const live = fakePage(standardAnswer);
-	const liveRun = harness(ALL, live.page);
-	await collectTikTok(liveRun.ctx, noDelay);
-
-	const replay = fakePage(standardAnswer, { pageFails: true });
-	const replayRun = harness(ALL, replay.page);
-	await collectTikTok(replayRun.ctx, noDelay);
-
-	assert.deepEqual(replayRun.failures, []);
-	assert.deepEqual(
-		replay.hostCalls.map((c) => c.path),
-		live.calls.map((c) => c.path),
-	);
-	assert.equal(replay.hostCalls[1]?.params.aid, "1988");
-	assert.equal(replay.hostCalls[1]?.params.cursor, "0");
-	assert.deepEqual(replay.gotos, []);
-	const strip = (messages: EmittedMessage[]) =>
-		messages.filter((m) => m.type === "RECORD" || m.type === "STATE");
-	assert.deepEqual(strip(replayRun.messages), strip(liveRun.messages));
-});
-
-test("an unsigned empty answer from the host client still stops the run", async () => {
+test("an in-page request that does not complete stops the run as retryable, with nothing re-sent", async () => {
+	let sent = 0;
 	const { page } = fakePage(
-		(call) =>
-			call.path === "/passport/account/info/v2/"
-				? ok(ACCOUNT)
-				: { ...ok(null), empty: true },
+		(call) => {
+			sent += 1;
+			return standardAnswer(call);
+		},
 		{ pageFails: true },
 	);
-	const h = harness(["videos"], page);
+	assert.equal("context" in page, false);
+	const h = harness(["videos", "likes"], page);
 	await collectTikTok(h.ctx, noDelay);
-	assert.match(h.failures[0]?.message ?? "", /^tiktok_request_unsigned/);
+	assert.equal(sent, 0);
+	assert.deepEqual(
+		h.failures.map((f) => [f.stream, f.retryable]),
+		[
+			["videos", true],
+			["likes", true],
+		],
+	);
+	assert.match(h.failures[0]?.message ?? "", /^tiktok_interrupted/);
+	assert.equal(
+		h.messages.some((m) => m.type === "STATE" || m.type === "RECORD"),
+		false,
+	);
+});
+
+test("the collection list sends the app's appId and publicOnly", async () => {
+	const { calls, page } = fakePage(standardAnswer);
+	const h = harness(["favorite_collections"], page);
+	await collectTikTok(h.ctx, noDelay);
+	const call = calls.find((c) => c.path === "/api/user/collection_list/");
+	assert.equal(call?.params.appId, "1988");
+	assert.equal(call?.params.publicOnly, "false");
 });

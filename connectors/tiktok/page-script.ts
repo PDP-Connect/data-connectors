@@ -60,6 +60,7 @@ const CALLER_KEYS = [
 	"post_item_list_request_type",
 	"enable_v2",
 	"publicOnly",
+	"appId",
 ];
 
 /**
