@@ -65,6 +65,11 @@ export type EndFacts =
 			rule: "window_boundary";
 			intervalBounded: true;
 			ordering: Guarantee;
+			/** Source guarantees nonincreasing window timestamps across all successors.
+			 * Uses the same timestamp as the old-page predicate; not verified here.
+			 * Snapshot/change-token/stable ordering alone does not imply this.
+			 */
+			timeOrder: "nonincreasing";
 			oldPagesInARow: number;
 			required: number;
 	  }
@@ -453,11 +458,13 @@ function parseEnd(value: unknown): EndFacts | null {
 				"rule",
 				"intervalBounded",
 				"ordering",
+				"timeOrder",
 				"oldPagesInARow",
 				"required",
 			]) &&
 				v.intervalBounded === true &&
 				oneOf(v.ordering, GUARANTEES as Guarantee[]) &&
+				v.timeOrder === "nonincreasing" &&
 				isCount(v.oldPagesInARow) &&
 				isCount(v.required) &&
 				v.required > 0 &&
@@ -466,6 +473,7 @@ function parseEnd(value: unknown): EndFacts | null {
 						rule: "window_boundary",
 						intervalBounded: true,
 						ordering: v.ordering,
+						timeOrder: "nonincreasing",
 						oldPagesInARow: v.oldPagesInARow,
 						required: v.required,
 					}
@@ -549,7 +557,8 @@ function settleEnd(
 	let completeAs: Outcome = "complete";
 	let rightScope: RequestScope = "inventory";
 	if (end.rule === "window_boundary") {
-		// A window end needs a named ordering the walk itself declared.
+		// parseEnd requires monotonic window timestamps, not just consistency.
+		// The named consistency guarantee must still match the walk.
 		if (
 			p.traversal.ordering === "none" ||
 			end.ordering !== p.traversal.ordering
@@ -608,27 +617,33 @@ function decide(claim: CoverageClaim, read: unknown): Verdict {
 				: null;
 			return end ? settleEnd(claim, p, end) : unproven("invalid_facts");
 		}
-		case "budget":
+		case "budget": {
+			const { limit, resumable } = stop;
 			return hasExactKeys(stop, ["kind", "limit", "resumable"]) &&
-				oneOf(stop.limit, ["pages", "items", "rounds", "time"] as const) &&
-				typeof stop.resumable === "boolean"
-				? partial(`budget_${stop.limit}`, stop.resumable)
+				oneOf(limit, ["pages", "items", "rounds", "time"] as const) &&
+				typeof resumable === "boolean"
+				? partial(`budget_${limit}`, resumable)
 				: unproven("invalid_facts");
-		case "stalled":
+		}
+		case "stalled": {
+			const { reason } = stop;
 			return hasExactKeys(stop, ["kind", "reason"]) &&
-				oneOf(stop.reason, ["no_progress", "cursor_cycle"] as const)
-				? { outcome: "stalled", reason: stop.reason }
+				oneOf(reason, ["no_progress", "cursor_cycle"] as const)
+				? { outcome: "stalled", reason }
 				: unproven("invalid_facts");
-		case "unreadable":
+		}
+		case "unreadable": {
+			const { reason } = stop;
 			return hasExactKeys(stop, ["kind", "reason"]) &&
-				oneOf(stop.reason, [
+				oneOf(reason, [
 					"page",
 					"response",
 					"auth",
 					"parse_mismatch",
 				] as const)
-				? { outcome: "unreadable", reason: stop.reason }
+				? { outcome: "unreadable", reason }
 				: unproven("invalid_facts");
+		}
 		case "no_end_signal":
 			return hasExactKeys(stop, ["kind"])
 				? unproven("no_end_signal")
