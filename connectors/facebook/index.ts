@@ -32,6 +32,17 @@
  * Pacing. One query at a time, a 2-4.5 s random pause before each, 3-6 s
  * before each page opened; a rate-limit answer ends the run at once.
  *
+ * Bounded. Every page action has a deadline (30 s to open a page or answer a
+ * query, 10 s to look up a query or scroll); past it the action fails as
+ * `facebook_page_timeout` and only that stream fails. A query id the page does
+ * not reveal in time fails the stream as `facebook_query_outdated`. A PROGRESS
+ * goes out at least every 20 s while collecting, and the sign-in hand-off
+ * gives up after 5 minutes, so every run ends with DONE.
+ *
+ * Main world. Page functions that need Facebook's module `require` run in the
+ * page's main world (`evaluateInMainWorld`): Patchright evaluates in an
+ * isolated world by default, where `require` does not exist.
+ *
  * Terms of service and legal basis. Meta's terms restrict automated access.
  * This connector reads only the account owner's own data, in the owner's own
  * session, at the owner's request, under their rights of access and
@@ -67,6 +78,7 @@ import {
 	type ModuleOperation,
 	type PageGraphqlResult,
 	type PageSnapshot,
+	withDeadline,
 } from "./collect.ts";
 import {
 	asRecord,
@@ -82,8 +94,17 @@ import {
 import { validateRecord } from "./schemas.ts";
 
 const LOGIN_URL = `${FB_ORIGIN}/login/`;
-const NAVIGATION_ATTEMPTS = 3;
-const READY_TIMEOUT_MS = 15_000;
+const NAVIGATION_ATTEMPTS = 2;
+const NAVIGATION_TIMEOUT_MS = 20_000;
+const READY_TIMEOUT_MS = 8000;
+/** The page's own fetch is aborted after this long; the Node-side deadline is a little longer. */
+const PAGE_FETCH_TIMEOUT_MS = 25_000;
+const PROBE_DEADLINE_MS = 30_000;
+/**
+ * How long the sign-in hand-off waits. Bounded so a run whose session cannot be
+ * proven ends with a clear auth failure instead of sitting silent.
+ */
+const SIGN_IN_TIMEOUT_SECONDS = 300;
 const SESSION_COOKIES = ["c_user", "xs"];
 
 /** JSON keys whose string values are blanked out of server-rendered scripts before they leave the page. */
@@ -119,10 +140,21 @@ function viewerIdInPage(): string | null {
 			typeof req === "function"
 				? (req("CurrentUserInitialData") as { USER_ID?: unknown })
 				: null;
-		return typeof data?.USER_ID === "string" ? data.USER_ID : null;
+		if (typeof data?.USER_ID === "string") return data.USER_ID;
 	} catch {
-		return null;
+		// Fall through to the server-rendered data, which every world can read.
 	}
+	const marker = '"USER_ID":"';
+	for (const node of Array.from(
+		document.querySelectorAll('script[type="application/json"]'),
+	)) {
+		const text = node.textContent ?? "";
+		const at = text.indexOf(marker);
+		if (at < 0) continue;
+		const end = text.indexOf('"', at + marker.length);
+		if (end > at + marker.length) return text.slice(at + marker.length, end);
+	}
+	return null;
 }
 
 function resolveModuleInPage(name: string): {
@@ -171,6 +203,7 @@ function resolveModuleInPage(name: string): {
 
 async function graphqlInPage(call: {
 	asbdId: string | null;
+	timeoutMs: number;
 	docId: string;
 	friendlyName: string;
 	path: string;
@@ -255,6 +288,7 @@ async function graphqlInPage(call: {
 		credentials: "include",
 		headers,
 		body,
+		signal: AbortSignal.timeout(call.timeoutMs),
 	});
 	return {
 		kind: "response",
@@ -284,7 +318,10 @@ async function gotoWithRetry(page: Page, url: string): Promise<void> {
 	let lastError: unknown;
 	for (let attempt = 0; attempt < NAVIGATION_ATTEMPTS; attempt += 1) {
 		try {
-			await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+			await page.goto(url, {
+				waitUntil: "domcontentloaded",
+				timeout: NAVIGATION_TIMEOUT_MS,
+			});
 			await page
 				.waitForFunction(() => document.readyState === "complete", undefined, {
 					timeout: READY_TIMEOUT_MS,
@@ -303,8 +340,30 @@ async function gotoWithRetry(page: Page, url: string): Promise<void> {
 /** The request body passed to the page. Only the query id and variables; the page adds its own tokens. */
 export function graphqlPageCall(
 	call: GraphqlCall,
-): GraphqlCall & { path: string } {
-	return { ...call, path: GRAPHQL_PATH };
+): GraphqlCall & { path: string; timeoutMs: number } {
+	return { ...call, path: GRAPHQL_PATH, timeoutMs: PAGE_FETCH_TIMEOUT_MS };
+}
+
+/**
+ * Run a page function in the page's main world. Patchright runs `evaluate` in
+ * an isolated world by default, where Facebook's module `require` (the query
+ * modules, `DTSGInitialData`, `CurrentUserInitialData`) does not exist; the
+ * first live run's sign-in probe failed for exactly that reason. Plain
+ * Playwright ignores the extra arguments.
+ */
+export function evaluateInMainWorld<R, A>(
+	page: Pick<Page, "evaluate">,
+	fn: (arg: A) => R | Promise<R>,
+	arg: A,
+): Promise<R> {
+	// Patchright's fourth `evaluate` argument is `isolatedContext`.
+	const result: Promise<R> = Reflect.apply(page.evaluate, page, [
+		fn,
+		arg,
+		undefined,
+		false,
+	]);
+	return result;
 }
 
 function asProvided(value: unknown): Record<string, unknown> {
@@ -353,14 +412,22 @@ export function createPageServices(
 				operationMatches(spec, operation.friendlyName),
 			) ?? null,
 		resolveModule: async (friendlyName: string): Promise<ModuleOperation> => {
-			const result = await page.evaluate(resolveModuleInPage, friendlyName);
+			const result = await evaluateInMainWorld(
+				page,
+				resolveModuleInPage,
+				friendlyName,
+			);
 			return { docId: result.docId, provided: asProvided(result.provided) };
 		},
 		graphql: async (call: GraphqlCall): Promise<PageGraphqlResult> =>
-			page.evaluate(graphqlInPage, graphqlPageCall(call)),
+			evaluateInMainWorld(page, graphqlInPage, graphqlPageCall(call)),
 		sleep: (ms: number) =>
 			new Promise<void>((resolve) => setTimeout(resolve, ms)),
 		random: () => Math.random(),
+		every: (ms: number, tick: () => void) => {
+			const timer = setInterval(tick, ms);
+			return () => clearInterval(timer);
+		},
 	};
 }
 
@@ -375,17 +442,29 @@ async function hasSessionCookies(
 	);
 }
 
-export async function probeFacebookSession({
+async function probeOnce({
 	context,
 	page,
 }: ProbeSessionArgs): Promise<boolean> {
 	if (!(await hasSessionCookies(context))) return false;
+	if (!page.url().startsWith(FB_ORIGIN))
+		await gotoWithRetry(page, `${FB_ORIGIN}/`);
+	assertLandedOnContent(page.url());
+	const viewerId = await evaluateInMainWorld(page, viewerIdInPage, undefined);
+	return isNumericId(viewerId) && viewerId !== "0";
+}
+
+/** Signed in when the session cookies are there and the page names a person. Bounded; never hangs. */
+export async function probeFacebookSession(
+	args: ProbeSessionArgs,
+	deadlineMs = PROBE_DEADLINE_MS,
+): Promise<boolean> {
 	try {
-		if (!page.url().startsWith(FB_ORIGIN))
-			await gotoWithRetry(page, `${FB_ORIGIN}/`);
-		assertLandedOnContent(page.url());
-		const viewerId = await page.evaluate(viewerIdInPage);
-		return isNumericId(viewerId) && viewerId !== "0";
+		return await withDeadline(
+			probeOnce(args),
+			deadlineMs,
+			"checking the sign-in",
+		);
 	} catch {
 		return false;
 	}
@@ -415,7 +494,7 @@ async function ensureFacebookSession(args: EnsureSessionArgs): Promise<void> {
 		readinessProbeOnHandoffPage: true,
 		reason: "login",
 		sendInteraction,
-		timeoutSeconds: 30 * 60,
+		timeoutSeconds: SIGN_IN_TIMEOUT_SECONDS,
 	});
 	if (!live)
 		throw new Error("facebook_auth_failed: the sign-in was not completed");

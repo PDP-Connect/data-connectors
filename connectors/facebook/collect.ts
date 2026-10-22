@@ -131,6 +131,79 @@ export interface FacebookServices {
 	sleep: (ms: number) => Promise<void>;
 	/** The latest of the page's own requests for this operation, if it made one. */
 	takeCaptured: (spec: OperationSpec) => CapturedOperation | null;
+	/** Run `tick` every `ms` until the returned stop function is called. */
+	every: (ms: number, tick: () => void) => () => void;
+}
+
+// ─── Bounded waits ──────────────────────────────────────────────────────
+
+/** The longest any one page action may take. Past it the action fails as `facebook_page_timeout`. */
+export interface PageDeadlines {
+	graphql: number;
+	open: number;
+	resolveModule: number;
+	scroll: number;
+}
+
+export const PAGE_DEADLINES: PageDeadlines = {
+	open: 30_000,
+	graphql: 30_000,
+	resolveModule: 10_000,
+	scroll: 10_000,
+};
+
+/** While collecting, a PROGRESS goes out at least this often, so the host never sees a silent run. */
+export const HEARTBEAT_MS = 20_000;
+
+export function withDeadline<T>(
+	work: Promise<T>,
+	ms: number,
+	what: string,
+): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(
+			() =>
+				reject(
+					facebookError(
+						ERROR_CLASSES.timeout,
+						`${what} took longer than ${ms} ms`,
+					),
+				),
+			ms,
+		);
+	});
+	return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** The same services, with every page action bounded. */
+export function boundServices(
+	services: FacebookServices,
+	deadlines: PageDeadlines,
+): FacebookServices {
+	return {
+		...services,
+		open: (url) =>
+			withDeadline(
+				services.open(url),
+				deadlines.open,
+				"opening a Facebook page",
+			),
+		graphql: (call) =>
+			withDeadline(
+				services.graphql(call),
+				deadlines.graphql,
+				`the ${call.friendlyName} query`,
+			),
+		resolveModule: (name) =>
+			withDeadline(
+				services.resolveModule(name),
+				deadlines.resolveModule,
+				"looking up a query in the page",
+			),
+		scroll: () =>
+			withDeadline(services.scroll(), deadlines.scroll, "scrolling the page"),
+	};
 }
 
 export type CollectorContext = Pick<
@@ -221,7 +294,17 @@ async function resolveOperation(
 		);
 	}
 	assertReadOnlyOperation(spec.friendlyName);
-	const module = await services.resolveModule(spec.friendlyName);
+	let module: ModuleOperation;
+	try {
+		module = await services.resolveModule(spec.friendlyName);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (!message.startsWith(ERROR_CLASSES.timeout)) throw error;
+		throw facebookError(
+			ERROR_CLASSES.outdated,
+			`${spec.friendlyName} could not be found in the page in time`,
+		);
+	}
 	if (!isValidDocId(module.docId)) {
 		throw facebookError(
 			ERROR_CLASSES.outdated,
@@ -710,25 +793,39 @@ async function runStream(
 /** Collect every requested stream. Auth, challenge and rate-limit errors end the run; others fail one stream. */
 export async function collectFacebook(
 	ctx: CollectorContext,
-	services: FacebookServices,
+	rawServices: FacebookServices,
+	deadlines: PageDeadlines = PAGE_DEADLINES,
 ): Promise<void> {
 	const streams = STREAM_ORDER.filter((stream) => ctx.requested.has(stream));
 	if (streams.length === 0) return;
-	await ctx.progress("Opening your Facebook profile");
-	const me = await services.open(`${FB_ORIGIN}/me`);
-	const viewer = extractViewer(me.scripts);
-	if (!viewer)
-		throw facebookError(
-			ERROR_CLASSES.auth,
-			"the page shows no signed-in person",
-		);
-	for (const stream of streams) {
-		await ctx.progress(PROGRESS[stream]);
-		try {
-			await runStream(ctx, services, viewer, me, stream);
-		} catch (error) {
-			if (isRunEndingError(error)) throw error;
-			await failStream(ctx, stream, error);
+	const services = boundServices(rawServices, deadlines);
+	let current = "Opening your Facebook profile";
+	const stopHeartbeat = services.every(HEARTBEAT_MS, () => {
+		ctx.progress(current).catch(() => undefined);
+	});
+	const say = async (message: string): Promise<void> => {
+		current = message;
+		await ctx.progress(message);
+	};
+	try {
+		await say(current);
+		const me = await services.open(`${FB_ORIGIN}/me`);
+		const viewer = extractViewer(me.scripts);
+		if (!viewer)
+			throw facebookError(
+				ERROR_CLASSES.auth,
+				"the page shows no signed-in person",
+			);
+		for (const stream of streams) {
+			await say(PROGRESS[stream]);
+			try {
+				await runStream(ctx, services, viewer, me, stream);
+			} catch (error) {
+				if (isRunEndingError(error)) throw error;
+				await failStream(ctx, stream, error);
+			}
 		}
+	} finally {
+		stopHeartbeat();
 	}
 }

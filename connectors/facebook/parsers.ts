@@ -35,6 +35,7 @@ export const ERROR_CLASSES = {
 	shape: "facebook_shape_changed",
 	incomplete: "facebook_list_not_proven_complete",
 	mutation: "facebook_mutation_refused",
+	timeout: "facebook_page_timeout",
 } as const;
 
 export type ErrorClass = (typeof ERROR_CLASSES)[keyof typeof ERROR_CLASSES];

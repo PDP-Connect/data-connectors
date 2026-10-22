@@ -9,10 +9,17 @@ import {
 	collectFacebook,
 	type FacebookServices,
 	type GraphqlCall,
+	HEARTBEAT_MS,
+	type PageDeadlines,
 	type PageGraphqlResult,
 	type PageSnapshot,
 } from "./collect.ts";
-import { graphqlPageCall, PAGE_FUNCTIONS } from "./index.ts";
+import {
+	evaluateInMainWorld,
+	graphqlPageCall,
+	PAGE_FUNCTIONS,
+	probeFacebookSession,
+} from "./index.ts";
 import {
 	type CapturedOperation,
 	GRAPHQL_PATH,
@@ -99,9 +106,11 @@ interface Harness {
 	emitted: { message: unknown; type: string }[];
 	failures: { message: string; stream: string }[];
 	opened: string[];
+	progress: string[];
 	records: { data: Record<string, unknown>; stream: string }[];
 	scrolls: number;
 	services: FacebookServices;
+	tickers: { ms: number; stopped: boolean; tick: () => void }[];
 }
 
 function harness(args: {
@@ -113,6 +122,8 @@ function harness(args: {
 	streams: string[];
 }): Harness {
 	const h: Harness = {
+		progress: [],
+		tickers: [],
 		calls: [],
 		emitted: [],
 		failures: [],
@@ -129,7 +140,9 @@ function harness(args: {
 				h.records.push({ stream, data });
 				h.emitted.push({ type: "RECORD", message: { stream } });
 			},
-			progress: async () => undefined,
+			progress: async (message) => {
+				h.progress.push(message);
+			},
 			reportStreamFailure: async (stream, message) => {
 				h.failures.push({ stream, message });
 			},
@@ -164,6 +177,13 @@ function harness(args: {
 			},
 			sleep: async () => undefined,
 			random: () => 0.5,
+			every: (ms, tick) => {
+				const ticker = { ms, tick, stopped: false };
+				h.tickers.push(ticker);
+				return () => {
+					ticker.stopped = true;
+				};
+			},
 		},
 	};
 	return h;
@@ -494,6 +514,162 @@ describe("page functions", () => {
 				x: ["DTSGInitialData", [], { token: "" }],
 				y: "RelayPrefetchedStreamCache",
 			});
+		} finally {
+			Object.defineProperty(globalThis, "document", {
+				value: saved,
+				configurable: true,
+			});
+		}
+	});
+});
+
+const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
+const SHORT: PageDeadlines = {
+	open: 50,
+	graphql: 50,
+	resolveModule: 50,
+	scroll: 50,
+};
+
+describe("bounded waits", () => {
+	it("fails a stream whose query never answers as a page timeout and moves on to the next stream", async () => {
+		const groupsUrl = "https://www.facebook.com/groups/joins/";
+		const h = harness({
+			streams: ["friends", "groups"],
+			pages: {
+				[ME]: meSnapshot,
+				[FRIENDS_URL]: { landedUrl: FRIENDS_URL, scripts: [] },
+				[groupsUrl]: { landedUrl: groupsUrl, scripts: [] },
+			},
+			captured: [FRIENDS_OP],
+			replies: [],
+		});
+		h.services.graphql = () => never();
+		await collectFacebook(h.ctx, h.services, SHORT);
+		assert.equal(h.failures[0]?.stream, "friends");
+		assert.match(h.failures[0]?.message ?? "", /^facebook_page_timeout/);
+		assert.ok(h.opened.includes(groupsUrl), "the next stream still ran");
+		assert.equal(h.failures[1]?.stream, "groups");
+		assert.match(h.failures[1]?.message ?? "", /^facebook_query_outdated/);
+	});
+
+	it("fails as an outdated query when the query lookup in the page hangs", async () => {
+		const h = harness({
+			streams: ["friends"],
+			pages: {
+				[ME]: meSnapshot,
+				[FRIENDS_URL]: { landedUrl: FRIENDS_URL, scripts: [] },
+			},
+			replies: [],
+		});
+		h.services.resolveModule = () => never();
+		await collectFacebook(h.ctx, h.services, SHORT);
+		assert.match(
+			h.failures[0]?.message ?? "",
+			/^facebook_query_outdated: .* could not be found in the page in time/,
+		);
+		assert.equal(
+			h.scrolls,
+			4,
+			"scrolling for the page's own request is bounded",
+		);
+	});
+
+	it("bounds a page that never finishes opening", async () => {
+		const h = harness({
+			streams: ["friends", "reactions"],
+			pages: { [ME]: meSnapshot },
+			replies: [],
+		});
+		const open = h.services.open;
+		h.services.open = (url) => (url === ME ? open(url) : never());
+		await collectFacebook(h.ctx, h.services, SHORT);
+		assert.deepEqual(
+			h.failures.map((failure) => failure.stream),
+			["friends", "reactions"],
+		);
+		for (const failure of h.failures)
+			assert.match(failure.message, /^facebook_page_timeout: opening/);
+	});
+
+	it("bounds the first page too, ending the run with an error instead of hanging", async () => {
+		const h = harness({ streams: ["profile"], pages: {}, replies: [] });
+		h.services.open = () => never();
+		await assert.rejects(
+			collectFacebook(h.ctx, h.services, SHORT),
+			/^Error: facebook_page_timeout/,
+		);
+		assert.equal(h.tickers[0]?.stopped, true);
+	});
+
+	it("sends a heartbeat PROGRESS naming the current step, and stops it when the run ends", async () => {
+		const h = harness({
+			streams: ["profile"],
+			pages: { [ME]: meSnapshot },
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services, SHORT);
+		const ticker = h.tickers[0];
+		assert.ok(ticker);
+		assert.ok(ticker.ms <= 30_000 && ticker.ms === HEARTBEAT_MS);
+		assert.equal(ticker.stopped, true);
+		ticker.tick();
+		await Promise.resolve();
+		assert.equal(h.progress.at(-1), "Reading your Facebook profile");
+	});
+
+	it("gives up on a sign-in probe that hangs", async () => {
+		const page = {
+			url: () => "https://www.facebook.com/",
+			evaluate: () => never(),
+		};
+		const context = {
+			cookies: async () => [
+				{ name: "c_user", value: "1" },
+				{ name: "xs", value: "x" },
+			],
+		};
+		const started = Date.now();
+		const live = await probeFacebookSession({ context, page } as never, 50);
+		assert.equal(live, false);
+		assert.ok(Date.now() - started < 2000);
+	});
+});
+
+describe("main-world evaluation", () => {
+	it("asks Patchright for the main world, where Facebook's require lives", async () => {
+		const seen: unknown[][] = [];
+		const page = {
+			evaluate: (...args: unknown[]) => {
+				seen.push(args);
+				return Promise.resolve("100476");
+			},
+		};
+		const result = await evaluateInMainWorld(
+			page as never,
+			PAGE_FUNCTIONS.viewerIdInPage,
+			undefined,
+		);
+		assert.equal(result, "100476");
+		assert.equal(seen[0]?.[3], false);
+	});
+
+	it("reads the viewer from server-rendered data when require is not visible", () => {
+		const fake = {
+			querySelectorAll: () => [
+				{
+					textContent:
+						'{"define":[["CurrentUserInitialData",[],{"USER_ID":"100476"},270]]}',
+				},
+			],
+		};
+		const saved = globalThis.document;
+		Object.defineProperty(globalThis, "document", {
+			value: fake,
+			configurable: true,
+		});
+		try {
+			assert.equal(PAGE_FUNCTIONS.viewerIdInPage(), "100476");
 		} finally {
 			Object.defineProperty(globalThis, "document", {
 				value: saved,
