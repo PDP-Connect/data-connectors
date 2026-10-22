@@ -307,6 +307,15 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	strava_browser: {
 		activities: { field: "start_date_local", format: "date" },
 	},
+	tiktok: {
+		favorite_collections: null,
+		favorites: null,
+		followers: null,
+		following: null,
+		likes: null,
+		profile: null,
+		videos: { field: "created_at", format: "date-time" },
+	},
 	twitter_archive: {
 		direct_messages: { field: "created_at", format: "date-time" },
 		tweets: { field: "created_at", format: "date-time" },
