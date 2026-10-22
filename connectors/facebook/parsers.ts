@@ -36,6 +36,7 @@ export const ERROR_CLASSES = {
 	incomplete: "facebook_list_not_proven_complete",
 	mutation: "facebook_mutation_refused",
 	timeout: "facebook_page_timeout",
+	unsafeText: "facebook_unsafe_text",
 } as const;
 
 export type ErrorClass = (typeof ERROR_CLASSES)[keyof typeof ERROR_CLASSES];
@@ -50,7 +51,8 @@ export function isRunEndingError(error: unknown): boolean {
 	return (
 		message.startsWith(ERROR_CLASSES.auth) ||
 		message.startsWith(ERROR_CLASSES.challenge) ||
-		message.startsWith(ERROR_CLASSES.rateLimited)
+		message.startsWith(ERROR_CLASSES.rateLimited) ||
+		message.startsWith(ERROR_CLASSES.server)
 	);
 }
 
@@ -149,8 +151,13 @@ export function safeText(
 	if (typeof value !== "string" || value.length === 0) return null;
 	const result = safeTextPreview(value, max);
 	if (result.kind === "binary") {
+		// Text Facebook sent that cannot be stored as text is not "no text":
+		// the item is unreadable and its stream must not checkpoint.
 		counter.replaced += 1;
-		return null;
+		throw facebookError(
+			ERROR_CLASSES.unsafeText,
+			`a text field could not be stored as text (${result.reason ?? "binary"})`,
+		);
 	}
 	if (result.truncated) counter.truncated += 1;
 	return result.preview;
@@ -196,6 +203,8 @@ export interface GraphqlErrorInfo {
 	code: number | null;
 	message: string;
 	path: string;
+	/** The raw GraphQL error path (field names and list indexes). */
+	segments: (string | number)[];
 	severity: string | null;
 }
 
@@ -228,6 +237,10 @@ function collectErrors(part: JsonRecord, into: GraphqlErrorInfo[]): void {
 				300,
 			),
 			path: path.map(String).join("."),
+			segments: path.filter(
+				(step): step is string | number =>
+					typeof step === "string" || typeof step === "number",
+			),
 			severity: asString(error.severity),
 		});
 	}
@@ -401,14 +414,23 @@ export interface PageInfo {
 export interface FoundConnection {
 	edges: unknown[];
 	key: string;
+	/** The object keys from the response root to this connection. */
+	keys: string[];
 	/** `id` of the object that holds the connection (a refetch variable). */
 	ownerId: string | null;
 	pageInfo: PageInfo | null;
 }
 
+/** Where a candidate connection sits: the objects above it (nearest last) and the keys leading to it. */
+export interface ConnectionContext {
+	ancestors: readonly JsonRecord[];
+	keys: readonly string[];
+}
+
 export type ConnectionMatcher = (
 	key: string,
 	connection: JsonRecord,
+	context: ConnectionContext,
 ) => boolean;
 
 function readPageInfo(connection: JsonRecord): PageInfo | null {
@@ -429,8 +451,8 @@ export function findConnections(
 	match: ConnectionMatcher,
 ): FoundConnection[] {
 	const found: FoundConnection[] = [];
-	const stack: { owner: JsonRecord | null; value: unknown }[] = [
-		{ owner: null, value: root },
+	const stack: { ancestors: JsonRecord[]; keys: string[]; value: unknown }[] = [
+		{ ancestors: [], keys: [], value: root },
 	];
 	let visited = 0;
 	while (stack.length > 0 && visited < MAX_WALK_NODES) {
@@ -439,24 +461,27 @@ export function findConnections(
 		if (!item) break;
 		const list = asArray(item.value);
 		if (list) {
-			for (const child of list) stack.push({ owner: item.owner, value: child });
+			for (const child of list) stack.push({ ...item, value: child });
 			continue;
 		}
 		const record = asRecord(item.value);
 		if (!record) continue;
+		const ancestors = [...item.ancestors, record];
 		for (const [key, child] of Object.entries(record)) {
 			const connection = asRecord(child);
 			const edges = asArray(connection?.edges);
-			if (connection && edges && match(key, connection)) {
+			const keys = [...item.keys, key];
+			if (connection && edges && match(key, connection, { ancestors, keys })) {
 				found.push({
 					edges,
 					key,
+					keys,
 					ownerId: asString(record.id),
 					pageInfo: readPageInfo(connection),
 				});
 				continue;
 			}
-			stack.push({ owner: record, value: child });
+			stack.push({ ancestors, keys, value: child });
 		}
 	}
 	return found;
@@ -472,25 +497,57 @@ export const matchTimelineConnection: ConnectionMatcher = (key) =>
 export const matchActivityConnection: ConnectionMatcher = (key) =>
 	key === "activity_log_stories";
 
-/** A friend list item: its inner node is a person, or its action names a friendship status. */
-function isFriendItem(edge: unknown): boolean {
-	const node = edgeNode(edge);
-	if (!node) return false;
-	const inner = asRecord(node.node);
-	if (inner?.__isEntity === "User" || inner?.__isNode === "User") return true;
-	const status = getPath(node, [
-		"actions_renderer",
-		"action",
-		"profile_owner",
-		"friendship_status",
-	]);
-	return typeof status === "string";
+const FRIEND_STATUS = "ARE_FRIENDS";
+
+/** The friendship status the list item states for its person (live: `ARE_FRIENDS`). */
+export function friendshipStatus(node: JsonRecord): string | null {
+	const status =
+		getPath(node, [
+			"actions_renderer",
+			"action",
+			"profile_owner",
+			"friendship_status",
+		]) ??
+		getPath(node, [
+			"actions_renderer",
+			"action",
+			"client_handler",
+			"profile_action",
+			"restrictable_profile_owner",
+			"friendship_status",
+		]);
+	return typeof status === "string" ? status : null;
 }
 
-export const matchFriendsConnection: ConnectionMatcher = (key, connection) => {
+/** A friend list item: a person whose stated status is `ARE_FRIENDS`. Suggestions (`CAN_REQUEST`) are not. */
+function isFriendItem(edge: unknown): boolean {
+	const node = edgeNode(edge);
+	return node !== null && friendshipStatus(node) === FRIEND_STATUS;
+}
+
+/** The friends section of a profile (`section_type`/`profile_tile_section_type` FRIENDS). */
+function insideFriendsSection(context: ConnectionContext): boolean {
+	return context.ancestors.some(
+		(ancestor) =>
+			ancestor.section_type === "FRIENDS" ||
+			ancestor.profile_tile_section_type === "FRIENDS",
+	);
+}
+
+/**
+ * The friends list: a `pageItems` collection whose every item is a confirmed
+ * friend. An empty one counts only inside the profile's FRIENDS section, so
+ * an empty unrelated collection is never taken for "no friends".
+ */
+export const matchFriendsConnection: ConnectionMatcher = (
+	key,
+	connection,
+	context,
+) => {
 	if (key !== "pageItems") return false;
 	const edges = asArray(connection.edges) ?? [];
-	return edges.length > 0 && edges.every(isFriendItem);
+	if (edges.length === 0) return insideFriendsSection(context);
+	return edges.every(isFriendItem);
 };
 
 const GROUP_URL_RE =
@@ -509,16 +566,46 @@ export const matchGroupsConnection: ConnectionMatcher = (_key, connection) => {
 	return edges.length > 0 && edges.every((edge) => isGroupNode(edgeNode(edge)));
 };
 
-/** The one connection a response carries for `match`, or null. The longest wins when several match. */
+const MEMBERSHIP_KEY_RE = /join|member/i;
+
+function connectionSignature(connection: FoundConnection): string {
+	return JSON.stringify([
+		connection.key,
+		connection.edges.map((edge) => edgeKey(edge)),
+	]);
+}
+
+/**
+ * The one connection a response carries for `match`, or null. Copies of the
+ * same list (a page can preload a payload twice) count once. Several
+ * different candidates are ambiguous: the one whose path names a membership
+ * (`joined`, `member`) is taken when exactly one does; otherwise the page
+ * cannot say which list is the person's, and this throws rather than guess.
+ */
 export function pickConnection(
 	root: unknown,
 	match: ConnectionMatcher,
 ): FoundConnection | null {
-	let best: FoundConnection | null = null;
-	for (const connection of findConnections(root, match)) {
-		if (!best || connection.edges.length > best.edges.length) best = connection;
-	}
-	return best;
+	return chooseConnection(findConnections(root, match));
+}
+
+function chooseConnection(
+	found: readonly FoundConnection[],
+): FoundConnection | null {
+	const distinct = new Map<string, FoundConnection>();
+	for (const connection of found)
+		distinct.set(connectionSignature(connection), connection);
+	const candidates = [...distinct.values()];
+	if (candidates.length <= 1) return candidates[0] ?? null;
+	const membership = candidates.filter((connection) =>
+		connection.keys.some((key) => MEMBERSHIP_KEY_RE.test(key)),
+	);
+	const [only] = membership;
+	if (membership.length === 1 && only) return only;
+	throw facebookError(
+		ERROR_CLASSES.shape,
+		`the page shows ${candidates.length} different lists that look like this one; refusing to guess`,
+	);
 }
 
 // ─── Server-rendered payloads ───────────────────────────────────────────
@@ -602,14 +689,16 @@ export function extractPreloadedPayloads(
 export function pickPreloadedConnection(
 	payloads: readonly MergedPayload[],
 	match: ConnectionMatcher,
-): FoundConnection | null {
-	let best: FoundConnection | null = null;
+): { connection: FoundConnection; payload: MergedPayload } | null {
+	const found: { connection: FoundConnection; payload: MergedPayload }[] = [];
 	for (const payload of payloads) {
-		const found = pickConnection(payload.data, match);
-		if (found && (!best || found.edges.length > best.edges.length))
-			best = found;
+		for (const connection of findConnections(payload.data, match))
+			found.push({ connection, payload });
 	}
-	return best;
+	const chosen = chooseConnection(found.map((entry) => entry.connection));
+	return chosen
+		? (found.find((entry) => entry.connection === chosen) ?? null)
+		: null;
 }
 
 // ─── Viewer and profile ─────────────────────────────────────────────────
@@ -1057,6 +1146,8 @@ export function parseFriendNode(
 			500,
 		);
 	if (!isNumericId(id) || name === null) return null;
+	// Only a confirmed friendship is a friend; a suggestion in the same list shape is not.
+	if (friendshipStatus(node) !== FRIEND_STATUS) return null;
 	return { id, name, profile_url: httpsUrl(node.url) ?? httpsUrl(inner?.url) };
 }
 
@@ -1248,12 +1339,98 @@ export interface OperationSpec {
 	}) => JsonRecord;
 	/** Exact friendly name, or a pattern for operations whose name is not known ahead. */
 	friendlyName: string | RegExp;
+	/** The id an item is emitted under; progress and duplicates are judged by it. */
+	itemKey: (edge: unknown) => string | null;
 	match: ConnectionMatcher;
+	/**
+	 * Field paths inside an item's `node` that the record is built from. A
+	 * GraphQL error that nulls one of them makes that item unreadable.
+	 */
+	readPaths: readonly (readonly string[])[];
+}
+
+/** Item key for lists whose node id is the record id (activity log, groups). */
+export const nodeIdKey = (edge: unknown): string | null => {
+	const id = edgeNode(edge)?.id;
+	return typeof id === "string" && id.length > 0 ? id : null;
+};
+
+/** Timeline units: the record id is the post id, not the feed-unit wrapper id. */
+export const postIdKey = (edge: unknown): string | null => {
+	const node = edgeNode(edge);
+	const id =
+		node?.post_id ??
+		getPath(node, ["comet_sections", "content", "story", "post_id"]);
+	return isNumericId(id) ? id : nodeIdKey(edge);
+};
+
+/** Friends: the record id is the person's id, inside the collection item. */
+export const friendIdKey = (edge: unknown): string | null => {
+	const node = edgeNode(edge);
+	const id =
+		asRecord(node?.node)?.id ??
+		getPath(node, ["actions_renderer", "action", "profile_owner", "id"]);
+	return isNumericId(id) ? id : nodeIdKey(edge);
+};
+
+function startsWithPath(
+	path: readonly (string | number)[],
+	prefix: readonly string[],
+): boolean {
+	return prefix.every((step, index) => path[index] === step);
+}
+
+/**
+ * How many items of this connection a GraphQL error made unreadable. An
+ * error points at the field it nulled: `…<key>.edges.<i>.node.<field…>`. The
+ * item counts when the error nulled the item itself or a field the record is
+ * built from (`readPaths`); errors on fields the connector never reads (the
+ * live activity log reports some on `privacy_scope`) do not.
+ */
+export function erroredItemCount(
+	errors: readonly GraphqlErrorInfo[],
+	connection: FoundConnection,
+	readPaths: readonly (readonly string[])[],
+): number {
+	const items = new Set<number>();
+	for (const error of errors) {
+		const at = error.segments.findIndex(
+			(step, index) =>
+				step === connection.key && error.segments[index + 1] === "edges",
+		);
+		if (at < 0) continue;
+		const index = Number(error.segments[at + 2]);
+		if (!Number.isInteger(index)) continue;
+		const inNode = error.segments[at + 3] === "node";
+		const field = error.segments.slice(at + 4);
+		if (
+			!inNode ||
+			field.length === 0 ||
+			readPaths.some((path) => startsWithPath(field, path))
+		)
+			items.add(index);
+	}
+	return items.size;
 }
 
 export const POSTS_OPERATION: OperationSpec = {
 	friendlyName: "ProfileCometTimelineFeedRefetchQuery",
 	match: matchTimelineConnection,
+	itemKey: postIdKey,
+	readPaths: [
+		["post_id"],
+		["creation_time"],
+		["permalink_url"],
+		["message"],
+		["actors"],
+		["attachments"],
+		["attached_story"],
+		["comet_sections", "content"],
+		["comet_sections", "message"],
+		["comet_sections", "timestamp"],
+		["comet_sections", "context_layout", "story", "comet_sections", "title"],
+		["comet_sections", "context_layout", "story", "comet_sections", "metadata"],
+	],
 	defaults: ({ viewerId }) => ({
 		afterTime: null,
 		beforeTime: null,
@@ -1281,6 +1458,8 @@ export const FRIENDS_OPERATION: OperationSpec = {
 	friendlyName:
 		"ProfileCometAppCollectionSelfFriendsListRendererPaginationQuery",
 	match: matchFriendsConnection,
+	itemKey: friendIdKey,
+	readPaths: [["node"], ["title"], ["url"], ["actions_renderer", "action"]],
 	defaults: ({ ownerId }) => ({
 		count: 8,
 		scale: 1,
@@ -1292,6 +1471,17 @@ export const FRIENDS_OPERATION: OperationSpec = {
 export const ACTIVITY_OPERATION: OperationSpec = {
 	friendlyName: "CometActivityLogStoriesListPaginationQuery",
 	match: matchActivityConnection,
+	itemKey: nodeIdKey,
+	readPaths: [
+		["id"],
+		["creation_time"],
+		["title"],
+		["summary"],
+		["url"],
+		["post_id"],
+		["message"],
+		["attached_story", "message"],
+	],
 	defaults: ({ viewerId }) => ({
 		audience: null,
 		category: null,
@@ -1314,6 +1504,16 @@ export const ACTIVITY_OPERATION: OperationSpec = {
 export const GROUPS_OPERATION: OperationSpec = {
 	friendlyName: /^Groups\w*Pagination\w*Query$/,
 	match: matchGroupsConnection,
+	itemKey: nodeIdKey,
+	readPaths: [
+		["id"],
+		["name"],
+		["title"],
+		["url"],
+		["viewer_join_time"],
+		["join_time"],
+		["viewer_membership"],
+	],
 	defaults: ({ ownerId }) => ({ count: 20, scale: 1, id: ownerId }),
 };
 
@@ -1360,35 +1560,44 @@ export function assertLandedOnContent(landedUrl: string): void {
 }
 
 /** Throws the right class for a non-data answer to a query. */
+const JSON_BODY_RE = /^(?:for \(;;\);)?\s*[{[]/;
+
+/**
+ * Throws the right class for a non-data answer to a query. A bot check comes
+ * first: a challenge header, or any body that is not JSON from this JSON
+ * endpoint (an HTML page, a plain-text notice), whatever the status. Only a
+ * JSON answer is then judged by its status.
+ */
 export function assertHttpOk(response: {
+	mitigated?: string | null;
 	status: number;
 	text: string;
 	url: string;
 }): void {
-	const html = response.text.trimStart().startsWith("<");
 	assertLandedOnContent(response.url);
 	if (response.status === 401)
 		throw facebookError(ERROR_CLASSES.auth, "Facebook answered 401");
+	if (response.mitigated)
+		throw facebookError(
+			ERROR_CLASSES.challenge,
+			`Facebook answered ${response.status} with a bot check`,
+		);
 	if (response.status === 429)
 		throw facebookError(ERROR_CLASSES.rateLimited, "Facebook answered 429");
+	const json = JSON_BODY_RE.test(response.text.trimStart());
+	if (!json && response.text.trim().length > 0)
+		throw facebookError(
+			ERROR_CLASSES.challenge,
+			`Facebook answered ${response.status} with a page instead of data`,
+		);
 	if (response.status >= 500)
 		throw facebookError(
 			ERROR_CLASSES.server,
 			`Facebook answered ${response.status}`,
 		);
-	if (response.status === 403 && html)
-		throw facebookError(
-			ERROR_CLASSES.challenge,
-			"Facebook answered 403 with a page",
-		);
 	if (response.status !== 200)
 		throw facebookError(
 			ERROR_CLASSES.http,
 			`Facebook answered ${response.status}`,
-		);
-	if (html)
-		throw facebookError(
-			ERROR_CLASSES.challenge,
-			"Facebook answered with a page instead of data",
 		);
 }

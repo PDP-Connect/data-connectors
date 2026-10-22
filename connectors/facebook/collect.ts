@@ -35,9 +35,9 @@ import {
 	buildProfileRecord,
 	buildVariables,
 	type CapturedOperation,
+	type ConnectionMatcher,
 	ERROR_CLASSES,
-	edgeCreationSeconds,
-	edgeKey,
+	erroredItemCount,
 	extractPreloadedPayloads,
 	extractProfileIntro,
 	extractViewer,
@@ -75,10 +75,6 @@ export const NAVIGATION_DELAY_MS: readonly [number, number] = [3000, 6000];
 /** Pause after each scroll that waits for the page to ask for the next part of a list. */
 export const SCROLL_WAIT_MS: readonly [number, number] = [2500, 4000];
 export const SCROLL_ATTEMPTS = 4;
-/** Consecutive empty pages tolerated while the source still says there is more. */
-const MAX_EMPTY_PAGES = 3;
-/** Activity and posts walks re-read this far behind the saved watermark. */
-const WATERMARK_OVERLAP_SECONDS = 2 * 24 * 60 * 60;
 
 export const MAX_PAGES: Readonly<Record<string, number>> = {
 	posts: 600,
@@ -109,6 +105,8 @@ export type PageGraphqlResult =
 	| {
 			contentType: string | null;
 			kind: "response";
+			/** The `cf-mitigated` header: set when a bot check answered instead of Facebook. */
+			mitigated: string | null;
 			status: number;
 			text: string;
 			url: string;
@@ -325,8 +323,6 @@ async function resolveOperation(
 
 // ─── The list walk ──────────────────────────────────────────────────────
 
-type EdgeVerdict = "continue" | "stop";
-
 interface WalkPlan {
 	maxPages: number;
 	/** Variables this stream always sets (for example the activity category). */
@@ -335,22 +331,26 @@ interface WalkPlan {
 	spec: OperationSpec;
 	stream: string;
 	viewerId: string;
-	/** Handle one page of edges. "stop" ends the walk early as complete (a watermark was reached). */
-	onEdges: (edges: unknown[]) => Promise<EdgeVerdict>;
+	/** Handle one page of edges. The walk itself decides when the list ended. */
+	onEdges: (edges: unknown[]) => Promise<void>;
 }
 
 interface WalkState {
 	cursor: string | null;
-	emptyPages: number;
 	ownerId: string | null;
 	seenCursors: Set<string>;
 	seenKeys: Set<string>;
 }
 
-function addKeys(state: WalkState, edges: readonly unknown[]): number {
+/** New item ids on this page, by the id the record is emitted under. */
+function addKeys(
+	spec: OperationSpec,
+	state: WalkState,
+	edges: readonly unknown[],
+): number {
 	let added = 0;
 	for (const edge of edges) {
-		const key = edgeKey(edge);
+		const key = spec.itemKey(edge);
 		if (key !== null && !state.seenKeys.has(key)) {
 			state.seenKeys.add(key);
 			added += 1;
@@ -359,14 +359,18 @@ function addKeys(state: WalkState, edges: readonly unknown[]): number {
 	return added;
 }
 
-/** Decide, from one page's `page_info`, whether the walk ended, goes on, or cannot be trusted. */
+/**
+ * Decide, from one page's `page_info`, whether the list ended or goes on.
+ * Only the source's own `has_next_page: false` ends it. A page that says
+ * more follows but repeats a cursor or brings no new item cannot be trusted.
+ */
 function nextCursor(
 	plan: WalkPlan,
 	state: WalkState,
 	connection: FoundConnection,
 	added: number,
 	restartedFromTop: boolean,
-): string | null | "end" {
+): string | "end" {
 	const info = connection.pageInfo;
 	if (!info || info.hasNextPage === null) {
 		throw facebookError(
@@ -382,43 +386,62 @@ function nextCursor(
 		);
 	}
 	// A walk that had to restart from the top re-reads the preloaded first page once; that is expected.
-	if (connection.edges.length > 0 && added === 0 && !restartedFromTop) {
+	const rereadFirstPage = restartedFromTop && connection.edges.length > 0;
+	if (added === 0 && !rereadFirstPage) {
 		throw facebookError(
 			ERROR_CLASSES.incomplete,
-			`${plan.stream}: a page added nothing new`,
-		);
-	}
-	state.emptyPages = connection.edges.length === 0 ? state.emptyPages + 1 : 0;
-	if (state.emptyPages > MAX_EMPTY_PAGES) {
-		throw facebookError(
-			ERROR_CLASSES.incomplete,
-			`${plan.stream}: the list kept returning empty pages`,
+			`${plan.stream}: a page said more follows but added nothing new`,
 		);
 	}
 	state.seenCursors.add(info.endCursor);
 	return info.endCursor;
 }
 
-function noteFieldErrors(stream: string, payload: MergedPayload): void {
-	if (payload.errors.length > 0) {
-		connectorDiagnostic(SOURCE, "graphql_field_errors", {
-			stream,
-			count: payload.errors.length,
-		});
+/** Fails the walk when Facebook reported errors on fields the records are built from. */
+function assertItemsReadable(
+	plan: WalkPlan,
+	payload: MergedPayload,
+	connection: FoundConnection,
+): void {
+	if (payload.errors.length === 0) return;
+	const errored = erroredItemCount(
+		payload.errors,
+		connection,
+		plan.spec.readPaths,
+	);
+	if (errored > 0) {
+		throw facebookError(
+			ERROR_CLASSES.incomplete,
+			`${plan.stream}: Facebook reported errors on ${errored} item(s) of a page`,
+		);
 	}
+	connectorDiagnostic(SOURCE, "graphql_field_errors", {
+		stream: plan.stream,
+		count: payload.errors.length,
+	});
+}
+
+/** Later pages are the same list: same key, under the same owner, or matching the list's own rule. */
+function samePagesMatcher(
+	plan: WalkPlan,
+	first: FoundConnection | null,
+): ConnectionMatcher {
+	if (first === null) return plan.spec.match;
+	return (key, connection, context) =>
+		key === first.key &&
+		((first.ownerId !== null &&
+			context.ancestors.at(-1)?.id === first.ownerId) ||
+			plan.spec.match(key, connection, context));
 }
 
 async function walkQueryPages(
 	services: FacebookServices,
 	plan: WalkPlan,
 	state: WalkState,
-	responseKey: string | null,
+	first: FoundConnection | null,
 ): Promise<void> {
 	const operation = await resolveOperation(services, plan.spec, plan.stream);
-	const match =
-		responseKey === null
-			? plan.spec.match
-			: (key: string) => key === responseKey;
+	const match = samePagesMatcher(plan, first);
 	for (let page = 0; ; page += 1) {
 		if (page >= plan.maxPages) {
 			throw facebookError(
@@ -441,39 +464,40 @@ async function walkQueryPages(
 		const connection = pickConnection(payload.data, match);
 		if (!connection)
 			throw missingConnectionError(payload, operation.friendlyName);
-		noteFieldErrors(plan.stream, payload);
+		assertItemsReadable(plan, payload, connection);
 		const restartedFromTop =
 			page === 0 && state.cursor === null && state.seenKeys.size > 0;
-		const added = addKeys(state, connection.edges);
-		if ((await plan.onEdges(connection.edges)) === "stop") return;
+		const added = addKeys(plan.spec, state, connection.edges);
+		await plan.onEdges(connection.edges);
 		const next = nextCursor(plan, state, connection, added, restartedFromTop);
 		if (next === "end") return;
 		state.cursor = next;
 	}
 }
 
-/** Walk one list to its end. Throws when the end was not proven. */
+/** Walk one list to the source's end signal. Throws when that end was not proven. */
 export async function walkList(
 	services: FacebookServices,
 	plan: WalkPlan,
 ): Promise<void> {
 	const payloads = extractPreloadedPayloads(plan.snapshot.scripts);
-	const first = pickPreloadedConnection(payloads, plan.spec.match);
+	const preloaded = pickPreloadedConnection(payloads, plan.spec.match);
+	const first = preloaded?.connection ?? null;
 	const state: WalkState = {
 		cursor: null,
-		emptyPages: 0,
 		ownerId: first?.ownerId ?? null,
 		seenCursors: new Set(),
 		seenKeys: new Set(),
 	};
-	if (first) {
-		addKeys(state, first.edges);
-		if ((await plan.onEdges(first.edges)) === "stop") return;
+	if (preloaded && first) {
+		assertItemsReadable(plan, preloaded.payload, first);
+		addKeys(plan.spec, state, first.edges);
+		await plan.onEdges(first.edges);
 		if (first.pageInfo?.hasNextPage === false) return;
 		state.cursor = first.pageInfo?.endCursor ?? null;
 		if (state.cursor) state.seenCursors.add(state.cursor);
 	}
-	await walkQueryPages(services, plan, state, first?.key ?? null);
+	await walkQueryPages(services, plan, state, first);
 }
 
 // ─── Streams ────────────────────────────────────────────────────────────
@@ -486,53 +510,20 @@ interface StreamRun {
 }
 
 function reportText(stream: string, counter: TextCounter): void {
-	if (counter.replaced > 0 || counter.truncated > 0) {
-		connectorDiagnostic(SOURCE, "text_replaced", {
+	if (counter.truncated > 0) {
+		connectorDiagnostic(SOURCE, "text_truncated", {
 			stream,
-			replaced: counter.replaced,
 			truncated: counter.truncated,
 		});
 	}
-}
-
-function priorWatermark(
-	ctx: CollectorContext,
-	stream: string,
-	field: string,
-): number | null {
-	if (ctx.collectionMode === "full_refresh") return null;
-	const cursor = ctx.state[stream];
-	const value =
-		typeof cursor === "object" && cursor !== null
-			? (cursor as Record<string, unknown>)[field]
-			: undefined;
-	if (typeof value !== "string") return null;
-	const ms = Date.parse(value);
-	return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
-}
-
-/** True when every dated edge on this page is older than the saved watermark (minus overlap). */
-function pageIsBehindWatermark(
-	edges: readonly unknown[],
-	watermark: number | null,
-): boolean {
-	if (watermark === null) return false;
-	const times = edges
-		.map(edgeCreationSeconds)
-		.filter((time): time is number => time !== null);
-	return (
-		times.length > 0 &&
-		times.every((time) => time < watermark - WATERMARK_OVERLAP_SECONDS)
-	);
 }
 
 function laterIso(current: string | null, candidate: string): string {
 	return current === null || candidate > current ? candidate : current;
 }
 
-/** True the first time an edge is met in this walk; a re-read page is not handled twice. */
-function firstSeen(handled: Set<string>, edge: unknown): boolean {
-	const key = edgeKey(edge);
+/** True the first time an item id is met in this walk; a re-read page or a repeated item is handled once. */
+function firstSeen(handled: Set<string>, key: string | null): boolean {
 	if (key === null) return true;
 	if (handled.has(key)) return false;
 	handled.add(key);
@@ -545,6 +536,14 @@ async function collectProfile(run: StreamRun): Promise<void> {
 		extractPreloadedPayloads(run.snapshot.scripts),
 		counter,
 	);
+	if (intro === null) {
+		// The intro (bio, "lives in", "works at") was not in the page, so it was
+		// not read; emitting nulls would say the person filled in nothing.
+		throw facebookError(
+			ERROR_CLASSES.shape,
+			"profile: the page did not include the intro card, so the bio and intro could not be read",
+		);
+	}
 	const record = buildProfileRecord(
 		run.viewer,
 		run.snapshot.landedUrl,
@@ -555,9 +554,13 @@ async function collectProfile(run: StreamRun): Promise<void> {
 	reportText("profile", counter);
 }
 
+/**
+ * Posts are mutable (text, audience), and an edit does not change a post's
+ * creation time, so every run walks the whole timeline to its end. STATE
+ * records only what this run saw; it never shortens the next walk.
+ */
 async function collectPosts(run: StreamRun): Promise<void> {
 	const counter = newTextCounter();
-	const watermark = priorWatermark(run.ctx, "posts", "newest_create_time");
 	let newest: string | null = null;
 	let unreadable = 0;
 	const handled = new Set<string>();
@@ -570,17 +573,16 @@ async function collectPosts(run: StreamRun): Promise<void> {
 		maxPages: MAX_PAGES.posts ?? 600,
 		onEdges: async (edges) => {
 			for (const edge of edges) {
-				if (!firstSeen(handled, edge)) continue;
 				const node = nodeOf(edge);
 				const parsed = node
 					? parsePostNode(node, run.viewer.id, counter)
 					: { kind: "unreadable" as const };
 				if (parsed.kind === "unreadable") unreadable += 1;
 				if (parsed.kind !== "post") continue;
+				if (!firstSeen(handled, parsed.record.id)) continue;
 				await run.ctx.emitRecord("posts", { ...parsed.record });
 				newest = laterIso(newest, parsed.record.create_time);
 			}
-			return pageIsBehindWatermark(edges, watermark) ? "stop" : "continue";
 		},
 	});
 	reportText("posts", counter);
@@ -589,21 +591,10 @@ async function collectPosts(run: StreamRun): Promise<void> {
 			ERROR_CLASSES.shape,
 			`posts: ${unreadable} timeline item(s) could not be read`,
 		);
-	const prior = run.ctx.state.posts as
-		| { newest_create_time?: unknown }
-		| undefined;
-	const priorNewest =
-		typeof prior?.newest_create_time === "string"
-			? prior.newest_create_time
-			: null;
-	const watermarkOut = newest ?? priorNewest;
 	await run.ctx.emit({
 		type: "STATE",
 		stream: "posts",
-		cursor:
-			watermarkOut === null
-				? {}
-				: { newest_create_time: laterIso(priorNewest, watermarkOut) },
+		cursor: newest === null ? {} : { newest_create_time: newest },
 	});
 }
 
@@ -615,7 +606,6 @@ async function collectInventory(
 ): Promise<void> {
 	const counter = newTextCounter();
 	const seen = new Set<string>();
-	const handled = new Set<string>();
 	let unreadable = 0;
 	await walkList(run.services, {
 		stream,
@@ -626,18 +616,15 @@ async function collectInventory(
 		maxPages: MAX_PAGES[stream] ?? 200,
 		onEdges: async (edges) => {
 			for (const edge of edges) {
-				if (!firstSeen(handled, edge)) continue;
 				const node = nodeOf(edge);
 				const record = node ? parse(node, counter) : null;
 				if (!record) {
 					unreadable += 1;
 					continue;
 				}
-				if (seen.has(record.id)) continue;
-				seen.add(record.id);
+				if (!firstSeen(seen, record.id)) continue;
 				await run.ctx.emitRecord(stream, { ...record });
 			}
-			return "continue";
 		},
 	});
 	reportText(stream, counter);
@@ -650,15 +637,17 @@ async function collectInventory(
 	await run.ctx.emit({ type: "STATE", stream, cursor: {} });
 }
 
+/**
+ * The activity log is walked to its end every run: a saved time is never
+ * taken as proof that older entries were read.
+ */
 async function collectActivity(
 	run: StreamRun,
 	stream: "comments" | "reactions",
 	kind: ActivityKind,
 ): Promise<void> {
 	const counter = newTextCounter();
-	const watermark = priorWatermark(run.ctx, stream, "newest_time");
 	const seen = new Set<string>();
-	const handled = new Set<string>();
 	let newest: string | null = null;
 	let unreadable = 0;
 	await walkList(run.services, {
@@ -670,19 +659,16 @@ async function collectActivity(
 		maxPages: MAX_PAGES[stream] ?? 400,
 		onEdges: async (edges) => {
 			for (const edge of edges) {
-				if (!firstSeen(handled, edge)) continue;
 				const node = nodeOf(edge);
 				const record = node ? parseActivityNode(node, kind, counter) : null;
 				if (!record) {
 					unreadable += 1;
 					continue;
 				}
+				if (!firstSeen(seen, record.id)) continue;
 				newest = laterIso(newest, record.time);
-				if (seen.has(record.id)) continue;
-				seen.add(record.id);
 				await run.ctx.emitRecord(stream, { ...record });
 			}
-			return pageIsBehindWatermark(edges, watermark) ? "stop" : "continue";
 		},
 	});
 	reportText(stream, counter);
@@ -691,14 +677,10 @@ async function collectActivity(
 			ERROR_CLASSES.shape,
 			`${stream}: ${unreadable} entry(ies) could not be read`,
 		);
-	const prior = run.ctx.state[stream] as { newest_time?: unknown } | undefined;
-	const priorNewest =
-		typeof prior?.newest_time === "string" ? prior.newest_time : null;
-	const out = newest === null ? priorNewest : laterIso(priorNewest, newest);
 	await run.ctx.emit({
 		type: "STATE",
 		stream,
-		cursor: out === null ? {} : { newest_time: out },
+		cursor: newest === null ? {} : { newest_time: newest },
 	});
 }
 

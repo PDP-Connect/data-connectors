@@ -214,6 +214,7 @@ async function graphqlInPage(call: {
 	| {
 			contentType: string | null;
 			kind: "response";
+			mitigated: string | null;
 			status: number;
 			text: string;
 			url: string;
@@ -296,6 +297,7 @@ async function graphqlInPage(call: {
 		status: response.status,
 		url: response.url,
 		contentType: response.headers.get("content-type"),
+		mitigated: response.headers.get("cf-mitigated"),
 		text: await response.text(),
 	};
 }

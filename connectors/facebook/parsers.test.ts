@@ -633,6 +633,48 @@ describe("guards", () => {
 		);
 	});
 
+	it("classifies bot checks before server errors, from the header or a non-JSON body (finding 10)", () => {
+		const base = {
+			status: 200,
+			text: "{}",
+			url: "https://www.facebook.com/api/graphql/",
+		};
+		assert.throws(
+			() =>
+				assertHttpOk({
+					...base,
+					status: 503,
+					text: "<!DOCTYPE html><title>Security check</title>",
+				}),
+			/^Error: facebook_challenge/,
+		);
+		assert.throws(
+			() => assertHttpOk({ ...base, status: 403, text: "<html></html>" }),
+			/^Error: facebook_challenge/,
+		);
+		assert.throws(
+			() => assertHttpOk({ ...base, text: "Please verify you are a human" }),
+			/^Error: facebook_challenge/,
+		);
+		assert.throws(
+			() =>
+				assertHttpOk({
+					...base,
+					status: 503,
+					text: "{}",
+					mitigated: "challenge",
+				}),
+			/^Error: facebook_challenge/,
+		);
+		assert.throws(
+			() => assertHttpOk({ ...base, status: 500, text: "{}" }),
+			/^Error: facebook_http_5xx/,
+		);
+		assert.doesNotThrow(() =>
+			assertHttpOk({ ...base, text: 'for (;;);{"data":{}}' }),
+		);
+	});
+
 	it("classifies legacy error envelopes", () => {
 		const signedOut = parseGraphqlText(
 			'for (;;);{"__ar":1,"error":1357001,"errorSummary":"Not logged in"}',
