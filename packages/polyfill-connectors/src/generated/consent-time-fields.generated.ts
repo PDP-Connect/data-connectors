@@ -114,6 +114,14 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		order_items: null,
 		orders: { field: "order_date", format: "date-time" },
 	},
+	facebook: {
+		comments: { field: "time", format: "date-time" },
+		friends: null,
+		groups: null,
+		posts: { field: "create_time", format: "date-time" },
+		profile: null,
+		reactions: { field: "time", format: "date-time" },
+	},
 	fitbit: {
 		activities: { field: "start_time", format: "date-time" },
 		daily_summaries: { field: "date", format: "date" },

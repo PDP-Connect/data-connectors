@@ -1,0 +1,447 @@
+#!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * PDPP Facebook browser connector (v0.1.0).
+ *
+ * Reads the signed-in person's own Facebook profile, posts, friends, joined
+ * groups, and the likes/reactions and comments in their activity log, from
+ * the facebook.com web app in the person's own signed-in tab. Messenger is
+ * not read: it is end-to-end encrypted on the web and needs the person's PIN.
+ *
+ * How it collects. Facebook's web app is Relay over GraphQL. The connector
+ * opens the page the web app shows each list on, takes the first page of the
+ * list from the page's server-rendered payloads, and pages the rest with the
+ * list's own persisted query, sent from the page with `fetch` (same origin,
+ * the page's cookies). It never hard-codes a query id (`doc_id`): Facebook
+ * versions them. It reads the id from the page's own request for that list
+ * (watching the page's requests, scrolling as a person would if the page has
+ * not asked yet) or from the page's loaded query modules. When neither shows
+ * the query, the stream fails as `facebook_query_outdated` rather than
+ * returning an empty list.
+ *
+ * Secrets. The CSRF token (`fb_dtsg`), `lsd` and the viewer id are read inside
+ * the page for each query and never leave it; captured requests keep only the
+ * query id and variables; server-rendered scripts have their tokens blanked
+ * before they are read. None of it is logged or written to STATE.
+ *
+ * Read-only. Every query passes `assertReadOnlyOperation`, which refuses any
+ * operation that is not a plain `...Query` or that names a mutation.
+ *
+ * Pacing. One query at a time, a 2-4.5 s random pause before each, 3-6 s
+ * before each page opened; a rate-limit answer ends the run at once.
+ *
+ * Terms of service and legal basis. Meta's terms restrict automated access.
+ * This connector reads only the account owner's own data, in the owner's own
+ * session, at the owner's request, under their rights of access and
+ * portability (GDPR Articles 15 and 20, CCPA/CPRA 1798.100 and 1798.130).
+ * Facebook's own "Download your information" export serves the same right.
+ *
+ * Streams: profile, posts, friends, groups, reactions, comments.
+ *
+ * Tested surfaces (as of 2026-10-22): response shapes from one English-language
+ * account (synthetic fixtures with real structure). Not yet run end to end.
+ * Known unverified: the joined-groups pagination query name, the comments
+ * activity-log category key (COMMENTSCLUSTER), the intro-card shape, and the
+ * fallback variable defaults used when the page's own request is not seen.
+ *
+ * CHANGES
+ *   v0.1.0 (2026-10-22): first version.
+ */
+
+import { isMainModule } from "@pdpp/connector-protocol";
+import type { Page, Request } from "playwright";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import {
+	type BrowserCollectContext,
+	type EnsureSessionArgs,
+	type ProbeSessionArgs,
+	runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	type CollectorContext,
+	collectFacebook,
+	type FacebookServices,
+	type GraphqlCall,
+	type ModuleOperation,
+	type PageGraphqlResult,
+	type PageSnapshot,
+} from "./collect.ts";
+import {
+	asRecord,
+	assertLandedOnContent,
+	type CapturedOperation,
+	FB_ORIGIN,
+	GRAPHQL_PATH,
+	isNumericId,
+	operationMatches,
+	parseCapturedGraphqlRequest,
+	RETRYABLE_PATTERN,
+} from "./parsers.ts";
+import { validateRecord } from "./schemas.ts";
+
+const LOGIN_URL = `${FB_ORIGIN}/login/`;
+const NAVIGATION_ATTEMPTS = 3;
+const READY_TIMEOUT_MS = 15_000;
+const SESSION_COOKIES = ["c_user", "xs"];
+
+/** JSON keys whose string values are blanked out of server-rendered scripts before they leave the page. */
+const SECRET_KEYS = ["token", "async_get_token"];
+/** Markers of the scripts worth reading: Relay payloads and the signed-in person. */
+const SCRIPT_MARKERS = ["RelayPrefetchedStreamCache", "CurrentUserInitialData"];
+
+// ─── Page-side functions (serialized into the page; self-contained) ──────
+
+function readScriptsInPage(args: {
+	markers: string[];
+	secretKeys: string[];
+}): string[] {
+	const out: string[] = [];
+	for (const node of Array.from(
+		document.querySelectorAll('script[type="application/json"]'),
+	)) {
+		let text = node.textContent ?? "";
+		if (!args.markers.some((marker) => text.includes(marker))) continue;
+		for (const key of args.secretKeys)
+			text = text.replace(new RegExp(`"${key}":"[^"]*"`, "g"), `"${key}":""`);
+		out.push(text);
+	}
+	return out;
+}
+
+function viewerIdInPage(): string | null {
+	const req = Reflect.get(globalThis, "require") as
+		| ((name: string) => unknown)
+		| undefined;
+	try {
+		const data =
+			typeof req === "function"
+				? (req("CurrentUserInitialData") as { USER_ID?: unknown })
+				: null;
+		return typeof data?.USER_ID === "string" ? data.USER_ID : null;
+	} catch {
+		return null;
+	}
+}
+
+function resolveModuleInPage(name: string): {
+	docId: string | null;
+	provided: Record<string, unknown>;
+} {
+	const req = Reflect.get(globalThis, "require") as
+		| ((module: string) => unknown)
+		| undefined;
+	const out: { docId: string | null; provided: Record<string, unknown> } = {
+		docId: null,
+		provided: {},
+	};
+	if (typeof req !== "function") return out;
+	try {
+		const request = req(`${name}.graphql`) as {
+			params?: {
+				id?: unknown;
+				providedVariables?: Record<string, { get?: () => unknown }>;
+			};
+		} | null;
+		if (typeof request?.params?.id === "string") out.docId = request.params.id;
+		for (const [key, provider] of Object.entries(
+			request?.params?.providedVariables ?? {},
+		)) {
+			try {
+				if (typeof provider.get === "function")
+					out.provided[key] = provider.get();
+			} catch {
+				// A provider that throws is left out; the query may still accept the rest.
+			}
+		}
+	} catch {
+		// The query module is not loaded on this page.
+	}
+	if (out.docId === null) {
+		try {
+			const id = req(`${name}_facebookRelayOperation`);
+			if (typeof id === "string") out.docId = id;
+		} catch {
+			// Not loaded either: the caller fails the stream as an outdated query.
+		}
+	}
+	return out;
+}
+
+async function graphqlInPage(call: {
+	asbdId: string | null;
+	docId: string;
+	friendlyName: string;
+	path: string;
+	variables: string;
+}): Promise<
+	| { kind: "signed_out" }
+	| {
+			contentType: string | null;
+			kind: "response";
+			status: number;
+			text: string;
+			url: string;
+	  }
+> {
+	// No named helper functions in here: this body is serialized into the page,
+	// and a named inner function would carry a Node-only `__name` wrapper.
+	const req = Reflect.get(globalThis, "require") as
+		| ((name: string) => unknown)
+		| undefined;
+	const lookups: [string, string, string][] = [
+		["DTSGInitialData", "token", '"DTSGInitialData",[],{"token":"'],
+		["LSD", "token", '"LSD",[],{"token":"'],
+		["CurrentUserInitialData", "USER_ID", '"USER_ID":"'],
+	];
+	const found: (string | null)[] = [];
+	let html: string | null = null;
+	for (const [moduleName, key, marker] of lookups) {
+		let value: string | null = null;
+		try {
+			const module =
+				typeof req === "function"
+					? (req(moduleName) as Record<string, unknown> | null)
+					: null;
+			const raw = module?.[key];
+			value = typeof raw === "string" && raw.length > 0 ? raw : null;
+		} catch {
+			value = null;
+		}
+		if (value === null && moduleName === "DTSGInitialData") {
+			value =
+				(
+					document.querySelector(
+						'input[name="fb_dtsg"]',
+					) as HTMLInputElement | null
+				)?.value || null;
+		}
+		if (value === null) {
+			html ??= document.documentElement.innerHTML;
+			const at = html.indexOf(marker);
+			const end = at < 0 ? -1 : html.indexOf('"', at + marker.length);
+			value =
+				end > at + marker.length ? html.slice(at + marker.length, end) : null;
+		}
+		found.push(value);
+	}
+	const [dtsg, lsd, user] = found;
+	if (!dtsg || !user || user === "0") return { kind: "signed_out" };
+	let sum = 0;
+	for (const char of dtsg) sum += char.charCodeAt(0);
+	const body = new URLSearchParams({
+		av: user,
+		__user: user,
+		__a: "1",
+		__comet_req: "15",
+		fb_dtsg: dtsg,
+		jazoest: `2${sum}`,
+		lsd: lsd ?? "",
+		fb_api_caller_class: "RelayModern",
+		fb_api_req_friendly_name: call.friendlyName,
+		variables: call.variables,
+		server_timestamps: "true",
+		doc_id: call.docId,
+	});
+	const headers: Record<string, string> = {
+		"content-type": "application/x-www-form-urlencoded",
+		"x-fb-friendly-name": call.friendlyName,
+	};
+	if (lsd) headers["x-fb-lsd"] = lsd;
+	if (call.asbdId) headers["x-asbd-id"] = call.asbdId;
+	const response = await fetch(call.path, {
+		method: "POST",
+		credentials: "include",
+		headers,
+		body,
+	});
+	return {
+		kind: "response",
+		status: response.status,
+		url: response.url,
+		contentType: response.headers.get("content-type"),
+		text: await response.text(),
+	};
+}
+
+function scrollInPage(): void {
+	window.scrollBy(0, Math.round(window.innerHeight * 2.5));
+}
+
+/** The functions Playwright serializes into the page; exported so a test can check they stay self-contained. */
+export const PAGE_FUNCTIONS = {
+	graphqlInPage,
+	readScriptsInPage,
+	resolveModuleInPage,
+	scrollInPage,
+	viewerIdInPage,
+};
+
+// ─── Page services ──────────────────────────────────────────────────────
+
+async function gotoWithRetry(page: Page, url: string): Promise<void> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < NAVIGATION_ATTEMPTS; attempt += 1) {
+		try {
+			await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+			await page
+				.waitForFunction(() => document.readyState === "complete", undefined, {
+					timeout: READY_TIMEOUT_MS,
+				})
+				.catch(() => undefined);
+			return;
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError instanceof Error
+		? lastError
+		: new Error("facebook_navigation_failed");
+}
+
+/** The request body passed to the page. Only the query id and variables; the page adds its own tokens. */
+export function graphqlPageCall(
+	call: GraphqlCall,
+): GraphqlCall & { path: string } {
+	return { ...call, path: GRAPHQL_PATH };
+}
+
+function asProvided(value: unknown): Record<string, unknown> {
+	return asRecord(value) ?? {};
+}
+
+export function createPageServices(
+	page: Page,
+): FacebookServices & { dispose: () => void } {
+	let captured: CapturedOperation[] = [];
+	const onRequest = (request: Request): void => {
+		try {
+			const operation = parseCapturedGraphqlRequest({
+				url: request.url(),
+				method: request.method(),
+				postData: request.postData(),
+				headers: request.headers(),
+			});
+			if (operation) captured.push(operation);
+		} catch {
+			// A request that cannot be read is simply not a template.
+		}
+	};
+	page.on("request", onRequest);
+	return {
+		dispose: () => {
+			page.off("request", onRequest);
+			captured = [];
+		},
+		open: async (url: string): Promise<PageSnapshot> => {
+			captured = [];
+			await gotoWithRetry(page, url);
+			const landedUrl = page.url();
+			assertLandedOnContent(landedUrl);
+			const scripts = await page.evaluate(readScriptsInPage, {
+				markers: SCRIPT_MARKERS,
+				secretKeys: SECRET_KEYS,
+			});
+			return { landedUrl, scripts };
+		},
+		scroll: async () => {
+			await page.evaluate(scrollInPage);
+		},
+		takeCaptured: (spec) =>
+			captured.findLast((operation) =>
+				operationMatches(spec, operation.friendlyName),
+			) ?? null,
+		resolveModule: async (friendlyName: string): Promise<ModuleOperation> => {
+			const result = await page.evaluate(resolveModuleInPage, friendlyName);
+			return { docId: result.docId, provided: asProvided(result.provided) };
+		},
+		graphql: async (call: GraphqlCall): Promise<PageGraphqlResult> =>
+			page.evaluate(graphqlInPage, graphqlPageCall(call)),
+		sleep: (ms: number) =>
+			new Promise<void>((resolve) => setTimeout(resolve, ms)),
+		random: () => Math.random(),
+	};
+}
+
+// ─── Session ────────────────────────────────────────────────────────────
+
+async function hasSessionCookies(
+	context: ProbeSessionArgs["context"],
+): Promise<boolean> {
+	const cookies = await context.cookies(`${FB_ORIGIN}/`);
+	return SESSION_COOKIES.every((name) =>
+		cookies.some((cookie) => cookie.name === name && cookie.value.length > 0),
+	);
+}
+
+export async function probeFacebookSession({
+	context,
+	page,
+}: ProbeSessionArgs): Promise<boolean> {
+	if (!(await hasSessionCookies(context))) return false;
+	try {
+		if (!page.url().startsWith(FB_ORIGIN))
+			await gotoWithRetry(page, `${FB_ORIGIN}/`);
+		assertLandedOnContent(page.url());
+		const viewerId = await page.evaluate(viewerIdInPage);
+		return isNumericId(viewerId) && viewerId !== "0";
+	} catch {
+		return false;
+	}
+}
+
+async function ensureFacebookSession(args: EnsureSessionArgs): Promise<void> {
+	const {
+		assist,
+		capture,
+		completeAssistance,
+		context,
+		page,
+		sendInteraction,
+	} = args;
+	if (await probeFacebookSession({ context, page })) return;
+	await gotoWithRetry(page, LOGIN_URL);
+	const live = await manualBrowserLogin({
+		assist,
+		capture,
+		completeAssistance,
+		isProbeSuccessful: (result) => result === true,
+		message:
+			"Sign in to Facebook in the secure browser, then continue. Collection starts once you are signed in.",
+		page,
+		probe: () => probeFacebookSession({ context, page }),
+		readinessProbe: () => probeFacebookSession({ context, page }),
+		readinessProbeOnHandoffPage: true,
+		reason: "login",
+		sendInteraction,
+		timeoutSeconds: 30 * 60,
+	});
+	if (!live)
+		throw new Error("facebook_auth_failed: the sign-in was not completed");
+}
+
+// ─── Collect ────────────────────────────────────────────────────────────
+
+export async function collect(ctx: BrowserCollectContext): Promise<void> {
+	const services = createPageServices(ctx.page);
+	const collector: CollectorContext = ctx;
+	try {
+		await collectFacebook(collector, services);
+	} finally {
+		services.dispose();
+	}
+}
+
+if (isMainModule(import.meta.url)) {
+	runConnector({
+		name: "facebook",
+		validateRecord,
+		retryablePattern: RETRYABLE_PATTERN,
+		browser: { profileName: "facebook" },
+		ensureSession: ensureFacebookSession,
+		probeSession: probeFacebookSession,
+		probeSessionIsAuthoritative: true,
+		collect,
+	});
+}
