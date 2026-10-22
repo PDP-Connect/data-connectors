@@ -793,22 +793,43 @@ function storyAttachments(node: JsonRecord): unknown[] {
 		: (asArray(node.attachments) ?? []);
 }
 
+/**
+ * Keys a post's own text can sit under. Comet nests it differently by layout:
+ * `story.message`, `comet_sections.message.story.message`,
+ * `comet_sections.content.story.message`,
+ * `content.story.comet_sections.message.story.message`, and
+ * `...comet_sections.message_container.story.message`. Nothing else is
+ * followed, so a shared post's text (`attached_story`), comments
+ * (`feedback`) and attachment titles are never taken for the post's own text.
+ */
+const POST_TEXT_KEYS = [
+	"comet_sections",
+	"content",
+	"story",
+	"message",
+	"message_container",
+];
+const POST_TEXT_MAX_DEPTH = 10;
+
 function postText(node: JsonRecord): string | null {
-	return (
-		textOf(getPath(node, ["comet_sections", "content", "story", "message"])) ??
-		textOf(
-			getPath(node, [
-				"comet_sections",
-				"content",
-				"story",
-				"comet_sections",
-				"message",
-				"story",
-				"message",
-			]),
-		) ??
-		textOf(node.message)
-	);
+	let level: JsonRecord[] = [node];
+	for (
+		let depth = 0;
+		depth < POST_TEXT_MAX_DEPTH && level.length > 0;
+		depth += 1
+	) {
+		const next: JsonRecord[] = [];
+		for (const record of level) {
+			const text = textOf(record.message);
+			if (text !== null) return text;
+			for (const key of POST_TEXT_KEYS) {
+				const child = asRecord(record[key]);
+				if (child) next.push(child);
+			}
+		}
+		level = next;
+	}
+	return null;
 }
 
 function postMetadataStory(node: JsonRecord): JsonRecord | null {

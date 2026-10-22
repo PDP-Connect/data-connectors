@@ -137,6 +137,99 @@ describe("posts", () => {
 		);
 	});
 
+	it("finds the post text in every Comet layout the timeline uses", () => {
+		const layouts: [string, (node: JsonRecord) => void][] = [
+			[
+				"content.story.comet_sections.message_container",
+				(node) => {
+					const sections = (
+						((node.comet_sections as JsonRecord).content as JsonRecord)
+							.story as JsonRecord
+					).comet_sections as JsonRecord;
+					sections.message_container = {
+						story: { message: { text: "Lake day" } },
+					};
+				},
+			],
+			[
+				"content.story.comet_sections.message",
+				(node) => {
+					const sections = (
+						((node.comet_sections as JsonRecord).content as JsonRecord)
+							.story as JsonRecord
+					).comet_sections as JsonRecord;
+					sections.message = { story: { message: { text: "Lake day" } } };
+				},
+			],
+			[
+				"comet_sections.message",
+				(node) => {
+					(node.comet_sections as JsonRecord).message = {
+						story: { message: { text: "Lake day" } },
+					};
+				},
+			],
+			[
+				"story.message",
+				(node) => {
+					node.message = { text: "Lake day" };
+				},
+			],
+		];
+		for (const [layout, place] of layouts) {
+			const node = firstEdgeNode(
+				loadFixture(TIMELINE),
+				matchTimelineConnection,
+			);
+			place(node);
+			const parsed = parsePostNode(node, TIMELINE_VIEWER, newTextCounter());
+			assert.equal(
+				parsed.kind === "post" ? parsed.record.text : "unread",
+				"Lake day",
+				layout,
+			);
+		}
+	});
+
+	it("takes text delivered by a deferred part into message_container", () => {
+		const first = loadFixture(TIMELINE);
+		const text = [
+			JSON.stringify(first),
+			JSON.stringify({
+				label: "CometFeedStoryDefaultMessageRenderingStrategy_message$defer",
+				path: [
+					"node",
+					"timeline_list_feed_units",
+					"edges",
+					0,
+					"node",
+					"comet_sections",
+					"content",
+					"story",
+					"comet_sections",
+					"message_container",
+				],
+				data: { story: { message: { text: "Deferred words" } } },
+			}),
+		].join("\n");
+		const node = firstEdgeNode(
+			{ data: parseGraphqlText(text).data },
+			matchTimelineConnection,
+		);
+		const parsed = parsePostNode(node, TIMELINE_VIEWER, newTextCounter());
+		assert.equal(
+			parsed.kind === "post" ? parsed.record.text : "unread",
+			"Deferred words",
+		);
+	});
+
+	it("keeps text null for a post without its own words, never borrowing a share's or a comment's", () => {
+		const node = firstEdgeNode(loadFixture(TIMELINE), matchTimelineConnection);
+		node.attached_story = { message: { text: "someone else's post" } };
+		const parsed = parsePostNode(node, TIMELINE_VIEWER, newTextCounter());
+		assert.equal(parsed.kind === "post" ? parsed.record.text : "unread", null);
+	});
+
 	it("calls a unit without a post id unreadable instead of guessing", () => {
 		const node = firstEdgeNode(loadFixture(TIMELINE), matchTimelineConnection);
 		delete node.post_id;
