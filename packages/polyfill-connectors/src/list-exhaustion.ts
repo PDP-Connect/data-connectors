@@ -635,12 +635,7 @@ function decide(claim: CoverageClaim, read: unknown): Verdict {
 		case "unreadable": {
 			const { reason } = stop;
 			return hasExactKeys(stop, ["kind", "reason"]) &&
-				oneOf(reason, [
-					"page",
-					"response",
-					"auth",
-					"parse_mismatch",
-				] as const)
+				oneOf(reason, ["page", "response", "auth", "parse_mismatch"] as const)
 				? { outcome: "unreadable", reason }
 				: unproven("invalid_facts");
 		}

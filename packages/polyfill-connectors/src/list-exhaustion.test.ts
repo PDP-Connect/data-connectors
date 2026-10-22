@@ -1011,18 +1011,39 @@ test("reflective traps return closed unproven results without exposing private p
 test("changing stop getters never emit private caller values", () => {
 	const canary = "PRIVATE-changing-stop-cursor-key";
 	for (const fixture of [
-		{ kind: "stalled", field: "reason", first: "no_progress", expected: { outcome: "stalled", reason: "no_progress" } },
-		{ kind: "unreadable", field: "reason", first: "auth", expected: { outcome: "unreadable", reason: "auth" } },
-		{ kind: "budget", field: "limit", first: "pages", expected: { outcome: "partial", reason: "budget_pages", resumable: true } },
-		{ kind: "budget", field: "resumable", first: true, expected: { outcome: "partial", reason: "budget_pages", resumable: true } },
+		{
+			kind: "stalled",
+			field: "reason",
+			first: "no_progress",
+			expected: { outcome: "stalled", reason: "no_progress" },
+		},
+		{
+			kind: "unreadable",
+			field: "reason",
+			first: "auth",
+			expected: { outcome: "unreadable", reason: "auth" },
+		},
+		{
+			kind: "budget",
+			field: "limit",
+			first: "pages",
+			expected: { outcome: "partial", reason: "budget_pages", resumable: true },
+		},
+		{
+			kind: "budget",
+			field: "resumable",
+			first: true,
+			expected: { outcome: "partial", reason: "budget_pages", resumable: true },
+		},
 	]) {
 		let reads = 0;
-		const stop = fixture.kind === "budget"
-			? { kind: fixture.kind, limit: "pages", resumable: true }
-			: { kind: fixture.kind, reason: fixture.first };
+		const stop =
+			fixture.kind === "budget"
+				? { kind: fixture.kind, limit: "pages", resumable: true }
+				: { kind: fixture.kind, reason: fixture.first };
 		Object.defineProperty(stop, fixture.field, {
 			enumerable: true,
-			get: () => ++reads === 1 ? fixture.first : canary,
+			get: () => (++reads === 1 ? fixture.first : canary),
 		});
 		const input = asRead({ ...read(), stop });
 		const got = settle("full_inventory", input);
@@ -1037,19 +1058,27 @@ test("consistent nonchronological pages do not prove a window boundary", () => {
 	const pages = [[30], [20], [10], [110]];
 	const visited = pages.slice(0, 3);
 	assert.ok(visited.every((page) => page.every((time) => time < windowStart)));
-	assert.ok(pages[3].some((time) => time >= windowStart));
-	for (const ordering of ["snapshot", "change_token", "stable_order"] as const) {
+	const unvisitedPage = pages[3];
+	assert.ok(unvisitedPage);
+	assert.ok(unvisitedPage.some((time) => time >= windowStart));
+	for (const ordering of [
+		"snapshot",
+		"change_token",
+		"stable_order",
+	] as const) {
 		const input = read({
 			requested: "window",
 			traversal: { ordering, pagesRead: visited.length },
 			accounting: { rawItems: 3, distinctKeys: 3 },
-			stop: end(asEnd({
-				rule: "window_boundary",
-				intervalBounded: true,
-				ordering,
-				oldPagesInARow: visited.length,
-				required: 3,
-			})),
+			stop: end(
+				asEnd({
+					rule: "window_boundary",
+					intervalBounded: true,
+					ordering,
+					oldPagesInARow: visited.length,
+					required: 3,
+				}),
+			),
 		});
 		const got = settle("checkpoint_window", input);
 		assert.equal(got.outcome, "unproven", ordering);
@@ -1057,7 +1086,11 @@ test("consistent nonchronological pages do not prove a window boundary", () => {
 });
 
 test("explicit monotonic window evidence preserves valid controls", () => {
-	for (const ordering of ["snapshot", "change_token", "stable_order"] as const) {
+	for (const ordering of [
+		"snapshot",
+		"change_token",
+		"stable_order",
+	] as const) {
 		const pages = [[130], [120], [90], [80], [70]];
 		const oldPages = pages.filter((page) => page.every((time) => time < 100));
 		const facts: EndFacts = {
@@ -1077,10 +1110,15 @@ test("explicit monotonic window evidence preserves valid controls", () => {
 		check("checkpoint_window", input, "window_complete");
 		check("full_inventory", input, "partial", "window_only");
 		for (const timeOrder of [undefined, "increasing", "unknown", false]) {
-			check("checkpoint_window", {
-				...input,
-				stop: end(asEnd({ ...facts, timeOrder })),
-			}, "unproven", "invalid_facts");
+			check(
+				"checkpoint_window",
+				{
+					...input,
+					stop: end(asEnd({ ...facts, timeOrder })),
+				},
+				"unproven",
+				"invalid_facts",
+			);
 		}
 	}
 });
