@@ -207,6 +207,15 @@
 		}
 	},
 	{
+		"file": "facebook.json",
+		"manifest": {
+			"connector_key": "facebook",
+			"reason_display_messages": {
+				"inventory_not_proven_complete": "Facebook did not show that this list was read in full, so it will be read again next time."
+			}
+		}
+	},
+	{
 		"file": "fitbit.json",
 		"manifest": {
 			"connector_key": "fitbit",
