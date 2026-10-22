@@ -18,11 +18,11 @@
         "type": "object",
         "properties": {
           "coverage_stores": {
-            "description": "Opaque store identifiers whose collection obligations are defined by this stream and manifest revision.",
+            "description": "Opaque store identifiers whose collection obligations are defined by this stream and manifest revision. An identifier is lowercase snake_case, so a device path, a space or a mixed-case token fails validation. A credential written in lowercase snake_case still passes; a reviewer must check for that, because no grammar can.",
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
           }
         }
       }

@@ -791,3 +791,38 @@ test("run coverage advertisement and stream inventories are optional and version
     ...[[], [""], ["   "], ["store", "store"]].map((coverage_stores) => ({ streams: [{ name: "items", coverage_stores }] })),
   ]) assert.equal(validate(invalid), false, JSON.stringify(invalid));
 });
+
+// A coverage_stores identifier is an opaque store name, never a device path or
+// a credential. The grammar is the mechanical floor for that rule: it rejects
+// path-shaped, spaced and mixed-case text, which is what a device path or a
+// pasted token usually looks like. It cannot tell a credential that happens to
+// be spelled in lowercase snake_case from a store name, so that part of the
+// rule remains a review obligation, not something this schema can check.
+function manifestDeclaring(identifier) {
+  return { streams: [{ name: "items", coverage_stores: [identifier] }] };
+}
+
+test("coverage_stores identifiers reject device paths, spaces and mixed-case tokens", () => {
+  for (const identifier of [
+    "/Users/tim/Library/Messages/chat.db",
+    "~/.config/tool/token",
+    "C:\\data\\x",
+    "a b",
+    "Token123",
+    "chat.db",
+    "chat-db",
+    "1chat_db",
+    "_chat_db",
+    "chat_db\n",
+  ]) assert.equal(validate(manifestDeclaring(identifier)), false, JSON.stringify(identifier));
+});
+
+test("coverage_stores identifiers accept every identifier the checked-in manifests declare", () => {
+  const declared = connectorManifests().flatMap(({ manifest }) =>
+    (manifest.streams ?? []).flatMap((stream) => stream.coverage_stores ?? []),
+  );
+  assert.ok(declared.length > 0, "no checked-in manifest declares coverage_stores, so this test would prove nothing");
+  for (const identifier of declared) {
+    assert.equal(validate(manifestDeclaring(identifier)), true, JSON.stringify(identifier));
+  }
+});
