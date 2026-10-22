@@ -9,7 +9,7 @@
 	},
 	"connector_key": "tiktok",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "TikTok (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -623,7 +623,6 @@
 		"tiktok_rate_limited": "TikTok asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait a while before running this again.",
 		"tiktok_server_error": "TikTok's servers had a problem partway through. What was collected is saved; try again later.",
 		"tiktok_interrupted": "The TikTok page stopped answering partway through. What was collected is saved; try again.",
-		"tiktok_client_request_not_seen": "The TikTok app did not make a request of its own in time, so nothing could be read safely. Nothing was collected.",
 		"tiktok_run_limit_reached": "This run reached its safety limit on requests. What was collected is saved; the next run continues.",
 		"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
 		"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",

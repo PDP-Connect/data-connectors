@@ -9,7 +9,7 @@ import type {
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { collectTikTok, type TikTokPage } from "./index.ts";
+import { checkTikTokSession, collectTikTok, type TikTokPage } from "./index.ts";
 import {
 	buildProfileRecord,
 	buildSavedVideoRecord,
@@ -209,25 +209,71 @@ const ok = (json: unknown) => ({
 
 const GET_CALL = /session\.get\(("[^"]+"), (\{.*?\}), \d+\)/s;
 
-function fakePage(answer: (call: Call, index: number) => Answer): {
+interface FakeOptions {
+	/** What the page's reader reports: client params held, or off the site. */
+	watch?: Json;
+	/** The in-page request never completes (as under a strict HAR replay). */
+	pageFails?: boolean;
+	/** The host request client fails too. */
+	hostFails?: boolean;
+}
+
+function fakePage(
+	answer: (call: Call, index: number) => Answer,
+	options: FakeOptions = {},
+): {
 	calls: Call[];
+	gotos: string[];
+	hostCalls: Call[];
 	page: TikTokPage;
 } {
 	const calls: Call[] = [];
+	const hostCalls: Call[] = [];
+	const gotos: string[] = [];
 	const page: TikTokPage = {
 		evaluate: async (script: string) => {
 			const match = GET_CALL.exec(script);
-			if (!match?.[1] || !match[2]) return { client: true, transport: null };
+			if (!match?.[1] || !match[2])
+				return options.watch ?? { client: true, transport: null };
 			const call: Call = {
 				path: JSON.parse(match[1]) as string,
 				params: JSON.parse(match[2]) as Record<string, string>,
 			};
+			if (options.pageFails)
+				return { kind: "network_error", transport: "fetch" };
 			calls.push(call);
 			return answer(call, calls.length - 1);
 		},
-		goto: async () => null,
+		goto: async (url: string) => {
+			gotos.push(url);
+			return null;
+		},
+		context: () => ({
+			request: {
+				get: async (url: string) => {
+					if (options.hostFails) throw new Error("net::ERR_FAILED");
+					const parsed = new URL(url);
+					const params = Object.fromEntries(parsed.searchParams);
+					const call: Call = { path: parsed.pathname, params };
+					hostCalls.push(call);
+					calls.push(call);
+					const result = answer(call, calls.length - 1) as Json;
+					const body =
+						result.kind === "response" && !result.empty
+							? JSON.stringify(result.json)
+							: "";
+					return {
+						status: () => Number(result.status ?? 200),
+						headers: () => ({
+							"content-type": result.html ? "text/html" : "application/json",
+						}),
+						text: async () => body,
+					};
+				},
+			},
+		}),
 	};
-	return { calls, page };
+	return { calls, gotos, hostCalls, page };
 }
 
 function harness(
@@ -556,4 +602,72 @@ test("a listed collection list that counts items but lists none fails", async ()
 	const h = harness(["favorite_collections"], page);
 	await collectTikTok(h.ctx, noDelay);
 	assert.match(h.failures[0]?.message ?? "", /counted 2 favorite_collections/);
+});
+
+// ─── session check and replay determinism (findings-2) ───────────────────
+
+test("a signed-in page on www.tiktok.com passes the session check without navigating", async () => {
+	const { gotos, calls, page } = fakePage(standardAnswer);
+	assert.equal(await checkTikTokSession(page, noDelay.delay), "signed_in");
+	assert.deepEqual(gotos, []);
+	assert.deepEqual(
+		calls.map((c) => c.path),
+		["/passport/account/info/v2/"],
+	);
+});
+
+test("a page off the site opens the profile page, never the sign-in page", async () => {
+	const { gotos, page } = fakePage(standardAnswer, {
+		watch: { wrongPage: true },
+	});
+	assert.equal(await checkTikTokSession(page, noDelay.delay), "unknown");
+	assert.deepEqual(gotos, ["https://www.tiktok.com/profile"]);
+});
+
+test("only an answer that names no account is signed out", async () => {
+	const signedOut = fakePage(() =>
+		ok({ data: { error_code: 1, description: "log in" }, message: "error" }),
+	);
+	assert.equal(
+		await checkTikTokSession(signedOut.page, noDelay.delay),
+		"signed_out",
+	);
+	const silent = fakePage(standardAnswer, { pageFails: true, hostFails: true });
+	assert.equal(await checkTikTokSession(silent.page, noDelay.delay), "unknown");
+	assert.deepEqual(silent.gotos, []);
+});
+
+test("when in-page requests never complete, the host client reads the same paths in the same order", async () => {
+	const live = fakePage(standardAnswer);
+	const liveRun = harness(ALL, live.page);
+	await collectTikTok(liveRun.ctx, noDelay);
+
+	const replay = fakePage(standardAnswer, { pageFails: true });
+	const replayRun = harness(ALL, replay.page);
+	await collectTikTok(replayRun.ctx, noDelay);
+
+	assert.deepEqual(replayRun.failures, []);
+	assert.deepEqual(
+		replay.hostCalls.map((c) => c.path),
+		live.calls.map((c) => c.path),
+	);
+	assert.equal(replay.hostCalls[1]?.params.aid, "1988");
+	assert.equal(replay.hostCalls[1]?.params.cursor, "0");
+	assert.deepEqual(replay.gotos, []);
+	const strip = (messages: EmittedMessage[]) =>
+		messages.filter((m) => m.type === "RECORD" || m.type === "STATE");
+	assert.deepEqual(strip(replayRun.messages), strip(liveRun.messages));
+});
+
+test("an unsigned empty answer from the host client still stops the run", async () => {
+	const { page } = fakePage(
+		(call) =>
+			call.path === "/passport/account/info/v2/"
+				? ok(ACCOUNT)
+				: { ...ok(null), empty: true },
+		{ pageFails: true },
+	);
+	const h = harness(["videos"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.match(h.failures[0]?.message ?? "", /^tiktok_request_unsigned/);
 });

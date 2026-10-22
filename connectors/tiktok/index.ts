@@ -25,6 +25,18 @@
  * app's requests. No signature, token or cookie is read by this code, logged
  * or kept in STATE: the page reports only whether a request left signed.
  *
+ * When the page holds no client parameters yet, or its request does not
+ * complete at all, the same GET goes once through the browser context's own
+ * request client (same cookies, TikTok's constant web client fields, no
+ * signatures). If TikTok refuses that unsigned request, the run stops as
+ * "unsigned"; it never retries further.
+ *
+ * Session check. Signed in is decided from the account endpoint the
+ * collection itself starts with, in the page as it is. The check opens the
+ * profile page only when the page is not on www.tiktok.com, and opens the
+ * sign-in page only when TikTok answered and named no account; a check that
+ * got no answer fails the run instead of navigating.
+ *
  *   GET /passport/account/info/v2/      -> the owner's id, secUid, handle
  *   GET /api/user/settings/             -> profile.private_account
  *   GET /api/post/item_list/            -> videos (and profile counts)
@@ -57,6 +69,8 @@
  *
  * CHANGES
  *   v0.1.0 (2026-10-22): first version.
+ *   v0.1.1 (2026-10-22): session check never opens /login without a signed-out
+ *     answer; host request client fallback; collections end on hasMore.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -76,7 +90,6 @@ import {
 	WATCH_EXPRESSION,
 } from "./page-script.ts";
 import {
-	type Account,
 	buildCollectionRecord,
 	buildProfileRecord,
 	buildSavedVideoRecord,
@@ -111,7 +124,7 @@ export const REQUEST_PAUSE_MAX_MS = 3000;
 /** How long one in-page request may take. */
 const REQUEST_TIMEOUT_MS = 20_000;
 /** How long the web app may take to make a request of its own. */
-const CLIENT_WAIT_MS = 30_000;
+const CLIENT_WAIT_MS = 15_000;
 const POLL_INTERVAL_MS = 500;
 /** Ids kept per incremental list: a later run stops at the first of them. */
 const HEAD_IDS = 20;
@@ -157,6 +170,21 @@ export interface TikTokPage {
 		url: string,
 		options?: { waitUntil?: "domcontentloaded" },
 	): Promise<unknown>;
+	/** The browser context's own request client: same cookies, sent by the host. */
+	context(): {
+		request: {
+			get(
+				url: string,
+				options: { failOnStatusCode: boolean; timeout: number },
+			): Promise<HostResponse>;
+		};
+	};
+}
+
+interface HostResponse {
+	headers(): Record<string, string>;
+	status(): number;
+	text(): Promise<string>;
 }
 
 /** The part of the collect context this connector uses. */
@@ -202,7 +230,6 @@ type StopClass =
 	| "rate_limited"
 	| "server_error"
 	| "interrupted"
-	| "no_client"
 	| "request_limit"
 	| "unreadable"
 	| "status_error"
@@ -215,7 +242,6 @@ const RUN_STOPS: ReadonlySet<StopClass> = new Set([
 	"rate_limited",
 	"server_error",
 	"interrupted",
-	"no_client",
 	"request_limit",
 ]);
 
@@ -234,7 +260,6 @@ const STOP_CODES: Record<StopClass, string> = {
 	rate_limited: "tiktok_rate_limited",
 	server_error: "tiktok_server_error",
 	interrupted: "tiktok_interrupted",
-	no_client: "tiktok_client_request_not_seen",
 	request_limit: "tiktok_run_limit_reached",
 	unreadable: "tiktok_source_unreadable",
 	status_error: "tiktok_api_error",
@@ -253,6 +278,96 @@ export class TikTokStop extends Error {
 // ─── the one path to the API ─────────────────────────────────────────────
 
 type Params = Record<string, string>;
+
+/**
+ * Client fields for a request the host sends itself. These are the constant
+ * values of TikTok's web app; the per-device fields stay in the page.
+ */
+const HOST_CLIENT: Params = {
+	aid: "1988",
+	app_name: "tiktok_web",
+	device_platform: "web_pc",
+};
+
+/** One GET from inside the page, signed by TikTok's own page scripts. */
+async function fetchFromPage(
+	page: TikTokPage,
+	path: AllowedPath,
+	params: Params,
+): Promise<PageApiResult | null> {
+	const result = await evaluateInPage(
+		page,
+		apiGetExpression(path, params, REQUEST_TIMEOUT_MS),
+	);
+	return result !== null && typeof result === "object"
+		? (result as PageApiResult)
+		: null;
+}
+
+/**
+ * One GET sent by the browser context's own request client: the same
+ * cookies, no page signatures. Used only when the in-page request could not
+ * be made or did not complete at the network layer; an unsigned refusal then
+ * surfaces as the "unsigned" stop.
+ */
+async function fetchFromHost(
+	page: TikTokPage,
+	path: AllowedPath,
+	params: Params,
+): Promise<PageApiResult> {
+	const query = new URLSearchParams({ ...HOST_CLIENT, ...params });
+	try {
+		const response = await page
+			.context()
+			.request.get(`${TIKTOK_ORIGIN}${path}?${query.toString()}`, {
+				failOnStatusCode: false,
+				timeout: REQUEST_TIMEOUT_MS,
+			});
+		const text = await response.text();
+		let json: unknown = null;
+		try {
+			json = JSON.parse(text);
+		} catch {
+			json = null;
+		}
+		const headers = response.headers();
+		const retryAfter = Number(headers["retry-after"]);
+		return {
+			kind: "response",
+			status: response.status(),
+			html: /html/i.test(headers["content-type"] ?? ""),
+			empty: text.trim() === "",
+			json,
+			signed: false,
+			transport: "host",
+			retryAfterSeconds: Number.isFinite(retryAfter) ? retryAfter : null,
+		};
+	} catch {
+		return { kind: "network_error", transport: "host" };
+	}
+}
+
+/**
+ * The in-page request first. When the page holds no client parameters yet or
+ * its request did not complete (no answer at all), the same GET goes once
+ * through the host's request client.
+ */
+export async function fetchApi(
+	page: TikTokPage,
+	path: AllowedPath,
+	params: Params,
+): Promise<PageApiResult | null> {
+	const inPage = await fetchFromPage(page, path, params);
+	if (
+		inPage !== null &&
+		(inPage.kind === "response" ||
+			inPage.kind === "refused" ||
+			inPage.kind === "wrong_origin")
+	) {
+		return inPage;
+	}
+	return fetchFromHost(page, path, params);
+}
 
 function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 	const delay = options.delay ?? realDelay;
@@ -274,21 +389,13 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 			await delay(REQUEST_PAUSE_MIN_MS + Math.floor(random() * span));
 		}
 		requests += 1;
-		const result = (await evaluateInPage(
-			page,
-			apiGetExpression(path, params, REQUEST_TIMEOUT_MS),
-		)) as PageApiResult | null;
-		if (result === null || typeof result !== "object") {
+		const result = await fetchApi(page, path, params);
+		if (result === null) {
 			throw new TikTokStop("interrupted", `the page did not answer ${path}`);
 		}
 		switch (result.kind) {
 			case "response":
 				break;
-			case "no_client":
-				throw new TikTokStop(
-					"no_client",
-					"the TikTok web app has not made a request of its own to copy client parameters from",
-				);
 			case "refused":
 				throw new TikTokStop("unreadable", `the page reader refused ${path}`);
 			default:
@@ -369,9 +476,11 @@ async function watch(page: TikTokPage): Promise<WatchStatus | null> {
 }
 
 /**
- * Make sure the page is the TikTok web app and the reader holds client
- * parameters from a request the app made itself. Opens the profile page when
- * it does not: the app then makes its own profile requests.
+ * Make sure the page is the TikTok web app, and give the app time to make a
+ * request of its own so the reader holds its client parameters. Navigates
+ * only when the page is not on www.tiktok.com; a page already there is left
+ * where it is. Returns whether client parameters were seen (not fatal: the
+ * host request client covers a page that has none).
  */
 async function prepareReader(
 	page: TikTokPage,
@@ -379,7 +488,9 @@ async function prepareReader(
 ): Promise<boolean> {
 	const first = await watch(page);
 	if (first?.client === true) return true;
-	await page.goto(PROFILE_URL, { waitUntil: "domcontentloaded" });
+	if (first === null || first.wrongPage === true) {
+		await page.goto(PROFILE_URL, { waitUntil: "domcontentloaded" });
+	}
 	for (let waited = 0; waited < CLIENT_WAIT_MS; waited += POLL_INTERVAL_MS) {
 		await delay(POLL_INTERVAL_MS);
 		const status = await watch(page);
@@ -388,14 +499,27 @@ async function prepareReader(
 	return false;
 }
 
-/** The signed-in account, read from the unsigned passport endpoint. */
-async function readAccount(page: TikTokPage): Promise<Account | null> {
-	const result = (await evaluateInPage(
-		page,
-		apiGetExpression("/passport/account/info/v2/", {}, REQUEST_TIMEOUT_MS),
-	)) as PageApiResult | null;
-	if (result?.kind !== "response" || result.status !== 200) return null;
-	return parseAccount(result.json);
+export type SessionState = "signed_in" | "signed_out" | "unknown";
+
+/**
+ * Whether the account endpoint (the same unsigned request the collection
+ * starts with) names a signed-in account. "signed_out" only when TikTok
+ * answered and named none; anything that is not an answer is "unknown".
+ * It never navigates.
+ */
+export async function readSessionState(
+	page: TikTokPage,
+): Promise<SessionState> {
+	const status = await watch(page);
+	if (!status || status.wrongPage === true) return "unknown";
+	const result = await fetchApi(page, "/passport/account/info/v2/", {});
+	if (result?.kind !== "response") return "unknown";
+	if (result.status === 401) return "signed_out";
+	if (result.status !== 200 || result.empty || result.html) return "unknown";
+	if (parseAccount(result.json) !== null) return "signed_in";
+	return result.json !== null && typeof result.json === "object"
+		? "signed_out"
+		: "unknown";
 }
 
 /**
@@ -403,23 +527,35 @@ async function readAccount(page: TikTokPage): Promise<Account | null> {
  * safe to repeat while the owner signs in.
  */
 export async function probeTikTokSession(page: TikTokPage): Promise<boolean> {
-	const status = await watch(page);
-	if (!status || status.wrongPage || status.client !== true) return false;
-	return (await readAccount(page)) !== null;
+	return (await readSessionState(page)) === "signed_in";
 }
 
-/** The session check that may navigate: used where no one is signing in. */
-async function hasTikTokSession(page: TikTokPage): Promise<boolean> {
-	if (await probeTikTokSession(page)) return true;
-	if (!(await prepareReader(page, realDelay))) return false;
-	return probeTikTokSession(page);
+/**
+ * The session check that may navigate, used where no one is signing in. It
+ * opens the profile page only when the page is not on www.tiktok.com.
+ */
+export async function checkTikTokSession(
+	page: TikTokPage,
+	delay: (ms: number) => Promise<void> = realDelay,
+): Promise<SessionState> {
+	const first = await readSessionState(page);
+	if (first !== "unknown") return first;
+	await prepareReader(page, delay);
+	return readSessionState(page);
 }
 
 export async function ensureTikTokSession(
 	args: EnsureSessionArgs,
 ): Promise<void> {
 	const { assist, capture, completeAssistance, page, sendInteraction } = args;
-	if (await hasTikTokSession(page)) return;
+	const state = await checkTikTokSession(page);
+	if (state === "signed_in") return;
+	if (state === "unknown") {
+		// Not proof of a signed-out session: never open the sign-in page on it.
+		throw new Error(
+			"tiktok_interrupted: TikTok did not answer the sign-in check",
+		);
+	}
 	await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
 	const ready = await manualBrowserLogin({
 		assist,
@@ -430,7 +566,7 @@ export async function ensureTikTokSession(
 		message:
 			"Sign in to TikTok in the secure browser, then continue. Collection starts once the session is verified.",
 		page,
-		probe: () => hasTikTokSession(page),
+		probe: async () => (await checkTikTokSession(page)) === "signed_in",
 		readinessProbe: probeTikTokSession,
 		readinessProbeOnHandoffPage: true,
 		sendInteraction,
@@ -673,13 +809,7 @@ export async function collectTikTok(
 	};
 
 	if (!(await prepareReader(ctx.page, delay))) {
-		await stopRun(
-			new TikTokStop(
-				"no_client",
-				"the TikTok web app did not make a request of its own in time",
-			),
-		);
-		return;
+		connectorDiagnostic("tiktok", "client_params_not_seen", {});
 	}
 	const api = createApi(ctx.page, options);
 
@@ -946,7 +1076,8 @@ if (isMainModule(import.meta.url)) {
 		retryablePattern:
 			/tiktok_rate_limited|tiktok_server_error|tiktok_interrupted|tiktok_run_limit_reached/,
 		ensureSession: ensureTikTokSession,
-		probeSession: ({ page }) => hasTikTokSession(page),
+		probeSession: async ({ page }) =>
+			(await checkTikTokSession(page)) === "signed_in",
 		probeSessionIsAuthoritative: true,
 		collect: (ctx: BrowserCollectContext) => collectTikTok(ctx),
 	});
