@@ -706,8 +706,9 @@ export function publicDiagnostics(
 	if (settlement.reason) {
 		out.reason = settlement.reason;
 	}
-	if (oneOf(end.rule, RULES)) {
-		out.rule = end.rule;
+	const rule = end.rule;
+	if (oneOf(rule, RULES)) {
+		out.rule = rule;
 	}
 	return out;
 }

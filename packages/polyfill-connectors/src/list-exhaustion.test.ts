@@ -1122,3 +1122,23 @@ test("explicit monotonic window evidence preserves valid controls", () => {
 		}
 	}
 });
+
+test("public diagnostics captures a changing end rule once", () => {
+	const input = read();
+	const settlement = settle("full_inventory", input);
+	const canary = "PRIVATE-changing-end-rule";
+	let reads = 0;
+	const facts = { ...TERMINAL };
+	Object.defineProperty(facts, "rule", {
+		enumerable: true,
+		get: () => (++reads === 1 ? "provider_terminal" : canary),
+	});
+	const diagnostic = publicDiagnostics(
+		settlement,
+		read({ stop: end(asEnd(facts)) }),
+	);
+	assert.ok(!JSON.stringify(diagnostic).includes(canary));
+	assert.equal(diagnostic.rule, "provider_terminal");
+	assert.equal(reads, 1);
+	assert.equal(publicDiagnostics(settlement, input).rule, "provider_terminal");
+});
