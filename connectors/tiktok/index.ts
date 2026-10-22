@@ -298,7 +298,8 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 				);
 		}
 		transport ??= result.transport;
-		signed ??= result.signed;
+		if (result.signed) signed = true;
+		else signed ??= false;
 		if (result.status === 401) {
 			throw new TikTokStop("auth", `${path} answered 401`);
 		}
@@ -811,11 +812,19 @@ export async function collectTikTok(
 					);
 				}
 				if (!page.hasMore) {
+					// hasMore: false is the end signal. A total without a list
+					// counts collections TikTok does not list here, so it is
+					// noted, not held against the walk.
+					if (!page.listed && page.total !== null && page.total > 0) {
+						connectorDiagnostic("tiktok", "collections_total_unlisted", {
+							total: page.total,
+						});
+					}
 					assertComplete(
 						FAVORITE_COLLECTIONS,
 						{
 							read: seenIds.size,
-							total: page.total,
+							total: page.listed ? page.total : null,
 							unreadable: page.unreadable,
 						},
 						false,

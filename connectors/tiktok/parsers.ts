@@ -309,6 +309,13 @@ const collectionPageSchema = z.object({
 
 export interface CollectionPage {
 	collections: Collection[];
+	/**
+	 * Whether the answer carried a `collectionList` array at all. The live
+	 * answer for the recorded account had `total: 1`, `hasMore: false` and no
+	 * list key: TikTok counts a collection it does not list to this call, so
+	 * `total` is only a claim about entries when the list is present.
+	 */
+	listed: boolean;
 	cursor: string | null;
 	hasMore: boolean;
 	total: number | null;
@@ -328,6 +335,7 @@ export function parseCollectionPage(json: unknown): CollectionPage | null {
 	const cursor = parsed.data.cursor;
 	return {
 		collections,
+		listed: parsed.data.collectionList !== undefined,
 		cursor: cursor === undefined ? null : String(cursor),
 		hasMore: parsed.data.hasMore,
 		total: parsed.data.total ?? null,

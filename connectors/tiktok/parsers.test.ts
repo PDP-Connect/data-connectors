@@ -272,8 +272,9 @@ const ACCOUNT = fixture("passport-account-info-v2.json");
 const SETTINGS = fixture("user-settings.json");
 const POSTS = fixture("post-item-list.json");
 const LIKED = fixture("favorite-item-list.json");
-const EMPTY = fixture("empty-item-list.json");
 const USERS = fixture("user-list.json");
+const COLLECT = fixture("collect-item-list.json");
+const COLLECTIONS = fixture("collection-list.json");
 
 function standardAnswer(call: Call): Answer {
 	switch (call.path) {
@@ -286,8 +287,9 @@ function standardAnswer(call: Call): Answer {
 		case "/api/favorite/item_list/":
 			return ok(LIKED);
 		case "/api/user/collect/item_list/":
+			return ok(COLLECT);
 		case "/api/user/collection_list/":
-			return ok(EMPTY);
+			return ok(COLLECTIONS);
 		case "/api/user/list/":
 			return ok(USERS);
 		default:
@@ -483,7 +485,7 @@ test("a truncated follower list fails rather than reports complete", async () =>
 test("a list that counts items but returns none fails", async () => {
 	const { page } = fakePage((call) =>
 		call.path === "/api/user/collect/item_list/"
-			? ok({ ...EMPTY, total: 4 })
+			? ok({ ...COLLECT, total: 4 })
 			: standardAnswer(call),
 	);
 	const h = harness(["favorites"], page);
@@ -504,4 +506,54 @@ test("a non-zero status code fails only that stream", async () => {
 		["likes"],
 	);
 	assert.equal(h.records.filter((r) => r.stream === "following").length, 1);
+});
+
+test("live shape: a collection list with a total but no list key ends on hasMore:false (findings-1)", async () => {
+	const parsed = parseCollectionPage(COLLECTIONS);
+	assert.ok(parsed);
+	assert.equal(parsed.listed, false);
+	assert.equal(parsed.total, 1);
+	assert.equal(parsed.hasMore, false);
+
+	const { page } = fakePage(standardAnswer);
+	const h = harness(["favorite_collections", "favorites"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.records.length, 0);
+	assert.deepEqual(
+		h.messages
+			.filter((m) => m.type === "STATE")
+			.map((m) => ("cursor" in m ? [m.stream, m.cursor] : null)),
+		[
+			["favorites", { head_ids: [] }],
+			["favorite_collections", { count: 0 }],
+		],
+	);
+});
+
+test("a listed collection that cannot be read still fails the stream", async () => {
+	const { page } = fakePage((call) =>
+		call.path === "/api/user/collection_list/"
+			? ok({ ...COLLECTIONS, collectionList: [{ unexpected: true }] })
+			: standardAnswer(call),
+	);
+	const h = harness(["favorite_collections"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.equal(h.failures.length, 1);
+	assert.match(h.failures[0]?.message ?? "", /^tiktok_source_unreadable/);
+	assert.equal(
+		h.messages.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("a listed collection list that counts items but lists none fails", async () => {
+	const { page } = fakePage((call) =>
+		call.path === "/api/user/collection_list/"
+			? ok({ ...COLLECTIONS, total: 2, collectionList: [] })
+			: standardAnswer(call),
+	);
+	const h = harness(["favorite_collections"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.match(h.failures[0]?.message ?? "", /counted 2 favorite_collections/);
 });
