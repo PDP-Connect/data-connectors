@@ -1,4 +1,4 @@
-# PDPP Collection Profile v1.0.0
+# PDPP Collection Profile v0.3.0
 
 Status: Normative draft. This is the canonical PDPP Collection Profile.
 
@@ -49,10 +49,14 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
 appear in all capitals.
 
 This document is normative except where a section is marked non-normative.
-Version 1.0.0 is a next-major draft, not a claim that existing connectors,
-runtimes or linked machine-readable schemas implement it. Strict accounting
-requires implementation and conformance work before accepting this version.
-The unreleased 0.2.0 diagnosis requirements are included in full.
+Version 0.3.0 is a breaking revision of 0.2.0, as a 0.x minor version may be.
+A runtime MUST apply the rules of 0.3.0 only to a manifest that declares
+`protocol_version` `"0.3.0"`. It MUST NOT apply them to a manifest that
+declares `"0.1.0"` or `"0.2.0"`, and it MUST NOT apply the rules of those
+versions to a manifest that declares `"0.3.0"`. Version 0.3.0 is not a claim
+that existing connectors, runtimes or linked machine-readable schemas implement
+it. Strict accounting requires implementation and conformance work before
+accepting this version. It includes the 0.2.0 diagnosis requirements in full.
 
 ## 2. Relationship to PDPP Core
 
@@ -84,9 +88,9 @@ features it needs, and describes the streams it can emit.
 
 ```json
 {
-  "protocol_version": "1.0.0",
+  "protocol_version": "0.3.0",
   "connector_key": "example",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "display_name": "Example",
   "runtime_requirements": {
     "bindings": {
@@ -119,7 +123,7 @@ features it needs, and describes the streams it can emit.
 
 | Field | Requirement |
 | --- | --- |
-| `protocol_version` | REQUIRED. It MUST be `"1.0.0"` for this profile version. |
+| `protocol_version` | REQUIRED. It MUST be `"0.3.0"` for this profile version. |
 | `connector_key` | REQUIRED operational identifier. It MUST match `^[a-z0-9][a-z0-9._-]*$`. |
 | `version` | REQUIRED non-empty connector version string. |
 | `display_name` | REQUIRED non-empty display name. |
@@ -510,7 +514,7 @@ connector reads:
 | --- | --- |
 | `env_var` | REQUIRED. The environment variable through which the runtime passes the path. It MUST match `^[A-Z][A-Z0-9_]*$` and MUST be unique within `inputs`. |
 | `kind` | REQUIRED. `file` or `dir`. |
-| `access` | REQUIRED. `read` is the only 1.0.0 value. |
+| `access` | REQUIRED. `read` is the only 0.3.0 value. |
 | `accepted_extensions` | OPTIONAL non-empty array of unique lowercase extensions, each with a leading dot. It names the file types the connector reads from the input. |
 
 An input object has no other members. `inputs`, when present, is a non-empty
@@ -547,7 +551,7 @@ default. `runtime_requirements.local_paths` (Section 3.7) can still describe the
 default location and readiness checks. A confining runtime that wants the
 connector to read the default location supplies it through the `env_var`.
 
-A `filesystem` declaration without `inputs` remains valid in 1.0.0. It makes no
+A `filesystem` declaration without `inputs` remains valid in 0.3.0. It makes no
 claim about which paths the connector reads, so a runtime cannot narrow the
 binding. A runtime SHOULD tell the owner that such a connector has broad file
 access.
@@ -606,7 +610,7 @@ of declared output roots:
 | Field | Requirement |
 | --- | --- |
 | `slot` | REQUIRED. An author-local name for the output root, matching `^[a-z][a-z0-9_]*$`. |
-| `access` | REQUIRED. `write` is the only 1.0.0 value. |
+| `access` | REQUIRED. `write` is the only 0.3.0 value. |
 | `overwrite` | OPTIONAL boolean. Whether the connector may overwrite an existing file in this slot. Default false. |
 | `delete` | OPTIONAL boolean. Whether the connector may delete a file in this slot. Default false. |
 | `durable` | OPTIONAL boolean. Whether this slot persists across runs. Default false. |
@@ -939,7 +943,7 @@ capabilities before placement. It MUST reject a connector with an unsupported
 required capability before spawn.
 
 DETAIL_GAP, DETAIL_COVERAGE and OBSERVATION are mandatory
-runtime features of 1.0.0, including Sections 5.10 through 5.13 and the
+runtime features of 0.3.0, including Sections 5.10 through 5.13 and the
 recovery-hint gate. A connector need not emit diagnostic facts on every run.
 Strict accounting MUST NOT depend on a per-feature capability, advisory flag,
 START capability list, message-content opt-in, or connector-side fold.
@@ -1021,9 +1025,9 @@ Capability metadata includes `refresh_policy`, `public_listing`, `proven`,
 `setup.manual_or_upload.import_dir_env_var` is deprecated in favor of
 filesystem inputs (Section 3.3.5).
 
-These members are not part of portable 1.0.0 conformance. A runtime MAY support
+These members are not part of portable 0.3.0 conformance. A runtime MAY support
 them as implementation metadata. Any manifest member that this profile does
-not define is also outside portable 1.0.0. A connector MUST NOT use such a
+not define is also outside portable 0.3.0. A connector MUST NOT use such a
 declaration to grant itself authority, widen collection scope, or bypass owner
 approval.
 
@@ -1064,7 +1068,7 @@ This version does not define the syntax of a rule's match condition
 (Section 5.13). A runtime records a match for a declared rule only from its
 own observations.
 
-A manifest implementing this document declares `protocol_version` `1.0.0`,
+A manifest implementing this document declares `protocol_version` `0.3.0`,
 including when it declares `diagnostic_descriptors`.
 
 ## 4. Run protocol
@@ -1229,7 +1233,7 @@ filter precisely, but it MUST restrict what it emits.
 Runtime-specific `START` members for backfill and detail-gap recovery are
 defined in the
 [runtime note](../../packages/polyfill-connectors/docs/collection-profile-runtime.md).
-They are not portable 1.0.0 fields.
+They are not portable 0.3.0 fields.
 
 ### 5.2 `RECORD`
 
@@ -1409,7 +1413,7 @@ enumeration finished, and ends with failed `DONE` whose `error.code` is
 failure, never an empty success.
 
 `recovery_hint` is OPTIONAL. It is either an action string or an object with a
-REQUIRED `action` string and an OPTIONAL boolean `retryable`. Portable 1.0.0
+REQUIRED `action` string and an OPTIONAL boolean `retryable`. Portable 0.3.0
 actions are `retry_by_runtime`, `retry_on_connector_upgrade`,
 `refresh_credentials`, `manual_action_required`, `update_selector`,
 `upstream_unblock`, `not_retriable`, and `unknown`.
@@ -1421,7 +1425,7 @@ runtime can present a hint as an instruction or act on it.
 
 ### 5.6 Detail obligations, gaps and coverage
 
-This section is mandatory in 1.0.0. Legacy hydrated-presence and optional-skip
+This section is mandatory in 0.3.0. Legacy hydrated-presence and optional-skip
 members are not aliases for the strict contract.
 
 #### 5.6.1 Obligations and closure
@@ -1781,7 +1785,7 @@ the runtime binds the domain but cannot verify the source observation.
 Key arrays MUST have no duplicates or overlap. The runtime MUST reject foreign
 outcomes, undeclared or ambiguous relationships, undeclared parents and coverage
 on a state_stream child. hydrated_keys, optional_skip_keys, considered and
-covered are invalid DETAIL_COVERAGE members in 1.0.0. Former optional skips
+covered are invalid DETAIL_COVERAGE members in 0.3.0. Former optional skips
 must be classified by each call site: proven scope exclusions are not required,
 unrepresentable detail is permanent debt, recoverable omissions are retryable
 debt. Unknown membership cannot silently disappear.
@@ -1896,7 +1900,7 @@ an emitted-record counter is not an integrity ledger.
 
 #### 5.6.6 Portable debt discovery and recovery seals
 
-This subsection applies to both dependency forms. It is mandatory in 1.0.0,
+This subsection applies to both dependency forms. It is mandatory in 0.3.0,
 not enabled by STREAM_EVIDENCE or a recovery capability.
 
 START.detail_debts is an array of objects with exactly the members of a valid
@@ -2194,7 +2198,7 @@ owner.
 ### 5.10 `OBSERVATION`
 
 `OBSERVATION` reports one typed fact about the run: what the connector saw,
-not what it concludes. Support is mandatory in 1.0.0 (Section 3.4); no
+not what it concludes. Support is mandatory in 0.3.0 (Section 3.4); no
 separate capability declaration enables or disables it.
 
 ```json
@@ -2444,7 +2448,7 @@ names the remaining parts. It does not define their behavior.
 
 A conforming connector:
 
-1. Declares a valid 1.0.0 manifest.
+1. Declares a valid 0.3.0 manifest.
 2. Reads one valid `START` before it emits a message.
 3. Emits only valid JSON Lines messages defined by this profile or by a
    negotiated extension.
@@ -2532,7 +2536,7 @@ claim.
 
 ### 6.3 Strict-accounting conformance cases
 
-Implementations claiming 1.0.0 MUST exercise the following cases through their
+Implementations claiming 0.3.0 MUST exercise the following cases through their
 actual enumeration, local disposition, durable acceptance and commit paths.
 A test that manually constructs successful coverage without exercising the
 relevant producer or consumer does not establish these requirements.
@@ -2563,7 +2567,7 @@ relevant producer or consumer does not establish these requirements.
 | Shape rejection, retryable failure or deployment cap reported permanent | Reject permanent classification; source_unrepresentable cannot hide implementation debt. |
 | Old runtime/new connector; new strict-only runtime/old connector | Refuse unsupported version before spawn; no implicit downgrade or strict reinterpretation. |
 | First strict run over legacy state | Recollect; no receipt manufactured from legacy hydration, optional skip or fingerprints. |
-| 1.0.0 runtime lacks OBSERVATION or recovery-hint gate | Not conformant; refuse this version instead of partial acceptance. |
+| 0.3.0 runtime lacks OBSERVATION or recovery-hint gate | Not conformant; refuse this version instead of partial acceptance. |
 | Transient sub-resource failure, then recovery at the same epoch | Hold the whole record and account for the obligation with a retryable transport gap, not connector_transform_failed. Recovery at the same transform_epoch may retry under the same obligation; it settles only through the full-obligation seal, and the stored row stays unchanged until then. |
 | Listing fails mid-page after some children were not seen | No coverage for that parent and the checkpoint is withheld. No absence-derived delete is emitted for children missing from the partial listing. Source-positive tombstones already read may be emitted. |
 | RECORD refused at durable admission with no matching debt admitted | A rejected effect, not a protocol violation: the run is not terminated. The key is unaccounted and the affected checkpoint is withheld. |
@@ -2603,7 +2607,7 @@ relevant producer or consumer does not establish these requirements.
 | Current-generation debt admitted, then unrelated checkpoint fails | Retain the valid admitted debt; do not mint receipt/state or apply failed settlement. Provisional unvalidated debt cannot become durable credit. |
 | Matching debt exists and full original obligation is freshly proved complete/empty | Atomically settle debt and publish outcome/receipt/state; if settlement fails, no complete/empty commit. Accounted remaining debt can instead checkpoint as gap. |
 | Selected relationship uses unsupported cardinality or lacks the supported child foreign-key shape | Refuse before spawn; no invented Core field or reverse attribution. |
-| 1.0.0 exchange without STREAM_EVIDENCE capability or messages | Valid when all mandatory accounting and diagnosis requirements hold. A connector requiring unsupported STREAM_EVIDENCE is refused before spawn. |
+| 0.3.0 exchange without STREAM_EVIDENCE capability or messages | Valid when all mandatory accounting and diagnosis requirements hold. A connector requiring unsupported STREAM_EVIDENCE is refused before spawn. |
 
 A positive state_stream sequence uses a manifest where item_bodies inherits
 items and the items relationship names item_bodies. START includes the resolved
@@ -2684,7 +2688,7 @@ This profile does not define `ASSISTANCE`, `ASSISTANCE_STATUS`,
 `START.detail_gaps`, `START.recovery_only`, or `START.streamsToBackfill`.
 Portable DETAIL_GAP_RECOVERED and START.detail_debts are instead defined by
 Section 5.6.6. Legacy extension shapes (including gap_id-only acknowledgments)
-are not aliases for this next-major typed seal.
+are not aliases for this typed seal.
 It does not define `CANCEL`, `RECORD_ERROR`, or a versioned `STATE` schema.
 It does not define the `BLOB` message or the `BLOB` protocol capability, which
 the current connector-protocol package defines and the `anthropic` manifest
@@ -2692,7 +2696,7 @@ declares.
 
 A runtime MAY define these features in a separately versioned extension. A
 connector MUST NOT require one without explicit capability or package-version
-coordination. None is required for 1.0.0 conformance.
+coordination. None is required for 0.3.0 conformance.
 
 ## 8. Profile versioning
 
@@ -2704,9 +2708,11 @@ Profile versions use `MAJOR.MINOR.PATCH`:
 
 - A patch version clarifies text or fixes an error without changing a valid
   manifest or wire exchange.
-- A minor version can add optional, capability-gated fields or messages. It
-  MUST preserve valid exchanges from earlier minor versions in the same major
-  version.
+- While MAJOR is `0`, a MINOR version MAY make incompatible manifest or wire
+  changes. Section 1 applies this to 0.3.0.
+- While MAJOR is `1` or higher, a MINOR version can add optional,
+  capability-gated fields or messages. It MUST preserve valid exchanges from
+  earlier minor versions in the same major version.
 - A major version can make incompatible manifest or wire changes.
 
 A runtime MUST NOT infer compatibility from an unknown version. It MUST either
@@ -2714,24 +2720,25 @@ support that exact version or apply an explicit compatibility rule that it
 advertises. A new optional message that an older fail-closed runtime would
 reject requires capability negotiation and a runtime-first rollout.
 
-Version 1.0.0 is the next-major strict-accounting version. It folds in all
-unreleased 0.2.0 content: OBSERVATION, diagnostic_descriptors, DONE.error.basis,
-and Sections 5.10 through 5.13. Accepting 1.0.0 requires every mandatory rule,
-not partial 0.2.0 support. This includes declared detail transform_epoch,
-START.detail_debts and the fully typed portable DETAIL_GAP_RECOVERED lifecycle;
-old gap_id-only extension acknowledgments cannot be interpreted as such seals.
+Version 0.3.0 is a breaking revision of 0.2.0. It folds in all 0.2.0 content:
+OBSERVATION, diagnostic_descriptors, DONE.error.basis, and Sections 5.10
+through 5.13. Accepting 0.3.0 requires every mandatory rule, not partial 0.2.0
+support. This includes declared detail transform_epoch, START.detail_debts and
+the fully typed portable DETAIL_GAP_RECOVERED lifecycle; old gap_id-only
+extension acknowledgments cannot be interpreted as such seals.
 
-A minor cannot invalidate earlier hydrated-without-record or optional_skip_keys
-exchanges. The complete/empty/unchanged/gap replacement therefore requires a
-major version. Lenient parsing, advisory flags or connector folds MUST NOT
-hide its incompatibility. Unsupported versions MUST be refused before spawn.
+The complete/empty/unchanged/gap replacement invalidates earlier
+hydrated-without-record and optional_skip_keys exchanges. Under MAJOR `0` it
+ships in MINOR version 0.3.0. Lenient parsing, advisory flags or connector
+folds MUST NOT hide that incompatibility. Unsupported versions MUST be refused
+before spawn.
 
 Rollout is runtime-first. During a bounded catalog migration a runtime MAY run
 explicitly supported old-profile connectors under old rules in separate
 versioned paths. The transition ends when that runtime's own catalog contains
-no connector entries with protocol_version below 1.0.0. From that point the
+no connector entries with protocol_version below 0.3.0. From that point the
 deployment MUST refuse old-profile connectors; this is not a permanent legacy
-escape hatch. A new runtime MUST NOT interpret an old connector as 1.0.0.
+escape hatch. A new runtime MUST NOT interpret an old connector as 0.3.0.
 No baseline receipt may be minted from legacy state: the first strict
 run per connection/source-account binding MUST recollect its obligations;
 retained legacy debt is not silently settled or aliased across accounts. An old runtime MUST refuse
@@ -2774,5 +2781,5 @@ The accepted design gives the provisional capability these constraints:
   dormant until a separate owner deletion or a later return to `retained`.
 
 The proposal remains pending OD-4. A manifest that contains this member does
-not gain 1.0.0 conformance, and a runtime MUST NOT infer support from the member
+not gain 0.3.0 conformance, and a runtime MUST NOT infer support from the member
 alone.

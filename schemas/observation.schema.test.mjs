@@ -125,6 +125,6 @@ test("a manifest that uses the 0.2.0 diagnostic members declares protocol_versio
   }
 });
 
-test("the profile states its version as 0.2.0", () => {
-  assert.match(profile, /^# PDPP Collection Profile v0\.2\.0$/m);
+test("the profile states its version as 0.3.0", () => {
+  assert.match(profile, /^# PDPP Collection Profile v0\.3\.0$/m);
 });
