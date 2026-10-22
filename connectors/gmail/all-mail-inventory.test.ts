@@ -78,6 +78,8 @@ function makeMsg(uid: number): FetchMessageObject {
 		envelope,
 		internalDate: new Date("2026-04-20T10:00:05.000Z"),
 		size: 1024,
+		// The requested header fields; an empty block is a known value.
+		headers: Buffer.from(""),
 		bodyStructure: { type: "multipart/mixed", childNodes: [] },
 	} as FetchMessageObject;
 }

@@ -25,6 +25,7 @@ function message(uid: number, threadId = "99"): FetchMessageObject {
 		labels: new Set([`label-${uid}`]),
 		internalDate: new Date(NOW),
 		size: 20,
+		headers: Buffer.from(""),
 		envelope: {
 			subject: "Conversation",
 			from: [{ address: `person-${uid}@example.com` }],
@@ -1482,4 +1483,147 @@ test("evidence: a delta change that never arrives whole stays owed past the hold
 		ofStream(repaired, "messages").map((x) => x.data.labels),
 		[["changed"]],
 	);
+});
+
+test("evidence: a delta change the full debt list cannot take holds MODSEQ until the row is repaired", async () => {
+	const full = message(10);
+	const rows: FetchMessageObject[] = [full];
+	const m = mailbox(rows, 2001, 1);
+	(m.box as { highestModseq?: bigint }).highestModseq = 50n;
+	const walk = m.client.fetch;
+	// The message changed at MODSEQ 60 and does not change again.
+	m.client.fetch = (range, query, options) => {
+		const since = options?.changedSince;
+		if (since === undefined) return walk(range, query, options);
+		return (async function* () {
+			const [changed] = rows;
+			if (changed && BigInt(since) < 60n) yield changed;
+		})();
+	};
+	const initial = legacyState(2000, 2001);
+	(initial.messages.all_mail as { highest_modseq?: number }).highest_modseq =
+		40;
+	const first = await run(m, initial, ["messages"]);
+	assert.deepEqual(
+		ofStream(first, "messages").map((x) => x.data.labels),
+		[["label-10"]],
+	);
+	// Another stream's retries fill the debt list; it is not requested now.
+	const progress = (
+		first.state.messages as {
+			progress: { streams: Record<string, unknown>; debt: unknown[] };
+		}
+	).progress;
+	progress.streams.attachments = {
+		through: 2000,
+		coveredFrom: 2001,
+		next: 2001,
+		scope: {},
+	};
+	progress.debt = Array.from({ length: 200 }, (_, i) => ({
+		uid: 1001 + i,
+		streams: ["attachments"],
+		attempts: 1,
+		failure: "bodystructure_unavailable",
+	}));
+	const { bodyStructure: _s, ...bare } = full;
+	rows[0] = { ...bare, labels: new Set(["changed"]) } as FetchMessageObject;
+	(m.box as { highestModseq?: bigint }).highestModseq = 60n;
+	let state = first.state;
+	for (let i = 0; i < 4; i += 1) {
+		const r = await run(m, state, ["messages"]);
+		state = r.state;
+		assert.equal(
+			String(
+				(state.messages as { all_mail: { highest_modseq: unknown } }).all_mail
+					.highest_modseq,
+			),
+			"50",
+			`miss ${i}: an unowned change holds the cursor`,
+		);
+	}
+	rows[0] = { ...full, labels: new Set(["changed"]) };
+	const repaired = await run(m, state, ["messages"]);
+	assert.deepEqual(
+		ofStream(repaired, "messages").map((x) => x.data.labels),
+		[["changed"]],
+	);
+});
+
+for (const item of ["flags", "labels", "size", "headers"] as const) {
+	test(`evidence: a catch-up FETCH without ${item} keeps the stored row and owes the UID`, async () => {
+		const full = {
+			...dated(10, MAY),
+			flags: new Set(["\\Seen", "\\Flagged"]),
+		};
+		const rows: FetchMessageObject[] = [full];
+		const m = mailbox(rows, 101, 1);
+		const first = await run(m, {}, ["messages"]);
+		assert.equal(ofStream(first, "messages").length, 1);
+		const narrowed = await run(
+			m,
+			first.state,
+			new Map([["messages", { name: "messages", time_range: { until: JAN } }]]),
+		);
+		const { [item]: _gone, ...bare } = full;
+		rows[0] = bare as FetchMessageObject;
+		const widened = await run(m, narrowed.state, ["messages"]);
+		assert.deepEqual(ofStream(widened, "messages"), [], "no stand-in values");
+		assert.deepEqual(
+			progressOf(widened).debt.map((d) => [d.uid, d.streams]),
+			[[10, ["messages"]]],
+		);
+		rows[0] = full;
+		const repaired = await run(m, widened.state, ["messages"]);
+		assert.deepEqual(
+			ofStream(repaired, "messages").map((x) => [
+				x.data.is_seen,
+				x.data.is_flagged,
+				x.data.labels,
+				x.data.size_bytes,
+			]),
+			[[true, true, ["label-10"], 20]],
+		);
+	});
+}
+
+test("evidence: undated messages that the requested resources exclude do not stall the walk", async () => {
+	const excluded = Array.from({ length: 201 }, (_, i) => {
+		const { internalDate: _d, ...bare } = message(i + 1);
+		return bare as FetchMessageObject;
+	});
+	const wanted = message(900);
+	const m = mailbox([...excluded, wanted], 1001, 202);
+	const scope = new Map([
+		["messages", { name: "messages", resources: [String(wanted.emailId)] }],
+	]);
+	let state: Record<string, unknown> = {};
+	const written: unknown[] = [];
+	for (let i = 0; i < 3; i += 1) {
+		const r = await run(m, state, scope);
+		state = r.state;
+		written.push(...ofStream(r, "messages").map((x) => x.data.id));
+		assert.deepEqual(progressOf(r).debt, [], `run ${i}: nothing is owed`);
+	}
+	assert.deepEqual(written, [wanted.emailId]);
+});
+
+test("evidence: empty flags, labels and header fields are known values", async () => {
+	const row = {
+		...message(10),
+		flags: new Set<string>(),
+		labels: new Set<string>(),
+		headers: Buffer.from(""),
+	};
+	const m = mailbox([row], 101, 1);
+	const r = await run(m, {}, ["messages"]);
+	assert.deepEqual(
+		ofStream(r, "messages").map((x) => [
+			x.data.is_seen,
+			x.data.labels,
+			x.data.references,
+		]),
+		[[false, [], []]],
+	);
+	assert.deepEqual(progressOf(r).debt, []);
 });

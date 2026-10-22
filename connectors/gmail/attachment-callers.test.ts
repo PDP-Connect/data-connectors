@@ -40,6 +40,7 @@ function attachmentMessage(
 		labels: new Set(["\\Inbox"]),
 		internalDate: new Date(NOW),
 		size: 1024,
+		headers: Buffer.from(""),
 		envelope: {
 			subject: "With attachments",
 			from: [{ address: `sender-${uid}@example.com` }],
@@ -957,4 +958,90 @@ test("served recovery defers a gap whose message FETCH comes back without INTERN
 		"the served gap stays deferred under its lease",
 	);
 	assert.deepEqual(recoveredGapIds(r), []);
+});
+
+test("hydration: a NIL part MIME header fails the transfer instead of storing undecoded base64", async () => {
+	const raw = Buffer.from("%PDF-original bytes");
+	const encoded = Buffer.from(raw.toString("base64"));
+	const row = attachmentMessage(10, "a", [encoded.length]);
+	row.internalDate = new Date("2026-05-15T00:00:00.000Z");
+	const m = mailbox([row], 101);
+	let mimeAbsent = false;
+	// imapflow picks the transfer decoder from the part's MIME header, read
+	// in the same FETCH as the first chunk.
+	Object.assign(m.client, {
+		_openDownloads: 0,
+		autoidle() {},
+		log: { warn() {}, error() {} },
+		download: ImapFlow.prototype.download,
+		async fetchOne(
+			_uid: string,
+			query: { bodyStructure?: boolean; bodyParts?: unknown[] },
+		) {
+			if (query.bodyStructure && !query.bodyParts) return row;
+			const request = query.bodyParts?.find(
+				(p): p is { key: string; start: number; maxLength: number } =>
+					typeof p === "object",
+			);
+			assert.ok(request);
+			return {
+				uid: 10,
+				size: 1024,
+				bodyParts: new Map([
+					[
+						request.key,
+						encoded.subarray(request.start, request.start + request.maxLength),
+					],
+					[
+						`${request.key}.mime`,
+						mimeAbsent
+							? null
+							: Buffer.from(
+									"Content-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n\r\n",
+								),
+					],
+				]),
+			};
+		},
+	});
+	const hashes = (r: RunResult) =>
+		events(r, "RECORD")
+			.filter((e) => e.stream === "attachments")
+			.map((e) => (e.data as Loose).content_sha256);
+	const rawSha = createHash("sha256").update(raw).digest("hex");
+	const streams = requested(["attachments"]);
+	const first = await run(m, {}, streams);
+	assert.deepEqual(hashes(first), [rawSha]);
+	// Narrow, then widen again: the catch-up re-reads the stored attachment.
+	const narrowed = await run(
+		m,
+		first.state,
+		new Map([
+			[
+				"attachments",
+				{
+					name: "attachments",
+					time_range: { until: "2026-02-01T00:00:00.000Z" },
+				},
+			],
+		]),
+	);
+	mimeAbsent = true;
+	const undecoded = await run(m, narrowed.state, streams);
+	assert.deepEqual(hashes(undecoded), [], "no base64 text replaces the PDF");
+	const gaps = events(undecoded, "DETAIL_GAP");
+	assert.deepEqual(
+		gaps.map((g) => g.record_key),
+		["a:1"],
+	);
+	mimeAbsent = false;
+	const served = gaps[0] as unknown as DetailGapStartEntry;
+	const repaired = await run(m, undecoded.state, streams, {
+		detailGaps: [{ ...served, status: "pending" }],
+	});
+	assert.deepEqual(hashes(repaired), [rawSha]);
+	assert.equal(
+		(m.client as unknown as { _openDownloads: number })._openDownloads,
+		0,
+	);
 });

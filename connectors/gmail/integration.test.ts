@@ -350,6 +350,8 @@ function makeMsg(
 		envelope,
 		internalDate: new Date("2026-04-20T10:00:05.000Z"),
 		size: 1024,
+		// The requested header fields; an empty block is a known value.
+		headers: Buffer.from(""),
 		// Gmail returns BODYSTRUCTURE whenever it is requested. This default is
 		// an affirmatively bodyless message; without any structure the parts
 		// are unknown and processMessage writes nothing (see processMessage).
@@ -2402,7 +2404,7 @@ test("resolveDeltaCursorAdvance: no skip always advances to the live value and r
 	);
 });
 
-test("resolveDeltaCursorAdvance: a skip holds the prior modseq and climbs the streak while under the limit", () => {
+test("resolveDeltaCursorAdvance: a skip holds the prior modseq and climbs the streak", () => {
 	assert.deepEqual(
 		resolveDeltaCursorAdvance({
 			liveHighestModseq: 500,
@@ -2421,32 +2423,24 @@ test("resolveDeltaCursorAdvance: a skip holds the prior modseq and climbs the st
 			skippedAnyMessage: true,
 		}),
 		{ highestModseq: 400, holdbackRuns: 2 },
-		"second held-back run — still under DELTA_HOLDBACK_RUN_LIMIT (3)",
+		"second held-back run",
 	);
 });
 
-test("resolveDeltaCursorAdvance: a skip that would reach the limit advances anyway and resets the streak", () => {
-	assert.deepEqual(
-		resolveDeltaCursorAdvance({
-			liveHighestModseq: 500,
-			priorHoldbackRuns: 2,
-			priorModseq: 400,
-			skippedAnyMessage: true,
-		}),
-		{ highestModseq: 500, holdbackRuns: 0 },
-		"the third consecutive skip hits the limit — advance, don't stall forever",
-	);
-	// Defensive: even a prior streak already past the limit (e.g. the limit
-	// was lowered, or state was hand-edited) never gets stuck.
-	assert.deepEqual(
-		resolveDeltaCursorAdvance({
-			liveHighestModseq: 500,
-			priorHoldbackRuns: 10,
-			priorModseq: 400,
-			skippedAnyMessage: true,
-		}),
-		{ highestModseq: 500, holdbackRuns: 0 },
-	);
+test("resolveDeltaCursorAdvance: an unowned change holds the prior modseq however long it lasts", () => {
+	// Moving past a change nobody owns loses it for good, so no run count
+	// releases the hold; only the ledger taking the change does.
+	for (const priorHoldbackRuns of [2, 10]) {
+		assert.deepEqual(
+			resolveDeltaCursorAdvance({
+				liveHighestModseq: 500,
+				priorHoldbackRuns,
+				priorModseq: 400,
+				skippedAnyMessage: true,
+			}),
+			{ highestModseq: 400, holdbackRuns: priorHoldbackRuns + 1 },
+		);
+	}
 });
 
 /** `[uid, streams]` for each retry-debt entry in a messages STATE cursor. */

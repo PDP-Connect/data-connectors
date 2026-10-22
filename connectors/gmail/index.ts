@@ -136,12 +136,6 @@ const EMAIL_SPLIT_RE = /^(.*)@([^@]+)$/;
 
 const FETCH_HEADER_BATCH_PROGRESS = 1000;
 const SNIPPET_FETCH_MAX_BYTES = 4096;
-// Bounds runDeltaPass's highest_modseq hold-back (see runAllMailPasses's
-// STATE emission). The cursor is held only for a skipped change the progress
-// ledger could not take as debt; after this many CONSECUTIVE held-back runs
-// the next run advances highest_modseq anyway rather than stall the cursor
-// forever and grow every later run's changedSince set without bound.
-const DELTA_HOLDBACK_RUN_LIMIT = 3;
 const ERROR_MSG_TAIL = 400;
 const DEFAULT_CRED_TIMEOUT_S = 1800;
 const DEFAULT_GMAIL_CONNECTOR_ID = "https://registry.pdpp.dev/connectors/gmail";
@@ -1283,7 +1277,15 @@ async function emitMessageBody(
 type MessageStream = "messages" | "message_bodies" | "attachments";
 export type MessageOutcome = Partial<Record<MessageStream, UidOutcome>>;
 
-type FetchItem = "internalDate" | "envelope" | "bodyStructure" | "threadId";
+type FetchItem =
+	| "internalDate"
+	| "envelope"
+	| "bodyStructure"
+	| "threadId"
+	| "flags"
+	| "labels"
+	| "size"
+	| "headers";
 
 /**
  * The FETCH items each stream's record is built from. This is the one
@@ -1294,10 +1296,26 @@ type FetchItem = "internalDate" | "envelope" | "bodyStructure" | "threadId";
  * the stored row, and the UID stays owed.
  */
 const REQUIRED_FETCH_ITEMS: Record<LedgerStream, readonly FetchItem[]> = {
-	messages: ["internalDate", "envelope", "bodyStructure", "threadId"],
+	messages: [
+		"internalDate",
+		"envelope",
+		"bodyStructure",
+		"threadId",
+		"flags",
+		"labels",
+		"size",
+		"headers",
+	],
 	message_bodies: ["internalDate", "bodyStructure"],
 	attachments: ["internalDate", "bodyStructure"],
-	threads: ["internalDate", "envelope", "bodyStructure", "threadId"],
+	threads: [
+		"internalDate",
+		"envelope",
+		"bodyStructure",
+		"threadId",
+		"flags",
+		"labels",
+	],
 };
 
 function fetchItemAvailable(msg: FetchMessageObject, item: FetchItem): boolean {
@@ -1316,7 +1334,34 @@ function fetchItemAvailable(msg: FetchMessageObject, item: FetchItem): boolean {
 			);
 		case "threadId":
 			return String(msg.threadId ?? "") !== "";
+		// An empty set or an empty header block is a known value.
+		case "flags":
+			return msg.flags instanceof Set;
+		case "labels":
+			return msg.labels instanceof Set;
+		case "size":
+			return typeof msg.size === "number" && Number.isFinite(msg.size);
+		case "headers":
+			return msg.headers instanceof Uint8Array;
 	}
+}
+
+/**
+ * True when `stream`'s requested resources exclude this message. This needs
+ * no FETCH item beyond the message key, so it is decided before any item
+ * is required. An attachment key is `<message key>:<part>`.
+ */
+function resourcesExcludeMessage(
+	requested: ReadonlyMap<string, StreamRequest>,
+	stream: MessageStream,
+	messageKey: string,
+): boolean {
+	const scope = requested.get(stream);
+	const resources = scope ? resourceSet(scope) : null;
+	if (resources === null) return false;
+	if (stream !== "attachments") return !resources.has(messageKey);
+	const prefix = `${messageKey}:`;
+	return ![...resources].some((key) => key.startsWith(prefix));
 }
 
 /**
@@ -1429,16 +1474,20 @@ export async function processMessage(
 		return outcome;
 	}
 
-	// Scope is decided from INTERNALDATE. Without it no stream can tell
-	// whether this UID is in range, so every stream stays owed.
+	// Time scope is decided from INTERNALDATE. Without it a stream cannot
+	// tell whether this UID is in range, so it stays owed, unless its
+	// resources already exclude the message.
 	if (!fetchItemAvailable(msg, "internalDate")) {
-		return Object.assign(
-			outcome,
-			sameOutcome(deps, {
-				kind: "failed",
-				failure: "internaldate_unavailable",
-			}),
-		);
+		const undated = (stream: MessageStream): UidOutcome =>
+			resourcesExcludeMessage(deps.requested, stream, gmMsgid)
+				? { kind: "out_of_scope" }
+				: { kind: "failed", failure: "internaldate_unavailable" };
+		if (deps.wantMessages) outcome.messages = undated("messages");
+		if (deps.wantBodies) outcome.message_bodies = undated("message_bodies");
+		if (deps.requested.has("attachments")) {
+			outcome.attachments = undated("attachments");
+		}
+		return outcome;
 	}
 	const receivedAt = new Date(msg.internalDate as Date | string).toISOString();
 	if (!isInTimeRange(receivedAt, deps.timeRange)) {
@@ -2019,8 +2068,7 @@ function validateExistsTotal(value: unknown): number {
  * Tolerantly parse the prior `all_mail.delta_holdback_runs` counter.
  * Absent (state written before this counter existed), non-number, negative,
  * non-finite, or fractional input all read as 0 — the safe default is "not
- * currently held back," never a crash and never a negative/fractional count
- * that could make the `>= DELTA_HOLDBACK_RUN_LIMIT` comparison misbehave.
+ * currently held back," never a crash and never a negative/fractional count.
  */
 export function parseDeltaHoldbackRuns(value: unknown): number {
 	if (
@@ -2037,22 +2085,16 @@ export function parseDeltaHoldbackRuns(value: unknown): number {
 /**
  * Decide this run's `messages.all_mail.highest_modseq` and
  * `delta_holdback_runs`, given whether `runDeltaPass` left a change behind
- * that the progress ledger could not take as debt.
- * Pure — the bound (`DELTA_HOLDBACK_RUN_LIMIT`) lives here so it has one
- * seam to unit-test independent of a full `runAllMailPasses` + IMAP mock.
+ * that the progress ledger could not take as debt. Pure.
  *
- *   - No skip this run: advance to the live value, counter resets to 0 —
- *     a clean run always clears the streak, matching `runDeltaPass`'s own
- *     "not lossy" framing of `!requested.has("messages")`.
- *   - Skip, and the streak (prior + this run) has not yet reached the
- *     limit: hold `highest_modseq` at `priorModseq`, counter becomes the
- *     new streak length.
- *   - Skip, and the streak WOULD reach the limit: advance to the live
- *     value anyway (the cursor must not stall forever on one persistently-
- *     failing message) and reset the counter to 0 — the still-failing
- *     message's retryable DETAIL_GAP (emitted by `runDeltaPass` itself,
- *     independent of this decision) is what keeps the miss visible in
- *     coverage once the cursor moves past it.
+ *   - Every change has an owner: advance to the live value; the counter
+ *     resets to 0.
+ *   - A change has no owner: hold `highest_modseq` at `priorModseq` for as
+ *     long as that lasts, so the next run's `changedSince` sees the change
+ *     again. There is no run-count limit: moving past an unowned change
+ *     loses it for good. The ledger's debt list is full only while the walk
+ *     is held too, and it drains as retries settle. The counter counts the
+ *     consecutive held runs, for diagnostics only.
  */
 export function resolveDeltaCursorAdvance(args: {
 	liveHighestModseq: number | string | null;
@@ -2063,11 +2105,10 @@ export function resolveDeltaCursorAdvance(args: {
 	if (!args.skippedAnyMessage) {
 		return { highestModseq: args.liveHighestModseq, holdbackRuns: 0 };
 	}
-	const streak = args.priorHoldbackRuns + 1;
-	if (streak >= DELTA_HOLDBACK_RUN_LIMIT) {
-		return { highestModseq: args.liveHighestModseq, holdbackRuns: 0 };
-	}
-	return { highestModseq: args.priorModseq ?? null, holdbackRuns: streak };
+	return {
+		highestModseq: args.priorModseq ?? null,
+		holdbackRuns: args.priorHoldbackRuns + 1,
+	};
 }
 
 /**
@@ -2670,6 +2711,13 @@ export function resolveAttachmentRecoveryPageByteBudget(
 	);
 }
 
+/** The header fields a `messages` record reads; every lane fetches them. */
+const MESSAGE_HEADER_FIELDS = [
+	"list-unsubscribe",
+	"auto-submitted",
+	"references",
+] as const;
+
 const GMAIL_METADATA_FETCH_QUERY: ExtendedFetchQuery = {
 	uid: true,
 	envelope: true,
@@ -2677,7 +2725,7 @@ const GMAIL_METADATA_FETCH_QUERY: ExtendedFetchQuery = {
 	flags: true,
 	size: true,
 	bodyStructure: true,
-	headers: ["list-unsubscribe", "auto-submitted", "references"],
+	headers: [...MESSAGE_HEADER_FIELDS],
 	source: false,
 	labels: true,
 	threadId: true,
@@ -4077,7 +4125,7 @@ export async function fetchAttachmentPart(
 	if (!msg.uid) {
 		throw new Error("attachment download requires IMAP UID");
 	}
-	const transfer = { truncated: false };
+	const transfer = { incomplete: false };
 	const response = (await observePartialFetches(client, transfer).download(
 		String(msg.uid),
 		attachment.part_index,
@@ -4087,7 +4135,7 @@ export async function fetchAttachmentPart(
 	)) as ImapDownloadResponse;
 	return {
 		content: response.content
-			? failTruncatedTransfer(response.content, transfer)
+			? failIncompleteTransfer(response.content, transfer)
 			: response.content,
 		expectedSize: attachment.size_bytes,
 		mimeType: normalizeAttachmentMimeType(
@@ -4097,30 +4145,33 @@ export async function fetchAttachmentPart(
 	};
 }
 
-/** A part transfer ended early: a partial FETCH past offset 0 had no bytes. */
+/** A part transfer lacks evidence: a requested section came back without bytes. */
 export class AttachmentTransferIncompleteError extends Error {
 	constructor() {
 		super(
-			"attachment transfer incomplete: a part chunk came back without bytes",
+			"attachment transfer incomplete: a requested part section came back without bytes",
 		);
 		this.name = "AttachmentTransferIncompleteError";
 	}
 }
 
 /**
- * imapflow's `download` reads a part as a series of partial FETCHes and ends
- * the stream at the first answer that carries no bytes. A NIL chunk past the
- * first one therefore looks like the end of a shorter file. A server that has
- * reached the end returns an empty string instead (RFC 3501 §6.4.5).
+ * imapflow's `download` reads a part as a series of partial FETCHes, with the
+ * part's MIME header in the first one. It ends the stream at the first chunk
+ * that carries no bytes, so a NIL chunk past the first one looks like the end
+ * of a shorter file; and it picks the transfer decoder from the MIME header,
+ * so a NIL header leaves base64 or quoted-printable bytes undecoded. A server
+ * that has reached the end of a part returns an empty string instead
+ * (RFC 3501 §6.4.5), and an empty header block is also a known value.
  *
  * This view of `client` runs `download` with itself as `this`, so each
- * partial answer passes through `fetchOne` here: a part request past offset
- * 0 answered without bytes marks the transfer truncated. Every other member
+ * partial answer passes through `fetchOne` here: any requested section
+ * answered without bytes marks the transfer incomplete. Every other member
  * reads and writes the client itself.
  */
 function observePartialFetches<T extends object>(
 	client: T,
-	transfer: { truncated: boolean },
+	transfer: { incomplete: boolean },
 ): T {
 	return new Proxy(client, {
 		get(target, prop) {
@@ -4132,20 +4183,21 @@ function observePartialFetches<T extends object>(
 					options: unknown,
 				) => {
 					const answer = (await value.call(target, range, query, options)) as
-						| { bodyParts?: Map<string, unknown> }
+						| { bodyParts?: Map<string, unknown>; headers?: unknown }
 						| false
 						| undefined;
 					for (const request of query?.bodyParts ?? []) {
-						if (typeof request !== "object" || request === null) continue;
-						const { key, start } = request as {
-							key?: unknown;
-							start?: unknown;
-						};
-						if (!(typeof start === "number" && start > 0)) continue;
-						const chunk = answer
-							? answer.bodyParts?.get(String(key))
-							: undefined;
-						if (!(chunk instanceof Uint8Array)) transfer.truncated = true;
+						const key =
+							typeof request === "string"
+								? request
+								: String((request as { key?: unknown } | null)?.key);
+						// imapflow files BODY[HEADER] under `headers`, not `bodyParts`.
+						const section = !answer
+							? undefined
+							: key === "header"
+								? answer.headers
+								: answer.bodyParts?.get(key);
+						if (!(section instanceof Uint8Array)) transfer.incomplete = true;
 					}
 					return answer;
 				};
@@ -4160,13 +4212,13 @@ function observePartialFetches<T extends object>(
 	});
 }
 
-/** Pass `content` through, then fail if its transfer was truncated. */
-async function* failTruncatedTransfer(
+/** Pass `content` through, then fail if its transfer was incomplete. */
+async function* failIncompleteTransfer(
 	content: AsyncIterable<Buffer | Uint8Array | string>,
-	transfer: { readonly truncated: boolean },
+	transfer: { readonly incomplete: boolean },
 ): AsyncIterable<Buffer | Uint8Array | string> {
 	yield* content;
-	if (transfer.truncated) throw new AttachmentTransferIncompleteError();
+	if (transfer.incomplete) throw new AttachmentTransferIncompleteError();
 }
 
 function buildRuntimeBlobUploader(): ReferenceBlobUploadFn {
@@ -4257,9 +4309,8 @@ export function validateAttachmentHydrationPreflight(args: {
  * `owe`, which hands it to the progress ledger as `messages` retry debt. The
  * debt retry rewrites the whole row from a fresh FETCH. `skippedAnyMessage`
  * tells the caller a change was left behind; the caller holds the cursor at
- * its prior value only when the ledger could not take the change (its debt
- * list is full), and that hold-back is bounded (`resolveDeltaCursorAdvance`,
- * `DELTA_HOLDBACK_RUN_LIMIT`).
+ * its prior value while the ledger cannot take the change (its debt list is
+ * full); see `resolveDeltaCursorAdvance`.
  *
  * The one skip that does NOT set it is `!requested.has("messages")`: that is
  * not a failure to cover a change, it's "this run was never asked to collect
@@ -4310,6 +4361,7 @@ export async function runDeltaPass(
 		internalDate: true,
 		size: true,
 		bodyStructure: true,
+		headers: [...MESSAGE_HEADER_FIELDS],
 	};
 	// Phase A: drain the delta FETCH completely before issuing any other IMAP
 	// command. Phase B: fetch snippets and emit.
@@ -4344,15 +4396,19 @@ export async function runDeltaPass(
 		if (!String(msg.emailId ?? "")) {
 			continue;
 		}
-		// Without INTERNALDATE the change's scope is unknown, so it is owed.
+		// A change whose resources exclude it is not this run's to collect.
+		if (resourcesExcludeMessage(requested, "messages", String(msg.emailId))) {
+			continue;
+		}
+		// Without INTERNALDATE the change's time scope is unknown: it is owed.
 		if (!fetchItemAvailable(msg, "internalDate")) {
 			skippedAnyMessage = true;
 			owe(msg.uid, "internaldate_unavailable");
 			continue;
 		}
-		// Admission comes first, before any other failure is classified or any
-		// body I/O happens: a change outside the stream's scope is not this
-		// run's to collect, and it must not spend the hold-back budget below.
+		// Admission comes before any other failure is classified or any body
+		// I/O happens: a change outside the stream's scope is not this run's
+		// to collect, and it must not become debt.
 		if (
 			!messageInStreamScope(
 				requested,
@@ -5161,8 +5217,8 @@ export async function runAllMailPasses(
 
 	// Advancing to the mailbox's CURRENT highestModseq is only correct when
 	// every change since `priorModseq` was applied or is owed by the ledger.
-	// A change the ledger could not take (its debt is full) holds the cursor;
-	// the bound on that hold-back lives in `resolveDeltaCursorAdvance`.
+	// A change the ledger could not take (its debt is full) holds the cursor
+	// (`resolveDeltaCursorAdvance`).
 	const { highestModseq: nextHighestModseq, holdbackRuns: nextHoldbackRuns } =
 		resolveDeltaCursorAdvance({
 			liveHighestModseq: session.highestModseqCursor ?? null,
