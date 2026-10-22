@@ -58,7 +58,15 @@ import { createHash } from "node:crypto";
 import { createReadStream, type Dirent, type Stats, statSync } from "node:fs";
 import { lstat, readdir, readlink, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import {
+	basename,
+	dirname,
+	isAbsolute,
+	join,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -1678,7 +1686,11 @@ interface ScanRolloutsResult {
 	messagesEmitted: number;
 	messagesExamined: number;
 	parsedFiles: number;
-	scanOutcome: "complete" | "unreadable" | "parse_error";
+	/**
+	 * `missing` means no rollout root exists, so nothing was enumerated. That is
+	 * not a complete scan: an absent source proves no emptiness.
+	 */
+	scanOutcome: "complete" | "missing" | "unreadable" | "parse_error";
 }
 
 /** Carry a file's prior cursor forward verbatim into the next STATE, and keep
@@ -1711,14 +1723,15 @@ async function reportMissingSessionsBase(
 		message: "Codex sessions folder not found or not readable",
 	});
 	await waitForEmitDrain();
-	// If we caught an error, it's unreadable; if not, ENOENT = complete
+	// If we caught an error, it's unreadable; if not, no root exists (ENOENT).
+	// Neither is a complete scan.
 	return {
 		parsedFiles: 0,
 		messagesEmitted: 0,
 		messagesExamined: 0,
 		functionCallsEmitted: 0,
 		functionCallsExamined: 0,
-		scanOutcome: scanOutcomeOnBaseError || "complete",
+		scanOutcome: scanOutcomeOnBaseError ?? "missing",
 	};
 }
 
@@ -2474,6 +2487,29 @@ function resolveCodexDirs(): CodexDirs {
 	};
 }
 
+/**
+ * The known stores at the paths this run reads. An env override moves a store
+ * away from its default path, and a coverage verdict has to describe the path
+ * that was read, not a default path beside it: the default may exist while the
+ * override does not, and an absent store proves no emptiness.
+ */
+function storesAtReadPaths(dirs: CodexDirs): KnownLocalStore[] {
+	const readPaths: Record<string, string> = {
+		prompts: dirs.promptsDir,
+		rules: dirs.rulesDir,
+		sessions: dirs.baseDir,
+		sessions_archive: dirs.archiveBaseDir,
+		skills: dirs.skillsDir,
+		state_db: dirs.stateDbPath,
+	};
+	return CODEX_KNOWN_LOCAL_STORES.map((store) => {
+		const readPath = readPaths[store.store];
+		return readPath === undefined
+			? store
+			: { ...store, relativePath: relative(dirs.codexHome, readPath) };
+	});
+}
+
 function readFileMtimes(startMsg: StartMessage): Record<string, number> {
 	const state = startMsg.state || {};
 	// STATE is stream-keyed per Collection Profile: `state` is
@@ -3129,7 +3165,7 @@ async function collect({
 	const inventory = await buildLocalSourceInventory(
 		"codex",
 		dirs.codexHome,
-		CODEX_KNOWN_LOCAL_STORES,
+		storesAtReadPaths(dirs),
 	);
 	await emit({
 		type: "PROGRESS",
@@ -3305,10 +3341,18 @@ async function collect({
 			runCoverage?.report(
 				stream,
 				store,
-				rolloutScan.scanOutcome === "complete" ? "collected" : "failed",
+				rolloutScan.scanOutcome === "complete"
+					? "collected"
+					: rolloutScan.scanOutcome === "missing"
+						? "unavailable"
+						: "failed",
 			);
 	}
-	if (requested.has("sessions") && rolloutScan.scanOutcome !== "complete") {
+	if (
+		requested.has("sessions") &&
+		rolloutScan.scanOutcome !== "complete" &&
+		rolloutScan.scanOutcome !== "missing"
+	) {
 		for (const store of ["sessions", "sessions_archive"] as const) {
 			if (
 				inventory.coverage.some(

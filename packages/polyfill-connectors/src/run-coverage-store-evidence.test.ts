@@ -292,6 +292,45 @@ async function writeClaudeTranscript(
 	return path;
 }
 
+const CODEX_SESSION = "019d922d-c38b-7e11-ae99-9187af386148";
+// A rollout written moments ago counts as still being written and is deferred.
+const CODEX_QUIET_OFF = { PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS: "0" } as const;
+
+function codexRollout(sessionId: string): string {
+	const lines = [
+		{
+			payload: {
+				cwd: "/repo",
+				id: sessionId,
+				originator: "codex-tui",
+				timestamp: "2026-04-15T17:33:32.000Z",
+			},
+			timestamp: "2026-04-15T17:33:32.000Z",
+			type: "session_meta",
+		},
+		{
+			payload: { content: [{ text: "hello" }], role: "user", type: "message" },
+			timestamp: "2026-04-15T17:34:00.000Z",
+			type: "response_item",
+		},
+	];
+	return `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`;
+}
+
+/** The rollout path for one day, with its parent directories created. */
+async function codexRolloutPath(
+	sessionsRoot: string,
+	day: readonly [string, string, string],
+	sessionId = CODEX_SESSION,
+): Promise<string> {
+	const directory = join(sessionsRoot, ...day);
+	await mkdir(directory, { recursive: true });
+	return join(
+		directory,
+		`rollout-${day.join("-")}T12-00-00-${sessionId}.jsonl`,
+	);
+}
+
 /** A corpus the connector can read, and a stream it declares an inventory for. */
 interface Corpus {
 	env: Record<string, string>;
@@ -506,6 +545,99 @@ test("claude_code does not claim a project, skills or commands store that is abs
 				assertUnavailable(run, stream, store, /missing or unreadable/);
 			}
 		}
+	});
+});
+
+// The stores a Codex home can hold, by the stream that reports each one.
+const CODEX_STORES: readonly (readonly [stream: string, store: string])[] = [
+	["sessions", "sessions"],
+	["sessions", "sessions_archive"],
+	["sessions", "state_db"],
+	["messages", "derived_messages"],
+	["function_calls", "derived_function_calls"],
+	["rules", "rules"],
+	["prompts", "prompts"],
+	["skills", "skills"],
+	["history", "history"],
+	["session_index", "session_index"],
+	["shell_snapshots", "shell_snapshots"],
+	["config_inventory", "config"],
+	["cache_inventory", "cache"],
+];
+
+function codexStreams(): StreamRequest[] {
+	return [...new Set(CODEX_STORES.map(([stream]) => stream))].map((name) => ({
+		name,
+	}));
+}
+
+test("codex reports every absent store as unavailable, derived message stores included", async () => {
+	await withHome(async (home) => {
+		const run = await drive({
+			connector: "codex",
+			env: { CODEX_HOME: home, ...CODEX_QUIET_OFF },
+			home,
+			streams: codexStreams(),
+		});
+		assert.equal(run.status, "succeeded");
+		for (const [stream, store] of CODEX_STORES) {
+			assertUnavailable(run, stream, store);
+		}
+	});
+});
+
+test("codex reports the override path it reads, not the default path beside it", async () => {
+	await withHome(async (home) => {
+		// Every default store exists, but each override points at a path that does not.
+		for (const directory of [
+			"prompts",
+			"rules",
+			"sessions",
+			"sessions-archive",
+			"skills",
+		]) {
+			await mkdir(join(home, directory));
+		}
+		await writeFile(join(home, "state_5.sqlite"), "not read: overridden");
+		const absent = join(home, "absent");
+		const run = await drive({
+			connector: "codex",
+			env: {
+				CODEX_HOME: home,
+				CODEX_PROMPTS_DIR: join(absent, "prompts"),
+				CODEX_RULES_DIR: join(absent, "rules"),
+				CODEX_SESSIONS_ARCHIVE_DIR: join(absent, "sessions-archive"),
+				CODEX_SESSIONS_DIR: join(absent, "sessions"),
+				CODEX_SKILLS_DIR: join(absent, "skills"),
+				CODEX_STATE_DB: join(absent, "state_5.sqlite"),
+				...CODEX_QUIET_OFF,
+			},
+			home,
+			streams: ["sessions", "messages", "rules", "prompts", "skills"].map(
+				(name) => ({ name }),
+			),
+		});
+		assert.equal(run.status, "succeeded");
+		for (const [stream, store] of CODEX_STORES) {
+			if (run.coverage?.streams.some((entry) => entry.stream === stream)) {
+				assertUnavailable(run, stream, store);
+			}
+		}
+	});
+});
+
+test("codex reports an override path that holds data as collected, though the default path is absent", async () => {
+	await withHome(async (home) => {
+		const rules = join(home, "elsewhere", "rules");
+		await mkdir(rules, { recursive: true });
+		await writeFile(join(rules, "default.rules"), "allow x\n");
+		const run = await drive({
+			connector: "codex",
+			env: { CODEX_HOME: home, CODEX_RULES_DIR: rules },
+			home,
+			streams: [{ name: "rules" }],
+		});
+		assert.equal(storeStatus(run, "rules", "rules"), "collected");
 	});
 });
 
@@ -817,5 +949,99 @@ test("claude_code claims nothing when a single-file store is malformed or is not
 			streams: [{ name: "file_history" }],
 		});
 		assertIncomplete(history, "file_history", "file_history", /ENOTDIR/);
+	});
+});
+
+test("codex reports the stores derived from a rollout it cannot read as failed", async () => {
+	await withHome(async (home) => {
+		const sessions = join(home, "sessions");
+		const rollout = await codexRolloutPath(sessions, ["2026", "04", "15"]);
+		const streams = ["sessions", "messages", "function_calls"].map((name) => ({
+			name,
+		}));
+		const env = { CODEX_HOME: home, ...CODEX_QUIET_OFF };
+		await writeFile(rollout, codexRollout(CODEX_SESSION));
+		const control = await drive({ connector: "codex", env, home, streams });
+		assert.equal(
+			storeStatus(control, "messages", "derived_messages"),
+			"collected",
+			"control: a readable rollout must be collected, or the failure proves nothing",
+		);
+
+		// A directory where the rollout file belongs cannot be read as a file.
+		await rm(rollout);
+		await mkdir(rollout);
+		const unreadable = await drive({ connector: "codex", env, home, streams });
+		// A rollout whose second line is not JSON is read in part.
+		await rm(rollout, { recursive: true });
+		await writeFile(rollout, `${codexRollout(CODEX_SESSION)}{broken json}\n`);
+		const malformed = await drive({ connector: "codex", env, home, streams });
+		for (const run of [unreadable, malformed]) {
+			assert.equal(storeStatus(run, "sessions", "sessions"), "failed");
+			assert.equal(storeStatus(run, "messages", "derived_messages"), "failed");
+			assert.equal(
+				storeStatus(run, "function_calls", "derived_function_calls"),
+				"failed",
+			);
+		}
+	});
+});
+
+test("codex reports the stores derived from a link it will not follow as failed", async () => {
+	await withHome(async (home) => {
+		const target = join(home, "elsewhere");
+		await writeFile(
+			await codexRolloutPath(target, ["2026", "04", "15"]),
+			codexRollout(CODEX_SESSION),
+		);
+		await symlink(target, join(home, "sessions"));
+		const run = await drive({
+			connector: "codex",
+			env: { CODEX_HOME: home, ...CODEX_QUIET_OFF },
+			home,
+			streams: ["sessions", "messages", "function_calls"].map((name) => ({
+				name,
+			})),
+		});
+		assertIncomplete(run, "sessions", "sessions");
+		assertIncomplete(run, "messages", "derived_messages");
+		assertIncomplete(run, "function_calls", "derived_function_calls");
+	});
+});
+
+test("codex reports a state database it cannot open as failed", async () => {
+	await withHome(async (home) => {
+		await mkdir(join(home, "sessions"));
+		await writeFile(join(home, "state_5.sqlite"), "not a sqlite database");
+		const run = await drive({
+			connector: "codex",
+			env: { CODEX_HOME: home, ...CODEX_QUIET_OFF },
+			home,
+			streams: [{ name: "sessions" }],
+		});
+		assert.equal(storeStatus(run, "sessions", "state_db"), "failed");
+	});
+});
+
+test("codex claims nothing when a user-authored source cannot be read", async () => {
+	await withHome(async (home) => {
+		// A directory where a rules or prompts file belongs, or where a skill's
+		// SKILL.md belongs, cannot be read as a file.
+		await mkdir(join(home, "rules", "bad.rules"), { recursive: true });
+		await mkdir(join(home, "prompts", "bad.md"), { recursive: true });
+		await mkdir(join(home, "skills", "bad", "SKILL.md"), { recursive: true });
+		for (const [stream, store] of [
+			["rules", "rules"],
+			["prompts", "prompts"],
+			["skills", "skills"],
+		] as const) {
+			const run = await drive({
+				connector: "codex",
+				env: { CODEX_HOME: home },
+				home,
+				streams: [{ name: stream }],
+			});
+			assertIncomplete(run, stream, store, /could not be read/);
+		}
 	});
 });
