@@ -811,13 +811,15 @@ test("review 3: a collection's videos page to hasMore:false; a repeated cursor i
 		calls
 			.filter((c) => c.params.collectionId === COLLECTION_A)
 			.map((c) => c.params.cursor),
-		["0", "c1"],
+		// A multi-page list is read twice and kept once both reads agree.
+		["0", "c1", "0", "c1"],
 	);
 	assert.deepEqual(
 		h.records
 			.filter((r) => r.stream === "collection_items")
 			.map((r) => r.data.video_id),
-		["300001", "300002", "300009", "300001", "300002"],
+		// Nothing of the gapped collection is emitted.
+		["300001", "300002", "300009"],
 	);
 	const gap = asRecord(h.messages.find((m) => m.type === "DETAIL_GAP"));
 	assert.equal(gap.record_key, COLLECTION_B);
@@ -909,6 +911,7 @@ test("review 3: a recovery-only run retries just the gapped collection", async (
 		calls.map((c) => [c.path, c.params.collectionId ?? null]),
 		[
 			["/passport/account/info/v2/", null],
+			["/api/user/collection_list/", null],
 			["/api/collection/item_list/", COLLECTION_B],
 		],
 	);
@@ -917,10 +920,21 @@ test("review 3: a recovery-only run retries just the gapped collection", async (
 	);
 	assert.deepEqual(coverage.required_keys, [COLLECTION_B]);
 	assert.deepEqual(coverage.hydrated_keys, [COLLECTION_B]);
-	assert.equal(
-		h.records.every((r) => r.stream === "collection_items"),
-		true,
+	// review 4 #1: the recovered collection's parent comes before its videos.
+	assert.deepEqual(
+		h.records.map((r) => [r.stream, r.data.id]),
+		[
+			["favorite_collections", COLLECTION_B],
+			["collection_items", `${COLLECTION_B}:300001`],
+			["collection_items", `${COLLECTION_B}:300002`],
+		],
 	);
+	// review 4 #3: the retried gap is acknowledged.
+	const recovered = asRecord(
+		h.messages.find((m) => m.type === "DETAIL_GAP_RECOVERED"),
+	);
+	assert.equal(recovered.gap_id, "g1");
+	assert.equal(recovered.record_key, COLLECTION_B);
 });
 
 test("live shape (before any collection): total 1 without a list key reads as no collections", async () => {
@@ -1152,4 +1166,204 @@ test("live run: a collection counting more videos than it lists (hasMore:false) 
 		h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
 	);
 	assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A, COLLECTION_B]);
+});
+
+// ─── review round 4 ──────────────────────────────────────────────────────
+
+const pendingGap = (gapId: string, collectionId: string, leaseId?: string) => ({
+	gap_id: gapId,
+	status: "pending" as const,
+	stream: "collection_items",
+	parent_stream: "favorite_collections",
+	record_key: collectionId,
+	...(leaseId ? { lease_id: leaseId } : {}),
+	detail_locator: {
+		kind: "tiktok.collection",
+		collection_id: collectionId,
+		name: "Synthetic",
+		user_name: "synthetic_owner",
+	},
+});
+
+test("review 4 #1: collection_items without favorite_collections emits no child and fails visibly", async () => {
+	for (const recoveryOnly of [false, true]) {
+		const { calls, page } = fakePage(standardAnswer);
+		const h = harness(
+			["collection_items"],
+			page,
+			{},
+			{
+				recoveryOnly,
+				detailGaps: [pendingGap("g1", COLLECTION_A)],
+			},
+		);
+		await collectTikTok(h.ctx, noDelay);
+		assert.equal(h.records.length, 0, String(recoveryOnly));
+		assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+		assert.equal(
+			h.messages.some((m) => m.type === "STATE"),
+			false,
+		);
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["collection_items"],
+		);
+		assert.match(
+			h.failures[0]?.message ?? "",
+			/^tiktok_parent_stream_required/,
+		);
+		assert.equal(
+			calls.some((c) => c.path.includes("collection")),
+			false,
+		);
+	}
+});
+
+test("review 4 #2: an unsafe collection name stops both streams before any child or coverage", async () => {
+	const { calls, page } = fakePage((call) =>
+		call.path === "/api/user/collection_list/"
+			? ok({
+					...COLLECTIONS,
+					collectionList: (COLLECTIONS.collectionList as Json[]).map((c, i) =>
+						i === 1 ? { ...c, name: "bad\u0000name" } : c,
+					),
+				})
+			: standardAnswer(call),
+	);
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.equal(h.records.length, 0);
+	assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+	assert.equal(
+		h.messages.some((m) => m.type === "STATE"),
+		false,
+	);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		BOTH,
+	);
+	assert.equal(
+		calls.some((c) => c.path === "/api/collection/item_list/"),
+		false,
+	);
+});
+
+test("review 4 #3: an ordinary run acknowledges recovered gaps, re-gaps failing ones and settles deleted ones", async () => {
+	const looping = { ...COLLECTION_ITEMS, hasMore: true, cursor: "0" };
+	const { page } = fakePage((call) =>
+		call.path === "/api/collection/item_list/" &&
+		call.params.collectionId === COLLECTION_B
+			? ok(looping)
+			: standardAnswer(call),
+	);
+	const h = harness(
+		BOTH,
+		page,
+		{},
+		{
+			detailGaps: [
+				pendingGap("gA", COLLECTION_A, "lease-a"),
+				pendingGap("gB", COLLECTION_B),
+				pendingGap("gGone", "7400000000000000099"),
+			],
+		},
+	);
+	await collectTikTok(h.ctx, noDelay);
+	const recovered = h.messages
+		.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+		.map((m) => asRecord(m));
+	assert.deepEqual(
+		recovered.map((m) => [m.gap_id, m.record_key, m.lease_id ?? null]),
+		[
+			["gA", COLLECTION_A, "lease-a"],
+			["gGone", "7400000000000000099", null],
+		],
+	);
+	const gaps = h.messages
+		.filter((m) => m.type === "DETAIL_GAP")
+		.map((m) => asRecord(m));
+	assert.deepEqual(
+		gaps.map((g) => g.record_key),
+		[COLLECTION_B],
+	);
+	const coverageAt = typeIndex(h, "DETAIL_COVERAGE");
+	assert.ok(typeIndex(h, "DETAIL_GAP_RECOVERED") < coverageAt);
+	const lastRecordA = h.messages.findLastIndex(
+		(m) =>
+			m.type === "RECORD" &&
+			"data" in m &&
+			asRecord(m.data).collection_id === COLLECTION_A,
+	);
+	assert.ok(lastRecordA < typeIndex(h, "DETAIL_GAP_RECOVERED"));
+});
+
+test("review 4 #4: a multi-page collection list is re-read until two reads agree", async () => {
+	const [first, second] = COLLECTIONS.collectionList as Json[];
+	const third = {
+		...(first as Json),
+		collectionId: "7400000000000000003",
+		name: "Synthetic third",
+	};
+	// Read 1: the offset page repeats `first` (the list moved) and misses `third`.
+	// Reads 2 and 3: the settled list.
+	const answers: Record<string, Json[]> = {
+		"1:0": [first as Json, second as Json],
+		"1:2": [second as Json],
+		"2:0": [third, first as Json],
+		"2:2": [second as Json],
+		"3:0": [third, first as Json],
+		"3:2": [second as Json],
+	};
+	let read = 0;
+	const { calls, page } = fakePage((call) => {
+		if (call.path !== "/api/user/collection_list/") return standardAnswer(call);
+		if (call.params.cursor === "0") read += 1;
+		const list = answers[`${read}:${call.params.cursor}`] ?? [];
+		const more = call.params.cursor === "0";
+		return ok({
+			...COLLECTIONS,
+			collectionList: list,
+			hasMore: more,
+			cursor: more ? "2" : "3",
+		});
+	});
+	const h = harness(["favorite_collections"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.equal(
+		calls.filter((c) => c.path === "/api/user/collection_list/").length,
+		6,
+	);
+	assert.deepEqual(
+		h.records.map((r) => r.data.id).sort(),
+		[COLLECTION_A, COLLECTION_B, "7400000000000000003"].sort(),
+	);
+});
+
+test("review 4 #4: a list that never reads the same twice fails without STATE", async () => {
+	const [first] = COLLECTIONS.collectionList as Json[];
+	let read = 0;
+	const { page } = fakePage((call) => {
+		if (call.path !== "/api/user/collection_list/") return standardAnswer(call);
+		if (call.params.cursor === "0") read += 1;
+		const more = call.params.cursor === "0";
+		const entry = {
+			...(first as Json),
+			collectionId: `74000000000000001${read}${more ? 0 : 1}`,
+		};
+		return ok({
+			...COLLECTIONS,
+			collectionList: [entry],
+			hasMore: more,
+			cursor: more ? "1" : "2",
+		});
+	});
+	const h = harness(["favorite_collections"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.match(h.failures[0]?.message ?? "", /changed on every read/);
+	assert.equal(
+		h.messages.some((m) => m.type === "STATE"),
+		false,
+	);
+	assert.equal(h.records.length, 0);
 });
