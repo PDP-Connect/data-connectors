@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { resourceSet } from "@pdpp/connector-protocol";
 import type { FetchMessageObject, ListResponse } from "imapflow";
+import { ImapFlow } from "imapflow";
 import type { DetailGapStartEntry } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type EmitRecordFn,
@@ -834,4 +835,126 @@ test("a lowered size cap never overwrites a stored hydrated part with too_large"
 			delete process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
 		else process.env.PDPP_GMAIL_MAX_ATTACHMENT_BYTES = savedCap;
 	}
+});
+
+test("hydration: a NIL part chunk after the first fails the transfer and keeps the stored attachment", async () => {
+	const CHUNK = 64 * 1024; // imapflow's default download chunk
+	const row = attachmentMessage(10, "a", [CHUNK + 10]);
+	const node = row.bodyStructure?.childNodes?.[0];
+	assert.ok(node);
+	node.encoding = "binary";
+	row.internalDate = new Date("2026-05-15T00:00:00.000Z");
+	const bytes = Buffer.concat([Buffer.alloc(CHUNK, 65), Buffer.alloc(10, 66)]);
+	const m = mailbox([row], 101);
+	let nilAfterFirstChunk = false;
+	// Production `download` is `ImapFlow.prototype.download`: it reads the
+	// part through the client's own `fetchOne`, one partial FETCH per chunk.
+	Object.assign(m.client, {
+		_openDownloads: 0,
+		autoidle() {},
+		log: { warn() {}, error() {} },
+		download: ImapFlow.prototype.download,
+		async fetchOne(
+			_uid: string,
+			query: { bodyStructure?: boolean; bodyParts?: unknown[] },
+		) {
+			if (query.bodyStructure && !query.bodyParts) return row;
+			const request = query.bodyParts?.find(
+				(p): p is { key: string; start: number; maxLength: number } =>
+					typeof p === "object",
+			);
+			assert.ok(request);
+			const chunk =
+				nilAfterFirstChunk && request.start > 0
+					? null
+					: bytes.subarray(request.start, request.start + request.maxLength);
+			return {
+				uid: 10,
+				size: 70_000,
+				bodyParts: new Map([
+					[request.key, chunk],
+					[
+						`${request.key}.mime`,
+						Buffer.from(
+							"Content-Type: application/pdf\r\nContent-Transfer-Encoding: binary\r\n\r\n",
+						),
+					],
+				]),
+			};
+		},
+	});
+	const sizes = (r: RunResult) =>
+		events(r, "RECORD")
+			.filter((e) => e.stream === "attachments")
+			.map((e) => (e.data as Loose).size_bytes);
+	const streams = requested(["attachments"]);
+	const first = await run(m, {}, streams);
+	assert.deepEqual(sizes(first), [CHUNK + 10]);
+	// Narrow, then widen again: the catch-up re-reads the stored attachment.
+	const narrowed = await run(
+		m,
+		first.state,
+		new Map([
+			[
+				"attachments",
+				{
+					name: "attachments",
+					time_range: { until: "2026-02-01T00:00:00.000Z" },
+				},
+			],
+		]),
+	);
+	nilAfterFirstChunk = true;
+	const truncated = await run(m, narrowed.state, streams);
+	assert.deepEqual(
+		sizes(truncated),
+		[],
+		"no short file replaces the stored one",
+	);
+	// A failed part is held by its retry gap; the runtime serves it back.
+	const gaps = events(truncated, "DETAIL_GAP");
+	assert.deepEqual(
+		gaps.map((g) => g.record_key),
+		["a:1"],
+	);
+	nilAfterFirstChunk = false;
+	const served = gaps[0] as unknown as DetailGapStartEntry;
+	const repaired = await run(m, truncated.state, streams, {
+		detailGaps: [{ ...served, status: "pending" }],
+	});
+	assert.deepEqual(sizes(repaired), [CHUNK + 10]);
+	assert.deepEqual(recoveredGapIds(repaired), [served.gap_id]);
+});
+
+test("served recovery defers a gap whose message FETCH comes back without INTERNALDATE", async () => {
+	const { internalDate: _d, ...bare } = attachmentMessage(10, "a", [16]);
+	const m = mailbox([bare as FetchMessageObject], 101);
+	const served = servedGap({
+		gapId: "gap-undated",
+		messageId: "a",
+		partIndex: 1,
+		leaseId: "lease-undated",
+	});
+	const r = await run(m, {}, requested(["attachments"]), {
+		detailGaps: [served],
+		recoveryOnly: true,
+	});
+	assert.deepEqual(
+		recordKeys(r, "attachments"),
+		[],
+		"no record with an invented date",
+	);
+	assert.deepEqual(
+		m.downloads,
+		[],
+		"nothing is downloaded for an unplaced part",
+	);
+	assert.deepEqual(
+		events(r, "DETAIL_GAP")
+			.filter((e) => e.gap_id === served.gap_id)
+			.map((e) => (e.last_error as Loose | undefined)?.class),
+		["internaldate_unavailable"],
+		"the served gap stays deferred under its lease",
+	);
+	assert.deepEqual(recoveredGapIds(r), []);
 });

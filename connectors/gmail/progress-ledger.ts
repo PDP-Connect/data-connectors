@@ -141,6 +141,8 @@ export interface LedgerCommit {
 	attachmentsInventoryComplete: boolean;
 	/** UIDs whose failure could not be recorded because the debt list is full. */
 	unaccounted: number[];
+	/** Every change reported through `oweChange` has a durable owner. */
+	changesOwed: boolean;
 }
 
 export interface LegacyCursors {
@@ -457,6 +459,7 @@ export class GmailProgressLedger {
 	private readonly timeRanges: Partial<Record<LedgerStream, TimeBand>>;
 	private readonly windowUids: number;
 	private readonly catchupPlans = new Map<LedgerStream, CatchupPlan>();
+	private readonly owedChanges = new Map<number, Map<LedgerStream, string>>();
 
 	constructor(input: LedgerOpenInput) {
 		if (!integer(input.uidvalidity, 1) || !integer(input.uidnext, 1)) {
@@ -777,6 +780,19 @@ export class GmailProgressLedger {
 		}
 	}
 
+	/**
+	 * Owe a change to `uid` that a pass outside the walk saw but could not
+	 * apply, such as a label change whose FETCH was incomplete. A UID the
+	 * stream has already walked becomes retry debt at commit; a UID it has
+	 * not walked yet is still owed by its lane.
+	 */
+	oweChange(uid: number, stream: LedgerStream, failure: string): void {
+		if (!integer(uid, 1)) throw new Error("gmail_progress_invalid_uid");
+		const owed = this.owedChanges.get(uid) ?? new Map<LedgerStream, string>();
+		owed.set(stream, failure);
+		this.owedChanges.set(uid, owed);
+	}
+
 	commit(now: string): LedgerCommit {
 		const streams = structuredClone(this.streams);
 		const coverage: Partial<Record<LedgerStream, StreamCoverage>> = {};
@@ -886,6 +902,19 @@ export class GmailProgressLedger {
 			}
 			coverage[stream] = counts;
 		}
+		let changesOwed = true;
+		for (const [uid, owed] of this.owedChanges) {
+			for (const [stream, failure] of owed) {
+				const s = streams[stream];
+				if (!(s && this.requested.has(stream))) {
+					changesOwed = false;
+					continue;
+				}
+				const walked =
+					uid <= s.through || (uid >= s.coveredFrom && uid < s.next);
+				if (walked && !addDebt(uid, stream, failure)) changesOwed = false;
+			}
+		}
 		const debt = [...queue.values(), ...fresh.values(), ...tail.values()];
 
 		const state: GmailProgressState = {
@@ -927,6 +956,7 @@ export class GmailProgressLedger {
 				!(streams.attachments?.shortfall ?? 0) &&
 				!debt.some((d) => d.streams.includes("attachments")),
 			unaccounted: [...unaccounted].sort((a, b) => a - b),
+			changesOwed,
 		};
 	}
 

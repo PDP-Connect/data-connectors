@@ -137,11 +137,10 @@ const EMAIL_SPLIT_RE = /^(.*)@([^@]+)$/;
 const FETCH_HEADER_BATCH_PROGRESS = 1000;
 const SNIPPET_FETCH_MAX_BYTES = 4096;
 // Bounds runDeltaPass's highest_modseq hold-back (see runAllMailPasses's
-// STATE emission): after this many CONSECUTIVE runs held back because of a
-// skipped delta message, the next run advances highest_modseq anyway rather
-// than letting one persistently-failing message (malformed MIME, a message
-// the server always errors on) stall the cursor forever and grow every
-// later run's changedSince set without bound.
+// STATE emission). The cursor is held only for a skipped change the progress
+// ledger could not take as debt; after this many CONSECUTIVE held-back runs
+// the next run advances highest_modseq anyway rather than stall the cursor
+// forever and grow every later run's changedSince set without bound.
 const DELTA_HOLDBACK_RUN_LIMIT = 3;
 const ERROR_MSG_TAIL = 400;
 const DEFAULT_CRED_TIMEOUT_S = 1800;
@@ -1284,6 +1283,56 @@ async function emitMessageBody(
 type MessageStream = "messages" | "message_bodies" | "attachments";
 export type MessageOutcome = Partial<Record<MessageStream, UidOutcome>>;
 
+type FetchItem = "internalDate" | "envelope" | "bodyStructure" | "threadId";
+
+/**
+ * The FETCH items each stream's record is built from. This is the one
+ * provider-evidence rule every lane (walk, catch-up, debt retry, delta and
+ * thread rebuild) applies before it writes: an item the server did not
+ * return is an unavailable read, never an empty value. The stream writes
+ * nothing, because a whole-record upsert built from a stand-in would replace
+ * the stored row, and the UID stays owed.
+ */
+const REQUIRED_FETCH_ITEMS: Record<LedgerStream, readonly FetchItem[]> = {
+	messages: ["internalDate", "envelope", "bodyStructure", "threadId"],
+	message_bodies: ["internalDate", "bodyStructure"],
+	attachments: ["internalDate", "bodyStructure"],
+	threads: ["internalDate", "envelope", "bodyStructure", "threadId"],
+};
+
+function fetchItemAvailable(msg: FetchMessageObject, item: FetchItem): boolean {
+	switch (item) {
+		case "internalDate":
+			return (
+				msg.internalDate !== undefined &&
+				msg.internalDate !== null &&
+				!Number.isNaN(new Date(msg.internalDate).getTime())
+			);
+		case "envelope":
+			return typeof msg.envelope === "object" && msg.envelope !== null;
+		case "bodyStructure":
+			return (
+				typeof msg.bodyStructure === "object" && msg.bodyStructure !== null
+			);
+		case "threadId":
+			return String(msg.threadId ?? "") !== "";
+	}
+}
+
+/**
+ * The failure class for the first item `stream` needs that `msg` lacks, or
+ * null when the server returned all of them.
+ */
+export function unavailableFetchItem(
+	msg: FetchMessageObject,
+	stream: LedgerStream,
+): string | null {
+	const missing = REQUIRED_FETCH_ITEMS[stream].find(
+		(item) => !fetchItemAvailable(msg, item),
+	);
+	return missing ? `${missing.toLowerCase()}_unavailable` : null;
+}
+
 function sameOutcome(
 	deps: Pick<PerMessageDeps, "requested" | "wantBodies" | "wantMessages">,
 	outcome: UidOutcome,
@@ -1344,6 +1393,8 @@ function messageInStreamScope(
  *      replay of a page whose run failed after its records landed), and a
  *      whole-record upsert with an empty snippet or body would destroy
  *      them. A genuinely bodyless message emits `body_source: "empty"`.
+ *   6. A FETCH item a stream needs that the server did not return (see
+ *      `REQUIRED_FETCH_ITEMS`) fails that stream the same way.
  *
  * A thrown error means the message was not fully collected; the caller turns
  * it into retry debt.
@@ -1378,11 +1429,22 @@ export async function processMessage(
 		return outcome;
 	}
 
-	const env = msg.envelope ?? {};
-	const receivedAt = perMessageInternalDateToIso(msg.internalDate, deps.nowIso);
+	// Scope is decided from INTERNALDATE. Without it no stream can tell
+	// whether this UID is in range, so every stream stays owed.
+	if (!fetchItemAvailable(msg, "internalDate")) {
+		return Object.assign(
+			outcome,
+			sameOutcome(deps, {
+				kind: "failed",
+				failure: "internaldate_unavailable",
+			}),
+		);
+	}
+	const receivedAt = new Date(msg.internalDate as Date | string).toISOString();
 	if (!isInTimeRange(receivedAt, deps.timeRange)) {
 		return Object.assign(outcome, sameOutcome(deps, { kind: "out_of_scope" }));
 	}
+	const env = msg.envelope ?? {};
 	const dateHeader = env.date ? new Date(env.date).toISOString() : null;
 	const flagsArr = toFlagsArray(msg.flags);
 	const labels = toLabelsArray(msg.labels);
@@ -1410,35 +1472,34 @@ export async function processMessage(
 			deps.timeRange,
 		);
 
-	const selection = selectBodyParts(msg.bodyStructure, wantBodies);
-	// No BODYSTRUCTURE means the body parts are unknown, not absent: nothing
-	// can be read, and nothing is written in place of stored content.
+	// A stream whose FETCH items are incomplete reads nothing and writes
+	// nothing (see `REQUIRED_FETCH_ITEMS`).
+	const bodiesUnavailable = wantBodies
+		? unavailableFetchItem(msg, "message_bodies")
+		: null;
+	const messagesUnavailable = wantMessages
+		? unavailableFetchItem(msg, "messages")
+		: null;
+	const readBodies = wantBodies && bodiesUnavailable === null;
+	const readSnippet = wantMessages && messagesUnavailable === null;
+	const selection = selectBodyParts(msg.bodyStructure, readBodies);
 	const { bodyHtmlFull, bodyTextFull, snippet, fetchFailed, failureClass } =
-		(wantBodies || wantMessages) && !msg.bodyStructure
-			? {
-					bodyHtmlFull: null,
-					bodyTextFull: null,
-					snippet: null,
-					fetchFailed: true,
-					failureClass: "bodystructure_unavailable",
-				}
-			: wantBodies || wantMessages
-				? await deps.fetchBodies(msg, selection, wantBodies, wantMessages)
-				: { bodyHtmlFull: null, bodyTextFull: null, snippet: null };
+		readBodies || readSnippet
+			? await deps.fetchBodies(msg, selection, readBodies, readSnippet)
+			: { bodyHtmlFull: null, bodyTextFull: null, snippet: null };
 
 	// Any lane can reach a message whose rows are already stored: a catch-up,
 	// a retry, or the replay of a page whose run failed after its records
 	// landed. A failed body read must never overwrite them with empty values,
 	// so it writes nothing and the UID stays owed as retry debt.
-	const degraded = fetchFailed === true;
+	const readFailure =
+		fetchFailed === true ? (failureClass ?? "body_fetch_failed") : null;
 	if (deps.wantBodies && !wantBodies) {
 		outcome.message_bodies = { kind: "out_of_scope" };
 	}
-	if (wantBodies && degraded) {
-		outcome.message_bodies = {
-			kind: "failed",
-			failure: failureClass ?? "body_fetch_failed",
-		};
+	const bodiesFailure = bodiesUnavailable ?? readFailure;
+	if (wantBodies && bodiesFailure) {
+		outcome.message_bodies = { kind: "failed", failure: bodiesFailure };
 	} else if (wantBodies) {
 		// A body that could not be captured leaves its own DETAIL_GAP, which
 		// accounts for it; the ledger only needs to know the UID was handled.
@@ -1461,11 +1522,9 @@ export async function processMessage(
 	if (deps.wantMessages && !wantMessages) {
 		outcome.messages = { kind: "out_of_scope" };
 	}
-	if (wantMessages && degraded) {
-		outcome.messages = {
-			kind: "failed",
-			failure: failureClass ?? "body_fetch_failed",
-		};
+	const messagesFailure = messagesUnavailable ?? readFailure;
+	if (wantMessages && messagesFailure) {
+		outcome.messages = { kind: "failed", failure: messagesFailure };
 	} else if (wantMessages) {
 		const emitted = await deps.emitRecord(
 			"messages",
@@ -1491,13 +1550,13 @@ export async function processMessage(
 				: { kind: "covered" };
 	}
 
-	if (deps.requested.has("attachments") && !msg.bodyStructure) {
+	const attachmentsUnavailable = deps.requested.has("attachments")
+		? unavailableFetchItem(msg, "attachments")
+		: null;
+	if (attachmentsUnavailable) {
 		// No BODYSTRUCTURE is not an empty part list: the parts are unknown,
 		// so the UID stays owed and a later run reads it again.
-		outcome.attachments = {
-			kind: "failed",
-			failure: "bodystructure_unavailable",
-		};
+		outcome.attachments = { kind: "failed", failure: attachmentsUnavailable };
 	} else if (deps.requested.has("attachments")) {
 		const owed = await emitAttachmentRecords(deps, msg, attachments);
 		outcome.attachments =
@@ -1977,7 +2036,8 @@ export function parseDeltaHoldbackRuns(value: unknown): number {
 
 /**
  * Decide this run's `messages.all_mail.highest_modseq` and
- * `delta_holdback_runs`, given whether `runDeltaPass` skipped a message.
+ * `delta_holdback_runs`, given whether `runDeltaPass` left a change behind
+ * that the progress ledger could not take as debt.
  * Pure — the bound (`DELTA_HOLDBACK_RUN_LIMIT`) lives here so it has one
  * seam to unit-test independent of a full `runAllMailPasses` + IMAP mock.
  *
@@ -3100,11 +3160,19 @@ async function processServedAttachmentRecoveryGap(
 		return false;
 	}
 
+	// An incomplete FETCH cannot locate the part or date its record; the gap
+	// stays deferred under its lease until the server returns the items.
+	const unavailable = unavailableFetchItem(loadedMessage, "attachments");
+	if (unavailable) {
+		await deps.emitProtocol(
+			buildServedAttachmentRecoveryDeferredGap(gap, unavailable),
+		);
+		return false;
+	}
 	const messageKey = String(loadedMessage.emailId ?? locator.messageId);
-	const receivedAt = perMessageInternalDateToIso(
-		loadedMessage.internalDate,
-		nowIso,
-	);
+	const receivedAt = new Date(
+		loadedMessage.internalDate as Date | string,
+	).toISOString();
 	const attachments = decodeBodystructureForAttachments(
 		loadedMessage.bodyStructure,
 		messageKey,
@@ -3929,6 +3997,11 @@ export function makeAttachmentHydrator(
 			if (originalError instanceof AttachmentTooLargeError) {
 				return hydrationFailureResult(attachment, "too_large", originalError);
 			}
+			if (originalError instanceof AttachmentTransferIncompleteError) {
+				return hydrationFailureResult(attachment, "failed", originalError, {
+					stage: "imap_download_failed",
+				});
+			}
 			if (originalError instanceof AttachmentStallTimeoutError) {
 				// Re-thrown, not returned as an ordinary `failed` result: `onStall`
 				// already closed the shared IMAP connection (imapflow has no
@@ -4004,7 +4077,8 @@ export async function fetchAttachmentPart(
 	if (!msg.uid) {
 		throw new Error("attachment download requires IMAP UID");
 	}
-	const response = (await client.download(
+	const transfer = { truncated: false };
+	const response = (await observePartialFetches(client, transfer).download(
 		String(msg.uid),
 		attachment.part_index,
 		{
@@ -4012,13 +4086,87 @@ export async function fetchAttachmentPart(
 		},
 	)) as ImapDownloadResponse;
 	return {
-		content: response.content,
+		content: response.content
+			? failTruncatedTransfer(response.content, transfer)
+			: response.content,
 		expectedSize: attachment.size_bytes,
 		mimeType: normalizeAttachmentMimeType(
 			response.meta?.contentType,
 			attachment.content_type,
 		),
 	};
+}
+
+/** A part transfer ended early: a partial FETCH past offset 0 had no bytes. */
+export class AttachmentTransferIncompleteError extends Error {
+	constructor() {
+		super(
+			"attachment transfer incomplete: a part chunk came back without bytes",
+		);
+		this.name = "AttachmentTransferIncompleteError";
+	}
+}
+
+/**
+ * imapflow's `download` reads a part as a series of partial FETCHes and ends
+ * the stream at the first answer that carries no bytes. A NIL chunk past the
+ * first one therefore looks like the end of a shorter file. A server that has
+ * reached the end returns an empty string instead (RFC 3501 §6.4.5).
+ *
+ * This view of `client` runs `download` with itself as `this`, so each
+ * partial answer passes through `fetchOne` here: a part request past offset
+ * 0 answered without bytes marks the transfer truncated. Every other member
+ * reads and writes the client itself.
+ */
+function observePartialFetches<T extends object>(
+	client: T,
+	transfer: { truncated: boolean },
+): T {
+	return new Proxy(client, {
+		get(target, prop) {
+			const value: unknown = Reflect.get(target, prop, target);
+			if (prop === "fetchOne" && typeof value === "function") {
+				return async (
+					range: unknown,
+					query: { bodyParts?: unknown[] } | undefined,
+					options: unknown,
+				) => {
+					const answer = (await value.call(target, range, query, options)) as
+						| { bodyParts?: Map<string, unknown> }
+						| false
+						| undefined;
+					for (const request of query?.bodyParts ?? []) {
+						if (typeof request !== "object" || request === null) continue;
+						const { key, start } = request as {
+							key?: unknown;
+							start?: unknown;
+						};
+						if (!(typeof start === "number" && start > 0)) continue;
+						const chunk = answer
+							? answer.bodyParts?.get(String(key))
+							: undefined;
+						if (!(chunk instanceof Uint8Array)) transfer.truncated = true;
+					}
+					return answer;
+				};
+			}
+			return typeof value === "function" && prop !== "download"
+				? value.bind(target)
+				: value;
+		},
+		set(target, prop, value) {
+			return Reflect.set(target, prop, value, target);
+		},
+	});
+}
+
+/** Pass `content` through, then fail if its transfer was truncated. */
+async function* failTruncatedTransfer(
+	content: AsyncIterable<Buffer | Uint8Array | string>,
+	transfer: { readonly truncated: boolean },
+): AsyncIterable<Buffer | Uint8Array | string> {
+	yield* content;
+	if (transfer.truncated) throw new AttachmentTransferIncompleteError();
 }
 
 function buildRuntimeBlobUploader(): ReferenceBlobUploadFn {
@@ -4101,42 +4249,21 @@ export function validateAttachmentHydrationPreflight(args: {
  * same as that gap, nothing in this connector currently consumes a served
  * gap of this kind to force a re-fetch.
  *
- * Skipping the RECORD is not enough on its own, though. The caller always
- * persists `highest_modseq` as the mailbox's CURRENT value (see
- * `runAllMailPasses`'s STATE emission), not "the modseq this pass actually
- * finished covering" — so a skipped message's flag/label change (the very
- * thing this pass exists to apply) would be silently and PERMANENTLY
- * dropped once the floor moves past it: `changedSince` on the next run only
- * re-surfaces a message whose modseq changes AGAIN, which may never happen.
- * That is the exact defect this function guards `snippet` against, just
- * aimed at `labels`/`is_seen`/`is_flagged` instead — recoverable-looking,
- * actually permanent. `skippedAnyMessage` in the return value tells the
- * caller a message was left behind this run, so it can hold `highest_modseq`
- * at its PRIOR value instead of advancing it: the next run's `changedSince`
- * then re-covers every message changed since that same floor, including the
- * ones that succeeded this run. Re-emitting those is harmless — ingest
- * treats a byte-identical re-emit as a no-op (`postgres-records.ts`'s
- * `IS NOT DISTINCT FROM`).
+ * Skipping the RECORD is not enough on its own, though. The cursor moves
+ * to the mailbox's CURRENT `highest_modseq`, and `changedSince` on the next
+ * run only re-surfaces a message whose modseq changes AGAIN, which may never
+ * happen. So every change this pass sees but cannot apply (a thrown snippet
+ * re-fetch, or a FETCH missing an item `REQUIRED_FETCH_ITEMS` names) goes to
+ * `owe`, which hands it to the progress ledger as `messages` retry debt. The
+ * debt retry rewrites the whole row from a fresh FETCH. `skippedAnyMessage`
+ * tells the caller a change was left behind; the caller holds the cursor at
+ * its prior value only when the ledger could not take the change (its debt
+ * list is full), and that hold-back is bounded (`resolveDeltaCursorAdvance`,
+ * `DELTA_HOLDBACK_RUN_LIMIT`).
  *
- * The hold-back itself is bounded, not indefinite (`resolveDeltaCursorAdvance`,
- * `DELTA_HOLDBACK_RUN_LIMIT`): a message that fails PERSISTENTLY (a malformed
- * MIME structure, a message the server always errors on) would otherwise
- * stall `highest_modseq` forever and make every later run's `changedSince`
- * set grow without bound. After `DELTA_HOLDBACK_RUN_LIMIT` consecutive
- * held-back runs, `runAllMailPasses` advances `highest_modseq` anyway; the
- * still-failing message's retryable DETAIL_GAP (emitted below, independent
- * of the cursor decision) is what keeps that miss visible in coverage once
- * the cursor moves past it, rather than it going silent.
- *
- * Both skip sites in this function set it: a thrown snippet re-fetch above,
- * and the pre-existing envelope-absent skip below (same defect — an
- * envelope-free message was ALREADY being skipped to avoid blanking the
- * stored row, but until now nothing told the caller to hold the cursor back
- * for it either). The one skip that does NOT set it is `!requested.has(
- * "messages")`: that is not a failure to cover a change, it's "this run was
- * never asked to collect `messages` at all," the same as `processMessage`'s
- * own `wantMessages` gate — advancing the cursor past a scope the run
- * deliberately excluded is correct, not lossy.
+ * The one skip that does NOT set it is `!requested.has("messages")`: that is
+ * not a failure to cover a change, it's "this run was never asked to collect
+ * `messages` at all," the same as `processMessage`'s own `wantMessages` gate.
  */
 export async function runDeltaPass(
 	client: Pick<ImapFlow, "fetch">,
@@ -4145,6 +4272,11 @@ export async function runDeltaPass(
 	emitRecord: EmitRecordFn,
 	receivedAtFallback: string,
 	fetchBodiesFn: FetchBodiesFn,
+	/**
+	 * Hands a change this pass could not apply to its durable owner (the
+	 * progress ledger's `messages` debt), so it survives the cursor moving on.
+	 */
+	owe: (uid: number, failure: string) => void = () => {},
 ): Promise<{ skippedAnyMessage: boolean }> {
 	if (
 		session.fullResync ||
@@ -4212,25 +4344,34 @@ export async function runDeltaPass(
 		if (!String(msg.emailId ?? "")) {
 			continue;
 		}
-		// Admission comes first, before any failure is classified or any body
-		// I/O happens: a change outside the stream's scope is not this run's to
-		// collect, and it must not spend the hold-back budget below.
+		// Without INTERNALDATE the change's scope is unknown, so it is owed.
+		if (!fetchItemAvailable(msg, "internalDate")) {
+			skippedAnyMessage = true;
+			owe(msg.uid, "internaldate_unavailable");
+			continue;
+		}
+		// Admission comes first, before any other failure is classified or any
+		// body I/O happens: a change outside the stream's scope is not this
+		// run's to collect, and it must not spend the hold-back budget below.
 		if (
 			!messageInStreamScope(
 				requested,
 				"messages",
 				String(msg.emailId),
-				perMessageInternalDateToIso(msg.internalDate, () => receivedAtFallback),
+				new Date(msg.internalDate as Date | string).toISOString(),
 				requested.get("messages")?.time_range,
 			)
 		) {
 			continue;
 		}
-		// No envelope, or no BODYSTRUCTURE (the snippet's part is unknown),
-		// means no safe whole record to write. Skipping preserves the stored
-		// row; emitting would blank fields. The change is held for a later run.
-		if (!(msg.envelope && msg.bodyStructure)) {
+		// An incomplete FETCH (no envelope, or no BODYSTRUCTURE, so the
+		// snippet's part is unknown) has no safe whole record to write.
+		// Skipping preserves the stored row; emitting would blank fields. The
+		// change is owed to a later run.
+		const unavailable = unavailableFetchItem(msg, "messages");
+		if (unavailable) {
 			skippedAnyMessage = true;
+			owe(msg.uid, unavailable);
 			continue;
 		}
 		deltaMetas.push(msg);
@@ -4262,6 +4403,7 @@ export async function runDeltaPass(
 			// message is NOT this branch: `fetchFailed` is false/absent for it,
 			// so it falls through to the normal emit below with `snippet: null`.
 			skippedAnyMessage = true;
+			owe(msg.uid, failureClass ?? "body_fetch_failed");
 			await emit(buildMessageDeltaSnippetDetailGap({ failureClass, gmMsgid }));
 			continue;
 		}
@@ -4316,6 +4458,12 @@ const THREAD_MEMBER_QUERY: ExtendedFetchQuery = {
  * thread's members: a thread that spans pages has a fragment on each one, and
  * a row built from a fragment would replace the whole conversation under the
  * same key. A member expunged between SEARCH and FETCH is simply absent.
+ *
+ * For the same reason a member whose FETCH items are incomplete (see
+ * `REQUIRED_FETCH_ITEMS`) fails its whole thread: the row is not emitted and
+ * its fingerprint is not moved. A member that comes back without X-GM-THRID
+ * fails every thread whose SEARCH named it. Returns each failed thread with
+ * its failure class.
  */
 export async function rebuildThreads(
 	client: Pick<ImapFlow, "fetch" | "search">,
@@ -4323,11 +4471,12 @@ export async function rebuildThreads(
 	seeds: readonly Pick<FetchMessageObject, "uid" | "threadId">[],
 	emitRecord: EmitRecordFn,
 	cursor: FingerprintCursor,
-): Promise<void> {
+): Promise<Map<string, string>> {
+	const failed = new Map<string, string>();
 	const ids = [
 		...new Set(seeds.map((m) => String(m.threadId ?? "")).filter(Boolean)),
 	];
-	if (ids.length === 0) return;
+	if (ids.length === 0) return failed;
 	await emit({
 		type: "PROGRESS",
 		stream: "threads",
@@ -4335,9 +4484,16 @@ export async function rebuildThreads(
 	});
 	// The seeds are members we already hold; SEARCH adds the members outside
 	// this page. A seed is never dropped because SEARCH did not echo it.
-	const memberUids = new Set<number>(
-		seeds.filter((m) => m.threadId).map((m) => m.uid),
-	);
+	// `namedBy` keeps which threads named each member UID.
+	const namedBy = new Map<number, Set<string>>();
+	const name = (uid: number, tids: readonly string[]) => {
+		const known = namedBy.get(uid) ?? new Set<string>();
+		for (const tid of tids) known.add(tid);
+		namedBy.set(uid, known);
+	};
+	for (const m of seeds) {
+		if (m.threadId) name(m.uid, [String(m.threadId)]);
+	}
 	for (let i = 0; i < ids.length; i += THREAD_SEARCH_BATCH) {
 		const batch = ids.slice(i, i + THREAD_SEARCH_BATCH);
 		const query =
@@ -4345,18 +4501,29 @@ export async function rebuildThreads(
 				? { threadId: batch[0] }
 				: { or: batch.map((threadId) => ({ threadId })) };
 		const uids = await client.search(query, { uid: true });
-		for (const uid of uids || []) memberUids.add(uid);
+		for (const uid of uids || []) name(uid, batch);
 	}
 	const wanted = new Set(ids);
 	const aggregates = new Map<string, ThreadAggregate>();
-	const sorted = [...memberUids].sort((a, b) => a - b);
+	const sorted = [...namedBy.keys()].sort((a, b) => a - b);
 	for (let i = 0; i < sorted.length; i += THREAD_MEMBER_FETCH_BATCH) {
 		const range = sorted.slice(i, i + THREAD_MEMBER_FETCH_BATCH).join(",");
 		for await (const msg of client.fetch(range, THREAD_MEMBER_QUERY, {
 			uid: true,
 		})) {
 			const tid = String(msg.threadId ?? "");
+			const unavailable = unavailableFetchItem(msg, "threads");
+			if (!tid) {
+				for (const named of namedBy.get(msg.uid) ?? []) {
+					failed.set(named, unavailable ?? "threadid_unavailable");
+				}
+				continue;
+			}
 			if (!wanted.has(tid)) continue;
+			if (unavailable) {
+				failed.set(tid, unavailable);
+				continue;
+			}
 			const env = msg.envelope ?? {};
 			const rcv = internalDateToIso(msg.internalDate);
 			const msgHasAttachments =
@@ -4379,7 +4546,12 @@ export async function rebuildThreads(
 			);
 		}
 	}
-	await emitChangedThreads(aggregates.values(), cursor, emitRecord);
+	await emitChangedThreads(
+		[...aggregates].filter(([tid]) => !failed.has(tid)).map(([, agg]) => agg),
+		cursor,
+		emitRecord,
+	);
+	return failed;
 }
 
 /**
@@ -4776,19 +4948,27 @@ export async function runAllMailPasses(
 			ledger.expect(m.uid).includes("threads"),
 		);
 		let threadFailure: string | null = null;
+		let failedThreads = new Map<string, string>();
 		try {
-			await rebuildThreads(client, threadMetas, deps.emitRecord, threadCursor);
+			failedThreads = await rebuildThreads(
+				client,
+				threadMetas,
+				deps.emitRecord,
+				threadCursor,
+			);
 		} catch (error) {
 			if (client.usable === false) throw error;
 			threadFailure = messageFailureClass(error);
 		}
 		for (const m of threadMetas) {
-			const outcome: UidOutcome = !m.threadId
-				? { kind: "terminal", reason: "missing_thread_id" }
-				: threadFailure
-					? { kind: "failed", failure: threadFailure }
-					: { kind: "covered" };
-			ledger.record(m.uid, ["threads"], outcome);
+			const failure = !m.threadId
+				? "threadid_unavailable"
+				: (threadFailure ?? failedThreads.get(String(m.threadId)) ?? null);
+			ledger.record(
+				m.uid,
+				["threads"],
+				failure ? { kind: "failed", failure } : { kind: "covered" },
+			);
 		}
 		// The threads STATE carries only the next-run fingerprint map; thread
 		// PROGRESS lives in the ledger with every other stream.
@@ -4949,6 +5129,7 @@ export async function runAllMailPasses(
 		deps.emitRecord,
 		deps.emittedAt,
 		fetchBodiesBound,
+		(uid, failure) => ledger.oweChange(uid, "messages", failure),
 	);
 
 	const commit = ledger.commit(nowIso());
@@ -4979,14 +5160,15 @@ export async function runAllMailPasses(
 	}
 
 	// Advancing to the mailbox's CURRENT highestModseq is only correct when
-	// `runDeltaPass` covered every change since `priorModseq`; the bound on
-	// that hold-back lives in `resolveDeltaCursorAdvance`.
+	// every change since `priorModseq` was applied or is owed by the ledger.
+	// A change the ledger could not take (its debt is full) holds the cursor;
+	// the bound on that hold-back lives in `resolveDeltaCursorAdvance`.
 	const { highestModseq: nextHighestModseq, holdbackRuns: nextHoldbackRuns } =
 		resolveDeltaCursorAdvance({
 			liveHighestModseq: session.highestModseqCursor ?? null,
 			priorHoldbackRuns: session.priorDeltaHoldbackRuns,
 			priorModseq: session.priorModseq,
-			skippedAnyMessage: deltaPassSkippedAnyMessage,
+			skippedAnyMessage: deltaPassSkippedAnyMessage && !commit.changesOwed,
 		});
 	await emit({
 		type: "STATE",

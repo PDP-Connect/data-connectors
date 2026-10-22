@@ -1325,12 +1325,161 @@ test("scope: the delta pass never rewrites a stored row when the change arrives 
 		[],
 		"no row with an unknown snippet",
 	);
-	const allMail = (
-		delta.state.messages as { all_mail: { highest_modseq: unknown } }
-	).all_mail;
-	assert.equal(
-		String(allMail.highest_modseq),
-		"50",
-		"the change is held for a later run",
+	assert.deepEqual(
+		progressOf(delta).debt.map((d) => [d.uid, d.streams]),
+		[[10, ["messages"]]],
+		"the change is owed to a later run",
+	);
+	rows[0] = full;
+	const repaired = await run(m, delta.state, ["messages"]);
+	// This fixture's delta FETCH ignores CHANGEDSINCE, so the delta pass
+	// writes the same row as the debt retry.
+	assert.deepEqual(
+		[...new Set(ofStream(repaired, "messages").map((x) => x.data.snippet))],
+		["saved snippet"],
+	);
+	assert.deepEqual(progressOf(repaired).debt, []);
+});
+
+// Provider evidence: a FETCH item the server did not return is an
+// unavailable read. No lane writes a record from a stand-in for it, and the
+// UID stays owed until the server returns the item.
+
+test("evidence: a catch-up FETCH without ENVELOPE keeps the stored row and owes the UID", async () => {
+	const full = dated(10, MAY);
+	full.envelope = {
+		subject: "Stored subject",
+		from: [{ address: "stored@example.com" }],
+		messageId: "<stored@example.com>",
+	};
+	const rows = [full];
+	const m = mailbox(rows, 101, 1);
+	const first = await run(m, {}, ["messages"]);
+	assert.equal(ofStream(first, "messages")[0]?.data.subject, "Stored subject");
+	const narrowed = await run(
+		m,
+		first.state,
+		new Map([["messages", { name: "messages", time_range: { until: JAN } }]]),
+	);
+	const { envelope: _e, ...bare } = full;
+	rows[0] = bare as FetchMessageObject;
+	const widened = await run(m, narrowed.state, ["messages"]);
+	assert.deepEqual(ofStream(widened, "messages"), [], "no blanked row");
+	assert.deepEqual(
+		progressOf(widened).debt.map((d) => [d.uid, d.streams]),
+		[[10, ["messages"]]],
+	);
+	rows[0] = full;
+	const repaired = await run(m, widened.state, ["messages"]);
+	assert.deepEqual(
+		ofStream(repaired, "messages").map((x) => x.data.subject),
+		["Stored subject"],
+	);
+});
+
+test("evidence: a catch-up FETCH without INTERNALDATE owes the UID instead of judging its scope", async () => {
+	const full = dated(10, MAY);
+	const rows = [full];
+	const m = mailbox(rows, 101, 1);
+	const narrow = new Map([
+		["messages", { name: "messages", time_range: { until: MAR } }],
+	]);
+	const first = await run(m, {}, narrow);
+	assert.equal(ofStream(first, "messages").length, 0);
+	const widened = new Map([
+		["messages", { name: "messages", time_range: { until: JUL } }],
+	]);
+	const { internalDate: _d, ...bare } = full;
+	rows[0] = bare as FetchMessageObject;
+	// SEARCH still places the UID in the widened band; FETCH omits the date.
+	m.client.search = async () => [10];
+	const second = await run(m, first.state, widened);
+	assert.deepEqual(ofStream(second, "messages"), []);
+	assert.deepEqual(
+		progressOf(second).debt.map((d) => [d.uid, d.streams]),
+		[[10, ["messages"]]],
+		"unknown time does not settle the UID",
+	);
+	rows[0] = full;
+	const third = await run(m, second.state, widened);
+	assert.equal(ofStream(third, "messages").length, 1);
+});
+
+for (const missing of ["bodyStructure", "envelope", "threadId"] as const) {
+	test(`evidence: a thread member FETCH without ${missing} keeps the stored thread row and owes the thread`, async () => {
+		const full = attachmentMessage(10);
+		full.envelope = {
+			subject: "Original thread",
+			from: [{ address: "original@example.com" }],
+		};
+		const m = mailbox([full], 101, 1);
+		const first = await run(m, {}, ["threads"]);
+		assert.equal(ofStream(first, "threads")[0]?.data.has_attachments, true);
+		const reply = message(110);
+		reply.envelope = { from: [{ address: "reply@example.com" }] };
+		m.rows.push(reply);
+		m.box.uidNext = 201;
+		m.box.exists = 2;
+		const { [missing]: _gone, ...bare } = full;
+		m.rows[0] = bare as FetchMessageObject;
+		// SEARCH still names the member while its FETCH omits the item.
+		const search = m.client.search;
+		if (missing === "threadId") m.client.search = async () => [10, 110];
+		const second = await run(m, first.state, ["threads"]);
+		assert.deepEqual(ofStream(second, "threads"), [], "no partial thread row");
+		assert.deepEqual(
+			progressOf(second).debt.map((d) => [d.uid, d.streams]),
+			[[110, ["threads"]]],
+		);
+		m.rows[0] = full;
+		m.client.search = search;
+		const third = await run(m, second.state, ["threads"]);
+		assert.deepEqual(
+			ofStream(third, "threads").map((x) => [
+				x.data.message_count,
+				x.data.has_attachments,
+				x.data.subject,
+			]),
+			[[2, true, "Original thread"]],
+		);
+	});
+}
+
+test("evidence: a delta change that never arrives whole stays owed past the hold-back limit", async () => {
+	const full = message(10);
+	const rows: FetchMessageObject[] = [full];
+	const m = mailbox(rows, 101, 1);
+	(m.box as { highestModseq?: bigint }).highestModseq = 50n;
+	const walk = m.client.fetch;
+	// The message changed at MODSEQ 60 and does not change again.
+	m.client.fetch = (range, query, options) => {
+		const since = options?.changedSince;
+		if (since === undefined) return walk(range, query, options);
+		return (async function* () {
+			const [changed] = rows;
+			if (changed && BigInt(since) < 60n) yield changed;
+		})();
+	};
+	const first = await run(m, {}, ["messages"]);
+	assert.equal(ofStream(first, "messages").length, 1);
+	const { bodyStructure: _s, ...bare } = full;
+	rows[0] = { ...bare, labels: new Set(["changed"]) } as FetchMessageObject;
+	(m.box as { highestModseq?: bigint }).highestModseq = 60n;
+	let state = first.state;
+	for (let i = 0; i < 4; i += 1) {
+		const r = await run(m, state, ["messages"]);
+		assert.deepEqual(ofStream(r, "messages"), [], `miss ${i}: no partial row`);
+		assert.deepEqual(
+			progressOf(r).debt.map((d) => [d.uid, d.streams]),
+			[[10, ["messages"]]],
+			`miss ${i}: the change is owed`,
+		);
+		state = r.state;
+	}
+	rows[0] = { ...full, labels: new Set(["changed"]) };
+	const repaired = await run(m, state, ["messages"]);
+	assert.deepEqual(
+		ofStream(repaired, "messages").map((x) => x.data.labels),
+		[["changed"]],
 	);
 });

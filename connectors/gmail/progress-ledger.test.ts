@@ -269,6 +269,63 @@ test("ledger: a full debt list holds the cursor at the first unrecordable failur
 	assert.equal(c.state.debt.length, MAX_RETRY_DEBT);
 });
 
+test("ledger: a change owed on a walked UID becomes debt; on an unwalked UID its lane owes it", () => {
+	const persisted: GmailProgressState = {
+		version: 1,
+		uidvalidity: 123,
+		streams: { messages: { through: 100, coveredFrom: 501, next: 601 } },
+		debt: [],
+	};
+	const ledger = open({
+		persisted,
+		uidnext: 601,
+		streams: ["messages"],
+		window: 100,
+	});
+	ledger.oweChange(50, "messages", "envelope_unavailable");
+	ledger.oweChange(550, "messages", "bodystructure_unavailable");
+	ledger.oweChange(300, "messages", "envelope_unavailable");
+	const c = ledger.commit(NOW);
+	assert.deepEqual(
+		c.state.debt.map((d) => [d.uid, d.streams, d.failure]),
+		[
+			[50, ["messages"], "envelope_unavailable"],
+			[550, ["messages"], "bodystructure_unavailable"],
+		],
+		"UID 300 is past this run's history page [101, 200]",
+	);
+	assert.equal(c.changesOwed, true);
+});
+
+test("ledger: a change the full debt list cannot take is reported unowed", () => {
+	const debt = range(1, MAX_RETRY_DEBT).map((uid) => ({
+		uid: uid + 1000,
+		streams: ["attachments" as const],
+		attempts: 1,
+		failure: "x",
+	}));
+	const persisted: GmailProgressState = {
+		version: 1,
+		uidvalidity: 123,
+		streams: { messages: { through: 2000, coveredFrom: 2001, next: 2001 } },
+		debt,
+	};
+	const ledger = open({ persisted, uidnext: 2001, streams: ["messages"] });
+	ledger.oweChange(10, "messages", "envelope_unavailable");
+	const c = ledger.commit(NOW);
+	assert.equal(c.changesOwed, false);
+	assert.equal(c.state.debt.length, MAX_RETRY_DEBT);
+	// A UID already in debt takes the owed stream without a new entry.
+	const merged = open({ persisted, uidnext: 2001, streams: ["messages"] });
+	merged.oweChange(1001, "messages", "envelope_unavailable");
+	const m = merged.commit(NOW);
+	assert.equal(m.changesOwed, true);
+	assert.deepEqual(m.state.debt.find((d) => d.uid === 1001)?.streams, [
+		"messages",
+		"attachments",
+	]);
+});
+
 test("ledger: an absent debt UID settles", () => {
 	const persisted: GmailProgressState = {
 		version: 1,
