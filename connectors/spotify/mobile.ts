@@ -172,33 +172,44 @@ export async function collectSpotifyMobileData(page: Page, streams: string[]): P
 }
 
 export async function spotifyMobileCollect(context: Context): Promise<void> {
-	const gaps = new Set<string>();
-	const incomplete = async (stream: string, message: string) => {
-		if (gaps.has(stream)) return;
-		gaps.add(stream);
-		const skip = {
-			type: "SKIP_RESULT" as const, stream,
-			message,
-			recovery_hint: { action: "retry_by_runtime" as const, retryable: true },
-		};
-		await context.emit({ ...skip, reason: "inventory_not_proven_complete" });
-	};
+	// PageShim reports `inventory_not_proven_complete` as Partial. The
+	// connector's own message says why, so it is kept; a coverage shortfall the
+	// connector did not explain gets a counted fallback after collection.
+	const explained = new Set<string>();
+	const reported = new Set<string>();
+	const shortfalls = new Map<string, { considered: number; covered: number } | null>();
 	await spotifyCollect({
 		...context,
 		emit: async (message) => {
 			if (message.type === "SKIP_RESULT") {
-				await incomplete(String(message.stream), String(message.message ?? message.reason));
+				const stream = String(message.stream);
+				const text = String(message.message ?? message.reason);
+				explained.add(stream);
+				if (reported.has(stream + "\u0000" + text)) return;
+				reported.add(stream + "\u0000" + text);
+				await context.emit({ ...message, reason: "inventory_not_proven_complete", message: text });
 				return;
 			}
 			await context.emit(message);
-			if (message.type === "DETAIL_GAP" ||
-				(message.type === "DETAIL_COVERAGE" &&
-					typeof message.considered === "number" &&
-					typeof message.covered === "number" &&
-					message.covered < message.considered)) {
-				await incomplete(String(message.stream),
-					"Spotify inventory completeness is unproven because source rows were unavailable.");
+			if (message.type === "DETAIL_GAP") shortfalls.set(String(message.stream), null);
+			else if (message.type === "DETAIL_COVERAGE" &&
+				typeof message.considered === "number" &&
+				typeof message.covered === "number" &&
+				message.covered < message.considered) {
+				shortfalls.set(String(message.stream),
+					{ considered: message.considered, covered: message.covered });
 			}
 		},
 	}, collectSpotifyMobileData);
+	for (const [stream, counts] of shortfalls) {
+		if (explained.has(stream)) continue;
+		await context.emit({
+			type: "SKIP_RESULT", stream,
+			reason: "inventory_not_proven_complete",
+			message: counts
+				? `${counts.considered - counts.covered} of ${counts.considered} rows of ${stream.replaceAll("_", " ")} from Spotify had fields the connector could not read; each was withheld whole.`
+				: `Spotify did not return every ${stream.replaceAll("_", " ")} row the connector requested.`,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	}
 }

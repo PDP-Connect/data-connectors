@@ -2660,22 +2660,21 @@ test("unknown and unavailable library items keep the export, report a named gap 
 		considered: 5,
 		covered: 1,
 	});
-	const skips = result.messages.filter(
-		(message) =>
-			message.type === "SKIP_RESULT" &&
-			message.reason === "spotify_library_row_type_unrecognized",
-	);
+	// Rows Spotify marks unavailable and rows of an unknown type are different
+	// gaps: only the second can be fixed by a connector upgrade.
 	assert.deepEqual(
-		skips.map((message) => message.type === "SKIP_RESULT" && message.stream),
-		["playlists", "playlist_items"],
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && [message.stream, message.reason, message.message]),
+		[
+			["playlists", "spotify_library_item_unavailable", "Spotify lists 2 items in this library that it reports as unavailable (PlaylistResponseWrapper/NotFound=1,RestrictedContent=1), such as a playlist its owner deleted; they were not exported."],
+			["playlists", "spotify_library_row_type_unrecognized", "Spotify returned 2 library items of a type this connector does not read (FutureType=1,InvalidTypename=1); any playlist among them was not exported."],
+			["playlist_items", "spotify_library_item_unavailable", "Spotify lists 2 items in this library that it reports as unavailable (PlaylistResponseWrapper/NotFound=1,RestrictedContent=1), such as a playlist its owner deleted; their tracks were not exported."],
+			["playlist_items", "spotify_library_row_type_unrecognized", "Spotify returned 2 library items of a type this connector does not read (FutureType=1,InvalidTypename=1); any playlist among them was not exported."],
+		],
 	);
 	const types =
 		"FutureType=1,PlaylistResponseWrapper/NotFound=1,RestrictedContent=1,InvalidTypename=1";
-	for (const message of skips) {
-		assert.ok(
-			message.type === "SKIP_RESULT" && message.message?.includes(types),
-		);
-	}
 	const line = result.diagnostics.find((entry) =>
 		entry.includes("library_rows_unclassified"),
 	);
@@ -2683,6 +2682,26 @@ test("unknown and unavailable library items keep the export, report a named gap 
 	assert.ok(line.includes(`"types":"${types}"`), line);
 	assert.ok(line.includes('"count":4'), line);
 	assert.equal(line.includes("with text"), false);
+});
+
+test("a playlist Spotify reports as not found is named on the playlist scopes only, as unavailable rather than unread", async () => {
+	const result = await collectLibrary([
+		libraryRow("Playlist", "spotify:playlist:pl1"),
+		libraryRow("NotFound", "spotify:playlist:gone", "PlaylistResponseWrapper"),
+	]);
+	assert.deepEqual(playlistCoverage(result.messages, "playlists"), {
+		considered: 2,
+		covered: 1,
+	});
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && [message.stream, message.reason, message.message, message.recovery_hint]),
+		[
+			["playlists", "spotify_library_item_unavailable", "Spotify lists 1 item in this library that it reports as unavailable (PlaylistResponseWrapper/NotFound=1), such as a playlist its owner deleted; it was not exported.", { action: "not_retriable", retryable: false }],
+			["playlist_items", "spotify_library_item_unavailable", "Spotify lists 1 item in this library that it reports as unavailable (PlaylistResponseWrapper/NotFound=1), such as a playlist its owner deleted; its tracks were not exported.", { action: "not_retriable", retryable: false }],
+		],
+	);
 });
 
 test("an unknown library item repeating a collected identity is still rejected", async () => {

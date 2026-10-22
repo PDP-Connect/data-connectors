@@ -3725,7 +3725,7 @@ test("spotify: seven mobile streams retain capped inventory semantics on both ho
 		const result = resultStreaming ? r.streamDone : r.result;
 		assert.deepEqual(result.exportSummary, c.exportSummary);
 		assert.deepEqual(result.errors, c.partialErrors);
-		assert.equal(result.errors.length, 3, "no failure companion for an incomplete inventory");
+		assert.equal(result.errors.length, 1, "no failure companion for an incomplete inventory");
 		for (const stream of ["recently_played_contexts", "top_artists", "top_tracks"]) {
 			assert.equal(r.states["spotify." + stream], undefined);
 		}
@@ -3735,6 +3735,48 @@ test("spotify: seven mobile streams retain capped inventory semantics on both ho
 			assert.equal(r.streamResult.scopeCount, 7);
 		}
 	}
+});
+
+test("spotify: a run shaped like a real export names each gap on the scopes it affects", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c, resolveFixture } = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-export-shape.js") });
+	const track = (id) => ({ data: { uri: "spotify:track:" + id, name: id, artists: { items: [] }, albumOfTrack: { name: "Synthetic album" } } });
+	const fixtures = { ...c.fixtures, resolve(raw, request) {
+		const response = resolveFixture(raw, request);
+		const reply = (body) => ({ ...response, body: JSON.stringify(body) });
+		if (raw.includes("/recently-played/")) return reply({ playContexts: [
+			{ uri: "spotify:playlist:syntheticPlaylist", lastPlayedTime: 1790812800000, lastPlayedTrackUri: "spotify:track:syntheticTrack" },
+			{ uri: "spotify:album:syntheticAlbum", lastPlayedTime: 1790812700000 },
+		] });
+		if (!raw.includes("api-partner.spotify.com")) return response;
+		const { operationName, variables } = JSON.parse(request.postData ?? "{}");
+		// A followed playlist Spotify no longer serves, as in a live library.
+		if (operationName === "libraryV3") return reply({ data: { me: { libraryV3: { offset: variables.offset, totalCount: 2, items: [
+			{ item: { data: { __typename: "Playlist", uri: "spotify:playlist:syntheticPlaylist" } } },
+			{ item: { __typename: "PlaylistResponseWrapper", _uri: "spotify:playlist:syntheticGone", data: { __typename: "NotFound" } } },
+		] } } } });
+		// Top artists stay within the bound; long-term top tracks exceed it.
+		if (operationName === "userTopContent" && variables.includeTopTracks && variables.topTracksInput.timeRange === "LONG_TERM") {
+			const { offset, limit } = variables.topTracksInput;
+			return reply({ data: { me: { profile: { topTracks: { totalCount: 150,
+				items: Array.from({ length: Math.min(limit, 150 - offset) }, (_, i) => track("long" + (offset + i))) } } } } });
+		}
+		return response;
+	} };
+	const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes, gotoDelayMs: 0 });
+	assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+	assertCleanRun(r);
+	assert.match(r.data.status, /^Partial:/);
+	const notFound = "Spotify lists 1 item in this library that it reports as unavailable (PlaylistResponseWrapper/NotFound=1), such as a playlist its owner deleted; ";
+	const entry = (stream, reason) => ({ errorClass: "partial", reason, disposition: "degraded", scope: "spotify." + stream, phase: "collect" });
+	assert.deepEqual(r.result.errors, [
+		entry("playlists", notFound + "it was not exported."),
+		entry("playlist_items", notFound + "its tracks were not exported."),
+		entry("recently_played_contexts", "1 of 2 recently played contexts from Spotify had fields the connector could not read; it was withheld whole."),
+		c.partialErrors[0],
+		entry("top_tracks", "Spotify ranks 150 top tracks in the long-term window; the connector reads the top 100 by design, so 50 lower-ranked tracks were not exported."),
+	]);
+	assert.equal(r.result["spotify.top_tracks"].records.length, 101);
 });
 
 test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeout: 180_000 }, async (t) => {
@@ -3803,7 +3845,8 @@ test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeo
 		assertCleanRun(r);
 		assert.equal(r.result[scope].records.length, 1);
 		assert.match(r.data.status, /^Partial:/);
-		assert.ok(r.result.errors.some((error) => /inventory completeness is unproven/.test(error.reason)));
+		assert.deepEqual(r.result.errors, [{ errorClass: "partial", disposition: "degraded", scope, phase: "collect",
+			reason: "1 of 2 rows of saved tracks from Spotify had fields the connector could not read; each was withheld whole." }]);
 		assert.equal(r.states[scope], undefined);
 	});
 	await t.test("unbound pagination totals never commit STATE", async () => {
