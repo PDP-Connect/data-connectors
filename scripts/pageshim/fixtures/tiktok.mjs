@@ -33,7 +33,6 @@ const settings = fx("user-settings.json");
 const posts = fx("post-item-list.json");
 const liked = fx("favorite-item-list.json");
 const users = fx("user-list.json");
-const collectionList = fx("collection-list.json");
 
 /** Client fields the page's own request carries; invented values. */
 const CLIENT_QUERY =
@@ -136,9 +135,6 @@ function answerApi(url) {
 			if (q.get("secUid") === SEC_UID && q.get("cursor") === "0")
 				return json(FAVORITES);
 			break;
-		case "/api/user/collection_list/":
-			if (q.get("secUid") === SEC_UID) return json(collectionList);
-			break;
 		case "/api/user/list/":
 			if (q.get("scene") === "21") return json(following);
 			if (q.get("scene") === "67") return json(followers);
@@ -172,7 +168,6 @@ const STREAMS = [
 	"videos",
 	"likes",
 	"favorites",
-	"favorite_collections",
 	"following",
 	"followers",
 ];
@@ -188,7 +183,6 @@ export const pageshimCase = {
 			videos: 3,
 			likes: 3,
 			favorites: 1,
-			favorite_collections: 0,
 			following: 1,
 			followers: 2,
 		},
@@ -201,7 +195,6 @@ export const pageshimCase = {
 			videos: 0,
 			likes: 0,
 			favorites: 0,
-			favorite_collections: 0,
 			following: 0,
 			followers: 0,
 		},

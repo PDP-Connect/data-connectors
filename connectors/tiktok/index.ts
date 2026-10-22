@@ -7,7 +7,7 @@
  *
  * Exports the signed-in owner's own TikTok data from the www.tiktok.com web
  * app: their profile, the videos they posted, the videos they liked, the
- * videos they saved to Favorites (and their favorite collections), and the
+ * videos they saved to Favorites, and the
  * accounts they follow and that follow them.
  *
  * Terms of service and legal basis. TikTok's terms do not permit automated
@@ -40,7 +40,6 @@
  *   GET /api/post/item_list/            -> videos (and profile counts)
  *   GET /api/favorite/item_list/        -> likes
  *   GET /api/user/collect/item_list/    -> favorites
- *   GET /api/user/collection_list/      -> favorite_collections
  *   GET /api/user/list/ (scene 21 / 67) -> following / followers
  *
  * Every list is paged until TikTok's own `hasMore: false`; a repeated cursor,
@@ -53,17 +52,18 @@
  * TikTok's data export), direct messages (a separate protocol; a later
  * phase), reposts and playlists.
  *
- * Tested surfaces (as of 2026-10-22): response shapes recorded by the factory
- * on one English-language test account with 8 videos, 1 following, no
- * collections. This code has run only against the synthetic fixtures. Known
- * untested: the transport signing in a live page, the scene numbers of
- * /api/user/list/ (21 following, 67 followers, from TikTok's web app), a
- * non-empty collection list, private liked lists, long lists, other locales.
+ * Not collected either: Favorites collections. The web app lists them, but
+ * no call that lists a collection's videos was observed, so membership could
+ * not be read without guessing an endpoint; favorites is the flat list.
+ *
+ * Tested surfaces (as of 2026-10-22): a live run in the owner's signed-in
+ * Chrome on one small English-language account (profile 1, videos 8, likes
+ * 10, favorites 4, following 1, followers 1). Known untested: long lists,
+ * private liked lists, incremental second runs, other locales.
  *
  * Reachability probe: exempt. Collection needs a signed-in browser session.
  *
- * Streams: profile, videos, likes, favorites, favorite_collections,
- * following, followers.
+ * Streams: profile, videos, likes, favorites, following, followers.
  *
  * CHANGES
  *   v0.1.0 (2026-10-22): first version.
@@ -72,6 +72,9 @@
  *   v0.1.2 (2026-10-22): likes/favorites walk to hasMore:false every run (no
  *     stop at a known id); profile counts need a usable own video or a proved
  *     empty list; unsafe text fails the stream; challenges classified first.
+ *   v0.2.0 (2026-10-22): favorite_collections removed (no evidence of a
+ *     collection's item list); the profile walks own videos to one that
+ *     carries the owner's counts; any non-JSON body is a challenge.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -91,7 +94,6 @@ import {
 	WATCH_EXPRESSION,
 } from "./page-script.ts";
 import {
-	buildCollectionRecord,
 	buildProfileRecord,
 	buildSavedVideoRecord,
 	buildUserRecord,
@@ -100,7 +102,6 @@ import {
 	type Item,
 	newTextNotes,
 	parseAccount,
-	parseCollectionPage,
 	parseItemPage,
 	parseSettings,
 	parseUserPage,
@@ -138,7 +139,6 @@ const PROFILE = "profile";
 const VIDEOS = "videos";
 const LIKES = "likes";
 const FAVORITES = "favorites";
-const FAVORITE_COLLECTIONS = "favorite_collections";
 const FOLLOWING = "following";
 const FOLLOWERS = "followers";
 const STREAMS = [
@@ -146,7 +146,6 @@ const STREAMS = [
 	PROFILE,
 	LIKES,
 	FAVORITES,
-	FAVORITE_COLLECTIONS,
 	FOLLOWING,
 	FOLLOWERS,
 ] as const;
@@ -339,6 +338,18 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 				`${path} answered ${result.status} with a challenge instead of data`,
 			);
 		}
+		// Every path here is a JSON endpoint. A body that is not its JSON, at
+		// any status (a plain-text 503 included), is the site answering with
+		// something else: a challenge, never a retryable server error.
+		if (
+			!result.empty &&
+			(result.json === null || typeof result.json !== "object")
+		) {
+			throw new TikTokStop(
+				"challenge",
+				`${path} answered ${result.status} with a body that is not JSON`,
+			);
+		}
 		if (result.status === 429) {
 			throw new TikTokStop("rate_limited", `${path} answered 429`);
 		}
@@ -364,8 +375,6 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 					);
 		}
 		if (result.json === null || typeof result.json !== "object") {
-			// Every path here is a JSON endpoint: a body that is not JSON is the
-			// site answering with something else, treated as a challenge.
 			throw new TikTokStop(
 				"challenge",
 				`${path} answered ${result.status} with a body that is not JSON`,
@@ -795,48 +804,95 @@ export async function collectTikTok(
 	let ownFirstItemRead = false;
 
 	/**
-	 * The owner's newest own video, whose author carries the profile counts,
-	 * or null when TikTok's own list proves there is none (hasMore:false and no
-	 * positive total). An unreadable entry, a positive total with no item, or
-	 * an empty page that claims more fail the profile instead of emitting
-	 * null counts.
+	 * Whether an own video carries what the profile needs: the owner as its
+	 * author and the author's follower, following, like and video counts.
+	 */
+	const isOwnerItem = (item: Item): boolean => {
+		if (item.author?.id !== account.id) return false;
+		const v1 = item.authorStats;
+		const v2 = item.authorStatsV2;
+		const has = (
+			key: "followerCount" | "followingCount" | "heartCount" | "videoCount",
+		): boolean => v2?.[key] !== undefined || v1?.[key] !== undefined;
+		return (
+			has("followerCount") &&
+			has("followingCount") &&
+			has("heartCount") &&
+			has("videoCount")
+		);
+	};
+
+	/**
+	 * Walk the owner's own videos (following TikTok's cursor) to the first one
+	 * that carries the owner's counts. Null only when TikTok's own list proves
+	 * there are no videos at all (hasMore:false, nothing listed, no positive
+	 * total), which the manifest documents as null counts. Everything else
+	 * that ends without a usable video fails the profile: an unreadable entry,
+	 * listed videos none of which carry the counts, a positive total with
+	 * nothing listed, a page that adds nothing, a repeated cursor, the cap.
 	 */
 	const findOwnItem = async (): Promise<Item | null> => {
-		const page = parseItemPage(
-			await api.get("/api/post/item_list/", {
-				secUid,
-				count: ITEM_PAGE_SIZE,
-				cursor: "0",
-				coverFormat: "2",
-			}),
+		const seenCursors = new Set<string>();
+		let cursor = "0";
+		let listed = 0;
+		for (let pages = 0; pages < maxPages; pages += 1) {
+			seenCursors.add(cursor);
+			const page = parseItemPage(
+				await api.get("/api/post/item_list/", {
+					secUid,
+					count: ITEM_PAGE_SIZE,
+					cursor,
+					coverFormat: "2",
+				}),
+			);
+			if (!page) {
+				throw new TikTokStop(
+					"unreadable",
+					"/api/post/item_list/ answered a page this connector does not recognise",
+				);
+			}
+			if (page.unreadable > 0) {
+				throw new TikTokStop(
+					"unreadable",
+					`${page.unreadable} own videos did not match the recorded shape, so the profile counts could not be read`,
+				);
+			}
+			const usable = page.items.find(isOwnerItem);
+			if (usable) return usable;
+			listed += page.items.length;
+			if (!page.hasMore) {
+				if (listed > 0) {
+					throw new TikTokStop(
+						"incomplete",
+						`none of the owner's ${listed} listed videos carried the profile counts`,
+					);
+				}
+				if (page.total !== null && page.total > 0) {
+					throw new TikTokStop(
+						"incomplete",
+						`TikTok counted ${page.total} videos but listed none, so the profile counts could not be read`,
+					);
+				}
+				return null;
+			}
+			const next = page.cursor;
+			if (
+				page.items.length === 0 ||
+				next === null ||
+				next === "" ||
+				seenCursors.has(next)
+			) {
+				throw new TikTokStop(
+					"incomplete",
+					"/api/post/item_list/ said it had more but gave no new video or cursor",
+				);
+			}
+			cursor = next;
+		}
+		throw new TikTokStop(
+			"incomplete",
+			`/api/post/item_list/ still had more after ${maxPages} pages and no video carried the profile counts`,
 		);
-		if (!page) {
-			throw new TikTokStop(
-				"unreadable",
-				"/api/post/item_list/ answered a page this connector does not recognise",
-			);
-		}
-		if (page.unreadable > 0) {
-			throw new TikTokStop(
-				"unreadable",
-				`${page.unreadable} own videos did not match the recorded shape, so the profile counts could not be read`,
-			);
-		}
-		const [first] = page.items;
-		if (first) return first;
-		if (page.hasMore) {
-			throw new TikTokStop(
-				"incomplete",
-				"/api/post/item_list/ said it had more but its first page listed no video",
-			);
-		}
-		if (page.total !== null && page.total > 0) {
-			throw new TikTokStop(
-				"incomplete",
-				`TikTok counted ${page.total} videos but listed none, so the profile counts could not be read`,
-			);
-		}
-		return null;
 	};
 
 	const run: Record<Stream, () => Promise<void>> = {
@@ -848,7 +904,7 @@ export async function collectTikTok(
 				secUid,
 				maxPages,
 				async (item) => {
-					ownFirstItem ??= item;
+					if (ownFirstItem === null && isOwnerItem(item)) ownFirstItem = item;
 					const created = secondsToInstant(item.createTime);
 					if (newest === null || String(created) > newest) {
 						newest = String(created);
@@ -858,7 +914,10 @@ export async function collectTikTok(
 			);
 			assertComplete(VIDEOS, walk, false);
 			assertSafe(VIDEOS);
-			ownFirstItemRead = true;
+			// A proved-empty list, or a usable own video, settles the profile
+			// counts; listed videos without the counts leave it to findOwnItem,
+			// which fails the profile.
+			ownFirstItemRead = ownFirstItem !== null || walk.read === 0;
 			await ctx.emit({
 				type: "STATE",
 				stream: VIDEOS,
@@ -891,87 +950,6 @@ export async function collectTikTok(
 		},
 		[LIKES]: () => walkSaved(LIKES, "/api/favorite/item_list/"),
 		[FAVORITES]: () => walkSaved(FAVORITES, "/api/user/collect/item_list/"),
-		[FAVORITE_COLLECTIONS]: async () => {
-			const seenCursors = new Set<string>();
-			const seenIds = new Set<string>();
-			let cursor = "0";
-			for (let pages = 0; ; pages += 1) {
-				if (pages >= maxPages) {
-					throw new TikTokStop(
-						"incomplete",
-						`/api/user/collection_list/ still had more after ${maxPages} pages`,
-					);
-				}
-				seenCursors.add(cursor);
-				const page = parseCollectionPage(
-					await api.get("/api/user/collection_list/", {
-						secUid: secUid,
-						count: ITEM_PAGE_SIZE,
-						cursor,
-						// The app's own call carries appId (1988, TikTok web's app
-						// id) and publicOnly; false asks for private collections
-						// too, which the owner's own data includes.
-						appId: "1988",
-						publicOnly: "false",
-					}),
-				);
-				if (!page) {
-					throw new TikTokStop(
-						"unreadable",
-						"/api/user/collection_list/ answered a page this connector does not recognise",
-					);
-				}
-				let added = 0;
-				for (const collection of page.collections) {
-					if (seenIds.has(collection.collectionId)) continue;
-					seenIds.add(collection.collectionId);
-					added += 1;
-					await emitBuilt(FAVORITE_COLLECTIONS, () =>
-						buildCollectionRecord(collection, notes),
-					);
-				}
-				if (!page.hasMore) {
-					// hasMore: false is the end signal. A total without a list
-					// counts collections TikTok does not list here, so it is
-					// noted, not held against the walk.
-					if (!page.listed && page.total !== null && page.total > 0) {
-						connectorDiagnostic("tiktok", "collections_total_unlisted", {
-							total: page.total,
-						});
-					}
-					assertComplete(
-						FAVORITE_COLLECTIONS,
-						{
-							read: seenIds.size,
-							total: page.listed ? page.total : null,
-							unreadable: page.unreadable,
-						},
-						false,
-					);
-					break;
-				}
-				if (page.unreadable > 0) {
-					throw new TikTokStop(
-						"unreadable",
-						`${page.unreadable} favorite collections did not match the expected shape`,
-					);
-				}
-				const next = page.cursor;
-				if (added === 0 || next === null || seenCursors.has(next)) {
-					throw new TikTokStop(
-						"incomplete",
-						"/api/user/collection_list/ said it had more but gave no new page",
-					);
-				}
-				cursor = next;
-			}
-			assertSafe(FAVORITE_COLLECTIONS);
-			await ctx.emit({
-				type: "STATE",
-				stream: FAVORITE_COLLECTIONS,
-				cursor: { count: seenIds.size },
-			});
-		},
 		[FOLLOWING]: () => walkUsers(FOLLOWING, FOLLOWING_SCENE),
 		[FOLLOWERS]: () => walkUsers(FOLLOWERS, FOLLOWERS_SCENE),
 	};

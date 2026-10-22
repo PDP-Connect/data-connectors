@@ -42,7 +42,6 @@ export const ALLOWED_PATHS = [
 	"/api/post/item_list/",
 	"/api/favorite/item_list/",
 	"/api/user/collect/item_list/",
-	"/api/user/collection_list/",
 	"/api/user/list/",
 ] as const;
 export type AllowedPath = (typeof ALLOWED_PATHS)[number];
@@ -59,8 +58,6 @@ const CALLER_KEYS = [
 	"needPinnedItemIds",
 	"post_item_list_request_type",
 	"enable_v2",
-	"publicOnly",
-	"appId",
 ];
 
 /**

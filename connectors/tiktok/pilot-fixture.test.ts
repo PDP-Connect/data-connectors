@@ -9,8 +9,4 @@ import { validateRecord } from "./schemas.ts";
 registerPilotFixtureTests({
 	connector: "tiktok",
 	validateRecord,
-	exemptStreams: {
-		favorite_collections:
-			"the recorded account had no Favorites collections, so no entry shape was observed",
-	},
 });

@@ -18,7 +18,6 @@ import {
 	envelopeStatus,
 	newTextNotes,
 	parseAccount,
-	parseCollectionPage,
 	parseItemPage,
 	parseSettings,
 	parseUserPage,
@@ -106,9 +105,6 @@ test("an empty list answers without itemList and still ends", () => {
 	assert.equal(page.hasMore, false);
 	assert.deepEqual(page.items, []);
 	assert.equal(page.total, 0);
-	const collections = parseCollectionPage(fixture("empty-item-list.json"));
-	assert.ok(collections);
-	assert.deepEqual(collections.collections, []);
 });
 
 test("a page without hasMore is unreadable, and a bad item is counted, not emitted", () => {
@@ -301,7 +297,6 @@ const POSTS = fixture("post-item-list.json");
 const LIKED = fixture("favorite-item-list.json");
 const USERS = fixture("user-list.json");
 const COLLECT = fixture("collect-item-list.json");
-const COLLECTIONS = fixture("collection-list.json");
 
 function standardAnswer(call: Call): Answer {
 	switch (call.path) {
@@ -315,8 +310,6 @@ function standardAnswer(call: Call): Answer {
 			return ok(LIKED);
 		case "/api/user/collect/item_list/":
 			return ok(COLLECT);
-		case "/api/user/collection_list/":
-			return ok(COLLECTIONS);
 		case "/api/user/list/":
 			return ok(USERS);
 		default:
@@ -329,7 +322,6 @@ const ALL = [
 	"videos",
 	"likes",
 	"favorites",
-	"favorite_collections",
 	"following",
 	"followers",
 ];
@@ -348,7 +340,6 @@ test("a full run reads every stream from its own path and checkpoints each after
 			"/api/user/settings/",
 			"/api/favorite/item_list/",
 			"/api/user/collect/item_list/",
-			"/api/user/collection_list/",
 			"/api/user/list/",
 			"/api/user/list/",
 		],
@@ -357,8 +348,8 @@ test("a full run reads every stream from its own path and checkpoints each after
 	assert.ok(owner);
 	assert.equal(calls[1]?.params.secUid, owner.secUid);
 	assert.equal(calls[1]?.params.cursor, "0");
-	assert.equal(calls[6]?.params.scene, "21");
-	assert.equal(calls[7]?.params.scene, "67");
+	assert.equal(calls[5]?.params.scene, "21");
+	assert.equal(calls[6]?.params.scene, "67");
 
 	const count = (stream: string) =>
 		h.records.filter((record) => record.stream === stream).length;
@@ -366,7 +357,6 @@ test("a full run reads every stream from its own path and checkpoints each after
 	assert.equal(count("profile"), 1);
 	assert.equal(count("likes"), 3);
 	assert.equal(count("favorites"), 0);
-	assert.equal(count("favorite_collections"), 0);
 	assert.equal(count("following"), 1);
 	assert.equal(count("followers"), 1);
 
@@ -676,123 +666,138 @@ test("a non-zero status code fails only that stream", async () => {
 	assert.equal(h.records.filter((r) => r.stream === "following").length, 1);
 });
 
-test("live shape: a collection list with a total but no list key ends on hasMore:false (findings-1)", async () => {
-	const parsed = parseCollectionPage(COLLECTIONS);
-	assert.ok(parsed);
-	assert.equal(parsed.listed, false);
-	assert.equal(parsed.total, 1);
-	assert.equal(parsed.hasMore, false);
-
+test("live shape: an empty Favorites list (no itemList key) ends on hasMore:false", async () => {
 	const { page } = fakePage(standardAnswer);
-	const h = harness(["favorite_collections", "favorites"], page);
+	const h = harness(["favorites"], page);
 	await collectTikTok(h.ctx, noDelay);
 	assert.deepEqual(h.failures, []);
 	assert.equal(h.records.length, 0);
-	assert.deepEqual(
-		h.messages
-			.filter((m) => m.type === "STATE")
-			.map((m) => ("cursor" in m ? [m.stream, m.cursor] : null)),
-		[
-			["favorites", { count: 0 }],
-			["favorite_collections", { count: 0 }],
-		],
-	);
-});
-
-test("a listed collection that cannot be read still fails the stream", async () => {
-	const { page } = fakePage((call) =>
-		call.path === "/api/user/collection_list/"
-			? ok({ ...COLLECTIONS, collectionList: [{ unexpected: true }] })
-			: standardAnswer(call),
-	);
-	const h = harness(["favorite_collections"], page);
-	await collectTikTok(h.ctx, noDelay);
-	assert.equal(h.failures.length, 1);
-	assert.match(h.failures[0]?.message ?? "", /^tiktok_source_unreadable/);
-	assert.equal(
-		h.messages.some((m) => m.type === "STATE"),
-		false,
-	);
-});
-
-test("a listed collection list that counts items but lists none fails", async () => {
-	const { page } = fakePage((call) =>
-		call.path === "/api/user/collection_list/"
-			? ok({ ...COLLECTIONS, total: 2, collectionList: [] })
-			: standardAnswer(call),
-	);
-	const h = harness(["favorite_collections"], page);
-	await collectTikTok(h.ctx, noDelay);
-	assert.match(h.failures[0]?.message ?? "", /counted 2 favorite_collections/);
-});
-
-// ─── session check and replay determinism (findings-2) ───────────────────
-
-test("a signed-in page on www.tiktok.com passes the session check without navigating", async () => {
-	const { gotos, calls, page } = fakePage(standardAnswer);
-	assert.equal(await checkTikTokSession(page, noDelay.delay), "signed_in");
-	assert.deepEqual(gotos, []);
-	assert.deepEqual(
-		calls.map((c) => c.path),
-		["/passport/account/info/v2/"],
-	);
-});
-
-test("a page off the site opens the profile page, never the sign-in page", async () => {
-	const { gotos, page } = fakePage(standardAnswer, {
-		watch: { wrongPage: true },
+	const state = h.messages.find((m) => m.type === "STATE");
+	assert.deepEqual(state && "cursor" in state ? state.cursor : null, {
+		count: 0,
 	});
-	assert.equal(await checkTikTokSession(page, noDelay.delay), "unknown");
-	assert.deepEqual(gotos, ["https://www.tiktok.com/profile"]);
 });
 
-test("only an answer that names no account is signed out", async () => {
-	const signedOut = fakePage(() =>
-		ok({ data: { error_code: 1, description: "log in" }, message: "error" }),
+test("review 2 #3: favorite_collections is not a stream and no collection path is requested", async () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { streams: { name: string; description: string }[] };
+	const names = manifest.streams.map((stream) => stream.name);
+	assert.equal(names.includes("favorite_collections"), false);
+	const favorites = manifest.streams.find(
+		(stream) => stream.name === "favorites",
 	);
-	assert.equal(
-		await checkTikTokSession(signedOut.page, noDelay.delay),
-		"signed_out",
+	assert.doesNotMatch(favorites?.description ?? "", /collection/i);
+	const { calls, page } = fakePage(standardAnswer);
+	const h = harness(
+		["profile", "videos", "likes", "favorites", "following", "followers"],
+		page,
 	);
-	const silent = fakePage(standardAnswer, { pageFails: true });
-	assert.equal(await checkTikTokSession(silent.page, noDelay.delay), "unknown");
-	assert.deepEqual(silent.gotos, []);
-});
-
-test("an in-page request that does not complete stops the run as retryable, with nothing re-sent", async () => {
-	let sent = 0;
-	const { page } = fakePage(
-		(call) => {
-			sent += 1;
-			return standardAnswer(call);
-		},
-		{ pageFails: true },
-	);
-	assert.equal("context" in page, false);
-	const h = harness(["videos", "likes"], page);
 	await collectTikTok(h.ctx, noDelay);
-	assert.equal(sent, 0);
-	assert.deepEqual(
-		h.failures.map((f) => [f.stream, f.retryable]),
-		[
-			["videos", true],
-			["likes", true],
-		],
-	);
-	assert.match(h.failures[0]?.message ?? "", /^tiktok_interrupted/);
 	assert.equal(
-		h.messages.some((m) => m.type === "STATE" || m.type === "RECORD"),
+		calls.some((c) => c.path.includes("collection")),
 		false,
 	);
 });
 
-test("the collection list sends the app's appId and publicOnly", async () => {
-	const { calls, page } = fakePage(standardAnswer);
-	const h = harness(["favorite_collections"], page);
+test("review 2 #5: a plain-text 503 (or any non-JSON body) is a challenge, not a retryable server error", async () => {
+	for (const status of [503, 500, 200, 429]) {
+		const { calls, page } = fakePage((call) =>
+			call.path === "/passport/account/info/v2/"
+				? ok(ACCOUNT)
+				: { ...ok(null), status, html: false, empty: false, json: null },
+		);
+		const h = harness(["videos", "likes"], page);
+		await collectTikTok(h.ctx, noDelay);
+		assert.deepEqual(
+			h.failures.map((f) => [f.stream, f.retryable]),
+			[
+				["videos", false],
+				["likes", false],
+			],
+			String(status),
+		);
+		assert.match(h.failures[0]?.message ?? "", /^tiktok_bot_check/);
+		assert.equal(calls.length, 2);
+	}
+	// An empty 503 stays a retryable server error.
+	const { page } = fakePage((call) =>
+		call.path === "/passport/account/info/v2/"
+			? ok(ACCOUNT)
+			: { ...ok(null), status: 503, empty: true },
+	);
+	const h = harness(["videos"], page);
 	await collectTikTok(h.ctx, noDelay);
-	const call = calls.find((c) => c.path === "/api/user/collection_list/");
-	assert.equal(call?.params.appId, "1988");
-	assert.equal(call?.params.publicOnly, "false");
+	assert.deepEqual(
+		h.failures.map((f) => f.retryable),
+		[true],
+	);
+	assert.match(h.failures[0]?.message ?? "", /^tiktok_server_error/);
+});
+
+test("review 2 #2: the profile follows the cursor past videos without the owner's counts", async () => {
+	const [first, second, third] = POSTS.itemList as Json[];
+	const stranger = {
+		...(first as Json),
+		author: { id: "999", uniqueId: "someone_else" },
+	};
+	const noStats = {
+		...(second as Json),
+		authorStats: undefined,
+		authorStatsV2: undefined,
+	};
+	const page1 = {
+		...POSTS,
+		hasMore: true,
+		cursor: "next",
+		itemList: [stranger, noStats],
+	};
+	const page2 = { ...POSTS, hasMore: false, cursor: "end", itemList: [third] };
+	const { calls, page } = fakePage((call) =>
+		call.path === "/api/post/item_list/"
+			? ok(call.params.cursor === "0" ? page1 : page2)
+			: standardAnswer(call),
+	);
+	const h = harness(["profile"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.deepEqual(
+		calls
+			.filter((c) => c.path === "/api/post/item_list/")
+			.map((c) => c.params.cursor),
+		["0", "next"],
+	);
+	const thirdStats = (third as { authorStatsV2: { followerCount: string } })
+		.authorStatsV2;
+	assert.equal(
+		h.records[0]?.data.follower_count,
+		Number(thirdStats.followerCount),
+	);
+	assert.equal(h.records[0]?.data.unique_id, "synthetic_owner");
+});
+
+test("review 2 #2: listed videos none of which carry the owner's counts fail the profile", async () => {
+	const [first] = POSTS.itemList as Json[];
+	const stranger = { ...(first as Json), author: { id: "999" } };
+	for (const streams of [["profile"], ["videos", "profile"]]) {
+		const { page } = fakePage((call) =>
+			call.path === "/api/post/item_list/"
+				? ok({ ...POSTS, hasMore: false, itemList: [stranger] })
+				: standardAnswer(call),
+		);
+		const h = harness(streams, page);
+		await collectTikTok(h.ctx, noDelay);
+		assert.equal(
+			h.records.some((r) => r.stream === "profile"),
+			false,
+			streams.join(),
+		);
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["profile"],
+		);
+		assert.match(h.failures[0]?.message ?? "", /carried the profile counts/);
+	}
 });
 
 test("the session probe waits for the page's first request instead of reading it as signed out", async () => {

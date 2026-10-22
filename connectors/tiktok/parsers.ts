@@ -196,7 +196,7 @@ const itemPageSchema = z.object({
 	cursor: cursorValue.optional(),
 	total: count.optional(),
 	// An empty list answers without the key at all (observed on the repost,
-	// collect and collection lists).
+	// collect lists).
 	itemList: z.array(z.unknown()).optional(),
 });
 
@@ -281,65 +281,6 @@ export function parseUserPage(json: unknown): UserPage | null {
 		total: parsed.data.total ?? null,
 		unreadable,
 		users,
-	};
-}
-
-// ─── favorite collections (/api/user/collection_list/) ───────────────────
-
-/**
- * The recorded account had no collections, so the entry shape is not in the
- * evidence: these are the fields TikTok's web app is known to use. An entry
- * without them counts as unreadable and fails the stream rather than being
- * guessed at.
- */
-const collectionSchema = z.object({
-	collectionId: digitString,
-	name: z.string(),
-	total: count.optional(),
-});
-
-type Collection = z.infer<typeof collectionSchema>;
-
-const collectionPageSchema = z.object({
-	hasMore: z.boolean(),
-	cursor: cursorValue.optional(),
-	total: count.optional(),
-	collectionList: z.array(z.unknown()).optional(),
-});
-
-export interface CollectionPage {
-	collections: Collection[];
-	/**
-	 * Whether the answer carried a `collectionList` array at all. The live
-	 * answer for the recorded account had `total: 1`, `hasMore: false` and no
-	 * list key: TikTok counts a collection it does not list to this call, so
-	 * `total` is only a claim about entries when the list is present.
-	 */
-	listed: boolean;
-	cursor: string | null;
-	hasMore: boolean;
-	total: number | null;
-	unreadable: number;
-}
-
-export function parseCollectionPage(json: unknown): CollectionPage | null {
-	const parsed = collectionPageSchema.safeParse(json);
-	if (!parsed.success) return null;
-	const collections: Collection[] = [];
-	let unreadable = 0;
-	for (const entry of parsed.data.collectionList ?? []) {
-		const collection = collectionSchema.safeParse(entry);
-		if (collection.success) collections.push(collection.data);
-		else unreadable += 1;
-	}
-	const cursor = parsed.data.cursor;
-	return {
-		collections,
-		listed: parsed.data.collectionList !== undefined,
-		cursor: cursor === undefined ? null : String(cursor),
-		hasMore: parsed.data.hasMore,
-		total: parsed.data.total ?? null,
-		unreadable,
 	};
 }
 
@@ -482,16 +423,5 @@ export function buildUserRecord(user: User, notes: TextNotes): RecordData {
 		sec_uid: text(user.secUid, notes, 200),
 		verified: user.verified ?? null,
 		private_account: user.privateAccount ?? null,
-	};
-}
-
-export function buildCollectionRecord(
-	collection: Collection,
-	notes: TextNotes,
-): RecordData {
-	return {
-		id: collection.collectionId,
-		name: text(collection.name, notes),
-		item_count: collection.total ?? null,
 	};
 }

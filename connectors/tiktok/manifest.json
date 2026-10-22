@@ -9,7 +9,7 @@
 	},
 	"connector_key": "tiktok",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-	"version": "0.1.2",
+	"version": "0.2.0",
 	"display_name": "TikTok (Browser Sign-In)",
 	"runtime_requirements": {
 		"bindings": {
@@ -346,10 +346,10 @@
 		{
 			"name": "favorites",
 			"required": false,
-			"description": "Videos the owner saved to Favorites, newest first: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected. Which Favorites collection a video sits in is not collected: the web API calls observed for this source list collections but not their contents.",
+			"description": "Videos the owner saved to Favorites, newest first: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected.",
 			"display": {
 				"label": "Your TikTok Favorites",
-				"detail": "The videos you saved to Favorites: who posted each, its caption and when it was posted. Which collection a video sits in is not collected."
+				"detail": "The videos you saved to Favorites: who posted each, its caption and when it was posted."
 			},
 			"semantics": "append_only",
 			"schema": {
@@ -414,58 +414,6 @@
 				"aggregations": {
 					"count": true,
 					"group_by_time": ["video_created_at"]
-				}
-			},
-			"coverage_strategy": "full_inventory",
-			"freshness_strategy": "manual_as_of"
-		},
-		{
-			"name": "favorite_collections",
-			"required": false,
-			"description": "The collections the owner made in Favorites: name and how many videos each holds. Which videos are in a collection is not collected.",
-			"display": {
-				"label": "Your TikTok Favorites collections",
-				"detail": "The name of each collection you made in Favorites and how many videos it holds."
-			},
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string",
-						"pattern": "^[0-9]{1,30}$",
-						"description": "TikTok's own numeric collection id.",
-						"x_pdpp_role": "secondary"
-					},
-					"name": {
-						"type": ["string", "null"],
-						"maxLength": 500,
-						"description": "The collection's name.",
-						"x_pdpp_role": "primary-title"
-					},
-					"item_count": {
-						"type": ["integer", "null"],
-						"minimum": 0,
-						"description": "Videos in the collection when collected."
-					}
-				},
-				"required": ["id", "name", "item_count"]
-			},
-			"primary_key": ["id"],
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": false,
-			"query": {
-				"search": {
-					"lexical_fields": ["name"]
-				},
-				"range_filters": {
-					"item_count": ["gte", "gt", "lte", "lt"]
-				},
-				"aggregations": {
-					"count": true
 				}
 			},
 			"coverage_strategy": "full_inventory",
