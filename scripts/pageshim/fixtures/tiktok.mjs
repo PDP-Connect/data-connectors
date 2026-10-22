@@ -33,6 +33,22 @@ const settings = fx("user-settings.json");
 const posts = fx("post-item-list.json");
 const liked = fx("favorite-item-list.json");
 const users = fx("user-list.json");
+const collectionList = fx("collection-list.json");
+const collectionItems = fx("collection-item-list.json");
+
+/** One collection, with one video, owned by the fixture's person. */
+const COLLECTION = collectionList.collectionList[0];
+const COLLECTIONS = {
+	...collectionList,
+	collectionList: [{ ...COLLECTION, total: "1" }],
+	total: 1,
+};
+const COLLECTION_VIDEOS = {
+	...collectionItems,
+	itemList: collectionItems.itemList.slice(0, 1),
+};
+/** Invented: the value the collection page's own request carries. */
+const SOURCE_TYPE = "3";
 
 /** Client fields the page's own request carries; invented values. */
 const CLIENT_QUERY =
@@ -99,12 +115,20 @@ const refused = () => ({
 	body: "",
 });
 
-const appPage = () =>
-	html(`<div id="app">TikTok</div>
+const appPage = (url) => {
+	// A collection page (/@<user>/collection/<Name>-<id>) also loads that
+	// collection's videos, carrying the app's own sourceType.
+	const collection = /\/collection\/.*-([0-9]+)$/.exec(url.pathname)?.[1];
+	const own = collection
+		? `fetch("/api/collection/item_list/?${CLIENT_QUERY}&collectionId=${collection}&count=30&cursor=0&sourceType=${SOURCE_TYPE}", { credentials: "include" }).catch(() => {});`
+		: "";
+	return html(`<div id="app">TikTok</div>
 <script>
 // The web app's own request on load, as www.tiktok.com makes on every page.
 fetch("/api/user/settings/?${CLIENT_QUERY}", { credentials: "include" }).catch(() => {});
+${own}
 </script>`);
+};
 
 /** Every API request the connector or the page made: `path?query`. */
 export const apiRequests = [];
@@ -135,6 +159,19 @@ function answerApi(url) {
 			if (q.get("secUid") === SEC_UID && q.get("cursor") === "0")
 				return json(FAVORITES);
 			break;
+		case "/api/user/collection_list/":
+			if (q.get("secUid") === SEC_UID && q.get("cursor") === "0")
+				return json(COLLECTIONS);
+			break;
+		case "/api/collection/item_list/":
+			// The app's own value, copied by the connector, is required.
+			if (q.get("sourceType") !== SOURCE_TYPE) return refused();
+			if (
+				q.get("collectionId") === COLLECTION.collectionId &&
+				q.get("cursor") === "0"
+			)
+				return json(COLLECTION_VIDEOS);
+			break;
 		case "/api/user/list/":
 			if (q.get("scene") === "21") return json(following);
 			if (q.get("scene") === "67") return json(followers);
@@ -149,7 +186,7 @@ export function resolveFixture(raw) {
 	const url = new URL(raw);
 	if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/passport/"))
 		return answerApi(url);
-	return appPage();
+	return appPage(url);
 }
 
 export const tiktokFixtures = {
@@ -168,6 +205,8 @@ const STREAMS = [
 	"videos",
 	"likes",
 	"favorites",
+	"favorite_collections",
+	"collection_items",
 	"following",
 	"followers",
 ];
@@ -176,13 +215,15 @@ export const pageshimCase = {
 	fixtures: tiktokFixtures,
 	scopes: STREAMS.map((stream) => `tiktok.${stream}`),
 	exportSummary: {
-		count: 11,
+		count: 13,
 		label: "records",
 		details: {
 			profile: 1,
 			videos: 3,
 			likes: 3,
 			favorites: 1,
+			favorite_collections: 1,
+			collection_items: 1,
 			following: 1,
 			followers: 2,
 		},
@@ -195,6 +236,8 @@ export const pageshimCase = {
 			videos: 0,
 			likes: 0,
 			favorites: 0,
+			favorite_collections: 0,
+			collection_items: 0,
 			following: 0,
 			followers: 0,
 		},

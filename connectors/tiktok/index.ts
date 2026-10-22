@@ -41,6 +41,8 @@
  *   GET /api/favorite/item_list/        -> likes
  *   GET /api/user/collect/item_list/    -> favorites
  *   GET /api/user/list/ (scene 21 / 67) -> following / followers
+ *   GET /api/user/collection_list/      -> favorite_collections
+ *   GET /api/collection/item_list/      -> collection_items
  *
  * Every list is paged until TikTok's own `hasMore: false`; a repeated cursor,
  * a page that adds nothing while hasMore is true, or the page cap fails the
@@ -52,9 +54,11 @@
  * TikTok's data export), direct messages (a separate protocol; a later
  * phase), reposts and playlists.
  *
- * Not collected either: Favorites collections. The web app lists them, but
- * no call that lists a collection's videos was observed, so membership could
- * not be read without guessing an endpoint; favorites is the flat list.
+ * Favorites collections: the list (favorite_collections) and, per
+ * collection, its videos (collection_items, parent_detail_accounting). The
+ * collection item call needs a `sourceType` the app sends; it is copied from
+ * the app's own request on the collection's page (opened once when needed),
+ * never guessed. A collection whose videos cannot be read is a DETAIL_GAP.
  *
  * Tested surfaces (as of 2026-10-22): a live run in the owner's signed-in
  * Chrome on one small English-language account (profile 1, videos 8, likes
@@ -63,7 +67,8 @@
  *
  * Reachability probe: exempt. Collection needs a signed-in browser session.
  *
- * Streams: profile, videos, likes, favorites, following, followers.
+ * Streams: profile, videos, likes, favorites, favorite_collections,
+ * collection_items, following, followers.
  *
  * CHANGES
  *   v0.1.0 (2026-10-22): first version.
@@ -75,6 +80,8 @@
  *   v0.2.0 (2026-10-22): favorite_collections removed (no evidence of a
  *     collection's item list); the profile walks own videos to one that
  *     carries the owner's counts; any non-JSON body is a challenge.
+ *   v0.3.0 (2026-10-22): favorite_collections back from the live list shape,
+ *     plus collection_items (each collection's videos, detail coverage).
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -85,7 +92,11 @@ import type {
 	EnsureSessionArgs,
 	RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	emitDetailCoverage,
+	emitDetailGap,
+	runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type AllowedPath,
 	apiGetExpression,
@@ -94,14 +105,19 @@ import {
 	WATCH_EXPRESSION,
 } from "./page-script.ts";
 import {
+	buildCollectionItemRecord,
+	buildCollectionRecord,
 	buildProfileRecord,
 	buildSavedVideoRecord,
 	buildUserRecord,
 	buildVideoRecord,
+	type Collection,
+	collectionItemCount,
 	envelopeStatus,
 	type Item,
 	newTextNotes,
 	parseAccount,
+	parseCollectionPage,
 	parseItemPage,
 	parseSettings,
 	parseUserPage,
@@ -141,11 +157,15 @@ const LIKES = "likes";
 const FAVORITES = "favorites";
 const FOLLOWING = "following";
 const FOLLOWERS = "followers";
+const FAVORITE_COLLECTIONS = "favorite_collections";
+const COLLECTION_ITEMS = "collection_items";
 const STREAMS = [
 	VIDEOS,
 	PROFILE,
 	LIKES,
 	FAVORITES,
+	FAVORITE_COLLECTIONS,
+	COLLECTION_ITEMS,
 	FOLLOWING,
 	FOLLOWERS,
 ] as const;
@@ -180,6 +200,10 @@ export interface TikTokCollectContext {
 	emitRecord: BrowserCollectContext["emitRecord"];
 	page: TikTokPage;
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
+	/** Pending detail gaps from earlier runs; absent on hosts that keep none. */
+	detailGaps?: BrowserCollectContext["detailGaps"];
+	/** When true, only retry `detailGaps`, then return. */
+	recoveryOnly?: boolean;
 	requested: BrowserCollectContext["requested"];
 	state: Record<string, unknown>;
 }
@@ -219,6 +243,7 @@ type StopClass =
 	| "request_limit"
 	| "unreadable"
 	| "status_error"
+	| "missing_param"
 	| "incomplete";
 
 const RUN_STOPS: ReadonlySet<StopClass> = new Set([
@@ -249,6 +274,7 @@ const STOP_CODES: Record<StopClass, string> = {
 	request_limit: "tiktok_run_limit_reached",
 	unreadable: "tiktok_source_unreadable",
 	status_error: "tiktok_api_error",
+	missing_param: "tiktok_app_value_not_seen",
 	incomplete: "tiktok_list_incomplete",
 };
 
@@ -317,6 +343,11 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 				break;
 			case "refused":
 				throw new TikTokStop("unreadable", `the page reader refused ${path}`);
+			case "missing_param":
+				throw new TikTokStop(
+					"missing_param",
+					`${path} needs a value the web app sends (sourceType) and the app has not sent it in this page`,
+				);
 			default:
 				throw new TikTokStop(
 					"interrupted",
@@ -404,6 +435,8 @@ type Api = ReturnType<typeof createApi>;
 
 interface WatchStatus {
 	client?: boolean;
+	/** Per path: whether the app's own request carried the copied keys. */
+	copied?: Record<string, boolean>;
 	transport?: string | null;
 	wrongPage?: boolean;
 }
@@ -539,6 +572,8 @@ export async function ensureTikTokSession(
 // ─── list walks ──────────────────────────────────────────────────────────
 
 interface WalkResult {
+	/** Field paths (never values) that made entries unreadable. */
+	failedFields?: string[];
 	/** Distinct items handed to `onItem`. */
 	read: number;
 	total: number | null;
@@ -555,7 +590,7 @@ interface WalkResult {
 async function walkItemList(
 	api: Api,
 	path: AllowedPath,
-	secUid: string,
+	base: Params,
 	maxPages: number,
 	onItem: (item: Item) => Promise<void>,
 ): Promise<WalkResult> {
@@ -565,6 +600,7 @@ async function walkItemList(
 	let read = 0;
 	let unreadable = 0;
 	let total: number | null = null;
+	const failedFields = new Set<string>();
 	for (let pages = 0; ; pages += 1) {
 		if (pages >= maxPages) {
 			throw new TikTokStop(
@@ -574,10 +610,9 @@ async function walkItemList(
 		}
 		seenCursors.add(cursor);
 		const json = await api.get(path, {
-			secUid,
+			...base,
 			count: ITEM_PAGE_SIZE,
 			cursor,
-			coverFormat: "2",
 		});
 		const page = parseItemPage(json);
 		if (!page) {
@@ -588,6 +623,20 @@ async function walkItemList(
 		}
 		total = page.total ?? total;
 		unreadable += page.unreadable;
+		if (page.failed.length > 0) {
+			connectorDiagnostic("tiktok", "item_unreadable", {
+				path,
+				fields: page.failed.join(","),
+			});
+			for (const field of page.failed) failedFields.add(field);
+		}
+		if (page.dropped.length > 0) {
+			// Paths only, never values: which context fields came in another type.
+			connectorDiagnostic("tiktok", "item_fields_dropped", {
+				path,
+				fields: page.dropped.join(","),
+			});
+		}
 		let added = 0;
 		for (const item of page.items) {
 			if (seenIds.has(item.id)) continue;
@@ -597,7 +646,7 @@ async function walkItemList(
 			read += 1;
 		}
 		if (!page.hasMore) {
-			return { read, total, unreadable };
+			return { read, total, unreadable, failedFields: [...failedFields] };
 		}
 		if (added === 0 && page.unreadable === 0) {
 			throw new TikTokStop(
@@ -697,13 +746,22 @@ async function walkUserList(
  */
 function assertComplete(
 	stream: Stream,
-	walk: { read: number; total: number | null; unreadable: number },
+	walk: {
+		failedFields?: string[];
+		read: number;
+		total: number | null;
+		unreadable: number;
+	},
 	known: boolean,
 ): void {
 	if (walk.unreadable > 0) {
+		const fields =
+			walk.failedFields && walk.failedFields.length > 0
+				? ` (fields: ${walk.failedFields.join(", ")})`
+				: "";
 		throw new TikTokStop(
 			"unreadable",
-			`${walk.unreadable} ${stream} ${walk.unreadable === 1 ? "entry" : "entries"} did not match the recorded shape`,
+			`${walk.unreadable} ${stream} ${walk.unreadable === 1 ? "entry" : "entries"} did not match the recorded shape${fields}`,
 		);
 	}
 	if (!known && walk.read === 0 && walk.total !== null && walk.total > 0) {
@@ -769,6 +827,8 @@ export async function collectTikTok(
 		);
 	}
 	const secUid = account.secUid;
+	/** Base query of the owner's own item lists. */
+	const ownList: Params = { secUid, coverFormat: "2" };
 
 	/** Records withheld per stream because a present text was not safe text. */
 	const unsafe = new Map<Stream, number>();
@@ -895,13 +955,288 @@ export async function collectTikTok(
 		);
 	};
 
+	/**
+	 * Make sure the page holds the `sourceType` the web app sends on
+	 * /api/collection/item_list/. The connector never guesses it: when this
+	 * page has no such request, it opens the collection's own page (where the
+	 * app makes that request itself) once, and waits for it. Returns false
+	 * when the app still did not send one.
+	 */
+	let collectionPageOpened = false;
+	const ensureCollectionSource = async (
+		collection: Collection,
+	): Promise<boolean> => {
+		const ready = async (): Promise<boolean> => {
+			const status = await watch(ctx.page);
+			return (
+				status?.client === true &&
+				status.copied?.["/api/collection/item_list/"] === true
+			);
+		};
+		if (await ready()) return true;
+		if (collectionPageOpened || !collection.userName) return false;
+		collectionPageOpened = true;
+		const slug = `${encodeURIComponent(collection.name)}-${collection.collectionId}`;
+		await ctx.page.goto(
+			`${TIKTOK_ORIGIN}/@${encodeURIComponent(collection.userName)}/collection/${slug}`,
+			{ waitUntil: "domcontentloaded" },
+		);
+		for (let waited = 0; waited < CLIENT_WAIT_MS; waited += POLL_INTERVAL_MS) {
+			await delay(POLL_INTERVAL_MS);
+			if (await ready()) return true;
+		}
+		return false;
+	};
+
+	/** Item-level outcomes of one collection's item list: a gap, not a stop. */
+	const ITEM_STOPS: ReadonlySet<StopClass> = new Set([
+		"unreadable",
+		"status_error",
+		"incomplete",
+	]);
+
+	/** Read one collection's videos to hasMore:false; throws on anything else. */
+	const hydrateCollection = async (collection: Collection): Promise<number> => {
+		const before = unsafe.get(COLLECTION_ITEMS) ?? 0;
+		const walk = await walkItemList(
+			api,
+			"/api/collection/item_list/",
+			{ collectionId: collection.collectionId },
+			maxPages,
+			(item) =>
+				emitBuilt(COLLECTION_ITEMS, () =>
+					buildCollectionItemRecord(collection.collectionId, item, notes),
+				),
+		);
+		// TikTok's collection count can include videos that are no longer
+		// available; with hasMore:false proved, a count above what was listed
+		// is noted, not failed.
+		assertComplete(COLLECTION_ITEMS, { ...walk, total: null }, false);
+		const counted = collectionItemCount(collection);
+		if (counted !== null && counted > walk.read) {
+			connectorDiagnostic("tiktok", "collection_count_above_listed", {
+				counted,
+				listed: walk.read,
+			});
+		}
+		const withheld = (unsafe.get(COLLECTION_ITEMS) ?? 0) - before;
+		if (withheld > 0) {
+			unsafe.set(COLLECTION_ITEMS, before);
+			throw new TikTokStop(
+				"unreadable",
+				`${withheld} videos in collection ${collection.collectionId} carry text that is not safe text`,
+			);
+		}
+		return walk.read;
+	};
+
+	interface CollectionsOutcome {
+		childFailure: TikTokStop | null;
+		parentFailure: TikTokStop | null;
+	}
+
+	/**
+	 * Hydrate each collection in `targets` (parent before child records were
+	 * already emitted), give every one exactly one outcome (hydrated, or a
+	 * DETAIL_GAP for an item-level failure), then one DETAIL_COVERAGE. A
+	 * run-level stop propagates and leaves no coverage and no checkpoint.
+	 */
+	const hydrateAll = async (
+		targets: Collection[],
+	): Promise<TikTokStop | null> => {
+		const hydratedKeys: string[] = [];
+		const gapKeys: string[] = [];
+		let items = 0;
+		for (const collection of targets) {
+			if (!(await ensureCollectionSource(collection))) {
+				// No child record was emitted yet: the stream fails visibly and
+				// writes no coverage; nothing is guessed.
+				return new TikTokStop(
+					"missing_param",
+					"the TikTok web app did not send the sourceType it uses for a collection's videos, so collection contents were not read",
+				);
+			}
+			try {
+				items += await hydrateCollection(collection);
+				hydratedKeys.push(collection.collectionId);
+			} catch (error) {
+				if (!(error instanceof TikTokStop) || !ITEM_STOPS.has(error.stop)) {
+					throw error;
+				}
+				await emitDetailGap(ctx, {
+					stream: COLLECTION_ITEMS,
+					parentStream: FAVORITE_COLLECTIONS,
+					recordKey: collection.collectionId,
+					reason: "temporary_unavailable",
+					locator: {
+						kind: "tiktok.collection",
+						collection_id: collection.collectionId,
+						name: collection.name,
+						user_name: collection.userName ?? null,
+					},
+					error: { class: STOP_CODES[error.stop], message: error.message },
+				});
+				gapKeys.push(collection.collectionId);
+			}
+		}
+		await emitDetailCoverage(ctx, {
+			stream: COLLECTION_ITEMS,
+			stateStream: FAVORITE_COLLECTIONS,
+			requiredKeys: targets.map((collection) => collection.collectionId),
+			hydratedKeys,
+			gapKeys,
+		});
+		await ctx.emit({
+			type: "STATE",
+			stream: COLLECTION_ITEMS,
+			cursor: { collections: hydratedKeys.length, items },
+		});
+		return null;
+	};
+
+	/** Read the Favorites collections list to hasMore:false. */
+	const listCollections = async (): Promise<Collection[]> => {
+		const seenCursors = new Set<string>();
+		const byId = new Map<string, Collection>();
+		let cursor = "0";
+		for (let pages = 0; ; pages += 1) {
+			if (pages >= maxPages) {
+				throw new TikTokStop(
+					"incomplete",
+					`/api/user/collection_list/ still had more after ${maxPages} pages`,
+				);
+			}
+			seenCursors.add(cursor);
+			const page = parseCollectionPage(
+				await api.get("/api/user/collection_list/", {
+					secUid,
+					count: ITEM_PAGE_SIZE,
+					cursor,
+					// The app's own call carries appId (1988, TikTok web's app
+					// id) and publicOnly; false asks for private collections too.
+					appId: "1988",
+					publicOnly: "false",
+				}),
+			);
+			if (!page) {
+				throw new TikTokStop(
+					"unreadable",
+					"/api/user/collection_list/ answered a page this connector does not recognise",
+				);
+			}
+			if (page.unreadable > 0) {
+				throw new TikTokStop(
+					"unreadable",
+					`${page.unreadable} favorite collections did not match the recorded shape`,
+				);
+			}
+			let added = 0;
+			for (const collection of page.collections) {
+				if (byId.has(collection.collectionId)) continue;
+				byId.set(collection.collectionId, collection);
+				added += 1;
+			}
+			if (!page.hasMore) {
+				if (page.listed && byId.size === 0 && (page.total ?? 0) > 0) {
+					throw new TikTokStop(
+						"incomplete",
+						`TikTok counted ${page.total} favorite_collections but none could be read`,
+					);
+				}
+				return [...byId.values()];
+			}
+			const next = page.cursor;
+			if (
+				added === 0 ||
+				next === null ||
+				next === "" ||
+				seenCursors.has(next)
+			) {
+				throw new TikTokStop(
+					"incomplete",
+					"/api/user/collection_list/ said it had more but gave no new page",
+				);
+			}
+			cursor = next;
+		}
+	};
+
+	/**
+	 * favorite_collections (parent) and collection_items (child) in one pass:
+	 * parent records, then each collection's videos, then coverage, then the
+	 * checkpoints. Shared by both streams; runs once.
+	 */
+	const runCollections = async (): Promise<CollectionsOutcome> => {
+		const parentRequested = ctx.requested.has(FAVORITE_COLLECTIONS);
+		const childRequested = ctx.requested.has(COLLECTION_ITEMS);
+		let list: Collection[];
+		try {
+			list = await listCollections();
+		} catch (error) {
+			if (error instanceof TikTokStop && !RUN_STOPS.has(error.stop)) {
+				return { parentFailure: error, childFailure: error };
+			}
+			throw error;
+		}
+		if (parentRequested) {
+			for (const collection of list) {
+				await emitBuilt(FAVORITE_COLLECTIONS, () =>
+					buildCollectionRecord(collection, notes),
+				);
+			}
+		}
+		let childFailure: TikTokStop | null = null;
+		if (childRequested) childFailure = await hydrateAll(list);
+		let parentFailure: TikTokStop | null = null;
+		if (parentRequested) {
+			try {
+				assertSafe(FAVORITE_COLLECTIONS);
+				await ctx.emit({
+					type: "STATE",
+					stream: FAVORITE_COLLECTIONS,
+					cursor: { count: list.length },
+				});
+			} catch (error) {
+				if (!(error instanceof TikTokStop)) throw error;
+				parentFailure = error;
+			}
+		}
+		return { parentFailure, childFailure };
+	};
+	let collectionsRun: Promise<CollectionsOutcome> | null = null;
+	const collections = (): Promise<CollectionsOutcome> => {
+		collectionsRun ??= runCollections();
+		return collectionsRun;
+	};
+
+	/** Retry earlier collection gaps only (recovery-only runs). */
+	const recoverCollections = async (): Promise<void> => {
+		const targets: Collection[] = [];
+		for (const gap of ctx.detailGaps ?? []) {
+			const locator = gap.detail_locator;
+			if (gap.stream !== COLLECTION_ITEMS || !locator) continue;
+			const id = locator.collection_id;
+			if (typeof id !== "string" || !/^[0-9]{1,30}$/.test(id)) continue;
+			if (targets.some((target) => target.collectionId === id)) continue;
+			targets.push({
+				collectionId: id,
+				name: typeof locator.name === "string" ? locator.name : id,
+				userName:
+					typeof locator.user_name === "string" ? locator.user_name : undefined,
+			});
+		}
+		if (targets.length === 0) return;
+		const failure = await hydrateAll(targets);
+		if (failure) await fail(COLLECTION_ITEMS, failure);
+	};
+
 	const run: Record<Stream, () => Promise<void>> = {
 		[VIDEOS]: async () => {
 			let newest: string | null = null;
 			const walk = await walkItemList(
 				api,
 				"/api/post/item_list/",
-				secUid,
+				ownList,
 				maxPages,
 				async (item) => {
 					if (ownFirstItem === null && isOwnerItem(item)) ownFirstItem = item;
@@ -950,6 +1285,14 @@ export async function collectTikTok(
 		},
 		[LIKES]: () => walkSaved(LIKES, "/api/favorite/item_list/"),
 		[FAVORITES]: () => walkSaved(FAVORITES, "/api/user/collect/item_list/"),
+		[FAVORITE_COLLECTIONS]: async () => {
+			const outcome = await collections();
+			if (outcome.parentFailure) throw outcome.parentFailure;
+		},
+		[COLLECTION_ITEMS]: async () => {
+			const outcome = await collections();
+			if (outcome.childFailure) throw outcome.childFailure;
+		},
 		[FOLLOWING]: () => walkUsers(FOLLOWING, FOLLOWING_SCENE),
 		[FOLLOWERS]: () => walkUsers(FOLLOWERS, FOLLOWERS_SCENE),
 	};
@@ -960,7 +1303,7 @@ export async function collectTikTok(
 	): Promise<void> {
 		// Every run walks the whole list to hasMore:false; the host keeps one
 		// record per video id, so videos seen before are not duplicated.
-		const walk = await walkItemList(api, path, secUid, maxPages, (item) =>
+		const walk = await walkItemList(api, path, ownList, maxPages, (item) =>
 			emitBuilt(stream, () => buildSavedVideoRecord(item, notes)),
 		);
 		assertComplete(stream, walk, false);
@@ -978,6 +1321,18 @@ export async function collectTikTok(
 		assertComplete(stream, walk, false);
 		assertSafe(stream);
 		await ctx.emit({ type: "STATE", stream, cursor: { count: walk.read } });
+	}
+
+	if (ctx.recoveryOnly === true) {
+		// Only earlier gaps are retried; no list is walked.
+		try {
+			if (ctx.requested.has(COLLECTION_ITEMS)) await recoverCollections();
+		} catch (error) {
+			if (!(error instanceof TikTokStop)) throw error;
+			await stopRun(error);
+			if (error.stop === "auth") throw error;
+		}
+		return;
 	}
 
 	for (const stream of requested) {

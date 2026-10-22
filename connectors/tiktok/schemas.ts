@@ -58,6 +58,22 @@ const savedVideoSchema = z.object({
 export const likesSchema = savedVideoSchema;
 export const favoritesSchema = savedVideoSchema;
 
+export const favoriteCollectionsSchema = z.object({
+	id: tiktokId,
+	name: shortText.nullable(),
+	item_count: counter,
+});
+
+export const collectionItemsSchema = z.object({
+	id: z.string().regex(/^[0-9]{1,30}:[0-9]{1,30}$/),
+	collection_id: tiktokId,
+	video_id: tiktokId,
+	author_id: tiktokId.nullable(),
+	author_unique_id: shortText.nullable(),
+	caption: pdppSafeText.max(4000).nullable(),
+	video_created_at: instant,
+});
+
 const accountSchema = z.object({
 	id: tiktokId,
 	unique_id: shortText.nullable(),
@@ -75,6 +91,8 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	videos: videosSchema,
 	likes: likesSchema,
 	favorites: favoritesSchema,
+	favorite_collections: favoriteCollectionsSchema,
+	collection_items: collectionItemsSchema,
 	following: followingSchema,
 	followers: followersSchema,
 };

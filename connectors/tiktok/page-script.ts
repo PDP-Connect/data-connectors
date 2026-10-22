@@ -43,6 +43,8 @@ export const ALLOWED_PATHS = [
 	"/api/favorite/item_list/",
 	"/api/user/collect/item_list/",
 	"/api/user/list/",
+	"/api/user/collection_list/",
+	"/api/collection/item_list/",
 ] as const;
 export type AllowedPath = (typeof ALLOWED_PATHS)[number];
 
@@ -58,7 +60,21 @@ const CALLER_KEYS = [
 	"needPinnedItemIds",
 	"post_item_list_request_type",
 	"enable_v2",
+	"appId",
+	"publicOnly",
+	"collectionId",
 ];
+
+/**
+ * Per-path query keys whose value the connector does not know and never
+ * guesses: the reader copies them from the web app's own latest request to
+ * the same path (TikTok's collection page sends `sourceType` on
+ * /api/collection/item_list/). Without such a request the reader answers
+ * `missing_param` and sends nothing.
+ */
+export const COPIED_KEYS: Readonly<Record<string, readonly string[]>> = {
+	"/api/collection/item_list/": ["sourceType"],
+};
 
 /**
  * Plain client parameters copied from the web app's own request. Signatures
@@ -109,7 +125,36 @@ const PAGE_HELPERS = String.raw`
 		const CLIENT = ${JSON.stringify(CLIENT_KEYS)};
 		const VALUE = /^[A-Za-z0-9_.\-]{0,240}$/;
 		const SIGNED = /[?&](X-Bogus|X-Gnarly)=/;
+		const COPIED = ${JSON.stringify(COPIED_KEYS)};
 		let client = null;
+		// The newest value the app itself sent for each copied key on a path.
+		const readCopied = (path) => {
+			const keys = COPIED[path] || [];
+			if (keys.length === 0) return [];
+			let entries = [];
+			try {
+				entries = performance.getEntriesByType("resource");
+			} catch {
+				return null;
+			}
+			for (let i = entries.length - 1; i >= 0; i -= 1) {
+				let url;
+				try {
+					url = new URL(entries[i].name);
+				} catch {
+					continue;
+				}
+				if (url.origin !== ORIGIN || url.pathname !== path) continue;
+				const kept = [];
+				for (const key of keys) {
+					const value = url.searchParams.get(key);
+					if (value === null || !VALUE.test(value)) break;
+					kept.push([key, value]);
+				}
+				if (kept.length === keys.length) return kept;
+			}
+			return null;
+		};
 		let preferred = "fetch";
 		let confirmed = false;
 		// The newest request the web app itself made to its JSON API that
@@ -199,7 +244,10 @@ const PAGE_HELPERS = String.raw`
 					return { kind: "refused" };
 			}
 			if (!readClient()) return { kind: "no_client" };
+			const copied = readCopied(path);
+			if (copied === null) return { kind: "missing_param" };
 			for (const [key, value] of client) query.set(key, value);
+			for (const [key, value] of copied) query.set(key, value);
 			for (const [key, value] of Object.entries(params || {})) query.set(key, value);
 			const url = path + "?" + query.toString();
 			const order = confirmed
@@ -243,7 +291,13 @@ const PAGE_HELPERS = String.raw`
 			return last;
 		};
 		const session = Object.freeze({
-			status: () => ({ client: readClient(), transport: confirmed ? preferred : null }),
+			status: () => ({
+				client: readClient(),
+				transport: confirmed ? preferred : null,
+				copied: Object.fromEntries(
+					Object.keys(COPIED).map((path) => [path, readCopied(path) !== null]),
+				),
+			}),
 			get,
 		});
 		Object.defineProperty(globalThis, KEY, {
@@ -269,6 +323,7 @@ export const WATCH_EXPRESSION = `(() => {
 /** What `apiGetExpression` resolves to. It carries no parameter, token or signature. */
 export type PageApiResult =
 	| { kind: "no_client" }
+	| { kind: "missing_param" }
 	| { kind: "no_session" }
 	| { kind: "refused" }
 	| { kind: "wrong_origin" }

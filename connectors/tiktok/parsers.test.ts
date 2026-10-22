@@ -9,8 +9,14 @@ import type {
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { checkTikTokSession, collectTikTok, type TikTokPage } from "./index.ts";
 import {
+	checkTikTokSession,
+	collectTikTok,
+	type TikTokCollectContext,
+	type TikTokPage,
+} from "./index.ts";
+import {
+	buildCollectionRecord,
 	buildProfileRecord,
 	buildSavedVideoRecord,
 	buildUserRecord,
@@ -18,6 +24,7 @@ import {
 	envelopeStatus,
 	newTextNotes,
 	parseAccount,
+	parseCollectionPage,
 	parseItemPage,
 	parseSettings,
 	parseUserPage,
@@ -226,7 +233,13 @@ function fakePage(
 		evaluate: async (script: string) => {
 			const match = GET_CALL.exec(script);
 			if (!match?.[1] || !match[2])
-				return options.watch ?? { client: true, transport: null };
+				return (
+					options.watch ?? {
+						client: true,
+						transport: null,
+						copied: { "/api/collection/item_list/": true },
+					}
+				);
 			const call: Call = {
 				path: JSON.parse(match[1]) as string,
 				params: JSON.parse(match[2]) as Record<string, string>,
@@ -248,6 +261,10 @@ function harness(
 	streams: string[],
 	page: TikTokPage,
 	state: Record<string, unknown> = {},
+	recovery: {
+		detailGaps?: NonNullable<TikTokCollectContext["detailGaps"]>;
+		recoveryOnly?: boolean;
+	} = {},
 ) {
 	const messages: EmittedMessage[] = [];
 	const records: { stream: string; data: RecordData }[] = [];
@@ -285,6 +302,7 @@ function harness(
 			page,
 			requested,
 			state,
+			...recovery,
 		},
 	};
 }
@@ -295,6 +313,8 @@ const ACCOUNT = fixture("passport-account-info-v2.json");
 const SETTINGS = fixture("user-settings.json");
 const POSTS = fixture("post-item-list.json");
 const LIKED = fixture("favorite-item-list.json");
+const COLLECTIONS = fixture("collection-list.json");
+const COLLECTION_ITEMS = fixture("collection-item-list.json");
 const USERS = fixture("user-list.json");
 const COLLECT = fixture("collect-item-list.json");
 
@@ -312,6 +332,10 @@ function standardAnswer(call: Call): Answer {
 			return ok(COLLECT);
 		case "/api/user/list/":
 			return ok(USERS);
+		case "/api/user/collection_list/":
+			return ok(COLLECTIONS);
+		case "/api/collection/item_list/":
+			return ok(COLLECTION_ITEMS);
 		default:
 			return { kind: "refused" };
 	}
@@ -678,26 +702,241 @@ test("live shape: an empty Favorites list (no itemList key) ends on hasMore:fals
 	});
 });
 
-test("review 2 #3: favorite_collections is not a stream and no collection path is requested", async () => {
-	const manifest = JSON.parse(
-		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
-	) as { streams: { name: string; description: string }[] };
-	const names = manifest.streams.map((stream) => stream.name);
-	assert.equal(names.includes("favorite_collections"), false);
-	const favorites = manifest.streams.find(
-		(stream) => stream.name === "favorites",
+const asRecord = (value: unknown): Record<string, unknown> =>
+	typeof value === "object" && value !== null
+		? Object.fromEntries(Object.entries(value))
+		: {};
+
+const COLLECTION_A = "7400000000000000001";
+const COLLECTION_B = "7400000000000000002";
+const BOTH = ["favorite_collections", "collection_items"];
+
+const typeIndex = (
+	h: { messages: EmittedMessage[] },
+	type: string,
+	stream?: string,
+) =>
+	h.messages.findIndex(
+		(m) =>
+			m.type === type &&
+			(stream === undefined || ("stream" in m && m.stream === stream)),
 	);
-	assert.doesNotMatch(favorites?.description ?? "", /collection/i);
+
+test("live shape: collection_list entries carry string totals and become collection records", () => {
+	const page = parseCollectionPage(COLLECTIONS);
+	assert.ok(page);
+	assert.equal(page.listed, true);
+	assert.equal(page.collections.length, 2);
+	const [first] = page.collections;
+	assert.ok(first);
+	const record = buildCollectionRecord(first, newTextNotes());
+	assert.deepEqual(record, {
+		id: COLLECTION_A,
+		name: "Synthetic recipes",
+		item_count: 2,
+	});
+	assertValid("favorite_collections", record);
+	assert.equal("cover" in record, false);
+});
+
+test("review 3: collections and their videos: parent first, every collection hydrated, coverage before the checkpoints", async () => {
 	const { calls, page } = fakePage(standardAnswer);
-	const h = harness(
-		["profile", "videos", "likes", "favorites", "following", "followers"],
-		page,
-	);
+	const h = harness(BOTH, page);
 	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	const parents = h.records.filter((r) => r.stream === "favorite_collections");
+	const children = h.records.filter((r) => r.stream === "collection_items");
+	assert.deepEqual(
+		parents.map((r) => r.data.id),
+		[COLLECTION_A, COLLECTION_B],
+	);
+	assert.deepEqual(
+		children.map((r) => r.data.id),
+		[
+			`${COLLECTION_A}:300001`,
+			`${COLLECTION_A}:300002`,
+			`${COLLECTION_B}:300001`,
+			`${COLLECTION_B}:300002`,
+		],
+	);
+	assert.equal(children[0]?.data.collection_id, COLLECTION_A);
+	assert.equal(children[0]?.data.video_id, "300001");
+	const itemCalls = calls.filter(
+		(c) => c.path === "/api/collection/item_list/",
+	);
+	assert.deepEqual(
+		itemCalls.map((c) => [c.params.collectionId, c.params.cursor]),
+		[
+			[COLLECTION_A, "0"],
+			[COLLECTION_B, "0"],
+		],
+	);
 	assert.equal(
-		calls.some((c) => c.path.includes("collection")),
+		"sourceType" in (itemCalls[0]?.params ?? {}),
+		false,
+		"copied in the page, never set by the connector",
+	);
+	const lastParent = h.messages.findLastIndex(
+		(m) => m.type === "RECORD" && m.stream === "favorite_collections",
+	);
+	const firstChild = typeIndex(h, "RECORD", "collection_items");
+	const coverage = typeIndex(h, "DETAIL_COVERAGE", "collection_items");
+	assert.ok(lastParent < firstChild);
+	assert.ok(coverage > h.messages.findLastIndex((m) => m.type === "RECORD"));
+	assert.ok(typeIndex(h, "STATE", "favorite_collections") > coverage);
+	assert.ok(typeIndex(h, "STATE", "collection_items") > coverage);
+	const message = asRecord(h.messages[coverage]);
+	assert.deepEqual(message.required_keys, [COLLECTION_A, COLLECTION_B]);
+	assert.deepEqual(message.hydrated_keys, [COLLECTION_A, COLLECTION_B]);
+	assert.equal(message.state_stream, "favorite_collections");
+});
+
+test("review 3: a collection's videos page to hasMore:false; a repeated cursor is a gap for that collection only", async () => {
+	const page1 = { ...COLLECTION_ITEMS, hasMore: true, cursor: "c1" };
+	const page2 = {
+		...COLLECTION_ITEMS,
+		hasMore: false,
+		itemList: [{ ...(COLLECTION_ITEMS.itemList as Json[])[0], id: "300009" }],
+	};
+	const looping = { ...COLLECTION_ITEMS, hasMore: true, cursor: "0" };
+	const { calls, page } = fakePage((call) => {
+		if (call.path !== "/api/collection/item_list/") return standardAnswer(call);
+		if (call.params.collectionId === COLLECTION_B) return ok(looping);
+		return ok(call.params.cursor === "0" ? page1 : page2);
+	});
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.deepEqual(
+		calls
+			.filter((c) => c.params.collectionId === COLLECTION_A)
+			.map((c) => c.params.cursor),
+		["0", "c1"],
+	);
+	assert.deepEqual(
+		h.records
+			.filter((r) => r.stream === "collection_items")
+			.map((r) => r.data.video_id),
+		["300001", "300002", "300009", "300001", "300002"],
+	);
+	const gap = asRecord(h.messages.find((m) => m.type === "DETAIL_GAP"));
+	assert.equal(gap.record_key, COLLECTION_B);
+	assert.equal(gap.parent_stream, "favorite_collections");
+	const coverage = asRecord(
+		h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
+	);
+	assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A]);
+	assert.deepEqual(coverage.gap_keys, [COLLECTION_B]);
+	assert.ok(typeIndex(h, "DETAIL_GAP") < typeIndex(h, "DETAIL_COVERAGE"));
+});
+
+test("review 3: without the app's own sourceType the connector opens the collection page once and never guesses", async () => {
+	const { calls, gotos, page } = fakePage(standardAnswer, {
+		watch: {
+			client: true,
+			transport: null,
+			copied: { "/api/collection/item_list/": false },
+		},
+	});
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(gotos, [
+		`https://www.tiktok.com/@synthetic_owner/collection/Synthetic%20recipes-${COLLECTION_A}`,
+	]);
+	assert.equal(
+		calls.some((c) => c.path === "/api/collection/item_list/"),
 		false,
 	);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["collection_items"],
+	);
+	assert.match(h.failures[0]?.message ?? "", /^tiktok_app_value_not_seen/);
+	assert.equal(
+		h.records.filter((r) => r.stream === "collection_items").length,
+		0,
+	);
+	assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+	assert.ok(typeIndex(h, "STATE", "favorite_collections") >= 0);
+});
+
+test("review 3: a challenge inside a collection stops the run with no coverage and no parent checkpoint", async () => {
+	const { page } = fakePage((call) =>
+		call.path === "/api/collection/item_list/"
+			? { ...ok(null), status: 403, html: true }
+			: standardAnswer(call),
+	);
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		BOTH,
+	);
+	assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+	assert.equal(
+		h.messages.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("review 3: a recovery-only run retries just the gapped collection", async () => {
+	const { calls, page } = fakePage(standardAnswer);
+	const h = harness(
+		BOTH,
+		page,
+		{},
+		{
+			recoveryOnly: true,
+			detailGaps: [
+				{
+					gap_id: "g1",
+					status: "pending",
+					stream: "collection_items",
+					parent_stream: "favorite_collections",
+					record_key: COLLECTION_B,
+					detail_locator: {
+						kind: "tiktok.collection",
+						collection_id: COLLECTION_B,
+						name: "Synthetic travel",
+						user_name: "synthetic_owner",
+					},
+				},
+			],
+		},
+	);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(
+		calls.map((c) => [c.path, c.params.collectionId ?? null]),
+		[
+			["/passport/account/info/v2/", null],
+			["/api/collection/item_list/", COLLECTION_B],
+		],
+	);
+	const coverage = asRecord(
+		h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
+	);
+	assert.deepEqual(coverage.required_keys, [COLLECTION_B]);
+	assert.deepEqual(coverage.hydrated_keys, [COLLECTION_B]);
+	assert.equal(
+		h.records.every((r) => r.stream === "collection_items"),
+		true,
+	);
+});
+
+test("live shape (before any collection): total 1 without a list key reads as no collections", async () => {
+	const { page } = fakePage((call) =>
+		call.path === "/api/user/collection_list/"
+			? ok({ ...COLLECTIONS, collectionList: undefined, total: 1 })
+			: standardAnswer(call),
+	);
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.records.length, 0);
+	const coverage = asRecord(
+		h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
+	);
+	assert.deepEqual(coverage.required_keys, []);
 });
 
 test("review 2 #5: a plain-text 503 (or any non-JSON body) is a challenge, not a retryable server error", async () => {
@@ -820,4 +1059,97 @@ test("the session probe waits for the page's first request instead of reading it
 		calls.map((c) => c.path),
 		["/passport/account/info/v2/"],
 	);
+});
+
+// ─── live run 2026-10-22 (favorites 7 items, collections) ────────────────
+
+test("live keys: items without challenges, textExtra, poi, stickersOnItem or diversificationId, with imagePost null, are read", async () => {
+	const base = (LIKED.itemList as Json[])[0] as Json;
+	const rich = {
+		...base,
+		challenges: [{ id: "1", title: "synthetic" }],
+		textExtra: [{ hashtagName: "synthetic", start: 0, end: 10, type: 1 }],
+		poi: { id: "1" },
+		stickersOnItem: [{ stickerType: 4 }],
+		diversificationId: 10045,
+		imagePost: null,
+	};
+	const bare = Object.fromEntries(
+		Object.entries({ ...base, imagePost: null }).filter(
+			([key]) => key !== "diversificationId",
+		),
+	);
+	const items = [
+		...Array.from({ length: 6 }, (_, i) => ({
+			...rich,
+			id: String(310001 + i),
+		})),
+		{ ...bare, id: "310007" },
+	];
+	const { page } = fakePage((call) =>
+		call.path === "/api/user/collect/item_list/"
+			? ok({ ...COLLECT, total: 7, itemList: items })
+			: standardAnswer(call),
+	);
+	const h = harness(["favorites"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.records.length, 7);
+});
+
+test("live run: a context field in another type is dropped to null, not the whole favorite", async () => {
+	const base = (LIKED.itemList as Json[])[0] as Json;
+	const odd = {
+		...base,
+		id: "310008",
+		author: { ...(base.author as Json), id: "" },
+		stats: { ...(base.stats as Json), playCount: 1.5 },
+	};
+	const parsed = parseItemPage({ ...COLLECT, itemList: [odd] });
+	assert.ok(parsed);
+	assert.equal(parsed.unreadable, 0);
+	assert.deepEqual(parsed.dropped, ["author.id", "stats.playCount"]);
+	const [item] = parsed.items;
+	assert.ok(item);
+	const record = buildSavedVideoRecord(item, newTextNotes());
+	assert.equal(record.author_id, null);
+	assert.equal(record.author_unique_id, "synthetic_creator_0");
+	assertValid("favorites", record);
+});
+
+test("live run: an item whose id, time or caption is unreadable still fails, naming the fields", async () => {
+	const base = (LIKED.itemList as Json[])[0] as Json;
+	const { page } = fakePage((call) =>
+		call.path === "/api/user/collect/item_list/"
+			? ok({ ...COLLECT, itemList: [{ ...base, desc: 42 }] })
+			: standardAnswer(call),
+	);
+	const h = harness(["favorites"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.match(
+		h.failures[0]?.message ?? "",
+		/^tiktok_source_unreadable: 1 favorites entry did not match the recorded shape \(fields: desc\)/,
+	);
+});
+
+test("live run: a collection counting more videos than it lists (hasMore:false) is hydrated, not gapped", async () => {
+	const { page } = fakePage((call) =>
+		call.path === "/api/user/collection_list/"
+			? ok({
+					...COLLECTIONS,
+					collectionList: (COLLECTIONS.collectionList as Json[]).map((c) => ({
+						...c,
+						total: "5",
+					})),
+				})
+			: standardAnswer(call),
+	);
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.equal(typeIndex(h, "DETAIL_GAP"), -1);
+	const coverage = asRecord(
+		h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
+	);
+	assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A, COLLECTION_B]);
 });

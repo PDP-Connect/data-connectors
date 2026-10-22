@@ -16,6 +16,8 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
 > = {
 	tiktok: {
+		collection_items: null,
+		favorite_collections: null,
 		favorites: null,
 		followers: null,
 		following: null,

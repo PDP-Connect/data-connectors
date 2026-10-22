@@ -20812,7 +20812,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.2.0",
+				"version": "0.3.0",
 				"display_name": "TikTok (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -21231,6 +21231,141 @@
 						"freshness_strategy": "manual_as_of"
 					},
 					{
+						"name": "favorite_collections",
+						"required": false,
+						"description": "The collections the owner made in Favorites: name and how many videos each holds. Covers, owner id and owner name are not collected. Every run reads the whole list again to TikTok's own end signal.",
+						"display": {
+							"label": "Your TikTok Favorites collections",
+							"detail": "The name of each collection you made in Favorites and how many videos it holds."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric collection id.",
+									"x_pdpp_role": "secondary"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The collection's name.",
+									"x_pdpp_role": "primary-title"
+								},
+								"item_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Videos in the collection when collected, as TikTok counts them."
+								}
+							},
+							"required": ["id", "name", "item_count"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							},
+							"range_filters": {
+								"item_count": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "collection_items",
+						"required": false,
+						"description": "Which saved videos sit in which Favorites collection: one record per video in a collection, with who posted it and its caption. Each collection is read to TikTok's own end signal; a collection that could not be read is retried on the next run. The video files are not collected.",
+						"display": {
+							"label": "Videos in your TikTok Favorites collections",
+							"detail": "For each collection, the videos in it: who posted each, its caption and when it was posted."
+						},
+						"semantics": "mutable_state",
+						"parent_streams": ["favorite_collections"],
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}:[0-9]{1,30}$",
+									"description": "The collection id and the video id, joined by a colon.",
+									"x_pdpp_role": "secondary"
+								},
+								"collection_id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "The collection the video sits in. Joins to favorite_collections.id."
+								},
+								"video_id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric video id. Joins to favorites.id."
+								},
+								"author_id": {
+									"type": ["string", "null"],
+									"pattern": "^[0-9]{1,30}$",
+									"description": "The numeric user id of the account that posted the video."
+								},
+								"author_unique_id": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The handle of the account that posted the video, without the @."
+								},
+								"caption": {
+									"type": ["string", "null"],
+									"maxLength": 4000,
+									"description": "The video's caption.",
+									"x_pdpp_role": "primary-title"
+								},
+								"video_created_at": {
+									"type": "string",
+									"format": "date-time",
+									"description": "When the video was posted, in UTC. Not when it was saved."
+								}
+							},
+							"required": [
+								"id",
+								"collection_id",
+								"video_id",
+								"author_id",
+								"author_unique_id",
+								"caption",
+								"video_created_at"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["caption", "author_unique_id"],
+								"semantic_fields": ["caption"]
+							},
+							"range_filters": {
+								"video_created_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["video_created_at"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
 						"name": "following",
 						"required": false,
 						"description": "Accounts the owner follows: handle, display name and id. Every run reads the whole list again; the stream fails rather than reports complete when TikTok cuts the list short.",
@@ -21381,7 +21516,8 @@
 					"tiktok_run_limit_reached": "This run reached its safety limit on requests. What was collected is saved; the next run continues.",
 					"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
 					"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
-					"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved."
+					"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
+					"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening."
 				},
 				"mobile": {
 					"pageshim": {

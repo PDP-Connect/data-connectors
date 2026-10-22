@@ -202,6 +202,14 @@ const itemPageSchema = z.object({
 
 export interface ItemPage {
 	cursor: string | null;
+	/**
+	 * Field paths (never values) dropped from otherwise readable items because
+	 * their value did not match the recorded type; those record fields are
+	 * then null. For diagnostics.
+	 */
+	dropped: string[];
+	/** Field paths (never values) that made entries unreadable. */
+	failed: string[];
 	hasMore: boolean;
 	items: Item[];
 	total: number | null;
@@ -209,19 +217,92 @@ export interface ItemPage {
 	unreadable: number;
 }
 
+/**
+ * Fields an item stays readable without. Its id, creation time and caption
+ * are what a record is (an item whose caption is present but not a string is
+ * unreadable, never a null caption); stats, author details, video details
+ * and privacy flags are context that may be dropped to null when TikTok sends
+ * them in another type (observed live: one saved video in Favorites and a
+ * collection failed the stricter shape).
+ */
+const DROPPABLE_KEYS = new Set([
+	"author",
+	"authorStats",
+	"authorStatsV2",
+	"stats",
+	"statsV2",
+	"video",
+	"privateItem",
+	"secret",
+	"forFriend",
+]);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * One item, dropping (to absent) only the droppable fields whose value did
+ * not match; null when anything else does not match. Returns the dropped
+ * paths, at most two levels deep (e.g. `author.id`), never values.
+ */
+export function parseItem(
+	entry: unknown,
+): { item: Item; dropped: string[] } | { item: null; failed: string[] } {
+	const first = itemSchema.safeParse(entry);
+	if (first.success) return { item: first.data, dropped: [] };
+	const failed = [
+		...new Set(
+			first.error.issues.map(
+				(issue) => issue.path.slice(0, 2).map(String).join(".") || "(item)",
+			),
+		),
+	].sort();
+	if (!isRecord(entry)) return { item: null, failed };
+	const copy: Record<string, unknown> = { ...entry };
+	const dropped: string[] = [];
+	for (const issue of first.error.issues) {
+		const [top, inner] = issue.path;
+		if (typeof top !== "string" || !DROPPABLE_KEYS.has(top))
+			return { item: null, failed };
+		const parent = copy[top];
+		if (typeof inner === "string" && isRecord(parent)) {
+			const trimmed = { ...parent };
+			delete trimmed[inner];
+			copy[top] = trimmed;
+			dropped.push(`${top}.${inner}`);
+		} else {
+			delete copy[top];
+			dropped.push(top);
+		}
+	}
+	const second = itemSchema.safeParse(copy);
+	return second.success
+		? { item: second.data, dropped: [...new Set(dropped)] }
+		: { item: null, failed };
+}
+
 /** One page of an item list, or null when the page itself is not readable. */
 export function parseItemPage(json: unknown): ItemPage | null {
 	const parsed = itemPageSchema.safeParse(json);
 	if (!parsed.success) return null;
 	const items: Item[] = [];
+	const dropped = new Set<string>();
+	const failed = new Set<string>();
 	let unreadable = 0;
 	for (const entry of parsed.data.itemList ?? []) {
-		const item = itemSchema.safeParse(entry);
-		if (item.success) items.push(item.data);
-		else unreadable += 1;
+		const parsedItem = parseItem(entry);
+		if (parsedItem.item !== null) {
+			items.push(parsedItem.item);
+			for (const path of parsedItem.dropped) dropped.add(path);
+		} else {
+			unreadable += 1;
+			for (const path of parsedItem.failed) failed.add(path);
+		}
 	}
 	const cursor = parsed.data.cursor;
 	return {
+		dropped: [...dropped].sort(),
+		failed: [...failed].sort(),
 		cursor: cursor === undefined ? null : String(cursor),
 		hasMore: parsed.data.hasMore,
 		items,
@@ -282,6 +363,72 @@ export function parseUserPage(json: unknown): UserPage | null {
 		unreadable,
 		users,
 	};
+}
+
+// ─── favorite collections (/api/user/collection_list/) ───────────────────
+
+/**
+ * One Favorites collection as the live list answers it (api.md, "Added by
+ * hand (2026-10-22): collections"): ids and the item count are decimal
+ * strings. The cover, owner id and owner name are not copied.
+ */
+const collectionSchema = z.object({
+	collectionId: digitString,
+	name: z.string(),
+	total: digitString.optional(),
+	userName: z.string().optional(),
+});
+
+export type Collection = z.infer<typeof collectionSchema>;
+
+const collectionPageSchema = z.object({
+	hasMore: z.boolean(),
+	cursor: cursorValue.optional(),
+	total: count.optional(),
+	// An account without collections answers without the key at all.
+	collectionList: z.array(z.unknown()).optional(),
+});
+
+export interface CollectionPage {
+	collections: Collection[];
+	/**
+	 * Whether the answer carried a `collectionList` array. Before any
+	 * collection existed the live answer had `total: 1` and no list key, so a
+	 * total is a claim about entries only when the list is present.
+	 */
+	listed: boolean;
+	cursor: string | null;
+	hasMore: boolean;
+	total: number | null;
+	unreadable: number;
+}
+
+export function parseCollectionPage(json: unknown): CollectionPage | null {
+	const parsed = collectionPageSchema.safeParse(json);
+	if (!parsed.success) return null;
+	const collections: Collection[] = [];
+	let unreadable = 0;
+	for (const entry of parsed.data.collectionList ?? []) {
+		const collection = collectionSchema.safeParse(entry);
+		if (collection.success) collections.push(collection.data);
+		else unreadable += 1;
+	}
+	const cursor = parsed.data.cursor;
+	return {
+		collections,
+		listed: parsed.data.collectionList !== undefined,
+		cursor: cursor === undefined ? null : String(cursor),
+		hasMore: parsed.data.hasMore,
+		total: parsed.data.total ?? null,
+		unreadable,
+	};
+}
+
+/** A collection's item count, or null when absent or not a safe integer. */
+export function collectionItemCount(collection: Collection): number | null {
+	if (collection.total === undefined) return null;
+	const value = Number(collection.total);
+	return Number.isSafeInteger(value) ? value : null;
 }
 
 // ─── records ─────────────────────────────────────────────────────────────
@@ -423,5 +570,33 @@ export function buildUserRecord(user: User, notes: TextNotes): RecordData {
 		sec_uid: text(user.secUid, notes, 200),
 		verified: user.verified ?? null,
 		private_account: user.privateAccount ?? null,
+	};
+}
+
+export function buildCollectionRecord(
+	collection: Collection,
+	notes: TextNotes,
+): RecordData {
+	return {
+		id: collection.collectionId,
+		name: text(collection.name, notes),
+		item_count: collectionItemCount(collection),
+	};
+}
+
+/** One video's membership in one Favorites collection. */
+export function buildCollectionItemRecord(
+	collectionId: string,
+	item: Item,
+	notes: TextNotes,
+): RecordData {
+	return {
+		id: `${collectionId}:${item.id}`,
+		collection_id: collectionId,
+		video_id: item.id,
+		author_id: item.author?.id ?? null,
+		author_unique_id: text(item.author?.uniqueId, notes),
+		caption: text(item.desc, notes, CAPTION_MAX_CHARS),
+		video_created_at: secondsToInstant(item.createTime),
 	};
 }

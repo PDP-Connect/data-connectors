@@ -308,6 +308,8 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		activities: { field: "start_date_local", format: "date" },
 	},
 	tiktok: {
+		collection_items: null,
+		favorite_collections: null,
 		favorites: null,
 		followers: null,
 		following: null,
