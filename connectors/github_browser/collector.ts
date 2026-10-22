@@ -174,11 +174,10 @@ export async function collectGitHubBrowser(
 		if (message.type === "SKIP_RESULT") {
 			message.diagnostics = { ...(asRecord(message.diagnostics) ?? {}), ...failure };
 			const requestFailed = failure.origin === "source" && ["source_request_failed", "http_rate_limited", "http_status_failed", "wrong_navigation"].includes(failure.cause);
-			// An unreadable embedded section (organizations, pinned, achievements) is a
-			// failed read of the profile. github_browser_incomplete is not a portable
-			// reason, so the runtime would end this run as a success.
-			const sectionFailed = failure.origin === "source" && failure.collection !== undefined;
-			if (requestFailed || sectionFailed) {
+			// A requested profile that could not be read is a stream failure,
+			// including owner, shape and embedded-section failures.
+			const profileFailed = stream === "profile" && failure.origin === "source";
+			if (requestFailed || profileFailed) {
 				const text = requestFailed
 					? `GitHub requests for this stream failed: ${failure.cause}.`
 					: `GitHub did not return a complete result for this stream: ${failure.cause}.`;
@@ -190,11 +189,9 @@ export async function collectGitHubBrowser(
 					catch { throw new CollectionError({ ...counts, origin: "sink", cause: "message_emit_failed" }); }
 					return;
 				}
-				if (requestFailed) {
-					message.reason = "stream_collection_failed";
-					message.message = text;
-					message.diagnostics = diagnostics;
-				}
+				message.reason = "stream_collection_failed";
+				message.message = text;
+				message.diagnostics = diagnostics;
 			}
 			if (failure.origin === "sink") {
 				message.reason = "github_browser_publication_failed";

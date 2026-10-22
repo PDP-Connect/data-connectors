@@ -922,7 +922,7 @@ for (const [field, container, brokenEntry] of [
 			const skip = messages[0];
 			assert.ok(skip?.type === "SKIP_RESULT");
 			assert.equal(skip.stream, "profile");
-			assert.equal(skip.reason, "github_browser_incomplete");
+			assert.equal(skip.reason, "stream_collection_failed");
 			assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
 			assert.deepEqual(records, []);
 			assert.deepEqual(state, prior);
@@ -957,4 +957,72 @@ for (const nested of [false, true]) {
   assert.equal(skip.stream, "repositories");
   assert.equal(skip.reason, "inventory_not_proven_complete");
  });
+}
+
+for (const reporter of [false, true]) {
+	for (const cause of ["wrong_page_or_owner", "collection_failed"]) {
+		test(`requested profile failure is portable: ${cause}, reporter=${reporter}`, async () => {
+			const html = await readFixture("profile.html");
+			const prior = { profile: { fetched_at: "2026-10-01T00:00:00Z" } };
+			const state = structuredClone(prior);
+			const messages: EmittedMessage[] = [];
+			const records: unknown[] = [];
+			await collectGitHubBrowser(
+				{
+					requested: new Set(["profile"]),
+					state,
+					progress: async () => {},
+					emit: async (message) => {
+						messages.push(message);
+					},
+					emitRecord: async (_stream, record) => {
+						records.push(record);
+					},
+					...(reporter
+						? {
+								reportStreamFailure: async (
+									stream: string,
+									message: string,
+									options?: { diagnostics?: Record<string, unknown> },
+								) => {
+									messages.push({
+										type: "SKIP_RESULT",
+										stream,
+										reason: "stream_collection_failed",
+										message,
+										diagnostics: options?.diagnostics,
+									});
+								},
+							}
+						: {}),
+				},
+				{
+					fetchPublicJson: async (url) => apiObservation(url, []),
+					openPage: async (url) => ({
+						...pageObservation(url, html),
+						currentUrl:
+							cause === "wrong_page_or_owner" && url !== "https://github.com/"
+								? "https://github.com/other"
+								: url,
+					}),
+					now: () => {
+						throw new Error("PRIVATE-profile-clock-error");
+					},
+					sleep: async () => {},
+				},
+			);
+			assert.deepEqual(records, []);
+			assert.deepEqual(state, prior);
+			assert.equal(messages.length, 1);
+			const skip = messages[0];
+			assert.ok(skip && skip.type === "SKIP_RESULT");
+			assert.equal(skip.reason, "stream_collection_failed");
+			assert.ok(skip.diagnostics && typeof skip.diagnostics === "object");
+			assert.equal((skip.diagnostics as Record<string, unknown>).cause, cause);
+			assert.doesNotMatch(
+				JSON.stringify(messages),
+				/PRIVATE-profile-clock-error/,
+			);
+		});
+	}
 }

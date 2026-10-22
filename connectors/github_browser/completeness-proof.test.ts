@@ -15,6 +15,7 @@ const prior = { fetched_at: "2025-12-01T00:00:00Z" };
 
 async function collect(stream: string, htmlFor: (url: string) => string, api?: (url: string) => { link: string | null | undefined; data: unknown }) {
 	const records: object[] = [];
+	const apiRequests: string[] = [];
 	const messages: Array<{ type: string; reason?: string; diagnostics?: unknown }> = [];
 	const state: Record<string, unknown> = { [stream]: structuredClone(prior) };
 	await collectGitHubBrowser({
@@ -23,10 +24,13 @@ async function collect(stream: string, htmlFor: (url: string) => string, api?: (
 		progress: async () => {}, requested: new Set([stream]), state,
 	}, {
 		openPage: async url => ({ requestedUrl: url, currentUrl: url, html: htmlFor(url) }),
-		fetchPublicJson: async url => ({ requestedUrl: url, responseUrl: url, status: api === undefined ? 500 : 200, data: null, ...api?.(url) }),
+		fetchPublicJson: async url => {
+			apiRequests.push(url);
+			return { requestedUrl: url, responseUrl: url, status: api === undefined ? 500 : 200, data: null, ...api?.(url) };
+		},
 		now: () => new Date("2026-01-01T00:00:00Z"), sleep: async () => {},
 	});
-	return { records, messages, state };
+	return { records, messages, state, apiRequests };
 }
 
 for (const stream of ["repositories", "starred"] as const) {
@@ -47,7 +51,9 @@ for (const stream of ["repositories", "starred"] as const) {
 					(scenario === "short" && first ? next(2) : pagination);
 			});
 			assert.deepEqual(result.records, []);
-			assert.deepEqual(result.messages.map(message => [message.type, message.reason]), [["SKIP_RESULT", "inventory_not_proven_complete"]]);
+			const failedRead = stream === "starred" && ["missing", "absent", "short"].includes(scenario);
+			assert.deepEqual(result.apiRequests, failedRead ? ["https://api.github.com/users/sample-user/starred?per_page=100&page=1"] : []);
+			assert.deepEqual(result.messages.map(message => [message.type, message.reason]), [["SKIP_RESULT", failedRead ? "stream_collection_failed" : "inventory_not_proven_complete"]]);
 			assert.deepEqual(result.state, { [stream]: prior });
 		});
 	}
@@ -103,7 +109,7 @@ for (const section of ["organizations", "achievements"] as const) {
 		assert.equal(parsed.row?.[section]?.length, 1);
 		const result = await collect("profile", () => html);
 		assert.deepEqual(result.records, []);
-		assert.deepEqual(result.messages.map(message => [message.type, message.reason]), [["SKIP_RESULT", "github_browser_incomplete"]]);
+		assert.deepEqual(result.messages.map(message => [message.type, message.reason]), [["SKIP_RESULT", "stream_collection_failed"]]);
 		assert.deepEqual(result.state, { profile: prior });
 	});
 }
@@ -150,7 +156,7 @@ for (const section of ["organizations", "achievements", "pinnedRepositories"] as
 		assert.equal(parsed.complete, false);
 		const result = await collect("profile", () => html);
 		assert.deepEqual(result.records, []);
-		assert.deepEqual(result.messages.map(message => [message.type, message.reason]), [["SKIP_RESULT", "github_browser_incomplete"]]);
+		assert.deepEqual(result.messages.map(message => [message.type, message.reason]), [["SKIP_RESULT", "stream_collection_failed"]]);
 		assert.deepEqual(result.state, { profile: prior });
 	});
 }

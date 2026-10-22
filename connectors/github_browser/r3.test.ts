@@ -293,9 +293,9 @@ for (const failure of ["redirect", "status", "shape", "throw"]) {
      status: failure === "status" ? 403 : 200, data: failure === "shape" ? {} : [restRepo], link: null };
    },
   });
-  // A request that threw is a failed read, not an unproven enumeration.
+  // Transport, status and redirect failures are failed reads; a parsed bad shape is unproven inventory.
   assertIncomplete(result, "starred",
-   failure === "throw" ? "stream_collection_failed" : "inventory_not_proven_complete");
+   failure !== "shape" ? "stream_collection_failed" : "inventory_not_proven_complete");
  });
 }
 test("starred: wrong fallback owner reports its specific withholding reason", async () => {
