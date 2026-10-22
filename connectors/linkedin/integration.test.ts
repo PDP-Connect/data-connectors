@@ -68,6 +68,7 @@ const DASH_PROFILE_RESPONSE = {
 				elements: [
 					{
 						dateRange: { end: { year: 2015 }, start: { year: 2011 } },
+						entityUrn: "urn:li:education:1",
 						degreeName: "B.S.",
 						fieldOfStudy: "Computer Science",
 						grade: "3.9 GPA",
@@ -110,6 +111,7 @@ const DASH_PROFILE_RESPONSE = {
 						profilePositionInPositionGroup: {
 							elements: [
 								{
+									entityUrn: "urn:li:position:1",
 									companyName: "Acme",
 									dateRange: { start: { month: 3, year: 2021 } },
 									title: "Staff Engineer",
@@ -2241,3 +2243,34 @@ for (const scenario of [
 			skip.reason === "linkedin_enumeration_unproven"), !scenario.complete);
 	});
 }
+
+test("source identity: mixed position and education IDs preserve only supported rows without STATE", async () => {
+	const profile = proofProfile();
+	const group = profile.profilePositionGroups.elements[0];
+	group.profilePositionInPositionGroup.elements.push({
+		title: "Unidentified position",
+	});
+	group.profilePositionInPositionGroup.paging.total = 2;
+	group.profilePositionInPositionGroup.paging.count = 2;
+	profile.profileEducations.elements.push({
+		schoolName: "Unidentified school",
+	});
+	profile.profileEducations.paging.total = 2;
+	profile.profileEducations.paging.count = 2;
+	const { recording } = await collectProof({ profile });
+	for (const stream of ["experience", "education"]) {
+		const rows = recording.emitted.filter((row) => row.stream === stream);
+		assert.equal(rows.length, 1, stream);
+		assert.equal(
+			rows[0]?.data.id,
+			stream === "experience" ? "urn:li:position:1" : "urn:li:education:1",
+		);
+		assert.equal(claimsFullCoverage(recording, stream), false);
+		assert.equal(
+			recording.protocolMessages.some(
+				(message) => message.type === "STATE" && message.stream === stream,
+			),
+			false,
+		);
+	}
+});
