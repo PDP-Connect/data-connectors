@@ -93,7 +93,7 @@ type Lock = (path: string) => Promise<void>;
 /**
  * A scratch home removed after the callback. `lock` makes a path unreadable
  * and restores it before removal, so a failed assertion cannot leave a
- * directory the cleanup cannot enter.
+ * directory the cleanup cannot enter. Locked paths must not nest.
  */
 async function withHome(
 	fn: (home: string, lock: Lock) => Promise<void>,
@@ -106,9 +106,9 @@ async function withHome(
 			locked.push(path);
 		});
 	} finally {
-		for (const path of locked.reverse()) {
-			await chmod(path, 0o755).catch(() => undefined);
-		}
+		await Promise.all(
+			locked.map((path) => chmod(path, 0o755).catch(() => undefined)),
+		);
 		await rm(home, { force: true, recursive: true });
 	}
 }
@@ -396,23 +396,24 @@ for (const connector of CONNECTORS) {
 				[stream],
 				"control: the declared stream alone must produce a verdict, or omission proves nothing",
 			);
-			for (const streams of [
-				[UNDECLARED_STREAM],
-				[stream, UNDECLARED_STREAM],
-			]) {
-				const run = await drive({
-					connector,
-					env,
-					home,
-					streams: streams.map((name) => ({ name })),
-				});
-				assert.equal(run.status, "succeeded", streams.join(","));
-				assert.equal(
-					run.coverage,
-					undefined,
-					`a verdict must not cover ${streams.join(",")}: one requested stream has no inventory`,
-				);
-			}
+			await Promise.all(
+				[[UNDECLARED_STREAM], [stream, UNDECLARED_STREAM]].map(
+					async (streams) => {
+						const run = await drive({
+							connector,
+							env,
+							home,
+							streams: streams.map((name) => ({ name })),
+						});
+						assert.equal(run.status, "succeeded", streams.join(","));
+						assert.equal(
+							run.coverage,
+							undefined,
+							`a verdict must not cover ${streams.join(",")}: one requested stream has no inventory`,
+						);
+					},
+				),
+			);
 		});
 	});
 }
@@ -538,17 +539,19 @@ test("claude_code does not claim a project, skills or commands store that is abs
 			{ skills: "skills" },
 			{ slash_commands: "commands" },
 		];
-		for (const group of groups) {
-			const run = await drive({
-				connector: "claude_code",
-				env: { CLAUDE_CODE_HOME: home },
-				home,
-				streams: Object.keys(group).map((name) => ({ name })),
-			});
-			for (const [stream, store] of Object.entries(group)) {
-				assertUnavailable(run, stream, store, /missing or unreadable/);
-			}
-		}
+		await Promise.all(
+			groups.map(async (group) => {
+				const run = await drive({
+					connector: "claude_code",
+					env: { CLAUDE_CODE_HOME: home },
+					home,
+					streams: Object.keys(group).map((name) => ({ name })),
+				});
+				for (const [stream, store] of Object.entries(group)) {
+					assertUnavailable(run, stream, store, /missing or unreadable/);
+				}
+			}),
+		);
 	});
 });
 
@@ -593,15 +596,11 @@ test("codex reports every absent store as unavailable, derived message stores in
 test("codex reports the override path it reads, not the default path beside it", async () => {
 	await withHome(async (home) => {
 		// Every default store exists, but each override points at a path that does not.
-		for (const directory of [
-			"prompts",
-			"rules",
-			"sessions",
-			"sessions-archive",
-			"skills",
-		]) {
-			await mkdir(join(home, directory));
-		}
+		await Promise.all(
+			["prompts", "rules", "sessions", "sessions-archive", "skills"].map(
+				(directory) => mkdir(join(home, directory)),
+			),
+		);
 		await writeFile(join(home, "state_5.sqlite"), "not read: overridden");
 		const absent = join(home, "absent");
 		const run = await drive({
@@ -1034,19 +1033,17 @@ test("codex claims nothing when a user-authored source cannot be read", async ()
 		await mkdir(join(home, "rules", "bad.rules"), { recursive: true });
 		await mkdir(join(home, "prompts", "bad.md"), { recursive: true });
 		await mkdir(join(home, "skills", "bad", "SKILL.md"), { recursive: true });
-		for (const [stream, store] of [
-			["rules", "rules"],
-			["prompts", "prompts"],
-			["skills", "skills"],
-		] as const) {
-			const run = await drive({
-				connector: "codex",
-				env: { CODEX_HOME: home },
-				home,
-				streams: [{ name: stream }],
-			});
-			assertIncomplete(run, stream, store, /could not be read/);
-		}
+		await Promise.all(
+			["rules", "prompts", "skills"].map(async (stream) => {
+				const run = await drive({
+					connector: "codex",
+					env: { CODEX_HOME: home },
+					home,
+					streams: [{ name: stream }],
+				});
+				assertIncomplete(run, stream, stream, /could not be read/);
+			}),
+		);
 	});
 });
 
@@ -1171,25 +1168,27 @@ test("claude_code claims a source_roots bound for the streams it read through th
 test("claude_code does not claim a time bound, alone or beside source_roots", async () => {
 	await withHome(async (home) => {
 		await seedClaudeProjects(home);
-		for (const bound of [
-			{ time_range: SINCE },
-			{ source_roots: ["included"], time_range: SINCE },
-		]) {
-			const run = await drive({
-				connector: "claude_code",
-				env: { CLAUDE_CODE_HOME: home },
-				home,
-				scope: BOUNDED,
-				streams: CLAUDE_BOUNDED_STREAMS.map((name) => ({ name, ...bound })),
-			});
-			for (const stream of CLAUDE_BOUNDED_STREAMS) {
-				assert.equal(
-					scopedFor(run, stream),
-					false,
-					`${stream} with ${JSON.stringify(bound)}: a since bound is applied only when emitting`,
-				);
-			}
-		}
+		await Promise.all(
+			[
+				{ time_range: SINCE },
+				{ source_roots: ["included"], time_range: SINCE },
+			].map(async (bound) => {
+				const run = await drive({
+					connector: "claude_code",
+					env: { CLAUDE_CODE_HOME: home },
+					home,
+					scope: BOUNDED,
+					streams: CLAUDE_BOUNDED_STREAMS.map((name) => ({ name, ...bound })),
+				});
+				for (const stream of CLAUDE_BOUNDED_STREAMS) {
+					assert.equal(
+						scopedFor(run, stream),
+						false,
+						`${stream} with ${JSON.stringify(bound)}: a since bound is applied only when emitting`,
+					);
+				}
+			}),
+		);
 	});
 });
 
