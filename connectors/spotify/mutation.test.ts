@@ -1231,3 +1231,126 @@ test("top rows: a field the operation never carries is null, a malformed one wit
 	assert.equal(withGenres([1]).withheld, 1);
 	assert.equal(withGenres("pop").withheld, 1);
 });
+
+for (const local of [false, true]) {
+	test(`saved-track source identity: ${local ? "local row withheld" : "catalog terminal control"}`, async () => {
+		const uris = local
+			? ["spotify:local:Artist:Album:Song:180", "spotify:track:catalog"]
+			: ["spotify:track:catalog"];
+		const result = await collectWithInPageFetch(
+			["saved_tracks"],
+			(operation, variables) => {
+				assert.equal(operation, "fetchLibraryTracks");
+				return {
+					data: {
+						me: {
+							library: {
+								tracks: {
+									items: uris.map((uri) => ({
+										addedAt: { isoString: "2024-01-01T00:00:00Z" },
+										track: {
+											uri,
+											data: {
+												name: "Track",
+												artists: { items: [] },
+												albumOfTrack: { name: "Album", artists: { items: [] } },
+												duration: { totalMilliseconds: 180000 },
+												contentRating: { label: "NONE" },
+											},
+										},
+									})),
+									totalCount: uris.length,
+									offset: variables.offset,
+								},
+							},
+						},
+					},
+				};
+			},
+		);
+		const rows = result.emittedRecords.filter(
+			(row) => row.stream === "saved_tracks",
+		);
+		assert.deepEqual(
+			rows.map((row) => row.data.id),
+			["catalog"],
+		);
+		assert.equal(rows[0]?.data.identity_unresolved, false);
+		assert.equal(
+			result.messages.some(
+				(message) =>
+					message.type === "STATE" && message.stream === "saved_tracks",
+			),
+			!local,
+		);
+		if (local) {
+			const gap = result.messages.find(
+				(message) =>
+					message.type === "DETAIL_COVERAGE" &&
+					message.stream === "saved_tracks",
+			);
+			assert.ok(gap && gap.type === "DETAIL_COVERAGE");
+			assert.equal(gap.considered, 2);
+			assert.equal(gap.covered, 1);
+		}
+	});
+}
+
+for (const missing of [true, false]) {
+	test(`saved-track source identity: ${missing ? "missing" : "conflicting"} catalog identity is withheld`, async () => {
+		const item = (uri: string | null, id: string | null) => ({
+			addedAt: { isoString: "2024-01-01T00:00:00Z" },
+			track: {
+				uri,
+				data: {
+					id,
+					name: "Track",
+					artists: { items: [] },
+					albumOfTrack: { name: "Album", artists: { items: [] } },
+					duration: { totalMilliseconds: 180000 },
+					contentRating: { label: "NONE" },
+				},
+			},
+		});
+		const result = await collectWithInPageFetch(
+			["saved_tracks"],
+			(_operation, variables) =>
+				new Response(
+					JSON.stringify({
+						data: {
+							me: {
+								library: {
+									tracks: {
+										items: [
+											item(
+												missing ? null : "spotify:track:bad",
+												missing ? null : "different",
+											),
+											item("spotify:track:catalog", "catalog"),
+										],
+										totalCount: 2,
+										offset: variables.offset,
+									},
+								},
+							},
+						},
+					}),
+					{ status: 200 },
+				),
+		);
+		assert.deepEqual(
+			result.emittedRecords.map((row) => row.data.id),
+			["catalog"],
+		);
+		assert.equal(
+			result.messages.some((message) => message.type === "STATE"),
+			false,
+		);
+		const coverage = result.messages.find(
+			(message) => message.type === "DETAIL_COVERAGE",
+		);
+		assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+		assert.equal(coverage.considered, 2);
+		assert.equal(coverage.covered, 1);
+	});
+}
