@@ -759,12 +759,13 @@ test("skipPoliteDelays: a timer armed by a helper that politeDelay calls keeps i
 	);
 });
 
-test("runConnector emits typed DONE coverage only for a START with collection_scope", async () => {
+test("runConnector emits typed DONE coverage only after explicit version negotiation", async () => {
 	const entrypoint = fixturePath("protocol-subprocess-run-coverage.ts");
 	const cases = [
 		{
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "unscoped",
 				scope: { streams: [{ name: "items" }] },
 			},
@@ -773,6 +774,7 @@ test("runConnector emits typed DONE coverage only for a START with collection_sc
 		{
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "unscoped",
 				scope: { streams: [{ name: "items", skip_for_test: true }] },
 			},
@@ -780,6 +782,40 @@ test("runConnector emits typed DONE coverage only for a START with collection_sc
 		},
 		{
 			start: { type: "START", scope: { streams: [{ name: "items" }] } },
+			status: null,
+		},
+		{
+			start: {
+				type: "START",
+				run_coverage_version: 1,
+				collection_scope: "unscoped",
+				scope: { streams: [{ name: "items" }, { name: "uninstrumented" }] },
+			},
+			status: null,
+		},
+		{
+			start: {
+				type: "START",
+				run_coverage_version: 1,
+				scope: { streams: [{ name: "items" }] },
+			},
+			status: null,
+		},
+		{
+			start: {
+				type: "START",
+				run_coverage_version: 2,
+				collection_scope: "unscoped",
+				scope: { streams: [{ name: "items" }] },
+			},
+			status: null,
+		},
+		{
+			start: {
+				type: "START",
+				collection_scope: "unscoped",
+				scope: { streams: [{ name: "items" }] },
+			},
 			status: null,
 		},
 	] as const;
@@ -805,4 +841,47 @@ test("runConnector emits typed DONE coverage only for a START with collection_sc
 			cases[index]?.status,
 		);
 	}
+});
+
+// Required capabilities also fail closed if an incompatible host spawns anyway.
+test("required run coverage refuses an unnegotiated START", async () => {
+	await Promise.all(
+		[false, true].map(async (negotiated) => {
+			const result = await runConnectorProtocolSubprocess({
+				cwd: PACKAGE_ROOT,
+				entrypoint: fixturePath("protocol-subprocess-run-coverage.ts"),
+				env: { RUN_COVERAGE_REQUIRED_FOR_TEST: "1" },
+				start: {
+					type: "START",
+					...(negotiated
+						? { run_coverage_version: 1, collection_scope: "unscoped" }
+						: {}),
+					scope: { streams: [{ name: "items" }] },
+				},
+				allowFailedDone: true,
+			});
+			const done = result.messages.at(-1) as {
+				status: string;
+				coverage?: unknown;
+			};
+			assert.equal(done.status, negotiated ? "succeeded" : "failed");
+			assert.equal(done.coverage !== undefined, negotiated);
+		}),
+	);
+});
+
+test("a base connector accepts an optional run coverage request without emitting evidence", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: fixturePath("protocol-subprocess-browser-shaped.ts"),
+		start: {
+			type: "START",
+			run_coverage_version: 1,
+			collection_scope: "unscoped",
+			scope: { streams: [{ name: "orders" }] },
+		},
+	});
+	const done = result.messages.at(-1) as { status: string; coverage?: unknown };
+	assert.equal(done.status, "succeeded");
+	assert.equal(done.coverage, undefined);
 });

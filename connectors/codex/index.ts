@@ -3034,10 +3034,12 @@ async function main(): Promise<void> {
 	if (!requested.size) {
 		return fail("START.scope.streams is required");
 	}
-	const collectionScope = (
-		startMsg as StartMessage & { collection_scope?: unknown }
-	).collection_scope;
-	if (typeof collectionScope === "string" && collectionScope.length > 0) {
+	const collectionScope = startMsg.collection_scope;
+	if (
+		startMsg.run_coverage_version === 1 &&
+		typeof collectionScope === "string" &&
+		collectionScope.trim().length > 0
+	) {
 		runCoverage = createRunCoverage(
 			Object.fromEntries(
 				manifest.streams.map((stream) => [stream.name, stream.coverage_stores]),

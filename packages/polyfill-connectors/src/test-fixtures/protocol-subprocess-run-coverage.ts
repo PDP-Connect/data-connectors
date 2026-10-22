@@ -5,6 +5,10 @@ import { runConnector } from "../connector-runtime.ts";
 
 runConnector({
 	name: "protocol-subprocess-run-coverage",
+	protocolCapabilities:
+		process.env.RUN_COVERAGE_REQUIRED_FOR_TEST === "1"
+			? ["RUN_COVERAGE_V1"]
+			: [],
 	coverageStores: { items: ["local_items"] },
 	async collect({ requested, reportCoverage, emit }) {
 		if (requested.has("items")) {

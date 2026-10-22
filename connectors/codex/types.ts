@@ -6,7 +6,10 @@
 // entry point.
 
 import type { ArtifactCaptureStatus } from "../../packages/polyfill-connectors/src/artifact-capture.ts";
-import type { RecordData, StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type {
+	RecordData,
+	StreamScope,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 
 /**
  * Per-thread fingerprint carried across runs. `updated_at` is the
@@ -97,6 +100,8 @@ interface RolloutStreamState {
 }
 
 export interface StartMessage {
+	collection_scope?: string;
+	run_coverage_version?: 1;
 	scope?: { streams?: readonly StreamScope[] };
 	state?: {
 		messages?: RolloutStreamState;

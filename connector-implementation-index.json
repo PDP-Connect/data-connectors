@@ -3469,6 +3469,9 @@
 			"entry": "./connectors/apple_photos/index.ts",
 			"manifest": {
 				"protocol_version": "0.1.0",
+				"run_coverage": {
+					"version": 1
+				},
 				"connector_id": "https://registry.pdpp.dev/connectors/apple-photos",
 				"source": {
 					"id": "https://registry.pdpp.dev/sources/apple_photos",
@@ -4992,6 +4995,9 @@
 			"entry": "./connectors/claude_code/index.ts",
 			"manifest": {
 				"protocol_version": "0.1.0",
+				"run_coverage": {
+					"version": 1
+				},
 				"connector_id": "https://registry.pdpp.dev/connectors/claude-code",
 				"source": {
 					"id": "https://registry.pdpp.dev/sources/claude_code",
@@ -6105,6 +6111,9 @@
 			"entry": "./connectors/codex/index.ts",
 			"manifest": {
 				"protocol_version": "0.1.0",
+				"run_coverage": {
+					"version": 1
+				},
 				"connector_id": "https://registry.pdpp.dev/connectors/codex",
 				"source": {
 					"id": "https://registry.pdpp.dev/sources/codex",
@@ -12703,6 +12712,9 @@
 			"entry": "./connectors/google_takeout/index.ts",
 			"manifest": {
 				"protocol_version": "0.1.0",
+				"run_coverage": {
+					"version": 1
+				},
 				"connector_id": "https://registry.pdpp.dev/connectors/google-takeout",
 				"source": {
 					"id": "https://registry.pdpp.dev/sources/google_takeout",
@@ -14453,6 +14465,9 @@
 			"entry": "./connectors/imessage/index.ts",
 			"manifest": {
 				"protocol_version": "0.1.0",
+				"run_coverage": {
+					"version": 1
+				},
 				"connector_id": "https://registry.pdpp.dev/connectors/imessage",
 				"source": {
 					"id": "https://registry.pdpp.dev/sources/imessage",

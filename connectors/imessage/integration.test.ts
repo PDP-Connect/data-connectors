@@ -166,6 +166,7 @@ test("iMessage empty attachment table proves the file store; deferred bytes stay
 			env: { IMESSAGE_DB_PATH: dbPath },
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "unscoped",
 				scope: { streams: [{ name: "attachments" }] },
 			} as unknown as Parameters<

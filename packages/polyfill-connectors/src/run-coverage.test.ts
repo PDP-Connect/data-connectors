@@ -86,8 +86,10 @@ test("five signed manifests declare unique stores for every stream", () => {
 		const manifest = JSON.parse(
 			readFileSync(manifestPath(connector), "utf8"),
 		) as {
+			run_coverage: { version: number };
 			streams: { name: string; coverage_stores: string[] }[];
 		};
+		assert.deepEqual(manifest.run_coverage, { version: 1 });
 		for (const stream of manifest.streams) {
 			assert.ok(
 				stream.coverage_stores.length > 0,
@@ -108,4 +110,18 @@ test("five signed manifests declare unique stores for every stream", () => {
 			}
 		}
 	}
+});
+
+// Selecting an instrumented stream must not require unrelated inventory.
+test("selected instrumented streams can report proven empty enumeration", () => {
+	const coverage = createRunCoverage(
+		{ items: ["local_items"], uninstrumented: [] },
+		"unscoped",
+	);
+	coverage.report("items", "local_items", "collected");
+	assert.equal(
+		coverage.done(["items"])?.streams[0]?.stores[0]?.status,
+		"collected",
+	);
+	assert.equal(coverage.done(["items", "uninstrumented"]), undefined);
 });

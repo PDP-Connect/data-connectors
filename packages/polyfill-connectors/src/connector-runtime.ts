@@ -52,6 +52,7 @@ import { type AuthConfig, resolveAuth } from "@pdpp/connector-protocol/auth";
 import type {
 	AssistanceCompletionStatus,
 	AssistanceRequest,
+	StartMessage as BaseStartMessage,
 	DetailCoverageMessage,
 	DetailGapMessage,
 	DetailGapNetworkPressure,
@@ -63,7 +64,6 @@ import type {
 	ProgressExtra,
 	RecordData,
 	ShapeAnomaly,
-	StartMessage,
 	StreamScope,
 	ValidateRecord,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
@@ -152,10 +152,15 @@ export type {
 	ProviderBudgetProgress,
 	RecordData,
 	ShapeAnomaly,
-	StartMessage,
 	StreamScope,
 	ValidateRecord,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
+
+/** Optional store-evidence extension; the base protocol stays compatible. */
+export interface StartMessage extends BaseStartMessage {
+	collection_scope?: string;
+	run_coverage_version?: 1;
+}
 
 // The session-establishment flow and the typed terminal-error primitive live
 // in `session-establish.ts` / `terminal-error.ts` (this runtime is their
@@ -368,7 +373,10 @@ interface BaseRunConnectorConfig {
 	 * `DONE.error.basis`. Without it the same facts go to standard error as
 	 * diagnostic lines and never reach the wire.
 	 */
-	protocolCapabilities?: readonly (typeof OBSERVATION_CAPABILITY)[];
+	protocolCapabilities?: readonly (
+		| typeof OBSERVATION_CAPABILITY
+		| "RUN_COVERAGE_V1"
+	)[];
 	/**
 	 * Optional post-commit hook. Runs ONLY on a successful run, AFTER the
 	 * runtime has acknowledged durable ingest (stdin EOF) and immediately
@@ -1314,14 +1322,20 @@ export function runConnector(config: RunConnectorConfig): void {
 
 	async function run(): Promise<void> {
 		const startMsg = await parseStart(readStart);
-		const collectionScope = (
-			startMsg as StartMessage & { collection_scope?: unknown }
-		).collection_scope;
-		if (
-			config.coverageStores &&
+		const collectionScope = startMsg.collection_scope;
+		const coverageRequested =
+			startMsg.run_coverage_version === 1 &&
 			typeof collectionScope === "string" &&
-			collectionScope.length > 0
+			collectionScope.trim().length > 0;
+		if (
+			config.protocolCapabilities?.includes("RUN_COVERAGE_V1") &&
+			!coverageRequested
 		) {
+			throw new TerminalError(
+				"RUN_COVERAGE_V1 requires version 1 and collection_scope",
+			);
+		}
+		if (config.coverageStores && coverageRequested) {
 			runCoverage = createRunCoverage(config.coverageStores, collectionScope);
 		}
 		const scopeRequested = buildRequested(startMsg);

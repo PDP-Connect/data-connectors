@@ -1,5 +1,6 @@
 {
 	"protocol_version": "0.1.0",
+	"run_coverage": { "version": 1 },
 	"connector_id": "https://registry.pdpp.dev/connectors/imessage",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/imessage",
@@ -224,7 +225,7 @@
 				}
 			],
 			"coverage_strategy": "parent_detail_accounting",
-			"coverage_stores": ["chat_db","attachment_files"],
+			"coverage_stores": ["chat_db", "attachment_files"],
 			"freshness_strategy": "manual_as_of"
 		}
 	],

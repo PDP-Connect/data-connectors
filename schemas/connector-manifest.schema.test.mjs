@@ -778,3 +778,16 @@ test("new-reader compatibility: the committed pre-binding-instances schema fixtu
     assert.equal(validate(manifest), true, `${path}: expected the new schema to still accept this unmodified manifest`);
   }
 });
+
+// Optional store evidence can be rolled out per stream; malformed declared
+// inventories must fail even though unrelated manifest fields stay extensible.
+test("run coverage advertisement and stream inventories are optional and versioned", () => {
+  assert.equal(validate({}), true);
+  assert.equal(validate({ run_coverage: { version: 1 }, streams: [{ name: "items", coverage_stores: ["metadata"] }, { name: "uninstrumented" }] }), true);
+  for (const invalid of [
+    { run_coverage: { version: 2 } },
+    { run_coverage: {} },
+    { run_coverage: { version: 1, required: true } },
+    ...[[], [""], ["   "], ["store", "store"]].map((coverage_stores) => ({ streams: [{ name: "items", coverage_stores }] })),
+  ]) assert.equal(validate(invalid), false, JSON.stringify(invalid));
+});

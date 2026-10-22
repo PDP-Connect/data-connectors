@@ -1,5 +1,6 @@
 {
 	"protocol_version": "0.1.0",
+	"run_coverage": { "version": 1 },
 	"connector_id": "https://registry.pdpp.dev/connectors/google-takeout",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/google_takeout",
@@ -315,8 +316,8 @@
 			"coverage_strategy": "snapshot_import_receipt",
 			"coverage_stores": ["photos"],
 			"freshness_strategy": "manual_as_of"
-			}
-		],
+		}
+	],
 	"reason_display_messages": {
 		"directory_read_failed": "We couldn't read a folder in your Google Takeout export",
 		"history_not_found": "We couldn't find any history to import",

@@ -61,6 +61,7 @@ test("Claude malformed usage JSON cannot prove stats-cache coverage", async () =
 			},
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "unscoped",
 				scope: { streams: [{ name: "usage" }] },
 				state: {},
@@ -97,6 +98,7 @@ test("Takeout malformed existing history does not claim an unavailable source", 
 			},
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "unscoped",
 				scope: { streams: [{ name: "youtube_watch_history" }] },
 				state: {},
@@ -132,6 +134,7 @@ test("Codex supported rules item read failure cannot prove rules coverage", asyn
 			},
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "unscoped",
 				scope: { streams: [{ name: "rules" }] },
 				state: {},
@@ -161,6 +164,7 @@ test("Codex unreadable state DB is not covered by rollout fallback", async () =>
 			},
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "unscoped",
 				scope: { streams: [{ name: "sessions" }] },
 				state: {},
@@ -176,7 +180,7 @@ test("Codex unreadable state DB is not covered by rollout fallback", async () =>
 	}
 });
 
-test("Codex legacy START without collection scope omits a verdict", async () => {
+test("Codex legacy START without a version request omits a verdict", async () => {
 	const home = await mkdtemp(join(tmpdir(), "pdpp-codex-legacy-coverage-"));
 	try {
 		const result = await runConnectorProtocolSubprocess({
@@ -191,6 +195,7 @@ test("Codex legacy START without collection scope omits a verdict", async () => 
 			},
 			start: {
 				type: "START",
+				collection_scope: "unscoped",
 				scope: { streams: [{ name: "rules" }] },
 				state: {},
 			},
@@ -220,6 +225,7 @@ test("Claude since-only scan does not claim bounded enumeration", async () => {
 			},
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "bounded-test",
 				scope: {
 					streams: [
@@ -251,6 +257,7 @@ test("Codex bounded sessions scan cannot claim coverage from an unbounded DB que
 			},
 			start: {
 				type: "START",
+				run_coverage_version: 1,
 				collection_scope: "bounded-test",
 				scope: {
 					streams: [
@@ -280,6 +287,40 @@ test("inventory directory traversal failure cannot masquerade as an empty source
 				reason: "metadata only",
 			}),
 		);
+	} finally {
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
+// A collected metadata inventory covers its declared obligation, not file content.
+test("Codex negotiated metadata inventory reports its selected store only", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pdpp-codex-metadata-coverage-"));
+	try {
+		await mkdir(join(home, "shell-snapshots"));
+		await writeFile(join(home, "shell-snapshots", "snapshot.sh"), "echo hello");
+		const result = await runConnectorProtocolSubprocess({
+			cwd: packageRoot,
+			entrypoint: connectorEntrypoint("codex"),
+			env: {
+				CODEX_HOME: home,
+				HOME: home,
+				PDPP_OWNER_TOKEN: "",
+				PDPP_RS_URL: "",
+				RS_URL: "",
+			},
+			start: {
+				type: "START",
+				run_coverage_version: 1,
+				collection_scope: "unscoped",
+				scope: { streams: [{ name: "shell_snapshots" }] },
+				state: {},
+			},
+		});
+		assert.equal(
+			statusFor(result.messages, "shell_snapshots", "shell_snapshots"),
+			"collected",
+		);
+		assert.equal(statusFor(result.messages, "sessions", "sessions"), undefined);
 	} finally {
 		await rm(home, { recursive: true, force: true });
 	}

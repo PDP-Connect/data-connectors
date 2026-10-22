@@ -1,5 +1,6 @@
 {
 	"protocol_version": "0.1.0",
+	"run_coverage": { "version": 1 },
 	"connector_id": "https://registry.pdpp.dev/connectors/codex",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/codex",
@@ -182,7 +183,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
-			"coverage_stores": ["sessions","sessions_archive","state_db"],
+			"coverage_stores": ["sessions", "sessions_archive", "state_db"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
