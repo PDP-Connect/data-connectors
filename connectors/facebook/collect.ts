@@ -131,6 +131,8 @@ export interface FacebookServices {
 	sleep: (ms: number) => Promise<void>;
 	/** The latest of the page's own requests for this operation, if it made one. */
 	takeCaptured: (spec: OperationSpec) => CapturedOperation | null;
+	/** False where the host cannot see the page's own requests (PageShim); then no scrolling for one. */
+	observesRequests: boolean;
 	/** Run `tick` every `ms` until the returned stop function is called. */
 	every: (ms: number, tick: () => void) => () => void;
 }
@@ -267,6 +269,7 @@ async function awaitCapture(
 	services: FacebookServices,
 	spec: OperationSpec,
 ): Promise<CapturedOperation | null> {
+	if (!services.observesRequests) return null;
 	let captured = services.takeCaptured(spec);
 	for (let attempt = 0; !captured && attempt < SCROLL_ATTEMPTS; attempt += 1) {
 		await services.scroll();

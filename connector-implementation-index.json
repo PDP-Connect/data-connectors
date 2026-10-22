@@ -7652,7 +7652,6 @@
 			}
 		},
 		{
-			"brandIcon": "./connectors/facebook/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/facebook",
 			"entry": "./connectors/facebook/index.ts",
 			"manifest": {
@@ -7668,10 +7667,6 @@
 				"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
 				"version": "0.1.1",
 				"display_name": "Facebook",
-				"brand": {
-					"icon": "icon.svg",
-					"background_color": "#0866FF"
-				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -8066,7 +8061,20 @@
 						"coverage_strategy": "checkpoint_window",
 						"freshness_strategy": "manual_as_of"
 					}
-				]
+				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "facebook",
+						"login_url": "https://www.facebook.com/login/",
+						"login_message": "Sign in to Facebook, then return here.",
+						"collect_export": "collectFacebookOnPage",
+						"probe_export": "probeFacebookSessionOnPage",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				}
 			}
 		},
 		{

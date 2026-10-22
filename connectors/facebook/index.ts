@@ -307,6 +307,7 @@ function scrollInPage(): void {
 /** The functions Playwright serializes into the page; exported so a test can check they stay self-contained. */
 export const PAGE_FUNCTIONS = {
 	graphqlInPage,
+	locationHrefInPage,
 	readScriptsInPage,
 	resolveModuleInPage,
 	scrollInPage,
@@ -371,8 +372,18 @@ function asProvided(value: unknown): Record<string, unknown> {
 	return asRecord(value) ?? {};
 }
 
+function locationHrefInPage(): string {
+	return location.href;
+}
+
+/**
+ * Page-backed services. `observeRequests` watches the page's own GraphQL
+ * requests (desktop Playwright). The mobile PageShim host has no request
+ * events, so there the query id comes only from the page's loaded modules.
+ */
 export function createPageServices(
 	page: Page,
+	options: { observeRequests: boolean } = { observeRequests: true },
 ): FacebookServices & { dispose: () => void } {
 	let captured: CapturedOperation[] = [];
 	const onRequest = (request: Request): void => {
@@ -388,16 +399,19 @@ export function createPageServices(
 			// A request that cannot be read is simply not a template.
 		}
 	};
-	page.on("request", onRequest);
+	if (options.observeRequests) page.on("request", onRequest);
 	return {
+		observesRequests: options.observeRequests,
 		dispose: () => {
-			page.off("request", onRequest);
+			if (options.observeRequests) page.off("request", onRequest);
 			captured = [];
 		},
 		open: async (url: string): Promise<PageSnapshot> => {
 			captured = [];
 			await gotoWithRetry(page, url);
-			const landedUrl = page.url();
+			const landedUrl = options.observeRequests
+				? page.url()
+				: await page.evaluate(locationHrefInPage);
 			assertLandedOnContent(landedUrl);
 			const scripts = await page.evaluate(readScriptsInPage, {
 				markers: SCRIPT_MARKERS,
@@ -502,6 +516,32 @@ async function ensureFacebookSession(args: EnsureSessionArgs): Promise<void> {
 }
 
 // ─── Collect ────────────────────────────────────────────────────────────
+
+/** The PageShim session probe: reads the current page only, never navigates. */
+export async function probeFacebookSessionOnPage(page: Page): Promise<boolean> {
+	try {
+		const viewerId = await withDeadline(
+			evaluateInMainWorld(page, viewerIdInPage, undefined),
+			PROBE_DEADLINE_MS,
+			"checking the sign-in",
+		);
+		return isNumericId(viewerId) && viewerId !== "0";
+	} catch {
+		return false;
+	}
+}
+
+/** The PageShim (mobile) entry: the same walk, without request observation. */
+export async function collectFacebookOnPage(
+	ctx: CollectorContext & { page: Page },
+): Promise<void> {
+	const services = createPageServices(ctx.page, { observeRequests: false });
+	try {
+		await collectFacebook(ctx, services);
+	} finally {
+		services.dispose();
+	}
+}
 
 export async function collect(ctx: BrowserCollectContext): Promise<void> {
 	const services = createPageServices(ctx.page);

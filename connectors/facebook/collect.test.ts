@@ -177,6 +177,7 @@ function harness(args: {
 			},
 			sleep: async () => undefined,
 			random: () => 0.5,
+			observesRequests: true,
 			every: (ms, tick) => {
 				const ticker = { ms, tick, stopped: false };
 				h.tickers.push(ticker);
@@ -469,6 +470,36 @@ describe("collectFacebook", () => {
 			collectFacebook(h.ctx, h.services),
 			/^Error: facebook_auth_failed/,
 		);
+	});
+});
+
+describe("mobile host", () => {
+	it("does not scroll for a request it cannot see, and takes the query id from the page's modules", async () => {
+		const h = harness({
+			streams: ["friends"],
+			pages: {
+				[ME]: meSnapshot,
+				[FRIENDS_URL]: {
+					landedUrl: FRIENDS_URL,
+					scripts: [
+						preloaded("adp_f", {
+							data: friendsPage(0, { end_cursor: "c1", has_next_page: true })
+								.data,
+						}),
+					],
+				},
+			},
+			moduleDocIds: { [FRIENDS_OP.friendlyName]: FRIENDS_OP.docId },
+			replies: [
+				response(friendsPage(1000, { end_cursor: "c2", has_next_page: false })),
+			],
+		});
+		h.services.observesRequests = false;
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.scrolls, 0);
+		assert.equal(h.records.length, 6);
+		assert.equal(h.calls[0]?.docId, FRIENDS_OP.docId);
 	});
 });
 
