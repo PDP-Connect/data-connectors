@@ -1436,6 +1436,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"oura.sleep",
 	"oura.readiness",
 	"oura.activity",
+	// Character.AI browser profile: auth-walled character.ai session whose API
+	// token lives only in the signed-in page; no credential-free coverage
+	// driver exists for it yet.
+	"character_ai.chats",
+	"character_ai.messages",
 	// Oura browser profile: auth-walled cloud.ouraring.com browser-session
 	// collection with no credential-free coverage driver yet. The PAT/API Oura
 	// connector remains the supported setup profile; this profile is listed as

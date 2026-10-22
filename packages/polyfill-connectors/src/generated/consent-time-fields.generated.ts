@@ -62,6 +62,10 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	apple_photos: {
 		photos: { field: "file_modified_at", format: "date-time" },
 	},
+	character_ai: {
+		chats: { field: "create_time", format: "date-time" },
+		messages: { field: "create_time", format: "date-time" },
+	},
 	chase: {
 		accounts: null,
 		balances: { field: "as_of", format: "date-time" },
