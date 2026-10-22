@@ -1026,3 +1026,112 @@ for (const reporter of [false, true]) {
 		});
 	}
 }
+
+const profilePrior = "2026-10-01T00:00:00Z";
+for (const [scenario, cause] of [
+	["wrong-owner", "wrong_page_or_owner"],
+	["unreadable-profile", "unreadable_profile"],
+	["throw-now", "collection_failed"],
+] as const) {
+	test(`profile ${cause} fails through the real runtime without changing its checkpoint`, async () => {
+		const result = await runConnectorProtocolSubprocess({
+			allowFailedDone: true,
+			cwd: new URL("../../packages/polyfill-connectors/", import.meta.url)
+				.pathname,
+			entrypoint: new URL(
+				"./protocol-profile-runtime-fixture.ts",
+				import.meta.url,
+			).pathname,
+			env: { GITHUB_PROFILE_SCENARIO: scenario },
+			start: {
+				type: "START",
+				scope: { streams: [{ name: "profile" }] },
+				state: { profile: { fetched_at: profilePrior } },
+			},
+		});
+		assert.equal(result.code, 1);
+		assert.equal(result.signal, null);
+		assert.deepEqual(
+			result.messages.filter(
+				(message) => message.type === "RECORD" || message.type === "STATE",
+			),
+			[],
+		);
+		const skips = result.messages.filter(
+			(message) => message.type === "SKIP_RESULT",
+		);
+		assert.equal(skips.length, 1);
+		assert.equal(skips[0]?.stream, "profile");
+		assert.equal(skips[0]?.reason, "stream_collection_failed");
+		const diagnostics = skips[0]?.diagnostics;
+		assert.ok(
+			diagnostics &&
+				typeof diagnostics === "object" &&
+				!Array.isArray(diagnostics),
+		);
+		const failure = diagnostics as Record<string, unknown>;
+		assert.equal(failure.reason, cause);
+		assert.equal(failure.origin, "source");
+		assert.equal(failure.considered, 0);
+		assert.equal(failure.covered, 0);
+		const done = result.messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(done.status, "failed");
+			assert.equal(done.error?.code, "stream_collection_failed");
+			assert.equal(done.records_emitted, 0);
+		}
+		assert.equal(
+			JSON.stringify(result.messages).includes("github_browser_incomplete"),
+			false,
+		);
+		for (const text of [
+			JSON.stringify(result.messages),
+			result.rawStdout,
+			result.stderr,
+		]) {
+			assert.equal(text.includes("PRIVATE_PROFILE_CLOCK_SENTINEL"), false);
+		}
+	});
+}
+
+test("an omitted optional profile name succeeds through the real runtime", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		cwd: new URL("../../packages/polyfill-connectors/", import.meta.url)
+			.pathname,
+		entrypoint: new URL(
+			"./protocol-profile-runtime-fixture.ts",
+			import.meta.url,
+		).pathname,
+		env: { GITHUB_PROFILE_SCENARIO: "optional-name" },
+		start: {
+			type: "START",
+			scope: { streams: [{ name: "profile" }] },
+			state: { profile: { fetched_at: profilePrior } },
+		},
+	});
+	assert.equal(result.code, 0);
+	assert.equal(result.signal, null);
+	const records = result.messages.filter(
+		(message) => message.type === "RECORD",
+	);
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.stream, "profile");
+	assert.equal(Object.hasOwn(records[0]?.data ?? {}, "fullName"), false);
+	const states = result.messages.filter((message) => message.type === "STATE");
+	assert.equal(states.length, 1);
+	assert.equal(states[0]?.stream, "profile");
+	assert.deepEqual(states[0]?.cursor, {
+		fetched_at: "2026-10-22T00:00:00.000Z",
+	});
+	assert.deepEqual(
+		result.messages.filter((message) => message.type === "SKIP_RESULT"),
+		[],
+	);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "succeeded");
+		assert.equal(done.records_emitted, records.length);
+	}
+});
