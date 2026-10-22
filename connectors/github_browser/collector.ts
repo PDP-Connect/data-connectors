@@ -173,8 +173,15 @@ export async function collectGitHubBrowser(
 			: fullInventoryCoverage(stream, enumeration, failure.cause);
 		if (message.type === "SKIP_RESULT") {
 			message.diagnostics = { ...(asRecord(message.diagnostics) ?? {}), ...failure };
-			if (failure.origin === "source" && ["source_request_failed", "http_rate_limited", "http_status_failed", "wrong_navigation"].includes(failure.cause)) {
-				const text = `GitHub requests for this stream failed: ${failure.cause}.`;
+			const requestFailed = failure.origin === "source" && ["source_request_failed", "http_rate_limited", "http_status_failed", "wrong_navigation"].includes(failure.cause);
+			// An unreadable embedded section (organizations, pinned, achievements) is a
+			// failed read of the profile. github_browser_incomplete is not a portable
+			// reason, so the runtime would end this run as a success.
+			const sectionFailed = failure.origin === "source" && failure.collection !== undefined;
+			if (requestFailed || sectionFailed) {
+				const text = requestFailed
+					? `GitHub requests for this stream failed: ${failure.cause}.`
+					: `GitHub did not return a complete result for this stream: ${failure.cause}.`;
 				const diagnostics = { ...asRecord(message.diagnostics), reason: failure.cause,
 					...(failure.status === undefined ? {} : { source_error: `http_${failure.status}` }) };
 				const recoveryHint = { action: "retry_by_runtime", retryable: true };
@@ -183,9 +190,11 @@ export async function collectGitHubBrowser(
 					catch { throw new CollectionError({ ...counts, origin: "sink", cause: "message_emit_failed" }); }
 					return;
 				}
-				message.reason = "stream_collection_failed";
-				message.message = text;
-				message.diagnostics = diagnostics;
+				if (requestFailed) {
+					message.reason = "stream_collection_failed";
+					message.message = text;
+					message.diagnostics = diagnostics;
+				}
 			}
 			if (failure.origin === "sink") {
 				message.reason = "github_browser_publication_failed";

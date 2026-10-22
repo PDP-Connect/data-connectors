@@ -135,7 +135,15 @@ const PROFILE_DECORATION_IDS = [
 	"com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-109",
 ];
 
-type VoyagerJsonResult<T> = { _error: string } | (T & { _error?: undefined });
+/** Why a Voyager read failed, as a closed set. A thrown message or a response
+ *  body can quote private text, so only these classes leave the page. */
+type VoyagerReadCause = `http_${number}` | "malformed_json_body" | "transport_failed";
+
+type PageVoyagerResult =
+	| { _error: VoyagerReadCause }
+	| { _body: unknown; _status: number };
+
+type VoyagerJsonResult<T> = { _error: VoyagerReadCause } | (T & { _error?: undefined });
 
 /** Fetch a Voyager endpoint from inside the logged-in page context. Voyager
  *  has no public CORS allowance, so this must run via `page.evaluate` on a
@@ -154,7 +162,7 @@ async function voyagerFetch<T>(
 	label?: string,
 ): Promise<VoyagerJsonResult<T>> {
 	const result = await page.evaluate(
-		async ({ path }) => {
+		async ({ path }): Promise<PageVoyagerResult> => {
 			try {
 				const csrfMatch = document.cookie.match(/JSESSIONID="?([^";]+)/);
 				const csrfToken = csrfMatch ? csrfMatch[1] : "";
@@ -167,13 +175,17 @@ async function voyagerFetch<T>(
 				}
 				return { _body: await resp.json(), _status: resp.status };
 			} catch (err) {
-				return { _error: err instanceof Error ? err.message : String(err) };
+				// Classes only: a parse or transport error's message can quote the
+				// response body or the host.
+				return {
+					_error: err instanceof SyntaxError ? "malformed_json_body" : "transport_failed",
+				};
 			}
 		},
 		{ path: endpoint },
 	);
 	if ("_error" in result) {
-		return result as VoyagerJsonResult<T>;
+		return result;
 	}
 	capture?.captureHttp(label ?? endpoint, result._body, {
 		endpoint,
@@ -191,7 +203,7 @@ async function voyagerFetch<T>(
 
 function isFetchError<T>(
 	result: VoyagerJsonResult<T>,
-): result is { _error: string } {
+): result is { _error: VoyagerReadCause } {
 	return (
 		typeof result === "object" &&
 		result !== null &&
@@ -203,7 +215,7 @@ function isFetchError<T>(
 interface DashProfileResult {
 	profile: VoyagerProfileElement | null;
 	source: DashProfileSource;
-	failure?: string;
+	failure?: VoyagerReadCause;
 }
 
 function hasRecognizedProfileField(profile: Record<string, unknown>): boolean {
@@ -249,7 +261,7 @@ async function fetchDashProfile(
 	capture?: CaptureSession | null,
 ): Promise<DashProfileResult> {
 	const publicIdStr = encodeURIComponent(publicIdentifier);
-	let decorationFailure: string | undefined;
+	let decorationFailure: VoyagerReadCause | undefined;
 	for (const decorationId of PROFILE_DECORATION_IDS) {
 		const result = await voyagerFetch<VoyagerDashProfilesResponse>(
 			page,
@@ -1092,13 +1104,14 @@ function coverageMessage(
 async function emitUnavailableSection(
 	stream: string,
 	sink: StreamSink,
-	failure?: string,
+	failure?: VoyagerReadCause,
 ): Promise<void> {
+	const diagnostics = { source_reason: "linkedin_profile_section_unavailable" };
 	if (failure) {
 		const message = `LinkedIn ${stream} read failed: ${failure}`;
 		const recoveryHint = { action: "retry_by_runtime", retryable: true };
-		if (sink.reportStreamFailure) await sink.reportStreamFailure(stream, message, { recoveryHint, retryable: true });
-		else await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message, recovery_hint: recoveryHint });
+		if (sink.reportStreamFailure) await sink.reportStreamFailure(stream, message, { recoveryHint, retryable: true, diagnostics });
+		else await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message, recovery_hint: recoveryHint, diagnostics });
 		return;
 	}
 	await sink.emit({
@@ -1107,7 +1120,7 @@ async function emitUnavailableSection(
 		reason: "linkedin_enumeration_unproven",
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		message: "LinkedIn enumeration is unproven; the profile section was unreadable",
-		diagnostics: { source_reason: "linkedin_profile_section_unavailable" },
+		diagnostics,
 	});
 }
 

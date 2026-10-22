@@ -24,10 +24,10 @@ import type {
 	EmittedMessage,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { makeRecordingEmit, runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { makeEmitRecord } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
-import { collectLinkedIn, ensureLinkedInSession } from "./index.ts";
+import { collectLinkedIn, collectLinkedInPageShim, ensureLinkedInSession } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
@@ -109,6 +109,97 @@ test("a later successful decoration recovers an earlier failed read", async () =
 	assert.deepEqual(skipResults(recording), []);
 	assert.equal(recording.emitted.length, 1);
 	assert.ok(recording.protocolMessages.some(message => message.type === "STATE"));
+});
+
+const decorated = (path: string) => path.includes("decorationId=");
+const basicProfileOnly = (path: string) =>
+	path.includes("memberIdentity=") && !decorated(path);
+const basicFallback = (path: string) =>
+	basicProfileOnly(path)
+		? { elements: [{ firstName: "Anon", lastName: "Member" }] }
+		: routeVoyagerPath(path);
+
+test("an unparseable decorated body reports its classified cause, never the body text", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const ctx = buildCtx(["profile", "experience"], recording, basicFallback,
+		(path) => (decorated(path) ? "malformed_body" : undefined));
+	await collectLinkedIn(ctx);
+	assert.deepEqual(
+		skipResults(recording)
+			.filter((skip) => skip.stream === "experience")
+			.map((skip) => [skip.reason, skip.message]),
+		[["stream_collection_failed", "LinkedIn experience read failed: malformed_json_body"]],
+	);
+	assert.equal(JSON.stringify(recording.protocolMessages).includes(PRIVATE_BODY_EXCERPT), false);
+	// Control: a section read from the basic fallback is never claimed complete.
+	assert.equal(
+		recording.protocolMessages.some((message) => message.type === "DETAIL_COVERAGE" && message.stream === "experience"),
+		false,
+	);
+});
+
+test("a rejected Voyager request reports transport_failed, never the thrown message", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const ctx = buildCtx(["experience"], recording, basicFallback,
+		(path) => (decorated(path) ? "transport" : undefined));
+	await collectLinkedIn(ctx);
+	assert.deepEqual(
+		skipResults(recording).map((skip) => [skip.reason, skip.message]),
+		[["stream_collection_failed", "LinkedIn experience read failed: transport_failed"]],
+	);
+	assert.equal(JSON.stringify(recording.protocolMessages).includes(PRIVATE_HOST), false);
+});
+
+test("the PageShim entry reports an unparseable decorated body without its text", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const ctx = buildCtx(["experience"], recording, basicFallback,
+		(path) => (decorated(path) ? "malformed_body" : undefined));
+	await collectLinkedInPageShim(ctx);
+	assert.deepEqual(
+		skipResults(recording).map((skip) => skip.message),
+		["LinkedIn experience read failed: malformed_json_body"],
+	);
+	assert.equal(JSON.stringify(recording.protocolMessages).includes(PRIVATE_BODY_EXCERPT), false);
+});
+
+test("a later full decoration recovers an earlier unparseable read", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	let decoratedCalls = 0;
+	const ctx = buildCtx(["experience"], recording,
+		(path) => (decorated(path) ? { elements: [proofProfile()] } : routeVoyagerPath(path)),
+		(path) => (decorated(path) && ++decoratedCalls === 1 ? "malformed_body" : undefined));
+	await collectLinkedIn(ctx);
+	assert.equal(decoratedCalls, 2);
+	assert.deepEqual(skipResults(recording), []);
+	assert.equal(recording.emitted.length, 1);
+	assert.ok(recording.protocolMessages.some((message) => message.type === "STATE"));
+});
+
+test("the real runtime ends a failed read without the unparseable body text", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
+		cwd: new URL("../../packages/polyfill-connectors/", import.meta.url).pathname,
+		entrypoint: new URL("./protocol-runtime-fixture.ts", import.meta.url).pathname,
+		start: { type: "START", scope: { streams: [{ name: "experience" }] } },
+	});
+	assert.equal(result.code, 1);
+	assert.equal(result.rawStdout.includes(PRIVATE_BODY_EXCERPT), false);
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => `${message.stream}:${message.reason}`),
+		["experience:stream_collection_failed"],
+	);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(done.error?.code, "stream_collection_failed");
+		assert.equal(
+			done.error?.message,
+			"stream collection failed: experience: LinkedIn experience read failed: malformed_json_body",
+		);
+	}
 });
 
 test("resource selection of connections does not become missing enrichment", async () => {
@@ -299,13 +390,34 @@ function requestedMap(names: string[]): Map<string, StreamScope> {
  * executes end to end rather than being bypassed by a path-level stub of
  * `voyagerFetch` itself.
  */
+/** How a Voyager request fails in the browser: its body does not parse, or the
+ *  request never completes. The fault text must not reach any surface. */
+type VoyagerFault = "malformed_body" | "transport";
+
+const PRIVATE_BODY_EXCERPT = "SECRET_NOTE";
+const PRIVATE_HOST = "private-host.example";
+
 function makeFakePage(
 	route: (path: string) => unknown = routeVoyagerPath,
+	fault: (path: string) => VoyagerFault | undefined = () => undefined,
 ): Page {
 	const fakeFetch = (path: string) => {
+		const kind = fault(path);
+		if (kind === "transport") {
+			return Promise.reject(
+				new TypeError(`fetch failed: https://${PRIVATE_HOST}/voyager`),
+			);
+		}
 		const body = route(path);
 		return Promise.resolve({
-			json: () => Promise.resolve(body),
+			json: () =>
+				kind === "malformed_body"
+					? Promise.reject(
+							new SyntaxError(
+								`Unexpected token 'S', "${PRIVATE_BODY_EXCERPT}" is not valid JSON`,
+							),
+						)
+					: Promise.resolve(body),
 			ok: true,
 			status: 200,
 		});
@@ -365,6 +477,7 @@ function buildCtx(
 	requestedNames: string[],
 	recording: ReturnType<typeof makeRecordingEmit>,
 	route: (path: string) => unknown = routeVoyagerPath,
+	fault: (path: string) => VoyagerFault | undefined = () => undefined,
 ): BrowserCollectContext {
 	const markFixtureCollectionsComplete = (value: unknown): unknown => {
 		if (Array.isArray(value)) return value.map(markFixtureCollectionsComplete);
@@ -396,7 +509,7 @@ function buildCtx(
 			return path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")
 				? markFixtureCollectionsComplete(response)
 				: response;
-		}),
+		}, fault),
 		progress: async () => undefined,
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested: requestedMap(requestedNames),

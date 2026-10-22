@@ -220,6 +220,112 @@ test("real runtime preserves selected aggregate contracts before DONE", async ()
 	}
 });
 
+test("a profile with an unreadable embedded section fails the real runtime run with the portable stream failure", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
+		cwd: new URL("../../packages/polyfill-connectors/", import.meta.url)
+			.pathname,
+		entrypoint: new URL("./protocol-profile-runtime-fixture.ts", import.meta.url)
+			.pathname,
+		start: { type: "START", scope: { streams: [{ name: "profile" }] } },
+	});
+	assert.equal(result.code, 1);
+	assert.deepEqual(
+		result.messages.filter(
+			(message) => message.type === "RECORD" || message.type === "STATE",
+		),
+		[],
+	);
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => `${message.stream}:${message.reason}`),
+		["profile:stream_collection_failed"],
+	);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(done.error?.code, "stream_collection_failed");
+	}
+});
+
+for (const [field, container, brokenEntry] of [
+	[
+		"pinnedRepositories",
+		'<div class="js-pinned-items-reorder-container"></div>',
+		'<div class="js-pinned-items-reorder-container"><li><a href="/sponsors/sample-user">Sponsor</a></li></div>',
+	],
+	[
+		"organizations",
+		'<div class="avatar-group"></div>',
+		'<div class="avatar-group"><a class="avatar-group-item" href="/"></a></div>',
+	],
+	[
+		"achievements",
+		'<div class="profile-achievements"></div>',
+		'<div class="profile-achievements"><a href="/sample-user?achievement=badge"><img src="https://example.test/badge.png"></a></div>',
+	],
+] as const) {
+	for (const failure of ["entry", "section"] as const) {
+		test(`profile with unreadable ${field} ${failure} reports a portable stream failure when the runtime supplies one`, async () => {
+			const html = (
+				await readFile(new URL("./__fixtures__/synthetic/profile.html", import.meta.url), "utf8")
+			).replace(
+				container,
+				failure === "entry"
+					? brokenEntry
+					: container.replace("></div>", ' aria-busy="true"></div>'),
+			);
+			const messages: EmittedMessage[] = [];
+			const records: unknown[] = [];
+			const reports: Array<{ stream: string; message: string; options: unknown }> = [];
+			await collectGitHubBrowser(
+				{
+					emit: async (message) => {
+						messages.push(message);
+					},
+					emitRecord: async (_stream, record) => {
+						records.push(record);
+					},
+					progress: async () => {},
+					reportStreamFailure: async (stream, message, options) => {
+						reports.push({ stream, message, options });
+					},
+					requested: new Set(["profile"]),
+					state: {},
+				},
+				{
+					fetchPublicJson: async () => {
+						throw new Error("a profile-only run must not call the API");
+					},
+					now: () => new Date("2026-10-20T17:00:00Z"),
+					openPage: async (url) => pageObservation(url, html),
+					sleep: async () => {},
+				},
+			);
+			assert.deepEqual(messages, []);
+			assert.deepEqual(records, []);
+			assert.equal(reports.length, 1);
+			assert.equal(reports[0]?.stream, "profile");
+			assert.equal(
+				reports[0]?.message,
+				"GitHub did not return a complete result for this stream: discarded_rows.",
+			);
+			const options = reports[0]?.options as {
+				recoveryHint: unknown;
+				diagnostics: Record<string, unknown>;
+			};
+			assert.deepEqual(options.recoveryHint, {
+				action: "retry_by_runtime",
+				retryable: true,
+			});
+			assert.equal(options.diagnostics.reason, "discarded_rows");
+			assert.equal(options.diagnostics.collection, field);
+		});
+	}
+}
+
 test("inventory follows next link and rejects an unproven empty page", async () => {
 	const profile = await readFixture("profile.html");
 	const row = await readFixture("repositories.html");
