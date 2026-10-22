@@ -17,13 +17,19 @@ export interface RunCoverageVerdict {
 	version: 1;
 }
 
-/** Accumulate explicit connector results against the signed manifest inventory. */
+/**
+ * Accumulate explicit connector results against the signed manifest inventory.
+ *
+ * A stream with no entry, an empty entry or an `undefined` entry (a manifest
+ * stream that omits the optional `coverage_stores`) has no declared inventory.
+ * `done` then returns no verdict at all, not a verdict without that stream.
+ */
 export function createRunCoverage(
-	inventory: Readonly<Record<string, readonly string[]>>,
+	inventory: Readonly<Record<string, readonly string[] | undefined>>,
 	collectionScope: string,
 ) {
 	for (const stores of Object.values(inventory)) {
-		if (new Set(stores).size !== stores.length)
+		if (stores && new Set(stores).size !== stores.length)
 			throw new Error("Duplicate coverage store");
 	}
 	const results = new Map<string, RunCoverageStatus>();

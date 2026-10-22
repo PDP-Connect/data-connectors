@@ -345,8 +345,12 @@ export type NormalizeTerminalError = (
 
 /** Fields shared by browser and non-browser configs. */
 interface BaseRunConnectorConfig {
-	/** Store inventory copied from the signed manifest, keyed by stream. */
-	coverageStores?: Readonly<Record<string, readonly string[]>>;
+	/**
+	 * Store inventory copied from the signed manifest, keyed by stream. A stream
+	 * that omits `coverage_stores` maps to `undefined`, and a run that requests
+	 * it carries no coverage verdict.
+	 */
+	coverageStores?: Readonly<Record<string, readonly string[] | undefined>>;
 	auth?: AuthConfig;
 	/**
 	 * Opt in to treating a DECLINED `credentials` interaction as "no stored
