@@ -157,6 +157,10 @@ function storeStatus(
 		?.stores.find((entry) => entry.store === store)?.status;
 }
 
+function scopedFor(run: ConnectorRun, stream: string): boolean | undefined {
+	return run.coverage?.streams.find((entry) => entry.stream === stream)?.scoped;
+}
+
 /**
  * How a run described one store: its status, or that the run failed and sent
  * no verdict. A failed run claims nothing about any store, so it can never
@@ -1042,6 +1046,260 @@ test("codex claims nothing when a user-authored source cannot be read", async ()
 				streams: [{ name: stream }],
 			});
 			assertIncomplete(run, stream, store, /could not be read/);
+		}
+	});
+});
+
+// ─── scoped: the connector applied the requested boundary ───────────────────
+
+// `scoped: true` says enumeration honored the requested boundary. Any
+// collection scope other than "unscoped" requests one. A connector that cannot
+// bound enumeration must report false, and one that claims true must have left
+// the out-of-bound data unread. The out-of-bound source below is poisoned: an
+// unbounded control run trips on it, so a bounded run that succeeds, collects
+// and claims the bound shows the poison was never opened.
+const BOUNDED = "bounded-for-test";
+const SINCE = { since: "2026-01-01T00:00:00Z" };
+const POISON = "{broken json}\n";
+
+test("apple_photos does not claim a time bound it applies only when emitting", async () => {
+	await withHome(async (home) => {
+		await writeFile(join(home, "photo.jpg"), "bytes");
+		const run = await drive({
+			connector: "apple_photos",
+			env: { APPLE_PHOTOS_EXPORT_DIR: home },
+			home,
+			scope: BOUNDED,
+			streams: [{ name: "photos", time_range: SINCE }],
+		});
+		assert.equal(scopedFor(run, "photos"), false);
+	});
+});
+
+test("google_takeout does not claim a time bound it applies only when emitting", async () => {
+	await withHome(async (home) => {
+		const streams = [
+			"location_history",
+			"youtube_watch_history",
+			"search_history",
+			"photos",
+		];
+		const run = await drive({
+			connector: "google_takeout",
+			env: { GOOGLE_TAKEOUT_DIR: home },
+			home,
+			scope: BOUNDED,
+			streams: streams.map((name) => ({ name, time_range: SINCE })),
+		});
+		for (const stream of streams) {
+			assert.equal(scopedFor(run, stream), false, stream);
+		}
+	});
+});
+
+test("imessage does not claim a time bound it applies only when emitting", async () => {
+	await withHome(async (home) => {
+		const database = join(home, "chat.db");
+		buildChatDbFixture(database, { messages: [] });
+		const run = await drive({
+			connector: "imessage",
+			env: { IMESSAGE_DB_PATH: database },
+			home,
+			scope: BOUNDED,
+			streams: [{ name: "messages", time_range: SINCE }],
+		});
+		assert.equal(scopedFor(run, "messages"), false);
+	});
+});
+
+// Two projects: the selected one holds a readable transcript, the other a
+// poisoned one. "included" names the first as the last segment of its path.
+async function seedClaudeProjects(home: string): Promise<void> {
+	await writeClaudeTranscript(home, "-work-included");
+	const excluded = join(home, "projects", "-work-excluded");
+	await mkdir(excluded, { recursive: true });
+	await writeFile(
+		join(excluded, "22222222-2222-4222-8222-222222222222.jsonl"),
+		POISON,
+	);
+	await mkdir(join(home, "skills"));
+}
+
+const CLAUDE_BOUNDED_STREAMS = ["sessions", "messages", "attachments"];
+
+test("claude_code claims a source_roots bound for the streams it read through the pruned projects", async () => {
+	await withHome(async (home) => {
+		await seedClaudeProjects(home);
+		const env = { CLAUDE_CODE_HOME: home };
+		const control = await drive({
+			connector: "claude_code",
+			env,
+			home,
+			streams: CLAUDE_BOUNDED_STREAMS.map((name) => ({ name })),
+		});
+		assert.notEqual(
+			storeStatus(control, "sessions", "projects"),
+			"collected",
+			"control: an unbounded run must trip on the poisoned project, or the bound proves nothing",
+		);
+
+		const run = await drive({
+			connector: "claude_code",
+			env,
+			home,
+			scope: BOUNDED,
+			streams: [
+				...CLAUDE_BOUNDED_STREAMS.map((name) => ({
+					name,
+					source_roots: ["included"],
+				})),
+				{ name: "skills" },
+			],
+		});
+		assert.equal(storeStatus(run, "sessions", "projects"), "collected");
+		for (const stream of CLAUDE_BOUNDED_STREAMS) {
+			assert.equal(scopedFor(run, stream), true, stream);
+		}
+		assert.equal(
+			scopedFor(run, "skills"),
+			false,
+			"a stream the bound does not reach must not claim it",
+		);
+	});
+});
+
+test("claude_code does not claim a time bound, alone or beside source_roots", async () => {
+	await withHome(async (home) => {
+		await seedClaudeProjects(home);
+		for (const bound of [
+			{ time_range: SINCE },
+			{ source_roots: ["included"], time_range: SINCE },
+		]) {
+			const run = await drive({
+				connector: "claude_code",
+				env: { CLAUDE_CODE_HOME: home },
+				home,
+				scope: BOUNDED,
+				streams: CLAUDE_BOUNDED_STREAMS.map((name) => ({ name, ...bound })),
+			});
+			for (const stream of CLAUDE_BOUNDED_STREAMS) {
+				assert.equal(
+					scopedFor(run, stream),
+					false,
+					`${stream} with ${JSON.stringify(bound)}: a since bound is applied only when emitting`,
+				);
+			}
+		}
+	});
+});
+
+test("claude_code claims no bound when a bounded collection carries none on its streams", async () => {
+	await withHome(async (home) => {
+		await seedClaudeProjects(home);
+		await rm(join(home, "projects", "-work-excluded"), { recursive: true });
+		const run = await drive({
+			connector: "claude_code",
+			env: { CLAUDE_CODE_HOME: home },
+			home,
+			scope: BOUNDED,
+			streams: [...CLAUDE_BOUNDED_STREAMS, "skills"].map((name) => ({ name })),
+		});
+		for (const stream of [...CLAUDE_BOUNDED_STREAMS, "skills"]) {
+			assert.equal(scopedFor(run, stream), false, stream);
+		}
+	});
+});
+
+// Two days of rollouts: 2026 is readable and 2020 is poisoned. A since of
+// 2026-01-01 and a source root of the 2026 tree both exclude 2020.
+async function seedCodexRollouts(home: string): Promise<void> {
+	const sessions = join(home, "sessions");
+	await writeFile(
+		await codexRolloutPath(sessions, ["2026", "04", "15"]),
+		codexRollout(CODEX_SESSION),
+	);
+	await writeFile(
+		await codexRolloutPath(
+			sessions,
+			["2020", "01", "05"],
+			"029d922d-c38b-7e11-ae99-9187af386149",
+		),
+		POISON,
+	);
+}
+
+const CODEX_ROLLOUT_STREAMS = ["sessions", "messages", "function_calls"];
+
+const CODEX_BOUNDS: readonly (readonly [
+	label: string,
+	request: (home: string) => Partial<StreamRequest>,
+])[] = [
+	["since", () => ({ time_range: SINCE })],
+	[
+		"source_roots",
+		(home) => ({ source_roots: [join(home, "sessions", "2026")] }),
+	],
+];
+
+for (const [label, request] of CODEX_BOUNDS) {
+	test(`codex claims a ${label} bound for the streams it read through the pruned rollouts only`, async () => {
+		await withHome(async (home) => {
+			await seedCodexRollouts(home);
+			const env = { CODEX_HOME: home, ...CODEX_QUIET_OFF };
+			const control = await drive({
+				connector: "codex",
+				env,
+				home,
+				streams: CODEX_ROLLOUT_STREAMS.map((name) => ({ name })),
+			});
+			assert.equal(
+				storeStatus(control, "messages", "derived_messages"),
+				"failed",
+				"control: an unbounded run must trip on the poisoned rollout, or the bound proves nothing",
+			);
+
+			const run = await drive({
+				connector: "codex",
+				env,
+				home,
+				scope: BOUNDED,
+				streams: CODEX_ROLLOUT_STREAMS.map((name) => ({
+					name,
+					...request(home),
+				})),
+			});
+			assert.equal(
+				storeStatus(run, "messages", "derived_messages"),
+				"collected",
+			);
+			assert.equal(scopedFor(run, "messages"), true);
+			assert.equal(scopedFor(run, "function_calls"), true);
+			assert.equal(
+				scopedFor(run, "sessions"),
+				false,
+				"sessions also reads a state database that no bound reaches",
+			);
+		});
+	});
+}
+
+test("codex claims no bound when a bounded collection carries none on its streams", async () => {
+	await withHome(async (home) => {
+		await mkdir(join(home, "rules"));
+		await writeFile(
+			await codexRolloutPath(join(home, "sessions"), ["2026", "04", "15"]),
+			codexRollout(CODEX_SESSION),
+		);
+		const streams = [...CODEX_ROLLOUT_STREAMS, "rules"];
+		const run = await drive({
+			connector: "codex",
+			env: { CODEX_HOME: home, ...CODEX_QUIET_OFF },
+			home,
+			scope: BOUNDED,
+			streams: streams.map((name) => ({ name })),
+		});
+		for (const stream of streams) {
+			assert.equal(scopedFor(run, stream), false, stream);
 		}
 	});
 });
