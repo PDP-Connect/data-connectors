@@ -63,9 +63,12 @@ const { decodeEscapedText } = await import("./safe-escape.ts");
 const { consentTimeFieldResolver, makeEmitRecord } = await import(
 	"../../packages/polyfill-connectors/src/connector-runtime.ts"
 );
-const { makeRecordingEmit } = await import(
+const { makeRecordingEmit, skipPoliteDelays } = await import(
 	"../../packages/polyfill-connectors/src/test-harness.ts"
 );
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 type BrowserCollectContext =
 	import("../../packages/polyfill-connectors/src/connector-runtime.ts").BrowserCollectContext;
 type AnthropicTestOverrides = {

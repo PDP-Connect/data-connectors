@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
@@ -12,9 +12,14 @@ import type { BrowserCollectContext } from "../../packages/polyfill-connectors/s
 import {
 	type EmittedRecord,
 	makeRecordingEmit,
+	skipPoliteDelays,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { hebConnector } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 const FIXTURES_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
