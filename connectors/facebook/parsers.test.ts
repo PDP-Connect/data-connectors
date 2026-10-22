@@ -406,24 +406,34 @@ describe("activity log", () => {
 });
 
 describe("groups", () => {
-	it("matches a joined-groups list by its group links and reads each group", () => {
+	it("reads joined groups from the live all_joined_groups.tab_groups_list path", () => {
 		const connection = {
 			edges: [
 				{
 					node: {
+						__typename: "Group",
 						id: "123456",
 						name: "Lake swimmers",
 						url: "https://www.facebook.com/groups/123456/",
+						viewer_join_state: "MEMBER",
 					},
 				},
 			],
 			page_info: { end_cursor: null, has_next_page: false },
 		};
 		const found = pickConnection(
-			{ viewer: { id: "1", groups_tab: connection } },
+			{
+				viewer: { all_joined_groups: { tab_groups_list: connection } },
+				nonAdminGroups: { groups_tab: { tab_groups_list: connection } },
+			},
 			matchGroupsConnection,
 		);
 		assert.ok(found);
+		assert.deepEqual(found.keys, [
+			"viewer",
+			"all_joined_groups",
+			"tab_groups_list",
+		]);
 		const node = nodeOf(found.edges[0]);
 		assert.ok(node);
 		const record = parseGroupNode(node, newTextCounter());
@@ -672,6 +682,30 @@ describe("guards", () => {
 		);
 		assert.doesNotThrow(() =>
 			assertHttpOk({ ...base, text: 'for (;;);{"data":{}}' }),
+		);
+	});
+
+	it("classifies an empty or malformed JSON body as a bot check, not a parse error (round 2, finding 3)", () => {
+		const base = {
+			status: 200,
+			text: "{}",
+			url: "https://www.facebook.com/api/graphql/",
+		};
+		assert.throws(
+			() => assertHttpOk({ ...base, text: "" }),
+			/^Error: facebook_challenge/,
+		);
+		assert.throws(
+			() => assertHttpOk({ ...base, text: "   " }),
+			/^Error: facebook_challenge/,
+		);
+		assert.throws(
+			() => assertHttpOk({ ...base, text: "{not json" }),
+			/^Error: facebook_challenge/,
+		);
+		assert.throws(
+			() => assertHttpOk({ ...base, status: 503, text: "for (;;);{oops" }),
+			/^Error: facebook_challenge/,
 		);
 	});
 

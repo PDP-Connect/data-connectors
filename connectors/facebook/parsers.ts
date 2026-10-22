@@ -416,6 +416,8 @@ export interface FoundConnection {
 	key: string;
 	/** The object keys from the response root to this connection. */
 	keys: string[];
+	/** Profile section types (`section_type`, `profile_tile_section_type`) of the objects above it. */
+	sectionTypes: string[];
 	/** `id` of the object that holds the connection (a refetch variable). */
 	ownerId: string | null;
 	pageInfo: PageInfo | null;
@@ -444,6 +446,19 @@ function readPageInfo(connection: JsonRecord): PageInfo | null {
 }
 
 const MAX_WALK_NODES = 400_000;
+
+function sectionTypesOf(ancestors: readonly JsonRecord[]): string[] {
+	const types: string[] = [];
+	for (const ancestor of ancestors) {
+		for (const value of [
+			ancestor.section_type,
+			ancestor.profile_tile_section_type,
+		]) {
+			if (typeof value === "string") types.push(value);
+		}
+	}
+	return types;
+}
 
 /** Every connection (`{ edges: [...] }`) under `root` that `match` accepts, depth first. */
 export function findConnections(
@@ -476,6 +491,7 @@ export function findConnections(
 					edges,
 					key,
 					keys,
+					sectionTypes: sectionTypesOf(ancestors),
 					ownerId: asString(record.id),
 					pageInfo: readPageInfo(connection),
 				});
@@ -550,23 +566,23 @@ export const matchFriendsConnection: ConnectionMatcher = (
 	return edges.every(isFriendItem);
 };
 
-const GROUP_URL_RE =
-	/^https:\/\/(?:www|web|m)\.facebook\.com\/groups\/[^/?#]+\/?(?:[?#].*)?$/;
+/** The joined-groups list key path observed live on `/groups/joins/`: `viewer.all_joined_groups.tab_groups_list`. */
+const JOINED_GROUPS_PARENT = "all_joined_groups";
+const JOINED_GROUPS_KEY = "tab_groups_list";
+/** The membership state a joined group carries (observed live). */
+const MEMBER_STATE = "MEMBER";
 
-function isGroupNode(node: JsonRecord | null): boolean {
-	if (!node) return false;
-	const url = asString(node.url);
-	const named = asString(node.name) !== null || textOf(node.title) !== null;
-	return named && url !== null && GROUP_URL_RE.test(url);
-}
-
-/** A joined-groups list: every item links to a group. Matched by shape, since its key is not stable. */
-export const matchGroupsConnection: ConnectionMatcher = (_key, connection) => {
-	const edges = asArray(connection.edges) ?? [];
-	return edges.length > 0 && edges.every((edge) => isGroupNode(edgeNode(edge)));
-};
-
-const MEMBERSHIP_KEY_RE = /join|member/i;
+/**
+ * The joined-groups list, matched by where it sits (`all_joined_groups.
+ * tab_groups_list`), not by what its cards look like: the same page carries
+ * other group lists (pinned, recently active) with the same card shape. An
+ * empty list there is a proven-empty membership list.
+ */
+export const matchGroupsConnection: ConnectionMatcher = (
+	key,
+	_connection,
+	context,
+) => key === JOINED_GROUPS_KEY && context.keys.at(-2) === JOINED_GROUPS_PARENT;
 
 function connectionSignature(connection: FoundConnection): string {
 	return JSON.stringify([
@@ -578,30 +594,30 @@ function connectionSignature(connection: FoundConnection): string {
 /**
  * The one connection a response carries for `match`, or null. Copies of the
  * same list (a page can preload a payload twice) count once. Several
- * different candidates are ambiguous: the one whose path names a membership
- * (`joined`, `member`) is taken when exactly one does; otherwise the page
- * cannot say which list is the person's, and this throws rather than guess.
+ * different candidates are ambiguous: the stream's own `prefer` rule may
+ * single one out (friends: the one in the profile's FRIENDS section);
+ * otherwise this throws rather than guess.
  */
 export function pickConnection(
 	root: unknown,
 	match: ConnectionMatcher,
+	prefer?: (connection: FoundConnection) => boolean,
 ): FoundConnection | null {
-	return chooseConnection(findConnections(root, match));
+	return chooseConnection(findConnections(root, match), prefer);
 }
 
 function chooseConnection(
 	found: readonly FoundConnection[],
+	prefer?: (connection: FoundConnection) => boolean,
 ): FoundConnection | null {
 	const distinct = new Map<string, FoundConnection>();
 	for (const connection of found)
 		distinct.set(connectionSignature(connection), connection);
 	const candidates = [...distinct.values()];
 	if (candidates.length <= 1) return candidates[0] ?? null;
-	const membership = candidates.filter((connection) =>
-		connection.keys.some((key) => MEMBERSHIP_KEY_RE.test(key)),
-	);
-	const [only] = membership;
-	if (membership.length === 1 && only) return only;
+	const preferred = prefer ? candidates.filter(prefer) : [];
+	const [only] = preferred;
+	if (preferred.length === 1 && only) return only;
 	throw facebookError(
 		ERROR_CLASSES.shape,
 		`the page shows ${candidates.length} different lists that look like this one; refusing to guess`,
@@ -689,13 +705,17 @@ export function extractPreloadedPayloads(
 export function pickPreloadedConnection(
 	payloads: readonly MergedPayload[],
 	match: ConnectionMatcher,
+	prefer?: (connection: FoundConnection) => boolean,
 ): { connection: FoundConnection; payload: MergedPayload } | null {
 	const found: { connection: FoundConnection; payload: MergedPayload }[] = [];
 	for (const payload of payloads) {
 		for (const connection of findConnections(payload.data, match))
 			found.push({ connection, payload });
 	}
-	const chosen = chooseConnection(found.map((entry) => entry.connection));
+	const chosen = chooseConnection(
+		found.map((entry) => entry.connection),
+		prefer,
+	);
 	return chosen
 		? (found.find((entry) => entry.connection === chosen) ?? null)
 		: null;
@@ -1174,6 +1194,8 @@ export function parseGroupNode(
 		500,
 	);
 	if (!url || id === null || name === null) return null;
+	// Only a membership is a joined group; the same card shape appears for groups the person merely sees.
+	if (node.viewer_join_state !== MEMBER_STATE) return null;
 	const joined =
 		epochSecondsToIso(node.viewer_join_time) ??
 		epochSecondsToIso(node.join_time) ??
@@ -1341,6 +1363,8 @@ export interface OperationSpec {
 	friendlyName: string | RegExp;
 	/** The id an item is emitted under; progress and duplicates are judged by it. */
 	itemKey: (edge: unknown) => string | null;
+	/** Picks the stream's own list when a page carries several that match. */
+	prefer?: (connection: FoundConnection) => boolean;
 	match: ConnectionMatcher;
 	/**
 	 * Field paths inside an item's `node` that the record is built from. A
@@ -1393,22 +1417,29 @@ export function erroredItemCount(
 	readPaths: readonly (readonly string[])[],
 ): number {
 	const items = new Set<number>();
+	// The error's field names must spell the connection's own key path; list
+	// indexes on the way (an edge of an outer list) are skipped.
+	const prefix = [...connection.keys, "edges"];
 	for (const error of errors) {
-		const at = error.segments.findIndex(
-			(step, index) =>
-				step === connection.key && error.segments[index + 1] === "edges",
-		);
-		if (at < 0) continue;
-		const index = Number(error.segments[at + 2]);
-		if (!Number.isInteger(index)) continue;
-		const inNode = error.segments[at + 3] === "node";
-		const field = error.segments.slice(at + 4);
+		let matched = 0;
+		let at = 0;
+		for (; at < error.segments.length && matched < prefix.length; at += 1) {
+			const step = error.segments[at];
+			if (typeof step === "number") continue;
+			if (step !== prefix[matched]) break;
+			matched += 1;
+		}
+		if (matched < prefix.length) continue;
+		const index = error.segments[at];
+		if (typeof index !== "number" && !Number.isInteger(Number(index))) continue;
+		const inNode = error.segments[at + 1] === "node";
+		const field = error.segments.slice(at + 2);
 		if (
 			!inNode ||
 			field.length === 0 ||
 			readPaths.some((path) => startsWithPath(field, path))
 		)
-			items.add(index);
+			items.add(Number(index));
 	}
 	return items.size;
 }
@@ -1459,6 +1490,7 @@ export const FRIENDS_OPERATION: OperationSpec = {
 		"ProfileCometAppCollectionSelfFriendsListRendererPaginationQuery",
 	match: matchFriendsConnection,
 	itemKey: friendIdKey,
+	prefer: (connection) => connection.sectionTypes.includes("FRIENDS"),
 	readPaths: [["node"], ["title"], ["url"], ["actions_renderer", "action"]],
 	defaults: ({ ownerId }) => ({
 		count: 8,
@@ -1560,7 +1592,16 @@ export function assertLandedOnContent(landedUrl: string): void {
 }
 
 /** Throws the right class for a non-data answer to a query. */
-const JSON_BODY_RE = /^(?:for \(;;\);)?\s*[{[]/;
+/** True when the body parses as the endpoint's JSON (with or without the anti-hijack prefix). */
+function isJsonBody(text: string): boolean {
+	if (text.trim().length === 0) return false;
+	try {
+		splitGraphqlText(text);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 /**
  * Throws the right class for a non-data answer to a query. A bot check comes
@@ -1584,8 +1625,7 @@ export function assertHttpOk(response: {
 		);
 	if (response.status === 429)
 		throw facebookError(ERROR_CLASSES.rateLimited, "Facebook answered 429");
-	const json = JSON_BODY_RE.test(response.text.trimStart());
-	if (!json && response.text.trim().length > 0)
+	if (!isJsonBody(response.text))
 		throw facebookError(
 			ERROR_CLASSES.challenge,
 			`Facebook answered ${response.status} with a page instead of data`,

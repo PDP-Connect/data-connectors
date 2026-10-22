@@ -421,7 +421,12 @@ function assertItemsReadable(
 	});
 }
 
-/** Later pages are the same list: same key, under the same owner, or matching the list's own rule. */
+/**
+ * Later pages are the same list: same key, and either the same owner, the
+ * same parent key (the joined-groups list's owner has no id), or the list's
+ * own rule. Contents are not judged here, so an empty final page that
+ * carries the end signal is still recognised.
+ */
 function samePagesMatcher(
 	plan: WalkPlan,
 	first: FoundConnection | null,
@@ -431,6 +436,7 @@ function samePagesMatcher(
 		key === first.key &&
 		((first.ownerId !== null &&
 			context.ancestors.at(-1)?.id === first.ownerId) ||
+			(first.keys.length > 1 && context.keys.at(-2) === first.keys.at(-2)) ||
 			plan.spec.match(key, connection, context));
 }
 
@@ -461,7 +467,7 @@ async function walkQueryPages(
 			template: operation.template,
 		});
 		const payload = await requestPage(services, operation, variables);
-		const connection = pickConnection(payload.data, match);
+		const connection = pickConnection(payload.data, match, plan.spec.prefer);
 		if (!connection)
 			throw missingConnectionError(payload, operation.friendlyName);
 		assertItemsReadable(plan, payload, connection);
@@ -481,7 +487,11 @@ export async function walkList(
 	plan: WalkPlan,
 ): Promise<void> {
 	const payloads = extractPreloadedPayloads(plan.snapshot.scripts);
-	const preloaded = pickPreloadedConnection(payloads, plan.spec.match);
+	const preloaded = pickPreloadedConnection(
+		payloads,
+		plan.spec.match,
+		plan.spec.prefer,
+	);
 	const first = preloaded?.connection ?? null;
 	const state: WalkState = {
 		cursor: null,

@@ -93,10 +93,33 @@ const PRELOADED = {
 		},
 	},
 	"/groups/joins/": {
+		// The joined-groups list sits at viewer.all_joined_groups.tab_groups_list (observed live);
+		// nonAdminGroups is a second group list on the same page that is not the membership list.
 		viewer: {
+			all_joined_groups: {
+				tab_groups_list: {
+					edges: [
+						{
+							node: {
+								__typename: "Group",
+								id: "300001",
+								name: "Lake swimmers",
+								url: `${ORIGIN}/groups/300001/`,
+								viewer_join_state: "MEMBER",
+								subspace_type: "NONE",
+								viewer_last_visited_time: NOW,
+							},
+							cursor: "g1",
+						},
+					],
+					page_info: { end_cursor: null, has_next_page: false },
+				},
+			},
+		},
+		nonAdminGroups: {
 			groups_tab: {
 				tab_groups_list: {
-					edges: [{ node: { id: "300001", name: "Lake swimmers", url: `${ORIGIN}/groups/300001/` }, cursor: "g1" }],
+					edges: [{ node: { id: "300002", name: "Pinned group", url: `${ORIGIN}/groups/300002/`, has_viewer_pinned: true } }],
 					page_info: { end_cursor: null, has_next_page: false },
 				},
 			},

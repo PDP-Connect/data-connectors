@@ -925,79 +925,6 @@ describe("review round 1", () => {
 		);
 	});
 
-	it("refuses to guess between a joined-groups list and recommendations (finding 7)", async () => {
-		const group = (id: number) => ({
-			node: {
-				id: String(id),
-				name: `Group ${id}`,
-				url: `https://www.facebook.com/groups/${id}/`,
-			},
-		});
-		const scripts = [
-			preloaded("adp_g", {
-				data: {
-					viewer: {
-						tab_groups_list: {
-							edges: [group(1), group(2)],
-							page_info: { end_cursor: null, has_next_page: false },
-						},
-						recommended: {
-							edges: [group(3), group(4), group(5)],
-							page_info: { end_cursor: null, has_next_page: false },
-						},
-					},
-				},
-			}),
-		];
-		const url = "https://www.facebook.com/groups/joins/";
-		const h = harness({
-			streams: ["groups"],
-			pages: { [ME]: meSnapshot, [url]: { landedUrl: url, scripts } },
-			replies: [],
-		});
-		await collectFacebook(h.ctx, h.services);
-		assert.equal(h.records.length, 0);
-		assert.match(h.failures[0]?.message ?? "", /refusing to guess/);
-	});
-
-	it("takes the list whose path names a membership when one does (finding 7)", async () => {
-		const group = (id: number) => ({
-			node: {
-				id: String(id),
-				name: `Group ${id}`,
-				url: `https://www.facebook.com/groups/${id}/`,
-			},
-		});
-		const scripts = [
-			preloaded("adp_g", {
-				data: {
-					viewer: {
-						all_joined_groups: {
-							edges: [group(1), group(2)],
-							page_info: { end_cursor: null, has_next_page: false },
-						},
-						recommended: {
-							edges: [group(3), group(4), group(5)],
-							page_info: { end_cursor: null, has_next_page: false },
-						},
-					},
-				},
-			}),
-		];
-		const url = "https://www.facebook.com/groups/joins/";
-		const h = harness({
-			streams: ["groups"],
-			pages: { [ME]: meSnapshot, [url]: { landedUrl: url, scripts } },
-			replies: [],
-		});
-		await collectFacebook(h.ctx, h.services);
-		assert.deepEqual(h.failures, []);
-		assert.deepEqual(
-			h.records.map((record) => record.data.id),
-			["1", "2"],
-		);
-	});
-
 	it("completes an empty friends list shown in the profile's FRIENDS section (finding 8)", async () => {
 		const scripts = [
 			preloaded("adp_f", {
@@ -1171,5 +1098,249 @@ describe("review round 1", () => {
 			/said more follows but added nothing new/,
 		);
 		assert.equal(stateFor(h, "friends"), undefined);
+	});
+});
+
+/** A joined group in the live `/groups/joins/` shape (keys observed live; values invented). */
+const joinedGroup = (id: number, state = "MEMBER") => ({
+	node: {
+		__typename: "Group",
+		id: String(id),
+		if_viewer_can_see_membership_questions: false,
+		name: `Group ${id}`,
+		profile_picture: { uri: "https://example.com/item/1" },
+		subspace_type: "NONE",
+		url: `https://www.facebook.com/groups/${id}/`,
+		viewer_join_state: state,
+		viewer_last_visited_time: 1_792_600_000,
+	},
+});
+/** The other group list on the same page, which is not the membership list. */
+const nonAdminGroup = (id: number) => ({
+	node: {
+		has_viewer_pinned: false,
+		id: String(id),
+		last_post_time: 1_792_600_000,
+		name: `Group ${id}`,
+		profile_picture_48: { uri: "https://example.com/item/2" },
+		url: `https://www.facebook.com/groups/${id}/`,
+	},
+});
+const GROUPS_URL = "https://www.facebook.com/groups/joins/";
+const groupsPage = (
+	joined: unknown[],
+	pageInfo: JsonRecord,
+	others: unknown[] = [],
+) =>
+	preloaded("adp_groups", {
+		data: {
+			viewer: {
+				all_joined_groups: {
+					tab_groups_list: { edges: joined, page_info: pageInfo },
+				},
+			},
+			nonAdminGroups: {
+				groups_tab: {
+					tab_groups_list: {
+						edges: others,
+						page_info: { end_cursor: null, has_next_page: false },
+					},
+				},
+			},
+		},
+	});
+
+describe("review round 2", () => {
+	it("reads joined groups from viewer.all_joined_groups only, never the other group list (finding 1)", async () => {
+		const scripts = [
+			groupsPage(
+				[joinedGroup(1), joinedGroup(2)],
+				{ end_cursor: null, has_next_page: false },
+				[nonAdminGroup(3), nonAdminGroup(4), nonAdminGroup(5)],
+			),
+		];
+		const h = harness({
+			streams: ["groups"],
+			pages: {
+				[ME]: meSnapshot,
+				[GROUPS_URL]: { landedUrl: GROUPS_URL, scripts },
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.deepEqual(
+			h.records.map((record) => record.data.id),
+			["1", "2"],
+		);
+	});
+
+	it("fails the stream when a listed group is not a membership (finding 1)", async () => {
+		const scripts = [
+			groupsPage([joinedGroup(1), joinedGroup(2, "CAN_REQUEST")], {
+				end_cursor: null,
+				has_next_page: false,
+			}),
+		];
+		const h = harness({
+			streams: ["groups"],
+			pages: {
+				[ME]: meSnapshot,
+				[GROUPS_URL]: { landedUrl: GROUPS_URL, scripts },
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.match(
+			h.failures[0]?.message ?? "",
+			/groups: 1 item\(s\) could not be read/,
+		);
+		assert.equal(stateFor(h, "groups"), undefined);
+	});
+
+	it("completes an account with no joined groups (finding 2)", async () => {
+		const scripts = [
+			groupsPage([], { end_cursor: null, has_next_page: false }, [
+				nonAdminGroup(3),
+			]),
+		];
+		const h = harness({
+			streams: ["groups"],
+			pages: {
+				[ME]: meSnapshot,
+				[GROUPS_URL]: { landedUrl: GROUPS_URL, scripts },
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records.length, 0);
+		assert.deepEqual(stateFor(h, "groups"), {
+			type: "STATE",
+			stream: "groups",
+			cursor: {},
+		});
+	});
+
+	it("takes the FRIENDS section's list over a smaller list of friends elsewhere (finding 5)", async () => {
+		const full = friendsPage(0, { end_cursor: null, has_next_page: false });
+		const fullItems = ((full.data as JsonRecord).node as JsonRecord)
+			.pageItems as JsonRecord;
+		const family = friendsPage(7000, {
+			end_cursor: null,
+			has_next_page: false,
+		});
+		const familyItems = ((family.data as JsonRecord).node as JsonRecord)
+			.pageItems as JsonRecord;
+		familyItems.edges = (familyItems.edges as unknown[]).slice(0, 1);
+		const scripts = [
+			preloaded("adp_f", {
+				data: {
+					user: {
+						timeline_nav_app_sections: {
+							edges: [
+								{
+									node: {
+										section_type: "FRIENDS",
+										collection: {
+											id: "YXBwX2NvbGxlY3Rpb246MQ==",
+											pageItems: fullItems,
+										},
+									},
+								},
+							],
+						},
+						family_members: { id: "family", pageItems: familyItems },
+					},
+				},
+			}),
+		];
+		const h = harness({
+			streams: ["friends"],
+			pages: {
+				[ME]: meSnapshot,
+				[FRIENDS_URL]: { landedUrl: FRIENDS_URL, scripts },
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records.length, 3);
+	});
+
+	it("accepts an empty final continuation of the joined-groups list as its end (finding 6)", async () => {
+		const scripts = [
+			groupsPage([joinedGroup(1)], { end_cursor: "g1", has_next_page: true }),
+		];
+		const h = harness({
+			streams: ["groups"],
+			pages: {
+				[ME]: meSnapshot,
+				[GROUPS_URL]: { landedUrl: GROUPS_URL, scripts },
+			},
+			captured: [
+				{
+					friendlyName: "GroupsCometAllJoinedGroupsSectionPaginationQuery",
+					docId: "7777777777",
+					variables: { count: 20, cursor: "g1", scale: 2 },
+					asbdId: null,
+				},
+			],
+			replies: [
+				response({
+					data: {
+						viewer: {
+							all_joined_groups: {
+								tab_groups_list: {
+									edges: [],
+									page_info: { end_cursor: null, has_next_page: false },
+								},
+							},
+						},
+					},
+				}),
+			],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records.length, 1);
+		assert.deepEqual(stateFor(h, "groups"), {
+			type: "STATE",
+			stream: "groups",
+			cursor: {},
+		});
+	});
+
+	it("does not blame the selected list for an error on another list with the same key (finding 7)", async () => {
+		const friends = friendsPage(0, { end_cursor: null, has_next_page: false });
+		const items = ((friends.data as JsonRecord).node as JsonRecord)
+			.pageItems as JsonRecord;
+		const page = {
+			data: {
+				node: { id: "collection", pageItems: items },
+				recommendations: { id: "recs", pageItems: { edges: [{ node: null }] } },
+			},
+			errors: [
+				{
+					message: "field error",
+					severity: "ERROR",
+					path: ["recommendations", "pageItems", "edges", 0, "node", "title"],
+				},
+			],
+		};
+		const h = harness({
+			streams: ["friends"],
+			pages: {
+				[ME]: meSnapshot,
+				[FRIENDS_URL]: {
+					landedUrl: FRIENDS_URL,
+					scripts: [preloaded("adp_f", page)],
+				},
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records.length, 3);
 	});
 });
