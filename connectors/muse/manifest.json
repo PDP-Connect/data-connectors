@@ -340,7 +340,8 @@
 				},
 				"range_filters": {
 					"created_at": ["gte", "gt", "lte", "lt"],
-					"updated_at": ["gte", "gt", "lte", "lt"]
+					"updated_at": ["gte", "gt", "lte", "lt"],
+					"last_activity_at": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
@@ -414,6 +415,14 @@
 				"search": {
 					"lexical_fields": ["title"],
 					"semantic_fields": ["title"]
+				},
+				"range_filters": {
+					"next_run_at": ["gte", "gt", "lte", "lt"],
+					"cadence_run_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["next_run_at"]
 				}
 			},
 			"coverage_strategy": "full_inventory",
@@ -596,5 +605,8 @@
 				"plural": "records"
 			}
 		}
+	},
+	"reason_display_messages": {
+		"scope_not_supported": "Muse messages can only be imported together with their conversations. Select both to import your messages."
 	}
 }
