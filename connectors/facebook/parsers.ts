@@ -416,6 +416,8 @@ export interface FoundConnection {
 	key: string;
 	/** The object keys from the response root to this connection. */
 	keys: string[];
+	/** The full path from the response root to this connection, with list positions. */
+	path: (string | number)[];
 	/** Profile section types (`section_type`, `profile_tile_section_type`) of the objects above it. */
 	sectionTypes: string[];
 	/** `id` of the object that holds the connection (a refetch variable). */
@@ -427,6 +429,8 @@ export interface FoundConnection {
 export interface ConnectionContext {
 	ancestors: readonly JsonRecord[];
 	keys: readonly string[];
+	/** The full path to the candidate, with list positions. */
+	path: readonly (string | number)[];
 }
 
 export type ConnectionMatcher = (
@@ -466,9 +470,12 @@ export function findConnections(
 	match: ConnectionMatcher,
 ): FoundConnection[] {
 	const found: FoundConnection[] = [];
-	const stack: { ancestors: JsonRecord[]; keys: string[]; value: unknown }[] = [
-		{ ancestors: [], keys: [], value: root },
-	];
+	const stack: {
+		ancestors: JsonRecord[];
+		keys: string[];
+		path: (string | number)[];
+		value: unknown;
+	}[] = [{ ancestors: [], keys: [], path: [], value: root }];
 	let visited = 0;
 	while (stack.length > 0 && visited < MAX_WALK_NODES) {
 		visited += 1;
@@ -476,7 +483,8 @@ export function findConnections(
 		if (!item) break;
 		const list = asArray(item.value);
 		if (list) {
-			for (const child of list) stack.push({ ...item, value: child });
+			for (const [index, child] of list.entries())
+				stack.push({ ...item, path: [...item.path, index], value: child });
 			continue;
 		}
 		const record = asRecord(item.value);
@@ -486,18 +494,24 @@ export function findConnections(
 			const connection = asRecord(child);
 			const edges = asArray(connection?.edges);
 			const keys = [...item.keys, key];
-			if (connection && edges && match(key, connection, { ancestors, keys })) {
+			const path = [...item.path, key];
+			if (
+				connection &&
+				edges &&
+				match(key, connection, { ancestors, keys, path })
+			) {
 				found.push({
 					edges,
 					key,
 					keys,
+					path,
 					sectionTypes: sectionTypesOf(ancestors),
 					ownerId: asString(record.id),
 					pageInfo: readPageInfo(connection),
 				});
 				continue;
 			}
-			stack.push({ ancestors, keys, value: child });
+			stack.push({ ancestors, keys, path, value: child });
 		}
 	}
 	return found;
@@ -1365,6 +1379,13 @@ export interface OperationSpec {
 	itemKey: (edge: unknown) => string | null;
 	/** Picks the stream's own list when a page carries several that match. */
 	prefer?: (connection: FoundConnection) => boolean;
+	/**
+	 * How a later page is known to be the same list:
+	 * - "owner": the object holding the list has the first page's id;
+	 * - "key": the list's key names it uniquely (timeline, activity log), or the owner matches;
+	 * - "path": the owner has no id (joined groups): the full path, list positions included, must match.
+	 */
+	continuation: "key" | "owner" | "path";
 	match: ConnectionMatcher;
 	/**
 	 * Field paths inside an item's `node` that the record is built from. A
@@ -1417,37 +1438,39 @@ export function erroredItemCount(
 	readPaths: readonly (readonly string[])[],
 ): number {
 	const items = new Set<number>();
-	// The error's field names must spell the connection's own key path; list
-	// indexes on the way (an edge of an outer list) are skipped.
-	const prefix = [...connection.keys, "edges"];
+	// The error must point inside this very list: its path starts with the
+	// list's full path, list positions included, then `edges.<i>`.
+	const prefix = [...connection.path, "edges"];
 	for (const error of errors) {
-		let matched = 0;
-		let at = 0;
-		for (; at < error.segments.length && matched < prefix.length; at += 1) {
-			const step = error.segments[at];
-			if (typeof step === "number") continue;
-			if (step !== prefix[matched]) break;
-			matched += 1;
-		}
-		if (matched < prefix.length) continue;
-		const index = error.segments[at];
-		if (typeof index !== "number" && !Number.isInteger(Number(index))) continue;
-		const inNode = error.segments[at + 1] === "node";
-		const field = error.segments.slice(at + 2);
+		if (!startsWithSegments(error.segments, prefix)) continue;
+		const index = Number(error.segments[prefix.length]);
+		if (!Number.isInteger(index)) continue;
+		const inNode = error.segments[prefix.length + 1] === "node";
+		const field = error.segments.slice(prefix.length + 2);
 		if (
 			!inNode ||
 			field.length === 0 ||
 			readPaths.some((path) => startsWithPath(field, path))
 		)
-			items.add(Number(index));
+			items.add(index);
 	}
 	return items.size;
+}
+
+function startsWithSegments(
+	segments: readonly (string | number)[],
+	prefix: readonly (string | number)[],
+): boolean {
+	return prefix.every(
+		(step, index) => String(segments[index]) === String(step),
+	);
 }
 
 export const POSTS_OPERATION: OperationSpec = {
 	friendlyName: "ProfileCometTimelineFeedRefetchQuery",
 	match: matchTimelineConnection,
 	itemKey: postIdKey,
+	continuation: "key",
 	readPaths: [
 		["post_id"],
 		["creation_time"],
@@ -1490,6 +1513,7 @@ export const FRIENDS_OPERATION: OperationSpec = {
 		"ProfileCometAppCollectionSelfFriendsListRendererPaginationQuery",
 	match: matchFriendsConnection,
 	itemKey: friendIdKey,
+	continuation: "owner",
 	prefer: (connection) => connection.sectionTypes.includes("FRIENDS"),
 	readPaths: [["node"], ["title"], ["url"], ["actions_renderer", "action"]],
 	defaults: ({ ownerId }) => ({
@@ -1504,6 +1528,7 @@ export const ACTIVITY_OPERATION: OperationSpec = {
 	friendlyName: "CometActivityLogStoriesListPaginationQuery",
 	match: matchActivityConnection,
 	itemKey: nodeIdKey,
+	continuation: "key",
 	readPaths: [
 		["id"],
 		["creation_time"],
@@ -1533,10 +1558,16 @@ export const ACTIVITY_OPERATION: OperationSpec = {
 };
 
 /** The joined-groups pagination query is not named in the evidence; it is taken from the page's own request. */
+/**
+ * The joined-groups pagination query. Its name was read from Facebook's own
+ * JS loaded on `/groups/joins/` (2026-10-22), so the mobile host, which
+ * cannot see requests, can look its id up in the page's modules.
+ */
 export const GROUPS_OPERATION: OperationSpec = {
-	friendlyName: /^Groups\w*Pagination\w*Query$/,
+	friendlyName: "GroupsCometAllJoinedGroupsSectionPaginationQuery",
 	match: matchGroupsConnection,
 	itemKey: nodeIdKey,
+	continuation: "path",
 	readPaths: [
 		["id"],
 		["name"],

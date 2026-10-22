@@ -7,8 +7,9 @@
 // GraphQL queries POSTed to /api/graphql/. These pages carry the same shapes
 // the connector reads, with invented values: the signed-in person
 // (CurrentUserInitialData), the page tokens, a page-level `require` that
-// resolves the friends pagination query id, and one paginated list (friends)
-// so the in-page GraphQL fetch is exercised. The signed-out answer is a
+// resolves the pagination query ids, and two paginated lists (friends
+// and the joined groups) so the in-page GraphQL fetch and the query-module
+// lookup the mobile host relies on are both exercised. The signed-out answer is a
 // sign-in form whose page names no person (USER_ID "0"). Real WebView
 // behavior against facebook.com needs a device run.
 
@@ -18,6 +19,8 @@ const DTSG = "SYNTHETIC_DTSG_TOKEN";
 const FRIENDS_DOC_ID = "1111111111111";
 const FRIENDS_QUERY = "ProfileCometAppCollectionSelfFriendsListRendererPaginationQuery";
 const FRIENDS_COLLECTION = "YXBwX2NvbGxlY3Rpb246MTAwNDc2OjI=";
+const GROUPS_DOC_ID = "2222222222222";
+const GROUPS_QUERY = "GroupsCometAllJoinedGroupsSectionPaginationQuery";
 const NOW = 1792600000;
 
 const html = (body = "", status = 200) => ({
@@ -29,6 +32,19 @@ const graphql = (value) => ({
 	status: 200,
 	contentType: "text/html; charset=utf-8",
 	body: `for (;;);${JSON.stringify(value)}`,
+});
+
+const joinedGroup = (id, name) => ({
+	node: {
+		__typename: "Group",
+		id: String(id),
+		name,
+		url: `${ORIGIN}/groups/${id}/`,
+		viewer_join_state: "MEMBER",
+		subspace_type: "NONE",
+		viewer_last_visited_time: NOW,
+	},
+	cursor: `group-cursor-${id}`,
 });
 
 const friend = (n, name) => ({
@@ -98,21 +114,8 @@ const PRELOADED = {
 		viewer: {
 			all_joined_groups: {
 				tab_groups_list: {
-					edges: [
-						{
-							node: {
-								__typename: "Group",
-								id: "300001",
-								name: "Lake swimmers",
-								url: `${ORIGIN}/groups/300001/`,
-								viewer_join_state: "MEMBER",
-								subspace_type: "NONE",
-								viewer_last_visited_time: NOW,
-							},
-							cursor: "g1",
-						},
-					],
-					page_info: { end_cursor: null, has_next_page: false },
+					edges: [joinedGroup(300001, "Lake swimmers")],
+					page_info: { end_cursor: "groups-c1", has_next_page: true },
 				},
 			},
 		},
@@ -159,11 +162,26 @@ const FRIENDS_PAGE_2 = {
 	extensions: { is_final: true },
 };
 
+const GROUPS_PAGE_2 = {
+	data: {
+		viewer: {
+			all_joined_groups: {
+				tab_groups_list: {
+					edges: [joinedGroup(300003, "Night runners")],
+					page_info: { end_cursor: "groups-c2", has_next_page: false },
+				},
+			},
+		},
+	},
+	extensions: { is_final: true },
+};
+
 const MODULES = {
 	CurrentUserInitialData: { USER_ID: VIEWER, ACCOUNT_ID: VIEWER, NAME: "Ada Example", SHORT_NAME: "Ada" },
 	DTSGInitialData: { token: DTSG },
 	LSD: { token: "SYNTHETIC_LSD" },
 	[`${FRIENDS_QUERY}_facebookRelayOperation`]: FRIENDS_DOC_ID,
+	[`${GROUPS_QUERY}_facebookRelayOperation`]: GROUPS_DOC_ID,
 };
 
 function signedInPage(data) {
@@ -219,6 +237,8 @@ function answerGraphql(request) {
 	}
 	if (form.get("doc_id") === FRIENDS_DOC_ID && name === FRIENDS_QUERY && variables.cursor === "friends-c1" && variables.id === FRIENDS_COLLECTION)
 		return graphql(FRIENDS_PAGE_2);
+	if (form.get("doc_id") === GROUPS_DOC_ID && name === GROUPS_QUERY && variables.cursor === "groups-c1")
+		return graphql(GROUPS_PAGE_2);
 	return graphql({ errors: [{ message: "PersistedQueryNotFound", severity: "CRITICAL", path: [] }], data: null });
 }
 
@@ -251,9 +271,9 @@ export const pageshimCase = {
 	fixtures: facebookFixtures,
 	scopes: STREAMS.map((stream) => `facebook.${stream}`),
 	exportSummary: {
-		count: 8,
+		count: 9,
 		label: "records",
-		details: { profile: 1, posts: 1, friends: 3, groups: 1, reactions: 1, comments: 1 },
+		details: { profile: 1, posts: 1, friends: 3, groups: 2, reactions: 1, comments: 1 },
 	},
 	emptyExportSummary: {
 		count: 0,

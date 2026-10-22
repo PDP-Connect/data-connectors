@@ -1024,25 +1024,9 @@ describe("review round 1", () => {
 		);
 	});
 
-	it("on the mobile host, a multi-page joined-groups list fails visibly as an outdated query (finding 12)", async () => {
-		const group = (id: number) => ({
-			node: {
-				id: String(id),
-				name: `Group ${id}`,
-				url: `https://www.facebook.com/groups/${id}/`,
-			},
-		});
+	it("on the mobile host, fails visibly as an outdated query when the page has not loaded the groups query module (finding 12)", async () => {
 		const scripts = [
-			preloaded("adp_g", {
-				data: {
-					viewer: {
-						all_joined_groups: {
-							edges: [group(1)],
-							page_info: { end_cursor: "g1", has_next_page: true },
-						},
-					},
-				},
-			}),
+			groupsPage([joinedGroup(1)], { end_cursor: "g1", has_next_page: true }),
 		];
 		const url = "https://www.facebook.com/groups/joins/";
 		const h = harness({
@@ -1342,5 +1326,238 @@ describe("review round 2", () => {
 		await collectFacebook(h.ctx, h.services);
 		assert.deepEqual(h.failures, []);
 		assert.equal(h.records.length, 3);
+	});
+});
+
+describe("review round 3", () => {
+	it("pages a joined-groups list on the mobile host with the query looked up by its exact name", async () => {
+		const scripts = [
+			groupsPage([joinedGroup(1)], { end_cursor: "g1", has_next_page: true }),
+		];
+		const h = harness({
+			streams: ["groups"],
+			pages: {
+				[ME]: meSnapshot,
+				[GROUPS_URL]: { landedUrl: GROUPS_URL, scripts },
+			},
+			moduleDocIds: {
+				GroupsCometAllJoinedGroupsSectionPaginationQuery: "7777777777",
+			},
+			replies: [
+				response({
+					data: {
+						viewer: {
+							all_joined_groups: {
+								tab_groups_list: {
+									edges: [joinedGroup(2)],
+									page_info: { end_cursor: "g2", has_next_page: false },
+								},
+							},
+						},
+					},
+				}),
+			],
+		});
+		h.services.observesRequests = false;
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.deepEqual(
+			h.records.map((record) => record.data.id),
+			["1", "2"],
+		);
+		assert.equal(
+			h.calls[0]?.friendlyName,
+			"GroupsCometAllJoinedGroupsSectionPaginationQuery",
+		);
+		assert.equal(
+			(JSON.parse(h.calls[0]?.variables ?? "{}") as JsonRecord).cursor,
+			"g1",
+		);
+		assert.deepEqual(stateFor(h, "groups"), {
+			type: "STATE",
+			stream: "groups",
+			cursor: {},
+		});
+	});
+
+	it("does not complete the friends list from an unrelated list that shares its key and parent key (P1)", async () => {
+		const first = friendsPage(0, { end_cursor: "c1", has_next_page: true });
+		const items = ((first.data as JsonRecord).node as JsonRecord)
+			.pageItems as JsonRecord;
+		const scripts = [
+			preloaded("adp_f", {
+				data: {
+					user: {
+						timeline_nav_app_sections: {
+							edges: [
+								{
+									node: {
+										section_type: "FRIENDS",
+										collection: {
+											id: "YXBwX2NvbGxlY3Rpb246MQ==",
+											pageItems: items,
+										},
+									},
+								},
+							],
+						},
+					},
+				},
+			}),
+		];
+		const h = harness({
+			streams: ["friends"],
+			pages: {
+				[ME]: meSnapshot,
+				[FRIENDS_URL]: { landedUrl: FRIENDS_URL, scripts },
+			},
+			captured: [FRIENDS_OP],
+			replies: [
+				response({
+					data: {
+						user: {
+							family: {
+								collection: {
+									pageItems: {
+										edges: [],
+										page_info: { end_cursor: null, has_next_page: false },
+									},
+								},
+							},
+						},
+					},
+				}),
+			],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.equal(h.failures[0]?.stream, "friends");
+		assert.equal(stateFor(h, "friends"), undefined);
+	});
+
+	it("does not blame the chosen list for an error at the same nested path in another section (finding 7)", async () => {
+		const friends = friendsPage(0, { end_cursor: null, has_next_page: false });
+		const items = ((friends.data as JsonRecord).node as JsonRecord)
+			.pageItems as JsonRecord;
+		const page = {
+			data: {
+				user: {
+					timeline_nav_app_sections: {
+						edges: [
+							{
+								node: {
+									section_type: "FRIENDS",
+									collection: {
+										id: "YXBwX2NvbGxlY3Rpb246MQ==",
+										pageItems: items,
+									},
+								},
+							},
+							{
+								node: {
+									section_type: "PHOTOS",
+									collection: {
+										id: "photos",
+										pageItems: { edges: [{ node: null }] },
+									},
+								},
+							},
+						],
+					},
+				},
+			},
+			errors: [
+				{
+					message: "field error",
+					severity: "ERROR",
+					path: [
+						"user",
+						"timeline_nav_app_sections",
+						"edges",
+						1,
+						"node",
+						"collection",
+						"pageItems",
+						"edges",
+						0,
+						"node",
+						"title",
+					],
+				},
+			],
+		};
+		const h = harness({
+			streams: ["friends"],
+			pages: {
+				[ME]: meSnapshot,
+				[FRIENDS_URL]: {
+					landedUrl: FRIENDS_URL,
+					scripts: [preloaded("adp_f", page)],
+				},
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records.length, 3);
+	});
+
+	it("still fails the chosen list for an error at its own position (finding 7)", async () => {
+		const friends = friendsPage(0, { end_cursor: null, has_next_page: false });
+		const items = ((friends.data as JsonRecord).node as JsonRecord)
+			.pageItems as JsonRecord;
+		const page = {
+			data: {
+				user: {
+					timeline_nav_app_sections: {
+						edges: [
+							{
+								node: {
+									section_type: "FRIENDS",
+									collection: {
+										id: "YXBwX2NvbGxlY3Rpb246MQ==",
+										pageItems: items,
+									},
+								},
+							},
+						],
+					},
+				},
+			},
+			errors: [
+				{
+					message: "field error",
+					severity: "ERROR",
+					path: [
+						"user",
+						"timeline_nav_app_sections",
+						"edges",
+						0,
+						"node",
+						"collection",
+						"pageItems",
+						"edges",
+						0,
+						"node",
+						"title",
+					],
+				},
+			],
+		};
+		const h = harness({
+			streams: ["friends"],
+			pages: {
+				[ME]: meSnapshot,
+				[FRIENDS_URL]: {
+					landedUrl: FRIENDS_URL,
+					scripts: [preloaded("adp_f", page)],
+				},
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.match(
+			h.failures[0]?.message ?? "",
+			/Facebook reported errors on 1 item/,
+		);
 	});
 });

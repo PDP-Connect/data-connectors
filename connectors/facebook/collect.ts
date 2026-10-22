@@ -422,22 +422,35 @@ function assertItemsReadable(
 }
 
 /**
- * Later pages are the same list: same key, and either the same owner, the
- * same parent key (the joined-groups list's owner has no id), or the list's
- * own rule. Contents are not judged here, so an empty final page that
- * carries the end signal is still recognised.
+ * Later pages are the same list only when they are provably that list (see
+ * `OperationSpec.continuation`): the same owner id, the same full path for
+ * an ownerless list, or a uniquely named key. Contents are not judged, so an
+ * empty last page carrying the end signal is still recognised; an unrelated
+ * list that merely shares a key is not.
  */
 function samePagesMatcher(
 	plan: WalkPlan,
 	first: FoundConnection | null,
 ): ConnectionMatcher {
 	if (first === null) return plan.spec.match;
-	return (key, connection, context) =>
-		key === first.key &&
-		((first.ownerId !== null &&
-			context.ancestors.at(-1)?.id === first.ownerId) ||
-			(first.keys.length > 1 && context.keys.at(-2) === first.keys.at(-2)) ||
-			plan.spec.match(key, connection, context));
+	const samePath = (path: readonly (string | number)[]): boolean =>
+		path.length === first.path.length &&
+		path.every((step, index) => step === first.path[index]);
+	return (key, connection, context) => {
+		if (key !== first.key) return false;
+		const ownerMatches =
+			first.ownerId !== null && context.ancestors.at(-1)?.id === first.ownerId;
+		switch (plan.spec.continuation) {
+			case "owner":
+				return ownerMatches;
+			case "path":
+				return (
+					ownerMatches || (first.ownerId === null && samePath(context.path))
+				);
+			default:
+				return ownerMatches || plan.spec.match(key, connection, context);
+		}
+	};
 }
 
 async function walkQueryPages(
