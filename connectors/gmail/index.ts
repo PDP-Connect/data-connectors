@@ -2233,41 +2233,38 @@ export function isoToImapDate(iso: string | undefined): string | null {
 }
 
 /**
- * Intersect two UID ranges (either "1:*" format or comma-separated list)
- * and return the overlap as a comma-separated list.
+ * Intersect an IMAP UID set with the UIDs a SEARCH returned, as a
+ * comma-separated list.
  *
- * - `rangeStr` is the original range (e.g., "200:*" from incremental cursor)
+ * - `rangeStr` is a UID set: comma-separated UIDs and `a:b` ranges, where
+ *   `b` may be `*` (for example "200:*", or "1:500,701:1200")
  * - `searchUids` are UIDs returned by IMAP search (sorted ascending)
  *
- * Returns only the UIDs that fall within both ranges.
+ * Returns only the UIDs that fall within both.
  */
 function intersectUidRanges(
 	rangeStr: string,
 	searchUids: readonly number[],
 ): string {
-	if (searchUids.length === 0) {
-		return ""; // Empty result
-	}
-
-	// Parse the range string to determine included UIDs
-	const parts = rangeStr.split(":");
-	if (parts.length === 2 && parts[0] && parts[1]) {
-		const start = Number(parts[0]);
-		const end = parts[1] === "*" ? Number.POSITIVE_INFINITY : Number(parts[1]);
-		if (!(Number.isNaN(start) || Number.isNaN(end))) {
-			// Range format: keep only UIDs in [start, end]
-			return searchUids.filter((uid) => uid >= start && uid <= end).join(",");
-		}
-	}
-
-	// Fallback: assume a comma-separated list, intersect with search result
-	const rangeUids = new Set(
-		rangeStr
-			.split(",")
-			.map((s) => Number(s.trim()))
-			.filter((n) => !Number.isNaN(n)),
-	);
-	return searchUids.filter((uid) => rangeUids.has(uid)).join(",");
+	const parts = rangeStr
+		.split(",")
+		.map((part) => part.trim())
+		.filter(Boolean)
+		.map((part) => {
+			const [a, b] = part.split(":");
+			const start = Number(a);
+			const end =
+				b === undefined
+					? start
+					: b === "*"
+						? Number.POSITIVE_INFINITY
+						: Number(b);
+			return { start, end };
+		})
+		.filter(({ start, end }) => !(Number.isNaN(start) || Number.isNaN(end)));
+	return searchUids
+		.filter((uid) => parts.some(({ start, end }) => uid >= start && uid <= end))
+		.join(",");
 }
 
 /**
@@ -4904,34 +4901,50 @@ export async function runAllMailPasses(
 	if (ledger.resetReason) {
 		gmailDiagnostic("progress_ledger_reset", { reason: ledger.resetReason });
 	}
-	// Served recovery and an attachment-only history page share this run's
-	// attachment bytes: the page gets half its budget while gaps are served.
-	// It still admits at least one UID, so recovery can never starve it.
-	const attachmentOnlyPage =
-		ledger.historicalStreams.length === 1 &&
-		ledger.historicalStreams[0] === "attachments";
-
-	const historical = ledger.historical;
+	// Each unfinished stream has its own history page; fetch their union.
+	const historicalRanges = ledger.historicalRanges;
 	let historicalMetas = await collectLaneMetadata(
 		client,
-		historical ? `${historical.start}:${historical.end}` : null,
+		historicalRanges.length > 0
+			? historicalRanges.map((r) => `${r.start}:${r.end}`).join(",")
+			: null,
 		sinceDate,
 		sinceIso,
 	);
-	if (historical && attachmentOnlyPage) {
-		// An attachment-only page is sized by attachment bytes, not UIDs. A page
-		// shared with other streams keeps the UID window, as before.
+	// An attachments page that no other stream's page overlaps is sized by
+	// attachment bytes, not UIDs; an overlapped page keeps the UID window.
+	// Served recovery shares this run's attachment bytes: the page gets half
+	// its budget while gaps are served, and still admits at least one UID, so
+	// recovery can never starve it.
+	const attachmentsPage = ledger.historicalPage("attachments");
+	const attachmentsPageAlone =
+		attachmentsPage !== null &&
+		ledger.historicalStreams.every((stream) => {
+			const other = ledger.historicalPage(stream);
+			return (
+				stream === "attachments" ||
+				other === null ||
+				other.end < attachmentsPage.start ||
+				other.start > attachmentsPage.end
+			);
+		});
+	if (attachmentsPage && attachmentsPageAlone) {
+		const inPage = (m: FetchMessageObject) =>
+			m.uid >= attachmentsPage.start && m.uid <= attachmentsPage.end;
+		const pageMetas = historicalMetas.filter(inPage);
 		const budget = resolveAttachmentBackfillPageByteBudget();
 		const plan = planAttachmentBackfillPage(
-			historicalMetas,
+			pageMetas,
 			servedAttachmentRecoveryRequested
 				? Math.max(1, Math.floor(budget / 2))
 				: budget,
-			historical.end,
+			attachmentsPage.end,
 		);
-		if (plan.backfillMetas.length < historicalMetas.length) {
-			ledger.limitHistorical(plan.backfillWindowEndUid);
-			historicalMetas = plan.backfillMetas;
+		if (plan.backfillMetas.length < pageMetas.length) {
+			ledger.limitHistorical("attachments", plan.backfillWindowEndUid);
+			historicalMetas = historicalMetas.filter(
+				(m) => !inPage(m) || m.uid <= plan.backfillWindowEndUid,
+			);
 		}
 	}
 	const forward = ledger.forward;
@@ -4975,16 +4988,19 @@ export async function runAllMailPasses(
 	}
 	const metas = [...byUid.values()].sort((a, b) => a.uid - b.uid);
 
-	const page = ledger.historical;
+	const pages = ledger.historicalRanges;
 	gmailDiagnostic("message_fetch_range", {
-		historical: page ? `${page.start}:${page.end}` : null,
+		historical:
+			pages.length > 0
+				? pages.map((r) => `${r.start}:${r.end}`).join(",")
+				: null,
 		forward: forward ? `${forward.start}:${forward.end}` : null,
 		debt_uids: debtUids.length,
 		catchup_uids: catchupUids.length,
 		mailbox: allMail.path,
 	});
 	let fetchProgressMessage = "No new messages to fetch";
-	if (page) {
+	if (pages.length > 0) {
 		fetchProgressMessage = "Fetching older messages";
 	} else if (forward) {
 		fetchProgressMessage = "Fetching new messages";
@@ -5153,7 +5169,7 @@ export async function runAllMailPasses(
 	// outright if it emits coverage of its own
 	// (`validateDetailCoverageAgainstManifest`).
 
-	if (page && ledger.historicalStreams.includes("attachments")) {
+	if (ledger.historicalStreams.includes("attachments")) {
 		// Only hydrated parts write records, so the emit tally sees only those.
 		// Failed and unhydrated (too_large, deferred) parts come from coverage.
 		const failed = attachmentCoverage?.failedRecords.length ?? 0;

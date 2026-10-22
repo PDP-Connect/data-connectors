@@ -452,7 +452,8 @@ export class GmailProgressLedger {
 	private readonly requested: ReadonlySet<LedgerStream>;
 	private readonly streams: Partial<Record<LedgerStream, StreamProgress>>;
 	private readonly debt: RetryDebt[];
-	private history: UidRange | null;
+	/** Each unfinished stream's own history page this run. */
+	private readonly pages = new Map<LedgerStream, UidRange>();
 	private readonly forwardRange: UidRange | null;
 	private readonly retried: RetryDebt[];
 	private readonly expected = new Map<number, Expected>();
@@ -538,19 +539,16 @@ export class GmailProgressLedger {
 		this.debt = debt;
 		this.resetReason = resetReason;
 
-		// One historical page per run, starting at the least-advanced stream.
-		// Streams further ahead join the page where their own history resumes.
-		const behind = this.requestedStreams().filter((s) => !this.complete(s));
-		if (behind.length > 0) {
-			const start =
-				Math.min(...behind.map((s) => this.progressOf(s).through)) + 1;
-			const end = Math.min(
-				start + input.windowUids - 1,
-				Math.max(...behind.map((s) => this.progressOf(s).coveredFrom - 1)),
-			);
-			this.history = { start, end };
-		} else {
-			this.history = null;
+		// Every unfinished stream walks one bounded page from its own resume
+		// point. A stream held back (for example by a full debt list) never
+		// holds another stream's history; the driver fetches the union.
+		for (const stream of this.requestedStreams()) {
+			if (this.complete(stream)) continue;
+			const p = this.progressOf(stream);
+			this.pages.set(stream, {
+				start: p.through + 1,
+				end: Math.min(p.through + input.windowUids, p.coveredFrom - 1),
+			});
 		}
 		const forwardStart = Math.min(
 			this.uidnext,
@@ -612,20 +610,30 @@ export class GmailProgressLedger {
 		const s = this.streams[stream];
 		if (!(s && this.requested.has(stream))) return null;
 		if (this.catchupPlans.get(stream)?.planned.includes(uid)) return "catchup";
-		if (
-			this.history &&
-			uid >= this.history.start &&
-			uid <= this.history.end &&
-			uid > s.through &&
-			uid < s.coveredFrom
-		) {
-			return "history";
-		}
+		const page = this.pages.get(stream);
+		if (page && uid >= page.start && uid <= page.end) return "history";
 		return uid >= s.next && uid < this.uidnext ? "forward" : null;
 	}
 
-	get historical(): UidRange | null {
-		return this.history ? { ...this.history } : null;
+	/** The union of this run's history pages, as ascending disjoint ranges. */
+	get historicalRanges(): UidRange[] {
+		const sorted = [...this.pages.values()].sort((a, b) => a.start - b.start);
+		const out: UidRange[] = [];
+		for (const page of sorted) {
+			const last = out.at(-1);
+			if (last && page.start <= last.end + 1) {
+				last.end = Math.max(last.end, page.end);
+			} else {
+				out.push({ ...page });
+			}
+		}
+		return out;
+	}
+
+	/** `stream`'s own history page this run, if it has one. */
+	historicalPage(stream: LedgerStream): UidRange | null {
+		const page = this.pages.get(stream);
+		return page ? { ...page } : null;
 	}
 
 	get forward(): UidRange | null {
@@ -705,25 +713,21 @@ export class GmailProgressLedger {
 			: this.rangeOf(stream);
 	}
 
-	/** Streams that walk part of the historical page. */
+	/** Streams that walk a history page this run. */
 	get historicalStreams(): LedgerStream[] {
-		const page = this.history;
-		if (!page) return [];
-		return this.requestedStreams().filter((stream) => {
-			const s = this.progressOf(stream);
-			return s.through < page.end && s.through + 1 < s.coveredFrom;
-		});
+		return this.requestedStreams().filter((s) => this.pages.has(s));
 	}
 
-	/** Shorten the historical page, for example to a byte budget. */
-	limitHistorical(endUid: number): void {
-		if (!this.history || this.expected.size > 0) {
+	/** Shorten `stream`'s history page, for example to a byte budget. */
+	limitHistorical(stream: LedgerStream, endUid: number): void {
+		const page = this.pages.get(stream);
+		if (!page || this.expected.size > 0) {
 			throw new Error("gmail_progress_page_already_consumed");
 		}
-		if (!integer(endUid, this.history.start) || endUid > this.history.end) {
+		if (!integer(endUid, page.start) || endUid > page.end) {
 			throw new Error("gmail_progress_invalid_page_end");
 		}
-		this.history = { start: this.history.start, end: endUid };
+		this.pages.set(stream, { start: page.start, end: endUid });
 	}
 
 	/**
@@ -863,7 +867,8 @@ export class GmailProgressLedger {
 			};
 			// Walk each lane in UID order; a stream's cursor stops at the first
 			// UID it cannot account.
-			let historyEnd = this.history ? this.history.end : s.through;
+			const page = this.pages.get(stream);
+			let historyEnd = page ? page.end : s.through;
 			let forwardEnd = this.uidnext - 1;
 			for (const uid of fetched) {
 				const lane = this.laneOf(stream, uid);
@@ -888,7 +893,7 @@ export class GmailProgressLedger {
 					: undefined;
 				if (o) settle(d.uid, o);
 			}
-			if (this.history && this.historicalStreams.includes(stream)) {
+			if (page) {
 				const end = Math.min(historyEnd, s.coveredFrom - 1);
 				if (end > s.through) {
 					historyPage[stream] = { start: s.through + 1, end };

@@ -1676,3 +1676,50 @@ test("coverage: a UID that is both retry debt and catch-up counts once", async (
 		[[50, 50]],
 	);
 });
+
+for (const since of [undefined, JAN]) {
+	test(`scheduling: attachments held by a full debt list never hold messages history (since ${since ?? "none"})`, async () => {
+		// 201 attachments over the 25 MiB default cap stay owed; the debt list
+		// holds 200, so the attachments cursor stops at UID 200 for good.
+		const oversized = Array.from({ length: 201 }, (_, i) => {
+			const row = attachmentMessage(i + 1);
+			const part = row.bodyStructure?.childNodes?.[1];
+			assert.ok(part);
+			part.size = 26 * 1024 * 1024;
+			return row;
+		});
+		// By run 3 the pages are disjoint: attachments 201..700, messages
+		// 1001..1500.
+		const wanted = message(1400);
+		const m = mailbox([...oversized, wanted], 2001, 202);
+		const scope = new Map<string, StreamRequest>(
+			(["messages", "attachments"] as const).map((name) => [
+				name,
+				since ? { name, time_range: { since } } : { name },
+			]),
+		);
+		let state: Record<string, unknown> = {};
+		const written: unknown[] = [];
+		for (let i = 0; i < 4; i += 1) {
+			// With a since bound, the union of the two pages goes through the
+			// SEARCH prefilter as one UID set.
+			const r = await run(m, state, scope);
+			state = r.state;
+			written.push(...ofStream(r, "messages").map((x) => x.data.id));
+		}
+		const last = (
+			state.messages as {
+				progress: { streams: Record<string, { through: number }> };
+			}
+		).progress.streams;
+		assert.equal(
+			last.attachments?.through,
+			200,
+			"the attachments obligation stays",
+		);
+		assert.ok(
+			written.includes(wanted.emailId),
+			"messages history reaches UID 1400 anyway",
+		);
+	});
+}

@@ -48,7 +48,7 @@ const range = (a: number, b: number) =>
 
 test("ledger: a first run walks one bounded history page and no forward lane", () => {
 	const ledger = open({ uidnext: 1201, streams: ["messages"] });
-	assert.deepEqual(ledger.historical, { start: 1, end: 500 });
+	assert.deepEqual(ledger.historicalRanges, [{ start: 1, end: 500 }]);
 	assert.equal(ledger.forward, null);
 	coverAll(ledger, [100, 400]);
 	const c = ledger.commit(NOW);
@@ -75,7 +75,7 @@ test("ledger: history and forward lanes are disjoint as mail arrives during the 
 		uidnext: 1301,
 		streams: ["messages"],
 	});
-	assert.deepEqual(ledger.historical, { start: 501, end: 1000 });
+	assert.deepEqual(ledger.historicalRanges, [{ start: 501, end: 1000 }]);
 	assert.deepEqual(ledger.forward, { start: 1201, end: 1300 });
 	assert.deepEqual(ledger.streamsFor(1250), ["messages"]);
 	assert.deepEqual(
@@ -96,8 +96,8 @@ test("ledger: history and forward lanes are disjoint as mail arrives during the 
 		streams: ["messages"],
 	});
 	assert.deepEqual(
-		last.historical,
-		{ start: 1001, end: 1200 },
+		last.historicalRanges,
+		[{ start: 1001, end: 1200 }],
 		"history stops below the forward lane",
 	);
 	const done = last.commit(NOW);
@@ -119,7 +119,7 @@ test("ledger: a completed history is never reopened by new mail", () => {
 		debt: [],
 	};
 	const ledger = open({ persisted, uidnext: 1301, streams: ["messages"] });
-	assert.equal(ledger.historical, null);
+	assert.deepEqual(ledger.historicalRanges, []);
 	assert.deepEqual(ledger.forward, { start: 1201, end: 1300 });
 });
 
@@ -129,7 +129,7 @@ test("ledger: an uncommitted run replays the same page (STATE is the only durabi
 	).state;
 	const a = open({ persisted, uidnext: 1201, streams: ["messages"] });
 	const b = open({ persisted, uidnext: 1201, streams: ["messages"] });
-	assert.deepEqual(a.historical, b.historical);
+	assert.deepEqual(a.historicalRanges, b.historicalRanges);
 });
 
 test("ledger: a stream first requested later walks its own history from UID 1", () => {
@@ -144,7 +144,7 @@ test("ledger: a stream first requested later walks its own history from UID 1", 
 		uidnext: 1201,
 		streams: ["messages", "attachments"],
 	});
-	assert.deepEqual(ledger.historical, { start: 1, end: 500 });
+	assert.deepEqual(ledger.historicalRanges, [{ start: 1, end: 500 }]);
 	assert.deepEqual(ledger.historicalStreams, ["attachments"]);
 	assert.deepEqual(ledger.streamsFor(10), ["attachments"]);
 	const c = ledger.commit(NOW);
@@ -152,7 +152,7 @@ test("ledger: a stream first requested later walks its own history from UID 1", 
 	assert.equal(c.historyComplete.messages, true);
 });
 
-test("ledger: a stream further ahead joins the page where its own history resumes", () => {
+test("ledger: each unfinished stream walks its own page; the fetch is their union", () => {
 	const persisted: GmailProgressState = {
 		version: 1,
 		uidvalidity: 123,
@@ -167,13 +167,58 @@ test("ledger: a stream further ahead joins the page where its own history resume
 		uidnext: 1201,
 		streams: ["messages", "attachments"],
 	});
-	assert.deepEqual(ledger.historical, { start: 101, end: 600 });
+	assert.deepEqual(ledger.historicalPage("attachments"), {
+		start: 101,
+		end: 600,
+	});
+	assert.deepEqual(ledger.historicalPage("messages"), { start: 301, end: 800 });
+	assert.deepEqual(ledger.historicalRanges, [{ start: 101, end: 800 }]);
 	assert.deepEqual(ledger.streamsFor(200), ["attachments"]);
 	assert.deepEqual(ledger.streamsFor(400), ["messages", "attachments"]);
+	assert.deepEqual(ledger.streamsFor(700), ["messages"]);
 	const c = ledger.commit(NOW);
-	assert.equal(c.state.streams.messages?.through, 600);
+	assert.equal(c.state.streams.messages?.through, 800);
 	assert.equal(c.state.streams.attachments?.through, 600);
-	assert.deepEqual(c.historyPage.messages, { start: 301, end: 600 });
+	assert.deepEqual(c.historyPage.messages, { start: 301, end: 800 });
+});
+
+test("ledger: a stream held by full debt never holds another stream's history", () => {
+	const persisted: GmailProgressState = {
+		version: 1,
+		uidvalidity: 123,
+		streams: {
+			messages: { through: 700, coveredFrom: 1001, next: 1001 },
+			attachments: { through: 200, coveredFrom: 1001, next: 1001 },
+		},
+		debt: range(1, MAX_RETRY_DEBT).map((uid) => ({
+			uid,
+			streams: ["attachments" as const],
+			attempts: 3,
+			failure: "attachment_unhydrated",
+		})),
+	};
+	const ledger = open({
+		persisted,
+		uidnext: 1001,
+		streams: ["messages", "attachments"],
+	});
+	assert.deepEqual(ledger.historicalPage("messages"), {
+		start: 701,
+		end: 1000,
+	});
+	// The attachments page cannot move: UID 201 fails and the list is full.
+	ledger.expect(201);
+	ledger.record(201, ["attachments"], {
+		kind: "failed",
+		failure: "attachment_unhydrated",
+	});
+	ledger.expect(900);
+	ledger.record(900, ledger.streamsFor(900), { kind: "covered" });
+	const c = ledger.commit(NOW);
+	assert.equal(c.state.streams.attachments?.through, 200);
+	assert.deepEqual(c.unaccounted, [201]);
+	assert.equal(c.state.streams.messages?.through, 1000);
+	assert.equal(c.historyComplete.messages, true);
 });
 
 test("ledger: a failure becomes debt, the cursor passes it, and a later run settles it", () => {
@@ -382,11 +427,14 @@ test("ledger: an expected UID with no reported outcome holds the cursor before i
 
 test("ledger: limitHistorical shortens the page; it cannot follow consumption", () => {
 	const ledger = open({ uidnext: 1201, streams: ["attachments"] });
-	ledger.limitHistorical(120);
-	assert.deepEqual(ledger.historical, { start: 1, end: 120 });
+	ledger.limitHistorical("attachments", 120);
+	assert.deepEqual(ledger.historicalRanges, [{ start: 1, end: 120 }]);
 	ledger.expect(10);
 	ledger.record(10, ["attachments"], { kind: "covered" });
-	assert.throws(() => ledger.limitHistorical(100), /already_consumed/);
+	assert.throws(
+		() => ledger.limitHistorical("attachments", 100),
+		/already_consumed/,
+	);
 	assert.equal(ledger.commit(NOW).state.streams.attachments?.through, 120);
 });
 
@@ -405,7 +453,7 @@ test("ledger: UIDVALIDITY change resets every stream and drops debt", () => {
 		streams: ["messages"],
 	});
 	assert.equal(ledger.resetReason, "full_resync");
-	assert.deepEqual(ledger.historical, { start: 1, end: 300 });
+	assert.deepEqual(ledger.historicalRanges, [{ start: 1, end: 300 }]);
 	assert.deepEqual(ledger.commit(NOW).state.debt, []);
 });
 
@@ -427,7 +475,7 @@ test("ledger: invalid persisted state falls back to the legacy cursors and says 
 		legacy: { forwardUidnext: 1201, messagesBackfillThrough: 1200 },
 	});
 	assert.equal(ledger.resetReason, "stream:messages");
-	assert.equal(ledger.historical, null);
+	assert.deepEqual(ledger.historicalRanges, []);
 	assert.deepEqual(ledger.forward, { start: 1201, end: 1300 });
 });
 
@@ -443,24 +491,34 @@ test("ledger: legacy migration trusts only per-stream evidence", () => {
 			attachmentsBackfillThrough: 300,
 		},
 	});
-	// The page starts at the least-advanced stream (threads, at 0), so this
-	// run walks 1..500 for threads and 301..500 for attachments only.
-	assert.deepEqual(ledger.historical, { start: 1, end: 500 });
-	const c = ledger.commit(NOW).state.streams;
-	assert.equal(c.messages?.through, 900);
-	assert.equal(
-		c.message_bodies?.through,
-		900,
+	// Each stream resumes from its own migrated cursor: threads at 1,
+	// attachments at 301, messages and bodies at 901.
+	assert.deepEqual(ledger.historicalRanges, [
+		{ start: 1, end: 800 },
+		{ start: 901, end: 1200 },
+	]);
+	assert.deepEqual(
+		ledger.historicalPage("messages"),
+		{ start: 901, end: 1200 },
+		"messages history is not re-walked",
+	);
+	assert.deepEqual(
+		ledger.historicalPage("message_bodies"),
+		{ start: 901, end: 1200 },
 		"bodies rode the messages cursor before",
+	);
+	const c = ledger.commit(NOW).state.streams;
+	// With nothing fetched the messages gap closes and history is complete.
+	assert.deepEqual(
+		[c.messages?.through, c.messages?.coveredFrom, c.messages?.next],
+		[1300, 1301, 1301],
 	);
 	assert.equal(
 		c.attachments?.through,
-		500,
+		800,
 		"attachments keep their own cursor",
 	);
 	assert.equal(c.threads?.through, 500, "thread rows are rebuilt from UID 1");
-	assert.equal(c.messages?.coveredFrom, 1201);
-	assert.equal(c.messages?.next, 1301);
 });
 
 test("ledger: compat cursor keeps the RI band contiguous on every shape", () => {
@@ -525,7 +583,11 @@ test("ledger: legacy migration seeds streams that are not requested yet", () => 
 		uidnext: 1301,
 		streams: ["messages"],
 	});
-	assert.equal(later.historical, null, "messages history is not re-walked");
+	assert.deepEqual(
+		later.historicalRanges,
+		[],
+		"messages history is not re-walked",
+	);
 	assert.deepEqual(
 		later.forward,
 		{ start: 1201, end: 1300 },
