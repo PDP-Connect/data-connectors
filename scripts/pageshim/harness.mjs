@@ -136,6 +136,8 @@ async function hostMain({
 	omitScopeEntries,
 	thinHost,
 }) {
+	// Deadline time must continue advancing when fixture calendar time is frozen.
+	const elapsedNow = performance.now.bind(performance);
 	window.__pageshimEnv = env || {};
 	if (Number.isFinite(clockNowMs)) Date.now = () => clockNowMs;
 	if (timerScale !== 1) {
@@ -182,10 +184,10 @@ async function hostMain({
 		waitForSelector: async (selector, options) => {
 			const timeout = options?.timeout ?? 30000;
 			const state = options?.state || "visible";
-			const started = Date.now();
+			const started = elapsedNow();
 			for (;;) {
 				if (await call("selectorState", [String(selector), state])) return;
-				if (Date.now() - started >= timeout)
+				if (elapsedNow() - started >= timeout)
 					throw new Error(
 						`waitForSelector timed out after ${timeout}ms: ${selector}`,
 					);
@@ -219,8 +221,8 @@ async function hostMain({
 		promptUser: async (msg, check, interval) => {
 			await call("setData", ["status", msg]);
 			await call("promptUser", []);
-			const started = Date.now();
-			while (Date.now() - started < loginWaitMs) {
+			const started = elapsedNow();
+			while (elapsedNow() - started < loginWaitMs) {
 				let ok = false;
 				try {
 					ok = await check();
@@ -483,6 +485,23 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 	};
 }
 
+// Settles like `promise`, but rejects with the signal's reason if the signal
+// aborts first. The run's finally block then closes the browser, which ends the
+// evaluate that the caller abandoned.
+function untilAborted(promise, signal) {
+	if (!signal) return promise;
+	return Promise.race([
+		promise,
+		new Promise((_, reject) => {
+			if (signal.aborted) reject(signal.reason);
+			else
+				signal.addEventListener("abort", () => reject(signal.reason), {
+					once: true,
+				});
+		}),
+	]);
+}
+
 /**
  * @param {object} o
  * @param {string} o.bundle path to the built bundle
@@ -492,6 +511,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {boolean} [o.supportsStateArgument] model an older shell with a two-argument runner
  * @param {boolean} [o.resultStreaming] model the thin host: offer page.input and accept only streamed results
  * @param {boolean} [o.acceptLegacyResult] also accept a one-message result (default: only without resultStreaming)
+ * @param {boolean} [o.fixtureReady] await fixture load instead of the host navigation delay
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
@@ -502,6 +522,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {boolean} [o.sampleHeap] poll the runner page's JS heap; maxHeapBytes is undefined without it
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
  * @param {(method: string, args: unknown[], result: unknown) => void} [o.observeBridge] sees every bridge call and its reply
+ * @param {AbortSignal} [o.signal] reject the run with the signal's reason when it aborts; the browser still closes
  */
 export async function runHarness({
 	bundle,
@@ -512,6 +533,7 @@ export async function runHarness({
 	loginAfterMs = 0,
 	sampleHeap = false,
 	gotoDelayMs = 2000,
+	fixtureReady = false,
 	loginWaitMs = 120_000,
 	env = {},
 	resultStreaming = false,
@@ -533,6 +555,7 @@ export async function runHarness({
 	missingScopeEntries = false,
 	acceptLegacyResult,
 	observeBridge,
+	signal,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -639,9 +662,10 @@ export async function runHarness({
 						});
 						if (failure) return { __shimError: String(failure) };
 						await target
-							.goto(a[0], { waitUntil: "commit" })
+							.goto(a[0], { waitUntil: fixtureReady ? "load" : "commit" })
 							.catch((e) => log.push(`goto error ${e.message}`));
-						await new Promise((r) => setTimeout(r, gotoDelayMs));
+						if (!fixtureReady)
+							await new Promise((r) => setTimeout(r, gotoDelayMs));
 					}
 					return null;
 				case "setData":
@@ -854,7 +878,7 @@ export async function runHarness({
 		}
 
 		const started = Date.now();
-		const ret = await runner.evaluate(hostMain, {
+		const evaluated = runner.evaluate(hostMain, {
 			source,
 			scopes,
 			initialState,
@@ -868,6 +892,7 @@ export async function runHarness({
 			omitScopeEntries: missingScopeEntries,
 			thinHost: resultStreaming,
 		});
+		const ret = await untilAborted(evaluated, signal);
 		sampling = false;
 		await sampler;
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
@@ -909,4 +934,17 @@ export async function runHarness({
 			await entry.handle?.close().catch(() => {});
 		await browser.close();
 	}
+}
+
+// Ordinary fixture runs opt into load readiness. Explicit timing controls keep
+// authentic wall-clock behavior, including the 45-second sign-in regression.
+export function runFixtureHarness(options) {
+	return runHarness({
+		...options,
+		fixtureReady: options.fixtureReady ?? (
+			options.loginAfterMs === undefined &&
+			options.gotoDelayMs === undefined &&
+			options.timerScale === undefined
+		),
+	});
 }
