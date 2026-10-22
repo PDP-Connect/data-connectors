@@ -1449,7 +1449,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/facebook/index.ts",
-			line: 321,
+			line: 322,
 			column: 4,
 			category: "bounded_retry_polling",
 			note: "Navigation is retried at most twice, each attempt bounded; an attempt runs only if the previous one failed.",

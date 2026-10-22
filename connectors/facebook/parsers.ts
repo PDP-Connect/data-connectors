@@ -753,7 +753,14 @@ export interface PostRecord {
 	id: string;
 	privacy: string | null;
 	privacy_label: string | null;
+	/** The person's own words in the post; null for photo-only posts and plain shares. */
 	text: string | null;
+	/** The story's context line, such as "… shared a post" or "… updated their profile picture". */
+	title: string | null;
+	/** The words of the post this one shares (its attached story), when it shares one. */
+	shared_text: string | null;
+	/** The title of the first attachment (a link's or a shared item's headline). */
+	attachment_title: string | null;
 	url: string | null;
 }
 
@@ -811,8 +818,11 @@ const POST_TEXT_KEYS = [
 ];
 const POST_TEXT_MAX_DEPTH = 10;
 
-function postText(node: JsonRecord): string | null {
-	let level: JsonRecord[] = [node];
+function messageTextUnder(
+	root: JsonRecord,
+	keys: readonly string[],
+): string | null {
+	let level: JsonRecord[] = [root];
 	for (
 		let depth = 0;
 		depth < POST_TEXT_MAX_DEPTH && level.length > 0;
@@ -822,7 +832,7 @@ function postText(node: JsonRecord): string | null {
 		for (const record of level) {
 			const text = textOf(record.message);
 			if (text !== null) return text;
-			for (const key of POST_TEXT_KEYS) {
+			for (const key of keys) {
 				const child = asRecord(record[key]);
 				if (child) next.push(child);
 			}
@@ -830,6 +840,78 @@ function postText(node: JsonRecord): string | null {
 		level = next;
 	}
 	return null;
+}
+
+function postText(node: JsonRecord): string | null {
+	return messageTextUnder(node, POST_TEXT_KEYS);
+}
+
+/** Keys the shared story's text sits under, inside the attached story. */
+const SHARED_TEXT_KEYS = [...POST_TEXT_KEYS, "attached_story_layout"];
+
+/**
+ * The story this post shares. Comet puts it at `content.story.attached_story`,
+ * or one layer deeper at `content.story.comet_sections.attached_story.story.attached_story`.
+ */
+function attachedStories(node: JsonRecord): JsonRecord[] {
+	const story = ["comet_sections", "content", "story"];
+	const candidates = [
+		getPath(node, [...story, "attached_story"]),
+		getPath(node, [
+			...story,
+			"comet_sections",
+			"attached_story",
+			"story",
+			"attached_story",
+		]),
+		node.attached_story,
+	];
+	return candidates
+		.map(asRecord)
+		.filter((candidate): candidate is JsonRecord => candidate !== null);
+}
+
+function sharedText(node: JsonRecord): string | null {
+	for (const attached of attachedStories(node)) {
+		const text = messageTextUnder(attached, SHARED_TEXT_KEYS);
+		if (text !== null) return text;
+	}
+	return null;
+}
+
+/** The first attachment title, from the story's attachments or the unit's own list (Comet fills either). */
+function firstAttachmentTitle(
+	node: JsonRecord,
+	counter: TextCounter,
+): string | null {
+	const lists = [
+		asArray(
+			getPath(node, ["comet_sections", "content", "story", "attachments"]),
+		),
+		asArray(node.attachments),
+	];
+	for (const list of lists) {
+		for (const raw of list ?? []) {
+			const attachment = asRecord(raw);
+			const title = attachment ? attachmentTitle(attachment, counter) : null;
+			if (title !== null) return title;
+		}
+	}
+	return null;
+}
+
+function contextTitle(node: JsonRecord): string | null {
+	return textOf(
+		getPath(node, [
+			"comet_sections",
+			"context_layout",
+			"story",
+			"comet_sections",
+			"title",
+			"story",
+			"title",
+		]),
+	);
 }
 
 function postMetadataStory(node: JsonRecord): JsonRecord | null {
@@ -930,6 +1012,9 @@ export function parsePostNode(
 			id,
 			create_time: createTime,
 			text: safeText(postText(node), counter, 60_000),
+			title: safeText(contextTitle(node), counter, 1000),
+			shared_text: safeText(sharedText(node), counter, 60_000),
+			attachment_title: firstAttachmentTitle(node, counter),
 			url:
 				httpsUrl(node.permalink_url) ??
 				httpsUrl(

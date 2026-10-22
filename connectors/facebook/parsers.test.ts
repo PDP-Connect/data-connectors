@@ -230,6 +230,105 @@ describe("posts", () => {
 		assert.equal(parsed.kind === "post" ? parsed.record.text : "unread", null);
 	});
 
+	it("fills title, shared_text and attachment_title from the live share layouts, keeping text null", () => {
+		const sharedLayouts: [string, (story: JsonRecord) => void][] = [
+			[
+				"content.story.attached_story.message",
+				(story) => {
+					story.attached_story = { message: { text: "Shared words" } };
+				},
+			],
+			[
+				"content.story.attached_story.comet_sections.message.story.message",
+				(story) => {
+					story.attached_story = {
+						comet_sections: {
+							message: { story: { message: { text: "Shared words" } } },
+						},
+					};
+				},
+			],
+			[
+				"content.story.attached_story...message_container.story.message",
+				(story) => {
+					story.attached_story = {
+						comet_sections: {
+							message_container: {
+								story: { message: { text: "Shared words" } },
+							},
+						},
+					};
+				},
+			],
+			[
+				"content.story.comet_sections.attached_story.story.attached_story.comet_sections.attached_story_layout.story.message",
+				(story) => {
+					(story.comet_sections as JsonRecord).attached_story = {
+						story: {
+							attached_story: {
+								comet_sections: {
+									attached_story_layout: {
+										story: { message: { text: "Shared words" } },
+									},
+								},
+							},
+						},
+					};
+				},
+			],
+		];
+		for (const [layout, place] of sharedLayouts) {
+			const node = firstEdgeNode(
+				loadFixture(TIMELINE),
+				matchTimelineConnection,
+			);
+			const sections = node.comet_sections as JsonRecord;
+			place((sections.content as JsonRecord).story as JsonRecord);
+			const titleStory = (
+				((sections.context_layout as JsonRecord).story as JsonRecord)
+					.comet_sections as JsonRecord
+			).title as JsonRecord;
+			(titleStory.story as JsonRecord).title = {
+				text: "Ada Example shared a post.",
+			};
+			const attachment = ((node.attachments as JsonRecord[])[0] as JsonRecord)
+				.styles as JsonRecord;
+			(attachment.attachment as JsonRecord).title_with_entities = {
+				text: "A headline",
+			};
+			const parsed = parsePostNode(node, TIMELINE_VIEWER, newTextCounter());
+			assert.equal(parsed.kind, "post", layout);
+			if (parsed.kind !== "post") continue;
+			assert.equal(parsed.record.text, null, layout);
+			assert.equal(parsed.record.shared_text, "Shared words", layout);
+			assert.equal(parsed.record.title, "Ada Example shared a post.", layout);
+			assert.equal(parsed.record.attachment_title, "A headline", layout);
+			assert.equal(
+				validateRecord("posts", { ...parsed.record }).ok,
+				true,
+				layout,
+			);
+		}
+	});
+
+	it("leaves the new fields null when the live fixture has none of them", () => {
+		const parsed = parsePostNode(
+			firstEdgeNode(loadFixture(TIMELINE), matchTimelineConnection),
+			TIMELINE_VIEWER,
+			newTextCounter(),
+		);
+		assert.equal(parsed.kind, "post");
+		if (parsed.kind !== "post") return;
+		assert.deepEqual(
+			[
+				parsed.record.title,
+				parsed.record.shared_text,
+				parsed.record.attachment_title,
+			],
+			[null, null, null],
+		);
+	});
+
 	it("calls a unit without a post id unreadable instead of guessing", () => {
 		const node = firstEdgeNode(loadFixture(TIMELINE), matchTimelineConnection);
 		delete node.post_id;

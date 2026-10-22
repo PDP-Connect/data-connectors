@@ -59,6 +59,7 @@
  *
  * CHANGES
  *   v0.1.0 (2026-10-22): first version.
+ *   v0.1.1 (2026-10-22): posts gain title, shared_text and attachment_title.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";

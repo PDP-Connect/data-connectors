@@ -37,6 +37,9 @@ export const postsSchema = z.object({
 	id: numericId,
 	create_time: isoUtc,
 	text: pdppSafeText.max(60_000).nullable(),
+	title: pdppSafeText.max(1000).nullable(),
+	shared_text: pdppSafeText.max(60_000).nullable(),
+	attachment_title: pdppSafeText.max(1000).nullable(),
 	url: httpsUrl.nullable(),
 	attachments: z.array(
 		z.object({

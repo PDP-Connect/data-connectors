@@ -9,7 +9,7 @@
 	},
 	"connector_key": "facebook",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Facebook",
 	"brand": {
 		"icon": "icon.svg",
@@ -109,7 +109,7 @@
 			"description": "Posts the person published on their own timeline. Attachments are described by kind and title; media files are not downloaded.",
 			"display": {
 				"label": "Your posts",
-				"detail": "Post text, time, link, audience, and the kind and title of each attachment."
+				"detail": "Your own words, the post's context line (such as a share or a profile picture update), the text of a post you shared, time, link, audience, and each attachment's kind and title."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -125,6 +125,15 @@
 					"text": {
 						"type": ["string", "null"],
 						"x_pdpp_role": "primary-title"
+					},
+					"title": {
+						"type": ["string", "null"]
+					},
+					"shared_text": {
+						"type": ["string", "null"]
+					},
+					"attachment_title": {
+						"type": ["string", "null"]
 					},
 					"url": {
 						"type": ["string", "null"]
@@ -163,8 +172,13 @@
 			"incremental": true,
 			"query": {
 				"search": {
-					"lexical_fields": ["text"],
-					"semantic_fields": ["text"]
+					"lexical_fields": [
+						"text",
+						"title",
+						"shared_text",
+						"attachment_title"
+					],
+					"semantic_fields": ["text", "title", "shared_text"]
 				},
 				"range_filters": {
 					"create_time": ["gte", "gt", "lte", "lt"]
