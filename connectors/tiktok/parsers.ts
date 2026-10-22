@@ -243,7 +243,7 @@ const userSchema = z.object({
 	}),
 });
 
-type User = z.infer<typeof userSchema>["user"];
+export type User = z.infer<typeof userSchema>["user"];
 
 const userPageSchema = z.object({
 	hasMore: z.boolean(),

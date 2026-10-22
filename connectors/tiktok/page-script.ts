@@ -158,6 +158,7 @@ const PAGE_HELPERS = String.raw`
 								status: xhr.status,
 								type: xhr.getResponseHeader("content-type") || "",
 								retryAfter: xhr.getResponseHeader("retry-after"),
+								mitigated: xhr.getResponseHeader("cf-mitigated"),
 								text: typeof xhr.responseText === "string" ? xhr.responseText : "",
 								signed: SIGNED.test(xhr.responseURL || ""),
 							});
@@ -182,6 +183,7 @@ const PAGE_HELPERS = String.raw`
 					status: response.status,
 					type: response.headers.get("content-type") || "",
 					retryAfter: response.headers.get("retry-after"),
+					mitigated: response.headers.get("cf-mitigated"),
 					text,
 					signed: SIGNED.test(response.url || ""),
 				};
@@ -222,6 +224,7 @@ const PAGE_HELPERS = String.raw`
 					kind: "response",
 					status: raw.status,
 					html: /html/i.test(raw.type),
+					challengeHeader: typeof raw.mitigated === "string" && raw.mitigated !== "",
 					empty,
 					json,
 					signed: raw.signed,
@@ -277,6 +280,8 @@ export type PageApiResult =
 			kind: "response";
 			status: number;
 			html: boolean;
+			/** The response carried a cf-mitigated header (a bot check). */
+			challengeHeader?: boolean;
 			empty: boolean;
 			json: unknown;
 			signed: boolean;

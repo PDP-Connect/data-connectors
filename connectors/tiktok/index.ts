@@ -69,6 +69,9 @@
  *   v0.1.0 (2026-10-22): first version.
  *   v0.1.1 (2026-10-22): session check never opens /login without a signed-out
  *     answer; collections end on hasMore and send the app's appId/publicOnly.
+ *   v0.1.2 (2026-10-22): likes/favorites walk to hasMore:false every run (no
+ *     stop at a known id); profile counts need a usable own video or a proved
+ *     empty list; unsafe text fails the stream; challenges classified first.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -101,7 +104,8 @@ import {
 	parseItemPage,
 	parseSettings,
 	parseUserPage,
-	type TextNotes,
+	secondsToInstant,
+	type User,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -126,8 +130,6 @@ const CLIENT_WAIT_MS = 15_000;
 const POLL_INTERVAL_MS = 500;
 /** How long the session probe waits for the page's own first request. */
 const PROBE_CLIENT_WAIT_MS = 10_000;
-/** Ids kept per incremental list: a later run stops at the first of them. */
-const HEAD_IDS = 20;
 /** /api/user/list/ scene numbers used by TikTok's web app. */
 const FOLLOWING_SCENE = "21";
 const FOLLOWERS_SCENE = "67";
@@ -328,17 +330,23 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 		if (result.status === 401) {
 			throw new TikTokStop("auth", `${path} answered 401`);
 		}
+		// A bot check comes before every status rule: an HTML page or a
+		// cf-mitigated header is a challenge whatever the status (a 503
+		// challenge page is not a server error).
+		if (result.html || result.challengeHeader === true) {
+			throw new TikTokStop(
+				"challenge",
+				`${path} answered ${result.status} with a challenge instead of data`,
+			);
+		}
 		if (result.status === 429) {
 			throw new TikTokStop("rate_limited", `${path} answered 429`);
 		}
 		if (result.status >= 500) {
 			throw new TikTokStop("server_error", `${path} answered ${result.status}`);
 		}
-		if (result.status === 403 || result.html) {
-			throw new TikTokStop(
-				"challenge",
-				`${path} answered ${result.status} with a page instead of data`,
-			);
+		if (result.status === 403) {
+			throw new TikTokStop("challenge", `${path} answered 403`);
 		}
 		if (result.status !== 200) {
 			throw new TikTokStop("status_error", `${path} answered ${result.status}`);
@@ -356,7 +364,12 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 					);
 		}
 		if (result.json === null || typeof result.json !== "object") {
-			throw new TikTokStop("unreadable", `${path} answered without JSON`);
+			// Every path here is a JSON endpoint: a body that is not JSON is the
+			// site answering with something else, treated as a challenge.
+			throw new TikTokStop(
+				"challenge",
+				`${path} answered ${result.status} with a body that is not JSON`,
+			);
 		}
 		const status = envelopeStatus(result.json);
 		if (status !== null && status !== 0) {
@@ -446,7 +459,13 @@ export async function readSessionState(
 	const result = await fetchApi(page, "/passport/account/info/v2/", {});
 	if (result?.kind !== "response") return "unknown";
 	if (result.status === 401) return "signed_out";
-	if (result.status !== 200 || result.empty || result.html) return "unknown";
+	if (
+		result.status !== 200 ||
+		result.empty ||
+		result.html ||
+		result.challengeHeader === true
+	)
+		return "unknown";
 	if (parseAccount(result.json) !== null) return "signed_in";
 	return result.json !== null && typeof result.json === "object"
 		? "signed_out"
@@ -511,26 +530,24 @@ export async function ensureTikTokSession(
 // ─── list walks ──────────────────────────────────────────────────────────
 
 interface WalkResult {
-	/** Items handed to `onItem` (new this run). */
+	/** Distinct items handed to `onItem`. */
 	read: number;
-	/** The walk reached the first id a previous run already holds. */
-	reachedKnown: boolean;
 	total: number | null;
 	unreadable: number;
 }
 
 /**
  * Walk one item list (post, favorite, collect) from the newest page until
- * TikTok says `hasMore: false`, or until the first id in `stopAt`. Any other
- * ending throws: a repeated cursor, a page that adds nothing while hasMore is
- * true, a missing cursor or the page cap.
+ * TikTok says `hasMore: false`. That is the only way a walk completes: a
+ * known id is not an end (a list can hold new items below one), and any
+ * other ending throws: a repeated cursor, a page that adds nothing while
+ * hasMore is true, a missing cursor or the page cap.
  */
 async function walkItemList(
 	api: Api,
 	path: AllowedPath,
 	secUid: string,
 	maxPages: number,
-	stopAt: ReadonlySet<string>,
 	onItem: (item: Item) => Promise<void>,
 ): Promise<WalkResult> {
 	const seenCursors = new Set<string>();
@@ -567,14 +584,11 @@ async function walkItemList(
 			if (seenIds.has(item.id)) continue;
 			seenIds.add(item.id);
 			added += 1;
-			if (stopAt.has(item.id)) {
-				return { read, reachedKnown: true, total, unreadable };
-			}
 			await onItem(item);
 			read += 1;
 		}
 		if (!page.hasMore) {
-			return { read, reachedKnown: false, total, unreadable };
+			return { read, total, unreadable };
 		}
 		if (added === 0 && page.unreadable === 0) {
 			throw new TikTokStop(
@@ -599,8 +613,7 @@ async function walkUserList(
 	secUid: string,
 	scene: string,
 	maxPages: number,
-	onUser: (record: RecordData) => Promise<void>,
-	notes: TextNotes,
+	onUser: (user: User) => Promise<void>,
 ): Promise<{ read: number; total: number | null; unreadable: number }> {
 	const seenCursors = new Set<number>();
 	const seenIds = new Set<string>();
@@ -636,7 +649,7 @@ async function walkUserList(
 			if (seenIds.has(user.id)) continue;
 			seenIds.add(user.id);
 			added += 1;
-			await onUser(buildUserRecord(user, notes));
+			await onUser(user);
 		}
 		if (!page.hasMore) {
 			if (page.isTruncated) {
@@ -665,18 +678,6 @@ async function walkUserList(
 }
 
 // ─── state ───────────────────────────────────────────────────────────────
-
-/** The stored head ids of an incremental list, or none. */
-function headIds(value: unknown): string[] {
-	if (value === null || typeof value !== "object") return [];
-	const ids = (value as { head_ids?: unknown }).head_ids;
-	if (!Array.isArray(ids)) return [];
-	return ids
-		.filter(
-			(id): id is string => typeof id === "string" && /^[0-9]{1,30}$/.test(id),
-		)
-		.slice(0, HEAD_IDS);
-}
 
 // ─── collection ──────────────────────────────────────────────────────────
 
@@ -712,7 +713,6 @@ export async function collectTikTok(
 	if (requested.length === 0) return;
 	const delay = options.delay ?? realDelay;
 	const maxPages = options.maxPages ?? MAX_PAGES_PER_LIST;
-	const fullRefresh = ctx.collectionMode === "full_refresh";
 	const notes = newTextNotes();
 	const finished = new Set<Stream>();
 
@@ -761,8 +761,83 @@ export async function collectTikTok(
 	}
 	const secUid = account.secUid;
 
+	/** Records withheld per stream because a present text was not safe text. */
+	const unsafe = new Map<Stream, number>();
+	/**
+	 * Build a record and emit it, unless one of its present text values was
+	 * not safe text: that record is withheld and counted, and the stream then
+	 * fails before its STATE (assertSafe). Null stays for absent values only.
+	 */
+	const emitBuilt = async (
+		stream: Stream,
+		build: () => RecordData,
+	): Promise<void> => {
+		const before = notes.replaced;
+		const record = build();
+		if (notes.replaced > before) {
+			unsafe.set(stream, (unsafe.get(stream) ?? 0) + 1);
+			return;
+		}
+		await ctx.emitRecord(stream, record);
+	};
+	const assertSafe = (stream: Stream): void => {
+		const count = unsafe.get(stream) ?? 0;
+		if (count > 0) {
+			connectorDiagnostic("tiktok", "unsafe_text", { stream, count });
+			throw new TikTokStop(
+				"unreadable",
+				`${count} ${stream} ${count === 1 ? "entry carries" : "entries carry"} text that is not safe text and ${count === 1 ? "was" : "were"} not saved`,
+			);
+		}
+	};
+
 	let ownFirstItem: Item | null = null;
 	let ownFirstItemRead = false;
+
+	/**
+	 * The owner's newest own video, whose author carries the profile counts,
+	 * or null when TikTok's own list proves there is none (hasMore:false and no
+	 * positive total). An unreadable entry, a positive total with no item, or
+	 * an empty page that claims more fail the profile instead of emitting
+	 * null counts.
+	 */
+	const findOwnItem = async (): Promise<Item | null> => {
+		const page = parseItemPage(
+			await api.get("/api/post/item_list/", {
+				secUid,
+				count: ITEM_PAGE_SIZE,
+				cursor: "0",
+				coverFormat: "2",
+			}),
+		);
+		if (!page) {
+			throw new TikTokStop(
+				"unreadable",
+				"/api/post/item_list/ answered a page this connector does not recognise",
+			);
+		}
+		if (page.unreadable > 0) {
+			throw new TikTokStop(
+				"unreadable",
+				`${page.unreadable} own videos did not match the recorded shape, so the profile counts could not be read`,
+			);
+		}
+		const [first] = page.items;
+		if (first) return first;
+		if (page.hasMore) {
+			throw new TikTokStop(
+				"incomplete",
+				"/api/post/item_list/ said it had more but its first page listed no video",
+			);
+		}
+		if (page.total !== null && page.total > 0) {
+			throw new TikTokStop(
+				"incomplete",
+				`TikTok counted ${page.total} videos but listed none, so the profile counts could not be read`,
+			);
+		}
+		return null;
+	};
 
 	const run: Record<Stream, () => Promise<void>> = {
 		[VIDEOS]: async () => {
@@ -772,21 +847,18 @@ export async function collectTikTok(
 				"/api/post/item_list/",
 				secUid,
 				maxPages,
-				new Set(),
 				async (item) => {
-					if (!ownFirstItemRead) {
-						ownFirstItem = item;
-						ownFirstItemRead = true;
+					ownFirstItem ??= item;
+					const created = secondsToInstant(item.createTime);
+					if (newest === null || String(created) > newest) {
+						newest = String(created);
 					}
-					const record = buildVideoRecord(item, notes);
-					if (newest === null || String(record.created_at) > newest) {
-						newest = String(record.created_at);
-					}
-					await ctx.emitRecord(VIDEOS, record);
+					await emitBuilt(VIDEOS, () => buildVideoRecord(item, notes));
 				},
 			);
-			ownFirstItemRead = true;
 			assertComplete(VIDEOS, walk, false);
+			assertSafe(VIDEOS);
+			ownFirstItemRead = true;
 			await ctx.emit({
 				type: "STATE",
 				stream: VIDEOS,
@@ -801,27 +873,8 @@ export async function collectTikTok(
 					"/api/user/settings/ answered without a settings object",
 				);
 			}
-			if (!ownFirstItemRead) {
-				// The counts live on the owner's own video; read one page.
-				const page = parseItemPage(
-					await api.get("/api/post/item_list/", {
-						secUid: secUid,
-						count: ITEM_PAGE_SIZE,
-						cursor: "0",
-						coverFormat: "2",
-					}),
-				);
-				if (!page) {
-					throw new TikTokStop(
-						"unreadable",
-						"/api/post/item_list/ answered a page this connector does not recognise",
-					);
-				}
-				ownFirstItem = page.items[0] ?? null;
-				ownFirstItemRead = true;
-			}
-			await ctx.emitRecord(
-				PROFILE,
+			if (!ownFirstItemRead) ownFirstItem = await findOwnItem();
+			await emitBuilt(PROFILE, () =>
 				buildProfileRecord(
 					account,
 					settings.privateAccount,
@@ -829,6 +882,7 @@ export async function collectTikTok(
 					notes,
 				),
 			);
+			assertSafe(PROFILE);
 			await ctx.emit({
 				type: "STATE",
 				stream: PROFILE,
@@ -872,8 +926,7 @@ export async function collectTikTok(
 					if (seenIds.has(collection.collectionId)) continue;
 					seenIds.add(collection.collectionId);
 					added += 1;
-					await ctx.emitRecord(
-						FAVORITE_COLLECTIONS,
+					await emitBuilt(FAVORITE_COLLECTIONS, () =>
 						buildCollectionRecord(collection, notes),
 					);
 				}
@@ -912,6 +965,7 @@ export async function collectTikTok(
 				}
 				cursor = next;
 			}
+			assertSafe(FAVORITE_COLLECTIONS);
 			await ctx.emit({
 				type: "STATE",
 				stream: FAVORITE_COLLECTIONS,
@@ -926,42 +980,25 @@ export async function collectTikTok(
 		stream: typeof LIKES | typeof FAVORITES,
 		path: AllowedPath,
 	): Promise<void> {
-		const prior = fullRefresh ? [] : headIds(ctx.state[stream]);
-		const fresh: string[] = [];
-		const walk = await walkItemList(
-			api,
-			path,
-			secUid,
-			maxPages,
-			new Set(prior),
-			async (item) => {
-				if (fresh.length < HEAD_IDS) fresh.push(item.id);
-				await ctx.emitRecord(stream, buildSavedVideoRecord(item, notes));
-			},
+		// Every run walks the whole list to hasMore:false; the host keeps one
+		// record per video id, so videos seen before are not duplicated.
+		const walk = await walkItemList(api, path, secUid, maxPages, (item) =>
+			emitBuilt(stream, () => buildSavedVideoRecord(item, notes)),
 		);
-		assertComplete(stream, walk, walk.reachedKnown);
-		// The newest ids first: this run's new ones, then the stored head the
-		// walk stopped at (only when it stopped there).
-		const head = [...fresh, ...(walk.reachedKnown ? prior : [])].slice(
-			0,
-			HEAD_IDS,
-		);
-		await ctx.emit({ type: "STATE", stream, cursor: { head_ids: head } });
+		assertComplete(stream, walk, false);
+		assertSafe(stream);
+		await ctx.emit({ type: "STATE", stream, cursor: { count: walk.read } });
 	}
 
 	async function walkUsers(
 		stream: typeof FOLLOWING | typeof FOLLOWERS,
 		scene: string,
 	): Promise<void> {
-		const walk = await walkUserList(
-			api,
-			secUid,
-			scene,
-			maxPages,
-			(record) => ctx.emitRecord(stream, record),
-			notes,
+		const walk = await walkUserList(api, secUid, scene, maxPages, (user) =>
+			emitBuilt(stream, () => buildUserRecord(user, notes)),
 		);
 		assertComplete(stream, walk, false);
+		assertSafe(stream);
 		await ctx.emit({ type: "STATE", stream, cursor: { count: walk.read } });
 	}
 
@@ -971,7 +1008,6 @@ export async function collectTikTok(
 			stream,
 			message: `Reading your TikTok ${stream.replace("_", " ")}`,
 		});
-		const replacedBefore = notes.replaced;
 		try {
 			await run[stream]();
 			finished.add(stream);
@@ -983,16 +1019,6 @@ export async function collectTikTok(
 				break;
 			}
 			await fail(stream, error);
-		}
-		if (notes.replaced > replacedBefore) {
-			// Unsafe text is stored as null; say so rather than drop it quietly.
-			const replaced = notes.replaced - replacedBefore;
-			connectorDiagnostic("tiktok", "text_replaced", { stream, replaced });
-			await ctx.emit({
-				type: "PROGRESS",
-				stream,
-				message: `${replaced} text ${replaced === 1 ? "field was" : "fields were"} not safe text and ${replaced === 1 ? "was" : "were"} stored as empty`,
-			});
 		}
 	}
 

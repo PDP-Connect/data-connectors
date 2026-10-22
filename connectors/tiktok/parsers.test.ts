@@ -388,7 +388,7 @@ test("a full run reads every stream from its own path and checkpoints each after
 	);
 	assert.deepEqual(
 		likesState && "cursor" in likesState ? likesState.cursor : null,
-		{ head_ids: ["300001", "300002", "300003"] },
+		{ count: 3 },
 	);
 	// No secret-looking value is kept in STATE.
 	assert.doesNotMatch(
@@ -468,6 +468,32 @@ test("a bot-check page stops the run as a challenge, not a retryable error", asy
 	assert.match(h.failures[0]?.message ?? "", /^tiktok_bot_check/);
 });
 
+test("review 1 #5: a 503 HTML page, a cf-mitigated header and a non-JSON body are challenges", async () => {
+	const answers = [
+		{ ...ok(null), status: 503, html: true },
+		{ ...ok({ statusCode: 0 }), challengeHeader: true },
+		{ ...ok(null), empty: false, json: null },
+	];
+	for (const answer of answers) {
+		const { calls, page } = fakePage((call) =>
+			call.path === "/passport/account/info/v2/" ? ok(ACCOUNT) : answer,
+		);
+		const h = harness(["videos", "likes"], page);
+		await collectTikTok(h.ctx, noDelay);
+		assert.deepEqual(
+			h.failures.map((f) => [f.stream, f.retryable]),
+			[
+				["videos", false],
+				["likes", false],
+			],
+			JSON.stringify(answer),
+		);
+		assert.match(h.failures[0]?.message ?? "", /^tiktok_bot_check/);
+		// The run stops: no request after the challenge.
+		assert.equal(calls.length, 2);
+	}
+});
+
 test("a signed-out session throws the auth class", async () => {
 	const { page } = fakePage(() =>
 		ok({ data: { error_code: 1, description: "log in" }, message: "error" }),
@@ -479,18 +505,133 @@ test("a signed-out session throws the auth class", async () => {
 	);
 });
 
-test("likes stop at the first video a previous run holds", async () => {
-	const { page } = fakePage(standardAnswer);
-	const h = harness(["likes"], page, { likes: { head_ids: ["300002"] } });
+test("review 1 #1: a known id is not an end; likes walk to hasMore:false before STATE", async () => {
+	const [i1, i2, i3] = LIKED.itemList as Json[];
+	const page1 = {
+		...LIKED,
+		hasMore: true,
+		cursor: "1781900000000",
+		itemList: [
+			{ ...i1, id: "21" },
+			{ ...i2, id: "20" },
+			{ ...i3, id: "22" },
+		],
+	};
+	const page2 = {
+		...LIKED,
+		hasMore: false,
+		cursor: "1781800000000",
+		itemList: [{ ...i1, id: "23" }],
+	};
+	const { calls, page } = fakePage((call) =>
+		call.path === "/api/favorite/item_list/"
+			? ok(call.params.cursor === "0" ? page1 : page2)
+			: standardAnswer(call),
+	);
+	// An old cursor shape from an earlier version must not shorten the walk.
+	const h = harness(["likes"], page, { likes: { head_ids: ["20"] } });
 	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
 	assert.deepEqual(
 		h.records.map((r) => r.data.id),
-		["300001"],
+		["21", "20", "22", "23"],
 	);
-	const state = h.messages.find((m) => m.type === "STATE");
-	assert.deepEqual(state && "cursor" in state ? state.cursor : null, {
-		head_ids: ["300001", "300002"],
-	});
+	assert.deepEqual(
+		calls
+			.filter((c) => c.path === "/api/favorite/item_list/")
+			.map((c) => c.params.cursor),
+		["0", "1781900000000"],
+	);
+	const last = h.messages.at(-1);
+	assert.equal(last?.type, "STATE");
+	assert.deepEqual(last && "cursor" in last ? last.cursor : null, { count: 4 });
+});
+
+test("review 1 #1: likes that end without hasMore:false write no STATE", async () => {
+	const looping = { ...LIKED, hasMore: true, cursor: "0" };
+	const { page } = fakePage((call) =>
+		call.path === "/api/favorite/item_list/"
+			? ok(looping)
+			: standardAnswer(call),
+	);
+	const h = harness(["likes"], page, { likes: { head_ids: ["300002"] } });
+	await collectTikTok(h.ctx, noDelay);
+	assert.match(h.failures[0]?.message ?? "", /^tiktok_list_incomplete/);
+	assert.equal(
+		h.messages.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("review 1 #2: a profile-only run does not take an empty page that claims more as zero counts", async () => {
+	const { page } = fakePage((call) =>
+		call.path === "/api/post/item_list/"
+			? ok({ ...POSTS, hasMore: true, total: 31, itemList: [], cursor: "next" })
+			: standardAnswer(call),
+	);
+	const h = harness(["profile"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.equal(h.records.length, 0);
+	assert.match(h.failures[0]?.message ?? "", /^tiktok_list_incomplete/);
+	assert.equal(
+		h.messages.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("review 1 #2: unreadable own videos or a positive total with none listed fail the profile", async () => {
+	for (const answer of [
+		{ ...POSTS, hasMore: false, itemList: [{ id: "not-a-number" }] },
+		{ ...POSTS, hasMore: false, total: 5, itemList: [] },
+	]) {
+		const { page } = fakePage((call) =>
+			call.path === "/api/post/item_list/" ? ok(answer) : standardAnswer(call),
+		);
+		const h = harness(["profile"], page);
+		await collectTikTok(h.ctx, noDelay);
+		assert.equal(h.records.length, 0, JSON.stringify(answer));
+		assert.equal(h.failures.length, 1);
+		assert.equal(
+			h.messages.some((m) => m.type === "STATE"),
+			false,
+		);
+	}
+	// A list TikTok proves empty still gives a profile with null counts.
+	const { page } = fakePage((call) =>
+		call.path === "/api/post/item_list/"
+			? ok({ ...POSTS, hasMore: false, total: 0, itemList: [] })
+			: standardAnswer(call),
+	);
+	const h = harness(["profile"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.records[0]?.data.follower_count, null);
+});
+
+test("review 1 #4: a present caption that is not safe text fails the stream before STATE", async () => {
+	const [first, ...rest] = POSTS.itemList as Json[];
+	const answer = {
+		...POSTS,
+		itemList: [{ ...first, desc: "bad\u0000text" }, ...rest],
+	};
+	const { page } = fakePage((call) =>
+		call.path === "/api/post/item_list/" ? ok(answer) : standardAnswer(call),
+	);
+	const h = harness(["videos"], page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.equal(
+		h.records.some((r) => r.data.id === first?.id),
+		false,
+		"the unsafe record is not saved with a null caption",
+	);
+	assert.match(
+		h.failures[0]?.message ?? "",
+		/^tiktok_source_unreadable: 1 videos entry carries text/,
+	);
+	assert.equal(
+		h.messages.some((m) => m.type === "STATE"),
+		false,
+	);
 });
 
 test("a truncated follower list fails rather than reports complete", async () => {
@@ -552,7 +693,7 @@ test("live shape: a collection list with a total but no list key ends on hasMore
 			.filter((m) => m.type === "STATE")
 			.map((m) => ("cursor" in m ? [m.stream, m.cursor] : null)),
 		[
-			["favorites", { head_ids: [] }],
+			["favorites", { count: 0 }],
 			["favorite_collections", { count: 0 }],
 		],
 	);

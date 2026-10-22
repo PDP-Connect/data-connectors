@@ -9,7 +9,7 @@
 	},
 	"connector_key": "tiktok",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "TikTok (Browser Sign-In)",
 	"runtime_requirements": {
 		"bindings": {
@@ -270,7 +270,7 @@
 		{
 			"name": "likes",
 			"required": false,
-			"description": "Videos the owner liked, newest first: who posted each and its caption. TikTok does not say when a video was liked, so this stream cannot be limited to a date range. Later runs stop at the first video already collected. The video files are not collected.",
+			"description": "Videos the owner liked, newest first: who posted each and its caption. TikTok does not say when a video was liked, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected.",
 			"display": {
 				"label": "Videos you liked on TikTok",
 				"detail": "The videos you liked: who posted each, its caption and when it was posted."
@@ -326,7 +326,7 @@
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["caption", "author_unique_id", "author_nickname"],
@@ -340,13 +340,13 @@
 					"group_by_time": ["video_created_at"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
 			"name": "favorites",
 			"required": false,
-			"description": "Videos the owner saved to Favorites, newest first: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Later runs stop at the first video already collected. The video files are not collected.",
+			"description": "Videos the owner saved to Favorites, newest first: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected. Which Favorites collection a video sits in is not collected: the web API calls observed for this source list collections but not their contents.",
 			"display": {
 				"label": "Your TikTok Favorites",
 				"detail": "The videos you saved to Favorites: who posted each, its caption and when it was posted. Which collection a video sits in is not collected."
@@ -402,7 +402,7 @@
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["caption", "author_unique_id", "author_nickname"],
@@ -416,7 +416,7 @@
 					"group_by_time": ["video_created_at"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
