@@ -4522,21 +4522,24 @@ const THREAD_MEMBER_QUERY: ExtendedFetchQuery = {
  * For the same reason a member whose FETCH items are incomplete (see
  * `REQUIRED_FETCH_ITEMS`) fails its whole thread: the row is not emitted and
  * its fingerprint is not moved. A member that comes back without X-GM-THRID
- * fails every thread whose SEARCH named it. Returns each failed thread with
- * its failure class.
+ * fails every thread whose SEARCH named it.
+ *
+ * This function only reads: it returns the whole-thread aggregates and each
+ * failed thread with its failure class. The caller publishes the aggregates
+ * outside its provider-read error handling, so a failed RECORD write fails
+ * the run before STATE and never commits a fingerprint for a row that did
+ * not land.
  */
 export async function rebuildThreads(
 	client: Pick<ImapFlow, "fetch" | "search">,
 	/** The page messages whose threads to rebuild; each is a known member. */
 	seeds: readonly Pick<FetchMessageObject, "uid" | "threadId">[],
-	emitRecord: EmitRecordFn,
-	cursor: FingerprintCursor,
-): Promise<Map<string, string>> {
+): Promise<{ aggregates: ThreadAggregate[]; failed: Map<string, string> }> {
 	const failed = new Map<string, string>();
 	const ids = [
 		...new Set(seeds.map((m) => String(m.threadId ?? "")).filter(Boolean)),
 	];
-	if (ids.length === 0) return failed;
+	if (ids.length === 0) return { aggregates: [], failed };
 	await emit({
 		type: "PROGRESS",
 		stream: "threads",
@@ -4606,12 +4609,12 @@ export async function rebuildThreads(
 			);
 		}
 	}
-	await emitChangedThreads(
-		[...aggregates].filter(([tid]) => !failed.has(tid)).map(([, agg]) => agg),
-		cursor,
-		emitRecord,
-	);
-	return failed;
+	return {
+		aggregates: [...aggregates]
+			.filter(([tid]) => !failed.has(tid))
+			.map(([, agg]) => agg),
+		failed,
+	};
 }
 
 /**
@@ -5026,19 +5029,22 @@ export async function runAllMailPasses(
 		const threadMetas = metas.filter((m) =>
 			ledger.expect(m.uid).includes("threads"),
 		);
+		// Only provider reads become retry debt. Publication runs outside this
+		// catch: a RECORD write that throws fails the run before STATE, so the
+		// fingerprint `emitChangedThreads` records for it is never committed.
 		let threadFailure: string | null = null;
 		let failedThreads = new Map<string, string>();
+		let aggregates: ThreadAggregate[] = [];
 		try {
-			failedThreads = await rebuildThreads(
+			({ aggregates, failed: failedThreads } = await rebuildThreads(
 				client,
 				threadMetas,
-				deps.emitRecord,
-				threadCursor,
-			);
+			));
 		} catch (error) {
 			if (client.usable === false) throw error;
 			threadFailure = messageFailureClass(error);
 		}
+		await emitChangedThreads(aggregates, threadCursor, deps.emitRecord);
 		for (const m of threadMetas) {
 			const failure = !m.threadId
 				? "threadid_unavailable"

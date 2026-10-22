@@ -1723,3 +1723,56 @@ for (const since of [undefined, JAN]) {
 		);
 	});
 }
+
+test("publication: a thread RECORD write that throws fails the run, and the next run publishes the thread", async () => {
+	const m = mailbox([message(10)], 101, 1);
+	let writes = 0;
+	// The host persists no STATE from a failed run, so the next run starts
+	// from the same state: `{}`.
+	await assert.rejects(
+		run(m, {}, ["threads", "messages"], {
+			async emitRecord(stream) {
+				if (stream === "threads") {
+					writes += 1;
+					throw new Error("record write failed");
+				}
+				return true;
+			},
+		}),
+		/record write failed/,
+	);
+	assert.equal(writes, 1);
+	const retry = await run(m, {}, ["threads", "messages"]);
+	assert.deepEqual(
+		ofStream(retry, "threads").map((x) => x.data.id),
+		["99"],
+		"the fingerprint of the failed write was never committed",
+	);
+	assert.deepEqual(progressOf(retry).debt, []);
+});
+
+test("publication: a failed thread read is retry debt, and its fingerprint does not move", async () => {
+	const m = mailbox([message(10)], 101, 1);
+	const search = m.client.search;
+	m.client.search = async () => {
+		throw new Error("temporary SEARCH failure");
+	};
+	const first = await run(m, {}, ["threads"]);
+	assert.deepEqual(ofStream(first, "threads"), []);
+	assert.deepEqual(
+		progressOf(first).debt.map((d) => [d.uid, d.streams]),
+		[[10, ["threads"]]],
+	);
+	assert.deepEqual(
+		(first.state.threads as { thread_fingerprints: unknown })
+			.thread_fingerprints,
+		{},
+	);
+	m.client.search = search;
+	const retry = await run(m, first.state, ["threads"]);
+	assert.deepEqual(
+		ofStream(retry, "threads").map((x) => x.data.id),
+		["99"],
+	);
+	assert.deepEqual(progressOf(retry).debt, []);
+});
