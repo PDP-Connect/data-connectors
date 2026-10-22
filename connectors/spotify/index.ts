@@ -118,6 +118,15 @@ export interface BrowserData {
 	top_artist_pages: unknown[];
 	top_tracks: Record<string, unknown>[];
 	top_track_pages: unknown[];
+	/**
+	 * Set outside the page: per ranking window, the size Spotify reports and
+	 * the rows the connector read (at most 100 by design).
+	 */
+	rankedListWindows?: Partial<
+		Record<"top_artists" | "top_tracks", { timeRange: TopTimeRange; total: number; read: number }[]>
+	>;
+	/** Set outside the page: recently played rows that repeat a context already read. */
+	recentRepeatedContexts?: number;
 	sourceCounts: Partial<
 		Record<
 			| "playlists"
@@ -251,10 +260,13 @@ export function parseRecentContextRows(payloads: unknown[]): {
 	rows: Record<string, unknown>[];
 	considered: number;
 	withheld: number;
+	/** Withheld rows whose context was already read; included in `withheld`. */
+	repeated: number;
 } {
 	const rows: Record<string, unknown>[] = [];
 	let considered = 0;
 	let withheld = 0;
+	let repeated = 0;
 	const identities = new Set<string>();
 	for (const payload of payloads) {
 		const items = readPath(payload, "playContexts");
@@ -275,6 +287,7 @@ export function parseRecentContextRows(payloads: unknown[]): {
 			}
 			if (identities.has(contextUri)) {
 				withheld += 1;
+				repeated += 1;
 				continue;
 			}
 			identities.add(contextUri);
@@ -286,13 +299,15 @@ export function parseRecentContextRows(payloads: unknown[]): {
 			});
 		}
 	}
-	return { rows, considered, withheld };
+	return { rows, considered, withheld, repeated };
 }
 
 export function parseTopRows(payloads: unknown[], stream: "top_artists" | "top_tracks", timeRange: TopTimeRange): {
 	rows: Record<string, unknown>[];
 	considered: number;
 	withheld: number;
+	/** The ranking size Spotify reported for this window; null without pages. */
+	total: number | null;
 } {
 	const rows: Record<string, unknown>[] = [];
 	let considered = 0;
@@ -385,7 +400,7 @@ export function parseTopRows(payloads: unknown[], stream: "top_artists" | "top_t
 			rows.push({ id, uri: fieldValue(uri), name: itemName, ...extra, time_range: timeRange });
 		}
 	}
-	return { rows, considered, withheld };
+	return { rows, considered, withheld, total: expectedTotal };
 }
 
 type BrowserCollectResult = BrowserData;
@@ -2379,6 +2394,7 @@ async function collectSpotifyWebData(
 			considered: recent.considered,
 			covered: recent.rows.length,
 		};
+		evaluated.recentRepeatedContexts = recent.repeated;
 	}
 	evaluated.top_artists ??= [];
 	evaluated.top_tracks ??= [];
@@ -2393,21 +2409,25 @@ async function collectSpotifyWebData(
 				readPath(entry, "timeRange") === timeRange.toUpperCase(),
 			)
 			.map((entry) => readPath(entry, "payload"));
-		if (requestedStreams.includes("top_artists")) {
-			const parsed = parseTopRows(artistPages, "top_artists", timeRange);
-			evaluated.top_artists.push(...parsed.rows);
-			const counts = evaluated.sourceCounts.top_artists ?? { considered: 0, covered: 0 };
+		for (const [stream, pages] of [
+			["top_artists", artistPages],
+			["top_tracks", trackPages],
+		] as const) {
+			if (!requestedStreams.includes(stream)) continue;
+			const parsed = parseTopRows(pages, stream, timeRange);
+			evaluated[stream].push(...parsed.rows);
+			const counts = evaluated.sourceCounts[stream] ?? { considered: 0, covered: 0 };
 			counts.considered += parsed.considered;
 			counts.covered += parsed.rows.length;
-			evaluated.sourceCounts.top_artists = counts;
-		}
-		if (requestedStreams.includes("top_tracks")) {
-			const parsed = parseTopRows(trackPages, "top_tracks", timeRange);
-			evaluated.top_tracks.push(...parsed.rows);
-			const counts = evaluated.sourceCounts.top_tracks ?? { considered: 0, covered: 0 };
-			counts.considered += parsed.considered;
-			counts.covered += parsed.rows.length;
-			evaluated.sourceCounts.top_tracks = counts;
+			evaluated.sourceCounts[stream] = counts;
+			if (parsed.total !== null) {
+				const windows = (evaluated.rankedListWindows ??= {});
+				(windows[stream] ??= []).push({
+					timeRange,
+					total: parsed.total,
+					read: parsed.considered,
+				});
+			}
 		}
 	}
 	return evaluated;
@@ -2623,14 +2643,59 @@ export async function spotifyCollect({
 			count: total,
 			types,
 		});
+		// A row Spotify itself marks unavailable is not a type the connector
+		// lacks: a connector upgrade cannot read it.
+		const unavailable = unclassified.filter(([label]) =>
+			SPOTIFY_UNAVAILABLE_LIBRARY_TYPES.has(label.split("/").at(-1) ?? ""),
+		);
+		const unrecognized = unclassified.filter(
+			(entry) => !unavailable.includes(entry),
+		);
 		for (const stream of ["playlists", "playlist_items"] as const) {
 			if (!requested.has(stream)) continue;
+			if (unavailable.length > 0) {
+				const n = unavailable.reduce((sum, [, count]) => sum + count, 0);
+				const named = unavailable.map(([type, count]) => `${type}=${count}`).join(",");
+				const lost =
+					stream === "playlists"
+						? n === 1 ? "it was" : "they were"
+						: n === 1 ? "its tracks were" : "their tracks were";
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "spotify_library_item_unavailable",
+					message: `Spotify lists ${plural(n, "item")} in this library that it reports as unavailable (${named}), such as a playlist its owner deleted; ${lost} not exported.`,
+					recovery_hint: { action: "not_retriable", retryable: false },
+				});
+			}
+			if (unrecognized.length > 0) {
+				const n = unrecognized.reduce((sum, [, count]) => sum + count, 0);
+				const named = unrecognized.map(([type, count]) => `${type}=${count}`).join(",");
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "spotify_library_row_type_unrecognized",
+					message: `Spotify returned ${plural(n, "library item")} of a type this connector does not read (${named}); any playlist among them was not exported.`,
+					recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+				});
+			}
+		}
+	}
+	for (const stream of ["playlists", "playlist_items"] as const) {
+		const counts = data.sourceCounts[stream];
+		if (!requested.has(stream) || !counts) continue;
+		// Library gaps are counted in playlist inventory and reported above.
+		const libraryGaps =
+			stream === "playlists"
+				? Object.values(libraryRows?.unclassified ?? {}).reduce((sum, n) => sum + n, 0)
+				: 0;
+		if (counts.considered - counts.covered > libraryGaps) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: "spotify_library_row_type_unrecognized",
-				message: `Spotify returned ${total} library item(s) of a type this connector does not read (${types}); any playlist among them was not exported.`,
-				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+				reason: "spotify_source_row_unavailable",
+				message: withheldRowsMessage(stream, counts, 0, libraryGaps),
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 			});
 		}
 	}
@@ -2680,7 +2745,13 @@ export async function spotifyCollect({
 				type: "SKIP_RESULT",
 				stream,
 				reason: "spotify_source_row_unavailable",
-				message: "One or more rows had unavailable mapped fields; each affected row was withheld whole.",
+				message: withheldRowsMessage(
+					stream,
+					counts,
+					stream === "recently_played_contexts"
+						? (data.recentRepeatedContexts ?? 0)
+						: 0,
+				),
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 			});
 		}
@@ -2689,19 +2760,84 @@ export async function spotifyCollect({
 				type: "SKIP_RESULT",
 				stream,
 				reason: "spotify_recent_context_boundary_unverified",
-				message: "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
+				message: "Spotify's recently played list reports no total, so the connector cannot show it read the whole list; no checkpoint was saved.",
 				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			});
-		} else {
+			continue;
+		}
+		const noun = stream === "top_artists" ? "artist" : "track";
+		const windows = data.rankedListWindows?.[stream] ?? [];
+		const missing: string[] = [];
+		const capped: string[] = [];
+		for (const timeRange of ["short_term", "long_term"] as const) {
+			const label = timeRange === "short_term" ? "short-term" : "long-term";
+			const window = windows.find((entry) => entry.timeRange === timeRange);
+			if (!window) missing.push(label);
+			// Only a ranking longer than the connector's bound loses rows.
+			else if (window.total > window.read) {
+				const unread = window.total - window.read;
+				capped.push(
+					`Spotify ranks ${plural(window.total, `top ${noun}`)} in the ${label} window; the connector reads the top ${window.read} by design, so ${plural(unread, `lower-ranked ${noun}`)} ${unread === 1 ? "was" : "were"} not exported.`,
+				);
+			}
+		}
+		if (missing.length > 0) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "spotify_ranked_list_unverified",
+				message: `Spotify returned no ${missing.join(" or ")} ranking of top ${noun}s, so the connector cannot show it read ${missing.length === 1 ? "that ranking" : "those rankings"}.`,
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+		}
+		if (capped.length > 0) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
 				reason: "spotify_ranked_list_capped",
-				message: "The connector requests at most 100 ranking rows per time window; rows beyond that bound are unobserved, so no full-scan state was saved.",
+				message: capped.join(" "),
 				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			});
 		}
 	}
+}
+
+/** Library row types Spotify uses for an item it lists but will not serve. */
+const SPOTIFY_UNAVAILABLE_LIBRARY_TYPES = new Set(["NotFound", "RestrictedContent"]);
+
+function plural(n: number, noun: string): string {
+	return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
+const STREAM_ROW_NOUNS = {
+	playlists: "playlist",
+	playlist_items: "playlist item",
+	recently_played_contexts: "recently played context",
+	top_artists: "top artist",
+	top_tracks: "top track",
+} as const;
+
+/** Why rows Spotify returned were not exported, counted by cause. */
+function withheldRowsMessage(
+	stream: keyof typeof STREAM_ROW_NOUNS,
+	counts: { considered: number; covered: number },
+	repeated: number,
+	reportedElsewhere = 0,
+): string {
+	const noun = STREAM_ROW_NOUNS[stream];
+	const unreadable = counts.considered - counts.covered - repeated - reportedElsewhere;
+	const parts: string[] = [];
+	if (unreadable > 0) {
+		parts.push(
+			`${unreadable} of ${plural(counts.considered, noun)} from Spotify had fields the connector could not read; ${unreadable === 1 ? "it was" : "each was"} withheld whole.`,
+		);
+	}
+	if (repeated > 0) {
+		parts.push(
+			`Spotify listed ${plural(repeated, "context")} a second time; each context is exported once.`,
+		);
+	}
+	return parts.join(" ");
 }
 
 if (isMainModule(import.meta.url)) {

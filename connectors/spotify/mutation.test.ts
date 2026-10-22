@@ -113,7 +113,7 @@ test("ranked-list coverage counts only inspected rows, not rows outside the cap"
 	assert.equal(result.withheld, 0);
 });
 
-test("bounded Spotify streams emit typed gaps and never claim full-scan STATE", async () => {
+test("bounded Spotify streams emit typed gaps and never claim full-scan STATE; a ranking read in full is not reported as capped", async () => {
 	const data = {
 		...webFixture,
 		recent_context_pages: [
@@ -174,12 +174,15 @@ test("bounded Spotify streams emit typed gaps and never claim full-scan STATE", 
 			top_tracks: { considered: 1, covered: 1 },
 		},
 	};
+	// Both windows of each ranking are read in full: Spotify's total is 1.
+	data.top_artist_pages.push({ ...data.top_artist_pages[0]!, timeRange: "LONG_TERM" });
+	data.top_track_pages.push({ ...data.top_track_pages[0]!, timeRange: "SHORT_TERM" });
 	const names = ["recently_played_contexts", "top_artists", "top_tracks"];
 	const { ctx, emittedRecords, messages } = makeContext(data, names);
 	await spotifyCollect(ctx);
 	assert.equal(
 		emittedRecords.filter((record) => names.includes(record.stream)).length,
-		3,
+		5,
 	);
 	assert.equal(
 		messages.some(
@@ -191,15 +194,72 @@ test("bounded Spotify streams emit typed gaps and never claim full-scan STATE", 
 	const gaps = messages.filter((message) => message.type === "SKIP_RESULT");
 	assert.deepEqual(
 		gaps.map((message) => message.type === "SKIP_RESULT" ? [message.stream, message.reason] : null),
-		[
-			["recently_played_contexts", "spotify_recent_context_boundary_unverified"],
-			["top_artists", "spotify_ranked_list_capped"],
-			["top_tracks", "spotify_ranked_list_capped"],
-		],
+		[["recently_played_contexts", "spotify_recent_context_boundary_unverified"]],
 	);
 	assert.deepEqual(
 		gaps[0]?.type === "SKIP_RESULT" ? gaps[0].recovery_hint : undefined,
 		{ action: "retry_on_connector_upgrade", retryable: false },
+	);
+});
+
+test("only a ranking longer than the 100-row bound is reported as capped, with its window and unread count", async () => {
+	const artist = (id: string) => ({ data: { uri: `spotify:artist:${id}`, name: id, genres: [], stats: { followers: 1 }, popularity: 5 } });
+	const track = (id: string) => ({ data: { uri: `spotify:track:${id}`, name: id, artists: { items: [] }, albumOfTrack: { name: "Album" }, trackDuration: { totalMilliseconds: 1 } } });
+	const totals = { SHORT_TERM: 20, LONG_TERM: 150 } as const;
+	const result = await collectWithInPageFetch(["top_artists", "top_tracks"], (operationName, variables) => {
+		assert.equal(operationName, "userTopContent");
+		if (variables.includeTopArtists) {
+			return { data: { me: { profile: { topArtists: { totalCount: 3, items: ["a1", "a2", "a3"].map(artist) } } } } };
+		}
+		const input = variables.topTracksInput as { offset: number; limit: number; timeRange: keyof typeof totals };
+		const total = totals[input.timeRange];
+		const count = Math.max(0, Math.min(input.limit, total - input.offset));
+		return { data: { me: { profile: { topTracks: {
+			totalCount: total,
+			items: Array.from({ length: count }, (_, i) => track(`${input.timeRange === "SHORT_TERM" ? "s" : "l"}${input.offset + i}`)),
+		} } } } };
+	});
+	assert.equal(result.emittedRecords.filter((record) => record.stream === "top_artists").length, 6);
+	assert.equal(result.emittedRecords.filter((record) => record.stream === "top_tracks").length, 120);
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && [message.stream, message.reason, message.message]),
+		[[
+			"top_tracks",
+			"spotify_ranked_list_capped",
+			"Spotify ranks 150 top tracks in the long-term window; the connector reads the top 100 by design, so 50 lower-ranked tracks were not exported.",
+		]],
+	);
+});
+
+test("withheld recently played rows are reported by cause and count", async () => {
+	const data = {
+		...webFixture,
+		recent_context_pages: [{ playContexts: [
+			{ uri: "spotify:album:album1", lastPlayedTime: 1720000000200, lastPlayedTrackUri: "spotify:track:t1" },
+			{ uri: "spotify:album:album2", lastPlayedTime: 1720000000100 },
+			{ uri: "spotify:album:album1", lastPlayedTime: 1720000000000, lastPlayedTrackUri: "spotify:track:t2" },
+		] }],
+		sourceCounts: {},
+	};
+	const { ctx, emittedRecords, messages } = makeContext(data, ["recently_played_contexts"]);
+	await spotifyCollect(ctx);
+	assert.equal(emittedRecords.length, 1);
+	assert.deepEqual(
+		messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && [message.reason, message.message]),
+		[
+			[
+				"spotify_source_row_unavailable",
+				"1 of 3 recently played contexts from Spotify had fields the connector could not read; it was withheld whole. Spotify listed 1 context a second time; each context is exported once.",
+			],
+			[
+				"spotify_recent_context_boundary_unverified",
+				"Spotify's recently played list reports no total, so the connector cannot show it read the whole list; no checkpoint was saved.",
+			],
+		],
 	);
 });
 
@@ -453,9 +513,12 @@ test("spotify browser collect skips Web API-only streams during stage 1", async 
 	assert.deepEqual(
 		messages
 			.filter((message) => message.type === "SKIP_RESULT")
-			.map((message) => message.stream)
-			.sort(),
-		["top_artists"],
+			.map((message) => message.type === "SKIP_RESULT" && [message.stream, message.reason, message.message]),
+		[[
+			"top_artists",
+			"spotify_ranked_list_unverified",
+			"Spotify returned no short-term or long-term ranking of top artists, so the connector cannot show it read those rankings.",
+		]],
 	);
 });
 
