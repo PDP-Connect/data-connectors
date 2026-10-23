@@ -938,8 +938,10 @@ The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7),
 `OBSERVATION` (since 0.2.0, Section 5.10), and `RUN_COVERAGE_V1` (Section 7.1,
 which defines it as elective). A connector that can emit one of these messages
 MUST declare that value. A runtime that does not advertise a declared
-capability MUST NOT start that connector. A runtime that implements profile
-version 0.2.0 MUST advertise and support `OBSERVATION`.
+capability MUST NOT start that connector, unless the section that defines the
+capability makes it elective; an elective capability never blocks spawn. A
+runtime that implements profile version 0.2.0 MUST advertise and support
+`OBSERVATION`.
 
 A connector that does not declare `OBSERVATION` is diagnosed from runtime
 records alone (Section 5.11). A runtime MUST NOT record that connector as
@@ -2016,15 +2018,17 @@ https://github.com/PDP-Connect/data-connect/blob/feat/local-run-coverage-verdict
 This requirement applies under every base profile version that this extension
 lists. A positive (`collected`) also requires that the base profile's own
 accounting for that run show no contradiction. Any obligation whose accounting
-the runtime cannot evaluate under its base profile yields no positive. A 0.2.0
-run with legacy detail accounting gets no positive for a stream whose detail
-accounting is incomplete or unevaluated. Under 0.2.0, a stream's detail
+the runtime cannot evaluate under its base profile yields no positive. A 0.1.0
+or 0.2.0 run with legacy detail accounting gets no positive for a stream whose
+detail accounting is incomplete or unevaluated. Under 0.1.0 and 0.2.0, a
+stream's detail
 accounting is incomplete when a required key is unaccounted, and unevaluated
 when a checkpoint-parent boundary has no `DETAIL_COVERAGE` report (Section 5.6).
 
-Base profile 0.2.0 defines no same-obligation baseline and no change interval.
-A rule in this extension that depends on either applies only where the base
-profile defines it. Under 0.2.0, a delta run therefore establishes no
+Base profiles 0.1.0 and 0.2.0 define no same-obligation baseline and no change
+interval. A rule in this extension that depends on either applies only where
+the base profile defines it. Under 0.1.0 and 0.2.0, a delta run therefore
+establishes no
 full-obligation collection, and unchanged state supports no positive.
 
 ### 7.2 Runtime-specific extensions

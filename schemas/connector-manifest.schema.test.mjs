@@ -105,7 +105,7 @@ test("RUN_COVERAGE_V1 is elective: it never blocks spawn, and Section 3.4's star
     text,
     /The extension is negotiated per run, so an exchange without the request is an ordinary base-profile exchange\./,
   );
-  // Section 3.4's rule text is unchanged; its capability list only points here.
+  // Section 3.4 states the general elective rule; Section 7.1 makes RUN_COVERAGE_V1 elective.
   const negotiation = profile
     .split(/^### 3\.4 Human interaction and protocol capabilities$/m)[1]
     ?.split(/^### 3\.5 /m)[0];
@@ -113,7 +113,7 @@ test("RUN_COVERAGE_V1 is elective: it never blocks spawn, and Section 3.4's star
   const normalized = negotiation.replace(/\s+/g, " ");
   assert.match(
     normalized,
-    /A runtime that does not advertise a declared capability MUST NOT start that connector\. A runtime that implements profile version 0\.2\.0 MUST advertise and support `OBSERVATION`\./,
+    /A runtime that does not advertise a declared capability MUST NOT start that connector, unless the section that defines the capability makes it elective; an elective capability never blocks spawn\. A runtime that implements profile version 0\.2\.0 MUST advertise and support `OBSERVATION`\./,
   );
   assert.match(normalized, /`RUN_COVERAGE_V1` \(Section 7\.1, which defines it as elective\)/);
   assert.doesNotMatch(normalized, /exception/i);
@@ -250,10 +250,10 @@ test("a positive also needs the base profile's own accounting, so a 0.2.0 run ge
   assert.match(text, /Any obligation whose accounting the runtime cannot evaluate under its base profile yields no positive\./);
   assert.match(
     text,
-    /A 0\.2\.0 run with legacy detail accounting gets no positive for a stream whose detail accounting is incomplete or unevaluated\./,
+    /A 0\.1\.0 or 0\.2\.0 run with legacy detail accounting gets no positive for a stream whose detail accounting is incomplete or unevaluated\./,
   );
-  assert.match(text, /Base profile 0\.2\.0 defines no same-obligation baseline and no change interval\./);
-  assert.match(text, /Under 0\.2\.0, a delta run therefore establishes no full-obligation collection, and unchanged state supports no positive\./);
+  assert.match(text, /Base profiles 0\.1\.0 and 0\.2\.0 define no same-obligation baseline and no change interval\./);
+  assert.match(text, /Under 0\.1\.0 and 0\.2\.0, a delta run therefore establishes no full-obligation collection, and unchanged state supports no positive\./);
 });
 
 test("a stream that declares coverage_stores is rejected without RUN_COVERAGE_V1 in protocol_capabilities", () => {
