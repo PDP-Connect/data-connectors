@@ -25,9 +25,13 @@ jobs:
   harness-shards:
     name: PageShim harness (${{ matrix.shard.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The job deadline covers a slow Chromium install as well as the tests.
+    # On 2026-10-22 `playwright install --with-deps` took 10-15 minutes on some
+    # runners and the old 15-minute deadline cancelled passing test runs. The
+    # test step keeps its own deadline so a hung harness still fails promptly.
+    timeout-minutes: 30
     # Keep the sequential connector gates separate from the regression tests.
-    # Together they exceed the job deadline; each shard takes about 8 minutes.
+    # Bound each shard independently; the connector gates can exceed 13 minutes.
     strategy:
       fail-fast: false
       matrix:
@@ -52,9 +56,11 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Install Chromium for the harness
+        timeout-minutes: 16
         run: npx playwright install --with-deps chromium
 
       - name: Build and run the harness
+        timeout-minutes: 15
         run: node --test ${{ matrix.shard.args }}
 
   harness:
