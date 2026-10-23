@@ -90,6 +90,30 @@ test("the spec's element states are exactly the schema's", () => {
   assert.deepEqual(states, schema.$defs.elementState.enum);
 });
 
+test("the profile's conformance cases preserve obligation and recovery debt rules", () => {
+  const deletionRules = section("#### 5.8.1 Explicit deletes before a later failure").replace(/\s+/g, " ");
+  assert.match(
+    deletionRules,
+    /A delete derived from absence MUST be based on the original\s+`kind:"inventory"` obligation for that exact parent and relationship,\s+and source\s+evidence that the full child enumeration for that obligation closed/,
+  );
+  assert.match(deletionRules, /A delta MUST NOT infer a delete from absence,\s+including omission from a closed or empty delta/);
+
+  const debtRules = section("#### 5.6.2 Outcomes and durable debt").replace(/\s+/g, " ");
+  assert.match(debtRules, /MUST retain the original debt until a fresh seal proves the full original\s+obligation under Section 5\.6\.6/);
+  assert.match(debtRules, /partial recovery MUST NOT settle the original debt or replace it with residual\s+obligations/);
+
+  const cases = section("### 6.3 Strict-accounting conformance cases");
+  assert.match(cases, /\| Closed empty delta omits retained child C \| Keep C; do not infer a delete from delta absence\./);
+  assert.match(
+    cases,
+    /\| Recovery fully reads a valid upsert, but the eligible checkpoint commit fails \| Keep the admitted upsert durable and preserve outstanding debt;/,
+  );
+  assert.match(
+    cases,
+    /\| Recovery covers only part of a time-range gap \| Retain the original debt; 0\.3\.0 defines no residual replacement or settlement\./,
+  );
+});
+
 function connectorManifests() {
   const connectorsDir = join(root, "connectors");
   return readdirSync(connectorsDir)

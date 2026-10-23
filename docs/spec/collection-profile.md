@@ -1606,9 +1606,11 @@ gap precedence still applies. This is not circular permission to mark a key
 complete while its debt remains. An accepted sibling alone is insufficient.
 Settlement uses the full gap identity and Section 5.6.3's fence; success for
 another source account on the same connection cannot settle the old debt. For time ranges, a runtime
-MAY atomically replace partially recovered debt with exact residual obligations;
-for cursor ranges, only equality with the original range permits settlement. The residual
-replacement is runtime-internal and has no wire message.
+MUST retain the original debt until a fresh seal proves the full original
+obligation under Section 5.6.6. Version 0.3.0 defers residual replacement:
+partial recovery MUST NOT settle the original debt or replace it with residual
+obligations. For cursor ranges, only equality with the original range permits
+settlement.
 A new epoch makes re-evaluation eligible, not automatically complete.
 These are mandatory debt-ledger rules even without a recovery extension:
 Section 5.6.6 supplies portable discovery and a typed recovery seal; Section 7
@@ -2159,11 +2161,14 @@ between attributed deletes from proven zero-child inventory (empty) and a
 delta containing deletes (complete) applies only when that boundary is
 otherwise eligible to commit.
 
-A delete derived from the absence of a child in an inventory MUST NOT be emitted
-until that parent's child enumeration has closed with the source evidence required
-by Section 6.1 item 14. A source-positive deletion signal, such as a tombstone or a
-delete event in a delta, MAY be emitted at any time. The connector emits every
-delete explicitly; the runtime never infers a delete from absence.
+A source-positive deletion signal, such as a tombstone or a delete event, MAY be
+emitted at any time. A delete derived from absence MUST be based on the original
+`kind:"inventory"` obligation for that exact parent and relationship, and source
+evidence that the full child enumeration for that obligation closed as required
+by Section 6.1 item 14. A delta MUST NOT infer a delete from absence, including
+omission from a closed or empty delta; a delta delete requires an explicit
+source-positive deletion signal. The connector emits every delete explicitly;
+the runtime never infers a delete from absence.
 
 ### 5.9 `PROGRESS`
 
@@ -2551,6 +2556,7 @@ relevant producer or consumer does not establish these requirements.
 | Admitted explicit delete followed by failure of the affected checkpoint | Delete remains applied and affected old/new receipts remain invalid; publish no new state, complete/empty receipt or debt settlement for that boundary. Replay safely; do not claim whole-run rollback. |
 | Stale, unauthorized or invalid delete followed by an empty claim | Refuse the effect and emitted-effect credit; reject false empty/unchanged completion. Empty inventory alone never deletes retained rows. |
 | Owner deletes or GC removes a retained child | Invalidate dependent receipt/state and generation before reuse; recollect. |
+| Closed empty delta omits retained child C | Keep C; do not infer a delete from delta absence. Absence-derived deletes require a closed original inventory obligation. |
 | Nonempty scan, every child suppressed against a valid committed complete-type receipt | Permit complete with closure and a currently valid reference; no new upsert required, never empty. An empty-type receipt cannot justify this case. |
 | One rejected or undateable child beside accepted siblings | Preserve valid data; reject complete, empty and unchanged credit for that parent. Matching gap debt can account for its uncovered obligation without withholding an otherwise eligible checkpoint. |
 | Candidate cannot be assigned to a parent | Withhold the affected boundary; do not silently omit the candidate or invent a parent. |
@@ -2559,7 +2565,7 @@ relevant producer or consumer does not establish these requirements.
 | Delta with only tombstones | Complete with accepted attributed deletes, never empty. Zero upserts does not prove an empty delta. |
 | Parent enumeration incomplete, including a missing empty-state signal | No coverage; checkpoint withheld even if all observed parents succeeded. |
 | Large-window failure followed by shorter success or empty | Keep original obligation; preserve missing interval debt and never credit the whole range from the suffix. |
-| Recovery covers only part of a time-range gap | Keep exact checked residual debt or retain the original gap; do not clear it by parent-key match alone. |
+| Recovery covers only part of a time-range gap | Retain the original debt; 0.3.0 defines no residual replacement or settlement. Require a full-original-obligation seal before clearing it. |
 | Stale A resumes after newer B completes and settles debt | A's expected generation rejects gap creation/update/credit as well as effects/state/receipts/settlement. No phantom stale debt survives the rejected admission. |
 | Crash between state and receipt writes | Atomicity yields both committed or neither; never reusable orphan receipt. |
 | Duplicate/overlapping/foreign keys or effects after coverage finality | Reject protocol violation; no checkpoint based on reopened boundary. |
@@ -2568,7 +2574,8 @@ relevant producer or consumer does not establish these requirements.
 | Old runtime/new connector; new strict-only runtime/old connector | Refuse unsupported version before spawn; no implicit downgrade or strict reinterpretation. |
 | First strict run over legacy state | Recollect; no receipt manufactured from legacy hydration, optional skip or fingerprints. |
 | 0.3.0 runtime lacks OBSERVATION or recovery-hint gate | Not conformant; refuse this version instead of partial acceptance. |
-| Transient sub-resource failure, then recovery at the same epoch | Hold the whole record and account for the obligation with a retryable transport gap, not connector_transform_failed. Recovery at the same transform_epoch may retry under the same obligation; it settles only through the full-obligation seal, and the stored row stays unchanged until then. |
+| Transient sub-resource failure, then recovery at the same epoch | Account for the failed read with a retryable transport gap, not connector_transform_failed. While a candidate remains partial, preserve the stored row. A fully read valid record follows normal effect-admission rules; settlement still needs the full-obligation seal. |
+| Recovery fully reads a valid upsert, but the eligible checkpoint commit fails | Keep the admitted upsert durable and preserve outstanding debt; publish no new receipt, STATE or settlement. Do not restore the old row after valid admission. |
 | Listing fails mid-page after some children were not seen | No coverage for that parent and the checkpoint is withheld. No absence-derived delete is emitted for children missing from the partial listing. Source-positive tombstones already read may be emitted. |
 | RECORD refused at durable admission with no matching debt admitted | A rejected effect, not a protocol violation: the run is not terminated. The key is unaccounted and the affected checkpoint is withheld. |
 | Missing identity, invalid date, parser or shape failure with a known parent | Use connector_transform_failed with retryable:true; reject transport or permanent classification. Retain the candidate and original obligation. |
