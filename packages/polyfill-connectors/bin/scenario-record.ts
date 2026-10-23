@@ -744,9 +744,11 @@ function manifestObject(value: unknown): Record<string, unknown> | undefined {
  *  fields past a bound fall into the advisory's generic bucket. */
 const MAX_SCHEMA_PATH_DEPTH = 32;
 const MAX_SCHEMA_PATHS = 2000;
-/** Total schema nodes visited. `allOf` and local `$ref` chains can fan out
- *  without adding a property, so path bounds alone do not bound the work. */
+/** Total schema frames scheduled, including the root. Bound enqueueing, not
+ *  just popping: a wide `allOf` must not allocate an unbounded pending stack. */
 const MAX_SCHEMA_NODES = 4096;
+/** Bound pointer parsing/decoding and ref bookkeeping before copying strings. */
+const MAX_SCHEMA_REF_LENGTH = 65_536;
 
 /** Keywords that can contribute instance fields this collector cannot name
  *  without a general JSON Schema engine. Their presence makes the metadata
@@ -807,13 +809,23 @@ function resolveLocalSchemaRef(
 	if (ref === "#") {
 		return root;
 	}
-	if (!ref.startsWith("#/")) {
+	if (!ref.startsWith("#/") || ref.length > MAX_SCHEMA_REF_LENGTH) {
 		return undefined;
 	}
 	let current = root;
 	for (const token of ref.slice(2).split("/")) {
 		const key = decodeSchemaRefToken(token);
 		if (key === undefined || typeof current !== "object" || current === null) {
+			return undefined;
+		}
+		const ancestor = manifestObject(current);
+		if (
+			current !== root &&
+			ancestor !== undefined &&
+			declaresNestedBaseUri(ancestor)
+		) {
+			// A pointer can skip straight into a descendant without visiting
+			// its resource root as a schema frame. Do not cross that boundary.
 			return undefined;
 		}
 		if (!Object.hasOwn(current, key)) {
@@ -853,13 +865,21 @@ function declaredSchemaPaths(schema: unknown): {
 	const paths: string[] = [];
 	const seen = new Set<string>();
 	let bounded = false;
-	let nodes = 0;
+	let scheduled = 1;
 	const activeRefs = new Set<string>();
 	const completedRefs = new Set<string>();
-	type Frame =
-		| { depth: number; prefix: string; schema: unknown }
-		| { exitedRef: string };
+	type SchemaFrame = { depth: number; prefix: string; schema: unknown };
+	type Frame = SchemaFrame | { exitedRef: string };
 	const pending: Frame[] = [{ depth: 0, prefix: "", schema }];
+	const schedule = (frame: SchemaFrame): boolean => {
+		if (scheduled >= MAX_SCHEMA_NODES) {
+			bounded = true;
+			return false;
+		}
+		scheduled += 1;
+		pending.push(frame);
+		return true;
+	};
 	while (pending.length > 0) {
 		const frame = pending.pop();
 		if (frame === undefined) {
@@ -869,11 +889,6 @@ function declaredSchemaPaths(schema: unknown): {
 			activeRefs.delete(frame.exitedRef);
 			completedRefs.add(frame.exitedRef);
 			continue;
-		}
-		nodes += 1;
-		if (nodes > MAX_SCHEMA_NODES) {
-			bounded = true;
-			break;
 		}
 		const node = manifestObject(frame.schema);
 		if (node === undefined) {
@@ -891,7 +906,7 @@ function declaredSchemaPaths(schema: unknown): {
 
 		if (Object.hasOwn(node, "$ref")) {
 			const ref = node.$ref;
-			if (typeof ref !== "string") {
+			if (typeof ref !== "string" || ref.length > MAX_SCHEMA_REF_LENGTH) {
 				bounded = true;
 			} else {
 				const visitKey = `${frame.prefix}\u0000${ref}`;
@@ -903,13 +918,19 @@ function declaredSchemaPaths(schema: unknown): {
 					if (resolved === undefined) {
 						bounded = true;
 					} else {
-						activeRefs.add(visitKey);
-						pending.push({ exitedRef: visitKey });
-						pending.push({
-							depth: frame.depth,
-							prefix: frame.prefix,
-							schema: resolved,
-						});
+						// Reserve a schema slot before adding its exit marker. There
+						// can be at most one exit marker per admitted schema frame.
+						if (scheduled >= MAX_SCHEMA_NODES) {
+							bounded = true;
+						} else {
+							activeRefs.add(visitKey);
+							pending.push({ exitedRef: visitKey });
+							schedule({
+								depth: frame.depth,
+								prefix: frame.prefix,
+								schema: resolved,
+							});
+						}
 					}
 				}
 			}
@@ -919,11 +940,15 @@ function declaredSchemaPaths(schema: unknown): {
 		if (Object.hasOwn(node, "allOf")) {
 			if (Array.isArray(node.allOf)) {
 				for (const subSchema of node.allOf) {
-					pending.push({
-						depth: frame.depth,
-						prefix: frame.prefix,
-						schema: subSchema,
-					});
+					if (
+						!schedule({
+							depth: frame.depth,
+							prefix: frame.prefix,
+							schema: subSchema,
+						})
+					) {
+						break;
+					}
 				}
 			} else {
 				bounded = true;
@@ -950,7 +975,7 @@ function declaredSchemaPaths(schema: unknown): {
 				paths.push(path);
 			}
 			if (frame.depth + 1 < MAX_SCHEMA_PATH_DEPTH) {
-				pending.push({
+				schedule({
 					depth: frame.depth + 1,
 					prefix: path,
 					schema: properties[name],

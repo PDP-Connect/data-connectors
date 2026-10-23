@@ -4696,6 +4696,164 @@ test("scenario-record: a deeply nested declared schema cannot abort capture befo
 	}
 });
 
+test("scenario-record: declared schema bounds wide allOf scheduling and discloses omitted children", () => {
+	const tmpDir = mkdtempSync(join(packageScratchDir(), "scenario-wide-allof-"));
+	const connectorKey = "wide_allof_fixture";
+	// The tail is visited first by the old eager stack. A bounded scheduler
+	// must omit it, not allocate a frame for every child before applying a cap.
+	const allOf = Array.from({ length: 8192 }, () => ({}));
+	allOf.push({ properties: { omitted: { type: "string" } } });
+	writeBoundObservationFixture({
+		collectBody: `    await emitRecord("items", { id: "wide-id-canary", safe: repeated ? "safe-second" : "safe-first", omitted: repeated ? "tail-second" : "tail-first" });`,
+		connectorKey,
+		schemaJson: JSON.stringify({
+			type: "object",
+			properties: { id: { type: "string" }, safe: { type: "string" } },
+			allOf,
+		}),
+		tmpDir,
+	});
+	try {
+		const result = runRecordCli(
+			[connectorKey, "--out", join(tmpDir, "wide.scenario.json")],
+			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+		);
+		assert.equal(result.code, 0, result.stderr);
+		assert.match(result.stdout, /complete: true/);
+		assert.match(
+			result.stdout,
+			/items: differences-observed \(1 repeated identities;/,
+		);
+		assert.match(result.stdout, /Schema field metadata was bounded/);
+		assert.match(result.stdout, /\/safe \(1\)/);
+		assert.doesNotMatch(result.stdout, /\/omitted/);
+		assert.match(result.stdout, /raw changes in unnamed or undeclared fields/);
+		for (const canary of [
+			"wide-id-canary",
+			"safe-first",
+			"safe-second",
+			"tail-first",
+			"tail-second",
+		]) {
+			assert.equal((result.stdout + result.stderr).includes(canary), false);
+		}
+		// This checks real metadata/output, not peak allocation or runtime.
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+for (const baseKeyword of ["$id", "id"]) {
+	test(`scenario-record: declared schema rejects pointer ancestors with nested ${baseKeyword}`, () => {
+		const tmpDir = mkdtempSync(
+			join(packageScratchDir(), "scenario-ref-ancestor-"),
+		);
+		const connectorKey = "ref_ancestor_fixture";
+		writeBoundObservationFixture({
+			collectBody: `    await emitRecord("items", { id: "ancestor-id-canary", safe: repeated ? "safe-second" : "safe-first", alias: { wrong: repeated ? "wrong-second" : "wrong-first" } });`,
+			connectorKey,
+			schemaJson: JSON.stringify({
+				$id: "urn:root",
+				type: "object",
+				properties: {
+					id: { type: "string" },
+					safe: { type: "string" },
+					alias: { $ref: "#/$defs/nested/$defs/leaf" },
+				},
+				$defs: {
+					target: { properties: { wrong: { type: "string" } } },
+					nested: {
+						[baseKeyword]: "urn:nested",
+						$defs: {
+							leaf: { $ref: "#/$defs/target" },
+							target: { properties: { right: { type: "string" } } },
+						},
+					},
+				},
+			}),
+			tmpDir,
+		});
+		try {
+			const result = runRecordCli(
+				[connectorKey, "--out", join(tmpDir, "ancestor.scenario.json")],
+				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			);
+			assert.equal(result.code, 0, result.stderr);
+			assert.match(result.stdout, /complete: true/);
+			assert.match(
+			result.stdout,
+			/items: differences-observed \(1 repeated identities;/,
+		);
+			assert.doesNotMatch(result.stdout, /\/alias\/wrong/);
+			assert.match(result.stdout, /Schema field metadata was bounded/);
+			assert.match(result.stdout, /\/safe \(1\)/);
+			assert.match(result.stdout, /raw changes in unnamed or undeclared fields/);
+			for (const canary of [
+				"ancestor-id-canary",
+				"safe-first",
+				"safe-second",
+				"wrong-first",
+				"wrong-second",
+			]) {
+				assert.equal((result.stdout + result.stderr).includes(canary), false);
+			}
+		} finally {
+			rmSync(tmpDir, { recursive: true, force: true });
+		}
+	});
+}
+
+test("scenario-record: declared schema bounds pointer length before expansion", () => {
+	const tmpDir = mkdtempSync(join(packageScratchDir(), "scenario-ref-length-"));
+	try {
+		for (const length of [65_536, 65_537]) {
+			const connectorKey = "ref_length_fixture";
+			const key = "x".repeat(length - "#/$defs/".length);
+			writeBoundObservationFixture({
+				collectBody: '    await emitRecord("items", { id: "pointer-id-canary", alias: { leaf: repeated ? "pointer-second" : "pointer-first" } });',
+				connectorKey,
+				schemaJson: JSON.stringify({
+					properties: {
+						id: { type: "string" },
+						alias: { $ref: "#/$defs/" + key },
+					},
+					$defs: { [key]: { properties: { leaf: { type: "string" } } } },
+				}),
+				tmpDir,
+			});
+			const result = runRecordCli(
+				[connectorKey, "--out", join(tmpDir, "pointer.scenario.json")],
+				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			);
+			assert.equal(result.code, 0, result.stderr);
+			assert.match(result.stdout, /complete: true/);
+			assert.match(
+				result.stdout,
+				/items: differences-observed \(1 repeated identities;/,
+			);
+			assert.equal(result.stdout.includes("/alias/leaf (1)"), length === 65_536);
+			assert.equal(
+				result.stdout.includes("Schema field metadata was bounded"),
+				length > 65_536,
+			);
+			assert.equal(
+				result.stdout.includes("raw changes in unnamed or undeclared fields"),
+				length > 65_536,
+			);
+			for (const canary of [
+				key,
+				"pointer-id-canary",
+				"pointer-first",
+				"pointer-second",
+			]) {
+				assert.equal((result.stdout + result.stderr).includes(canary), false);
+			}
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
 const ALL_OF_REF_SCHEMA = JSON.stringify({
 	type: "object",
 	properties: {
@@ -4950,7 +5108,7 @@ function boundarySchema(levels: number, leaf: unknown): string {
 	return JSON.stringify(schema);
 }
 
-test("scenario-record: unsupported keywords keep the metadata bounded, at the depth bound too", () => {
+test("scenario-record: declared schema unsupported keywords keep the metadata bounded, at the depth bound too", () => {
 	const tmpDir = mkdtempSync(
 		join(packageScratchDir(), "scenario-unsupported-keywords-"),
 	);
@@ -5083,7 +5241,7 @@ const NESTED_BASE_URI_SCHEMA = JSON.stringify({
 	$defs: { d: { properties: { root: { type: "string" } } } },
 });
 
-test("scenario-record: a nested base URI stops names beneath it and keeps safe siblings", () => {
+test("scenario-record: declared schema nested base URI stops names beneath it and keeps safe siblings", () => {
 	const tmpDir = mkdtempSync(
 		join(packageScratchDir(), "scenario-nested-base-"),
 	);
