@@ -308,6 +308,23 @@ function makeHintResolver(ast: Node): (node: Node) => string[] {
 					}
 					if (caught) continue;
 				}
+				if (last.type === "ReturnStatement") {
+					for (
+						let ancestor = parents.get(p);
+						ancestor;
+						ancestor = parents.get(ancestor)
+					) {
+						if (isFunction(ancestor)) break;
+						const finalizer = ancestor.finalizer;
+						if (
+							ancestor.type === "TryStatement" &&
+							isNode(finalizer) &&
+							inside(use, finalizer)
+						) {
+							return false;
+						}
+					}
+				}
 				return true;
 			}
 		}
@@ -327,7 +344,15 @@ function makeHintResolver(ast: Node): (node: Node) => string[] {
 	};
 	const closedCalls = (fn: Node): Node[] | null => {
 		const binding = bindings.find((candidate) => candidate.value === fn);
-		if (!binding || parents.get(fn)?.type.startsWith("Export")) return null;
+		if (!binding) return null;
+		for (
+			let ancestor: Node | undefined = parents.get(binding.id);
+			ancestor;
+			ancestor = parents.get(ancestor)
+		) {
+			if (ancestor.type.startsWith("Export")) return null;
+			if (isFunction(ancestor) && ancestor !== fn) break;
+		}
 		const calls: Node[] = [];
 		for (const ref of binding.refs) {
 			const p = parents.get(ref);
@@ -752,6 +777,18 @@ test("desktop-pinned connectors: every recovery_hint action is in the spec vocab
  * can be established without ignoring unknown branches. */
 const snippetCases = [
 	{
+		name: "finally can mutate after return",
+		valid: false,
+		source:
+			'function mutate(h) { h.action = "terminal"; } function collect() { const h = {action:"retry_by_runtime"}; try { if (true) { mutate(h); return; } } finally { emit({type:"SKIP_RESULT",stream:"items",reason:"scope_not_supported",message:"omitted",recovery_hint:h}); } } collect();',
+	},
+	{
+		name: "outer finally can mutate after return",
+		valid: false,
+		source:
+			'function mutate(h) { h.action = "terminal"; } function collect() { const h = {action:"retry_by_runtime"}; try { try { if (true) { mutate(h); return; } } finally {} } finally { emit({type:"SKIP_RESULT",stream:"items",reason:"scope_not_supported",message:"omitted",recovery_hint:h}); } } collect();',
+	},
+	{
 		name: "literal",
 		valid: true,
 		source:
@@ -1013,6 +1050,48 @@ const snippetCases = [
 		valid: false,
 		source:
 			'function mutate(h){h.action="terminal";}function send(){const h={action:"retry_by_runtime"};try{if(true){mutate(h);throw new Error("caught");}}catch{}emit({type:"SKIP_RESULT",recovery_hint:h});}send();',
+	},
+	{
+		name: "exported arrow parameter is not closed over local calls",
+		valid: false,
+		source:
+			'export const sendExportedArrow = (hint) => { emit({type:"SKIP_RESULT",stream:"items",reason:"scope_not_supported",message:"omitted",recovery_hint:hint}); }; sendExportedArrow({action:"retry_by_runtime"});',
+	},
+	{
+		name: "exported function expression parameter is not closed over local calls",
+		valid: false,
+		source:
+			'export const sendExportedFunctionExpression = function (hint) { emit({type:"SKIP_RESULT",stream:"items",reason:"scope_not_supported",message:"omitted",recovery_hint:hint}); }; sendExportedFunctionExpression({action:"retry_by_runtime"});',
+	},
+	{
+		name: "unexported closed arrow parameter",
+		valid: true,
+		source:
+			'const sendLocalArrow = (hint) => { emit({type:"SKIP_RESULT",stream:"items",reason:"scope_not_supported",message:"omitted",recovery_hint:hint}); }; sendLocalArrow({action:"retry_by_runtime"});',
+	},
+	{
+		name: "unexported closed function expression parameter",
+		valid: true,
+		source:
+			'const sendLocalFunctionExpression = function (hint) { emit({type:"SKIP_RESULT",stream:"items",reason:"scope_not_supported",message:"omitted",recovery_hint:hint}); }; sendLocalFunctionExpression({action:"retry_by_runtime"});',
+	},
+	{
+		name: "directly exported function remains fail-closed",
+		valid: false,
+		source:
+			'export function sendDirectExportedFunction(hint) { emit({type:"SKIP_RESULT",recovery_hint:hint}); } sendDirectExportedFunction({action:"retry_by_runtime"});',
+	},
+	{
+		name: "export-list binding remains fail-closed",
+		valid: false,
+		source:
+			'const sendExportListBinding = (hint) => { emit({type:"SKIP_RESULT",recovery_hint:hint}); }; export { sendExportListBinding }; sendExportListBinding({action:"retry_by_runtime"});',
+	},
+	{
+		name: "export-list alias remains fail-closed",
+		valid: false,
+		source:
+			'const sendExportListAlias = (hint) => { emit({type:"SKIP_RESULT",recovery_hint:hint}); }; export { sendExportListAlias as externalSendAlias }; sendExportListAlias({action:"retry_by_runtime"});',
 	},
 ] as const;
 for (const fixture of snippetCases) {
