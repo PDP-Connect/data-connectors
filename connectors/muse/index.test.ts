@@ -770,6 +770,207 @@ test("activities stop at the saved watermark", async () => {
 	);
 });
 
+/** Fixed newest-first source with two distinct activities at the saved boundary. */
+function watermarkActivities() {
+	const day = (fixture("activity").days as Json[])[0] ?? {};
+	const template: Json = ((day.activities as Json[]) ?? [])[0] ?? {};
+	const boundary = "2026-01-31T11:31:00.000Z";
+	const activity = (i: number) => ({
+		...template,
+		message_id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+		timestamp: new Date(
+			Date.UTC(2026, 0, 31, 12) - Math.min(i, 29) * 60_000,
+		).toISOString(),
+	});
+	const all = Array.from({ length: ACTIVITY_LIMIT + 1 }, (_, i) => activity(i));
+	const page = (items: typeof all) => ({
+		days: items.length === 0 ? [] : [{ ...day, activities: items }],
+	});
+	const read = (p: Json) => {
+		const before =
+			typeof p.before === "string" ? Date.parse(p.before) : Infinity;
+		return page(
+			all
+				.filter((a) => Date.parse(a.timestamp) < before)
+				.slice(0, Number(p.limit)),
+		);
+	};
+	const state = { activities: { version: 1, newest_timestamp: boundary } };
+	return { activity, all, boundary, page, read, state };
+}
+
+test("activity watermark: drain later-page ties once and resume with stable record identities", async () => {
+	const source = watermarkActivities();
+	const first = fakeGateway({ "activity.list": source.read });
+	const h = harness({ streams: ["activities"], state: source.state });
+	await collectMuseWith(h.ctx, first.gateway);
+	assert.deepEqual(h.failures, []);
+	const records = h.records("activities");
+	assert.deepEqual(
+		records.map((r) => r.message_id),
+		source.all.map((a) => a.message_id),
+	);
+	assert.equal(new Set(records.map((r) => r.id)).size, ACTIVITY_LIMIT + 1);
+	assert.deepEqual(
+		first.calls.map((c) => c.params.before),
+		[null, "2026-01-31T11:31:01.000Z", source.boundary],
+	);
+	assert.deepEqual(h.states("activities"), [
+		{
+			version: 1,
+			newest_timestamp: "2026-01-31T12:00:00.000Z",
+		},
+	]);
+	// Simulate the host upserting emitted records, then resuming the real collector.
+	const retained = new Map(records.map((r) => [String(r.id), r]));
+	const next = fakeGateway({ "activity.list": source.read });
+	const resumed = harness({
+		streams: ["activities"],
+		state: { activities: h.states("activities")[0] },
+	});
+	await collectMuseWith(resumed.ctx, next.gateway);
+	assert.deepEqual(resumed.failures, []);
+	for (const r of resumed.records("activities")) retained.set(String(r.id), r);
+	assert.deepEqual([...retained.values()], records);
+	assert.deepEqual(resumed.states("activities"), h.states("activities"));
+	assert.equal(next.calls.length, 1);
+});
+
+for (const failure of ["unreadable", "rpc", "stuck"] as const) {
+	test(`activity watermark: ${failure} boundary drain never checkpoints`, async () => {
+		const source = watermarkActivities();
+		const { gateway, calls } = fakeGateway({
+			"activity.list": (p) => {
+				if (p.before === null) return source.read(p);
+				if (failure === "unreadable") return { days: [{ activities: [{}] }] };
+				if (failure === "rpc")
+					throw new MuseRpcError(
+						"unavailable",
+						"muse_rpc_failed: activity.list unavailable",
+					);
+				return source.page(source.all.slice(0, ACTIVITY_LIMIT));
+			},
+		});
+		const h = harness({ streams: ["activities"], state: source.state });
+		await collectMuseWith(h.ctx, gateway);
+		assert.ok(calls.length > 1);
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["activities"],
+		);
+		assert.equal(h.states("activities").length, 0);
+		assert.equal(
+			new Set(h.records("activities").map((r) => r.id)).size,
+			h.records("activities").length,
+		);
+	});
+}
+
+test("activity watermark: a full tied boundary page is not completion proof", async () => {
+	const source = watermarkActivities();
+	const tied = source.all.map((a) => ({ ...a, timestamp: source.boundary }));
+	const { gateway } = fakeGateway({
+		"activity.list": () => source.page(tied.slice(0, ACTIVITY_LIMIT)),
+	});
+	const h = harness({ streams: ["activities"], state: source.state });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["activities"],
+	);
+	assert.equal(h.states("activities").length, 0);
+});
+
+test("activity watermark: genuinely older activity remains a legitimate stop", async () => {
+	const source = watermarkActivities();
+	const older = {
+		...source.activity(0),
+		timestamp: "2026-01-31T11:30:00.000Z",
+	};
+	const { gateway, calls } = fakeGateway({
+		"activity.list": () => source.page([...source.all.slice(0, 2), older]),
+	});
+	const h = harness({ streams: ["activities"], state: source.state });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.failures, []);
+	assert.equal(calls.length, 1);
+	assert.equal(h.states("activities").length, 1);
+});
+
+test("activity watermark: public collector accepts nonzero fractional timestamps", async () => {
+	const source = watermarkActivities();
+	const timestamp = "2026-01-31T11:31:00.500Z";
+	const item = { ...source.activity(0), timestamp };
+	const { gateway } = fakeGateway({
+		"activity.list": (p) =>
+			p.before === null ? source.page([item]) : source.page([]),
+	});
+	const h = harness({ streams: ["activities"], state: source.state });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.records("activities").length, 1);
+	assert.equal(h.records("activities")[0]?.message_id, item.message_id);
+	assert.deepEqual(h.states("activities"), [
+		{
+			version: 1,
+			newest_timestamp: timestamp,
+		},
+	]);
+});
+
+test("activity watermark: full mixed fractional bucket is complete or fails without a checkpoint", async () => {
+	const source = watermarkActivities();
+	const newer = "2026-01-31T11:31:00.500Z";
+	const all = source.all.map((a, i) => ({
+		...a,
+		timestamp: i < ACTIVITY_LIMIT - 1 ? newer : source.boundary,
+	}));
+	const { gateway, calls } = fakeGateway({
+		"activity.list": (p) => {
+			const before =
+				typeof p.before === "string" ? Date.parse(p.before) : Infinity;
+			return source.page(
+				all
+					.filter((a) => Date.parse(a.timestamp) < before)
+					.slice(0, Number(p.limit)),
+			);
+		},
+	});
+	const oldState = structuredClone(source.state);
+	const h = harness({ streams: ["activities"], state: source.state });
+	await collectMuseWith(h.ctx, gateway);
+	const records = h.records("activities");
+	assert.equal(new Set(records.map((r) => r.id)).size, records.length);
+	assert.deepEqual(source.state, oldState);
+	assert.equal(
+		records.filter((r) =>
+			all.slice(0, 29).some((a) => a.message_id === r.message_id),
+		).length,
+		29,
+	);
+	assert.deepEqual(
+		calls.slice(0, 2).map((c) => c.params.before),
+		[null, "2026-01-31T11:31:01.000Z"],
+	);
+	if (h.failures.length === 0) {
+		assert.equal(
+			records.length,
+			all.length,
+			"successful collection must not lose the second boundary activity",
+		);
+		assert.deepEqual(
+			new Set(records.map((r) => r.message_id)),
+			new Set(all.map((a) => a.message_id)),
+		);
+	} else {
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["activities"],
+		);
+		assert.equal(h.states("activities").length, 0);
+	}
+});
+
 test("an activity page that repeats fails the stream without a checkpoint", async () => {
 	const pages = activityPages(ACTIVITY_LIMIT);
 	const { gateway } = fakeGateway({
@@ -1676,6 +1877,81 @@ test("round 6 #5: goals are read for all three app variants and follow the page 
 	);
 	assert.deepEqual(h.failures, []);
 	assert.equal(h.states("goals").length, 1);
+});
+
+test("goals continue a completed variant whose first page overlaps an earlier variant", async () => {
+	const goal = (id: string) => ({
+		...((fixture("goals-tracking").goals as Json[])[0] ?? {}),
+		goal_id: id,
+	});
+	const { gateway, calls } = fakeGateway({
+		"goals.list": (p) => {
+			if (p.source === "user_goal")
+				return { goals: [goal("G")], pagination: { has_next_page: false } };
+			if (p.source === "assistant_tracking")
+				return { goals: [], pagination: { has_next_page: false } };
+			assert.equal(p.status, "completed");
+			if (p.cursor === undefined)
+				return {
+					goals: [goal("G")],
+					pagination: { has_next_page: true, next_cursor: "c2" },
+				};
+			assert.equal(p.cursor, "c2");
+			return { goals: [goal("H")], pagination: { has_next_page: false } };
+		},
+	});
+	const h = harness({ streams: ["goals"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(calls, [
+		{ method: "goals.list", params: { source: "user_goal" } },
+		{ method: "goals.list", params: { source: "assistant_tracking" } },
+		{ method: "goals.list", params: { status: "completed" } },
+		{ method: "goals.list", params: { status: "completed", cursor: "c2" } },
+	]);
+	assert.deepEqual(
+		h.records("goals").map((r) => r.id),
+		["G", "H"],
+	);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.states("goals").length, 1);
+	assert.equal(h.of("STATE").length, 1);
+	assert.ok(
+		(h.of("STATE", "goals")[0]?.index ?? -1) >
+			(h.of("RECORD", "goals").at(-1)?.index ?? -1),
+	);
+});
+
+test("goals reject a stalled variant cursor even when each page has a fresh goal", async () => {
+	let page = 0;
+	const { gateway, calls } = fakeGateway({
+		"goals.list": () => ({
+			goals: [
+				{
+					...((fixture("goals-tracking").goals as Json[])[0] ?? {}),
+					goal_id: `fresh-${++page}`,
+				},
+			],
+			pagination: { has_next_page: true, next_cursor: "stalled" },
+		}),
+	});
+	const h = harness({ streams: ["goals"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(calls.length, 2);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		["goals"],
+	);
+	assert.match(h.failures[0]?.message ?? "", /repeated a page cursor/);
+	assert.equal(h.states("goals").length, 0);
+});
+
+test("goals are not read or checkpointed when unselected", async () => {
+	const { gateway, calls } = fakeGateway();
+	const h = harness({ streams: [] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(calls, []);
+	assert.deepEqual(h.emitted, []);
+	assert.deepEqual(h.failures, []);
 });
 
 test("round 6 #5: a goals cursor that repeats fails the stream", async () => {

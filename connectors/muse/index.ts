@@ -32,7 +32,7 @@
  *     walk fails, repeats or stops moving back gets a DETAIL_GAP.
  *   - activities: activity.list {limit, before, capabilities}, newest first;
  *     `before` is the oldest activity's timestamp string as returned. Ends on
- *     a page with no activity, or at the saved watermark.
+ *     a page with no activity, or once activity is older than the watermark.
  *   - goals: goals.list per source; complete only on has_next_page false.
  *   - scheduled_tasks: tasks.list {} (whole list).
  *   - memory_files: fs.list {path:""} then fs.raw for each memory file.
@@ -1249,9 +1249,11 @@ function oneSecondAfter(raw: string, iso: string): string {
  * connector first asks for everything up to one second after the oldest
  * time: the activities tied at that time come back (already read ones are
  * deduplicated) together with older ones. Only when such a page brings
- * nothing new does it step strictly past that time, as the app does. A page
- * filled entirely by one timestamp cannot prove every tied activity was
- * read, so the walk fails instead.
+ * nothing new and is not full does it step strictly past that time, as the
+ * app does. A full inclusive page can hide more activities at its oldest
+ * time even when newer fractional timestamps also fill the page.
+ * runActivities rejects that fallback, and a page filled entirely by one
+ * timestamp fails here immediately.
  */
 export function nextActivityCursor(input: {
 	oldestRaw: string;
@@ -1263,8 +1265,9 @@ export function nextActivityCursor(input: {
 	if (input.tiedFullPage) return null;
 	const inclusive = oneSecondAfter(input.oldestRaw, input.oldestIso);
 	if (input.freshCount > 0 && input.previous !== inclusive) return inclusive;
-	// Nothing new up to one second after the oldest time: every activity at
-	// that time has been read. Step strictly past it, unless already there.
+	// Propose stepping strictly past the oldest time, unless already there.
+	// The caller must establish that this page is not full before accepting
+	// this fallback; no new identities alone is not exhaustion proof.
 	if (input.previous === input.oldestRaw) return null;
 	return input.oldestRaw;
 }
@@ -1335,8 +1338,10 @@ export async function runActivities(
 				}
 			}
 			if (oldestRaw === null || oldestIso === null) break;
-			// Reached activity a complete earlier walk already emitted.
-			if (stopAt !== null && oldestIso <= stopAt) break;
+			// Equality may split a timestamp bucket across pages. Drain it
+			// through the normal inclusive cursor and deduplication checks;
+			// only genuinely older activity proves we crossed the watermark.
+			if (stopAt !== null && oldestIso < stopAt) break;
 			const tiedFullPage =
 				items.length >= ACTIVITY_LIMIT &&
 				items.every((a) => zonedIsoToIso(a.timestamp) === oldestIso);
@@ -1347,7 +1352,13 @@ export async function runActivities(
 				tiedFullPage,
 				previous: before,
 			});
-			if (next === null) {
+			// No fresh identities on a full inclusive page does not prove the
+			// boundary bucket is exhausted: newer fractional timestamps can
+			// occupy its slots and hide another activity at the oldest time.
+			if (
+				next === null ||
+				(items.length >= ACTIVITY_LIMIT && next === oldestRaw)
+			) {
 				throw new StreamFailure(
 					"Muse's activity log has more activities at one time than a page holds, or did not page back; nothing was checkpointed.",
 				);
@@ -1398,6 +1409,7 @@ export async function runGoals(
 		const seen = new Set<string>();
 		for (const variant of GOAL_VARIANTS) {
 			const label = Object.values(variant).join(" ");
+			const variantSeen = new Set<string>();
 			const cursors = new Set<string>();
 			let cursor: PageCursor | null = null;
 			for (let pageIndex = 0; ; pageIndex++) {
@@ -1417,9 +1429,12 @@ export async function runGoals(
 				}
 				let added = 0;
 				for (const goal of page.goals) {
+					if (!variantSeen.has(goal.goal_id)) {
+						variantSeen.add(goal.goal_id);
+						added += 1;
+					}
 					if (seen.has(goal.goal_id)) continue;
 					seen.add(goal.goal_id);
-					added += 1;
 					await emitBuilt(
 						ctx,
 						tally,
@@ -1438,8 +1453,9 @@ export async function runGoals(
 						false,
 					);
 				}
-				// A page that says more follow must add goals; one that adds none
-				// is stuck, even with a new cursor.
+				// Progress is local to this variant: a goal may already have been
+				// emitted from another view. Repeated pages within this variant
+				// still fail, even with a new cursor.
 				if (added === 0) {
 					throw new StreamFailure(
 						`Muse's ${label} goals returned a page with no new goals while saying more follow; nothing was checkpointed.`,
