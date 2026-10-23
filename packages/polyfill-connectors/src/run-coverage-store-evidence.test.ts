@@ -147,6 +147,31 @@ async function drive(input: {
 	};
 }
 
+/** Require the requested identities before inspecting outcomes or bounds. */
+function assertSelectedStores(
+	run: ConnectorRun,
+	expected: readonly (readonly [stream: string, store: string])[],
+): void {
+	assert.equal(run.status, "succeeded");
+	assert.ok(run.coverage, "selected streams require a coverage verdict");
+	const streams = [...new Set(expected.map(([stream]) => stream))].sort();
+	assert.deepEqual(
+		run.coverage.streams.map((entry) => entry.stream).sort(),
+		streams,
+		"coverage must contain exactly the selected streams",
+	);
+	for (const entry of run.coverage.streams) {
+		assert.deepEqual(
+			entry.stores.map(({ store }) => store).sort(),
+			expected
+				.filter(([stream]) => stream === entry.stream)
+				.map(([, store]) => store)
+				.sort(),
+			`${entry.stream}: coverage must contain exactly the required stores`,
+		);
+	}
+}
+
 function storeStatus(
 	run: ConnectorRun,
 	stream: string,
@@ -593,7 +618,7 @@ test("codex reports every absent store as unavailable, derived message stores in
 	});
 });
 
-test("codex reports the override path it reads, not the default path beside it", async () => {
+test("codex reports the override path it reads, not the default path beside it", async (t) => {
 	await withHome(async (home) => {
 		// Every default store exists, but each override points at a path that does not.
 		await Promise.all(
@@ -620,12 +645,124 @@ test("codex reports the override path it reads, not the default path beside it",
 				(name) => ({ name }),
 			),
 		});
-		assert.equal(run.status, "succeeded");
-		for (const [stream, store] of CODEX_STORES) {
-			if (run.coverage?.streams.some((entry) => entry.stream === stream)) {
-				assertUnavailable(run, stream, store);
+		const selected = ["sessions", "messages", "rules", "prompts", "skills"];
+		const expected = CODEX_STORES.filter(([stream]) =>
+			selected.includes(stream),
+		);
+		const assertOverride = (candidate: ConnectorRun) => {
+			assertSelectedStores(candidate, expected);
+			for (const [stream, store] of expected) {
+				assertUnavailable(candidate, stream, store);
 			}
-		}
+		};
+		assertOverride(run);
+		assert.ok(run.coverage);
+		const coverage = run.coverage;
+		const firstStream = coverage.streams[0];
+		assert.ok(firstStream);
+		const corruptions: Array<[string, ConnectorRun, boolean]> = [
+			["absent coverage", { ...run, coverage: undefined }, true],
+			[
+				"absent selected stream",
+				{
+					...run,
+					coverage: {
+						...coverage,
+						streams: coverage.streams.filter(
+							(entry) => entry.stream !== "rules",
+						),
+					},
+				},
+				true,
+			],
+			[
+				"absent required store",
+				{
+					...run,
+					coverage: {
+						...coverage,
+						streams: coverage.streams.map((entry) =>
+							entry.stream === "sessions"
+								? {
+										...entry,
+										stores: entry.stores.filter(
+											({ store }) => store !== "state_db",
+										),
+									}
+								: entry,
+						),
+					},
+				},
+				false,
+			],
+			[
+				"unexpected selected stream",
+				{
+					...run,
+					coverage: {
+						...coverage,
+						streams: [
+							...coverage.streams,
+							{ ...firstStream, stream: "unexpected" },
+						],
+					},
+				},
+				true,
+			],
+			[
+				"unexpected required store",
+				{
+					...run,
+					coverage: {
+						...coverage,
+						streams: coverage.streams.map((entry) =>
+							entry.stream === "rules"
+								? {
+										...entry,
+										stores: [
+											...entry.stores,
+											{ store: "unexpected", status: "unavailable" },
+										],
+									}
+								: entry,
+						),
+					},
+				},
+				true,
+			],
+		];
+		await Promise.all(
+			corruptions.map(([label, corrupted, acceptedBefore]) => {
+				return t.test(label, () => {
+					const oldOracle = () => {
+						assert.equal(corrupted.status, "succeeded");
+						for (const [stream, store] of CODEX_STORES) {
+							if (
+								corrupted.coverage?.streams.some(
+									(entry) => entry.stream === stream,
+								)
+							) {
+								assertUnavailable(corrupted, stream, store);
+							}
+						}
+					};
+					if (acceptedBefore) assert.doesNotThrow(oldOracle);
+					else assert.throws(oldOracle, assert.AssertionError);
+					assert.throws(() => assertOverride(corrupted), assert.AssertionError);
+				});
+			}),
+		);
+		// Neither stream nor store ordering is part of the protocol.
+		assertOverride({
+			...run,
+			coverage: {
+				...coverage,
+				streams: [...coverage.streams].reverse().map((entry) => ({
+					...entry,
+					stores: [...entry.stores].reverse(),
+				})),
+			},
+		});
 	});
 });
 
@@ -1251,6 +1388,12 @@ for (const [label, request] of CODEX_BOUNDS) {
 				home,
 				streams: CODEX_ROLLOUT_STREAMS.map((name) => ({ name })),
 			});
+			assertSelectedStores(
+				control,
+				CODEX_STORES.filter(([stream]) =>
+					CODEX_ROLLOUT_STREAMS.includes(stream),
+				),
+			);
 			assert.equal(
 				storeStatus(control, "messages", "derived_messages"),
 				"failed",
@@ -1267,6 +1410,12 @@ for (const [label, request] of CODEX_BOUNDS) {
 					...request(home),
 				})),
 			});
+			assertSelectedStores(
+				run,
+				CODEX_STORES.filter(([stream]) =>
+					CODEX_ROLLOUT_STREAMS.includes(stream),
+				),
+			);
 			assert.equal(
 				storeStatus(run, "messages", "derived_messages"),
 				"collected",
@@ -1297,6 +1446,10 @@ test("codex claims no bound when a bounded collection carries none on its stream
 			scope: BOUNDED,
 			streams: streams.map((name) => ({ name })),
 		});
+		assertSelectedStores(
+			run,
+			CODEX_STORES.filter(([stream]) => streams.includes(stream)),
+		);
 		for (const stream of streams) {
 			assert.equal(scopedFor(run, stream), false, stream);
 		}
