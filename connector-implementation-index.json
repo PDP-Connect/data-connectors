@@ -18954,7 +18954,7 @@
 				},
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "0.7.2",
+				"version": "0.7.3",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -20505,7 +20505,7 @@
 							"items": {
 								"type": "string"
 							},
-							"description": "Channel types to export. Allowed values: public, private, im, mpim.",
+							"description": "Channel types to export. Allowed values: public, private, im, mpim. A type left out is never downloaded: the connector lists the channels first and downloads only those of the chosen types.",
 							"enum": ["public", "private", "im", "mpim"],
 							"default": ["public", "private", "im", "mpim"],
 							"declared_option_kind": "collection_scope"

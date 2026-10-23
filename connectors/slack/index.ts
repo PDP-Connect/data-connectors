@@ -61,7 +61,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
 import {
@@ -89,6 +89,15 @@ import {
 	type FingerprintCursor,
 	openFingerprintCursor,
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import {
+	type ChannelType,
+	ChannelTypeError,
+	channelsForRun,
+	narrowsChannelTypes,
+	parseChannelTypes,
+	restrictRecordToChannels,
+	selectChannelIdsByType,
+} from "./channel-types.ts";
 import {
 	buildCanvasRecord,
 	buildChannelCanvasIndex,
@@ -500,14 +509,25 @@ async function emitUnprovenChannelDiagnostic(
 	db: DatabaseSync,
 	messageFamilyRequested: boolean,
 	memberOnly: boolean,
+	channelScope?: ReadonlySet<string>,
 ): Promise<void> {
 	if (!messageFamilyRequested) {
 		return;
 	}
-	const inventory = archiveInventoryChannelIds(db);
-	const finalized = archiveFinalizedChannelIds(db);
+	let inventory = archiveInventoryChannelIds(db);
+	let finalized = archiveFinalizedChannelIds(db);
 	if (finalized.size === 0) {
 		return;
+	}
+	if (channelScope) {
+		inventory = new Set([...inventory].filter((id) => channelScope.has(id)));
+		finalized = new Set([...finalized].filter((id) => channelScope.has(id)));
+	}
+	const reachability = archiveChannelReachability(db);
+	if (channelScope) {
+		for (const id of reachability.keys()) {
+			if (!channelScope.has(id)) reachability.delete(id);
+		}
 	}
 	const unproven = unprovenChannelIds(inventory, finalized);
 	if (unproven.length === 0) {
@@ -515,7 +535,7 @@ async function emitUnprovenChannelDiagnostic(
 	}
 	const { inScope, outOfScope } = partitionUnprovenChannels(
 		unproven,
-		archiveChannelReachability(db),
+		reachability,
 		memberOnly,
 	);
 	// Split the in-scope gap by whether slackdump ever opened a messages chunk
@@ -2153,7 +2173,12 @@ export function pickResumeTarget(
 	{
 		allowStateArchive = true,
 		forceFullArchive = false,
-	}: { allowStateArchive?: boolean; forceFullArchive?: boolean } = {},
+		scopedArchiveRoot,
+	}: {
+		allowStateArchive?: boolean;
+		forceFullArchive?: boolean;
+		scopedArchiveRoot?: string;
+	} = {},
 ): { resumeTarget: string | null; priorArchive: string | undefined } {
 	// STATE is stream-keyed per Collection Profile: state is returned as
 	// { <stream>: <cursor>, ... }. We write `archive_dir` into the messages
@@ -2162,7 +2187,15 @@ export function pickResumeTarget(
 	const legacyArchiveDir = (state as Record<string, unknown>).archive_dir as
 		| string
 		| undefined;
-	const priorArchive = messagesState?.archive_dir || legacyArchiveDir; // fallback for pre-fix state
+	const candidate = messagesState?.archive_dir || legacyArchiveDir;
+	// Only reject this workspace's generated scoped namespace and digest.
+	// A valid legacy directory is not rejected merely for containing "scoped".
+	const isScopedPrior =
+		candidate &&
+		scopedArchiveRoot &&
+		resolve(dirname(candidate)) === resolve(scopedArchiveRoot) &&
+		/^[a-f0-9]{12}$/.test(basename(candidate));
+	const priorArchive = isScopedPrior ? undefined : candidate;
 	if (forceFullArchive) {
 		// `priorArchive` is still reported: callers use it to distinguish an
 		// archive named by STATE from one merely discovered on disk, and that
@@ -2218,8 +2251,12 @@ function buildArchiveArgs(input: ArchiveArgsInput): string[] {
 	if (opts.SKIP_FILES) {
 		args.push("-files=false");
 	}
-	// NOTE: CHANNEL_TYPES maps to `list channels -chan-types`; archive has
-	// no equivalent flag. We filter post-fetch via channel.is_im/is_mpim/etc.
+	// `archive -chan-types` exists, but explicit positional list generation ignores
+	// it. CHANNEL_TYPES is therefore resolved before this
+	// point: collect() lists the channels, keeps those of the chosen types and
+	// passes only their IDs here (see resolveTypedChannelScope). An empty list
+	// would archive every channel, so a caller must never reach here with one
+	// after narrowing the types.
 	args.push(...positionalChannels);
 	return args;
 }
@@ -2334,6 +2371,11 @@ type EmitRecordFn = (
  * without opening a DB. Mirrors the gmail/chase/usaa EmitDeps shape.
  */
 export interface MessagesPassDeps {
+	/**
+	 * See `StreamDeps.channelScope`: a row of any other channel is skipped
+	 * before it is counted or can advance a cursor.
+	 */
+	channelScope?: ReadonlySet<string> | undefined;
 	/**
 	 * Only a record this reports as accepted may advance the emitting
 	 * channel's durable cursor. See `EmitRecordFn`.
@@ -2514,6 +2556,9 @@ export async function emitMessagesPass(
 		covered: 0,
 	};
 	for (const r of rows) {
+		if (deps.channelScope && !deps.channelScope.has(r.CHANNEL_ID)) {
+			continue;
+		}
 		considered += 1;
 		// A row whose Slack `ts` will not parse gets a fabricated `sent_at`
 		// (parseMessageRow's `?? sentAtFallback`). It is still emitted — the
@@ -2582,6 +2627,14 @@ export async function emitMessagesPass(
  * untouched (their `dropUnseenIds` is never called).
  */
 export interface StreamDeps {
+	/**
+	 * The channels whose rows this run may read, when CHANNEL_TYPES leaves a type
+	 * out. A channel-bearing runner skips every other row before it reaches the
+	 * fingerprint cursor or a coverage count, so a row the record guard would
+	 * drop is never counted as covered or remembered as emitted. Unset means
+	 * every channel.
+	 */
+	channelScope?: ReadonlySet<string> | undefined;
 	db: DatabaseSync;
 	/**
 	 * Protocol-message side-channel (non-RECORD). Used today only to declare a
@@ -2907,6 +2960,9 @@ export async function runChannelsStream(deps: StreamDeps): Promise<void> {
 	} catch {
 		// A failed archive enumeration is not an empty archive. Leave coverage
 		// unmeasured so the shared projection exposes the exact run failure.
+		for (const stream of ["channels", "channel_stats"]) {
+			if (deps.requested.has(stream)) markEnumerationFailed(deps, stream);
+		}
 		return;
 	}
 	const observedOn = deps.emittedAt.slice(0, 10);
@@ -2919,13 +2975,19 @@ export async function runChannelsStream(deps: StreamDeps): Promise<void> {
 			nextRow = rowIterator.next();
 		} catch {
 			// A mid-scan read failure cannot prove that the inventory was complete.
+			for (const stream of ["channels", "channel_stats"]) {
+				if (deps.requested.has(stream)) markEnumerationFailed(deps, stream);
+			}
 			return;
 		}
 		if (nextRow.done) {
 			break;
 		}
-		channelsConsidered += 1;
 		const raw = nextRow.value;
+		if (deps.channelScope && !deps.channelScope.has(raw.id as string)) {
+			continue;
+		}
+		channelsConsidered += 1;
 		const r: ChannelRow = {
 			id: raw.id as string,
 			name: (raw.name as string | null) ?? null,
@@ -2969,7 +3031,9 @@ export async function runChannelsStream(deps: StreamDeps): Promise<void> {
 	}
 }
 
-async function runChannelMembershipsStream(deps: StreamDeps): Promise<void> {
+export async function runChannelMembershipsStream(
+	deps: StreamDeps,
+): Promise<void> {
 	const rows = safeAll<ChannelUserRow>(
 		deps.db,
 		`
@@ -2983,7 +3047,9 @@ async function runChannelMembershipsStream(deps: StreamDeps): Promise<void> {
 	const { considered, covered } = await runFingerprintedFullSync(
 		deps,
 		"channel_memberships",
-		rows,
+		deps.channelScope
+			? rows.filter((r) => deps.channelScope?.has(r.CHANNEL_ID))
+			: rows,
 		(r) => buildChannelMembershipRecord(r, deps.emittedAt),
 	);
 	await declareListConsidered(deps, "channel_memberships", considered, covered);
@@ -3327,10 +3393,10 @@ export async function runFilesStream(deps: StreamDeps): Promise<void> {
 	// Exclude quip/canvas files from the generic `files` stream — they are
 	// first-class records in the `canvases` stream (v0.3). Other file modes
 	// (hosted, snippet, external, tombstone) still flow here.
-	const rows = safeAll<FileRow>(
+	let rows = safeAll<FileRow & { channel_id?: unknown }>(
 		deps.db,
 		`
-    SELECT f.ID AS id, f.FILENAME AS filename, f.URL AS url, f.MODE AS mode, f.DATA AS data
+    SELECT f.ID AS id, f.FILENAME AS filename, f.URL AS url, f.MODE AS mode, f.DATA AS data${deps.channelScope ? ", f.CHANNEL_ID AS channel_id" : ""}
     FROM FILE f
     JOIN (SELECT ID, MAX(CHUNK_ID) AS mx FROM FILE GROUP BY ID) m
       ON m.ID = f.ID AND m.mx = f.CHUNK_ID
@@ -3340,6 +3406,15 @@ export async function runFilesStream(deps: StreamDeps): Promise<void> {
 	if (rows === null) {
 		markEnumerationFailed(deps, "files");
 		return;
+	}
+	if (deps.channelScope) {
+		// FILE's primary key (ID, CHUNK_ID) makes the MAX join select one
+		// observation per file, not a complete set of current shares. Withhold
+		// a latest outside observation even if an older allowed share exists.
+		const allowed = deps.channelScope;
+		rows = rows.filter(
+			(row) => typeof row.channel_id === "string" && allowed.has(row.channel_id),
+		);
 	}
 	const { considered, covered } = await runFingerprintedFullSync(
 		deps,
@@ -3391,20 +3466,31 @@ export async function runCanvasesStream(deps: StreamDeps): Promise<void> {
 		return;
 	}
 	const channelCanvasIndex = buildChannelCanvasIndex(chanRows);
-	for (const r of canvasRows) {
-		await deps.emitRecord("canvases", buildCanvasRecord(r, channelCanvasIndex));
+	// The record's channel is the file row's, else the owning channel's. A
+	// canvas outside any channel has no channel to scope by and stays.
+	const records = canvasRows
+		.map((r) => buildCanvasRecord(r, channelCanvasIndex))
+		.filter(
+			(record) =>
+				!deps.channelScope ||
+				record.channel_id == null ||
+				deps.channelScope.has(String(record.channel_id)),
+		);
+	for (const record of records) {
+		await deps.emitRecord("canvases", record);
 	}
 	// `canvases` is the one Slack stream where `considered` is objectively
 	// honest: it full-syncs every run (NOT fingerprint-suppressed, unlike
 	// workspace/users/files/channels/channel_memberships), and every enumerated
 	// `canvasRows` row is emitted unconditionally — so `collected` equals the
 	// enumerated quip-file inventory, never a churn-reduced subset. Declaring
-	// `canvasRows.length` (the deduped MODE='quip' count read at the query site)
-	// as `considered` lets the report read a real `complete` when every canvas
-	// emitted, and an honest `partial` if a canvas was weighed but dropped (e.g.
-	// by record-shape validation). The denominator is measured here, never
-	// aliased to the emitted count.
-	await deps.emit(buildFullScanCoverageMessage("canvases", canvasRows.length));
+	// `records.length` (the deduped MODE='quip' count read at the query site,
+	// less the canvases a channel scope leaves out) as `considered` lets the
+	// report read a real `complete` when every canvas emitted, and an honest
+	// `partial` if a canvas was weighed but dropped (e.g. by record-shape
+	// validation). The denominator is measured here, never aliased to the
+	// emitted count.
+	await deps.emit(buildFullScanCoverageMessage("canvases", records.length));
 }
 
 /**
@@ -3418,11 +3504,19 @@ export async function runStarsStream(
 	token: string,
 	cookie: string,
 ): Promise<void> {
-	const items = await fetchAllStars(token, cookie);
-	for (const item of items) {
-		await deps.emitRecord("stars", buildStarRecord(item));
+	// A star on an item outside any channel has no channel to scope by and stays.
+	const records = (await fetchAllStars(token, cookie))
+		.map(buildStarRecord)
+		.filter(
+			(record) =>
+				!deps.channelScope ||
+				record.channel_id == null ||
+				deps.channelScope.has(String(record.channel_id)),
+		);
+	for (const record of records) {
+		await deps.emitRecord("stars", record);
 	}
-	await deps.emit(buildFullScanCoverageMessage("stars", items.length));
+	await deps.emit(buildFullScanCoverageMessage("stars", records.length));
 }
 
 export async function runUserGroupsStream(
@@ -3489,7 +3583,9 @@ export async function runDmReadStatesStream(
 	token: string,
 	cookie: string,
 ): Promise<void> {
-	const dmChannelIds = currentDmMpimChannelIds(deps.db);
+	const dmChannelIds = currentDmMpimChannelIds(deps.db).filter(
+		(id) => !deps.channelScope || deps.channelScope.has(id),
+	);
 	const states = await fetchDmReadStates(token, cookie, dmChannelIds);
 	for (const state of states) {
 		await deps.emitRecord(
@@ -3534,7 +3630,12 @@ export interface StateEmitDeps {
  *   marker for visibility.
  */
 export function emitStateCheckpoints(deps: StateEmitDeps): void {
-	if (!deps.failedStreams.has("messages")) {
+	if (
+		(deps.requested.has("messages") ||
+			deps.requested.has("reactions") ||
+			deps.requested.has("message_attachments")) &&
+		!deps.failedStreams.has("messages")
+	) {
 		deps.emit({
 			type: "STATE",
 			stream: "messages",
@@ -3589,6 +3690,91 @@ export function pruneRequestedFingerprintCursors(
 			fingerprintCursors.get(stream)?.dropUnseenIds();
 		}
 	}
+}
+
+const CHANNEL_LISTING_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * The channels a run with a narrowed CHANNEL_TYPES may archive, which are also
+ * the only channels whose records it may emit.
+ *
+ * It lists every channel the signed-in user can see, keeps those of the chosen
+ * types that every restriction the run carries also names (a grant's channels
+ * and the allowlist are intersected, never united), and returns their IDs for
+ * `archive` to take as its positional arguments. It runs
+ * before anything is downloaded, so a channel of an excluded type never
+ * reaches the disk. It fails closed: a listing that cannot be run or read, a
+ * channel that cannot be placed in one type, and a selection that matches no
+ * channel all throw, because an empty positional list makes `archive` take
+ * every channel. `PDPP_SLACK_SKIP_SLACKDUMP=1` throws too, since it would read
+ * an archive chosen without the listing.
+ */
+export async function resolveTypedChannelScope(input: {
+	childEnv: NodeJS.ProcessEnv;
+	cookie: string;
+	progress: CollectContext["progress"];
+	/**
+	 * The restrictions the run carries, one list per source (the grant's
+	 * channels, the allowlist). Only a present source appears, and the channels
+	 * must satisfy all of them.
+	 */
+	restrictions: readonly (readonly string[])[];
+	selected: ReadonlySet<ChannelType>;
+	token: string;
+}): Promise<{ allowed: ReadonlySet<string>; channels: string[] }> {
+	const { childEnv, cookie, progress, restrictions, selected, token } = input;
+	if (process.env.PDPP_SLACK_SKIP_SLACKDUMP === "1") {
+		throw new ChannelTypeError(
+			"needs_slackdump",
+			"Skipping the Slack download cannot be combined with a CHANNEL_TYPES that leaves a type out, because the channel types cannot be checked offline.",
+		);
+	}
+	progress("Checking which Slack channels match the chosen types");
+	await ensureWorkspaceCached({ cookie, env: childEnv, token });
+	const { stdout } = await runSlackdump(
+		[
+			"list",
+			"channels",
+			"-y",
+			"-no-encryption",
+			"-no-chan-cache",
+			"-no-json",
+			"-format",
+			"JSON",
+		],
+		{
+			env: childEnv,
+			progressLabel: "list",
+			timeoutMs: CHANNEL_LISTING_TIMEOUT_MS,
+		},
+	);
+	let listing: unknown;
+	try {
+		listing = JSON.parse(stdout);
+	} catch {
+		throw new ChannelTypeError(
+			"unreadable",
+			"The Slack channel list could not be read (it is not JSON), so no channel was downloaded.",
+		);
+	}
+	const typed = selectChannelIdsByType(listing, selected);
+	const channels = channelsForRun(restrictions, typed);
+	slackDiagnostic("channel_types_resolved", {
+		archive_channels: channels.length,
+		restrictions: restrictions.length,
+		matching_channels: typed.length,
+		selected_types: [...selected].sort().join(","),
+	});
+	if (channels.length === 0) {
+		throw new ChannelTypeError(
+			"no_channels",
+			`No channel you can see is of a chosen type${restrictions.length > 0 ? " and also in every list of channels this run names" : ""}, so nothing was downloaded.`,
+		);
+	}
+	// The record guard allows exactly the channels this run archives. A set wider
+	// than that, such as every channel of the chosen types, would let a channel
+	// the allowlist left out through when an archive or an API returns it.
+	return { allowed: new Set(channels), channels };
 }
 
 interface EnsureArchiveDeps {
@@ -3981,10 +4167,31 @@ if (isMainModule(import.meta.url)) {
 
 			const childEnv = buildChildEnv(token, cookie);
 			const msgResFilter = resFilters.get("messages");
-			const positionalChannels: string[] = [
+			const explicitChannels: string[] = [
 				...(msgResFilter ? [...msgResFilter] : []),
 				...opts.CHANNEL_ALLOWLIST,
 			];
+			// A narrowed CHANNEL_TYPES picks the channels before anything is
+			// downloaded; the default (every type) leaves the run as it was.
+			const selectedTypes = parseChannelTypes(opts.CHANNEL_TYPES);
+			const typeScope = narrowsChannelTypes(selectedTypes)
+				? await resolveTypedChannelScope({
+						childEnv,
+						cookie,
+						progress,
+						restrictions: [
+							...(msgResFilter ? [[...msgResFilter]] : []),
+							...(opts.CHANNEL_ALLOWLIST.length > 0
+								? [opts.CHANNEL_ALLOWLIST]
+								: []),
+						],
+						selected: selectedTypes,
+						token,
+					})
+				: null;
+			const positionalChannels: string[] = typeScope
+				? typeScope.channels
+				: explicitChannels;
 			const messageFamilyRequested =
 				requested.has("messages") ||
 				requested.has("reactions") ||
@@ -4018,6 +4225,7 @@ if (isMainModule(import.meta.url)) {
 				archivePath,
 				{
 					allowStateArchive: isUnscopedMessageBoundary,
+					scopedArchiveRoot: join(baseArchivePaths.dumpDir, "archive-scoped"),
 					forceFullArchive: enumerationIncomplete,
 				},
 			);
@@ -4104,20 +4312,30 @@ if (isMainModule(import.meta.url)) {
 				);
 			}
 			const deps: StreamDeps = {
+				channelScope: typeScope?.allowed,
 				db,
 				// Narrow the ctx.emit union to the single message kind StreamDeps.emit
 				// accepts (DETAIL_COVERAGE). runConnector's emit accepts the full
 				// EmittedMessage union, so this is a contravariant widening at the call
 				// boundary, not a coercion of message shape.
 				emit: (msg) => emit(msg),
-				emitRecord: (stream, data) =>
-					stream === "messages" && msgResFilter
+				emitRecord: (stream, data) => {
+					// Whatever archive or API a record came from, a run that left a
+					// channel type out emits nothing that names a channel of it.
+					const record = typeScope
+						? restrictRecordToChannels(stream, data, typeScope.allowed)
+						: data;
+					if (record === null) {
+						return Promise.resolve(false);
+					}
+					return stream === "messages" && msgResFilter
 						? emitMessageRecordScopedByChannel({
 								channelIds: msgResFilter,
 								emitRecord: ctx.emitRecord,
-								record: data,
+								record,
 							})
-						: ctx.emitRecord(stream, data),
+						: ctx.emitRecord(stream, record);
+				},
 				emittedAt: ctx.emittedAt,
 				failedStreams: new Set(),
 				fingerprintCursors,
@@ -4185,6 +4403,7 @@ if (isMainModule(import.meta.url)) {
 				db,
 				messageFamilyRequested,
 				opts.MEMBER_ONLY,
+				typeScope?.allowed,
 			);
 
 			// Register the opt-in __uploads reclaim once every archive this run
@@ -4281,7 +4500,7 @@ if (isMainModule(import.meta.url)) {
 					: priorObservedChannelIds;
 			const stateArchivePath = isUnscopedMessageBoundary
 				? archivePath
-				: (messagesState?.archive_dir ?? archivePath);
+				: (priorArchive ?? baseArchivePaths.archivePath);
 			emitStateCheckpoints({
 				archivePath: stateArchivePath,
 				baseArchiveResumedAt,

@@ -10,7 +10,11 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, before, test } from "node:test";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
+	runChannelsStream,
+	pruneRequestedFingerprintCursors,
+	emitStateCheckpoints,
 	runDmReadStatesStream,
 	runOptionalStream,
 	runRemindersStream,
@@ -430,3 +434,188 @@ test("contrast: a REQUIRED stream's failure is NOT caught by runOptionalStream a
 	};
 	await assert.rejects(() => runUsersStream(deps), /emitRecord_boom/);
 });
+
+// ─── channel scope: a run that leaves a channel type out ───
+//
+// `stars` and `dm_read_states` come from the Web API, not the archive, so a
+// narrowed CHANNEL_TYPES run has to scope them itself: it may not read or
+// count a star on, or a DM state of, a channel the run leaves out.
+
+const STAR_ITEMS = [
+	{
+		type: "message",
+		channel: "C0PUBLIC1",
+		message: { ts: "1.1", user: "U01" },
+	},
+	{
+		type: "message",
+		channel: "D0DIRECT01",
+		message: { ts: "2.2", user: "U01" },
+	},
+	{ type: "channel", channel: "G0PRIVATE1" },
+	// A starred file names no channel, so there is nothing to scope it by.
+	{ type: "file", file: { id: "F0LOOSE01" } },
+];
+
+async function starChannels(
+	channelScope: ReadonlySet<string> | undefined,
+): Promise<{ channels: unknown[]; considered: number; covered: number }> {
+	globalThis.fetch = () =>
+		Promise.resolve(jsonResponse({ ok: true, items: STAR_ITEMS }));
+	const captured: Captured = { considered: [], records: [] };
+	await runStarsStream(
+		{
+			...fakeDeps(new DatabaseSync(":memory:"), captured, ["stars"]),
+			...(channelScope ? { channelScope } : {}),
+		},
+		"xoxc-fake",
+		"d-fake",
+	);
+	return {
+		channels: captured.records.map(
+			(record) => (record.data as { channel_id: unknown }).channel_id,
+		),
+		considered: captured.considered[0]?.considered ?? -1,
+		covered: captured.considered[0]?.covered ?? -1,
+	};
+}
+
+test("runStarsStream: a channel scope drops stars on channels left out and counts what it kept", async () => {
+	const unscoped = await starChannels(undefined);
+	assert.deepEqual(unscoped.channels, [
+		"C0PUBLIC1",
+		"D0DIRECT01",
+		"G0PRIVATE1",
+		null,
+	]);
+	assert.equal(unscoped.considered, 4);
+
+	const scoped = await starChannels(new Set(["C0PUBLIC1"]));
+	assert.deepEqual(scoped.channels, ["C0PUBLIC1", null]);
+	assert.equal(
+		scoped.considered,
+		2,
+		"the API listed four stars; two are in scope",
+	);
+	assert.equal(scoped.covered, 2);
+});
+
+function seedDmChannels(db: DatabaseSync): void {
+	seedChannel(db, "D0DIRECT01", { is_im: true });
+	seedChannel(db, "G0GROUPDM1", { is_mpim: true });
+	seedChannel(db, "C0PUBLIC1", { is_channel: true });
+}
+
+async function dmStatesAskedAbout(
+	channelScope: ReadonlySet<string>,
+): Promise<{ asked: string[]; captured: Captured }> {
+	const db = new DatabaseSync(":memory:");
+	seedDmChannels(db);
+	const asked: string[] = [];
+	globalThis.fetch = (url) => {
+		const channel = new URL(String(url)).searchParams.get("channel") ?? "";
+		asked.push(channel);
+		return Promise.resolve(
+			jsonResponse({
+				ok: true,
+				channel: {
+					id: channel,
+					last_read: "1.1",
+					unread_count: 0,
+					unread_count_display: 0,
+				},
+			}),
+		);
+	};
+	const captured: Captured = { considered: [], records: [] };
+	await runDmReadStatesStream(
+		{ ...fakeDeps(db, captured, ["dm_read_states"]), channelScope },
+		"xoxc-fake",
+		"d-fake",
+	);
+	return { asked, captured };
+}
+
+test("runDmReadStatesStream: a channel scope asks about, emits and counts only the DMs in scope", async () => {
+	const { asked, captured } = await dmStatesAskedAbout(
+		new Set(["D0DIRECT01", "C0PUBLIC1"]),
+	);
+
+	assert.deepEqual(
+		asked,
+		["D0DIRECT01"],
+		"no conversations.info call for the group DM the scope leaves out",
+	);
+	assert.deepEqual(
+		captured.records.map(
+			(record) => (record.data as { channel_id: unknown }).channel_id,
+		),
+		["D0DIRECT01"],
+	);
+	assert.equal(captured.considered[0]?.considered, 1);
+	assert.equal(captured.considered[0]?.covered, 1);
+});
+
+test("runDmReadStatesStream: a scope that names no DM asks about none and declares an empty inventory", async () => {
+	const { asked, captured } = await dmStatesAskedAbout(new Set(["C0PUBLIC1"]));
+
+	assert.deepEqual(asked, []);
+	assert.equal(captured.records.length, 0);
+	assert.equal(captured.considered[0]?.considered, 0);
+});
+
+for (const failure of ["prepare", "iteration"] as const) {
+	test(`channel ${failure} failure preserves unseen fingerprints and suppresses checkpoints`, async () => {
+		const db = new DatabaseSync(":memory:");
+		try {
+			seedChannel(db, "C01", { id: "C01", name: "general", is_channel: true });
+			const captured: Captured = { considered: [], records: [] };
+			const deps = fakeDeps(db, captured, ["channels", "channel_stats"]);
+			const prior = openFingerprintCursor(undefined, { excludeFromFingerprint: [] });
+			prior.shouldEmit({ id: "CUNSEEN", name: "previous" });
+			const priorState = prior.toState();
+			const cursor = openFingerprintCursor({ fingerprints: priorState }, { excludeFromFingerprint: [] });
+			deps.fingerprintCursors.set("channels", cursor);
+			const prepare = db.prepare.bind(db);
+			deps.db = new Proxy(db, {
+				get(target, key) {
+					if (key === "prepare") return (sql: string) => {
+						if (failure === "prepare") throw new Error("synthetic prepare failure");
+						const statement = prepare(sql);
+						return {
+							iterate() {
+								const rows = statement.iterate();
+								return (function* () {
+									const first = rows.next();
+									assert.equal(first.done, false);
+									yield first.value;
+									throw new Error("synthetic mid-scan failure");
+								})();
+							},
+						};
+					};
+					const value = Reflect.get(target, key, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+			await runChannelsStream(deps);
+			assert.deepEqual([...deps.failedStreams].sort(), ["channel_stats", "channels"]);
+			assert.equal(captured.records.filter(r => r.stream === "channels").length, failure === "iteration" ? 1 : 0);
+			assert.equal(captured.records.filter(r => r.stream === "channel_stats").length, failure === "iteration" ? 1 : 0);
+			assert.deepEqual(captured.considered, []);
+			pruneRequestedFingerprintCursors(deps.requested, deps.failedStreams, deps.fingerprintCursors);
+			assert.equal(cursor.toState().CUNSEEN, priorState.CUNSEEN);
+			const messages: EmittedMessage[] = [];
+			emitStateCheckpoints({
+				archivePath: "/synthetic/archive", baseArchiveResumedAt: {},
+				channelLastTs: {}, committedMaxTs: null,
+				emit: async message => { messages.push(message); },
+				failedStreams: deps.failedStreams, fingerprintCursors: deps.fingerprintCursors,
+				observedChannelIds: [], requested: deps.requested, scopedArchiveResumedAt: {},
+			});
+			assert.equal(messages.some(m => m.type === "STATE" && (m.stream === "channels" || m.stream === "channel_stats")), false);
+		} finally {
+			db.close();
+		}
+	});
+}
