@@ -4900,7 +4900,9 @@ for (const { label, ref, named, bounded } of [
 	},
 ]) {
 	test(`scenario-record: declared schema fragment decoding: ${label}`, () => {
-		const tmpDir = mkdtempSync(join(packageScratchDir(), "scenario-ref-fragment-"));
+		const tmpDir = mkdtempSync(
+			join(packageScratchDir(), "scenario-ref-fragment-"),
+		);
 		const connectorKey = "ref_fragment_fixture";
 		writeBoundObservationFixture({
 			collectBody: `    await emitRecord("items", { id: "fragment-id-canary", alias: { right: repeated ? "right-second" : "right-first", wrong: repeated ? "wrong-second" : "wrong-first", once: repeated ? "once-second" : "once-first" } });`,
@@ -4922,7 +4924,10 @@ for (const { label, ref, named, bounded } of [
 			);
 			assert.equal(result.code, 0, result.stderr);
 			assert.match(result.stdout, /complete: true/);
-			assert.match(result.stdout, /items: differences-observed \(1 repeated identities;/);
+			assert.match(
+				result.stdout,
+				/items: differences-observed \(1 repeated identities;/,
+			);
 			for (const field of ["right", "wrong", "once"]) {
 				assert.equal(
 					result.stdout.includes(`/alias/${field} (1)`),
@@ -4930,11 +4935,22 @@ for (const { label, ref, named, bounded } of [
 					`${label}: only the independently expected target may be named; stdout=${result.stdout}`,
 				);
 			}
-			assert.match(result.stdout, /raw changes in unnamed or undeclared fields/);
-			assert.equal(result.stdout.includes("Schema field metadata was bounded"), bounded);
+			assert.match(
+				result.stdout,
+				/raw changes in unnamed or undeclared fields/,
+			);
+			assert.equal(
+				result.stdout.includes("Schema field metadata was bounded"),
+				bounded,
+			);
 			for (const canary of [
-				"fragment-id-canary", "right-first", "right-second",
-				"wrong-first", "wrong-second", "once-first", "once-second",
+				"fragment-id-canary",
+				"right-first",
+				"right-second",
+				"wrong-first",
+				"wrong-second",
+				"once-first",
+				"once-second",
 			]) {
 				assert.equal((result.stdout + result.stderr).includes(canary), false);
 			}
