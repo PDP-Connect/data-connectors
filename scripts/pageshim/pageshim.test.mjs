@@ -1433,6 +1433,8 @@ test("github_browser: an incomplete stream is an omitted error", {
 			disposition: "omitted",
 			scope: "github.starred",
 			phase: "collect",
+			code: "stream_collection_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		},
 	);
 });
@@ -3661,7 +3663,6 @@ test("meta: following empty, contradictory, owner and partial-page evidence neve
    {owner, users: [row], has_more: true, next_max_id: "next"},
    {owner, users: [{pk: "bad"}], has_more: false},
   ]}, count: 1, complete: false},
-  {name: "late logout", options: {logoutAtEnd: true}, count: 1, complete: false},
  ];
  for (const c of cases) {
   const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(c.options),
@@ -3673,6 +3674,37 @@ test("meta: following empty, contradictory, owner and partial-page evidence neve
   assert.equal(r.result.errors.length, c.complete ? 0 : 1, c.name);
   assert.match(r.data.status, c.complete ? /^Complete!/ : /^Partial:/, c.name);
   if (!c.complete) assert.match(r.result.errors[0].reason, /not proven complete/, c.name);
+ }
+});
+
+
+test("meta: late logout remains a terminal session failure on both hosts", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-late-logout.js")});
+ for (const resultStreaming of [false, true]) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures({logoutAtEnd: true}),
+   scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}},
+   resultStreaming, resultSpoolDirectory: join(out, "meta-late-logout-" + resultStreaming)});
+  assertCleanRun(r);
+  assert.equal(r.data.error, "meta_session_required: Instagram authentication was rejected or challenged during this run");
+  assert.deepEqual(r.stateMessages, []);
+  assert.deepEqual(r.states, {"instagram.following": {old: true}});
+  assert.doesNotMatch(r.data.status ?? "", /^(Complete!|Partial:)/);
+  assert.deepEqual(r.ret, {ok: true});
+  assert.equal(r.streamDone, null);
+  assert.equal(r.streamResult, null);
+  if (resultStreaming) {
+   assert.equal(r.result, null);
+  } else {
+   assert.deepEqual(r.result.errors, [{
+    errorClass: "auth_failed",
+    reason: "meta_session_required: Instagram authentication was rejected or challenged during this run",
+    disposition: "fatal",
+    phase: "collect",
+   }]);
+   assert.equal(r.result["instagram.following"], undefined);
+   assert.equal(r.result.exportSummary.count, 0);
+  }
  }
 });
 
