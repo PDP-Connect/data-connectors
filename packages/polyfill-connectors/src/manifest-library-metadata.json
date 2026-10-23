@@ -713,6 +713,26 @@
 		}
 	},
 	{
+		"file": "tiktok.json",
+		"manifest": {
+			"connector_key": "tiktok",
+			"reason_display_messages": {
+				"tiktok_auth_failed": "TikTok needs you to sign in again before this can continue.",
+				"tiktok_bot_check": "TikTok showed a check or refused a request, so collection stopped without retrying. Open TikTok yourself and make sure your account works normally before running this again.",
+				"tiktok_request_unsigned": "TikTok's page did not sign a request the way it signs its own, so nothing more could be read safely. TikTok may have changed its site; please report this if it keeps happening.",
+				"tiktok_rate_limited": "TikTok asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait a while before running this again.",
+				"tiktok_server_error": "TikTok's servers had a problem partway through. What was collected is saved; try again later.",
+				"tiktok_interrupted": "The TikTok page stopped answering partway through. What was collected is saved; try again.",
+				"tiktok_run_limit_reached": "This run reached its safety limit on requests. What was collected is saved; the next run continues.",
+				"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
+				"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
+				"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
+				"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
+				"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
+			}
+		}
+	},
+	{
 		"file": "twitter_archive.json",
 		"manifest": {
 			"connector_key": "twitter-archive",
