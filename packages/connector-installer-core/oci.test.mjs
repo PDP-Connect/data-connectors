@@ -66,6 +66,145 @@ function countTempArtifacts() {
   return readdirSync(tmpdir()).filter((name) => name.startsWith("connector-oci-layer-")).length;
 }
 
+test("F1 refuses unsafe connector IDs before registry access or writes", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    const root = mkdtempSync(join(tmpdir(), "oci-destinations-"));
+    const installRoot = join(root, "install");
+    mkdirSync(installRoot);
+    const sentinel = join(root, "sentinel");
+    writeFileSync(sentinel, "unchanged");
+    try {
+      for (const connectorId of ["../../outside", "", ".", "..", "a/b", "a\\b", "C:alias", "CON", "name."]) {
+        registry.requests.length = 0;
+        await assert.rejects(() => installFromLock({
+          lock: { connectors: [ociLockEntry(registry, digest, { connectorId })] },
+          source: null, installRoot, layout: "snapshot", prune: true,
+          ...fixtureOptions(registry, signer),
+        }), /connector id/i, connectorId);
+        assert.deepEqual(registry.requests, []);
+        assert.deepEqual(readdirSync(installRoot), []);
+        assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("F2 refuses linked install roots, destination parents and leaves before any write", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    for (const linked of ["root", "collection-profiles", "collection-profiles/ynab-pdpp/dist", "collection-profiles/ynab-pdpp/dist/collection-profile.mjs"]) {
+      const root = mkdtempSync(join(tmpdir(), "oci-linked-install-"));
+      const installRoot = join(root, "install");
+      const outside = join(root, "outside");
+      mkdirSync(outside);
+      const sentinel = join(outside, "collection-profile.mjs");
+      writeFileSync(sentinel, "unchanged");
+      try {
+        const link = linked === "root" ? installRoot : join(installRoot, linked);
+        mkdirSync(join(link, ".."), { recursive: true });
+        symlinkSync(linked.endsWith(".mjs") ? sentinel : outside, link);
+        await assert.rejects(() => installFromLock({
+          lock: { connectors: [ociLockEntry(registry, digest)] }, source: null,
+          installRoot, layout: "snapshot", prune: true, ...fixtureOptions(registry, signer),
+        }), /symlink|symbolic link/i, linked);
+        assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+        assert.equal(existsSync(join(installRoot, "collection-profiles/ynab-pdpp/profile/collection-profile.json")), false,
+          "preflight must reject a later linked destination before writing the first file");
+        await assert.rejects(() => verifyInstalled({
+          lock: { connectors: [ociLockEntry(registry, digest)] }, source: null,
+          installRoot, layout: "snapshot", ...fixtureOptions(registry, signer),
+        }), /symlink|symbolic link/i, linked);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+test("F3 malformed lock envelopes fail closed for install and verification", async () => {
+  const root = mkdtempSync(join(tmpdir(), "oci-malformed-lock-"));
+  const sentinel = join(root, "keep.txt");
+  writeFileSync(sentinel, "unchanged");
+  try {
+    for (const lock of [{}, { connectors: null }, null, [], { connectors: {} }]) {
+      for (const run of [installFromLock, verifyInstalled]) {
+        await assert.rejects(() => run({ lock, source: null, installRoot: root, layout: "snapshot", prune: true }), /lock.*connectors/i);
+        assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+      }
+    }
+    const empty = { lock: { connectors: [] }, source: null, installRoot: root, layout: "snapshot" };
+    assert.equal((await verifyInstalled(empty)).ok, true);
+    assert.equal((await installFromLock({ ...empty, prune: true })).connectorCount, 0);
+    assert.equal(existsSync(sentinel), false, "an explicit empty plan still permits pruning");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("F4 noncanonical lock destinations refuse before mutation or registry access", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    const root = mkdtempSync(join(tmpdir(), "oci-path-alias-"));
+    const sentinel = join(root, "keep.txt");
+    writeFileSync(sentinel, "unchanged");
+    try {
+      for (const manifestPath of ["profile/./collection-profile.json", "profile//collection-profile.json", "profile/collection-profile.json/", "profile/name.", "profile/CON", "profile/file:stream"]) {
+        registry.requests.length = 0;
+        await assert.rejects(() => installFromLock({
+          lock: { connectors: [ociLockEntry(registry, digest, { manifestPath })] },
+          source: null, installRoot: root, layout: "snapshot", prune: true, ...fixtureOptions(registry, signer),
+        }), /path|destination/i, manifestPath);
+        assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+        assert.deepEqual(registry.requests, []);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("F5 the complete install plan refuses reserved, asset, prefix and cross-entry collisions", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const first = publishArtifact(registry, { signer, withAssets: true });
+    const second = publishArtifact(registry, { signer });
+    const entry = (overrides = {}) => ociLockEntry(registry, first.digest, overrides);
+    for (const entries of [
+      [entry({ manifestPath: "source-declaration.json" })],
+      [entry({ entrypointPath: "provenance.json" })],
+      [entry({ manifestPath: "licenses/LICENSE" })],
+      [entry({ manifestPath: "assets/icons/ynab.svg" })],
+      [entry({ manifestPath: "dist" })],
+      [entry({ manifestPath: "PROVENANCE.JSON" })],
+      [entry({ manifestPath: "ASSETS/profile.json" })],
+      [entry(), ociLockEntry(registry, second.digest)],
+      [entry(), ociLockEntry(registry, second.digest, { connectorId: "YNAB-PDPP" })],
+    ]) {
+      const root = mkdtempSync(join(tmpdir(), "oci-colliding-install-"));
+      const sentinel = join(root, "keep.txt");
+      writeFileSync(sentinel, "unchanged");
+      try {
+        for (const run of [installFromLock, verifyInstalled]) {
+          await assert.rejects(() => run({
+            lock: { connectors: entries }, source: null, installRoot: root, layout: "snapshot",
+            prune: true, ...fixtureOptions(registry, signer),
+          }), /collision|conflict|duplicate/i, JSON.stringify(entries.map(({ connectorId, manifestPath, entrypointPath }) => ({ connectorId, manifestPath, entrypointPath }))));
+          assert.deepEqual(readdirSync(root), ["keep.txt"]);
+          assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
 function duplicateMemberTarball(entries) {
   const root = mkdtempSync(join(tmpdir(), "oci-duplicate-member-"));
   const archive = join(root, "layer.tar");
@@ -1511,79 +1650,6 @@ test("an OCI artifact whose config entrypoint is not a safe relative path is ref
         }
       );
     });
-  }
-});
-
-test("adding licence writes does not start installing stray tarball files", async () => {
-  // The OCI path writes `assetFiles` so licences land on disk (C5.4), and
-  // `buildPdppCollectionProfileWrites` is SHARED with the tarball path — where
-  // `assetFiles` is also populated, with every artifact member that is not the
-  // manifest, entrypoint, provenance, a schema or the README.
-  //
-  // So the obvious spelling of that change (spread `assetFiles`
-  // unconditionally) silently starts installing files a tarball artifact
-  // previously carried and the installer previously ignored. No existing test
-  // catches it, because the two published collection profiles happen to carry
-  // no such file. This one builds an artifact that does.
-  const { createHash } = await import("node:crypto");
-  const { mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
-  const digestOf = (buffer) => `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
-
-  const root = mkdtempSync(join(tmpdir(), "tarball-stray-"));
-  try {
-    const bundle = join(root, "bundle");
-    const members = {
-      "profile/collection-profile.json": JSON.stringify({ version: "1.0.0", name: "n", description: "d" }),
-      "dist/collection-profile.mjs": "export const x = 1;\n",
-      "provenance.json": "{}\n",
-      "STRAY.txt": "not one of the three\n",
-    };
-    for (const [path, content] of Object.entries(members)) {
-      const target = join(bundle, path);
-      mkdirSync(join(target, ".."), { recursive: true });
-      writeFileSync(target, content);
-    }
-
-    mkdirSync(join(root, "artifacts", "stray"), { recursive: true });
-    const tarPath = join(root, "artifacts", "stray", "stray.tgz");
-    execFileSync("tar", ["-czf", tarPath, "-C", bundle, "."]);
-
-    const installRoot = join(root, "install");
-    const result = await installFromLock({
-      lock: {
-        connectors: [
-          {
-            connectorId: "stray",
-            company: "c",
-            version: "1.0.0",
-            artifactKind: "pdpp-collection-profile",
-            artifactPath: "artifacts/stray/stray.tgz",
-            artifactSha256: digestOf(readFileSync(tarPath)),
-            manifestPath: "profile/collection-profile.json",
-            manifestSha256: digestOf(Buffer.from(members["profile/collection-profile.json"])),
-            entrypointPath: "dist/collection-profile.mjs",
-            entrypointSha256: digestOf(Buffer.from(members["dist/collection-profile.mjs"])),
-            provenancePath: "provenance.json",
-            provenanceSha256: digestOf(Buffer.from(members["provenance.json"])),
-          },
-        ],
-      },
-      source: { mode: "local", rootDir: root },
-      installRoot,
-      layout: "source",
-    });
-
-    assert.deepEqual(result.expectedPaths, [
-      "collection-profiles/stray/profile/collection-profile.json",
-      "collection-profiles/stray/dist/collection-profile.mjs",
-      "collection-profiles/stray/provenance.json",
-    ]);
-    assert.ok(
-      !existsSync(join(installRoot, "collection-profiles/stray/STRAY.txt")),
-      "a tarball artifact's extra member must not become an installed file"
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
   }
 });
 

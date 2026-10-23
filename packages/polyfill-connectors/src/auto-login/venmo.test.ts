@@ -3078,7 +3078,7 @@ test("ensureVenmoOrigin: a post-sign-in page on id.venmo.com re-navigates to ven
 	);
 	assert.deepEqual(
 		gotoUrls,
-		["https://venmo.com/", "https://venmo.com/"],
+		["https://venmo.com/", "https://venmo.com/robots.txt"],
 		"the guard must re-navigate, bounded to one extra attempt",
 	);
 });
@@ -3125,6 +3125,32 @@ test("ensureVenmoOrigin: a navigation Venmo redirects to account.venmo.com still
 		"the probe's credentialed fetch needs this exact origin",
 	);
 	assert.equal(gotoUrls.length, 2);
+});
+
+// Prod run_9f4c54fd (2026-10-20): signed in, Venmo redirects every request
+// for https://venmo.com/ to account.venmo.com, so retrying the home page can
+// never reach the CORS-granted origin. The retry loads a venmo.com document
+// that is not redirected.
+test("ensureVenmoOrigin: when a signed-in venmo.com/ always redirects to account.venmo.com, the retry still reaches venmo.com", async () => {
+	const gotoUrls: string[] = [];
+	let currentUrl = "https://account.venmo.com/";
+	const page: Pick<Page, "goto" | "url"> = {
+		goto(url: string): ReturnType<Page["goto"]> {
+			gotoUrls.push(url);
+			currentUrl =
+				url === "https://venmo.com/" ? "https://account.venmo.com/" : url;
+			return Promise.resolve(null);
+		},
+		url(): string {
+			return currentUrl;
+		},
+	};
+	await assert.doesNotReject(ensureVenmoOrigin(page as Page));
+	assert.equal(new URL(currentUrl).origin, "https://venmo.com");
+	assert.deepEqual(gotoUrls, [
+		"https://venmo.com/",
+		"https://venmo.com/robots.txt",
+	]);
 });
 
 // The guard must NOT become a no-op: a family host that never converges to

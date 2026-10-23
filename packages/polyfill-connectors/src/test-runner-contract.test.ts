@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "@babel/parser";
 import { testCommands } from "../scripts/test-dispatch.mjs";
 import { NAMESPACE_TESTS, VITEST_TESTS } from "../scripts/test-lanes.mjs";
+import { selectTestShard } from "../scripts/test-shards.mjs";
 
 const skipVitestFixture =
 	process.env.CI === undefined &&
@@ -114,7 +115,7 @@ test("package test runner bounds file concurrency and retains a finite hang guar
 	assert.match(ordinary, /process\.env\.TEST_CONCURRENCY \?\? "4"/);
 	assert.match(
 		ordinary,
-		/testCommands\(\s*files,\s*lane === "namespaces" \? "1" : rawConcurrency/,
+		/testCommands\(\s*shardFiles,\s*lane === "namespaces" \? "1" : rawConcurrency/,
 	);
 	assert.match(related, /process\.env\.TEST_CONCURRENCY \?\? "4"/);
 	assert.match(related, /scripts\/test-dispatch\.mjs/);
@@ -148,6 +149,25 @@ test("package test runner bounds file concurrency and retains a finite hang guar
 			new Set(["src/vitest.test.ts"]),
 		)[0]?.args.includes("--maxWorkers=1"),
 	);
+});
+
+test("test shards are deterministic, disjoint, and cover the full file list", () => {
+	const files = [
+		"c.test.ts",
+		"a.test.ts",
+		"b.test.ts",
+		"d.test.ts",
+		"e.test.ts",
+	];
+	const shards = [1, 2, 3].map((index) => selectTestShard(files, `${index}/3`));
+	assert.deepEqual(shards.flat().sort(), files.sort());
+	assert.equal(new Set(shards.flat()).size, files.length);
+	assert.deepEqual(
+		selectTestShard(files, "1/3"),
+		selectTestShard([...files].reverse(), "1/3"),
+	);
+	assert.throws(() => selectTestShard(files, "0/3"), /positive index\/count/);
+	assert.throws(() => selectTestShard(files, "4/3"), /between 1 and its count/);
 });
 
 test("Vitest registration matches every imported Vitest test in runner globs", async () => {

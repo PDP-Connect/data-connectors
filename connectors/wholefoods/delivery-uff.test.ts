@@ -11,18 +11,25 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { afterEach, beforeEach, test } from "node:test";
+import { after, afterEach, beforeEach, test } from "node:test";
 import type { Page } from "playwright";
 import {
 	assertUserFacingProgress,
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import {
+	makeRecordingEmit,
+	skipPoliteDelays,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
 import * as connector from "./index.ts";
 import * as parsers from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { OrderStub } from "./types.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 /** Diagnostic lines written during the current test. */
 const diagnostics: string[] = [];
@@ -85,7 +92,7 @@ test("parses all 31 delivery rows without clicking show-all and preserves unknow
 	assert.equal(connector.orderDetailCountsMatch(STUB, items), true);
 
 	const order = connector.buildOrderRecord(STUB, null, items);
-	assert.equal(order.item_count, null);
+	assert.equal(order.item_count, items.length);
 	assert.equal(order.total_cents, null);
 	validateRecord("orders", order);
 	const records = connector.buildOrderItemRecords(ORDER_ID, items);
@@ -108,11 +115,10 @@ test("delivery row without a product link remains countable and priced, without 
 	assert.equal(connector.buildOrderItemRecords(ORDER_ID, items).length, 30);
 });
 
-test("delivery count mismatch keeps the order and reports PROGRESS", async () => {
+test("delivery count mismatch withholds same-key rows and reports PROGRESS", async () => {
 	const mismatchStub = { ...STUB, expectedItemCount: 33 };
 	const harness = makeRecordingEmit(validateRecord);
 	await connector.collectOrderStubs({
-		credentials: {},
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		ordersCursor: openFingerprintCursor(undefined),
@@ -126,7 +132,11 @@ test("delivery count mismatch keeps the order and reports PROGRESS", async () =>
 	});
 	assert.equal(
 		harness.emitted.filter((record) => record.stream === "orders").length,
-		1,
+		0,
+	);
+	assert.equal(
+		harness.emitted.filter((record) => record.stream === "order_items").length,
+		0,
 	);
 	const warning = harness.protocolMessages.find((message) => {
 		const progress = message as { type?: string; message?: string };

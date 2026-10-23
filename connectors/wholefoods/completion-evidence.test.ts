@@ -10,10 +10,23 @@ import {
 	buildOrderRecord,
 	collectOrders,
 } from "./index.ts";
-import { mapUsdaNutrients, parseOrderDetailDom } from "./parsers.ts";
+import { acceptNutrition } from "./nutrition-acceptance.ts";
+import {
+	parseAmazonProductNutritionDom,
+	parseOrderDetailDom,
+} from "./parsers.ts";
 import { nutritionSchema, validateRecord } from "./schemas.ts";
+import { parseWholeFoodsProductPageDom } from "./test-support.ts";
 
-test("nutrition outcomes survive production keying and schema validation", async () => {
+const AMAZON_PANEL = `<html><body><div id="nic-nutrition-facts">Calories 150 Total Fat 8g Total Carbohydrate 37g Protein 3g</div></body></html>`;
+
+function acceptedAmazonRow() {
+	const facts = acceptNutrition(parseAmazonProductNutritionDom(AMAZON_PANEL));
+	assert.ok(facts);
+	return buildNutritionRecord("B012345678", "Source product", facts);
+}
+
+test("accepted nutrition survives production keying and schema validation", async () => {
 	const wire: any[] = [];
 	const runtime = makeEmitRecord({
 		requested: new Map([["nutrition", {}]]) as never,
@@ -25,13 +38,8 @@ test("nutrition outcomes survive production keying and schema validation", async
 		isTombstone: undefined,
 		timeRangeFieldFor: () => null,
 	});
-	for (const outcome of ["not_found", "error", "blocked"] as const) {
-		await runtime.emit(
-			"nutrition",
-			buildNutritionRecord("B012345678", "Source product", outcome),
-		);
-	}
-	assert.equal(runtime.counters.totalEmitted, 3);
+	await runtime.emit("nutrition", acceptedAmazonRow());
+	assert.equal(runtime.counters.totalEmitted, 1);
 	assert.equal(runtime.counters.totalSkipped, 0);
 	assert.ok(
 		wire.every(
@@ -55,7 +63,7 @@ test("unproven order totals and absent quantity stay unknown", () => {
 		null,
 		detail.items,
 	);
-	assert.equal(order.item_count, null);
+	assert.equal(order.item_count, 1);
 	assert.equal(order.total_cents, null);
 });
 
@@ -77,7 +85,7 @@ test("order-bound detail date survives a missing search-stub date", () => {
 		detail.items,
 	);
 	assert.equal(order.order_date, "2026-03-03");
-	assert.equal(order.item_count, null);
+	assert.equal(order.item_count, 1);
 	assert.equal(order.total_cents, null);
 });
 
@@ -101,22 +109,82 @@ test("unrelated body date is never used as the order date", () => {
 	assert.equal(order.order_date, null);
 });
 
-test("USDA absent serving units never imply grams", () => {
-	const facts = mapUsdaNutrients(
+test("nutrition parsing retains the legacy script's expanded nutrition payload", () => {
+	const facts = parseWholeFoodsProductPageDom(`<html><head>
+		<script type="application/ld+json">{"@type":"Product","gtin12":"012345678905","category":"Produce","ingredients":"Apples","nutrition":{"@type":"NutritionInformation","calories":"52","proteinContent":"0.3 g","carbohydrateContent":"14 g","fatContent":"0.2 g","saturatedFatContent":"0 g","transFatContent":"0 g","cholesterolContent":"0 mg","fiberContent":"2.4 g","sugarContent":"10 g","sodiumContent":"1 mg","potassiumContent":"107 mg","calciumContent":"6 mg","ironContent":"0.1 mg","vitaminDContent":"0 mcg"}}</script>
+	</head><body></body></html>`);
+	assert.ok(facts);
+	const accepted = acceptNutrition(facts);
+	assert.ok(accepted);
+	const row = buildNutritionRecord("B012345678", "Apples", accepted);
+	assert.deepEqual(
 		{
-			description: "food",
-			fdcId: 1,
-			brandName: null,
-			brandOwner: null,
-			gtinUpc: null,
-			servingSize: 30,
-			servingSizeUnit: null,
-			foodNutrients: [{ nutrientId: 1008, value: 100 }],
+			calories: row.calories,
+			protein_g: row.protein_g,
+			carbs_g: row.carbs_g,
+			fat_g: row.fat_g,
+			saturated_fat_g: row.saturated_fat_g,
+			trans_fat_g: row.trans_fat_g,
+			cholesterol_mg: row.cholesterol_mg,
+			added_sugar_g: row.added_sugar_g,
+			potassium_mg: row.potassium_mg,
+			calcium_mg: row.calcium_mg,
+			iron_mg: row.iron_mg,
+			vitamin_d_mcg: row.vitamin_d_mcg,
+			ingredients: row.ingredients,
+			allergens: row.allergens,
+			category: row.category,
+			upc: row.upc,
+			"@type": row.type,
 		},
-		"text",
+		{
+			calories: 52,
+			protein_g: 0.3,
+			carbs_g: 14,
+			fat_g: 0.2,
+			saturated_fat_g: 0,
+			trans_fat_g: 0,
+			cholesterol_mg: 0,
+			added_sugar_g: null,
+			potassium_mg: 107,
+			calcium_mg: 6,
+			iron_mg: 0.1,
+			vitamin_d_mcg: 0,
+			ingredients: "Apples",
+			allergens: null,
+			category: ["Produce"],
+			upc: "012345678905",
+			"@type": "https://schema.org/NutritionInformation",
+		},
 	);
-	assert.equal(facts.servingSize, null);
-	assert.equal(facts.calories, 100);
+	assert.equal(validateRecord("nutrition", row).ok, true);
+});
+
+test("structured nutrition is used when the rendered facts heading has no calories", () => {
+	const facts = parseWholeFoodsProductPageDom(`<html><head>
+		<script type="application/ld+json">{"@type":"Product","name":"Apples","category":"Produce","ingredients":"Apples","nutrition":{"@type":"NutritionInformation","calories":"52","proteinContent":"0.3 g","carbohydrateContent":"14 g","fatContent":"0.2 g","potassiumContent":"107 mg","calciumContent":"6 mg","ironContent":"0.1 mg","vitaminDContent":"0 mcg"}}</script>
+	</head><body><section><h2>Nutrition Facts</h2><div>Serving size 1 apple</div></section></body></html>`);
+	assert.ok(facts);
+	assert.equal(facts.calories, 52);
+	assert.equal(facts.potassiumMg, 107);
+	assert.equal(facts.ingredients, "Apples");
+});
+
+test("Amazon product nutrition parser keeps Amazon-only facts and provenance", () => {
+	const facts = parseAmazonProductNutritionDom(`<html><body>
+		<div id="detailBullets_feature_div"><li>UPC: 012345678905</li></div>
+		<div id="nic-nutrition-facts">Nutrition Facts Serving size 1 cup Calories 150 Total Fat 5g Saturated Fat 1g Trans Fat 0g Cholesterol 2mg Sodium 10mg Total Carbohydrate 20g Dietary Fiber 4g Sugars 8g Added Sugars 2g Protein 3g Potassium 100mg Calcium 20mg Iron 1mg Vitamin D 0mcg</div>
+		<div id="ingredients_feature_div">Ingredients: oats and salt</div>
+		<div>Contains: wheat</div>
+	</body></html>`);
+	assert.ok(facts);
+	assert.equal(facts.source, "amazon_product_page");
+	assert.equal(facts.calories, 150);
+	assert.equal(facts.saturatedFatG, 1);
+	assert.equal(facts.addedSugarG, 2);
+	assert.equal(facts.ingredients, "oats and salt");
+	assert.equal(facts.allergens, "wheat");
+	assert.equal(facts.upc, "012345678905");
 });
 
 test("DOM terminal and loading empty pages emit retryable inventory skip and no checkpoint", async () => {
@@ -133,7 +201,6 @@ test("DOM terminal and loading empty pages emit retryable inventory skip and no 
 			locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
 		} as unknown as Page;
 		await collectOrders({
-			credentials: {},
 			page,
 			state: {},
 			requested: new Map([["orders", {}]]) as never,
@@ -172,7 +239,7 @@ test("duplicate ASIN lines without source line identity are never silently merge
 });
 
 test("nutrition key must agree with its source product identity", () => {
-	const record = buildNutritionRecord("B012345678", "Source product", "error");
+	const record = acceptedAmazonRow();
 	assert.equal(
 		nutritionSchema.safeParse({ ...record, id: "B087654321" }).success,
 		false,

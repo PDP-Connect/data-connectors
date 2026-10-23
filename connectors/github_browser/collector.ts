@@ -4,7 +4,9 @@
 import type {
 	EmittedMessage,
 	RecordData,
+	StreamFailureOptions,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { inspectApiWindow } from "./page-evidence.ts";
 import { InventoryEvidence } from "./inventory-evidence.ts";
 import { fullInventoryCoverage } from "./inventory-coverage.ts";
 import {
@@ -34,6 +36,7 @@ const HISTORY_PAGE_SIZE = 100;
 const HISTORY_PAGE_LIMIT = 10;
 
 export interface BrowserCollectionPort {
+	reportStreamFailure?: (stream: string, message: string, options?: StreamFailureOptions) => Promise<void>;
 	emit(message: EmittedMessage): Promise<void>;
 	emitRecord(stream: string, record: RecordData): Promise<void>;
 	progress(message: string): Promise<void>;
@@ -46,8 +49,22 @@ interface CoverageCounts {
 	covered: number;
 }
 
+type CollectionFailure = CoverageCounts & (
+	| { origin: "source"; cause: string; status?: number; collection?: string }
+	| { origin: "sink"; cause: "record_emit_failed" | "state_emit_failed" | "message_emit_failed" }
+);
+
+// Only connector-owned classifications cross this boundary, never exception text.
+class CollectionError extends Error {
+	readonly failure: CollectionFailure;
+	constructor(failure: CollectionFailure) {
+		super(failure.cause);
+		this.failure = failure;
+	}
+}
+
 interface HistoryTypeResult extends CoverageCounts {
-	complete: boolean;
+	failure: CollectionFailure | null;
 	capped: boolean;
 }
 
@@ -55,7 +72,23 @@ export async function collectGitHubBrowser(
 	context: BrowserCollectionPort,
 	services: BrowserServices,
 ): Promise<void> {
-	const homepage = await services.openPage(`${GITHUB}/`);
+	const sourceRequest = async <T>(request: () => Promise<T>, counts: CoverageCounts = { considered: 0, covered: 0 }): Promise<T> => {
+		try { return await request(); }
+		catch (error) {
+			if (error instanceof CollectionError) throw error;
+			const status = error instanceof Error ? /^github_browser_http_(\d{3})$/u.exec(error.message)?.[1] : undefined;
+			throw new CollectionError({ ...counts, origin: "source", cause: "source_request_failed",
+				...(status === undefined ? {} : { status: Number(status) }) });
+		}
+	};
+	const fetchJson = async (url: string, counts: CoverageCounts = { considered: 0, covered: 0 }) => {
+		const response = await sourceRequest(() => services.fetchPublicJson(url), counts);
+		if (response.status !== 200) throw new CollectionError({ ...counts, origin: "source",
+			cause: response.status === 429 ? "http_rate_limited" : "http_status_failed", status: response.status });
+		if (!apiResponseMatches(response, url)) throw new CollectionError({ ...counts, origin: "source", cause: "wrong_navigation" });
+		return response;
+	};
+	const homepage = await sourceRequest(() => services.openPage(`${GITHUB}/`));
 	const username = parseLoggedInUsername(homepage.html);
 	if (
 		username === null ||
@@ -68,7 +101,15 @@ export async function collectGitHubBrowser(
 	const snapshotId = (stream: string): string => `${username}:${stream}`;
 	const pending = new Map<string, RecordData[]>();
 	const flushed = new Map<string, boolean>();
-	const flush = async (stream: string, allowEmpty = false): Promise<boolean> => {
+	const emitMessage = async (message: EmittedMessage, counts: CoverageCounts = { considered: 0, covered: 0 }): Promise<void> => {
+		try { await context.emit(message); }
+		catch { throw new CollectionError({ considered: counts.considered, covered: counts.covered, origin: "sink", cause: message.type === "STATE" ? "state_emit_failed" : "message_emit_failed" }); }
+	};
+	const checkpoint = async (stream: string, cursor: Record<string, unknown>, counts?: CoverageCounts): Promise<void> => {
+		await emitMessage({ type: "STATE", stream, cursor }, counts);
+		context.state[stream] = cursor;
+	};
+	const flush = async (stream: string, allowEmpty = false, counts: CoverageCounts = { considered: 1, covered: 1 }): Promise<boolean> => {
 		if (flushed.has(stream)) return flushed.get(stream) === true;
 		const rows = pending.get(stream) ?? [];
 		if (rows.length === 0 && !allowEmpty) return false;
@@ -95,9 +136,10 @@ export async function collectGitHubBrowser(
 			};
 		}
 		const validated = validateRecord(stream, data);
-		flushed.set(stream, validated.ok);
 		if (!validated.ok) return false;
-		await context.emitRecord(stream, validated.data);
+		try { await context.emitRecord(stream, validated.data); }
+		catch { throw new CollectionError({ ...counts, origin: "sink", cause: "record_emit_failed" }); }
+		flushed.set(stream, true);
 		return true;
 	};
 	const complete = async (
@@ -105,36 +147,58 @@ export async function collectGitHubBrowser(
 		counts: CoverageCounts,
 		metadata: Record<string, unknown> = {},
 	): Promise<void> => {
-		if (!(await flush(stream, true))) {
+		if (!(await flush(stream, true, counts))) {
 			await incomplete(stream, "invalid_snapshot_shape", counts);
 			return;
 		}
-		context.state[stream] = {
+		await checkpoint(stream, {
 			fetched_at: services.now().toISOString(),
 			...metadata,
-		};
-		await context.emit({
-			type: "STATE",
-			stream,
-			cursor: context.state[stream],
-		});
-		await context.emit(fullInventoryCoverage(stream, { kind: "enumerated", complete: true, considered: 1, covered: 1 }));
+		}, counts);
+		await emitMessage(fullInventoryCoverage(stream, { kind: "enumerated", complete: true, considered: 1, covered: 1 }));
 	};
 	const incomplete = async (
 		stream: string,
-		reason: string,
-		counts?: CoverageCounts,
+		reason: string | CollectionFailure,
+		counts: CoverageCounts = { considered: 0, covered: 0 },
 	): Promise<void> => {
-		if (stream === "profile") {
-			await context.emit({ type: "SKIP_RESULT", stream, reason: "github_browser_incomplete", message: `GitHub did not return a complete result for this stream: ${reason}.`, diagnostics: { cause: reason },
-				recovery_hint: { action: "retry_by_runtime", retryable: true } });
-			return;
+		const failure: CollectionFailure = typeof reason === "string"
+			? { origin: "source", cause: reason, ...counts } : reason;
+		const enumeration = { kind: "enumerated" as const, complete: false,
+			considered: failure.considered, covered: failure.covered };
+		const message: EmittedMessage = stream === "profile"
+			? { type: "SKIP_RESULT", stream, reason: "github_browser_incomplete",
+				message: `GitHub did not return a complete result for this stream: ${failure.cause}.`,
+				recovery_hint: { action: "retry_by_runtime", retryable: true } }
+			: fullInventoryCoverage(stream, enumeration, failure.cause);
+		if (message.type === "SKIP_RESULT") {
+			message.diagnostics = { ...(asRecord(message.diagnostics) ?? {}), ...failure };
+			const requestFailed = failure.origin === "source" && ["source_request_failed", "http_rate_limited", "http_status_failed", "wrong_navigation"].includes(failure.cause);
+			// A requested profile that could not be read is a stream failure,
+			// including owner, shape and embedded-section failures.
+			const profileFailed = stream === "profile" && failure.origin === "source";
+			if (requestFailed || profileFailed) {
+				const text = requestFailed
+					? `GitHub requests for this stream failed: ${failure.cause}.`
+					: `GitHub did not return a complete result for this stream: ${failure.cause}.`;
+				const diagnostics = { ...asRecord(message.diagnostics), reason: failure.cause,
+					...(failure.status === undefined ? {} : { source_error: `http_${failure.status}` }) };
+				const recoveryHint = { action: "retry_by_runtime", retryable: true };
+				if (context.reportStreamFailure) {
+					try { await context.reportStreamFailure(stream, text, { diagnostics, recoveryHint, retryable: true }); }
+					catch { throw new CollectionError({ ...counts, origin: "sink", cause: "message_emit_failed" }); }
+					return;
+				}
+				message.reason = "stream_collection_failed";
+				message.message = text;
+				message.diagnostics = diagnostics;
+			}
+			if (failure.origin === "sink") {
+				message.reason = "github_browser_publication_failed";
+				message.message = `GitHub stream publication failed: ${failure.cause}.`;
+			}
 		}
-		// Inventory snapshots are withheld until their source window is complete.
-		await context.emit(fullInventoryCoverage(stream, {
-			kind: "enumerated", complete: false,
-			considered: counts?.considered ?? 0, covered: counts?.covered ?? 0,
-		}, reason));
+		await emitMessage(message, failure);
 	};
 	const emitEntity = async (stream: string, data: object): Promise<boolean> => {
 		const record = data as RecordData;
@@ -151,8 +215,10 @@ export async function collectGitHubBrowser(
 	): Promise<void> => {
 		try {
 			await work();
-		} catch {
-			await incomplete(stream, "source_request_failed");
+		} catch (error) {
+			if (error instanceof CollectionError && error.failure.origin === "sink" && error.failure.cause === "message_emit_failed") throw error;
+			await incomplete(stream, error instanceof CollectionError ? error.failure
+				: { origin: "source", cause: "collection_failed", considered: 0, covered: 0 });
 		}
 	};
 
@@ -161,7 +227,7 @@ export async function collectGitHubBrowser(
 			const url = `${GITHUB}/${username}`;
 			// The contribution heading loads after the profile shell, so read the
 			// profile through the loader that waits for the contribution section.
-			const page = await (services.openContributionPage ?? services.openPage)(url);
+			const page = await sourceRequest(() => (services.openContributionPage ?? services.openPage)(url));
 			if (!inspectProfilePage(page, username, url)) {
 				await incomplete("profile", "wrong_page_or_owner");
 				return;
@@ -170,6 +236,11 @@ export async function collectGitHubBrowser(
 			const record = parsed.row;
 			if (record === null || record.username !== username) {
 				await incomplete("profile", "unreadable_profile");
+				return;
+			}
+			const collectionFailure = parsed.collectionFailures[0];
+			if (collectionFailure !== undefined) {
+				await incomplete("profile", { ...collectionFailure, origin: "source", considered: 1, covered: 0 });
 				return;
 			}
 			const emitted = await emitEntity("profile", {
@@ -183,11 +254,10 @@ export async function collectGitHubBrowser(
 				});
 				return;
 			}
-			// Singleton presence only. Embedded lists are best-effort, not inventories.
+			// Singleton presence only, with readable embedded collections.
 			// Never issue self coverage or derive deletes from these fields.
 			if (await flush("profile")) {
-				context.state.profile = { fetched_at: services.now().toISOString() };
-				await context.emit({ type: "STATE", stream: "profile", cursor: context.state.profile });
+				await checkpoint("profile", { fetched_at: services.now().toISOString() }, { considered: 1, covered: 1 });
 			} else await incomplete("profile", "invalid_snapshot_shape");
 		});
 	}
@@ -195,98 +265,65 @@ export async function collectGitHubBrowser(
 	for (const stream of ["repositories", "starred"] as const) {
 		if (!wants.has(stream)) continue;
 		await runIsolated(stream, async () => {
-			const seen = new Set<string>();
 			let covered = 0;
-			const evidence = new InventoryEvidence();
-			let endProven = false;
-			let failure: string | null = "page_limit_reached";
-			let entriesComplete = true;
-			let rejected = 0;
-			let url = inventoryUrl(username, stream, 1);
-			for (let pageNumber = 1; pageNumber <= INVENTORY_PAGE_LIMIT; pageNumber += 1) {
-				let page = await services.openPage(url);
-				let parsed = inventoryRows(stream, page.html);
-				let proof = inspectInventoryPage(page, stream, username, pageNumber, new Set([...seen, ...parsed.rows.map(row => row.id)]).size, rejected + parsed.rejectedRows);
-				evidence.add(proof);
-				if (stream === "starred" && pageNumber === 1 && (proof.reason === "terminal_unverified" || proof.reason === "unreadable_list")) {
-					const primary = { parsed, proof };
-					url = `${GITHUB}/stars/${username}?page=1`;
-					page = await services.openPage(url);
-					parsed = inventoryRows(stream, page.html);
-					proof = inspectInventoryPage(page, stream, username, pageNumber, parsed.rows.length, parsed.rejectedRows);
-					evidence.add(proof);
-					// An unreadable alternate route must not discard a readable primary list.
-					if (proof.reason === "unreadable_list" && primary.proof.reason === "terminal_unverified") {
-						parsed = primary.parsed;
-						proof = primary.proof;
-					}
+			const evidence = new InventoryEvidence(inventoryUrl(username, stream, 1), { pages: INVENTORY_PAGE_LIMIT });
+			const counts = () => ({ considered: evidence.expectedTotal ?? evidence.identities.size, covered });
+			for (let request = evidence.next; request !== null; request = evidence.next) {
+				const inspect = (page: BrowserPageObservation, parsed: ReturnType<typeof inventoryRows>) => {
+					const { distinct, noProgress } = evidence.previewPage(parsed.rows.map(row => row.id));
+					return inspectInventoryPage(page, stream, username, request.page, distinct, parsed.rejectedRows, noProgress);
+				};
+				const read = async (url: string) => {
+					const page = await sourceRequest(() => services.openPage(url), counts());
+					const parsed = inventoryRows(stream, page.html);
+					return { ...inspect(page, parsed), rows: parsed.rows, ids: parsed.rows.map(row => row.id),
+						rowsComplete: parsed.entriesComplete, rejectedRows: parsed.rejectedRows };
+				};
+				const primary = await read(request.url);
+				const alternate = stream === "starred" && request.page === 1 &&
+					(primary.reason === "terminal_unverified" || primary.reason === "unreadable_list")
+					? await read(`${GITHUB}/stars/${username}?page=1`) : undefined;
+				const { selected, added } = evidence.observeRoutes(primary, alternate);
+				for (const row of selected.rows) {
+					if (added.delete(row.id) && await emitEntity(stream, row)) covered += 1;
 				}
-				if (proof.reason === "wrong_navigation" || proof.reason === "wrong_owner") {
-					await incomplete(stream, proof.reason); return;
-				}
-				rejected += parsed.rejectedRows;
-				entriesComplete &&= parsed.entriesComplete;
-				for (const row of parsed.rows) {
-					if (seen.has(row.id)) continue;
-					seen.add(row.id);
-					if (await emitEntity(stream, row)) covered += 1;
-				}
-				if (proof.nextUrl !== null) {
-					url = proof.nextUrl;
-					continue;
-				}
-				failure = proof.reason;
-				if (entriesComplete && rejected === 0 &&
-					(proof.complete || proof.reason === "terminal_unverified") && covered === seen.size) {
-					failure = null;
-					endProven = proof.complete;
-					if (!endProven && proof.total === null && stream === "starred") {
-						failure = await inspectStarredRest(services, username, seen, evidence);
-						endProven = failure === null;
-					}
-				}
-				break;
 			}
-			const reason = evidence.decide(seen.size, endProven, failure);
-			const counts = { considered: evidence.expectedTotal ?? seen.size, covered };
-			if (reason === null) await complete(stream, counts);
-			else await incomplete(stream, reason, counts);
+			// Without an exact total, the REST list is the independent enumeration.
+			if (stream === "starred" && evidence.decide(covered) === "terminal_unverified") {
+				evidence.reconcile(await sourceRequest(() => enumerateStarredRest(
+					restUrl => fetchJson(restUrl, counts()), username), counts()));
+			}
+			const reason = evidence.decide(covered);
+			if (reason === null) await complete(stream, counts());
+			else await incomplete(stream, reason, counts());
 		});
 	}
 
 	if (wants.has("events")) {
 		await runIsolated("events", async () => {
-			const seen = new Set<string>();
+			const evidence = new InventoryEvidence(`${API}/users/${username}/events/public?per_page=100&page=1`, { pages: 3 });
 			let considered = 0;
 			let covered = 0;
-			let valid = true;
-			for (let page = 1; page <= 3; page += 1) {
-				const url = `${API}/users/${username}/events/public?per_page=100&page=${page}`;
-				const response = await services.fetchPublicJson(url);
-				if (!apiResponseMatches(response, url) || !Array.isArray(response.data))
+			for (let request = evidence.next; request !== null; request = evidence.next) {
+				const response = await fetchJson(request.url, { considered, covered });
+				if (!Array.isArray(response.data)) {
+					evidence.fail("invalid_events_response");
 					break;
-				considered += response.data.length;
-				for (const raw of response.data) {
-					const parsed = parseLegacyEventPageItem(raw);
-					const event = parsed.row;
-					if (!parsed.complete) valid = false;
-					if (event === null || seen.has(event.id)) {
-						valid = false;
-						continue;
-					}
-					seen.add(event.id);
-					if (await emitEntity("events", event)) covered += 1;
-					else valid = false;
 				}
-				if (response.data.length === 0 || apiWindowEnded(response.link)) {
-					if (valid) await complete("events", { considered, covered });
-					else await incomplete("events", "invalid_or_duplicate_rows", { considered, covered });
-					return;
+				considered += response.data.length;
+				const events = response.data.map(raw => parseLegacyEventPageItem(raw));
+				const rows = events.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
+				const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: events.every(parsed => parsed.complete),
+					rejectedRows: events.length - rows.length,
+					...inspectApiWindow(response.link, request.url, response.data.length) });
+				for (const event of rows) {
+					if (added.delete(event.id) && await emitEntity("events", event)) covered += 1;
 				}
 			}
-			const counts = { considered, covered };
 			// Neither a short page nor our loop limit establishes the source end.
-			await incomplete("events", !valid ? "invalid_or_duplicate_rows" : "end_not_proven", counts);
+			const reason = evidence.decide(covered);
+			if (reason === null) await complete("events", { considered, covered });
+			else await incomplete("events", reason, { considered, covered });
 		});
 	}
 
@@ -300,7 +337,7 @@ export async function collectGitHubBrowser(
 			}> = [];
 			let considered = 0;
 			let rejected = 0;
-			let sourceFailed = false;
+			let sourceFailure: CollectionFailure | null = null;
 			const openContributionPage =
 				services.openContributionPage ?? services.openPage;
 			for (let offset = 0; offset < 4; offset += 1) {
@@ -312,7 +349,7 @@ export async function collectGitHubBrowser(
 				try {
 					page = await openContributionPage(url);
 				} catch {
-					sourceFailed = true;
+					sourceFailure ??= { origin: "source", cause: "source_request_failed", considered, covered: 0 };
 					continue;
 				}
 				if (
@@ -320,11 +357,11 @@ export async function collectGitHubBrowser(
 					page.currentUrl !== url ||
 					!hasExpectedOwner(page.html, username)
 				) {
-					sourceFailed = true;
+					sourceFailure ??= { origin: "source", cause: "wrong_page_or_owner", considered, covered: 0 };
 					continue;
 				}
 				const graph = parseContributionHtml(page.html);
-				if (!graph.complete) sourceFailed = true;
+				if (!graph.complete) sourceFailure ??= { origin: "source", cause: "year_view_unavailable", considered, covered: 0 };
 				considered += graph.rawDays;
 				rejected += graph.rejectedDays;
 				graphs.push({ ...graph, year: itemYear });
@@ -367,15 +404,15 @@ export async function collectGitHubBrowser(
 				else rejected += 1;
 			}
 			if (
-				sourceFailed ||
+				sourceFailure !== null ||
 				snapshot === null ||
 				rejected > 0 ||
 				covered !== days.size + (snapshot === null ? 0 : 1)
 			) {
 				await incomplete(
 					"contributions",
-					sourceFailed
-						? "year_view_unavailable"
+					sourceFailure !== null
+						? { ...sourceFailure, considered, covered }
 						: "date_coverage_or_shape_mismatch",
 					{ considered, covered },
 				);
@@ -387,38 +424,18 @@ export async function collectGitHubBrowser(
 
 	if (wants.has("history")) {
 		await runIsolated("history", async () => {
-			let issueResult: HistoryTypeResult;
-			let prResult: HistoryTypeResult;
-			try {
-				issueResult = await collectHistoryType("issue");
-			} catch {
-				issueResult = {
-					complete: false,
-					capped: false,
-					considered: 0,
-					covered: 0,
-				};
+			const issueResult = await collectHistoryType("issue");
+			if (issueResult.failure !== null) {
+				await incomplete("history", issueResult.failure);
+				return;
 			}
-			try {
-				prResult = await collectHistoryType("pr");
-			} catch {
-				prResult = {
-					complete: false,
-					capped: false,
-					considered: 0,
-					covered: 0,
-				};
-			}
+			const prResult = await collectHistoryType("pr");
 			const considered = issueResult.considered + prResult.considered;
 			const covered = issueResult.covered + prResult.covered;
-			if (
-				!issueResult.complete ||
-				!prResult.complete
-			) {
+			if (prResult.failure !== null) {
 				await incomplete(
 					"history",
-					"search_incomplete",
-					{ considered, covered },
+					{ ...prResult.failure, considered, covered },
 				);
 				return;
 			}
@@ -438,19 +455,29 @@ export async function collectGitHubBrowser(
 	async function collectHistoryType(
 		type: "issue" | "pr",
 	): Promise<HistoryTypeResult> {
-		let expectedTotal: number | null = null;
-		let considered = 0;
+		const query = encodeURIComponent(`author:${username} ${type === "pr" ? "type:pr" : "type:issue"}`);
+		// The API caps this search window, not the underlying authored history.
+		const window = HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT;
+		const evidence = new InventoryEvidence(
+			`${API}/search/issues?q=${query}&sort=created&order=desc&per_page=${HISTORY_PAGE_SIZE}&page=1`,
+			{ pages: HISTORY_PAGE_LIMIT, window },
+		);
 		let covered = 0;
-		let completeType = false;
 		let capped = false;
-		const seen = new Set<string>();
-		for (let page = 1; page <= HISTORY_PAGE_LIMIT; page += 1) {
-			const kind = type === "pr" ? "type:pr" : "type:issue";
-			const query = encodeURIComponent(`author:${username} ${kind}`);
-			const url = `${API}/search/issues?q=${query}&sort=created&order=desc&per_page=${HISTORY_PAGE_SIZE}&page=${page}`;
-			const response = await services.fetchPublicJson(url);
-			if (!apiResponseMatches(response, url)) break;
+		const counts = () => ({ considered: evidence.expectedTotal ?? evidence.identities.size, covered });
+		for (let request = evidence.next; request !== null; request = evidence.next) {
+			if (request.page > 1) await services.sleep(6500);
+			let response: Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>;
+			try { response = await fetchJson(request.url, counts()); }
+			catch (error) {
+				if (!(error instanceof CollectionError)) throw error;
+				return { failure: error.failure, capped, ...counts() };
+			}
 			const body = asRecord(response.data);
+			if (body?.incomplete_results === true) {
+				evidence.fail("search_incomplete_results");
+				break;
+			}
 			if (
 				body === null ||
 				!Array.isArray(body.items) ||
@@ -458,39 +485,25 @@ export async function collectGitHubBrowser(
 				typeof body.total_count !== "number" ||
 				!Number.isInteger(body.total_count) ||
 				body.total_count < 0
-			)
-				break;
-			if (expectedTotal !== null && body.total_count !== expectedTotal) break;
-			expectedTotal = body.total_count;
-			considered = Math.max(considered, body.total_count);
-			if (body.total_count > HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT) {
-				capped = true;
-			}
-			let invalid = false;
-			for (const raw of body.items) {
-				const parsed = parseLegacyHistoryPageItem(raw, type);
-				const item = parsed.row;
-				if (!parsed.complete) invalid = true;
-				if (item === null || seen.has(item.id)) {
-					invalid = true;
-					continue;
-				}
-				seen.add(item.id);
-				if (await emitEntity("history", item)) covered += 1;
-				else invalid = true;
-			}
-			if (invalid) break;
-			// The API caps this search window, not the underlying authored history.
-			// Short pages and our page budget are never completion evidence.
-			if (expectedTotal === seen.size ||
-				(capped && (apiWindowEnded(response.link) || seen.size === HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT))) {
-				completeType = true;
+			) {
+				evidence.fail("malformed_search_response");
 				break;
 			}
-			if (body.items.length === 0 || apiWindowEnded(response.link)) break;
-			if (page < HISTORY_PAGE_LIMIT) await services.sleep(6500);
+			evidence.addTotals({ exactTotals: [body.total_count], totalConflict: false });
+			capped ||= body.total_count > window;
+			const items = body.items.map(raw => parseLegacyHistoryPageItem(raw, type));
+			const rows = items.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
+			// The walk ends on GitHub's Link end, and decide() then requires every
+			// identity in the stable window. Short pages and our page budget prove nothing.
+			const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: items.every(parsed => parsed.complete),
+				rejectedRows: items.length - rows.length,
+				...inspectApiWindow(response.link, request.url, body.items.length) });
+			for (const item of rows) {
+				if (added.delete(item.id) && await emitEntity("history", item)) covered += 1;
+			}
 		}
-		return { complete: completeType, capped, considered, covered };
+		const cause = evidence.decide(covered);
+		return { failure: cause === null ? null : { origin: "source", cause, ...counts() }, capped, ...counts() };
 	}
 }
 
@@ -531,41 +544,26 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 		: null;
 }
 
-// undefined means the adapter did not observe headers; null means an observed
-// absent Link header. Only the latter is GitHub source-end evidence.
-function apiWindowEnded(link: string | null | undefined): boolean {
-	if (link === undefined) return false;
-	if (link === null) return true;
-	return !/;\s*rel\s*=\s*(?:"[^"]*\bnext\b[^"]*"|next\b)/iu.test(link);
-}
-
 /** REST supplies enumeration evidence; browser rows remain the emitted payload. */
-async function inspectStarredRest(
-	services: BrowserServices,
+async function enumerateStarredRest(
+	fetchPublicJson: BrowserServices["fetchPublicJson"],
 	username: string,
-	browserRepos: ReadonlySet<string>,
-	evidence: InventoryEvidence,
-): Promise<string | null> {
-	const seen = new Set<string>();
-	for (let page = 1; page <= INVENTORY_PAGE_LIMIT; page += 1) {
-		const url = `${API}/users/${username}/starred?per_page=100&page=${page}`;
-		const response = await services.fetchPublicJson(url);
-		if (!apiResponseMatches(response, url) || !Array.isArray(response.data))
-			return "invalid_starred_rest_response";
-		for (const raw of response.data) {
+): Promise<InventoryEvidence> {
+	const rest = new InventoryEvidence(`${API}/users/${username}/starred?per_page=100&page=1`, { pages: INVENTORY_PAGE_LIMIT });
+	for (let request = rest.next; request !== null; request = rest.next) {
+		const response = await fetchPublicJson(request.url);
+		if (!Array.isArray(response.data)) {
+			rest.fail("invalid_starred_rest_response");
+			break;
+		}
+		const ids = response.data.flatMap(raw => {
 			const repo = asRecord(raw);
 			const name = repo?.full_name;
-			if (typeof name !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(name) ||
-				repo?.html_url !== `${GITHUB}/${name}` || seen.has(repo.html_url))
-				return "invalid_or_duplicate_rows";
-			seen.add(repo.html_url as string);
-		}
-		if ((page === 1 && response.data.length === 0) || apiWindowEnded(response.link)) {
-			evidence.addEnumeration(seen.size);
-			if (seen.size !== browserRepos.size) return "total_mismatch";
-			if (Array.from(seen).some(repo => !browserRepos.has(repo))) return "repository_mismatch";
-			return null;
-		}
+			return typeof name === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(name) &&
+				repo?.html_url === `${GITHUB}/${name}` ? [`${GITHUB}/${name}`] : [];
+		});
+		rest.observePage({ ids, rowsComplete: true, rejectedRows: response.data.length - ids.length,
+			...inspectApiWindow(response.link, request.url, response.data.length) });
 	}
-	return "end_not_proven";
+	return rest;
 }

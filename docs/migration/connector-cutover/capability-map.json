@@ -383,7 +383,7 @@
       "connector_key": "wholefoods",
       "oci_name": "wholefoods",
       "lane": "cut-wholefoods",
-      "acquisition": "browser session on amazon.com (shared Amazon session seam in the runtime library) -> Whole Foods order search + order detail; nutrition enrichment from wholefoodsmarket.com product pages, USDA FDC fallback",
+      "acquisition": "browser session on amazon.com (shared Amazon session seam in the runtime library) -> Whole Foods order search + order detail; nutrition read from the Amazon product page and wholefoodsmarket.com product pages (no USDA lookup)",
       "browser_profile": "wholefoods",
       "tier_target": "development until proof gate",
       "scopes": [

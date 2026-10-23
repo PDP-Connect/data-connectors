@@ -6,6 +6,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { collectGitHubBrowser } from "./collector.ts";
+import { githubLink } from "./api-link-fixture.ts";
+import { parseProfilePage } from "./parsers.ts";
+import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
 
 const pageObservation = (requestedUrl: string, html: string) => ({
@@ -176,6 +179,7 @@ test("real runtime preserves selected aggregate contracts before DONE", async ()
 		"history",
 	];
 	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
 		cwd: new URL("../../packages/polyfill-connectors/", import.meta.url)
 			.pathname,
 		entrypoint: new URL("./protocol-runtime-fixture.ts", import.meta.url)
@@ -185,7 +189,6 @@ test("real runtime preserves selected aggregate contracts before DONE", async ()
 			scope: { streams: streams.map((name) => ({ name })) },
 		},
 	});
-	assert.equal(result.code, 0);
 	const records = result.messages.filter(
 		(message) => message.type === "RECORD",
 	);
@@ -197,10 +200,131 @@ test("real runtime preserves selected aggregate contracts before DONE", async ()
 		if (message.type !== "RECORD") continue;
 		assert.equal(message.data.id, message.key);
 	}
+	// starred and contributions are not proven complete: Collection Profile
+	// 5.5 and 5.8 end that run failed with the portable stream failure, and the
+	// streams that were proven keep their records.
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => `${message.stream}:${message.reason}`)
+			.sort(),
+		["contributions:stream_collection_failed", "starred:stream_collection_failed"],
+	);
+	assert.equal(result.code, 1);
 	const done = result.messages.at(-1);
 	assert.equal(done?.type, "DONE");
-	if (done?.type === "DONE") assert.equal(done.records_emitted, records.length);
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(done.error?.code, "stream_collection_failed");
+		assert.equal(done.records_emitted, records.length);
+	}
 });
+
+test("a profile with an unreadable embedded section fails the real runtime run with the portable stream failure", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
+		cwd: new URL("../../packages/polyfill-connectors/", import.meta.url)
+			.pathname,
+		entrypoint: new URL("./protocol-profile-runtime-fixture.ts", import.meta.url)
+			.pathname,
+		start: { type: "START", scope: { streams: [{ name: "profile" }] } },
+	});
+	assert.equal(result.code, 1);
+	assert.deepEqual(
+		result.messages.filter(
+			(message) => message.type === "RECORD" || message.type === "STATE",
+		),
+		[],
+	);
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => `${message.stream}:${message.reason}`),
+		["profile:stream_collection_failed"],
+	);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(done.error?.code, "stream_collection_failed");
+	}
+});
+
+for (const [field, container, brokenEntry] of [
+	[
+		"pinnedRepositories",
+		'<div class="js-pinned-items-reorder-container"></div>',
+		'<div class="js-pinned-items-reorder-container"><li><a href="/sponsors/sample-user">Sponsor</a></li></div>',
+	],
+	[
+		"organizations",
+		'<div class="avatar-group"></div>',
+		'<div class="avatar-group"><a class="avatar-group-item" href="/"></a></div>',
+	],
+	[
+		"achievements",
+		'<div class="profile-achievements"></div>',
+		'<div class="profile-achievements"><a href="/sample-user?achievement=badge"><img src="https://example.test/badge.png"></a></div>',
+	],
+] as const) {
+	for (const failure of ["entry", "section"] as const) {
+		test(`profile with unreadable ${field} ${failure} reports a portable stream failure when the runtime supplies one`, async () => {
+			const html = (
+				await readFile(new URL("./__fixtures__/synthetic/profile.html", import.meta.url), "utf8")
+			).replace(
+				container,
+				failure === "entry"
+					? brokenEntry
+					: container.replace("></div>", ' aria-busy="true"></div>'),
+			);
+			const messages: EmittedMessage[] = [];
+			const records: unknown[] = [];
+			const reports: Array<{ stream: string; message: string; options: unknown }> = [];
+			await collectGitHubBrowser(
+				{
+					emit: async (message) => {
+						messages.push(message);
+					},
+					emitRecord: async (_stream, record) => {
+						records.push(record);
+					},
+					progress: async () => {},
+					reportStreamFailure: async (stream, message, options) => {
+						reports.push({ stream, message, options });
+					},
+					requested: new Set(["profile"]),
+					state: {},
+				},
+				{
+					fetchPublicJson: async () => {
+						throw new Error("a profile-only run must not call the API");
+					},
+					now: () => new Date("2026-10-20T17:00:00Z"),
+					openPage: async (url) => pageObservation(url, html),
+					sleep: async () => {},
+				},
+			);
+			assert.deepEqual(messages, []);
+			assert.deepEqual(records, []);
+			assert.equal(reports.length, 1);
+			assert.equal(reports[0]?.stream, "profile");
+			assert.equal(
+				reports[0]?.message,
+				"GitHub did not return a complete result for this stream: discarded_rows.",
+			);
+			const options = reports[0]?.options as {
+				recoveryHint: unknown;
+				diagnostics: Record<string, unknown>;
+			};
+			assert.deepEqual(options.recoveryHint, {
+				action: "retry_by_runtime",
+				retryable: true,
+			});
+			assert.equal(options.diagnostics.reason, "discarded_rows");
+			assert.equal(options.diagnostics.collection, field);
+		});
+	}
+}
 
 test("inventory follows next link and rejects an unproven empty page", async () => {
 	const profile = await readFixture("profile.html");
@@ -370,8 +494,10 @@ test("three full event pages withhold the snapshot without source end evidence",
 			state,
 		},
 		{
-			fetchPublicJson: async (url: string) =>
-				apiObservation(url, pages[page++]),
+			fetchPublicJson: async (url: string) => ({
+				...apiObservation(url, pages[page++]),
+				link: githubLink(url, 5),
+			}),
 			now: () => new Date("2026-01-01T00:00:00Z"),
 			openPage: async (url) => pageObservation(url, profile),
 			sleep: async () => {},
@@ -413,7 +539,7 @@ test("history exact source total of 1,000 can prove completeness", async () => {
 						incomplete_results: false,
 					});
 				const page = issuePage++;
-				return apiObservation(url, {
+				return Object.assign(apiObservation(url, {
 					items: Array.from({ length: 100 }, (_, index) => ({
 						...source,
 						id: page * 100 + index + 1,
@@ -423,7 +549,7 @@ test("history exact source total of 1,000 can prove completeness", async () => {
 					})),
 					total_count: 1000,
 					incomplete_results: false,
-				});
+				}), { link: githubLink(url, 10) });
 			},
 			now: () => new Date("2026-01-01T00:00:00Z"),
 			openPage: async (url) => pageObservation(url, profile),
@@ -581,7 +707,9 @@ test("compact pull-request event payloads publish the observed events window", a
 });
 
 test("two-identity starred cards cannot publish with terminal pagination and no counter", async () => {
-	const messages: Array<{ type: string }> = [];
+	const messages: EmittedMessage[] = [];
+	const prior = { starred: { fetched_at: "2026-10-01T00:00:00Z" } };
+	const state = structuredClone(prior);
 	const records: unknown[] = [];
 	const html = withOwner(`<main><turbo-frame id="user-starred-repos"><div class="col-12 d-block width-full border-bottom"><h3><a href="/sample-owner/first">sample-owner/first</a></h3><h3><a href="/sample-owner/second">sample-owner/second</a></h3><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div></turbo-frame>${terminalInventory}</main>`);
 	await collectGitHubBrowser(
@@ -590,7 +718,7 @@ test("two-identity starred cards cannot publish with terminal pagination and no 
 			emitRecord: async (_stream, data) => { records.push(data); },
 			progress: async () => {},
 			requested: new Set(["starred"]),
-			state: {},
+			state,
 		},
 		{
 			fetchPublicJson: async (url) => apiObservation(url, []),
@@ -601,6 +729,13 @@ test("two-identity starred cards cannot publish with terminal pagination and no 
 	);
 	assert.deepEqual(records, []);
 	assert.equal(messages.some(({ type }) => ["RECORD", "STATE", "DETAIL_COVERAGE"].includes(type)), false);
+	assert.deepEqual(state, prior);
+	assert.equal(messages.length, 1);
+	const skip = messages[0];
+	assert.ok(skip?.type === "SKIP_RESULT");
+	assert.equal(skip.stream, "starred");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
 });
 
 for (const countConflict of [false, true]) {
@@ -670,3 +805,333 @@ test(`overlapping contribution views ${countConflict ? "withhold conflicting cou
 });
 
 }
+
+// A GitHub request that throws (navigation, an HTTP status such as the
+// unauthenticated REST rate limit, transport) never read the inventory. It is
+// a failed read reported through reportStreamFailure, not an unproven
+// enumeration (Collection Profile 5.5).
+for (const { stream, services } of [
+	{
+		stream: "events",
+		services: {
+			fetchPublicJson: async (): Promise<never> => {
+				throw new Error("github_browser_http_429");
+			},
+		},
+	},
+	{
+		stream: "history",
+		services: {
+			fetchPublicJson: async (): Promise<never> => {
+				throw new Error("github_browser_http_403");
+			},
+		},
+	},
+	{
+		stream: "contributions",
+		services: {
+			openContributionPage: async (): Promise<never> => {
+				throw new Error("net::ERR_TIMED_OUT at https://github.com/sample-user");
+			},
+		},
+	},
+] as const) {
+	test(`a ${stream} request that throws is a reported stream failure, not an unproven inventory`, async () => {
+		const profile = await readFixture("profile.html");
+		const messages: Array<{ type: string; stream?: string; reason?: string }> = [];
+		const reports: Array<{ stream: string; message: string; options: unknown }> = [];
+		await collectGitHubBrowser(
+			{
+				emit: async (message) => {
+					messages.push(message);
+				},
+				emitRecord: async () => {},
+				progress: async () => {},
+				reportStreamFailure: async (failed, message, options) => {
+					reports.push({ stream: failed, message, options });
+				},
+				requested: new Set([stream]),
+				state: {},
+			},
+			{
+				fetchPublicJson: async (url) => apiObservation(url, []),
+				now: () => new Date("2026-01-01T00:00:00Z"),
+				openPage: async (url) => pageObservation(url, profile),
+				sleep: async () => {},
+				...services,
+			},
+		);
+		assert.equal(
+			messages.some((message) => message.type === "SKIP_RESULT"),
+			false,
+			"no unproven-enumeration SKIP_RESULT",
+		);
+		assert.equal(reports.length, 1);
+		assert.equal(reports[0]?.stream, stream);
+		assert.equal(
+			reports[0]?.message,
+			"GitHub requests for this stream failed: source_request_failed.",
+		);
+		const options = reports[0]?.options as {
+			recoveryHint: unknown;
+			diagnostics: Record<string, unknown>;
+		};
+		assert.deepEqual(options.recoveryHint, {
+			action: "retry_by_runtime",
+			retryable: true,
+		});
+		assert.equal(options.diagnostics.reason, "source_request_failed");
+		assert.equal(
+			options.diagnostics.source_error,
+			stream === "events" ? "http_429" : stream === "history" ? "http_403" : undefined,
+		);
+		assert.doesNotMatch(JSON.stringify(reports), /https:\/\/github\.com/u);
+	});
+}
+
+for (const [field, container, brokenEntry] of [
+	["pinnedRepositories", '<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><li><a href="/sponsors/sample-user">Sponsor</a></li></div>'],
+	["organizations", '<div class="avatar-group"></div>', '<div class="avatar-group"><a class="avatar-group-item" href="/"></a></div>'],
+	["achievements", '<div class="profile-achievements"></div>', '<div class="profile-achievements"><a href="/sample-user?achievement=badge"><img src="https://example.test/badge.png"></a></div>'],
+] as const) {
+	for (const failure of ["entry", "section"] as const) {
+		test(`profile with unreadable ${field} ${failure} preserves prior state and signals incomplete`, async () => {
+			const html = (await readFixture("profile.html")).replace(container,
+				failure === "entry" ? brokenEntry : container.replace("></div>", ' aria-busy="true"></div>'));
+			const parsed = parseProfilePage(html, "https://github.com/sample-user");
+			assert.equal(parsed.row?.username, "sample-user");
+			assert.equal(parsed.complete, false);
+			if (failure === "entry") assert.ok(parsed.rejectedEntries > 0);
+			else assert.ok(parsed.unreadableFields.includes(field));
+			const prior = { profile: { fetched_at: "2026-10-01T00:00:00Z" } };
+			const state = structuredClone(prior);
+			const messages: EmittedMessage[] = [];
+			const records: unknown[] = [];
+			await collectGitHubBrowser({
+				emit: async (message) => { messages.push(message); },
+				emitRecord: async (_stream, record) => { records.push(record); },
+				progress: async () => {},
+				requested: new Set(["profile"]), state,
+			}, {
+				fetchPublicJson: async (url) => apiObservation(url, []),
+				now: () => new Date("2026-10-20T17:00:00Z"),
+				openPage: async (url) => pageObservation(url, html),
+				sleep: async () => {},
+			});
+			assert.deepEqual(messages.map(message => message.type), ["SKIP_RESULT"]);
+			const skip = messages[0];
+			assert.ok(skip?.type === "SKIP_RESULT");
+			assert.equal(skip.stream, "profile");
+			assert.equal(skip.reason, "stream_collection_failed");
+			assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+			assert.deepEqual(records, []);
+			assert.deepEqual(state, prior);
+		});
+	}
+}
+
+
+for (const nested of [false, true]) {
+ test(`ambiguous repository rows preserve prior state with terminal pagination: ${nested ? "nested row" : "two identities"}`, async () => {
+  const messages: EmittedMessage[] = [];
+  const records: unknown[] = [];
+  const prior = { repositories: { fetched_at: "2026-10-01T00:00:00Z" } };
+  const state = structuredClone(prior);
+  const second = '<h3><a href="/sample-user/second">second</a></h3>';
+  const html = withOwner(`<main><div id="user-repositories-list"><ul><li><h3><a href="/sample-user/first">first</a></h3>${nested ? `<ul><li>${second}</li></ul>` : second}<span class="Label">Public</span><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></li></ul></div>${terminalInventory}</main>`);
+  await collectGitHubBrowser({
+   emit: async message => { messages.push(message); },
+   emitRecord: async (_stream, data) => { records.push(data); },
+   progress: async () => {}, requested: new Set(["repositories"]), state,
+  }, {
+   fetchPublicJson: async url => apiObservation(url, []),
+   now: () => new Date("2026-10-20T17:00:00Z"),
+   openPage: async url => pageObservation(url, url === "https://github.com/" ? profilePlaceholder : html),
+   sleep: async () => {},
+  });
+  assert.deepEqual(records, []);
+  assert.deepEqual(state, prior);
+  assert.deepEqual(messages.map(message => message.type), ["SKIP_RESULT"]);
+  const skip = messages[0];
+  assert.ok(skip?.type === "SKIP_RESULT");
+  assert.equal(skip.stream, "repositories");
+  assert.equal(skip.reason, "inventory_not_proven_complete");
+ });
+}
+
+for (const reporter of [false, true]) {
+	for (const cause of ["wrong_page_or_owner", "collection_failed"]) {
+		test(`requested profile failure is portable: ${cause}, reporter=${reporter}`, async () => {
+			const html = await readFixture("profile.html");
+			const prior = { profile: { fetched_at: "2026-10-01T00:00:00Z" } };
+			const state = structuredClone(prior);
+			const messages: EmittedMessage[] = [];
+			const records: unknown[] = [];
+			await collectGitHubBrowser(
+				{
+					requested: new Set(["profile"]),
+					state,
+					progress: async () => {},
+					emit: async (message) => {
+						messages.push(message);
+					},
+					emitRecord: async (_stream, record) => {
+						records.push(record);
+					},
+					...(reporter
+						? {
+								reportStreamFailure: async (
+									stream: string,
+									message: string,
+									options?: { diagnostics?: Record<string, unknown> },
+								) => {
+									messages.push({
+										type: "SKIP_RESULT",
+										stream,
+										reason: "stream_collection_failed",
+										message,
+										diagnostics: options?.diagnostics,
+									});
+								},
+							}
+						: {}),
+				},
+				{
+					fetchPublicJson: async (url) => apiObservation(url, []),
+					openPage: async (url) => ({
+						...pageObservation(url, html),
+						currentUrl:
+							cause === "wrong_page_or_owner" && url !== "https://github.com/"
+								? "https://github.com/other"
+								: url,
+					}),
+					now: () => {
+						throw new Error("PRIVATE-profile-clock-error");
+					},
+					sleep: async () => {},
+				},
+			);
+			assert.deepEqual(records, []);
+			assert.deepEqual(state, prior);
+			assert.equal(messages.length, 1);
+			const skip = messages[0];
+			assert.ok(skip && skip.type === "SKIP_RESULT");
+			assert.equal(skip.reason, "stream_collection_failed");
+			assert.ok(skip.diagnostics && typeof skip.diagnostics === "object");
+			assert.equal((skip.diagnostics as Record<string, unknown>).cause, cause);
+			assert.doesNotMatch(
+				JSON.stringify(messages),
+				/PRIVATE-profile-clock-error/,
+			);
+		});
+	}
+}
+
+const profilePrior = "2026-10-01T00:00:00Z";
+for (const [scenario, cause] of [
+	["wrong-owner", "wrong_page_or_owner"],
+	["unreadable-profile", "unreadable_profile"],
+	["throw-now", "collection_failed"],
+] as const) {
+	test(`profile ${cause} fails through the real runtime without changing its checkpoint`, async () => {
+		const result = await runConnectorProtocolSubprocess({
+			allowFailedDone: true,
+			cwd: new URL("../../packages/polyfill-connectors/", import.meta.url)
+				.pathname,
+			entrypoint: new URL(
+				"./protocol-profile-runtime-fixture.ts",
+				import.meta.url,
+			).pathname,
+			env: { GITHUB_PROFILE_SCENARIO: scenario },
+			start: {
+				type: "START",
+				scope: { streams: [{ name: "profile" }] },
+				state: { profile: { fetched_at: profilePrior } },
+			},
+		});
+		assert.equal(result.code, 1);
+		assert.equal(result.signal, null);
+		assert.deepEqual(
+			result.messages.filter(
+				(message) => message.type === "RECORD" || message.type === "STATE",
+			),
+			[],
+		);
+		const skips = result.messages.filter(
+			(message) => message.type === "SKIP_RESULT",
+		);
+		assert.equal(skips.length, 1);
+		assert.equal(skips[0]?.stream, "profile");
+		assert.equal(skips[0]?.reason, "stream_collection_failed");
+		const diagnostics = skips[0]?.diagnostics;
+		assert.ok(
+			diagnostics &&
+				typeof diagnostics === "object" &&
+				!Array.isArray(diagnostics),
+		);
+		const failure = diagnostics as Record<string, unknown>;
+		assert.equal(failure.reason, cause);
+		assert.equal(failure.origin, "source");
+		assert.equal(failure.considered, 0);
+		assert.equal(failure.covered, 0);
+		const done = result.messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(done.status, "failed");
+			assert.equal(done.error?.code, "stream_collection_failed");
+			assert.equal(done.records_emitted, 0);
+		}
+		assert.equal(
+			JSON.stringify(result.messages).includes("github_browser_incomplete"),
+			false,
+		);
+		for (const text of [
+			JSON.stringify(result.messages),
+			result.rawStdout,
+			result.stderr,
+		]) {
+			assert.equal(text.includes("PRIVATE_PROFILE_CLOCK_SENTINEL"), false);
+		}
+	});
+}
+
+test("an omitted optional profile name succeeds through the real runtime", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		cwd: new URL("../../packages/polyfill-connectors/", import.meta.url)
+			.pathname,
+		entrypoint: new URL(
+			"./protocol-profile-runtime-fixture.ts",
+			import.meta.url,
+		).pathname,
+		env: { GITHUB_PROFILE_SCENARIO: "optional-name" },
+		start: {
+			type: "START",
+			scope: { streams: [{ name: "profile" }] },
+			state: { profile: { fetched_at: profilePrior } },
+		},
+	});
+	assert.equal(result.code, 0);
+	assert.equal(result.signal, null);
+	const records = result.messages.filter(
+		(message) => message.type === "RECORD",
+	);
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.stream, "profile");
+	assert.equal(Object.hasOwn(records[0]?.data ?? {}, "fullName"), false);
+	const states = result.messages.filter((message) => message.type === "STATE");
+	assert.equal(states.length, 1);
+	assert.equal(states[0]?.stream, "profile");
+	assert.deepEqual(states[0]?.cursor, {
+		fetched_at: "2026-10-22T00:00:00.000Z",
+	});
+	assert.deepEqual(
+		result.messages.filter((message) => message.type === "SKIP_RESULT"),
+		[],
+	);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "succeeded");
+		assert.equal(done.records_emitted, records.length);
+	}
+});
