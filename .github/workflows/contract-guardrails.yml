@@ -30,9 +30,6 @@ jobs:
       - name: Test temporary release metadata and fixture proofs (remove with F10)
         run: npm run legacy-retention:test
 
-      - name: Test the retained Oura artifact (until F2) and connector brand icons
-        run: npm run oura-retention:test
-
       - name: Test installer artifact contracts
         run: npm run installer:test
 
@@ -45,7 +42,7 @@ jobs:
       - name: Test publish ref gate
         run: node --test scripts/publish-ref-gate.test.mjs
 
-      - name: Test publish tag guard, manifest lookup, registry rate limit and additive schemas
+      - name: Test publish tag guard, manifest lookup, registry rate limit, additive schemas and connector brand icons
         run: npm run scripts:test
 
       - name: Check scope schemas additive (HC-COMPAT-ADDITIVE-SCHEMA-001)
