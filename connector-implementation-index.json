@@ -10841,7 +10841,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.26",
+				"version": "0.2.27",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",
@@ -21292,7 +21292,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.0",
+				"version": "0.3.1",
 				"display_name": "TikTok (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
