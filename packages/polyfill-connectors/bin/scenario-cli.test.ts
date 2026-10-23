@@ -4414,6 +4414,176 @@ test("scenario-record: advisory omits repeated-key comparisons when the runs ans
 	}
 });
 
+/**
+ * Same kind/message/request_id and the same wire answer ("0") in both runs,
+ * but the prompt schema says option 0 is a different account each run. The
+ * schema is selection-relevant: dropping it pairs the runs and blames the
+ * stream for the label change. The variants below cover canonical key order,
+ * selection-relevant array order and types, the serialized-context bound,
+ * legacy prompts with no schema, and a schema nested past the canonical bound.
+ */
+const SELECTION_SCHEMA_FIXTURE_BODY = `    const mode = process.env.SELECTION_SCHEMA_FIXTURE_MODE ?? "account";
+    const label = repeated ? "SELECTION_ACCOUNT_B_CANARY" : "SELECTION_ACCOUNT_A_CANARY";
+    const sharedLabel = "SELECTION_ACCOUNT_A_CANARY";
+    let schema;
+    if (mode === "legacy") {
+      schema = undefined;
+    } else if (mode === "same") {
+      schema = { type: "object", properties: { account: { type: "string", const: sharedLabel } }, required: ["account"] };
+    } else if (mode === "reordered") {
+      schema = repeated
+        ? { required: ["account"], properties: { account: { const: sharedLabel, type: "string" } }, type: "object" }
+        : { type: "object", properties: { account: { type: "string", const: sharedLabel } }, required: ["account"] };
+    } else if (mode === "array-order") {
+      schema = { type: "object", properties: { account: { type: "string", enum: repeated ? ["b", "a"] : ["a", "b"] } } };
+    } else if (mode === "type-change") {
+      schema = { type: "object", properties: { account: { type: repeated ? "number" : "string" } } };
+    } else if (mode === "bound") {
+      schema = { type: "object", description: "x".repeat(60_000), properties: { account: { type: "string" } } };
+    } else if (mode === "overbound") {
+      schema = { type: "object", description: "y".repeat(70_000), properties: { account: { type: "string" } } };
+    } else if (mode === "unsupported") {
+      schema = { type: "string" };
+      for (let depth = 0; depth < 100; depth += 1) {
+        schema = { type: "object", properties: { step: schema } };
+      }
+    } else {
+      schema = { type: "object", properties: { account: { type: "string", enum: [label] } }, required: ["account"] };
+    }
+    const selection = await sendInteraction({
+      kind: "manual_action",
+      message: "SELECTION_SCHEMA_PROMPT_CANARY",
+      request_id: "pick",
+      ...(schema === undefined ? {} : { schema }),
+    });
+    if (selection.status !== "success") throw new Error("selection not answered");
+    await emitRecord("items", { id: "same-stream-local-id", label: repeated ? "second" : "first" });`;
+
+test("scenario-record: selection schema distinguishes account options across runs", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-selection-schema-"),
+	);
+	const connectorKey = "selection_schema_fixture";
+	writeBoundObservationFixture({
+		collectBody: SELECTION_SCHEMA_FIXTURE_BODY,
+		connectorKey,
+		schemaJson: SIMPLE_SCHEMA,
+		tmpDir,
+	});
+	const cases = [
+		{
+			mode: "account",
+			expected: "insufficient-repeat-observations (0 repeated identities;",
+			why: "different account options must not be paired",
+		},
+		{
+			mode: "same",
+			expected: "differences-observed (1 repeated identities;",
+			why: "an identical schema stays comparable",
+		},
+		{
+			mode: "reordered",
+			expected: "differences-observed (1 repeated identities;",
+			why: "object key order is not selection-relevant",
+		},
+		{
+			mode: "array-order",
+			expected: "insufficient-repeat-observations (0 repeated identities;",
+			why: "array order is selection-relevant",
+		},
+		{
+			mode: "type-change",
+			expected: "insufficient-repeat-observations (0 repeated identities;",
+			why: "a JSON type change is selection-relevant",
+		},
+		{
+			mode: "bound",
+			expected: "differences-observed (1 repeated identities;",
+			why: "a schema inside the serialized bound still compares",
+		},
+		{
+			mode: "overbound",
+			expected: "insufficient-repeat-observations (0 repeated identities;",
+			why: "a schema past the serialized bound makes the context unknown",
+		},
+		{
+			mode: "legacy",
+			expected: "differences-observed (1 repeated identities;",
+			why: "a missing legacy schema preserves the old comparison",
+		},
+		{
+			mode: "unsupported",
+			expected: "insufficient-repeat-observations (0 repeated identities;",
+			why: "a schema past the canonical depth bound is unsupported",
+		},
+	];
+	try {
+		for (const { mode, expected, why } of cases) {
+			const transcriptDir = join(tmpDir, `transcript-${mode}`);
+			const result = runRecordCli(
+				[
+					connectorKey,
+					"--out",
+					join(tmpDir, `${mode}.scenario.json`),
+					"--answer",
+					"pick=0",
+				],
+				{
+					PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+					PDPP_SCENARIO_TRANSCRIPT_DIR: transcriptDir,
+					SELECTION_SCHEMA_FIXTURE_MODE: mode,
+				},
+			);
+			assert.equal(result.code, 0, `${mode}: ${result.stderr}`);
+			assert.match(result.stdout, /complete: true/, mode);
+			assert.equal(
+				assertTranscriptInteractionsContractValid(transcriptDir),
+				2,
+				mode,
+			);
+			assert.equal(
+				result.stdout.includes(`items: ${expected}`),
+				true,
+				`${mode}: ${why}; stdout=${result.stdout}`,
+			);
+			if (expected.startsWith("insufficient")) {
+				assert.equal(
+					result.stdout.includes("/label (1)"),
+					false,
+					`${mode} must not claim a label change`,
+				);
+				assert.equal(
+					result.stdout.includes("raw changed fields:"),
+					false,
+					`${mode} must not name changed fields from unpaired runs`,
+				);
+				assert.match(
+					result.stdout,
+					/limitation: [^\n]*scope or selection context/,
+					mode,
+				);
+			} else {
+				assert.equal(
+					result.stdout.includes("/label (1)"),
+					true,
+					`${mode} should pair the runs and report the label change`,
+				);
+			}
+			for (const canary of [
+				"SELECTION_SCHEMA_PROMPT_CANARY",
+				"SELECTION_ACCOUNT_A_CANARY",
+				"SELECTION_ACCOUNT_B_CANARY",
+				"same-stream-local-id",
+			]) {
+				assert.equal(result.stdout.includes(canary), false, mode);
+				assert.equal(result.stderr.includes(canary), false, mode);
+			}
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
 test("scenario-record: advisory keeps wire key [x] distinct from the scalar string whose text is [x]", () => {
 	const tmpDir = mkdtempSync(join(packageScratchDir(), "scenario-wire-key-"));
 	const fixturePath = join(tmpDir, "wire-key-fixture.ts");
@@ -4512,6 +4682,249 @@ test("scenario-record: a deeply nested declared schema cannot abort capture befo
 	}
 });
 
+const ALL_OF_REF_SCHEMA = JSON.stringify({
+	type: "object",
+	properties: {
+		id: { type: "string" },
+		nested: { $ref: "#/$defs/a~1b~0c" },
+	},
+	allOf: [
+		{ properties: { clock: { type: "string" } } },
+		{ $ref: "#/$defs/shared" },
+		{ $ref: "#/$defs/shared" },
+	],
+	$defs: {
+		"a/b~c": { properties: { value: { type: "string" } } },
+		shared: { properties: { status: { type: "string" } } },
+	},
+});
+
+test("scenario-record: declared schema follows allOf and local $refs across runs", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-declared-schema-"),
+	);
+	const connectorKey = "declared_schema_fixture";
+	writeBoundObservationFixture({
+		collectBody: `    await emitRecord("items", {
+      id: "same-stream-local-id",
+      clock: repeated ? "second-clock" : "first-clock",
+      nested: { value: repeated ? "second-value" : "first-value" },
+      status: repeated ? "second-status" : "first-status",
+    });`,
+		connectorKey,
+		schemaJson: ALL_OF_REF_SCHEMA,
+		tmpDir,
+	});
+	try {
+		const result = runRecordCli(
+			[connectorKey, "--out", join(tmpDir, "declared.scenario.json")],
+			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+		);
+		assert.equal(result.code, 0, result.stderr);
+		assert.match(result.stdout, /complete: true/);
+		assert.match(
+			result.stdout,
+			/items: differences-observed \(1 repeated identities;/,
+		);
+		assert.equal(
+			result.stdout.includes(
+				"raw changed fields: /clock (1), /nested/value (1), /status (1)",
+			),
+			true,
+			`allOf and local $ref field names must be declared; stdout=${result.stdout}`,
+		);
+		assert.equal(
+			result.stdout.includes("raw changes in unnamed or undeclared fields"),
+			false,
+			"all changed fields are declared through allOf/$ref, so none is unnamed",
+		);
+		assert.equal(
+			result.stdout.includes("Schema field metadata was bounded"),
+			false,
+			"resolvable local refs must not claim schema metadata was bounded",
+		);
+		for (const canary of [
+			"first-clock",
+			"second-clock",
+			"first-value",
+			"second-value",
+			"first-status",
+			"second-status",
+			"same-stream-local-id",
+		]) {
+			assert.equal(result.stdout.includes(canary), false);
+			assert.equal(result.stderr.includes(canary), false);
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+/** A chain of local refs long enough that traversing it twice would cross the
+ *  node visit bound; one traversal stays under it. */
+function chainedRefSchema(length: number): string {
+	const defs: Record<string, unknown> = {};
+	for (let index = 0; index < length; index += 1) {
+		defs[`s${String(index)}`] =
+			index === length - 1
+				? { properties: { last: { type: "string" } } }
+				: { $ref: `#/$defs/s${String(index + 1)}` };
+	}
+	return JSON.stringify({
+		type: "object",
+		properties: { id: { type: "string" } },
+		allOf: [{ $ref: "#/$defs/s0" }, { $ref: "#/$defs/s0" }],
+		$defs: defs,
+	});
+}
+
+function chainedRefOverflowSchema(length: number): string {
+	const defs: Record<string, unknown> = {};
+	for (let index = 0; index < length; index += 1) {
+		defs[`s${String(index)}`] =
+			index === length - 1
+				? { properties: { last: { type: "string" } } }
+				: { $ref: `#/$defs/s${String(index + 1)}` };
+	}
+	return JSON.stringify({
+		type: "object",
+		properties: { id: { type: "string" } },
+		allOf: [{ $ref: "#/$defs/s0" }],
+		$defs: defs,
+	});
+}
+
+test("scenario-record: declared schema cycles, unresolved refs, and node overflows stay bounded", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-schema-bounds-"),
+	);
+	const cases: Array<{
+		bounded: boolean;
+		collectBody?: string;
+		key: string;
+		namedField?: string;
+		runs?: string;
+		schema: string;
+		why: string;
+	}> = [
+		{
+			bounded: true,
+			key: "schema_cycle_fixture",
+			schema: JSON.stringify({
+				type: "object",
+				properties: { id: { type: "string" } },
+				allOf: [{ $ref: "#/$defs/a" }],
+				$defs: {
+					a: { $ref: "#/$defs/b" },
+					b: { $ref: "#/$defs/a" },
+				},
+			}),
+			why: "a ref cycle must be reported as bounded",
+		},
+		{
+			bounded: true,
+			key: "schema_unresolved_fixture",
+			schema: JSON.stringify({
+				type: "object",
+				properties: { id: { type: "string" } },
+				allOf: [{ $ref: "#/$defs/missing" }],
+			}),
+			why: "an unresolved local ref must be reported as bounded",
+		},
+		{
+			bounded: true,
+			key: "schema_external_fixture",
+			schema: JSON.stringify({
+				type: "object",
+				properties: { id: { type: "string" } },
+				allOf: [{ $ref: "https://example.invalid/schema.json" }],
+			}),
+			why: "an external ref must be reported as bounded without fetching",
+		},
+		{
+			bounded: true,
+			key: "schema_unsupported_fixture",
+			schema: JSON.stringify({
+				type: "object",
+				properties: { id: { type: "string" } },
+				anyOf: [{ properties: { conditional: { type: "string" } } }],
+			}),
+			why: "an unsupported combinator must be reported as bounded",
+		},
+		{
+			bounded: false,
+			key: "schema_repeated_ref_fixture",
+			schema: chainedRefSchema(2500),
+			why: "the same ref twice is visited once, not counted twice",
+		},
+		{
+			bounded: true,
+			key: "schema_node_overflow_fixture",
+			schema: chainedRefOverflowSchema(5000),
+			why: "a ref chain past the node visit bound must stop honestly",
+		},
+		{
+			bounded: true,
+			collectBody: `    await emitRecord("items", { id: "same-stream-local-id", label: repeated ? "sibling-second" : "sibling-first" });`,
+			key: "schema_ref_sibling_fixture",
+			namedField: "/label (1)",
+			runs: "2",
+			schema: JSON.stringify({
+				type: "object",
+				properties: {
+					id: { type: "string" },
+					label: { type: "string" },
+				},
+				allOf: [{ $ref: "https://example.invalid/schema.json" }],
+			}),
+			why: "direct siblings stay named even when an external ref is bounded",
+		},
+	];
+	try {
+		for (const {
+			bounded,
+			collectBody = `    await emitRecord("items", { id: "same-stream-local-id" });`,
+			key,
+			namedField,
+			runs = "1",
+			schema,
+			why,
+		} of cases) {
+			writeBoundObservationFixture({
+				collectBody,
+				connectorKey: key,
+				schemaJson: schema,
+				tmpDir,
+			});
+			const result = runRecordCli(
+				[key, "--runs", runs, "--out", join(tmpDir, `${key}.scenario.json`)],
+				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			);
+			assert.equal(result.code, 0, `${key}: ${result.stderr}`);
+			assert.match(result.stdout, /complete: true/, key);
+			assert.equal(
+				result.stdout.includes("RangeError"),
+				false,
+				`${key} must not overflow the stack`,
+			);
+			assert.equal(
+				result.stdout.includes("Schema field metadata was bounded"),
+				bounded,
+				`${key}: ${why}; stdout=${result.stdout}`,
+			);
+			if (namedField !== undefined) {
+				assert.equal(
+					result.stdout.includes(namedField),
+					true,
+					`${key}: ${why}; stdout=${result.stdout}`,
+				);
+			}
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
 const OTP_FIXTURE_BODY = `    const different = process.env.OTP_FIXTURE_IDENTICAL !== "1";
     const otp = await sendInteraction({
       kind: "otp",
@@ -4601,6 +5014,19 @@ test("selection context is kept up to exactly 65,536 serialized characters and u
 	assert.equal(selectionContextKey([atLimit])?.length, 65_536);
 	assert.equal(selectionContextKey([`${atLimit}a`]), undefined);
 	assert.equal(selectionContextKey([]), "[]");
+	// The prompt schema is part of the same serialized-character budget: no
+	// hashing or separate allowance can hide an oversized selection context.
+	const schemaKey = selectionContextKey([
+		{ schema: { description: "a".repeat(60_000) } },
+	]);
+	assert.notEqual(schemaKey, undefined);
+	assert.ok((schemaKey ?? "").length <= MAX_SELECTION_CONTEXT_LENGTH);
+	assert.equal(
+		selectionContextKey([
+			{ schema: { description: "a".repeat(MAX_SELECTION_CONTEXT_LENGTH) } },
+		]),
+		undefined,
+	);
 });
 
 function writeMultiByteConnector(directory: string): string {

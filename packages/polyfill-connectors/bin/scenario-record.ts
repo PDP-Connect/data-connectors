@@ -744,20 +744,164 @@ function manifestObject(value: unknown): Record<string, unknown> | undefined {
  *  fields past a bound fall into the advisory's generic bucket. */
 const MAX_SCHEMA_PATH_DEPTH = 32;
 const MAX_SCHEMA_PATHS = 2000;
+/** Total schema nodes visited. `allOf` and local `$ref` chains can fan out
+ *  without adding a property, so path bounds alone do not bound the work. */
+const MAX_SCHEMA_NODES = 4096;
 
-/** Schema properties use the same RFC 6901 paths as raw observation traversal. */
+/** Keywords that can contribute instance fields this collector cannot name
+ *  without a general JSON Schema engine. Their presence makes the metadata
+ *  honestly bounded instead of silently incomplete. */
+const UNSUPPORTED_SCHEMA_KEYWORDS = [
+	"oneOf",
+	"anyOf",
+	"not",
+	"if",
+	"then",
+	"else",
+	"patternProperties",
+	"dependentSchemas",
+] as const;
+
+function decodeSchemaRefToken(token: string): string | undefined {
+	let decoded: string;
+	try {
+		decoded = decodeURIComponent(token);
+	} catch {
+		return undefined;
+	}
+	return decoded.replaceAll("~1", "/").replaceAll("~0", "~");
+}
+
+/** Resolve a same-document JSON Pointer (`#/...`) against the ORIGINAL schema
+ *  root using own properties only. External refs and malformed pointers
+ *  return undefined; nothing is fetched or inferred. */
+function resolveLocalSchemaRef(
+	root: unknown,
+	ref: string,
+): unknown | undefined {
+	if (ref === "#") {
+		return root;
+	}
+	if (!ref.startsWith("#/")) {
+		return undefined;
+	}
+	let current = root;
+	for (const token of ref.slice(2).split("/")) {
+		const key = decodeSchemaRefToken(token);
+		if (key === undefined || typeof current !== "object" || current === null) {
+			return undefined;
+		}
+		if (!Object.hasOwn(current, key)) {
+			return undefined;
+		}
+		current = (current as Record<string, unknown>)[key];
+	}
+	return current;
+}
+
+/** Whether stopping at the depth bound can hide deeper declared fields. */
+function declaresNestedSchema(value: unknown): boolean {
+	const node = manifestObject(value);
+	return (
+		node !== undefined &&
+		(manifestObject(node.properties) !== undefined ||
+			Array.isArray(node.allOf) ||
+			Object.hasOwn(node, "$ref"))
+	);
+}
+
+/** Schema properties use the same RFC 6901 paths as raw observation traversal.
+ *  `allOf` subschemas and same-document `$ref`s apply to the same instance,
+ *  so they are followed at the same prefix; unsafe or unsupported schema
+ *  shapes set `bounded` instead of guessing field names. */
 function declaredSchemaPaths(schema: unknown): {
 	bounded: boolean;
 	paths: string[];
 } {
 	const paths: string[] = [];
+	const seen = new Set<string>();
 	let bounded = false;
-	const pending: Array<{ depth: number; prefix: string; schema: unknown }> = [
-		{ depth: 0, prefix: "", schema },
-	];
-	for (let next = pending.pop(); next; next = pending.pop()) {
-		const properties = manifestObject(manifestObject(next.schema)?.properties);
-		if (!properties) {
+	let nodes = 0;
+	const activeRefs = new Set<string>();
+	const completedRefs = new Set<string>();
+	type Frame =
+		| { depth: number; prefix: string; schema: unknown }
+		| { exitedRef: string };
+	const pending: Frame[] = [{ depth: 0, prefix: "", schema }];
+	while (pending.length > 0) {
+		const frame = pending.pop();
+		if (frame === undefined) {
+			break;
+		}
+		if ("exitedRef" in frame) {
+			activeRefs.delete(frame.exitedRef);
+			completedRefs.add(frame.exitedRef);
+			continue;
+		}
+		nodes += 1;
+		if (nodes > MAX_SCHEMA_NODES) {
+			bounded = true;
+			break;
+		}
+		const node = manifestObject(frame.schema);
+		if (node === undefined) {
+			continue;
+		}
+		for (const keyword of UNSUPPORTED_SCHEMA_KEYWORDS) {
+			if (Object.hasOwn(node, keyword)) {
+				bounded = true;
+			}
+		}
+		if (manifestObject(node.additionalProperties) !== undefined) {
+			bounded = true;
+		}
+
+		if (Object.hasOwn(node, "$ref")) {
+			const ref = node.$ref;
+			if (typeof ref !== "string") {
+				bounded = true;
+			} else {
+				const visitKey = `${frame.prefix}\u0000${ref}`;
+				if (activeRefs.has(visitKey)) {
+					// A ref cycle at the same instance prefix.
+					bounded = true;
+				} else if (!completedRefs.has(visitKey)) {
+					const resolved = resolveLocalSchemaRef(schema, ref);
+					if (resolved === undefined) {
+						bounded = true;
+					} else {
+						activeRefs.add(visitKey);
+						pending.push({ exitedRef: visitKey });
+						pending.push({
+							depth: frame.depth,
+							prefix: frame.prefix,
+							schema: resolved,
+						});
+					}
+				}
+			}
+			// Direct siblings still apply; they are collected below.
+		}
+
+		if (Object.hasOwn(node, "allOf")) {
+			if (Array.isArray(node.allOf)) {
+				for (const subSchema of node.allOf) {
+					pending.push({
+						depth: frame.depth,
+						prefix: frame.prefix,
+						schema: subSchema,
+					});
+				}
+			} else {
+				bounded = true;
+			}
+		}
+
+		const properties = manifestObject(node.properties);
+		if (properties === undefined) {
+			if (Object.hasOwn(node, "properties")) {
+				bounded = true;
+			}
 			continue;
 		}
 		for (const name in properties) {
@@ -767,15 +911,18 @@ function declaredSchemaPaths(schema: unknown): {
 			if (paths.length >= MAX_SCHEMA_PATHS) {
 				return { bounded: true, paths };
 			}
-			const path = appendObservationPath(next.prefix, name);
-			paths.push(path);
-			if (next.depth + 1 < MAX_SCHEMA_PATH_DEPTH) {
+			const path = appendObservationPath(frame.prefix, name);
+			if (!seen.has(path)) {
+				seen.add(path);
+				paths.push(path);
+			}
+			if (frame.depth + 1 < MAX_SCHEMA_PATH_DEPTH) {
 				pending.push({
-					depth: next.depth + 1,
+					depth: frame.depth + 1,
 					prefix: path,
 					schema: properties[name],
 				});
-			} else if (manifestObject(manifestObject(properties[name])?.properties)) {
+			} else if (declaresNestedSchema(properties[name])) {
 				bounded = true;
 			}
 		}
@@ -1454,14 +1601,90 @@ function toScenarioUserInteraction(
 /** Marks a run whose selection context cannot be established. */
 const UNKNOWN_SELECTION_CONTEXT = Symbol("unknown-selection-context");
 
+/** Canonicalization bounds for a prompt schema. These are far above any
+ *  legitimate interaction schema; they exist so a hostile or malformed
+ *  schema cannot make the advisory compare exhausted or cyclic state. */
+const MAX_SELECTION_SCHEMA_DEPTH = 64;
+const MAX_SELECTION_SCHEMA_NODES = 4096;
+
+/**
+ * Canonical, selection-relevant projection of a prompt schema. Object key
+ * order is not selection-relevant (the same schema is often serialized in a
+ * different order), but array order and JSON types are. The projection is
+ * private: it only feeds `selectionContextKey`, which is compared in memory
+ * and never printed or persisted.
+ *
+ * Returns `undefined` when the value cannot be represented safely inside the
+ * bounds (cycles, non-JSON values, or a hostile depth/node fan-out). A schema
+ * that exists but cannot be compared makes the whole run's selection context
+ * unknown rather than guessed.
+ */
+function canonicalSelectionSchema(value: unknown): unknown | undefined {
+	let nodes = 0;
+	const active = new Set<object>();
+	const encode = (item: unknown, depth: number): unknown | undefined => {
+		if (depth > MAX_SELECTION_SCHEMA_DEPTH) {
+			return undefined;
+		}
+		nodes += 1;
+		if (nodes > MAX_SELECTION_SCHEMA_NODES) {
+			return undefined;
+		}
+		if (item === null) {
+			return null;
+		}
+		if (typeof item !== "object") {
+			if (typeof item === "string" || typeof item === "boolean") {
+				return item;
+			}
+			return typeof item === "number" && Number.isFinite(item)
+				? item
+				: undefined;
+		}
+		if (active.has(item)) {
+			return undefined;
+		}
+		active.add(item);
+		try {
+			if (Array.isArray(item)) {
+				const encoded: unknown[] = [];
+				for (const entry of item) {
+					const next = encode(entry, depth + 1);
+					if (next === undefined) {
+						return undefined;
+					}
+					encoded.push(next);
+				}
+				return encoded;
+			}
+			const encoded: Record<string, unknown> = {};
+			for (const key of Object.keys(item).sort()) {
+				const next = encode((item as Record<string, unknown>)[key], depth + 1);
+				if (next === undefined) {
+					return undefined;
+				}
+				encoded[key] = next;
+			}
+			return encoded;
+		} finally {
+			active.delete(item);
+		}
+	};
+	return encode(value, 0);
+}
+
 /**
  * Private, in-memory equality input for "did these runs answer the same
  * selections?". The persisted `user_interactions` redact credentials and OTP
  * values, so they cannot say whether two runs picked the same account or
  * resource; the advisory needs the raw answers, and must never print or
- * persist them (or a hash of them). An OTP exchange makes the whole run's
- * context unknown: nothing in the wire protocol binds a successful OTP to
- * the same account across runs, so the advisory does not infer it.
+ * persist them (or a hash of them). The prompt schema is part of the
+ * selection: the same answer index means a different account when the
+ * schema's options differ between runs. It is canonicalized (sorted object
+ * keys, arrays and types preserved) and counted in the same serialized
+ * budget as the answers. An OTP exchange makes the whole run's context
+ * unknown: nothing in the wire protocol binds a successful OTP to the same
+ * account across runs, so the advisory does not infer it.
  */
 function selectionContextEntry(
 	prompt: RawInteractionLine,
@@ -1470,7 +1693,7 @@ function selectionContextEntry(
 	if (isOtpPrompt(prompt)) {
 		return UNKNOWN_SELECTION_CONTEXT;
 	}
-	return {
+	const entry: Record<string, unknown> = {
 		kind: prompt.kind,
 		message: prompt.message,
 		response: {
@@ -1480,6 +1703,15 @@ function selectionContextEntry(
 			error: response.error,
 		},
 	};
+	// A legacy prompt with no schema keeps the previous entry shape exactly.
+	if (prompt.schema !== undefined) {
+		const schema = canonicalSelectionSchema(prompt.schema);
+		if (schema === undefined) {
+			return UNKNOWN_SELECTION_CONTEXT;
+		}
+		entry.schema = schema;
+	}
+	return entry;
 }
 
 /** Largest serialized context (JavaScript string length, measured after
