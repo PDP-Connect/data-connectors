@@ -789,17 +789,7 @@ function declaresNestedBaseUri(node: Record<string, unknown>): boolean {
 	return Object.hasOwn(node, "$id") || typeof node.id === "string";
 }
 
-function decodeSchemaRefToken(token: string): string | undefined {
-	let decoded: string;
-	try {
-		decoded = decodeURIComponent(token);
-	} catch {
-		return undefined;
-	}
-	return decoded.replaceAll("~1", "/").replaceAll("~0", "~");
-}
-
-/** Resolve a same-document JSON Pointer (`#/...`) against the ORIGINAL schema
+/** Resolve a same-document JSON Pointer fragment against the ORIGINAL schema
  *  root using own properties only. External refs and malformed pointers
  *  return undefined; nothing is fetched or inferred. */
 function resolveLocalSchemaRef(
@@ -809,13 +799,24 @@ function resolveLocalSchemaRef(
 	if (ref === "#") {
 		return root;
 	}
-	if (!ref.startsWith("#/") || ref.length > MAX_SCHEMA_REF_LENGTH) {
+	if (!ref.startsWith("#") || ref.length > MAX_SCHEMA_REF_LENGTH) {
+		return undefined;
+	}
+	// URI decoding precedes pointer splitting: encoded slashes are separators,
+	// while ~1 denotes a slash within a token. Never percent-decode tokens again.
+	let pointer: string;
+	try {
+		pointer = decodeURIComponent(ref.slice(1));
+	} catch {
+		return undefined;
+	}
+	if (!pointer.startsWith("/")) {
 		return undefined;
 	}
 	let current = root;
-	for (const token of ref.slice(2).split("/")) {
-		const key = decodeSchemaRefToken(token);
-		if (key === undefined || typeof current !== "object" || current === null) {
+	for (const token of pointer.slice(1).split("/")) {
+		const key = token.replaceAll("~1", "/").replaceAll("~0", "~");
+		if (typeof current !== "object" || current === null) {
 			return undefined;
 		}
 		const ancestor = manifestObject(current);

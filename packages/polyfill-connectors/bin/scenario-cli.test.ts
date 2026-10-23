@@ -4861,6 +4861,89 @@ test("scenario-record: declared schema bounds pointer length before expansion", 
 	}
 });
 
+for (const { label, ref, named, bounded } of [
+	{
+		label: "encoded separators",
+		ref: "#/$defs/a%2F$defs%2Fb",
+		named: "right",
+		bounded: false,
+	},
+	{
+		label: "literal slash key",
+		ref: "#/$defs/a~1$defs~1b",
+		named: "wrong",
+		bounded: false,
+	},
+	{
+		label: "encoded tilde",
+		ref: "#/$defs/a%7E1$defs%7E1b",
+		named: "wrong",
+		bounded: false,
+	},
+	{
+		label: "percent decoded once",
+		ref: "#/$defs/a%252F$defs%252Fb",
+		named: "once",
+		bounded: false,
+	},
+	{
+		label: "malformed percent",
+		ref: "#/$defs/a%ZZ",
+		named: undefined,
+		bounded: true,
+	},
+	{
+		label: "encoded initial separator",
+		ref: "#%2F$defs%2Fa%2F$defs%2Fb",
+		named: "right",
+		bounded: false,
+	},
+]) {
+	test(`scenario-record: declared schema fragment decoding: ${label}`, () => {
+		const tmpDir = mkdtempSync(join(packageScratchDir(), "scenario-ref-fragment-"));
+		const connectorKey = "ref_fragment_fixture";
+		writeBoundObservationFixture({
+			collectBody: `    await emitRecord("items", { id: "fragment-id-canary", alias: { right: repeated ? "right-second" : "right-first", wrong: repeated ? "wrong-second" : "wrong-first", once: repeated ? "once-second" : "once-first" } });`,
+			connectorKey,
+			schemaJson: JSON.stringify({
+				properties: { id: { type: "string" }, alias: { $ref: ref } },
+				$defs: {
+					a: { $defs: { b: { properties: { right: {} } } } },
+					"a/$defs/b": { properties: { wrong: {} } },
+					"a%2F$defs%2Fb": { properties: { once: {} } },
+				},
+			}),
+			tmpDir,
+		});
+		try {
+			const result = runRecordCli(
+				[connectorKey, "--out", join(tmpDir, "fragment.scenario.json")],
+				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			);
+			assert.equal(result.code, 0, result.stderr);
+			assert.match(result.stdout, /complete: true/);
+			assert.match(result.stdout, /items: differences-observed \(1 repeated identities;/);
+			for (const field of ["right", "wrong", "once"]) {
+				assert.equal(
+					result.stdout.includes(`/alias/${field} (1)`),
+					field === named,
+					`${label}: only the independently expected target may be named; stdout=${result.stdout}`,
+				);
+			}
+			assert.match(result.stdout, /raw changes in unnamed or undeclared fields/);
+			assert.equal(result.stdout.includes("Schema field metadata was bounded"), bounded);
+			for (const canary of [
+				"fragment-id-canary", "right-first", "right-second",
+				"wrong-first", "wrong-second", "once-first", "once-second",
+			]) {
+				assert.equal((result.stdout + result.stderr).includes(canary), false);
+			}
+		} finally {
+			rmSync(tmpDir, { recursive: true, force: true });
+		}
+	});
+}
+
 const ALL_OF_REF_SCHEMA = JSON.stringify({
 	type: "object",
 	properties: {
