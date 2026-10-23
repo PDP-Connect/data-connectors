@@ -362,6 +362,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		chats: { field: "first_message_date", format: "date-time" },
 		messages: { field: "sent_at", format: "date-time" },
 	},
+	whatsapp_web: {
+		chats: { field: "last_activity_at", format: "date-time" },
+		contacts: null,
+		groups: { field: "created_at", format: "date-time" },
+		messages: { field: "sent_at", format: "date-time" },
+	},
 	wholefoods: {
 		nutrition: null,
 		order_items: null,
