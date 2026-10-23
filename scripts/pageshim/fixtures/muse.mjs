@@ -151,6 +151,8 @@ export const pageshimCase = {
 			disposition: "degraded",
 			scope: "muse.conversations",
 			phase: "collect",
+			code: "stream_collection_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: false },
 		},
 		{
 			errorClass: "partial",
@@ -158,6 +160,8 @@ export const pageshimCase = {
 			disposition: "degraded",
 			scope: "muse.messages",
 			phase: "collect",
+			code: "stream_collection_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: false },
 		},
 	],
 	scopes: [
