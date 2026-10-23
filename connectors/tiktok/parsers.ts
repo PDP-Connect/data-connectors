@@ -64,11 +64,11 @@ const accountSchema = z.object({
 	data: z.object({
 		user_id_str: digitString,
 		sec_user_id: z.string().min(1).max(200),
-		username: z.string().optional(),
-		screen_name: z.string().optional(),
-		description: z.string().optional(),
-		avatar_url: z.string().optional(),
-		user_create_time: count.optional(),
+		username: z.string().nullish(),
+		screen_name: z.string().nullish(),
+		description: z.string().nullish(),
+		avatar_url: z.string().nullish(),
+		user_create_time: count.nullish(),
 	}),
 });
 
@@ -99,6 +99,20 @@ export function parseAccount(json: unknown): Account | null {
 		avatarUrl: httpsUrl(data.avatar_url),
 		createTime: data.user_create_time ?? null,
 	};
+}
+
+// Only the observed login-required error is positive sign-out evidence.
+// Other error codes/descriptions may be transient and must stay unknown.
+const signedOutAccountSchema = z.object({
+	message: z.literal("error"),
+	data: z.object({
+		error_code: z.literal(1),
+		description: z.string().regex(/^(?:Please )?log in$/i),
+	}),
+});
+
+export function isSignedOutAccount(json: unknown): boolean {
+	return signedOutAccountSchema.safeParse(json).success;
 }
 
 // ─── settings (/api/user/settings/) ──────────────────────────────────────

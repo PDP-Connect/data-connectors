@@ -282,7 +282,12 @@ const PAGE_HELPERS = String.raw`
 				// TikTok answers an unsigned request with 200 and an empty body:
 				// try the other transport once before giving up.
 				if (raw.status === 200 && empty && !raw.signed && !confirmed) continue;
-				if (json !== null && typeof json === "object") {
+				// The unsigned account endpoint proves identity, not that this
+				// transport can sign protected reads. Cache only signed success.
+				if (path !== "/passport/account/info/v2/" && raw.signed &&
+					raw.status === 200 && !last.html && !last.challengeHeader &&
+					json !== null && typeof json === "object" &&
+					(json.statusCode ?? json.status_code) === 0) {
 					preferred = transport;
 					confirmed = true;
 				}
