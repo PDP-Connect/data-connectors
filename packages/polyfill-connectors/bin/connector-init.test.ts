@@ -6,11 +6,9 @@
  * an immediately-green skeleton — the acceptance bar the module docstring
  * states. This test:
  *
- *   1. Runs init for a temp-named connector (zz_init_smoke_<pid>) directly
- *      against the real package tree (writeScaffold has no dry-run mode;
- *      there is nowhere safer to prove "init produces files the fleet's
- *      real test discovery picks up" than the real tree the fleet's tests
- *      already scan).
+ *   1. Runs init in a private fixture tree through the existing live path
+ *      override. The real fleet is linked for acceptance checks;
+ *      generated connectors never enter the shared checkout's inventory.
  *   2. Asserts every planned file exists.
  *   3. Runs the scaffolded connector's own pilot-fixture test AND the full
  *      manifest-honesty test family as real `node --test` subprocesses,
@@ -35,12 +33,23 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	rmSync,
+	symlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+	connectorsDir,
 	fixturesDir,
+	manifestFileNames,
 	packageRoot as PACKAGE_ROOT,
+	repoRoot,
 } from "../src/connector-paths.ts";
 import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
 import {
@@ -55,6 +64,63 @@ import {
 const TEMP_NAME = `zz_init_smoke_${String(process.pid)}`;
 const TEMP_NAME_BROWSER = `zz_init_browser_smoke_${String(process.pid)}`;
 const TEMP_STREAM = "items";
+
+function withPrivateConnectorTree(run: () => void): void {
+	const previousRoot = process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
+	const root = mkdtempSync(join(tmpdir(), "connector-init-"));
+	const realInventory = readdirSync(connectorsDir).sort();
+	try {
+		const privateConnectors = join(root, "connectors");
+		mkdirSync(privateConnectors);
+		// Real directories are required: manifestFileNames intentionally ignores
+		// symlinked connector directories. Link their contents, not the inventory
+		// entries, so no existing manifest or honesty check disappears.
+		for (const entry of readdirSync(connectorsDir, { withFileTypes: true })) {
+			const source = join(connectorsDir, entry.name);
+			const target = join(privateConnectors, entry.name);
+			if (entry.isDirectory()) {
+				mkdirSync(target);
+				for (const child of readdirSync(source)) {
+					symlinkSync(join(source, child), join(target, child));
+				}
+			} else {
+				symlinkSync(source, target);
+			}
+		}
+		// Generated imports retain the ordinary repository-relative layout,
+		// and their bare dependencies resolve through the real install.
+		symlinkSync(join(repoRoot, "packages"), join(root, "packages"), "dir");
+		symlinkSync(
+			join(repoRoot, "node_modules"),
+			join(root, "node_modules"),
+			"dir",
+		);
+		symlinkSync(join(repoRoot, "package.json"), join(root, "package.json"));
+		delete process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
+		const realManifests = manifestFileNames();
+		process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT = root;
+		assert.deepEqual(manifestFileNames(), realManifests);
+		run();
+	} finally {
+		if (previousRoot === undefined) {
+			delete process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
+		} else {
+			process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT = previousRoot;
+		}
+		rmSync(root, { recursive: true, force: true });
+		assert.equal(
+			existsSync(root),
+			false,
+			"private fixture tree was not removed",
+		);
+		assert.equal(process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT, previousRoot);
+		assert.deepEqual(
+			readdirSync(connectorsDir).sort(),
+			realInventory,
+			"connector-init changed the real connector inventory",
+		);
+	}
+}
 
 interface CliResult {
 	code: number | null;
@@ -153,6 +219,19 @@ function assertScaffoldPassesAcceptanceSuite(args: InitArgs): void {
 
 	try {
 		writeScaffold(args);
+		assert.equal(
+			existsSync(join(connectorsDir, args.name)),
+			false,
+			"scaffold must never appear in the real connector inventory",
+		);
+		assert.ok(
+			manifestFileNames().includes(`${args.name}.json`),
+			"the relocated inventory must discover the generated manifest",
+		);
+		assert.equal(
+			childTestEnv().PDPP_CONNECTOR_PATHS_TEST_ROOT,
+			process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT,
+		);
 
 		// ── 2. Every planned file exists ──────────────────────────────────
 		assert.ok(
@@ -234,6 +313,11 @@ function assertScaffoldPassesAcceptanceSuite(args: InitArgs): void {
 			0,
 			`reconcile-manifests suite failed against the scaffolded connector:\n${reconcileResult.stdout}\n${reconcileResult.stderr}`,
 		);
+		assert.equal(
+			reconcileResult.code,
+			0,
+			`reconcile-manifests process exited nonzero: ${reconcileResult.stderr}`,
+		);
 	} finally {
 		// ── 4. Always clean up, regardless of pass/fail above ──────────────
 		cleanUp(plan.connectorDir, fixtureDir, plan.files.manifestJson);
@@ -260,7 +344,7 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 		"--stream",
 		TEMP_STREAM,
 	]);
-	assertScaffoldPassesAcceptanceSuite(args);
+	withPrivateConnectorTree(() => assertScaffoldPassesAcceptanceSuite(args));
 });
 
 test("connector-init --browser: scaffolds a browser connector whose pilot-fixture and manifest-honesty tests pass immediately", () => {
@@ -273,35 +357,42 @@ test("connector-init --browser: scaffolds a browser connector whose pilot-fixtur
 		"--browser",
 	]);
 	assert.equal(args.browser, true);
-	assertScaffoldPassesAcceptanceSuite(args);
+	withPrivateConnectorTree(() => assertScaffoldPassesAcceptanceSuite(args));
 });
 
 test("connector-init: refuses to overwrite an existing target and lists every collision", () => {
-	const args = parseArgs([TEMP_NAME, "--stream", TEMP_STREAM]);
-	const plan = planTargets(args.name, args.stream);
-	const fixtureDir = fixturesDir(args.name);
-	assert.deepEqual(
-		findCollisions(plan),
-		[],
-		`unexpected pre-existing path(s) for ${TEMP_NAME}`,
-	);
+	withPrivateConnectorTree(() => {
+		const args = parseArgs([TEMP_NAME, "--stream", TEMP_STREAM]);
+		const plan = planTargets(args.name, args.stream);
+		const fixtureDir = fixturesDir(args.name);
+		assert.deepEqual(
+			findCollisions(plan),
+			[],
+			`unexpected pre-existing path(s) for ${TEMP_NAME}`,
+		);
 
-	try {
-		writeScaffold(args);
-		const collisions = findCollisions(plan);
-		// Every real target file plus the connector directory itself should be
-		// reported — a partial collision list would let a second init silently
-		// clobber files it didn't list.
-		assert.ok(collisions.includes(plan.connectorDir));
-		assert.ok(collisions.includes(plan.files.manifestJson));
-		assert.ok(collisions.includes(plan.files.indexTs));
-		assert.ok(collisions.includes(plan.files.schemasTs));
-		assert.ok(collisions.includes(plan.files.pilotFixtureTestTs));
-		assert.ok(collisions.includes(plan.files.fixtureJsonl));
-		assert.ok(collisions.includes(plan.files.provenanceJson));
-	} finally {
-		cleanUp(plan.connectorDir, fixtureDir, plan.files.manifestJson);
-	}
+		try {
+			writeScaffold(args);
+			assert.equal(
+				existsSync(join(connectorsDir, args.name)),
+				false,
+				"collision test must not write into the real connector inventory",
+			);
+			const collisions = findCollisions(plan);
+			// Every real target file plus the connector directory itself should be
+			// reported — a partial collision list would let a second init silently
+			// clobber files it didn't list.
+			assert.ok(collisions.includes(plan.connectorDir));
+			assert.ok(collisions.includes(plan.files.manifestJson));
+			assert.ok(collisions.includes(plan.files.indexTs));
+			assert.ok(collisions.includes(plan.files.schemasTs));
+			assert.ok(collisions.includes(plan.files.pilotFixtureTestTs));
+			assert.ok(collisions.includes(plan.files.fixtureJsonl));
+			assert.ok(collisions.includes(plan.files.provenanceJson));
+		} finally {
+			cleanUp(plan.connectorDir, fixtureDir, plan.files.manifestJson);
+		}
+	});
 });
 
 test("connector-init: rejects a non-snake_case connector name before touching disk", () => {

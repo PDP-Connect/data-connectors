@@ -166,13 +166,10 @@ export interface BlobRef {
 export interface AllMailCursor {
 	/**
 	 * Consecutive runs `highest_modseq` has been held at its prior value
-	 * because `runDeltaPass` skipped at least one message (see
-	 * `runAllMailPasses`'s STATE emission). Bounds the hold-back: once this
-	 * reaches `DELTA_HOLDBACK_RUN_LIMIT`, the next run advances
-	 * `highest_modseq` to the live value anyway rather than stalling the
-	 * cursor forever on one persistently-failing message, and resets to 0.
-	 * Any run that advances cleanly (no skip) also resets it to 0. Absent on
-	 * state written before this counter existed, which reads as 0.
+	 * because `runDeltaPass` left a change the progress ledger could not take
+	 * as debt (see `resolveDeltaCursorAdvance`). Diagnostic only; any run that
+	 * advances resets it to 0. Absent on state written before this counter
+	 * existed, which reads as 0.
 	 */
 	delta_holdback_runs?: number;
 	/**

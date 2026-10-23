@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { parseHTML } from "linkedom";
+import type { InventoryTerminalProof, PageEvidence } from "./inventory-evidence.ts";
 
 export interface BrowserPageObservation {
 	readonly requestedUrl: string;
@@ -21,7 +22,7 @@ export interface InventoryEndEvidence {
 	readonly hasRecognizedList: boolean;
 	readonly renderComplete: boolean;
 	readonly hasUnknownContinuation: boolean;
-	readonly terminalProof: "disabled_next" | "exact_count" | null;
+	readonly terminalProof: InventoryTerminalProof;
 	readonly nextUrl: string | null;
 }
 
@@ -63,6 +64,8 @@ export function inspectInventoryEnd(
 		return { complete: false, nextUrl: null, reason: "render_incomplete" };
 	if (evidence.hasUnknownContinuation)
 		return { complete: false, nextUrl: null, reason: "unknown_continuation" };
+	if (evidence.noProgress)
+		return { complete: false, nextUrl: null, reason: "no_progress" };
 	if (evidence.nextUrl !== null) {
 		const next = validContinuation(
 			evidence.nextUrl,
@@ -76,9 +79,8 @@ export function inspectInventoryEnd(
 	}
 	if (evidence.rejectedRows > 0)
 		return { complete: false, nextUrl: null, reason: "discarded_rows" };
-	if (evidence.terminalProof === null)
-		return { complete: false, nextUrl: null, reason: "terminal_unverified" };
-	return { complete: true, nextUrl: null, reason: "terminal_list" };
+	const reason = evidence.terminalProof === null ? "terminal_unverified" : "terminal_list";
+	return { complete: reason === "terminal_list", nextUrl: null, reason };
 }
 
 function isExpectedRequest(
@@ -204,4 +206,75 @@ function validSelection(url: URL, starsRoute: boolean): boolean {
 		(!url.searchParams.has("after") || (url.searchParams.get("after")?.trim().length ?? 0) > 0) &&
 		Array.from(url.searchParams.keys()).every((key) =>
 			allowed.includes(key) && url.searchParams.getAll(key).length === 1);
+}
+
+/**
+ * Classify one REST page's Link header against the request that produced it.
+ * Every relation must name the same endpoint and selection as the request, and
+ * the only supported continuation is the immediate successor page. The walk then
+ * requests its own owner-bound successor, never the header's target. GitHub names
+ * the owner by account id in Link targets: `/user/<id>/x` for `/users/<login>/x`.
+ * A bound `last` relation is reported too; it binds every later page of the walk.
+ */
+export function inspectApiWindow(link: string | null | undefined, request: string, rows: number): PageEvidence {
+	const current = new URL(request);
+	const page = pageNumber(current);
+	if (page === null) return { continuation: { kind: "unknown", reason: "unbound_request" } };
+	// Uncaptured headers prove nothing, but an empty first page has nothing to continue.
+	if (link === undefined) return page === 1 && rows === 0 ? { continuation: { kind: "end" } } : { continuation: { kind: "unknown", reason: "unobserved_pagination" } };
+	// GitHub omits Link only when every result fits on the first page.
+	if (link === null) return page === 1 ? { continuation: { kind: "end" } } : { continuation: { kind: "unknown", reason: "missing_pagination" } };
+	const relations = new Map<string, number>();
+	let endpoint: string | null = null;
+	for (const segment of link.split(",")) {
+		const match = /^\s*<([^<>]+)>;\s*rel=(?:"(next|prev|first|last)"|(next|prev|first|last))\s*$/u.exec(segment);
+		const relation = match?.[2] ?? match?.[3];
+		if (match === null || relation === undefined || relations.has(relation)) return { continuation: { kind: "unknown", reason: "unreadable_pagination" } };
+		let target: URL;
+		try { target = new URL(match[1] ?? ""); } catch { return { continuation: { kind: "unknown", reason: "unreadable_pagination" } }; }
+		const targetPage = boundPage(target, current);
+		if (targetPage === null || (endpoint ?? target.pathname) !== target.pathname)
+			return { continuation: { kind: "unknown", reason: "foreign_pagination" } };
+		endpoint = target.pathname;
+		relations.set(relation, targetPage);
+	}
+	const next = relations.get("next");
+	const prev = relations.get("prev");
+	const first = relations.get("first");
+	const last = relations.get("last");
+	if ((next !== undefined && next !== page + 1) || (prev !== undefined && prev !== page - 1) ||
+		(first !== undefined && first !== 1) || (last !== undefined && last < (next ?? page)))
+		return { continuation: { kind: "unknown", reason: "non_adjacent_pagination" } };
+	if (next !== undefined) {
+		const successor = new URL(current);
+		successor.searchParams.set("page", String(next));
+		return { continuation: { kind: "next", url: successor.href }, ...(last === undefined ? {} : { lastPage: last }) };
+	}
+	// GitHub ends a list with a header only on a later page that links back with
+	// neither next nor last. A first page with a header always has a successor.
+	if (last !== undefined || prev === undefined)
+		return { continuation: { kind: "unknown", reason: "unproven_pagination_end" } };
+	return { continuation: { kind: "end" } };
+}
+
+/** The page a Link target names, if it selects exactly what the request selects. */
+function boundPage(target: URL, current: URL): number | null {
+	if (target.origin !== current.origin || target.username || target.password || target.hash ||
+		!sameEndpoint(target.pathname, current.pathname)) return null;
+	const selection = (url: URL) => Array.from(url.searchParams).filter(([key]) => key !== "page")
+		.map(([key, value]) => `${key}=${value}`).sort().join("&");
+	if (selection(target) !== selection(current)) return null;
+	return pageNumber(target);
+}
+
+function sameEndpoint(target: string, current: string): boolean {
+	if (target === current) return true;
+	const owned = /^\/users\/[^/]+(\/.+)$/u.exec(current);
+	const alias = /^\/user\/[1-9]\d*(\/.+)$/u.exec(target);
+	return owned !== null && alias !== null && owned[1] === alias[1];
+}
+
+function pageNumber(url: URL): number | null {
+	const pages = url.searchParams.getAll("page");
+	return pages.length === 1 && /^[1-9]\d{0,8}$/u.test(pages[0] ?? "") ? Number(pages[0]) : null;
 }

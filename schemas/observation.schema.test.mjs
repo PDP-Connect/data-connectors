@@ -114,6 +114,35 @@ test("the profile's conformance cases preserve obligation and recovery debt rule
   );
 });
 
+test("the profile preserves strict 0.3.0 accounting alongside elective store coverage", () => {
+  const placement = section("### 3.4 Human interaction and protocol capabilities").replace(/\s+/g, " ");
+  assert.match(placement, /DETAIL_GAP, DETAIL_COVERAGE and OBSERVATION are mandatory runtime features of 0\.3\.0/);
+  assert.match(placement, /Strict accounting MUST NOT depend on a per-feature capability, advisory flag, START capability list, message-content opt-in, or connector-side fold/);
+  assert.match(placement, /unsupported required capability before spawn, except for `RUN_COVERAGE_V1` when the runtime implements the elective exception in Section 7\.1/);
+  assert.match(placement, /This exception MUST NOT weaken mandatory 0\.3\.0 accounting or diagnosis/);
+  assert.doesNotMatch(placement, /A connector that does not declare `?OBSERVATION`?/);
+
+  const extension = section("### 7.1 Store collection evidence (RUN_COVERAGE_V1)").replace(/\s+/g, " ");
+  assert.match(extension, /protocol_version is 0\.1\.0, 0\.2\.0 or 0\.3\.0/);
+  assert.match(extension, /It MUST omit `START\.run_coverage_version`, and the connector MUST omit `DONE\.coverage`/);
+  const negotiation = section("#### 7.1.1 Declaration and negotiation").replace(/\s+/g, " ");
+  assert.match(negotiation, /When `START` omits `run_coverage_version`, a connector MUST omit `DONE\.coverage`/);
+  const evidence = section("#### 7.1.2 Optional terminal store collection evidence").replace(/\s+/g, " ");
+  assert.match(evidence, /`DONE\.coverage` MUST NOT authorize STATE advancement, materialization receipts, debt settlement or absence-derived deletion/);
+  assert.match(evidence, /under 0\.3\.0, debt settlement still requires Sections 5\.6\.2, 5\.6\.3 and 5\.6\.6/);
+  assert.match(evidence, /pending seals remain debt until commit/);
+  const accounting = section("#### 7.1.5 Accounting under the base profile").replace(/\s+/g, " ");
+  assert.match(accounting, /Section 5\.6 of the applicable base profile/);
+  assert.match(accounting, /same-obligation identity and range refer to Section 5\.6\.1; baseline validity and admission invalidation follow Section 5\.6\.3/);
+  assert.match(accounting, /mandatory accounting and outcome checks of Sections 5\.6\.2 through 5\.6\.6, including portable recovery seals where applicable/);
+
+  const runtimeExtensions = section("### 7.2 Runtime-specific extensions").replace(/\s+/g, " ");
+  assert.match(runtimeExtensions, /Portable DETAIL_GAP_RECOVERED and START\.detail_debts are instead defined by Section 5\.6\.6/);
+  assert.match(runtimeExtensions, /gap_id-only acknowledgments\) are not aliases for this typed seal/);
+  const cases = section("### 6.3 Strict-accounting conformance cases");
+  assert.match(cases, /\| Transient sub-resource failure, then recovery at the same epoch \|[^\n]*While a candidate remains partial, preserve the stored row\. A fully read valid record follows normal effect-admission rules;/);
+});
+
 function connectorManifests() {
   const connectorsDir = join(root, "connectors");
   return readdirSync(connectorsDir)

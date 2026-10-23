@@ -17,17 +17,20 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"anthropic_live",
 		"chatgpt",
 		"discord_browser",
+		"facebook",
 		"github_browser",
 		"icloud_notes",
 		"linkedin",
 		"meta",
+		"muse",
 		"oura_browser",
 		"spotify",
 		"strava_browser",
+		"tiktok",
 		"x_browser",
 		"youtube",
 	]);
-	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "meta", "spotify", "youtube", "linkedin"]) {
+	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -167,8 +170,8 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			browser: ["page_script_evaluation", "page_navigation"],
 		},
 		oura_browser: {
-			network: ["same_origin_page_fetch"],
-			browser: ["page_script_evaluation", "page_navigation"],
+			network: ["same_origin_page_fetch", "host_http_request"],
+			browser: ["page_script_evaluation", "page_navigation", "host_http_request"],
 		},
 		strava_browser: {
 			network: ["same_origin_page_fetch", "host_http_request"],
@@ -186,11 +189,23 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_script_evaluation", "page_navigation"],
 		},
+		tiktok: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
 		youtube: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
+		facebook: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
 		meta: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
+		muse: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},

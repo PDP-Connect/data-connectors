@@ -84,12 +84,13 @@ import {
 	buildCreditCardBillingStatsRecord,
 	buildInboxMessageRecord,
 	creditCardId,
+	hasCsvTransactionHeader,
 	hashId,
 	isoDate,
 	mmddyyyy,
 	BACKFILL_17MO as PARSERS_BACKFILL_17MO,
 	INCREMENTAL_OVERLAP_MS as PARSERS_INCREMENTAL_OVERLAP_MS,
-	parseCsv,
+	parseCsvWithIntegrity,
 	resolveAccountIdForRef,
 	rowsToTransactions,
 } from "./parsers.ts";
@@ -123,7 +124,6 @@ import type {
 	ParseMeta,
 	StatementRecord,
 	TransactionsPriorState,
-	TransactionsStreamCursor,
 } from "./types.ts";
 
 // Explicit, literal-per-branch mapping from the statement-PDF download
@@ -2480,6 +2480,7 @@ export async function tryExportLadder(
 }
 
 interface CsvTransactionEmitResult {
+	malformedCsv?: true;
 	dataRows: number;
 	latest: string | null;
 	usableCount: number;
@@ -2496,7 +2497,8 @@ export async function emitCsvTransactions(
 	fingerprintCursor?: FingerprintCursor,
 ): Promise<CsvTransactionEmitResult> {
 	const text = await readFile(csvPath, "utf8");
-	const rows = parseCsv(text);
+	const { rows, malformed: malformedQuotes } = parseCsvWithIntegrity(text);
+	const malformed = malformedQuotes || !hasCsvTransactionHeader(rows[0]);
 	const txnAccountId = a.account_id_raw || a.last_four || "unknown";
 	const txns = rowsToTransactions(rows, {
 		accountId: txnAccountId,
@@ -2510,10 +2512,13 @@ export async function emitCsvTransactions(
 	// by account ordinal (never the account number / last-four) so the run does
 	// not look complete. The caller also refuses to advance this account's
 	// transaction cursor on this outcome, so a parser fix can recover the gap.
-	// `rows.length` is the raw parsed line count; we report data-row count
-	// (rows beyond the header) to keep the number meaningful.
-	const dataRows = Math.max(0, rows.length - 1);
-	if (txns.length === 0) {
+	// Count only tokenized logical data rows. Syntax/header integrity is
+	// separate evidence; each usable row also requires a real calendar date
+	// and valid safe-integer amount before deriving its transaction identity.
+	const dataRows = rows
+		.slice(1)
+		.filter((row) => row.some((field) => field.trim())).length;
+	if (txns.length === 0 && !malformed) {
 		await deps.emit({
 			type: "SKIP_RESULT",
 			stream: "transactions",
@@ -2526,6 +2531,25 @@ export async function emitCsvTransactions(
 				account_ordinal: accountOrdinal,
 				account_total: accountTotal,
 				data_rows: dataRows,
+			},
+		});
+	}
+	if (malformed || (txns.length > 0 && txns.length < dataRows)) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "csv_partial_parse",
+			message: malformed
+				? `CSV syntax or required header was malformed for account ${accountOrdinal}/${accountTotal}; no complete account coverage can be claimed`
+				: `CSV left ${dataRows - txns.length} unparsed row(s) for account ${accountOrdinal}/${accountTotal}`,
+			diagnostics: {
+				account_ordinal: accountOrdinal,
+				account_total: accountTotal,
+				data_rows: dataRows,
+				usable_rows: txns.length,
+				...(malformed
+					? { malformed_csv: true }
+					: { unparsed_rows: dataRows - txns.length }),
 			},
 		});
 	}
@@ -2561,7 +2585,12 @@ export async function emitCsvTransactions(
 			}
 		})
 		.catch((): undefined => undefined);
-	return { dataRows, latest, usableCount: txns.length };
+	return {
+		dataRows,
+		latest,
+		usableCount: txns.length,
+		...(malformed ? { malformedCsv: true as const } : {}),
+	};
 }
 
 /**
@@ -2575,7 +2604,7 @@ export async function emitCsvTransactions(
  *   - `no_activity`: the source gave a real, source-limited "nothing here"
  *     answer — either the export dialog explicitly reported "no
  *     transactions" (`exportEmpty`) or the export downloaded a headers-only
- *     CSV with zero data rows (a dormant account's steady state). Both
+ *     CSV with a recognized date/amount header and zero data rows. Both
  *     count as covered, never as a failure.
  *   - `gap`: the export ladder was exhausted without a download, or the
  *     downloaded CSV had data rows but none parsed to a usable transaction
@@ -2597,7 +2626,7 @@ export type AccountTransactionOutcome =
 
 /** Build the retryable DETAIL_GAP for a USAA transaction account whose CSV
  *  export failed this run — the ladder produced no download, or the CSV had
- *  data rows but none parsed usable (a headers-only CSV is NOT a gap; see
+ *  data rows but none parsed usable (a recognized headers-only CSV is NOT a gap; see
  *  `classifyCsvTransactionResult`). `record_key` is the account id — the
  *  next run's detail pass retries exactly this account. Mirrors chase's
  *  `buildAccountDetailGap` (reference_only, retryable, pending) so the
@@ -2820,41 +2849,65 @@ export async function emitTransactionsDetailCoverage(
 	});
 }
 
+export interface PendingExportWindow {
+	since: string;
+	until: string;
+	unknown_original?: true;
+}
+function pendingExportWindow(value: unknown): PendingExportWindow | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const row = value as Record<string, unknown>;
+	const isDay = (day: unknown): day is string =>
+		typeof day === "string" &&
+		/^\d{4}-\d{2}-\d{2}$/.test(day) &&
+		Number.isFinite(Date.parse(day)) &&
+		new Date(day).toISOString().slice(0, 10) === day;
+	if (!isDay(row.since) || !isDay(row.until) || row.since > row.until)
+		return undefined;
+	return {
+		since: row.since,
+		until: row.until,
+		...(row.unknown_original === true
+			? { unknown_original: true as const }
+			: {}),
+	};
+}
 export interface AccountTransactionResult {
 	last_date: string | null;
 	outcome: AccountTransactionOutcome;
+	pending_export?: PendingExportWindow;
 }
 
 /**
- * Classify a downloaded-and-parsed CSV into the account's per-run detail
- * outcome + cursor decision. Pure — exported so the coverage classification
- * is testable without driving the Playwright export flow. The distinction
- * that matters (`csvResult` comes straight from `emitCsvTransactions`):
- *   - `usableCount > 0`: real transactions parsed → `hydrated`; the cursor
- *     advances to the latest parsed date (or the window start).
- *   - `usableCount === 0 && dataRows === 0`: the export produced a
- *     headers-only CSV — the source genuinely had no transactions for the
- *     window. A dormant account exports exactly this every run, so it is
- *     the same source-limited answer as the explicit "nothing to export"
- *     dialog → `no_activity` (covered), NEVER a gap. Classifying it as a
- *     gap would pin a pending retryable DETAIL_GAP on a healthy dormant
- *     account forever (permanent Degraded).
- *   - `usableCount === 0 && dataRows > 0`: data rows were present but none
- *     parsed to a usable transaction (header mismatch / unparseable rows)
- *     → genuine parse trouble, a retryable `gap` so a parser fix can
- *     recover it next run. (`emitCsvTransactions` already emitted the
- *     matching `csv_no_usable_transactions` SKIP_RESULT.)
- * In both zero-usable cases `last_date` stays at the prior watermark
- * (possibly null → the caller writes no cursor entry), preserving the
- * pre-coverage behavior of never advancing the cursor on a run that parsed
- * nothing.
+ * Classify the real parser result before advancing an account watermark.
+ * Malformed syntax/header or any unusable sibling leaves a gap, even when
+ * valid siblings emitted. Usable rows have unambiguous CSV fields, a strict
+ * calendar date and a real safe-integer amount before identity derivation.
+ * Only a recognized, syntactically valid header with no data rows proves
+ * no_activity. An empty download or unsupported header does not.
+ * Complete usable rows may advance the cursor; every gap and no_activity
+ * retain the prior watermark. Downstream selection is not a parse failure.
  */
 export function classifyCsvTransactionResult(
 	accountId: string,
 	priorLastDate: string | null,
 	usedSince: string | null,
-	csvResult: { dataRows: number; latest: string | null; usableCount: number },
+	csvResult: CsvTransactionEmitResult,
 ): AccountTransactionResult {
+	if (
+		csvResult.malformedCsv ||
+		(csvResult.usableCount > 0 && csvResult.usableCount < csvResult.dataRows)
+	) {
+		return {
+			last_date: priorLastDate,
+			outcome: {
+				accountId,
+				kind: "gap",
+				reason: "temporary_unavailable",
+				errorClass: "csv_partial_parse",
+			},
+		};
+	}
 	if (csvResult.usableCount > 0) {
 		return {
 			last_date: csvResult.latest || usedSince || null,
@@ -2878,7 +2931,7 @@ export function classifyCsvTransactionResult(
 	};
 }
 
-async function processAccountTransactions(
+export async function processAccountTransactions(
 	deps: EmitDeps,
 	context: BrowserContext,
 	page: Page,
@@ -2891,15 +2944,34 @@ async function processAccountTransactions(
 	accountOrdinal: number,
 	accountTotal: number,
 	fingerprintCursor?: FingerprintCursor,
+	pendingValue?: unknown,
 ): Promise<AccountTransactionResult | null> {
 	const accountId = a.account_id_raw || a.last_four || "unknown";
-	const desiredSince = priorLastDate
+	const currentSince = priorLastDate
 		? new Date(Date.parse(priorLastDate) - INCREMENTAL_OVERLAP_MS)
 				.toISOString()
 				.slice(0, 10)
 		: (sinceDateCfg ?? seventeenMonthsAgo);
+	const pending = pendingExportWindow(pendingValue);
 	const todayIso = new Date().toISOString().slice(0, 10);
-	const candidateStarts = buildCandidateStarts(desiredSince);
+	const desiredSince =
+		pending && pending.since < currentSince ? pending.since : currentSince;
+	const untilDate =
+		pending && pending.until > todayIso ? pending.until : todayIso;
+	// Neither today's configuration nor a watermark proves a legacy gap's original interval.
+	const unknownOriginal =
+		pending?.unknown_original === true ||
+		(pendingValue !== undefined && !pending) ||
+		(!pending && deps.servedAccountTransactionGaps?.has(accountId) === true);
+	const continuation: PendingExportWindow = {
+		since: desiredSince,
+		until: untilDate,
+		...(unknownOriginal ? { unknown_original: true } : {}),
+	};
+	// A narrowed explicit request never authorizes fetching the older retained debt.
+	const requestedSince =
+		sinceDateCfg && sinceDateCfg > desiredSince ? sinceDateCfg : desiredSince;
+	const candidateStarts = buildCandidateStarts(requestedSince);
 
 	const { csvPath, exportEmpty, usedSince, lastDiag } = await tryExportLadder(
 		deps,
@@ -2910,7 +2982,7 @@ async function processAccountTransactions(
 		accountOrdinal,
 		accountTotal,
 		candidateStarts,
-		todayIso,
+		untilDate,
 		streamState,
 		() => {
 			streamState.sessionDeadMidRun = true;
@@ -2919,7 +2991,20 @@ async function processAccountTransactions(
 	if (streamState.sessionDeadMidRun) {
 		return null;
 	}
+	const incompleteWindow = usedSince !== null && usedSince > desiredSince;
+	const uncoveredWindow: AccountTransactionResult = {
+		last_date: priorLastDate,
+		pending_export: continuation,
+		outcome: {
+			accountId,
+			kind: "gap",
+			reason: "temporary_unavailable",
+			errorClass: "export_window_incomplete",
+		},
+	};
 	if (!csvPath) {
+		if (exportEmpty && (incompleteWindow || unknownOriginal))
+			return uncoveredWindow;
 		if (exportEmpty) {
 			return {
 				last_date: priorLastDate || usedSince || null,
@@ -2933,6 +3018,7 @@ async function processAccountTransactions(
 				: "export_no_download";
 		return {
 			last_date: priorLastDate,
+			pending_export: continuation,
 			outcome: {
 				accountId,
 				kind: "gap",
@@ -2950,15 +3036,21 @@ async function processAccountTransactions(
 		accountTotal,
 		fingerprintCursor,
 	);
-	return classifyCsvTransactionResult(
+	// Keep useful suffix records, but neither advance the original watermark
+	// nor acknowledge a served account gap until the requested window succeeds.
+	if (incompleteWindow || unknownOriginal) return uncoveredWindow;
+	const result = classifyCsvTransactionResult(
 		accountId,
 		priorLastDate,
 		usedSince,
 		csvResult,
 	);
+	return result.outcome.kind === "gap"
+		? { ...result, pending_export: continuation }
+		: result;
 }
 
-async function runTransactionsStream(
+export async function runTransactionsStream(
 	deps: EmitDeps,
 	context: BrowserContext,
 	page: Page,
@@ -2968,7 +3060,7 @@ async function runTransactionsStream(
 	requested: BrowserCollectContext["requested"],
 	streamState: TransactionsStreamState,
 	fingerprintCursor?: FingerprintCursor,
-): Promise<TransactionsStreamCursor> {
+): Promise<Record<string, unknown>> {
 	const stream = requested.get("transactions");
 	const rawSince = stream?.time_range?.since;
 	const parsedSince = rawSince ? Date.parse(rawSince) : Number.NaN;
@@ -2981,7 +3073,7 @@ async function runTransactionsStream(
 
 	const priorStateForTxns =
 		(state.transactions as TransactionsPriorState | undefined) ?? {};
-	const transactionsCursor: TransactionsStreamCursor = { ...priorStateForTxns };
+	const transactionsCursor: Record<string, unknown> = { ...priorStateForTxns };
 
 	const transactionAccounts = accounts.filter((a) =>
 		TRANSACTION_ACCOUNT_TYPE_RE.test(a.account_type),
@@ -3000,8 +3092,10 @@ async function runTransactionsStream(
 			});
 			break;
 		}
-		const accountKey = a.account_id_raw || "";
-		const perAccState = priorStateForTxns[accountKey];
+		const accountKey = a.account_id_raw || a.last_four || "unknown";
+		const perAccState = priorStateForTxns[accountKey] as
+			| { last_date?: string | null; pending_export?: unknown }
+			| undefined;
 		const priorLastDate = perAccState?.last_date ?? null;
 		const result = await processAccountTransactions(
 			deps,
@@ -3016,6 +3110,7 @@ async function runTransactionsStream(
 			i + 1,
 			transactionAccounts.length,
 			fingerprintCursor,
+			perAccState?.pending_export,
 		);
 		if (!result) {
 			// Session died mid-attempt: the account was never reached, so it is
@@ -3027,14 +3122,20 @@ async function runTransactionsStream(
 		if (result.outcome.kind === "gap") {
 			await deps.emit(buildAccountTransactionDetailGap(result.outcome));
 		}
-		if (result.last_date === null) {
-			// No cursor advance to record this account (e.g. a gap with no
-			// prior watermark) — preserve prior behavior of leaving the cursor
-			// untouched rather than writing a null watermark.
+		// Records are emitted; acknowledge recovery before STATE can discard its interval.
+		await recoverServedAccountTransactionGaps(deps, [result.outcome]);
+		if (
+			result.last_date === null &&
+			!result.pending_export &&
+			perAccState?.pending_export === undefined
+		)
 			continue;
-		}
-		transactionsCursor[accountKey || a.last_four || "unknown"] = {
+		// Persist unresolved windows even without a watermark; replacing clears settled metadata.
+		transactionsCursor[accountKey] = {
 			last_date: result.last_date,
+			...(result.pending_export
+				? { pending_export: result.pending_export }
+				: {}),
 		};
 		await deps.emit({
 			type: "STATE",
@@ -3049,7 +3150,6 @@ async function runTransactionsStream(
 	// one means every transaction-eligible account was attempted (including
 	// the zero-eligible-accounts case, where the loop body never ran at all),
 	// so the denominator this run enumerated is genuinely complete.
-	await recoverServedAccountTransactionGaps(deps, outcomes);
 	await emitTransactionsDetailCoverage(
 		deps,
 		outcomes,
@@ -3065,7 +3165,7 @@ async function runTransactionsStream(
  *  `readPriorTransactionFingerprints`. NOT pruned: transactions is a
  *  partial scan (see emitCsvTransactions). */
 function withTransactionFingerprints(
-	cursor: TransactionsStreamCursor,
+	cursor: Record<string, unknown>,
 	fingerprintCursor?: FingerprintCursor,
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = { ...cursor };
@@ -4161,7 +4261,7 @@ export async function collectUsaa(ctx: BrowserCollectContext): Promise<void> {
 	// the advanced per-account watermark cursor so the final transactions
 	// STATE write below preserves the incremental `last_date` progress
 	// (not just the fingerprint map).
-	let transactionsCursorAfterCsv: TransactionsStreamCursor =
+	let transactionsCursorAfterCsv: Record<string, unknown> =
 		(state.transactions as TransactionsPriorState | undefined) ?? {};
 	if (requested.has("transactions")) {
 		transactionsCursorAfterCsv = await runTransactionsStream(

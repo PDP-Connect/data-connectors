@@ -1,0 +1,48 @@
+{
+  "collectionList": [
+    {
+      "collectionId": "7400000000000000001",
+      "cover": {
+        "urlList": [
+          "https://example.com/cover/1",
+          "https://example.com/cover/2",
+          "https://example.com/cover/3"
+        ]
+      },
+      "name": "Synthetic recipes",
+      "status": 3,
+      "total": "2",
+      "userId": "100007",
+      "userName": "synthetic_owner"
+    },
+    {
+      "collectionId": "7400000000000000002",
+      "cover": {
+        "urlList": [
+          "https://example.com/cover/1",
+          "https://example.com/cover/2",
+          "https://example.com/cover/3"
+        ]
+      },
+      "name": "Synthetic travel",
+      "status": 3,
+      "total": "1",
+      "userId": "100007",
+      "userName": "synthetic_owner"
+    }
+  ],
+  "cursor": "2",
+  "extra": {
+    "fatal_item_ids": [],
+    "logid": "Synthetic logid 2 lorem lorem lorem lorem",
+    "now": 1792644430000
+  },
+  "log_pb": {
+    "impr_id": "Synthetic impr_id 3 lorem lorem lorem lorem"
+  },
+  "statusCode": 0,
+  "status_code": 0,
+  "status_msg": "",
+  "hasMore": false,
+  "total": 2
+}

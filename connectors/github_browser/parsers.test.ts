@@ -109,7 +109,7 @@ test("current GitHub empty state alone does not certify an inventory", async () 
 			0,
 			0,
 		),
-		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, nextUrl: null, reason: "terminal_unverified" },
+		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, terminalProof: null, nextUrl: null, reason: "terminal_unverified", continuation: { kind: "unproven" } },
 	);
 });
 
@@ -535,7 +535,7 @@ test("current GitHub starred empty state with filter menus has no rows to discar
 			parsed.rows.length,
 			parsed.rejectedRows,
 		),
-		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, nextUrl: null, reason: "terminal_unverified" },
+		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, terminalProof: null, nextUrl: null, reason: "terminal_unverified", continuation: { kind: "unproven" } },
 	);
 });
 
@@ -562,7 +562,7 @@ test("a rendered repository row without optional slots omits those fields and co
 			inventoryObservation("repositories", owned, 1),
 			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
 		),
-		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, nextUrl: null, reason: "terminal_unverified" },
+		{ valid: false, complete: false, total: null, exactTotals: [], totalConflict: false, terminalProof: null, nextUrl: null, reason: "terminal_unverified", continuation: { kind: "unproven" } },
 	);
 	const terminal = owned +
 		'<div class="paginate-container"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
@@ -571,7 +571,7 @@ test("a rendered repository row without optional slots omits those fields and co
 			inventoryObservation("repositories", terminal, 1),
 			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
 		),
-		{ valid: true, complete: true, total: null, exactTotals: [], totalConflict: false, nextUrl: null, reason: "terminal_list" },
+		{ valid: true, complete: true, total: null, exactTotals: [], totalConflict: false, terminalProof: "disabled_next", nextUrl: null, reason: "terminal_list", continuation: { kind: "end" } },
 	);
 });
 
@@ -645,7 +645,7 @@ test("owner repository tab counters remain authoritative inside the site header"
 		"repositories", "sample-user", 1, 0, 0,
 	);
 	assert.deepEqual(inspect(header(tab("0"))), {
-		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, nextUrl: null, reason: "terminal_list",
+		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, terminalProof: "exact_count", nextUrl: null, reason: "terminal_list", continuation: { kind: "end" },
 	});
 	assert.equal(inspect(header(tab("0") + tab("0"))).complete, true);
 	assert.equal(inspect(header(tab("0") + tab("1"))).totalConflict, true);
@@ -684,7 +684,7 @@ test("All stars totals are exact, owner-bound, unfiltered and reconciled with pr
 		"starred", "sample-user", 1, 0, 0,
 	);
 	assert.deepEqual(inspect(allStars("0")), {
-		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, nextUrl: null, reason: "terminal_list",
+		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, terminalProof: "exact_count", nextUrl: null, reason: "terminal_list", continuation: { kind: "end" },
 	});
 	assert.equal(inspect(allStars("0") + allStars("0") + profileTab("0")).complete, true);
 	for (const navigation of [
@@ -715,4 +715,161 @@ test("All stars totals are exact, owner-bound, unfiltered and reconciled with pr
 		assert.equal(proof.total, null);
 		assert.equal(proof.reason, "terminal_unverified");
 	}
+});
+
+test("current div starred cards retain details and malformed cards remain rejected", () => {
+	const card = `<div class="col-12 d-block width-full border-bottom"><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3><p>Example</p><span itemprop="programmingLanguage">TypeScript</span><a href="/sample-owner/demo/stargazers">12</a><a href="/sample-owner/demo/forks">3</a><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div>`;
+	const html = `<turbo-frame id="user-starred-repos">${card}</turbo-frame>`;
+	const parsed = parseStarredPage(html);
+	assert.equal(parsed.complete, true);
+	assert.deepEqual(parsed.unreadableFields, []);
+	assert.equal(parsed.rows[0]?.description, "Example");
+	assert.equal(parsed.rows[0]?.language, "TypeScript");
+	assert.equal(parsed.rows[0]?.stars, 12);
+	assert.equal(parsed.rows[0]?.forks, 3);
+	const damaged = parseStarredPage(html.replace(/<h3>.*?<\/h3>/u, ""));
+	assert.equal(damaged.rows.length, 0);
+	assert.equal(damaged.rejectedRows, 1);
+	assert.equal(damaged.entriesComplete, false);
+});
+
+test("compact PR acceptance still rejects wrong repositories and missing details outside that shape", () => {
+	const pr = { id: 77, number: 7, url: "https://api.github.com/repos/sample-owner/demo/pulls/7", head: { ref: "feature" }, base: { ref: "main" } };
+	for (const pull_request of [
+		{ ...pr, url: "https://api.github.com/repos/other-owner/demo/pulls/7" },
+		{ ...pr, head: {} },
+		{ ...pr, head: undefined },
+		{ ...pr, head: { ref: "" } },
+		{ ...pr, base: {} },
+		{ ...pr, base: undefined },
+		{ ...pr, base: { ref: "" } },
+		{ ...pr, html_url: "https://github.com/other-owner/other/pull/99" },
+		{ ...pr, html_url: "https://github.com/sample-owner/demo/pull/8" },
+		{ ...pr, html_url: "invalid" },
+		{ ...pr, html_url: "" },
+		{ ...pr, html_url: null },
+		{ ...pr, number: 8 },
+		{ ...pr, number: "7" },
+		{ ...pr, number: 0 },
+		{ ...pr, number: 1.5 },
+		{ ...pr, id: "77" },
+		{ ...pr, id: null },
+		{ ...pr, id: undefined },
+		{ ...pr, id: 0 },
+		{ ...pr, id: -1 },
+		{ ...pr, id: 1.5 },
+		{ ...pr, id: Number.MAX_SAFE_INTEGER + 1 },
+		{ ...pr, body: "Source supplied body but no title" },
+	]) {
+		const parsed = parseLegacyEventPageItem({ id: "123", type: "PullRequestEvent", public: true, created_at: "2026-10-19T12:00:00Z", repo: { name: "sample-owner/demo" }, payload: { action: "opened", number: 7, pull_request } });
+		assert.equal(parsed.complete, false);
+	}
+	for (const html_url of [undefined, "https://github.com/sample-owner/demo/pull/7"]) {
+		const parsed = parseLegacyEventPageItem({ id: "123", type: "PullRequestEvent", public: true, created_at: "2026-10-19T12:00:00Z", repo: { name: "sample-owner/demo" }, payload: { action: "opened", number: 7, pull_request: { ...pr, html_url } } });
+		assert.equal(parsed.complete, true);
+		assert.equal(parsed.row?.url, "https://github.com/sample-owner/demo/pull/7");
+	}
+});
+
+test("starred cards reject multiple repository identities and nested candidate cards", () => {
+	const heading = '<h3><a href="/sample-owner/demo">sample-owner/demo</a></h3>';
+	const card = (body: string) => `<div class="col-12 d-block width-full border-bottom">${body}<relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div>`;
+	for (const contents of [
+		heading + '<h3><a href="/sample-owner/other">sample-owner/other</a></h3>',
+		heading + card('<h3><a href="/sample-owner/other">sample-owner/other</a></h3>'),
+		card(heading),
+	]) {
+		const parsed = parseStarredPage(`<turbo-frame id="user-starred-repos">${card(contents)}</turbo-frame>`);
+		assert.equal(parsed.entriesComplete, false);
+		assert.equal(parsed.complete, false);
+		assert.equal(parsed.rejectedRows, 1);
+		assert.deepEqual(parsed.rows, []);
+	}
+});
+
+// Every candidate a parser sees is claimed or rejected; none hides inside a claimed row.
+for (const stream of ["starred", "repositories"] as const) {
+	for (const nested of ["li", 'div role="listitem"', "article", "h4", 'div role="row"'] as const) {
+		test(`${stream} rows reject a nested ${nested} entry whose heading drifted`, () => {
+			const tag = nested.split(" ")[0];
+			const item = `<${nested}><a href="/sample-owner/second">sample-owner/second</a></${tag}>`;
+			const row = `<li><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3><ul>${item}</ul><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></li>`;
+			const parsed = stream === "starred"
+				? parseStarredPage(`<turbo-frame id="user-starred-repos"><ul>${row}</ul></turbo-frame>`)
+				: parseRepositoriesPage(`<div id="user-repositories-list"><ul>${row}</ul></div>`);
+			assert.equal(parsed.entriesComplete, false);
+			assert.equal(parsed.rejectedRows, 1);
+			assert.deepEqual(parsed.rows, []);
+		});
+	}
+}
+
+// One definition of a repository link: query strings and fragments do not make a
+// second entry chrome, and another link to the row's own repository is not an entry.
+for (const stream of ["starred", "repositories"] as const) {
+	const parse = (extra: string) => {
+		const row = `<li><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3>${extra}<relative-time datetime="2026-10-19T00:00:00Z"></relative-time></li>`;
+		return stream === "starred"
+			? parseStarredPage(`<turbo-frame id="user-starred-repos"><ul>${row}</ul></turbo-frame>`)
+			: parseRepositoriesPage(`<div id="user-repositories-list"><ul>${row}</ul></div>`);
+	};
+	for (const href of ["/sample-owner/second?tab=readme", "/sample-owner/second#readme"]) {
+		test(`${stream} rows reject a second entry link carrying ${href.includes("?") ? "a query" : "a fragment"}`, () => {
+			const parsed = parse(`<div><a href="${href}">second</a></div>`);
+			assert.equal(parsed.entriesComplete, false);
+			assert.equal(parsed.rejectedRows, 1);
+		});
+	}
+	for (const href of ["https://github.com/sample-owner/demo", "/sample-owner/demo/", "/sample-owner/demo#readme"]) {
+		test(`${stream} rows keep their entry beside another link to the same repository: ${href}`, () => {
+			const parsed = parse(`<a href="${href}"><img alt="" src="https://avatars.githubusercontent.com/u/1"></a>`);
+			assert.equal(parsed.rejectedRows, 0);
+			assert.equal(parsed.entriesComplete, true);
+			assert.equal(parsed.rows[0]?.id, "https://github.com/sample-owner/demo");
+		});
+	}
+}
+
+test("starred card accepts fork-parent and description links plus overlay headings", async () => {
+	const parsed = parseStarredPage(await fixture("starred-card-with-auxiliary-links.html"));
+	assert.equal(parsed.complete, true);
+	assert.equal(parsed.entriesComplete, true);
+	assert.equal(parsed.rejectedRows, 0);
+	assert.equal(parsed.rawRows, 1);
+	assert.equal(parsed.rows.length, 1);
+	assert.equal(parsed.rows[0]?.id, "https://github.com/sample-owner/demo");
+	assert.equal(parsed.rows[0]?.forkedFrom, "upstream-owner/original");
+	assert.equal(parsed.rows[0]?.description, "Example with documentation");
+});
+
+
+test("repository rows reject multiple primary identities and nested rows", () => {
+ const heading = '<h3><a href="/sample-user/first">first</a></h3>';
+ const row = (body: string) => `<li>${body}<span class="Label">Public</span><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></li>`;
+ for (const contents of [
+  heading + '<h3><a href="/sample-user/second">second</a></h3>',
+  '<h3><a href="/sample-user/first">first</a><a href="/sample-user/second">second</a></h3>',
+  heading + `<ul>${row('<h3><a href="/sample-user/second">second</a></h3>')}</ul>`,
+  `<ul>${row(heading)}</ul>`,
+ ]) {
+  const parsed = parseRepositoriesPage(`<div id="user-repositories-list"><ul>${row(contents)}</ul></div>`);
+  assert.equal(parsed.entriesComplete, false);
+  assert.equal(parsed.complete, false);
+  assert.equal(parsed.rejectedRows, 1);
+  assert.deepEqual(parsed.rows, []);
+ }
+});
+
+
+test("repository row ignores overlay headings and keeps ordinary description and fork links", async () => {
+ const html = (await fixture("repositories.html"))
+  .replace('</h3>', '</h3><span>Forked from <a href="/upstream-owner/original">upstream-owner/original</a></span>')
+  .replace('Synthetic fixture repository', 'Read <a href="/docs-owner/guide">the guide</a>')
+  .replace('</li>', '<details-menu><h3><a href="/overlay-owner/other">Other repository</a></h3><ul><li>Menu entry</li></ul></details-menu></li>');
+ const parsed = parseRepositoriesPage(html);
+ assert.equal(parsed.entriesComplete, true);
+ assert.equal(parsed.complete, true);
+ assert.equal(parsed.rejectedRows, 0);
+ assert.equal(parsed.rows.length, 1);
+ assert.equal(parsed.rows[0]?.forkedFrom, "upstream-owner/original");
 });

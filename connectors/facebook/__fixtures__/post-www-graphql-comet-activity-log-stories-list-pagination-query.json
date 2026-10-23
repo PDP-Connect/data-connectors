@@ -1,0 +1,768 @@
+{
+  "data": {
+    "node": {
+      "__typename": "Synthetic __typename 1",
+      "__isActivityLogActor": "User",
+      "activity_log_stories": {
+        "page_info": {
+          "end_cursor": "Synthetic end_cursor 2 lorem",
+          "has_next_page": true
+        },
+        "edges": [
+          {
+            "node": {
+              "id": "Synthetic id 3 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+              "post_id": "100004",
+              "__typename": "Synthetic __typename 5",
+              "title": {
+                "text": "Synthetic text 6 lorem lorem lorem lorem lorem"
+              },
+              "can_viewer_edit_post_privacy": false,
+              "privacy_scope": null,
+              "underlying_admin_creator": null,
+              "should_disable_underlying_admin_for_activity_log": false,
+              "actors": [
+                {
+                  "__typename": "Synthetic __typename 7",
+                  "profile_picture": {
+                    "uri": "https://example.com/item/8"
+                  },
+                  "id": "100009"
+                }
+              ],
+              "application": null,
+              "attachments": [],
+              "feedback_context": {
+                "relevant_comments": []
+              },
+              "message": null,
+              "attached_story": {
+                "actors": [
+                  {
+                    "__typename": "Synthetic __typename 10",
+                    "profile_picture": {
+                      "uri": "https://example.com/item/11"
+                    },
+                    "id": "100012"
+                  }
+                ],
+                "attachments": [
+                  {
+                    "media": {
+                      "__typename": "Synthetic __typename 13",
+                      "image": {
+                        "uri": "https://example.com/item/14"
+                      },
+                      "__isNode": "Photo",
+                      "id": "100015"
+                    },
+                    "subattachments": [
+                      {
+                        "media": {
+                          "__typename": "Synthetic __typename 16",
+                          "image": {
+                            "uri": "https://example.com/item/17"
+                          },
+                          "__isNode": "Photo",
+                          "id": "100018"
+                        }
+                      }
+                    ],
+                    "subtitle": null
+                  }
+                ],
+                "message": {
+                  "text": "Synthetic text 19 lorem lorem lorem lorem lorem lorem"
+                },
+                "privacy_scope": {
+                  "feed_story_label": "Synthetic feed_story_label 20",
+                  "label": "Synthetic label 21",
+                  "icon_image": {
+                    "name": "Synthetic name 22",
+                    "height": 24,
+                    "scale": 2,
+                    "uri": "https://example.com/item/23",
+                    "width": 24
+                  },
+                  "privacy_scope_renderer": null
+                },
+                "id": "Synthetic id 24 lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+              },
+              "summary": {
+                "delight_ranges": [],
+                "image_ranges": [],
+                "inline_style_ranges": [],
+                "aggregated_ranges": [],
+                "ranges": [
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 25",
+                      "__isEntity": "User",
+                      "__isActor": "User",
+                      "id": "100026",
+                      "url": "https://example.com/item/27",
+                      "profile_url": "https://example.com/item/28",
+                      "short_name": "Synthetic short_name 29",
+                      "work_info": null,
+                      "__module_operation_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 30 lorem lorem lorem lorem lorem lorem lorem"
+                      },
+                      "__module_component_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 31 lorem lorem lorem lorem"
+                      },
+                      "work_foreign_entity_info": null,
+                      "is_verified": false,
+                      "mobileUrl": "https://example.com/item/32",
+                      "__isNode": "User"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 14,
+                    "offset": 0
+                  },
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 33",
+                      "__isEntity": "User",
+                      "__isActor": "User",
+                      "id": "100034",
+                      "url": "https://example.com/item/35",
+                      "profile_url": "https://example.com/item/36",
+                      "short_name": "Synthetic short_name 37",
+                      "work_info": null,
+                      "__module_operation_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 38 lorem lorem lorem lorem lorem lorem lorem"
+                      },
+                      "__module_component_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 39 lorem lorem lorem lorem"
+                      },
+                      "work_foreign_entity_info": null,
+                      "is_verified": false,
+                      "mobileUrl": "https://example.com/item/40",
+                      "__isNode": "User"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 16,
+                    "offset": 21
+                  },
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 41",
+                      "__isEntity": "Story",
+                      "url": "https://example.com/item/42",
+                      "mobileUrl": "https://example.com/item/43",
+                      "__isNode": "Story",
+                      "id": "Synthetic id 44 lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 4,
+                    "offset": 40
+                  }
+                ],
+                "color_ranges": [],
+                "text": "Synthetic text 45 lorem lorem lorem lorem lorem"
+              },
+              "archive_state": null,
+              "trash_state": null,
+              "creation_time": 1648675259,
+              "url": "https://example.com/item/46"
+            },
+            "visibility_options": [],
+            "options": [
+              {
+                "__typename": "Synthetic __typename 47 lorem",
+                "key": "UNLIKE",
+                "label": "Synthetic label 48",
+                "www_uri": "https://example.com/item/49",
+                "confirmation_dialog_info": null
+              }
+            ],
+            "selected_visibility": "ALLOW",
+            "cursor": "Synthetic cursor 50 lorem"
+          },
+          {
+            "node": {
+              "id": "Synthetic id 51 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+              "post_id": "100052",
+              "__typename": "Synthetic __typename 53",
+              "title": {
+                "text": "Synthetic text 54 lorem lorem lorem lorem lorem lorem"
+              },
+              "can_viewer_edit_post_privacy": false,
+              "privacy_scope": null,
+              "underlying_admin_creator": null,
+              "should_disable_underlying_admin_for_activity_log": false,
+              "actors": [
+                {
+                  "__typename": "Synthetic __typename 55",
+                  "profile_picture": {
+                    "uri": "https://example.com/item/56"
+                  },
+                  "id": "100057"
+                }
+              ],
+              "application": null,
+              "attachments": [],
+              "feedback_context": {
+                "relevant_comments": []
+              },
+              "message": null,
+              "attached_story": {
+                "actors": [
+                  {
+                    "__typename": "Synthetic __typename 58",
+                    "profile_picture": {
+                      "uri": "https://example.com/item/59"
+                    },
+                    "id": "100060"
+                  }
+                ],
+                "attachments": [
+                  {
+                    "media": {
+                      "__typename": "Synthetic __typename 61",
+                      "image": {
+                        "uri": "https://example.com/item/62"
+                      },
+                      "__isNode": "Photo",
+                      "id": "100063"
+                    },
+                    "subattachments": [],
+                    "subtitle": null
+                  }
+                ],
+                "message": {
+                  "text": "Synthetic text 64 lorem lorem"
+                },
+                "privacy_scope": {
+                  "feed_story_label": "Synthetic feed_story_label 65",
+                  "label": "Synthetic label 66",
+                  "icon_image": {
+                    "name": "Synthetic name 67",
+                    "height": 24,
+                    "scale": 2,
+                    "uri": "https://example.com/item/68",
+                    "width": 24
+                  },
+                  "privacy_scope_renderer": null
+                },
+                "id": "Synthetic id 69 lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+              },
+              "summary": {
+                "delight_ranges": [],
+                "image_ranges": [],
+                "inline_style_ranges": [],
+                "aggregated_ranges": [],
+                "ranges": [
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 70",
+                      "__isEntity": "User",
+                      "__isActor": "User",
+                      "id": "100071",
+                      "url": "https://example.com/item/72",
+                      "profile_url": "https://example.com/item/73",
+                      "short_name": "Synthetic short_name 74",
+                      "work_info": null,
+                      "__module_operation_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 75 lorem lorem lorem lorem lorem lorem lorem"
+                      },
+                      "__module_component_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 76 lorem lorem lorem lorem"
+                      },
+                      "work_foreign_entity_info": null,
+                      "is_verified": false,
+                      "mobileUrl": "https://example.com/item/77",
+                      "__isNode": "User"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 14,
+                    "offset": 0
+                  },
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 78",
+                      "__isEntity": "User",
+                      "__isActor": "User",
+                      "id": "100079",
+                      "url": "https://example.com/item/80",
+                      "profile_url": "https://example.com/item/81",
+                      "short_name": "Synthetic short_name 82",
+                      "work_info": null,
+                      "__module_operation_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 83 lorem lorem lorem lorem lorem lorem lorem"
+                      },
+                      "__module_component_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 84 lorem lorem lorem lorem"
+                      },
+                      "work_foreign_entity_info": null,
+                      "is_verified": false,
+                      "mobileUrl": "https://example.com/item/85",
+                      "__isNode": "User"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 15,
+                    "offset": 26
+                  },
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 86",
+                      "__isEntity": "Photo",
+                      "url": "https://example.com/item/87",
+                      "imageScaledForFeed": {
+                        "height": 960,
+                        "uri": "https://example.com/item/88",
+                        "width": 1710
+                      },
+                      "accessibility_caption": "Synthetic accessibility_caption 89 lorem lorem lorem",
+                      "mobileUrl": "https://example.com/item/90",
+                      "__isNode": "Photo",
+                      "id": "100091"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 5,
+                    "offset": 44
+                  }
+                ],
+                "color_ranges": [],
+                "text": "Synthetic text 92 lorem lorem lorem lorem lorem lorem"
+              },
+              "archive_state": null,
+              "trash_state": null,
+              "creation_time": 1648675222,
+              "url": "https://example.com/item/93"
+            },
+            "visibility_options": [],
+            "options": [
+              {
+                "__typename": "Synthetic __typename 94 lorem",
+                "key": "UNLIKE",
+                "label": "Synthetic label 95 lorem",
+                "www_uri": "https://example.com/item/96",
+                "confirmation_dialog_info": null
+              }
+            ],
+            "selected_visibility": "ALLOW",
+            "cursor": "Synthetic cursor 97 lorem"
+          },
+          {
+            "node": {
+              "id": "Synthetic id 98 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+              "post_id": "100099",
+              "__typename": "Synthetic __typename 100",
+              "title": {
+                "text": "Synthetic text 101 lorem lorem lorem lorem lorem"
+              },
+              "can_viewer_edit_post_privacy": false,
+              "privacy_scope": null,
+              "underlying_admin_creator": null,
+              "should_disable_underlying_admin_for_activity_log": false,
+              "actors": [
+                {
+                  "__typename": "Synthetic __typename 102",
+                  "profile_picture": {
+                    "uri": "https://example.com/item/103"
+                  },
+                  "id": "100104"
+                }
+              ],
+              "application": null,
+              "attachments": [],
+              "feedback_context": {
+                "relevant_comments": []
+              },
+              "message": null,
+              "attached_story": {
+                "actors": [
+                  {
+                    "__typename": "Synthetic __typename 105",
+                    "profile_picture": {
+                      "uri": "https://example.com/item/106"
+                    },
+                    "id": "100107"
+                  }
+                ],
+                "attachments": [
+                  {
+                    "media": {
+                      "__typename": "Synthetic __typename 108",
+                      "image": {
+                        "uri": "https://example.com/item/109"
+                      },
+                      "__isNode": "Photo",
+                      "id": "100110"
+                    },
+                    "subattachments": [],
+                    "subtitle": null
+                  }
+                ],
+                "message": {
+                  "text": "Synthetic text 111 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+                },
+                "privacy_scope": {
+                  "feed_story_label": "Synthetic feed_story_label 112",
+                  "label": "Synthetic label 113",
+                  "icon_image": {
+                    "name": "Synthetic name 114",
+                    "height": 24,
+                    "scale": 2,
+                    "uri": "https://example.com/item/115",
+                    "width": 24
+                  },
+                  "privacy_scope_renderer": null
+                },
+                "id": "Synthetic id 116 lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+              },
+              "summary": {
+                "delight_ranges": [],
+                "image_ranges": [],
+                "inline_style_ranges": [],
+                "aggregated_ranges": [],
+                "ranges": [
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 117",
+                      "__isEntity": "User",
+                      "__isActor": "User",
+                      "id": "100118",
+                      "url": "https://example.com/item/119",
+                      "profile_url": "https://example.com/item/120",
+                      "short_name": "Synthetic short_name 121",
+                      "work_info": null,
+                      "__module_operation_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 122 lorem lorem lorem lorem lorem lorem lorem"
+                      },
+                      "__module_component_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 123 lorem lorem lorem lorem"
+                      },
+                      "work_foreign_entity_info": null,
+                      "is_verified": false,
+                      "mobileUrl": "https://example.com/item/124",
+                      "__isNode": "User"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 14,
+                    "offset": 0
+                  },
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 125",
+                      "__isEntity": "User",
+                      "__isActor": "User",
+                      "id": "100126",
+                      "url": "https://example.com/item/127",
+                      "profile_url": "https://example.com/item/128",
+                      "short_name": "Synthetic short_name 129",
+                      "work_info": null,
+                      "__module_operation_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 130 lorem lorem lorem lorem lorem lorem lorem"
+                      },
+                      "__module_component_CometTextWithEntitiesRelay_textWithEntities": {
+                        "__dr": "Synthetic __dr 131 lorem lorem lorem lorem"
+                      },
+                      "work_foreign_entity_info": null,
+                      "is_verified": false,
+                      "mobileUrl": "https://example.com/item/132",
+                      "__isNode": "User"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 15,
+                    "offset": 21
+                  },
+                  {
+                    "entity": {
+                      "__typename": "Synthetic __typename 133",
+                      "__isEntity": "Photo",
+                      "url": "https://example.com/item/134",
+                      "imageScaledForFeed": {
+                        "height": 960,
+                        "uri": "https://example.com/item/135",
+                        "width": 1405
+                      },
+                      "accessibility_caption": "Synthetic accessibility_caption 136 lorem lorem lorem",
+                      "mobileUrl": "https://example.com/item/137",
+                      "__isNode": "Photo",
+                      "id": "100138"
+                    },
+                    "entity_is_weak_reference": false,
+                    "length": 5,
+                    "offset": 39
+                  }
+                ],
+                "color_ranges": [],
+                "text": "Synthetic text 139 lorem lorem lorem lorem lorem"
+              },
+              "archive_state": null,
+              "trash_state": null,
+              "creation_time": 1648459325,
+              "url": "https://example.com/item/140"
+            },
+            "visibility_options": [],
+            "options": [
+              {
+                "__typename": "Synthetic __typename 141 lorem",
+                "key": "UNLIKE",
+                "label": "Synthetic label 142",
+                "www_uri": "https://example.com/item/143",
+                "confirmation_dialog_info": null
+              }
+            ],
+            "selected_visibility": "ALLOW",
+            "cursor": "Synthetic cursor 144 lorem"
+          }
+        ]
+      },
+      "__isNode": "User",
+      "id": "100145"
+    }
+  },
+  "errors": [
+    {
+      "message": "Synthetic message 146 lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "severity": "ERROR",
+      "mids": [
+        "Synthetic mids 147 lorem lorem lorem lorem"
+      ],
+      "debug_link": "https://example.com/item/148",
+      "path": [
+        "node",
+        "activity_log_stories",
+        "edges"
+      ]
+    },
+    {
+      "message": "Synthetic message 149 lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "severity": "ERROR",
+      "mids": [
+        "Synthetic mids 150 lorem lorem lorem lorem"
+      ],
+      "debug_link": "https://example.com/item/151",
+      "path": [
+        "node",
+        "activity_log_stories",
+        "edges"
+      ]
+    },
+    {
+      "message": "Synthetic message 152 lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "severity": "ERROR",
+      "mids": [
+        "Synthetic mids 153 lorem lorem lorem lorem"
+      ],
+      "debug_link": "https://example.com/item/154",
+      "path": [
+        "node",
+        "activity_log_stories",
+        "edges"
+      ]
+    }
+  ],
+  "extensions": {
+    "prefetch_uris_v2": [
+      {
+        "uri": "https://example.com/item/155",
+        "label": null,
+        "width": null,
+        "height": null,
+        "surface": null
+      },
+      {
+        "uri": "https://example.com/item/156",
+        "label": null,
+        "width": null,
+        "height": null,
+        "surface": null
+      },
+      {
+        "uri": "https://example.com/item/157",
+        "label": null,
+        "width": null,
+        "height": null,
+        "surface": null
+      }
+    ],
+    "all_video_dash_prefetch_representations": [
+      {
+        "initial_representation_ids": [],
+        "representations": [
+          {
+            "representation_id": "Synthetic representation_id 158 lorem",
+            "mime_type": "Synthetic mime_type 159",
+            "codecs": "av01.0.04M.08.0.111",
+            "base_url": "https://example.com/item/160",
+            "bandwidth": 104296,
+            "height": 540,
+            "width": 540,
+            "playback_resolution_mos": "Synthetic playback_resolution_mos 161 lorem lorem lorem lorem lorem",
+            "playback_resolution_csvqm": "Synthetic playback_resolution_csvqm 162 lorem lorem lorem lorem lorem",
+            "segments": [
+              {
+                "start": 0,
+                "end": 825
+              },
+              {
+                "start": 826,
+                "end": 1313
+              },
+              {
+                "start": 1314,
+                "end": 87165
+              }
+            ]
+          },
+          {
+            "representation_id": "Synthetic representation_id 163 lorem",
+            "mime_type": "Synthetic mime_type 164",
+            "codecs": "av01.0.04M.08.0.111",
+            "base_url": "https://example.com/item/165",
+            "bandwidth": 176053,
+            "height": 720,
+            "width": 720,
+            "playback_resolution_mos": "Synthetic playback_resolution_mos 166 lorem lorem lorem lorem lorem",
+            "playback_resolution_csvqm": "Synthetic playback_resolution_csvqm 167 lorem lorem lorem lorem lorem",
+            "segments": [
+              {
+                "start": 0,
+                "end": 825
+              },
+              {
+                "start": 826,
+                "end": 1313
+              },
+              {
+                "start": 1314,
+                "end": 147399
+              }
+            ]
+          },
+          {
+            "representation_id": "Synthetic representation_id 168 lorem",
+            "mime_type": "Synthetic mime_type 169",
+            "codecs": "av01.0.04M.08.0.111",
+            "base_url": "https://example.com/item/170",
+            "bandwidth": 257142,
+            "height": 720,
+            "width": 720,
+            "playback_resolution_mos": "Synthetic playback_resolution_mos 171 lorem lorem lorem lorem lorem",
+            "playback_resolution_csvqm": "Synthetic playback_resolution_csvqm 172 lorem lorem lorem lorem lorem",
+            "segments": [
+              {
+                "start": 0,
+                "end": 825
+              },
+              {
+                "start": 826,
+                "end": 1313
+              },
+              {
+                "start": 1314,
+                "end": 211560
+              }
+            ]
+          }
+        ],
+        "video_id": "100173",
+        "nextgendash": true
+      },
+      {
+        "initial_representation_ids": [],
+        "representations": [
+          {
+            "representation_id": "Synthetic representation_id 174 lorem",
+            "mime_type": "Synthetic mime_type 175",
+            "codecs": "vp09.00.21.08.00.01.01.01.00",
+            "base_url": "https://example.com/item/176",
+            "bandwidth": 510785,
+            "height": 304,
+            "width": 540,
+            "playback_resolution_mos": "Synthetic playback_resolution_mos 177 lorem lorem lorem lorem lorem lorem",
+            "playback_resolution_csvqm": "Synthetic playback_resolution_csvqm 178 lorem lorem lorem lorem lorem lorem",
+            "segments": [
+              {
+                "start": 0,
+                "end": 817
+              },
+              {
+                "start": 818,
+                "end": 969
+              },
+              {
+                "start": 970,
+                "end": 195385
+              }
+            ]
+          },
+          {
+            "representation_id": "Synthetic representation_id 179 lorem",
+            "mime_type": "Synthetic mime_type 180",
+            "codecs": "mp4a.40.5",
+            "base_url": "https://example.com/item/181",
+            "bandwidth": 49522,
+            "height": 0,
+            "width": 0,
+            "playback_resolution_mos": "",
+            "playback_resolution_csvqm": "",
+            "segments": [
+              {
+                "start": 0,
+                "end": 907
+              },
+              {
+                "start": 908,
+                "end": 1227
+              }
+            ]
+          }
+        ],
+        "video_id": "100182",
+        "nextgendash": true
+      }
+    ],
+    "server_metadata": {
+      "request_start_time_ms": 1792643678542,
+      "time_at_flush_ms": 1792643679243
+    },
+    "is_final": false,
+    "sr_payload": {
+      "ddd": {
+        "hsrp": {
+          "hblp": {
+            "consistency": {
+              "rev": 1051264295
+            },
+            "rsrcMap": {
+              "csr:_z_0_x7": {
+                "type": "csr",
+                "src": "Synthetic src 183 lorem lorem lorem lorem",
+                "c": 1
+              }
+            },
+            "indexUpgrades": {}
+          }
+        },
+        "jsmods": {
+          "require": [
+            [
+              "Synthetic require 184 lorem lorem lorem lorem lorem lorem lorem"
+            ],
+            [
+              "Synthetic require 185 lorem lorem lorem lorem"
+            ],
+            [
+              "Synthetic require 186 lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+            ]
+          ]
+        },
+        "allResources": [
+          "csr:_z_0_x7"
+        ],
+        "tieredResources": {
+          "r": [
+            "csr:_z_0_x7"
+          ],
+          "rdfds": [],
+          "rds": []
+        }
+      }
+    }
+  }
+}

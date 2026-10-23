@@ -45,6 +45,10 @@ import {
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
+	parseAccountProfile,
+	sourceReportsEmptyHistory,
+} from "./account-source.ts";
+import {
 	type InventoryEvidence,
 	inventoryIsComplete,
 	unprovenInventory,
@@ -57,7 +61,6 @@ import {
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
-	buildProfileRecord,
 	diagnoseEmptyListPage,
 	inspectOrderListParsing,
 	isIncapsulaBlocked,
@@ -68,7 +71,6 @@ import {
 	parseOrderDetailDom,
 	parseOrdersListDom,
 	parseOrdersListStructured,
-	parseProfileDom,
 	resolveMaxPage,
 } from "./parsers.ts";
 import {
@@ -1069,16 +1071,76 @@ async function extractAndShapeCheckOrders(
 
 type EmptyListPageAction = "abort" | "terminal";
 
-/** The order-history list walk reached a page that gives no evidence of the
- *  list's end (failed navigation, unresolved pagination, an empty page that is
- *  not H-E-B's own empty state or past the advertised last page). `collect`
- *  turns exactly this error into `stream_collection_failed`; any other throw
- *  keeps its own failure meaning. */
+/** The order-history list walk stopped on a page that gives no evidence of
+ *  the list's end (failed navigation, unresolved pagination, an empty page
+ *  that is not H-E-B's own empty state or past the advertised last page).
+ *  `collect` turns exactly this error into `stream_collection_failed`; a
+ *  page that failed to load or was not the order list (`readFailed`) is
+ *  reported as a failed read, everything else as an unproven enumeration.
+ *  A sign-in or bot wall is not this error: it throws `heb_session_required`. */
 export class HebEnumerationUnprovenError extends Error {
-	constructor(reason: string, options?: ErrorOptions) {
+	readonly reason: string;
+	readonly ownerMessage: string | undefined;
+	readonly diagnostics: Record<string, unknown> | undefined;
+	constructor(
+		reason: string,
+		options?: ErrorOptions & {
+			diagnostics?: Record<string, unknown>;
+			ownerMessage?: string;
+		},
+	) {
 		super(`heb_empty_list_page_${reason}`, options);
 		this.name = "HebEnumerationUnprovenError";
+		this.reason = reason;
+		this.ownerMessage = options?.ownerMessage;
+		this.diagnostics = options?.diagnostics;
 	}
+
+	get readFailed(): boolean {
+		return HEB_LIST_READ_FAILURES.has(this.reason);
+	}
+}
+
+/** List-page outcomes where the page itself did not load as the order list:
+ *  the read failed, so nothing about the list's end was observed. */
+const HEB_LIST_READ_FAILURES: ReadonlySet<string> = new Set([
+	"navigation_failed",
+	"response_identity_or_readiness_unproven",
+	"selector_drift",
+]);
+
+/** The error `ensureSession` throws when H-E-B has no live session. A sign-in
+ *  page or an Incapsula block during collection ends the run the same way. */
+function hebSessionRequired(): Error {
+	return new Error("heb_session_required");
+}
+
+/** A stream whose read failed (the page did not load, or was not the page
+ *  asked for) is a stream failure with the connector's own hint, not an
+ *  unproven enumeration. Test contexts without `reportStreamFailure` see the
+ *  SKIP_RESULT the runtime would emit. */
+async function reportReadFailure(
+	deps: Pick<EmitDeps, "emit" | "reportStreamFailure">,
+	stream: string,
+	message: string,
+	recoveryHint: { action: string; retryable: boolean },
+	diagnostics: Record<string, unknown>,
+): Promise<void> {
+	if (deps.reportStreamFailure) {
+		await deps.reportStreamFailure(stream, message, {
+			recoveryHint,
+			diagnostics,
+		});
+		return;
+	}
+	await deps.emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason: "stream_collection_failed",
+		message,
+		recovery_hint: recoveryHint,
+		diagnostics,
+	});
 }
 
 /** An empty page behind a sign-in or bot wall needs the owner; a page whose
@@ -1106,6 +1168,9 @@ function emptyListPageRecoveryHint(reason: string): {
 interface EmptyListPageClassification {
 	action: EmptyListPageAction;
 	reason: string;
+	/** Set only for a failed read, which `collect` reports per stream. */
+	diagnostics?: Record<string, unknown>;
+	message?: string;
 }
 
 /**
@@ -1308,27 +1373,36 @@ async function reportEmptyPageDiagnostics(
 		}
 		return classification;
 	}
+	const message =
+		classification.reason === "heb_empty_history_after_prior_orders"
+			? HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE
+			: `H-E-B list page ${pageNum}: empty page is not a proven terminal page (${classification.reason}).`;
+	const diagnostics = {
+		any_card: diag.any_card,
+		body_preview: "",
+		empty_state: diag.empty_state,
+		has_prior_orders: priorOrdersEvidence.hasPriorOrders,
+		incapsula_block: diag.incapsula_block,
+		max_page_resolution: maxPageResolution,
+		order_cards: diag.order_cards,
+		password_form: diag.password_form,
+		title: "",
+		url: "",
+	};
+	if (HEB_LIST_READ_FAILURES.has(classification.reason)) {
+		// `collect` reports the failed read for every affected stream.
+		return { ...classification, message, diagnostics };
+	}
 	await emit({
 		type: "SKIP_RESULT",
 		stream: "orders",
-		reason: "stream_collection_failed",
+		reason:
+			classification.reason === "source_auth_or_challenge"
+				? "session_repair_required"
+				: "stream_collection_failed",
 		recovery_hint: emptyListPageRecoveryHint(classification.reason),
-		message:
-			classification.reason === "heb_empty_history_after_prior_orders"
-				? HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE
-				: `H-E-B list page ${pageNum}: empty page is not a proven terminal page (${classification.reason}).`,
-		diagnostics: {
-			any_card: diag.any_card,
-			body_preview: "",
-			empty_state: diag.empty_state,
-			has_prior_orders: priorOrdersEvidence.hasPriorOrders,
-			incapsula_block: diag.incapsula_block,
-			max_page_resolution: maxPageResolution,
-			order_cards: diag.order_cards,
-			password_form: diag.password_form,
-			title: "",
-			url: "",
-		},
+		message,
+		diagnostics,
 	});
 	return classification;
 }
@@ -1448,6 +1522,8 @@ export interface RunFlags {
 }
 
 export interface EmitDeps extends HydrationDeps {
+	/** First-page authenticated source response explicitly reports no retained orders. */
+	emptyOrderHistoryProven?: boolean;
 	inventoryEvidence?: InventoryEvidence;
 	capture?: BrowserCollectContext["capture"];
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
@@ -2096,6 +2172,7 @@ export async function processListOrder(
 /** Traversal bounds and source evidence are separate. A max page link or
  * resume boundary can stop collection but cannot prove inventory completion. */
 export interface ForwardScanResult {
+	sourceReportedEmpty: boolean;
 	pages: InventoryEvidence[];
 	evidence: InventoryEvidence;
 	newestOrderDate: string | null;
@@ -2119,6 +2196,7 @@ export async function runForwardScan(
 	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
 ): Promise<ForwardScanResult> {
 	const pages: InventoryEvidence[] = [];
+	let sourceReportedEmpty = false;
 	let newestOrderDate: string | null = null;
 	// Run-scoped dedup: parseOrdersListDom already dedupes within one page, but
 	// a pagination-boundary repeat (the last order on page N reappearing as the
@@ -2155,6 +2233,8 @@ export async function runForwardScan(
 			// shared page to any order-detail URL (fix for the item-enriched scan
 			// silently truncating after page 1: detail HTML has no pagination nav).
 			const { maxPage, orders } = listPage;
+			sourceReportedEmpty =
+				pageNum === 1 && listPage.sourceReportedEmpty === true;
 			pages.push(listPage.evidence);
 			advertisedMaxPage = maxPage;
 
@@ -2222,6 +2302,7 @@ export async function runForwardScan(
 		[...seenOrderIds],
 	);
 	return {
+		sourceReportedEmpty,
 		newestOrderDate,
 		stoppedAtBoundary,
 		truncated: walk.truncated,
@@ -2262,6 +2343,7 @@ export async function reportListPageCeiling(
 }
 
 interface LoadedListPage {
+	sourceReportedEmpty?: boolean;
 	evidence: InventoryEvidence;
 	maxPage: number;
 	orders: ListPageOrder[];
@@ -2302,18 +2384,12 @@ async function loadListPage(
 		)
 		.catch((error: unknown) => ({ error, ok: false as const }));
 	if (!navigation.ok) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "orders",
-			reason: "stream_collection_failed",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			message: `H-E-B list page ${pageNum}: navigation failed; refusing to parse stale page content or advance the cursor.`,
+		throw new HebEnumerationUnprovenError("navigation_failed", {
+			cause: navigation.error,
+			ownerMessage: `H-E-B list page ${pageNum}: navigation failed; refusing to parse stale page content or advance the cursor.`,
 			diagnostics: {
 				error_class: navigation.error instanceof Error ? "Error" : "unknown",
 			},
-		});
-		throw new HebEnumerationUnprovenError("navigation_failed", {
-			cause: navigation.error,
 		});
 	}
 	await (waitForHydration ?? hydrationWait)();
@@ -2326,16 +2402,25 @@ async function loadListPage(
 
 	const html = await page.content().catch((): string => "");
 	if (looksLoggedOut(page.url(), html) || isIncapsulaBlocked(html)) {
-		await emitInventoryIncomplete({ emit }, "orders");
-		throw new HebEnumerationUnprovenError("source_auth_or_challenge");
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "session_repair_required",
+			recovery_hint: emptyListPageRecoveryHint("source_auth_or_challenge"),
+			message: `H-E-B list page ${pageNum} redirected to sign-in or was blocked by Incapsula.`,
+		});
+		throw hebSessionRequired();
 	}
 	if (
 		page.url() !== url ||
 		unprovenInventory("orders", url, page.url(), html).loading
 	) {
-		await emitInventoryIncomplete({ emit }, "orders");
 		throw new HebEnumerationUnprovenError(
 			"response_identity_or_readiness_unproven",
+			{
+				ownerMessage: `H-E-B list page ${pageNum} was not the requested order-history page or did not finish loading.`,
+				diagnostics: { landed_on_requested_page: page.url() === url },
+			},
 		);
 	}
 	const orders = await extractAndShapeCheckOrders(html, emit);
@@ -2373,6 +2458,19 @@ async function loadListPage(
 		}
 		return { maxPage: maxPageResolution.value, orders, evidence };
 	}
+	if (
+		pageNum === 1 &&
+		orders.length === 0 &&
+		navigation.responseSucceeded === true &&
+		!evidence.loading &&
+		evidence.rejectedRows === 0 &&
+		evidence.missingIdentityRows === 0 &&
+		evidence.sourceIds.length === 0 &&
+		sourceReportsEmptyHistory(html) &&
+		(!priorOrdersEvidence.hasPriorOrders ||
+			priorOrdersAreBeyondRetention(priorOrdersEvidence, new Date()))
+	)
+		return { maxPage: 1, orders, evidence, sourceReportedEmpty: true };
 	const classification = await reportEmptyPageDiagnostics(
 		page,
 		pageNum,
@@ -2383,7 +2481,17 @@ async function loadListPage(
 	if (classification.action === "terminal") {
 		return "terminal";
 	}
-	throw new HebEnumerationUnprovenError(classification.reason);
+	if (classification.reason === "source_auth_or_challenge") {
+		throw hebSessionRequired();
+	}
+	throw new HebEnumerationUnprovenError(classification.reason, {
+		...(classification.message === undefined
+			? {}
+			: { ownerMessage: classification.message }),
+		...(classification.diagnostics === undefined
+			? {}
+			: { diagnostics: classification.diagnostics }),
+	});
 }
 
 /** Build the next `orders` STATE cursor from this run's newest order_date
@@ -2422,7 +2530,10 @@ export async function emitOrderItemsCoverage(
 	deps: EmitDeps,
 	coverage: OrderItemsCoverage,
 ): Promise<void> {
-	if (!inventoryIsComplete(deps.inventoryEvidence)) {
+	if (
+		!inventoryIsComplete(deps.inventoryEvidence) &&
+		!(deps.emptyOrderHistoryProven && coverage.required.length === 0)
+	) {
 		await emitInventoryIncomplete(deps, "order_items");
 		return;
 	}
@@ -2442,7 +2553,10 @@ export async function emitOrdersCoverage(
 	deps: EmitDeps,
 	coverage: OrdersCoverage,
 ): Promise<void> {
-	if (!inventoryIsComplete(deps.inventoryEvidence)) {
+	if (
+		!inventoryIsComplete(deps.inventoryEvidence) &&
+		!(deps.emptyOrderHistoryProven && coverage.considered.length === 0)
+	) {
 		await emitInventoryIncomplete(deps, "orders");
 		return;
 	}
@@ -2533,14 +2647,20 @@ export async function collectProfile(
 	page: Page,
 	deps: Pick<
 		EmitDeps,
-		"emit" | "emitRecord" | "emittedAt" | "waitForHydration"
+		| "emit"
+		| "emitRecord"
+		| "emittedAt"
+		| "reportStreamFailure"
+		| "waitForHydration"
 	>,
 ): Promise<void> {
+	let responseSucceeded = false;
 	try {
-		await page.goto(PROFILE_URL, {
+		const response = await page.goto(PROFILE_URL, {
 			waitUntil: "domcontentloaded",
 			timeout: NAV_TIMEOUT_MS,
 		});
+		responseSucceeded = response?.ok() === true;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		await deps.emit({
@@ -2577,30 +2697,33 @@ export async function collectProfile(
 		return;
 	}
 
-	const extraction = parseProfileDom(html);
-	const profileEvidence = unprovenInventory(
+	const record = parseAccountProfile(html);
+	const loading = unprovenInventory(
 		"profile",
 		PROFILE_URL,
 		landedUrl,
 		html,
-		extraction.email ? [extraction.email] : [],
-	);
-	const addressEvidence = unprovenInventory(
-		"addresses",
-		PROFILE_URL,
-		landedUrl,
-		html,
-		extraction.deliveryAddresses?.map((address) => address.address) ?? [],
-	);
-	// Labels and address cards identify observed fields, not owner-bound complete
-	// source sections. Withhold unknown addresses or unreadable primary markers.
-	const record = buildProfileRecord(extraction, deps.emittedAt);
+	).loading;
 	if (
-		record === null ||
-		!inventoryIsComplete(profileEvidence) ||
-		!inventoryIsComplete(addressEvidence)
+		!responseSucceeded ||
+		landedUrl !== PROFILE_URL ||
+		loading ||
+		!record
 	) {
-		await emitInventoryIncomplete(deps, "profile");
+		// The profile is one record, not an enumeration: a page that did not
+		// load as the readable account profile is a failed read.
+		await reportReadFailure(
+			deps,
+			"profile",
+			"H-E-B profile page did not load as a readable account profile.",
+			{ action: "retry_by_runtime", retryable: true },
+			{
+				response_succeeded: responseSucceeded,
+				landed_on_profile: landedUrl === PROFILE_URL,
+				loading,
+				record_parsed: record !== null,
+			},
+		);
 		return;
 	}
 	await deps.emitRecord("profile", record);
@@ -2720,6 +2843,9 @@ async function emitNutritionCoverageIncomplete(
 	});
 }
 
+const NUTRITION_PAGE_UNREAD_MESSAGE =
+	"An H-E-B product page did not load, so its nutrition facts were not read.";
+
 /** Fetch and emit `nutrition` records for every unique product this run's
  *  `order_items` collection observed. Products without a resolvable
  *  `product_url` receive an explicit not_found outcome; no URL is guessed. */
@@ -2728,10 +2854,16 @@ export async function collectNutrition(
 	targets: readonly NutritionTarget[],
 	deps: Pick<
 		EmitDeps,
-		"emit" | "emitRecord" | "emittedAt" | "waitForHydration"
+		| "emit"
+		| "emitRecord"
+		| "emittedAt"
+		| "reportStreamFailure"
+		| "waitForHydration"
 	>,
-): Promise<{ lookupSkips: number }> {
+): Promise<{ lookupSkips: number; readFailures: number }> {
 	let lookupSkips = 0;
+	/** Lookups already reported as failed reads; a subset of `lookupSkips`. */
+	let readFailures = 0;
 	for (const target of targets) {
 		if (!target.productUrl) {
 			lookupSkips += 1;
@@ -2747,7 +2879,14 @@ export async function collectNutrition(
 			responseSucceeded = response?.ok() === true;
 		} catch {
 			lookupSkips += 1;
-			await emitInventoryIncomplete(deps, "nutrition");
+			readFailures += 1;
+			await reportReadFailure(
+				deps,
+				"nutrition",
+				NUTRITION_PAGE_UNREAD_MESSAGE,
+				{ action: "retry_by_runtime", retryable: true },
+				{ source_reason: "nutrition_navigation_failed" },
+			);
 			continue;
 		}
 		await (deps.waitForHydration ?? hydrationWait)();
@@ -2772,15 +2911,35 @@ export async function collectNutrition(
 			html,
 		).loading;
 		if (
-			!responseSucceeded ||
-			!resourceMatches ||
-			loading ||
 			SIGNIN_URL_RE.test(landedUrl) ||
 			looksLoggedOut(landedUrl, html) ||
 			isIncapsulaBlocked(html)
 		) {
+			await deps.emit({
+				type: "SKIP_RESULT",
+				stream: "nutrition",
+				reason: "session_repair_required",
+				recovery_hint: { action: "refresh_credentials", retryable: false },
+				message:
+					"H-E-B product page redirected to sign-in or was blocked by Incapsula.",
+			});
+			throw hebSessionRequired();
+		}
+		if (!responseSucceeded || !resourceMatches || loading) {
 			lookupSkips += 1;
-			await emitInventoryIncomplete(deps, "nutrition");
+			readFailures += 1;
+			await reportReadFailure(
+				deps,
+				"nutrition",
+				NUTRITION_PAGE_UNREAD_MESSAGE,
+				{ action: "retry_by_runtime", retryable: true },
+				{
+					source_reason: "nutrition_navigation_failed",
+					response_succeeded: responseSucceeded,
+					resource_matches: resourceMatches,
+					loading,
+				},
+			);
 			continue;
 		}
 		const extraction = parseNutritionDom(html);
@@ -2832,7 +2991,7 @@ export async function collectNutrition(
 			);
 		}
 	}
-	return { lookupSkips };
+	return { lookupSkips, readFailures };
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────
@@ -2905,7 +3064,12 @@ export const hebConnector: BrowserConnectorConfig = {
 		const wantsNutrition = requested.has("nutrition");
 
 		if (wantsProfile) {
-			await collectProfile(page, { emit, emitRecord, emittedAt });
+			await collectProfile(page, {
+				emit,
+				emitRecord,
+				emittedAt,
+				reportStreamFailure,
+			});
 		}
 
 		// Nutrition discovers products through order history and item details,
@@ -3048,16 +3212,28 @@ export const hebConnector: BrowserConnectorConfig = {
 					emit,
 					emitRecord,
 					emittedAt,
+					reportStreamFailure,
 				});
 			for (const stream of [
 				...(wantsOrders ? ["orders"] : []),
 				...(wantsItems ? ["order_items"] : []),
 				...(wantsNutrition ? ["nutrition"] : []),
-			])
-				await emitInventoryIncomplete({ emit }, stream);
+			]) {
+				if (error.readFailed)
+					await reportReadFailure(
+						{ emit, reportStreamFailure },
+						stream,
+						error.ownerMessage ?? error.message,
+						emptyListPageRecoveryHint(error.reason),
+						{ source_reason: error.reason, ...error.diagnostics },
+					);
+				else await emitInventoryIncomplete({ emit }, stream);
+			}
 			return;
 		}
-		const listComplete = inventoryIsComplete(scan.evidence);
+		const listComplete =
+			inventoryIsComplete(scan.evidence) || scan.sourceReportedEmpty;
+		deps.emptyOrderHistoryProven = scan.sourceReportedEmpty;
 		deps.inventoryEvidence = scan.evidence;
 		if (wantsOrders) {
 			if (listComplete && !scan.truncated) {
@@ -3085,15 +3261,24 @@ export const hebConnector: BrowserConnectorConfig = {
 		}
 		if (wantsNutrition) {
 			// Enumeration completeness gates only completion, never valid upserts.
-			const { lookupSkips } = await collectNutrition(page, nutritionTargets, {
-				emit,
-				emitRecord,
-				emittedAt,
-			});
+			const { lookupSkips, readFailures } = await collectNutrition(
+				page,
+				nutritionTargets,
+				{
+					emit,
+					emitRecord,
+					emittedAt,
+					reportStreamFailure,
+				},
+			);
 			const itemCountShort = itemCountTallies
 				? summarizeItemCounts(itemCountTallies).short > 0
 				: false;
-			if (detailsComplete && !itemCountShort && lookupSkips === 0) {
+			const coverageProven = detailsComplete && !itemCountShort;
+			// A lookup whose page failed to load is already reported as a failed
+			// nutrition read; only other gaps leave the inventory unproven.
+			const onlyReadFailures = lookupSkips > 0 && lookupSkips === readFailures;
+			if (coverageProven && lookupSkips === 0) {
 				await emit({
 					type: "STATE",
 					stream: "nutrition",
@@ -3103,7 +3288,8 @@ export const hebConnector: BrowserConnectorConfig = {
 						source: "heb_order_history",
 					},
 				});
-			} else await emitInventoryIncomplete({ emit }, "nutrition");
+			} else if (!(coverageProven && onlyReadFailures))
+				await emitInventoryIncomplete({ emit }, "nutrition");
 		}
 	},
 };

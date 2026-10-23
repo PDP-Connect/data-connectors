@@ -2570,13 +2570,34 @@ async function reportCollectionFailure(
 	ctx: BrowserCollectContext,
 	stream: string,
 	message: string,
+	diagnostics?: Record<string, unknown>,
 ): Promise<void> {
 	if (!ctx.reportStreamFailure) {
 		throw createConnectorFailure("stream_collection_failed", message, {
 			retryable: true,
 		});
 	}
-	await ctx.reportStreamFailure(stream, message, { retryable: true });
+	await ctx.reportStreamFailure(stream, message, {
+		retryable: true,
+		...(diagnostics === undefined ? {} : { diagnostics }),
+	});
+}
+
+/** Walk errors where Instagram answered but the answer cannot prove the
+ *  list: a different owner, a missing cursor, changed or unreadable rows.
+ *  Any other walk error (navigation, an unsuccessful or unobserved page, a
+ *  page-script or transport error) means the read itself failed. */
+const UNPROVEN_WALK_ERROR =
+	/^meta_(?:posts_owner_conflict|posts_cursor_unavailable|posts_timeline_contradictory|posts_unrecordable_edges|following_owner_conflict|following_unreadable_row)\b/;
+
+/** The connector's own error code for a failed walk read, or `null` when the
+ *  walk ended without a failure that means the read did not complete. */
+function failedWalkRead(error: unknown): string | null {
+	const message = error instanceof Error ? error.message : String(error);
+	if (UNPROVEN_WALK_ERROR.test(message)) return null;
+	// Only the connector's own codes reach diagnostics; browser error text can
+	// name URLs.
+	return /^meta_[a-z_]+/.exec(message)?.[0] ?? "read_failed";
 }
 
 async function emitPostRecords(
@@ -2638,15 +2659,15 @@ export async function collectAllStreams(
 	const authentication = {blocked: false};
 	authenticationEvidence.set(page, authentication);
 	const mobileOwner = mobile ? await fetchWebInfoUser(page) : null;
-	const pending: Array<{stream: string; read: number; complete: boolean; why?: string}> = [];
+	const pending: Array<{stream: string; read: number; complete: boolean; why?: string; failedRead?: string}> = [];
 	const checkAuthentication = async (): Promise<void> => {
 		const url = mobile ? await page.evaluate(() => location.href) : page.url();
 		observeAuthentication(page, null, 200, url);
 		authentication.blocked ||= await page.evaluate(pageShowsLoginOrChallengeControls).catch(() => false) === true;
 	};
-	const queueInventoryResult = async (_ctx: BrowserCollectContext, stream: string, read: number, complete: boolean, why?: string): Promise<void> => {
+	const queueInventoryResult = async (_ctx: BrowserCollectContext, stream: string, read: number, complete: boolean, why?: string, failedRead?: string | null): Promise<void> => {
 		await checkAuthentication();
-		pending.push({stream, read, complete, ...(why ? {why} : {})});
+		pending.push({stream, read, complete, ...(why ? {why} : {}), ...(failedRead ? {failedRead} : {})});
 	};
 	const onNavigation = (frame: Frame): void => { if (frame === page.mainFrame()) observeAuthentication(page, null, 200, frame.url()); };
 	const responseReads = new Set<Promise<void>>();
@@ -2683,11 +2704,7 @@ export async function collectAllStreams(
 				(stream) => requested.has(stream),
 			);
 			for (const stream of unavailable) {
-				await reportCollectionFailure(
-					ctx,
-					stream,
-					"Instagram authenticated profile data was unavailable; this stream was not proven complete.",
-				);
+				await queueInventoryResult(ctx, stream, 0, false, undefined, "authenticated_profile_unavailable");
 			}
 		}
 
@@ -2736,6 +2753,7 @@ export async function collectAllStreams(
 			let sourceEnd = false;
 			let readable = true;
 			let ownerBound = false;
+			let postsFailedRead: string | null = null;
 			try {
 				if (mobile) throw new Error("PageShim lacks passive GraphQL request/response capture; page-minted posts doc_id, variables and anti-bot parameters are not available");
 				const result = await fetchAllPosts(page, identity.username, capture, progress, delay, postsClock, identity.id);
@@ -2744,6 +2762,7 @@ export async function collectAllStreams(
 				sourceEnd = result.sourceEnd;
 			} catch (error) {
 				readable = false;
+				if (!mobile) postsFailedRead = failedWalkRead(error);
 				if (error instanceof PartialWalkFailure) edges = [...error.partial];
 			}
 			const emitted = await emitPostRecords(ctx, edges);
@@ -2751,10 +2770,10 @@ export async function collectAllStreams(
 			const postsWhy = mobile
 				? "PageShim lacks passive GraphQL request/response capture; page-minted posts doc_id, variables and anti-bot parameters are not available"
 				: readable ? undefined : "the posts read failed before the source's end";
-			if (wantsPosts) await queueInventoryResult(ctx, "posts", emitted.posts, postsComplete && emitted.postsReadable, postsWhy);
+			if (wantsPosts) await queueInventoryResult(ctx, "posts", emitted.posts, postsComplete && emitted.postsReadable, postsWhy, postsFailedRead);
 			if (wantsPostLikes) {
 				await queueInventoryResult(ctx, "post_likes", emitted.likes,
-					postsComplete && emitted.likesReadable && edges.every(postLikesAreComplete), postsWhy);
+					postsComplete && emitted.likesReadable && edges.every(postLikesAreComplete), postsWhy, postsFailedRead);
 			}
 		}
 
@@ -2765,6 +2784,7 @@ export async function collectAllStreams(
 			let ownerConflict = false;
 			let sourceEnd = false;
 			let readable = true;
+			let followingFailedRead: string | null = null;
 			try {
 				const result = await fetchAllFollowing(page, identity.id, capture, progress, delay, identity.username);
 				users = result.users;
@@ -2773,12 +2793,13 @@ export async function collectAllStreams(
 				sourceEnd = result.sourceEnd;
 			} catch (error) {
 				readable = false;
+				followingFailedRead = failedWalkRead(error);
 				if (error instanceof PartialWalkFailure) users = [...error.partial];
 			}
 			await emitFollowingRecords(ctx, users);
 			await queueInventoryResult(ctx, "following", users.length,
 				readable && !ownerConflict && sourceInventoryComplete(users.length, observedFollowingCount, sourceEnd && ownerBound),
-				readable ? undefined : "the following read failed before the source's end");
+				readable ? undefined : "the following read failed before the source's end", followingFailedRead);
 		}
 
 		if (wantsAds) {
@@ -2841,9 +2862,22 @@ export async function collectAllStreams(
 			authentication.blocked ||= !before || !after ||
 				before.id !== after.id || before.username !== after.username;
 		}
+		// A signed-out or challenged session is the run's failure, not a list
+		// that failed to prove its end: end the run as a session failure.
+		if (authentication.blocked) {
+			throw createConnectorFailure("meta_session_required",
+				"meta_session_required: Instagram authentication was rejected or challenged during this run",
+				{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
+			);
+		}
 		for (const result of pending) {
-			await emitInventoryResult(ctx, result.stream, result.read, result.complete && !authentication.blocked,
-				authentication.blocked ? "Instagram signed out or requested a challenge during this run" : result.why);
+			if (result.failedRead !== undefined) {
+				await reportCollectionFailure(ctx, result.stream,
+					`The ${result.stream} read failed before the source's end.`,
+					{ items_read: result.read, source_reason: result.failedRead });
+				continue;
+			}
+			await emitInventoryResult(ctx, result.stream, result.read, result.complete, result.why);
 		}
 	} finally {
 		if (!mobile) {

@@ -78,6 +78,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
 	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
+	facebook: { testFile: "connectors/facebook/collect.test.ts" },
 	garmin_browser: { testFile: "connectors/garmin_browser/index.test.ts" },
 	icloud_notes: { testFile: "connectors/icloud_notes/integration.test.ts" },
 	fitbit: { testFile: "connectors/fitbit/index.test.ts" },
@@ -93,6 +94,9 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	github_browser: { testFile: "connectors/github_browser/protocol.test.ts" },
 	groupme: { testFile: "connectors/groupme/collection.test.ts" },
 	meta: { testFile: "connectors/meta/integration.test.ts" },
+	// Tier development. Collects through the signed-in muse.ai app's own
+	// gateway client; the oracle is the collection protocol test.
+	muse: { testFile: "connectors/muse/index.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
 	// not scaffold: it parses a
 	// genuine Netflix export rather than emitting a SKIP_RESULT placeholder.
@@ -107,6 +111,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	pocket: { testFile: "connectors/pocket/schemas.test.ts" },
 	shopify: { testFile: "connectors/shopify/index.test.ts" },
 	spotify: { testFile: "connectors/spotify/schemas.test.ts" },
+	tiktok: { testFile: "connectors/tiktok/parsers.test.ts" },
 	twitter_archive: { testFile: "connectors/twitter_archive/parsers.test.ts" },
 	x_browser: { testFile: "connectors/x_browser/index.test.ts" },
 	youtube: { testFile: "connectors/youtube/index.test.ts" },

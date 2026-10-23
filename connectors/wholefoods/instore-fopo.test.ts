@@ -97,11 +97,11 @@ test("a weighed row counts as one search row when reconciling item counts", () =
 	);
 });
 
-test("in-store order record uses charged line totals and validates", () => {
+test("in-store order record has no order total and validates", () => {
 	const { items } = parsers.parseOrderDetailDom(FIXTURE);
 	const record = connector.buildOrderRecord(STUB, null, items);
 	assert.equal(record.total_cents, null);
-	assert.equal(record.item_count, null);
+	assert.equal(record.item_count, items.length);
 	validateRecord("orders", record);
 	for (const itemRecord of connector.buildOrderItemRecords(
 		STUB.orderId,

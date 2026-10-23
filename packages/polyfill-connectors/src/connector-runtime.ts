@@ -112,6 +112,11 @@ import {
 	isOutsideTimeRange,
 	timeRangeUnsupportedReason,
 } from "./time-range.ts";
+import {
+	isUnprovenEnumerationSkip,
+	portableUnprovenEnumerationSkip,
+	unprovenEnumerationRetryable,
+} from "./unproven-enumeration.ts";
 
 // ─── Protocol message shapes (re-exported from connector-runtime-protocol.ts) ──
 //
@@ -182,15 +187,65 @@ export type { TerminalErrorDetails } from "./terminal-error.ts";
 export function createConnectorFailure(
 	code: string,
 	message: string,
-	options: { cause?: unknown; retryable?: boolean } = {},
+	options: {
+		cause?: unknown;
+		retryable?: boolean;
+		recoveryHint?: TerminalErrorDetails["recovery_hint"];
+	} = {},
 ): Error {
 	assertValidConnectorErrorCode(code);
+	if (options.recoveryHint !== undefined)
+		assertValidConnectorErrorCode(
+			typeof options.recoveryHint === "string"
+				? options.recoveryHint
+				: options.recoveryHint.action,
+		);
 	return new TerminalError(message, { ...options, code });
 }
 
 // ─── Collect context ────────────────────────────────────────────────────
 
 type Credentials = Record<string, string>;
+
+interface StreamFailureRecord {
+	/** The first message reported for the stream. */
+	message: string;
+	/** Whether any report for the stream said a retry can make progress. */
+	retryable: boolean;
+}
+
+/**
+ * The failed DONE for a run that reported stream failures, independent of
+ * the order the streams reported in.
+ *
+ * DONE carries one `retryable` bit for the whole run, and each stream's
+ * `retryable` is only the connector's claim (Collection Profile 5.11). The
+ * bit is true when ANY failed stream is retryable, because a retry can then
+ * make progress on that stream; it is false only when no failed stream can
+ * gain from a retry. The message names the failed streams in sorted order and
+ * quotes the first message reported for the first of them, so the same set of
+ * failures always yields the same DONE.
+ */
+function streamFailureDone(
+	failures: ReadonlyMap<string, StreamFailureRecord>,
+): { message: string; retryable: boolean } | null {
+	const streams = [...failures.keys()].sort();
+	const [first, ...others] = streams;
+	if (first === undefined) return null;
+	const firstFailure = failures.get(first);
+	return {
+		message: `stream collection failed: ${first}: ${firstFailure?.message ?? ""}${
+			others.length === 0 ? "" : ` (also failed: ${others.join(", ")})`
+		}`,
+		retryable: [...failures.values()].some((failure) => failure.retryable),
+	};
+}
+
+export interface StreamFailureOptions {
+	diagnostics?: Record<string, unknown>;
+	recoveryHint?: { action: string; retryable?: boolean };
+	retryable?: boolean;
+}
 
 interface EmitRecordOptions {
 	skipResourceFilter?: boolean;
@@ -251,11 +306,16 @@ interface BaseCollectContext {
 	 *
 	 * Optional for compatibility with hand-built test contexts. The real runtime
 	 * always supplies it.
+	 *
+	 * `recoveryHint` replaces the default `retry_by_runtime` hint when the
+	 * connector already knows a better one (for example an unrecognized
+	 * response that needs a connector upgrade); `retryable` then defaults to
+	 * the hint's own value. `diagnostics` passes through on the SKIP_RESULT.
 	 */
 	reportStreamFailure?: (
 		stream: string,
 		message: string,
-		options?: { retryable?: boolean },
+		options?: StreamFailureOptions,
 	) => Promise<void>;
 	requestDetailGapPage: (req?: {
 		maxBytes?: number;
@@ -452,19 +512,26 @@ export function composeNormalizedTerminalError({
 	message,
 	retryable,
 	code,
+	recoveryHint,
 	normalizeTerminalError,
 }: {
 	message: string;
 	retryable: boolean;
 	code?: string | undefined;
+	recoveryHint?: TerminalErrorDetails["recovery_hint"];
 	normalizeTerminalError: NormalizeTerminalError;
 }): TerminalErrorDetails {
 	const normalized = normalizeTerminalError({
 		message,
 		retryable,
 		...(code ? { code } : {}),
+		...(recoveryHint === undefined ? {} : { recovery_hint: recoveryHint }),
 	});
-	return code && !normalized.code ? { ...normalized, code } : normalized;
+	const withCode =
+		code && !normalized.code ? { ...normalized, code } : normalized;
+	return recoveryHint !== undefined && withCode.recovery_hint === undefined
+		? { ...withCode, recovery_hint: recoveryHint }
+		: withCode;
 }
 
 const UNEXPECTED_FAILURE_DETAIL_MAX = 300;
@@ -1000,11 +1067,22 @@ export function runConnector(config: RunConnectorConfig): void {
 
 	let observedCounters: { totalEmitted: number; totalSkipped: number } | null =
 		null;
-	let reportedStreamFailure: {
-		message: string;
-		retryable: boolean;
-		stream: string;
-	} | null = null;
+	// Every stream failure this run reported, by stream. DONE is derived from
+	// the whole set (see `streamFailureDone`), never from report order.
+	const reportedStreamFailures = new Map<string, StreamFailureRecord>();
+	const recordStreamFailure = (
+		stream: string,
+		message: string,
+		retryable: boolean,
+	): void => {
+		const prior = reportedStreamFailures.get(stream);
+		reportedStreamFailures.set(
+			stream,
+			prior === undefined
+				? { message, retryable }
+				: { message: prior.message, retryable: prior.retryable || retryable },
+		);
+	};
 
 	const observationsDeclared =
 		config.protocolCapabilities?.includes(OBSERVATION_CAPABILITY) ?? false;
@@ -1018,6 +1096,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		records_emitted = observedCounters?.totalEmitted ?? 0,
 		code?: string,
 		errorBasis: readonly string[] = [],
+		recoveryHint?: TerminalErrorDetails["recovery_hint"],
 	): void => {
 		// The runtime ACK handshake may outlive every ref'd process handle. Mark
 		// the natural exit path before emitting DONE so it cannot contradict the
@@ -1027,6 +1106,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			message,
 			retryable,
 			code,
+			recoveryHint,
 			normalizeTerminalError,
 		});
 		// `DONE.error.basis` cites the OBSERVATION ids the failure rests on
@@ -1265,14 +1345,21 @@ export function runConnector(config: RunConnectorConfig): void {
 				code: "stream_failure_invalid",
 			});
 		}
-		const retryable = options.retryable === true;
-		reportedStreamFailure ??= { message: normalizedMessage, retryable, stream };
+		const retryable =
+			(options.retryable ?? options.recoveryHint?.retryable) === true;
+		recordStreamFailure(stream, normalizedMessage, retryable);
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
 			reason: "stream_collection_failed",
 			message: normalizedMessage,
-			recovery_hint: { action: "retry_by_runtime", retryable },
+			recovery_hint: options.recoveryHint ?? {
+				action: "retry_by_runtime",
+				retryable,
+			},
+			...(options.diagnostics === undefined
+				? {}
+				: { diagnostics: options.diagnostics }),
 		});
 	};
 
@@ -1282,7 +1369,14 @@ export function runConnector(config: RunConnectorConfig): void {
 	run().catch((err: unknown) => {
 		const errorBasis = observationBasisOf(err);
 		if (err instanceof TerminalError) {
-			emitFailed(err.message, err.retryable, undefined, err.code, errorBasis);
+			emitFailed(
+				err.message,
+				err.retryable,
+				undefined,
+				err.code,
+				errorBasis,
+				err.recoveryHint,
+			);
 			return;
 		}
 		const message = describeUnexpectedFailure(err);
@@ -1381,12 +1475,29 @@ export function runConnector(config: RunConnectorConfig): void {
 					})
 				: emit(msg);
 
+		// §5.5 and §5.8: an enumeration the connector could not prove complete
+		// goes out as the portable `stream_collection_failed` SKIP_RESULT, and the
+		// run ends failed with the same code, as `reportStreamFailure` does. The
+		// connector's own cause stays in `diagnostics.original_reason`.
+		const emitConnectorMessage = (msg: EmittedMessage): Promise<void> => {
+			if (!isUnprovenEnumerationSkip(msg)) {
+				return emitWithBoundedCheckpoints(msg);
+			}
+			const skip = portableUnprovenEnumerationSkip(msg);
+			recordStreamFailure(
+				skip.stream,
+				skip.message,
+				unprovenEnumerationRetryable(skip),
+			);
+			return emitWithBoundedCheckpoints(skip);
+		};
+
 		const baseCtx: BaseCollectContext = {
 			scope: startMsg.scope,
 			state: startMsg.state ?? {},
 			requested,
 			credentials,
-			emit: emitWithBoundedCheckpoints,
+			emit: emitConnectorMessage,
 			emitRecord: emitRecord.emit,
 			isRecordSelected: emitRecord.isSelected,
 			assist,
@@ -1437,16 +1548,18 @@ export function runConnector(config: RunConnectorConfig): void {
 				...(resolveDeferredCredentials ? { resolveDeferredCredentials } : {}),
 				collect,
 				baseCtx,
+				runFailed: () => reportedStreamFailures.size > 0,
 				retryablePattern,
 			});
 		} else {
 			await collect(baseCtx);
 		}
 
-		if (reportedStreamFailure) {
+		const streamFailure = streamFailureDone(reportedStreamFailures);
+		if (streamFailure) {
 			emitFailed(
-				`stream collection failed: ${reportedStreamFailure.stream}: ${reportedStreamFailure.message}`,
-				reportedStreamFailure.retryable,
+				streamFailure.message,
+				streamFailure.retryable,
 				emitRecord.counters.totalEmitted,
 				"stream_collection_failed",
 			);
@@ -1837,6 +1950,8 @@ async function runInBrowser(args: {
 	resolveDeferredCredentials?: () => Promise<Credentials>;
 	collect: BrowserConnectorConfig["collect"];
 	baseCtx: BaseCollectContext;
+	/** True once a stream failure is on record: collect returning normally is then not a clean run. */
+	runFailed: () => boolean;
 	retryablePattern: RegExp;
 }): Promise<void> {
 	const {
@@ -1853,6 +1968,7 @@ async function runInBrowser(args: {
 		resolveDeferredCredentials,
 		collect,
 		baseCtx,
+		runFailed,
 		retryablePattern,
 	} = args;
 	const {
@@ -2013,9 +2129,13 @@ async function runInBrowser(args: {
 		// clean run, and capture.finalize() can scrub the raw dir in
 		// PDPP_CAPTURE_ON_FAILURE mode. Anything thrown after this point (only
 		// release/page-close) is treated as benign teardown.
-		tracer.markSucceeded();
-		baseCtx.capture?.markSucceeded?.();
-		runSucceeded = true;
+		// A reported stream failure ends the run failed, so its trace, capture and
+		// page keep the failure policy even though collect returned.
+		if (!runFailed()) {
+			tracer.markSucceeded();
+			baseCtx.capture?.markSucceeded?.();
+			runSucceeded = true;
+		}
 	} catch (err) {
 		if (page) {
 			await captureBrowserPage(baseCtx.capture, page, "runtime-error");
