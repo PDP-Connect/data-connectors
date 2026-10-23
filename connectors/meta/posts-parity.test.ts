@@ -1049,6 +1049,11 @@ async function collectWithSettledResponses(responses: Array<Exclude<ScriptedPost
 		progress: async (message: string) => { if (message === "Fetching Instagram posts") fetchingPosts = true; },
 		emitRecord: async (stream: string, data: Record<string, unknown>) => { emitted.push({ stream, data }); },
 		emit: async (message: typeof messages[number]) => { messages.push(message); },
+		// The SKIP_RESULT the runtime's reportStreamFailure emits.
+		reportStreamFailure: async (stream: string, _message: string, options?: { retryable?: boolean }) => {
+			messages.push({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed",
+				recovery_hint: { retryable: options?.retryable === true } });
+		},
 	} as unknown as Parameters<typeof collectAllStreams>[0];
 	const late = responses.slice(1);
 	let now = 0;
@@ -1112,7 +1117,8 @@ for (const path of ["/api/graphqlx", "/notgraphql/"]) {
 				assert.equal(messages.some(message => message.type === "STATE" && message.stream === stream), false);
 				const skips = messages.filter(message => message.type === "SKIP_RESULT" && message.stream === stream);
 				assert.equal(skips.length, 1);
-				assert.equal(skips[0]?.reason, "inventory_not_proven_complete");
+				// No timeline response was observed: the read failed.
+				assert.equal(skips[0]?.reason, "stream_collection_failed");
 				assert.equal(skips[0]?.recovery_hint?.retryable, true);
 			}
 		});
@@ -1139,7 +1145,10 @@ for (const { label, late, expected, complete } of [
 			const skip = messages.find(message => message.type === "SKIP_RESULT" && message.stream === stream);
 			assert.equal(Boolean(skip), !complete);
 			if (!complete) {
-				assert.equal(skip?.reason, "inventory_not_proven_complete");
+				// An unsuccessful or unreadable late page is a failed read; a
+				// readable page that contradicts the list leaves it unproven.
+				assert.equal(skip?.reason, /HTTP failure|envelope|then failure/.test(label)
+					? "stream_collection_failed" : "inventory_not_proven_complete");
 				assert.equal(skip?.recovery_hint?.retryable, true);
 			}
 		}

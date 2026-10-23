@@ -42,6 +42,7 @@ import {
 	classifyEmptyListPage,
 	classifyHebDetailFailure,
 	collectNutrition,
+	HebEnumerationUnprovenError,
 	collectProfile,
 	type DetailFailureKind,
 	type EmitDeps,
@@ -1591,7 +1592,14 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
 
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_navigation_failed/,
+		(error: unknown) => {
+			// A failed navigation is a failed read: `collect` reports it for
+			// every order stream from the error, so the scan emits no SKIP.
+			assert.ok(error instanceof HebEnumerationUnprovenError);
+			assert.match(error.message, /heb_empty_list_page_navigation_failed/);
+			assert.equal(error.readFailed, true);
+			return true;
+		},
 	);
 
 	assert.deepEqual(
@@ -1601,11 +1609,10 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
 		["HEB1000000001"],
 		"stale page cards must not enter the current run",
 	);
-	const skip = protocolMessages.find(
-		(message) => message.type === "SKIP_RESULT",
+	assert.equal(
+		protocolMessages.some((message) => message.type === "SKIP_RESULT"),
+		false,
 	);
-	assert.ok(skip);
-	assert.equal(skip?.reason, "stream_collection_failed");
 	assert.equal(
 		protocolMessages.some(
 			(message) =>
@@ -1639,9 +1646,15 @@ test("runForwardScan: a falsy goto rejection cannot parse stale page content", a
 			`https://www.heb.com/my-account/your-orders?page=${navigations}`,
 	});
 
+	let failure: HebEnumerationUnprovenError | undefined;
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_navigation_failed/,
+		(error: unknown) => {
+			assert.ok(error instanceof HebEnumerationUnprovenError);
+			assert.match(error.message, /heb_empty_list_page_navigation_failed/);
+			failure = error;
+			return true;
+		},
 	);
 	assert.deepEqual(
 		emitted
@@ -1655,8 +1668,7 @@ test("runForwardScan: a falsy goto rejection cannot parse stale page content", a
 		false,
 	);
 	assert.deepEqual(
-		protocolMessages.find((message) => message.type === "SKIP_RESULT")
-			?.diagnostics,
+		failure?.diagnostics,
 		{
 			error_class: "unknown",
 		},
@@ -1936,7 +1948,7 @@ test("runForwardScan: an Imperva block is never laundered into a proven-empty re
 
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_source_auth_or_challenge/,
+		{ message: "heb_session_required" },
 		"bot protection must outrank the empty-state marker",
 	);
 });
@@ -3849,7 +3861,7 @@ test("collectProfile withholds an aggregate without complete owner-bound section
 		protocolMessages.some(
 			(m) =>
 				m.type === "SKIP_RESULT" &&
-				m.reason === "inventory_not_proven_complete",
+				m.reason === "stream_collection_failed",
 		),
 	);
 });
@@ -4062,50 +4074,53 @@ test("collectNutrition covers products past the former 50-lookup limit and recor
 
 	const outcomes = emitted.filter((record) => record.stream === "nutrition");
 	assert.equal(outcomes.length, targets.length - 2);
-	assert.equal(
-		protocolMessages.filter(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "inventory_not_proven_complete",
-		).length,
-		2,
+	// The target without a URL is an unproven lookup; the page that failed to
+	// load is a failed read.
+	assert.deepEqual(
+		protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && message.reason),
+		["inventory_not_proven_complete", "stream_collection_failed"],
 	);
 });
 
-test("collectNutrition retains blocked outcomes with the observed product URL", async () => {
+test("collectNutrition ends the run as a session failure on a blocked product page", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const blockedPage = makePageStub({
 		content:
 			"<html><body><iframe src='/_Incapsula_Resource'></iframe></body></html>",
 	});
 
-	await collectNutrition(
-		blockedPage,
-		[
-			{
-				name: "H-E-B Organic 2% Reduced Fat Milk",
-				productId: "123456789",
-				productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
-			},
-		],
-		{
-			emit: deps.emit,
-			emitRecord: deps.emitRecord,
-			emittedAt: deps.emittedAt,
-			waitForHydration: immediateWait,
-		},
+	await assert.rejects(
+		() =>
+			collectNutrition(
+				blockedPage,
+				[
+					{
+						name: "H-E-B Organic 2% Reduced Fat Milk",
+						productId: "123456789",
+						productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
+					},
+				],
+				{
+					emit: deps.emit,
+					emitRecord: deps.emitRecord,
+					emittedAt: deps.emittedAt,
+					waitForHydration: immediateWait,
+				},
+			),
+		{ message: "heb_session_required" },
 	);
 
 	assert.equal(
 		emitted.filter((record) => record.stream === "nutrition").length,
 		0,
 	);
-	assert.ok(
-		protocolMessages.some(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "inventory_not_proven_complete",
-		),
+	assert.deepEqual(
+		protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && message.reason),
+		["session_repair_required"],
 	);
 });
 

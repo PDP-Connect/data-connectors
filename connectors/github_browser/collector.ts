@@ -4,6 +4,7 @@
 import type {
 	EmittedMessage,
 	RecordData,
+	StreamFailureOptions,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { inspectApiWindow } from "./page-evidence.ts";
 import { InventoryEvidence } from "./inventory-evidence.ts";
@@ -35,6 +36,7 @@ const HISTORY_PAGE_SIZE = 100;
 const HISTORY_PAGE_LIMIT = 10;
 
 export interface BrowserCollectionPort {
+	reportStreamFailure?: (stream: string, message: string, options?: StreamFailureOptions) => Promise<void>;
 	emit(message: EmittedMessage): Promise<void>;
 	emitRecord(stream: string, record: RecordData): Promise<void>;
 	progress(message: string): Promise<void>;
@@ -74,7 +76,9 @@ export async function collectGitHubBrowser(
 		try { return await request(); }
 		catch (error) {
 			if (error instanceof CollectionError) throw error;
-			throw new CollectionError({ ...counts, origin: "source", cause: "source_request_failed" });
+			const status = error instanceof Error ? /^github_browser_http_(\d{3})$/u.exec(error.message)?.[1] : undefined;
+			throw new CollectionError({ ...counts, origin: "source", cause: "source_request_failed",
+				...(status === undefined ? {} : { status: Number(status) }) });
 		}
 	};
 	const fetchJson = async (url: string, counts: CoverageCounts = { considered: 0, covered: 0 }) => {
@@ -169,6 +173,26 @@ export async function collectGitHubBrowser(
 			: fullInventoryCoverage(stream, enumeration, failure.cause);
 		if (message.type === "SKIP_RESULT") {
 			message.diagnostics = { ...(asRecord(message.diagnostics) ?? {}), ...failure };
+			const requestFailed = failure.origin === "source" && ["source_request_failed", "http_rate_limited", "http_status_failed", "wrong_navigation"].includes(failure.cause);
+			// A requested profile that could not be read is a stream failure,
+			// including owner, shape and embedded-section failures.
+			const profileFailed = stream === "profile" && failure.origin === "source";
+			if (requestFailed || profileFailed) {
+				const text = requestFailed
+					? `GitHub requests for this stream failed: ${failure.cause}.`
+					: `GitHub did not return a complete result for this stream: ${failure.cause}.`;
+				const diagnostics = { ...asRecord(message.diagnostics), reason: failure.cause,
+					...(failure.status === undefined ? {} : { source_error: `http_${failure.status}` }) };
+				const recoveryHint = { action: "retry_by_runtime", retryable: true };
+				if (context.reportStreamFailure) {
+					try { await context.reportStreamFailure(stream, text, { diagnostics, recoveryHint, retryable: true }); }
+					catch { throw new CollectionError({ ...counts, origin: "sink", cause: "message_emit_failed" }); }
+					return;
+				}
+				message.reason = "stream_collection_failed";
+				message.message = text;
+				message.diagnostics = diagnostics;
+			}
 			if (failure.origin === "sink") {
 				message.reason = "github_browser_publication_failed";
 				message.message = `GitHub stream publication failed: ${failure.cause}.`;

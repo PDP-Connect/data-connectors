@@ -9,7 +9,7 @@
 	},
 	"connector_key": "facebook",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Facebook",
 	"runtime_requirements": {
 		"bindings": {
@@ -43,7 +43,7 @@
 		}
 	},
 	"reason_display_messages": {
-		"inventory_not_proven_complete": "Facebook did not show that this list was read in full, so it will be read again next time."
+		"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time."
 	},
 	"streams": [
 		{

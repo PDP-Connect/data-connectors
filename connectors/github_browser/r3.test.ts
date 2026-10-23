@@ -30,12 +30,13 @@ async function run(stream: string, overrides: Partial<BrowserServices>) {
  });
  return { records, messages, state, prior };
 }
-function assertIncomplete(result: Awaited<ReturnType<typeof run>>, stream: string) {
+function assertIncomplete(result: Awaited<ReturnType<typeof run>>, stream: string,
+ reason = "inventory_not_proven_complete") {
  assert.deepEqual(result.records, [], "an incomplete aggregate must preserve the prior snapshot");
  assert.equal(result.state[stream], result.prior);
  assert.equal(result.messages.some(m => m.type === "STATE" || m.type === "DETAIL_COVERAGE" || m.op === "delete"), false);
  const skip = result.messages.find(m => m.type === "SKIP_RESULT");
- assert.equal(skip?.reason, "inventory_not_proven_complete");
+ assert.equal(skip?.reason, reason);
  assert.deepEqual(skip?.recovery_hint, { action: "retry_by_runtime", retryable: true });
 }
 for (const stream of ["repositories", "starred"] as const) {
@@ -292,7 +293,9 @@ for (const failure of ["redirect", "status", "shape", "throw"]) {
      status: failure === "status" ? 403 : 200, data: failure === "shape" ? {} : [restRepo], link: null };
    },
   });
-  assertIncomplete(result, "starred");
+  // Transport, status and redirect failures are failed reads; a parsed bad shape is unproven inventory.
+  assertIncomplete(result, "starred",
+   failure !== "shape" ? "stream_collection_failed" : "inventory_not_proven_complete");
  });
 }
 test("starred: wrong fallback owner reports its specific withholding reason", async () => {

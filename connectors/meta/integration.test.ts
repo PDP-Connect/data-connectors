@@ -27,6 +27,7 @@ import type {
 	BrowserCollectContext,
 	EmittedMessage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	classifyAdsDialogInPage,
@@ -1276,7 +1277,7 @@ test("collectAllStreams: an empty nonterminal timeline does not complete posts",
 	);
 });
 
-test("collectAllStreams: a login challenge vetoes completion even with same-owner exact-zero evidence", async () => {
+test("collectAllStreams: a login challenge ends the run as a session failure even with same-owner exact-zero evidence", async () => {
 	const ended = JSON.parse(
 		await readFile(
 			new URL("./fixtures/posts.empty.json", import.meta.url),
@@ -1301,18 +1302,29 @@ test("collectAllStreams: a login challenge vetoes completion even with same-owne
 			requestedStreams: ["posts"],
 		});
 
-		await collectAllStreams(
-			ctx,
-			NO_DELAY,
-			TEST_POSTS_CLOCK,
-			makeVirtualAdsClock(),
-			TEST_PROFILE_CLOCK,
+		// A login challenge ends the run as a session failure.
+		await assert.rejects(
+			collectAllStreams(
+				ctx,
+				NO_DELAY,
+				TEST_POSTS_CLOCK,
+				makeVirtualAdsClock(),
+				TEST_PROFILE_CLOCK,
+			),
+			(error: unknown) => {
+				assert.ok(error instanceof TerminalError);
+				assert.equal(error.code, "meta_session_required");
+				assert.equal(error.retryable, false);
+				assert.deepEqual(error.recoveryHint, { action: "manual_action_required", retryable: false });
+				assert.equal(error.message, "meta_session_required: Instagram authentication was rejected or challenged during this run");
+				return true;
+			},
 		);
 		assert.equal(
 			harness.protocolMessages.some((message) => message.type === "STATE"),
 			complete,
 		);
-		assert.deepEqual(unprovenInventories(harness), complete ? [] : ["posts"]);
+		assert.deepEqual(unprovenInventories(harness), []);
 	}
 });
 
@@ -1642,6 +1654,21 @@ const unprovenIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
 		(m) => m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
 	);
 
+/** Streams whose read failed (navigation, an unsuccessful page, a browser
+ *  error): reported through reportStreamFailure, rows upsert, no STATE. */
+const failedReads = (harness: ReturnType<typeof makeRecordingEmit>): string[] =>
+	harness.protocolMessages
+		.filter(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+		)
+		.map((m) => String((m as { stream: string }).stream))
+		.sort();
+
+const failedReadIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
+	harness.protocolMessages.findIndex(
+		(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+	);
+
 test("collectAllStreams: a posts timeout after a valid page emits that page, then skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
@@ -1675,7 +1702,7 @@ test("collectAllStreams: a posts timeout after a valid page emits that page, the
 	);
 });
 
-test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then skips the stream as unproven", async () => {
+test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then reports the stream as a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1700,15 +1727,15 @@ test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, 
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1", "p2"],
 	);
-	assert.deepEqual(unprovenInventories(harness), ["posts"]);
-	assert.ok(recordIndex(harness, "posts") < unprovenIndex(harness));
+	assert.deepEqual(failedReads(harness), ["posts"]);
+	assert.ok(recordIndex(harness, "posts") < failedReadIndex(harness));
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
 	);
 });
 
-test("collectAllStreams: a browser error while advancing posts keeps the earlier page and is not proven complete", async () => {
+test("collectAllStreams: a browser error while advancing posts keeps the earlier page and reports a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1730,11 +1757,11 @@ test("collectAllStreams: a browser error while advancing posts keeps the earlier
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1"],
 	);
-	assert.deepEqual(unprovenInventories(harness), ["post_likes", "posts"]);
-	assert.ok(recordIndex(harness, "posts") < unprovenIndex(harness));
+	assert.deepEqual(failedReads(harness), ["post_likes", "posts"]);
+	assert.ok(recordIndex(harness, "posts") < failedReadIndex(harness));
 });
 
-test("collectAllStreams: a first-page posts failure emits nothing and skips the stream as unproven", async () => {
+test("collectAllStreams: a first-page posts failure emits nothing and reports the stream as a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1752,10 +1779,10 @@ test("collectAllStreams: a first-page posts failure emits nothing and skips the 
 	);
 
 	assert.equal(harness.emitted.filter((e) => e.stream === "posts").length, 0);
-	assert.deepEqual(unprovenInventories(harness), ["posts"]);
+	assert.deepEqual(failedReads(harness), ["posts"]);
 });
 
-test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then skips the stream as unproven", async () => {
+test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then reports the stream as a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1789,15 +1816,15 @@ test("collectAllStreams: an HTTP 503 on a later following page emits earlier pag
 			.map((e) => e.data.username),
 		["followed1"],
 	);
-	assert.deepEqual(unprovenInventories(harness), ["following"]);
-	assert.ok(recordIndex(harness, "following") < unprovenIndex(harness));
+	assert.deepEqual(failedReads(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < failedReadIndex(harness));
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
 	);
 });
 
-test("collectAllStreams: a browser error on a later following page keeps earlier pages and is not proven complete", async () => {
+test("collectAllStreams: a browser error on a later following page keeps earlier pages and reports a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1832,11 +1859,11 @@ test("collectAllStreams: a browser error on a later following page keeps earlier
 			.map((e) => e.data.username),
 		["followed1"],
 	);
-	assert.deepEqual(unprovenInventories(harness), ["following"]);
-	assert.ok(recordIndex(harness, "following") < unprovenIndex(harness));
+	assert.deepEqual(failedReads(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < failedReadIndex(harness));
 });
 
-test("collectAllStreams: a first-page following failure emits nothing and skips the stream as unproven", async () => {
+test("collectAllStreams: a first-page following failure emits nothing and reports the stream as a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1860,7 +1887,7 @@ test("collectAllStreams: a first-page following failure emits nothing and skips 
 		harness.emitted.filter((e) => e.stream === "following").length,
 		0,
 	);
-	assert.deepEqual(unprovenInventories(harness), ["following"]);
+	assert.deepEqual(failedReads(harness), ["following"]);
 });
 
 // ─── Invariant 5: ads merges three DOM-scraped lists with a kind discriminator ──

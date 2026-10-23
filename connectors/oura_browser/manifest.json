@@ -9,7 +9,7 @@
   },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.41",
+  "version": "0.1.42",
   "display_name": "Oura (Browser Sign-In)",
   "runtime_requirements": {
     "bindings": {
@@ -306,7 +306,7 @@
   ],
   "reason_display_messages": {
     "oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
-    "inventory_not_proven_complete": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
+    "stream_collection_failed": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
   },
   "mobile": {
     "pageshim": {
