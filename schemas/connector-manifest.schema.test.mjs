@@ -90,33 +90,51 @@ test("store evidence states its base profiles in one sentence, and conformance s
   );
 });
 
-test("RUN_COVERAGE_V1 is elective: it never blocks spawn, and Section 3.4's start rule is unchanged", () => {
-  const section = profile
-    .split(/^### 7\.1 Store collection evidence \(RUN_COVERAGE_V1\)$/m)[1]
-    ?.split(/^### 7\.2 /m)[0];
-  assert.ok(section, "profile must define the store collection evidence extension");
-  const text = section.replace(/\s+/g, " ");
-  assert.match(text, /`RUN_COVERAGE_V1` is an elective capability\. An elective capability never blocks spawn\./);
-  assert.match(
-    text,
-    /A runtime that does not support `RUN_COVERAGE_V1` starts the connector, never sends `START\.run_coverage_version`, and the connector omits `DONE\.coverage`\./,
-  );
-  assert.match(
-    text,
-    /The extension is negotiated per run, so an exchange without the request is an ordinary base-profile exchange\./,
-  );
-  // Section 3.4 states the general elective rule; Section 7.1 makes RUN_COVERAGE_V1 elective.
-  const negotiation = profile
-    .split(/^### 3\.4 Human interaction and protocol capabilities$/m)[1]
-    ?.split(/^### 3\.5 /m)[0];
-  assert.ok(negotiation, "profile must define protocol capabilities");
-  const normalized = negotiation.replace(/\s+/g, " ");
-  assert.match(
-    normalized,
-    /A runtime that does not advertise a declared capability MUST NOT start that connector, unless the section that defines the capability makes it elective; an elective capability never blocks spawn\. A runtime that implements profile version 0\.2\.0 MUST advertise and support `OBSERVATION`\./,
-  );
-  assert.match(normalized, /`RUN_COVERAGE_V1` \(Section 7\.1, which defines it as elective\)/);
-  assert.doesNotMatch(normalized, /exception/i);
+// These are document regressions, not runtime interoperability tests.
+function profileSection(heading, nextHeading) {
+  const section = profile.split(heading)[1]?.split(nextHeading)[0];
+  assert.ok(section, `profile must contain ${heading}`);
+  return section.replace(/\s+/g, " ");
+}
+
+test("Section 3.4 preserves pre-spawn refusal of unsupported required capabilities", () => {
+  const text = profileSection("### 3.4 Human interaction and protocol capabilities", "### 3.5 ");
+  assert.match(text, /It MUST reject a connector with an unsupported required capability before spawn\./);
+  assert.match(text, /A runtime that implements profile version 0\.2\.0 MUST advertise and support `OBSERVATION`\./);
+});
+
+test("Section 3.4 limits the elective exception to readers implementing it", () => {
+  const text = profileSection("### 3.4 Human interaction and protocol capabilities", "### 3.5 ");
+  assert.match(text, /A runtime that does not advertise a declared capability MUST NOT start that connector, unless the section that defines the capability makes it elective and the runtime implements that elective exception\./);
+  assert.match(text, /This exception does not waive any other placement requirement\./);
+  assert.match(text, /`RUN_COVERAGE_V1` \(Section 7\.1, which defines it as elective\)/);
+  assert.doesNotMatch(text, /an elective capability never blocks spawn/i);
+});
+
+test("an elective-aware runtime lacking coverage support may start only after other placement checks", () => {
+  const text = profileSection("### 7.1 Store collection evidence (RUN_COVERAGE_V1)", "#### 7.1.1 ");
+  assert.match(text, /`RUN_COVERAGE_V1` is an elective capability for runtimes that implement the elective exception in Section 3\.4\./);
+  assert.match(text, /Such a runtime that does not support `RUN_COVERAGE_V1` MAY start the connector only if all other placement requirements pass\./);
+  assert.match(text, /It MUST omit `START.run_coverage_version`, and the connector MUST omit `DONE.coverage`\./);
+  assert.match(text, /The extension is negotiated per run, so an exchange without the request is an ordinary base-profile exchange\./);
+  assert.doesNotMatch(text, /An elective capability never blocks spawn|A runtime that does not support `RUN_COVERAGE_V1` starts the connector/);
+});
+
+test("base-profile applicability does not promise unchanged-reader compatibility: roll out runtimes first", () => {
+  const text = profileSection("### 7.1 Store collection evidence (RUN_COVERAGE_V1)", "#### 7.1.1 ");
+  assert.match(text, /Applicability to base profiles 0\.1\.0 and 0\.2\.0 does not imply interoperability with unchanged readers\./);
+  assert.match(text, /Old required-only readers that do not support a declared `RUN_COVERAGE_V1` reject the connector before `START`\./);
+  assert.match(text, /Rollout MUST be runtime-first: upgrade readers to implement the elective exception before deploying manifests that declare `RUN_COVERAGE_V1`, as required by Section 8\./);
+  const versioning = profileSection("## 8. Profile versioning", "## 9. ");
+  assert.match(versioning, /A new optional message that an older fail-closed runtime would reject requires capability negotiation and a runtime-first rollout\./);
+});
+
+test("coverage inventory requires unique opaque non-empty strings and exact terminal inventory", () => {
+  const declaration = profileSection("#### 7.1.1 Declaration and negotiation", "#### 7.1.2 ");
+  assert.match(declaration, /A stream MAY declare `coverage_stores`, a non-empty array of unique, opaque, non-empty string identifiers\./);
+  const terminal = profileSection("#### 7.1.2 Optional terminal store collection evidence", "#### 7.1.3 ");
+  assert.match(terminal, /Each store MUST contain a non-empty `store` identifier and one status\./);
+  assert.match(terminal, /each stream's stores MUST equal its manifest inventory, without duplicates or extras\./);
 });
 
 test("a connector that uses the extension declares RUN_COVERAGE_V1, and coverage_stores needs that declaration", () => {
@@ -267,6 +285,17 @@ test("a stream that declares coverage_stores is accepted with RUN_COVERAGE_V1, a
   const streams = [{ name: "items", coverage_stores: ["store-a"] }];
   assert.equal(validate({ streams, protocol_capabilities: ["RUN_COVERAGE_V1"] }), true, JSON.stringify(validate.errors));
   assert.equal(validate({ streams: [{ name: "items" }] }), true, JSON.stringify(validate.errors));
+});
+
+// The schema owns only the capability-declaration implication here.
+// Full inventory validation is outside this schema's responsibility;
+// schema acceptance below does not make these inventories protocol-valid.
+test("outside-schema responsibility: malformed coverage inventories pass the declaration-only schema boundary", () => {
+  for (const coverage_stores of [[], [""], ["store-a", "store-a"], [42]]) {
+    const streams = [{ name: "items", coverage_stores }];
+    assert.equal(validate({ streams, protocol_capabilities: ["RUN_COVERAGE_V1"] }), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ streams }), false, "even malformed inventories still require the capability declaration");
+  }
 });
 
 // Section 3.3.8's one-providing-kind rule is the target shape, not an

@@ -939,9 +939,9 @@ The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7),
 which defines it as elective). A connector that can emit one of these messages
 MUST declare that value. A runtime that does not advertise a declared
 capability MUST NOT start that connector, unless the section that defines the
-capability makes it elective; an elective capability never blocks spawn. A
-runtime that implements profile version 0.2.0 MUST advertise and support
-`OBSERVATION`.
+capability makes it elective and the runtime implements that elective exception.
+This exception does not waive any other placement requirement. A runtime that
+implements profile version 0.2.0 MUST advertise and support `OBSERVATION`.
 
 A connector that does not declare `OBSERVATION` is diagnosed from runtime
 records alone (Section 5.11). A runtime MUST NOT record that connector as
@@ -1833,11 +1833,18 @@ This extension applies to manifests whose protocol_version is 0.1.0, 0.2.0 or
 version it does not fully implement; conformance to the base profile is a
 separate claim.
 
-`RUN_COVERAGE_V1` is an elective capability. An elective capability never blocks
-spawn. A runtime that does not support `RUN_COVERAGE_V1` starts the connector,
-never sends `START.run_coverage_version`, and the connector omits `DONE.coverage`.
-The extension is negotiated per run, so an exchange without the request is an
-ordinary base-profile exchange.
+`RUN_COVERAGE_V1` is an elective capability for runtimes that implement the
+elective exception in Section 3.4. Such a runtime that does not support
+`RUN_COVERAGE_V1` MAY start the connector only if all other placement
+requirements pass. It MUST omit `START.run_coverage_version`, and the connector
+MUST omit `DONE.coverage`. The extension is negotiated per run, so an exchange
+without the request is an ordinary base-profile exchange.
+
+Applicability to base profiles 0.1.0 and 0.2.0 does not imply interoperability
+with unchanged readers. Old required-only readers that do not support a declared
+`RUN_COVERAGE_V1` reject the connector before `START`. Rollout MUST be
+runtime-first: upgrade readers to implement the elective exception before
+deploying manifests that declare `RUN_COVERAGE_V1`, as required by Section 8.
 
 #### 7.1.1 Declaration and negotiation
 
@@ -1846,8 +1853,8 @@ A connector that uses this extension MUST declare `RUN_COVERAGE_V1` in
 `DONE.coverage`, is a use of this extension. `coverage_stores` is valid only
 with that declaration, and a validator MUST reject `coverage_stores` without it.
 
-A stream MAY declare `coverage_stores`, a non-empty array of unique, opaque
-string identifiers. An identifier MUST NOT contain a credential or a
+A stream MAY declare `coverage_stores`, a non-empty array of unique, opaque,
+non-empty string identifiers. An identifier MUST NOT contain a credential or a
 device-specific path. Identifiers are scoped to their stream and manifest
 revision. The manifest MUST state each store's collection obligation, including
 whether the store covers content or metadata inventory only. A runtime MUST NOT
