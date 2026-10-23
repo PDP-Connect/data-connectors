@@ -275,26 +275,29 @@ test("a positive also needs the base profile's own accounting, so a 0.2.0 run ge
 });
 
 test("a stream that declares coverage_stores is rejected without RUN_COVERAGE_V1 in protocol_capabilities", () => {
-  const streams = [{ name: "items", coverage_stores: ["store-a"] }];
+  const streams = [{ name: "items", coverage_stores: ["store_a"] }];
   assert.equal(validate({ streams }), false, "a missing protocol_capabilities fails the rule");
   assert.equal(validate({ streams, protocol_capabilities: ["OBSERVATION"] }), false);
   assert.equal(validate({ streams, protocol_capabilities: "RUN_COVERAGE_V1" }), false, "the capability list must be an array");
 });
 
 test("a stream that declares coverage_stores is accepted with RUN_COVERAGE_V1, and other streams need no declaration", () => {
-  const streams = [{ name: "items", coverage_stores: ["store-a"] }];
+  const streams = [{ name: "items", coverage_stores: ["store_a"] }];
   assert.equal(validate({ streams, protocol_capabilities: ["RUN_COVERAGE_V1"] }), true, JSON.stringify(validate.errors));
   assert.equal(validate({ streams: [{ name: "items" }] }), true, JSON.stringify(validate.errors));
 });
 
-// The schema owns only the capability-declaration implication here.
-// Full inventory validation is outside this schema's responsibility;
-// schema acceptance below does not make these inventories protocol-valid.
-test("outside-schema responsibility: malformed coverage inventories pass the declaration-only schema boundary", () => {
-  for (const coverage_stores of [[], [""], ["store-a", "store-a"], [42]]) {
+// The schema checks the inventory's shape as well as the capability rule.
+// These cases make sure neither check masks the other.
+test("coverage inventory grammar and capability declaration are checked independently", () => {
+  for (const coverage_stores of [[], [""], ["store_a", "store_a"], [42]]) {
     const streams = [{ name: "items", coverage_stores }];
-    assert.equal(validate({ streams, protocol_capabilities: ["RUN_COVERAGE_V1"] }), true, JSON.stringify(validate.errors));
-    assert.equal(validate({ streams }), false, "even malformed inventories still require the capability declaration");
+    assert.equal(
+      validate({ streams, protocol_capabilities: ["RUN_COVERAGE_V1"] }),
+      false,
+      JSON.stringify(validate.errors),
+    );
+    assert.equal(validate({ streams }), false, "the capability declaration is also required");
   }
 });
 
@@ -783,12 +786,25 @@ test("new-reader compatibility: the committed pre-binding-instances schema fixtu
 // inventories must fail even though unrelated manifest fields stay extensible.
 test("run coverage advertisement and stream inventories are optional and versioned", () => {
   assert.equal(validate({}), true);
-  assert.equal(validate({ run_coverage: { version: 1 }, streams: [{ name: "items", coverage_stores: ["metadata"] }, { name: "uninstrumented" }] }), true);
+  assert.equal(
+    validate({
+      protocol_capabilities: ["RUN_COVERAGE_V1"],
+      run_coverage: { version: 1 },
+      streams: [
+        { name: "items", coverage_stores: ["metadata"] },
+        { name: "uninstrumented" },
+      ],
+    }),
+    true,
+  );
   for (const invalid of [
     { run_coverage: { version: 2 } },
     { run_coverage: {} },
     { run_coverage: { version: 1, required: true } },
-    ...[[], [""], ["   "], ["store", "store"]].map((coverage_stores) => ({ streams: [{ name: "items", coverage_stores }] })),
+    ...[[], [""], ["   "], ["store", "store"]].map((coverage_stores) => ({
+      protocol_capabilities: ["RUN_COVERAGE_V1"],
+      streams: [{ name: "items", coverage_stores }],
+    })),
   ]) assert.equal(validate(invalid), false, JSON.stringify(invalid));
 });
 
@@ -799,7 +815,10 @@ test("run coverage advertisement and stream inventories are optional and version
 // be spelled in lowercase snake_case from a store name, so that part of the
 // rule remains a review obligation, not something this schema can check.
 function manifestDeclaring(identifier) {
-  return { streams: [{ name: "items", coverage_stores: [identifier] }] };
+  return {
+    protocol_capabilities: ["RUN_COVERAGE_V1"],
+    streams: [{ name: "items", coverage_stores: [identifier] }],
+  };
 }
 
 test("coverage_stores identifiers reject device paths, spaces and mixed-case tokens", () => {

@@ -1,6 +1,7 @@
 {
 	"protocol_version": "0.1.0",
 	"run_coverage": { "version": 1 },
+	"protocol_capabilities": ["RUN_COVERAGE_V1"],
 	"connector_id": "https://registry.pdpp.dev/connectors/imessage",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/imessage",
