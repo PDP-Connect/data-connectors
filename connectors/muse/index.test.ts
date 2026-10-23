@@ -190,12 +190,144 @@ function harness(options: HarnessOptions = {}) {
 	return { ctx, emitted, failures, of, records, retryable, states };
 }
 
+/** Separate-view reads preserve data, but cannot certify the chat inventory. */
+function assertIncompleteChats(h: ReturnType<typeof harness>) {
+	const streams = ["conversations", "messages"].filter((s) =>
+		h.ctx.requested.has(s),
+	);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		streams,
+	);
+	for (const failure of h.failures) {
+		assert.match(failure.message, /chat inventory is incomplete/);
+		assert.equal(h.retryable(failure.stream), false);
+	}
+	assert.equal(h.states("conversations").length, 0);
+	assert.equal(h.states("messages").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
+}
+
+test("unproven chat inventory preserves records, parent ordering and healthy activity/goal progress", async () => {
+	const { gateway } = fakeGateway();
+	const h = harness({
+		streams: ["conversations", "messages", "activities", "goals"],
+	});
+	const progress: string[] = [];
+	h.ctx.progress = async (message) => {
+		progress.push(message);
+	};
+	await collectMuseWith(h.ctx, gateway);
+	assertIncompleteChats(h);
+	assert.deepEqual(
+		h.records("conversations").map((r) => r.id),
+		SESSION_IDS,
+	);
+	for (const id of SESSION_IDS) {
+		const parent = h
+			.of("RECORD", "conversations")
+			.find((x) => (x.m.data as Json).id === id);
+		assert.ok(parent);
+		const children = h
+			.of("RECORD", "messages")
+			.filter((x) => (x.m.data as Json).session_id === id);
+		assert.equal(children.length, 3);
+		assert.ok(children.every((x) => x.index > parent.index));
+		assert.deepEqual(
+			new Set(children.map((x) => (x.m.data as Json).id)),
+			new Set((historyFor(id).chat_events as Json[]).map((e) => e.message_id)),
+		);
+	}
+	assert.equal(h.records("activities").length, 3);
+	assert.deepEqual(
+		h.records("goals").map((r) => r.id),
+		["goal_516bb0ad139a"],
+	);
+	assert.equal(h.states("activities").length, 1);
+	assert.equal(h.states("goals").length, 1);
+	assert.ok(progress.includes("Reading activity"));
+	assert.ok(progress.includes("Reading goals"));
+});
+
+test("even empty chat views cannot certify inventory or advance existing chat state", async () => {
+	const { gateway } = fakeGateway({
+		"sessions.list": () => ({ sessions: [], has_more: false }),
+	});
+	const state = {
+		conversations: {
+			version: 2,
+			chats: {
+				[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
+			},
+		},
+	};
+	const h = harness({ streams: ["conversations", "messages"], state });
+	const before = structuredClone(state);
+	await collectMuseWith(h.ctx, gateway);
+	assertIncompleteChats(h);
+	assert.equal(h.of("RECORD").length, 0);
+	assert.deepEqual(h.ctx.state, before);
+});
+
+test("standalone collection rejects incomplete inventory after importing healthy siblings", async () => {
+	const { gateway } = fakeGateway();
+	const h = harness({
+		streams: ["conversations", "messages", "activities", "goals"],
+	});
+	delete h.ctx.reportStreamFailure;
+	await assert.rejects(
+		collectMuseWith(h.ctx, gateway),
+		/chat inventory is incomplete/,
+	);
+	assert.equal(h.records("conversations").length, 2);
+	assert.equal(h.records("messages").length, 6);
+	assert.equal(h.records("activities").length, 3);
+	assert.equal(h.records("goals").length, 1);
+	assert.equal(h.states("conversations").length, 0);
+	assert.equal(h.states("messages").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
+	assert.equal(h.states("activities").length, 1);
+	assert.equal(h.states("goals").length, 1);
+	assert.equal(h.ctx.reportStreamFailure, undefined);
+});
+
+test("standalone healthy non-chat collection still completes", async () => {
+	const { gateway, calls } = fakeGateway();
+	const h = harness({ streams: ["activities", "goals"] });
+	delete h.ctx.reportStreamFailure;
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.states("activities").length, 1);
+	assert.equal(h.states("goals").length, 1);
+	assert.ok(
+		calls.every(
+			(c) => c.method === "activity.list" || c.method === "goals.list",
+		),
+	);
+});
+
+test("standalone failed recovery rejects instead of silently clearing a gap", async () => {
+	const { gateway } = fakeGateway({
+		"sessions.get": () => {
+			throw new MuseRpcError("not_found", "missing parent");
+		},
+	});
+	const h = recoveryFor(SIDE_CHAT);
+	delete h.ctx.reportStreamFailure;
+	await assert.rejects(
+		collectMuseWith(h.ctx, gateway),
+		/could not be found or read/,
+	);
+	assert.equal(h.of("DETAIL_GAP_RECOVERED").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE").length, 0);
+	assert.equal(h.of("STATE").length, 0);
+});
+
 test("a full run reads every stream through read methods only and follows the protocol", async () => {
 	const { gateway, calls } = fakeGateway();
 	const h = harness();
 	await collectMuseWith(h.ctx, gateway);
 
-	assert.deepEqual(h.failures, []);
+	assertIncompleteChats(h);
 	for (const c of calls) {
 		assert.ok(READ_METHODS.has(c.method), c.method);
 		if (c.method === "fs.raw")
@@ -257,8 +389,10 @@ test("a full run reads every stream through read methods only and follows the pr
 	);
 	assert.ok(cov.index > lastMessage);
 
-	// Every stream with records ends with a STATE after its last record.
-	for (const stream of ALL_STREAMS.filter((s) => s !== "messages")) {
+	// Healthy sibling streams still checkpoint after their records.
+	for (const stream of ALL_STREAMS.filter(
+		(s) => s !== "messages" && s !== "conversations",
+	)) {
 		const state = h.of("STATE", stream);
 		assert.equal(state.length, 1, stream);
 		const lastRecord = Math.max(
@@ -267,14 +401,9 @@ test("a full run reads every stream through read methods only and follows the pr
 		);
 		assert.ok((state[0]?.index ?? -1) > lastRecord, stream);
 	}
-	assert.ok((h.of("STATE", "conversations")[0]?.index ?? -1) > cov.index);
-	assert.deepEqual(h.states("conversations")[0], {
-		version: 2,
-		chats: {
-			[SIDE_CHAT]: { updated_at_ms: 1792610689000, transcript_revision: 31 },
-			[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
-		},
-	});
+	assert.equal(h.of("STATE", "conversations").length, 0);
+	assert.equal(h.states("conversations").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
 	assert.deepEqual(h.states("activities")[0], {
 		version: 1,
 		newest_timestamp: "2026-01-15T10:14:38.000Z",
@@ -338,13 +467,8 @@ test("chat.history pages back with before_seq until has_more is false", async ()
 	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
 	assert.deepEqual(cov?.hydrated_keys, [SIDE_CHAT, MAIN_CHAT]);
 	assert.equal(h.of("DETAIL_GAP").length, 0);
-	assert.deepEqual(h.states("conversations")[0], {
-		version: 2,
-		chats: {
-			[SIDE_CHAT]: { updated_at_ms: 1792610689000, transcript_revision: 31 },
-			[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
-		},
-	});
+	assert.equal(h.states("conversations").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
 });
 
 test("a chat.history page that repeats is a DETAIL_GAP, not a complete chat", async () => {
@@ -377,12 +501,8 @@ test("a chat.history page that repeats is a DETAIL_GAP, not a complete chat", as
 	assert.deepEqual(cov.m.gap_keys, [SIDE_CHAT]);
 	assert.deepEqual(cov.m.hydrated_keys, [MAIN_CHAT]);
 	// The gapped chat gets no mark, so the next run reads it again.
-	assert.deepEqual(h.states("conversations")[0], {
-		version: 2,
-		chats: {
-			[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
-		},
-	});
+	assert.equal(h.states("conversations").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
 });
 
 test("a chat.history cursor that does not move back is a DETAIL_GAP", async () => {
@@ -467,21 +587,16 @@ test("the next run reads only chats that changed, plus pending gaps", async () =
 	);
 	assert.deepEqual(
 		h.failures.map((f) => f.stream),
-		["messages"],
+		["conversations", "messages"],
 	);
 	assert.equal(h.retryable("messages"), true);
 	assert.match(
 		h.failures[0]?.message ?? "",
 		/^muse_rpc_failed: .*could not be found/,
 	);
-	// conversations completes; the chat marks do not move for this run.
-	assert.deepEqual(h.states("conversations")[0], {
-		version: 2,
-		chats: {
-			[SIDE_CHAT]: { updated_at_ms: 1792610689000, transcript_revision: 31 },
-			[MAIN_CHAT]: { updated_at_ms: 1792600000000, transcript_revision: 31 },
-		},
-	});
+	// Inventory is unproven too: neither chat stream can checkpoint.
+	assert.equal(h.states("conversations").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
 });
 
 test("a recovery-only run retries pending gaps and nothing else", async () => {
@@ -1225,13 +1340,141 @@ test("round 6 #1: sessions.list is read page by page until an answer has no next
 		{ limit: 100, cursor: "c1" },
 		{ limit: 100, view: "archived" },
 	]);
-	assert.deepEqual(h.failures, []);
+	assertIncompleteChats(h);
 	// Deduplicated by session_id.
 	assert.deepEqual(
 		h.records("conversations").map((r) => r.id),
 		SESSION_IDS,
 	);
+	assert.equal(h.states("conversations").length, 0);
+	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
+});
+
+test("first sync: an unknown chat moving from archived to active cannot disappear into full success", async () => {
+	const [main, side] = SESSIONS.sessions as Json[];
+	assert.ok(main && side);
+	assert.equal(main.session_id, MAIN_CHAT);
+	assert.equal(side.session_id, SIDE_CHAT);
+	let sideArchived = true;
+	const snapshots: Array<{ view: string; ids: unknown[] }> = [];
+	const { gateway, calls } = fakeGateway({
+		"sessions.list": (p) => {
+			const archived = p.view === "archived";
+			const sessions = archived
+				? sideArchived
+					? [side]
+					: []
+				: sideArchived
+					? [main]
+					: [main, side];
+			snapshots.push({
+				view: archived ? "archived" : "active",
+				ids: sessions.map((s) => s.session_id),
+			});
+			// SIDE exists throughout, but moves after the active snapshot.
+			if (snapshots.length === 1 && !archived) sideArchived = false;
+			return { sessions, has_more: false, next_cursor: null };
+		},
+		"sessions.get": (p) => {
+			const session = [main, side].find((s) => s.session_id === p.id);
+			assert.ok(session);
+			return {
+				session: { ...session, archived: p.id === SIDE_CHAT && sideArchived },
+			};
+		},
+	});
+	const h = harness({
+		streams: ["conversations", "messages"],
+		state: {},
+		detailGaps: [],
+	});
+	// Never turn this first-sync case into known-ID recovery.
+	assert.deepEqual(h.ctx.state, {});
+	assert.deepEqual(h.ctx.detailGaps, []);
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(snapshots.slice(0, 2), [
+		{ view: "active", ids: [MAIN_CHAT] },
+		{ view: "archived", ids: [] },
+	]);
+	assert.equal(sideArchived, false);
+
+	const partial =
+		h.failures.length > 0 || h.of("DETAIL_GAP", "messages").length > 0;
+	if (partial) {
+		assert.ok(
+			h.failures.some((f) =>
+				["conversations", "messages"].includes(f.stream),
+			) || h.of("DETAIL_GAP", "messages").length > 0,
+		);
+		assert.equal(h.states("conversations").length, 0);
+		assert.equal(h.states("messages").length, 0);
+		assert.equal(
+			h.of("DETAIL_COVERAGE", "conversations").length,
+			0,
+			"an incomplete moving inventory must not advertise full conversations coverage",
+		);
+		return;
+	}
+
+	const parents = h.of("RECORD", "conversations");
+	const sideParentIndex =
+		parents.find((x) => (x.m.data as Json).id === SIDE_CHAT)?.index ?? -1;
+	assert.ok(
+		sideParentIndex >= 0,
+		"first-sync full success must include unknown SIDE; MAIN-only inventory is incomplete",
+	);
+	assert.deepEqual(
+		new Set(h.records("conversations").map((r) => r.id)),
+		new Set(SESSION_IDS),
+	);
+	for (const id of SESSION_IDS) {
+		const parentIndex =
+			parents.find((x) => (x.m.data as Json).id === id)?.index ?? -1;
+		assert.ok(parentIndex >= 0);
+		const children = h
+			.of("RECORD", "messages")
+			.filter((x) => (x.m.data as Json).session_id === id);
+		assert.equal(children.length, 3);
+		assert.ok(children.every((x) => parentIndex < x.index));
+		assert.deepEqual(
+			new Set(children.map((x) => (x.m.data as Json).id)),
+			new Set((historyFor(id).chat_events as Json[]).map((e) => e.message_id)),
+		);
+		assert.ok(
+			calls.some(
+				(c) => c.method === "chat.history" && c.params.session_id === id,
+			),
+		);
+	}
+	const coverage = h.of("DETAIL_COVERAGE", "messages");
+	assert.equal(coverage.length, 1);
+	assert.equal(coverage[0]?.m.state_stream, "conversations");
+	assert.deepEqual(
+		new Set(coverage[0]?.m.required_keys as string[]),
+		new Set(SESSION_IDS),
+	);
+	assert.deepEqual(
+		new Set(coverage[0]?.m.hydrated_keys as string[]),
+		new Set(SESSION_IDS),
+	);
+	assert.deepEqual(coverage[0]?.m.gap_keys ?? [], []);
+	assert.ok(
+		(coverage[0]?.index ?? -1) >
+			Math.max(...h.of("RECORD", "messages").map((x) => x.index)),
+	);
+	const inventory = h.of("DETAIL_COVERAGE", "conversations");
+	assert.equal(inventory.length, 1);
+	assert.equal(inventory[0]?.m.considered, SESSION_IDS.length);
+	assert.equal(inventory[0]?.m.covered, SESSION_IDS.length);
 	assert.equal(h.states("conversations").length, 1);
+	assert.deepEqual(
+		Object.keys(h.states("conversations")[0]?.chats as Json).sort(),
+		[...SESSION_IDS].sort(),
+	);
+	assert.ok(
+		(h.of("STATE", "conversations")[0]?.index ?? -1) >
+			(coverage[0]?.index ?? Infinity),
+	);
 });
 
 test("round 6 #1: a chat list walk that cannot reach its end is not checkpointed", async () => {
@@ -1311,7 +1554,7 @@ test("round 7: a numeric page cursor is passed back as a number", async () => {
 	});
 	const h = harness({ streams: ["conversations", "goals"] });
 	await collectMuseWith(h.ctx, gateway);
-	assert.deepEqual(h.failures, []);
+	assertIncompleteChats(h);
 	assert.ok(params.some((p) => p.cursor === 100));
 	assert.ok(params.some((p) => p.cursor === 7));
 	assert.equal(
@@ -1416,13 +1659,7 @@ test("round 5 #2: a chat whose transcript revision changed under the same update
 	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.required_keys, [
 		MAIN_CHAT,
 	]);
-	assert.deepEqual(
-		((h.states("conversations")[0]?.chats ?? {}) as Json)[MAIN_CHAT],
-		{
-			updated_at_ms: 1792612428000,
-			transcript_revision: 32,
-		},
-	);
+	assertIncompleteChats(h);
 });
 
 test("round 5 #2: a chat with no known revision is always read again", async () => {
@@ -1458,7 +1695,7 @@ test("round 5 #2: a chat with no known revision is always read again", async () 
 	]);
 	assert.equal(calls.filter((c) => c.params.limit === 50).length, 2);
 	// Nothing to compare next time: no mark is kept.
-	assert.deepEqual(h.states("conversations")[0], { version: 2, chats: {} });
+	assertIncompleteChats(h);
 });
 
 test("round 5 #2: a version 1 watermark cursor is not trusted", async () => {
@@ -1704,7 +1941,7 @@ test("finding 9: a rate limit or outage stops the chat walk instead of gapping e
 	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
 		SIDE_CHAT,
 	]);
-	assert.deepEqual(h.failures, []);
+	assertIncompleteChats(h);
 });
 
 test("finding 9: the page script keeps the gateway's status class", async () => {
@@ -1807,10 +2044,7 @@ test("round 6 #2: a continuation page without a revision is unknown, not a chang
 		h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys ?? [],
 		[],
 	);
-	assert.deepEqual(
-		((h.states("conversations")[0]?.chats ?? {}) as Json)[SIDE_CHAT],
-		{ updated_at_ms: 1792610689000, transcript_revision: 31 },
-	);
+	assertIncompleteChats(h);
 	// One first-page read at the end confirms the revision.
 	assert.equal(calls.at(-1)?.limit, 1);
 });
@@ -2130,7 +2364,7 @@ test("round 9: DETAIL_GAP_RECOVERED is emitted only after a full history read", 
 	assert.equal(h.of("DETAIL_COVERAGE", "messages").length, 0);
 	assert.deepEqual(
 		h.failures.map((f) => f.stream),
-		["messages"],
+		["conversations", "messages"],
 	);
 	assert.equal(h.retryable("messages"), true);
 });

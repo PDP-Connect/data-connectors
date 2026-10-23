@@ -25,7 +25,8 @@
  *
  * Streams and their end signals:
  *   - conversations: sessions.list {} plus {view:"archived"}; each answer is
- *     the whole list (no paging in the observed shape).
+ *     an independently paged view, not an authoritative all-status snapshot.
+ *     Readable chats are imported, but inventory remains incomplete.
  *   - messages: chat.history per chat, child of conversations with
  *     parent_detail_accounting, paged back like the app does (`before_seq` =
  *     the smallest `seq` on the page) until `has_more: false`. A chat whose
@@ -508,6 +509,11 @@ async function failStreams(
 	const retryable = error instanceof StreamFailure ? error.retryable : true;
 	for (const stream of streams) {
 		connectorDiagnostic("muse", "stream_failed", { stream, retryable });
+		if (!ctx.reportStreamFailure) {
+			throw createConnectorFailure("muse_stream_incomplete", describe(error), {
+				retryable,
+			});
+		}
 		await ctx.reportStreamFailure?.(stream, describe(error), { retryable });
 	}
 }
@@ -590,7 +596,7 @@ interface ListedSession {
 }
 
 /**
- * Every chat, active then archived, read page by page as the app does:
+ * Observed chats, active then archived, read page by page as the app does:
  * `{ limit }`, then `{ limit, cursor: <next_cursor> }`, until an answer has
  * no next_cursor. A repeated cursor, a page cap, or has_more with no cursor
  * fails the list; nothing is checkpointed from a list that did not end.
@@ -1134,10 +1140,6 @@ export async function runChatStreams(
 			: parseConversationsCursor(ctx.state[CONVERSATIONS]);
 	const prior = stored?.chats ?? {};
 	const listedIds = new Set(listed.map(({ session }) => session.session_id));
-	// Marks of chats still listed carry forward; a chat no longer listed drops.
-	let nextChats: Record<string, ChatMark> = Object.fromEntries(
-		Object.entries(prior).filter(([id]) => listedIds.has(id)),
-	);
 	if (wantMessages) {
 		const chats = listed
 			.map(({ session }) => ({
@@ -1149,7 +1151,6 @@ export async function runChatStreams(
 						: null,
 			}))
 			.sort((a, b) => (a.updatedMs ?? 0) - (b.updatedMs ?? 0));
-		let hydrated: Map<string, number | null>;
 		const counts = { unsafe: 0 };
 		try {
 			const changed: string[] = [];
@@ -1166,72 +1167,42 @@ export async function runChatStreams(
 				...[...pending.keys()].filter((id) => !changedIds.has(id)),
 				...changed,
 			];
-			hydrated = await hydrateChats(
-				ctx,
-				gateway,
-				tally,
-				required,
-				pending,
-				(id) =>
-					listedIds.has(id)
-						? Promise.resolve<ParentOutcome>({ kind: "emitted" })
-						: parentFromSessionsGet(ctx, gateway, tally, id, counts),
+			await hydrateChats(ctx, gateway, tally, required, pending, (id) =>
+				listedIds.has(id)
+					? Promise.resolve<ParentOutcome>({ kind: "emitted" })
+					: parentFromSessionsGet(ctx, gateway, tally, id, counts),
 			);
-			for (const id of changed) {
-				const revision = hydrated.get(id);
-				const updatedMs = chats.find((c) => c.id === id)?.updatedMs ?? null;
-				// Not read completely, or nothing to compare next time: read again.
-				if (revision === undefined || revision === null || updatedMs === null) {
-					delete nextChats[id];
-				} else {
-					nextChats[id] = {
-						updated_at_ms: updatedMs,
-						transcript_revision: revision,
-					};
-				}
-			}
 		} catch (error) {
-			// A blocked parent fails messages only (no coverage, gaps stay
-			// pending); the conversation inventory itself was read in full and
-			// its chat marks have not moved. Anything else fails both.
-			if (!(error instanceof ParentsBlocked) || counts.unsafe > 0) {
-				await failStreams(
-					ctx,
-					[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
-					error,
-				);
-				return;
-			}
-			await failStreams(ctx, [MESSAGES], error);
-		}
-		// A time-ranged run reads only part of each chat: it records no marks.
-		if (ctx.requested.get(MESSAGES)?.time_range) {
-			nextChats = Object.fromEntries(
-				Object.entries(prior).filter(([id]) => listedIds.has(id)),
-			);
-		}
-	}
-
-	if (wantConversations) {
-		if (unsafeTextCount(tally, CONVERSATIONS) > 0) {
 			await failStreams(
 				ctx,
-				[CONVERSATIONS],
-				unsafeTextFailure(tally, CONVERSATIONS),
+				[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
+				error,
 			);
 			return;
 		}
-		await ctx.emit(buildFullScanCoverageMessage(CONVERSATIONS, listed.length));
-		const cursor: ConversationsCursor = {
-			version: CHATS_CURSOR_VERSION,
-			chats: nextChats,
-		};
-		await ctx.emit({
-			type: "STATE",
-			stream: CONVERSATIONS,
-			cursor: { ...cursor },
-		});
 	}
+
+	if (unsafeTextCount(tally, CONVERSATIONS) > 0) {
+		await failStreams(
+			ctx,
+			[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
+			unsafeTextFailure(tally, CONVERSATIONS),
+		);
+		return;
+	}
+	// Exhausting two independent views does not prove an inventory: an
+	// unknown chat can move from archived to active between those reads.
+	// Known-ID recovery and repeated walks cannot close that discovery gap.
+	// Keep records and per-parent detail accounting, but never full coverage
+	// or a chat checkpoint until an authoritative inventory contract exists.
+	await failStreams(
+		ctx,
+		[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
+		new StreamFailure(
+			"Muse chat inventory is incomplete: active and archived lists are independent reads without an authoritative all-status snapshot. Readable chats were imported, but conversations and messages are not checkpointed as complete.",
+			false,
+		),
+	);
 }
 
 /** One second after a zoned timestamp, in the same shape (`Z`, whole seconds unless the source had a fraction). */
@@ -1697,15 +1668,36 @@ export async function collectMuseWith(
 	gateway: MuseGateway,
 ): Promise<void> {
 	const tally = new TextTally();
+	// Standalone callers have no runtime reporter. Collect healthy siblings
+	// before throwing, rather than silently treating an incomplete run as success.
+	const failures: string[] = [];
+	let retryable = true;
+	if (!ctx.reportStreamFailure) {
+		ctx = {
+			...ctx,
+			reportStreamFailure: async (stream, message, options) => {
+				failures.push(`${stream}: ${message}`);
+				retryable &&= options?.retryable !== false;
+			},
+		};
+	}
 	try {
 		await runChatStreams(ctx, gateway, tally);
-		if (ctx.recoveryOnly) return;
-		await runActivities(ctx, gateway, tally);
-		await runGoals(ctx, gateway, tally);
-		await runScheduledTasks(ctx, gateway, tally);
-		await runMemoryFiles(ctx, gateway, tally);
-		await runFiles(ctx, gateway, tally);
-		await runConnectedApps(ctx, gateway, tally);
+		if (!ctx.recoveryOnly) {
+			await runActivities(ctx, gateway, tally);
+			await runGoals(ctx, gateway, tally);
+			await runScheduledTasks(ctx, gateway, tally);
+			await runMemoryFiles(ctx, gateway, tally);
+			await runFiles(ctx, gateway, tally);
+			await runConnectedApps(ctx, gateway, tally);
+		}
+		if (failures.length > 0) {
+			throw createConnectorFailure(
+				"muse_stream_incomplete",
+				failures.join("; "),
+				{ retryable },
+			);
+		}
 	} finally {
 		for (const [stream, count] of tally.byStream) {
 			connectorDiagnostic("muse", "unsafe_text_replaced", { stream, count });
