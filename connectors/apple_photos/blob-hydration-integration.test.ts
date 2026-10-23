@@ -12,12 +12,13 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -88,7 +89,13 @@ async function withBlobServer<T>(
 async function runApplePhotos(
 	exportDir: string,
 	env: Record<string, string> = {},
-): Promise<{ messages: EmittedMessage[]; photos: Record<string, unknown>[] }> {
+	state: Record<string, unknown> = {},
+	runCoverage = false,
+): Promise<{
+	messages: EmittedMessage[];
+	photos: Record<string, unknown>[];
+	stderr: string;
+}> {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
@@ -100,13 +107,17 @@ async function runApplePhotos(
 			...env,
 		},
 		start: {
+			...(runCoverage
+				? { run_coverage_version: 1, collection_scope: "photos-test" }
+				: {}),
 			scope: { streams: [{ name: "photos" }] },
-			state: {},
+			state,
 			type: "START",
 		},
 	});
 	return {
 		messages: result.messages,
+		stderr: result.stderr,
 		photos: records(result.messages, "photos"),
 	};
 }
@@ -192,7 +203,7 @@ test("photos stream skips oversized files without dropping the record", async ()
 	try {
 		await writeFile(join(dir, "big.jpg"), TINY_JPEG_A);
 
-		const { photos } = await runApplePhotos(dir, {
+		const { photos, messages } = await runApplePhotos(dir, {
 			PDPP_APPLE_PHOTOS_MAX_PHOTO_BYTES: "1",
 		});
 
@@ -200,6 +211,11 @@ test("photos stream skips oversized files without dropping the record", async ()
 		assert.equal(photos[0]?.hydration_status, "skipped_too_large");
 		assert.equal(photos[0]?.blob_ref, null);
 		assert.equal(photos[0]?.content_sha256, null);
+		assert.equal(
+			photoCursor(messages).last_modified,
+			photos[0]?.file_modified_at,
+			"intentionally oversized photos retain their cursor policy",
+		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
@@ -239,3 +255,188 @@ test("photos stream dedupes identical-content files discovered under different n
 		await rm(dir, { force: true, recursive: true });
 	}
 });
+
+function photoCursor(
+	messages: readonly EmittedMessage[],
+): Record<string, unknown> {
+	const checkpoint = messages.find(
+		(m) => m.type === "STATE" && m.stream === "photos",
+	);
+	assert.ok(checkpoint?.type === "STATE", "expected a photos STATE checkpoint");
+	return checkpoint.cursor as Record<string, unknown>;
+}
+
+function assertPhotoDone(
+	messages: readonly EmittedMessage[],
+	runCoverage: boolean,
+	status: "partial" | "collected",
+): void {
+	const done = messages.find((m) => m.type === "DONE");
+	assert.deepEqual(done, {
+		type: "DONE",
+		status: "succeeded",
+		records_emitted: 2,
+		...(runCoverage
+			? {
+					coverage: {
+						version: 1,
+						collection_scope: "photos-test",
+						streams: [{
+							stream: "photos",
+							scoped: false,
+							stores: [{ store: "export_dir", status }],
+						}],
+					},
+				}
+			: {}),
+	});
+}
+
+for (const [failure, runCoverage] of [
+	["read", false],
+	["read", true],
+	["upload", false],
+	["upload", true],
+] as const) {
+	test(
+		`photos retries older ${failure} failure from STATE (${runCoverage ? "coverage v1" : "legacy DONE"})`,
+		async () => {
+			const root = await mkdtemp(join(tmpdir(), "pdpp-apple-photos-resume-"));
+			const dir = join(root, "export");
+			const oldPath = join(dir, "older.jpg");
+			const newerPath = join(dir, "newer.jpg");
+			const older = new Date("2024-06-01T00:00:00.000Z");
+			const newer = new Date("2024-06-10T00:00:00.000Z");
+			const prior = failure === "read" ? "2024-05-01T00:00:00.000Z" : undefined;
+			const oldBytes = Buffer.concat([TINY_JPEG_A, Buffer.from("older")]);
+			const newBytes = Buffer.concat([TINY_JPEG_A, Buffer.from("newer")]);
+			const preload = join(root, "make-unreadable.mjs");
+			try {
+				await mkdir(dir);
+				await writeFile(oldPath, oldBytes);
+				await writeFile(newerPath, newBytes);
+				await utimes(oldPath, older, older);
+				await utimes(newerPath, newer, newer);
+				// Remove the discovered file immediately after its metadata is read.
+				// This causes a real ENOENT during hydration even when running as root,
+				// without mocking hydration results or depending on chmod behavior.
+				await writeFile(
+					preload,
+					[
+						'import fs from "node:fs/promises";',
+						'import { syncBuiltinESMExports } from "node:module";',
+						"const originalStat = fs.stat;",
+						"let removed = false;",
+						"fs.stat = async function(path, ...args) {",
+						"  const result = await originalStat.call(this, path, ...args);",
+						"  if (!removed && String(path) === process.env.PDPP_TEST_UNREADABLE_PHOTO) {",
+						"    removed = true;",
+						'    await fs.rename(path, String(path) + ".unreadable");',
+						"  }",
+						"  return result;",
+						"};",
+						"syncBuiltinESMExports();",
+					].join("\n"),
+				);
+				let failUpload = failure === "upload";
+				await withBlobServer(
+					async (req) => {
+						const body = await readRequestBody(req);
+						if (failUpload && body.equals(oldBytes)) {
+							return {
+								body: { error: "synthetic upload failure" },
+								status: 500,
+							};
+						}
+						const sha256 = createHash("sha256").update(body).digest("hex");
+						return {
+							body: {
+								blob_id: `blob_sha256_${sha256}`,
+								mime_type: "image/jpeg",
+								object: "blob",
+								sha256,
+								size_bytes: body.byteLength,
+							},
+							status: 200,
+						};
+					},
+					async (baseUrl) => {
+						const env = {
+							PDPP_OWNER_TOKEN: "owner-token",
+							PDPP_RS_URL: baseUrl,
+						};
+						const first = await runApplePhotos(
+							dir,
+							{
+								...env,
+								...(failure === "read"
+									? {
+											NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(preload).href}`,
+											PDPP_TEST_UNREADABLE_PHOTO: oldPath,
+										}
+									: {}),
+							},
+							{ photos: { last_modified: prior, export_marker: "preserved" } },
+							runCoverage,
+						);
+						const failed = first.photos.find((p) => p.filename === "older.jpg");
+						const healthy = first.photos.find((p) => p.filename === "newer.jpg");
+						assert.equal(
+							first.photos.length, 2, "failure must not drop either record",
+						);
+						assert.equal(failed?.hydration_status, "failed");
+						assert.equal(failed?.blob_ref, null);
+						assert.equal(healthy?.hydration_status, "hydrated");
+						assert.ok(healthy?.blob_ref);
+						if (failure === "read") {
+							assert.equal(failed?.content_sha256, null);
+							await rename(oldPath + ".unreadable", oldPath);
+						}
+						failUpload = false;
+						const checkpoint = photoCursor(first.messages);
+						const second = await runApplePhotos(
+							dir, env, { photos: checkpoint }, runCoverage,
+						);
+						const repaired = second.photos.find((p) => p.filename === "older.jpg");
+						assert.equal(
+							repaired?.hydration_status,
+							"hydrated",
+							"resume must retry repaired older work, not skip it behind the cursor",
+						);
+						assert.equal(
+							repaired?.content_sha256,
+							createHash("sha256").update(oldBytes).digest("hex"),
+						);
+						assert.ok(repaired?.blob_ref);
+						assert.deepEqual(
+							second.photos.find((p) => p.filename === "newer.jpg"),
+							healthy,
+							"replayed healthy records retain identity, bytes and all metadata",
+						);
+						assert.equal(second.photos.length, 2);
+						assert.equal(checkpoint.export_marker, "preserved");
+						assert.equal(photoCursor(second.messages).export_marker, "preserved");
+						assert.equal(
+							checkpoint.last_modified, prior,
+							"any failed hydration must hold the existing cursor",
+						);
+						assert.match(
+							first.stderr, /"reason":"hydration_failed","status":"partial"/,
+						);
+						assert.doesNotMatch(first.stderr, /coverage .*"status":"collected"/);
+						assert.equal(
+							photoCursor(second.messages).last_modified, newer.toISOString(),
+						);
+						assert.match(
+							second.stderr, /"reason":"collected","status":"collected"/,
+						);
+						assertPhotoDone(first.messages, runCoverage, "partial");
+						assertPhotoDone(second.messages, runCoverage, "collected");
+					},
+				);
+			} finally {
+				await rm(root, { force: true, recursive: true });
+			}
+		},
+	);
+}

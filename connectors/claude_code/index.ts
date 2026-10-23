@@ -2052,7 +2052,7 @@ export async function discoverClaudeJsonlSources(
 	// naming the expected root format.
 	if (
 		!directoryFailed &&
-		sources.length === 0 &&
+		projectDirs.length === 0 &&
 		(scope?.source_roots?.length ?? 0) > 0
 	) {
 		await emit({
@@ -2675,6 +2675,10 @@ if (isMainModule(import.meta.url)) {
 				}
 			};
 			const skippedSymlinks = new Set<string>();
+			const claudeHome =
+				process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
+			const baseDir =
+				process.env.CLAUDE_CODE_PROJECTS_DIR || join(claudeHome, "projects");
 			const reportSymlink: SymlinkSkipped = async (path) => {
 				if (skippedSymlinks.has(path)) return;
 				skippedSymlinks.add(path);
@@ -2685,8 +2689,21 @@ if (isMainModule(import.meta.url)) {
 					await reportDirectoryError(path, error);
 					return;
 				}
-				for (const stream of ["sessions", "messages", "attachments"]) {
+				for (const stream of [
+					"sessions",
+					"messages",
+					"attachments",
+					"memory_notes",
+				]) {
 					if (!requested.has(stream)) continue;
+					// Only the shared root or a project boundary excludes memory.
+					// Transcript and subagent links cannot taint healthy notes.
+					if (
+						stream === "memory_notes" &&
+						resolve(path) !== resolve(baseDir) &&
+						dirname(resolve(path)) !== resolve(baseDir)
+					)
+						continue;
 					await emit({
 						type: "SKIP_RESULT",
 						stream,
@@ -2726,10 +2743,6 @@ if (isMainModule(import.meta.url)) {
 					enabled: captureContext !== null,
 				});
 
-				const claudeHome =
-					process.env.CLAUDE_CODE_HOME || join(homedir(), ".claude");
-				const baseDir =
-					process.env.CLAUDE_CODE_PROJECTS_DIR || join(claudeHome, "projects");
 				// Build the source inventory from path metadata. This walk never reads
 				// payload, so it is safe on a partial or empty home.
 				const enumerationScope = readEnumerationScope(requested, [
@@ -2889,7 +2902,21 @@ if (isMainModule(import.meta.url)) {
 						decodedSessionAggregates.valid;
 					const sources = await discoverClaudeJsonlSources(
 						baseDir,
-						emit,
+						async (message) => {
+							if (message.type !== "SKIP_RESULT") {
+								await emit(message);
+								return;
+							}
+							// Discovery reports the shared project boundary through sessions.
+							// Every requested consumer needs that outcome, even without sessions.
+							// Emit in order: each stream waits for the previous emit to finish.
+							await ["sessions", "messages", "attachments", "memory_notes"]
+								.filter((stream) => requested.has(stream))
+								.reduce<Promise<void>>(async (previous, stream) => {
+									await previous;
+									await emit({ ...message, stream });
+								}, Promise.resolve());
+						},
 						enumerationScope,
 						reportDirectoryError,
 						reportSymlink,

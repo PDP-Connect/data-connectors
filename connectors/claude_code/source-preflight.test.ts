@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -367,3 +367,294 @@ async function runConnectorProcess(input: {
 		stderr: result.stderr,
 	};
 }
+
+type CoverageDone = Extract<EmittedMessage, { type: "DONE" }> & {
+	coverage?: {
+		version: number;
+		collection_scope: string;
+		streams: Array<{
+			stream: string;
+			scoped: boolean;
+			stores: Array<{ store: string; status: string }>;
+		}>;
+	};
+};
+
+const PROJECT_STREAMS = ["sessions", "messages", "attachments", "memory_notes"];
+
+function assertProjectCoverage(
+	result: Awaited<ReturnType<typeof runConnectorProcess>>,
+	streams: string[],
+	status: string,
+) {
+	const done = result.messages.findLast((message) => message.type === "DONE") as
+		| CoverageDone
+		| undefined;
+	assert.ok(done?.coverage, "negotiated coverage must be present");
+	assert.equal(done.coverage.version, 1);
+	assert.equal(done.coverage.collection_scope, "project-coverage-test");
+	assert.deepEqual(
+		done.coverage.streams.map((entry) => entry.stream).sort(),
+		[...streams].sort(),
+		"coverage must contain exactly the requested streams",
+	);
+	for (const entry of done.coverage.streams) {
+		assert.ok(entry.stores.length > 0);
+		assert.ok(
+			entry.stores.every((store) => store.status === status),
+			JSON.stringify({ entry, messages: result.messages }),
+		);
+	}
+}
+
+async function runProjectCoverage(
+	home: string,
+	streams: string[],
+	options: {
+		roots?: string[];
+		state?: Record<string, unknown>;
+		negotiated?: boolean;
+	} = {},
+) {
+	return runConnectorProcess({
+		env: {
+			CLAUDE_CODE_HOME: home,
+			CLAUDE_CODE_PROJECTS_DIR: join(home, "projects"),
+			CLAUDE_CODE_PROJECT_INCLUDE: "",
+			CLAUDE_CODE_PROJECT_EXCLUDE: "",
+			HOME: home,
+			PDPP_OWNER_TOKEN: "",
+			PDPP_RS_URL: "",
+			RS_URL: "",
+		},
+		start: {
+			type: "START",
+			...(options.negotiated === false
+				? {}
+				: { run_coverage_version: 1, collection_scope: "project-coverage-test" }),
+			scope: {
+				streams: streams.map((name) => ({
+					name,
+					...(options.roots ? { source_roots: options.roots } : {}),
+				})),
+			},
+			state: options.state ?? {},
+		},
+	});
+}
+
+test("project symlink exclusion reaches memory_notes alone and every requested dependent stream", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pdpp-claude-project-symlink-"));
+	try {
+		const target = join(home, "excluded-projects");
+		await mkdir(join(target, "-tmp-demo", "memory"), { recursive: true });
+		await writeFile(
+			join(target, "-tmp-demo", "memory", "note.md"),
+			"PRIVATE SYMLINK BODY",
+		);
+		await symlink(target, join(home, "projects"), "dir");
+		const priorPath = join(home, "projects", "-tmp-demo", "memory", "note.md");
+		for (const streams of [["memory_notes"], PROJECT_STREAMS]) {
+			const result = await runProjectCoverage(home, streams, {
+				state: { memory_notes: { file_mtimes: { [priorPath]: 42 } } },
+			});
+			assertProjectCoverage(result, streams, "partial");
+			const skips = result.messages.filter(
+				(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+					message.type === "SKIP_RESULT" && message.reason === "symlink_skipped",
+			);
+			assert.deepEqual(
+				skips.map((message) => message.stream).sort(),
+				[...streams].sort(),
+			);
+			assert.equal(
+				result.messages.filter((message) => message.type === "RECORD").length,
+				0,
+			);
+			assert.ok(!JSON.stringify(result.messages).includes("PRIVATE SYMLINK BODY"));
+			const state = result.messages.find(
+				(message) => message.type === "STATE" && message.stream === "memory_notes",
+			) as Extract<EmittedMessage, { type: "STATE" }> | undefined;
+			assert.equal(
+				(state?.cursor as { file_mtimes?: Record<string, number> })
+					?.file_mtimes?.[priorPath],
+				42,
+			);
+		}
+		const legacy = await runProjectCoverage(home, ["memory_notes"], {
+			negotiated: false,
+		});
+		const done = legacy.messages.findLast((message) => message.type === "DONE");
+		assert.ok(done);
+		assert.equal(
+			Object.hasOwn(done, "coverage"),
+			false,
+			"older runtime DONE shape stays unchanged",
+		);
+		assert.ok(
+			legacy.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.stream === "memory_notes" &&
+					message.reason === "symlink_skipped",
+			),
+		);
+
+		// Restoring an enumerable source clears only this run's incomplete outcome.
+		await rm(join(home, "projects"));
+		await mkdir(join(home, "projects", "-tmp-demo", "memory"), { recursive: true });
+		await writeFile(priorPath, "Restored memory note");
+		const restored = await runProjectCoverage(home, ["memory_notes"], {
+			state: {
+				memory_notes: { file_mtimes: { [priorPath]: 42 } },
+			},
+		});
+		assertProjectCoverage(restored, ["memory_notes"], "collected");
+		assert.equal(
+			restored.messages.filter((message) => message.type === "RECORD").length,
+			1,
+		);
+	} finally {
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
+for (const streams of [
+	["messages"],
+	["attachments"],
+	["messages", "attachments"],
+	PROJECT_STREAMS,
+]) {
+	test(`unmatched source_roots are partial for ${streams.join(", ")}`, async () => {
+		const home = await mkdtemp(join(tmpdir(), "pdpp-claude-unmatched-roots-"));
+		try {
+			await mkdir(join(home, "projects", "-tmp-present"), { recursive: true });
+			await writeFile(
+				join(home, "projects", "-tmp-present", "session.jsonl"),
+				"PRIVATE OUT OF SCOPE BODY\n",
+			);
+			const result = await runProjectCoverage(home, streams, {
+				roots: ["/tmp/absent"],
+			});
+			assertProjectCoverage(result, streams, "partial");
+			const skips = result.messages.filter(
+				(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+					message.type === "SKIP_RESULT",
+			);
+			assert.deepEqual(
+				skips.map((message) => message.stream).sort(),
+				[...streams].sort(),
+			);
+			assert.ok(skips.every((message) => message.reason === "scope_matched_no_sources"));
+			assert.equal(
+				result.messages.filter((message) => message.type === "RECORD").length,
+				0,
+			);
+			assert.ok(
+				!JSON.stringify(result.messages).includes("PRIVATE OUT OF SCOPE BODY"),
+			);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
+	});
+}
+
+test("enumerable empty project stores and matched empty roots remain collected", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pdpp-claude-empty-projects-"));
+	try {
+		await mkdir(join(home, "projects"), { recursive: true });
+		const empty = await runProjectCoverage(home, PROJECT_STREAMS);
+		assertProjectCoverage(empty, PROJECT_STREAMS, "collected");
+		await mkdir(join(home, "projects", "-tmp-empty"), { recursive: true });
+		const matched = await runProjectCoverage(home, PROJECT_STREAMS, {
+			roots: ["/tmp/empty"],
+		});
+		assertProjectCoverage(matched, PROJECT_STREAMS, "collected");
+		assert.equal(
+			matched.messages.filter((message) => message.type === "SKIP_RESULT").length,
+			0,
+		);
+	} finally {
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
+test("valid scoped project collection keeps subset isolation and replay cursors", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pdpp-claude-valid-root-"));
+	try {
+		const project = join(home, "projects", "-tmp-valid");
+		await mkdir(join(project, "memory"), { recursive: true });
+		await writeFile(join(project, "memory", "note.md"), "A real memory note");
+		await writeFile(
+			join(project, "session.jsonl"),
+			JSON.stringify({
+				type: "user",
+				uuid: "123e4567-e89b-42d3-a456-426614174000",
+				sessionId: "coverage-session",
+				isSidechain: false,
+				timestamp: "2026-04-22T00:00:01.000Z",
+				message: { content: "hello" },
+			}) + "\n",
+		);
+		const streams = ["messages", "memory_notes"];
+		const first = await runProjectCoverage(home, streams, {
+			roots: ["/tmp/valid"],
+		});
+		assertProjectCoverage(first, streams, "collected");
+		const records = first.messages.filter((message) => message.type === "RECORD");
+		assert.deepEqual(
+			records.map((message) => message.stream).sort(),
+			[...streams].sort(),
+		);
+		const state = Object.fromEntries(
+			first.messages
+				.filter((message) => message.type === "STATE")
+				.map((message) => [message.stream, message.cursor]),
+		);
+		const second = await runProjectCoverage(home, streams, {
+			roots: ["/tmp/valid"],
+			state,
+		});
+		assertProjectCoverage(second, streams, "collected");
+		assert.equal(
+			second.messages.filter((message) => message.type === "RECORD").length,
+			0,
+		);
+	} finally {
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
+test("transcript symlink does not make healthy memory_notes partial", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pdpp-claude-transcript-symlink-"));
+	try {
+		const project = join(home, "projects", "-tmp-demo");
+		await mkdir(join(project, "memory"), { recursive: true });
+		const note = join(project, "memory", "note.md");
+		await writeFile(note, "A healthy memory note");
+		const target = join(home, "excluded-session.jsonl");
+		await writeFile(target, "PRIVATE TRANSCRIPT TARGET\n");
+		await symlink(target, join(project, "session.jsonl"));
+		const result = await runProjectCoverage(home, ["memory_notes"]);
+		assert.equal(result.exitCode, 0);
+		const records = result.messages.filter((message) => message.type === "RECORD");
+		assert.equal(records.length, 1);
+		assert.equal(records[0]?.stream, "memory_notes");
+		assert.ok(JSON.stringify(records).includes("A healthy memory note"));
+		assert.ok(!JSON.stringify(result.messages).includes("PRIVATE TRANSCRIPT TARGET"));
+		assertProjectCoverage(result, ["memory_notes"], "collected");
+		assert.equal(
+			result.messages.filter((message) => message.type === "SKIP_RESULT").length,
+			0,
+		);
+		const states = result.messages.filter((message) => message.type === "STATE");
+		assert.equal(states.length, 1);
+		assert.equal(states[0]?.stream, "memory_notes");
+		const cursor = states[0]?.cursor as
+			| { file_mtimes?: Record<string, number> }
+			| undefined;
+		assert.ok((cursor?.file_mtimes?.[note] ?? 0) > 0);
+	} finally {
+		await rm(home, { recursive: true, force: true });
+	}
+});

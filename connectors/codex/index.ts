@@ -1689,8 +1689,9 @@ interface ScanRolloutsResult {
 	/**
 	 * `missing` means no rollout root exists, so nothing was enumerated. That is
 	 * not a complete scan: an absent source proves no emptiness.
+	 * `partial` means at least one changed file was deferred while still active.
 	 */
-	scanOutcome: "complete" | "missing" | "unreadable" | "parse_error";
+	scanOutcome: "complete" | "partial" | "missing" | "unreadable" | "parse_error";
 }
 
 /** Carry a file's prior cursor forward verbatim into the next STATE, and keep
@@ -1838,7 +1839,7 @@ async function processRolloutEntry(
 	},
 	args: ScanRolloutsArgs,
 	rolloutOrdinal: number,
-): Promise<"missing" | "parsed" | "skipped" | "duplicate"> {
+): Promise<"missing" | "parsed" | "skipped" | "deferred" | "duplicate"> {
 	let st: Stats;
 	try {
 		st = statSync(entry.path);
@@ -1967,7 +1968,7 @@ async function processRolloutEntry(
 		if (cursor) {
 			args.newFileCursors[cursorKey] = cursor;
 		}
-		return "skipped";
+		return "deferred";
 	}
 
 	const isAppend = action.kind === "append";
@@ -2243,7 +2244,7 @@ export async function scanRollouts(
 
 	let totalRollouts = 0;
 	let parsedRollouts = 0;
-	let scanOutcome: "complete" | "unreadable" | "parse_error" = anyUnreadable
+	let scanOutcome: ScanRolloutsResult["scanOutcome"] = anyUnreadable
 		? "unreadable"
 		: "complete";
 	let messagesExamined = 0;
@@ -2270,18 +2271,27 @@ export async function scanRollouts(
 					if (result === "parsed") {
 						parsedRollouts += 1;
 					}
-					// A "parsed" file was just examined; a "skipped" file may still carry
-					// examined counts forward from a prior run's cursor — either way, the
-					// cursor at this key (fresh or carried-forward) is the source of truth.
+					// A quiet-window defer leaves unread work, even with no saved gap.
+					// Keep stronger failure outcomes and the prior committed boundary.
+					if (result === "deferred" && scanOutcome === "complete") {
+						scanOutcome = "partial";
+					}
+					// A "parsed" file was just examined; a "skipped" or "deferred" file
+					// may carry examined counts from a prior run's committed cursor.
+					// The fresh or carried-forward cursor is the source of truth.
 					// A "duplicate" (mid-move-race second sighting of the same UUID this
 					// scan) contributes nothing: its cursor was already counted at first
 					// sighting, so adding it again would double-count the file.
-					if (result === "parsed" || result === "skipped") {
+					if (
+						result === "parsed" ||
+						result === "skipped" ||
+						result === "deferred"
+					) {
 						const gaps =
 							args.newFileCursors[cursorKeyForEntry(entry)]?.jsonl_gaps ?? [];
 						if (gaps.length > 0) {
 							scanOutcome = "parse_error";
-							if (result === "skipped") {
+							if (result !== "parsed") {
 								for (const gap of gaps)
 									await reportMalformedRolloutGap(args.requested, gap);
 							}
@@ -3343,9 +3353,11 @@ async function collect({
 				store,
 				rolloutScan.scanOutcome === "complete"
 					? "collected"
-					: rolloutScan.scanOutcome === "missing"
-						? "unavailable"
-						: "failed",
+					: rolloutScan.scanOutcome === "partial"
+						? "partial"
+						: rolloutScan.scanOutcome === "missing"
+							? "unavailable"
+							: "failed",
 			);
 	}
 	if (
@@ -3358,7 +3370,13 @@ async function collect({
 				inventory.coverage.some(
 					(record) => record.store === store && record.status === "collected",
 				)
-			) runCoverage?.report("sessions", store, "failed");
+			) {
+				runCoverage?.report(
+					"sessions",
+					store,
+					rolloutScan.scanOutcome === "partial" ? "partial" : "failed",
+				);
+			}
 		}
 	}
 	if (scopeBoundsEnumeration(enumerationScope)) {

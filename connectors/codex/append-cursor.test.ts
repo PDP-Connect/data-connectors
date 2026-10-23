@@ -38,6 +38,7 @@ import {
 	rm,
 	symlink,
 	truncate,
+	utimes,
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -141,6 +142,7 @@ async function runCodex(input: {
 	streams: readonly string[];
 	state?: Record<string, unknown>;
 	quietMs?: string;
+	coverage?: boolean;
 	sourceRoots?: string[];
 }): Promise<{
 	exitCode: number | null;
@@ -157,6 +159,9 @@ async function runCodex(input: {
 				input.quietMs ?? QUIET_OFF.PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS,
 		},
 		start: {
+			...(input.coverage
+				? { run_coverage_version: 1 as const, collection_scope: "codex-deferred-test" }
+				: {}),
 			scope: {
 				streams: input.streams.map((name) => ({
 					name,
@@ -167,6 +172,15 @@ async function runCodex(input: {
 			type: "START",
 		},
 	});
+	if (!input.coverage) {
+		const done = result.messages.findLast((message) => message.type === "DONE");
+		assert.ok(done);
+		assert.equal(
+			"coverage" in done,
+			false,
+			"older runtimes omit optional coverage",
+		);
+	}
 	return {
 		exitCode: result.code,
 		messages: result.messages,
@@ -208,6 +222,212 @@ function rolloutStateCursor(
 	assert.ok(state, `expected a ${stream} STATE cursor`);
 	return state.cursor as StateCursor;
 }
+
+function assertRolloutCoverage(
+	messages: EmittedMessage[],
+	status: "partial" | "collected",
+): void {
+	const done = messages.findLast((message) => message.type === "DONE");
+	assert.ok(done && done.type === "DONE" && done.status === "succeeded");
+	const coverage = "coverage" in done ? done.coverage : undefined;
+	assert.deepEqual(coverage, {
+		version: 1,
+		collection_scope: "codex-deferred-test",
+		streams: [
+			{
+				stream: "messages",
+				scoped: false,
+				stores: [{ store: "derived_messages", status }],
+			},
+			{
+				stream: "function_calls",
+				scoped: false,
+				stores: [{ store: "derived_function_calls", status }],
+			},
+			{
+				stream: "sessions",
+				scoped: false,
+				stores: [
+					{ store: "sessions", status },
+					{ store: "sessions_archive", status: "unavailable" },
+					{ store: "state_db", status: "unavailable" },
+				],
+			},
+		],
+	});
+}
+
+test("fresh default quiet-window deferral reports partial without committing unread work", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-coverage-fresh-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const body = jsonl([
+		sessionMetaLine(),
+		messageLine("not yet read"),
+		functionCallLine(CALL_A, "shell", "ls"),
+	]);
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T12-26-06-${SESSION_ID}.jsonl`,
+		body,
+	);
+	const streams = ["messages", "function_calls", "sessions"];
+	// Empty override exercises the production default, not the disabled test default.
+	const deferred = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "",
+		coverage: true,
+	});
+	assert.equal(deferred.exitCode, 0);
+	for (const stream of streams) {
+		assert.equal(recordsFor(deferred.messages, stream).length, 0);
+	}
+	const cursor = rolloutStateCursor(deferred.messages);
+	assert.deepEqual(cursor.file_cursors, {});
+	assert.equal(cursor.file_mtimes?.[path], undefined);
+	assert.deepEqual(cursor.source_gaps, {});
+	assertRolloutCoverage(deferred.messages, "partial");
+
+	const settledAt = new Date(Date.now() - 300_000);
+	await utimes(path, settledAt, settledAt);
+	const settled = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "",
+		coverage: true,
+		state: { messages: cursor },
+	});
+	assert.equal(settled.exitCode, 0);
+	assertRolloutCoverage(settled.messages, "collected");
+	assert.equal(recordsFor(settled.messages, "messages").length, 1);
+	assert.equal(recordsFor(settled.messages, "function_calls").length, 1);
+	assert.equal(recordsFor(settled.messages, "sessions")[0]?.key, SESSION_ID);
+	const next = rolloutStateCursor(settled.messages);
+	assert.equal(
+		next.file_cursors?.[SESSION_ID]?.offset_bytes,
+		Buffer.byteLength(body),
+	);
+	assert.equal(next.file_cursors?.[SESSION_ID]?.message_count, 1);
+	assert.equal(next.file_cursors?.[SESSION_ID]?.function_call_count, 1);
+	const unchanged = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "",
+		coverage: true,
+		state: { messages: next },
+	});
+	assert.equal(unchanged.exitCode, 0);
+	assertRolloutCoverage(unchanged.messages, "collected");
+	for (const stream of streams) {
+		assert.equal(recordsFor(unchanged.messages, stream).length, 0);
+	}
+	assert.deepEqual(
+		rolloutStateCursor(unchanged.messages).file_cursors,
+		next.file_cursors,
+	);
+});
+
+test("deferred append reports partial and retains its boundary until the delta is collected once", async (t) => {
+	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-coverage-append-"));
+	t.after(() => rm(codexHome, { recursive: true, force: true }));
+	const prefix = jsonl([
+		sessionMetaLine(),
+		messageLine("retained"),
+		functionCallLine(CALL_A, "shell", "ls"),
+	]);
+	const path = await writeRollout(
+		codexHome,
+		OLD_DATE_DIR,
+		`rollout-2026-04-15T12-26-06-${SESSION_ID}.jsonl`,
+		prefix,
+	);
+	const streams = ["messages", "function_calls", "sessions"];
+	const initial = await runCodex({ codexHome, streams, coverage: true });
+	assert.equal(initial.exitCode, 0);
+	const prior = rolloutStateCursor(initial.messages);
+	const append = jsonl([
+		messageLine("appended"),
+		functionCallLine(CALL_B, "shell", "pwd"),
+	]);
+	await appendFile(path, append);
+	const deferred = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "",
+		coverage: true,
+		state: { messages: prior },
+	});
+	assert.equal(deferred.exitCode, 0);
+	const cursor = rolloutStateCursor(deferred.messages);
+	assert.deepEqual(cursor.file_cursors, prior.file_cursors);
+	assert.deepEqual(cursor.file_mtimes, prior.file_mtimes);
+	assert.deepEqual(cursor.source_gaps, {});
+	for (const stream of streams) {
+		assert.equal(recordsFor(deferred.messages, stream).length, 0);
+	}
+	assertRolloutCoverage(deferred.messages, "partial");
+
+	const settledAt = new Date(Date.now() - 300_000);
+	await utimes(path, settledAt, settledAt);
+	const settled = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "",
+		coverage: true,
+		state: { messages: cursor },
+	});
+	assert.equal(settled.exitCode, 0);
+	assertRolloutCoverage(settled.messages, "collected");
+	for (const stream of ["messages", "function_calls"]) {
+		const before = recordsFor(initial.messages, stream);
+		const delta = recordsFor(settled.messages, stream);
+		assert.equal(before.length, 1);
+		assert.equal(delta.length, 1);
+		assert.notEqual(delta[0]?.key, before[0]?.key);
+		assert.equal(delta[0]?.data.session_id, SESSION_ID);
+		const retained = new Map(
+			[...before, ...delta].map((record) => [record.key, record.data]),
+		);
+		assert.equal(
+			retained.size,
+			2,
+			"prior rows survive alongside the appended delta",
+		);
+		const priorRecord = before[0];
+		assert.ok(priorRecord);
+		assert.deepEqual(retained.get(priorRecord.key), priorRecord.data);
+	}
+	assert.equal(
+		recordsFor(settled.messages, "messages")[0]?.data.content,
+		"appended",
+	);
+	const session = recordsFor(settled.messages, "sessions")[0];
+	assert.equal(session?.key, SESSION_ID);
+	assert.equal(session?.data.message_count, 2);
+	assert.equal(session?.data.function_call_count, 2);
+	const next = rolloutStateCursor(settled.messages);
+	assert.equal(
+		next.file_cursors?.[SESSION_ID]?.offset_bytes,
+		Buffer.byteLength(prefix + append),
+	);
+	const unchanged = await runCodex({
+		codexHome,
+		streams,
+		quietMs: "",
+		coverage: true,
+		state: { messages: next },
+	});
+	assert.equal(unchanged.exitCode, 0);
+	assertRolloutCoverage(unchanged.messages, "collected");
+	for (const stream of streams) {
+		assert.equal(recordsFor(unchanged.messages, stream).length, 0);
+	}
+	assert.deepEqual(
+		rolloutStateCursor(unchanged.messages).file_cursors,
+		next.file_cursors,
+	);
+});
 
 test("first run full-parses a rollout file and writes a rich per-file cursor", async () => {
 	const codexHome = await mkdtemp(join(tmpdir(), "pdpp-codex-append-first-"));
