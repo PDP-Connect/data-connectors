@@ -552,6 +552,8 @@ function fakePage(answers: FakeAnswers) {
 			const s = String(script);
 			calls.push({ script: s, isolatedContext });
 			if (s.includes("typeof window.require")) return Promise.resolve(READY);
+			if (s.includes("WAWebStreamModel"))
+				return Promise.resolve({ mode: "MAIN", resume_complete: true });
 			if (s.includes("sendPeerDataOperationRequest")) {
 				const id = /chatId: "(.+?)"/u.exec(s)?.[1] ?? "";
 				return Promise.resolve(answers.send(id));
@@ -592,7 +594,9 @@ function e2eWorld(options: { settleOnSend: boolean; settleTo?: string }) {
 	assert.ok(chatA !== undefined && chatB !== undefined && chatC !== undefined);
 	chatA.history_state = "COMPLETE_AND_NO_MORE_MESSAGE_REMAIN_ON_PRIMARY";
 	// chatB starts as a group chat that still has to ask for its history.
-	chatB.id = "group-one@example.com";
+	// Its id is the first group's in the group metadata fixture: every group
+	// chat has its metadata, so the groups inventory is proven complete.
+	chatB.id = String(groupsFixture[0]?.id);
 	chatB.server = "g.us";
 	chatB.history_state = "COMPLETE_BUT_MORE_MESSAGES_REMAIN_ON_PRIMARY";
 	// chatC already synced (this or a previous run): state 1 says nothing
@@ -739,8 +743,20 @@ test("collect walks the live shapes: every stream emits its records", async () =
 	assert.equal(interactive.data.media_duration, null);
 	assert.equal(typeof interactive.data.media_size, "number");
 
-	// Finding 5: contacts from the collection read.
-	assert.equal(recordsFor(harness, "contacts").length, contactsFixture.length);
+	// Finding 5: contacts from the collection read: one record for every
+	// one-to-one chat and group participant id, each id once.
+	const expectedContacts = new Set<string>([
+		chatId(world.chats, 0),
+		chatId(world.chats, 2),
+		...groupsFixture.flatMap((g) =>
+			(g.participants as Array<{ id: string }>).map((p) => p.id),
+		),
+	]);
+	const contactIds = recordsFor(harness, "contacts").map((c) =>
+		String(c.data.id),
+	);
+	assert.equal(contactIds.length, expectedContacts.size);
+	assert.deepEqual(new Set(contactIds), expectedContacts);
 	// Finding 6: groups from the collection read.
 	const groups = recordsFor(harness, "groups");
 	assert.equal(groups.length, groupsFixture.length);

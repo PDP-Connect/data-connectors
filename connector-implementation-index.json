@@ -24467,7 +24467,19 @@
 									"description": "The chat's end-of-history-transfer state, named as the app's own module names it."
 								}
 							},
-							"required": ["id", "kind"]
+							"required": [
+								"id",
+								"kind",
+								"title",
+								"last_activity_at",
+								"archived",
+								"pinned",
+								"muted",
+								"muted_until",
+								"unread_count",
+								"read_only",
+								"history_state"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "last_activity_at",
@@ -24575,7 +24587,28 @@
 									"description": "For a location message, the longitude."
 								}
 							},
-							"required": ["id", "chat_id", "from_me", "type"]
+							"required": [
+								"id",
+								"chat_id",
+								"from_me",
+								"author",
+								"type",
+								"subtype",
+								"text",
+								"sent_at",
+								"quoted_id",
+								"is_forwarded",
+								"starred",
+								"media_mimetype",
+								"media_size",
+								"media_filename",
+								"media_duration",
+								"call_log",
+								"call_duration",
+								"poll_name",
+								"location_lat",
+								"location_lng"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "sent_at",
@@ -24627,7 +24660,14 @@
 									"description": "The contact's verified business name."
 								}
 							},
-							"required": ["id"]
+							"required": [
+								"id",
+								"name",
+								"short_name",
+								"push_name",
+								"is_business",
+								"verified_name"
+							]
 						},
 						"primary_key": ["id"],
 						"selection": {
@@ -24692,7 +24732,13 @@
 									}
 								}
 							},
-							"required": ["id"]
+							"required": [
+								"id",
+								"subject",
+								"created_at",
+								"owner",
+								"participants"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "created_at",
@@ -24706,6 +24752,9 @@
 						"freshness_strategy": "scheduled_window"
 					}
 				],
+				"reason_display_messages": {
+					"scope_not_supported": "WhatsApp messages can only be imported together with their chats. Select both to import your messages."
+				},
 				"mobile": {
 					"pageshim": {
 						"scope_prefix": "whatsapp_web",

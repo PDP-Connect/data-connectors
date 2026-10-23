@@ -824,6 +824,15 @@
 		}
 	},
 	{
+		"file": "whatsapp_web.json",
+		"manifest": {
+			"connector_key": "whatsapp-web",
+			"reason_display_messages": {
+				"scope_not_supported": "WhatsApp messages can only be imported together with their chats. Select both to import your messages."
+			}
+		}
+	},
+	{
 		"file": "wholefoods.json",
 		"manifest": {
 			"connector_key": "wholefoods",

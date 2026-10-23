@@ -321,6 +321,8 @@ const chatWalkSchema = z.object({
 	anchored: z.boolean().nullable().optional(),
 	stop: z.string().max(100).nullable().optional(),
 	me_id: z.string().max(1024).nullable().optional(),
+	more: z.boolean().nullable().optional(),
+	token: z.string().min(1).max(200).nullable().optional(),
 });
 
 /**
@@ -345,6 +347,12 @@ export interface ChatMessageWalk {
 	stop: string | null;
 	/** The signed-in account's own id, when the page has it. */
 	me_id: string | null;
+	/**
+	 * True when this chunk stopped only on its page budget: the walk goes on
+	 * with the next chunk, asked for with `token`.
+	 */
+	more: boolean;
+	token: string | null;
 }
 
 export function parseChatWalk(raw: unknown): ChatMessageWalk | null {
@@ -371,6 +379,8 @@ export function parseChatWalk(raw: unknown): ChatMessageWalk | null {
 		anchored: walk.data.anchored ?? false,
 		stop: walk.data.stop ?? null,
 		me_id: walk.data.me_id ?? null,
+		more: walk.data.more === true && typeof walk.data.token === "string",
+		token: walk.data.token ?? null,
 	};
 }
 
@@ -592,17 +602,28 @@ export interface StoresReadiness {
 }
 
 /**
- * The readiness the collector waits for: the module loader and every store
- * the four streams read. `send_request` is deliberately not required — a
- * chat that needs the on-demand request gaps visibly when it is missing.
+ * The readiness the collector waits for: the module loader, the chat
+ * collection every stream reads (messages for their parents, contacts and
+ * groups for the ids they cover), and the stores of the requested streams
+ * only. `send_request` is deliberately not required: a chat that needs the
+ * on-demand request gaps visibly when it is missing.
  */
-export function storesReady(readiness: StoresReadiness): boolean {
+export function storesReady(
+	readiness: StoresReadiness,
+	streams: ReadonlySet<string> = new Set([
+		"chats",
+		"messages",
+		"contacts",
+		"groups",
+	]),
+): boolean {
+	const needsGroups = streams.has("groups") || streams.has("contacts");
 	return (
 		readiness.require_function &&
 		readiness.chats &&
-		readiness.contacts &&
-		readiness.groups &&
-		readiness.find_messages
+		(!streams.has("contacts") || readiness.contacts) &&
+		(!needsGroups || readiness.groups) &&
+		(!streams.has("messages") || readiness.find_messages)
 	);
 }
 
@@ -624,4 +645,29 @@ export function parseStoresReadiness(raw: unknown): StoresReadiness | null {
 export function parseHistoryAck(raw: unknown): { sent: boolean } | null {
 	const parsed = z.object({ sent: z.boolean() }).safeParse(raw);
 	return parsed.success ? parsed.data : null;
+}
+
+/**
+ * The client's own sync state: the socket stream's mode (`MAIN` once the
+ * client runs normally, `QR` when signed out) and whether the offline resume
+ * (the catch-up of what arrived while the client was away) has completed.
+ */
+export interface SyncState {
+	mode: string | null;
+	resume_complete: boolean | null;
+}
+
+export function parseSyncState(raw: unknown): SyncState | null {
+	const parsed = z
+		.object({
+			mode: z.string().max(100).nullable(),
+			resume_complete: z.boolean().nullable(),
+		})
+		.safeParse(raw);
+	return parsed.success ? parsed.data : null;
+}
+
+/** True when the client says it is running normally and has caught up. */
+export function syncSettled(state: SyncState): boolean {
+	return state.mode === "MAIN" && state.resume_complete === true;
 }

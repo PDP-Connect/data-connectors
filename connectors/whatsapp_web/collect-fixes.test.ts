@@ -111,6 +111,8 @@ function fakePage(world: World) {
 		evaluate: (script: unknown): Promise<unknown> => {
 			const s = String(script);
 			if (s.includes("typeof window.require")) return Promise.resolve(READY);
+			if (s.includes("WAWebStreamModel"))
+				return Promise.resolve({ mode: "MAIN", resume_complete: true });
 			if (s.includes("sendPeerDataOperationRequest")) {
 				const id = /chatId: "(.+?)"/u.exec(s)?.[1] ?? "";
 				return Promise.resolve(world.send(id));
@@ -528,20 +530,21 @@ const stubMsg = (
 	...extra,
 });
 
-/** Runs a store script offline in a vm whose `window.require` serves `modules`. */
+/**
+ * Runs store scripts offline in a vm whose `window.require` serves `modules`.
+ * One runner is one page: every script it runs shares one global object.
+ */
 function vmRunner(modules: Record<string, unknown>): ScriptRunner {
-	return {
-		evaluate: async (script: string) => {
-			const sandbox = {
-				window: {
-					require: (name: string) => {
-						if (!(name in modules)) throw new Error(`no module ${name}`);
-						return modules[name];
-					},
-				},
-			};
-			return await vm.runInNewContext(script, sandbox);
+	const sandbox = vm.createContext({
+		window: {
+			require: (name: string) => {
+				if (!(name in modules)) throw new Error(`no module ${name}`);
+				return modules[name];
+			},
 		},
+	});
+	return {
+		evaluate: async (script: string) => await vm.runInContext(script, sandbox),
 	};
 }
 
@@ -656,7 +659,7 @@ test("fix 5: the in-page walk reports a non-200 page mid-walk as incomplete", as
 	);
 });
 
-test("fix 5: the in-page walk stops on its page cap and says so", async () => {
+test("fix 5: the in-page walk ends a chunk on its page budget and says more remains", async () => {
 	const stub = stubChat({
 		chatId: "peer-one@lid",
 		total: 3,
@@ -668,7 +671,9 @@ test("fix 5: the in-page walk stops on its page cap and says so", async () => {
 	);
 	assert.ok(walk !== null);
 	assert.equal(walk.complete, false);
-	assert.equal(walk.stop, "page_cap");
+	assert.equal(walk.stop, "chunk");
+	assert.equal(walk.more, true);
+	assert.ok(walk.token !== null);
 	assert.ok(stub.calls() > 1);
 });
 
@@ -759,7 +764,8 @@ test("pageshim probe: signed in only when the app knows its own user, and it nev
 							? {}
 							: {
 									require: (name: string) => {
-										if (!(name in modules)) throw new Error(`no module ${name}`);
+										if (!(name in modules))
+											throw new Error(`no module ${name}`);
 										return modules[name];
 									},
 								},
@@ -777,9 +783,15 @@ test("pageshim probe: signed in only when the app knows its own user, and it nev
 			getMaybeMeLidUser: () => lid,
 		},
 	});
-	const signedIn = pageAt("https://web.whatsapp.com", me({ _serialized: "owner@c.us" }, null));
+	const signedIn = pageAt(
+		"https://web.whatsapp.com",
+		me({ _serialized: "owner@c.us" }, null),
+	);
 	assert.equal(await probeWhatsAppSessionOnPage(signedIn as never, 0), true);
-	const lidOnly = pageAt("https://web.whatsapp.com", me(null, { _serialized: "owner@lid" }));
+	const lidOnly = pageAt(
+		"https://web.whatsapp.com",
+		me(null, { _serialized: "owner@lid" }),
+	);
 	assert.equal(await probeWhatsAppSessionOnPage(lidOnly as never, 0), true);
 	for (const page of [
 		pageAt("https://web.whatsapp.com", me(null, null)),
@@ -788,7 +800,11 @@ test("pageshim probe: signed in only when the app knows its own user, and it nev
 		pageAt("https://example.invalid", me({ _serialized: "owner@c.us" }, null)),
 	]) {
 		assert.equal(await probeWhatsAppSessionOnPage(page as never, 0), false);
-		assert.equal(page.calls.includes("goto"), false, "the probe never navigates");
+		assert.equal(
+			page.calls.includes("goto"),
+			false,
+			"the probe never navigates",
+		);
 	}
 });
 
@@ -808,8 +824,35 @@ test("every page script is one expression, as the PageShim host wraps it in awai
 	assert.equal(scripts.length, 7);
 	for (const script of scripts) {
 		assert.doesNotThrow(
-			() => new Function(`return (async () => { const value = await (${script}); return value; })`),
+			() =>
+				new Function(
+					`return (async () => { const value = await (${script}); return value; })`,
+				),
 			script.slice(0, 80),
 		);
 	}
+});
+
+test("review 1 #2: a chat longer than one chunk is walked to its store's own end, chunk after chunk, from the store's own keys", async () => {
+	const total = MESSAGE_PAGE_SIZE * 40 * 2 + 7;
+	const stub = stubChat({ chatId: "peer-one@lid", total, inMemory: 1 });
+	const runner = vmRunner(stub.modules);
+	const ids = new Set<string>();
+	let token: string | null = null;
+	let chunks = 0;
+	let last = null as ReturnType<typeof parseChatWalk>;
+	do {
+		last = parseChatWalk(await readChatMessages(runner, "peer-one@lid", token));
+		assert.ok(last !== null);
+		for (const row of [...last.memory, ...last.messages]) ids.add(row.id);
+		token = last.more ? last.token : null;
+		chunks += 1;
+	} while (token !== null && chunks < 10);
+	assert.equal(chunks, 3, "two full chunks, then the store's own short page");
+	assert.equal(last?.complete, true);
+	assert.equal(last?.stop, "short_page");
+	assert.equal(ids.size, total, "every locally stored message was read");
+	// msgFindBefore refuses anything but the store's own key objects, so a
+	// resumed chunk anchored on a rebuilt key would have thrown above.
+	assert.ok(stub.anchors.length >= 80);
 });

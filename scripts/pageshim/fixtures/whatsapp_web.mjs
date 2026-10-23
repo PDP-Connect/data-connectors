@@ -153,6 +153,10 @@ function installClient(data) {
 				COMPLETE_ON_DEMAND_SYNC_WITH_MORE_MSG_ON_PRIMARY_BUT_NO_ACCESS: 5,
 			},
 		},
+		// The client says it runs normally and has caught up, so the chat
+		// list is the inventory's end.
+		WAWebStreamModel: { Stream: { mode: "MAIN" } },
+		WAWebOfflineHandler: { OfflineMessageHandler: { isResumeComplete: () => true } },
 		WAWebUserPrefsMeUser: {
 			getMaybeMePnUser: () => wid(data.owner),
 			getMaybeMeLidUser: () => null,
