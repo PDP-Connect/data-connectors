@@ -1267,7 +1267,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/codex/index.ts",
-			line: 2254,
+			line: 2255,
 			column: 4,
 			category: "shared_mutable_accumulator",
 			note: "scanRollouts(): the merged sessions/ + sessions-archive/ root walk shares seenCursorKeysThisScan, newFileCursors, newMtimes, and running counters across both roots' walks (see ARCHIVAL-CONTRACT.md); processRolloutEntry mutates them, so the two roots cannot be walked in parallel without a data race on that shared state.",
