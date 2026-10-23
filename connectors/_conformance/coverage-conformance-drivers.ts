@@ -1377,6 +1377,9 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"github.events",
 	"github.organizations",
 	"github.pinned_repositories",
+	// Facebook (browser-session-backed, auth-walled; no credential-free
+	// coverage driver yet). profile is its only required stream.
+	"facebook.profile",
 	// GitHub browser profile: auth-walled browser-session collection with no
 	// credential-free coverage driver yet. The PAT/API GitHub connector remains
 	// the supported setup profile; this profile is listed as development.

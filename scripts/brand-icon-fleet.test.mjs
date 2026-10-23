@@ -58,6 +58,8 @@ function assertSafeRecognisableSvg(source, filename) {
 // original per-connector removal verdict.
 const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "heb.json",
+  "facebook.json", // no vendored real mark; the factory agent's drawn icon was removed
+  "tiktok.json", // no vendored real mark; the factory agent's drawn icon was removed
   "fitbit.json", // a mark exists; omitted by choice (trademark)
   "garmin_browser.json",
   "google_takeout.json",
