@@ -16,7 +16,9 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, test } from "node:test";
 import type { BrowserContext, Cookie, Page } from "playwright";
 import type {
@@ -69,7 +71,7 @@ for (const status of [401, 403, 429, 503]) {
 	test(`section-only dash failure preserves HTTP ${status} as a failed read or rejected session`, async () => {
 		const recording = makeRecordingEmit(validateRecord);
 		const ctx = buildCtx(["experience"], recording, (path) => path.includes("memberIdentity=")
-			? { _error: `http_${status}` } : routeVoyagerPath(path));
+			? httpFailure(status) : routeVoyagerPath(path));
 		if (status === 401 || status === 403) {
 			await assert.rejects(collectLinkedIn(ctx), error => {
 				assert.ok(error instanceof TerminalError);
@@ -93,7 +95,7 @@ for (const status of [429, 503]) {
 	test(`decorated HTTP ${status} failure survives a successful weaker basic fallback`, async () => {
 		const recording = makeRecordingEmit(validateRecord);
 		const ctx = buildCtx(["experience"], recording, path => path.includes("decorationId=")
-			? { _error: `http_${status}` } : path.includes("memberIdentity=")
+			? httpFailure(status) : path.includes("memberIdentity=")
 				? { elements: [{ firstName: "Anon", lastName: "Member" }] } : routeVoyagerPath(path));
 		await collectLinkedIn(ctx);
 		assert.equal(skipResults(recording).length, 1);
@@ -108,7 +110,7 @@ test("a later successful decoration recovers an earlier failed read", async () =
 	let decoratedCalls = 0;
 	const ctx = buildCtx(["experience"], recording, path => {
 		if (!path.includes("decorationId=")) return routeVoyagerPath(path);
-		if (++decoratedCalls === 1) return { _error: "http_503" };
+		if (++decoratedCalls === 1) return httpFailure(503);
 		const response = { elements: [proofProfile()] };
 		return response;
 	});
@@ -126,6 +128,66 @@ const basicFallback = (path: string) =>
 	basicProfileOnly(path)
 		? { elements: [{ firstName: "Anon", lastName: "Member" }] }
 		: routeVoyagerPath(path);
+
+
+for (const [surface, collect] of [
+	["desktop", collectLinkedIn],
+	["PageShim entry", collectLinkedInPageShim],
+] as const) {
+	for (const value of ["SECRET_NOTE", "http_401", "malformed_json_body", "transport_failed"]) {
+		test(`${surface}: successful JSON _error=${value} remains profile data`, async () => {
+			const recording = makeRecordingEmit(validateRecord);
+			const captured: unknown[] = [];
+			const ctx = buildCtx(["experience", "skills"], recording, (path) =>
+				decorated(path) ? { _error: value, elements: [proofProfile()] } : routeVoyagerPath(path));
+			ctx.capture = makeRawBodyCapture(captured);
+			await collect(ctx);
+			assert.deepEqual(skipResults(recording), []);
+			assert.equal(recording.emitted.filter((row) => row.stream === "experience").length, 1);
+			assert.equal(recording.emitted.filter((row) => row.stream === "skills").length, 1);
+			assert.ok(claimsFullCoverage(recording, "experience"));
+			assert.equal(JSON.stringify(recording.protocolMessages).includes("SECRET_NOTE"), false);
+			assert.ok(captured.some((body) => (body as { _error?: unknown })._error === value),
+				"the existing private capture owner still receives the original body");
+		});
+	}
+
+	test(`${surface}: unreadable successful JSON never supplies public failure text`, async () => {
+		const recording = makeRecordingEmit(validateRecord);
+		const profile = proofProfile();
+		delete profile.profilePositionGroups;
+		await collect(buildCtx(["experience", "skills"], recording, (path) =>
+			decorated(path) ? { _error: PRIVATE_BODY_EXCERPT, elements: [profile] } : routeVoyagerPath(path)));
+		const skip = skipResults(recording).find((message) => message.stream === "experience");
+		assert.ok(skip);
+		assert.equal(skip.reason, surface === "desktop" ? "linkedin_enumeration_unproven" : "inventory_not_proven_complete");
+		assert.equal(skip.message, "LinkedIn enumeration is unproven; the profile section was unreadable");
+		assert.equal(diagnosticsOf(skip).source_reason, "linkedin_profile_section_unavailable");
+		assert.equal(recording.emitted.filter((row) => row.stream === "skills").length, 1);
+		assert.equal(claimsFullCoverage(recording, "experience"), false);
+		assert.equal(JSON.stringify(recording.protocolMessages).includes(PRIVATE_BODY_EXCERPT), false);
+	});
+
+	test(`${surface}: malformed successful JSON shape is not an internal failure envelope`, async () => {
+		const recording = makeRecordingEmit(validateRecord);
+		await collect(buildCtx(["experience"], recording, (path) =>
+			path.includes("memberIdentity=") ? { _error: PRIVATE_BODY_EXCERPT, elements: "not-an-array" } : routeVoyagerPath(path)));
+		assert.equal(skipResults(recording)[0]?.reason,
+			surface === "desktop" ? "linkedin_enumeration_unproven" : "inventory_not_proven_complete");
+		assert.equal(JSON.stringify(recording.protocolMessages).includes(PRIVATE_BODY_EXCERPT), false);
+	});
+
+	test(`${surface}: real HTTP failure survives successful basic JSON with an _error field`, async () => {
+		const recording = makeRecordingEmit(validateRecord);
+		await collect(buildCtx(["experience"], recording, (path) =>
+			decorated(path) ? httpFailure(503) : basicProfileOnly(path)
+				? { _error: PRIVATE_BODY_EXCERPT, elements: [{ firstName: "Anon", lastName: "Member" }] }
+				: routeVoyagerPath(path)));
+		assert.deepEqual(skipResults(recording).map((skip) => [skip.reason, skip.message]),
+			[["stream_collection_failed", "LinkedIn experience read failed: http_503"]]);
+		assert.equal(JSON.stringify(recording.protocolMessages).includes(PRIVATE_BODY_EXCERPT), false);
+	});
+}
 
 test("an unparseable decorated body reports its classified cause, never the body text", async () => {
 	const recording = makeRecordingEmit(validateRecord);
@@ -208,6 +270,166 @@ test("the real runtime ends a failed read without the unparseable body text", as
 			"stream collection failed: experience: LinkedIn experience read failed: malformed_json_body",
 		);
 	}
+});
+
+// The real-runtime cases below run collectLinkedIn under runConnector in a child
+// process. Only the Voyager page responses come from LINKEDIN_SUBPROCESS_ROUTES;
+// the connector, runtime and DONE/SKIP_RESULT emission are the real ones.
+const LINKEDIN_PACKAGE_ROOT = new URL("../../packages/polyfill-connectors/", import.meta.url).pathname;
+const BASIC_FALLBACK_BODY = { elements: [{ firstName: "Anon", lastName: "Member" }] };
+type ProtocolRoute = { status: number; body?: unknown; malformed?: string };
+const PROTOCOL_ENTRY_SOURCE = [
+	`import { collectLinkedIn } from ${JSON.stringify(new URL("./index.ts", import.meta.url).href)};`,
+	`import { validateRecord } from ${JSON.stringify(new URL("./schemas.ts", import.meta.url).href)};`,
+	`import { runConnector } from ${JSON.stringify(new URL("../../packages/polyfill-connectors/src/connector-runtime.ts", import.meta.url).href)};`,
+	"const routes = JSON.parse(process.env.LINKEDIN_SUBPROCESS_ROUTES);",
+	"const reply = (route) => ({",
+	"  ok: route.status < 400,",
+	"  status: route.status,",
+	"  json: () => (route.malformed === undefined",
+	"    ? Promise.resolve(route.body)",
+	"    : Promise.reject(new SyntaxError(route.malformed))),",
+	"});",
+	"const fetchVoyager = (path) => {",
+	"  if (path.includes('decorationId=')) return reply(routes.decorated);",
+	"  if (path.includes('memberIdentity=')) return reply(routes.basic);",
+	"  if (path === '/voyager/api/me') return reply(routes.me);",
+	"  return reply({ status: 404 });",
+	"};",
+	"const page = {",
+	"  goto: async () => null,",
+	"  evaluate: async (fn, arg) => {",
+	"    const prior = { document: globalThis.document, fetch: globalThis.fetch };",
+	"    globalThis.document = { cookie: 'JSESSIONID=\"ajax:1234567890\"' };",
+	"    globalThis.fetch = fetchVoyager;",
+	"    try {",
+	"      return await fn(arg);",
+	"    } finally {",
+	"      globalThis.document = prior.document;",
+	"      globalThis.fetch = prior.fetch;",
+	"    }",
+	"  },",
+	"};",
+	"runConnector({",
+	"  name: 'linkedin_protocol_probe',",
+	"  validateRecord,",
+	"  async collect(ctx) {",
+	"    await collectLinkedIn({ ...ctx, page });",
+	"  },",
+	"});",
+].join("\n");
+
+async function runProtocolProbe(
+	routes: { decorated: ProtocolRoute; basic: ProtocolRoute },
+	streams: readonly string[],
+) {
+	const dir = mkdtempSync(join(tmpdir(), "linkedin-protocol-probe-"));
+	try {
+		const entrypoint = join(dir, "entry.mjs");
+		writeFileSync(entrypoint, PROTOCOL_ENTRY_SOURCE);
+		return await runConnectorProtocolSubprocess({
+			allowFailedDone: true,
+			cwd: LINKEDIN_PACKAGE_ROOT,
+			entrypoint,
+			env: {
+				LINKEDIN_SUBPROCESS_ROUTES: JSON.stringify({ me: { status: 200, body: ME_RESPONSE }, ...routes }),
+			},
+			start: { type: "START", scope: { streams: streams.map((name) => ({ name })) } },
+		});
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+for (const value of ["SECRET_NOTE", "http_503", "transport_failed"]) {
+	test(`the real runtime keeps successful JSON _error=${value} as profile data`, async () => {
+		const result = await runProtocolProbe(
+			{
+				basic: { status: 200, body: BASIC_FALLBACK_BODY },
+				decorated: { status: 200, body: { _error: value, elements: [proofProfile()] } },
+			},
+			["experience", "skills"],
+		);
+		assert.equal(result.code, 0);
+		assert.deepEqual(result.messages.filter((message) => message.type === "SKIP_RESULT"), []);
+		const recordedStreams = new Set(
+			result.messages.filter((message) => message.type === "RECORD").map((message) => message.stream),
+		);
+		assert.ok(recordedStreams.has("experience"));
+		assert.ok(recordedStreams.has("skills"));
+		const done = result.messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(done.status, "succeeded");
+			assert.equal(done.error, undefined);
+		}
+		assert.equal(result.rawStdout.includes(value), false);
+	});
+}
+
+test("the real runtime: a genuine HTTP 503 keeps its public cause beside a successful _error basic body", async () => {
+	const result = await runProtocolProbe(
+		{
+			basic: { status: 200, body: { _error: PRIVATE_BODY_EXCERPT, elements: [{ firstName: "Anon", lastName: "Member" }] } },
+			decorated: { status: 503 },
+		},
+		["experience"],
+	);
+	assert.equal(result.code, 1);
+	assert.equal(result.rawStdout.includes(PRIVATE_BODY_EXCERPT), false);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(
+			done.error?.message,
+			"stream collection failed: experience: LinkedIn experience read failed: http_503",
+		);
+	}
+});
+
+test("the real runtime: an unreadable successful JSON body supplies no public failure text", async () => {
+	const profile = proofProfile();
+	delete profile.profilePositionGroups;
+	const result = await runProtocolProbe(
+		{
+			basic: { status: 200, body: BASIC_FALLBACK_BODY },
+			decorated: { status: 200, body: { _error: PRIVATE_BODY_EXCERPT, elements: [profile] } },
+		},
+		["experience"],
+	);
+	assert.equal(result.code, 1);
+	assert.equal(result.rawStdout.includes(PRIVATE_BODY_EXCERPT), false);
+	assert.equal(JSON.stringify(result.messages).includes(PRIVATE_BODY_EXCERPT), false);
+	// The runtime turns an unproven enumeration into the portable reason and
+	// keeps the connector's own cause in diagnostics.original_reason.
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => [message.stream, message.reason, message.message, diagnosticsOf(message).original_reason]),
+		[["experience", "stream_collection_failed", "LinkedIn enumeration is unproven; the profile section was unreadable", "linkedin_enumeration_unproven"]],
+	);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(
+			done.error?.message,
+			"stream collection failed: experience: LinkedIn enumeration is unproven; the profile section was unreadable",
+		);
+	}
+});
+
+test("the real runtime: a malformed successful JSON shape with an _error field is not an internal failure", async () => {
+	const result = await runProtocolProbe(
+		{
+			basic: { status: 200, body: BASIC_FALLBACK_BODY },
+			decorated: { status: 200, body: { _error: PRIVATE_BODY_EXCERPT, elements: "not-an-array" } },
+		},
+		["experience"],
+	);
+	assert.equal(result.rawStdout.includes(PRIVATE_BODY_EXCERPT), false);
+	assert.equal(JSON.stringify(result.messages).includes(PRIVATE_BODY_EXCERPT), false);
 });
 
 test("resource selection of connections does not become missing enrichment", async () => {
@@ -405,6 +627,45 @@ type VoyagerFault = "malformed_body" | "transport";
 const PRIVATE_BODY_EXCERPT = "SECRET_NOTE";
 const PRIVATE_HOST = "private-host.example";
 
+/** A transport response, deliberately distinct from successful JSON fixture data. */
+class HttpFailureFixture {
+	readonly status: number;
+	constructor(status: number) {
+		this.status = status;
+	}
+}
+function httpFailure(status: number): HttpFailureFixture {
+	return new HttpFailureFixture(status);
+}
+
+/** A typed capture owner that keeps the raw HTTP bodies it is handed, as the
+ *  private fixture-capture owner does. No assertion is needed: the literal
+ *  satisfies the full CaptureSession shape. */
+function makeRawBodyCapture(captured: unknown[]): NonNullable<BrowserCollectContext["capture"]> {
+	return {
+		baseDir: "/tmp/linkedin-raw-body-capture",
+		keepOnSuccess: false,
+		runId: "linkedin-raw-body",
+		captureDom: () => Promise.resolve(),
+		captureHttp: (_label, body) => {
+			captured.push(body);
+		},
+		finalize: () => {
+			/* no-op */
+		},
+		hasRegisteredSecrets: () => false,
+		markSucceeded: () => {
+			/* no-op */
+		},
+		recordRecord: () => {
+			/* no-op */
+		},
+		registerSecrets: () => {
+			/* no-op */
+		},
+	};
+}
+
 function makeFakePage(
 	route: (path: string) => unknown = routeVoyagerPath,
 	fault: (path: string) => VoyagerFault | undefined = () => undefined,
@@ -426,8 +687,8 @@ function makeFakePage(
 							),
 						)
 					: Promise.resolve(body),
-			ok: true,
-			status: 200,
+			ok: !(body instanceof HttpFailureFixture),
+			status: body instanceof HttpFailureFixture ? body.status : 200,
 		});
 	};
 
@@ -488,6 +749,7 @@ function buildCtx(
 	fault: (path: string) => VoyagerFault | undefined = () => undefined,
 ): BrowserCollectContext {
 	const markFixtureCollectionsComplete = (value: unknown): unknown => {
+		if (value instanceof HttpFailureFixture) return value;
 		if (Array.isArray(value)) return value.map(markFixtureCollectionsComplete);
 		if (typeof value !== "object" || value === null) return value;
 		const collection = Object.fromEntries(
@@ -894,7 +1156,7 @@ test("collectLinkedIn: keeps a listed connection when its profile lookup returns
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
 			return CONNECTION_ENRICHMENT_NOT_FOUND.profileLookup;
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["connections"], recording, route));
 
@@ -910,7 +1172,7 @@ test("collectLinkedIn: transient or malformed connection rows preserve prior ups
 	for (const scenario of [
 		{
 			name: "profile lookup 503",
-			options: { resolution: { _error: "http_503" } },
+			options: { resolution: httpFailure(503) },
 			shouldEmitEdge: false,
 		},
 		{
@@ -975,7 +1237,7 @@ test("collectLinkedIn: dash failure keeps /me profile fields and reports unavail
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			return { elements: [], paging: { total: 0 } };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
@@ -999,14 +1261,14 @@ test("collectLinkedIn: a basic empty dash profile cannot prove profile coverage"
 	const recording = makeRecordingEmit(validateRecord);
 	const route = (path: string): unknown => {
 		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
-		if (path.includes("decorationId=")) return { _error: "http_404" };
+		if (path.includes("decorationId=")) return httpFailure(404);
 		if (path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")) {
 			return { elements: [{}] };
 		}
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			return { elements: [], paging: { total: 0 } };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
@@ -1043,7 +1305,7 @@ test("collectLinkedIn: an empty decoration does not block a later usable decorat
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			return { elements: [], paging: { total: 0 } };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
@@ -1081,7 +1343,7 @@ test("collectLinkedIn: a truncated decorated section does not claim complete cov
 			if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 				return { elements: [], paging: { total: 0 } };
 			}
-			return { _error: "http_404" };
+			return httpFailure(404);
 		};
 
 		await collectLinkedIn(buildCtx(["skills"], recording, route));
@@ -1124,7 +1386,7 @@ test("collectLinkedIn: incomplete nested position paging withholds the experienc
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			return { elements: [], paging: { total: 0 } };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 
 	await collectLinkedIn(buildCtx(["experience"], recording, route));
@@ -1145,9 +1407,9 @@ test("collectLinkedIn: failed connection paging falls back to zero observed conn
 		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
 		if (path.includes("decorationId=")) return DASH_PROFILE_RESPONSE;
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
-			return { _error: "http_503" };
+			return httpFailure(503);
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
@@ -1176,7 +1438,7 @@ test("collectLinkedIn: malformed connections page withholds coverage and exact c
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			return { paging: { total: 99 } };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
@@ -1237,7 +1499,7 @@ test("collectLinkedIn: repeated connection pages cannot prove a count or emit du
 				),
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
@@ -1266,7 +1528,7 @@ test("collectLinkedIn: mismatched paging start vetoes connection completeness", 
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			return { elements: [], paging: { count: 40, start: 40, total: 0 } };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
@@ -1294,7 +1556,7 @@ test("collectLinkedIn: a short reported full page cannot prove connection end", 
 				paging: { count: 20, start: 0 },
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
@@ -1326,7 +1588,7 @@ async function runConnectionsPageError(pageError: string) {
 						createdAt: 1_700_000_000_000,
 					})),
 					}
-				: { _error: pageError };
+				: httpFailure(Number(pageError.slice(5)));
 		}
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
 			const ids = decodeURIComponent(
@@ -1343,7 +1605,7 @@ async function runConnectionsPageError(pageError: string) {
 				),
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	const error = await collectLinkedIn(buildCtx(["connections"], recording, route))
 		.then(() => null, (failure: unknown) => failure);
@@ -1427,7 +1689,7 @@ test("collectLinkedIn: a failed member batch retries each URN as a singleton", a
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
 			batchRequests.push(path);
 			if (path.includes(",")) {
-				return { _error: "http_503" };
+				return httpFailure(503);
 			}
 			const urn = decodeURIComponent(
 				path.split("ids=List(")[1]?.split(")")[0] ?? "",
@@ -1441,7 +1703,7 @@ test("collectLinkedIn: a failed member batch retries each URN as a singleton", a
 				} },
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["connections"], recording, route));
 	assert.equal(
@@ -1468,7 +1730,7 @@ test("collectLinkedIn: unreadable nested sections do not prove empty coverage", 
 		) {
 			return { elements: [{}] };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(
 		buildCtx(
@@ -1502,7 +1764,7 @@ test("collectLinkedIn: empty sections on the basic-profile fallback are unavaila
 	const recording = makeRecordingEmit(validateRecord);
 	const route = (path: string): unknown => {
 		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
-		if (path.includes("decorationId=")) return { _error: "http_404" };
+		if (path.includes("decorationId=")) return httpFailure(404);
 		if (path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")) {
 			return {
 				elements: [
@@ -1517,7 +1779,7 @@ test("collectLinkedIn: empty sections on the basic-profile fallback are unavaila
 				],
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(
 		buildCtx(["experience", "education", "skills", "languages"], recording, route),
@@ -1562,7 +1824,7 @@ test("collectLinkedIn: unreadable experience and education rows stay uncovered",
 				],
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	const ctx = buildCtx(["experience", "education"], recording, route);
 	await collectLinkedIn({
@@ -1634,7 +1896,7 @@ test("collectLinkedIn: malformed mapped experience and education values stay unc
 				],
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	const ctx = buildCtx(["experience", "education"], recording, route);
 	await collectLinkedIn({
@@ -1707,7 +1969,7 @@ test("collectLinkedIn: malformed profile mappings stay unavailable without crash
 			if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 				return { elements: [], paging: { total: 0 } };
 			}
-			return { _error: "http_404" };
+			return httpFailure(404);
 		};
 		await assert.doesNotReject(
 			collectLinkedIn(
@@ -1756,7 +2018,7 @@ test("collectLinkedIn: malformed current-position and location values veto profi
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			return { elements: [], paging: { total: 0 } };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
@@ -1794,7 +2056,7 @@ test("collectLinkedIn: readable empty sections still cannot authorize replacemen
 				],
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(
 		buildCtx(
@@ -1853,7 +2115,7 @@ test("collectLinkedIn: skill/language malformed rows preserve values and omit ro
 				],
 			};
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	const ctx = buildCtx(["skills", "languages"], recording, route);
 	await collectLinkedIn({
@@ -1906,9 +2168,9 @@ test("collectLinkedIn: connection rows without URNs or resolved enrichment are w
 			};
 		}
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
-			return { _error: "http_503" };
+			return httpFailure(503);
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	const ctx = buildCtx(["connections"], recording, route);
 	await collectLinkedIn({
@@ -1976,7 +2238,7 @@ test("collectLinkedIn: partial batches retry missing URNs and validate sourced s
 			}
 			return { elements: [{ entityUrn: urns[2], lastName: "Only" }] };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	const ctx = buildCtx(["connections"], recording, route);
 	await collectLinkedIn({
@@ -2023,7 +2285,7 @@ test("collectLinkedIn: batch array enrichment with missing fields withholds part
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
 			return { elements: [{ entityUrn: urn, lastName: "Only" }] };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["connections"], recording, route));
 
@@ -2051,14 +2313,14 @@ test("collectLinkedIn: singleton enrichment preserves source-backed blanks in ma
 			const ids = decodeURIComponent(
 				path.split("ids=List(")[1]?.split(")")[0] ?? "",
 			).split(",");
-			if (ids.length > 1) return { _error: "http_503" };
+			if (ids.length > 1) return httpFailure(503);
 			singletonRequests.push(ids[0] ?? "");
 			if (ids[0] === urns[0]) {
 				return { results: { [urns[0] as string]: { firstName: "", lastName: null, headline: "", publicIdentifier: null } } };
 			}
 			return { elements: [{ entityUrn: urns[1], lastName: "", firstName: null, headline: "", publicIdentifier: null }] };
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	};
 	await collectLinkedIn(buildCtx(["connections"], recording, route));
 
@@ -2259,7 +2521,7 @@ async function collectProof(options: {
 			if (Array.isArray((result as { elements?: unknown[] }).elements) && (result as { elements: unknown[] }).elements.length === 0) walkEnded = true;
 			return result;
 		}
-		return { _error: "http_404" };
+		return httpFailure(404);
 	});
 	await collectLinkedIn(ctx);
 	return { recording, paths, summaryReads, progressMessages };
@@ -2294,17 +2556,17 @@ test("provider evidence: proved zero totals cover empty sections and connections
 });
 
 for (const [name, options, reason] of [
-	["missing summary", { before: { _error: "http_404" } }, "summary_request_failed"],
+	["missing summary", { before: httpFailure(404) }, "summary_request_failed"],
 	["changed summary", { after: { ...PROOF_SUMMARY, numConnections: 2 } }, "summary_total_changed"],
 	["wrong summary owner", { before: { ...PROOF_SUMMARY, entityUrn: "urn:li:fsd_connectionsSummary:123" } }, "summary_owner_mismatch"],
 	["malformed summary total", { before: { ...PROOF_SUMMARY, numConnections: "1" } }, "summary_total_invalid"],
-	["missing confirmation", { confirmation: { _error: "http_503" } }, "connection_confirmation_missing"],
+	["missing confirmation", { confirmation: httpFailure(503) }, "connection_confirmation_missing"],
 	["nonempty confirmation", { confirmation: { elements: CONNECTIONS_PAGE_1.elements } }, "connection_confirmation_missing"],
 	["contradictory confirmation", { confirmation: { elements: [], paging: { start: 0 } } }, "connection_confirmation_malformed"],
 	["confirmation continuation", { confirmation: { elements: [], paging: { links: [{}] } } }, "connection_confirmation_malformed"],
 	["summary exceeds distinct rows", { before: { ...PROOF_SUMMARY, numConnections: 2 }, after: { ...PROOF_SUMMARY, numConnections: 2 } }, "connection_total_mismatch"],
 	["per-member 404 omits optional enrichment", { resolution: { errors: { "urn:li:fsd_profile:conn-1": { status: 404 } } } }, ""],
-	["endpoint HTTP 404 is not a per-member 404", { resolution: { _error: "http_404" } }, "linkedin_connection_enrichment_incomplete"],
+	["endpoint HTTP 404 is not a per-member 404", { resolution: httpFailure(404) }, "linkedin_connection_enrichment_incomplete"],
 ] as const) {
 	test(`provider evidence: ${name}`, async () => {
 		const { recording } = await collectProof(options);
@@ -2355,7 +2617,7 @@ test("provider evidence: nested experience count and owner identity independentl
 test("profile count uses owner summary while withheld connection enrichment remains unproven", async () => {
 	const total = { ...PROOF_SUMMARY, numConnections: 354 };
 	const { recording } = await collectProof({
-		before: total, after: total, resolution: { _error: "http_404" },
+		before: total, after: total, resolution: httpFailure(404),
 	});
 	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 354);
 	assert.equal(claimsFullCoverage(recording, "profile"), true);
@@ -2367,7 +2629,7 @@ test("profile count uses owner summary while withheld connection enrichment rema
 for (const [summary, reason] of [
 	[{ entityUrn: PROOF_SUMMARY.entityUrn }, "summary_total_invalid"],
 	[{ ...PROOF_SUMMARY, entityUrn: "urn:li:fsd_connectionsSummary:99" }, "summary_owner_mismatch"],
-	[{ _error: "http_503" }, "summary_request_failed"],
+	[httpFailure(503), "summary_request_failed"],
 ] as const) {
 	test(`profile count walked distinct fallback preserves profile for ${reason}`, async () => {
 		const { recording, progressMessages } = await collectProof({ before: summary, after: summary });
@@ -2446,8 +2708,8 @@ for (const duplicate of [true, false]) {
 test("profile fallback counts distinct walked members before failed enrichment", async () => {
 	const member = CONNECTIONS_PAGE_1.elements[0];
 	const { recording, progressMessages } = await collectProof({
-		before: { _error: "http_503" }, after: { _error: "http_503" },
-		connections: { elements: [member, member] }, resolution: { _error: "http_404" },
+		before: httpFailure(503), after: httpFailure(503),
+		connections: { elements: [member, member] }, resolution: httpFailure(404),
 	});
 	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 1);
 	assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 0);
@@ -2484,7 +2746,7 @@ for (const scenario of [
 				return path.endsWith("&start=0") ? fixture.listing : fixture.terminal;
 			}
 			if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) return fixture.profiles;
-			return { _error: "http_404" };
+			return httpFailure(404);
 		};
 		await collectLinkedIn(buildCtx(["connections"], recording, route));
 		assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 2);

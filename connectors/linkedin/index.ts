@@ -143,7 +143,23 @@ type PageVoyagerResult =
 	| { _error: VoyagerReadCause }
 	| { _body: unknown; _status: number };
 
-type VoyagerJsonResult<T> = { _error: VoyagerReadCause } | (T & { _error?: undefined });
+// JSON can contain any string key, including _error and recognized cause names.
+// Only envelopes created here carry this process-local, non-JSON brand.
+const VOYAGER_FAILURE = Symbol("voyager_failure");
+type VoyagerFailure = { [VOYAGER_FAILURE]: true; _error: VoyagerReadCause };
+type VoyagerJsonResult<T> = VoyagerFailure | (T & { [VOYAGER_FAILURE]?: never });
+
+function isVoyagerReadCause(value: unknown): value is VoyagerReadCause {
+	return value === "malformed_json_body" || value === "transport_failed" ||
+		(typeof value === "string" && /^http_[0-9]{1,3}$/u.test(value));
+}
+
+function voyagerFailure(cause: unknown): VoyagerFailure {
+	return {
+		[VOYAGER_FAILURE]: true,
+		_error: isVoyagerReadCause(cause) ? cause : "transport_failed",
+	};
+}
 
 /** Fetch a Voyager endpoint from inside the logged-in page context. Voyager
  *  has no public CORS allowance, so this must run via `page.evaluate` on a
@@ -185,7 +201,7 @@ async function voyagerFetch<T>(
 		{ path: endpoint },
 	);
 	if ("_error" in result) {
-		return result;
+		return voyagerFailure(result._error);
 	}
 	capture?.captureHttp(label ?? endpoint, result._body, {
 		endpoint,
@@ -196,19 +212,19 @@ async function voyagerFetch<T>(
 		result._body === null ||
 		Array.isArray(result._body)
 	) {
-		return { _error: "malformed_json_body" };
+		return voyagerFailure("malformed_json_body");
 	}
-	return result._body as VoyagerJsonResult<T>;
+	return result._body as T & { [VOYAGER_FAILURE]?: never };
 }
 
 function isFetchError<T>(
 	result: VoyagerJsonResult<T>,
-): result is { _error: VoyagerReadCause } {
+): result is VoyagerFailure {
 	return (
 		typeof result === "object" &&
 		result !== null &&
-		"_error" in result &&
-		typeof result._error === "string"
+		result[VOYAGER_FAILURE] === true &&
+		isVoyagerReadCause(result._error)
 	);
 }
 
