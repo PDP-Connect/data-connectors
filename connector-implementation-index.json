@@ -7652,6 +7652,432 @@
 			}
 		},
 		{
+			"connectorId": "https://registry.pdpp.dev/connectors/facebook",
+			"entry": "./connectors/facebook/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/facebook",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/facebook",
+					"display": {
+						"name": "Facebook"
+					}
+				},
+				"connector_key": "facebook",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
+				"version": "0.1.2",
+				"display_name": "Facebook",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"]
+						},
+						"browser": {
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"minimum_interval_seconds": 3600,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "high",
+						"bot_detection_sensitivity": "high",
+						"background_safe": false,
+						"rationale": "Facebook restricts accounts that read quickly or repeatedly; refresh manually and not more than hourly."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"reason_display_messages": {
+					"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time."
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": true,
+						"description": "The signed-in person's own Facebook profile.",
+						"display": {
+							"label": "Your Facebook profile",
+							"detail": "Name, profile link, and the intro you filled in (bio and the lines you chose to show, such as where you live or work)."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"username": {
+									"type": ["string", "null"]
+								},
+								"profile_url": {
+									"type": "string"
+								},
+								"bio": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "secondary"
+								},
+								"intro": {
+									"type": ["array", "null"],
+									"items": {
+										"type": "string"
+									}
+								}
+							},
+							"required": ["id", "profile_url"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "username", "bio"],
+								"semantic_fields": ["bio"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "posts",
+						"required": false,
+						"description": "Posts the person published on their own timeline. Attachments are described by kind and title; media files are not downloaded.",
+						"display": {
+							"label": "Your posts",
+							"detail": "Your own words, the post's context line (such as a share or a profile picture update), the text of a post you shared, time, link, audience, and each attachment's kind and title."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"create_time": {
+									"type": "string",
+									"format": "date-time"
+								},
+								"text": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"title": {
+									"type": ["string", "null"]
+								},
+								"shared_text": {
+									"type": ["string", "null"]
+								},
+								"attachment_title": {
+									"type": ["string", "null"]
+								},
+								"url": {
+									"type": ["string", "null"]
+								},
+								"attachments": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"kind": {
+												"type": ["string", "null"]
+											},
+											"title": {
+												"type": ["string", "null"]
+											}
+										},
+										"required": ["kind", "title"]
+									}
+								},
+								"privacy": {
+									"type": ["string", "null"]
+								},
+								"privacy_label": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "create_time", "attachments"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "create_time",
+						"consent_time_field": "create_time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"text",
+									"title",
+									"shared_text",
+									"attachment_title"
+								],
+								"semantic_fields": ["text", "title", "shared_text"]
+							},
+							"range_filters": {
+								"create_time": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["create_time"],
+								"group_by": ["privacy"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "friends",
+						"required": false,
+						"description": "The person's Facebook friends.",
+						"display": {
+							"label": "Your friends",
+							"detail": "Each friend's name and profile link."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"profile_url": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "name"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "groups",
+						"required": false,
+						"description": "Facebook groups the person joined.",
+						"display": {
+							"label": "Your groups",
+							"detail": "Each group's name and link, and when you joined it if Facebook shows it."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"url": {
+									"type": "string"
+								},
+								"joined_time": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								}
+							},
+							"required": ["id", "name", "url"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							},
+							"range_filters": {
+								"joined_time": ["gte", "gt", "lte", "lt"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "reactions",
+						"required": false,
+						"description": "Likes and reactions from the person's activity log.",
+						"display": {
+							"label": "Your likes and reactions",
+							"detail": "When you liked or reacted, what Facebook says you reacted to, and the post's link and text."
+						},
+						"semantics": "append_only",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"kind": {
+									"type": "string",
+									"enum": ["reaction"]
+								},
+								"time": {
+									"type": "string",
+									"format": "date-time"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"target_url": {
+									"type": ["string", "null"]
+								},
+								"target_text": {
+									"type": ["string", "null"]
+								},
+								"post_id": {
+									"type": ["string", "null"]
+								},
+								"comment_text": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "kind", "time"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "time",
+						"consent_time_field": "time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "target_text", "comment_text"],
+								"semantic_fields": ["title", "target_text", "comment_text"]
+							},
+							"range_filters": {
+								"time": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["time"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "comments",
+						"required": false,
+						"description": "Comments from the person's activity log.",
+						"display": {
+							"label": "Your comments",
+							"detail": "When you commented, your comment's text, and the post it was on."
+						},
+						"semantics": "append_only",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"kind": {
+									"type": "string",
+									"enum": ["comment"]
+								},
+								"time": {
+									"type": "string",
+									"format": "date-time"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"target_url": {
+									"type": ["string", "null"]
+								},
+								"target_text": {
+									"type": ["string", "null"]
+								},
+								"post_id": {
+									"type": ["string", "null"]
+								},
+								"comment_text": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "kind", "time"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "time",
+						"consent_time_field": "time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "target_text", "comment_text"],
+								"semantic_fields": ["title", "target_text", "comment_text"]
+							},
+							"range_filters": {
+								"time": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["time"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					}
+				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "facebook",
+						"login_url": "https://www.facebook.com/login/",
+						"login_message": "Sign in to Facebook, then return here.",
+						"collect_export": "collectFacebookOnPage",
+						"probe_export": "probeFacebookSessionOnPage",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				}
+			}
+		},
+		{
 			"connectorId": "https://registry.pdpp.dev/connectors/fitbit",
 			"entry": "./connectors/fitbit/index.ts",
 			"manifest": {
@@ -9681,7 +10107,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.9",
+				"version": "0.3.11",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -10168,7 +10594,7 @@
 					{
 						"name": "history",
 						"required": true,
-						"description": "One legacy aggregate snapshot of authored issues and pull requests. At or above 1,000 results per type, readable rows are retained without completion.",
+						"description": "One legacy aggregate snapshot of authored issues and pull requests. Each type completes after exactly min(stable total_count, 1000) valid distinct items; totals above 1000 describe a bounded search window. Otherwise the snapshot and checkpoint are withheld.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10353,7 +10779,7 @@
 				],
 				"reason_display_messages": {
 					"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
-					"inventory_not_proven_complete": "GitHub did not show that this list was read in full, so the last complete copy was kept."
+					"stream_collection_failed": "GitHub did not show that this list was read in full, so the last complete copy was kept."
 				},
 				"mobile": {
 					"pageshim": {
@@ -10380,7 +10806,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.26",
+				"version": "0.2.28",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",
@@ -13609,7 +14035,6 @@
 					}
 				],
 				"reason_display_messages": {
-					"inventory_not_proven_complete": "H-E-B did not provide enough source evidence to prove this inventory complete. Valid records were kept; the next run will try again",
 					"empty_page_before_max_page": "We hit an empty page of orders before we expected to, so we stopped to check rather than assume we were done",
 					"heb_empty_history_after_prior_orders": "H-E-B reported no order history, but we previously collected orders for this account. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove your history is gone",
 					"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
@@ -13782,7 +14207,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.36",
+				"version": "0.1.38",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13979,7 +14404,7 @@
 					}
 				],
 				"reason_display_messages": {
-					"inventory_not_proven_complete": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
+					"stream_collection_failed": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
 					"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
 					"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
 					"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
@@ -14890,7 +15315,6 @@
 					}
 				],
 				"reason_display_messages": {
-					"linkedin_enumeration_unproven": "LinkedIn cannot verify the full inventory; readable entries are saved without replacing or deleting existing entries",
 					"absent": "LinkedIn did not provide this field",
 					"malformed": "LinkedIn returned this field in an unreadable format",
 					"invalid_value": "LinkedIn returned a value outside the expected format",
@@ -14928,7 +15352,7 @@
 					"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 					"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
 					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
-					"inventory_not_proven_complete": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
+					"stream_collection_failed": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
 					"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
 					"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
 					"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
@@ -15181,7 +15605,7 @@
 					}
 				},
 				"reason_display_messages": {
-					"inventory_not_proven_complete": "Instagram did not show that this list was read in full, so it will be read again next time."
+					"stream_collection_failed": "Instagram did not show that this list was read in full, so it will be read again next time."
 				},
 				"streams": [
 					{
@@ -15477,6 +15901,622 @@
 						"collect_export": "collectAllStreams",
 						"probe_export": "probeMetaSession"
 					}
+				}
+			}
+		},
+		{
+			"connectorId": "https://registry.pdpp.dev/connectors/muse",
+			"entry": "./connectors/muse/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/muse",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/muse",
+					"display": {
+						"name": "Muse (Meta)"
+					}
+				},
+				"connector_key": "muse",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
+				"version": "0.1.1",
+				"display_name": "Muse (Meta)",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"]
+						},
+						"browser": {
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"minimum_interval_seconds": 3600,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "high",
+						"background_safe": false,
+						"rationale": "Collection runs inside the owner's signed-in muse.ai tab and reads through the web app's own gateway client to the owner's Muse VM. Meta sign-in is strict about automation; refresh manually."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"streams": [
+					{
+						"name": "conversations",
+						"description": "Muse chats: the main chat and side chats, active and archived, as sessions.list reports them.",
+						"display": {
+							"label": "Your Muse chats",
+							"detail": "Chat title, snippet of the latest message, create and update times, and whether the chat is the main chat, a thread, archived or pinned."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"snippet": {
+									"type": ["string", "null"]
+								},
+								"created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"updated_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"is_primary": {
+									"type": ["boolean", "null"]
+								},
+								"is_thread": {
+									"type": ["boolean", "null"]
+								},
+								"archived": {
+									"type": "boolean"
+								},
+								"pinned": {
+									"type": ["boolean", "null"]
+								},
+								"status": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "archived"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "updated_at",
+						"consent_time_field": "created_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"required": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "snippet"],
+								"semantic_fields": ["title", "snippet"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"],
+								"updated_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["created_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "messages",
+						"description": "Messages in Muse chats, yours and the agent's, from chat.history, paged back to the start of each chat. Collected only together with conversations (each message's chat record is emitted before it); a request for messages without conversations is answered with scope_not_supported.",
+						"display": {
+							"label": "Your Muse messages",
+							"detail": "Role, message text, time, the message it replies to, source and visibility."
+						},
+						"semantics": "append_only",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"session_id": {
+									"type": "string"
+								},
+								"role": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "actor"
+								},
+								"text": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"text_binary_reason": {
+									"type": ["string", "null"],
+									"description": "Why text is null although the source had text: it held characters that cannot be stored as text."
+								},
+								"occurred_at": {
+									"type": "string",
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"reply_to_message_id": {
+									"type": ["string", "null"]
+								},
+								"source": {
+									"type": ["string", "null"]
+								},
+								"visibility": {
+									"type": ["string", "null"]
+								},
+								"seq": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": ["id", "session_id", "occurred_at"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "occurred_at",
+						"consent_time_field": "occurred_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"required": false,
+						"parent_streams": ["conversations"],
+						"relationships": [
+							{
+								"name": "conversation",
+								"stream": "conversations",
+								"foreign_key": "session_id",
+								"cardinality": "has_one"
+							}
+						],
+						"query": {
+							"search": {
+								"lexical_fields": ["text"],
+								"semantic_fields": ["text"]
+							},
+							"range_filters": {
+								"occurred_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["occurred_at"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "activities",
+						"description": "What the agent did, from Muse's activity log: tasks it ran, searches, reminders it set, files it changed.",
+						"display": {
+							"label": "Your Muse agent activity",
+							"detail": "Activity type, title, status, the task it belonged to and when it happened."
+						},
+						"semantics": "append_only",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"message_id": {
+									"type": ["string", "null"]
+								},
+								"type": {
+									"type": "string"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"subtitle": {
+									"type": ["string", "null"]
+								},
+								"status": {
+									"type": ["string", "null"]
+								},
+								"status_title": {
+									"type": ["string", "null"]
+								},
+								"task_label": {
+									"type": ["string", "null"]
+								},
+								"timestamp": {
+									"type": "string",
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								}
+							},
+							"required": ["id", "type", "timestamp"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "timestamp",
+						"consent_time_field": "timestamp",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"required": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "task_label"],
+								"semantic_fields": ["title", "task_label"]
+							},
+							"range_filters": {
+								"timestamp": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["timestamp"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "goals",
+						"description": "Goals you set in Muse and goals the agent tracks for you.",
+						"display": {
+							"label": "Your Muse goals",
+							"detail": "Goal title, summary, description, status and momentum, whether you or the agent set it, and its times."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"source": {
+									"type": ["string", "null"]
+								},
+								"slug": {
+									"type": ["string", "null"]
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"status": {
+									"type": ["string", "null"]
+								},
+								"summary": {
+									"type": ["string", "null"]
+								},
+								"description": {
+									"type": ["string", "null"]
+								},
+								"momentum_status": {
+									"type": ["string", "null"]
+								},
+								"emoji": {
+									"type": ["string", "null"]
+								},
+								"created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"updated_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"last_activity_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "updated_at",
+						"consent_time_field": "created_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"required": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "summary", "description"],
+								"semantic_fields": ["title", "summary", "description"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"],
+								"updated_at": ["gte", "gt", "lte", "lt"],
+								"last_activity_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["created_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "scheduled_tasks",
+						"description": "Scheduled tasks and reminders the agent runs for you, from tasks.list.",
+						"display": {
+							"label": "Your Muse scheduled tasks",
+							"detail": "Task title, schedule, mode, whether it is enabled, next run time, time zone and cadence."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"schedule_key": {
+									"type": ["string", "null"]
+								},
+								"mode": {
+									"type": ["string", "null"]
+								},
+								"enabled": {
+									"type": ["boolean", "null"]
+								},
+								"is_heartbeat": {
+									"type": ["boolean", "null"]
+								},
+								"next_run_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"timezone": {
+									"type": ["string", "null"]
+								},
+								"cadence_kind": {
+									"type": ["string", "null"]
+								},
+								"cadence_time": {
+									"type": ["string", "null"]
+								},
+								"cadence_interval_seconds": {
+									"type": ["integer", "null"]
+								},
+								"cadence_run_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"required": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title"],
+								"semantic_fields": ["title"]
+							},
+							"range_filters": {
+								"next_run_at": ["gte", "gt", "lte", "lt"],
+								"cadence_run_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["next_run_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "memory_files",
+						"description": "The agent's memory and profile files (MEMORY.md, USER.md, SOUL.md, IDENTITY.md, PROACTIVE_PREFERENCES.md) at the root of its workspace. No other file is read.",
+						"display": {
+							"label": "Your Muse agent's memory",
+							"detail": "Full text of what the agent remembers about you, its profile of you, and its own identity and preferences, with each file's size and modified time."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"path": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"text": {
+									"type": ["string", "null"]
+								},
+								"text_binary_reason": {
+									"type": ["string", "null"],
+									"description": "Why text is null although the file had content: it held characters that cannot be stored as text."
+								},
+								"size": {
+									"type": ["integer", "null"]
+								},
+								"modified_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								}
+							},
+							"required": ["id", "path"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "modified_at",
+						"consent_time_field": "modified_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"required": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["text"],
+								"semantic_fields": ["text"]
+							},
+							"range_filters": {
+								"modified_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["modified_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "files",
+						"description": "Recent files in your Muse library (uploaded or produced by the agent): metadata only, no file contents.",
+						"display": {
+							"label": "Your Muse files",
+							"detail": "File name, path, size and modified time."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"path": {
+									"type": "string"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"size": {
+									"type": ["integer", "null"]
+								},
+								"modified_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								}
+							},
+							"required": ["id", "path"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "modified_at",
+						"consent_time_field": "modified_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"required": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "path"],
+								"semantic_fields": ["name", "path"]
+							},
+							"range_filters": {
+								"modified_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["modified_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "connected_apps",
+						"description": "Services you connected to Muse (or that need you to reconnect them). Available but unconnected services are not included.",
+						"display": {
+							"label": "Your Muse connected apps",
+							"detail": "Service id and name, connection state, how it is managed, and whether it needs re-authorization."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"state": {
+									"type": ["string", "null"]
+								},
+								"management_kind": {
+									"type": ["string", "null"]
+								},
+								"needs_reauth": {
+									"type": ["boolean", "null"]
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"required": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"],
+								"semantic_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					}
+				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "muse",
+						"login_url": "https://muse.ai/",
+						"login_message": "Sign in to Muse, then return here.",
+						"collect_export": "collectMuse",
+						"probe_export": "probeMuseSessionOnPage",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				},
+				"reason_display_messages": {
+					"scope_not_supported": "Muse messages can only be imported together with their conversations. Select both to import your messages."
 				}
 			}
 		},
@@ -16524,7 +17564,7 @@
 				],
 				"reason_display_messages": {
 					"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
-					"inventory_not_proven_complete": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
+					"stream_collection_failed": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
 				},
 				"mobile": {
 					"pageshim": {
@@ -17579,7 +18619,7 @@
 					"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
 					"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
 					"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",
-					"inventory_not_proven_complete": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
+					"stream_collection_failed": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
 					"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
 					"shopify_order_rows_unresolved": "Some Shop orders could not be read completely; retry to collect them",
 					"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
@@ -19991,7 +21031,7 @@
 					}
 				},
 				"reason_display_messages": {
-					"inventory_not_proven_complete": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
+					"stream_collection_failed": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
 					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 					"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 					"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
@@ -20793,6 +21833,743 @@
 							"singular": "activity",
 							"plural": "activities",
 							"details": ["activities"]
+						}
+					}
+				}
+			}
+		},
+		{
+			"connectorId": "https://registry.pdpp.dev/connectors/tiktok",
+			"entry": "./connectors/tiktok/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/tiktok",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/tiktok",
+					"display": {
+						"name": "TikTok"
+					}
+				},
+				"connector_key": "tiktok",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
+				"version": "0.3.1",
+				"display_name": "TikTok (Browser Sign-In)",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"]
+						},
+						"browser": {
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"recommended_interval_seconds": 604800,
+						"minimum_interval_seconds": 86400,
+						"maximum_staleness_seconds": 2592000,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "high",
+						"bot_detection_sensitivity": "high",
+						"background_safe": false,
+						"rationale": "Collection runs in the owner's own signed-in www.tiktok.com session: every request is a GET to TikTok's own web API made from inside the page, signed by TikTok's own page scripts, one at a time, 1.5 to 3 seconds apart, at most 900 per run and 200 pages per list. TikTok's terms do not permit automated access, so the owner starts every run and no run happens in the background. A sign-in prompt, a bot check, an unsigned request, a rate limit or a server error ends the run without a retry. Nothing that writes (follow, like, post, comment) is reachable."
+					},
+					"public_listing": {
+						"tier": "development",
+						"rationale": "Built from recorded response shapes of one test account; not yet run end to end against a live TikTok session."
+					}
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": false,
+						"description": "The signed-in owner's own TikTok profile. Follower, following, like and video counts come from the owner's own videos, so they are null for an account that has posted none. The email address, phone number and sign-in settings are not collected.",
+						"display": {
+							"label": "Your TikTok profile",
+							"detail": "Your user id, handle, nickname, bio, avatar, whether the account is private, and your follower, following, like and video counts."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric user id, stable for the life of the account.",
+									"x_pdpp_role": "secondary"
+								},
+								"sec_uid": {
+									"type": ["string", "null"],
+									"maxLength": 200,
+									"description": "TikTok's public secure user id, used in profile links."
+								},
+								"unique_id": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The account's handle, without the @.",
+									"x_pdpp_role": "primary-title"
+								},
+								"nickname": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The display name."
+								},
+								"bio": {
+									"type": ["string", "null"],
+									"maxLength": 1000,
+									"description": "The profile bio."
+								},
+								"avatar_url": {
+									"type": ["string", "null"],
+									"format": "uri",
+									"maxLength": 2000,
+									"description": "Address of the avatar image TikTok served. Null when absent."
+								},
+								"private_account": {
+									"type": ["boolean", "null"],
+									"description": "Whether the account is private."
+								},
+								"follower_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Accounts following the owner, when collected."
+								},
+								"following_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Accounts the owner follows, when collected."
+								},
+								"like_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Likes the owner's videos have received, when collected."
+								},
+								"video_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Videos the owner has posted, when collected."
+								},
+								"created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the account was created, in UTC.",
+									"x_pdpp_role": "event-time"
+								}
+							},
+							"required": [
+								"id",
+								"sec_uid",
+								"unique_id",
+								"nickname",
+								"bio",
+								"avatar_url",
+								"private_account",
+								"follower_count",
+								"following_count",
+								"like_count",
+								"video_count",
+								"created_at"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["unique_id", "nickname", "bio"],
+								"semantic_fields": ["bio"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["created_at"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "videos",
+						"required": false,
+						"description": "Videos the owner posted, newest first, with their caption, length, who may see them, and their counts when collected. Every run reads the whole list again so the counts stay current. The video files are not collected.",
+						"display": {
+							"label": "Your TikTok videos",
+							"detail": "Each video's caption, when you posted it, its length, who can see it, and its views, likes, comments, shares, saves and reposts."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric video id.",
+									"x_pdpp_role": "secondary"
+								},
+								"created_at": {
+									"type": "string",
+									"format": "date-time",
+									"description": "When the video was posted, in UTC. This is the stream's cursor and consent time field.",
+									"x_pdpp_role": "event-time"
+								},
+								"caption": {
+									"type": ["string", "null"],
+									"maxLength": 4000,
+									"description": "The video's caption, including hashtags as written.",
+									"x_pdpp_role": "primary-title"
+								},
+								"duration_seconds": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Length of the video in seconds."
+								},
+								"privacy": {
+									"type": ["string", "null"],
+									"enum": ["public", "friends", "private", null],
+									"description": "Who may see the video: everyone, friends only, or only the owner."
+								},
+								"play_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Views when collected."
+								},
+								"like_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Likes when collected."
+								},
+								"comment_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Comments when collected."
+								},
+								"share_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Shares when collected."
+								},
+								"save_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Saves to Favorites when collected."
+								},
+								"repost_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Reposts when collected."
+								}
+							},
+							"required": [
+								"id",
+								"created_at",
+								"caption",
+								"duration_seconds",
+								"privacy",
+								"play_count",
+								"like_count",
+								"comment_count",
+								"share_count",
+								"save_count",
+								"repost_count"
+							]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "created_at",
+						"consent_time_field": "created_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["caption"],
+								"semantic_fields": ["caption"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"],
+								"play_count": ["gte", "gt", "lte", "lt"],
+								"like_count": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["created_at"],
+								"group_by": ["privacy"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "likes",
+						"required": false,
+						"description": "Videos the owner liked, newest first: who posted each and its caption. TikTok does not say when a video was liked, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected.",
+						"display": {
+							"label": "Videos you liked on TikTok",
+							"detail": "The videos you liked: who posted each, its caption and when it was posted."
+						},
+						"semantics": "append_only",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric video id.",
+									"x_pdpp_role": "secondary"
+								},
+								"author_id": {
+									"type": ["string", "null"],
+									"pattern": "^[0-9]{1,30}$",
+									"description": "The numeric user id of the account that posted the video."
+								},
+								"author_unique_id": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The handle of the account that posted the video, without the @."
+								},
+								"author_nickname": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The display name of the account that posted the video."
+								},
+								"caption": {
+									"type": ["string", "null"],
+									"maxLength": 4000,
+									"description": "The video's caption.",
+									"x_pdpp_role": "primary-title"
+								},
+								"video_created_at": {
+									"type": "string",
+									"format": "date-time",
+									"description": "When the video was posted, in UTC. Not when it was liked."
+								}
+							},
+							"required": [
+								"id",
+								"author_id",
+								"author_unique_id",
+								"author_nickname",
+								"caption",
+								"video_created_at"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"caption",
+									"author_unique_id",
+									"author_nickname"
+								],
+								"semantic_fields": ["caption"]
+							},
+							"range_filters": {
+								"video_created_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["video_created_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "favorites",
+						"required": false,
+						"description": "Videos the owner saved to Favorites, newest first: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected.",
+						"display": {
+							"label": "Your TikTok Favorites",
+							"detail": "The videos you saved to Favorites: who posted each, its caption and when it was posted."
+						},
+						"semantics": "append_only",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric video id.",
+									"x_pdpp_role": "secondary"
+								},
+								"author_id": {
+									"type": ["string", "null"],
+									"pattern": "^[0-9]{1,30}$",
+									"description": "The numeric user id of the account that posted the video."
+								},
+								"author_unique_id": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The handle of the account that posted the video, without the @."
+								},
+								"author_nickname": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The display name of the account that posted the video."
+								},
+								"caption": {
+									"type": ["string", "null"],
+									"maxLength": 4000,
+									"description": "The video's caption.",
+									"x_pdpp_role": "primary-title"
+								},
+								"video_created_at": {
+									"type": "string",
+									"format": "date-time",
+									"description": "When the video was posted, in UTC. Not when it was saved."
+								}
+							},
+							"required": [
+								"id",
+								"author_id",
+								"author_unique_id",
+								"author_nickname",
+								"caption",
+								"video_created_at"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"caption",
+									"author_unique_id",
+									"author_nickname"
+								],
+								"semantic_fields": ["caption"]
+							},
+							"range_filters": {
+								"video_created_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["video_created_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "favorite_collections",
+						"required": false,
+						"description": "The collections the owner made in Favorites: name and how many videos each holds. Covers, owner id and owner name are not collected. Every run reads the whole list again to TikTok's own end signal.",
+						"display": {
+							"label": "Your TikTok Favorites collections",
+							"detail": "The name of each collection you made in Favorites and how many videos it holds."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric collection id.",
+									"x_pdpp_role": "secondary"
+								},
+								"name": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The collection's name.",
+									"x_pdpp_role": "primary-title"
+								},
+								"item_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Videos in the collection when collected, as TikTok counts them."
+								}
+							},
+							"required": ["id", "name", "item_count"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							},
+							"range_filters": {
+								"item_count": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "collection_items",
+						"required": false,
+						"description": "Which saved videos sit in which Favorites collection: one record per video in a collection, with who posted it and its caption. Each collection is read to TikTok's own end signal; a collection that could not be read is retried on the next run. The video files are not collected.",
+						"display": {
+							"label": "Videos in your TikTok Favorites collections",
+							"detail": "For each collection, the videos in it: who posted each, its caption and when it was posted."
+						},
+						"semantics": "mutable_state",
+						"parent_streams": ["favorite_collections"],
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}:[0-9]{1,30}$",
+									"description": "The collection id and the video id, joined by a colon.",
+									"x_pdpp_role": "secondary"
+								},
+								"collection_id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "The collection the video sits in. Joins to favorite_collections.id."
+								},
+								"video_id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric video id. Joins to favorites.id."
+								},
+								"author_id": {
+									"type": ["string", "null"],
+									"pattern": "^[0-9]{1,30}$",
+									"description": "The numeric user id of the account that posted the video."
+								},
+								"author_unique_id": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The handle of the account that posted the video, without the @."
+								},
+								"caption": {
+									"type": ["string", "null"],
+									"maxLength": 4000,
+									"description": "The video's caption.",
+									"x_pdpp_role": "primary-title"
+								},
+								"video_created_at": {
+									"type": "string",
+									"format": "date-time",
+									"description": "When the video was posted, in UTC. Not when it was saved."
+								}
+							},
+							"required": [
+								"id",
+								"collection_id",
+								"video_id",
+								"author_id",
+								"author_unique_id",
+								"caption",
+								"video_created_at"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["caption", "author_unique_id"],
+								"semantic_fields": ["caption"]
+							},
+							"range_filters": {
+								"video_created_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["video_created_at"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "following",
+						"required": false,
+						"description": "Accounts the owner follows: handle, display name and id. Every run reads the whole list again; the stream fails rather than reports complete when TikTok cuts the list short.",
+						"display": {
+							"label": "Accounts you follow on TikTok",
+							"detail": "Each account's handle, display name and id, and whether it is verified or private."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric user id of the account.",
+									"x_pdpp_role": "secondary"
+								},
+								"unique_id": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The account's handle, without the @.",
+									"x_pdpp_role": "primary-title"
+								},
+								"nickname": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The account's display name."
+								},
+								"sec_uid": {
+									"type": ["string", "null"],
+									"maxLength": 200,
+									"description": "TikTok's public secure user id of the account."
+								},
+								"verified": {
+									"type": ["boolean", "null"],
+									"description": "Whether TikTok shows the account as verified."
+								},
+								"private_account": {
+									"type": ["boolean", "null"],
+									"description": "Whether the account is private."
+								}
+							},
+							"required": [
+								"id",
+								"unique_id",
+								"nickname",
+								"sec_uid",
+								"verified",
+								"private_account"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["unique_id", "nickname"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["verified", "private_account"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "followers",
+						"required": false,
+						"description": "Accounts that follow the owner: handle, display name and id. Every run reads the whole list again; the stream fails rather than reports complete when TikTok cuts the list short.",
+						"display": {
+							"label": "Your TikTok followers",
+							"detail": "Each follower's handle, display name and id, and whether it is verified or private."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,30}$",
+									"description": "TikTok's own numeric user id of the account.",
+									"x_pdpp_role": "secondary"
+								},
+								"unique_id": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The account's handle, without the @.",
+									"x_pdpp_role": "primary-title"
+								},
+								"nickname": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The account's display name."
+								},
+								"sec_uid": {
+									"type": ["string", "null"],
+									"maxLength": 200,
+									"description": "TikTok's public secure user id of the account."
+								},
+								"verified": {
+									"type": ["boolean", "null"],
+									"description": "Whether TikTok shows the account as verified."
+								},
+								"private_account": {
+									"type": ["boolean", "null"],
+									"description": "Whether the account is private."
+								}
+							},
+							"required": [
+								"id",
+								"unique_id",
+								"nickname",
+								"sec_uid",
+								"verified",
+								"private_account"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["unique_id", "nickname"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["verified", "private_account"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					}
+				],
+				"reason_display_messages": {
+					"tiktok_auth_failed": "TikTok needs you to sign in again before this can continue.",
+					"tiktok_bot_check": "TikTok showed a check or refused a request, so collection stopped without retrying. Open TikTok yourself and make sure your account works normally before running this again.",
+					"tiktok_request_unsigned": "TikTok's page did not sign a request the way it signs its own, so nothing more could be read safely. TikTok may have changed its site; please report this if it keeps happening.",
+					"tiktok_rate_limited": "TikTok asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait a while before running this again.",
+					"tiktok_server_error": "TikTok's servers had a problem partway through. What was collected is saved; try again later.",
+					"tiktok_interrupted": "The TikTok page stopped answering partway through. What was collected is saved; try again.",
+					"tiktok_run_limit_reached": "This run reached its safety limit on requests. What was collected is saved; the next run continues.",
+					"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
+					"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
+					"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
+					"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
+					"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "tiktok",
+						"login_url": "https://www.tiktok.com/login",
+						"login_message": "Sign in to TikTok, then return here.",
+						"collect_export": "collectTikTok",
+						"probe_export": "probeTikTokSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
 						}
 					}
 				}
@@ -22912,7 +24689,7 @@
 					"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
 					"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
 					"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
-					"inventory_not_proven_complete": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh.",
+					"stream_collection_failed": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh.",
 					"wholefoods_nutrition_unread": "Some Whole Foods products' nutrition panels could not be read, so those products have no nutrition row. Retry to read them."
 				}
 			}
@@ -26437,7 +28214,7 @@
 					}
 				],
 				"reason_display_messages": {
-					"inventory_not_proven_complete": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
+					"stream_collection_failed": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
 					"page_unreadable": "The signed-in page did not expose a trustworthy record.",
 					"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
 					"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",

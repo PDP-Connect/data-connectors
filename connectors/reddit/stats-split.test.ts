@@ -1087,10 +1087,10 @@ test("manifest: score / num_comments query affordances moved to the stats stream
 
 test("manifest: breaking field removal is a 0.x minor bump from 0.3.13, not a 1.0 promotion", () => {
 	const [major, minor] = manifest.version.split(".").map(Number);
-	assert.equal(major, 0);
+	assert.equal(major, 0, "not a 1.0 promotion");
 	assert.ok(
 		(minor ?? 0) >= 4,
-		`expected a 0.x release of at least 0.4.0, got ${manifest.version}`,
+		`at least the 0.4 minor bump from 0.3.13; expected a 0.x release of at least 0.4.0, got ${manifest.version}`,
 	);
 });
 

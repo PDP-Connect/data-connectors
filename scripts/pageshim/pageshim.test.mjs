@@ -26,7 +26,7 @@ import { buildPageshim } from "./build.mjs";
 import { assertHashParity, assertPageOnlyAdmission, assertFingerprintBundle } from "./crypto-regressions.mjs";
 import { pageShimConnectors } from "./capabilities.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
-import { runHarness } from "./harness.mjs";
+import { runFixtureHarness as runHarness } from "./harness.mjs";
 
 const scratchRoot = fileURLToPath(
 	new URL("../../.tmp/pageshim/", import.meta.url),
@@ -1433,6 +1433,8 @@ test("github_browser: an incomplete stream is an omitted error", {
 			disposition: "omitted",
 			scope: "github.starred",
 			phase: "collect",
+			code: "stream_collection_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		},
 	);
 });
@@ -3661,7 +3663,6 @@ test("meta: following empty, contradictory, owner and partial-page evidence neve
    {owner, users: [row], has_more: true, next_max_id: "next"},
    {owner, users: [{pk: "bad"}], has_more: false},
   ]}, count: 1, complete: false},
-  {name: "late logout", options: {logoutAtEnd: true}, count: 1, complete: false},
  ];
  for (const c of cases) {
   const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(c.options),
@@ -3673,6 +3674,37 @@ test("meta: following empty, contradictory, owner and partial-page evidence neve
   assert.equal(r.result.errors.length, c.complete ? 0 : 1, c.name);
   assert.match(r.data.status, c.complete ? /^Complete!/ : /^Partial:/, c.name);
   if (!c.complete) assert.match(r.result.errors[0].reason, /not proven complete/, c.name);
+ }
+});
+
+
+test("meta: late logout remains a terminal session failure on both hosts", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-late-logout.js")});
+ for (const resultStreaming of [false, true]) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures({logoutAtEnd: true}),
+   scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}},
+   resultStreaming, resultSpoolDirectory: join(out, "meta-late-logout-" + resultStreaming)});
+  assertCleanRun(r);
+  assert.equal(r.data.error, "meta_session_required: Instagram authentication was rejected or challenged during this run");
+  assert.deepEqual(r.stateMessages, []);
+  assert.deepEqual(r.states, {"instagram.following": {old: true}});
+  assert.doesNotMatch(r.data.status ?? "", /^(Complete!|Partial:)/);
+  assert.deepEqual(r.ret, {ok: true});
+  assert.equal(r.streamDone, null);
+  assert.equal(r.streamResult, null);
+  if (resultStreaming) {
+   assert.equal(r.result, null);
+  } else {
+   assert.deepEqual(r.result.errors, [{
+    errorClass: "auth_failed",
+    reason: "meta_session_required: Instagram authentication was rejected or challenged during this run",
+    disposition: "fatal",
+    phase: "collect",
+   }]);
+   assert.equal(r.result["instagram.following"], undefined);
+   assert.equal(r.result.exportSummary.count, 0);
+  }
  }
 });
 
@@ -3935,5 +3967,60 @@ test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", {
   assert.equal(r.calls.showBrowser, 1);
   assert.ok(fixtures.requests.every((request) => request.path === "/voyager/api/me"));
   assert.deepEqual(r.stateMessages, []);
+ });
+ // A successful HTTP 200 JSON body with an `_error` key is profile data. These
+ // cases send the sentinel through the real harness and the fixture transform.
+ const SENTINEL = "SECRET_NOTE";
+ const exportedText = (r) => JSON.stringify([r.result, r.data, r.states, r.stateMessages]);
+ await t.test("successful JSON _error=SECRET_NOTE on a usable profile keeps the complete inventory", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) body._error = SENTINEL;
+   return body;
+  });
+  const r = await run(fixtures);
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.result.exportSummary, c.exportSummary);
+  assert.match(r.data.status, /^Complete!/);
+  assert.equal(r.result["linkedin.experience"].records.length, 1);
+  assert.equal(exportedText(r).includes(SENTINEL), false);
+ });
+ await t.test("successful JSON _error=SECRET_NOTE on an unreadable profile is a portable partial, not its text", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) {
+    delete body.elements[0].profilePositionGroups;
+    body._error = SENTINEL;
+   }
+   return body;
+  });
+  const r = await run(fixtures, { scopes: ["linkedin.experience", "linkedin.skills"] });
+  assertCleanRun(r);
+  assert.match(r.data.status, /^Partial:/);
+  assert.equal(r.result["linkedin.experience"]?.records.length ?? 0, 0);
+  assert.equal(r.result["linkedin.skills"].records.length, 1);
+  assert.equal(r.result.errors.length, 1);
+  const [error] = r.result.errors;
+  assert.equal(error.scope, "linkedin.experience");
+  assert.equal(error.errorClass, "partial");
+  assert.equal(error.code, "stream_collection_failed");
+  assert.equal(error.reason, "LinkedIn enumeration is unproven; the profile section was unreadable");
+  assert.equal(exportedText(r).includes(SENTINEL), false);
+ });
+ await t.test("genuine HTTP 503 beside a successful basic JSON _error=SECRET_NOTE keeps its own cause", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) return { fixtureStatus: 503 };
+   if (url.searchParams.has("memberIdentity")) return { _error: SENTINEL, elements: [{ firstName: "Anon", lastName: "Member" }] };
+   return body;
+  });
+  const r = await run(fixtures, { scopes: ["linkedin.experience"] });
+  assertCleanRun(r);
+  assert.match(r.data.status, /^Partial:/);
+  assert.equal(r.result.errors.length, 1);
+  const [error] = r.result.errors;
+  assert.equal(error.scope, "linkedin.experience");
+  assert.equal(error.errorClass, "partial");
+  assert.equal(error.code, "stream_collection_failed");
+  assert.equal(error.reason, "LinkedIn experience read failed: http_503");
+  assert.equal(exportedText(r).includes(SENTINEL), false);
  });
 });

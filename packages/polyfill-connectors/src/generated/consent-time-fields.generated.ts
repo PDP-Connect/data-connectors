@@ -114,6 +114,14 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		order_items: null,
 		orders: { field: "order_date", format: "date-time" },
 	},
+	facebook: {
+		comments: { field: "time", format: "date-time" },
+		friends: null,
+		groups: null,
+		posts: { field: "create_time", format: "date-time" },
+		profile: null,
+		reactions: { field: "time", format: "date-time" },
+	},
 	fitbit: {
 		activities: { field: "start_time", format: "date-time" },
 		daily_summaries: { field: "date", format: "date" },
@@ -227,6 +235,16 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		posts: { field: "taken_at", format: "date-time" },
 		profile: null,
 	},
+	muse: {
+		activities: { field: "timestamp", format: "date-time" },
+		connected_apps: null,
+		conversations: { field: "created_at", format: "date-time" },
+		files: { field: "modified_at", format: "date-time" },
+		goals: { field: "created_at", format: "date-time" },
+		memory_files: { field: "modified_at", format: "date-time" },
+		messages: { field: "occurred_at", format: "date-time" },
+		scheduled_tasks: null,
+	},
 	netflix_export: {
 		viewing_activity: { field: "watched_at", format: "date-time" },
 	},
@@ -306,6 +324,16 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	},
 	strava_browser: {
 		activities: { field: "start_date_local", format: "date" },
+	},
+	tiktok: {
+		collection_items: null,
+		favorite_collections: null,
+		favorites: null,
+		followers: null,
+		following: null,
+		likes: null,
+		profile: null,
+		videos: { field: "created_at", format: "date-time" },
 	},
 	twitter_archive: {
 		direct_messages: { field: "created_at", format: "date-time" },

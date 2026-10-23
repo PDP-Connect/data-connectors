@@ -62,6 +62,10 @@ import {
 	scanConnectorForReasonEmissions,
 } from "./reason-emission-scan.ts";
 import { RUNTIME_GENERIC_REASON_CODES } from "./reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
+import {
+	PORTABLE_ENUMERATION_FAILURE_REASON,
+	UNPROVEN_ENUMERATION_CAUSES,
+} from "./unproven-enumeration.ts";
 
 const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
 
@@ -153,6 +157,22 @@ test("no connector manifest declares an RI-reserved generic reason code in its o
 	);
 });
 
+test("no connector manifest declares copy under an unproven-enumeration cause, which never reaches the wire", () => {
+	const dead: string[] = [];
+	for (const [connectorKey, messages] of Object.entries(
+		connectorReasonDisplayMessages(),
+	)) {
+		for (const cause of UNPROVEN_ENUMERATION_CAUSES) {
+			if (cause in messages) dead.push(`${connectorKey}: ${cause}`);
+		}
+	}
+	assert.deepEqual(
+		dead,
+		[],
+		`declare this copy under ${PORTABLE_ENUMERATION_FAILURE_REASON}: ${dead.join(", ")}`,
+	);
+});
+
 test("every connector-emitted reason code has a registered display message (that connector's own manifest, OR RI-generic)", () => {
 	const dirs = listConnectorDirs();
 	assert.ok(dirs.length > 0, "expected at least one connector directory");
@@ -172,7 +192,12 @@ test("every connector-emitted reason code has a registered display message (that
 			unresolvedByConnector.push({ connector: key, file, line, snippet });
 		}
 		const messages = byConnector[key] ?? {};
-		for (const reason of literalReasons) {
+		for (const emitted of literalReasons) {
+			// The runtime puts an unproven-enumeration cause on the wire as the
+			// portable reason, so the owner sees the copy declared under that one.
+			const reason = UNPROVEN_ENUMERATION_CAUSES.has(emitted)
+				? PORTABLE_ENUMERATION_FAILURE_REASON
+				: emitted;
 			if (!(reason in messages || RUNTIME_GENERIC_REASON_CODES.has(reason))) {
 				missing.push({ connector: key, reason });
 			}
