@@ -569,6 +569,9 @@ function queryResponse(
  *  fails the same way until the source changes, so it asks for no retry. A
  *  dependency failure takes the hint of the dependency's own cause. */
 function recoveryHintFor(cause: FailureCause): RecoveryHint {
+	while (cause.kind === "dependency") {
+		cause = cause.failure.cause;
+	}
 	switch (cause.kind) {
 		case "transient":
 			return { action: "retry_by_runtime", retryable: true };
@@ -578,8 +581,8 @@ function recoveryHintFor(cause: FailureCause): RecoveryHint {
 			return { action: "retry_on_connector_upgrade", retryable: false };
 		case "unrepresentable_rows":
 			return { action: "not_retriable", retryable: false };
-		case "dependency":
-			return recoveryHintFor(cause.failure.cause);
+		default:
+			throw new Error(`unhandled failure cause: ${JSON.stringify(cause)}`);
 	}
 }
 

@@ -1259,7 +1259,9 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		page_navigation: walked.pageEvidence?.navigation ?? null,
 		end_reason: walked.reason,
 	});
-	if (!complete && discardedRows > 0) {
+	// Row loss must not mask a failed page read. The failure path below
+	// retains the same withheld-row diagnostics without a companion skip.
+	if (!complete && !pageBlocked && discardedRows > 0) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
@@ -1279,7 +1281,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		if (args.reportStreamFailure) await args.reportStreamFailure(ORDERS_STREAM, message, failure);
 		else await emit({
 			type: "SKIP_RESULT", stream: ORDERS_STREAM, reason: "stream_collection_failed", message,
-			recovery_hint: failure.recoveryHint, diagnostics: failure.diagnostics,
+			recovery_hint: { action: "retry_by_runtime", retryable: true }, diagnostics: failure.diagnostics,
 		});
 	} else if (!complete && (!pageComplete || mismatch)) {
 		await emit({

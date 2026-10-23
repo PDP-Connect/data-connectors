@@ -2760,3 +2760,79 @@ for (const { name, response, reason, hint } of [
 		);
 	});
 }
+
+// Exercise the production notes -> folders dependency cause through collect(),
+// including both runtime reporting and the standalone SKIP_RESULT fallback.
+for (const fixture of [
+	{ name: "transient", folders: { status: 503, json: null }, action: "retry_by_runtime", retryable: true, reason: "icloud_http_error" },
+	{ name: "auth rejected", folders: { status: 401, json: null }, action: "manual_action_required", retryable: false, reason: "icloud_auth_failed" },
+	{ name: "unrecognized response", folders: {}, action: "retry_on_connector_upgrade", retryable: false, reason: "icloud_invalid_query_response" },
+	{
+		name: "unrepresentable folder",
+		folders: { records: [{ recordName: "folder-work", recordType: "Folder", fields: { TitleEncrypted: { value: "/w==" } } }] },
+		action: "not_retriable", retryable: false, reason: "icloud_omitted_rows",
+	},
+]) {
+	for (const runtimeReports of [false, true]) {
+		test(`collectAllStreams: nested ${fixture.name} cause preserves recovery with runtime reports ${runtimeReports}`, async () => {
+			const harness = makeRecordingEmit(validateRecord);
+			const seed = { notes: { fingerprints: { "note-1": "prior" } } };
+			const base = makeCtx(makeFakePage([
+				{ stream: "folders", response: fixture.folders },
+				{ stream: "notes", response: noteQueryResponse() },
+			]), harness, ["notes"], structuredClone(seed));
+			const spy = withStreamFailureSpy(base);
+			const ctx = runtimeReports ? spy.ctx : base;
+			const hint = { action: fixture.action, retryable: fixture.retryable };
+			if (fixture.reason === "icloud_auth_failed") {
+				await assert.rejects(collectAllStreams(ctx), (error: unknown) => {
+					const failure = error as Error & { code: string; retryable: boolean; recoveryHint: unknown };
+					assert.equal(failure.code, "icloud_auth_failed");
+					assert.equal(failure.retryable, false);
+					assert.deepEqual(failure.recoveryHint, hint);
+					return true;
+				});
+				assert.equal(spy.reports.length, 0);
+				assert.equal(harness.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+			} else {
+				await collectAllStreams(ctx);
+				if (runtimeReports && fixture.reason !== "icloud_omitted_rows") {
+					assert.equal(spy.reports.length, 1);
+					const [report] = spy.reports;
+					assert.ok(report);
+					assert.equal(report.stream, "notes");
+					const options = report.options as { recoveryHint: unknown; diagnostics: Record<string, unknown> };
+					assert.deepEqual(options.recoveryHint, hint);
+					assert.equal(options.diagnostics.dependency_stream, "folders");
+					assert.equal(options.diagnostics.dependency_reason, fixture.reason);
+					assert.equal(harness.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+				} else {
+					assert.equal(spy.reports.length, 0);
+					const skips = harness.protocolMessages.filter((message) => message.type === "SKIP_RESULT");
+					assert.equal(skips.length, 1);
+					const [skip] = skips;
+					assert.ok(skip);
+					assert.equal(skip.stream, "notes");
+					assert.equal(skip.reason, fixture.reason === "icloud_omitted_rows" ? "inventory_not_proven_complete" : "stream_collection_failed");
+					assert.deepEqual(skip.recovery_hint, hint);
+					assert.equal(diagnosticField(skip, "dependency_stream"), "folders");
+					assert.equal(diagnosticField(skip, "dependency_reason"), fixture.reason);
+				}
+			}
+			assert.deepEqual(harness.emitted, []);
+			assert.equal(harness.protocolMessages.some((message) => message.type === "STATE"), false);
+			assert.deepEqual(ctx.state, seed);
+
+			const repaired = makeRecordingEmit(validateRecord);
+			await collectAllStreams(makeCtx(makeFakePage([
+				{ stream: "folders", response: folderQueryResponse() },
+				{ stream: "notes", response: noteQueryResponse() },
+			]), repaired, ["notes"], structuredClone(seed)));
+			assert.equal(repaired.emitted.length, 1);
+			const [emitted] = repaired.emitted;
+			assert.ok(emitted);
+			assert.equal(emitted.data.folder_name, "Work");
+			assert.ok(repaired.protocolMessages.some((message) => message.type === "STATE" && message.stream === "notes"));
+		});
+	}
+}

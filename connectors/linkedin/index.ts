@@ -1089,7 +1089,7 @@ async function emitRows(
 			await sink.reportStreamFailure(stream, message, { recoveryHint, diagnostics });
 		else
 			await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed",
-				recovery_hint: recoveryHint, message, diagnostics });
+				recovery_hint: { action: "retry_by_runtime", retryable: true }, message, diagnostics });
 		return;
 	}
 	await sink.emit({
@@ -1127,7 +1127,7 @@ async function emitUnavailableSection(
 		const message = `LinkedIn ${stream} read failed: ${failure}`;
 		const recoveryHint = { action: "retry_by_runtime", retryable: true };
 		if (sink.reportStreamFailure) await sink.reportStreamFailure(stream, message, { recoveryHint, retryable: true, diagnostics });
-		else await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message, recovery_hint: recoveryHint, diagnostics });
+		else await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message, recovery_hint: { action: "retry_by_runtime", retryable: true }, diagnostics });
 		return;
 	}
 	await sink.emit({

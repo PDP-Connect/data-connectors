@@ -17,7 +17,11 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright";
 import { chromium as patchrightChromium } from "patchright";
 import type {
@@ -25,7 +29,7 @@ import type {
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { makeRecordingEmit, runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	collectShopify,
 	orderRecord,
@@ -44,6 +48,91 @@ import {
 import { createOrderHistoryApiReader } from "./order-history-api.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache } from "./types.ts";
+
+test("mixed fixture navigation cannot mask reportStreamFailure with row loss", async (t) => {
+	const run = makeRecordingEmit(validateRecord);
+	const cache = makeCache(["Order:1", "Order:bad"], false);
+	cache["Order:bad"] = { id: null };
+	const reports: Array<{ stream: string; message: string; options: unknown }> = [];
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => cache, readPageEvidence: letSwitchingEvidence(),
+		reportStreamFailure: async (stream, message, options) => { reports.push({ stream, message, options }); },
+		cacheWaitTimeoutMs: 0, scroll: async () => undefined,
+	});
+	t.diagnostic(JSON.stringify({ reportedFailures: reports.length, skipReasons: run.protocolMessages.filter((message) => message.type === "SKIP_RESULT").map((message) => message.reason) }));
+	assert.equal(reports.length, 1, "navigation failure must reach the runtime despite the withheld row");
+	assert.equal(reports[0]?.stream, "orders");
+	const options = reports[0]?.options as { recoveryHint: unknown; diagnostics: Record<string, unknown> };
+	assert.deepEqual(options.recoveryHint, { action: "retry_by_runtime", retryable: true });
+	assert.equal(options.diagnostics.end_reason, "page_blocked");
+	assert.equal(options.diagnostics.discovered_rows, 2);
+	assert.equal(options.diagnostics.valid_rows, 0);
+	assert.equal(options.diagnostics.discarded_rows, 1);
+	assert.ok(Array.isArray(options.diagnostics.withheld_fields) && options.diagnostics.withheld_fields.length > 0);
+	assert.deepEqual(run.protocolMessages, []);
+	assert.deepEqual(run.emitted, []);
+});
+
+test("mixed Shop read failure produces failed DONE and preserves healthy sibling data in the real runtime", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "shopify-mixed-read-"));
+	try {
+		const cache = makeCache(["Order:1", "Order:bad"], false);
+		cache["Order:bad"] = { id: null };
+		const entrypoint = join(directory, "fixture.mjs");
+		// Only the page/cache inputs are fixtures. START, reportStreamFailure,
+		// RECORD, and DONE travel through the production runtime and stdio harness.
+		await writeFile(entrypoint, `
+			import { runConnector } from ${JSON.stringify(new URL("../../packages/polyfill-connectors/src/connector-runtime.ts", import.meta.url).href)};
+			import { collectShopify } from ${JSON.stringify(new URL("./index.ts", import.meta.url).href)};
+			const cache = ${JSON.stringify(cache)};
+			runConnector({
+				name: "shopify-mixed-read-fixture",
+				async collect(ctx) {
+					await ctx.emitRecord("healthy_sibling", { id: "kept" });
+					let navigation = "fixture-1";
+					await collectShopify({
+						...ctx,
+						readCache: async () => cache,
+						readPageEvidence: async () => ({
+							url: "https://shop.app/account/order-history", navigation,
+							orderContext: true, blocked: false, pageHeight: 100,
+							domHasContinuation: false, domCardCount: 0,
+						}),
+						scroll: async () => { navigation = "fixture-2"; },
+						cacheWaitTimeoutMs: 0,
+					});
+				},
+			});
+		`);
+		const result = await runConnectorProtocolSubprocess({
+			cwd: fileURLToPath(new URL("../..", import.meta.url)), entrypoint, allowFailedDone: true,
+			start: { type: "START", scope: { streams: [{ name: "orders" }, { name: "healthy_sibling" }] } },
+		}).catch((error: unknown) => { t.diagnostic(String(error)); throw error; });
+		t.diagnostic(JSON.stringify({ done: result.messages.filter((message) => message.type === "DONE"), records: result.messages.filter((message) => message.type === "RECORD").map((message) => message.stream), skips: result.messages.filter((message) => message.type === "SKIP_RESULT").map((message) => message.reason) }));
+		const done = result.messages.filter((message) => message.type === "DONE");
+		assert.equal(done.length, 1, result.rawStdout);
+		assert.equal(done[0]?.status, "failed", result.rawStdout);
+		assert.equal(result.messages.some((message) => message.type === "STATE" && message.stream === "orders"), false);
+		const records = result.messages.filter((message) => message.type === "RECORD");
+		assert.equal(records.filter((message) => message.stream === "orders").length, 0);
+		assert.ok(records.some((message) => message.stream === "healthy_sibling" && message.data.id === "kept"));
+		const skips = result.messages.filter((message) => message.type === "SKIP_RESULT" && message.stream === "orders");
+		assert.equal(skips.length, 1, result.rawStdout);
+		const [skip] = skips;
+		assert.ok(skip && "reason" in skip && "diagnostics" in skip);
+		assert.equal(skip.reason, "stream_collection_failed");
+		const diagnostics = skip.diagnostics as Record<string, unknown>;
+		assert.equal(diagnostics.end_reason, "page_blocked");
+		assert.equal(diagnostics.discovered_rows, 2);
+		assert.equal(diagnostics.valid_rows, 0);
+		assert.equal(diagnostics.discarded_rows, 1);
+		assert.ok(Array.isArray(diagnostics.withheld_fields) && diagnostics.withheld_fields.length > 0);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
 
 test("Shop sign-in returns from the provider redirect to order history and checks that page", async () => {
 	const navigations: string[] = [];
@@ -1684,4 +1773,118 @@ test("collectShopify reports a page that changes during the walk as a failed rea
 	assert.equal(options.diagnostics.end_reason, "page_blocked");
 	assert.equal(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
 	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+});
+
+type NavigationFixtureChange = "none" | "navigation" | "sign_in";
+
+async function withShopifyNavigationFixture(
+	withheldRow: boolean,
+	change: NavigationFixtureChange,
+	collect: (readers: Pick<Parameters<typeof collectShopify>[0],
+		"readCache" | "readPageEvidence" | "scroll" | "cacheWaitTimeoutMs">) => Promise<void>,
+): Promise<void> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://shop.app/**", (route) => route.fulfill({
+			status: 200, contentType: "text/html",
+			body: route.request().url().includes("/login")
+				? '<main><input type="email"><button>Sign in</button></main>'
+				: '<div id="root"><h1>Your orders</h1></div>',
+		}));
+		const cache = makeCache(withheldRow ? ["Order:1", "Order:bad"] : ["Order:1"], false);
+		if (withheldRow) cache["Order:bad"] = { id: null };
+		await page.goto("https://shop.app/account/order-history");
+		await page.evaluate(installApolloFixtureInPage, cache);
+		const original = await page.evaluate(readShopOrderPageEvidenceInPage);
+		let navigated = false;
+		await collect({
+			readCache: () => page.evaluate(readLiveApolloCacheInPage),
+			readPageEvidence: () => page.evaluate(readShopOrderPageEvidenceInPage),
+			cacheWaitTimeoutMs: 1000,
+			scroll: async () => {
+				if (change === "none" || navigated) return;
+				navigated = true;
+				await page.goto(change === "sign_in"
+					? "https://shop.app/account/login"
+					: "https://shop.app/account/order-history?fixture=next");
+				if (change === "navigation") {
+					await page.evaluate(installApolloFixtureInPage, cache);
+					const current = await page.evaluate(readShopOrderPageEvidenceInPage);
+					assert.notEqual(current.navigation, original.navigation);
+					assert.equal(current.blocked, false);
+					assert.equal(current.orderContext, true);
+				}
+			},
+		});
+	} finally {
+		await browser.close();
+	}
+}
+
+test("real Shop navigation preserves read failures alongside withheld rows", async (t) => {
+	for (const scenario of [
+		{ name: "row-only preserves the healthy row", withheld: true, change: "none", reporter: true },
+		{ name: "page-only reports a read failure", withheld: false, change: "navigation", reporter: true },
+		{ name: "mixed navigation and withheld row reports both causes once", withheld: true, change: "navigation", reporter: true },
+		{ name: "mixed failure retains the no-reporter fallback", withheld: true, change: "navigation", reporter: false },
+		{ name: "mixed sign-in still ends the run", withheld: true, change: "sign_in", reporter: true },
+	] as const) {
+		await t.test(scenario.name, async () => {
+			const run = makeRecordingEmit(validateRecord);
+			const reports: Array<{ stream: string; message: string; options: unknown }> = [];
+			const state = { orders: { fingerprints: { prior: "keep-me" } } };
+			const originalState = structuredClone(state);
+			await withShopifyNavigationFixture(scenario.withheld, scenario.change, async (readers) => {
+				const collecting = collectShopify({
+					...readers, emit: run.emit, emitRecord: run.emitRecord,
+					progress: async () => undefined, requested: requestedMap(["orders"]), state,
+					...(scenario.reporter ? {
+						reportStreamFailure: async (stream: string, message: string, options: unknown) => {
+							reports.push({ stream, message, options });
+						},
+					} : {}),
+				});
+				if (scenario.change === "sign_in") {
+					await assert.rejects(collecting, { message: "shopify_signed_out_or_blocked" });
+				} else await collecting;
+			});
+			assert.deepEqual(state, originalState, "incomplete reads cannot prune prior fingerprints");
+			assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+			const skips = run.protocolMessages.filter((message) => message.type === "SKIP_RESULT");
+			if (scenario.change === "sign_in") {
+				assert.deepEqual(reports, []);
+				assert.deepEqual(skips, []);
+				assert.equal(run.emitted.length, 0);
+				return;
+			}
+			const failedRead = scenario.change === "navigation";
+			const usesReporter = failedRead && scenario.reporter;
+			assert.equal(reports.length, usesReporter ? 1 : 0);
+			assert.equal(skips.length, usesReporter ? 0 : 1, "no duplicate companion skip");
+			let diagnostics: Record<string, unknown>;
+			if (usesReporter) {
+				assert.equal(reports[0]?.stream, "orders");
+				assert.equal(reports[0]?.message, "Shop order history changed during the read; retry to collect the remaining rows.");
+				const options = reports[0]?.options as { recoveryHint: unknown; diagnostics: Record<string, unknown> };
+				assert.deepEqual(options.recoveryHint, { action: "retry_by_runtime", retryable: true });
+				diagnostics = options.diagnostics;
+			} else {
+				const skip = skips[0];
+				assert.ok(skip?.type === "SKIP_RESULT");
+				assert.equal(skip.reason, failedRead ? "stream_collection_failed" : "shopify_order_rows_unresolved");
+				assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+				diagnostics = skip.diagnostics as Record<string, unknown>;
+			}
+			assert.equal(diagnostics.end_reason, failedRead ? "page_blocked" : "end_unproven");
+			assert.equal(diagnostics.discovered_rows, scenario.withheld ? 2 : 1);
+			assert.equal(diagnostics.valid_rows, failedRead ? 0 : 1);
+			assert.equal(diagnostics.discarded_rows, scenario.withheld ? 1 : 0);
+			assert.equal(diagnostics.terminal_evidence, false);
+			assert.ok(Array.isArray(diagnostics.withheld_fields));
+			assert.equal(diagnostics.withheld_fields.length > 0, scenario.withheld);
+			assert.deepEqual(recordsOf(run.emitted, "orders").map((record) => record.id),
+				failedRead ? [] : ["gid://shopify/Order/1"]);
+		});
+	}
 });
