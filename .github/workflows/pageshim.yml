@@ -36,8 +36,10 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - name: connector gates
-            args: --test-name-pattern="pageshim gate" scripts/pageshim/pageshim.test.mjs
+          - name: connector gates a-m
+            args: '--test-name-pattern="^[a-m].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
+          - name: connector gates other
+            args: '--test-name-pattern="^[^a-m].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
           - name: regressions
             args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/harness-timing.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs
     steps:
@@ -70,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - name: Require both shards to pass
+      - name: Require all shards to pass
         env:
           SHARD_RESULT: ${{ needs.harness-shards.result }}
         run: test "$SHARD_RESULT" = success
