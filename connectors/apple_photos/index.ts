@@ -77,6 +77,7 @@ import {
 	hydrateMediaBytes,
 	resolveMaxMediaBytes,
 } from "../../packages/polyfill-connectors/src/local-media-blob-hydration.ts";
+import manifest from "./manifest.json" with { type: "json" };
 import {
 	advanceCursor,
 	buildPhotoRecord,
@@ -123,13 +124,23 @@ function hasSupportedExtension(filename: string): boolean {
 }
 
 async function emitCoverageProgress(
-	emit: CollectContext["emit"],
+	ctx: CollectContext,
 	input: {
 		filesScanned?: number;
-		reason: "collected" | "export_dir_empty" | "export_dir_missing";
-		status: "collected" | "missing";
+		reason:
+			| "collected"
+			| "export_dir_empty"
+			| "export_dir_missing"
+			| "hydration_failed";
+		status: "collected" | "missing" | "partial";
 	},
 ): Promise<void> {
+	const { emit } = ctx;
+	ctx.reportCoverage?.(
+		"photos",
+		"export_dir",
+		input.status === "missing" ? "unavailable" : input.status,
+	);
 	const filesScanned = input.filesScanned ?? 0;
 	connectorDiagnostic("apple_photos", "coverage", {
 		files_scanned: filesScanned,
@@ -145,11 +156,18 @@ async function emitCoverageProgress(
 }
 
 function coverageMessage(
-	reason: "collected" | "export_dir_empty" | "export_dir_missing",
+	reason:
+		| "collected"
+		| "export_dir_empty"
+		| "export_dir_missing"
+		| "hydration_failed",
 	filesScanned: number,
 ): string {
 	if (reason === "export_dir_missing") {
 		return "No photo export folder found";
+	}
+	if (reason === "hydration_failed") {
+		return "Some photos could not be read or uploaded";
 	}
 	if (reason === "export_dir_empty") {
 		return "Photo export folder is empty";
@@ -184,11 +202,15 @@ async function* walkDir(dir: string): AsyncGenerator<DiscoveredFile> {
 
 runConnector({
 	name: "apple_photos",
+	coverageStores: Object.fromEntries(
+		manifest.streams.map((stream) => [stream.name, stream.coverage_stores]),
+	),
 	validateRecord,
-	async collect({ state, requested, emit, emitRecord, progress }) {
+	async collect(ctx) {
+		const { state, requested, emit, emitRecord, progress } = ctx;
 		const dir = resolveExportDir();
 		if (!dir) {
-			await emitCoverageProgress(emit, {
+			await emitCoverageProgress(ctx, {
 				reason: "export_dir_missing",
 				status: "missing",
 			});
@@ -204,7 +226,7 @@ runConnector({
 		}
 
 		if (await isEmptyDir(dir)) {
-			await emitCoverageProgress(emit, {
+			await emitCoverageProgress(ctx, {
 				reason: "export_dir_empty",
 				status: "missing",
 			});
@@ -226,6 +248,7 @@ runConnector({
 		const photosState = (state.photos ?? {}) as ApplePhotosState;
 		const since = photosState.last_modified;
 		let latest = since;
+		let hydrationFailed = false;
 		let fileCount = 0;
 		const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
 
@@ -248,6 +271,12 @@ runConnector({
 				maxBytes,
 				stream: "photos",
 			});
+			if (hydration.hydrationStatus !== "hydrated") {
+				ctx.reportCoverage?.("photos", "export_dir", "partial");
+			}
+			if (hydration.hydrationStatus === "failed") {
+				hydrationFailed = true;
+			}
 			const record = buildPhotoRecord(file, filename, hydration);
 			latest = advanceCursor(latest, file.mtimeIso);
 			await emitRecord("photos", { ...record });
@@ -268,16 +297,22 @@ runConnector({
 			pass: "emit",
 			phase: "emit",
 		});
-		await emitCoverageProgress(emit, {
+		await emitCoverageProgress(ctx, {
 			filesScanned: fileCount,
-			reason: "collected",
-			status: "collected",
+			reason: hydrationFailed ? "hydration_failed" : "collected",
+			status: hydrationFailed ? "partial" : "collected",
 		});
 
 		await emit({
 			type: "STATE",
 			stream: "photos",
-			cursor: { last_modified: latest },
+			// Discovery is unordered. A later success must not checkpoint past
+			// an earlier failed photo: replay from the existing cursor until all
+			// retryable hydration work completes. Healthy IDs remain unchanged.
+			cursor: {
+				...photosState,
+				last_modified: hydrationFailed ? since : latest,
+			},
 		});
 	},
 });

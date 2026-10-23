@@ -1,5 +1,7 @@
 {
 	"protocol_version": "0.1.0",
+	"run_coverage": { "version": 1 },
+	"protocol_capabilities": ["RUN_COVERAGE_V1"],
 	"connector_id": "https://registry.pdpp.dev/connectors/imessage",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/imessage",
@@ -9,7 +11,7 @@
 	},
 	"connector_key": "imessage",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-	"version": "0.1.21",
+	"version": "0.1.22",
 	"display_name": "iMessage (macOS)",
 	"brand": {
 		"icon": "icon.svg",
@@ -47,6 +49,7 @@
 	"streams": [
 		{
 			"name": "messages",
+			"required": true,
 			"description": "iMessage + SMS messages from ~/Library/Messages/chat.db (macOS).",
 			"display": {
 				"label": "Your iMessages",
@@ -105,6 +108,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["chat_db"],
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -142,6 +146,7 @@
 			},
 			"incremental": false,
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["chat_db"],
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -221,6 +226,7 @@
 				}
 			],
 			"coverage_strategy": "parent_detail_accounting",
+			"coverage_stores": ["chat_db", "attachment_files"],
 			"freshness_strategy": "manual_as_of"
 		}
 	],

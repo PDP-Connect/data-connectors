@@ -155,6 +155,38 @@ test("iMessage reports failed DONE when chat.db exists but cannot be queried", a
 	}
 });
 
+test("iMessage empty attachment table proves the file store; deferred bytes stay partial", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-coverage-"));
+	const dbPath = join(dir, "chat.db");
+	try {
+		buildChatDbFixture(dbPath, { messages: [], attachments: [] });
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint: ENTRYPOINT,
+			env: { IMESSAGE_DB_PATH: dbPath },
+			start: {
+				type: "START",
+				run_coverage_version: 1,
+				collection_scope: "unscoped",
+				scope: { streams: [{ name: "attachments" }] },
+			} as unknown as Parameters<
+				typeof runConnectorProtocolSubprocess
+			>[0]["start"],
+		});
+		const done = result.messages.findLast(
+			(message) => message.type === "DONE",
+		) as {
+			coverage?: { streams: { stores: { store: string; status: string }[] }[] };
+		};
+		assert.deepEqual(done.coverage?.streams[0]?.stores, [
+			{ store: "chat_db", status: "collected" },
+			{ store: "attachment_files", status: "collected" },
+		]);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
 // ─── messages: one-to-one and cursor carry-forward ───────────────────────────
 
 test("iMessage emits a one-to-one conversation and a monotonic date cursor", async () => {

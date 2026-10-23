@@ -58,7 +58,15 @@ import { createHash } from "node:crypto";
 import { createReadStream, type Dirent, type Stats, statSync } from "node:fs";
 import { lstat, readdir, readlink, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import {
+	basename,
+	dirname,
+	isAbsolute,
+	join,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -98,7 +106,9 @@ import {
 	openInventoryFingerprintCursor,
 	reportLocalInventory,
 } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
+import { createRunCoverage } from "../../packages/polyfill-connectors/src/run-coverage.ts";
 import { CodexArtifactLedger } from "./artifact-ledger.ts";
+import manifest from "./manifest.json" with { type: "json" };
 import {
 	buildPromptRecord,
 	buildRolloutOnlySessionRecord,
@@ -163,8 +173,11 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const ROLLOUT_MIME_TYPE = "application/jsonl";
 
 let stdoutDrainPromise: Promise<void> | null = null;
+let runCoverage: ReturnType<typeof createRunCoverage> | null = null;
+let stateDbQueryOutcome: "not_attempted" | "failed" | "complete" = "not_attempted";
 
 const emit = (m: EmittedMessage): void => {
+	if (m.type === "SKIP_RESULT") runCoverage?.skip(m.stream);
 	const ok = process.stdout.write(stringifyForJsonl(m));
 	if (!ok && stdoutDrainPromise === null) {
 		stdoutDrainPromise = new Promise<void>((resolve) => {
@@ -665,6 +678,7 @@ function openThreadsDb(dbPath: string): DatabaseSync | null {
 	try {
 		return new DatabaseSync(dbPath, { readOnly: true });
 	} catch {
+		stateDbQueryOutcome = "failed";
 		connectorDiagnostic("codex", "state_db_unreadable", {
 			fallback: "rollouts_only",
 		});
@@ -690,9 +704,13 @@ function* queryThreadsRows(db: DatabaseSync): Iterable<ThreadRow> {
 		for (const row of db.prepare(THREADS_QUERY).iterate()) {
 			if (isThreadRow(row)) {
 				yield row;
+			} else {
+				stateDbQueryOutcome = "failed";
 			}
 		}
+		if (stateDbQueryOutcome !== "failed") stateDbQueryOutcome = "complete";
 	} catch {
+		stateDbQueryOutcome = "failed";
 		connectorDiagnostic("codex", "state_db_query_failed", {
 			fallback: "rollouts_only",
 		});
@@ -711,18 +729,12 @@ interface LoadedFile {
 	text: string;
 }
 
-async function statAndRead(path: string): Promise<LoadedFile | null> {
-	try {
-		const st = await stat(path);
-		const preview = await readBoundedFilePreview(path);
-		if (preview === null) {
-			return null;
-		}
-		const text = preview.buffer.toString("utf8");
-		return { mtimeMs: Number(st.mtimeMs), size: Number(st.size), text };
-	} catch {
-		return null;
-	}
+async function statAndRead(path: string): Promise<LoadedFile> {
+	const st = await stat(path);
+	const preview = await readBoundedFilePreview(path);
+	if (preview === null) throw new Error("Codex supported item could not be read");
+	const text = preview.buffer.toString("utf8");
+	return { mtimeMs: Number(st.mtimeMs), size: Number(st.size), text };
 }
 
 async function emitRulesStream(
@@ -739,9 +751,6 @@ async function emitRulesStream(
 		}
 		const p = join(rulesDir, f);
 		const loaded = await statAndRead(p);
-		if (!loaded) {
-			continue;
-		}
 		const mtime = Math.floor(loaded.mtimeMs / 1000);
 		const ruleset = f.replace(RULES_SUFFIX_RE, "");
 		let idx = 0;
@@ -774,9 +783,6 @@ async function emitPromptsStream(
 		}
 		const p = join(promptsDir, f);
 		const loaded = await statAndRead(p);
-		if (!loaded) {
-			continue;
-		}
 		const { meta, body } = parseFrontmatter(loaded.text);
 		emitRecord(
 			"prompts",
@@ -800,8 +806,9 @@ async function isDirectoryPath(p: string): Promise<boolean> {
 	try {
 		const s = await stat(p);
 		return s.isDirectory();
-	} catch {
-		return false;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+		throw error;
 	}
 }
 
@@ -838,9 +845,6 @@ async function emitSkillsStream(
 		}
 		const skillMdPath = join(dirPath, "SKILL.md");
 		const loaded = await statAndRead(skillMdPath);
-		if (!loaded) {
-			continue;
-		}
 		const { meta, body } = parseFrontmatter(loaded.text);
 		emitRecord(
 			"skills",
@@ -1682,7 +1686,12 @@ interface ScanRolloutsResult {
 	messagesEmitted: number;
 	messagesExamined: number;
 	parsedFiles: number;
-	scanOutcome: "complete" | "unreadable" | "parse_error";
+	/**
+	 * `missing` means no rollout root exists, so nothing was enumerated. That is
+	 * not a complete scan: an absent source proves no emptiness.
+	 * `partial` means at least one changed file was deferred while still active.
+	 */
+	scanOutcome: "complete" | "partial" | "missing" | "unreadable" | "parse_error";
 }
 
 /** Carry a file's prior cursor forward verbatim into the next STATE, and keep
@@ -1715,14 +1724,15 @@ async function reportMissingSessionsBase(
 		message: "Codex sessions folder not found or not readable",
 	});
 	await waitForEmitDrain();
-	// If we caught an error, it's unreadable; if not, ENOENT = complete
+	// If we caught an error, it's unreadable; if not, no root exists (ENOENT).
+	// Neither is a complete scan.
 	return {
 		parsedFiles: 0,
 		messagesEmitted: 0,
 		messagesExamined: 0,
 		functionCallsEmitted: 0,
 		functionCallsExamined: 0,
-		scanOutcome: scanOutcomeOnBaseError || "complete",
+		scanOutcome: scanOutcomeOnBaseError ?? "missing",
 	};
 }
 
@@ -1829,7 +1839,7 @@ async function processRolloutEntry(
 	},
 	args: ScanRolloutsArgs,
 	rolloutOrdinal: number,
-): Promise<"missing" | "parsed" | "skipped" | "duplicate"> {
+): Promise<"missing" | "parsed" | "skipped" | "deferred" | "duplicate"> {
 	let st: Stats;
 	try {
 		st = statSync(entry.path);
@@ -1958,7 +1968,7 @@ async function processRolloutEntry(
 		if (cursor) {
 			args.newFileCursors[cursorKey] = cursor;
 		}
-		return "skipped";
+		return "deferred";
 	}
 
 	const isAppend = action.kind === "append";
@@ -2234,7 +2244,7 @@ export async function scanRollouts(
 
 	let totalRollouts = 0;
 	let parsedRollouts = 0;
-	let scanOutcome: "complete" | "unreadable" | "parse_error" = anyUnreadable
+	let scanOutcome: ScanRolloutsResult["scanOutcome"] = anyUnreadable
 		? "unreadable"
 		: "complete";
 	let messagesExamined = 0;
@@ -2261,18 +2271,27 @@ export async function scanRollouts(
 					if (result === "parsed") {
 						parsedRollouts += 1;
 					}
-					// A "parsed" file was just examined; a "skipped" file may still carry
-					// examined counts forward from a prior run's cursor — either way, the
-					// cursor at this key (fresh or carried-forward) is the source of truth.
+					// A quiet-window defer leaves unread work, even with no saved gap.
+					// Keep stronger failure outcomes and the prior committed boundary.
+					if (result === "deferred" && scanOutcome === "complete") {
+						scanOutcome = "partial";
+					}
+					// A "parsed" file was just examined; a "skipped" or "deferred" file
+					// may carry examined counts from a prior run's committed cursor.
+					// The fresh or carried-forward cursor is the source of truth.
 					// A "duplicate" (mid-move-race second sighting of the same UUID this
 					// scan) contributes nothing: its cursor was already counted at first
 					// sighting, so adding it again would double-count the file.
-					if (result === "parsed" || result === "skipped") {
+					if (
+						result === "parsed" ||
+						result === "skipped" ||
+						result === "deferred"
+					) {
 						const gaps =
 							args.newFileCursors[cursorKeyForEntry(entry)]?.jsonl_gaps ?? [];
 						if (gaps.length > 0) {
 							scanOutcome = "parse_error";
-							if (result === "skipped") {
+							if (result !== "parsed") {
 								for (const gap of gaps)
 									await reportMalformedRolloutGap(args.requested, gap);
 							}
@@ -2476,6 +2495,29 @@ function resolveCodexDirs(): CodexDirs {
 		promptsDir: process.env.CODEX_PROMPTS_DIR || join(codexHome, "prompts"),
 		skillsDir: process.env.CODEX_SKILLS_DIR || join(codexHome, "skills"),
 	};
+}
+
+/**
+ * The known stores at the paths this run reads. An env override moves a store
+ * away from its default path, and a coverage verdict has to describe the path
+ * that was read, not a default path beside it: the default may exist while the
+ * override does not, and an absent store proves no emptiness.
+ */
+function storesAtReadPaths(dirs: CodexDirs): KnownLocalStore[] {
+	const readPaths: Record<string, string> = {
+		prompts: dirs.promptsDir,
+		rules: dirs.rulesDir,
+		sessions: dirs.baseDir,
+		sessions_archive: dirs.archiveBaseDir,
+		skills: dirs.skillsDir,
+		state_db: dirs.stateDbPath,
+	};
+	return CODEX_KNOWN_LOCAL_STORES.map((store) => {
+		const readPath = readPaths[store.store];
+		return readPath === undefined
+			? store
+			: { ...store, relativePath: relative(dirs.codexHome, readPath) };
+	});
 }
 
 function readFileMtimes(startMsg: StartMessage): Record<string, number> {
@@ -2942,6 +2984,9 @@ async function resolveGatedInventoryRecords(
 		return inventory.recordsByStream.get(stream) ?? [];
 	}
 	return await listDirectoryInventory({
+		requireExisting: inventory.coverage.some(
+			(record) => record.store === "shell_snapshots" && record.status !== "missing",
+		),
 		tool: "codex",
 		sourceHome: codexHome,
 		relativeRoot: "shell-snapshots",
@@ -3025,6 +3070,7 @@ function makeCodexEmitRecord(deps: {
 // ─── main ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+	stateDbQueryOutcome = "not_attempted";
 	const startMsg = await readStartMessage();
 	if (startMsg.type !== "START") {
 		return fail("Expected START");
@@ -3033,6 +3079,19 @@ async function main(): Promise<void> {
 	const requested = buildRequestedMap(startMsg);
 	if (!requested.size) {
 		return fail("START.scope.streams is required");
+	}
+	const collectionScope = startMsg.collection_scope;
+	if (
+		startMsg.run_coverage_version === 1 &&
+		typeof collectionScope === "string" &&
+		collectionScope.trim().length > 0
+	) {
+		runCoverage = createRunCoverage(
+			Object.fromEntries(
+				manifest.streams.map((stream) => [stream.name, stream.coverage_stores]),
+			),
+			collectionScope,
+		);
 	}
 
 	// The artifact stores live with the collector runner that spawned this
@@ -3116,7 +3175,7 @@ async function collect({
 	const inventory = await buildLocalSourceInventory(
 		"codex",
 		dirs.codexHome,
-		CODEX_KNOWN_LOCAL_STORES,
+		storesAtReadPaths(dirs),
 	);
 	await emit({
 		type: "PROGRESS",
@@ -3265,7 +3324,92 @@ async function collect({
 	}
 	await waitForEmitDrain();
 
-	emit({ type: "DONE", status: "succeeded", records_emitted: counters.total });
+	for (const record of inventory.coverage) {
+		if (record.stream && requested.has(record.stream)) {
+			runCoverage?.report(
+				record.stream,
+				record.store,
+				record.store === "state_db" && record.status === "collected"
+					? stateDbQueryOutcome === "complete"
+						? "collected"
+						: stateDbQueryOutcome === "failed"
+							? "failed"
+							: "partial"
+					: record.status === "collected" || record.status === "inventory_only"
+					? "collected"
+					: record.status === "missing"
+						? "unavailable"
+						: "partial",
+			);
+		}
+	}
+	for (const [stream, store] of [
+		["messages", "derived_messages"],
+		["function_calls", "derived_function_calls"],
+	] as const) {
+		if (requested.has(stream))
+			runCoverage?.report(
+				stream,
+				store,
+				rolloutScan.scanOutcome === "complete"
+					? "collected"
+					: rolloutScan.scanOutcome === "partial"
+						? "partial"
+						: rolloutScan.scanOutcome === "missing"
+							? "unavailable"
+							: "failed",
+			);
+	}
+	if (
+		requested.has("sessions") &&
+		rolloutScan.scanOutcome !== "complete" &&
+		rolloutScan.scanOutcome !== "missing"
+	) {
+		for (const store of ["sessions", "sessions_archive"] as const) {
+			if (
+				inventory.coverage.some(
+					(record) => record.store === store && record.status === "collected",
+				)
+			) {
+				runCoverage?.report(
+					"sessions",
+					store,
+					rolloutScan.scanOutcome === "partial" ? "partial" : "failed",
+				);
+			}
+		}
+	}
+	if (scopeBoundsEnumeration(enumerationScope)) {
+		for (const stream of ["messages", "function_calls"]) {
+			if (requested.has(stream)) runCoverage?.scoped(stream);
+		}
+	}
+	if (captureLedger.size > 0 || captureLedger.pendingUpload > 0) {
+		for (const store of [
+			"sessions",
+			"sessions_archive",
+			"derived_messages",
+			"derived_function_calls",
+		]) {
+			for (const stream of ["sessions", "messages", "function_calls"]) {
+				if (
+					manifest.streams
+						.find((item) => item.name === stream)
+						?.coverage_stores.includes(store)
+				) {
+					runCoverage?.report(stream, store, "partial");
+				}
+			}
+		}
+	}
+	emit({
+		type: "DONE",
+		status: "succeeded",
+		records_emitted: counters.total,
+		...(runCoverage
+			? { coverage: runCoverage.done([...requested.keys()]) }
+			: {}),
+	} as EmittedMessage);
 	flushAndExit(0);
 }
 

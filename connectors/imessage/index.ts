@@ -84,6 +84,7 @@ import {
 	type ReferenceBlobRef,
 	runtimeBlobUploadAvailable,
 } from "../../packages/polyfill-connectors/src/reference-blob-uploader.ts";
+import manifest from "./manifest.json" with { type: "json" };
 import { validateRecord } from "./schemas.ts";
 
 interface MessageRow {
@@ -677,18 +678,19 @@ async function emitAttachmentRows({
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	maxBytes: number;
 	progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
-}): Promise<number> {
+}): Promise<{ emitted: number; fullyHydrated: boolean }> {
 	if (
 		!(
 			tableExists(db, "attachment") &&
 			tableExists(db, "message_attachment_join")
 		)
 	) {
-		return 0;
+		return { emitted: 0, fullyHydrated: false };
 	}
 	const hasChatJoin = tableExists(db, "chat_message_join");
 	const rows = queryAttachmentRows(db, hasChatJoin);
 	let emitted = 0;
+	let fullyHydrated = true;
 	for (const r of rows) {
 		const filename = r.filename
 			? basename(r.filename)
@@ -702,6 +704,7 @@ async function emitAttachmentRows({
 			maxBytes,
 			attachmentsRoot,
 		);
+		if (result.hydrationStatus !== "hydrated") fullyHydrated = false;
 
 		await emitRecord("attachments", {
 			id,
@@ -740,7 +743,7 @@ async function emitAttachmentRows({
 			stream: "attachments",
 		});
 	}
-	return emitted;
+	return { emitted, fullyHydrated };
 }
 
 // Guarded so importing this module (e.g. from a unit test that only wants
@@ -750,8 +753,18 @@ async function emitAttachmentRows({
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "imessage",
+		coverageStores: Object.fromEntries(
+			manifest.streams.map((stream) => [stream.name, stream.coverage_stores]),
+		),
 		validateRecord,
-		async collect({ state, requested, emit, emitRecord, progress }) {
+		async collect({
+			state,
+			requested,
+			emit,
+			emitRecord,
+			progress,
+			reportCoverage,
+		}) {
 			const dbPath =
 				process.env.IMESSAGE_DB_PATH ||
 				join(homedir(), "Library/Messages/chat.db");
@@ -810,6 +823,7 @@ if (isMainModule(import.meta.url)) {
 					stream: "messages",
 					cursor: { last_apple_date: latestApple },
 				});
+				reportCoverage?.("messages", "chat_db", "collected");
 			}
 
 			if (requested.has("participants")) {
@@ -835,6 +849,7 @@ if (isMainModule(import.meta.url)) {
 					stream: "participants",
 					cursor: { synced_at: new Date().toISOString() },
 				});
+				reportCoverage?.("participants", "chat_db", "collected");
 			}
 
 			if (requested.has("attachments")) {
@@ -850,7 +865,7 @@ if (isMainModule(import.meta.url)) {
 				const hasAttachmentTables =
 					tableExists(db, "attachment") &&
 					tableExists(db, "message_attachment_join");
-				const emitted = await emitAttachmentRows({
+				const { emitted, fullyHydrated } = await emitAttachmentRows({
 					attachmentsRoot,
 					db,
 					emitRecord,
@@ -871,6 +886,12 @@ if (isMainModule(import.meta.url)) {
 					stream: "attachments",
 					cursor: { synced_at: new Date().toISOString() },
 				});
+				reportCoverage?.("attachments", "chat_db", "collected");
+				reportCoverage?.(
+					"attachments",
+					"attachment_files",
+					fullyHydrated ? "collected" : "partial",
+				);
 			}
 		},
 	});

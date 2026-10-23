@@ -698,7 +698,8 @@ async function statKind(path: string): Promise<{
 			sizeBytes: st.isFile() ? st.size : null,
 			type: inventoryEntryType(st),
 		};
-	} catch {
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
 		return {
 			exists: false,
 			mtimeEpoch: null,
@@ -778,6 +779,7 @@ export async function buildLocalSourceInventory(
 }
 
 export async function listDirectoryInventory(input: {
+	requireExisting?: boolean;
 	reason: string;
 	relativeRoot: string;
 	sourceHome: string;
@@ -789,7 +791,12 @@ export async function listDirectoryInventory(input: {
 	let entries: Dirent[];
 	try {
 		entries = await readdir(root, { withFileTypes: true });
-	} catch {
+	} catch (error) {
+		if (
+			(error as NodeJS.ErrnoException)?.code !== "ENOENT" ||
+			input.requireExisting
+		)
+			throw error;
 		return [];
 	}
 
@@ -800,12 +807,7 @@ export async function listDirectoryInventory(input: {
 		}
 		const rel = `${input.relativeRoot}/${ent.name}`;
 		const full = join(root, ent.name);
-		let st: ReturnType<typeof statSync>;
-		try {
-			st = statSync(full);
-		} catch {
-			continue;
-		}
+		const st = statSync(full);
 		records.push({
 			id: `${input.store}:${pathHash(input.tool, rel)}`,
 			store: input.store,

@@ -1,5 +1,7 @@
 {
 	"protocol_version": "0.1.0",
+	"run_coverage": { "version": 1 },
+	"protocol_capabilities": ["RUN_COVERAGE_V1"],
 	"connector_id": "https://registry.pdpp.dev/connectors/apple-photos",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/apple_photos",
@@ -9,7 +11,7 @@
 	},
 	"connector_key": "apple-photos",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-	"version": "0.1.22",
+	"version": "0.1.23",
 	"display_name": "Apple Photos",
 	"brand": {
 		"icon": "icon.svg",
@@ -142,9 +144,10 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["export_dir"],
 			"freshness_strategy": "manual_as_of"
-			}
-		],
+		}
+	],
 	"reason_display_messages": {
 		"export_not_found": "We couldn't find an export to import"
 	}

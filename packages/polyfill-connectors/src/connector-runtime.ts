@@ -52,6 +52,7 @@ import { type AuthConfig, resolveAuth } from "@pdpp/connector-protocol/auth";
 import type {
 	AssistanceCompletionStatus,
 	AssistanceRequest,
+	StartMessage as BaseStartMessage,
 	DetailCoverageMessage,
 	DetailGapMessage,
 	DetailGapNetworkPressure,
@@ -63,7 +64,6 @@ import type {
 	ProgressExtra,
 	RecordData,
 	ShapeAnomaly,
-	StartMessage,
 	StreamScope,
 	ValidateRecord,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
@@ -94,6 +94,11 @@ import {
 	observationBasisOf,
 	setObservationSink,
 } from "./observation.ts";
+import {
+	createRunCoverage,
+	type RunCoverageStatus,
+	type RunCoverageVerdict,
+} from "./run-coverage.ts";
 import { trackRunOwnedPages } from "./run-owned-pages.ts";
 import {
 	DEFAULT_RETRYABLE_PATTERN,
@@ -147,10 +152,15 @@ export type {
 	ProviderBudgetProgress,
 	RecordData,
 	ShapeAnomaly,
-	StartMessage,
 	StreamScope,
 	ValidateRecord,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
+
+/** Optional store-evidence extension; the base protocol stays compatible. */
+export interface StartMessage extends BaseStartMessage {
+	collection_scope?: string;
+	run_coverage_version?: 1;
+}
 
 // The session-establishment flow and the typed terminal-error primitive live
 // in `session-establish.ts` / `terminal-error.ts` (this runtime is their
@@ -235,6 +245,14 @@ interface BaseCollectContext {
 	isRecordSelected?: (stream: string, data: RecordData) => boolean;
 	emittedAt: string;
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
+	/** Explicit result for one signed manifest coverage store. */
+	reportCoverage?: (
+		stream: string,
+		store: string,
+		status: RunCoverageStatus,
+	) => void;
+	/** Declare that this stream enforced the START boundary during enumeration. */
+	reportCoverageScoped?: (stream: string) => void;
 	/**
 	 * SLVP-ideal §4.3: when true, the connector MUST run its gap-recovery pass
 	 * then return before any forward walk / list-phase fetch. Threaded from the
@@ -327,6 +345,8 @@ export type NormalizeTerminalError = (
 
 /** Fields shared by browser and non-browser configs. */
 interface BaseRunConnectorConfig {
+	/** Store inventory from the signed manifest, by stream; no coverage_stores maps to undefined. */
+	coverageStores?: Readonly<Record<string, readonly string[] | undefined>>;
 	auth?: AuthConfig;
 	/**
 	 * Opt in to treating a DECLINED `credentials` interaction as "no stored
@@ -353,7 +373,10 @@ interface BaseRunConnectorConfig {
 	 * `DONE.error.basis`. Without it the same facts go to standard error as
 	 * diagnostic lines and never reach the wire.
 	 */
-	protocolCapabilities?: readonly (typeof OBSERVATION_CAPABILITY)[];
+	protocolCapabilities?: readonly (
+		| typeof OBSERVATION_CAPABILITY
+		| "RUN_COVERAGE_V1"
+	)[];
 	/**
 	 * Optional post-commit hook. Runs ONLY on a successful run, AFTER the
 	 * runtime has acknowledged durable ingest (stdin EOF) and immediately
@@ -958,7 +981,9 @@ export function runConnector(config: RunConnectorConfig): void {
 	const rl = createInterface({ input: process.stdin, terminal: false });
 
 	// Wraps stdout write with backpressure. RECORD messages auto-captured.
+	let runCoverage: ReturnType<typeof createRunCoverage> | null = null;
 	const emit = (msg: EmittedMessage): Promise<void> => {
+		if (msg.type === "SKIP_RESULT") runCoverage?.skip(msg.stream);
 		if (capture && msg.type === "RECORD") {
 			capture.recordRecord(msg);
 		}
@@ -1297,6 +1322,22 @@ export function runConnector(config: RunConnectorConfig): void {
 
 	async function run(): Promise<void> {
 		const startMsg = await parseStart(readStart);
+		const collectionScope = startMsg.collection_scope;
+		const coverageRequested =
+			startMsg.run_coverage_version === 1 &&
+			typeof collectionScope === "string" &&
+			collectionScope.trim().length > 0;
+		if (
+			config.protocolCapabilities?.includes("RUN_COVERAGE_V1") &&
+			!coverageRequested
+		) {
+			throw new TerminalError(
+				"RUN_COVERAGE_V1 requires version 1 and collection_scope",
+			);
+		}
+		if (config.coverageStores && coverageRequested) {
+			runCoverage = createRunCoverage(config.coverageStores, collectionScope);
+		}
 		const scopeRequested = buildRequested(startMsg);
 		// §5.1: a bounded stream with no timestamp consent field cannot apply
 		// the bound. Report it and withhold it from collection rather than
@@ -1382,6 +1423,9 @@ export function runConnector(config: RunConnectorConfig): void {
 				: emit(msg);
 
 		const baseCtx: BaseCollectContext = {
+			reportCoverage: (stream, store, status) =>
+				runCoverage?.report(stream, store, status),
+			reportCoverageScoped: (stream) => runCoverage?.scoped(stream),
 			scope: startMsg.scope,
 			state: startMsg.state ?? {},
 			requested,
@@ -1452,7 +1496,12 @@ export function runConnector(config: RunConnectorConfig): void {
 			);
 			return;
 		}
-		await finalizeRun(emitRecord.counters, progress, emit);
+		await finalizeRun(
+			emitRecord.counters,
+			progress,
+			emit,
+			runCoverage?.done([...scopeRequested.keys()]),
+		);
 		flushAndExit(0);
 	}
 }
@@ -2595,6 +2644,7 @@ async function finalizeRun(
 	},
 	progress: BaseCollectContext["progress"],
 	emit: (msg: EmittedMessage) => Promise<void>,
+	coverage?: RunCoverageVerdict,
 ): Promise<void> {
 	if (counters.totalSkipped > 0) {
 		connectorDiagnostic("runtime", "shape_check_skipped", {
@@ -2617,7 +2667,8 @@ async function finalizeRun(
 		type: "DONE",
 		status: "succeeded",
 		records_emitted: counters.totalEmitted,
-	});
+		...(coverage ? { coverage } : {}),
+	} as EmittedMessage);
 }
 
 // ─── Browser-mode helpers ──────────────────────────────────────────────

@@ -195,6 +195,8 @@ export interface ConnectorSubprocessOptions {
 	 *  `rawStdout` must keep the default (true). */
 	retainRawStdout?: boolean;
 	start: {
+		run_coverage_version?: 1;
+		collection_scope?: string;
 		/** Mirrors the real runtime's START `collection_mode` field, so a test can
 		 *  exercise the owner-triggered full-refresh bypass end to end rather than
 		 *  reaching past the wire to construct a CollectContext by hand. */

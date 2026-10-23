@@ -1,5 +1,7 @@
 {
 	"protocol_version": "0.1.0",
+	"run_coverage": { "version": 1 },
+	"protocol_capabilities": ["RUN_COVERAGE_V1"],
 	"connector_id": "https://registry.pdpp.dev/connectors/google-takeout",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/google_takeout",
@@ -9,7 +11,7 @@
 	},
 	"connector_key": "google-takeout",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-	"version": "0.1.22",
+	"version": "0.1.23",
 	"display_name": "Google Takeout",
 	"runtime_requirements": {
 		"bindings": {
@@ -42,6 +44,7 @@
 	"streams": [
 		{
 			"name": "location_history",
+			"required": true,
 			"description": "Location history from Google Maps Timeline.",
 			"display": {
 				"label": "Your Google location history",
@@ -98,10 +101,12 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["location_history"],
 			"freshness_strategy": "manual_as_of"
 		},
 		{
 			"name": "youtube_watch_history",
+			"required": true,
 			"description": "YouTube watch history.",
 			"display": {
 				"label": "Your YouTube watch history",
@@ -157,10 +162,12 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["youtube_watch_history"],
 			"freshness_strategy": "manual_as_of"
 		},
 		{
 			"name": "search_history",
+			"required": true,
 			"description": "Google search queries from My Activity.",
 			"display": {
 				"label": "Your Google search history",
@@ -210,6 +217,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["search_history"],
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -307,9 +315,10 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["photos"],
 			"freshness_strategy": "manual_as_of"
-			}
-		],
+		}
+	],
 	"reason_display_messages": {
 		"directory_read_failed": "We couldn't read a folder in your Google Takeout export",
 		"history_not_found": "We couldn't find any history to import",

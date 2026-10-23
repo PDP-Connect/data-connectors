@@ -1,5 +1,7 @@
 {
 	"protocol_version": "0.1.0",
+	"run_coverage": { "version": 1 },
+	"protocol_capabilities": ["RUN_COVERAGE_V1"],
 	"connector_id": "https://registry.pdpp.dev/connectors/codex",
 	"source": {
 		"id": "https://registry.pdpp.dev/sources/codex",
@@ -9,7 +11,7 @@
 	},
 	"connector_key": "codex",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-	"version": "0.3.15",
+	"version": "0.3.16",
 	"display_name": "OpenAI Codex CLI",
 	"brand": {
 		"icon": "icon.svg",
@@ -182,6 +184,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["sessions", "sessions_archive", "state_db"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -254,6 +257,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["derived_messages"],
 			"state_stream": "sessions",
 			"freshness_strategy": "device_heartbeat"
 		},
@@ -329,6 +333,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["derived_function_calls"],
 			"state_stream": "sessions",
 			"freshness_strategy": "device_heartbeat"
 		},
@@ -387,6 +392,7 @@
 				}
 			},
 			"coverage_strategy": "full_inventory",
+			"coverage_stores": ["rules"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -444,6 +450,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["prompts"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -502,6 +509,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["skills"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -564,6 +572,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["history"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -626,6 +635,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["session_index"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -688,6 +698,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["shell_snapshots"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -750,6 +761,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["config"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -812,6 +824,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["cache"],
 			"freshness_strategy": "device_heartbeat"
 		}
 	],
