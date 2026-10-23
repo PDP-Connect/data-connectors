@@ -22,6 +22,7 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"icloud_notes",
 		"linkedin",
 		"meta",
+		"muse",
 		"oura_browser",
 		"spotify",
 		"strava_browser",
@@ -29,7 +30,7 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"x_browser",
 		"youtube",
 	]);
-	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "spotify", "youtube", "linkedin", "tiktok"]) {
+	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -201,6 +202,10 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
 		meta: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
+		muse: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},

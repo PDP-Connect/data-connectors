@@ -56,6 +56,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["linkedin", "linkedin"],
     ["loom", "loom"],
     ["meta", "meta"],
+    ["muse", "muse"],
     ["netflix_export", "netflix-export"],
     ["notion", "notion"],
     ["oura", "oura"],

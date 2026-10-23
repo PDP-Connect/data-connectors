@@ -1,0 +1,26 @@
+{
+  "goals": [
+    {
+      "goal_id": "goal_516bb0ad139a",
+      "source": "assistant_tracking",
+      "slug": "Synthetic slug 1 lorem",
+      "title": "Synthetic title 2 lorem",
+      "status": "active",
+      "summary": "Synthetic summary 3 lorem lorem lorem lorem lorem lorem",
+      "description": "Synthetic description 4 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "momentum": "",
+      "momentum_status": "on_track",
+      "created_at": "2026-01-06T10:05:35Z",
+      "updated_at": "2026-01-07T10:06:42Z",
+      "last_activity_at": "2026-01-08T10:07:49Z",
+      "pushable": true,
+      "emoji": "Synthetic emoji 8",
+      "sort_order": 0,
+      "is_thread": false
+    }
+  ],
+  "warnings": [],
+  "pagination": {
+    "has_next_page": false
+  }
+}
