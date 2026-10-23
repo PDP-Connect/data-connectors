@@ -9,7 +9,7 @@
 	},
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.37",
+	"version": "0.1.38",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",
@@ -487,7 +487,7 @@
 		}
 	},
 	"reason_display_messages": {
-		"inventory_not_proven_complete": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
+		"stream_collection_failed": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
 		"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 		"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 		"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",

@@ -43,7 +43,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { BrowserContext, Page } from "playwright";
 import type { BodyResponseDiagnostics } from "../../packages/polyfill-connectors/src/browser-artifact-response.ts";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
@@ -55,6 +55,7 @@ import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixt
 import {
 	type EmittedRecord,
 	makeRecordingEmit,
+	skipPoliteDelays,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	buildIndexRows,
@@ -92,6 +93,10 @@ import type {
 	HydrationResultSuccess,
 	IndexRow,
 } from "./types.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 interface RecordingHarness {
 	deps: EmitDeps;

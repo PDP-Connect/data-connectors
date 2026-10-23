@@ -13,21 +13,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-	bestUsdaMatch,
-	cleanProductName,
 	hasOrderSearchEmptyState,
 	isCancelledOrderDetail,
-	mapUsdaNutrients,
+	parseAmazonProductNutritionDom,
 	parseAmazonProfileDom,
 	parseDollarsToCents,
 	parseOrderDateIso,
 	parseOrderDetailDom,
 	parseOrderSearchPageDom,
-	parseWholeFoodsProductPageDom,
 	parseWholeFoodsSearchResultDom,
-	scoreUsdaMatch,
 } from "./parsers.ts";
-import type { UsdaFood } from "./types.ts";
+import { parseWholeFoodsProductPageDom } from "./test-support.ts";
 
 // ─── Profile ────────────────────────────────────────────────────────────
 
@@ -253,101 +249,16 @@ test("parseDollarsToCents returns null for absent input", () => {
 	assert.equal(parseDollarsToCents(undefined), null);
 });
 
-// ─── Nutrition: name cleaning + USDA fuzzy match ──────────────────────────
-
-test("cleanProductName strips brand prefix and trailing size", () => {
-	assert.equal(
-		cleanProductName("365 by Whole Foods Market Organic Bananas, 1 lb"),
-		"Bananas",
-	);
-});
-
-function usdaFood(overrides: Partial<UsdaFood> = {}): UsdaFood {
-	return {
-		brandName: null,
-		brandOwner: null,
-		description: "Bananas, raw",
-		fdcId: 1,
-		foodNutrients: [],
-		gtinUpc: null,
-		servingSize: null,
-		servingSizeUnit: null,
-		...overrides,
-	};
-}
-
-test("scoreUsdaMatch scores full word overlap as 1", () => {
-	const score = scoreUsdaMatch(
-		"bananas raw",
-		usdaFood({ description: "Bananas, raw" }),
-	);
-	assert.equal(score, 1);
-});
-
-test("scoreUsdaMatch scores no overlap as 0", () => {
-	const score = scoreUsdaMatch(
-		"bananas raw",
-		usdaFood({ description: "Chicken breast" }),
-	);
-	assert.equal(score, 0);
-});
-
-test("bestUsdaMatch returns null when nothing clears the minimum score", () => {
-	const foods = [usdaFood({ description: "Chicken breast" })];
-	assert.equal(bestUsdaMatch("bananas raw", foods, 0.4), null);
-});
-
-test("bestUsdaMatch returns the highest-scoring food above the threshold", () => {
-	const foods = [
-		usdaFood({ description: "Chicken breast", fdcId: 1 }),
-		usdaFood({ description: "Bananas, raw", fdcId: 2 }),
-	];
-	const match = bestUsdaMatch("bananas raw", foods, 0.4);
-	assert.equal(match?.fdcId, 2);
-});
-
-test("mapUsdaNutrients scales per-100g nutrients to the food's own serving size", () => {
-	const food = usdaFood({
-		foodNutrients: [
-			{ nutrientId: 1008, value: 89 }, // calories
-			{ nutrientId: 1003, value: 1.1 }, // protein
-		],
-		gtinUpc: "012345678905",
-		servingSize: 118,
-		servingSizeUnit: "g",
-	});
-	const facts = mapUsdaNutrients(food, "upc");
-	assert.equal(facts.confidence, "high");
-	assert.equal(facts.source, "usda_fdc");
-	assert.equal(facts.servingSize, "118g");
-	assert.equal(facts.calories, Math.round(89 * 1.18 * 100) / 100);
-	assert.equal(facts.upc, "012345678905");
-});
-
-test("mapUsdaNutrients reports medium confidence for a text-matched result", () => {
-	const facts = mapUsdaNutrients(usdaFood(), "text");
-	assert.equal(facts.confidence, "medium");
-});
-
-test("mapUsdaNutrients falls back to per-100g scale when servingSize is absent", () => {
-	const food = usdaFood({
-		foodNutrients: [{ nutrientId: 1008, value: 89 }],
-	});
-	const facts = mapUsdaNutrients(food, "text");
-	assert.equal(facts.calories, 89);
-	assert.equal(facts.servingSize, null);
-});
-
 // ─── Nutrition: Whole Foods product page ──────────────────────────────────
 
-test("parseWholeFoodsProductPageDom prefers JSON-LD NutritionInformation when present", () => {
+test("parseWholeFoodsProductPageDom preserves legacy JSON-LD provenance", () => {
 	const html = `<html><body>
     <script type="application/ld+json">
       {"@type":"Product","nutrition":{"@type":"NutritionInformation","calories":"105 calories","proteinContent":"1.3g","servingSize":"1 medium (118g)"}}
     </script>
   </body></html>`;
 	const facts = parseWholeFoodsProductPageDom(html);
-	assert.equal(facts?.source, "wholefoods_product_page");
+	assert.equal(facts?.source, "wholefoods_structured_data");
 	assert.equal(facts?.confidence, "high");
 	assert.equal(facts?.calories, 105);
 	assert.equal(facts?.proteinG, 1.3);
@@ -383,7 +294,7 @@ test("parseWholeFoodsSearchResultDom extracts the first product tile link", () =
 	const html = `<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>`;
 	assert.equal(
 		parseWholeFoodsSearchResultDom(html),
-		"/product/organic-bananas",
+		"https://www.wholefoodsmarket.com/product/organic-bananas",
 	);
 });
 
@@ -496,4 +407,339 @@ test("a hidden empty-orders element is not an empty state", () => {
 		hasOrderSearchEmptyState('<div class="no-orders">No orders</div>'),
 		true,
 	);
+});
+
+// ─── Nutrition: identity binding, units and basis ─────────────────────────
+
+const LD_NUTRITION_95 =
+	'"nutrition":{"@type":"NutritionInformation","calories":"95"}';
+
+function ld(json: string): string {
+	return `<html><head><script type="application/ld+json">${json}</script></head><body></body></html>`;
+}
+
+const ldWithHeading = (json: string, heading: string) =>
+	`<html><head><script type="application/ld+json">${json}</script></head><body><h1>${heading}</h1></body></html>`;
+
+test("JSON-LD nutrition belongs to the Product node that holds it, not to the first named node", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ldWithHeading(
+			`[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears",${LD_NUTRITION_95}}]`,
+			"Pears",
+		),
+	);
+	assert.equal(facts?.calories, 95);
+	assert.equal(facts?.productName, "Pears");
+	assert.equal(facts?.upc, null);
+});
+
+test("several Product nodes with no tie to the page have no main subject", () => {
+	assert.equal(
+		parseWholeFoodsProductPageDom(
+			ld(
+				`[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears",${LD_NUTRITION_95}}]`,
+			),
+		),
+		null,
+	);
+});
+
+test("JSON-LD @graph keeps nutrition, name and gtin from one Product node", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ldWithHeading(
+			`{"@graph":[{"@type":"Product","name":"Apples","gtin12":"111111111111"},{"@type":"Product","name":"Pears","gtin13":"2222222222222",${LD_NUTRITION_95}}]}`,
+			"Pears",
+		),
+	);
+	assert.equal(facts?.productName, "Pears");
+	assert.equal(facts?.upc, "2222222222222");
+});
+
+test("a Product without a GTIN has a null UPC, never the string 'undefined'", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ld(`{"@type":"Product","name":"Apples",${LD_NUTRITION_95}}`),
+	);
+	assert.equal(facts?.upc, null);
+});
+
+test("GTINs are validated and normalized to digits", () => {
+	const upcOf = (gtin: string) =>
+		parseWholeFoodsProductPageDom(
+			ld(
+				`{"@type":"Product","name":"Apples","gtin12":"${gtin}",${LD_NUTRITION_95}}`,
+			),
+		)?.upc;
+	assert.equal(upcOf("0-12345-67890-5"), "012345678905");
+	assert.equal(upcOf("not-a-code"), null);
+	assert.equal(upcOf("12345"), null);
+});
+
+test("structured nutrition units are normalized to the field's unit", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ld(
+			'{"@type":"Product","name":"Apples","nutrition":{"@type":"NutritionInformation","calories":"95 kcal","sodiumContent":"0.5 g","fatContent":"500 mg","vitaminDContent":"5 µg","potassiumContent":"0.1 g","proteinContent":"2"}}',
+		),
+	);
+	assert.equal(facts?.calories, 95);
+	assert.equal(facts?.sodiumMg, 500);
+	assert.equal(facts?.fatG, 0.5);
+	assert.equal(facts?.vitaminDMcg, 5);
+	assert.equal(facts?.potassiumMg, 100);
+	assert.equal(facts?.proteinG, 2);
+});
+
+test("structured nutrition with an unsupported unit is withheld, not relabelled", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		ld(
+			'{"@type":"Product","name":"Apples","nutrition":{"@type":"NutritionInformation","calories":"398 kJ","sodiumContent":"3 oz","fatContent":"2 g"}}',
+		),
+	);
+	assert.equal(facts?.calories, null);
+	assert.equal(facts?.sodiumMg, null);
+	assert.equal(facts?.fatG, 2);
+});
+
+test("text-panel units are normalized to the field's unit", () => {
+	const facts = parseWholeFoodsProductPageDom(`<html><body><div>
+      <h3>Nutrition Facts</h3>
+      <div>Serving size 1 cup
+      Calories 105
+      Total Fat 500 mg
+      Sodium 0.5 g
+      Protein 1.3g
+      </div></div></body></html>`);
+	assert.equal(facts?.fatG, 0.5);
+	assert.equal(facts?.sodiumMg, 500);
+	assert.equal(facts?.proteinG, 1.3);
+});
+
+test("Amazon panel units are normalized and a non-GTIN id is not a UPC", () => {
+	const facts = parseAmazonProductNutritionDom(`<html><body>
+		<div id="detailBullets_feature_div"><li>ASIN: 0123456789</li></div>
+		<div id="nic-nutrition-facts">Nutrition Facts Calories 150 Sodium 0.5 g Total Fat 5g</div>
+	</body></html>`);
+	assert.equal(facts?.sodiumMg, 500);
+	assert.equal(facts?.upc, null);
+});
+
+// ─── Round 2: panel rows, stated core rows ────────────────────────────────
+
+// Amazon renders the panel with no separators ("Total Fat12g20%Sodium480mg…").
+// Legacy keeps Calories outside #nic-nutrition-facts, in the enclosing
+// expander, and reads the panel from that wider scope.
+const RUN_TOGETHER_ROWS =
+	"10%Total Fat8g25%Saturated Fat5gTrans Fat0gCholesterol5mg2%Sodium160mg7%Total Carbohydrate37g13%Dietary Fiber4g14%Sugars11gProtein3gVitamin D2mcg10%";
+
+test("Amazon run-together panel: every row keeps its whole value", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories250% Daily Value*15%Total Fat12g20%Sodium480mg21%Total Carbohydrate31g11%Sugars14gProtein22gVitamin D2mcg10%</div></body></html>`,
+	);
+	assert.equal(facts?.calories, 250);
+	assert.equal(facts?.fatG, 12);
+	assert.equal(facts?.sodiumMg, 480);
+	assert.equal(facts?.carbsG, 31);
+	assert.equal(facts?.sugarG, 14);
+	assert.equal(facts?.proteinG, 22);
+	assert.equal(facts?.vitaminDMcg, 2);
+});
+
+test("Amazon run-together panel: a row before the next label is not truncated", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content">Calories150% Daily Value*<div id="nic-nutrition-facts">${RUN_TOGETHER_ROWS}</div></div></body></html>`,
+	);
+	assert.equal(facts?.saturatedFatG, 5);
+	assert.equal(facts?.transFatG, 0);
+	assert.equal(facts?.cholesterolMg, 5);
+	assert.equal(facts?.fiberG, 4);
+	assert.equal(facts?.proteinG, 3);
+});
+
+test("Amazon panel: Calories outside #nic-nutrition-facts are read from the enclosing expander", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content">Serving size 1 cup (240g) Calories150% Daily Value*<div id="nic-nutrition-facts">${RUN_TOGETHER_ROWS}</div></div></body></html>`,
+	);
+	assert.equal(facts?.calories, 150);
+	assert.equal(facts?.fatG, 8);
+	assert.equal(facts?.carbsG, 37);
+	assert.deepEqual([...(facts?.coreStated ?? [])].sort(), [
+		"calories",
+		"carbs",
+		"fat",
+		"protein",
+	]);
+});
+
+test("rendered Whole Foods run-together panel keeps every row's whole value", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		`<html><body><div><h3>Nutrition Facts</h3><div>Calories250% Daily Value*15%Total Fat12g20%Sodium480mg21%Total Carbohydrate31g11%Sugars14gProtein22gVitamin D2mcg10%</div></div></body></html>`,
+	);
+	assert.equal(facts?.proteinG, 22);
+	assert.equal(facts?.sugarG, 14);
+	assert.equal(facts?.fatG, 12);
+});
+
+test("a '<1g' row is stated with no amount, so a core row is not lost and not invented", () => {
+	const amazon = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories 15 Total Fat 0g Sodium 140mg Total Carbohydrate 3g Sugars 2g Protein <1g</div></body></html>`,
+	);
+	assert.equal(amazon?.proteinG, null);
+	assert.ok(amazon?.coreStated.includes("protein"));
+	const structured = parseWholeFoodsProductPageDom(
+		ld(
+			'{"@type":"Product","name":"Apples","nutrition":{"@type":"NutritionInformation","calories":"95 calories","fatContent":"<1 g","carbohydrateContent":"25 g","proteinContent":"0.5 g"}}',
+		),
+	);
+	assert.equal(structured?.fatG, null);
+	assert.ok(structured?.coreStated.includes("fat"));
+});
+
+test("a core row that was never stated is not counted as stated", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories 15 Total Fat 0g Total Carbohydrate 3g</div></body></html>`,
+	);
+	assert.ok(!facts?.coreStated.includes("protein"));
+});
+
+test("panel percentages and IU are not read as mass amounts", () => {
+	const percent = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g Calcium 20% Iron 6% Vitamin D 10%</div></body></html>`,
+	);
+	assert.equal(percent?.calciumMg, null);
+	assert.equal(percent?.ironMg, null);
+	assert.equal(percent?.vitaminDMcg, null);
+	const iu = parseAmazonProductNutritionDom(
+		`<html><body><div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g Vitamin D 100 IU</div></body></html>`,
+	);
+	assert.equal(iu?.vitaminDMcg, 2.5);
+});
+
+// ─── Round 3: units, labels, scope and numbers ────────────────────────────
+
+const panelOf = (rows: string) =>
+	`<html><body><div id="nic-nutrition-facts">${rows}</div></body></html>`;
+
+test("a row marker or punctuation after the unit does not un-state the row", () => {
+	for (const fat of ["2g*", "2g†", "2g,", "2 g."]) {
+		const facts = parseAmazonProductNutritionDom(
+			panelOf(
+				`Calories 100 Total Fat ${fat} Total Carbohydrate 10g Protein 3g`,
+			),
+		);
+		assert.equal(facts?.fatG, 2, fat);
+		assert.ok(facts?.coreStated.includes("fat"), fat);
+	}
+});
+
+test("a label inside a longer word is not a row", () => {
+	const facts = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g Environ 5mg",
+		),
+	);
+	assert.equal(facts?.ironMg, null);
+	const glued = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories100% Daily Value*Total Fat2gTotal Carbohydrate10gProtein3gIron5mg",
+		),
+	);
+	assert.equal(glued?.ironMg, 5);
+	assert.equal(glued?.proteinG, 3);
+});
+
+test("ingredient text in the panel's container never supplies a row", () => {
+	const inline = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content"><div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g</div>Ingredients: water, salt, sodium 5mg</div></body></html>`,
+	);
+	assert.equal(inline?.sodiumMg, null);
+	const section = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content"><div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g</div><div id="ingredients_feature_div">Ingredients: sodium 5mg</div></div></body></html>`,
+	);
+	assert.equal(section?.sodiumMg, null);
+});
+
+test("a number with a thousands separator is read whole; an unclean number is not stated", () => {
+	const calories = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories 1,200 Total Fat 2g Total Carbohydrate 10g Protein 3g Sodium 1,200mg",
+		),
+	);
+	assert.equal(calories?.calories, 1200);
+	assert.equal(calories?.sodiumMg, 1200);
+	const unclean = parseAmazonProductNutritionDom(
+		panelOf("Calories 100 Total Fat 12,5g Total Carbohydrate 10g Protein 3g"),
+	);
+	assert.equal(unclean?.fatG, null);
+	assert.ok(!unclean?.coreStated.includes("fat"));
+});
+
+test("a glued unit followed by prose is still the unit", () => {
+	const facts = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3gIngredients",
+		),
+	);
+	assert.equal(facts?.proteinG, 3);
+});
+
+// ─── Round 4: panel ends and glued labels ─────────────────────────────────
+
+test("the footnotes under a panel never supply rows", () => {
+	const perGram = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories 100 Total Fat 2g Total Carbohydrate 10g Sodium 5mg *Percent Daily Values are based on a 2,000 calorie diet. Calories per gram: Fat 9 Carbohydrate 4 Protein 4",
+		),
+	);
+	assert.equal(perGram?.proteinG, null);
+	assert.ok(!perGram?.coreStated.includes("protein"));
+	const allowance = parseAmazonProductNutritionDom(
+		panelOf(
+			"Total Fat 2g Total Carbohydrate 10g Protein 3g *Percent Daily Values Calories: 2,000 2,500",
+		),
+	);
+	assert.ok(allowance === null || allowance.calories === null);
+});
+
+test("an Ingredients heading without a colon ends the panel", () => {
+	const facts = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories 100 Total Fat 2g Total Carbohydrate 10g IngredientsWater, whey protein 20g",
+		),
+	);
+	assert.equal(facts?.proteinG, null);
+	assert.ok(!facts?.coreStated.includes("protein"));
+});
+
+test("an Ingredients line before the panel neither cuts the panel nor supplies rows", () => {
+	const facts = parseAmazonProductNutritionDom(
+		`<html><body><div class="a-expander-content">Ingredients: whey protein 20g, sodium 5mg<div id="nic-nutrition-facts">Calories 100 Total Fat 2g Total Carbohydrate 10g Protein 3g</div></div></body></html>`,
+	);
+	assert.equal(facts?.calories, 100);
+	assert.equal(facts?.proteinG, 3);
+	assert.equal(facts?.sodiumMg, null);
+});
+
+test("the Whole Foods panel ends at its footnotes and starts at its heading", () => {
+	const facts = parseWholeFoodsProductPageDom(
+		`<html><body><div>Ingredients: whey protein 20g<h3>Nutrition Facts</h3><div>Calories 100 Total Fat 2g Total Carbohydrate 10g *Percent Daily Values Calories per gram: Fat 9 Carbohydrate 4 Protein 4</div></div></body></html>`,
+	);
+	assert.equal(facts?.proteinG, null);
+	assert.ok(!facts?.coreStated.includes("protein"));
+});
+
+test("plural and glued labels still state their rows", () => {
+	const plural = parseAmazonProductNutritionDom(
+		panelOf("Calories 100 Total Fat 2g Total Carbohydrates 10g Protein 3g"),
+	);
+	assert.equal(plural?.carbsG, 10);
+	const afterKcal = parseAmazonProductNutritionDom(
+		panelOf("150kcalTotal Fat3gTotal Carbohydrate10gProtein5g Calories 150"),
+	);
+	assert.equal(afterKcal?.fatG, 3);
+	const afterIu = parseAmazonProductNutritionDom(
+		panelOf(
+			"Calories 100 Total Fat 2g Total Carbohydrate 10g Vitamin D80IUProtein5g",
+		),
+	);
+	assert.equal(afterIu?.vitaminDMcg, 2);
+	assert.equal(afterIu?.proteinG, 5);
 });

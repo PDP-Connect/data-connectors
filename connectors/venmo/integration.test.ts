@@ -17,10 +17,13 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { Page } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import {
+	makeRecordingEmit,
+	skipPoliteDelays,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	collectAllStreams,
 	collectTransactions,
@@ -31,6 +34,10 @@ import {
 	type VenmoPageFetch,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 const OWNER_ID = "1111111111111111111";
 const EMITTED_AT = "2026-08-10T00:00:00.000Z";
