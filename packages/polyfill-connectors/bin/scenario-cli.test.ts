@@ -4442,6 +4442,10 @@ const SELECTION_SCHEMA_FIXTURE_BODY = `    const mode = process.env.SELECTION_SC
       schema = { type: "object", description: "x".repeat(60_000), properties: { account: { type: "string" } } };
     } else if (mode === "overbound") {
       schema = { type: "object", description: "y".repeat(70_000), properties: { account: { type: "string" } } };
+    } else if (mode === "proto-type-change") {
+      schema = JSON.parse(repeated ? '{"type":"object","properties":{"__proto__":{"type":"number"}}}' : '{"type":"object","properties":{"__proto__":{"type":"string"}}}');
+    } else if (mode === "proto-same") {
+      schema = JSON.parse('{"type":"object","properties":{"__proto__":{"type":"string"}}}');
     } else if (mode === "unsupported") {
       schema = { type: "string" };
       for (let depth = 0; depth < 100; depth += 1) {
@@ -4515,6 +4519,16 @@ test("scenario-record: selection schema distinguishes account options across run
 			mode: "unsupported",
 			expected: "insufficient-repeat-observations (0 repeated identities;",
 			why: "a schema past the canonical depth bound is unsupported",
+		},
+		{
+			mode: "proto-same",
+			expected: "differences-observed (1 repeated identities;",
+			why: "an identical own __proto__ schema key stays comparable",
+		},
+		{
+			mode: "proto-type-change",
+			expected: "insufficient-repeat-observations (0 repeated identities;",
+			why: "an own __proto__ schema key is data, so schemas that differ in its type must not pair",
 		},
 	];
 	try {
@@ -4919,6 +4933,219 @@ test("scenario-record: declared schema cycles, unresolved refs, and node overflo
 					`${key}: ${why}; stdout=${result.stdout}`,
 				);
 			}
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+/** A schema whose innermost node is `leaf`, `levels` property steps below the
+ *  root. 32 (the traversal's depth bound) puts `leaf` at the first depth the
+ *  traversal does not enter; 31 keeps it inside the traversal. */
+function boundarySchema(levels: number, leaf: unknown): string {
+	let schema: unknown = leaf;
+	for (let index = 0; index < levels; index += 1) {
+		schema = { properties: { [`n${String(index)}`]: schema } };
+	}
+	return JSON.stringify(schema);
+}
+
+test("scenario-record: unsupported keywords keep the metadata bounded, at the depth bound too", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-unsupported-keywords-"),
+	);
+	const base = { type: "object", properties: { id: { type: "string" } } };
+	const cases: Array<{
+		bounded: boolean;
+		key: string;
+		schema: string;
+		why: string;
+	}> = [
+		{
+			bounded: true,
+			key: "dependencies_fixture",
+			schema: JSON.stringify({
+				...base,
+				dependencies: { id: { properties: { extra: { type: "string" } } } },
+			}),
+			why: "a schema dependency can declare fields the collector cannot name",
+		},
+		{
+			bounded: true,
+			key: "unevaluated_fixture",
+			schema: JSON.stringify({
+				...base,
+				unevaluatedProperties: { properties: { extra: { type: "string" } } },
+			}),
+			why: "an object unevaluatedProperties can declare fields",
+		},
+		{
+			bounded: true,
+			key: "dynamic_ref_fixture",
+			schema: JSON.stringify({ ...base, $dynamicRef: "#meta" }),
+			why: "a dynamic ref resolves to targets the collector does not follow",
+		},
+		{
+			bounded: true,
+			key: "recursive_ref_fixture",
+			schema: JSON.stringify({ ...base, $recursiveRef: "#" }),
+			why: "a recursive ref resolves to targets the collector does not follow",
+		},
+		{
+			bounded: false,
+			key: "unevaluated_boolean_fixture",
+			schema: JSON.stringify({ ...base, unevaluatedProperties: false }),
+			why: "a boolean unevaluatedProperties adds no named fields",
+		},
+		{
+			bounded: true,
+			key: "boundary_one_of_fixture",
+			schema: boundarySchema(32, {
+				oneOf: [{ properties: { hidden: { type: "string" } } }],
+			}),
+			why: "an unsupported keyword at the depth bound must still mark the metadata bounded",
+		},
+		{
+			bounded: true,
+			key: "boundary_dependencies_fixture",
+			schema: boundarySchema(32, {
+				dependencies: { n0: { properties: { hidden: { type: "string" } } } },
+			}),
+			why: "a schema dependency at the depth bound must still mark the metadata bounded",
+		},
+		{
+			bounded: true,
+			key: "boundary_unevaluated_fixture",
+			schema: boundarySchema(32, {
+				unevaluatedProperties: { properties: { hidden: { type: "string" } } },
+			}),
+			why: "an object unevaluatedProperties at the depth bound must still mark the metadata bounded",
+		},
+		{
+			bounded: true,
+			key: "one_below_boundary_fixture",
+			schema: boundarySchema(31, {
+				oneOf: [{ properties: { hidden: { type: "string" } } }],
+			}),
+			why: "the same keyword one level shallower is traversed and marks the metadata bounded",
+		},
+		{
+			bounded: false,
+			key: "boundary_plain_leaf_fixture",
+			schema: boundarySchema(32, { type: "string" }),
+			why: "a plain leaf at the depth bound hides no declared fields",
+		},
+	];
+	const problems: string[] = [];
+	try {
+		for (const { bounded, key, schema, why } of cases) {
+			writeBoundObservationFixture({
+				collectBody: `    await emitRecord("items", { id: "same-stream-local-id" });`,
+				connectorKey: key,
+				schemaJson: schema,
+				tmpDir,
+			});
+			const result = runRecordCli(
+				[key, "--out", join(tmpDir, `${key}.scenario.json`)],
+				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			);
+			const isBounded = result.stdout.includes(
+				"Schema field metadata was bounded",
+			);
+			if (
+				result.code !== 0 ||
+				!result.stdout.includes("complete: true") ||
+				isBounded !== bounded
+			) {
+				problems.push(
+					`${key} (bounded expected ${String(bounded)}, got ${String(isBounded)}; exit ${String(result.code)}): ${why}`,
+				);
+			}
+		}
+		assert.deepEqual(problems, []);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+const NESTED_BASE_URI_SCHEMA = JSON.stringify({
+	type: "object",
+	properties: {
+		id: { type: "string" },
+		safe: { type: "string" },
+		a: {
+			$id: "urn:nested-a",
+			$defs: { d: { properties: { v: { type: "string" } } } },
+			properties: { b: { $ref: "#/$defs/d" } },
+		},
+		legacy: { id: "urn:legacy", properties: { w: { type: "string" } } },
+	},
+	$defs: { d: { properties: { root: { type: "string" } } } },
+});
+
+test("scenario-record: a nested base URI stops names beneath it and keeps safe siblings", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-nested-base-"),
+	);
+	const connectorKey = "nested_base_uri_fixture";
+	writeBoundObservationFixture({
+		collectBody: `    await emitRecord("items", {
+      id: "same-stream-local-id",
+      safe: repeated ? "safe-second" : "safe-first",
+      a: { b: { root: repeated ? "root-second" : "root-first", v: repeated ? "v-second" : "v-first" } },
+      legacy: { w: repeated ? "w-second" : "w-first" },
+    });`,
+		connectorKey,
+		schemaJson: NESTED_BASE_URI_SCHEMA,
+		tmpDir,
+	});
+	try {
+		const result = runRecordCli(
+			[
+				connectorKey,
+				"--runs",
+				"2",
+				"--out",
+				join(tmpDir, "nested.scenario.json"),
+			],
+			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+		);
+		assert.equal(result.code, 0, result.stderr);
+		assert.match(result.stdout, /complete: true/);
+		assert.match(
+			result.stdout,
+			/items: differences-observed \(1 repeated identities;/,
+		);
+		assert.equal(
+			result.stdout.includes("/safe (1)"),
+			true,
+			`a sibling outside the nested base must stay named; stdout=${result.stdout}`,
+		);
+		for (const hidden of ["/a/b/root", "/a/b/v", "/legacy/w"]) {
+			assert.equal(
+				result.stdout.includes(hidden),
+				false,
+				`${hidden} sits beneath a nested base URI and must not be named; stdout=${result.stdout}`,
+			);
+		}
+		assert.equal(
+			result.stdout.includes("Schema field metadata was bounded"),
+			true,
+			"a nested base URI must be disclosed as bounded metadata",
+		);
+		for (const canary of [
+			"safe-first",
+			"safe-second",
+			"root-first",
+			"root-second",
+			"v-first",
+			"v-second",
+			"w-first",
+			"w-second",
+			"same-stream-local-id",
+		]) {
+			assert.equal(result.stdout.includes(canary), false);
+			assert.equal(result.stderr.includes(canary), false);
 		}
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });

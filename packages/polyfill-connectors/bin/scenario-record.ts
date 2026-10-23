@@ -750,7 +750,8 @@ const MAX_SCHEMA_NODES = 4096;
 
 /** Keywords that can contribute instance fields this collector cannot name
  *  without a general JSON Schema engine. Their presence makes the metadata
- *  honestly bounded instead of silently incomplete. */
+ *  honestly bounded instead of silently incomplete. The dynamic refs are
+ *  listed because they resolve to targets this collector does not follow. */
 const UNSUPPORTED_SCHEMA_KEYWORDS = [
 	"oneOf",
 	"anyOf",
@@ -760,7 +761,31 @@ const UNSUPPORTED_SCHEMA_KEYWORDS = [
 	"else",
 	"patternProperties",
 	"dependentSchemas",
+	"dependencies",
+	"$dynamicRef",
+	"$recursiveRef",
 ] as const;
+
+/** Whether a schema node can add instance fields this collector cannot name
+ *  exactly. Object-valued `additionalProperties` and `unevaluatedProperties`
+ *  can; their boolean forms add no named fields. */
+function hasUnsupportedSchemaShape(node: Record<string, unknown>): boolean {
+	const hasListedKeyword = UNSUPPORTED_SCHEMA_KEYWORDS.some((keyword) =>
+		Object.hasOwn(node, keyword),
+	);
+	return (
+		hasListedKeyword ||
+		manifestObject(node.additionalProperties) !== undefined ||
+		manifestObject(node.unevaluatedProperties) !== undefined
+	);
+}
+
+/** A subschema that declares its own base URI (`$id`, or a draft-04 `id`
+ *  string) resolves its `$ref`s against that base, which this collector does
+ *  not model. The root document is exempt; see `declaredSchemaPaths`. */
+function declaresNestedBaseUri(node: Record<string, unknown>): boolean {
+	return Object.hasOwn(node, "$id") || typeof node.id === "string";
+}
 
 function decodeSchemaRefToken(token: string): string | undefined {
 	let decoded: string;
@@ -799,13 +824,19 @@ function resolveLocalSchemaRef(
 	return current;
 }
 
-/** Whether stopping at the depth bound can hide deeper declared fields. */
-function declaresNestedSchema(value: unknown): boolean {
+/** Whether a schema the traversal will not enter can hide declared fields.
+ *  It applies the traversal's own shape tests before the depth return, so a
+ *  node at the bound is never passed over for a keyword the traversal flags.
+ *  Any `properties`, `allOf`, or `$ref` counts, because this check does not
+ *  resolve refs. */
+function hidesDeclaredFields(value: unknown): boolean {
 	const node = manifestObject(value);
 	return (
 		node !== undefined &&
-		(manifestObject(node.properties) !== undefined ||
-			Array.isArray(node.allOf) ||
+		(declaresNestedBaseUri(node) ||
+			hasUnsupportedSchemaShape(node) ||
+			Object.hasOwn(node, "properties") ||
+			Object.hasOwn(node, "allOf") ||
 			Object.hasOwn(node, "$ref"))
 	);
 }
@@ -813,7 +844,8 @@ function declaresNestedSchema(value: unknown): boolean {
 /** Schema properties use the same RFC 6901 paths as raw observation traversal.
  *  `allOf` subschemas and same-document `$ref`s apply to the same instance,
  *  so they are followed at the same prefix; unsafe or unsupported schema
- *  shapes set `bounded` instead of guessing field names. */
+ *  shapes set `bounded` instead of guessing field names. A subschema with its
+ *  own base URI is not entered, so nothing beneath it is named. */
 function declaredSchemaPaths(schema: unknown): {
 	bounded: boolean;
 	paths: string[];
@@ -847,12 +879,13 @@ function declaredSchemaPaths(schema: unknown): {
 		if (node === undefined) {
 			continue;
 		}
-		for (const keyword of UNSUPPORTED_SCHEMA_KEYWORDS) {
-			if (Object.hasOwn(node, keyword)) {
-				bounded = true;
-			}
+		if (node !== schema && declaresNestedBaseUri(node)) {
+			// Refs under this subschema would resolve against its own base URI,
+			// which is not modeled, so name nothing beneath it.
+			bounded = true;
+			continue;
 		}
-		if (manifestObject(node.additionalProperties) !== undefined) {
+		if (hasUnsupportedSchemaShape(node)) {
 			bounded = true;
 		}
 
@@ -922,7 +955,7 @@ function declaredSchemaPaths(schema: unknown): {
 					prefix: path,
 					schema: properties[name],
 				});
-			} else if (declaresNestedSchema(properties[name])) {
+			} else if (hidesDeclaredFields(properties[name])) {
 				bounded = true;
 			}
 		}
@@ -1601,9 +1634,9 @@ function toScenarioUserInteraction(
 /** Marks a run whose selection context cannot be established. */
 const UNKNOWN_SELECTION_CONTEXT = Symbol("unknown-selection-context");
 
-/** Canonicalization bounds for a prompt schema. These are far above any
- *  legitimate interaction schema; they exist so a hostile or malformed
- *  schema cannot make the advisory compare exhausted or cyclic state. */
+/** Canonicalization bounds for a prompt schema. They keep a hostile or
+ *  malformed schema from making the advisory walk an unbounded or cyclic
+ *  value. A schema past them makes the run's selection context unknown. */
 const MAX_SELECTION_SCHEMA_DEPTH = 64;
 const MAX_SELECTION_SCHEMA_NODES = 4096;
 
@@ -1657,7 +1690,9 @@ function canonicalSelectionSchema(value: unknown): unknown | undefined {
 				}
 				return encoded;
 			}
-			const encoded: Record<string, unknown> = {};
+			// A null prototype keeps an own `__proto__` key (from JSON.parse) as
+			// data. A plain object would treat the assignment as a prototype change.
+			const encoded: Record<string, unknown> = Object.create(null);
 			for (const key of Object.keys(item).sort()) {
 				const next = encode((item as Record<string, unknown>)[key], depth + 1);
 				if (next === undefined) {
