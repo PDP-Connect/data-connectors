@@ -4781,13 +4781,16 @@ for (const baseKeyword of ["$id", "id"]) {
 			assert.equal(result.code, 0, result.stderr);
 			assert.match(result.stdout, /complete: true/);
 			assert.match(
-			result.stdout,
-			/items: differences-observed \(1 repeated identities;/,
-		);
+				result.stdout,
+				/items: differences-observed \(1 repeated identities;/,
+			);
 			assert.doesNotMatch(result.stdout, /\/alias\/wrong/);
 			assert.match(result.stdout, /Schema field metadata was bounded/);
 			assert.match(result.stdout, /\/safe \(1\)/);
-			assert.match(result.stdout, /raw changes in unnamed or undeclared fields/);
+			assert.match(
+				result.stdout,
+				/raw changes in unnamed or undeclared fields/,
+			);
 			for (const canary of [
 				"ancestor-id-canary",
 				"safe-first",
@@ -4810,7 +4813,8 @@ test("scenario-record: declared schema bounds pointer length before expansion", 
 			const connectorKey = "ref_length_fixture";
 			const key = "x".repeat(length - "#/$defs/".length);
 			writeBoundObservationFixture({
-				collectBody: '    await emitRecord("items", { id: "pointer-id-canary", alias: { leaf: repeated ? "pointer-second" : "pointer-first" } });',
+				collectBody:
+					'    await emitRecord("items", { id: "pointer-id-canary", alias: { leaf: repeated ? "pointer-second" : "pointer-first" } });',
 				connectorKey,
 				schemaJson: JSON.stringify({
 					properties: {
@@ -4831,7 +4835,10 @@ test("scenario-record: declared schema bounds pointer length before expansion", 
 				result.stdout,
 				/items: differences-observed \(1 repeated identities;/,
 			);
-			assert.equal(result.stdout.includes("/alias/leaf (1)"), length === 65_536);
+			assert.equal(
+				result.stdout.includes("/alias/leaf (1)"),
+				length === 65_536,
+			);
 			assert.equal(
 				result.stdout.includes("Schema field metadata was bounded"),
 				length > 65_536,
