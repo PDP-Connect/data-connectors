@@ -211,7 +211,7 @@
 		"manifest": {
 			"connector_key": "facebook",
 			"reason_display_messages": {
-				"inventory_not_proven_complete": "Facebook did not show that this list was read in full, so it will be read again next time."
+				"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time."
 			}
 		}
 	},
@@ -544,6 +544,15 @@
 			"connector_key": "meta",
 			"reason_display_messages": {
 				"stream_collection_failed": "Instagram did not show that this list was read in full, so it will be read again next time."
+			}
+		}
+	},
+	{
+		"file": "muse.json",
+		"manifest": {
+			"connector_key": "muse",
+			"reason_display_messages": {
+				"scope_not_supported": "Muse messages can only be imported together with their conversations. Select both to import your messages."
 			}
 		}
 	},

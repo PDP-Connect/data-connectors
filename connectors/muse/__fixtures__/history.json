@@ -1,0 +1,188 @@
+{
+  "channel": "all",
+  "chat_events": [
+    {
+      "agent_id": null,
+      "chat_context": {
+        "chat_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+        "chat_kind": "direct",
+        "event_kind": "message",
+        "originating_channel": "main",
+        "require_mention": false
+      },
+      "display_text": "Synthetic display_text 1 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "display_text_ready": true,
+      "display_text_updated_at_ms": 1792608185205,
+      "event_name": "Synthetic event_name 2 lorem",
+      "message_id": "Synthetic message_id 3 lorem lorem lorem lorem lorem lorem",
+      "occurred_at_ms": 1792608185077,
+      "parent_agent_id": "74121f63-4aa8-409d-820c-429147ba0f07",
+      "parent_message_id": null,
+      "payload": {
+        "chat_context": {
+          "chat_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+          "chat_kind": "direct",
+          "event_kind": "message",
+          "originating_channel": "main",
+          "require_mention": false
+        },
+        "chat_event_seq": 3,
+        "content": "Synthetic content 4 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+        "display_text": "Synthetic display_text 5 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+        "display_text_ready": true,
+        "display_text_updated_at_ms": 1792608185205,
+        "is_thread": false,
+        "message_id": "Synthetic message_id 6 lorem lorem lorem lorem lorem lorem",
+        "metadata": {
+          "can_broadcast_share": true,
+          "context_seq": 3,
+          "message_kind": "Synthetic message_kind 7",
+          "root_message_execution_id": "5d760c5e-ca5c-4bf9-85bc-0816268724cf",
+          "started_at_ms": 1792608185077
+        },
+        "parent_agent_id": "74121f63-4aa8-409d-820c-429147ba0f07",
+        "reply_to_message_id": "5d760c5e-ca5c-4bf9-85bc-0816268724cf",
+        "role": "assistant",
+        "seq": 3,
+        "session_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+        "source": "runtime",
+        "status": "completed",
+        "transcript_surface": "main_chat",
+        "visibility": "public"
+      },
+      "reaction_emoji": null,
+      "reply_to_message_id": "5d760c5e-ca5c-4bf9-85bc-0816268724cf",
+      "resources": [],
+      "role": "assistant",
+      "seq": 3,
+      "transcript_surface": "main_chat",
+      "visibility": "public"
+    },
+    {
+      "agent_id": null,
+      "chat_context": {
+        "chat_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+        "chat_kind": "direct",
+        "event_kind": "message",
+        "originating_channel": "main",
+        "require_mention": false
+      },
+      "display_text": "Synthetic display_text 8 lorem lorem lorem lorem lorem",
+      "display_text_ready": true,
+      "display_text_updated_at_ms": 1792608185598,
+      "event_name": "Synthetic event_name 9 lorem",
+      "message_id": "Synthetic message_id 10 lorem lorem lorem lorem lorem lorem",
+      "occurred_at_ms": 1792608185186,
+      "parent_agent_id": "74121f63-4aa8-409d-820c-429147ba0f07",
+      "parent_message_id": null,
+      "payload": {
+        "chat_context": {
+          "chat_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+          "chat_kind": "direct",
+          "event_kind": "message",
+          "originating_channel": "main",
+          "require_mention": false
+        },
+        "chat_event_seq": 4,
+        "content": "Synthetic content 11 lorem lorem lorem lorem lorem",
+        "display_text": "Synthetic display_text 12 lorem lorem lorem lorem lorem",
+        "display_text_ready": true,
+        "display_text_updated_at_ms": 1792608185598,
+        "is_thread": false,
+        "message_id": "Synthetic message_id 13 lorem lorem lorem lorem lorem lorem",
+        "metadata": {
+          "can_broadcast_share": true,
+          "context_seq": 3,
+          "message_kind": "Synthetic message_kind 14",
+          "root_message_execution_id": "5d760c5e-ca5c-4bf9-85bc-0816268724cf",
+          "started_at_ms": 1792608185186
+        },
+        "parent_agent_id": "74121f63-4aa8-409d-820c-429147ba0f07",
+        "reply_to_message_id": "5d760c5e-ca5c-4bf9-85bc-0816268724cf",
+        "role": "assistant",
+        "seq": 4,
+        "session_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+        "source": "runtime",
+        "status": "completed",
+        "transcript_surface": "main_chat",
+        "visibility": "public"
+      },
+      "reaction_emoji": null,
+      "reply_to_message_id": "5d760c5e-ca5c-4bf9-85bc-0816268724cf",
+      "resources": [],
+      "role": "assistant",
+      "seq": 4,
+      "transcript_surface": "main_chat",
+      "visibility": "public"
+    },
+    {
+      "agent_id": null,
+      "chat_context": {
+        "chat_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+        "chat_kind": "direct",
+        "device_id": "78661027-13da-49ec-8f00-9422f252c82e",
+        "event_kind": "message",
+        "originating_channel": "main",
+        "require_mention": false
+      },
+      "display_text": "Synthetic display_text 15 lorem",
+      "display_text_ready": true,
+      "display_text_updated_at_ms": 1792608195460,
+      "event_name": "Synthetic event_name 16 lorem",
+      "message_id": "7e9c5820-d45f-445a-8253-e9150d153793",
+      "occurred_at_ms": 1792608195460,
+      "parent_agent_id": "74121f63-4aa8-409d-820c-429147ba0f07",
+      "parent_message_id": null,
+      "payload": {
+        "chat_context": {
+          "chat_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+          "chat_kind": "direct",
+          "device_id": "78661027-13da-49ec-8f00-9422f252c82e",
+          "event_kind": "message",
+          "originating_channel": "main",
+          "require_mention": false
+        },
+        "chat_event_seq": 6,
+        "content": "Synthetic content 17 lorem",
+        "display_text": "Synthetic display_text 18 lorem",
+        "display_text_ready": true,
+        "display_text_updated_at_ms": 1792608195460,
+        "is_thread": false,
+        "message_id": "7e9c5820-d45f-445a-8253-e9150d153793",
+        "metadata": {
+          "client_app_id": "hatch-web",
+          "client_chat_context": {
+            "chat_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+            "chat_kind": "direct",
+            "device_id": "78661027-13da-49ec-8f00-9422f252c82e",
+            "event_kind": "message",
+            "origin_provider": "main",
+            "require_mention": false
+          },
+          "client_device_id": "78661027-13da-49ec-8f00-9422f252c82e",
+          "client_timezone": "Synthetic client_timezone 19 lorem",
+          "context_seq": 4,
+          "message_kind": "Synthetic message_kind 20",
+          "thoughtful_follow_through": true,
+          "timestamp_timezone": "Synthetic timestamp_timezone 21 lorem"
+        },
+        "parent_agent_id": "74121f63-4aa8-409d-820c-429147ba0f07",
+        "role": "user",
+        "seq": 6,
+        "session_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+        "source": "runtime",
+        "transcript_surface": "main_chat",
+        "visibility": "public"
+      },
+      "reaction_emoji": null,
+      "reply_to_message_id": "",
+      "resources": [],
+      "role": "user",
+      "seq": 6,
+      "transcript_surface": "main_chat",
+      "visibility": "public"
+    }
+  ],
+  "has_more": false,
+  "transcript_revision": 31
+}
