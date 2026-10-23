@@ -1002,9 +1002,11 @@ export async function collectWith(
 		// completely this run acknowledges its gaps; a chat gapped again this
 		// run already re-emitted its gap. A recovery-only run reads the
 		// pending chats here, and only those. A pending chat that is not in
-		// this run's inventory (or cannot be imported) keeps its gap, re-emitted
-		// once: deletion is never inferred from absence.
-		const regapped = new Set<string>();
+		// this run's inventory (or cannot be imported) has no parent record
+		// this run, so no child gap is emitted for it: its gap stays pending
+		// untouched, and messages fail for a retry instead of checkpointing.
+		// Deletion is never inferred from absence.
+		const blockedPending = new Set<string>();
 		await forEachPendingGapPage(ctx, firstGapPage, async (fresh) => {
 			for (const [chatId, gaps] of fresh) {
 				const item = items.get(chatId);
@@ -1017,23 +1019,7 @@ export async function collectWith(
 					await emitRecovered(ctx, chatId, gaps);
 					continue;
 				}
-				if (outcome === "gapped" || regapped.has(chatId)) continue;
-				regapped.add(chatId);
-				await emitDetailGap(ctx, {
-					stream: MESSAGES,
-					parentStream: CHATS,
-					recordKey: chatId,
-					reason: "temporary_unavailable",
-					locator: { kind: "whatsapp_web.chat_messages", chat_id: chatId },
-					error: {
-						class: unsafeChatIds.has(chatId)
-							? "chat_text_unstorable"
-							: "chat_not_in_inventory",
-						message: unsafeChatIds.has(chatId)
-							? "the chat's own text cannot be stored, so its messages were not read this run"
-							: "the chat is not in this run's chat inventory; its gap stays pending",
-					},
-				});
+				if (outcome === undefined) blockedPending.add(chatId);
 			}
 		});
 		if (unsafeChats > 0) {
@@ -1042,6 +1028,16 @@ export async function collectWith(
 				MESSAGES,
 				`${unsafeChats} chats could not be imported (their text holds characters that cannot be stored), so their messages were not read and messages are not checkpointed as complete.`,
 				false,
+			);
+		} else if (blockedPending.size > 0) {
+			const unstorable = [...blockedPending].filter((id) =>
+				unsafeChatIds.has(id),
+			).length;
+			await failStream(
+				ctx,
+				MESSAGES,
+				`${blockedPending.size} chats with pending message gaps are not readable this run (${blockedPending.size - unstorable} not in the chat inventory, ${unstorable} with text that cannot be stored); their gaps stay pending and messages are not checkpointed as complete.`,
+				unstorable < blockedPending.size,
 			);
 		} else if (!ctx.recoveryOnly || requiredKeys.length > 0) {
 			await emitDetailCoverage(ctx, {

@@ -614,7 +614,7 @@ test("review 2 #1: a walk is not capped per run: it goes on chunk after chunk un
 	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
 });
 
-test("review 2 #2: a pending chat missing from the inventory keeps its gap, and later gap pages are drained", async () => {
+test("review 2 #2: later gap pages are drained, and a pending chat missing from the inventory keeps its gap pending", async () => {
 	const GONE = "15550000009@c.us";
 	const r = await run(
 		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
@@ -624,20 +624,39 @@ test("review 2 #2: a pending chat missing from the inventory keeps its gap, and 
 			gapPages: [[pendingGap(GONE), pendingGap(PEER)]],
 		},
 	);
-	const regap = messagesOf(r, "DETAIL_GAP").filter(
-		(g) => g.record_key === GONE,
-	);
-	assert.equal(regap.length, 1, "the absent chat's gap is re-emitted once");
-	assert.equal(asObject(regap[0]?.last_error).class, "chat_not_in_inventory");
 	const recovered = messagesOf(r, "DETAIL_GAP_RECOVERED");
 	assert.deepEqual(
 		recovered.map((g) => g.gap_id),
 		[`gap-${PEER}`],
 		"the second page's gap of a chat read completely is acknowledged",
 	);
-	// The re-emitted gap comes before the coverage report.
-	const types = r.harness.protocolMessages.map((m) => asObject(m).type);
-	assert.ok(types.lastIndexOf("DETAIL_GAP") < types.indexOf("DETAIL_COVERAGE"));
+	assert.ok(
+		!recovered.some((g) => g.record_key === GONE),
+		"the absent chat's gap is never acknowledged",
+	);
+	const failure = r.failures.find((f) => f.stream === "messages");
+	assert.ok(
+		failure,
+		"messages are not checkpointed while a pending chat is unreadable",
+	);
+	assert.equal(failure.retryable, true);
+	assert.equal(messagesOf(r, "DETAIL_COVERAGE").length, 0);
+});
+
+test("review 3 #1: no child gap is emitted for a chat whose parent record this run never emitted", async () => {
+	const GONE = "15550000009@c.us";
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{ detailGaps: [pendingGap(GONE)] },
+	);
+	const parents = new Set(recordsOf(r, "chats").map((c) => String(c.data.id)));
+	for (const gap of messagesOf(r, "DETAIL_GAP")) {
+		assert.ok(
+			parents.has(String(gap.record_key)),
+			`gap ${String(gap.record_key)} has its parent chat record in this run`,
+		);
+	}
+	assert.ok(r.failures.some((f) => f.stream === "messages" && f.retryable));
 });
 
 test("review 2 #2: a recovery-only run walks pending chats from every gap page", async () => {
