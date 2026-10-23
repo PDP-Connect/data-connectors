@@ -21,6 +21,7 @@ import {
 	probeFacebookSession,
 } from "./index.ts";
 import {
+	asRecord,
 	type CapturedOperation,
 	GRAPHQL_PATH,
 	type JsonRecord,
@@ -1559,5 +1560,452 @@ describe("review round 3", () => {
 			h.failures[0]?.message ?? "",
 			/Facebook reported errors on 1 item/,
 		);
+	});
+});
+
+function ownershipFriendsNode(
+	shift: number,
+	pageInfo: { end_cursor: string | null; has_next_page: boolean },
+): JsonRecord {
+	const page = friendsPage(shift, pageInfo);
+	const node = asRecord(asRecord(page.data)?.node);
+	assert.ok(node);
+	return node;
+}
+
+function ownershipFriendsHarness(
+	scripts: string[],
+	replies: PageGraphqlResult[],
+): Harness {
+	return harness({
+		streams: ["friends"],
+		pages: {
+			[ME]: meSnapshot,
+			[FRIENDS_URL]: { landedUrl: FRIENDS_URL, scripts },
+		},
+		captured: [FRIENDS_OP],
+		replies,
+	});
+}
+
+function assertNoCompletion(h: Harness, stream: string): void {
+	assert.equal(stateFor(h, stream), undefined);
+	assert.equal(
+		h.emitted.some(
+			(entry) =>
+				entry.type === "DETAIL_COVERAGE" &&
+				asRecord(entry.message)?.stream === stream,
+		),
+		false,
+	);
+}
+
+describe("read ownership regressions", () => {
+	for (const reversed of [false, true]) {
+		it(`selects FRIENDS before collapsing equal first edges (reversed=${reversed})`, async () => {
+			const friends = ownershipFriendsNode(0, {
+				end_cursor: "c1",
+				has_next_page: true,
+			});
+			const family = ownershipFriendsNode(0, {
+				end_cursor: null,
+				has_next_page: false,
+			});
+			family.id = "family";
+			const scripts = [
+				preloaded("friends", {
+					data: { user: { section_type: "FRIENDS", collection: friends } },
+				}),
+				preloaded("family", {
+					data: { user: { section_type: "FAMILY", collection: family } },
+				}),
+			];
+			if (reversed) scripts.reverse();
+			const h = ownershipFriendsHarness(scripts, [
+				response(friendsPage(1000, { end_cursor: null, has_next_page: false })),
+			]);
+			await collectFacebook(h.ctx, h.services);
+			assert.deepEqual(h.failures, []);
+			assert.equal(h.calls.length, 1);
+			assert.equal(JSON.parse(h.calls[0]?.variables ?? "{}").cursor, "c1");
+			assert.equal(h.records.length, 6);
+			assert.ok(stateFor(h, "friends"));
+			const coverage = h.emitted.find(
+				(entry) => entry.type === "DETAIL_COVERAGE",
+			);
+			assert.equal(asRecord(coverage?.message)?.considered, 6);
+		});
+
+		it(`rejects contradictory pagination for the same collection (reversed=${reversed})`, async () => {
+			const scripts = [
+				preloaded("ongoing", {
+					data: {
+						node: ownershipFriendsNode(0, {
+							end_cursor: "c1",
+							has_next_page: true,
+						}),
+					},
+				}),
+				preloaded("terminal", {
+					data: {
+						node: ownershipFriendsNode(0, {
+							end_cursor: null,
+							has_next_page: false,
+						}),
+					},
+				}),
+			];
+			if (reversed) scripts.reverse();
+			const h = ownershipFriendsHarness(scripts, []);
+			await collectFacebook(h.ctx, h.services);
+			assert.equal(h.failures.length, 1);
+			assert.match(h.failures[0]?.message ?? "", /^facebook_shape_changed/);
+			assert.equal(h.records.length, 0);
+			assert.equal(h.calls.length, 0);
+			assertNoCompletion(h, "friends");
+		});
+	}
+
+	it("keeps equivalent preloads as one complete walk", async () => {
+		const first = {
+			data: {
+				node: ownershipFriendsNode(0, {
+					end_cursor: "c1",
+					has_next_page: true,
+				}),
+			},
+		};
+		const h = ownershipFriendsHarness(
+			[preloaded("first", first), preloaded("copy", structuredClone(first))],
+			[response(friendsPage(1000, { end_cursor: null, has_next_page: false }))],
+		);
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records.length, 6);
+		assert.equal(h.calls.length, 1);
+		assert.ok(stateFor(h, "friends"));
+	});
+
+	for (const difference of [
+		"owner",
+		"path",
+		"section",
+		"cursor",
+		"missing page_info",
+	]) {
+		it(`does not deduplicate equal edges across different ${difference}`, async () => {
+			const first = ownershipFriendsNode(0, {
+				end_cursor: "c1",
+				has_next_page: false,
+			});
+			const other = structuredClone(first);
+			const items = asRecord(other.pageItems);
+			assert.ok(items);
+			if (difference === "owner") other.id = "another-collection";
+			if (difference === "cursor")
+				items.page_info = { end_cursor: "c2", has_next_page: false };
+			if (difference === "missing page_info") delete items.page_info;
+			const firstData = { node: first };
+			const otherData =
+				difference === "path"
+					? { another: other }
+					: {
+							node:
+								difference === "section"
+									? { ...other, section_type: "FAMILY" }
+									: other,
+						};
+			const h = ownershipFriendsHarness(
+				[
+					preloaded("first", { data: firstData }),
+					preloaded("other", { data: otherData }),
+				],
+				[],
+			);
+			await collectFacebook(h.ctx, h.services);
+			assert.equal(h.failures.length, 1);
+			assert.equal(h.records.length, 0);
+			assertNoCompletion(h, "friends");
+		});
+	}
+
+	for (const field of [
+		["profile_intro_card"],
+		["profile_intro_card", "bio"],
+		["profile_intro_card", "bio", "text"],
+		["profile_intro_card", "context_items"],
+		["profile_intro_card", "context_items", "nodes", 0, "title", "text"],
+	]) {
+		it(`refuses a failed profile read at ${field.join(".")} while retaining friends`, async () => {
+			const profile = {
+				data: {
+					user: { profile_intro_card: { bio: null, context_items: null } },
+				},
+				errors: [{ message: "field error", path: ["user", ...field] }],
+			};
+			const h = harness({
+				streams: ["profile", "friends"],
+				pages: {
+					[ME]: {
+						...meSnapshot,
+						scripts: [VIEWER_SCRIPT, preloaded("profile", profile)],
+					},
+					[FRIENDS_URL]: {
+						landedUrl: FRIENDS_URL,
+						scripts: [
+							preloaded(
+								"friends",
+								friendsPage(0, { end_cursor: null, has_next_page: false }),
+							),
+						],
+					},
+				},
+				replies: [],
+			});
+			await collectFacebook(h.ctx, h.services);
+			assert.equal(h.failures.length, 1);
+			assert.equal(h.failures[0]?.stream, "profile");
+			assert.match(
+				h.failures[0]?.message ?? "",
+				/^facebook_list_not_proven_complete/,
+			);
+			assert.equal(
+				h.records.filter((record) => record.stream === "profile").length,
+				0,
+			);
+			assertNoCompletion(h, "profile");
+			assert.equal(
+				h.records.filter((record) => record.stream === "friends").length,
+				3,
+			);
+			assert.ok(stateFor(h, "friends"));
+		});
+	}
+
+	for (const contextItems of [null, { nodes: [] }]) {
+		it(`accepts legitimate empty profile fields (${contextItems === null ? "null" : "empty"})`, async () => {
+			const h = harness({
+				streams: ["profile"],
+				pages: {
+					[ME]: {
+						...meSnapshot,
+						scripts: [
+							VIEWER_SCRIPT,
+							preloaded("profile", {
+								data: {
+									user: {
+										profile_intro_card: {
+											bio: null,
+											context_items: contextItems,
+										},
+									},
+								},
+							}),
+						],
+					},
+				},
+				replies: [],
+			});
+			await collectFacebook(h.ctx, h.services);
+			assert.deepEqual(h.failures, []);
+			assert.equal(h.records.length, 1);
+			assert.equal(h.records[0]?.data.bio, null);
+			assert.deepEqual(h.records[0]?.data.intro, []);
+		});
+	}
+
+	it("keeps healthy intro text when an error hits a title field the intro never reads", async () => {
+		const h = harness({
+			streams: ["profile"],
+			pages: {
+				[ME]: {
+					...meSnapshot,
+					scripts: [
+						VIEWER_SCRIPT,
+						preloaded("profile", {
+							data: {
+								user: {
+									profile_intro_card: {
+										bio: { text: "Healthy bio" },
+										context_items: {
+											nodes: [
+												{ title: { text: "Healthy intro", ranges: null } },
+											],
+										},
+									},
+								},
+							},
+							errors: [
+								{
+									message: "field error",
+									path: [
+										"user",
+										"profile_intro_card",
+										"context_items",
+										"nodes",
+										0,
+										"title",
+										"ranges",
+									],
+								},
+							],
+						}),
+					],
+				},
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records[0]?.data.bio, "Healthy bio");
+		assert.deepEqual(h.records[0]?.data.intro, ["Healthy intro"]);
+	});
+
+	it("isolates profile errors by payload, field and list position", async () => {
+		const h = harness({
+			streams: ["profile"],
+			pages: {
+				[ME]: {
+					...meSnapshot,
+					scripts: [
+						VIEWER_SCRIPT,
+						preloaded("unrelated", {
+							data: {},
+							errors: [
+								{
+									message: "field error",
+									path: ["users", 0, "profile_intro_card", "bio"],
+								},
+							],
+						}),
+						preloaded("profile", {
+							data: {
+								users: [
+									{
+										profile_intro_card: {
+											bio: { text: "Healthy bio" },
+											context_items: {
+												nodes: [{ title: { text: "Healthy intro" } }],
+											},
+										},
+									},
+								],
+							},
+							errors: [
+								{
+									message: "field error",
+									path: ["users", 1, "profile_intro_card", "bio"],
+								},
+								{
+									message: "field error",
+									path: ["users", 0, "profile_picture"],
+								},
+								{
+									message: "field error",
+									path: ["users", 0, "profile_intro_card", "privacy_scope"],
+								},
+							],
+						}),
+					],
+				},
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records[0]?.data.bio, "Healthy bio");
+		assert.deepEqual(h.records[0]?.data.intro, ["Healthy intro"]);
+	});
+
+	for (const field of [
+		["attached_story"],
+		["attached_story", "message"],
+		["attached_story", "message", "text"],
+	]) {
+		it(`does not checkpoint activity with an error at ${field.join(".")}`, async () => {
+			const page = loadFixture(ACTIVITY);
+			const stories = asRecord(asRecord(page.data)?.node);
+			const connection = asRecord(stories?.activity_log_stories);
+			assert.ok(connection);
+			assert.ok(Array.isArray(connection.edges));
+			const first = asRecord(asRecord(connection.edges[0])?.node);
+			assert.ok(first);
+			first.attached_story = null;
+			for (const [index, edge] of connection.edges.entries()) {
+				const node = asRecord(asRecord(edge)?.node);
+				assert.ok(node);
+				node.id = `ownership-activity-${index}`;
+			}
+			connection.page_info = { end_cursor: null, has_next_page: false };
+			page.errors = [
+				{
+					message: "field error",
+					path: ["node", "activity_log_stories", "edges", 0, "node", ...field],
+				},
+			];
+			const url = activityUrl(TIMELINE_VIEWER, "reaction");
+			const h = harness({
+				streams: ["reactions"],
+				pages: {
+					[ME]: meSnapshot,
+					[url]: { landedUrl: url, scripts: [preloaded("activity", page)] },
+				},
+				replies: [],
+			});
+			await collectFacebook(h.ctx, h.services);
+			assert.equal(h.failures.length, 1);
+			assert.match(
+				h.failures[0]?.message ?? "",
+				/Facebook reported errors on 1 item/,
+			);
+			assert.equal(h.records.length, 0);
+			assertNoCompletion(h, "reactions");
+		});
+	}
+
+	it("keeps healthy activity and legitimate null target text with unrelated sibling errors", async () => {
+		const page = loadFixture(ACTIVITY);
+		const connection = asRecord(
+			asRecord(asRecord(page.data)?.node)?.activity_log_stories,
+		);
+		assert.ok(connection);
+		assert.ok(Array.isArray(connection.edges));
+		for (const [index, edge] of connection.edges.entries()) {
+			const node = asRecord(asRecord(edge)?.node);
+			assert.ok(node);
+			node.id = `ownership-activity-${index}`;
+			node.attached_story =
+				index === 0 ? null : { message: { text: "Healthy target" } };
+		}
+		connection.page_info = { end_cursor: null, has_next_page: false };
+		page.errors = [
+			{
+				message: "field error",
+				path: [
+					"node",
+					"activity_log_stories",
+					"edges",
+					0,
+					"node",
+					"attached_story",
+					"privacy_scope",
+				],
+			},
+		];
+		const url = activityUrl(TIMELINE_VIEWER, "reaction");
+		const h = harness({
+			streams: ["reactions"],
+			pages: {
+				[ME]: meSnapshot,
+				[url]: { landedUrl: url, scripts: [preloaded("activity", page)] },
+			},
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services);
+		assert.deepEqual(h.failures, []);
+		assert.equal(h.records.length, 3);
+		assert.equal(h.records[0]?.data.target_text, null);
+		assert.equal(h.records[1]?.data.target_text, "Healthy target");
+		assert.ok(stateFor(h, "reactions"));
 	});
 });

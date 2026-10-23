@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+	ACTIVITY_OPERATION,
 	assertHttpOk,
 	assertLandedOnContent,
 	assertNoEnvelopeFailure,
@@ -11,6 +12,7 @@ import {
 	buildProfileRecord,
 	buildVariables,
 	epochSecondsToIso,
+	erroredItemCount,
 	extractPreloadedPayloads,
 	extractProfileIntro,
 	extractViewer,
@@ -578,6 +580,60 @@ describe("server-rendered payloads", () => {
 			null,
 		);
 	});
+
+	const introWithError = (path: readonly (string | number)[]) =>
+		extractPreloadedPayloads([
+			streamed("adp_p", 0, {
+				data: {
+					user: {
+						profile_intro_card: {
+							bio: { text: "Swimmer." },
+							context_items: {
+								nodes: [{ title: { text: "Healthy intro", ranges: null } }],
+							},
+						},
+					},
+				},
+				errors: [{ message: "field error", path: ["user", ...path] }],
+			}),
+		]);
+
+	// The intro reads bio.text and each item's title.text. The walk enters every
+	// other field under context_items, so an error there can hide a title.
+	const refusedIntroErrors = [
+		["profile_intro_card"],
+		["profile_intro_card", "bio"],
+		["profile_intro_card", "bio", "text"],
+		["profile_intro_card", "context_items"],
+		["profile_intro_card", "context_items", "nodes", 0],
+		["profile_intro_card", "context_items", "nodes", 0, "title"],
+		["profile_intro_card", "context_items", "nodes", 0, "title", "text"],
+		["profile_intro_card", "context_items", "nodes", 0, "description"],
+	];
+	for (const path of refusedIntroErrors) {
+		it(`refuses an intro error at ${path.join(".")}`, () => {
+			assert.throws(
+				() => extractProfileIntro(introWithError(path), newTextCounter()),
+				/reported an error on the bio or intro/,
+			);
+		});
+	}
+
+	const readAroundIntroErrors = [
+		["profile_intro_card", "bio", "ranges"],
+		["profile_intro_card", "context_items", "nodes", 0, "title", "ranges"],
+	];
+	for (const path of readAroundIntroErrors) {
+		it(`reads the intro past an unread field that errored at ${path.join(".")}`, () => {
+			assert.deepEqual(
+				extractProfileIntro(introWithError(path), newTextCounter()),
+				{
+					bio: "Swimmer.",
+					items: ["Healthy intro"],
+				},
+			);
+		});
+	}
 });
 
 describe("guards", () => {
@@ -842,5 +898,149 @@ describe("captured requests and variables", () => {
 			category_key: "COMMENTSCLUSTER",
 			__relay_internal__pv__Flagrelayprovider: true,
 		});
+	});
+});
+
+describe("GraphQL read-path intersection", () => {
+	const cases: { name: string; path: (string | number)[]; count: number }[] = [
+		{
+			name: "ancestor",
+			path: [
+				"sections",
+				0,
+				"activity_log_stories",
+				"edges",
+				0,
+				"node",
+				"attached_story",
+			],
+			count: 1,
+		},
+		{
+			name: "exact",
+			path: [
+				"sections",
+				0,
+				"activity_log_stories",
+				"edges",
+				0,
+				"node",
+				"attached_story",
+				"message",
+			],
+			count: 1,
+		},
+		{
+			name: "descendant",
+			path: [
+				"sections",
+				0,
+				"activity_log_stories",
+				"edges",
+				0,
+				"node",
+				"attached_story",
+				"message",
+				"text",
+			],
+			count: 1,
+		},
+		{
+			name: "sibling",
+			path: [
+				"sections",
+				0,
+				"activity_log_stories",
+				"edges",
+				0,
+				"node",
+				"attached_story",
+				"privacy_scope",
+			],
+			count: 0,
+		},
+		{
+			name: "other section index",
+			path: [
+				"sections",
+				1,
+				"activity_log_stories",
+				"edges",
+				0,
+				"node",
+				"attached_story",
+			],
+			count: 0,
+		},
+		{
+			name: "other connection",
+			path: [
+				"sections",
+				0,
+				"other_stories",
+				"edges",
+				0,
+				"node",
+				"attached_story",
+			],
+			count: 0,
+		},
+	];
+	for (const test of cases) {
+		it(`counts only intersecting fields in the selected connection: ${test.name}`, () => {
+			const payload = parseGraphqlText(
+				JSON.stringify({
+					data: {
+						sections: [
+							{
+								activity_log_stories: {
+									edges: [{ node: { id: "one", attached_story: null } }],
+								},
+							},
+						],
+					},
+					errors: [{ message: "field error", path: test.path }],
+				}),
+			);
+			const connection = pickConnection(payload.data, matchActivityConnection);
+			assert.ok(connection);
+			assert.equal(
+				erroredItemCount(
+					payload.errors,
+					connection,
+					ACTIVITY_OPERATION.readPaths,
+				),
+				test.count,
+			);
+		});
+	}
+
+	it("counts intersecting item indexes once each", () => {
+		const prefix = ["node", "activity_log_stories", "edges"];
+		const payload = parseGraphqlText(
+			JSON.stringify({
+				data: {
+					node: {
+						activity_log_stories: {
+							edges: [{ node: { id: "one" } }, { node: { id: "two" } }],
+						},
+					},
+				},
+				errors: [0, 0, 1].map((index) => ({
+					message: "field error",
+					path: [...prefix, index, "node", "attached_story"],
+				})),
+			}),
+		);
+		const connection = pickConnection(payload.data, matchActivityConnection);
+		assert.ok(connection);
+		assert.equal(
+			erroredItemCount(
+				payload.errors,
+				connection,
+				ACTIVITY_OPERATION.readPaths,
+			),
+			2,
+		);
 	});
 });

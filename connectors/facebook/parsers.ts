@@ -601,6 +601,10 @@ export const matchGroupsConnection: ConnectionMatcher = (
 function connectionSignature(connection: FoundConnection): string {
 	return JSON.stringify([
 		connection.key,
+		connection.ownerId,
+		connection.path,
+		connection.sectionTypes,
+		connection.pageInfo,
 		connection.edges.map((edge) => edgeKey(edge)),
 	]);
 }
@@ -624,14 +628,14 @@ function chooseConnection(
 	found: readonly FoundConnection[],
 	prefer?: (connection: FoundConnection) => boolean,
 ): FoundConnection | null {
+	// Select the intended collection before comparing copies of its first page.
+	const preferred = prefer ? found.filter(prefer) : [];
+	const selected = preferred.length > 0 ? preferred : found;
 	const distinct = new Map<string, FoundConnection>();
-	for (const connection of found)
+	for (const connection of selected)
 		distinct.set(connectionSignature(connection), connection);
 	const candidates = [...distinct.values()];
 	if (candidates.length <= 1) return candidates[0] ?? null;
-	const preferred = prefer ? candidates.filter(prefer) : [];
-	const [only] = preferred;
-	if (preferred.length === 1 && only) return only;
 	throw facebookError(
 		ERROR_CLASSES.shape,
 		`the page shows ${candidates.length} different lists that look like this one; refusing to guess`,
@@ -782,6 +786,26 @@ function collectTitleTexts(root: unknown, into: string[]): void {
 }
 
 /**
+ * Whether an error at `segments` can change the intro. The intro reads
+ * bio.text, and walks every field under context_items except `title`, where
+ * it reads only title.text. An error inside a title, other than on its text,
+ * is not read.
+ */
+function errorTouchesIntro(
+	segments: readonly (string | number)[],
+	cardPath: readonly (string | number)[],
+): boolean {
+	if (pathsIntersect(segments, [...cardPath, "bio", "text"])) return true;
+	const contextItems = [...cardPath, "context_items"];
+	if (startsWithSegments(contextItems, segments)) return true;
+	if (!startsWithSegments(segments, contextItems)) return false;
+	const rest = segments.slice(contextItems.length);
+	const title = rest.indexOf("title");
+	if (title < 0) return true;
+	return title === rest.length - 1 || String(rest[title + 1]) === "text";
+}
+
+/**
  * The intro card the person filled in (bio and the "lives in / works at"
  * lines), when the profile page preloaded it. Null when no intro card was in
  * the page at all, which is not the same as an empty intro.
@@ -792,17 +816,38 @@ export function extractProfileIntro(
 ): ProfileIntro | null {
 	for (const payload of payloads) {
 		let card: JsonRecord | null = null;
-		const stack: unknown[] = [payload.data];
+		let cardPath: (string | number)[] = [];
+		const stack: { value: unknown; path: (string | number)[] }[] = [
+			{ value: payload.data, path: [] },
+		];
 		while (stack.length > 0 && !card) {
-			const value = stack.pop();
-			const record = asRecord(value);
-			const list = asArray(value);
-			if (list) for (const child of list) stack.push(child);
+			const item = stack.pop();
+			if (!item) break;
+			const record = asRecord(item.value);
+			const list = asArray(item.value);
+			if (list)
+				for (const [index, child] of list.entries())
+					stack.push({ value: child, path: [...item.path, index] });
 			if (!record) continue;
 			card = asRecord(record.profile_intro_card);
-			if (!card) for (const child of Object.values(record)) stack.push(child);
+			if (card) cardPath = [...item.path, "profile_intro_card"];
+			else
+				for (const [key, child] of Object.entries(record))
+					stack.push({ value: child, path: [...item.path, key] });
 		}
 		if (!card) continue;
+		if (
+			payload.errors.some(
+				(error) =>
+					error.segments.length > 0 &&
+					errorTouchesIntro(error.segments, cardPath),
+			)
+		) {
+			throw facebookError(
+				ERROR_CLASSES.incomplete,
+				"profile: Facebook reported an error on the bio or intro",
+			);
+		}
 		const raw: string[] = [];
 		collectTitleTexts(card.context_items, raw);
 		const items = raw
@@ -1418,11 +1463,14 @@ export const friendIdKey = (edge: unknown): string | null => {
 	return isNumericId(id) ? id : nodeIdKey(edge);
 };
 
-function startsWithPath(
+/** An error at a read field, its ancestor, or its descendant affects that read. */
+function pathsIntersect(
 	path: readonly (string | number)[],
-	prefix: readonly string[],
+	readPath: readonly (string | number)[],
 ): boolean {
-	return prefix.every((step, index) => path[index] === step);
+	return (
+		startsWithSegments(path, readPath) || startsWithSegments(readPath, path)
+	);
 }
 
 /**
@@ -1450,7 +1498,7 @@ export function erroredItemCount(
 		if (
 			!inNode ||
 			field.length === 0 ||
-			readPaths.some((path) => startsWithPath(field, path))
+			readPaths.some((path) => pathsIntersect(field, path))
 		)
 			items.add(index);
 	}
