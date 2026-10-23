@@ -27,9 +27,6 @@ jobs:
       - name: Check permanent frozen scope IDs, schemas and generated docs
         run: npm run legacy-shapes:check && npm run legacy-shapes:test
 
-      - name: Test temporary release metadata and fixture proofs (remove with F10)
-        run: npm run legacy-retention:test
-
       - name: Test installer artifact contracts
         run: npm run installer:test
 
