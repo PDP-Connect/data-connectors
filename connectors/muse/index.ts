@@ -24,9 +24,10 @@
  * every other path is refused before the page is touched.
  *
  * Streams and their end signals:
- *   - conversations: sessions.list {} plus {view:"archived"}; each answer is
- *     an independently paged view, not an authoritative all-status snapshot.
- *     Readable chats are imported, but inventory remains incomplete.
+ *   - conversations: sessions.list {} plus {view:"archived"}, each paged to
+ *     its end. Muse has no all-status view, so the inventory is proven by
+ *     bracketing: active, archived, active, archived, complete only when
+ *     both pairs list the same chat ids (see listSessions).
  *   - messages: chat.history per chat, child of conversations with
  *     parent_detail_accounting, paged back like the app does (`before_seq` =
  *     the smallest `seq` on the page) until `has_more: false`. A chat whose
@@ -596,68 +597,148 @@ interface ListedSession {
 }
 
 /**
- * Observed chats, active then archived, read page by page as the app does:
- * `{ limit }`, then `{ limit, cursor: <next_cursor> }`, until an answer has
- * no next_cursor. A repeated cursor, a page cap, or has_more with no cursor
- * fails the list; nothing is checkpointed from a list that did not end.
+ * sessions.list (active, archived) pair reads before a chat list that keeps
+ * moving fails the chat streams: one bracket (two pairs) plus up to three
+ * retries, each retry one more pair compared with the pair before it.
  */
-async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
-	const out: ListedSession[] = [];
+const MAX_INVENTORY_PAIRS = 5;
+
+/**
+ * One view's chats, read page by page as the app does: `{ limit }`, then
+ * `{ limit, cursor: <next_cursor> }`, until an answer has no next_cursor. A
+ * repeated cursor, a page cap, or has_more with no cursor fails the list;
+ * nothing is checkpointed from a list that did not end.
+ */
+async function readChatView(
+	gateway: MuseGateway,
+	archivedView: boolean,
+): Promise<MuseSession[]> {
+	const label = archivedView ? "archived chat list" : "chat list";
+	const out: MuseSession[] = [];
 	const seen = new Set<string>();
-	for (const archivedView of [false, true]) {
-		const label = archivedView ? "archived chat list" : "chat list";
-		const cursors = new Set<string>();
-		let cursor: PageCursor | null = null;
-		for (let pageIndex = 0; ; pageIndex++) {
-			if (pageIndex >= MAX_SESSION_PAGES) {
-				throw new StreamFailure(
-					`Muse's ${label} is longer than ${MAX_SESSION_PAGES} pages; nothing was checkpointed.`,
-					false,
-				);
-			}
-			const params: Record<string, unknown> = {
-				limit: SESSIONS_LIMIT,
-				...(archivedView ? { view: "archived" } : {}),
-				...(cursor === null ? {} : { cursor }),
-			};
-			const page = parseSessionsPage(
-				await call(gateway, "sessions.list", params),
+	const cursors = new Set<string>();
+	let cursor: PageCursor | null = null;
+	for (let pageIndex = 0; ; pageIndex++) {
+		if (pageIndex >= MAX_SESSION_PAGES) {
+			throw new StreamFailure(
+				`Muse's ${label} is longer than ${MAX_SESSION_PAGES} pages; nothing was checkpointed.`,
+				false,
 			);
-			if (page === null) {
-				throw new StreamFailure(
-					`Muse's ${label} came back in a shape the connector cannot read; nothing was checkpointed.`,
-				);
-			}
-			let added = 0;
-			for (const session of page.sessions) {
-				if (seen.has(session.session_id)) continue;
-				seen.add(session.session_id);
-				out.push({ session, archivedView });
-				added += 1;
-			}
-			if (page.moreWithoutCursor) {
-				throw new StreamFailure(
-					`Muse's ${label} says more chats follow but gives no cursor to read them; nothing was checkpointed.`,
-				);
-			}
-			if (page.nextCursor === null) break; // the source's end signal
-			// A page that says more follow must add chats: one that adds none
-			// (a moving list, a stuck page) cannot prove the list complete.
-			if (added === 0) {
-				throw new StreamFailure(
-					`Muse's ${label} returned a page with no new chats while saying more follow; nothing was checkpointed.`,
-				);
-			}
-			if (cursors.has(cursorKey(page.nextCursor))) {
-				throw new StreamFailure(
-					`Muse's ${label} repeated a page cursor; nothing was checkpointed.`,
-				);
-			}
-			cursors.add(cursorKey(page.nextCursor));
-			cursor = page.nextCursor;
+		}
+		const params: Record<string, unknown> = {
+			limit: SESSIONS_LIMIT,
+			...(archivedView ? { view: "archived" } : {}),
+			...(cursor === null ? {} : { cursor }),
+		};
+		const page = parseSessionsPage(
+			await call(gateway, "sessions.list", params),
+		);
+		if (page === null) {
+			throw new StreamFailure(
+				`Muse's ${label} came back in a shape the connector cannot read; nothing was checkpointed.`,
+			);
+		}
+		let added = 0;
+		for (const session of page.sessions) {
+			if (seen.has(session.session_id)) continue;
+			seen.add(session.session_id);
+			out.push(session);
+			added += 1;
+		}
+		if (page.moreWithoutCursor) {
+			throw new StreamFailure(
+				`Muse's ${label} says more chats follow but gives no cursor to read them; nothing was checkpointed.`,
+			);
+		}
+		if (page.nextCursor === null) return out; // the source's end signal
+		// A page that says more follow must add chats: one that adds none
+		// (a moving list, a stuck page) cannot prove the list complete.
+		if (added === 0) {
+			throw new StreamFailure(
+				`Muse's ${label} returned a page with no new chats while saying more follow; nothing was checkpointed.`,
+			);
+		}
+		if (cursors.has(cursorKey(page.nextCursor))) {
+			throw new StreamFailure(
+				`Muse's ${label} repeated a page cursor; nothing was checkpointed.`,
+			);
+		}
+		cursors.add(cursorKey(page.nextCursor));
+		cursor = page.nextCursor;
+	}
+}
+
+function sameChatIds(
+	a: readonly MuseSession[],
+	b: readonly MuseSession[],
+): boolean {
+	if (a.length !== b.length) return false;
+	const ids = new Set(a.map((s) => s.session_id));
+	return b.every((s) => ids.has(s.session_id));
+}
+
+/** The chat list as read, and whether it is proven complete. */
+interface ChatInventory {
+	listed: ListedSession[];
+	/** Two consecutive (active, archived) reads agreed on every chat id. */
+	proven: boolean;
+	pairs: number;
+}
+
+/**
+ * The chat inventory, proven by bracketing. Muse has no all-status view:
+ * the app reads active (`{}`) and archived (`{view:"archived"}`) separately
+ * and nothing records a total, so one pass over both views cannot rule out a
+ * chat that moved from archived to active between the two reads. The
+ * connector reads active, archived, active, archived, each view walked to
+ * its end. When the second pair lists exactly the chat ids of the first in
+ * each view, no chat was created, deleted or moved between the views during
+ * that window, and active plus archived is the whole inventory. Otherwise
+ * it reads one more pair and compares it with the one before, up to
+ * MAX_INVENTORY_PAIRS. A list that never settles is returned unproven: its
+ * chats are still imported, nothing is checkpointed.
+ *
+ * Residual: a chat that flips between the views at least three times, each
+ * flip landing between two specific reads, could be absent from all four
+ * reads of a bracket; nothing short of an all-status snapshot excludes that.
+ *
+ * Records come from the latest pair. A chat in both views is kept once,
+ * as active.
+ */
+async function listSessions(gateway: MuseGateway): Promise<ChatInventory> {
+	let previous: { active: MuseSession[]; archived: MuseSession[] } | null =
+		null;
+	let pairs = 0;
+	let proven = false;
+	let active: MuseSession[] = [];
+	let archived: MuseSession[] = [];
+	while (pairs < MAX_INVENTORY_PAIRS) {
+		active = await readChatView(gateway, false);
+		archived = await readChatView(gateway, true);
+		pairs += 1;
+		if (
+			previous !== null &&
+			sameChatIds(previous.active, active) &&
+			sameChatIds(previous.archived, archived)
+		) {
+			proven = true;
+			break;
+		}
+		previous = { active, archived };
+	}
+	const listed: ListedSession[] = [];
+	const seen = new Set<string>();
+	for (const [sessions, archivedView] of [
+		[active, false],
+		[archived, true],
+	] as const) {
+		for (const session of sessions) {
+			if (seen.has(session.session_id)) continue;
+			seen.add(session.session_id);
+			listed.push({ session, archivedView });
 		}
 	}
-	return out;
+	return { listed, proven, pairs };
 }
 
 /**
@@ -1111,9 +1192,9 @@ export async function runChatStreams(
 	}
 
 	await ctx.progress("Listing chats", { stream: CONVERSATIONS });
-	let listed: ListedSession[];
+	let inventory: ChatInventory;
 	try {
-		listed = await listSessions(gateway);
+		inventory = await listSessions(gateway);
 	} catch (error) {
 		await failStreams(
 			ctx,
@@ -1122,6 +1203,7 @@ export async function runChatStreams(
 		);
 		return;
 	}
+	const { listed } = inventory;
 
 	if (wantConversations) {
 		for (const { session, archivedView } of listed) {
@@ -1140,15 +1222,15 @@ export async function runChatStreams(
 			: parseConversationsCursor(ctx.state[CONVERSATIONS]);
 	const prior = stored?.chats ?? {};
 	const listedIds = new Set(listed.map(({ session }) => session.session_id));
+	// Chats read again this run, and the transcript revision of each one read
+	// completely (absent for a gapped chat).
+	const changedIds = new Set<string>();
+	let revisions = new Map<string, number | null>();
 	if (wantMessages) {
 		const chats = listed
 			.map(({ session }) => ({
 				id: session.session_id,
-				updatedMs:
-					typeof session.updated_at_ms === "number" &&
-					Number.isFinite(session.updated_at_ms)
-						? session.updated_at_ms
-						: null,
+				updatedMs: listedUpdatedMs(session),
 			}))
 			.sort((a, b) => (a.updatedMs ?? 0) - (b.updatedMs ?? 0));
 		const counts = { unsafe: 0 };
@@ -1158,7 +1240,7 @@ export async function runChatStreams(
 				if (!(await chatUnchanged(gateway, c.id, c.updatedMs, prior[c.id])))
 					changed.push(c.id);
 			}
-			const changedIds = new Set(changed);
+			for (const id of changed) changedIds.add(id);
 			// Retry earlier gaps first, then every chat that changed. A gapped
 			// chat the inventory did not list gets its parent from sessions.get
 			// (it may have moved between the two views during the walk); it is
@@ -1167,10 +1249,16 @@ export async function runChatStreams(
 				...[...pending.keys()].filter((id) => !changedIds.has(id)),
 				...changed,
 			];
-			await hydrateChats(ctx, gateway, tally, required, pending, (id) =>
-				listedIds.has(id)
-					? Promise.resolve<ParentOutcome>({ kind: "emitted" })
-					: parentFromSessionsGet(ctx, gateway, tally, id, counts),
+			revisions = await hydrateChats(
+				ctx,
+				gateway,
+				tally,
+				required,
+				pending,
+				(id) =>
+					listedIds.has(id)
+						? Promise.resolve<ParentOutcome>({ kind: "emitted" })
+						: parentFromSessionsGet(ctx, gateway, tally, id, counts),
 			);
 		} catch (error) {
 			await failStreams(
@@ -1190,19 +1278,53 @@ export async function runChatStreams(
 		);
 		return;
 	}
-	// Exhausting two independent views does not prove an inventory: an
-	// unknown chat can move from archived to active between those reads.
-	// Known-ID recovery and repeated walks cannot close that discovery gap.
-	// Keep records and per-parent detail accounting, but never full coverage
-	// or a chat checkpoint until an authoritative inventory contract exists.
-	await failStreams(
-		ctx,
-		[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
-		new StreamFailure(
-			"Muse chat inventory is incomplete: active and archived lists are independent reads without an authoritative all-status snapshot. Readable chats were imported, but conversations and messages are not checkpointed as complete.",
-			false,
-		),
-	);
+	if (!inventory.proven) {
+		// The views kept changing: an unknown chat may have moved between
+		// them unseen. Keep records and per-parent detail accounting, but no
+		// conversations coverage and no chat checkpoint. Retryable: a list
+		// that settles proves itself on a later run.
+		await failStreams(
+			ctx,
+			[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
+			new StreamFailure(
+				`Muse chat inventory is incomplete: the active and archived chat lists changed between every pair of reads (${inventory.pairs} reads of each), so no read proves every chat was listed. Readable chats were imported, but conversations and messages are not checkpointed as complete.`,
+				true,
+			),
+		);
+		return;
+	}
+
+	// Proven inventory: full conversations coverage, then the cursor. A chat
+	// read completely this run (changed, or a pending gap) gets a new mark;
+	// an unchanged chat keeps its mark; a gapped chat, or one whose revision
+	// or update time is unknown, gets none and is read again next run. Chats
+	// no longer listed drop out.
+	const marks: Record<string, ChatMark> = {};
+	for (const { session } of listed) {
+		const id = session.session_id;
+		if (revisions.has(id) || changedIds.has(id)) {
+			const revision = revisions.get(id);
+			const updatedMs = listedUpdatedMs(session);
+			if (typeof revision === "number" && updatedMs !== null)
+				marks[id] = { updated_at_ms: updatedMs, transcript_revision: revision };
+			continue;
+		}
+		const mark = prior[id];
+		if (mark) marks[id] = mark;
+	}
+	await ctx.emit(buildFullScanCoverageMessage(CONVERSATIONS, listed.length));
+	await ctx.emit({
+		type: "STATE",
+		stream: CONVERSATIONS,
+		cursor: { version: CHATS_CURSOR_VERSION, chats: marks },
+	});
+}
+
+function listedUpdatedMs(session: MuseSession): number | null {
+	return typeof session.updated_at_ms === "number" &&
+		Number.isFinite(session.updated_at_ms)
+		? session.updated_at_ms
+		: null;
 }
 
 /** One second after a zoned timestamp, in the same shape (`Z`, whole seconds unless the source had a fraction). */
