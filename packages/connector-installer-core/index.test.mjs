@@ -5,7 +5,7 @@
 // the in-process fixture registry; nothing contacts GHCR.
 
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix, win32 } from "node:path";
 import test, { after } from "node:test";
@@ -167,4 +167,64 @@ test("pruning preserves configured link subtrees and removes only unpreserved li
   );
   assert.equal(existsSync(join(installRoot, "remove-link")), false);
   assert.equal(readFileSync(externalFile, "utf8"), "outside\n");
+});
+
+test("direct prune refuses malformed paths, linked roots and expected links without touching outside files", () => {
+  const installRoot = createTempDir("prune-destinations-");
+  const sentinel = join(installRoot, "keep");
+  writeFileSync(sentinel, "unchanged");
+  for (const expectedPaths of [["../outside"], ["a/./b"], ["a//b"]]) {
+    assert.throws(() => pruneInstalled({ installRoot, expectedPaths }), /destination path/i);
+    assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+  }
+  const linksRoot = createTempDir("prune-links-");
+  const linkedRoot = join(linksRoot, "linked");
+  symlinkSync(installRoot, linkedRoot);
+  assert.throws(() => pruneInstalled({ installRoot: linkedRoot, expectedPaths: [] }), /symbolic link/i);
+  const linkedLeaf = join(linksRoot, "expected");
+  symlinkSync(sentinel, linkedLeaf);
+  assert.throws(() => pruneInstalled({ installRoot: linksRoot, expectedPaths: ["expected"] }), /symbolic link/i);
+  rmSync(linkedRoot);
+  pruneInstalled({ installRoot: linksRoot, expectedPaths: [] });
+  assert.equal(existsSync(linkedLeaf), false);
+  assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+});
+
+test("direct prune refuses noncanonical destination casing before deleting files", () => {
+  const installRoot = createTempDir("prune-case-alias-");
+  mkdirSync(join(installRoot, "Actual"));
+  const sentinel = join(installRoot, "Actual/keep");
+  writeFileSync(sentinel, "unchanged");
+  assert.throws(() => pruneInstalled({ installRoot, expectedPaths: ["actual/keep"] }), /alias|canonical|case/i);
+  assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+});
+
+test("OCI reinstall truncates longer files and refuses hardlinked or directory leaves", async () => {
+  await withRegistry(async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    const entry = ociLockEntry(registry, digest);
+    for (const layout of ["snapshot", "source"]) {
+      const installRoot = createTempDir("oci-reinstall-");
+      const options = { lock: { connectors: [entry] }, source: null, installRoot, layout, ...fixtureOptions(registry, signer) };
+      await installFromLock(options);
+      const scriptPath = join(installRoot, "collection-profiles", entry.connectorId, entry.entrypointPath);
+      const expected = readFileSync(scriptPath);
+      writeFileSync(scriptPath, "longer existing content".repeat(100));
+      await installFromLock(options);
+      assert.deepEqual(readFileSync(scriptPath), expected);
+      assert.equal((await verifyInstalled(options)).ok, true);
+      rmSync(scriptPath);
+      const sentinel = join(createTempDir("oci-hardlink-sentinel-"), "outside");
+      writeFileSync(sentinel, "unchanged");
+      linkSync(sentinel, scriptPath);
+      for (const run of [installFromLock, verifyInstalled]) {
+        await assert.rejects(() => run(options), /single regular file/i);
+        assert.equal(readFileSync(sentinel, "utf8"), "unchanged");
+      }
+      rmSync(scriptPath);
+      mkdirSync(scriptPath);
+      await assert.rejects(() => installFromLock(options), /single regular file/i);
+    }
+  });
 });
