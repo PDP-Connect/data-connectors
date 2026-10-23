@@ -3968,4 +3968,59 @@ test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", {
   assert.ok(fixtures.requests.every((request) => request.path === "/voyager/api/me"));
   assert.deepEqual(r.stateMessages, []);
  });
+ // A successful HTTP 200 JSON body with an `_error` key is profile data. These
+ // cases send the sentinel through the real harness and the fixture transform.
+ const SENTINEL = "SECRET_NOTE";
+ const exportedText = (r) => JSON.stringify([r.result, r.data, r.states, r.stateMessages]);
+ await t.test("successful JSON _error=SECRET_NOTE on a usable profile keeps the complete inventory", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) body._error = SENTINEL;
+   return body;
+  });
+  const r = await run(fixtures);
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.result.exportSummary, c.exportSummary);
+  assert.match(r.data.status, /^Complete!/);
+  assert.equal(r.result["linkedin.experience"].records.length, 1);
+  assert.equal(exportedText(r).includes(SENTINEL), false);
+ });
+ await t.test("successful JSON _error=SECRET_NOTE on an unreadable profile is a portable partial, not its text", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) {
+    delete body.elements[0].profilePositionGroups;
+    body._error = SENTINEL;
+   }
+   return body;
+  });
+  const r = await run(fixtures, { scopes: ["linkedin.experience", "linkedin.skills"] });
+  assertCleanRun(r);
+  assert.match(r.data.status, /^Partial:/);
+  assert.equal(r.result["linkedin.experience"]?.records.length ?? 0, 0);
+  assert.equal(r.result["linkedin.skills"].records.length, 1);
+  assert.equal(r.result.errors.length, 1);
+  const [error] = r.result.errors;
+  assert.equal(error.scope, "linkedin.experience");
+  assert.equal(error.errorClass, "partial");
+  assert.equal(error.code, "stream_collection_failed");
+  assert.equal(error.reason, "LinkedIn enumeration is unproven; the profile section was unreadable");
+  assert.equal(exportedText(r).includes(SENTINEL), false);
+ });
+ await t.test("genuine HTTP 503 beside a successful basic JSON _error=SECRET_NOTE keeps its own cause", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) return { fixtureStatus: 503 };
+   if (url.searchParams.has("memberIdentity")) return { _error: SENTINEL, elements: [{ firstName: "Anon", lastName: "Member" }] };
+   return body;
+  });
+  const r = await run(fixtures, { scopes: ["linkedin.experience"] });
+  assertCleanRun(r);
+  assert.match(r.data.status, /^Partial:/);
+  assert.equal(r.result.errors.length, 1);
+  const [error] = r.result.errors;
+  assert.equal(error.scope, "linkedin.experience");
+  assert.equal(error.errorClass, "partial");
+  assert.equal(error.code, "stream_collection_failed");
+  assert.equal(error.reason, "LinkedIn experience read failed: http_503");
+  assert.equal(exportedText(r).includes(SENTINEL), false);
+ });
 });

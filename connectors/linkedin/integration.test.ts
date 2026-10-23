@@ -430,6 +430,48 @@ test("the real runtime: a malformed successful JSON shape with an _error field i
 	);
 	assert.equal(result.rawStdout.includes(PRIVATE_BODY_EXCERPT), false);
 	assert.equal(JSON.stringify(result.messages).includes(PRIVATE_BODY_EXCERPT), false);
+	assert.equal(result.code, 1);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(done.error?.code, "stream_collection_failed");
+		assert.equal(
+			done.error?.message,
+			"stream collection failed: experience: LinkedIn enumeration is unproven; the profile section was unreadable",
+		);
+	}
+});
+
+test("the real runtime: a failed run keeps a healthy sibling's records", async () => {
+	const profile = proofProfile();
+	delete profile.profilePositionGroups;
+	const result = await runProtocolProbe(
+		{
+			basic: { status: 200, body: BASIC_FALLBACK_BODY },
+			decorated: { status: 200, body: { _error: PRIVATE_BODY_EXCERPT, elements: [profile] } },
+		},
+		["experience", "skills"],
+	);
+	assert.equal(result.code, 1);
+	assert.equal(result.rawStdout.includes(PRIVATE_BODY_EXCERPT), false);
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => [message.stream, message.reason]),
+		[["experience", "stream_collection_failed"]],
+	);
+	const skillRecords = result.messages.filter((message) => message.type === "RECORD" && message.stream === "skills");
+	assert.equal(skillRecords.length, 1);
+	const done = result.messages.at(-1);
+	assert.equal(done?.type, "DONE");
+	if (done?.type === "DONE") {
+		assert.equal(done.status, "failed");
+		assert.equal(
+			done.error?.message,
+			"stream collection failed: experience: LinkedIn enumeration is unproven; the profile section was unreadable",
+		);
+	}
 });
 
 test("resource selection of connections does not become missing enrichment", async () => {
