@@ -4207,10 +4207,24 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/whatsapp_web/collect-fixes.test.ts",
-			line: 717,
+			line: 723,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "sendHistorySyncOnDemand(): test drives each gate case (throws, undefined, false) in turn against its own stub and asserts nothing was sent",
+		},
+		{
+			path: "connectors/whatsapp_web/collect-fixes.test.ts",
+			line: 790,
+			column: 16,
+			category: "test_assertion_sequencing",
+			note: "probeWhatsAppSessionOnPage(): test drives each signed-out page case in turn and asserts the probe says false and never navigates",
+		},
+		{
+			path: "connectors/whatsapp_web/index.ts",
+			line: 984,
+			column: 9,
+			category: "bounded_retry_polling",
+			note: "probeWhatsAppSessionOnPage(): page.evaluate(): bounded three-attempt poll for the app to know its own user, a second apart",
 		},
 		{
 			path: "connectors/whatsapp_web/index.ts",

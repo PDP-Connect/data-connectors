@@ -1396,6 +1396,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"linkedin.skills",
 	"linkedin.languages",
 	"linkedin.connections",
+	// WhatsApp (web): read from the owner's signed-in WhatsApp Web tab's own
+	// in-page stores; auth-walled (phone-linked session), no credential-free
+	// coverage driver. chats and messages are its required streams.
+	"whatsapp_web.chats",
+	"whatsapp_web.messages",
 	// Meta (browser-session-backed; no credential-free fixture yet).
 	"meta.profile",
 	// Shopify (browser Apollo-cache extraction; no credential-free fixture yet).

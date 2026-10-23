@@ -24351,22 +24351,27 @@
 			}
 		},
 		{
-			"connectorId": "https://registry.pdpp.dev/connectors/whatsapp_web",
+			"brandIcon": "./connectors/whatsapp_web/icon.svg",
+			"connectorId": "https://registry.pdpp.dev/connectors/whatsapp-web",
 			"entry": "./connectors/whatsapp_web/index.ts",
 			"manifest": {
 				"protocol_version": "0.1.0",
-				"connector_id": "https://registry.pdpp.dev/connectors/whatsapp_web",
+				"connector_id": "https://registry.pdpp.dev/connectors/whatsapp-web",
 				"source": {
 					"id": "https://registry.pdpp.dev/sources/whatsapp_web",
 					"display": {
 						"name": "WhatsApp (web)",
-						"icon": "icon.svg",
 						"description": "WhatsApp chats, messages, contacts and groups, read from the signed-in WhatsApp Web page's own local stores."
 					}
 				},
-				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp_web",
+				"connector_key": "whatsapp-web",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
 				"version": "0.1.0",
 				"display_name": "WhatsApp (web)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#25D366"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -24700,7 +24705,20 @@
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					}
-				]
+				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "whatsapp_web",
+						"login_url": "https://web.whatsapp.com/",
+						"login_message": "Sign in to WhatsApp Web, then return here.",
+						"collect_export": "collect",
+						"probe_export": "probeWhatsAppSessionOnPage",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				}
 			}
 		},
 		{

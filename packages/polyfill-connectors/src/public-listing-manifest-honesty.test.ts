@@ -33,7 +33,7 @@ function manifest(name: string): Manifest {
 }
 
 test("every shipped manifest declares exactly one typed public lifecycle tier", () => {
-	assert.equal(names.length, 60);
+	assert.equal(names.length, 61);
 	for (const name of names) {
 		const { capabilities } = manifest(name);
 		const { public_listing: listing } = capabilities ?? {};

@@ -224,7 +224,7 @@ export const STORES_SCRIPT = `
 		find_messages: !!(find && typeof find.msgFindBefore === "function"),
 		send_request: !!(send && typeof send.sendPeerDataOperationRequest === "function"),
 	};
-})();
+})()
 `;
 
 /** A read of the page's chat collection, mapped to the observed plain shape. */
@@ -256,7 +256,7 @@ export async function listChats(page: ScriptRunner): Promise<unknown> {
 			history_state: st(c.endOfHistoryTransferType),
 			msgs_in_memory: c.msgs ? c.msgs.getModelsArray().length : 0,
 		}));
-	})();
+	})()
 	`);
 }
 
@@ -330,7 +330,7 @@ export async function readChatMessages(
 			anchor = oldest.id;
 		}
 		return { chat_id: chatId, status: 200, memory, messages: out, complete: false, anchored: true, stop: "page_cap", me_id: me };
-	})();
+	})()
 	`);
 }
 
@@ -358,7 +358,7 @@ export async function listContacts(
 			is_business: !!c.isBusiness,
 			verified_name: c.verifiedName ?? null,
 		}));
-	})();
+	})()
 	`);
 }
 
@@ -378,7 +378,7 @@ export async function listGroups(page: ScriptRunner): Promise<unknown> {
 			restrict: !!g.restrict,
 			participants: g.participants ? g.participants.getModelsArray().map((p) => ({ id: w(p.id), is_admin: !!p.isAdmin, is_super_admin: !!p.isSuperAdmin })) : [],
 		}));
-	})();
+	})()
 	`);
 }
 
@@ -409,7 +409,7 @@ export async function sendHistorySyncOnDemand(
 		} catch (error) {
 			return { sent: false, reason: String((error && error.message) ?? error).slice(0, 300) };
 		}
-	})();
+	})()
 	`);
 }
 
@@ -945,6 +945,49 @@ export async function probeSession({
 	page,
 }: ProbeSessionArgs): Promise<boolean> {
 	return page.url().startsWith(WHATSAPP_ORIGIN);
+}
+
+/**
+ * Signed-in check for a page the host already holds: the tab is on
+ * web.whatsapp.com, the app's module loader is up, and the client knows its
+ * own user (a QR or signed-out screen has none). It returns plain booleans
+ * only and reads no chat, contact or message.
+ */
+export const SIGNED_IN_SCRIPT = `
+(() => {
+	if (location.origin !== ${JSON.stringify(WHATSAPP_ORIGIN)}) return false;
+	if (typeof window.require !== "function") return false;
+	try {
+		const M = window.require("WAWebUserPrefsMeUser");
+		return !!(M.getMaybeMePnUser() || M.getMaybeMeLidUser());
+	} catch {
+		return false;
+	}
+})()
+`;
+
+const PROBE_ATTEMPTS = 3;
+const PROBE_WAIT_MS = 1_000;
+
+/**
+ * Session probe for hosts that pass a page (the mobile PageShim host). It
+ * never navigates, so repeating it while the owner signs in is safe, and it
+ * waits only a few seconds for the app to know its own user.
+ */
+export async function probeWhatsAppSessionOnPage(
+	page: MainWorldPage,
+	waitMs: number = PROBE_WAIT_MS,
+): Promise<boolean> {
+	const main = mainWorld(page);
+	for (let attempt = 0; attempt < PROBE_ATTEMPTS; attempt++) {
+		try {
+			if ((await main.evaluate(SIGNED_IN_SCRIPT)) === true) return true;
+		} catch {
+			// A page mid-navigation cannot be read yet: not signed in, for now.
+		}
+		if (attempt < PROBE_ATTEMPTS - 1) await wait(waitMs);
+	}
+	return false;
 }
 
 export async function ensureSession({

@@ -34,9 +34,15 @@ import {
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	collect,
+	listChats,
+	listContacts,
+	listGroups,
 	MESSAGE_PAGE_SIZE,
+	probeWhatsAppSessionOnPage,
 	readChatMessages,
 	type ScriptRunner,
+	SIGNED_IN_SCRIPT,
+	STORES_SCRIPT,
 	sendHistorySyncOnDemand,
 } from "./index.ts";
 import {
@@ -737,4 +743,73 @@ test("fix 5: the history request is not sent when its gate cannot be verified or
 		true,
 	);
 	assert.equal(sent.length, 1);
+});
+
+test("pageshim probe: signed in only when the app knows its own user, and it never navigates", async () => {
+	const pageAt = (origin: string, modules: Record<string, unknown> | null) => {
+		const calls: string[] = [];
+		return {
+			calls,
+			evaluate: async (script: unknown) => {
+				calls.push("evaluate");
+				const sandbox = {
+					location: { origin },
+					window:
+						modules === null
+							? {}
+							: {
+									require: (name: string) => {
+										if (!(name in modules)) throw new Error(`no module ${name}`);
+										return modules[name];
+									},
+								},
+				};
+				return await vm.runInNewContext(String(script), sandbox);
+			},
+			goto: async () => {
+				calls.push("goto");
+			},
+		};
+	};
+	const me = (pn: unknown, lid: unknown) => ({
+		WAWebUserPrefsMeUser: {
+			getMaybeMePnUser: () => pn,
+			getMaybeMeLidUser: () => lid,
+		},
+	});
+	const signedIn = pageAt("https://web.whatsapp.com", me({ _serialized: "owner@c.us" }, null));
+	assert.equal(await probeWhatsAppSessionOnPage(signedIn as never, 0), true);
+	const lidOnly = pageAt("https://web.whatsapp.com", me(null, { _serialized: "owner@lid" }));
+	assert.equal(await probeWhatsAppSessionOnPage(lidOnly as never, 0), true);
+	for (const page of [
+		pageAt("https://web.whatsapp.com", me(null, null)),
+		pageAt("https://web.whatsapp.com", null),
+		pageAt("https://web.whatsapp.com", {}),
+		pageAt("https://example.invalid", me({ _serialized: "owner@c.us" }, null)),
+	]) {
+		assert.equal(await probeWhatsAppSessionOnPage(page as never, 0), false);
+		assert.equal(page.calls.includes("goto"), false, "the probe never navigates");
+	}
+});
+
+test("every page script is one expression, as the PageShim host wraps it in await (...)", async () => {
+	const scripts: string[] = [STORES_SCRIPT, SIGNED_IN_SCRIPT];
+	const capture: ScriptRunner = {
+		evaluate: async (script: string) => {
+			scripts.push(script);
+			return null;
+		},
+	};
+	await listChats(capture);
+	await readChatMessages(capture, "peer-one@lid");
+	await listContacts(capture, ["peer-one@lid"]);
+	await listGroups(capture);
+	await sendHistorySyncOnDemand(capture, "peer-one@lid");
+	assert.equal(scripts.length, 7);
+	for (const script of scripts) {
+		assert.doesNotThrow(
+			() => new Function(`return (async () => { const value = await (${script}); return value; })`),
+			script.slice(0, 80),
+		);
+	}
 });
