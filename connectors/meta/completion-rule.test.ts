@@ -924,7 +924,7 @@ async function sourceRun(options: {
  let sessionFailure: Error | null = null;
  await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK)
   .catch((error: unknown) => {
-   if (error instanceof Error && error.message.startsWith("meta_session_required:")) sessionFailure = error;
+   if (error instanceof TerminalError && error.code === "meta_session_required") sessionFailure = error;
    else throw error;
   });
  return Object.assign(result.harness, { sessionFailure: sessionFailure as Error | null });
@@ -1028,8 +1028,12 @@ for (const challenge of ["dom", "body", "late"] as const) {
    assert.equal(harness.emitted.length, empty ? 0 : 3);
    // A sign-in or challenge wall is not an unproven list: no stream-scoped
    // skip, the run fails with the session error.
-   assert.equal(harness.sessionFailure?.message,
-    "meta_session_required: Instagram signed out or requested a challenge during this run");
+   assert.ok(harness.sessionFailure instanceof TerminalError);
+   assert.equal(harness.sessionFailure.code, "meta_session_required");
+   assert.equal(harness.sessionFailure.retryable, false);
+   assert.deepEqual(harness.sessionFailure.recoveryHint, { action: "manual_action_required", retryable: false });
+   assert.equal(harness.sessionFailure.message,
+    "meta_session_required: Instagram authentication was rejected or challenged during this run");
    assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT"), false);
   });
  }

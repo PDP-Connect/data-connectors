@@ -27,6 +27,7 @@ import type {
 	BrowserCollectContext,
 	EmittedMessage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	classifyAdsDialogInPage,
@@ -1310,7 +1311,14 @@ test("collectAllStreams: a login challenge ends the run as a session failure eve
 				makeVirtualAdsClock(),
 				TEST_PROFILE_CLOCK,
 			),
-			/^Error: meta_session_required: /,
+			(error: unknown) => {
+				assert.ok(error instanceof TerminalError);
+				assert.equal(error.code, "meta_session_required");
+				assert.equal(error.retryable, false);
+				assert.deepEqual(error.recoveryHint, { action: "manual_action_required", retryable: false });
+				assert.equal(error.message, "meta_session_required: Instagram authentication was rejected or challenged during this run");
+				return true;
+			},
 		);
 		assert.equal(
 			harness.protocolMessages.some((message) => message.type === "STATE"),

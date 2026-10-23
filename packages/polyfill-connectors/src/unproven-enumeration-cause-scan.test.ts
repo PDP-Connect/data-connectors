@@ -19,14 +19,10 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse } from "@babel/parser";
+import { connectorsDir as CONNECTORS_DIR } from "./connector-paths.ts";
 import { connectorProductionFiles } from "./reason-emission-scan.ts";
 import { UNPROVEN_ENUMERATION_CAUSES } from "./unproven-enumeration.ts";
-
-const CONNECTORS_DIR = fileURLToPath(
-	new URL("../../../connectors/", import.meta.url),
-);
 
 /** Tokens that name a failed read, not an unproven end of a list. */
 const READ_FAILURE_TOKEN =
