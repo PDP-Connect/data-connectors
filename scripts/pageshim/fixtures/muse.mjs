@@ -144,6 +144,22 @@ export const museFixtures = {
 
 export const pageshimCase = {
 	fixtures: museFixtures,
+	partialErrors: [
+		{
+			errorClass: "partial",
+			reason: "Muse chat inventory is incomplete: active and archived lists are independent reads without an authoritative all-status snapshot. Readable chats were imported, but conversations and messages are not checkpointed as complete.",
+			disposition: "degraded",
+			scope: "muse.conversations",
+			phase: "collect",
+		},
+		{
+			errorClass: "partial",
+			reason: "Muse chat inventory is incomplete: active and archived lists are independent reads without an authoritative all-status snapshot. Readable chats were imported, but conversations and messages are not checkpointed as complete.",
+			disposition: "degraded",
+			scope: "muse.messages",
+			phase: "collect",
+		},
+	],
 	scopes: [
 		"muse.conversations",
 		"muse.messages",
