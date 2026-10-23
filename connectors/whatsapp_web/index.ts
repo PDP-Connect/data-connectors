@@ -87,13 +87,6 @@ const GROUPS = "groups";
 export const MESSAGE_PAGE_SIZE = 50;
 /** One in-page walk chunk reads at most this many local pages. */
 const MAX_CHUNK_PAGES = 40;
-/**
- * Backstop on a chat's chunks in one run (MAX_WALK_CHUNKS x MAX_CHUNK_PAGES x
- * MESSAGE_PAGE_SIZE = 1,000,000 messages). The walk otherwise runs until the
- * store's own short page; the backstop only guards against a store that
- * never ends.
- */
-const MAX_WALK_CHUNKS = 500;
 /** How long to wait for the page's own module stores to be ready. */
 const STORE_WAIT_ATTEMPTS = 40;
 const STORE_WAIT_MS = 1_500;
@@ -108,8 +101,6 @@ export interface CollectionTimings {
 	/** Reads of the chat list while a chat's on-demand history settles. */
 	historyAttempts: number;
 	historyMs: number;
-	/** A chat's walk chunks per run before it gaps (default MAX_WALK_CHUNKS). */
-	maxWalkChunks?: number;
 }
 
 export const DEFAULT_TIMINGS: CollectionTimings = {
@@ -632,6 +623,8 @@ export type WhatsAppCollectContext = Pick<
 	detailGaps?: BrowserCollectContext["detailGaps"];
 	recoveryOnly?: boolean;
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
+	/** Further pages of pending gaps; absent means the START page is all. */
+	requestDetailGapPage?: BrowserCollectContext["requestDetailGapPage"];
 };
 
 /** The requested streams this connector serves. */
@@ -673,13 +666,13 @@ function pendingMessageGaps(
 	return byChat;
 }
 
-/** DETAIL_GAP_RECOVERED for each gap an earlier run left for this chat. */
-async function resolvePendingGaps(
+/** DETAIL_GAP_RECOVERED for pending gaps of a chat this run read completely. */
+async function emitRecovered(
 	ctx: WhatsAppCollectContext,
-	pending: ReadonlyMap<string, readonly PendingGap[]>,
 	chatId: string,
+	gaps: readonly PendingGap[],
 ): Promise<void> {
-	for (const gap of pending.get(chatId) ?? []) {
+	for (const gap of gaps) {
 		await ctx.emit({
 			type: "DETAIL_GAP_RECOVERED",
 			reference_only: true,
@@ -688,6 +681,33 @@ async function resolvePendingGaps(
 			stream: MESSAGES,
 			record_key: chatId,
 		});
+	}
+}
+
+/**
+ * Hand every pending message gap to `handle` once: the START page first,
+ * then further pages from the runtime until a page holds no gap not already
+ * handled (the runtime answers with the gaps still pending, so recovered
+ * ones drop out and a re-emitted one comes back once, already handled).
+ */
+async function forEachPendingGapPage(
+	ctx: WhatsAppCollectContext,
+	first: WhatsAppCollectContext["detailGaps"],
+	handle: (fresh: Map<string, PendingGap[]>) => Promise<void>,
+): Promise<void> {
+	const seen = new Set<string>();
+	let page = first ?? [];
+	for (;;) {
+		const fresh = new Map<string, PendingGap[]>();
+		for (const [key, gaps] of pendingMessageGaps(page)) {
+			const unseen = gaps.filter((g) => !seen.has(g.gapId));
+			for (const gap of unseen) seen.add(gap.gapId);
+			if (unseen.length > 0) fresh.set(key, unseen);
+		}
+		if (fresh.size === 0) return;
+		await handle(fresh);
+		if (!ctx.requestDetailGapPage) return;
+		page = await ctx.requestDetailGapPage({ streams: [MESSAGES] });
 	}
 }
 
@@ -840,11 +860,12 @@ async function requestHistory(
 			);
 		}
 		const row = fresh.find((c) => c.id === item.id);
-		// A read that does not hold the chat says nothing about its history:
-		// the chat keeps the state it was last seen in (which said history
-		// remained on the phone), so it gaps instead of passing as complete.
-		if (row === undefined) continue;
-		state = row.history_state ?? null;
+		// A read that does not hold the chat, or holds it without a history
+		// state, says nothing about its history: the chat keeps the state it
+		// was last seen in (which said history remained on the phone), so it
+		// gaps instead of passing as complete.
+		if (row === undefined || row.history_state == null) continue;
+		state = row.history_state;
 		if (!needsHistoryRequest(state)) break;
 	}
 	return { state, requested: true };
@@ -877,8 +898,17 @@ export async function collectWith(
 		want.delete(MESSAGES);
 	}
 	if (want.size === 0) return;
-	const pending = pendingMessageGaps(ctx.detailGaps);
-	if (ctx.recoveryOnly && (!want.has(MESSAGES) || pending.size === 0)) return;
+	let firstGapPage = ctx.detailGaps ?? [];
+	if (ctx.recoveryOnly) {
+		if (!want.has(MESSAGES)) return;
+		if (
+			pendingMessageGaps(firstGapPage).size === 0 &&
+			ctx.requestDetailGapPage
+		) {
+			firstGapPage = await ctx.requestDetailGapPage({ streams: [MESSAGES] });
+		}
+		if (pendingMessageGaps(firstGapPage).size === 0) return;
+	}
 
 	const chats = await settleChatList(stores, timings);
 	if (chats.length === 0) {
@@ -892,15 +922,12 @@ export async function collectWith(
 	// Every chat's record, built once. A chat whose text cannot be stored is
 	// not emitted with that text silently emptied: it is withheld, and the
 	// chats stream (and the messages under it) are not checkpointed.
-	const chatItems: ChatItem[] = [];
-	let unsafeChats = 0;
-	const inScope = ctx.recoveryOnly
-		? chats.filter((c) => pending.has(c.id))
-		: chats;
-	for (const chat of inScope) {
+	const items = new Map<string, ChatItem>();
+	const unsafeChatIds = new Set<string>();
+	for (const chat of chats) {
 		const built = buildChat(chat, tally);
 		if (built.replaced > 0) {
-			unsafeChats += 1;
+			unsafeChatIds.add(chat.id);
 			continue;
 		}
 		const checked = validateRecord(CHATS, built.record);
@@ -910,7 +937,7 @@ export async function collectWith(
 				`chats record failed schema validation: ${issuesText(checked.issues)}`,
 			);
 		}
-		chatItems.push({
+		items.set(chat.id, {
 			id: chat.id,
 			kind: chatKind(chat.id, chat.server),
 			record: built.record,
@@ -919,47 +946,96 @@ export async function collectWith(
 			history_state: chat.history_state ?? null,
 		});
 	}
+	const unsafeChats = ctx.recoveryOnly ? 0 : unsafeChatIds.size;
 
-	if (want.has(CHATS)) {
-		for (const item of chatItems) await ctx.emitRecord(CHATS, item.record);
+	// One chat's messages: its one history request when it needs one, the
+	// walk of its local store, then its gap when the walk or the history
+	// state says something remains. Every message the store holds is
+	// emitted either way.
+	const requiredKeys: string[] = [];
+	const hydratedKeys: string[] = [];
+	const gapKeys: string[] = [];
+	const outcomes = new Map<string, "hydrated" | "gapped">();
+	const hydrateChat = async (item: ChatItem): Promise<void> => {
+		requiredKeys.push(item.id);
+		const history = await requestHistory(stores, item, timings);
+		const walk = await walkMessagesForChat(ctx, stores, tally, item);
+		const gap =
+			walk.gap ??
+			(historyRemainsOnPhone(history.state)
+				? {
+						reason: "retry_exhausted" as const,
+						class: "history_remains_on_phone",
+						message: `history state ${String(history.state)}; ${history.requested ? "after this run's on-demand history request" : "no on-demand history request was sent this run"}`,
+					}
+				: null);
+		if (gap !== null) {
+			await emitDetailGap(ctx, {
+				stream: MESSAGES,
+				parentStream: CHATS,
+				recordKey: item.id,
+				reason: gap.reason,
+				locator: { kind: "whatsapp_web.chat_messages", chat_id: item.id },
+				error: { class: gap.class, message: gap.message },
+			});
+			gapKeys.push(item.id);
+			outcomes.set(item.id, "gapped");
+			return;
+		}
+		hydratedKeys.push(item.id);
+		outcomes.set(item.id, "hydrated");
+	};
+
+	if (!ctx.recoveryOnly) {
+		// Parents first, then each chat's messages.
+		if (want.has(CHATS)) {
+			for (const item of items.values())
+				await ctx.emitRecord(CHATS, item.record);
+		}
+		if (want.has(MESSAGES)) {
+			for (const item of items.values()) await hydrateChat(item);
+		}
 	}
 
 	if (want.has(MESSAGES)) {
-		const requiredKeys = chatItems.map((c) => c.id);
-		const hydratedKeys: string[] = [];
-		const gapKeys: string[] = [];
-		for (const item of chatItems) {
-			const history = await requestHistory(stores, item, timings);
-			// Every chat's local store is walked and every message it holds is
-			// emitted, whatever its history state. Only then does a chat get
-			// its one visible gap: for a walk that did not reach the store's
-			// own end, or for the history that still remains on the phone.
-			const walk = await walkMessagesForChat(ctx, stores, tally, item, timings);
-			const gap =
-				walk.gap ??
-				(historyRemainsOnPhone(history.state)
-					? {
-							reason: "retry_exhausted" as const,
-							class: "history_remains_on_phone",
-							message: `history state ${String(history.state)}; ${history.requested ? "after this run's on-demand history request" : "no on-demand history request was sent this run"}`,
-						}
-					: null);
-			if (gap !== null) {
+		// Pending gaps from earlier runs, every page of them. A chat read
+		// completely this run acknowledges its gaps; a chat gapped again this
+		// run already re-emitted its gap. A recovery-only run reads the
+		// pending chats here, and only those. A pending chat that is not in
+		// this run's inventory (or cannot be imported) keeps its gap, re-emitted
+		// once: deletion is never inferred from absence.
+		const regapped = new Set<string>();
+		await forEachPendingGapPage(ctx, firstGapPage, async (fresh) => {
+			for (const [chatId, gaps] of fresh) {
+				const item = items.get(chatId);
+				if (!outcomes.has(chatId) && ctx.recoveryOnly && item !== undefined) {
+					if (want.has(CHATS)) await ctx.emitRecord(CHATS, item.record);
+					await hydrateChat(item);
+				}
+				const outcome = outcomes.get(chatId);
+				if (outcome === "hydrated") {
+					await emitRecovered(ctx, chatId, gaps);
+					continue;
+				}
+				if (outcome === "gapped" || regapped.has(chatId)) continue;
+				regapped.add(chatId);
 				await emitDetailGap(ctx, {
 					stream: MESSAGES,
 					parentStream: CHATS,
-					recordKey: item.id,
-					reason: gap.reason,
-					locator: { kind: "whatsapp_web.chat_messages", chat_id: item.id },
-					error: { class: gap.class, message: gap.message },
+					recordKey: chatId,
+					reason: "temporary_unavailable",
+					locator: { kind: "whatsapp_web.chat_messages", chat_id: chatId },
+					error: {
+						class: unsafeChatIds.has(chatId)
+							? "chat_text_unstorable"
+							: "chat_not_in_inventory",
+						message: unsafeChatIds.has(chatId)
+							? "the chat's own text cannot be stored, so its messages were not read this run"
+							: "the chat is not in this run's chat inventory; its gap stays pending",
+					},
 				});
-				gapKeys.push(item.id);
-				continue;
 			}
-			hydratedKeys.push(item.id);
-			// Read completely: resolve the gaps an earlier run left for it.
-			await resolvePendingGaps(ctx, pending, item.id);
-		}
+		});
 		if (unsafeChats > 0) {
 			await failStream(
 				ctx,
@@ -967,7 +1043,7 @@ export async function collectWith(
 				`${unsafeChats} chats could not be imported (their text holds characters that cannot be stored), so their messages were not read and messages are not checkpointed as complete.`,
 				false,
 			);
-		} else {
+		} else if (!ctx.recoveryOnly || requiredKeys.length > 0) {
 			await emitDetailCoverage(ctx, {
 				stream: MESSAGES,
 				stateStream: CHATS,
@@ -978,12 +1054,7 @@ export async function collectWith(
 		}
 	}
 
-	if (ctx.recoveryOnly) {
-		if (want.has(CHATS) && unsafeChats > 0) {
-			await failStream(ctx, CHATS, unsafeChatsMessage(unsafeChats), false);
-		}
-		return;
-	}
+	if (ctx.recoveryOnly) return;
 
 	// groups: the page's own group metadata collection, proven against the
 	// group chats of the settled chat list. Its participant ids widen the
@@ -1116,7 +1187,7 @@ export async function collectWith(
 			return;
 		}
 		const marks: Record<string, ChatMark> = {};
-		for (const item of chatItems) {
+		for (const item of items.values()) {
 			marks[item.id] = { t: item.t, history_state: item.history_state };
 		}
 		await ctx.emit({
@@ -1193,14 +1264,12 @@ async function walkMessagesForChat(
 	stores: WhatsAppWebStores,
 	tally: TextTally,
 	item: Pick<ChatItem, "id" | "kind">,
-	timings: CollectionTimings,
 ): Promise<WalkOutcome> {
 	const chatId = item.id;
-	const maxChunks = timings.maxWalkChunks ?? MAX_WALK_CHUNKS;
 	const seen = new Set<string>();
 	let unsafe = 0;
 	let token: string | null = null;
-	for (let chunk = 1; ; chunk++) {
+	for (;;) {
 		let raw: unknown;
 		try {
 			raw = await stores.readChatMessages(chatId, token);
@@ -1270,15 +1339,16 @@ async function walkMessagesForChat(
 			return { emitted: seen.size, gap: walkGap(parsed) ?? unsafeGap };
 		}
 		token = parsed.token;
-		if (fresh === 0 || chunk >= maxChunks) {
+		// A chunk that brought no message the walk had not seen is not
+		// progress toward the store's end: stop and gap instead of spinning.
+		// Otherwise the walk goes on, chunk after chunk, until the store's own
+		// short page; there is no per-run cap that would leave older
+		// messages unreachable.
+		if (fresh === 0) {
 			await stores.releaseChatWalk(chatId, token).catch(() => undefined);
 			return {
 				emitted: seen.size,
-				gap: walkGap({
-					status: 200,
-					complete: false,
-					stop: fresh === 0 ? "no_progress" : "page_cap",
-				}),
+				gap: walkGap({ status: 200, complete: false, stop: "no_progress" }),
 			};
 		}
 	}
@@ -1292,7 +1362,10 @@ export type WhatsAppRunContext = Pick<
 	Partial<
 		Pick<
 			BrowserCollectContext,
-			"detailGaps" | "recoveryOnly" | "reportStreamFailure"
+			| "detailGaps"
+			| "recoveryOnly"
+			| "reportStreamFailure"
+			| "requestDetailGapPage"
 		>
 	> & { page: Pick<Page, "evaluate"> };
 
@@ -1320,6 +1393,9 @@ export async function collect(
 				recoveryOnly: ctx.recoveryOnly === true,
 				...(ctx.reportStreamFailure
 					? { reportStreamFailure: ctx.reportStreamFailure }
+					: {}),
+				...(ctx.requestDetailGapPage
+					? { requestDetailGapPage: ctx.requestDetailGapPage }
 					: {}),
 			},
 			stores,

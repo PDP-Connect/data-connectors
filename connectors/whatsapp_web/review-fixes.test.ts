@@ -206,6 +206,7 @@ async function run(
 		streams?: string[];
 		detailGaps?: DetailGapStartEntry[];
 		recoveryOnly?: boolean;
+		gapPages?: DetailGapStartEntry[][];
 	} = {},
 ): Promise<Run> {
 	const harness = makeRecordingEmit(validateRecord);
@@ -230,6 +231,11 @@ async function run(
 			reportStreamFailure: async (stream, message, opts = {}) => {
 				failures.push({ stream, message, retryable: opts.retryable === true });
 			},
+			...(options.gapPages
+				? {
+						requestDetailGapPage: async () => options.gapPages?.shift() ?? [],
+					}
+				: {}),
 		} as Parameters<typeof collect>[0],
 		TIMINGS,
 	);
@@ -582,4 +588,85 @@ test("review 1 #11: the desktop probe refuses look-alike hosts and the QR page",
 		false,
 	);
 	assert.equal(await probe("https://web.whatsapp.com/", false), false);
+});
+
+// ─── review round 2 ──────────────────────────────────────────────────────
+
+test("review 2 #1: a walk is not capped per run: it goes on chunk after chunk until the store's own end", async () => {
+	const CHUNKS = 600;
+	const r = await run({
+		chats: () => [chatRow(PEER)],
+		walk: (id, token) => {
+			const n = token === null ? 0 : Number(token);
+			if (n + 1 < CHUNKS)
+				return {
+					...completeWalk(id, [messageRow(id, n + 1)]),
+					complete: false,
+					stop: "chunk",
+					more: true,
+					token: String(n + 1),
+				};
+			return completeWalk(id, [messageRow(id, n + 1)]);
+		},
+	});
+	assert.equal(recordsOf(r, "messages").length, CHUNKS);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
+});
+
+test("review 2 #2: a pending chat missing from the inventory keeps its gap, and later gap pages are drained", async () => {
+	const GONE = "15550000009@c.us";
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{
+			detailGaps: [pendingGap(GONE)],
+			// The runtime's next page holds a gap the START page did not.
+			gapPages: [[pendingGap(GONE), pendingGap(PEER)]],
+		},
+	);
+	const regap = messagesOf(r, "DETAIL_GAP").filter(
+		(g) => g.record_key === GONE,
+	);
+	assert.equal(regap.length, 1, "the absent chat's gap is re-emitted once");
+	assert.equal(asObject(regap[0]?.last_error).class, "chat_not_in_inventory");
+	const recovered = messagesOf(r, "DETAIL_GAP_RECOVERED");
+	assert.deepEqual(
+		recovered.map((g) => g.gap_id),
+		[`gap-${PEER}`],
+		"the second page's gap of a chat read completely is acknowledged",
+	);
+	// The re-emitted gap comes before the coverage report.
+	const types = r.harness.protocolMessages.map((m) => asObject(m).type);
+	assert.ok(types.lastIndexOf("DETAIL_GAP") < types.indexOf("DETAIL_COVERAGE"));
+});
+
+test("review 2 #2: a recovery-only run walks pending chats from every gap page", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{
+			detailGaps: [pendingGap(PEER)],
+			recoveryOnly: true,
+			gapPages: [[pendingGap(OTHER)]],
+		},
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => w.chatId),
+		[PEER, OTHER],
+	);
+	assert.equal(messagesOf(r, "DETAIL_GAP_RECOVERED").length, 2);
+	assert.equal(messagesOf(r, "STATE").length, 0);
+});
+
+test("review 2 #3: a poll row without a history state keeps the chat's last known state and gaps it", async () => {
+	const r = await run({
+		chats: (call) =>
+			call < 2
+				? [chatRow(PEER, { history_state: STATE_0 })]
+				: [chatRow(PEER, { history_state: null })],
+		send: () => ({ sent: true }),
+	});
+	assert.deepEqual(r.calls.sends, [PEER]);
+	const coverage = messagesOf(r, "DETAIL_COVERAGE")[0];
+	assert.deepEqual(coverage?.hydrated_keys ?? [], []);
+	assert.deepEqual(coverage?.gap_keys, [PEER]);
 });
