@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright";
+import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	EmittedMessage,
 	RecordData,
@@ -1155,8 +1156,8 @@ test("live run: an item whose id, time or caption is unreadable still fails, nam
 	);
 });
 
-test("completeness: a collection counting five videos but listing two stays gapped", async () => {
-	const { page } = fakePage((call) =>
+test("count above listed: a collection counting five videos that lists two on a confirmed walk is hydrated", async () => {
+	const { calls, page } = fakePage((call) =>
 		call.path === "/api/user/collection_list/"
 			? ok({
 					...COLLECTIONS,
@@ -1174,17 +1175,17 @@ test("completeness: a collection counting five videos but listing two stays gapp
 		h.records.filter((r) => r.stream === "collection_items").length,
 		4,
 	);
-	assert.equal(typeIndex(h, "DETAIL_GAP_RECOVERED"), -1);
+	// Each short single-page list is read a second time to confirm it.
+	assert.equal(
+		calls.filter((c) => c.path === "/api/collection/item_list/").length,
+		4,
+	);
+	assert.equal(typeIndex(h, "DETAIL_GAP"), -1);
 	const coverage = asRecord(
 		h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
 	);
-	assert.deepEqual(coverage.hydrated_keys, []);
-	assert.deepEqual(coverage.gap_keys, [COLLECTION_A, COLLECTION_B]);
-	const gapKeys = h.messages
-		.filter((m) => m.type === "DETAIL_GAP")
-		.map((m) => asRecord(m).record_key);
-	assert.deepEqual(gapKeys.sort(), [COLLECTION_A, COLLECTION_B]);
-	assert.ok(typeIndex(h, "DETAIL_GAP") < typeIndex(h, "DETAIL_COVERAGE"));
+	assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A, COLLECTION_B]);
+	assert.deepEqual(coverage.gap_keys ?? [], []);
 	assert.ok(
 		typeIndex(h, "STATE", "collection_items") > typeIndex(h, "DETAIL_COVERAGE"),
 	);
@@ -1193,7 +1194,138 @@ test("completeness: a collection counting five videos but listing two stays gapp
 			(m) => m.type === "STATE" && m.stream === "collection_items",
 		),
 	);
-	assert.deepEqual(state.cursor, { collections: 0, items: 0 });
+	assert.deepEqual(state.cursor, { collections: 2, items: 4 });
+});
+
+// ─── TikTok counts more than its list returns ────────────────────────────
+
+/**
+ * The owner's live shape, synthetic values: TikTok counts 3 collections (the
+ * count also holds one its list never returns), lists 2 on one page with
+ * hasMore:false, and the 2 hold 3 videos.
+ */
+function countedThreeListedTwo(
+	collectionPage: (call: Call) => Json = () => ({}),
+) {
+	const [a, b] = collectionRows();
+	const [first, second] = itemRows();
+	return fakePage((call) => {
+		if (call.path === "/api/user/collection_list/")
+			return ok({
+				...COLLECTIONS,
+				total: 3,
+				collectionList: [
+					{ ...a, total: "2" },
+					{ ...b, total: "1" },
+				],
+				hasMore: false,
+				...collectionPage(call),
+			});
+		if (call.path === "/api/collection/item_list/")
+			return ok({
+				...COLLECTION_ITEMS,
+				itemList:
+					call.params.collectionId === COLLECTION_A
+						? [first, second]
+						: [{ ...first, id: "7500000000000000099" }],
+				hasMore: false,
+			});
+		return standardAnswer(call);
+	});
+}
+
+test("count above listed: 3 counted, 2 listed and hasMore:false completes both streams and reads their videos", async () => {
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const { calls, page } = countedThreeListedTwo();
+		const h = harness(BOTH, page);
+		await collectTikTok(h.ctx, noDelay);
+		assert.deepEqual(h.failures, []);
+		assert.deepEqual(
+			h.records
+				.filter((r) => r.stream === "favorite_collections")
+				.map((r) => r.data.id),
+			[COLLECTION_A, COLLECTION_B],
+		);
+		assert.equal(
+			h.records.filter((r) => r.stream === "collection_items").length,
+			3,
+		);
+		// The short list is read twice and must hold the same ids both times.
+		assert.equal(
+			calls.filter((c) => c.path === "/api/user/collection_list/").length,
+			2,
+		);
+		const coverage = asRecord(
+			h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
+		);
+		assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A, COLLECTION_B]);
+		assert.deepEqual(coverage.gap_keys ?? [], []);
+		assert.equal(typeIndex(h, "DETAIL_GAP"), -1);
+		const parentState = asRecord(
+			h.messages.find(
+				(m) => m.type === "STATE" && m.stream === "favorite_collections",
+			),
+		);
+		assert.deepEqual(parentState.cursor, { count: 2 });
+		const childState = asRecord(
+			h.messages.find(
+				(m) => m.type === "STATE" && m.stream === "collection_items",
+			),
+		);
+		assert.deepEqual(childState.cursor, { collections: 2, items: 3 });
+		assert.ok(
+			typeIndex(h, "STATE", "collection_items") >
+				typeIndex(h, "DETAIL_COVERAGE"),
+		);
+		// The mismatch is a diagnostic with counts only, never names or ids.
+		const diagnostic = lines.filter((l) => l.includes("count_above_listed"));
+		assert.deepEqual(diagnostic, [
+			'[tiktok-diagnostic] count_above_listed {"stream":"favorite_collections","counted":3,"read":2}',
+		]);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+});
+
+test("count above listed: a walk that stops without hasMore:false still fails both streams", async () => {
+	const { calls, page } = countedThreeListedTwo(() => ({
+		hasMore: true,
+		cursor: "0",
+	}));
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		BOTH,
+	);
+	for (const failure of h.failures)
+		assert.match(failure.message, /^tiktok_list_incomplete: /);
+	assert.equal(typeIndex(h, "STATE"), -1);
+	assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+	assert.equal(h.records.length, 0);
+	assert.equal(
+		calls.some((c) => c.path === "/api/collection/item_list/"),
+		false,
+	);
+});
+
+test("count above listed: a short list that reads differently every time still fails", async () => {
+	let read = 0;
+	const { page } = countedThreeListedTwo(() => {
+		read += 1;
+		return {
+			collectionList: [
+				{ ...collectionRows()[0], collectionId: `74000000000000009${read}` },
+			],
+		};
+	});
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.match(h.failures[0]?.message ?? "", /changed on every read/);
+	assert.equal(typeIndex(h, "STATE"), -1);
+	assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
 });
 
 // ─── review round 4 ──────────────────────────────────────────────────────
@@ -1460,7 +1592,7 @@ test("completeness: withheld and duplicate child rows cannot satisfy parent or i
 	}
 });
 
-test("completeness: a pending child gap recovers only after all five distinct videos are read", async () => {
+test("completeness: a pending child gap recovers once its videos are read to a confirmed end, even below TikTok's count", async () => {
 	for (const recoveryOnly of [false, true]) {
 		const pending = [pendingGap("gA", COLLECTION_A, "lease-a")];
 		for (const count of [2, 5]) {
@@ -1492,31 +1624,22 @@ test("completeness: a pending child gap recovers only after all five distinct vi
 			const coverage = asRecord(
 				h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
 			);
-			assert.deepEqual(
-				coverage.hydrated_keys,
-				count === 5 ? [COLLECTION_A] : [],
-			);
-			assert.deepEqual(
-				coverage.gap_keys ?? [],
-				count === 5 ? [] : [COLLECTION_A],
-			);
+			assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A]);
+			assert.deepEqual(coverage.gap_keys ?? [], []);
 			const recovered = h.messages
 				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
 				.map(asRecord);
 			assert.deepEqual(
 				recovered.map((m) => [m.gap_id, m.record_key, m.lease_id]),
-				count === 5 ? [["gA", COLLECTION_A, "lease-a"]] : [],
+				[["gA", COLLECTION_A, "lease-a"]],
 			);
-			assert.equal(typeIndex(h, "DETAIL_GAP") >= 0, count !== 5);
+			assert.equal(typeIndex(h, "DETAIL_GAP"), -1);
 			const state = asRecord(
 				h.messages.find(
 					(m) => m.type === "STATE" && m.stream === "collection_items",
 				),
 			);
-			assert.deepEqual(state.cursor, {
-				collections: count === 5 ? 1 : 0,
-				items: count === 5 ? 5 : 0,
-			});
+			assert.deepEqual(state.cursor, { collections: 1, items: count });
 			assert.ok(
 				typeIndex(h, "STATE", "collection_items") >
 					typeIndex(h, "DETAIL_COVERAGE"),
@@ -1580,20 +1703,34 @@ test("completeness: a short collection inventory never settles missing pending B
 				{ recoveryOnly, detailGaps: [pendingGap("gB", COLLECTION_B)] },
 			);
 			await collectTikTok(h.ctx, noDelay);
-			assert.match(
-				h.failures[0]?.message ?? "",
-				/counted 2 favorite_collections/,
-			);
+			// B is never settled as deleted: with one listed of two counted, it
+			// may be the one TikTok counts but does not list.
 			assert.equal(typeIndex(h, "DETAIL_GAP_RECOVERED"), -1);
-			assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
-			assert.equal(typeIndex(h, "STATE"), -1);
-			assert.equal(
-				calls.some((c) => c.path === "/api/collection/item_list/"),
-				false,
-			);
+			if (duplicate) {
+				// A repeat stood in for an entry: still incomplete.
+				assert.match(
+					h.failures[0]?.message ?? "",
+					/^tiktok_list_incomplete: TikTok counted 2 favorite_collections/,
+				);
+				assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+				assert.equal(typeIndex(h, "STATE"), -1);
+				assert.equal(
+					calls.some((c) => c.path === "/api/collection/item_list/"),
+					false,
+				);
+			} else {
+				// A confirmed walk that lists fewer than counted is complete.
+				assert.deepEqual(h.failures, []);
+				assert.ok(typeIndex(h, "DETAIL_COVERAGE") >= 0);
+				assert.ok(typeIndex(h, "STATE", "collection_items") >= 0);
+				if (!recoveryOnly)
+					assert.ok(typeIndex(h, "STATE", "favorite_collections") >= 0);
+			}
 			if (!recoveryOnly)
 				assert.deepEqual(
-					h.records.map((r) => r.data.id),
+					h.records
+						.filter((r) => r.stream === "favorite_collections")
+						.map((r) => r.data.id),
 					[COLLECTION_A],
 				);
 		}

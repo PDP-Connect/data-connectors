@@ -98,6 +98,12 @@
  *     replaced) gets one wait and at most one profile-page open, then the run
  *     stops early with client_params_not_seen instead of every stream failing
  *     with no_client.
+ *   v0.3.5 (2026-10-24): a list read to hasMore:false that then reads the same
+ *     ids twice is complete even when TikTok counts more entries than it lists
+ *     (the owner's 3 counted Favorites collections, 2 listed): records,
+ *     coverage and checkpoints are written and the difference is only a
+ *     count_above_listed diagnostic. Collection video lists follow the same
+ *     rule. Unconfirmed walks, empty reads and repeats still fail.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -632,6 +638,8 @@ export async function ensureTikTokSession(
 // ─── list walks ──────────────────────────────────────────────────────────
 
 interface WalkResult {
+	/** Entries the pages returned, repeats included. */
+	entries: number;
 	/** Pages read to reach hasMore:false. */
 	pages: number;
 	/** Field paths (never values) that made entries unreadable. */
@@ -660,6 +668,7 @@ async function walkItemList(
 	const seenIds = new Set<string>();
 	let cursor = "0";
 	let read = 0;
+	let entries = 0;
 	let unreadable = 0;
 	let total: number | null = null;
 	const failedFields = new Set<string>();
@@ -700,6 +709,7 @@ async function walkItemList(
 			});
 		}
 		let added = 0;
+		entries += page.items.length;
 		for (const item of page.items) {
 			if (seenIds.has(item.id)) continue;
 			seenIds.add(item.id);
@@ -709,6 +719,7 @@ async function walkItemList(
 		}
 		if (!page.hasMore) {
 			return {
+				entries,
 				read,
 				total,
 				unreadable,
@@ -837,6 +848,38 @@ function assertComplete(
 			`TikTok counted ${walk.total} ${stream} but only ${walk.read} distinct entries could be read`,
 		);
 	}
+}
+
+/**
+ * A count above the distinct entries read, for a list that ended on TikTok's
+ * own hasMore:false and then read the same ids twice in a row (`confirmed`):
+ * TikTok's count also holds entries its list never returns (a hidden or
+ * removed collection, an unavailable video), so the list is complete and the
+ * difference is only a diagnostic, counts only. It is still the incomplete
+ * failure when the walk was not confirmed, when nothing was read, or when the
+ * pages returned at least as many entries as counted (a repeat stood in for
+ * an entry). Returns true when such a difference was accepted.
+ */
+function settleCount(
+	stream: Stream,
+	walk: {
+		confirmed: boolean;
+		entries: number;
+		read: number;
+		total: number | null;
+	},
+): boolean {
+	if (walk.total === null || walk.read >= walk.total) return false;
+	if (walk.confirmed && walk.read > 0 && walk.entries < walk.total) {
+		connectorDiagnostic("tiktok", "count_above_listed", {
+			stream,
+			counted: walk.total,
+			read: walk.read,
+		});
+		return true;
+	}
+	assertComplete(stream, { read: walk.read, total: walk.total, unreadable: 0 });
+	return false;
 }
 
 export async function collectTikTok(
@@ -1080,11 +1123,17 @@ export async function collectTikTok(
 	 * pages these lists by offset, so a list that changes while it is read can
 	 * repeat one video and skip another: a list that took more than one page is
 	 * read again until two consecutive reads hold the same ids, or fails after
-	 * MAX_STABLE_READS. A single page is one consistent answer.
+	 * MAX_STABLE_READS. A single page is one consistent answer, unless TikTok
+	 * counts more videos than it listed: then it too must read the same twice.
 	 */
 	const readCollectionItems = async (
 		collection: Collection,
-	): Promise<{ items: Item[]; total: number | null }> => {
+	): Promise<{
+		confirmed: boolean;
+		entries: number;
+		items: Item[];
+		total: number | null;
+	}> => {
 		let total = collectionItemCount(collection);
 		let previous: string[] | null = null;
 		for (let attempt = 0; attempt < MAX_STABLE_READS; attempt += 1) {
@@ -1103,8 +1152,12 @@ export async function collectTikTok(
 			assertComplete(COLLECTION_ITEMS, { ...walk, total: null });
 			if (walk.total !== null) total = Math.max(total ?? 0, walk.total);
 			const ids = items.map((item) => item.id);
-			if (walk.pages <= 1) return { items, total };
-			if (previous !== null && sameIds(previous, ids)) return { items, total };
+			const short = total !== null && items.length < total;
+			const entries = walk.entries;
+			if (walk.pages <= 1 && !short)
+				return { confirmed: false, entries, items, total };
+			if (previous !== null && sameIds(previous, ids))
+				return { confirmed: true, entries, items, total };
 			previous = ids;
 		}
 		throw new TikTokStop(
@@ -1118,7 +1171,8 @@ export async function collectTikTok(
 	 * a collection whose list is unreadable or carries unsafe text.
 	 */
 	const hydrateCollection = async (collection: Collection): Promise<number> => {
-		const { items, total } = await readCollectionItems(collection);
+		const { confirmed, entries, items, total } =
+			await readCollectionItems(collection);
 		const before = notes.replaced;
 		const records = items.map((item) =>
 			buildCollectionItemRecord(collection.collectionId, item, notes),
@@ -1131,12 +1185,13 @@ export async function collectTikTok(
 		}
 		for (const record of records)
 			await ctx.emitRecord(COLLECTION_ITEMS, record);
-		// Missing videos may be unavailable, but no per-member outcome proves
-		// that here. Keep the durable gap instead of claiming full hydration.
-		assertComplete(COLLECTION_ITEMS, {
+		// A count above the videos read is accepted only for a confirmed walk
+		// (see settleCount); anything else keeps the durable gap.
+		settleCount(COLLECTION_ITEMS, {
+			confirmed,
+			entries,
 			read: items.length,
 			total,
-			unreadable: 0,
 		});
 		return items.length;
 	};
@@ -1175,13 +1230,15 @@ export async function collectTikTok(
 	 * Hydrate each collection in `targets` (their parent records are already
 	 * emitted), give every one exactly one outcome (hydrated, which also
 	 * acknowledges its pending gaps, or a fresh DETAIL_GAP), acknowledge gaps
-	 * of collections no longer in the complete list `listed`, then one
+	 * of collections no longer in the complete list `listed` (null when TikTok
+	 * counted more collections than it listed: an absent one may be among
+	 * those, so its gap stays pending), then one
 	 * DETAIL_COVERAGE and the child STATE. A run-level stop propagates and
 	 * leaves no coverage and no checkpoint.
 	 */
 	const hydrateAll = async (
 		targets: Collection[],
-		listed: ReadonlySet<string>,
+		listed: ReadonlySet<string> | null,
 	): Promise<TikTokStop | null> => {
 		const hydratedKeys: string[] = [];
 		const gapKeys: string[] = [];
@@ -1221,8 +1278,8 @@ export async function collectTikTok(
 		}
 		// A gapped collection the complete list no longer holds was deleted:
 		// there is nothing left to read for it.
-		for (const id of [...pendingGaps.keys()]) {
-			if (!listed.has(id)) await recoverGaps(id);
+		for (const id of listed ? [...pendingGaps.keys()] : []) {
+			if (!listed?.has(id)) await recoverGaps(id);
 		}
 		await emitDetailCoverage(ctx, {
 			stream: COLLECTION_ITEMS,
@@ -1241,12 +1298,14 @@ export async function collectTikTok(
 
 	/** One read of the Favorites collections list to hasMore:false. */
 	const listCollectionsOnce = async (): Promise<{
+		entries: number;
 		list: Collection[];
 		pages: number;
 		total: number | null;
 	}> => {
 		const seenCursors = new Set<string>();
 		const byId = new Map<string, Collection>();
+		let entries = 0;
 		let total: number | null = null;
 		let cursor = "0";
 		for (let pages = 0; ; pages += 1) {
@@ -1292,13 +1351,19 @@ export async function collectTikTok(
 			if (!preCollectionEmpty && page.total !== null)
 				total = Math.max(total ?? 0, page.total);
 			let added = 0;
+			entries += page.collections.length;
 			for (const collection of page.collections) {
 				if (byId.has(collection.collectionId)) continue;
 				byId.set(collection.collectionId, collection);
 				added += 1;
 			}
 			if (!page.hasMore) {
-				return { list: [...byId.values()], pages: pages + 1, total };
+				return {
+					entries,
+					list: [...byId.values()],
+					pages: pages + 1,
+					total,
+				};
 			}
 			const next = page.cursor;
 			if (
@@ -1320,9 +1385,13 @@ export async function collectTikTok(
 	 * The Favorites collections list, read until two consecutive reads of a
 	 * multi-page list hold the same ids (offset paging can repeat one entry
 	 * and skip another while the list changes), or failed after
-	 * MAX_STABLE_READS. A single page is one consistent answer.
+	 * MAX_STABLE_READS. A single page is one consistent answer, unless TikTok
+	 * counts more collections than it listed: then it too must read the same
+	 * twice. The count is settled by the caller, after the records are saved.
 	 */
 	const listCollections = async (): Promise<{
+		confirmed: boolean;
+		entries: number;
 		list: Collection[];
 		total: number | null;
 	}> => {
@@ -1332,9 +1401,12 @@ export async function collectTikTok(
 			const read = await listCollectionsOnce();
 			if (read.total !== null) total = Math.max(total ?? 0, read.total);
 			const ids = read.list.map((collection) => collection.collectionId);
-			if (read.pages <= 1) return { list: read.list, total };
-			if (previous !== null && sameIds(previous, ids))
-				return { list: read.list, total };
+			const short = total !== null && ids.length < total;
+			let confirmed: boolean | null = null;
+			if (read.pages <= 1 && !short) confirmed = false;
+			else if (previous !== null && sameIds(previous, ids)) confirmed = true;
+			if (confirmed !== null)
+				return { confirmed, entries: read.entries, list: read.list, total };
 			previous = ids;
 		}
 		throw new TikTokStop(
@@ -1383,16 +1455,16 @@ export async function collectTikTok(
 		if (childRequested && !parentRequested) {
 			return { parentFailure: null, childFailure: parentRequired };
 		}
-		let list: Collection[];
-		let total: number | null;
+		let walk: Awaited<ReturnType<typeof listCollections>>;
 		try {
-			({ list, total } = await listCollections());
+			walk = await listCollections();
 		} catch (error) {
 			if (error instanceof TikTokStop && !RUN_STOPS.has(error.stop)) {
 				return { parentFailure: error, childFailure: error };
 			}
 			throw error;
 		}
+		const { list } = walk;
 		const parents = buildParents(list);
 		if ("failure" in parents) {
 			return { parentFailure: parents.failure, childFailure: parents.failure };
@@ -1400,11 +1472,11 @@ export async function collectTikTok(
 		for (const record of parents.records) {
 			await ctx.emitRecord(FAVORITE_COLLECTIONS, record);
 		}
+		let short: boolean;
 		try {
-			assertComplete(FAVORITE_COLLECTIONS, {
+			short = settleCount(FAVORITE_COLLECTIONS, {
+				...walk,
 				read: list.length,
-				total,
-				unreadable: 0,
 			});
 		} catch (error) {
 			if (!(error instanceof TikTokStop)) throw error;
@@ -1414,7 +1486,9 @@ export async function collectTikTok(
 		if (childRequested) {
 			childFailure = await hydrateAll(
 				list,
-				new Set(list.map((collection) => collection.collectionId)),
+				short
+					? null
+					: new Set(list.map((collection) => collection.collectionId)),
 			);
 		}
 		await ctx.emit({
@@ -1441,10 +1515,9 @@ export async function collectTikTok(
 			await fail(COLLECTION_ITEMS, parentRequired);
 			return;
 		}
-		let list: Collection[];
-		let total: number | null;
+		let walk: Awaited<ReturnType<typeof listCollections>>;
 		try {
-			({ list, total } = await listCollections());
+			walk = await listCollections();
 		} catch (error) {
 			if (error instanceof TikTokStop && !RUN_STOPS.has(error.stop)) {
 				await fail(COLLECTION_ITEMS, error);
@@ -1452,6 +1525,7 @@ export async function collectTikTok(
 			}
 			throw error;
 		}
+		const { list } = walk;
 		const targets = list.filter((collection) =>
 			pendingGaps.has(collection.collectionId),
 		);
@@ -1463,11 +1537,11 @@ export async function collectTikTok(
 		for (const record of parents.records) {
 			await ctx.emitRecord(FAVORITE_COLLECTIONS, record);
 		}
+		let short: boolean;
 		try {
-			assertComplete(FAVORITE_COLLECTIONS, {
+			short = settleCount(FAVORITE_COLLECTIONS, {
+				...walk,
 				read: list.length,
-				total,
-				unreadable: 0,
 			});
 		} catch (error) {
 			if (!(error instanceof TikTokStop)) throw error;
@@ -1476,7 +1550,9 @@ export async function collectTikTok(
 		}
 		const failure = await hydrateAll(
 			targets,
-			new Set(list.map((collection) => collection.collectionId)),
+			short
+				? null
+				: new Set(list.map((collection) => collection.collectionId)),
 		);
 		if (failure) await fail(COLLECTION_ITEMS, failure);
 	};

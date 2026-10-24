@@ -21852,7 +21852,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.4",
+				"version": "0.3.5",
 				"display_name": "TikTok (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
