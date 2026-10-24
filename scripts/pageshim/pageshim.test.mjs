@@ -1663,8 +1663,14 @@ test("anthropic: export paths on the PageShim host", {
 				resultSpoolDirectory: spool,
 			});
 			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
-			for (const scope of ["claude.conversations", "claude.messages"])
-				assert.equal(r.streamScopeFiles?.[scope], undefined, scope);
+			// A thin host gets the skipped scope as a placeholder that carries its
+			// error; it is never a checkpointed empty scope.
+			assert.ok(r.streamScopeFiles?.["claude.conversations"], "claude.conversations");
+			for (const scope of ["claude.conversations", "claude.messages"]) {
+				const file = r.streamScopeFiles?.[scope];
+				if (file !== undefined) assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { records: [] }, scope);
+				assert.equal(r.states?.[scope], undefined, scope);
+			}
 		} finally {
 			rmSync(spool, { recursive: true, force: true });
 		}
@@ -3748,6 +3754,8 @@ test("meta: late logout remains a terminal session failure on both hosts", {time
     reason: "meta_session_required: Instagram authentication was rejected or challenged during this run",
     disposition: "fatal",
     phase: "collect",
+    code: "meta_session_required",
+    recovery_hint: { action: "manual_action_required", retryable: false },
    }]);
    assert.equal(r.result["instagram.following"], undefined);
    assert.equal(r.result.exportSummary.count, 0);
