@@ -6,7 +6,10 @@
  * PDPP WhatsApp (web) connector: chats, messages, contacts and groups, read
  * from the signed-in web.whatsapp.com page's own in-page stores.
  *
- * The connector runs inside a tab the host provides, already past login. It
+ * The connector runs inside a tab the host provides. When that tab is not
+ * signed in, ensureSession hands it to the person to scan the QR code from
+ * their phone (Linked devices) and waits for the client to know its own user
+ * before collecting. It
  * talks to the page's own modules (WAWebCollections.Chat,
  * WAWebDBMessageFindLocal, WAWebGroupMetadataCollection and the contact
  * store) through the page's module loader, the way the app itself calls them.
@@ -38,6 +41,10 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import {
+	BrowserHandoffReadinessTimedOutError,
+	manualBrowserLogin,
+} from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
 	createConnectorFailure,
@@ -76,7 +83,7 @@ import { validateRecord } from "./schemas.ts";
 const WHATSAPP_ORIGIN = "https://web.whatsapp.com";
 const WHATSAPP_HOME_URL = `${WHATSAPP_ORIGIN}/`;
 export const WHATSAPP_LOGIN_MESSAGE =
-	"Sign in to WhatsApp in the secure browser. The import continues automatically once the WhatsApp Web app has loaded.";
+	"Scan the QR code with WhatsApp on your phone (Settings, Linked devices, Link a device), then continue. The import starts once WhatsApp Web has loaded.";
 
 const CHATS = "chats";
 const MESSAGES = "messages";
@@ -1476,11 +1483,127 @@ export async function probeWhatsAppSessionOnPage(
 	return false;
 }
 
-export async function ensureSession({
-	page,
-}: EnsureSessionArgs): Promise<void> {
+/**
+ * Where the app on the page stands, as one plain string: "signed_in" when the
+ * client knows its own user (the probe's check), "signed_out" when it shows
+ * its sign-in QR code (the socket stream in QR mode, or the QR canvas on the
+ * landing screen), otherwise "loading". It reads no chat, contact or message.
+ */
+export const SESSION_STATE_SCRIPT = `
+(() => {
+	if (location.origin !== ${JSON.stringify(WHATSAPP_ORIGIN)}) return "loading";
+	const mod = (name) => { try { return typeof window.require === "function" ? window.require(name) : null; } catch { return null; } };
+	const me = mod("WAWebUserPrefsMeUser");
+	try { if (me && (me.getMaybeMePnUser() || me.getMaybeMeLidUser())) return "signed_in"; } catch {}
+	const stream = mod("WAWebStreamModel");
+	let mode = null;
+	try { mode = stream && stream.Stream ? stream.Stream.mode : null; } catch { mode = null; }
+	if (mode === "QR") return "signed_out";
+	if (document.querySelector("div[data-ref] canvas, canvas[aria-label*='QR' i], canvas[aria-label*='scan' i]")) return "signed_out";
+	return "loading";
+})()
+`;
+
+export type SessionState = "signed_in" | "signed_out" | "loading";
+
+/** One non-navigating read of the app's session state. */
+export async function readSessionState(
+	page: MainWorldPage,
+): Promise<SessionState> {
+	try {
+		const state = await mainWorld(page).evaluate(SESSION_STATE_SCRIPT);
+		return state === "signed_in" || state === "signed_out" ? state : "loading";
+	} catch {
+		// A page mid-navigation cannot be read yet.
+		return "loading";
+	}
+}
+
+export interface SessionTimings {
+	/** Reads while the freshly opened app boots, before handing it over. */
+	bootAttempts: number;
+	bootMs: number;
+	/** Readiness poll interval while the person scans the QR code. */
+	handoffProbeMs: number;
+	handoffTimeoutSeconds: number;
+}
+
+export const DEFAULT_SESSION_TIMINGS: SessionTimings = {
+	bootAttempts: 30,
+	bootMs: 1_000,
+	handoffProbeMs: 3_000,
+	handoffTimeoutSeconds: 30 * 60,
+};
+
+/**
+ * Read the app until it says signed in or shows its QR code, never
+ * navigating. A page still loading when the budget ends reads as "loading".
+ */
+async function waitForBootedState(
+	page: MainWorldPage,
+	timings: SessionTimings,
+	attempt = 0,
+): Promise<SessionState> {
+	const state = await readSessionState(page);
+	if (state !== "loading" || attempt + 1 >= timings.bootAttempts) return state;
+	await wait(timings.bootMs);
+	return waitForBootedState(page, timings, attempt + 1);
+}
+
+/**
+ * Opens web.whatsapp.com in the connector's own page when it is elsewhere
+ * (never a second tab). A signed-in client goes straight to collection. One
+ * showing its sign-in QR code (or not done loading) is handed to the person
+ * to link this browser from their phone; collection starts only once the
+ * client knows its own user. When no one links it before the handoff ends,
+ * the run fails as whatsapp_web_auth_failed.
+ */
+export async function ensureSession(
+	{
+		assist,
+		capture,
+		completeAssistance,
+		page,
+		sendInteraction,
+	}: Pick<
+		EnsureSessionArgs,
+		"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+	>,
+	timings: SessionTimings = DEFAULT_SESSION_TIMINGS,
+): Promise<void> {
 	if (!isWhatsAppOrigin(page.url())) {
 		await page.goto(WHATSAPP_HOME_URL, { waitUntil: "domcontentloaded" });
+	}
+	if ((await waitForBootedState(page, timings)) === "signed_in") return;
+	let ready: boolean;
+	try {
+		ready = await manualBrowserLogin({
+			assist,
+			autoProbeIntervalMs: timings.handoffProbeMs,
+			...(capture ? { capture } : {}),
+			completeAssistance,
+			isProbeSuccessful: (live: boolean) => live,
+			message: WHATSAPP_LOGIN_MESSAGE,
+			page,
+			probe: async () => (await readSessionState(page)) === "signed_in",
+			readinessProbe: async (p) => (await readSessionState(p)) === "signed_in",
+			readinessProbeOnHandoffPage: true,
+			reason: "login",
+			sendInteraction,
+			timeoutSeconds: timings.handoffTimeoutSeconds,
+		});
+	} catch (error) {
+		if (error instanceof BrowserHandoffReadinessTimedOutError) {
+			throw authFailure(
+				"WhatsApp Web stayed on its sign-in QR code: no phone linked this browser before the sign-in window closed",
+			);
+		}
+		throw error;
+	}
+	if (!ready) {
+		throw authFailure(
+			"WhatsApp Web is showing its sign-in QR code: the session is not signed in",
+		);
 	}
 }
 
