@@ -49,13 +49,19 @@ function makeLocator({
 	innerText?: string;
 	visible?: boolean;
 } = {}): Locator {
+	// A field holds what was typed into it, so the connector's read-back of a
+	// filled password sees the fill rather than an always-empty fake.
+	let value = "";
 	const fake: Pick<
 		Locator,
 		| "click"
 		| "count"
 		| "fill"
+		| "filter"
 		| "first"
+		| "getAttribute"
 		| "innerText"
+		| "inputValue"
 		| "isEnabled"
 		| "isVisible"
 		| "nth"
@@ -63,11 +69,19 @@ function makeLocator({
 	> = {
 		click: (): Promise<void> => Promise.resolve(),
 		count: (): Promise<number> => Promise.resolve(count),
-		fill: (_value: string): Promise<void> => Promise.resolve(),
+		fill: (next: string): Promise<void> => {
+			value = next;
+			return Promise.resolve();
+		},
+		filter(): Locator {
+			return fake as Locator;
+		},
+		getAttribute: (): Promise<null> => Promise.resolve(null),
 		first(): Locator {
 			return fake as Locator;
 		},
 		innerText: (): Promise<string> => Promise.resolve(innerText),
+		inputValue: (): Promise<string> => Promise.resolve(value),
 		isEnabled(): Promise<boolean> {
 			return Promise.resolve(enabled);
 		},
@@ -77,13 +91,28 @@ function makeLocator({
 		nth(): Locator {
 			return fake as Locator;
 		},
-		waitFor(): Promise<void> {
-			return count > 0
-				? Promise.resolve()
-				: Promise.reject(new Error("Timeout waiting for locator"));
-		},
+		waitFor: (options?: { state?: string }): Promise<void> =>
+			staticWaitFor({ count, visible }, options),
 	};
 	return fake as Locator;
+}
+
+/**
+ * `waitFor` for a fake whose state never changes: it either already holds or
+ * never will, so it settles at once. `hidden`/`detached` hold for an absent or
+ * invisible element — Playwright's semantics, which a wait for "step one is
+ * gone" depends on.
+ */
+function staticWaitFor(
+	{ count, visible }: { count: number; visible: boolean },
+	options?: { state?: string },
+): Promise<void> {
+	const gone = count === 0 || !visible;
+	const wantsGone =
+		options?.state === "hidden" || options?.state === "detached";
+	return (wantsGone ? gone : count > 0)
+		? Promise.resolve()
+		: Promise.reject(new Error("Timeout waiting for locator"));
 }
 
 /** A page whose `/account` probe always returns live=false/true per `accountLive`, honoring successive changes via `setLive`. Starts on `about:blank`, mirroring a fresh run's initial page state. */
@@ -146,28 +175,39 @@ function makeFillRecordingLocator(
 	opts: { count?: number; visible?: boolean } = {},
 ): Locator {
 	const { count = 1, visible = true } = opts;
+	let held = "";
 	const fake: Pick<
 		Locator,
-		"click" | "count" | "fill" | "first" | "innerText" | "isVisible" | "waitFor"
+		| "click"
+		| "count"
+		| "fill"
+		| "filter"
+		| "first"
+		| "innerText"
+		| "inputValue"
+		| "isVisible"
+		| "waitFor"
 	> = {
 		click: (): Promise<void> => Promise.resolve(),
 		count: (): Promise<number> => Promise.resolve(count),
 		fill: (value: string): Promise<void> => {
+			held = value;
 			onFill(value);
 			return Promise.resolve();
+		},
+		filter(): Locator {
+			return fake as Locator;
 		},
 		first(): Locator {
 			return fake as Locator;
 		},
 		innerText: (): Promise<string> => Promise.resolve(""),
+		inputValue: (): Promise<string> => Promise.resolve(held),
 		isVisible(): Promise<boolean> {
 			return Promise.resolve(visible);
 		},
-		waitFor(): Promise<void> {
-			return count > 0
-				? Promise.resolve()
-				: Promise.reject(new Error("Timeout waiting for locator"));
-		},
+		waitFor: (options?: { state?: string }): Promise<void> =>
+			staticWaitFor({ count, visible }, options),
 	};
 	return fake as Locator;
 }
@@ -822,9 +862,17 @@ test("ensureVenmoSession: a code-bearing OTP response triggers no page-context p
 		const filledCodes: string[] = [];
 		const otp: Pick<
 			Locator,
-			"count" | "fill" | "first" | "isEnabled" | "isVisible" | "nth" | "waitFor"
+			| "count"
+			| "fill"
+			| "first"
+			| "getAttribute"
+			| "isEnabled"
+			| "isVisible"
+			| "nth"
+			| "waitFor"
 		> = {
 			count: (): Promise<number> => Promise.resolve(1),
+			getAttribute: (): Promise<null> => Promise.resolve(null),
 			fill: (value: string): Promise<void> => {
 				filledCodes.push(value);
 				codeFilled = true;
@@ -1072,6 +1120,9 @@ function makeOtpDecisionPage({
 	const state = { otpVisible };
 	let currentUrl = "https://venmo.com/";
 	const submit = makeLocator();
+	// One field for the whole page, so the connector's read-back of the
+	// password sees what it typed.
+	const passwordField = makeLocator();
 	const otpLocator = (): Locator =>
 		makeLocator({
 			count: otpCount,
@@ -1105,7 +1156,7 @@ function makeOtpDecisionPage({
 				return makeLocator();
 			}
 			if (selector.includes("password")) {
-				return makeLocator();
+				return passwordField;
 			}
 			if (selector.includes("otp") || selector.includes("code")) {
 				// Reading the OTP selector is the connector's classification
@@ -1164,6 +1215,9 @@ function makeCapturedSmsOfferPage({
 	const loginSubmit = makeClickRecordingLocator(() => {
 		stage = "offer";
 	});
+	// One field for the whole page, so the connector's read-back of the
+	// password sees what it typed.
+	const passwordField = makeLocator();
 	const rememberDevice: Pick<
 		Locator,
 		"click" | "count" | "first" | "isChecked" | "isEnabled" | "isVisible"
@@ -1207,9 +1261,17 @@ function makeCapturedSmsOfferPage({
 	};
 	const otpInput: Pick<
 		Locator,
-		"count" | "fill" | "first" | "isEnabled" | "isVisible" | "nth" | "waitFor"
+		| "count"
+		| "fill"
+		| "first"
+		| "getAttribute"
+		| "isEnabled"
+		| "isVisible"
+		| "nth"
+		| "waitFor"
 	> = {
 		count: (): Promise<number> => Promise.resolve(stage === "code" ? 1 : 0),
+		getAttribute: (): Promise<null> => Promise.resolve(null),
 		fill: (value: string): Promise<void> => {
 			filledCodes.push(value);
 			return Promise.resolve();
@@ -1261,7 +1323,7 @@ function makeCapturedSmsOfferPage({
 				return makeLocator();
 			}
 			if (selector.includes("password")) {
-				return makeLocator();
+				return passwordField;
 			}
 			if (selector.includes("venmoRemeberMeDevice")) {
 				return rememberDevice as Locator;
@@ -1280,7 +1342,12 @@ function makeCapturedSmsOfferPage({
 		url: (): string => currentUrl,
 		waitForLoadState: (): ReturnType<Page["waitForLoadState"]> =>
 			Promise.resolve(),
-		waitForTimeout: (): ReturnType<Page["waitForTimeout"]> => Promise.resolve(),
+		waitForTimeout: (): ReturnType<Page["waitForTimeout"]> => {
+			if (stage === "waiting") {
+				stage = "code";
+			}
+			return new Promise((resolve) => setTimeout(resolve, 1));
+		},
 	};
 	return {
 		get checkboxClicks(): number {
@@ -1528,43 +1595,177 @@ test("ensureVenmoSession: a rendered but disabled code box never asks the owner 
 	});
 });
 
-test("ensureVenmoSession: a split per-digit code layout still counts as a real code-entry page", async () => {
-	await withVenmoCredentials(async () => {
-		const { page } = makeOtpDecisionPage({
-			bodyText: "Enter the code we sent you",
-			otpCount: 6,
+/** Distinct DOM-like fields reject unusable fills and enforce maxlength. */
+function otpFields(
+	specs: { visible?: boolean; enabled?: boolean; maxlength?: number }[],
+): { locator: Locator; values: string[] } {
+	const values = specs.map(() => "");
+	const fields = specs.map(
+		(spec, index) =>
+			({
+				...makeLocator({
+					visible: spec.visible ?? true,
+					enabled: spec.enabled ?? true,
+				}),
+				getAttribute: (name: string): Promise<string | null> =>
+					Promise.resolve(
+						name === "maxlength" && spec.maxlength !== undefined
+							? String(spec.maxlength)
+							: null,
+					),
+				fill: (value: string): Promise<void> => {
+					if (spec.visible === false || spec.enabled === false) {
+						return Promise.reject(new Error("cannot fill unusable field"));
+					}
+					if (spec.maxlength !== undefined && value.length > spec.maxlength) {
+						return Promise.reject(new Error("maxlength exceeded"));
+					}
+					values[index] = value;
+					return Promise.resolve();
+				},
+			}) as unknown as Locator,
+	);
+	return {
+		locator: {
+			...makeLocator(),
+			count: (): Promise<number> => Promise.resolve(fields.length),
+			// Out of range matches nothing, as a real Playwright `nth` does.
+			first: (): Locator =>
+				fields[0] ?? makeLocator({ count: 0, visible: false }),
+			nth: (index: number): Locator =>
+				fields[index] ?? makeLocator({ count: 0, visible: false }),
+		} as Locator,
+		values,
+	};
+}
+
+function replaceOtpFields(page: Page, locator: Locator): void {
+	const original = page.locator.bind(page);
+	page.locator = ((selector: string): Locator =>
+		selector.includes("otp") || selector.includes("code")
+			? locator
+			: original(selector)) as Page["locator"];
+}
+
+for (const unusable of [{ visible: false }, { enabled: false }]) {
+	test(`OTP fill skips an unusable first field: ${JSON.stringify(unusable)}`, async () => {
+		const { page } = makeOtpDecisionPage({ bodyText: "Enter the code" });
+		const fields = otpFields([unusable, { maxlength: 6 }]);
+		replaceOtpFields(page, fields.locator);
+		const result = await ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "test-password",
+				VENMO_USERNAME: "test-user",
+			},
+			page,
+			sendInteraction: (request) => {
+				assert.equal(request.kind, "otp");
+				return Promise.resolve({ value: "123456" } as InteractionResponse);
+			},
 		});
-		const { requests, sendInteraction } = recordingSendInteraction();
+		assert.equal(result, null);
+		assert.deepEqual(fields.values, ["", "123456"]);
+	});
+}
+
+test("OTP fill distributes all six digits across distinct maxlength=1 fields", async () => {
+	const { page } = makeOtpDecisionPage({ bodyText: "Enter the code" });
+	const fields = otpFields(Array.from({ length: 6 }, () => ({ maxlength: 1 })));
+	replaceOtpFields(page, fields.locator);
+	assert.equal(
 		await ensureVenmoSession({
 			credentials: {
 				VENMO_PASSWORD: "test-password",
 				VENMO_USERNAME: "test-user",
 			},
 			page,
-			sendInteraction,
-		}).catch((): undefined => undefined);
-		assert.equal(
-			requests.filter((req): boolean => req.kind === "otp").length,
-			1,
-			"a boxed per-digit layout must stay recognized as a genuine code screen",
-		);
-	});
+			sendInteraction: (request) => {
+				assert.equal(request.kind, "otp");
+				return Promise.resolve({ value: "123456" } as InteractionResponse);
+			},
+		}),
+		null,
+	);
+	assert.deepEqual(fields.values, ["1", "2", "3", "4", "5", "6"]);
+});
+
+test("OTP split/code length mismatch hands off without partial entry", async () => {
+	const { page } = makeOtpDecisionPage({ bodyText: "Enter the code" });
+	const fields = otpFields(Array.from({ length: 6 }, () => ({ maxlength: 1 })));
+	replaceOtpFields(page, fields.locator);
+	const kinds: string[] = [];
+	assert.equal(
+		await ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "test-password",
+				VENMO_USERNAME: "test-user",
+			},
+			page,
+			sendInteraction: (request) => {
+				kinds.push(request.kind);
+				return Promise.resolve({
+					value: request.kind === "otp" ? "1234" : undefined,
+				} as InteractionResponse);
+			},
+		}),
+		null,
+	);
+	assert.deepEqual(kinds, ["otp", "manual_action"]);
+	assert.deepEqual(fields.values, ["", "", "", "", "", ""]);
+});
+
+test("SMS offer wait ignores a hidden first match and fills the usable second", async () => {
+	const fake = makeCapturedSmsOfferPage();
+	const original = fake.page.locator.bind(fake.page);
+	const hidden = otpFields([{ visible: false }]).locator.first();
+	fake.page.locator = ((selector: string): Locator => {
+		const real = original(selector);
+		if (
+			!(
+				selector.includes("input") &&
+				(selector.includes("otp") || selector.includes("code"))
+			)
+		) {
+			return real;
+		}
+		return {
+			...makeLocator(),
+			count: async () => 1 + (await real.count()),
+			first: () => hidden,
+			nth: (index: number) => (index === 0 ? hidden : real),
+		} as Locator;
+	}) as Page["locator"];
+	assert.equal(
+		await ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "test-password",
+				VENMO_USERNAME: "test-user",
+			},
+			page: fake.page,
+			sendInteraction: (request) => {
+				assert.equal(request.kind, "otp");
+				fake.markOtpRequested();
+				return Promise.resolve({ value: "123456" } as InteractionResponse);
+			},
+		}),
+		null,
+	);
+	assert.equal(fake.sendCodeClicks, 1);
+	assert.deepEqual(fake.filledCodes, ["123456"]);
 });
 
 test("ensureVenmoSession: a code input that vanishes after classification fails loudly instead of prompting", async () => {
 	await withVenmoCredentials(async () => {
 		// Classification sees a usable input; Venmo re-renders it away before the
 		// prompt site is reached. The prompt-site re-check must catch that.
-		// Sequenced off the connector's own reads rather than a timer. Read 1 only
-		// binds the locator; read 2 is `hasUsableVenmoOtpInput` deciding this IS an
-		// OTP page. Venmo re-renders the input away at that instant, so the
-		// prompt-site re-check (read 3) must find nothing and throw.
+		// Classification reads the usable inputs once. Re-render immediately
+		// after that snapshot; the prompt-site second read must see no input.
 		let otpSelectorReads = 0;
 		const { page } = makeOtpDecisionPage({
 			bodyText: "We sent a verification code to your phone",
 			onOtpClassified: (mutate) => {
 				otpSelectorReads += 1;
-				if (otpSelectorReads === 2) {
+				if (otpSelectorReads === 1) {
 					mutate({ otpVisible: false });
 				}
 			},
@@ -1628,6 +1829,12 @@ test("ensureVenmoSession: a code input that vanishes after classification fails 
  *
  * `passwordAppearsAfterNext: false` models the second screen never arriving.
  * `captchaVisible` models the reCAPTCHA frame the live page really does embed.
+ *
+ * Step one and step two each own a SEPARATE password input. With
+ * `stepOneUnnamedPassword` the step-one input is visible (the live page's
+ * unnamed `input[type="password"]`); either way step two renders a NEW, empty
+ * input in its place, so text typed on step one never reaches step two.
+ * `submittedPasswords` records step two's field value at each "Log in" click.
  */
 function makeTwoStepVenmoPage({
 	captchaVisible = false,
@@ -1635,8 +1842,11 @@ function makeTwoStepVenmoPage({
 	deadProbesAfterSubmit = 0,
 	identifierSelectorMatches = true,
 	passwordAppearsAfterNext = true,
+	passwordClearedBySubmit = false,
+	passwordFillSticks = true,
 	passwordScreenDelayMs = 0,
 	semanticSubmitVisible = true,
+	stepOneUnnamedPassword = false,
 }: {
 	captchaVisible?: boolean;
 	/**
@@ -1659,6 +1869,17 @@ function makeTwoStepVenmoPage({
 	scoringChallengeLoaded?: boolean;
 	passwordAppearsAfterNext?: boolean;
 	/**
+	 * `true` empties step two's password field when "Log in" is clicked — the
+	 * page then sits on the password step with an empty field, as in the live
+	 * 2026-10-21 run.
+	 */
+	passwordClearedBySubmit?: boolean;
+	/**
+	 * `false` models a step-two field that does not keep typed text: `fill`
+	 * resolves, but the field's value stays empty.
+	 */
+	passwordFillSticks?: boolean;
+	/**
 	 * How long Venmo's second screen takes to render after the identifier is
 	 * submitted. Non-zero is the realistic case and the ONLY one that can tell a
 	 * real wait from a fixed sleep: a `waitFor` resolves the instant the field
@@ -1675,19 +1896,43 @@ function makeTwoStepVenmoPage({
 	 * consulted.
 	 */
 	semanticSubmitVisible?: boolean;
+	/**
+	 * `true` gives step one a VISIBLE unnamed `input[type="password"]` beside
+	 * the identifier field — the live page's shape (run_1787164654406), which a
+	 * bare "is a password field visible?" wait reads as step two.
+	 */
+	stepOneUnnamedPassword?: boolean;
 } = {}): {
 	clicks: string[];
 	fillCalls: Record<string, string>;
 	page: Page;
+	submittedPasswords: string[];
 } {
 	const clicks: string[] = [];
 	const fillCalls: Record<string, string> = {};
+	const submittedPasswords: string[] = [];
 	let onPasswordScreen = false;
 	let probeCount = 0;
 	let currentUrl = "https://id.venmo.com/signin?country.x=US";
+	let stepOnePasswordValue = "";
+	let stepTwoPasswordValue = "";
 
 	const advance = (via: string): void => {
 		clicks.push(via);
+		if (onPasswordScreen) {
+			submittedPasswords.push(stepTwoPasswordValue);
+			if (passwordClearedBySubmit) {
+				stepTwoPasswordValue = "";
+			}
+			if (stepTwoPasswordValue === "") {
+				// Venmo's client-side "Required" validation: nothing is sent and the
+				// page stays on the password step.
+				return;
+			}
+			// The provider, not an account probe, leaves identity after submit.
+			currentUrl = "https://venmo.com/";
+			return;
+		}
 		if (!passwordAppearsAfterNext) {
 			return;
 		}
@@ -1706,46 +1951,115 @@ function makeTwoStepVenmoPage({
 	};
 
 	/**
-	 * A password locator that reports its CURRENT visibility on every read and
-	 * whose `waitFor` genuinely polls until visible or the deadline passes —
-	 * Playwright's real semantics. A fake whose `waitFor` resolved immediately
-	 * would make a fixed sleep and a real wait look identical.
+	 * Poll `holds` until true or the deadline passes — Playwright's real
+	 * `waitFor` semantics. A fake whose `waitFor` resolved immediately would
+	 * make a fixed sleep and a real wait look identical.
 	 */
+	const pollUntil = async (
+		holds: () => boolean,
+		timeoutMs = 30_000,
+	): Promise<void> => {
+		const deadline = Date.now() + timeoutMs;
+		while (!holds()) {
+			if (Date.now() >= deadline) {
+				throw new Error("Timeout waiting for locator");
+			}
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+	};
+
+	/**
+	 * A password locator that resolves against the CURRENT screen on every
+	 * read, like a real Playwright locator: step one's input until step two
+	 * renders, then step two's fresh input. Step one's input exists only with
+	 * `stepOneUnnamedPassword`.
+	 */
+	const passwordVisible = (): boolean =>
+		onPasswordScreen || stepOneUnnamedPassword;
 	const passwordLocator = (): Locator => {
 		const fake: Pick<
 			Locator,
 			| "click"
 			| "count"
 			| "fill"
+			| "filter"
 			| "first"
+			| "inputValue"
 			| "isEnabled"
 			| "isVisible"
 			| "waitFor"
 		> = {
 			click: (): Promise<void> => Promise.resolve(),
-			count: (): Promise<number> => Promise.resolve(onPasswordScreen ? 1 : 0),
+			count: (): Promise<number> => Promise.resolve(passwordVisible() ? 1 : 0),
 			fill: (value: string): Promise<void> => {
-				// Only a rendered field can be typed into. Recording a fill against a
-				// screen that has not arrived would let a broken wait look successful.
 				if (onPasswordScreen) {
-					fillCalls.password = value;
+					// `fillCalls.password` records only text step two kept: a fill the
+					// field dropped must not look like a successful one.
+					if (passwordFillSticks) {
+						stepTwoPasswordValue = value;
+						fillCalls.password = value;
+					}
+					fillCalls.passwordFillAttempts = String(
+						Number(fillCalls.passwordFillAttempts ?? 0) + 1,
+					);
+				} else if (stepOneUnnamedPassword) {
+					// Typed into step one's box — the live bug. Step two will not see it.
+					stepOnePasswordValue = value;
+					fillCalls.passwordOnStepOne = value;
 				}
 				return Promise.resolve();
+			},
+			filter(): Locator {
+				return fake as Locator;
 			},
 			first(): Locator {
 				return fake as Locator;
 			},
-			isEnabled: (): Promise<boolean> => Promise.resolve(onPasswordScreen),
-			isVisible: (): Promise<boolean> => Promise.resolve(onPasswordScreen),
-			async waitFor(options?: { timeout?: number }): Promise<void> {
-				const deadline = Date.now() + (options?.timeout ?? 30_000);
-				while (!onPasswordScreen) {
-					if (Date.now() >= deadline) {
-						throw new Error("Timeout waiting for locator");
-					}
-					await new Promise((resolve) => setTimeout(resolve, 5));
+			inputValue: (): Promise<string> =>
+				Promise.resolve(
+					onPasswordScreen ? stepTwoPasswordValue : stepOnePasswordValue,
+				),
+			isEnabled: (): Promise<boolean> => Promise.resolve(passwordVisible()),
+			isVisible: (): Promise<boolean> => Promise.resolve(passwordVisible()),
+			waitFor: (options?: { timeout?: number }): Promise<void> =>
+				pollUntil(passwordVisible, options?.timeout),
+		};
+		return fake as Locator;
+	};
+
+	/**
+	 * Screen one's id-addressed control, resolved on every read. Present only on
+	 * screen one — on screen two the id is gone, so a connector that kept
+	 * clicking it would find nothing, and a wait for it to go hidden resolves
+	 * only once screen two has actually rendered.
+	 */
+	const stepOneControl = (): Locator => {
+		const fake: Pick<
+			Locator,
+			"click" | "count" | "first" | "isEnabled" | "isVisible" | "waitFor"
+		> = {
+			click: (): Promise<void> => {
+				if (!onPasswordScreen) {
+					advance("btnNext");
 				}
+				return Promise.resolve();
 			},
+			count: (): Promise<number> => Promise.resolve(onPasswordScreen ? 0 : 1),
+			first(): Locator {
+				return fake as Locator;
+			},
+			isEnabled: (): Promise<boolean> => Promise.resolve(!onPasswordScreen),
+			isVisible: (): Promise<boolean> => Promise.resolve(!onPasswordScreen),
+			waitFor: (options?: {
+				state?: string;
+				timeout?: number;
+			}): Promise<void> =>
+				pollUntil(
+					options?.state === "hidden" || options?.state === "detached"
+						? (): boolean => onPasswordScreen
+						: (): boolean => !onPasswordScreen,
+					options?.timeout,
+				),
 		};
 		return fake as Locator;
 	};
@@ -1812,22 +2126,17 @@ function makeTwoStepVenmoPage({
 					: makeLocator({ count: 0, visible: false });
 			}
 			if (selector.includes('input[name="password"]')) {
-				// Screen two only. Not-visible on screen one is the fact that makes
-				// this a TWO-step page rather than a one-screen form. The locator
-				// re-reads the live state on every call, so it flips the moment the
-				// second screen renders — it is not frozen at bind time.
+				// Screen two's input, plus screen one's unnamed input when
+				// `stepOneUnnamedPassword` is set. The locator re-reads the live state
+				// on every call, so it switches inputs the moment the second screen
+				// renders — it is not frozen at bind time.
 				return passwordLocator();
 			}
 			if (selector.includes("otp") || selector.includes("code")) {
 				return makeLocator({ count: 0, visible: false });
 			}
 			if (selector === "#btnNext") {
-				// Screen one's id-addressed control. Present only on screen one — on
-				// screen two the id is gone, so a connector that kept clicking it
-				// would find nothing.
-				return onPasswordScreen
-					? makeLocator({ count: 0, visible: false })
-					: makeClickRecordingLocator(() => advance("btnNext"));
+				return stepOneControl();
 			}
 			if (selector === 'button[type="submit"]') {
 				// The generic fallback both screens carry.
@@ -1867,14 +2176,21 @@ function makeTwoStepVenmoPage({
 			});
 		},
 	};
-	return { clicks, fillCalls, page: page as Page };
+	return { clicks, fillCalls, page: page as Page, submittedPasswords };
 }
 
 /** A visible locator that records each click, so a test can pin WHICH control advanced the flow. */
 function makeClickRecordingLocator(onClick: () => void): Locator {
 	const fake: Pick<
 		Locator,
-		"click" | "count" | "fill" | "first" | "isEnabled" | "isVisible" | "waitFor"
+		| "click"
+		| "count"
+		| "fill"
+		| "filter"
+		| "first"
+		| "isEnabled"
+		| "isVisible"
+		| "waitFor"
 	> = {
 		click: (): Promise<void> => {
 			onClick();
@@ -1882,12 +2198,16 @@ function makeClickRecordingLocator(onClick: () => void): Locator {
 		},
 		count: (): Promise<number> => Promise.resolve(1),
 		fill: (): Promise<void> => Promise.resolve(),
+		filter(): Locator {
+			return fake as Locator;
+		},
 		first(): Locator {
 			return fake as Locator;
 		},
 		isEnabled: (): Promise<boolean> => Promise.resolve(true),
 		isVisible: (): Promise<boolean> => Promise.resolve(true),
-		waitFor: (): Promise<void> => Promise.resolve(),
+		waitFor: (options?: { state?: string }): Promise<void> =>
+			staticWaitFor({ count: 1, visible: true }, options),
 	};
 	return fake as Locator;
 }
@@ -2136,6 +2456,149 @@ test("ensureVenmoSession: an invisible v3 scoring challenge is named, not report
 			[],
 			"v3 renders no challenge, so an owner handoff would send them to a puzzle that does not exist",
 		);
+	});
+});
+
+// (2e) Live run, 2026-10-21, real account: Venmo's step one shows an UNNAMED
+// visible password input beside the identifier. After `Next`, the connector
+// waited for "a visible password field", which step one's box already
+// satisfied, so it typed the password there. Venmo then rendered step two with
+// a NEW, empty password input, and the connector clicked "Log in" on it.
+// Venmo's "Required" validation blocked the click: the network log shows no
+// sign-in request after the identifier step. The step-two render here is
+// delayed, as it is on the live page.
+test("ensureVenmoSession: a visible step-one password box is not step two — the password lands in step two's NEW input and Log in is clicked only with it filled (live 2026-10-21)", async () => {
+	await withVenmoCredentials(async () => {
+		const { fillCalls, page, submittedPasswords } = makeTwoStepVenmoPage({
+			passwordScreenDelayMs: 300,
+			stepOneUnnamedPassword: true,
+		});
+		const { requests, sendInteraction } = recordingSendInteraction();
+		const result = await ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "test-password",
+				VENMO_USERNAME: "test-user",
+			},
+			page,
+			passwordScreenTimeoutMs: 5000,
+			postSubmitSettleTimeoutMs: 2000,
+			sendInteraction,
+		});
+		assert.equal(
+			fillCalls.passwordOnStepOne,
+			undefined,
+			"the password must not be typed into step one's box",
+		);
+		assert.equal(
+			fillCalls.password,
+			"test-password",
+			"the password must be typed into step two's input",
+		);
+		assert.deepEqual(
+			submittedPasswords,
+			["test-password"],
+			"Log in must be clicked exactly once, with step two's field holding the password",
+		);
+		assert.equal(result?.live, true);
+		assert.deepEqual(requests, []);
+	});
+});
+
+// The guard behind the fix above: the connector reads the field back before it
+// clicks Log in. A field that does not keep the text gets ONE re-fill; if it
+// still reads empty, nothing is submitted and the owner gets an honest reason.
+// An empty submit is the live failure, and it later surfaced as a false
+// "invisible scoring challenge".
+test("ensureVenmoSession: a password field that does not keep the typed password is never submitted — it hands off with an honest reason", async () => {
+	await withVenmoCredentials(async () => {
+		const { clicks, fillCalls, page, submittedPasswords } =
+			makeTwoStepVenmoPage({
+				passwordFillSticks: false,
+				passwordScreenDelayMs: 50,
+				stepOneUnnamedPassword: true,
+			});
+		const { requests, sendInteraction } = recordingSendInteraction();
+		let markerFired = false;
+		const result = await ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "test-password",
+				VENMO_USERNAME: "test-user",
+			},
+			onCredentialSubmit: () => {
+				markerFired = true;
+			},
+			page,
+			passwordScreenTimeoutMs: 5000,
+			postSubmitSettleTimeoutMs: 2000,
+			sendInteraction,
+		});
+		assert.deepEqual(
+			submittedPasswords,
+			[],
+			"Log in must never be clicked on an empty password field",
+		);
+		assert.deepEqual(
+			clicks,
+			["role-submit-identifier-screen"],
+			"only the identifier step may be submitted",
+		);
+		assert.equal(
+			fillCalls.passwordFillAttempts,
+			"2",
+			"one fill and exactly one re-fill",
+		);
+		assert.equal(markerFired, false, "no password went out");
+		assert.equal(result, null, "the run ends in an owner handoff");
+		assert.equal(requests.length, 1);
+		assert.match(
+			requests[0]?.message ?? "",
+			/password field did not accept input/,
+		);
+		assert.doesNotMatch(
+			requests[0]?.message ?? "",
+			/test-password/,
+			"the handoff must never carry the password",
+		);
+	});
+});
+
+// The misclassification from the same live run. A post-submit stall where the
+// page still shows the password step with an EMPTY field is not an invisible
+// reCAPTCHA v3 score — Venmo loads v3 on healthy sign-ins too. It must report
+// what the page shows.
+test("ensureVenmoSession: a post-submit stall on the password step with an empty field is not reported as an invisible scoring challenge", async () => {
+	await withVenmoCredentials(async () => {
+		const { page } = makeTwoStepVenmoPage({
+			deadProbesAfterSubmit: Number.MAX_SAFE_INTEGER,
+			passwordClearedBySubmit: true,
+			scoringChallengeLoaded: true,
+		});
+		const { requests, sendInteraction } = recordingSendInteraction();
+		await assert.rejects(
+			ensureVenmoSession({
+				credentials: {
+					VENMO_PASSWORD: "test-password",
+					VENMO_USERNAME: "test-user",
+				},
+				page,
+				postSubmitSettleTimeoutMs: 1000,
+				sendInteraction,
+			}),
+			(error: Error) => {
+				assert.match(
+					error.message,
+					/^venmo_password_field_empty_after_submit:/,
+				);
+				assert.doesNotMatch(error.message, /scoring|test-password/);
+				assert.doesNotMatch(
+					error.message,
+					VENMO_RETRYABLE_PATTERN,
+					"a password may have gone out; this must not auto-retry (B4)",
+				);
+				return true;
+			},
+		);
+		assert.deepEqual(requests, []);
 	});
 });
 
@@ -3299,9 +3762,18 @@ function makeVenmoStepOneWithUnnamedPasswordPage({
 
 	// The unnamed step-one password box. Visible and enabled from the very first
 	// paint — the fact `makeTwoStepVenmoPage` cannot express.
+	let unnamedPasswordValue = "";
 	const unnamedPassword: Pick<
 		Locator,
-		"click" | "count" | "fill" | "first" | "isEnabled" | "isVisible" | "waitFor"
+		| "click"
+		| "count"
+		| "fill"
+		| "filter"
+		| "first"
+		| "inputValue"
+		| "isEnabled"
+		| "isVisible"
+		| "waitFor"
 	> = {
 		click: (): Promise<void> => Promise.resolve(),
 		count: (): Promise<number> => Promise.resolve(1),
@@ -3309,11 +3781,16 @@ function makeVenmoStepOneWithUnnamedPasswordPage({
 			// Records WHICH screen the password was typed on. Typing on step one is
 			// the bug; typing on step two is correct behavior.
 			fillCalls[onPasswordScreen ? "password" : "passwordOnStepOne"] = value;
+			unnamedPasswordValue = value;
 			return Promise.resolve();
+		},
+		filter(): Locator {
+			return unnamedPassword as Locator;
 		},
 		first(): Locator {
 			return unnamedPassword as Locator;
 		},
+		inputValue: (): Promise<string> => Promise.resolve(unnamedPasswordValue),
 		isEnabled: (): Promise<boolean> => Promise.resolve(true),
 		isVisible: (): Promise<boolean> => Promise.resolve(true),
 		waitFor: (): Promise<void> => Promise.resolve(),
@@ -4200,7 +4677,9 @@ test("a submitted password in one run does not misclassify the next run's pre-su
  * signs in manually, and the run must still end honestly (`null`) rather than
  * asserting a liveness nothing checked.
  */
-test("suppression preserves the manual fallback: an owner who signs in by hand still completes, unverified", async () => {
+async function assertManualFallbackCompletes(
+	establish: typeof ensureVenmoSession = ensureVenmoSession,
+): Promise<void> {
 	const { page, submitClicks } = makePageWithChallengeThenForm();
 	let promptCount = 0;
 	// Never call `reveal()`: the sign-in form stays absent, so the replay finds
@@ -4212,11 +4691,11 @@ test("suppression preserves the manual fallback: an owner who signs in by hand s
 		return Promise.resolve({ ok: true } as unknown as InteractionResponse);
 	};
 
-	const result = await ensureVenmoSession({
+	const result = await establish({
 		credentials: { VENMO_PASSWORD: "pw-stored", VENMO_USERNAME: "user-stored" },
 		page,
 		sendInteraction,
-	}).catch((): null => null);
+	});
 
 	assert.equal(
 		submitClicks.length,
@@ -4233,4 +4712,273 @@ test("suppression preserves the manual fallback: an owner who signs in by hand s
 		null,
 		"an unreached form must resolve as a completed, unverified handoff — never a fabricated live session",
 	);
+}
+
+test("suppression preserves the manual fallback: an owner who signs in by hand still completes, unverified", async () => {
+	await assertManualFallbackCompletes();
 });
+
+test("manual fallback oracle rejects a deliberate post-handoff throw mutation", async () => {
+	await assert.rejects(
+		assertManualFallbackCompletes(async (args) => {
+			await ensureVenmoSession(args);
+			throw new Error("deliberate post-handoff rejection mutation");
+		}),
+		/deliberate post-handoff rejection mutation/,
+	);
+});
+
+/** A goto really destroys the pending identity XHR and its eventual outcome. */
+function makePendingIdentityPage(
+	outcome: "otp" | "captcha" | "complete" | "pending",
+	otpOutcome: "complete" | "pending" | "rejected" | "captcha" = "complete",
+	otpDelayMs = 5,
+) {
+	const { page } = makeOtpDecisionPage({ bodyText: "" });
+	const baseLocator = page.locator.bind(page);
+	let url = "https://venmo.com/";
+	let stage = "form";
+	let ticks = 0;
+	let destroyed = false;
+	let postSubmitProbes = 0;
+	let otpSubmittedAt = 0;
+	const fields = otpFields([{ maxlength: 6 }]);
+	page.url = () => url;
+	// biome-ignore lint/suspicious/useAwait: mirrors Playwright's Promise-returning signature
+	page.goto = async (target) => {
+		if (["pending", "otp", "captcha", "verifying"].includes(stage)) {
+			destroyed = true;
+			stage = "destroyed";
+		}
+		url =
+			target === "https://venmo.com/login"
+				? "https://id.venmo.com/signin"
+				: target;
+		return null;
+	};
+	page.getByRole = (() =>
+		makeClickRecordingLocator(() => {
+			if (stage === "form") {
+				stage = "pending";
+			} else if (stage === "otp") {
+				stage = "verifying";
+				otpSubmittedAt = Date.now();
+			}
+		})) as Page["getByRole"];
+	// biome-ignore lint/suspicious/useAwait: mirrors Playwright's Promise-returning signature
+	page.evaluate = (async () => {
+		if (stage !== "form") {
+			postSubmitProbes += 1;
+		}
+		return stage === "complete" && !destroyed
+			? { kind: "live", ownerId: "owner-id" }
+			: { kind: "dead" };
+	}) as Page["evaluate"];
+	page.locator = ((selector: string) => {
+		if (selector === "body") {
+			return makeLocator({
+				innerText:
+					stage === "rejected"
+						? "Incorrect or expired verification code. Try again."
+						: stage === "otp"
+							? "Enter the code we sent"
+							: "",
+			});
+		}
+		if (selector.includes("otp") || selector.includes("code")) {
+			return stage === "otp" || stage === "rejected"
+				? fields.locator
+				: makeLocator({ count: 0, visible: false });
+		}
+		if (selector.includes("recaptcha")) {
+			return makeLocator({
+				count: stage === "captcha" ? 1 : 0,
+				visible: stage === "captcha",
+			});
+		}
+		return baseLocator(selector);
+	}) as Page["locator"];
+	page.waitForTimeout = async () => {
+		ticks += 1;
+		if (!destroyed && stage === "pending" && ticks === 2) {
+			stage = outcome;
+			if (outcome === "complete") {
+				url = "https://account.venmo.com/";
+			}
+		}
+		if (
+			!destroyed &&
+			stage === "verifying" &&
+			Date.now() - otpSubmittedAt >= otpDelayMs &&
+			otpOutcome !== "pending"
+		) {
+			stage = otpOutcome;
+			if (otpOutcome === "complete") url = "https://venmo.com/";
+		}
+		await new Promise((resolve) => setTimeout(resolve, 1));
+	};
+	return {
+		page,
+		values: fields.values,
+		get destroyed() {
+			return destroyed;
+		},
+		get postSubmitProbes() {
+			return postSubmitProbes;
+		},
+	};
+}
+
+test("pending identity XHR survives until a delayed OTP is filled", async () => {
+	const fake = makePendingIdentityPage("otp");
+	const kinds: string[] = [];
+	assert.equal(
+		await ensureVenmoSession({
+			credentials: {
+				VENMO_USERNAME: "test-user",
+				VENMO_PASSWORD: "test-password",
+			},
+			page: fake.page,
+			postSubmitSettleTimeoutMs: 100,
+			sendInteraction: (request) => {
+				kinds.push(request.kind);
+				return Promise.resolve({ value: "123456" } as InteractionResponse);
+			},
+		}),
+		null,
+	);
+	assert.equal(fake.destroyed, false);
+	assert.equal(fake.postSubmitProbes, 0);
+	assert.deepEqual(kinds, ["otp"]);
+	assert.deepEqual(fake.values, ["123456"]);
+});
+
+test("pending identity XHR survives until the provider navigates after completion", async () => {
+	const fake = makePendingIdentityPage("complete");
+	const { requests, sendInteraction } = recordingSendInteraction();
+	const result = await ensureVenmoSession({
+		credentials: {
+			VENMO_USERNAME: "test-user",
+			VENMO_PASSWORD: "test-password",
+		},
+		page: fake.page,
+		postSubmitSettleTimeoutMs: 100,
+		sendInteraction,
+	});
+	assert.equal(result?.live, true);
+	assert.equal(fake.destroyed, false);
+	assert.equal(fake.postSubmitProbes, 1);
+	assert.deepEqual(requests, []);
+});
+
+test("late identity CAPTCHA is handed off without destroying the document", async () => {
+	const fake = makePendingIdentityPage("captcha");
+	const { requests, sendInteraction } = recordingSendInteraction();
+	assert.equal(
+		await ensureVenmoSession({
+			credentials: {
+				VENMO_USERNAME: "test-user",
+				VENMO_PASSWORD: "test-password",
+			},
+			page: fake.page,
+			postSubmitSettleTimeoutMs: 100,
+			sendInteraction,
+		}),
+		null,
+	);
+	assert.equal(fake.destroyed, false);
+	assert.equal(fake.postSubmitProbes, 0);
+	assert.equal(requests.length, 1);
+	assert.equal(requests[0]?.kind, "manual_action");
+});
+
+test("an identity XHR that never completes times out without navigation or probing", async () => {
+	const fake = makePendingIdentityPage("pending");
+	const { requests, sendInteraction } = recordingSendInteraction();
+	await assert.rejects(
+		ensureVenmoSession({
+			credentials: {
+				VENMO_USERNAME: "test-user",
+				VENMO_PASSWORD: "test-password",
+			},
+			page: fake.page,
+			postSubmitSettleTimeoutMs: 20,
+			sendInteraction,
+		}),
+		/venmo_login_did_not_complete/,
+	);
+	assert.equal(fake.destroyed, false);
+	assert.equal(fake.postSubmitProbes, 0);
+	assert.deepEqual(requests, []);
+});
+
+// Models the caller's next collection step: it may navigate/probe immediately
+// once ensureVenmoSession returns, so the verification must already be settled.
+test("OTP verification leaves identity before the caller navigates or probes", async () => {
+	const fake = makePendingIdentityPage("otp", "complete", 150);
+	await ensureVenmoSession({
+		credentials: {
+			VENMO_USERNAME: "test-user",
+			VENMO_PASSWORD: "test-password",
+		},
+		page: fake.page,
+		postSubmitSettleTimeoutMs: 1000,
+		sendInteraction: () =>
+			Promise.resolve({ value: "123456" } as InteractionResponse),
+	});
+	assert.equal(
+		fake.page.url(),
+		"https://venmo.com/",
+		"provider must finish OTP verification before returning",
+	);
+	assert.equal(fake.postSubmitProbes, 0);
+	await fake.page.goto("https://venmo.com/");
+	assert.equal(
+		fake.destroyed,
+		false,
+		"the caller must not abort pending OTP verification",
+	);
+});
+
+test("OTP verification bound expires honestly without navigation or probing", async () => {
+	const fake = makePendingIdentityPage("otp", "pending");
+	await assert.rejects(
+		ensureVenmoSession({
+			credentials: {
+				VENMO_USERNAME: "test-user",
+				VENMO_PASSWORD: "test-password",
+			},
+			page: fake.page,
+			postSubmitSettleTimeoutMs: 20,
+			sendInteraction: () =>
+				Promise.resolve({ value: "123456" } as InteractionResponse),
+		}),
+		/venmo_login_did_not_complete:.*after verification code submit/,
+	);
+	assert.equal(fake.destroyed, false);
+	assert.equal(fake.postSubmitProbes, 0);
+});
+
+for (const outcome of ["rejected", "captcha"] as const) {
+	test(`OTP verification hands off a ${outcome} screen without navigation or probing`, async () => {
+		const fake = makePendingIdentityPage("otp", outcome);
+		const kinds: string[] = [];
+		await ensureVenmoSession({
+			credentials: {
+				VENMO_USERNAME: "test-user",
+				VENMO_PASSWORD: "test-password",
+			},
+			page: fake.page,
+			postSubmitSettleTimeoutMs: 100,
+			sendInteraction: (request) => {
+				kinds.push(request.kind);
+				return Promise.resolve({
+					value: request.kind === "otp" ? "123456" : "success",
+				} as InteractionResponse);
+			},
+		});
+		assert.deepEqual(kinds, ["otp", "manual_action"]);
+		assert.equal(fake.destroyed, false);
+		assert.equal(fake.postSubmitProbes, 0);
+	});
+}
