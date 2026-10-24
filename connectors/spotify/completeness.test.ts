@@ -10,6 +10,7 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { completeSourceFields } from "./__fixtures__/complete-source-fields.ts";
 import { hasSpotifyEndProof } from "./completion-evidence.ts";
+import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { spotifyCollect } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -1058,11 +1059,14 @@ test("saved tracks reject a terminal response without a returned offset", async 
 	});
 });
 
-test("library rows require a recognized type and folders veto root-only coverage", async () => {
+test("library rows require a typename and folders veto root-only coverage", async () => {
 	for (const row of [
 		{ item: { data: {} } },
-		{ item: { data: { __typename: "FutureType" } } },
+		{ item: { data: { __typename: "" } } },
 		{ item: { data: { __typename: "Folder", uri: "spotify:folder:f1" } } },
+		// A known type still has to carry its own resource identity.
+		{ item: { data: { __typename: "Podcast", uri: "spotify:album:a1" } } },
+		{ item: { data: { __typename: "Audiobook" } } },
 	] as const) {
 		await assertRejectedWithoutAuthority(
 			() => ({
@@ -1211,6 +1215,96 @@ test("playlist item positions retain source slots occupied by episodes", async (
 	assert.equal(items.length, 1);
 	assert.equal(items[0]?.data.id, "pl1:1");
 	assert.equal(items[0]?.data.position, 1);
+});
+
+// Shape observed live (2026-10-22, values redacted): a local file added to a
+// playlist arrives as itemV2 { __typename: LocalTrackResponseWrapper,
+// data { __typename: LocalTrack, albumName, artistName,
+// localTrackDuration { totalMilliseconds }, name, uri } }.
+function localPlaylistTrackItem(
+	data: Record<string, unknown> = {},
+): Record<string, unknown> {
+	return {
+		addedAt: { isoString: "2024-01-02T00:00:00Z" },
+		addedBy: { data: { name: "Adder" } },
+		itemV2: {
+			__typename: "LocalTrackResponseWrapper",
+			data: {
+				__typename: "LocalTrack",
+				albumName: "Local Album",
+				artistName: "Local Artist",
+				localTrackDuration: { totalMilliseconds: 180000 },
+				name: "Local Track",
+				uri: "spotify:local:Local%20Artist:Local%20Album:Local%20Track:180",
+				...data,
+			},
+		},
+	};
+}
+
+test("local files in a playlist are exported as playlist items without a catalog track id", async () => {
+	const result = await collectSavedTracks(
+		(offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") return playlistLibraryResponse();
+			return playlistDetailResponse(String(variables?.uri), offset, [
+				completePlaylistTrackItem(),
+				localPlaylistTrackItem(),
+			]);
+		},
+		{ requested: ["playlist_items"], completeFixtures: false },
+	);
+	const items = result.emittedRecords.filter(
+		(record) => record.stream === "playlist_items",
+	);
+	assert.equal(items.length, 2);
+	assert.deepEqual(items[1]?.data, {
+		id: "pl1:1",
+		playlist_id: "pl1",
+		track_id: null,
+		uri: "spotify:local:Local%20Artist:Local%20Album:Local%20Track:180",
+		position: 1,
+		added_at: "2024-01-02T00:00:00Z",
+		added_by: "Adder",
+		name: "Local Track",
+		artist_names: ["Local Artist"],
+		album_name: "Local Album",
+		duration_ms: 180000,
+	});
+	assert.deepEqual(playlistCoverage(result.messages, "playlist_items"), {
+		considered: 2,
+		covered: 2,
+	});
+});
+
+test("a local playlist track with a missing field or a non-local URI is withheld and counted as a gap", async () => {
+	const variants: Array<Record<string, unknown>> = [
+		{ uri: "spotify:track:t2" },
+		{ uri: undefined },
+		{ artistName: undefined },
+		{ localTrackDuration: undefined },
+		{ localTrackDuration: [] },
+	];
+	for (const variant of variants) {
+		const result = await collectSavedTracks(
+			(offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") return playlistLibraryResponse();
+				return playlistDetailResponse(String(variables?.uri), offset, [
+					localPlaylistTrackItem(variant),
+				]);
+			},
+			{ requested: ["playlist_items"], completeFixtures: false },
+		);
+		assert.deepEqual(
+			result.emittedRecords.filter(
+				(record) => record.stream === "playlist_items",
+			),
+			[],
+		);
+		assert.deepEqual(playlistCoverage(result.messages, "playlist_items"), {
+			considered: 1,
+			covered: 0,
+		});
+	}
 });
 
 test("malformed playlist item fields withhold the whole row before coverage", async () => {
@@ -2447,4 +2541,166 @@ test("a profile image absent from one source is read from the other, absent from
 		profileEnrichment: { ...enrichment(), image_url: 42 },
 	});
 	assert.deepEqual(malformed.emittedRecords, []);
+});
+
+function libraryRow(
+	typeName: string,
+	uri: string | null,
+	wrapper?: string,
+): Record<string, unknown> {
+	return {
+		item: {
+			...(wrapper ? { __typename: wrapper } : {}),
+			...(wrapper && uri ? { _uri: uri } : {}),
+			data: {
+				__typename: typeName,
+				...(!wrapper && uri ? { uri } : {}),
+			},
+		},
+	};
+}
+
+async function collectLibrary(rows: Record<string, unknown>[]) {
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		const result = await collectSavedTracks(
+			(offset, _index, operationName, variables) =>
+				operationName === "libraryV3"
+					? {
+							data: {
+								me: {
+									libraryV3: {
+										offset: 0,
+										totalCount: rows.length,
+										items: rows,
+									},
+								},
+							},
+						}
+					: playlistDetailResponse(String(variables?.uri), offset, [
+							completePlaylistTrackItem(),
+						]),
+			{ requested: ["playlists", "playlist_items"] },
+		);
+		return { ...result, diagnostics };
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+}
+
+test("known non-playlist library items are read past explicitly and counted by type", async () => {
+	const result = await collectLibrary([
+		libraryRow("Playlist", "spotify:playlist:pl1"),
+		libraryRow("PseudoPlaylist", "spotify:collection:tracks"),
+		libraryRow("PseudoPlaylist", "spotify:collection:your-episodes"),
+		libraryRow("Album", "spotify:album:al1"),
+		libraryRow("Artist", "spotify:artist:ar1"),
+		libraryRow("Episode", "spotify:episode:ep1"),
+		libraryRow("Track", "spotify:track:tr1"),
+		libraryRow("Podcast", "spotify:show:sh1"),
+		libraryRow("Audiobook", "spotify:show:ab1"),
+		libraryRow("Audiobook", "spotify:audiobook:ab2"),
+		libraryRow("PreRelease", "spotify:prerelease:pr1"),
+		// The web player puts the URI on the response wrapper for some types.
+		libraryRow("Podcast", "spotify:show:sh2", "PodcastResponseWrapper"),
+	]);
+	assert.deepEqual(
+		result.emittedRecords
+			.filter((record) => record.stream === "playlists")
+			.map((record) => record.data.id),
+		["pl1"],
+	);
+	assert.deepEqual(playlistCoverage(result.messages, "playlists"), {
+		considered: 1,
+		covered: 1,
+	});
+	assert.equal(
+		result.messages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+	const skipped = result.diagnostics.find((line) =>
+		line.includes("library_rows_skipped"),
+	);
+	assert.ok(skipped);
+	for (const fragment of [
+		'"PseudoPlaylist":2',
+		'"Album":1',
+		'"Artist":1',
+		'"Episode":1',
+		'"Track":1',
+		'"Podcast":2',
+		'"Audiobook":2',
+		'"PreRelease":1',
+	]) {
+		assert.ok(skipped.includes(fragment), `${fragment} in ${skipped}`);
+	}
+});
+
+test("unknown and unavailable library items keep the export, report a named gap and withhold completeness", async () => {
+	const result = await collectLibrary([
+		libraryRow("Playlist", "spotify:playlist:pl1"),
+		libraryRow("FutureType", "spotify:future:f1"),
+		libraryRow("NotFound", "spotify:playlist:gone", "PlaylistResponseWrapper"),
+		libraryRow("RestrictedContent", null),
+		libraryRow("bad typename; with text", null),
+	]);
+	assert.deepEqual(
+		result.emittedRecords
+			.filter((record) => record.stream === "playlists")
+			.map((record) => record.data.id),
+		["pl1"],
+	);
+	assert.equal(
+		result.emittedRecords.filter((record) => record.stream === "playlist_items")
+			.length,
+		1,
+	);
+	assert.deepEqual(playlistCoverage(result.messages, "playlists"), {
+		considered: 5,
+		covered: 1,
+	});
+	const skips = result.messages.filter(
+		(message) =>
+			message.type === "SKIP_RESULT" &&
+			message.reason === "spotify_library_row_type_unrecognized",
+	);
+	assert.deepEqual(
+		skips.map((message) => message.type === "SKIP_RESULT" && message.stream),
+		["playlists", "playlist_items"],
+	);
+	const types =
+		"FutureType=1,PlaylistResponseWrapper/NotFound=1,RestrictedContent=1,InvalidTypename=1";
+	for (const message of skips) {
+		assert.ok(
+			message.type === "SKIP_RESULT" && message.message?.includes(types),
+		);
+	}
+	const line = result.diagnostics.find((entry) =>
+		entry.includes("library_rows_unclassified"),
+	);
+	assert.ok(line);
+	assert.ok(line.includes(`"types":"${types}"`), line);
+	assert.ok(line.includes('"count":4'), line);
+	assert.equal(line.includes("with text"), false);
+});
+
+test("an unknown library item repeating a collected identity is still rejected", async () => {
+	await assertRejectedWithoutAuthority(
+		() => ({
+			data: {
+				me: {
+					libraryV3: {
+						offset: 0,
+						totalCount: 2,
+						items: [
+							libraryRow("Playlist", "spotify:playlist:pl1"),
+							libraryRow("FutureType", "spotify:playlist:pl1"),
+						],
+					},
+				},
+			},
+		}),
+		{ requested: ["playlists"] },
+	);
 });

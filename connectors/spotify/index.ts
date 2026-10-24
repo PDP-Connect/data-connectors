@@ -95,6 +95,15 @@ interface SpotifyProfile {
 
 export interface BrowserData {
 	playlistRevisionUnproven?: boolean;
+	/**
+	 * Library rows read but not exported, by Spotify `__typename`. `skipped`
+	 * rows are known non-playlist items; `unclassified` rows (unknown or
+	 * unavailable types) may hide a playlist, so they are a coverage gap.
+	 */
+	libraryRows?: {
+		skipped: Record<string, number>;
+		unclassified: Record<string, number>;
+	};
 	completion: Partial<
 		Record<"playlists" | "playlist_items" | "saved_tracks", SpotifyEndEvidence>
 	>;
@@ -1401,6 +1410,30 @@ export const spotifyPageCollector = async (
 			let libraryExpectedCount: number | null = null;
 			let libraryPageCount = 0;
 			let libraryTerminal: SpotifyEndEvidence["terminal"] = null;
+			// Library item types and the URI resource each must carry. Only
+			// playlists are collected; the rest are read past explicitly and
+			// counted. Liked Songs and Your Episodes arrive as PseudoPlaylist.
+			const libraryResourceTypes: Record<string, string[]> = {
+				Playlist: ["playlist"],
+				PseudoPlaylist: ["collection"],
+				LikedSongs: ["collection"],
+				YourEpisodes: ["collection"],
+				Album: ["album"],
+				Artist: ["artist"],
+				Episode: ["episode"],
+				Track: ["track"],
+				Podcast: ["show"],
+				Audiobook: ["show", "audiobook"],
+				PreRelease: ["prerelease", "album"],
+			};
+			const librarySkipped: Record<string, number> = {};
+			const libraryUnclassified: Record<string, number> = {};
+			let libraryUnclassifiedCount = 0;
+			// A GraphQL type name is not user data; anything else is not reported.
+			const libraryTypeLabel = (value: unknown): string | null =>
+				typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value)
+					? value
+					: null;
 			while (true) {
 				const requestOffset = libraryOffset;
 				const libData = await gql("libraryV3", {
@@ -1441,11 +1474,10 @@ export const spotifyPageCollector = async (
 				if (pageItems.length > 0) libraryPageSignatures.add(signature);
 				for (const item of pageItems) {
 					const libraryItem = isRecord(item) ? item.item : null;
-					const itemData = isRecord(libraryItem) ? libraryItem.data : null;
-					if (!isRecord(itemData)) {
+					if (!isRecord(libraryItem) || !isRecord(libraryItem.data)) {
 						throw new Error("spotify_library_row_invalid");
 					}
-					const data = itemData;
+					const data = libraryItem.data;
 					const typeName = data.__typename;
 					if (typeof typeName !== "string" || typeName.length === 0) {
 						throw new Error("spotify_library_row_invalid");
@@ -1453,38 +1485,40 @@ export const spotifyPageCollector = async (
 					if (typeName === "Folder") {
 						throw new Error("spotify_library_folder_untraversed");
 					}
-					const supportedLibraryTypes = [
-						"Playlist",
-						"PseudoPlaylist",
-						"Album",
-						"Artist",
-						"Episode",
-						"Track",
-						"LikedSongs",
-						"YourEpisodes",
-					];
-					if (!supportedLibraryTypes.includes(typeName)) {
-						throw new Error("spotify_library_row_type_unrecognized");
+					const uri = data._uri ?? data.uri ?? libraryItem._uri;
+					const resourceTypes = Object.hasOwn(libraryResourceTypes, typeName)
+						? libraryResourceTypes[typeName]
+						: undefined;
+					if (!resourceTypes) {
+						// An unknown or unavailable row (NotFound, RestrictedContent, a
+						// future type) may be a playlist the connector cannot read. It is
+						// counted as a gap and named by type, never silently dropped.
+						if (typeof uri === "string" && uri.length > 0) {
+							if (libraryIdentities.has(uri)) {
+								throw new Error("spotify_library_identity_repeated");
+							}
+							libraryIdentities.add(uri);
+						}
+						const wrapper = libraryTypeLabel(libraryItem.__typename);
+						const own = libraryTypeLabel(typeName) ?? "InvalidTypename";
+						const label = wrapper ? `${wrapper}/${own}` : own;
+						const key =
+							Object.hasOwn(libraryUnclassified, label) ||
+							Object.keys(libraryUnclassified).length < 16
+								? label
+								: "Other";
+						libraryUnclassified[key] = (libraryUnclassified[key] ?? 0) + 1;
+						libraryUnclassifiedCount += 1;
+						continue;
 					}
-					const uri = data._uri ?? data.uri;
 					if (typeof uri !== "string" || uri.length === 0) {
 						throw new Error("spotify_library_identity_missing");
 					}
-					const expectedResourceTypes: Record<string, string[]> = {
-						Playlist: ["playlist"],
-						PseudoPlaylist: ["collection"],
-						Album: ["album"],
-						Artist: ["artist"],
-						Episode: ["episode"],
-						Track: ["track"],
-						LikedSongs: ["collection"],
-						YourEpisodes: ["collection"],
-					};
 					const uriParts = uri.split(":");
 					if (
 						uriParts.length !== 3 ||
 						uriParts[0] !== "spotify" ||
-						!expectedResourceTypes[typeName]?.includes(uriParts[1] ?? "") ||
+						!resourceTypes.includes(uriParts[1] ?? "") ||
 						!idFromUri(uri)
 					) {
 						throw new Error("spotify_library_identity_invalid");
@@ -1494,6 +1528,7 @@ export const spotifyPageCollector = async (
 					}
 					libraryIdentities.add(uri);
 					if (typeName === "Playlist") playlistUris.push(uri);
+					else librarySkipped[typeName] = (librarySkipped[typeName] ?? 0) + 1;
 				}
 				libraryRawCount += pageItems.length;
 				libraryPageCount += 1;
@@ -1540,11 +1575,15 @@ export const spotifyPageCollector = async (
 				pageCount: libraryPageCount,
 				rawCount: libraryRawCount,
 				expectedCount: libraryExpectedCount,
-				discardedCount: 0,
+				discardedCount: libraryUnclassifiedCount,
 				remaining: false,
 				terminal: libraryTerminal,
 			};
 			result.playlistUris = playlistUris;
+			result.libraryRows = {
+				skipped: librarySkipped,
+				unclassified: libraryUnclassified,
+			};
 			if (wanted.has("playlists")) result.completion.playlists = libraryProof;
 			let childRawCount = 0;
 			let childExpectedCount = 0;
@@ -1714,7 +1753,11 @@ export const spotifyPageCollector = async (
 							}
 							const trackPosition = position;
 							position += 1;
-							if (trackData.__typename !== "Track") {
+							// A local file added to a playlist arrives as a LocalTrack row
+							// (inside a LocalTrackResponseWrapper) with flat artist/album
+							// fields and a spotify:local: URI instead of a catalog track.
+							const isLocalTrack = trackData.__typename === "LocalTrack";
+							if (trackData.__typename !== "Track" && !isLocalTrack) {
 								if (["Episode", "PodcastEpisode"].includes(trackData.__typename))
 									continue;
 								throw new Error("spotify_playlist_row_type_unrecognized");
@@ -1723,29 +1766,53 @@ export const spotifyPageCollector = async (
 							if (wanted.has("playlist_items")) childTrackCount += 1;
 							if (!wanted.has("playlist_items")) continue;
 							try {
-								const artistNames = requireField(
-									sourceArtists(trackData.artists, "playlist_track_artists"),
-									"spotify_playlist",
-								);
 								const trackUri = requireField(
 									readString(trackData.uri, "playlist_track_uri"),
 									"spotify_playlist",
 								);
+								if (
+									isLocalTrack &&
+									(trackUri === null || !trackUri.startsWith("spotify:local:"))
+								) {
+									throw new Error(
+										"spotify_playlist_field_unavailable:playlist_local_track_uri_malformed",
+									);
+								}
 								const trackName = requireField(
 									readString(trackData.name, "playlist_track_name"),
 									"spotify_playlist",
 								);
-								const album = sourceContainer(
-									trackData.albumOfTrack,
-									"album",
-									"spotify_playlist",
-								);
-								const albumName = requireField(
-									readString(child(album, "name"), "playlist_album_name"),
-									"spotify_playlist",
-								);
+								let artistNames: string[];
+								let albumName: string | null;
+								if (isLocalTrack) {
+									const localArtist = requireField(
+										readString(trackData.artistName, "playlist_track_artists"),
+										"spotify_playlist",
+									);
+									artistNames = localArtist ? [localArtist] : [];
+									albumName = requireField(
+										readString(trackData.albumName, "playlist_album_name"),
+										"spotify_playlist",
+									);
+								} else {
+									artistNames = requireField(
+										sourceArtists(trackData.artists, "playlist_track_artists"),
+										"spotify_playlist",
+									);
+									const album = sourceContainer(
+										trackData.albumOfTrack,
+										"album",
+										"spotify_playlist",
+									);
+									albumName = requireField(
+										readString(child(album, "name"), "playlist_album_name"),
+										"spotify_playlist",
+									);
+								}
 								const durationContainer = sourceContainer(
-									trackData.trackDuration,
+									isLocalTrack
+										? trackData.localTrackDuration
+										: trackData.trackDuration,
 									"duration",
 									"spotify_playlist",
 								);
@@ -1913,9 +1980,9 @@ export const spotifyPageCollector = async (
 							};
 			}
 			if (wanted.has("playlists")) {
-				libraryProof.discardedCount = playlistRowUnavailableCount;
+				libraryProof.discardedCount += playlistRowUnavailableCount;
 				result.sourceCounts.playlists = {
-					considered: playlistUris.length,
+					considered: playlistUris.length + libraryUnclassifiedCount,
 					covered: result.playlists.length,
 				};
 			}
@@ -2543,6 +2610,29 @@ export async function spotifyCollect({
 			emit,
 			emitRecord,
 		);
+	}
+	const libraryRows = data.libraryRows;
+	if (libraryRows && Object.keys(libraryRows.skipped).length > 0) {
+		connectorDiagnostic("spotify", "library_rows_skipped", libraryRows.skipped);
+	}
+	const unclassified = Object.entries(libraryRows?.unclassified ?? {});
+	if (unclassified.length > 0) {
+		const total = unclassified.reduce((sum, [, n]) => sum + n, 0);
+		const types = unclassified.map(([type, n]) => `${type}=${n}`).join(",");
+		connectorDiagnostic("spotify", "library_rows_unclassified", {
+			count: total,
+			types,
+		});
+		for (const stream of ["playlists", "playlist_items"] as const) {
+			if (!requested.has(stream)) continue;
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "spotify_library_row_type_unrecognized",
+				message: `Spotify returned ${total} library item(s) of a type this connector does not read (${types}); any playlist among them was not exported.`,
+				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+			});
+		}
 	}
 	if (requested.has("saved_tracks")) {
 		await emitRecordsWithCoverage(
