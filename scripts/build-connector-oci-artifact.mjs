@@ -42,13 +42,15 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readFileSync,
 	readdirSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	classifyExternals,
@@ -57,6 +59,7 @@ import {
 	hostNodeRange,
 	packageNameOf,
 } from "./connector-host-runtime-contract.mjs";
+import { assertNoUnbundledNativeDependency } from "./connector-oci-tool-guard.mjs";
 import {
 	buildSourceDeclaration,
 	serializeSourceDeclaration,
@@ -87,69 +90,6 @@ function declaredDependencies() {
 		readFileSync(join(packageRoot, "package.json"), "utf8"),
 	);
 	return new Map(Object.entries(manifest.dependencies ?? {}));
-}
-
-/**
- * Refuse to build a connector whose code needs something the artifact does not
- * carry.
- *
- * The obvious check — `if (profile.external_tools)` — does not work, and
- * believing it did would be the expensive mistake here. That key is empty on
- * every one of the 45 manifests: the three that declare external tools
- * (`google_messages`, `signal`, `slack`) spell it `runtime_requirements
- * .external_tools`, so the top-level read is `undefined` for all 45 and the
- * check silently passes everything. Slack shells out to a `slackdump` binary it
- * expects on `PATH`, and its bundle builds and imports perfectly cleanly,
- * because a missing subprocess is a RUN-time failure, not a load-time one.
- * Trusting that read would therefore have published a Slack artifact that
- * verifies, signs, installs, and then fails on the first collection against a
- * host that happens not to have slackdump installed — the precise failure this
- * distribution path exists to eliminate.
- *
- * So the check is positive: look at what the code actually reaches for.
- *
- *   1. A binary resolved from PATH or an env override. Bundling the binary is
- *      the fix (design §2.5), and it needs a per-platform tool layer plus a
- *      manifest that declares it — neither of which exists yet.
- *   2. A code-relative asset that escapes the install root once the entrypoint
- *      is flattened to `code/collection-profile.mjs`. Slack reads
- *      `new URL("../../config/slackdump-api-config.toml", import.meta.url)`,
- *      which resolves ABOVE the connector's own install root. That is design
- *      §1.3's rewrite obligation, and until the bundler performs the rewrite,
- *      the artifact would be missing a file the code opens.
- *
- * Both are lifted the moment the tool-layer path is implemented. Until then
- * this fails loudly, on a named connector, at build time.
- */
-function assertNoUnbundledNativeDependency(connectorKey, profile, connectorDirectory) {
-	const declaresBundledTools = (profile.external_tools ?? []).some(
-		(tool) => tool.provisioning === "bundled",
-	);
-	if (declaresBundledTools) {
-		throw new Error(
-			`${connectorKey} declares a bundled external tool, but the per-platform tool layer is not implemented.`,
-		);
-	}
-
-	const source = readFileSync(join(connectorDirectory, "index.ts"), "utf8");
-
-	const pathResolvedBinary = source.match(/\b([A-Z][A-Z0-9_]*_BIN)\b/);
-	if (pathResolvedBinary) {
-		throw new Error(
-			`${connectorKey} resolves an executable from PATH or $${pathResolvedBinary[1]}, which the artifact does not carry. ` +
-				"A bundled per-platform tool layer must land first — see OCI-PUBLISH-0911.md, 'What Slack additionally needs'.",
-		);
-	}
-
-	const escapingAsset = source.match(
-		/new URL\(\s*"(\.\.\/[^"]*)"\s*,\s*import\.meta\.url/,
-	);
-	if (escapingAsset) {
-		throw new Error(
-			`${connectorKey} reads '${escapingAsset[1]}' relative to its module, which escapes the install root once the ` +
-				"entrypoint is flattened to code/collection-profile.mjs. The bundler must rewrite that specifier first (design §1.3).",
-		);
-	}
 }
 
 function argument(name, fallback = null) {
@@ -217,6 +157,35 @@ function assertSafeMembers(members) {
 			throw new Error(`Parent traversal: ${member}`);
 		if (member.includes("\\")) throw new Error(`Backslash: ${member}`);
 		if (member.includes("\0")) throw new Error(`NUL: ${member}`);
+	}
+}
+
+/**
+ * Refuses a manifest asset path before anything is read or written under it.
+ *
+ * The brand icon used to be joined under the staging root and only checked by
+ * the final archive walk. A parent-segment path wrote outside that root, and
+ * the walk never saw the file. The raw path is refused for `..` and absolute
+ * forms, the resolved source must be a regular file that really lives under
+ * the connector directory, and symlinks are refused the same way filesUnder
+ * refuses them inside the archive.
+ */
+function assertContainedAssetSource(label, relativePath, root) {
+	if (typeof relativePath !== "string" || relativePath === "" || isAbsolute(relativePath)) {
+		throw new Error(`${label} must be a relative path, got '${relativePath}'`);
+	}
+	if (relativePath.includes("\\") || relativePath.includes("\0") || relativePath.split("/").includes("..")) {
+		throw new Error(`${label} ${relativePath} escapes its connector directory`);
+	}
+	const source = join(root, relativePath);
+	if (!existsSync(source)) {
+		throw new Error(`Manifest declares ${label} ${relativePath}, missing at ${source}`);
+	}
+	if (!lstatSync(source).isFile()) {
+		throw new Error(`Refusing non-regular ${label} ${relativePath}`);
+	}
+	if (!realpathSync(source).startsWith(`${realpathSync(root)}/`)) {
+		throw new Error(`${label} ${relativePath} resolves outside its connector directory`);
 	}
 }
 
@@ -413,10 +382,8 @@ async function main() {
 	let assetsTarball = null;
 	const iconRelative = profile.brand?.icon;
 	if (iconRelative) {
+		assertContainedAssetSource("brand.icon", iconRelative, connectorDirectory);
 		const iconSource = join(connectorDirectory, iconRelative);
-		if (!existsSync(iconSource)) {
-			throw new Error(`Manifest declares brand.icon ${iconRelative}, missing at ${iconSource}`);
-		}
 		const assetsStaging = join(staging, "assets");
 		mkdirSync(join(assetsStaging, dirname(iconRelative)), { recursive: true });
 		writeFileSync(join(assetsStaging, iconRelative), readFileSync(iconSource));
