@@ -599,3 +599,123 @@ test("the installer-side catalog schema accepts the real github_browser and stra
     assert.equal(assertCatalog(catalog), catalog, `${connectorKey}: expected the catalog schema to accept it`);
   }
 });
+
+test("a scaffold or excluded connector is refused before any registry request", async () => {
+  for (const connector of [
+    { manifest: "loom", connectorKey: "loom" },
+    { manifest: "wholefoods", connectorKey: "wholefoods" },
+    { manifest: "amazon", connectorKey: "loom" },
+    { manifest: "loom", connectorKey: "amazon" },
+    { manifest: "youtube_takeout", connectorKey: "youtube-takeout" },
+  ]) {
+    let requests = 0;
+    const refuseRegistry = async () => {
+      requests += 1;
+      throw new Error("registry contacted");
+    };
+    await assert.rejects(
+      generateConnectorCatalog({
+        registry: "registry.invalid",
+        namespace: "acme",
+        sourceCommit: SOURCE_COMMIT,
+        generatedAt: GENERATED_AT,
+        connectors: [connector],
+        requestImpl: refuseRegistry,
+        lookupImpl: refuseRegistry,
+        fetchImpl: refuseRegistry,
+      }),
+      /refusing to publish/,
+      JSON.stringify(connector),
+    );
+    assert.equal(requests, 0, `${JSON.stringify(connector)} reached the registry`);
+  }
+});
+
+test("ordinary and unknown synthetic identities pass the publish guard", async () => {
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos" });
+  try {
+    const catalog = await generateConnectorCatalog({
+      registry: registry.registry,
+      namespace: "acme",
+      sourceCommit: SOURCE_COMMIT,
+      generatedAt: GENERATED_AT,
+      connectors: [
+        { manifest: "apple_photos", connectorKey: "apple-photos", exclusionReason: null },
+        { manifest: "source_name", connectorKey: "public-name" },
+      ],
+      scheme: "http",
+      allowInsecureLoopback: true,
+    });
+    assert.deepEqual(catalog.connectors.map((connector) => connector.connector_key), ["apple-photos"]);
+  } finally {
+    await registry.stop();
+  }
+});
+
+test("a refresh drops a previously published scaffold entry and the next run is stable", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const current = await generate(root, registry.registry);
+    const [synthetic] = current.connectors;
+    const previous = {
+      ...structuredClone(current),
+      connectors: [
+        structuredClone(synthetic),
+        {
+          ...structuredClone(synthetic),
+          connector_key: "loom",
+          connector_id: "https://registry.pdpp.dev/connectors/loom",
+          display_name: "Loom",
+        },
+      ],
+    };
+
+    const refreshed = await generate(root, registry.registry, { previousCatalog: previous });
+    assert.deepEqual(refreshed.connectors.map((connector) => connector.connector_key), ["public-name"]);
+    assert.deepEqual(refreshed.connectors[0].latest, synthetic.latest);
+    assert.equal(refreshed.generated_at, "2026-09-15T16:34:18.001Z");
+
+    const retry = await generate(root, registry.registry, { previousCatalog: refreshed });
+    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(refreshed));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the CLI refresh drops a scaffold entry from the previous catalog and repeats byte for byte", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos" });
+  const seedPath = join(root, "seed.json");
+  const previousPath = join(root, "previous.json");
+  const firstPath = join(root, "first.json");
+  const secondPath = join(root, "second.json");
+  try {
+    const seed = await runCli(registry.registry, seedPath);
+    assert.equal(seed.status, 0, seed.stderr);
+    const seeded = JSON.parse(readFileSync(seedPath, "utf8"));
+    const [photos] = seeded.connectors;
+    writeFileSync(previousPath, JSON.stringify({
+      ...seeded,
+      source_commit: "b".repeat(40),
+      connectors: [
+        photos,
+        { ...photos, connector_key: "loom", connector_id: "https://registry.pdpp.dev/connectors/loom", display_name: "Loom" },
+      ],
+    }));
+
+    const first = await runCli(registry.registry, firstPath, previousPath);
+    const second = await runCli(registry.registry, secondPath, firstPath);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(second.status, 0, second.stderr);
+    const refreshed = JSON.parse(readFileSync(firstPath, "utf8"));
+    assert.deepEqual(refreshed.connectors.map((connector) => connector.connector_key), ["apple-photos"]);
+    assert.equal(refreshed.generated_at, "2026-09-15T16:34:18.001Z");
+    assert.deepEqual(readFileSync(firstPath), readFileSync(secondPath));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
