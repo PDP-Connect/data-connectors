@@ -1663,8 +1663,14 @@ test("anthropic: export paths on the PageShim host", {
 				resultSpoolDirectory: spool,
 			});
 			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
-			for (const scope of ["claude.conversations", "claude.messages"])
-				assert.equal(r.streamScopeFiles?.[scope], undefined, scope);
+			// A thin host gets the skipped scope as a placeholder that carries its
+			// error; it is never a checkpointed empty scope.
+			assert.ok(r.streamScopeFiles?.["claude.conversations"], "claude.conversations");
+			for (const scope of ["claude.conversations", "claude.messages"]) {
+				const file = r.streamScopeFiles?.[scope];
+				if (file !== undefined) assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { records: [] }, scope);
+				assert.equal(r.states?.[scope], undefined, scope);
+			}
 		} finally {
 			rmSync(spool, { recursive: true, force: true });
 		}
@@ -3416,6 +3422,53 @@ test("icloud_notes: failed continuation preserves readable rows and never checkp
 	assert.ok(r.states["icloud_notes.folders"]);
 });
 
+test("icloud_notes: incomplete inventories retain recovery hints without checkpointing", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-recovery.js") });
+	for (const [status, action, retryable] of [
+		[429, "retry_by_runtime", true], [503, "retry_by_runtime", true],
+		[401, "manual_action_required", false], [403, "manual_action_required", false],
+		[200, "not_retriable", false],
+	]) {
+		for (const resultStreaming of [false, true]) {
+			const fixtures = { ...c.fixtures, resolve(url, request) {
+				const response = c.fixtures.resolve(url, request);
+				if (!url.includes("/records/query")) return response;
+				const query = JSON.parse(request.postData);
+				if (query.query.filterBy[0].fieldValue.value !== "parentless") return response;
+				return { ...response, status, body: JSON.stringify(status === 200 ? { records: [{ recordType: "Folder" }] } : { error: "synthetic failure" }) };
+			} };
+			const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes,
+				gotoDelayMs: 0, loginWaitMs: 1000, resultStreaming,
+				resultSpoolDirectory: join(out, `icloud-recovery-${status}-${resultStreaming}`) });
+			assertCleanRun(r);
+			assert.deepEqual(r.ret, { ok: true });
+			// The stacked portable-failure change makes rejected authentication a
+			// run-level failure. It must not turn back into a scoped retry.
+			if (status === 401 || status === 403) {
+				assert.match(r.data.error, /^icloud_auth_failed:/);
+				assert.doesNotMatch(r.data.status, /^(Complete!|Partial:)/);
+				assert.deepEqual(r.states, {});
+				assert.deepEqual(r.stateMessages, []);
+				if (resultStreaming) assert.equal(r.streamDone, null);
+				else {
+					assert.deepEqual(r.result.errors.map(error => [error.errorClass, error.disposition]), [["auth_failed", "fatal"]]);
+					assert.equal(r.result.errors[0].code, "icloud_auth_failed");
+					assert.deepEqual(r.result.errors[0].recovery_hint, { action, retryable });
+				}
+				continue;
+			}
+			const errors = resultStreaming ? r.streamDone.errors : r.result.errors;
+			for (const scope of ["icloud_notes.folders", "icloud_notes.notes"]) {
+				const error = errors.find(error => error.scope === scope);
+				assert.equal(error?.code, "stream_collection_failed", `${status}: ${scope}`);
+				assert.deepEqual(error?.recovery_hint, { action, retryable }, `${status}: ${scope}`);
+				assert.equal(r.states[scope], undefined, `${status}: no checkpoint for ${scope}`);
+			}
+		}
+	}
+});
+
 test("icloud_notes: thin host commits all streams only after accepted completion", { timeout: 120_000 }, async () => {
  const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
  const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-thin.js") });
@@ -3701,6 +3754,8 @@ test("meta: late logout remains a terminal session failure on both hosts", {time
     reason: "meta_session_required: Instagram authentication was rejected or challenged during this run",
     disposition: "fatal",
     phase: "collect",
+    code: "meta_session_required",
+    recovery_hint: { action: "manual_action_required", retryable: false },
    }]);
    assert.equal(r.result["instagram.following"], undefined);
    assert.equal(r.result.exportSummary.count, 0);

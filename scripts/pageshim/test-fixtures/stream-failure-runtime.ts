@@ -5,6 +5,7 @@
 // a memories stream that completes.
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 declare const PAGESHIM_STREAM_FAILURE_MODE: "report" | "skip";
+declare const PAGESHIM_STREAM_FAILURE_OPTIONS: { retryable?: boolean; recoveryHint?: { action: string; retryable?: boolean } };
 const MESSAGE = "The conversations list failed to load.";
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
@@ -25,7 +26,7 @@ const MESSAGE = "The conversations list failed to load.";
 				await emit({ type: "STATE", stream: "memories", cursor: { done: true } });
 			}
 			if (PAGESHIM_STREAM_FAILURE_MODE === "report") {
-				await reportStreamFailure?.("conversations", MESSAGE, { retryable: true });
+				await reportStreamFailure?.("conversations", MESSAGE, typeof PAGESHIM_STREAM_FAILURE_OPTIONS === "undefined" ? { retryable: true } : PAGESHIM_STREAM_FAILURE_OPTIONS);
 				return;
 			}
 			await emit({
