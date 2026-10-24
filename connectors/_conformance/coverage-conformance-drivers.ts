@@ -1492,6 +1492,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"whatsapp.chats",
 	"whatsapp.messages",
 	"whatsapp.attachments",
+	// Whole Foods is real-unlisted Development, but this aggregate gate has
+	// no registered real-collection driver for its required order streams.
+	// Dedicated integration fixtures do not establish coverage in this gate.
+	"wholefoods.order_items",
+	"wholefoods.orders",
 	// YNAB: module-level paced HTTP governor (createConnectorHttpGovernor,
 	// 20s floor interval) for every stream except account_stats, which this
 	// gate drives through ynabCollect's own DI seam (see driveYnabAccountStats
