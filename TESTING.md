@@ -15,7 +15,7 @@ The root `npm test` runs these lanes, each in its own sandbox:
 
 | Lane | Network | Files | Measured |
 |---|---|---|---|
-| `connector-implementation-index:check`, `oura-retention:test`, `manifest-schema:test`, `cross-repo-integrity:test`, `scripts:test`, `test:tooling` | none | explicit lists in package.json | each under 25 s |
+| `connector-implementation-index:check`, `manifest-schema:test`, `cross-repo-integrity:test`, `scripts:test`, `test:tooling` | none | explicit lists in package.json | each under 25 s |
 | `installer:test` | host (installs packed tarballs from the npm registry) | explicit list | 359 tests, 145 s |
 | polyfill `test:sandboxed` | none | every file `scripts/run-tests.mjs` globs, except NAMESPACE_TESTS and EXCLUDED_TESTS (`scripts/test-lanes.mjs`) | 9,995 tests; 416 s at concurrency 4 (the default), 816 s at 2 |
 | polyfill `test:namespaces` | host, `--isolate cgroup` (no bwrap, so tests can create their own namespaces) | the five scenario-isolation files in NAMESPACE_TESTS, one at a time | 291 tests, 94 s |
