@@ -52,7 +52,7 @@
     "pdpp-source-contract:generate": "node ./scripts/generate-pdpp-source-contract.mjs",
     "pdpp-source-contract:check": "node ./scripts/generate-pdpp-source-contract.mjs --check",
     "old-installer-compat:test": "scripts/test-sandbox/test-sandbox --net host -- node --test ./scripts/old-installer-compat.test.mjs",
-    "manifest-schema:test": "scripts/test-sandbox/test-sandbox -- node --test ./schemas/connector-manifest.schema.test.mjs ./schemas/connector-binding-grammar.test.mjs ./schemas/observation.schema.test.mjs",
+    "manifest-schema:test": "scripts/test-sandbox/test-sandbox -- node --test ./schemas/collection-profile-vectors.test.mjs ./schemas/connector-manifest.schema.test.mjs ./schemas/connector-binding-grammar.test.mjs ./schemas/observation.schema.test.mjs",
     "polyfill-library-metadata:generate": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs",
     "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check",
     "connector-stdout-console:check": "node --import tsx ./packages/polyfill-connectors/scripts/check-connector-stdout-console.ts",

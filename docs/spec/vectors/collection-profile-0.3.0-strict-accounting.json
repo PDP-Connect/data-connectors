@@ -1,0 +1,2244 @@
+{
+  "requirements": [
+    {
+      "id": "r01",
+      "section": "5.6.1",
+      "text": "For each parent boundary, the connector MUST enumerate `required_keys` independently under effective scope, never derive them from successful parsing, emission or gaps, and emit coverage only after parent enumeration closes with Section 6.1 item 14 evidence; otherwise it emits no coverage and the runtime withholds the checkpoint.",
+      "failure": "A failed parse or an unclosed parent listing shrinks required_keys and permits a checkpoint.",
+      "vectors": [
+        "v12",
+        "v16",
+        "v29",
+        "v44"
+      ]
+    },
+    {
+      "id": "r02",
+      "section": "5.6.1",
+      "text": "Keys MUST use Section 5.1 canonical strings, including ordered composite keys, and select the Section 5.2 parent-declared `has_many` relationship whose foreign key is on the child.",
+      "failure": "Parent attribution follows the reverse relationship or conflates colliding composite keys.",
+      "vectors": [
+        "v37",
+        "v38",
+        "v40",
+        "v47",
+        "v48",
+        "v49",
+        "v66"
+      ]
+    },
+    {
+      "id": "r03",
+      "section": "5.6.1",
+      "text": "A delta range MUST contain exactly one of `time_range` (inclusive `since`, exclusive `until`, both in the declared consent-time format, `since < until`) or `cursor_range` (exclusive `after`, inclusive `through`, both opaque JSON values in one source cursor domain).",
+      "failure": "Malformed, unordered time bounds or an untyped/mixed delta range is admitted.",
+      "vectors": [
+        "v51",
+        "v52",
+        "v70"
+      ]
+    },
+    {
+      "id": "r04",
+      "section": "5.6.1",
+      "text": "The runtime MUST compare cursor ranges by equality only, never infer ordering, containment or subranges from opaque endpoints.",
+      "failure": "Lexical cursor ordering permits a narrower recovery range.",
+      "vectors": [
+        "v51"
+      ]
+    },
+    {
+      "id": "r05",
+      "section": "5.6.1",
+      "text": "A shorter successful or empty fallback MUST NOT replace the original obligation or credit its uncovered parts.",
+      "failure": "A successful short fallback credits the failed original window.",
+      "vectors": [
+        "v17"
+      ]
+    },
+    {
+      "id": "r06",
+      "section": "5.6.1",
+      "text": "Debt MUST remain bound to its source account; success under another account MUST NOT settle, retry or credit it, even with the same key or validator.",
+      "failure": "A2 success silently settles or credits A1 debt on the reused connection.",
+      "vectors": [
+        "v42",
+        "v60"
+      ]
+    },
+    {
+      "id": "r07",
+      "section": "5.6.2",
+      "text": "The connector MUST partition accounted required keys into these disjoint outcomes:",
+      "failure": "A deletion-only delta is labeled empty or a zero-child inventory with deletes is labeled complete.",
+      "vectors": [
+        "v09",
+        "v10",
+        "v14",
+        "v15",
+        "v21",
+        "v62"
+      ]
+    },
+    {
+      "id": "r08",
+      "section": "5.6.2",
+      "text": "An absent required key is unaccounted and MUST withhold its parent checkpoint.",
+      "failure": "An absent required key advances its checkpoint without debt.",
+      "vectors": [
+        "v12",
+        "v16",
+        "v30"
+      ]
+    },
+    {
+      "id": "r09",
+      "section": "5.6.2",
+      "text": "The runtime MUST give every outstanding matching debt binding precedence over complete, empty or unchanged, including earlier debt with no accepted effects; only a full-original-obligation seal under Section 5.6.6 can settle it.",
+      "failure": "A matching old validator hides unresolved debt or only one sibling is settled.",
+      "vectors": [
+        "v02",
+        "v03",
+        "v45",
+        "v57",
+        "v65"
+      ]
+    },
+    {
+      "id": "r10",
+      "section": "5.6.2",
+      "text": "A gap MUST NOT mint a baseline or be displayed as complete data, and durable gap debt alone MUST NOT withhold an otherwise eligible checkpoint.",
+      "failure": "Gap credit mints a baseline, claims complete data or blocks an otherwise eligible checkpoint.",
+      "vectors": [
+        "v02",
+        "v03",
+        "v53",
+        "v68",
+        "v74"
+      ]
+    },
+    {
+      "id": "r11",
+      "section": "5.6.2",
+      "text": "Before durable gap admission or credit, the runtime MUST validate the complete shape, normalize scope by START's policy/field rules and require target equality, validate original obligation type and authorized bounds, attribute the canonical parent and selected relationship in this boundary or retained authorized state, and recheck current grant and placement authority.",
+      "failure": "Provisional or unauthorized child gap becomes durable credit without binding validation.",
+      "vectors": [
+        "v53",
+        "v54",
+        "v68"
+      ]
+    },
+    {
+      "id": "r12",
+      "section": "5.6.2",
+      "text": "The runtime MUST reject missing/malformed binding or epoch, unauthorized scope, unknown parent, unknown reason or any retryable value outside this closed table:",
+      "failure": "Malformed epoch, reason/retryable or unknown-parent gap counts as accounted.",
+      "vectors": [
+        "v32",
+        "v54",
+        "v70"
+      ]
+    },
+    {
+      "id": "r13",
+      "section": "5.6.2",
+      "text": "Every gap lookup, deduplication, count and settlement MUST use the full identity: (connection, source account, stream, parent_stream, selected relationship name, canonical record_key, canonical detail_locator), retaining each outstanding scope/obligation/epoch binding rather than overwriting it on a later observation.",
+      "failure": "Debt lookup by record_key alone merges relationships, scopes or source accounts.",
+      "vectors": [
+        "v50",
+        "v56",
+        "v60"
+      ]
+    },
+    {
+      "id": "r14",
+      "section": "5.6.2",
+      "text": "For new debt admitted within one boundary, a time-range locator may name exact uncovered subranges only when the remaining parts were independently closed and accounted; the runtime MUST check typed bounds, containment and full interval accounting, preserve every uncovered part, and never replace outstanding debt with these subranges.",
+      "failure": "New suffix debt replaces an older full obligation or loses an unchecked interval.",
+      "vectors": [
+        "v18",
+        "v52"
+      ]
+    },
+    {
+      "id": "r15",
+      "section": "5.6.2",
+      "text": "A cursor locator MUST equal the original cursor range.",
+      "failure": "Cursor suffix debt is accepted by containment rather than equality.",
+      "vectors": [
+        "v51"
+      ]
+    },
+    {
+      "id": "r16",
+      "section": "5.6.2",
+      "text": "The connector MUST use `connector_transform_failed` for known-parent transformation failures, never a transport reason or `source_unrepresentable`.",
+      "failure": "A parser failure receives a transport or permanent cause and bypasses epoch gating.",
+      "vectors": [
+        "v04",
+        "v27",
+        "v31"
+      ]
+    },
+    {
+      "id": "r17",
+      "section": "5.6.2",
+      "text": "A timeout, unknown field, parser bug, permission/configuration issue or deployment limit MUST NOT be classified permanent.",
+      "failure": "An implementation or transient failure is hidden as permanent source unrepresentability.",
+      "vectors": [
+        "v23"
+      ]
+    },
+    {
+      "id": "r18",
+      "section": "5.6.2",
+      "text": "For transformation or permanent debt the runtime MUST NOT schedule, request or offer recovery refetch under the same or an unknown epoch; a different current manifest epoch for that detail stream permits re-evaluation but never clears debt.",
+      "failure": "Unchanged/unknown transformation epoch is offered for refetch or changed epoch clears debt without proof.",
+      "vectors": [
+        "v33",
+        "v34",
+        "v58",
+        "v74"
+      ]
+    },
+    {
+      "id": "r19",
+      "section": "5.6.2",
+      "text": "Partial recovery MUST NOT settle original debt or replace it with residual obligations; 0.3.0 defers residual replacement until a later protocol revision.",
+      "failure": "Partial recovery subtracts debt using an undefined residual replacement transition.",
+      "vectors": [
+        "v18",
+        "v52"
+      ]
+    },
+    {
+      "id": "r20",
+      "section": "5.6.2",
+      "text": "Relationship retirement MUST NOT alias debt to a new relationship name.",
+      "failure": "A relationship rename aliases its predecessor debt to a new name.",
+      "vectors": [
+        "v50"
+      ]
+    },
+    {
+      "id": "r21",
+      "section": "5.6.3",
+      "text": "Every receipt-dependent acceptance MUST use the current durable ledger's valid exact binding, epoch and domain, without an intervening invalidation; a supplied copy or START-time validity alone is insufficient.",
+      "failure": "A receipt invalidated after START still justifies unchanged or suppression.",
+      "vectors": [
+        "v41",
+        "v46"
+      ]
+    },
+    {
+      "id": "r22",
+      "section": "5.6.3",
+      "text": "Suppression MUST additionally rely on retained child state certified by that receipt; outstanding debt or invalidation forbids reuse.",
+      "failure": "Suppression trusts invalidated or absent retained state.",
+      "vectors": [
+        "v10",
+        "v41",
+        "v45",
+        "v59"
+      ]
+    },
+    {
+      "id": "r23",
+      "section": "5.6.3",
+      "text": "The runtime MUST NOT mint a receipt from legacy state, failed work or gap credit, or install a failed/gap-covered attempt's validator as a new baseline.",
+      "failure": "Legacy/gap/failed state manufactures a receipt or installs a failed validator.",
+      "vectors": [
+        "v02",
+        "v03",
+        "v25",
+        "v28"
+      ]
+    },
+    {
+      "id": "r24",
+      "section": "5.6.3",
+      "text": "Work from a superseded placement MUST NOT add, clear or rewrite effects, debt, state, receipts or receipt-dependent credit.",
+      "failure": "Superseded work recreates debt or overwrites a newer receipt/state.",
+      "vectors": [
+        "v19",
+        "v54"
+      ]
+    },
+    {
+      "id": "r25",
+      "section": "5.6.3",
+      "text": "Effect admission MUST atomically invalidate every receipt and dependent state whose certified membership it changes, for both old and new parents, relationships and scopes across obligations in the bound source account.",
+      "failure": "A child move/delete invalidates only the new parent and leaves an old membership certified.",
+      "vectors": [
+        "v06",
+        "v45",
+        "v61"
+      ]
+    },
+    {
+      "id": "r26",
+      "section": "5.6.3",
+      "text": "Scope change, owner deletion, retention GC affecting certified data, schema or transform change, source-account change and relationship rename MUST invalidate affected receipts and dependent state before reuse; unknown/different epochs require recollection rather than resume.",
+      "failure": "Changed scope, storage, epoch, account or relationship resumes from obsolete certified state.",
+      "vectors": [
+        "v01",
+        "v08",
+        "v34",
+        "v41",
+        "v42",
+        "v50"
+      ]
+    },
+    {
+      "id": "r27",
+      "section": "5.6.3",
+      "text": "A rejected admission MUST leave no new effect, debt or credit from that transaction; valid earlier admissions remain.",
+      "failure": "A rejected transaction mutates debt/effects or later failure erases earlier valid admission.",
+      "vectors": [
+        "v19",
+        "v28",
+        "v30",
+        "v54",
+        "v64"
+      ]
+    },
+    {
+      "id": "r28",
+      "section": "5.6.3",
+      "text": "New durable debt MUST invalidate incompatible provisional complete, empty or unchanged credit before commit.",
+      "failure": "A newly admitted gap coexists with committable provisional complete/empty credit.",
+      "vectors": [
+        "v02",
+        "v11",
+        "v64"
+      ]
+    },
+    {
+      "id": "r29",
+      "section": "5.6.3",
+      "text": "Eligible checkpoint state, new receipts and all proved debt settlements MUST publish atomically after reconciling the final ledger under current authority; a failed commit publishes none, never an orphan receipt or a checkpoint justified by a missing receipt.",
+      "failure": "Crash publishes an orphan receipt, unbacked checkpoint or partial settlement.",
+      "vectors": [
+        "v20",
+        "v28",
+        "v65",
+        "v69"
+      ]
+    },
+    {
+      "id": "r30",
+      "section": "5.6.3",
+      "text": "A committed complete/empty receipt MUST supersede prior receipts for the same obligation binding atomically, never receipts for a different binding.",
+      "failure": "New receipt supersedes unrelated obligations or leaves two current receipts for one binding.",
+      "vectors": [
+        "v43"
+      ]
+    },
+    {
+      "id": "r31",
+      "section": "5.6.4",
+      "text": "Credited gaps MUST agree with coverage's original obligation and binding; coverage cannot supply or overwrite missing gap metadata.",
+      "failure": "Coverage retroactively fabricates a missing gap binding or credits a different original obligation.",
+      "vectors": [
+        "v53",
+        "v54",
+        "v68",
+        "v70"
+      ]
+    },
+    {
+      "id": "r32",
+      "section": "5.6.4",
+      "text": "The connector MUST change `transform_epoch` when schema or transformation changes represented child state; validator-domain equality includes source account and semantics, covering membership, content and deletion.",
+      "failure": "Changed transformation or account/validator semantics reuses an old epoch/domain.",
+      "vectors": [
+        "v34",
+        "v41",
+        "v42"
+      ]
+    },
+    {
+      "id": "r33",
+      "section": "5.6.4",
+      "text": "The runtime MUST reject duplicate/overlapping key arrays, foreign outcomes or map keys, obligations not keyed exactly by required_keys, undeclared parents, undeclared/ambiguous relationships, invalid domain/epoch/ranges, or coverage on a state_stream child.",
+      "failure": "Duplicate/foreign keys, malformed ranges or state_stream coverage are accepted.",
+      "vectors": [
+        "v21",
+        "v38",
+        "v51",
+        "v70"
+      ]
+    },
+    {
+      "id": "r34",
+      "section": "5.6.4",
+      "text": "`hydrated_keys`, `optional_skip_keys`, `considered` and `covered` MUST be rejected as legacy coverage members; former skips are classified per call site as proven out-of-scope (not required), source-unrepresentable (permanent gap), or recoverable omission (retryable gap).",
+      "failure": "Legacy optional skips disappear without source-exclusion or debt classification.",
+      "vectors": [
+        "v13",
+        "v23",
+        "v25",
+        "v70",
+        "v74"
+      ]
+    },
+    {
+      "id": "r35",
+      "section": "5.6.4",
+      "text": "The connector MUST emit at most one final coverage per evaluated parent boundary, after related effects and gaps; later related effects or gaps are protocol violations and cannot reopen or mutate that boundary.",
+      "failure": "Duplicate final coverage or later effects reopen a sealed boundary.",
+      "vectors": [
+        "v21"
+      ]
+    },
+    {
+      "id": "r36",
+      "section": "5.6.4",
+      "text": "The runtime MUST reconcile each key against this table after proposed atomic settlement, including every outstanding matching debt binding:",
+      "failure": "Complete lacks effects/baseline, empty has upserts or unchanged ignores effects/debt.",
+      "vectors": [
+        "v10",
+        "v11",
+        "v14",
+        "v15",
+        "v35",
+        "v36",
+        "v59",
+        "v62",
+        "v65"
+      ]
+    },
+    {
+      "id": "r37",
+      "section": "5.6.4",
+      "text": "A known-parent rejected effect MUST forbid complete, empty and unchanged for that key; without matching admitted debt it is unaccounted, while an unknown parent withholds the whole affected boundary.",
+      "failure": "Rejected child disappears behind accepted siblings or an unknown parent is silently ignored.",
+      "vectors": [
+        "v11",
+        "v12",
+        "v30",
+        "v35"
+      ]
+    },
+    {
+      "id": "r38",
+      "section": "5.6.4",
+      "text": "Durable RECORD rejection for schema, key, attribution, authorization or stale placement is nonfatal and MUST NOT be treated as a protocol violation; malformed framing, duplicate coverage/seals and post-finality/foreign effects remain fatal under Section 6.2 item 8.",
+      "failure": "A schema admission refusal kills the run, or malformed framing is treated as nonfatal.",
+      "vectors": [
+        "v21",
+        "v30",
+        "v32"
+      ]
+    },
+    {
+      "id": "r39",
+      "section": "5.6.5",
+      "text": "The connector MUST register candidates before parsing/transformation independently of emission, by source account, stream and known parent, retaining a unique boundary-local identity when unattributable; parse failure cannot remove them.",
+      "failure": "Parse failure removes candidates or merges unidentified candidates before accounting.",
+      "vectors": [
+        "v04",
+        "v12",
+        "v44",
+        "v55",
+        "v63"
+      ]
+    },
+    {
+      "id": "r40",
+      "section": "5.6.5",
+      "text": "The connector MUST retain typed dispositions distinguishing upsert, delete, valid-baseline suppression, proven scope exclusion and unknown/rejected/unavailable work; exceptions or interruptions cannot advance fingerprints, baselines or completion, and only the host attests durable acceptance.",
+      "failure": "An interruption advances a fingerprint despite unknown disposition or emission is mistaken for host acceptance.",
+      "vectors": [
+        "v05",
+        "v11",
+        "v13",
+        "v44"
+      ]
+    },
+    {
+      "id": "r41",
+      "section": "5.6.5",
+      "text": "The connector MUST distinguish readable, source-explicit empty/absent and unavailable/malformed values, retaining their source basis locally and emitting only schema-permitted source emptiness, never fabricated null, zero or empty values.",
+      "failure": "An unreadable value is fabricated as schema-permitted source emptiness.",
+      "vectors": [
+        "v05",
+        "v22"
+      ]
+    },
+    {
+      "id": "r42",
+      "section": "5.6.5",
+      "text": "For a partial selected record or unavailable/malformed required mapped value, the connector MUST hold back the whole record, never emit a partial complete upsert or clear retained fields by omission/substitution; authorized scope projection under Section 5.1 is not a partial read.",
+      "failure": "A partial upsert clears retained fields while selected values remain unreadable.",
+      "vectors": [
+        "v04",
+        "v05",
+        "v22",
+        "v27"
+      ]
+    },
+    {
+      "id": "r43",
+      "section": "5.6.5",
+      "text": "A known-parent held candidate MUST retain its original obligation with retryable DETAIL_GAP debt whose reason follows the cause: transport failure uses the matching transport reason, while missing/malformed mapped values use connector_transform_failed; without admitted debt or a known parent the checkpoint is withheld.",
+      "failure": "Partial candidates lose their obligation, use the wrong cause, or checkpoint without admitted debt.",
+      "vectors": [
+        "v04",
+        "v12",
+        "v22",
+        "v27",
+        "v31"
+      ]
+    },
+    {
+      "id": "r44",
+      "section": "5.6.5",
+      "text": "The connector MUST require explicit parent and child close events backed by Section 6.1 item 14 evidence, refusing complete/empty without closure; unknown candidates and unresolved failures taint the key or withhold an unattributable boundary.",
+      "failure": "A builder emits complete/empty without explicit source-backed parent/child close events.",
+      "vectors": [
+        "v10",
+        "v16",
+        "v29"
+      ]
+    },
+    {
+      "id": "r45",
+      "section": "5.6.6",
+      "text": "The runtime MUST supply the complete outstanding active descriptor list for the run's source account whose full original scope/obligation is authorized and whose normalized effective_scope equals its detail target, or refuse placement if that list exceeds a runtime bound; excluded debt is retained, never narrowed or truncated.",
+      "failure": "Discovery silently truncates, narrows or excludes authorized exact-target active descriptors.",
+      "vectors": [
+        "v71"
+      ]
+    },
+    {
+      "id": "r46",
+      "section": "5.6.6",
+      "text": "The runtime MUST match each seal to both the delivered descriptor and current ledger's full identity/original binding in the same source account, require current epoch equality with manifest and coverage, and validate closure, attribution, current grant, receipts and all effects/rejections under Section 5.6.4's checks.",
+      "failure": "A seal settles a different descriptor, old/current epoch, scope or account without matching typed proof.",
+      "vectors": [
+        "v18",
+        "v57",
+        "v65",
+        "v69"
+      ]
+    },
+    {
+      "id": "r47",
+      "section": "5.6.6",
+      "text": "A seal stages settlement, remaining debt until commit; state_stream children use no DETAIL_COVERAGE, while parent_streams seals MUST agree with final coverage's outcome, obligation, domain and current epoch.",
+      "failure": "A seal clears debt immediately or disagrees with final parent_streams coverage.",
+      "vectors": [
+        "v57",
+        "v65",
+        "v69",
+        "v72"
+      ]
+    },
+    {
+      "id": "r48",
+      "section": "5.6.6",
+      "text": "The runtime MUST allow publication only with an otherwise eligible parent STATE and terminal outcome under Sections 5.3 and 5.8, atomically publishing state, current-epoch complete/empty receipt and settlement of every matching proved debt binding; failed admission, cancellation, superseded placement, failed commit or missing eligible parent STATE publishes no receipt/state/settlement, while valid earlier effects/debt survive.",
+      "failure": "Missing parent STATE or failed commit nevertheless publishes settlement or a receipt.",
+      "vectors": [
+        "v20",
+        "v28",
+        "v57",
+        "v64",
+        "v65",
+        "v69"
+      ]
+    },
+    {
+      "id": "r49",
+      "section": "5.6.6",
+      "text": "The required set, source closure, candidate completeness, exclusions, original ranges, delta continuity, validator truth, gap causes and epoch-change truth remain connector assertions; runtime checks MUST NOT be presented as proof of all source data.",
+      "failure": "Host checks are advertised as independent proof of all source children.",
+      "vectors": [
+        "v55",
+        "v63",
+        "v68"
+      ]
+    },
+    {
+      "id": "r50",
+      "section": "5.7",
+      "text": "A supporting runtime MUST apply this section and refuse a connector requiring an unsupported capability before spawn.",
+      "failure": "Required unsupported STREAM_EVIDENCE runs, or aggregate omission makes a conforming exchange invalid.",
+      "vectors": [
+        "v67"
+      ]
+    },
+    {
+      "id": "r51",
+      "section": "5.7",
+      "text": "Every count MUST be an integer from 0 through 9007199254740991, with disjoint outcomes summing to considered.",
+      "failure": "Unsafe, fractional or nonpartitioned evidence counts are accepted.",
+      "vectors": [
+        "v72"
+      ]
+    },
+    {
+      "id": "r52",
+      "section": "5.7",
+      "text": "The connector MUST register candidates before transformation and derive considered from their enumeration ledger, including unaccounted units, retaining mappings across repeated observations; it cannot derive considered from emitted messages.",
+      "failure": "considered is reconstructed from emitted rows and drops unparsed or unidentified candidates.",
+      "vectors": [
+        "v44",
+        "v55",
+        "v63"
+      ]
+    },
+    {
+      "id": "r53",
+      "section": "5.7",
+      "text": "Repeated observations of one established identity count once, including multiple accepted upserts/deletes on one key; distinct unidentified candidates MUST NOT be collapsed or assigned invented parents, record keys or gap identities.",
+      "failure": "Repeated keys count twice, or two unknown candidates collapse to one invented gap.",
+      "vectors": [
+        "v55",
+        "v63"
+      ]
+    },
+    {
+      "id": "r54",
+      "section": "5.7",
+      "text": "Three unparsed children sharing one parent gap count as one gapped unit, while the candidate ledger retains all three; the connector MUST NOT present this aggregate as raw source-child cardinality.",
+      "failure": "One parent-keyed gap is reported as three raw missing children.",
+      "vectors": [
+        "v55",
+        "v68"
+      ]
+    },
+    {
+      "id": "r55",
+      "section": "5.7",
+      "text": "The connector MUST withhold evidence without enumeration, emit at most one message per stream/run, and emit no later RECORD, DETAIL_GAP or DETAIL_GAP_RECOVERED for that stream.",
+      "failure": "Unenumerated/duplicate evidence or later stream effects pass finality.",
+      "vectors": [
+        "v72"
+      ]
+    },
+    {
+      "id": "r56",
+      "section": "5.7",
+      "text": "The runtime MUST reject invalid partitions, duplicates, out-of-scope streams, streams without state_stream and messages reopening final evidence, and verify that emitted equals distinct durably accepted upsert/delete keys and gapped equals distinct represented unrecovered durable gap identities for this run/account.",
+      "failure": "Aggregate emitted/gapped counts disagree with distinct durable key/gap identities.",
+      "vectors": [
+        "v55",
+        "v63",
+        "v72"
+      ]
+    },
+    {
+      "id": "r57",
+      "section": "5.7",
+      "text": "Each counted gap MUST already have passed Section 5.6.2 admission; the aggregate cannot make provisional debt durable or perform a recovery settlement.",
+      "failure": "Aggregate gapped count turns provisional debt into durable credit or settles a pending seal.",
+      "vectors": [
+        "v54",
+        "v68",
+        "v72"
+      ]
+    },
+    {
+      "id": "r58",
+      "section": "5.7",
+      "text": "The counts cannot prove candidate-to-gap mapping, source enumeration, ephemeral completeness, unchanged, withheld evidence or considered derivation; these connector assertions MUST NOT widen scope or commit a checkpoint.",
+      "failure": "Unverifiable aggregate counts widen scope or authorize checkpoint advancement.",
+      "vectors": [
+        "v55",
+        "v63"
+      ]
+    },
+    {
+      "id": "r59",
+      "section": "5.8.1",
+      "text": "Every delete MUST be explicit; the runtime never infers deletion from absence.",
+      "failure": "Empty coverage implicitly deletes retained rows without explicit delete RECORDs.",
+      "vectors": [
+        "v09",
+        "v14",
+        "v29"
+      ]
+    },
+    {
+      "id": "r60",
+      "section": "5.8.1",
+      "text": "A delete derived from absence MUST be based on the original `kind:\"inventory\"` obligation for that exact parent and relationship, with Section 6.1 item 14 evidence that its full child enumeration closed.",
+      "failure": "An absence-derived delete comes from a partial or non-original inventory obligation.",
+      "vectors": [
+        "v09",
+        "v14",
+        "v29"
+      ]
+    },
+    {
+      "id": "r61",
+      "section": "5.8.1",
+      "text": "A delta MUST NOT infer a delete from absence, including a closed/empty delta; it requires a source-positive deletion signal.",
+      "failure": "An empty/closed delta infers a deletion from an omitted retained child.",
+      "vectors": [
+        "v09",
+        "v15"
+      ]
+    },
+    {
+      "id": "r62",
+      "section": "5.8.1",
+      "text": "The runtime MUST refuse invalid, unauthorized or superseded-placement deletes, retain admitted deletes' Section 5.2 attribution through the retained row or parent_ref, and atomically invalidate affected old/new receipts and dependent state under Section 5.6.3.",
+      "failure": "Invalid delete is admitted or valid delete loses old parent attribution/invalidation.",
+      "vectors": [
+        "v06",
+        "v07",
+        "v19",
+        "v39",
+        "v61"
+      ]
+    },
+    {
+      "id": "r63",
+      "section": "5.8.1",
+      "text": "Replay MUST preserve identity, authorization, placement and idempotence safeguards; it supplies no new completion proof.",
+      "failure": "Delete replay bypasses current authorization/identity/fencing or counts as full completion proof.",
+      "vectors": [
+        "v06",
+        "v07"
+      ]
+    },
+    {
+      "id": "r64",
+      "section": "5.8.1",
+      "text": "Delete admission MUST NOT authorize STATE, a new receipt or settlement for a failed/withheld boundary; the Section 5.8 stream-scoped exception still permits independently eligible unaffected checkpoints.",
+      "failure": "A failed affected checkpoint publishes state/receipt/settlement merely because a delete was admitted.",
+      "vectors": [
+        "v06",
+        "v28",
+        "v64"
+      ]
+    },
+    {
+      "id": "r65",
+      "section": "5.8.1",
+      "text": "Counts and failed-run diagnostics MUST distinguish local emission from durable acceptance; rejected deletes cannot justify empty/unchanged, empty inventory alone never deletes, and Section 5.6's inventory-empty/delta-complete distinction applies only to an otherwise eligible boundary.",
+      "failure": "Local delete emission is counted as durable acceptance, or rejected delete supports empty/unchanged.",
+      "vectors": [
+        "v07",
+        "v14",
+        "v15",
+        "v35",
+        "v63"
+      ]
+    },
+    {
+      "id": "r66",
+      "section": "6.3",
+      "text": "Implementations claiming 0.3.0 MUST exercise every [strict-accounting vector](vectors/collection-profile-0.3.0-strict-accounting.json) through their real enumeration, disposition, admission and commit paths; constructed coverage bypassing those paths does not count.",
+      "failure": "Constructed successful coverage is accepted as a real-path conformance exercise.",
+      "vectors": [
+        "v73"
+      ]
+    },
+    {
+      "id": "r67",
+      "section": "8",
+      "text": "It MUST preserve valid exchanges from earlier minor versions in the same major version.",
+      "failure": "A later stable-major minor version invalidates a valid earlier minor exchange.",
+      "vectors": [
+        "v75"
+      ]
+    },
+    {
+      "id": "r68",
+      "section": "8",
+      "text": "A runtime MUST NOT infer compatibility from an unknown version.",
+      "failure": "A runtime guesses compatibility from an unknown profile version.",
+      "vectors": [
+        "v24",
+        "v75"
+      ]
+    },
+    {
+      "id": "r69",
+      "section": "8",
+      "text": "It MUST either support that exact version or apply an explicit compatibility rule that it advertises.",
+      "failure": "Unknown-version acceptance has neither exact support nor an advertised explicit compatibility rule.",
+      "vectors": [
+        "v75"
+      ]
+    },
+    {
+      "id": "r70",
+      "section": "8",
+      "text": "Lenient parsing, advisory flags or connector folds MUST NOT hide that incompatibility.",
+      "failure": "Lenient parsing or flags hide the breaking strict-accounting exchange change.",
+      "vectors": [
+        "v24",
+        "v70"
+      ]
+    },
+    {
+      "id": "r71",
+      "section": "8",
+      "text": "Unsupported versions MUST be refused before spawn.",
+      "failure": "An unsupported connector process is spawned before version refusal.",
+      "vectors": [
+        "v24",
+        "v75"
+      ]
+    },
+    {
+      "id": "r72",
+      "section": "8",
+      "text": "From that point the deployment MUST refuse old-profile connectors; this is not a permanent legacy escape hatch.",
+      "failure": "Legacy placement continues after the runtime catalog has completed its strict cutover.",
+      "vectors": [
+        "v76"
+      ]
+    },
+    {
+      "id": "r73",
+      "section": "8",
+      "text": "A new runtime MUST NOT interpret an old connector as 0.3.0.",
+      "failure": "A new runtime reinterprets an old connector exchange as strict 0.3.0.",
+      "vectors": [
+        "v24",
+        "v76"
+      ]
+    },
+    {
+      "id": "r74",
+      "section": "8",
+      "text": "No baseline receipt may be minted from legacy state: the first strict run per connection/source-account binding MUST recollect its obligations; retained legacy debt is not silently settled or aliased across accounts.",
+      "failure": "The first strict run reuses legacy fingerprints as receipts or silently settles other-account debt.",
+      "vectors": [
+        "v25",
+        "v60"
+      ]
+    },
+    {
+      "id": "r75",
+      "section": "8",
+      "text": "An old runtime MUST refuse a new connector unless it implements this whole version.",
+      "failure": "An old runtime accepts a new connector while missing mandatory diagnosis or recovery rules.",
+      "vectors": [
+        "v26",
+        "v76"
+      ]
+    }
+  ],
+  "vectors": [
+    {
+      "id": "v01",
+      "title": "Narrow empty inventory, then widened scope with unchanged validator text",
+      "from_case": "Narrow empty inventory, then widened scope with unchanged validator text",
+      "requirements": [
+        "r26"
+      ],
+      "given": "A committed empty receipt covers a narrow scope; validator V is unchanged.",
+      "when": "Widen scope and offer V as unchanged without recollection.",
+      "then": {
+        "receipt": "invalidated",
+        "checkpoint": "withheld",
+        "outcome": {
+          "p": "unaccounted"
+        },
+        "note": "Reset dependent state and recollect the wider obligation."
+      }
+    },
+    {
+      "id": "v02",
+      "title": "Complete baseline, then parser gap with no accepted effects, then old validator matches",
+      "from_case": "Complete baseline, then parser gap with no accepted effects, then old validator matches",
+      "requirements": [
+        "r09",
+        "r10",
+        "r23",
+        "r28"
+      ],
+      "given": "A complete receipt R exists; a parser gap is admitted with no accepted effects.",
+      "when": "Offer the old validator as unchanged, complete or empty without a full recovery seal.",
+      "then": {
+        "checkpoint": "committed",
+        "outcome": {
+          "p": "gap"
+        },
+        "debt": "kept",
+        "receipt": "kept",
+        "note": "R is history only; no failed validator is installed."
+      }
+    },
+    {
+      "id": "v03",
+      "title": "Only gap credit exists, then unchanged claim",
+      "from_case": "Only gap credit exists, then unchanged claim",
+      "requirements": [
+        "r09",
+        "r10",
+        "r23"
+      ],
+      "given": "Only a gap-covered checkpoint exists, with no baseline receipt.",
+      "when": "Claim unchanged using that checkpoint.",
+      "then": {
+        "checkpoint": "withheld",
+        "outcome": {
+          "p": "gap"
+        },
+        "receipt": "none",
+        "debt": "kept",
+        "note": "Reject unchanged; an eligible gap partition could checkpoint instead."
+      }
+    },
+    {
+      "id": "v04",
+      "title": "Required mapped field malformed after other fields were read",
+      "from_case": "Required mapped field malformed after other fields were read",
+      "requirements": [
+        "r16",
+        "r39",
+        "r42",
+        "r43"
+      ],
+      "given": "A retained row has all fields; a candidate has a malformed required mapped field.",
+      "when": "Register before parsing, read other fields, then encounter the malformed field.",
+      "then": {
+        "effect": "refused",
+        "debt": "admitted",
+        "outcome": {
+          "known_parent": "gap",
+          "unknown_parent": "unaccounted"
+        },
+        "note": "Hold the entire record and preserve the stored row. Only the known-parent variant can admit transformation debt/checkpoint; unknown parent withholds."
+      }
+    },
+    {
+      "id": "v05",
+      "title": "Source-explicit empty/absent field versus failed field read",
+      "from_case": "Source-explicit empty/absent field versus failed field read",
+      "requirements": [
+        "r40",
+        "r41",
+        "r42"
+      ],
+      "given": "One source field is explicitly empty/absent; another selected field cannot be read.",
+      "when": "Classify both values locally and attempt to emit them.",
+      "then": {
+        "note": "Retain the source basis in typed dispositions. Emit only schema-permitted explicit emptiness; hold the unavailable record whole, never fabricate null or zero or add a wire member."
+      }
+    },
+    {
+      "id": "v06",
+      "title": "Admitted explicit delete followed by failure of the affected checkpoint",
+      "from_case": "Admitted explicit delete followed by failure of the affected checkpoint",
+      "requirements": [
+        "r25",
+        "r62",
+        "r63",
+        "r64"
+      ],
+      "given": "A parent-attributed explicit delete is valid under current grant/placement.",
+      "when": "Admit the delete, then fail the affected checkpoint; replay later.",
+      "then": {
+        "effect": "admitted",
+        "receipt": "invalidated",
+        "checkpoint": "withheld",
+        "debt": "kept",
+        "note": "The delete stays applied; no new state, receipt or settlement; replay remains safe."
+      }
+    },
+    {
+      "id": "v07",
+      "title": "Stale, unauthorized or invalid delete followed by an empty claim",
+      "from_case": "Stale, unauthorized or invalid delete followed by an empty claim",
+      "requirements": [
+        "r62",
+        "r63",
+        "r65"
+      ],
+      "given": "A delete has invalid identity, stale placement or lacks authorization.",
+      "when": "Try durable admission, then claim empty or unchanged.",
+      "then": {
+        "effect": "refused",
+        "checkpoint": "withheld",
+        "outcome": {
+          "p": "unaccounted"
+        },
+        "receipt": "none",
+        "note": "No emitted-effect credit; an empty inventory never itself deletes retained rows."
+      }
+    },
+    {
+      "id": "v08",
+      "title": "Owner deletes or GC removes a retained child",
+      "from_case": "Owner deletes or GC removes a retained child",
+      "requirements": [
+        "r26"
+      ],
+      "given": "A receipt certifies a retained child.",
+      "when": "Owner deletion or retention GC removes that child before reuse.",
+      "then": {
+        "receipt": "invalidated",
+        "note": "Reset dependent state and invalidate stale placement authority before reuse; recollect."
+      }
+    },
+    {
+      "id": "v09",
+      "title": "Closed empty delta omits retained child C",
+      "from_case": "Closed empty delta omits retained child C",
+      "requirements": [
+        "r07",
+        "r59",
+        "r60",
+        "r61"
+      ],
+      "given": "Retained child C exists; the original delta contains no deletion signal.",
+      "when": "Close an empty delta omitting C and commit its valid empty outcome.",
+      "then": {
+        "checkpoint": "committed",
+        "outcome": {
+          "p": "empty"
+        },
+        "receipt": "minted",
+        "debt": "none",
+        "note": "Keep C. Only a closed original inventory can authorize an absence-derived explicit delete."
+      }
+    },
+    {
+      "id": "v10",
+      "title": "Nonempty scan, every child suppressed against a valid committed complete-type receipt",
+      "from_case": "Nonempty scan, every child suppressed against a valid committed complete-type receipt",
+      "requirements": [
+        "r07",
+        "r22",
+        "r36",
+        "r44"
+      ],
+      "given": "Every child in a nonempty scan has retained state certified by a valid complete-kind receipt.",
+      "when": "Close enumeration and suppress each child against that receipt.",
+      "then": {
+        "checkpoint": "committed",
+        "outcome": {
+          "p": "complete"
+        },
+        "receipt": "minted",
+        "note": "Zero new effects is valid; an empty-kind receipt cannot justify this suppression/complete case."
+      }
+    },
+    {
+      "id": "v11",
+      "title": "One rejected or undateable child beside accepted siblings",
+      "from_case": "One rejected or undateable child beside accepted siblings",
+      "requirements": [
+        "r28",
+        "r36",
+        "r37",
+        "r40"
+      ],
+      "given": "One obligated parent has accepted siblings and one rejected or undateable child.",
+      "when": "Retain all candidates and admit matching debt for the rejected candidate.",
+      "then": {
+        "checkpoint": "committed",
+        "effect": "admitted",
+        "debt": "admitted",
+        "outcome": {
+          "p": "gap"
+        },
+        "receipt": "none",
+        "note": "Keep accepted siblings; forbid complete, empty and unchanged for this parent."
+      }
+    },
+    {
+      "id": "v12",
+      "title": "Candidate cannot be assigned to a parent",
+      "from_case": "Candidate cannot be assigned to a parent",
+      "requirements": [
+        "r01",
+        "r08",
+        "r37",
+        "r39",
+        "r43"
+      ],
+      "given": "A registered candidate has no attributable parent.",
+      "when": "Parsing/emission cannot recover the parent identity.",
+      "then": {
+        "checkpoint": "withheld",
+        "outcome": {
+          "boundary": "unaccounted"
+        },
+        "note": "Retain the candidate; never invent a parent or silently drop it."
+      }
+    },
+    {
+      "id": "v13",
+      "title": "Valid child excluded by proved scope constraints",
+      "from_case": "Valid child excluded by proved scope constraints",
+      "requirements": [
+        "r34",
+        "r40"
+      ],
+      "given": "A valid candidate is independently proven outside effective scope.",
+      "when": "Classify a scope exclusion before emission.",
+      "then": {
+        "effect": "refused",
+        "note": "The disposition remains in the candidate ledger, outside required in-scope work and aggregate units; it is not an accepted effect or a parse failure."
+      }
+    },
+    {
+      "id": "v14",
+      "title": "Delete the last child in a full inventory",
+      "from_case": "Delete the last child in a full inventory",
+      "requirements": [
+        "r07",
+        "r36",
+        "r59",
+        "r60",
+        "r65"
+      ],
+      "given": "A retained last child belongs to the exact original inventory obligation.",
+      "when": "Prove zero current in-scope children, close full inventory, explicitly delete the child with attribution and seal.",
+      "then": {
+        "checkpoint": "committed",
+        "effect": "admitted",
+        "outcome": {
+          "p": "empty"
+        },
+        "receipt": "minted",
+        "debt": "none",
+        "note": "Classify inventory-derived deletes as empty, never infer the delete from empty alone."
+      }
+    },
+    {
+      "id": "v15",
+      "title": "Delta with only tombstones",
+      "from_case": "Delta with only tombstones",
+      "requirements": [
+        "r07",
+        "r36",
+        "r61",
+        "r65"
+      ],
+      "given": "A delta contains only source-positive tombstones.",
+      "when": "Attribute and durably accept the explicit deletes, close enumeration and commit.",
+      "then": {
+        "checkpoint": "committed",
+        "effect": "admitted",
+        "outcome": {
+          "p": "complete"
+        },
+        "receipt": "minted",
+        "debt": "none",
+        "note": "Zero upserts does not make this delta empty."
+      }
+    },
+    {
+      "id": "v16",
+      "title": "Parent enumeration incomplete, including a missing empty-state signal",
+      "from_case": "Parent enumeration incomplete, including a missing empty-state signal",
+      "requirements": [
+        "r01",
+        "r08",
+        "r44"
+      ],
+      "given": "All observed parents succeeded but enumeration has no item-14 end evidence.",
+      "when": "Try final parent coverage/checkpoint, including a missing empty-state signal.",
+      "then": {
+        "checkpoint": "withheld",
+        "receipt": "none",
+        "note": "Emit no coverage even if the observed set is empty."
+      }
+    },
+    {
+      "id": "v17",
+      "title": "Large-window failure followed by shorter success or empty",
+      "from_case": "Large-window failure followed by shorter success or empty",
+      "requirements": [
+        "r05"
+      ],
+      "given": "The original time-window obligation failed; a shorter retry succeeds or is empty.",
+      "when": "Offer the fallback as proof of the entire original obligation.",
+      "then": {
+        "outcome": {
+          "p": "gap"
+        },
+        "debt": "kept",
+        "receipt": "none",
+        "note": "Retain the original range and uncovered-interval debt; a shorter fallback supplies no full-range credit."
+      }
+    },
+    {
+      "id": "v18",
+      "title": "Recovery covers only part of a time-range gap",
+      "from_case": "Recovery covers only part of a time-range gap",
+      "requirements": [
+        "r14",
+        "r19",
+        "r46"
+      ],
+      "given": "Original time-range debt is durable.",
+      "when": "Fetch only part and try to replace the debt with residual obligations.",
+      "then": {
+        "debt": "kept",
+        "receipt": "none",
+        "note": "No residual replacement or settlement in 0.3.0; require fresh full-original-obligation seal."
+      }
+    },
+    {
+      "id": "v19",
+      "title": "Stale A resumes after newer B completes and settles debt",
+      "from_case": "Stale A resumes after newer B completes and settles debt",
+      "requirements": [
+        "r24",
+        "r27",
+        "r62"
+      ],
+      "given": "Placement B superseded A and committed state/receipts and settled debt.",
+      "when": "Resume A and attempt effects, gap creation/update/credit, state, receipt or settlement.",
+      "then": {
+        "effect": "refused",
+        "debt": "none",
+        "receipt": "kept",
+        "checkpoint": "withheld",
+        "note": "B stays intact; A cannot recreate phantom debt or refresh its placement authority."
+      }
+    },
+    {
+      "id": "v20",
+      "title": "Crash between state and receipt writes",
+      "from_case": "Crash between state and receipt writes",
+      "requirements": [
+        "r29",
+        "r48"
+      ],
+      "given": "An eligible state/receipt/debt-settlement transaction is ready.",
+      "when": "Crash between conceptual state and receipt writes before commit.",
+      "then": {
+        "checkpoint": "withheld",
+        "receipt": "none",
+        "debt": "kept",
+        "note": "No partial publication. If commit already completed, all three survive together; never an orphan receipt or state justified by a missing receipt."
+      }
+    },
+    {
+      "id": "v21",
+      "title": "Duplicate/overlapping/foreign keys or effects after coverage finality",
+      "from_case": "Duplicate/overlapping/foreign keys or effects after coverage finality",
+      "requirements": [
+        "r07",
+        "r33",
+        "r35",
+        "r38"
+      ],
+      "given": "A required-key partition or final coverage boundary is established.",
+      "when": "Send duplicate/overlapping/foreign keys, duplicate coverage/seals or a related effect after finality.",
+      "then": {
+        "checkpoint": "withheld",
+        "run": "terminated",
+        "note": "Reject malformed accounting and write nothing from a late transaction; finality cannot be reopened."
+      }
+    },
+    {
+      "id": "v22",
+      "title": "Unavailable value vs explicit source emptiness",
+      "from_case": "Unavailable value vs explicit source emptiness",
+      "requirements": [
+        "r41",
+        "r42",
+        "r43"
+      ],
+      "given": "A selected value is unavailable; a separate source value is explicitly empty.",
+      "when": "Read/classify candidates and account for the unavailable value by its cause.",
+      "then": {
+        "outcome": {
+          "known_parent": "gap",
+          "unknown_parent": "unaccounted"
+        },
+        "note": "Transport failure uses a transport gap; malformed/missing mapped value uses transformation debt. Preserve legitimate source emptiness and the stored partial row. No required local API spelling."
+      }
+    },
+    {
+      "id": "v23",
+      "title": "Shape rejection, retryable failure or deployment cap reported permanent",
+      "from_case": "Shape rejection, retryable failure or deployment cap reported permanent",
+      "requirements": [
+        "r17",
+        "r34"
+      ],
+      "given": "A shape/parser failure, transient failure, permission/configuration issue or deployment cap occurs.",
+      "when": "Try to classify it as source_unrepresentable/retryable:false.",
+      "then": {
+        "debt": "refused",
+        "checkpoint": "withheld",
+        "note": "This is not permanent source unrepresentability."
+      }
+    },
+    {
+      "id": "v24",
+      "title": "Old runtime/new connector; new strict-only runtime/old connector",
+      "from_case": "Old runtime/new connector; new strict-only runtime/old connector",
+      "requirements": [
+        "r68",
+        "r70",
+        "r71",
+        "r73"
+      ],
+      "given": "Runtime and connector declare incompatible profile versions in either direction.",
+      "when": "Attempt placement with implicit downgrade or strict reinterpretation.",
+      "then": {
+        "spawn": "refused",
+        "note": "Refuse before spawning; old rules do not implement 0.3.0."
+      }
+    },
+    {
+      "id": "v25",
+      "title": "First strict run over legacy state",
+      "from_case": "First strict run over legacy state",
+      "requirements": [
+        "r23",
+        "r34",
+        "r74"
+      ],
+      "given": "A connection has legacy hydrated/optional-skip/fingerprint state but no strict receipts.",
+      "when": "Start its first strict run and attempt baseline reuse without recollection.",
+      "then": {
+        "receipt": "none",
+        "note": "Recollect the original obligations; legacy state cannot manufacture receipts."
+      }
+    },
+    {
+      "id": "v26",
+      "title": "0.3.0 runtime lacks OBSERVATION or recovery-hint gate",
+      "from_case": "0.3.0 runtime lacks OBSERVATION or recovery-hint gate",
+      "requirements": [
+        "r75"
+      ],
+      "given": "A runtime lacks OBSERVATION or the Section 5.11 recovery-hint gate.",
+      "when": "Attempt to accept a 0.3.0 connector.",
+      "then": {
+        "spawn": "refused",
+        "note": "Whole-version acceptance includes all mandatory diagnosis requirements."
+      }
+    },
+    {
+      "id": "v27",
+      "title": "Transient sub-resource failure, then recovery at the same epoch",
+      "from_case": "Transient sub-resource failure, then recovery at the same epoch",
+      "requirements": [
+        "r16",
+        "r42",
+        "r43"
+      ],
+      "given": "A selected sub-resource returns 503 and leaves the record partial.",
+      "when": "Admit a retryable transport gap, retry at the same epoch, then fully read a valid record and seal its full obligation.",
+      "then": {
+        "effect": "admitted",
+        "debt": "settled",
+        "receipt": "minted",
+        "checkpoint": "committed",
+        "outcome": {
+          "p": "complete"
+        },
+        "note": "Preserve the old row while partial. After full read use normal admission; settlement still needs full-obligation sealing."
+      }
+    },
+    {
+      "id": "v28",
+      "title": "Recovery fully reads a valid upsert, but the eligible checkpoint commit fails",
+      "from_case": "Recovery fully reads a valid upsert, but the eligible checkpoint commit fails",
+      "requirements": [
+        "r23",
+        "r27",
+        "r29",
+        "r48",
+        "r64"
+      ],
+      "given": "Recovery fully reads a valid attributed upsert and the host admits it.",
+      "when": "Fail the otherwise eligible parent checkpoint transaction.",
+      "then": {
+        "effect": "admitted",
+        "debt": "kept",
+        "receipt": "none",
+        "checkpoint": "withheld",
+        "note": "Keep the admitted upsert; publish no new STATE or settlement and do not restore the old row."
+      }
+    },
+    {
+      "id": "v29",
+      "title": "Listing fails mid-page after some children were not seen",
+      "from_case": "Listing fails mid-page after some children were not seen",
+      "requirements": [
+        "r01",
+        "r44",
+        "r59",
+        "r60"
+      ],
+      "given": "A listing stops mid-page before all children are observed.",
+      "when": "Attempt closure or absence-derived deletes for unseen retained children.",
+      "then": {
+        "checkpoint": "withheld",
+        "receipt": "none",
+        "note": "No coverage for that parent or absence-derived deletes. Source-positive tombstones already read may be admitted."
+      }
+    },
+    {
+      "id": "v30",
+      "title": "RECORD refused at durable admission with no matching debt admitted",
+      "from_case": "RECORD refused at durable admission with no matching debt admitted",
+      "requirements": [
+        "r08",
+        "r27",
+        "r37",
+        "r38"
+      ],
+      "given": "An in-scope known-parent RECORD has a schema, key, attribution, authorization or stale-placement defect; no matching debt was admitted.",
+      "when": "Refuse it at durable admission and reconcile the key.",
+      "then": {
+        "effect": "refused",
+        "run": "continues",
+        "outcome": {
+          "p": "unaccounted"
+        },
+        "checkpoint": "withheld",
+        "receipt": "none",
+        "debt": "none",
+        "note": "Durable rejection is nonfatal; malformed wire framing remains fatal."
+      }
+    },
+    {
+      "id": "v31",
+      "title": "Missing identity, invalid date, parser or shape failure with a known parent",
+      "from_case": "Missing identity, invalid date, parser or shape failure with a known parent",
+      "requirements": [
+        "r16",
+        "r43"
+      ],
+      "given": "A known-parent candidate lacks identity, has an invalid date, or fails parser/shape transformation.",
+      "when": "Register the candidate and account for the original obligation.",
+      "then": {
+        "debt": "admitted",
+        "outcome": {
+          "p": "gap"
+        },
+        "receipt": "none",
+        "note": "Use connector_transform_failed with boolean retryable:true, not a transport or permanent cause."
+      }
+    },
+    {
+      "id": "v32",
+      "title": "Unknown gap reason, missing retryable, string retryable or mismatched reason and boolean",
+      "from_case": "Unknown gap reason, missing retryable, string retryable or mismatched reason and boolean",
+      "requirements": [
+        "r12",
+        "r38"
+      ],
+      "given": "A gap has an unknown reason, missing/string retryable or mismatched reason/boolean.",
+      "when": "Validate the gap before durable admission.",
+      "then": {
+        "debt": "refused",
+        "checkpoint": "withheld",
+        "run": "terminated",
+        "outcome": {
+          "p": "unaccounted"
+        },
+        "note": "No gap credit from invalid wire shape."
+      }
+    },
+    {
+      "id": "v33",
+      "title": "Transformation debt at epoch A; subsequent boundary still A or epoch unknown",
+      "from_case": "Transformation debt at epoch A; subsequent boundary still A or epoch unknown",
+      "requirements": [
+        "r18"
+      ],
+      "given": "Durable transformation debt was admitted at A.",
+      "when": "Place a later otherwise eligible boundary at A or unknown epoch and consider retry.",
+      "then": {
+        "debt": "kept",
+        "checkpoint": "committed",
+        "outcome": {
+          "p": "gap"
+        },
+        "receipt": "none",
+        "note": "Never schedule, request or offer the refetch. Missing required manifest epoch instead refuses placement."
+      }
+    },
+    {
+      "id": "v34",
+      "title": "Transformation debt at epoch A; later boundary for the same detail stream at epoch B",
+      "from_case": "Transformation debt at epoch A; later boundary for the same detail stream at epoch B",
+      "requirements": [
+        "r18",
+        "r26",
+        "r32"
+      ],
+      "given": "Durable transformation debt was admitted at A; the same detail stream declares B.",
+      "when": "Place the new boundary and discover its stored debt.",
+      "then": {
+        "debt": "kept",
+        "receipt": "invalidated",
+        "note": "Recovery is eligible, not settled. Reset old epoch-bound incremental state and recollect."
+      }
+    },
+    {
+      "id": "v35",
+      "title": "Rejected last-child delete followed by empty or unchanged claim",
+      "from_case": "Rejected last-child delete followed by empty or unchanged claim",
+      "requirements": [
+        "r36",
+        "r37",
+        "r65"
+      ],
+      "given": "A last-child delete was refused by the host.",
+      "when": "Claim empty or unchanged without matching durable gap debt.",
+      "then": {
+        "effect": "refused",
+        "checkpoint": "withheld",
+        "outcome": {
+          "p": "unaccounted"
+        },
+        "receipt": "none",
+        "note": "Only matching admitted debt can account for the uncovered obligation."
+      }
+    },
+    {
+      "id": "v36",
+      "title": "Accepted effect followed by unchanged claim for the same parent",
+      "from_case": "Accepted effect followed by unchanged claim for the same parent",
+      "requirements": [
+        "r36"
+      ],
+      "given": "An attributed effect was accepted for p; a previous validator still matches.",
+      "when": "Claim unchanged for p in this boundary.",
+      "then": {
+        "effect": "admitted",
+        "checkpoint": "withheld",
+        "receipt": "invalidated",
+        "note": "Any attempted effect, including a delete, forbids unchanged."
+      }
+    },
+    {
+      "id": "v37",
+      "title": "Parent conversations declares messages with foreign_key conversation_id",
+      "from_case": "Parent conversations declares messages with foreign_key conversation_id",
+      "requirements": [
+        "r02"
+      ],
+      "given": "conversations declares {name:messages,stream:messages,foreign_key:conversation_id,cardinality:has_many}.",
+      "when": "Admit a messages upsert with data.conversation_id equal to the parent key.",
+      "then": {
+        "effect": "admitted",
+        "note": "Attribute using the child foreign key and relationship name scoped by conversations; no reverse lookup or invented Core id field."
+      }
+    },
+    {
+      "id": "v38",
+      "title": "Missing parent relationship, duplicate relationship names, undeclared related stream or absent foreign-key schema field",
+      "from_case": "Missing parent relationship, duplicate relationship names, undeclared related stream or absent foreign-key schema field",
+      "requirements": [
+        "r02",
+        "r33"
+      ],
+      "given": "A manifest lacks a parent relationship, repeats its name, names an undeclared related stream or omits the child foreign-key schema field.",
+      "when": "Validate placement; separately attempt an unattributable runtime effect.",
+      "then": {
+        "spawn": "refused",
+        "effect": "refused",
+        "note": "Unknown runtime parent withholds its affected boundary."
+      }
+    },
+    {
+      "id": "v39",
+      "title": "Delete omits payload foreign key but retained row or parent_ref identifies parent",
+      "from_case": "Delete omits payload foreign key but retained row or parent_ref identifies parent",
+      "requirements": [
+        "r62"
+      ],
+      "given": "A delete omits the payload foreign key; retained row or parent_ref identifies the parent.",
+      "when": "Attribute the delete; also try disagreeing references and parent_ref on an upsert.",
+      "then": {
+        "note": "Accept matching delete attribution; refuse disagreements among retained row, parent_ref and supplied foreign key, and refuse parent_ref on an upsert."
+      }
+    },
+    {
+      "id": "v40",
+      "title": "Composite parent keys whose dot-joined components collide",
+      "from_case": "Composite parent keys whose dot-joined components collide",
+      "requirements": [
+        "r02"
+      ],
+      "given": "Composite parent keys [\"a.b\",\"c\"] and [\"a\",\"b.c\"] would collide when dot-joined.",
+      "when": "Canonicalize and use both parents in obligations and gap/receipt lookup.",
+      "then": {
+        "note": "Keep ordered canonical JSON-array strings distinct; never join key components with dots."
+      }
+    },
+    {
+      "id": "v41",
+      "title": "START contains an old-epoch or different-domain baseline",
+      "from_case": "START contains an old-epoch or different-domain baseline",
+      "requirements": [
+        "r21",
+        "r22",
+        "r26",
+        "r32"
+      ],
+      "given": "START supplied an old-epoch or different-domain baseline.",
+      "when": "Offer it for suppression, unchanged or zero-effect complete.",
+      "then": {
+        "checkpoint": "withheld",
+        "receipt": "invalidated",
+        "note": "Recollect; only a new eligible complete/empty commit can supersede a same-binding receipt."
+      }
+    },
+    {
+      "id": "v42",
+      "title": "Source-account change, including identical validator text",
+      "from_case": "Source-account change, including identical validator text",
+      "requirements": [
+        "r06",
+        "r26",
+        "r32"
+      ],
+      "given": "A connection changes source account while validator text stays identical.",
+      "when": "Attempt to reuse old receipts and dependent state.",
+      "then": {
+        "receipt": "invalidated",
+        "note": "Reset known pre-launch changes before launch; reject cross-account reuse."
+      }
+    },
+    {
+      "id": "v43",
+      "title": "New receipt for the same binding tuple versus a different obligation",
+      "from_case": "New receipt for the same binding tuple versus a different obligation",
+      "requirements": [
+        "r30"
+      ],
+      "given": "A prior receipt certifies binding B; another certifies different obligation C.",
+      "when": "Commit a new eligible complete/empty receipt for B.",
+      "then": {
+        "checkpoint": "committed",
+        "receipt": "minted",
+        "note": "Atomically supersede B only, preserving C unless an independent membership invalidation affects it."
+      }
+    },
+    {
+      "id": "v44",
+      "title": "Connector implemented without an SDK, with a candidate that fails parsing",
+      "from_case": "Connector implemented without an SDK, with a candidate that fails parsing",
+      "requirements": [
+        "r01",
+        "r39",
+        "r40",
+        "r52"
+      ],
+      "given": "A connector uses no SDK and registers a source candidate.",
+      "when": "Fail parsing, then attempt to drop the candidate from accounting.",
+      "then": {
+        "outcome": {
+          "p": "gap"
+        },
+        "debt": "admitted",
+        "note": "Candidate remains registered and unsettled/gapped; SDK choice does not waive conformance. Unknown parent instead withholds."
+      }
+    },
+    {
+      "id": "v45",
+      "title": "R1 certifies c1v1,c2v1; later c1v2 is accepted but c2 gaps; source validator returns to V1",
+      "from_case": "R1 certifies c1v1,c2v1; later c1v2 is accepted but c2 gaps; source validator returns to V1",
+      "requirements": [
+        "r09",
+        "r22",
+        "r25"
+      ],
+      "given": "R1 certifies c1v1/c2v1; c1v2 is admitted but c2 gaps.",
+      "when": "The source returns validator V1 again; try R1 for unchanged or suppression.",
+      "then": {
+        "effect": "admitted",
+        "receipt": "invalidated",
+        "debt": "kept",
+        "outcome": {
+          "p": "gap"
+        },
+        "note": "V1 is comparison-only; no replacement receipt is needed to make R1 unusable."
+      }
+    },
+    {
+      "id": "v46",
+      "title": "A run received R1 at START; another accepted effect invalidates it before unchanged acceptance",
+      "from_case": "A run received R1 at START; another accepted effect invalidates it before unchanged acceptance",
+      "requirements": [
+        "r21"
+      ],
+      "given": "A run received R1 in START; another accepted effect invalidates it.",
+      "when": "Try unchanged using the stale START reference.",
+      "then": {
+        "checkpoint": "withheld",
+        "receipt": "invalidated",
+        "note": "Check current ledger and placement authority at acceptance, without an intervening invalidation."
+      }
+    },
+    {
+      "id": "v47",
+      "title": "Field projection omits the selected relationship's foreign key",
+      "from_case": "Field projection omits the selected relationship's foreign key",
+      "requirements": [
+        "r02"
+      ],
+      "given": "Requested field projection omits the selected relationship foreign key.",
+      "when": "Resolve authorized dependency projection before admitting effects.",
+      "then": {
+        "note": "Preserve canonical identity and attribution fields only if authorized; otherwise refuse the unsatisfiable request before effects. Never strip attribution and stall."
+      }
+    },
+    {
+      "id": "v48",
+      "title": "Parent integer key 42, child foreign key 42, wire parent key \"42\"",
+      "from_case": "Parent integer key 42, child foreign key 42, wire parent key \"42\"",
+      "requirements": [
+        "r02"
+      ],
+      "given": "Parent integer key 42 and child foreign key 42 occur in authorized input.",
+      "when": "Canonicalize the wire parent key as \"42\" and attribute the child.",
+      "then": {
+        "effect": "admitted",
+        "note": "Attribute to the same canonical identity; foreign-key values need not already be strings."
+      }
+    },
+    {
+      "id": "v49",
+      "title": "Composite parent key [42,\"a.b\"] in one child foreign-key field",
+      "from_case": "Composite parent key [42,\"a.b\"] in one child foreign-key field",
+      "requirements": [
+        "r02"
+      ],
+      "given": "One child foreign-key field contains composite parent key [42,\"a.b\"].",
+      "when": "Canonicalize using the declared parent primary-key order.",
+      "then": {
+        "effect": "admitted",
+        "note": "Identity is [\"42\",\"a.b\"] as a canonical array string; do not dot-join or invent a multi-field Core relationship."
+      }
+    },
+    {
+      "id": "v50",
+      "title": "Relationship name retires while validator text stays the same",
+      "from_case": "Relationship name retires while validator text stays the same",
+      "requirements": [
+        "r13",
+        "r20",
+        "r26"
+      ],
+      "given": "A relationship name retires, with old debt and unchanged validator text.",
+      "when": "Introduce a different relationship name and offer old certifications/debt as equivalent.",
+      "then": {
+        "receipt": "invalidated",
+        "debt": "kept",
+        "note": "Archive original unresolved debt/binding with retirement reason outside unrelated new scope; mapping/settlement requires semantic equivalence proof plus full recollection."
+      }
+    },
+    {
+      "id": "v51",
+      "title": "Opaque cursor obligation after A through D; gap claims after B through D",
+      "from_case": "Opaque cursor obligation after A through D; gap claims after B through D",
+      "requirements": [
+        "r03",
+        "r04",
+        "r15",
+        "r33"
+      ],
+      "given": "Coverage obligation cursor_range is after A through D.",
+      "when": "Claim a gap after B through D based on lexical containment.",
+      "then": {
+        "debt": "refused",
+        "checkpoint": "withheld",
+        "note": "Typed structural equality only; opaque endpoints have no ordering or containment."
+      }
+    },
+    {
+      "id": "v52",
+      "title": "Time-range obligation has a checked accounted prefix and exact uncovered suffix",
+      "from_case": "Time-range obligation has a checked accounted prefix and exact uncovered suffix",
+      "requirements": [
+        "r03",
+        "r14",
+        "r19"
+      ],
+      "given": "One original time_range has an independently closed/accounted prefix and exact uncovered suffix.",
+      "when": "Admit NEW debt for the suffix in this boundary with typed bounds and complete interval accounting.",
+      "then": {
+        "debt": "admitted",
+        "outcome": {
+          "p": "gap"
+        },
+        "receipt": "none",
+        "note": "This describes new debt at admission within one boundary and never replaces outstanding debt. Preserve every uncovered part."
+      }
+    },
+    {
+      "id": "v53",
+      "title": "state_stream child emits a known-parent gap after START",
+      "from_case": "state_stream child emits a known-parent gap after START",
+      "requirements": [
+        "r10",
+        "r11",
+        "r31"
+      ],
+      "given": "START authorizes a state_stream child and a known retained/enumerated parent.",
+      "when": "Send a gap with exact effective target, original obligation and declared epoch; validate current grant/account/placement and durably admit.",
+      "then": {
+        "debt": "admitted",
+        "outcome": {
+          "p": "gap"
+        },
+        "receipt": "none",
+        "note": "No child DETAIL_COVERAGE. A later eligible parent commit may checkpoint with debt."
+      }
+    },
+    {
+      "id": "v54",
+      "title": "Child gap lacks binding or epoch, names unauthorized scope or an unknown parent, or arrives from a stale placement",
+      "from_case": "Child gap lacks binding or epoch, names unauthorized scope or an unknown parent, or arrives from a stale placement",
+      "requirements": [
+        "r11",
+        "r12",
+        "r24",
+        "r27",
+        "r31",
+        "r57"
+      ],
+      "given": "A child gap lacks binding/epoch, names unauthorized scope/unknown parent, or comes from a superseded placement.",
+      "when": "Stage then attempt durable gap admission and optional evidence credit.",
+      "then": {
+        "debt": "refused",
+        "receipt": "none",
+        "note": "No credit; provisional staging stays provisional. Malformed messages terminate; a stale admission writes no new debt. STREAM_EVIDENCE cannot repair it."
+      }
+    },
+    {
+      "id": "v55",
+      "title": "Three unparsed children share one durable parent-keyed gap identity",
+      "from_case": "Three unparsed children share one durable parent-keyed gap identity",
+      "requirements": [
+        "r39",
+        "r49",
+        "r52",
+        "r53",
+        "r54",
+        "r56",
+        "r58"
+      ],
+      "given": "Three registered unparsed children share one durably admitted parent-keyed gap.",
+      "when": "Emit optional STREAM_EVIDENCE for this enumerated state_stream child.",
+      "then": {
+        "debt": "kept",
+        "outcome": {
+          "p": "gap"
+        },
+        "note": "considered=1; gapped=1; emitted=unchanged=unaccounted=0. Keep all three candidates; never call this a raw child count or source completeness proof."
+      }
+    },
+    {
+      "id": "v56",
+      "title": "Same record_key but different parent relationship or canonical detail_locator",
+      "from_case": "Same record_key but different parent relationship or canonical detail_locator",
+      "requirements": [
+        "r13"
+      ],
+      "given": "Two debts share record_key but have different parent relationships or canonical locators.",
+      "when": "Look up, deduplicate, count or settle one debt.",
+      "then": {
+        "debt": "kept",
+        "note": "Use full identities; do not merge or settle by record_key alone."
+      }
+    },
+    {
+      "id": "v57",
+      "title": "Accounted debt followed by sealed complete or empty proving its full original obligation",
+      "from_case": "Accounted debt followed by sealed complete or empty proving its full original obligation",
+      "requirements": [
+        "r09",
+        "r46",
+        "r47",
+        "r48"
+      ],
+      "given": "Matching durable debt exists and START delivers its exact authorized original descriptor.",
+      "when": "Freshly enumerate the entire original obligation, send its typed complete/empty seal and commit eligible parent state without an optional recovery capability.",
+      "then": {
+        "checkpoint": "committed",
+        "receipt": "minted",
+        "debt": "settled",
+        "note": "Reject cross-scope, cross-parent or mismatched cursor-range settlement."
+      }
+    },
+    {
+      "id": "v58",
+      "title": "Source-unrepresentable debt followed by a new transformation epoch",
+      "from_case": "Source-unrepresentable debt followed by a new transformation epoch",
+      "requirements": [
+        "r18"
+      ],
+      "given": "Permanent source_unrepresentable debt exists at epoch A.",
+      "when": "Declare a different current transformation epoch.",
+      "then": {
+        "debt": "kept",
+        "receipt": "none",
+        "note": "Re-evaluation may become eligible; changing epoch alone never clears the gap. Same/unknown epoch refetch stays forbidden."
+      }
+    },
+    {
+      "id": "v59",
+      "title": "Complete claim with zero effects citing an empty-type receipt",
+      "from_case": "Complete claim with zero effects citing an empty-type receipt",
+      "requirements": [
+        "r22",
+        "r36"
+      ],
+      "given": "A nonempty scan has zero accepted effects and only an empty-kind receipt.",
+      "when": "Offer complete coverage instead of a newly proven empty outcome.",
+      "then": {
+        "checkpoint": "withheld",
+        "receipt": "none",
+        "note": "Zero-effect complete requires a valid complete-kind baseline and closure."
+      }
+    },
+    {
+      "id": "v60",
+      "title": "Same connection changes source account A1 to A2; A1 has gap G and A2 completes the same key",
+      "from_case": "Same connection changes source account A1 to A2; A1 has gap G and A2 completes the same key",
+      "requirements": [
+        "r06",
+        "r13",
+        "r74"
+      ],
+      "given": "Connection changes A1 to A2; A1 has durable G with the same parent key/validator.",
+      "when": "A2 completes its own obligation.",
+      "then": {
+        "debt": "kept",
+        "note": "A1 G remains unresolved under A1 and outside A2 denominator. A2 success cannot settle, retry or credit it."
+      }
+    },
+    {
+      "id": "v61",
+      "title": "Child moves P1 to P2, changes relationship membership or crosses a time-scope boundary",
+      "from_case": "Child moves P1 to P2, changes relationship membership or crosses a time-scope boundary",
+      "requirements": [
+        "r25",
+        "r62"
+      ],
+      "given": "A receipt certifies old membership of a child.",
+      "when": "Admit a move P1 to P2, changed relationship membership or crossing a time/resource scope.",
+      "then": {
+        "effect": "admitted",
+        "receipt": "invalidated",
+        "note": "Invalidate old and new certified memberships atomically; if uncertain, conservatively invalidate the detail stream/source-account set."
+      }
+    },
+    {
+      "id": "v62",
+      "title": "Valid empty-kind receipt and full membership/content/deletion validator match, with no debt",
+      "from_case": "Valid empty-kind receipt and full membership/content/deletion validator match, with no debt",
+      "requirements": [
+        "r07",
+        "r36"
+      ],
+      "given": "An empty-kind receipt is valid, with a matching membership/content/deletion validator and no debt.",
+      "when": "Skip enumeration/effects and claim unchanged.",
+      "then": {
+        "checkpoint": "committed",
+        "outcome": {
+          "p": "unchanged"
+        },
+        "receipt": "kept",
+        "debt": "none",
+        "note": "The obligation remains empty; this receipt cannot support zero-effect complete for a nonempty scan."
+      }
+    },
+    {
+      "id": "v63",
+      "title": "Two unattributable candidates and an accepted delete are enumerated",
+      "from_case": "Two unattributable candidates and an accepted delete are enumerated",
+      "requirements": [
+        "r39",
+        "r49",
+        "r52",
+        "r53",
+        "r56",
+        "r58",
+        "r65"
+      ],
+      "given": "Enumeration registers two unattributable candidates and one accepted attributed delete.",
+      "when": "Build optional STREAM_EVIDENCE from the enumeration ledger.",
+      "then": {
+        "effect": "admitted",
+        "outcome": {
+          "boundary": "unaccounted"
+        },
+        "checkpoint": "withheld",
+        "note": "considered=3; unaccounted=2; emitted=1; unchanged=gapped=0. Preserve distinct ephemeral identities; no invented parents or source-completeness claim."
+      }
+    },
+    {
+      "id": "v64",
+      "title": "Current-generation debt admitted, then unrelated checkpoint fails",
+      "from_case": "Current-generation debt admitted, then unrelated checkpoint fails",
+      "requirements": [
+        "r27",
+        "r28",
+        "r48",
+        "r64"
+      ],
+      "given": "Current-placement fully validated debt has already been admitted.",
+      "when": "An unrelated checkpoint later fails.",
+      "then": {
+        "debt": "kept",
+        "receipt": "none",
+        "note": "No state/receipt/settlement from the failed transaction. Provisional unvalidated debt never becomes durable credit."
+      }
+    },
+    {
+      "id": "v65",
+      "title": "Matching debt exists and full original obligation is freshly proved complete/empty",
+      "from_case": "Matching debt exists and full original obligation is freshly proved complete/empty",
+      "requirements": [
+        "r09",
+        "r29",
+        "r36",
+        "r46",
+        "r47",
+        "r48"
+      ],
+      "given": "All matching debt bindings exist for an original obligation.",
+      "when": "Freshly prove complete/empty with matching seals and attempt atomic settlement/state/receipt commit.",
+      "then": {
+        "checkpoint": "committed",
+        "receipt": "minted",
+        "debt": "settled",
+        "note": "On settlement failure publish no complete/empty commit; alternatively eligible accounted remaining debt can checkpoint as gap."
+      }
+    },
+    {
+      "id": "v66",
+      "title": "Selected relationship uses unsupported cardinality or lacks the supported child foreign-key shape",
+      "from_case": "Selected relationship uses unsupported cardinality or lacks the supported child foreign-key shape",
+      "requirements": [
+        "r02"
+      ],
+      "given": "A selected relationship has unsupported cardinality or no supported child foreign-key shape.",
+      "when": "Validate the strict boundary before spawn.",
+      "then": {
+        "spawn": "refused",
+        "note": "No invented Core field or reverse attribution."
+      }
+    },
+    {
+      "id": "v67",
+      "title": "0.3.0 exchange without STREAM_EVIDENCE capability or messages",
+      "from_case": "0.3.0 exchange without STREAM_EVIDENCE capability or messages",
+      "requirements": [
+        "r50"
+      ],
+      "given": "A 0.3.0 connector declares no STREAM_EVIDENCE capability and sends no aggregate.",
+      "when": "Run all mandatory strict accounting and diagnosis, then commit eligible parent state.",
+      "then": {
+        "spawn": "allowed",
+        "checkpoint": "committed",
+        "note": "Aggregate absence is lawful. A connector requiring unsupported STREAM_EVIDENCE is instead refused before spawn."
+      }
+    },
+    {
+      "id": "v68",
+      "title": "Positive state_stream sequence",
+      "from_case": "state_stream child emits a known-parent gap after START",
+      "requirements": [
+        "r10",
+        "r11",
+        "r31",
+        "r49",
+        "r54",
+        "r57"
+      ],
+      "given": {
+        "manifest": "item_bodies inherits items; items has a has_many relationship naming item_bodies, with child foreign key",
+        "scope": [
+          {
+            "name": "items"
+          },
+          {
+            "name": "item_bodies"
+          }
+        ],
+        "parent": "item-2",
+        "epoch": "bodies-v1"
+      },
+      "when": [
+        "START with resolved targets and detail_debts:[]",
+        "Register three unparsed child candidates independently of emission",
+        "Emit one bound item_bodies DETAIL_GAP for item-2, inventory, connector_transform_failed, retryable:true, bodies-v1",
+        "Validate scope, original obligation, parent, epoch, account, current grant and placement; admit debt",
+        "If negotiated, emit STREAM_EVIDENCE considered:1, emitted:0, unchanged:0, gapped:1, unaccounted:0; omit it entirely in the second variant",
+        "Close parent enumeration with source evidence; emit eligible items STATE, successful DONE and exit 0"
+      ],
+      "then": {
+        "checkpoint": "committed",
+        "debt": "admitted",
+        "receipt": "none",
+        "outcome": {
+          "item-2": "gap"
+        },
+        "note": "Child inherits parent checkpoint; keep all three candidates and do not emit child DETAIL_COVERAGE. No missing-child completeness claim."
+      }
+    },
+    {
+      "id": "v69",
+      "title": "Portable recovery sequence",
+      "from_case": "Accounted debt followed by sealed complete or empty proving its full original obligation",
+      "requirements": [
+        "r29",
+        "r46",
+        "r47",
+        "r48"
+      ],
+      "given": {
+        "scope": [
+          {
+            "name": "items"
+          },
+          {
+            "name": "item_bodies"
+          }
+        ],
+        "parent": "item-2",
+        "optional_aggregate": false
+      },
+      "when": [
+        "At bodies-v1/G1, START has detail_debts:[]; admit bound transformation gap D and checkpoint parent as gap without child baseline",
+        "Change manifest epoch to bodies-v2; invalidate old epoch-bound state/receipts; place G2 and deliver exact stored D with OLD binding epoch bodies-v1 and original inventory/range",
+        "Complete variant: enumerate D full original obligation, admit an attributed child upsert, close and settle every candidate; emit DETAIL_GAP_RECOVERED copying D locator/binding with current bodies-v2, outcome:complete, closure:{enumeration_closed:true,candidates_settled:true}, validator_domain:bodies-v1",
+        "Emit eligible items STATE then successful DONE with records_emitted:1, exit 0; publish state/current-epoch receipt/settlement atomically",
+        "Independent empty variant starts from SAME pending D: prove explicit full empty inventory, admit necessary attributed deletes, send same seal with outcome:empty and closure true; DONE count is actual RECORD messages (zero without effects); commit eligible parent state",
+        "Negative variants: omit closure, narrow D bounds, unknown parent, different account/scope, replay G1 or prove only sibling: reject settlement. Missing parent STATE or failed commit leaves D pending and publishes no state/receipt"
+      ],
+      "then": {
+        "checkpoint": "committed",
+        "receipt": "minted",
+        "debt": "settled",
+        "note": "Complete and empty variants each start from pending D, never from one another. Negative variants withhold complete/empty publication and keep debt; already valid admissions survive. No optional aggregate."
+      }
+    },
+    {
+      "id": "v70",
+      "title": "Malformed coverage shapes and legacy members",
+      "from_case": "Duplicate/overlapping/foreign keys or effects after coverage finality",
+      "requirements": [
+        "r03",
+        "r12",
+        "r31",
+        "r33",
+        "r34",
+        "r70"
+      ],
+      "given": "A closed parent_streams boundary has canonical required_keys [p] and one inventory obligation.",
+      "when": "Try duplicate arrays, overlap, foreign outcome/map keys, missing/extra obligation, undeclared/ambiguous relationship or parent, empty domain/epoch, malformed/reversed time range, both/no range kinds, wrong-domain cursor range, legacy hydrated_keys/optional_skip_keys/considered/covered, or child state_stream coverage.",
+      "then": {
+        "checkpoint": "withheld",
+        "run": "terminated",
+        "receipt": "none",
+        "note": "Validate each variant independently. Reject every malformed shape; classify former skips at producer call sites instead."
+      }
+    },
+    {
+      "id": "v71",
+      "title": "Complete authorized debt discovery or refusal",
+      "from_case": "Accounted debt followed by sealed complete or empty proving its full original obligation",
+      "requirements": [
+        "r45"
+      ],
+      "given": "Ledger has active authorized exact-target debt D plus excluded other-scope, retired and other-account debt.",
+      "when": "Place with a sufficient discovery bound; repeat independently with a bound smaller than the complete active authorized list.",
+      "then": {
+        "note": "Sufficient bound: START.detail_debts delivers the complete exact descriptors, retaining original binding/OLD epoch. Insufficient bound: refuse spawn. Never truncate/narrow debt; excluded descriptors stay retained."
+      }
+    },
+    {
+      "id": "v72",
+      "title": "Optional aggregate framing and finality",
+      "from_case": "Three unparsed children share one durable parent-keyed gap identity",
+      "requirements": [
+        "r47",
+        "r51",
+        "r55",
+        "r56",
+        "r57"
+      ],
+      "given": "An enumerated in-scope state_stream child has known durable key and gap identities.",
+      "when": "Independently submit negative/fractional/unsafe or mismatched counts, wrong emitted/gapped counts, duplicate evidence, unenumerated/non-child/out-of-scope evidence, or a later RECORD/gap/recovery seal after evidence.",
+      "then": {
+        "run": "terminated",
+        "checkpoint": "withheld",
+        "note": "Reject invalid consumer input; producer withholds evidence without enumeration. No count repairs missing durable admission; pending recovery seals still count as debt."
+      }
+    },
+    {
+      "id": "v73",
+      "title": "Real-path vector exercise",
+      "from_case": "Duplicate/overlapping/foreign keys or effects after coverage finality",
+      "requirements": [
+        "r66"
+      ],
+      "given": "A conformance suite manually constructs valid coverage while bypassing producer enumeration or host admission/commit.",
+      "when": "Claim 0.3.0 conformance from that constructed result.",
+      "then": {
+        "note": "The claim fails Section 6.3 even if the constructed partition is valid; exercise every vector through the real paths."
+      }
+    },
+    {
+      "id": "v74",
+      "title": "Permanent gap stays pending without capability",
+      "from_case": "Source-unrepresentable debt followed by a new transformation epoch",
+      "requirements": [
+        "r10",
+        "r18",
+        "r34"
+      ],
+      "given": "The source in its current form cannot represent an obligated detail; known parent and current declared epoch are authorized.",
+      "when": "Admit source_unrepresentable/retryable:false without a capability flag; later consider refetch at same/unknown epoch.",
+      "then": {
+        "debt": "admitted",
+        "checkpoint": "committed",
+        "receipt": "none",
+        "outcome": {
+          "p": "gap"
+        },
+        "note": "Pending permanent debt never certifies completeness. Forbid same/unknown-epoch refetch; a new epoch only permits re-evaluation."
+      }
+    },
+    {
+      "id": "v75",
+      "title": "Version compatibility is explicit and preserves stable-major minor exchanges",
+      "from_case": "Old runtime/new connector; new strict-only runtime/old connector",
+      "requirements": [
+        "r67",
+        "r68",
+        "r69",
+        "r71"
+      ],
+      "given": "An unknown profile version is presented; separately a valid earlier 1.x minor exchange is presented to a runtime supporting a later minor in that major.",
+      "when": "Try unknown-version placement without exact support or an advertised explicit compatibility rule; try invalidating the earlier same-major minor exchange.",
+      "then": {
+        "note": "Refuse the unknown version before spawn absent an explicit advertised compatibility rule. Preserve valid earlier minor exchanges when MAJOR is at least 1; 0.x minor versions may break compatibility."
+      }
+    },
+    {
+      "id": "v76",
+      "title": "Bounded runtime-first catalog transition",
+      "from_case": "Old runtime/new connector; new strict-only runtime/old connector",
+      "requirements": [
+        "r72",
+        "r73",
+        "r75"
+      ],
+      "given": "A runtime explicitly supports legacy versions under separate old rules during a bounded catalog migration.",
+      "when": "Before migration completes, run a supported old connector under old rules. Remove the last old-profile catalog entry and attempt legacy placement again; separately attempt a new connector on an old runtime lacking a mandatory rule.",
+      "then": {
+        "note": "Before cutover only explicitly supported old rules apply. After the catalog has no entry below 0.3.0, refuse old-profile connectors before spawn. Refuse a new connector unless the whole declared version is implemented; mandatory OBSERVATION and Section 5.11 cannot be waived."
+      }
+    }
+  ]
+}

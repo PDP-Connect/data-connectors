@@ -111,6 +111,16 @@ test("Section 3.4 limits the elective exception to readers implementing it", () 
   assert.doesNotMatch(text, /an elective capability never blocks spawn/i);
 });
 
+test("strict detail accounting keeps current manifest epochs and child-side relationship attribution", () => {
+  const declarations = profileSection("### 3.6 Checkpoint dependencies", "### 3.7 ");
+  assert.match(declarations, /Every stream declaring state_stream or parent_streams MUST also declare a non-empty string transform_epoch/);
+  const obligations = profileSection("#### 5.6.1 Obligations and closure", "#### 5.6.2 ");
+  assert.match(obligations, /parent-declared `has_many` relationship whose foreign key is on the child/);
+  const coverage = profileSection("#### 5.6.4 Final coverage and runtime checks", "#### 5.6.5 ");
+  assert.match(coverage, /MUST change `transform_epoch` when schema or transformation changes represented child state/);
+  assert.match(coverage, /`hydrated_keys`, `optional_skip_keys`, `considered` and `covered` MUST be rejected as legacy coverage members/);
+});
+
 test("an elective-aware runtime lacking coverage support may start only after other placement checks", () => {
   const text = profileSection("### 7.1 Store collection evidence (RUN_COVERAGE_V1)", "#### 7.1.1 ");
   assert.match(text, /`RUN_COVERAGE_V1` is an elective capability for runtimes that implement the elective exception in Section 3\.4\./);
