@@ -220,3 +220,14 @@ test("every manifest connector key resolves to exactly one conformance roster bu
 		`roster references connector key(s) with no manifest file: ${unknownKeys.join(", ")}`,
 	);
 });
+
+test("Whole Foods is real but remains Development, while Loom remains scaffolded", () => {
+	assert.deepEqual(REAL_UNLISTED_CONNECTORS.wholefoods, {
+		testFile: "connectors/wholefoods/integration.test.ts",
+	});
+	assert.equal("wholefoods" in PRODUCTION_READY_CONNECTORS, false);
+	assert.equal(new Set<string>(KNOWN_SCAFFOLD_CONNECTORS).has("wholefoods"), false);
+	assert.equal(new Set<string>(KNOWN_SCAFFOLD_CONNECTORS).has("loom"), true);
+	assert.equal(publicTier("wholefoods"), "development");
+	assert.equal(publicTier("loom"), "development");
+});

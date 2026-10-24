@@ -7,6 +7,35 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
+
+test("declared scaffolds and Whole Foods are excluded from publication", () => {
+  const scaffoldKeys = new Set(KNOWN_SCAFFOLD_CONNECTORS);
+  assert.deepEqual(PUBLISHABLE_CONNECTORS.filter((row) => scaffoldKeys.has(row.manifest)), []);
+  assert.equal(PUBLISHABLE_CONNECTORS.some((row) => row.manifest === "wholefoods"), false);
+  for (const manifest of [...KNOWN_SCAFFOLD_CONNECTORS, "wholefoods"]) {
+    const row = PUBLISH_EXCLUSIONS.find((entry) => entry.manifest === manifest);
+    assert.ok(row?.exclusionReason?.trim(), manifest);
+  }
+});
+
+test("actual CLI matrices exclude scaffolds and held real collectors", () => {
+  const expected = PUBLISHABLE_CONNECTORS.map(({ manifest, connectorKey }) => ({ manifest, connectorKey }));
+  for (const args of [["--matrix"], ["--shard-matrix", "6"]]) {
+    const result = spawnSync(process.execPath, ["scripts/connector-publish-allowlist.mjs", ...args], {
+      cwd: repoRoot, encoding: "utf8", env: { PATH: process.env.PATH },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const include = JSON.parse(result.stdout).include;
+    const rows = args[0] === "--matrix"
+      ? include.map(({ manifest, connector }) => ({ manifest, connectorKey: connector }))
+      : include.flatMap(({ connectors }) => connectors.map(({ manifest, connectorKey }) => ({ manifest, connectorKey })));
+    assert.deepEqual([...rows].sort((a, b) => a.manifest.localeCompare(b.manifest)),
+      [...expected].sort((a, b) => a.manifest.localeCompare(b.manifest)));
+    const forbidden = new Set([...KNOWN_SCAFFOLD_CONNECTORS, "wholefoods"]);
+    assert.deepEqual(rows.filter(({ manifest }) => forbidden.has(manifest)), []);
+  }
+});
 import {
   CONNECTOR_PUBLISH_INVENTORY, PUBLISHABLE_CONNECTORS, PUBLISH_EXCLUSIONS,
 } from "./connector-publish-allowlist.mjs";
@@ -34,7 +63,7 @@ test("C-T2 every non-allowlisted manifest has a recorded exclusion reason", () =
     }
   }
   assert.deepEqual(PUBLISH_EXCLUSIONS.map((row) => row.manifest).sort(),
-    ["github", "google_messages", "signal", "slack", "youtube_takeout"]);
+    ["github", "google_messages", "loom", "signal", "slack", "wholefoods", "youtube_takeout"]);
 });
 
 function workflow(name) {
