@@ -92,8 +92,6 @@ const count = (scope: unknown): number => {
 				};
 			},
 		},
-		partialStreamsFromDetailGaps: (streams) =>
-			streams.filter((s) => STREAMS.includes(s)),
 		summarize: (scopes) => {
 			const details = Object.fromEntries(
 				STREAMS.map((s) => [s, count(scopes[`chatgpt.${s}`])]),
