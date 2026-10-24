@@ -3398,6 +3398,46 @@ page = new Proxy(locationHost, {
 		}
 	}
 });
+test("icloud_notes: overlap outcomes and recovery survive the built collector host boundary", { timeout: 120_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud-overlap.js") });
+	for (const mode of ["identical", "conflicting", "duplicate-only"]) {
+		for (const resultStreaming of [false, true]) {
+			let noteCalls = 0;
+			const fixtures = { ...c.fixtures, resolve(url, request) {
+				const response = c.fixtures.resolve(url, request);
+				if (!url.includes("/records/query") || JSON.parse(request.postData).query.filterBy[0].fieldValue.value !== "recents") return response;
+				const rows = JSON.parse(response.body).records;
+				const overlap = structuredClone(rows[0]);
+				if (mode === "conflicting") overlap.fields.TitleEncrypted.value = Buffer.from("New revision").toString("base64");
+				noteCalls++;
+				const records = noteCalls === 1 ? [rows[0]] : noteCalls === 2 ? mode === "duplicate-only" ? [overlap] : [overlap, rows[1]] : [rows[2]];
+				return { ...response, body: JSON.stringify({ records, ...(noteCalls < 3 ? { continuationMarker: `page-${noteCalls + 1}` } : {}) }) };
+			} };
+			const run = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes, resultStreaming,
+				gotoDelayMs: 0, loginWaitMs: 1000, resultSpoolDirectory: join(out, `icloud-overlap-${mode}-${resultStreaming}`) });
+			assertCleanRun(run);
+			assert.equal(run.data.error, undefined);
+			assert.equal(noteCalls, mode === "identical" ? 3 : 2);
+			const done = resultStreaming ? run.streamDone : run.result;
+			const notes = resultStreaming ? JSON.parse(readFileSync(run.streamScopeFiles["icloud_notes.notes"], "utf8")) : run.result["icloud_notes.notes"];
+			assert.equal(notes.records.length, mode === "identical" ? 3 : mode === "conflicting" ? 2 : 1);
+			assert.match(run.data.status, mode === "identical" ? /^Complete!/ : /^Partial:/);
+			if (mode === "identical") {
+				assert.deepEqual(done.errors, []);
+				assert.ok(run.states["icloud_notes.notes"]);
+			} else {
+				const error = done.errors.find(error => error.scope === "icloud_notes.notes");
+				assert.equal(error.code, "stream_collection_failed");
+				assert.deepEqual(error.recovery_hint, { action: "retry_by_runtime", retryable: true });
+				assert.equal(run.states["icloud_notes.notes"], undefined);
+			}
+			assert.ok(run.states["icloud_notes.folders"]);
+			assert.ok(run.states["icloud_notes.profile"]);
+		}
+	}
+});
+
 test("icloud_notes: failed continuation preserves readable rows and never checkpoints notes", { timeout: 120_000 }, async () => {
 	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
 	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-partial.js") });
