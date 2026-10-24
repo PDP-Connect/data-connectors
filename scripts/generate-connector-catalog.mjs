@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertPublishableRow } from "./assert-publishable-readiness.mjs";
 import {
   PUBLISHABLE_CONNECTORS,
 } from "./connector-publish-allowlist.mjs";
@@ -417,6 +418,8 @@ export async function generateConnectorCatalog({
   lookupImpl = lookupManifest,
   fetchImpl = fetch,
 }) {
+  // Before any request: an override may not publish a scaffold or an excluded connector.
+  for (const connector of connectors) assertPublishableRow(connector);
   if (!/^[0-9a-f]{40}$/.test(sourceCommit ?? "")) {
     throw new Error("source commit must be a 40-character lowercase hexadecimal Git object ID");
   }
