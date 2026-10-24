@@ -29,9 +29,17 @@
  * owner's session would be a bot signal, so a request the page cannot make or
  * that does not complete stops the run as tiktok_interrupted (retryable).
  *
+ * The reader holds the copied client parameters per page: a page TikTok
+ * replaces (a redirect or reload) starts with none. A page that makes no
+ * qualifying request of its own (the sign-in page, or wherever TikTok lands
+ * after it) is moved once to the profile page, whose app reads the person's
+ * own videos with the client parameters on the request. Without them nothing
+ * is sent: the run stops early as tiktok_interrupted: client_params_not_seen.
+ *
  * Session check. Signed in is decided from the account endpoint the
  * collection itself starts with, in the page as it is. The check opens the
- * profile page only when the page is not on www.tiktok.com. When the check
+ * profile page only when the page is not on www.tiktok.com, or when the page
+ * it is on made no request the reader can copy from. When the check
  * does not prove a signed-in session (signed out, or no answer, as in a
  * browser that never signed in), it opens the sign-in page and hands it to
  * the person; collection starts only once the session is verified.
@@ -85,6 +93,11 @@
  *     plus collection_items (each collection's videos, detail coverage).
  *   v0.3.3 (2026-10-24): a session check with no answer (a browser that never
  *     signed in) hands the sign-in page to the person instead of failing.
+ *   v0.3.4 (2026-10-24): after a hand sign-in the page moves to the profile
+ *     page; a page with no client parameters (none made, or the page was
+ *     replaced) gets one wait and at most one profile-page open, then the run
+ *     stops early with client_params_not_seen instead of every stream failing
+ *     with no_client.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -151,6 +164,15 @@ const CLIENT_WAIT_MS = 15_000;
 const POLL_INTERVAL_MS = 500;
 /** How long the session probe waits for the page's own first request. */
 const PROBE_CLIENT_WAIT_MS = 10_000;
+/**
+ * How many times one run may re-acquire client parameters after the page lost
+ * them (TikTok replaced the page mid-run). Each time waits, and opens the
+ * profile page at most once.
+ */
+const MAX_CLIENT_RECOVERIES = 2;
+/** The stop when the web app made no request the reader can copy from. */
+export const CLIENT_NOT_SEEN =
+	"client_params_not_seen: TikTok's web app made no request of its own on this page or the profile page, so no request was sent";
 /** /api/user/list/ scene numbers used by TikTok's web app. */
 const FOLLOWING_SCENE = "21";
 const FOLLOWERS_SCENE = "67";
@@ -325,6 +347,7 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 	const random = options.random ?? Math.random;
 	const maxRequests = options.maxRequests ?? MAX_REQUESTS_PER_RUN;
 	let requests = 0;
+	let recoveries = 0;
 	let transport: string | null = null;
 	let signed: boolean | null = null;
 
@@ -340,7 +363,23 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 			await delay(REQUEST_PAUSE_MIN_MS + Math.floor(random() * span));
 		}
 		requests += 1;
-		const result = await fetchApi(page, path, params);
+		let result = await fetchApi(page, path, params);
+		if (result?.kind === "no_client") {
+			// The reader checks for client parameters before it sends, so
+			// nothing left the page. The page lost them: TikTok replaced it
+			// (a redirect or reload after sign-in) and the new page has not
+			// made its own request yet. Wait for it, open the profile page at
+			// most once, then ask once more; never an unsigned request.
+			if (recoveries >= MAX_CLIENT_RECOVERIES) {
+				throw new TikTokStop("interrupted", `${path}: ${CLIENT_NOT_SEEN}`);
+			}
+			recoveries += 1;
+			connectorDiagnostic("tiktok", "client_params_lost", {});
+			if (!(await prepareReader(page, delay))) {
+				throw new TikTokStop("interrupted", `${path}: ${CLIENT_NOT_SEEN}`);
+			}
+			result = await fetchApi(page, path, params);
+		}
 		if (result === null) {
 			throw new TikTokStop("interrupted", `the page did not answer ${path}`);
 		}
@@ -454,12 +493,29 @@ async function watch(page: TikTokPage): Promise<WatchStatus | null> {
 		: null;
 }
 
+/** Poll the page until its app has made a request the reader copies from. */
+async function waitForClient(
+	page: TikTokPage,
+	delay: (ms: number) => Promise<void>,
+): Promise<boolean> {
+	for (let waited = 0; waited < CLIENT_WAIT_MS; waited += POLL_INTERVAL_MS) {
+		await delay(POLL_INTERVAL_MS);
+		const status = await watch(page);
+		if (status?.client === true) return true;
+	}
+	return false;
+}
+
 /**
- * Make sure the page is the TikTok web app, and give the app time to make a
- * request of its own so the reader holds its client parameters. Navigates
- * only when the page is not on www.tiktok.com; a page already there is left
- * where it is. Returns whether client parameters were seen; without them the
- * first in-page request fails the run as tiktok_interrupted.
+ * Make sure the page is the TikTok web app and the reader holds its client
+ * parameters. A www.tiktok.com page gets the client wait first, in place;
+ * a page that is off the site, or made no request the reader can copy from
+ * in that wait (the sign-in page, or where TikTok lands after it), is moved
+ * once to the profile page, whose app reads the person's own videos with the
+ * client parameters on the request, and waited on again. Callers await every
+ * in-page request first, so no request of this connector is in flight when it
+ * navigates. Returns whether client parameters were seen; without them no
+ * request can be sent.
  */
 async function prepareReader(
 	page: TikTokPage,
@@ -467,15 +523,11 @@ async function prepareReader(
 ): Promise<boolean> {
 	const first = await watch(page);
 	if (first?.client === true) return true;
-	if (first === null || first.wrongPage === true) {
-		await page.goto(PROFILE_URL, { waitUntil: "domcontentloaded" });
+	if (first !== null && first.wrongPage !== true) {
+		if (await waitForClient(page, delay)) return true;
 	}
-	for (let waited = 0; waited < CLIENT_WAIT_MS; waited += POLL_INTERVAL_MS) {
-		await delay(POLL_INTERVAL_MS);
-		const status = await watch(page);
-		if (status?.client === true) return true;
-	}
-	return false;
+	await page.goto(PROFILE_URL, { waitUntil: "domcontentloaded" });
+	return waitForClient(page, delay);
 }
 
 export type SessionState = "signed_in" | "signed_out" | "unknown";
@@ -523,7 +575,8 @@ export async function probeTikTokSession(page: TikTokPage): Promise<boolean> {
 
 /**
  * The session check that may navigate, used where no one is signing in. It
- * opens the profile page only when the page is not on www.tiktok.com.
+ * opens the profile page only when the page is not on www.tiktok.com or made
+ * no request the reader can copy from.
  */
 export async function checkTikTokSession(
 	page: TikTokPage,
@@ -537,12 +590,14 @@ export async function checkTikTokSession(
 
 export async function ensureTikTokSession(
 	args: EnsureSessionArgs,
+	/** Test seam: production uses the real clock. */
+	delay: (ms: number) => Promise<void> = realDelay,
 ): Promise<void> {
 	const { assist, capture, completeAssistance, page, sendInteraction } = args;
 	// One non-navigating check, then at most one navigation to the web app
 	// (checkTikTokSession). Only a verified signed-in answer skips the
 	// handoff; the page is never moved away from a session that answered.
-	const state = await checkTikTokSession(page);
+	const state = await checkTikTokSession(page, delay);
 	if (state === "signed_in") return;
 	// "unknown" is what a browser that never signed in usually reads as: the
 	// app makes no account request of its own, or a bot check answers first.
@@ -558,7 +613,7 @@ export async function ensureTikTokSession(
 		message:
 			"Sign in to TikTok in the secure browser, then continue. Collection starts once the session is verified.",
 		page,
-		probe: async () => (await checkTikTokSession(page)) === "signed_in",
+		probe: async () => (await checkTikTokSession(page, delay)) === "signed_in",
 		readinessProbe: probeTikTokSession,
 		readinessProbeOnHandoffPage: true,
 		sendInteraction,
@@ -567,6 +622,11 @@ export async function ensureTikTokSession(
 	if (!ready) {
 		throw new Error("tiktok_auth_failed: TikTok sign-in was not completed");
 	}
+	// The person is signed in and nothing of this connector is in flight. The
+	// page is the sign-in page or wherever TikTok sent them after it, which
+	// may make no request the reader copies from, and TikTok may still replace
+	// it. Start collection from the profile page instead.
+	await page.goto(PROFILE_URL, { waitUntil: "domcontentloaded" });
 }
 
 // ─── list walks ──────────────────────────────────────────────────────────
@@ -814,7 +874,11 @@ export async function collectTikTok(
 	};
 
 	if (!(await prepareReader(ctx.page, delay))) {
+		// Nothing could be signed, so nothing is sent: one clear stop instead
+		// of every stream failing on its first request.
 		connectorDiagnostic("tiktok", "client_params_not_seen", {});
+		await stopRun(new TikTokStop("interrupted", CLIENT_NOT_SEEN));
+		return;
 	}
 	const api = createApi(ctx.page, options);
 
@@ -1557,7 +1621,7 @@ if (isMainModule(import.meta.url)) {
 		browser: { profileName: "tiktok" },
 		retryablePattern:
 			/tiktok_rate_limited|tiktok_server_error|tiktok_interrupted|tiktok_run_limit_reached/,
-		ensureSession: ensureTikTokSession,
+		ensureSession: (args) => ensureTikTokSession(args),
 		probeSession: async ({ page }) =>
 			(await checkTikTokSession(page)) === "signed_in",
 		probeSessionIsAuthoritative: true,

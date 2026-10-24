@@ -5,18 +5,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createContext, runInContext } from "node:vm";
+import type { Page } from "playwright";
 import type {
 	EmittedMessage,
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import type { Page } from "playwright";
 import {
+	CLIENT_NOT_SEEN,
 	checkTikTokSession,
 	collectTikTok,
 	ensureTikTokSession,
-	LOGIN_URL,
 	fetchApi,
+	LOGIN_URL,
+	PROFILE_URL,
 	readSessionState,
 	type TikTokCollectContext,
 	type TikTokPage,
@@ -2130,7 +2132,8 @@ test("signin handoff: a check with no answer (never signed in) opens the sign-in
 	);
 	const h = handoffArgs(page);
 	await ensureTikTokSession(h.args);
-	assert.deepEqual(gotos, [LOGIN_URL]);
+	// Signed in by hand: collection starts from the profile page.
+	assert.deepEqual(gotos, [LOGIN_URL, PROFILE_URL]);
 	assert.equal(h.assists.length, 1);
 	assert.match(h.assists[0] ?? "", /Sign in to TikTok/);
 	assert.deepEqual(h.completions, ["resolved"]);
@@ -2143,4 +2146,228 @@ test("signin handoff: a signed-in session is never moved to the sign-in page", a
 	await ensureTikTokSession(h.args);
 	assert.deepEqual(gotos, []);
 	assert.deepEqual(h.assists, []);
+});
+
+// ─── client parameters per page (2026-10-24) ─────────────────────────────
+
+// The installed page reader runs unchanged, one fresh context per document
+// (a navigation or TikTok's own redirect starts a new page with an empty
+// reader). Only the page's resource entries and the network are fake.
+interface PageSpec {
+	/** Whether the page's app makes a request the reader copies from. */
+	appRequest: boolean;
+	/** Reader evaluations before that request shows up (it is in flight). */
+	readyAfter?: number;
+}
+
+const WIRE_ACCOUNT = {
+	...ACCOUNT,
+	data: {
+		...(ACCOUNT.data as Json),
+		sec_user_id: "MS4wLjABAAAASyntheticSecUidOnlyForTheReaderTest",
+	},
+};
+
+function documentPages(
+	start: { url: string } & PageSpec,
+	pageAt: (url: string) => PageSpec,
+	options: { signedOutChecks?: number } = {},
+) {
+	const origin = "https://www.tiktok.com";
+	const calls: string[] = [];
+	const gotos: string[] = [];
+	let signedOutChecks = options.signedOutChecks ?? 0;
+	let replaceWhen: ((path: string) => boolean) | null = null;
+	let replacement: PageSpec | null = null;
+	/** TikTok's own redirect, landing before the next page evaluation. */
+	let pending: PageSpec | null = null;
+	const open = (spec: PageSpec) => {
+		const doc = { evals: 0, context: createContext({}) };
+		doc.context = createContext({
+			AbortController,
+			URL,
+			URLSearchParams,
+			clearTimeout,
+			setTimeout,
+			location: { origin },
+			performance: {
+				getEntriesByType: () => [
+					// Not an /api/ request: the reader never copies from it.
+					{ name: `${origin}/passport/web/account/info/?aid=1988` },
+					...(spec.appRequest && doc.evals > (spec.readyAfter ?? 0)
+						? [
+								{
+									name: `${origin}/api/post/item_list/?aid=1988&device_id=12345&app_name=tiktok_web&msToken=discarded&X-Bogus=discarded`,
+								},
+							]
+						: []),
+				],
+			},
+			fetch: async (input: string) => {
+				const url = new URL(input, origin);
+				// Only a request carrying the copied client fields leaves.
+				assert.equal(url.searchParams.get("aid"), "1988");
+				assert.equal(url.searchParams.get("device_id"), "12345");
+				calls.push(url.pathname);
+				const json =
+					url.pathname === ACCOUNT_PATH
+						? WIRE_ACCOUNT
+						: (
+								standardAnswer({
+									path: url.pathname,
+									params: Object.fromEntries(url.searchParams),
+								}) as { json?: unknown }
+							).json;
+				if (replaceWhen?.(url.pathname)) {
+					replaceWhen = null;
+					pending = replacement;
+				}
+				url.searchParams.set("X-Bogus", "synthetic");
+				return {
+					status: 200,
+					url: url.href,
+					headers: {
+						get: (name: string) =>
+							name === "content-type" ? "application/json" : null,
+					},
+					text: async () => JSON.stringify(json),
+				};
+			},
+		});
+		return doc;
+	};
+	let current = open(start);
+	const page: TikTokPage = {
+		evaluate: async (script) => {
+			if (pending) {
+				current = open(pending);
+				pending = null;
+			}
+			current.evals += 1;
+			if (
+				signedOutChecks > 0 &&
+				script.includes(`session.get(${JSON.stringify(ACCOUNT_PATH)}`)
+			) {
+				signedOutChecks -= 1;
+				return ok({});
+			}
+			const result: unknown = runInContext(script, current.context);
+			return await result;
+		},
+		goto: async (url) => {
+			gotos.push(url);
+			// Our navigation supersedes a redirect TikTok had not made yet.
+			pending = null;
+			current = open(pageAt(url));
+		},
+	};
+	return {
+		calls,
+		gotos,
+		page,
+		/** After the response to `path`, TikTok replaces the page. */
+		replaceAfter: (when: (path: string) => boolean, spec: PageSpec) => {
+			replaceWhen = when;
+			replacement = spec;
+		},
+	};
+}
+
+const FULL_RUN_PATHS = [
+	ACCOUNT_PATH,
+	"/api/post/item_list/",
+	"/api/user/settings/",
+	"/api/favorite/item_list/",
+	"/api/user/collect/item_list/",
+	"/api/user/list/",
+	"/api/user/list/",
+];
+
+const onlyProfileHasClient = (url: string): PageSpec => ({
+	appRequest: url === PROFILE_URL,
+});
+
+test("client params: signed in on a page with no app request, the session check moves to the profile page and collection reads every stream", async () => {
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: false },
+		onlyProfileHasClient,
+	);
+	const h = handoffArgs(d.page);
+	await ensureTikTokSession(h.args, noDelay.delay);
+	assert.deepEqual(d.gotos, [PROFILE_URL]);
+	assert.deepEqual(h.assists, []);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.calls, [ACCOUNT_PATH, ...FULL_RUN_PATHS]);
+	assert.equal(run.records.filter((r) => r.stream === "videos").length, 3);
+	assert.deepEqual(d.gotos, [PROFILE_URL]);
+});
+
+test("client params: collection on a page with no app request opens the profile page once, then collects", async () => {
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: false },
+		onlyProfileHasClient,
+	);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(d.gotos, [PROFILE_URL]);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.calls, FULL_RUN_PATHS);
+});
+
+test("client params: after a hand sign-in the page moves to the profile page before collection", async () => {
+	// Not signed in at first; the person signs in on the sign-in page, whose
+	// readiness probe answers, then TikTok carries them to a page that makes
+	// no request the reader copies from.
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: true },
+		(url) => ({ appRequest: url === LOGIN_URL || url === PROFILE_URL }),
+		{ signedOutChecks: 2 },
+	);
+	d.replaceAfter((path) => path === ACCOUNT_PATH, { appRequest: false });
+	const h = handoffArgs(d.page);
+	await ensureTikTokSession(h.args, noDelay.delay);
+	assert.equal(h.assists.length, 1);
+	assert.deepEqual(h.completions, ["resolved"]);
+	assert.deepEqual(d.gotos, [LOGIN_URL, PROFILE_URL]);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.calls, [ACCOUNT_PATH, ...FULL_RUN_PATHS]);
+});
+
+test("client params: TikTok replacing the page mid-run is waited out in place, and the request is sent once on the new page", async () => {
+	// The live failure: the account read succeeds, then the page is replaced
+	// and the next request finds a reader with no client parameters.
+	const d = documentPages(
+		{ url: PROFILE_URL, appRequest: true },
+		onlyProfileHasClient,
+	);
+	d.replaceAfter((path) => path === ACCOUNT_PATH, {
+		appRequest: true,
+		readyAfter: 3,
+	});
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.gotos, []);
+	assert.deepEqual(d.calls, FULL_RUN_PATHS);
+	assert.equal(run.records.filter((r) => r.stream === "videos").length, 3);
+});
+
+test("client params: still none after the profile page, the run stops early with client_params_not_seen and sends nothing", async () => {
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: false },
+		() => ({ appRequest: false }),
+	);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(d.gotos, [PROFILE_URL]);
+	assert.deepEqual(d.calls, []);
+	assert.deepEqual(run.failures.map((f) => f.stream).sort(), [...ALL].sort());
+	for (const failure of run.failures) {
+		assert.equal(failure.message, `tiktok_interrupted: ${CLIENT_NOT_SEEN}`);
+		assert.equal(failure.retryable, true);
+	}
 });
