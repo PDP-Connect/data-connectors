@@ -31,9 +31,10 @@
  *
  * Session check. Signed in is decided from the account endpoint the
  * collection itself starts with, in the page as it is. The check opens the
- * profile page only when the page is not on www.tiktok.com, and opens the
- * sign-in page only when TikTok explicitly reports a signed-out session;
- * an unreadable or failed check stops the run instead of navigating.
+ * profile page only when the page is not on www.tiktok.com. When the check
+ * does not prove a signed-in session (signed out, or no answer, as in a
+ * browser that never signed in), it opens the sign-in page and hands it to
+ * the person; collection starts only once the session is verified.
  *
  *   GET /passport/account/info/v2/      -> the owner's id, secUid, handle
  *   GET /api/user/settings/             -> profile.private_account
@@ -82,6 +83,8 @@
  *     carries the owner's counts; any non-JSON body is a challenge.
  *   v0.3.0 (2026-10-22): favorite_collections back from the live list shape,
  *     plus collection_items (each collection's videos, detail coverage).
+ *   v0.3.3 (2026-10-24): a session check with no answer (a browser that never
+ *     signed in) hands the sign-in page to the person instead of failing.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -536,14 +539,15 @@ export async function ensureTikTokSession(
 	args: EnsureSessionArgs,
 ): Promise<void> {
 	const { assist, capture, completeAssistance, page, sendInteraction } = args;
+	// One non-navigating check, then at most one navigation to the web app
+	// (checkTikTokSession). Only a verified signed-in answer skips the
+	// handoff; the page is never moved away from a session that answered.
 	const state = await checkTikTokSession(page);
 	if (state === "signed_in") return;
-	if (state === "unknown") {
-		// Not proof of a signed-out session: never open the sign-in page on it.
-		throw new Error(
-			"tiktok_interrupted: TikTok did not answer the sign-in check",
-		);
-	}
+	// "unknown" is what a browser that never signed in usually reads as: the
+	// app makes no account request of its own, or a bot check answers first.
+	// Hand the sign-in page to the person either way; they can clear a bot
+	// check there too. Collection still waits for a verified session.
 	await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
 	const ready = await manualBrowserLogin({
 		assist,

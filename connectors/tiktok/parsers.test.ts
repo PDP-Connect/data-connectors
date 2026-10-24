@@ -10,9 +10,12 @@ import type {
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type { Page } from "playwright";
 import {
 	checkTikTokSession,
 	collectTikTok,
+	ensureTikTokSession,
+	LOGIN_URL,
 	fetchApi,
 	readSessionState,
 	type TikTokCollectContext,
@@ -2092,4 +2095,52 @@ test("read boundary: collection uses the installed reader and checkpoints after 
 		calls.map((call) => call.transport),
 		["fetch", "fetch", "xhr"],
 	);
+});
+
+// ─── sign-in handoff (2026-10-24) ────────────────────────────────────────
+
+function handoffArgs(page: TikTokPage) {
+	const assists: string[] = [];
+	const completions: string[] = [];
+	return {
+		assists,
+		completions,
+		args: {
+			assist: async (req: { message: string }) => {
+				assists.push(req.message);
+				return "tiktok_handoff";
+			},
+			capture: null,
+			checkpoint: async () => {},
+			completeAssistance: async (_id: string, status: string) => {
+				completions.push(status);
+			},
+			page: page as unknown as Page,
+			sendInteraction: async () => {
+				throw new Error("unexpected manual action fallback");
+			},
+		} as unknown as Parameters<typeof ensureTikTokSession>[0],
+	};
+}
+
+test("signin handoff: a check with no answer (never signed in) opens the sign-in page and waits for the person", async () => {
+	// The account endpoint gives no readable answer until the person signs in.
+	const { calls, gotos, page } = fakePage((_call, index) =>
+		index < 2 ? ok({}) : ok(ACCOUNT),
+	);
+	const h = handoffArgs(page);
+	await ensureTikTokSession(h.args);
+	assert.deepEqual(gotos, [LOGIN_URL]);
+	assert.equal(h.assists.length, 1);
+	assert.match(h.assists[0] ?? "", /Sign in to TikTok/);
+	assert.deepEqual(h.completions, ["resolved"]);
+	assert.ok(calls.every((c) => c.path === "/passport/account/info/v2/"));
+});
+
+test("signin handoff: a signed-in session is never moved to the sign-in page", async () => {
+	const { gotos, page } = fakePage(standardAnswer);
+	const h = handoffArgs(page);
+	await ensureTikTokSession(h.args);
+	assert.deepEqual(gotos, []);
+	assert.deepEqual(h.assists, []);
 });
