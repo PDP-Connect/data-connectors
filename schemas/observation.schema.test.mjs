@@ -121,6 +121,35 @@ test("the profile's conformance cases preserve obligation and recovery debt rule
   assert.match(vectorCase("Time-range obligation has a checked accounted prefix and exact uncovered suffix").then.note, /new debt at admission within one boundary and never replaces outstanding debt/);
 });
 
+test("round-two review preserves empty semantics and observable invalidation outcomes", () => {
+  const debt = section("#### 5.6.2 Outcomes and durable debt").replace(/\s+/g, " ");
+  assert.match(debt, /Empty never implies deletion/);
+  assert.match(debt, /Retired-relationship debt MUST keep its original binding and retirement reason outside unrelated new-scope accounting/);
+  assert.match(debt, /proof of semantic relationship\/scope equivalence plus recollection of the full original obligation; a rename or equal validator is not proof/);
+  const publication = section("#### 5.6.3 Baselines and publication").replace(/\s+/g, " ");
+  assert.match(publication, /whose certified materialization it changes, including content and old\/new parent, relationship and scope memberships/);
+  assert.match(publication, /If the affected set cannot be proved, the runtime MUST conservatively invalidate a broader set, up to all receipts and dependent state for that detail stream and source account/);
+  assert.match(publication, /Known pre-launch changes MUST reset dependent state before collection; resuming from an old cursor counts as reuse/);
+});
+
+test("round-two vectors preserve conditional checkpoints, exclusions and parse alternatives", () => {
+  const byId = (id) => vectors.find((vector) => vector.id === id);
+  assert.equal(byId("v02").then.checkpoint, undefined, "debt precedence alone never commits");
+  assert.match(byId("v02").then.note, /valid final gap coverage and eligible parent STATE/);
+  assert.match(byId("v03").then.note, /valid final gap partition and eligible parent STATE/);
+  assert.deepEqual(byId("v04").then.outcome, { p: "gap" });
+  const unknown = byId("v77");
+  assert.equal(unknown.from_case, byId("v04").from_case);
+  assert.equal(unknown.then.checkpoint, "withheld");
+  assert.equal(unknown.then.debt, "none");
+  assert.equal(byId("v13").then.effect, "not_attempted");
+  assert.equal(byId("v41").then.receipt, undefined, "rejecting a reference does not itself invalidate a receipt");
+  assert.equal(byId("v44").then.debt, "none");
+  assert.equal(byId("v44").then.outcome.p, "unaccounted");
+  assert.equal(byId("v79").from_case, byId("v44").from_case);
+  assert.equal(byId("v79").then.debt, "admitted");
+});
+
 test("the profile preserves strict 0.3.0 accounting alongside elective store coverage", () => {
   const placement = section("### 3.4 Human interaction and protocol capabilities").replace(/\s+/g, " ");
   assert.match(placement, /DETAIL_GAP, DETAIL_COVERAGE and OBSERVATION are mandatory runtime features of 0\.3\.0/);

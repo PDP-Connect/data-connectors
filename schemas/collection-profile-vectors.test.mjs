@@ -80,7 +80,7 @@ test("vector expectations use controlled protocol results", () => {
     checkpoint: ["committed", "withheld"],
     receipt: ["minted", "none", "invalidated", "kept"],
     debt: ["admitted", "kept", "settled", "refused", "none"],
-    effect: ["admitted", "refused"],
+    effect: ["admitted", "refused", "not_attempted"],
     run: ["continues", "terminated"],
     spawn: ["allowed", "refused"],
   };

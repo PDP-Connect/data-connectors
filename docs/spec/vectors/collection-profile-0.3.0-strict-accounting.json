@@ -9,7 +9,8 @@
         "v12",
         "v16",
         "v29",
-        "v44"
+        "v44",
+        "v79"
       ]
     },
     {
@@ -101,7 +102,8 @@
         "v03",
         "v45",
         "v57",
-        "v65"
+        "v65",
+        "v78"
       ]
     },
     {
@@ -114,7 +116,8 @@
         "v03",
         "v53",
         "v68",
-        "v74"
+        "v74",
+        "v78"
       ]
     },
     {
@@ -214,8 +217,8 @@
     {
       "id": "r20",
       "section": "5.6.2",
-      "text": "Relationship retirement MUST NOT alias debt to a new relationship name.",
-      "failure": "A relationship rename aliases its predecessor debt to a new name.",
+      "text": "Retired-relationship debt MUST keep its original binding and retirement reason outside unrelated new-scope accounting; migrating or settling it requires proof of semantic relationship/scope equivalence plus recollection of the full original obligation; a rename or equal validator is not proof.",
+      "failure": "Retired debt loses its original binding/retirement reason, blocks unrelated accounting, or is migrated/settled by a rename or equal validator without equivalence proof and full recollection.",
       "vectors": [
         "v50"
       ]
@@ -251,7 +254,8 @@
         "v02",
         "v03",
         "v25",
-        "v28"
+        "v28",
+        "v78"
       ]
     },
     {
@@ -267,12 +271,13 @@
     {
       "id": "r25",
       "section": "5.6.3",
-      "text": "Effect admission MUST atomically invalidate every receipt and dependent state whose certified membership it changes, for both old and new parents, relationships and scopes across obligations in the bound source account.",
-      "failure": "A child move/delete invalidates only the new parent and leaves an old membership certified.",
+      "text": "Effect admission MUST atomically invalidate every receipt and dependent state whose certified materialization it changes, including content and old/new parent, relationship and scope memberships across obligations in the bound source account.",
+      "failure": "A content-only upsert leaves its old receipt valid, or a child move/delete invalidates only the new parent and leaves old certified materialization reusable.",
       "vectors": [
         "v06",
         "v45",
-        "v61"
+        "v61",
+        "v80"
       ]
     },
     {
@@ -417,7 +422,8 @@
         "v11",
         "v12",
         "v30",
-        "v35"
+        "v35",
+        "v77"
       ]
     },
     {
@@ -441,7 +447,9 @@
         "v12",
         "v44",
         "v55",
-        "v63"
+        "v63",
+        "v77",
+        "v79"
       ]
     },
     {
@@ -453,7 +461,8 @@
         "v05",
         "v11",
         "v13",
-        "v44"
+        "v44",
+        "v79"
       ]
     },
     {
@@ -475,7 +484,8 @@
         "v04",
         "v05",
         "v22",
-        "v27"
+        "v27",
+        "v77"
       ]
     },
     {
@@ -488,7 +498,9 @@
         "v12",
         "v22",
         "v27",
-        "v31"
+        "v31",
+        "v77",
+        "v79"
       ]
     },
     {
@@ -586,7 +598,8 @@
       "vectors": [
         "v44",
         "v55",
-        "v63"
+        "v63",
+        "v79"
       ]
     },
     {
@@ -824,6 +837,27 @@
         "v26",
         "v76"
       ]
+    },
+    {
+      "id": "r76",
+      "section": "5.6.3",
+      "text": "If the affected set cannot be proved, the runtime MUST conservatively invalidate a broader set, up to all receipts and dependent state for that detail stream and source account.",
+      "failure": "An effect with unprovable affected memberships leaves potentially changed certifications valid instead of conservatively invalidating a broader set.",
+      "vectors": [
+        "v61",
+        "v80"
+      ]
+    },
+    {
+      "id": "r77",
+      "section": "5.6.3",
+      "text": "Known pre-launch changes MUST reset dependent state before collection; resuming from an old cursor counts as reuse.",
+      "failure": "A known pre-launch scope, epoch or source-account change resumes an old dependent cursor before resetting state.",
+      "vectors": [
+        "v01",
+        "v34",
+        "v42"
+      ]
     }
   ],
   "vectors": [
@@ -832,7 +866,8 @@
       "title": "Narrow empty inventory, then widened scope with unchanged validator text",
       "from_case": "Narrow empty inventory, then widened scope with unchanged validator text",
       "requirements": [
-        "r26"
+        "r26",
+        "r77"
       ],
       "given": "A committed empty receipt covers a narrow scope; validator V is unchanged.",
       "when": "Widen scope and offer V as unchanged without recollection.",
@@ -858,13 +893,12 @@
       "given": "A complete receipt R exists; a parser gap is admitted with no accepted effects.",
       "when": "Offer the old validator as unchanged, complete or empty without a full recovery seal.",
       "then": {
-        "checkpoint": "committed",
         "outcome": {
           "p": "gap"
         },
         "debt": "kept",
         "receipt": "kept",
-        "note": "R is history only; no failed validator is installed."
+        "note": "R is retained history only; matching debt forces gap, never unchanged/complete/empty. Only a later full-original-obligation seal can settle it; never install the failed validator. Any commit requires valid final gap coverage and eligible parent STATE plus the required terminal outcome."
       }
     },
     {
@@ -885,7 +919,7 @@
         },
         "receipt": "none",
         "debt": "kept",
-        "note": "Reject unchanged; an eligible gap partition could checkpoint instead."
+        "note": "Reject unchanged credit: a gap never minted a baseline. Committing the gap checkpoint instead requires a valid final gap partition and eligible parent STATE plus the required terminal outcome."
       }
     },
     {
@@ -898,16 +932,15 @@
         "r42",
         "r43"
       ],
-      "given": "A retained row has all fields; a candidate has a malformed required mapped field.",
+      "given": "A retained row has all fields; a candidate for a known obligated parent has a malformed required mapped field.",
       "when": "Register before parsing, read other fields, then encounter the malformed field.",
       "then": {
-        "effect": "refused",
+        "effect": "not_attempted",
         "debt": "admitted",
         "outcome": {
-          "known_parent": "gap",
-          "unknown_parent": "unaccounted"
+          "p": "gap"
         },
-        "note": "Hold the entire record and preserve the stored row. Only the known-parent variant can admit transformation debt/checkpoint; unknown parent withholds."
+        "note": "Hold the entire record and preserve the stored row. Matching transformation debt is durably admitted for the known parent; it supplies no baseline."
       }
     },
     {
@@ -1078,8 +1111,8 @@
       "given": "A valid candidate is independently proven outside effective scope.",
       "when": "Classify a scope exclusion before emission.",
       "then": {
-        "effect": "refused",
-        "note": "The disposition remains in the candidate ledger, outside required in-scope work and aggregate units; it is not an accepted effect or a parse failure."
+        "effect": "not_attempted",
+        "note": "Keep the proven exclusion disposition in the candidate ledger, outside required in-scope work and aggregate units. No effect is attempted; this is neither host rejection nor parse failure."
       }
     },
     {
@@ -1467,7 +1500,8 @@
       "requirements": [
         "r18",
         "r26",
-        "r32"
+        "r32",
+        "r77"
       ],
       "given": "Durable transformation debt was admitted at A; the same detail stream declares B.",
       "when": "Place the new boundary and discover its stored debt.",
@@ -1584,8 +1618,7 @@
       "when": "Offer it for suppression, unchanged or zero-effect complete.",
       "then": {
         "checkpoint": "withheld",
-        "receipt": "invalidated",
-        "note": "Recollect; only a new eligible complete/empty commit can supersede a same-binding receipt."
+        "note": "Reject baseline_refs, suppression and unchanged reuse; recollect. A reference mismatch does not itself direct receipt invalidation. Supersession occurs only when new complete or empty coverage commits for the same obligation binding."
       }
     },
     {
@@ -1595,10 +1628,11 @@
       "requirements": [
         "r06",
         "r26",
-        "r32"
+        "r32",
+        "r77"
       ],
-      "given": "A connection changes source account while validator text stays identical.",
-      "when": "Attempt to reuse old receipts and dependent state.",
+      "given": "Before launch a connection changes source account while validator text stays identical.",
+      "when": "Attempt to reuse old receipts and dependent state, including resuming an old cursor.",
       "then": {
         "receipt": "invalidated",
         "note": "Reset known pre-launch changes before launch; reject cross-account reuse."
@@ -1630,13 +1664,14 @@
         "r52"
       ],
       "given": "A connector uses no SDK and registers a source candidate.",
-      "when": "Fail parsing, then attempt to drop the candidate from accounting.",
+      "when": "Fail parsing and leave the registered candidate unsettled without matching admitted debt; attempt to drop it from accounting.",
       "then": {
         "outcome": {
-          "p": "gap"
+          "p": "unaccounted"
         },
-        "debt": "admitted",
-        "note": "Candidate remains registered and unsettled/gapped; SDK choice does not waive conformance. Unknown parent instead withholds."
+        "debt": "none",
+        "checkpoint": "withheld",
+        "note": "Candidate remains registered and unsettled. The alternative with matching admitted gap debt is v79; using no SDK cannot evade either integrity outcome."
       }
     },
     {
@@ -1648,7 +1683,7 @@
         "r22",
         "r25"
       ],
-      "given": "R1 certifies c1v1/c2v1; c1v2 is admitted but c2 gaps.",
+      "given": "R1 certifies c1v1/c2v1; content-only c1v2 is admitted without any parent, relationship or scope membership change, but c2 gaps.",
       "when": "The source returns validator V1 again; try R1 for unchanged or suppression.",
       "then": {
         "effect": "admitted",
@@ -1657,7 +1692,7 @@
         "outcome": {
           "p": "gap"
         },
-        "note": "V1 is comparison-only; no replacement receipt is needed to make R1 unusable."
+        "note": "R1 is invalidated at c1v2 admission even though membership is unchanged. V1 is comparison-only; no replacement receipt is needed to make R1 unusable."
       }
     },
     {
@@ -1730,7 +1765,7 @@
       "then": {
         "receipt": "invalidated",
         "debt": "kept",
-        "note": "Archive original unresolved debt/binding with retirement reason outside unrelated new scope; mapping/settlement requires semantic equivalence proof plus full recollection."
+        "note": "Retain original unresolved debt/binding with retirement reason outside unrelated new-scope accounting. Migration/settlement requires semantic relationship/scope equivalence proof plus full-original-obligation recollection; a rename or equal validator is not proof."
       }
     },
     {
@@ -1920,7 +1955,8 @@
       "from_case": "Child moves P1 to P2, changes relationship membership or crosses a time-scope boundary",
       "requirements": [
         "r25",
-        "r62"
+        "r62",
+        "r76"
       ],
       "given": "A receipt certifies old membership of a child.",
       "when": "Admit a move P1 to P2, changed relationship membership or crossing a time/resource scope.",
@@ -2238,6 +2274,89 @@
       "when": "Before migration completes, run a supported old connector under old rules. Remove the last old-profile catalog entry and attempt legacy placement again; separately attempt a new connector on an old runtime lacking a mandatory rule.",
       "then": {
         "note": "Before cutover only explicitly supported old rules apply. After the catalog has no entry below 0.3.0, refuse old-profile connectors before spawn. Refuse a new connector unless the whole declared version is implemented; mandatory OBSERVATION and Section 5.11 cannot be waived."
+      }
+    },
+    {
+      "id": "v77",
+      "title": "Malformed mapped field with an unknown parent",
+      "from_case": "Required mapped field malformed after other fields were read",
+      "requirements": [
+        "r37",
+        "r39",
+        "r42",
+        "r43"
+      ],
+      "given": "A retained row exists; a candidate has a malformed required mapped field and cannot be assigned to a parent.",
+      "when": "Register the candidate before parsing, read other fields, encounter the malformed field and retain it without inventing a parent.",
+      "then": {
+        "checkpoint": "withheld",
+        "debt": "none",
+        "receipt": "none",
+        "effect": "not_attempted",
+        "outcome": {
+          "boundary": "unaccounted"
+        },
+        "note": "Hold the whole record and preserve the stored row; no attributable gap debt can be admitted."
+      }
+    },
+    {
+      "id": "v78",
+      "title": "Gap checkpoint with final accounting and eligible parent state",
+      "from_case": "Only gap credit exists, then unchanged claim",
+      "requirements": [
+        "r09",
+        "r10",
+        "r23"
+      ],
+      "given": "Matching durable debt exists; no baseline receipt was minted by prior gap credit.",
+      "when": "Close parent enumeration, emit a valid final gap coverage partition representing all matching debt, then eligible parent STATE and the required successful terminal outcome.",
+      "then": {
+        "checkpoint": "committed",
+        "outcome": {
+          "p": "gap"
+        },
+        "debt": "kept",
+        "receipt": "none",
+        "note": "Unchanged has no baseline support; the eligible gap checkpoint does not settle debt or certify complete data."
+      }
+    },
+    {
+      "id": "v79",
+      "title": "No-SDK parse failure with matching admitted gap debt",
+      "from_case": "Connector implemented without an SDK, with a candidate that fails parsing",
+      "requirements": [
+        "r01",
+        "r39",
+        "r40",
+        "r43",
+        "r52"
+      ],
+      "given": "A connector uses no SDK; a registered known-parent candidate fails parsing.",
+      "when": "Retain the candidate and original obligation, emit a correctly bound cause-specific gap and durably admit the matching debt.",
+      "then": {
+        "outcome": {
+          "p": "gap"
+        },
+        "debt": "admitted",
+        "receipt": "none",
+        "effect": "not_attempted",
+        "note": "The candidate remains registered and gapped. Without admitted debt it remains unsettled/unaccounted as in v44; any checkpoint still needs final accounting and eligible parent state."
+      }
+    },
+    {
+      "id": "v80",
+      "title": "Effect with an unprovable affected set",
+      "from_case": "Child moves P1 to P2, changes relationship membership or crosses a time-scope boundary",
+      "requirements": [
+        "r25",
+        "r76"
+      ],
+      "given": "An effect changes certified materialization but the exact affected parent/relationship/scope set cannot be proved.",
+      "when": "Admit the valid effect and conservatively invalidate every receipt and dependent state for the bound detail stream/source account.",
+      "then": {
+        "effect": "admitted",
+        "receipt": "invalidated",
+        "note": "No potentially affected certification survives merely because the precise membership set is unknown; broader invalidation may extend to the entire stream/account set."
       }
     }
   ]
