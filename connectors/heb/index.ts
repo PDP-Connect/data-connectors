@@ -98,6 +98,11 @@ export const MAX_LIST_PAGES = 50;
 // Bounded per-run detail budget (design doc "Collector plan" §3): blast-radius
 // stop, not an attempt at exhaustive backfill in one run.
 const MAX_DETAIL_ATTEMPTS_PER_RUN = 100;
+// H-E-B's detail page carries no completeness signal, so a hydrated order stays
+// a pending gap and the old-gap pass retries it on every run. Left unbounded, a
+// backlog of 100 such gaps spends the whole budget before the scan for new
+// orders starts. A run that also scans forward lets the pass spend half.
+const MAX_RECOVERY_ATTEMPTS_PER_RUN = MAX_DETAIL_ATTEMPTS_PER_RUN / 2;
 // ~60 days overlap re-scans recently-seen orders to catch status transitions
 // (design doc "Collector plan" §4).
 const CHECKPOINT_OVERLAP_DAYS = 60;
@@ -1642,6 +1647,14 @@ export async function resolveOrderDetail(
 ): Promise<DetailFetchResult> {
 	if (flags.sessionRepairRequired) {
 		if (flags.isManualRun && !flags.manualRepairAttempted && repairDeps) {
+			// Do not open repair when no detail attempt remains for its retry.
+			if (flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN) {
+				return {
+					failureKind: "deferred_budget",
+					reason: reasonForDetailFailure("deferred_budget"),
+					status: "deferred",
+				};
+			}
 			const recovered = await attemptManualSessionRepair(
 				page,
 				repairDeps,
@@ -1736,6 +1749,7 @@ async function recoverPendingOrderItemDetailGapPage(
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
 	gaps: readonly BrowserCollectContext["detailGaps"][number][],
+	attemptCeiling: number,
 ): Promise<{ recovered: number; reDeferred: number; skipped: number }> {
 	let recovered = 0;
 	let reDeferred = 0;
@@ -1746,6 +1760,13 @@ async function recoverPendingOrderItemDetailGapPage(
 			if (gap.stream === "order_items" && gap.status === "pending") {
 				skipped += 1;
 			}
+			continue;
+		}
+		if (flags.detailAttempts >= attemptCeiling) {
+			// Past this run's share of the budget. The host takes back a lease the
+			// run did not settle without counting an attempt, and serves the gaps
+			// with the fewest attempts first, so these come first next run.
+			skipped += 1;
 			continue;
 		}
 		const result = await resolveOrderDetail(page, flags, locator.orderId, {
@@ -1840,6 +1861,7 @@ export async function recoverPendingOrderItemDetailGaps(
 	page: Page,
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
+	attemptCeiling = MAX_DETAIL_ATTEMPTS_PER_RUN,
 ): Promise<{ recovered: number; stoppedWithPending: boolean }> {
 	let recovered = 0;
 	let gaps = deps.detailGaps;
@@ -1849,6 +1871,7 @@ export async function recoverPendingOrderItemDetailGaps(
 			deps,
 			flags,
 			gaps,
+			attemptCeiling,
 		);
 		recovered += result.recovered;
 		if (!deps.requestDetailGapPage) {
@@ -1904,7 +1927,18 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 			suppressForward,
 		};
 	}
-	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
+	// A recovery-only run has no forward scan to leave budget for.
+	const recovery = await recoverPendingOrderItemDetailGaps(
+		page,
+		deps,
+		flags,
+		options.recoveryOnly === true
+			? MAX_DETAIL_ATTEMPTS_PER_RUN
+			: Math.min(
+					MAX_DETAIL_ATTEMPTS_PER_RUN,
+					flags.detailAttempts + MAX_RECOVERY_ATTEMPTS_PER_RUN,
+				),
+	);
 	const detailBudgetExhausted =
 		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN;
 	const suppressForward =
