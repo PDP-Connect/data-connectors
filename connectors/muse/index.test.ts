@@ -190,7 +190,7 @@ function harness(options: HarnessOptions = {}) {
 	return { ctx, emitted, failures, of, records, retryable, states };
 }
 
-/** Separate-view reads preserve data, but cannot certify the chat inventory. */
+/** A chat list that never settles keeps its records but certifies nothing. */
 function assertIncompleteChats(h: ReturnType<typeof harness>) {
 	const streams = ["conversations", "messages"].filter((s) =>
 		h.ctx.requested.has(s),
@@ -201,14 +201,67 @@ function assertIncompleteChats(h: ReturnType<typeof harness>) {
 	);
 	for (const failure of h.failures) {
 		assert.match(failure.message, /chat inventory is incomplete/);
-		assert.equal(h.retryable(failure.stream), false);
+		// A moving list may settle on a later run.
+		assert.equal(h.retryable(failure.stream), true);
 	}
 	assert.equal(h.states("conversations").length, 0);
 	assert.equal(h.states("messages").length, 0);
 	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
 }
 
-test("unproven chat inventory preserves records, parent ordering and healthy activity/goal progress", async () => {
+/**
+ * A bracketed chat list that held still: full conversations coverage over
+ * `considered` chats, then the one conversations STATE after every chat
+ * record, message and messages coverage. No chat stream fails.
+ */
+function assertCompleteChats(
+	h: ReturnType<typeof harness>,
+	considered: number,
+): Json {
+	assert.deepEqual(
+		h.failures.filter((f) => ["conversations", "messages"].includes(f.stream)),
+		[],
+	);
+	const inventory = h.of("DETAIL_COVERAGE", "conversations");
+	assert.equal(inventory.length, 1);
+	assert.equal(inventory[0]?.m.considered, considered);
+	assert.equal(inventory[0]?.m.covered, considered);
+	const state = h.of("STATE", "conversations");
+	assert.equal(state.length, 1);
+	const stateIndex = state[0]?.index ?? -1;
+	const before = [
+		...h.of("RECORD", "conversations"),
+		...h.of("RECORD", "messages"),
+		...h.of("DETAIL_COVERAGE", "messages"),
+		...inventory,
+	];
+	assert.ok(before.every((x) => x.index < stateIndex));
+	assert.equal(h.states("messages").length, 0);
+	const cursor = state[0]?.m.cursor as Json;
+	assert.equal(cursor.version, 2);
+	return cursor.chats as Json;
+}
+
+/**
+ * sessions.list for a list that never settles: every active read lists a
+ * chat the previous one did not (a new chat each time), so no two
+ * consecutive (active, archived) pairs agree.
+ */
+function movingSessions(): (p: Json) => unknown {
+	const [main, side] = SESSIONS.sessions as Json[];
+	let reads = 0;
+	return (p) => {
+		if (p.view === "archived") return { sessions: [] };
+		reads += 1;
+		const fresh = {
+			...side,
+			session_id: `33333333-3333-4333-8333-${String(reads).padStart(12, "0")}`,
+		};
+		return { sessions: [main, side, fresh] };
+	};
+}
+
+test("a stable chat inventory completes with records, parent ordering and healthy activity/goal progress", async () => {
 	const { gateway } = fakeGateway();
 	const h = harness({
 		streams: ["conversations", "messages", "activities", "goals"],
@@ -218,7 +271,7 @@ test("unproven chat inventory preserves records, parent ordering and healthy act
 		progress.push(message);
 	};
 	await collectMuseWith(h.ctx, gateway);
-	assertIncompleteChats(h);
+	assertCompleteChats(h, SESSION_IDS.length);
 	assert.deepEqual(
 		h.records("conversations").map((r) => r.id),
 		SESSION_IDS,
@@ -249,7 +302,7 @@ test("unproven chat inventory preserves records, parent ordering and healthy act
 	assert.ok(progress.includes("Reading goals"));
 });
 
-test("even empty chat views cannot certify inventory or advance existing chat state", async () => {
+test("empty chat views, read stably, complete and drop chats no longer listed", async () => {
 	const { gateway } = fakeGateway({
 		"sessions.list": () => ({ sessions: [], has_more: false }),
 	});
@@ -262,15 +315,30 @@ test("even empty chat views cannot certify inventory or advance existing chat st
 		},
 	};
 	const h = harness({ streams: ["conversations", "messages"], state });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(assertCompleteChats(h, 0), {});
+	assert.equal(h.of("RECORD").length, 0);
+});
+
+test("empty chat views that keep changing never advance existing chat state", async () => {
+	const { gateway } = fakeGateway({ "sessions.list": movingSessions() });
+	const state = {
+		conversations: {
+			version: 2,
+			chats: {
+				[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 31 },
+			},
+		},
+	};
+	const h = harness({ streams: ["conversations"], state });
 	const before = structuredClone(state);
 	await collectMuseWith(h.ctx, gateway);
 	assertIncompleteChats(h);
-	assert.equal(h.of("RECORD").length, 0);
 	assert.deepEqual(h.ctx.state, before);
 });
 
 test("standalone collection rejects incomplete inventory after importing healthy siblings", async () => {
-	const { gateway } = fakeGateway();
+	const { gateway } = fakeGateway({ "sessions.list": movingSessions() });
 	const h = harness({
 		streams: ["conversations", "messages", "activities", "goals"],
 	});
@@ -279,8 +347,8 @@ test("standalone collection rejects incomplete inventory after importing healthy
 		collectMuseWith(h.ctx, gateway),
 		/chat inventory is incomplete/,
 	);
-	assert.equal(h.records("conversations").length, 2);
-	assert.equal(h.records("messages").length, 6);
+	assert.equal(h.records("conversations").length, 3);
+	assert.equal(h.records("messages").length, 9);
 	assert.equal(h.records("activities").length, 3);
 	assert.equal(h.records("goals").length, 1);
 	assert.equal(h.states("conversations").length, 0);
@@ -327,7 +395,7 @@ test("a full run reads every stream through read methods only and follows the pr
 	const h = harness();
 	await collectMuseWith(h.ctx, gateway);
 
-	assertIncompleteChats(h);
+	const marks = assertCompleteChats(h, SESSION_IDS.length);
 	for (const c of calls) {
 		assert.ok(READ_METHODS.has(c.method), c.method);
 		if (c.method === "fs.raw")
@@ -401,9 +469,8 @@ test("a full run reads every stream through read methods only and follows the pr
 		);
 		assert.ok((state[0]?.index ?? -1) > lastRecord, stream);
 	}
-	assert.equal(h.of("STATE", "conversations").length, 0);
-	assert.equal(h.states("conversations").length, 0);
-	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
+	// Every chat read completely gets a mark for the next run.
+	assert.deepEqual(Object.keys(marks).sort(), [...SESSION_IDS].sort());
 	assert.deepEqual(h.states("activities")[0], {
 		version: 1,
 		newest_timestamp: "2026-01-15T10:14:38.000Z",
@@ -467,8 +534,7 @@ test("chat.history pages back with before_seq until has_more is false", async ()
 	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
 	assert.deepEqual(cov?.hydrated_keys, [SIDE_CHAT, MAIN_CHAT]);
 	assert.equal(h.of("DETAIL_GAP").length, 0);
-	assert.equal(h.states("conversations").length, 0);
-	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
+	assertCompleteChats(h, SESSION_IDS.length);
 });
 
 test("a chat.history page that repeats is a DETAIL_GAP, not a complete chat", async () => {
@@ -501,8 +567,9 @@ test("a chat.history page that repeats is a DETAIL_GAP, not a complete chat", as
 	assert.deepEqual(cov.m.gap_keys, [SIDE_CHAT]);
 	assert.deepEqual(cov.m.hydrated_keys, [MAIN_CHAT]);
 	// The gapped chat gets no mark, so the next run reads it again.
-	assert.equal(h.states("conversations").length, 0);
-	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
+	assert.deepEqual(Object.keys(assertCompleteChats(h, SESSION_IDS.length)), [
+		MAIN_CHAT,
+	]);
 });
 
 test("a chat.history cursor that does not move back is a DETAIL_GAP", async () => {
@@ -1335,19 +1402,19 @@ test("round 6 #1: sessions.list is read page by page until an answer has no next
 	});
 	const h = harness({ streams: ["conversations", "messages"] });
 	await collectMuseWith(h.ctx, gateway);
-	assert.deepEqual(params, [
+	// Each view walked to its end, twice: the bracket that proves the list.
+	const pair = [
 		{ limit: 100 },
 		{ limit: 100, cursor: "c1" },
 		{ limit: 100, view: "archived" },
-	]);
-	assertIncompleteChats(h);
+	];
+	assert.deepEqual(params, [...pair, ...pair]);
+	assertCompleteChats(h, SESSION_IDS.length);
 	// Deduplicated by session_id.
 	assert.deepEqual(
 		h.records("conversations").map((r) => r.id),
 		SESSION_IDS,
 	);
-	assert.equal(h.states("conversations").length, 0);
-	assert.equal(h.of("DETAIL_COVERAGE", "conversations").length, 0);
 });
 
 test("first sync: an unknown chat moving from archived to active cannot disappear into full success", async () => {
@@ -1477,6 +1544,139 @@ test("first sync: an unknown chat moving from archived to active cannot disappea
 	);
 });
 
+/** A synthetic archived chat (no real data), shaped like the side chat. */
+function archivedChat(n: number): Json {
+	const [, side] = SESSIONS.sessions as Json[];
+	return {
+		...side,
+		session_id: `44444444-4444-4444-8444-${String(n).padStart(12, "0")}`,
+		title: `Archived ${n}`,
+		archived: true,
+	};
+}
+
+test("chat inventory bracket: single-page views are read active, archived, active, archived and checkpoint", async () => {
+	const archived = archivedChat(1);
+	const { gateway, calls } = fakeGateway({
+		"sessions.list": (p) =>
+			p.view === "archived" ? { sessions: [archived] } : SESSIONS,
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.deepEqual(
+		calls.filter((c) => c.method === "sessions.list").map((c) => c.params),
+		[
+			{ limit: 100 },
+			{ limit: 100, view: "archived" },
+			{ limit: 100 },
+			{ limit: 100, view: "archived" },
+		],
+	);
+	const ids = [...SESSION_IDS, String(archived.session_id)];
+	const marks = assertCompleteChats(h, ids.length);
+	assert.deepEqual(Object.keys(marks).sort(), [...ids].sort());
+	assert.deepEqual(
+		h.records("conversations").map((r) => [r.id, r.archived]),
+		[
+			[MAIN_CHAT, false],
+			[SIDE_CHAT, false],
+			[archived.session_id, true],
+		],
+	);
+	assert.equal(h.records("messages").length, 9);
+});
+
+test("chat inventory bracket: a stable multi-page bracket completes and its checkpoint drives the next run", async () => {
+	const [main, side] = SESSIONS.sessions as Json[];
+	const a1 = archivedChat(1);
+	const a2 = archivedChat(2);
+	const listing = (p: Json) => {
+		if (p.view === "archived")
+			return p.cursor === undefined
+				? { sessions: [a1], next_cursor: "r1" }
+				: { sessions: [a2], next_cursor: null };
+		return p.cursor === undefined
+			? { sessions: [main], next_cursor: "c1" }
+			: { sessions: [side], has_more: false };
+	};
+	const first = fakeGateway({ "sessions.list": listing });
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, first.gateway);
+	assert.equal(
+		first.calls.filter((c) => c.method === "sessions.list").length,
+		8,
+	);
+	const ids = [MAIN_CHAT, SIDE_CHAT, a1.session_id, a2.session_id].map(String);
+	const marks = assertCompleteChats(h, ids.length);
+	assert.deepEqual(Object.keys(marks).sort(), [...ids].sort());
+
+	// The checkpoint is usable: nothing changed, so the next run only checks
+	// revisions and reads no transcript in full.
+	const next = fakeGateway({ "sessions.list": listing });
+	const h2 = harness({
+		streams: ["conversations", "messages"],
+		state: { conversations: h.states("conversations")[0] },
+	});
+	await collectMuseWith(h2.ctx, next.gateway);
+	assert.deepEqual(
+		next.calls
+			.filter((c) => c.method === "chat.history")
+			.map((c) => c.params.limit),
+		[1, 1, 1, 1],
+	);
+	assert.deepEqual(assertCompleteChats(h2, ids.length), marks);
+});
+
+test("chat inventory bracket: a chat moving between views during the window triggers a retry, then completes", async () => {
+	const [main, side] = SESSIONS.sessions as Json[];
+	assert.ok(main && side);
+	let sideArchived = true;
+	const views: string[] = [];
+	const { gateway } = fakeGateway({
+		"sessions.list": (p) => {
+			const archived = p.view === "archived";
+			views.push(archived ? "R" : "A");
+			const sessions = archived
+				? sideArchived
+					? [{ ...side, archived: true }]
+					: []
+				: sideArchived
+					? [main]
+					: [main, side];
+			// SIDE is unarchived right after the first archived read.
+			if (views.length === 2) sideArchived = false;
+			return { sessions };
+		},
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	// A1 R1 A2 R2 disagree (SIDE moved); A3 R3 agree with A2 R2.
+	assert.deepEqual(views, ["A", "R", "A", "R", "A", "R"]);
+	assertCompleteChats(h, SESSION_IDS.length);
+	assert.deepEqual(
+		h.records("conversations").map((r) => [r.id, r.archived]),
+		[
+			[MAIN_CHAT, false],
+			[SIDE_CHAT, false],
+		],
+	);
+});
+
+test("chat inventory bracket: a list that never settles keeps records but fails both chat streams without a checkpoint", async () => {
+	const { gateway, calls } = fakeGateway({
+		"sessions.list": movingSessions(),
+	});
+	const h = harness({ streams: ["conversations", "messages", "goals"] });
+	await collectMuseWith(h.ctx, gateway);
+	// One bracket plus three retries: five (active, archived) pairs.
+	assert.equal(calls.filter((c) => c.method === "sessions.list").length, 10);
+	assertIncompleteChats(h);
+	assert.equal(h.records("conversations").length, 3);
+	assert.equal(h.records("messages").length, 9);
+	// Healthy siblings still checkpoint.
+	assert.equal(h.states("goals").length, 1);
+});
+
 test("round 6 #1: a chat list walk that cannot reach its end is not checkpointed", async () => {
 	const [main, side] = SESSIONS.sessions as Json[];
 	for (const pages of [
@@ -1554,7 +1754,7 @@ test("round 7: a numeric page cursor is passed back as a number", async () => {
 	});
 	const h = harness({ streams: ["conversations", "goals"] });
 	await collectMuseWith(h.ctx, gateway);
-	assertIncompleteChats(h);
+	assertCompleteChats(h, SESSION_IDS.length);
 	assert.ok(params.some((p) => p.cursor === 100));
 	assert.ok(params.some((p) => p.cursor === 7));
 	assert.equal(
@@ -1659,7 +1859,11 @@ test("round 5 #2: a chat whose transcript revision changed under the same update
 	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.required_keys, [
 		MAIN_CHAT,
 	]);
-	assertIncompleteChats(h);
+	// SIDE keeps its mark; MAIN gets the new revision.
+	assert.deepEqual(assertCompleteChats(h, SESSION_IDS.length), {
+		[SIDE_CHAT]: marks[SIDE_CHAT],
+		[MAIN_CHAT]: { updated_at_ms: 1792612428000, transcript_revision: 32 },
+	});
 });
 
 test("round 5 #2: a chat with no known revision is always read again", async () => {
@@ -1695,7 +1899,7 @@ test("round 5 #2: a chat with no known revision is always read again", async () 
 	]);
 	assert.equal(calls.filter((c) => c.params.limit === 50).length, 2);
 	// Nothing to compare next time: no mark is kept.
-	assertIncompleteChats(h);
+	assert.deepEqual(assertCompleteChats(h, SESSION_IDS.length), {});
 });
 
 test("round 5 #2: a version 1 watermark cursor is not trusted", async () => {
@@ -1941,7 +2145,9 @@ test("finding 9: a rate limit or outage stops the chat walk instead of gapping e
 	assert.deepEqual(h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys, [
 		SIDE_CHAT,
 	]);
-	assertIncompleteChats(h);
+	assert.deepEqual(Object.keys(assertCompleteChats(h, SESSION_IDS.length)), [
+		MAIN_CHAT,
+	]);
 });
 
 test("finding 9: the page script keeps the gateway's status class", async () => {
@@ -2044,7 +2250,7 @@ test("round 6 #2: a continuation page without a revision is unknown, not a chang
 		h.of("DETAIL_COVERAGE", "messages")[0]?.m.gap_keys ?? [],
 		[],
 	);
-	assertIncompleteChats(h);
+	assertCompleteChats(h, SESSION_IDS.length);
 	// One first-page read at the end confirms the revision.
 	assert.equal(calls.at(-1)?.limit, 1);
 });
