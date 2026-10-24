@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { closeSync, openSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -171,6 +172,29 @@ describe("secret field classification", () => {
 	});
 });
 
+// `handleInteraction` reads `process.stdin.isTTY` asynchronously, so the
+// override has to outlive the await — restoring it synchronously in a
+// `finally` would put it back before the handler ever looks.
+async function withIsTTY<T>(
+	value: boolean | undefined,
+	body: () => Promise<T>,
+): Promise<T> {
+	const descriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+	Object.defineProperty(process.stdin, "isTTY", {
+		configurable: true,
+		value,
+	});
+	try {
+		return await body();
+	} finally {
+		if (descriptor) {
+			Object.defineProperty(process.stdin, "isTTY", descriptor);
+		} else {
+			delete (process.stdin as { isTTY?: boolean }).isTTY;
+		}
+	}
+}
+
 describe("handleInteraction operator instructions", () => {
 	function captureStderr(body: () => Promise<void>): Promise<string> {
 		const chunks: string[] = [];
@@ -187,29 +211,6 @@ describe("handleInteraction operator instructions", () => {
 				(process.stderr as { write: unknown }).write = original;
 				return chunks.join("");
 			});
-	}
-
-	// `handleInteraction` reads `process.stdin.isTTY` asynchronously, so the
-	// override has to outlive the await — restoring it synchronously in a
-	// `finally` would put it back before the handler ever looks.
-	async function withIsTTY<T>(
-		value: boolean | undefined,
-		body: () => Promise<T>,
-	): Promise<T> {
-		const descriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-		Object.defineProperty(process.stdin, "isTTY", {
-			configurable: true,
-			value,
-		});
-		try {
-			return await body();
-		} finally {
-			if (descriptor) {
-				Object.defineProperty(process.stdin, "isTTY", descriptor);
-			} else {
-				delete (process.stdin as { isTTY?: boolean }).isTTY;
-			}
-		}
 	}
 
 	test("a non-TTY run keeps the full file-drop instructions — it is the only way in", async () => {
@@ -332,6 +333,21 @@ describe("handleInteraction envelope shape", () => {
 		assert.equal(out.error?.code, "user_aborted");
 	});
 
+	test("a non-success response file drops its data from the envelope", async () => {
+		await Promise.all(
+			["failed", "cancelled", "timeout"].map(async (status) => {
+				const request_id = withFreshRequestId(`data_${status}`);
+				dropResponse(request_id, { status, data: { code: "123456" } });
+				const out = await handleInteraction(
+					{ kind: "otp", message: "code", request_id, timeout_seconds: 60 },
+					{ connectorName: "test" },
+				);
+				assert.notEqual(out.status, "success");
+				assert.equal(out.data, undefined, `${status} kept data`);
+			}),
+		);
+	});
+
 	test("preserves cancelled status when owner explicitly cancels", async () => {
 		const request_id = withFreshRequestId("cancel");
 		dropResponse(request_id, { status: "cancelled" });
@@ -443,5 +459,163 @@ describe("respondViaTerminal manual_action", () => {
 			io,
 		);
 		assert.equal(out, null);
+	});
+});
+
+// These run the handler in a child process because the defect is the process
+// itself staying alive: the losing channel of the terminal/file-drop race kept
+// a timer or a raw-mode stdin listener open, so scenario-record printed its
+// summary and then hung until the 30-minute interaction timeout.
+describe("handleInteraction file drop", () => {
+	test("a response file still being written is read once complete, not lost", async () => {
+		const request_id = withFreshRequestId("partial");
+		const path = join(tmpdir(), `pdpp-interaction-${request_id}.response.json`);
+		const body = JSON.stringify({
+			status: "success",
+			data: { code: "112233" },
+		});
+		const fd = openSync(path, "w");
+		writeSync(fd, body.slice(0, 10));
+		// The poll runs every 1.5 s: let it see the partial file first.
+		const finish = setTimeout(() => {
+			writeSync(fd, body.slice(10));
+			closeSync(fd);
+		}, 2000);
+		try {
+			const out = await withIsTTY(undefined, () =>
+				handleInteraction(
+					{ kind: "otp", message: "code", request_id, timeout_seconds: 60 },
+					{ connectorName: "test" },
+				),
+			);
+			assert.equal(out.status, "success");
+			assert.deepEqual(out.data, { code: "112233" });
+		} finally {
+			clearTimeout(finish);
+		}
+	});
+
+	test("a terminal that cannot answer leaves the file drop to answer", async () => {
+		// `credentials` without schema properties has no terminal prompt, so
+		// the terminal side resolves with no answer straight away.
+		const request_id = withFreshRequestId("noprompt");
+		setTimeout(
+			() => dropResponse(request_id, { status: "success", data: { u: "x" } }),
+			200,
+		);
+		const out = await withIsTTY(true, () =>
+			handleInteraction(
+				{
+					kind: "credentials",
+					message: "sign in",
+					request_id,
+					timeout_seconds: 60,
+				},
+				{ connectorName: "test" },
+			),
+		);
+		assert.equal(out.status, "success");
+		assert.deepEqual(out.data, { u: "x" });
+	});
+});
+
+describe("handleInteraction releases the losing channel", () => {
+	const HANDLER_URL = new URL("./interaction-handler.ts", import.meta.url).href;
+
+	// The child fakes a raw-mode TTY on its piped stdin, starts an OTP
+	// interaction with a 60 s timeout, then either types the code (terminal
+	// wins) or drops a response file (file drop wins). It never ends stdin, so
+	// a listener left on it also keeps the child alive.
+	function runChild(winner: "terminal" | "file" | "keystrokes"): Promise<{
+		code: number | null;
+		elapsedMs: number;
+		stdout: string;
+	}> {
+		const request_id = withFreshRequestId(`release_${winner}`);
+		const code = [
+			`import { closeSync, openSync, writeFileSync, writeSync } from "node:fs";`,
+			`import { tmpdir } from "node:os";`,
+			`import { join } from "node:path";`,
+			`const rawModes = [];`,
+			`Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });`,
+			`process.stdin.setRawMode = (mode) => { rawModes.push(mode); return process.stdin; };`,
+			`const { handleInteraction } = await import(${JSON.stringify(HANDLER_URL)});`,
+			`const pending = handleInteraction({ kind: "otp", message: "code", request_id: ${JSON.stringify(request_id)}, timeout_seconds: 60 }, { connectorName: "test" });`,
+			`setTimeout(() => {`,
+			winner === "terminal"
+				? `  process.stdin.emit("data", Buffer.from("123456\\r"));`
+				: winner === "keystrokes"
+					? // "a", then "\u00e9" split across two chunks, then an emoji
+						// erased by Backspace, then "b" and Enter.
+						`  for (const c of [Buffer.from("a"), Buffer.from("\\u00e9").subarray(0, 1), Buffer.from("\\u00e9").subarray(1), Buffer.from("\\u{1F600}"), Buffer.from([0x7f]), Buffer.from("b\\r")]) process.stdin.emit("data", c);`
+					: `  writeFileSync(join(tmpdir(), "pdpp-interaction-${request_id}.response.json"), JSON.stringify({ status: "success", data: { code: "654321" } }));`,
+			`}, 200);`,
+			`const out = await pending;`,
+			`console.log(JSON.stringify({ status: out.status, code: out.data?.code, rawModes }));`,
+		].join("\n");
+		const started = Date.now();
+		return new Promise((resolve, reject) => {
+			const child = spawn(
+				process.execPath,
+				["--import", "tsx", "--input-type=module", "-e", code],
+				{ stdio: ["pipe", "pipe", "ignore"] },
+			);
+			let stdout = "";
+			child.stdout.on("data", (chunk: Buffer) => {
+				stdout += chunk.toString("utf8");
+			});
+			const killer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+			child.on("error", reject);
+			child.on("exit", (exitCode) => {
+				clearTimeout(killer);
+				resolve({ code: exitCode, elapsedMs: Date.now() - started, stdout });
+			});
+		});
+	}
+
+	// The prompt itself also writes to stdout; the result is the last line.
+	function lastJsonLine(stdout: string) {
+		return JSON.parse(stdout.trim().split("\n").at(-1) ?? "");
+	}
+
+	test("a typed or pasted terminal answer lets the process exit", async () => {
+		const result = await runChild("terminal");
+		assert.equal(
+			result.code,
+			0,
+			`child did not exit on its own: ${result.stdout}`,
+		);
+		assert.ok(result.elapsedMs < 15_000, `child lived ${result.elapsedMs} ms`);
+		const out = lastJsonLine(result.stdout);
+		// The code and Enter arrive in one chunk, as a paste does.
+		assert.equal(out.status, "success");
+		assert.equal(out.code, "123456");
+		assert.deepEqual(out.rawModes, [true, false]);
+	});
+
+	test("masked input keeps split multi-byte characters and erases whole characters", async () => {
+		const result = await runChild("keystrokes");
+		assert.equal(
+			result.code,
+			0,
+			`child did not exit on its own: ${result.stdout}`,
+		);
+		const out = lastJsonLine(result.stdout);
+		assert.equal(out.status, "success");
+		assert.equal(out.code, "a\u00e9b");
+	});
+
+	test("a file drop that wins restores the terminal and lets the process exit", async () => {
+		const result = await runChild("file");
+		assert.equal(
+			result.code,
+			0,
+			`child did not exit on its own: ${result.stdout}`,
+		);
+		assert.ok(result.elapsedMs < 15_000, `child lived ${result.elapsedMs} ms`);
+		const out = lastJsonLine(result.stdout);
+		assert.equal(out.status, "success");
+		assert.equal(out.code, "654321");
+		assert.deepEqual(out.rawModes, [true, false]);
 	});
 });
