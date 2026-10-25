@@ -23,7 +23,10 @@
  * is read as UTC. Any other shape is refused rather than guessed at.
  */
 
-import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
+import {
+	safeTextPreview,
+	stripForbiddenControlChars,
+} from "@pdpp/connector-protocol/safe-text-preview";
 import type {
 	Citation,
 	ConversationRecord,
@@ -101,8 +104,9 @@ export type ContentRead =
 	| { readonly ok: false; readonly reason: string };
 
 /**
- * A question or answer body. Absent or empty is `text: null`; a body that is
- * not a string or fails the PDPP safe-text invariant is `ok: false`, so the
+ * A question or answer body. Absent or empty is `text: null`; forbidden
+ * control characters are stripped; a body that is not a string or still
+ * fails the PDPP safe-text invariant is `ok: false`, so the
  * caller can account for it rather than emit a record with its content
  * silently dropped.
  */
@@ -113,7 +117,13 @@ export function readContent(value: unknown): ContentRead {
 	if (typeof value !== "string") {
 		return { ok: false, reason: "body is not a string" };
 	}
-	const preview = safeTextPreview(value, CONTENT_MAX_CHARS);
+	// C0/C1 control characters carry no meaning in a question or an answer;
+	// they are dropped so one stray byte does not make a whole entry (and its
+	// thread) unreadable. Anything still unsafe after that stays unreadable.
+	const preview = safeTextPreview(
+		stripForbiddenControlChars(value),
+		CONTENT_MAX_CHARS,
+	);
 	if (preview.preview === null) {
 		return { ok: false, reason: preview.reason ?? "body is not safe text" };
 	}

@@ -241,7 +241,7 @@ test("an answer still being written is incomplete, not a record", () => {
 	assert.deepEqual(read, { kind: "incomplete", id: "e1" });
 });
 
-test("an unsafe answer is unreadable, never stored as null or as a partial join", () => {
+test("an unreadable answer is never stored as null or as a partial join", () => {
 	const unsafe = entryMessages(
 		{
 			uuid: "e1",
@@ -250,7 +250,7 @@ test("an unsafe answer is unreadable, never stored as null or as a partial join"
 			blocks: [
 				{
 					intended_usage: "ask_text",
-					markdown_block: { answer: "bad\u0000text" },
+					markdown_block: { answer: 42 },
 				},
 				{
 					intended_usage: "ask_text_0_markdown",
@@ -266,8 +266,39 @@ test("an unsafe answer is unreadable, never stored as null or as a partial join"
 		"c1",
 	);
 	assert.equal(missing.kind, "unreadable");
-	assert.equal(readContent("bad\u0000text").ok, false);
+	assert.equal(readContent(42).ok, false);
 	assert.deepEqual(readContent(""), { ok: true, text: null });
+});
+
+test("C0 and C1 control characters are stripped from question and answer bodies, not fatal", () => {
+	assert.deepEqual(readContent("bad\u0000te\u0085xt\u007f"), {
+		ok: true,
+		text: "badtext",
+	});
+	// Tab, newline and carriage return are text, not control noise.
+	assert.deepEqual(readContent("a\tb\nc\r\n"), {
+		ok: true,
+		text: "a\tb\nc\r\n",
+	});
+	const read = entryMessages(
+		{
+			uuid: "e3",
+			status: "COMPLETED",
+			query_str: "why\u0001?",
+			blocks: [
+				{
+					intended_usage: "ask_text",
+					markdown_block: { answer: "be\u009bcause" },
+				},
+			],
+		},
+		"c1",
+	);
+	assert.equal(read.kind, "ok");
+	if (read.kind === "ok") {
+		assert.equal(read.user.content, "why?");
+		assert.equal(read.assistant.content, "because");
+	}
 });
 
 test("answer sections with a hole are unreadable, never joined into a partial answer", () => {

@@ -151,31 +151,32 @@ export async function checkPerplexitySession(
 				if (cf !== undefined || doc?.title === "Just a moment...") {
 					return "challenge";
 				}
-				// Bounded: a stalled session check must not hold a handoff
-				// watcher or an end-of-list proof forever.
+				// Bounded, body included: a stalled session check must not hold
+				// a handoff watcher or an end-of-list proof forever, so the timer
+				// stays armed until the body has been read.
 				const controller = new AbortController();
 				const timer = setTimeout(() => controller.abort(), 15_000);
-				let response: Response;
+				let payload: unknown;
 				try {
-					response = await fetch("/api/auth/session", {
+					const response = await fetch("/api/auth/session", {
 						credentials: "include",
 						signal: controller.signal,
 					});
+					const type = response.headers.get("content-type") ?? "";
+					if (
+						response.headers.get("cf-mitigated") === "challenge" ||
+						(type.includes("text/html") &&
+							(response.status === 403 || response.status === 503))
+					) {
+						return "challenge";
+					}
+					if (!response.ok) {
+						return "unknown";
+					}
+					payload = await response.json();
 				} finally {
 					clearTimeout(timer);
 				}
-				const type = response.headers.get("content-type") ?? "";
-				if (
-					response.headers.get("cf-mitigated") === "challenge" ||
-					(type.includes("text/html") &&
-						(response.status === 403 || response.status === 503))
-				) {
-					return "challenge";
-				}
-				if (!response.ok) {
-					return "unknown";
-				}
-				const payload: unknown = await response.json();
 				if (
 					typeof payload !== "object" ||
 					payload === null ||
@@ -383,7 +384,11 @@ async function pageJson(
 
 /** Errors that stop the whole run rather than one thread. */
 function stopsTheRun(message: string): boolean {
-	return /perplexity_(?:auth_failed|challenge|internal_api_)/.test(message);
+	// A closed page or a destroyed execution context is the browser going
+	// away, not one thread failing: every later read would fail the same way.
+	return /perplexity_(?:auth_failed|challenge|internal_api_)|has been closed|Execution context was destroyed/.test(
+		message,
+	);
 }
 
 async function fetchListPage(
@@ -538,7 +543,10 @@ interface ListWalk {
  * is more is followed. A thread seen twice (the list moved under the walk)
  * is kept once.
  */
-async function walkList(ctx: BrowserCollectContext): Promise<ListWalk> {
+async function walkList(
+	ctx: BrowserCollectContext,
+	delay: (ms: number) => Promise<void>,
+): Promise<ListWalk> {
 	const threads: ListedThread[] = [];
 	const seen = new Set<string>();
 	let unreadable = 0;
@@ -571,11 +579,7 @@ async function walkList(ctx: BrowserCollectContext): Promise<ListWalk> {
 			// session that lapsed mid-walk may answer an empty list rather than
 			// a 401, and that must not read as "nothing more" (or as an empty
 			// library, checkpointed).
-			if (!(await probePerplexitySession(ctx.page))) {
-				throw new Error(
-					"perplexity_auth_failed: the list came back empty from a session that is not signed in",
-				);
-			}
+			await confirmSignedIn(ctx.page, delay);
 			return { threads, unreadable, pages: pageIndex + 1 };
 		}
 		if (!parsed.page.hasNextPage) {
@@ -583,6 +587,44 @@ async function walkList(ctx: BrowserCollectContext): Promise<ListWalk> {
 		}
 		offset += parsed.page.items.length;
 	}
+}
+
+/**
+ * The end-of-list session confirmation. Signed in proves the empty page;
+ * signed out fails the run (`perplexity_auth_failed`); a human check stops
+ * it as a challenge; an answer that says nothing is re-read in place, then
+ * stops the run retryably (`perplexity_interrupted`).
+ */
+async function confirmSignedIn(
+	page: BrowserCollectContext["page"],
+	delay: (ms: number) => Promise<void>,
+): Promise<void> {
+	let state = await checkPerplexitySession(page);
+	for (
+		let retry = 0;
+		(state === "unknown" || state === "off_origin") &&
+		retry < SESSION_CHECK_RETRIES;
+		retry += 1
+	) {
+		await delay(SESSION_RETRY_DELAY_MS);
+		state = await checkPerplexitySession(page);
+	}
+	if (state === "signed_in") {
+		return;
+	}
+	if (state === "signed_out") {
+		throw new Error(
+			"perplexity_auth_failed: the list came back empty from a session that is not signed in",
+		);
+	}
+	if (state === "challenge") {
+		throw new Error(
+			"perplexity_challenge: a human check answered the session check at the end of the list",
+		);
+	}
+	throw new Error(
+		"perplexity_interrupted: the session check at the end of the list had no answer",
+	);
 }
 
 /**
@@ -611,13 +653,14 @@ function walkSignature(walk: ListWalk): string {
  */
 async function stableList(
 	ctx: BrowserCollectContext,
+	delay: (ms: number) => Promise<void>,
 ): Promise<ListWalk & { readonly proven: boolean }> {
-	let walk = await walkList(ctx);
+	let walk = await walkList(ctx, delay);
 	if (walk.pages <= 1) {
 		return { ...walk, proven: true };
 	}
 	for (let attempt = 0; attempt < MAX_LIST_WALKS; attempt += 1) {
-		const again = await walkList(ctx);
+		const again = await walkList(ctx, delay);
 		if (walkSignature(again) === walkSignature(walk)) {
 			return { ...again, proven: true };
 		}
@@ -757,7 +800,16 @@ async function readThread(
 	};
 }
 
-function threadLocatorSlug(locator: unknown): string | null {
+/**
+ * What a gap's locator says about its thread: the slug to read it by, and
+ * the entry count the list reported when the gap was written. `expected` is
+ * `undefined` when the locator does not say (a gap written before the count
+ * was recorded): such a gap could be a short read, so recovery-only leaves
+ * it to the forward walk, which reads the thread against the live list.
+ */
+function threadLocator(
+	locator: unknown,
+): { slug: string; expected: number | null | undefined } | null {
 	if (
 		typeof locator !== "object" ||
 		locator === null ||
@@ -766,58 +818,108 @@ function threadLocatorSlug(locator: unknown): string | null {
 		return null;
 	}
 	const record = locator as Record<string, unknown>;
-	return record.kind === "perplexity.thread" &&
-		typeof record.slug === "string" &&
-		record.slug.length > 0
-		? record.slug
-		: null;
+	if (
+		record.kind !== "perplexity.thread" ||
+		typeof record.slug !== "string" ||
+		record.slug.length === 0
+	) {
+		return null;
+	}
+	const count = record.entry_count;
+	const expected =
+		count === null
+			? null
+			: typeof count === "number" && Number.isSafeInteger(count) && count >= 0
+				? count
+				: undefined;
+	return { slug: record.slug, expected };
+}
+
+type GapEntry = BrowserCollectContext["detailGaps"][number];
+
+/**
+ * Hand every pending `messages` gap to `handle` once: the first page, then
+ * further pages from the runtime until a page holds no gap not already
+ * handled (the runtime answers with the gaps still pending, so recovered
+ * ones drop out and one still pending comes back, already handled).
+ */
+async function forEachPendingGapPage(
+	ctx: BrowserCollectContext,
+	first: readonly GapEntry[],
+	handle: (fresh: readonly GapEntry[]) => Promise<void>,
+	seen: Set<string> = new Set(),
+): Promise<void> {
+	let page = first;
+	for (;;) {
+		const fresh = page.filter(
+			(gap) =>
+				gap.stream === "messages" &&
+				typeof gap.record_key === "string" &&
+				!seen.has(gap.gap_id),
+		);
+		for (const gap of fresh) {
+			seen.add(gap.gap_id);
+		}
+		if (fresh.length > 0) {
+			await handle(fresh);
+		} else if (page !== first) {
+			return;
+		}
+		if (typeof ctx.requestDetailGapPage !== "function") {
+			return;
+		}
+		page = await ctx.requestDetailGapPage({ streams: ["messages"] });
+	}
 }
 
 /**
  * A recovery-only run: every pending `messages` gap this connector wrote is
- * re-read from its locator, without walking the list. A thread that now reads
- * completely gets its messages and a DETAIL_GAP_RECOVERED for each of its
- * pending gaps; one that still fails stays pending. Nothing is checkpointed
- * here, so the next ordinary run still reads the thread in full against the
- * list's entry count before remembering it. Its conversation record was
- * emitted by the run that wrote the gap.
+ * re-read from its locator, page by page, without walking the list. A
+ * thread that now reads completely, and to at least the entry count its
+ * locator recorded, gets its messages and a DETAIL_GAP_RECOVERED for each of
+ * its pending gaps; one that still fails or is still short stays pending,
+ * and one whose locator has no count is left to the forward walk. Nothing is
+ * checkpointed here. Its conversation record was emitted by the run that
+ * wrote the gap.
  */
 async function recoverDetailGapsOnly(
 	ctx: BrowserCollectContext,
 	threadDelayMs: number,
 ): Promise<void> {
-	const gapsByThread = new Map<
-		string,
-		{ slug: string | null; gaps: PendingGap[] }
-	>();
-	for (const gap of startGaps(ctx)) {
-		if (gap.stream !== "messages" || typeof gap.record_key !== "string") {
-			continue;
+	await forEachPendingGapPage(ctx, startGaps(ctx), async (fresh) => {
+		const gapsByThread = new Map<
+			string,
+			{ locator: ReturnType<typeof threadLocator>; gaps: PendingGap[] }
+		>();
+		for (const gap of fresh) {
+			const key = gap.record_key as string;
+			const entry = gapsByThread.get(key) ?? { locator: null, gaps: [] };
+			entry.locator ??= threadLocator(gap.detail_locator);
+			entry.gaps.push(pendingGap(gap));
+			gapsByThread.set(key, entry);
 		}
-		const entry = gapsByThread.get(gap.record_key) ?? {
-			slug: null,
-			gaps: [],
-		};
-		entry.slug ??= threadLocatorSlug(gap.detail_locator);
-		entry.gaps.push(pendingGap(gap));
-		gapsByThread.set(gap.record_key, entry);
-	}
-	for (const [conversationId, { slug, gaps }] of gapsByThread) {
-		if (slug === null) {
-			continue;
+		for (const [conversationId, { locator, gaps }] of gapsByThread) {
+			if (locator === null || locator.expected === undefined) {
+				continue;
+			}
+			const read = await readThread(
+				ctx.page,
+				locator.slug,
+				conversationId,
+				locator.expected,
+			);
+			await politeDelay(threadDelayMs);
+			if (read.kind !== "read" || !read.complete) {
+				continue;
+			}
+			for (const message of read.messages) {
+				await ctx.emitRecord("messages", { ...message });
+			}
+			for (const gap of gaps) {
+				await ctx.emit(gapRecovered(gap, conversationId));
+			}
 		}
-		const read = await readThread(ctx.page, slug, conversationId, null);
-		await politeDelay(threadDelayMs);
-		if (read.kind !== "read" || !read.complete) {
-			continue;
-		}
-		for (const message of read.messages) {
-			await ctx.emitRecord("messages", { ...message });
-		}
-		for (const gap of gaps) {
-			await ctx.emit(gapRecovered(gap, conversationId));
-		}
-	}
+	});
 }
 
 /**
@@ -881,9 +983,14 @@ function pendingGapsByThread(
 
 export async function collectPerplexity(
 	ctx: BrowserCollectContext,
-	options: { threadDelayMs?: number } = {},
+	options: {
+		threadDelayMs?: number;
+		/** Test seam for the session re-reads; production uses the real clock. */
+		delay?: (ms: number) => Promise<void>;
+	} = {},
 ): Promise<void> {
 	const threadDelayMs = options.threadDelayMs ?? THREAD_DELAY_MS;
+	const delay = options.delay ?? realDelay;
 	const wantsConversations = ctx.requested.has("conversations");
 	const wantsMessages = ctx.requested.has("messages");
 	if (!(wantsConversations || wantsMessages)) {
@@ -912,7 +1019,7 @@ export async function collectPerplexity(
 		threads: listed,
 		unreadable: unreadableThreads,
 		proven,
-	} = await stableList(ctx);
+	} = await stableList(ctx, delay);
 	if (!proven) {
 		// The threads seen are real and are kept, but nothing is checkpointed
 		// and no thread is read in depth: both requested streams fail, and a
@@ -1049,18 +1156,25 @@ export async function collectPerplexity(
 			parentStream: "conversations",
 			recordKey: thread.id,
 			reason: "temporary_unavailable",
-			locator: { kind: "perplexity.thread", slug: thread.slug },
+			// The list's entry count travels with the gap, so a recovery-only
+			// run can hold the thread to it instead of accepting a short read.
+			locator: {
+				kind: "perplexity.thread",
+				slug: thread.slug,
+				entry_count: thread.entryCount,
+			},
 			error: why,
 		});
 		connectorDiagnostic("perplexity", why.class, { thread: thread.id });
 	}
 
+	// Each thread with an unreadable entry already carries its own DETAIL_GAP
+	// (and is not remembered), so it is re-read next run. Failing the whole
+	// stream as well would keep messages from ever checkpointing.
 	if (unreadableEntries > 0) {
-		await failStream(
-			ctx,
-			"messages",
-			`${String(unreadableEntries)} Perplexity answer(s) could not be read safely and were not stored. Everything else was collected normally.`,
-			false,
+		await ctx.progress(
+			`${String(unreadableEntries)} Perplexity answer(s) could not be read safely and were not stored; their threads will be read again next time`,
+			{ stream: "messages" },
 		);
 	}
 	if (incompleteEntries > 0) {
@@ -1073,6 +1187,29 @@ export async function collectPerplexity(
 		await ctx.progress(`Read ${String(messagesRead)} Perplexity message(s)`, {
 			stream: "messages",
 		});
+	}
+
+	// Pending gaps beyond START's first page. A thread read completely this
+	// run, or skipped as unchanged (it is remembered only after a complete
+	// read, which can postdate a gap the first page did not carry), has its
+	// gaps acknowledged. A thread gapped again this run already re-emitted its
+	// gap; one not listed this run is left pending.
+	const firstPage = startGaps(ctx);
+	if (wantsMessages && pending.size > 0) {
+		const settled = new Set([...hydrated, ...skippedUnchanged]);
+		await forEachPendingGapPage(
+			ctx,
+			[],
+			async (fresh) => {
+				for (const gap of fresh) {
+					const key = gap.record_key as string;
+					if (settled.has(key)) {
+						await ctx.emit(gapRecovered(pendingGap(gap), key));
+					}
+				}
+			},
+			new Set(firstPage.map((gap) => gap.gap_id)),
+		);
 	}
 
 	// 3. Prove the boundaries, then checkpoint. Reaching here means the list

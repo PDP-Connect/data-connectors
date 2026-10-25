@@ -958,7 +958,11 @@ test("a pending gap is recovered from its locator, and recovery-only stops there
 			status: "pending",
 			stream: "messages",
 			record_key: threadId(1),
-			detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+			detail_locator: {
+				kind: "perplexity.thread",
+				slug: threadSlug(1),
+				entry_count: 1,
+			},
 		};
 		Object.assign(h.ctx, {
 			recoveryOnly: true,
@@ -1001,7 +1005,11 @@ test("an ordinary run resolves a pending gap in the forward walk, parent first",
 					status: "pending",
 					stream: "messages",
 					record_key: threadId(1),
-					detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+					detail_locator: {
+						kind: "perplexity.thread",
+						slug: threadSlug(1),
+						entry_count: 1,
+					},
 				},
 			],
 		});
@@ -1038,7 +1046,11 @@ test("a pending gap whose thread is still short stays pending and is not remembe
 					status: "pending",
 					stream: "messages",
 					record_key: threadId(1),
-					detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+					detail_locator: {
+						kind: "perplexity.thread",
+						slug: threadSlug(1),
+						entry_count: 1,
+					},
 				},
 			],
 		});
@@ -1167,7 +1179,11 @@ test("a pending gap whose thread still fails is gapped again in this run, matchi
 					status: "pending",
 					stream: "messages",
 					record_key: threadId(1),
-					detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+					detail_locator: {
+						kind: "perplexity.thread",
+						slug: threadSlug(1),
+						entry_count: 1,
+					},
 				},
 			],
 		});
@@ -1658,7 +1674,11 @@ test("a leased pending gap is recovered with its lease echoed, in recovery-only 
 		status: "pending",
 		stream: "messages",
 		record_key: threadId(1),
-		detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+		detail_locator: {
+			kind: "perplexity.thread",
+			slug: threadSlug(1),
+			entry_count: 1,
+		},
 	};
 	for (const recoveryOnly of [true, false]) {
 		const library = perplexityLibrary({ total: 1 });
@@ -1726,4 +1746,283 @@ test("a walk that saw an unkeyed row and one that shifted past it do not agree",
 			false,
 		);
 	});
+});
+
+// ─── round 3 review ──────────────────────────────────────────────────────
+
+/** A thread whose entry pages a test scripts: `count` single-entry entries. */
+function entriesOf(
+	count: number,
+	answer: (k: number) => unknown = (k) => `Synthetic answer ${String(k)}.`,
+) {
+	return Array.from({ length: count }, (_, i) => ({
+		uuid: entryId(200 + i),
+		status: "COMPLETED",
+		context_uuid: threadId(1),
+		query_str: `Synthetic question ${String(i)}?`,
+		entry_created_datetime: entryStamp(i),
+		entry_updated_datetime: entryStamp(i),
+		display_model: "sonar",
+		blocks: [
+			{ intended_usage: "ask_text", markdown_block: { answer: answer(i) } },
+		],
+	}));
+}
+
+test("recovery-only holds a gapped thread to the entry count its locator recorded, and skips a locator without one", async () => {
+	const short = entriesOf(10);
+	const library = scriptedLibrary({
+		listPage: () => [],
+		thread: (_slug, offset) =>
+			Response.json({
+				entries: short.slice(offset, offset + 10),
+				has_next_page: false,
+			}),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		const locator = { kind: "perplexity.thread", slug: threadSlug(1) };
+		Object.assign(h.ctx, {
+			recoveryOnly: true,
+			detailGaps: [
+				{
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(1),
+					gap_id: "gap-short",
+					detail_locator: { ...locator, entry_count: 12 },
+				},
+				{
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(2),
+					gap_id: "gap-uncounted",
+					detail_locator: { ...locator, slug: threadSlug(2) },
+				},
+			],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(
+			h.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		assert.deepEqual(h.records, []);
+		const reads = library.requests
+			.filter((r) => r.method === "GET")
+			.map((r) => r.url.pathname);
+		assert.deepEqual(reads, [`/rest/thread/${threadSlug(1)}`]);
+	});
+});
+
+test("a forward gap records the list's entry count in its locator", async () => {
+	const library = perplexityLibrary({
+		total: 1,
+		failingSlugs: [threadSlug(1)],
+		failStatus: 404,
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const gap = h.messages.find(
+			(m) => (m as { type: string }).type === "DETAIL_GAP",
+		) as { detail_locator?: Record<string, unknown> } | undefined;
+		assert.deepEqual(gap?.detail_locator, {
+			kind: "perplexity.thread",
+			slug: threadSlug(1),
+			entry_count: 1,
+		});
+	});
+});
+
+test("an answer that cannot be read gaps its thread only; messages still checkpoint", async () => {
+	const library = scriptedLibrary({
+		listPage: (offset) => (offset === 0 ? listItems([1, 2], false) : []),
+		thread: (slug) =>
+			slug === threadSlug(1)
+				? Response.json({
+						entries: entriesOf(1, () => 42),
+						has_next_page: false,
+					})
+				: new Response(threadDetail(2), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					}),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, []);
+		assert.deepEqual(detailCoverage(h.messages, "messages").gap_keys, [
+			threadId(1),
+		]);
+		const synced = (
+			stateCursor(h.messages, "messages") as { synced: Record<string, unknown> }
+		).synced;
+		assert.deepEqual(Object.keys(synced), [threadId(2)]);
+	});
+});
+
+test("an empty list page whose session check meets a human check stops as a challenge, not a sign-in failure", async () => {
+	const library = scriptedLibrary({ listPage: () => [] });
+	const serve: typeof fetch = async (input, init) =>
+		new URL(String(input), HOME).pathname === "/api/auth/session"
+			? new Response("<html></html>", {
+					status: 403,
+					headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
+				})
+			: library.serve(input, init);
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0, delay: async () => {} }),
+			/^Error: perplexity_challenge/,
+		);
+	});
+});
+
+test("an empty list page whose session check has no answer is re-read, then stops retryably", async () => {
+	let checks = 0;
+	const library = scriptedLibrary({ listPage: () => [] });
+	const serve: typeof fetch = async (input, init) => {
+		if (new URL(String(input), HOME).pathname === "/api/auth/session") {
+			checks += 1;
+			return new Response("{}", {
+				status: 502,
+				headers: { "content-type": "application/json" },
+			});
+		}
+		return library.serve(input, init);
+	};
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0, delay: async () => {} }),
+			/perplexity_interrupted/,
+		);
+	});
+	assert.equal(checks, 3);
+});
+
+test("a session check whose body stalls is abandoned by its own timer", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let aborted = false;
+	const pending = withBrowser(
+		async (_input, init) => {
+			const signal = init?.signal ?? undefined;
+			const body = new ReadableStream({
+				start(controller) {
+					signal?.addEventListener("abort", () => {
+						aborted = true;
+						controller.error(new DOMException("aborted", "AbortError"));
+					});
+				},
+			});
+			return new Response(body, {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		},
+		() => checkPerplexitySession(page()),
+	);
+	for (let i = 0; i < 10 && !aborted; i += 1) {
+		await new Promise((resolve) => setImmediate(resolve));
+		t.mock.timers.tick(15_000);
+	}
+	assert.equal(await pending, "unknown");
+	assert.equal(aborted, true);
+});
+
+test("pending gaps beyond START's first page are paged and acknowledged for threads read this run", async () => {
+	const library = perplexityLibrary({ total: 2 });
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		const gap = (n: number, id: string) => ({
+			status: "pending",
+			stream: "messages",
+			record_key: threadId(n),
+			gap_id: id,
+			detail_locator: {
+				kind: "perplexity.thread",
+				slug: threadSlug(n),
+				entry_count: 1,
+			},
+		});
+		const pages = [[gap(1, "gap-1"), gap(2, "gap-2")], [gap(2, "gap-2")]];
+		let requests = 0;
+		Object.assign(h.ctx, {
+			detailGaps: [gap(1, "gap-1")],
+			requestDetailGapPage: async () => pages[requests++] ?? [],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const recovered = h.messages
+			.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+			.map((m) => (m as { gap_id?: string }).gap_id);
+		assert.deepEqual(recovered, ["gap-1", "gap-2"]);
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		let served = false;
+		Object.assign(h.ctx, {
+			recoveryOnly: true,
+			detailGaps: [],
+			requestDetailGapPage: async () => {
+				if (served) return [];
+				served = true;
+				return [
+					{
+						status: "pending",
+						stream: "messages",
+						record_key: threadId(2),
+						gap_id: "gap-late",
+						detail_locator: {
+							kind: "perplexity.thread",
+							slug: threadSlug(2),
+							entry_count: 1,
+						},
+					},
+				];
+			},
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			h.messages
+				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+				.map((m) => (m as { gap_id?: string }).gap_id),
+			["gap-late"],
+		);
+	});
+});
+
+test("a closed page or a destroyed context stops the run instead of gapping every thread", async () => {
+	for (const failure of [
+		"page.evaluate: Target page, context or browser has been closed",
+		"page.evaluate: Execution context was destroyed, most likely because of a navigation",
+	]) {
+		const library = perplexityLibrary({ total: 3 });
+		const base = page();
+		let lists = 0;
+		const closing = Object.assign(Object.create(base) as Page, {
+			evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => {
+				const isThread =
+					typeof arg === "object" &&
+					arg !== null &&
+					(arg as { method?: string }).method === "GET";
+				if (isThread) throw new Error(failure);
+				lists += 1;
+				return base.evaluate(fn as never, arg as never);
+			},
+		});
+		await withBrowser(library.serve, async () => {
+			const h = harness(ALL_STREAMS, closing);
+			await assert.rejects(
+				collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+				(error: unknown) => error instanceof Error && error.message === failure,
+			);
+			assert.equal(
+				h.messages.some((m) => (m as { type: string }).type === "DETAIL_GAP"),
+				false,
+			);
+		});
+		assert.ok(lists > 0);
+	}
 });
