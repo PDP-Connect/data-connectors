@@ -589,7 +589,13 @@ export async function ensureCharacterAiSession(
 			connectorDiagnostic("character_ai", "sign_in_interrupted", { code });
 			throw new Error(INTERRUPTED);
 		}
-		throw error;
+		// Anything else the handoff threw still leaves the run without a
+		// session: stop it under a bare code rather than a free-form message.
+		connectorDiagnostic("character_ai", "sign_in_handoff_failed", {
+			code,
+			name: error instanceof Error ? error.name : typeof error,
+		});
+		throw new Error(INTERRUPTED);
 	}
 	if (!ready) {
 		connectorDiagnostic("character_ai", "sign_in_not_completed", { state });
@@ -758,7 +764,10 @@ async function fetchChatDetail(
 	try {
 		return {
 			ok: true,
-			chat: parseChatDetail(await neoGetJson(page, `/chat/${chatId}/`, {})),
+			chat: parseChatDetail(
+				await neoGetJson(page, `/chat/${chatId}/`, {}),
+				chatId,
+			),
 		};
 	} catch (error) {
 		if (error instanceof NeoRequestError && error.kind === "not_found") {
@@ -789,17 +798,30 @@ function startGaps(ctx: BrowserCollectContext): readonly GapEntry[] {
 	return Array.isArray(gaps) ? (gaps as GapEntry[]) : [];
 }
 
-/** The chat a `messages` gap of this connector is about, or null for any other gap. */
+/**
+ * The chat a `messages` gap of this connector is about, or null for any
+ * other gap. The record key is authoritative; a gap whose locator names a
+ * different chat is not this connector's to read or recover.
+ */
 function gapChatId(gap: GapEntry): string | null {
 	if (gap.stream !== "messages") {
 		return null;
 	}
-	const fromLocator = (gap.detail_locator as { chat_id?: unknown } | undefined)
-		?.chat_id;
-	const chatId = typeof fromLocator === "string" ? fromLocator : gap.record_key;
-	return typeof chatId === "string" && uuidSchema.safeParse(chatId).success
-		? chatId
-		: null;
+	const chatId = gap.record_key;
+	if (typeof chatId !== "string" || !uuidSchema.safeParse(chatId).success) {
+		return null;
+	}
+	const locator = gap.detail_locator as
+		| { kind?: unknown; chat_id?: unknown }
+		| undefined;
+	if (
+		locator !== undefined &&
+		locator !== null &&
+		(locator.kind !== "character_ai.chat_turns" || locator.chat_id !== chatId)
+	) {
+		return null;
+	}
+	return chatId;
 }
 
 function pendingGap(gap: GapEntry): PendingGap {

@@ -1879,3 +1879,65 @@ test("HTTP 408 is a transient answer the runtime retries", async () => {
 		return true;
 	});
 });
+
+test("a gap whose locator names another chat is neither read nor recovered", async () => {
+	const [first, second] = CHAT_IDS;
+	assert.ok(first && second);
+	const seen: Seen[] = [];
+	const h = harness(fakePage(defaultRoute(), seen), {
+		detailGaps: [
+			{
+				...gap("g8", first, "l8"),
+				detail_locator: { kind: "character_ai.chat_turns", chat_id: second },
+			},
+		],
+		recoveryOnly: true,
+	});
+	await collectCharacterAi(h.ctx);
+	assert.deepEqual(seen, []);
+	assert.equal(ofType(h.messages, "DETAIL_GAP_RECOVERED").length, 0);
+});
+
+test("a chat detail answer about another chat is not taken for the requested one", async () => {
+	const [first, second] = CHAT_IDS;
+	assert.ok(first && second);
+	const h = harness(
+		fakePage(
+			defaultRoute({
+				[`chat:${GONE_CHAT}`]: () => {
+					const detail = fixture("get-neo-chat-uuid.json") as {
+						chat: Record<string, unknown>;
+					};
+					detail.chat.chat_id = second;
+					return json(detail);
+				},
+			}),
+			[],
+		),
+		{ detailGaps: [gap("g9", GONE_CHAT, "l9")], recoveryOnly: true },
+	);
+	await collectCharacterAi(h.ctx);
+	assert.equal(h.records.length, 0);
+	assert.equal(ofType(h.messages, "DETAIL_GAP_RECOVERED").length, 0);
+	assert.deepEqual(coverageOf(h.messages, "messages")?.required_keys, []);
+});
+
+test("any other handoff failure still reaches the runtime as the bare interrupted code", async () => {
+	const browserPage = fakePage(defaultRoute(), [], {
+		token: null,
+		url: "https://character.ai/",
+	});
+	await assert.rejects(
+		ensureCharacterAiSession(
+			Object.assign(Object.create(null) as EnsureSessionArgs, {
+				page: browserPage,
+				sendInteraction: async () => {
+					throw new TypeError("something unexpected went wrong");
+				},
+			}),
+			noDelay,
+		),
+		(error: unknown) =>
+			error instanceof Error && error.message === "character_ai_interrupted",
+	);
+});

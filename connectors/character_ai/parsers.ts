@@ -131,10 +131,16 @@ export function parseTurnsPage(json: unknown, chatId: string): Page<ApiTurn> {
  * character name; when the chat's turns name the character (an author whose
  * id is the chat's character id), that name is used, otherwise it stays null.
  */
-export function parseChatDetail(json: unknown): ApiChat {
+export function parseChatDetail(json: unknown, chatId: string): ApiChat {
 	const parsed = apiChatDetailSchema.safeParse(json);
 	if (!parsed.success) {
 		throw new CharacterAiPayloadError("chat", issuesOf(parsed.error));
+	}
+	if (parsed.data.chat.chat_id !== chatId) {
+		throw new CharacterAiPayloadError(
+			"chat",
+			"the answer is about a different chat than the one requested",
+		);
 	}
 	return { ...parsed.data.chat, character_name: null };
 }
