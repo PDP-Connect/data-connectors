@@ -13,7 +13,9 @@ import type {
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
+import { isConnectorErrorCodeShaped } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import {
+	checkPerplexitySession,
 	collectPerplexity,
 	ensurePerplexitySession,
 	hasPerplexitySession,
@@ -130,6 +132,9 @@ function perplexityLibrary(options: {
 			headers,
 			body,
 		});
+		if (url.pathname === "/api/auth/session") {
+			return Response.json({ user: { id: "synthetic-owner" } });
+		}
 		if (url.pathname === "/rest/thread/list_ask_threads") {
 			if (options.listStatus !== undefined) {
 				return new Response("{}", { status: options.listStatus });
@@ -561,7 +566,10 @@ test("a library whose only item cannot be read reports it and completes", async 
 });
 
 test("an empty library is proven empty, with zero records and a null cursor", async () => {
-	const serve: typeof fetch = async () => Response.json([]);
+	const serve: typeof fetch = async (input) =>
+		new URL(String(input), HOME).pathname === "/api/auth/session"
+			? Response.json({ user: { id: "synthetic-owner" } })
+			: Response.json([]);
 	await withBrowser(serve, async () => {
 		const h = harness(ALL_STREAMS, page());
 		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
@@ -629,6 +637,8 @@ test("an expired session hands off to the owner and resolves when they sign in",
 function scriptedLibrary(options: {
 	readonly listPage: (offset: number, walk: number) => unknown[];
 	readonly thread?: (slug: string, offset: number) => Response;
+	/** The session endpoint's body; signed in unless a test says otherwise. */
+	readonly session?: () => unknown;
 }) {
 	const requests: ServedRequest[] = [];
 	let walk = 0;
@@ -641,6 +651,11 @@ function scriptedLibrary(options: {
 			headers: new Headers(init?.headers),
 			body,
 		});
+		if (url.pathname === "/api/auth/session") {
+			return Response.json(
+				options.session?.() ?? { user: { id: "synthetic-owner" } },
+			);
+		}
 		if (url.pathname === "/rest/thread/list_ask_threads") {
 			const offset =
 				body === undefined
@@ -702,7 +717,7 @@ test("a list that moves under the walk is re-walked until two walks agree", asyn
 	});
 });
 
-test("a list that never holds still fails without a checkpoint", async () => {
+test("a list that never holds still keeps its threads, fails both streams retryably and checkpoints nothing", async () => {
 	const library = scriptedLibrary({
 		listPage: (offset, walk) => {
 			const ids = Array.from(
@@ -717,12 +732,24 @@ test("a list that never holds still fails without a checkpoint", async () => {
 	});
 	await withBrowser(library.serve, async () => {
 		const h = harness(ALL_STREAMS, page());
-		await assert.rejects(
-			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
-			/perplexity_list_unstable/,
-		);
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		// The threads seen are kept, but neither stream is proven: both fail
+		// retryably, with no coverage claim and no checkpoint.
 		assert.equal(
-			h.messages.some((m) => m.type === "STATE"),
+			h.records.filter((r) => r.stream === "conversations").length,
+			PAGE_SIZE + 2,
+		);
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 0);
+		assert.deepEqual(h.failures, [
+			{ stream: "conversations", retryable: true },
+			{ stream: "messages", retryable: true },
+		]);
+		assert.equal(
+			h.messages.some(
+				(m) =>
+					m.type === "STATE" ||
+					(m as { type: string }).type === "DETAIL_COVERAGE",
+			),
 			false,
 		);
 	});
@@ -1245,4 +1272,259 @@ test("each manifest field matches its zod schema in type, format, nullability an
 			`${stream.name}: required`,
 		);
 	}
+});
+
+// ─── current runtime: session handoff and completeness proof ─────────────
+
+/** EnsureSession arguments whose assist records each handoff it is asked for. */
+function sessionArgs(
+	browserPage: Page,
+	onAssist: () => void = () => {},
+): {
+	args: EnsureSessionArgs;
+	handoffs: string[];
+	statuses: string[];
+} {
+	const handoffs: string[] = [];
+	const statuses: string[] = [];
+	const args = Object.assign(Object.create(null) as EnsureSessionArgs, {
+		page: browserPage,
+		assist: async (request: { message: string }) => {
+			handoffs.push(request.message);
+			onAssist();
+			return `assist-${String(handoffs.length)}`;
+		},
+		completeAssistance: async (_id: string, status: string) => {
+			statuses.push(status);
+		},
+	});
+	return { args, handoffs, statuses };
+}
+
+const noDelay = async (): Promise<void> => {};
+
+test("a signed-out page elsewhere on the site is moved to the sign-in page, then handed over", async () => {
+	let authenticated = false;
+	const visits: string[] = [];
+	const session = sessionArgs(
+		page(`${HOME}search/synthetic-thread`, visits),
+		() => {
+			authenticated = true;
+		},
+	);
+	await withBrowser(
+		async () =>
+			Response.json(authenticated ? { user: { id: "synthetic-owner" } } : {}),
+		() => ensurePerplexitySession(session.args, noDelay),
+	);
+	assert.deepEqual(visits, [HOME]);
+	assert.equal(session.handoffs.length, 1);
+	assert.match(session.handoffs[0] ?? "", /^Sign in to Perplexity/);
+	assert.deepEqual(session.statuses, ["resolved"]);
+});
+
+test("a human check is handed over in place, never navigated away from", async () => {
+	let cleared = false;
+	const visits: string[] = [];
+	const session = sessionArgs(
+		page(`${HOME}search/synthetic-thread`, visits),
+		() => {
+			cleared = true;
+		},
+	);
+	await withBrowser(
+		async () =>
+			cleared
+				? Response.json({ user: { id: "synthetic-owner" } })
+				: new Response("<html>Just a moment...</html>", {
+						status: 403,
+						headers: {
+							"content-type": "text/html",
+							"cf-mitigated": "challenge",
+						},
+					}),
+		() => ensurePerplexitySession(session.args, noDelay),
+	);
+	assert.deepEqual(visits, []);
+	assert.equal(session.handoffs.length, 1);
+	assert.match(session.handoffs[0] ?? "", /human check/);
+	assert.doesNotMatch(session.handoffs[0] ?? "", /^Sign in/);
+});
+
+test("a Cloudflare challenge document is read as a challenge without a request", async () => {
+	const requests: string[] = [];
+	const saved = Object.getOwnPropertyDescriptor(globalThis, "document");
+	Object.defineProperty(globalThis, "document", {
+		configurable: true,
+		value: { title: "Just a moment..." },
+	});
+	try {
+		await withBrowser(
+			async (input) => {
+				requests.push(String(input));
+				return Response.json({});
+			},
+			async () => {
+				assert.equal(await checkPerplexitySession(page()), "challenge");
+			},
+		);
+	} finally {
+		if (saved) Object.defineProperty(globalThis, "document", saved);
+		else Reflect.deleteProperty(globalThis, "document");
+	}
+	assert.deepEqual(requests, []);
+});
+
+test("a session check with no usable answer is retried in place, then fails with a bare code and no handoff", async () => {
+	let reads = 0;
+	const visits: string[] = [];
+	const session = sessionArgs(page(HOME, visits));
+	let thrown: unknown;
+	await withBrowser(
+		async () => {
+			reads += 1;
+			return new Response("{}", {
+				status: 502,
+				headers: { "content-type": "application/json" },
+			});
+		},
+		async () => {
+			try {
+				await ensurePerplexitySession(session.args, noDelay);
+			} catch (error) {
+				thrown = error;
+			}
+		},
+	);
+	assert.ok(thrown instanceof Error);
+	assert.equal(thrown.message, "perplexity_interrupted");
+	assert.equal(isConnectorErrorCodeShaped(thrown.message), true);
+	assert.equal(reads, 3);
+	assert.deepEqual(session.handoffs, []);
+	assert.deepEqual(visits, []);
+});
+
+test("a sign-in that is never completed fails with the bare perplexity_auth_failed code", async () => {
+	const visits: string[] = [];
+	const browserPage = page(HOME, visits);
+	let thrown: unknown;
+	await withBrowser(
+		async () => Response.json({}),
+		async () => {
+			try {
+				// A host without the streamed handoff: the owner says they are
+				// done, and the session is then read once and is still signed out.
+				await ensurePerplexitySession(
+					Object.assign(Object.create(null) as EnsureSessionArgs, {
+						page: browserPage,
+						sendInteraction: async () => ({
+							type: "INTERACTION_RESPONSE",
+							request_id: "synthetic",
+							status: "success",
+						}),
+					}),
+					noDelay,
+				);
+			} catch (error) {
+				thrown = error;
+			}
+		},
+	);
+	assert.ok(thrown instanceof Error);
+	assert.equal(thrown.message, "perplexity_auth_failed");
+	assert.equal(isConnectorErrorCodeShaped(thrown.message), true);
+});
+
+test("exactly one full page whose last item ends the list is one request and a proven, checkpointed list", async () => {
+	// The owner's live library shape: 20 threads, one page, the last item
+	// saying has_next_page: false.
+	const library = perplexityLibrary({ total: PAGE_SIZE });
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const listCalls = library.requests.filter(
+			(request) => request.url.pathname === "/rest/thread/list_ask_threads",
+		);
+		assert.equal(listCalls.length, 1);
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 40);
+		assert.deepEqual(h.failures, []);
+		assert.equal(detailCoverage(h.messages, "messages").covered, PAGE_SIZE);
+		assert.equal(
+			Object.keys(
+				(stateCursor(h.messages, "messages") as { synced: object }).synced,
+			).length,
+			PAGE_SIZE,
+		);
+	});
+});
+
+test("a full page that still claims more ends on the empty page after it, only once the session is confirmed", async () => {
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0
+				? listItems(
+						Array.from({ length: PAGE_SIZE }, (_, i) => i + 1),
+						true,
+					)
+				: [],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const offsets = library.requests
+			.filter((r) => r.url.pathname === "/rest/thread/list_ask_threads")
+			.map((r) => (JSON.parse(r.body ?? "{}") as { offset: number }).offset);
+		// Two pages per walk, walked twice to prove it held still.
+		assert.deepEqual(offsets, [0, PAGE_SIZE, 0, PAGE_SIZE]);
+		assert.equal(
+			library.requests.filter((r) => r.url.pathname === "/api/auth/session")
+				.length,
+			2,
+		);
+		assert.equal(detailCoverage(h.messages, "messages").covered, PAGE_SIZE);
+		assert.deepEqual(h.failures, []);
+	});
+});
+
+test("an empty list from a session that is no longer signed in fails the run with no checkpoint", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [],
+		session: () => ({}),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_auth_failed/,
+		);
+		assert.equal(
+			h.messages.some(
+				(m) =>
+					m.type === "STATE" ||
+					(m as { type: string }).type === "DETAIL_COVERAGE",
+			),
+			false,
+		);
+	});
+});
+
+test("a stream failure without the runtime's reporter fails the run instead of finishing complete", async () => {
+	const serve: typeof fetch = async () =>
+		Response.json([
+			{
+				uuid: "aaaaaaaa-0000-4000-8000-000000000001",
+				title: "a thread with no id of its own",
+				has_next_page: false,
+			},
+		]);
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		Reflect.deleteProperty(h.ctx, "reportStreamFailure");
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			(error: unknown) =>
+				error instanceof Error &&
+				(error as { code?: string }).code === "perplexity_stream_incomplete",
+		);
+	});
 });

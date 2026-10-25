@@ -19,10 +19,21 @@
  * Streams: `conversations` (one record per thread, mutable_state, cursor
  * `update_time`) and `messages` (the question and the answer of every entry,
  * append_only, child of `conversations`). The list walk must prove it ended
- * (an empty page, a short page, or the last item's `has_next_page: false`)
- * before either stream is reported complete. `total_threads` on list items
- * is NOT the library size (a live 4-thread account reported 99 on every
- * item), so nothing is cross-checked against it.
+ * (the last item's `has_next_page: false`, or an empty page read from a
+ * session that is still signed in; a short page that claims more is
+ * followed) and, when it took more than one page, two consecutive walks must
+ * see the same threads, before either stream is checkpointed. A list that
+ * never holds still keeps its conversation records and fails both streams
+ * retryably with no checkpoint; a thread whose entries cannot be proven
+ * complete is a DETAIL_GAP. `total_threads` on list items is NOT the
+ * library size (a live 4-thread account reported 99 on every item), so
+ * nothing is cross-checked against it.
+ *
+ * Session: a signed-in page is never moved. A Cloudflare human check is
+ * handed to the owner in place; a signed-out page goes to the sign-in page
+ * (the home page) and is handed over with `manualBrowserLogin`. Readiness is
+ * read without navigation. Session errors are bare codes
+ * (`perplexity_auth_failed`, `perplexity_interrupted`).
  *
  * Tested surfaces (as of 2026-10-12, from the live recon notes):
  *   - a small Pro-tier library; threads with one entry each
@@ -44,6 +55,7 @@ import type {
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
+	createConnectorFailure,
 	emitDetailCoverage,
 	emitDetailGap,
 	politeDelay,
@@ -62,6 +74,8 @@ import type { MessageRecord } from "./types.ts";
 
 const ORIGIN = "https://www.perplexity.ai";
 const HOME = `${ORIGIN}/`;
+/** Perplexity signs in from its home page (a sign-in dialog), as the manifest's login_url says. */
+const SIGN_IN_URL = HOME;
 const LIST_PATH = "/rest/thread/list_ask_threads";
 const THREAD_PATH = "/rest/thread/";
 /** The web app's own list page size; 20 was observed working. */
@@ -108,24 +122,48 @@ interface MessagesCursor {
 // ─── session ─────────────────────────────────────────────────────────────
 
 /**
- * Whether the page's own session is signed in: `GET /api/auth/session`
- * answers `{ user: {...} }` when it is and `{}` when it is not. Origin-strict,
- * so it is safe to run while the owner is part way through signing in.
+ * What the current page says about the session, read without moving it:
+ *   - `signed_in`: `GET /api/auth/session` answered `{ user: {...} }`;
+ *   - `signed_out`: it answered `{}` (NextAuth's signed-out body);
+ *   - `challenge`: a Cloudflare human check holds the page or answered the
+ *     session request (`cf-mitigated: challenge`, or an HTML 403/503);
+ *   - `off_origin`: the page is not on www.perplexity.ai;
+ *   - `unknown`: anything else (a network error, a 5xx, an odd body).
  */
-export async function probePerplexitySession(
+export type PerplexitySessionState =
+	| "signed_in"
+	| "signed_out"
+	| "challenge"
+	| "off_origin"
+	| "unknown";
+
+export async function checkPerplexitySession(
 	page: BrowserCollectContext["page"],
-): Promise<boolean> {
+): Promise<PerplexitySessionState> {
 	try {
-		return await page.evaluate(async () => {
+		return await page.evaluate(async (): Promise<PerplexitySessionState> => {
 			try {
 				if (location.origin !== "https://www.perplexity.ai") {
-					return false;
+					return "off_origin";
+				}
+				const doc = (globalThis as { document?: { title?: unknown } }).document;
+				const cf = (globalThis as { _cf_chl_opt?: unknown })._cf_chl_opt;
+				if (cf !== undefined || doc?.title === "Just a moment...") {
+					return "challenge";
 				}
 				const response = await fetch("/api/auth/session", {
 					credentials: "include",
 				});
+				const type = response.headers.get("content-type") ?? "";
+				if (
+					response.headers.get("cf-mitigated") === "challenge" ||
+					(type.includes("text/html") &&
+						(response.status === 403 || response.status === 503))
+				) {
+					return "challenge";
+				}
 				if (!response.ok) {
-					return false;
+					return "unknown";
 				}
 				const payload: unknown = await response.json();
 				if (
@@ -133,21 +171,31 @@ export async function probePerplexitySession(
 					payload === null ||
 					Array.isArray(payload)
 				) {
-					return false;
+					return "unknown";
 				}
-				const data = payload as Record<string, unknown>;
-				return (
-					typeof data.user === "object" &&
-					data.user !== null &&
-					!Array.isArray(data.user)
-				);
+				const user = (payload as Record<string, unknown>).user;
+				if (typeof user === "object" && user !== null && !Array.isArray(user)) {
+					return "signed_in";
+				}
+				return Object.keys(payload).length === 0 ? "signed_out" : "unknown";
 			} catch {
-				return false;
+				return "unknown";
 			}
 		});
 	} catch {
-		return false;
+		return "unknown";
 	}
+}
+
+/**
+ * Whether the page's own session is signed in. Reads the current page only
+ * and never navigates, so it is the readiness check while the owner signs in
+ * (possibly on a Google or Apple page) and the PageShim probe.
+ */
+export async function probePerplexitySession(
+	page: BrowserCollectContext["page"],
+): Promise<boolean> {
+	return (await checkPerplexitySession(page)) === "signed_in";
 }
 
 /** Same probe, but first lands the run page on perplexity.ai if it is elsewhere. */
@@ -164,29 +212,88 @@ export async function hasPerplexitySession(
 	return probePerplexitySession(page);
 }
 
+/** Session reads that may repeat in place when the answer was not usable. */
+const SESSION_CHECK_RETRIES = 2;
+const SESSION_RETRY_DELAY_MS = 1500;
+const SIGN_IN_TIMEOUT_SECONDS = 30 * 60;
+const SIGN_IN_MESSAGE =
+	"Sign in to Perplexity in the secure browser, then continue. PDPP will verify the session before collecting.";
+const CHALLENGE_MESSAGE =
+	"Perplexity is showing a human check. Complete it in the secure browser, then continue. PDPP will verify the session before collecting.";
+
+const realDelay = (ms: number): Promise<void> =>
+	new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Make sure the page is signed in to Perplexity before collection.
+ *
+ * One non-navigating check (after at most one navigation to the home page
+ * when the run page is elsewhere). A signed-in page is never moved. A human
+ * check is handed to the owner in place, on the page as it is. A signed-out
+ * page is moved to the sign-in page (the home page, where Perplexity offers
+ * its sign-in) and handed over. Readiness during either handoff is read
+ * without navigation, so a sign-in that passes through Google or Apple is
+ * never pulled away. Errors thrown here are bare codes: the runtime keeps a
+ * session error's code only when the whole message is the code.
+ */
 export async function ensurePerplexitySession(
 	args: EnsureSessionArgs,
+	/** Test seam: production uses the real clock. */
+	delay: (ms: number) => Promise<void> = realDelay,
 ): Promise<void> {
 	const { assist, capture, completeAssistance, page, sendInteraction } = args;
-	if (await hasPerplexitySession(page)) {
+	let state = await checkPerplexitySession(page);
+	if (state === "off_origin") {
+		try {
+			await page.goto(HOME, { waitUntil: "domcontentloaded" });
+		} catch {
+			connectorDiagnostic("perplexity", "session_home_unreachable", {});
+			throw new Error("perplexity_interrupted");
+		}
+		state = await checkPerplexitySession(page);
+	}
+	for (
+		let retry = 0;
+		state === "unknown" && retry < SESSION_CHECK_RETRIES;
+		retry += 1
+	) {
+		await delay(SESSION_RETRY_DELAY_MS);
+		state = await checkPerplexitySession(page);
+	}
+	if (state === "signed_in") {
 		return;
+	}
+	if (state === "unknown" || state === "off_origin") {
+		connectorDiagnostic("perplexity", "session_check_no_answer", { state });
+		throw new Error("perplexity_interrupted");
+	}
+	if (state === "signed_out" && page.url() !== SIGN_IN_URL) {
+		try {
+			await page.goto(SIGN_IN_URL, { waitUntil: "domcontentloaded" });
+		} catch {
+			connectorDiagnostic("perplexity", "sign_in_page_unreachable", {});
+			throw new Error("perplexity_interrupted");
+		}
 	}
 	const ready = await manualBrowserLogin({
 		assist,
 		capture,
 		completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
-		message:
-			"Sign in to Perplexity in the secure browser (and complete its human check if one is shown), then continue. PDPP will verify the session before collecting.",
+		message: state === "challenge" ? CHALLENGE_MESSAGE : SIGN_IN_MESSAGE,
 		page,
+		// Only after the owner says they are done (hosts without the streamed
+		// handoff) may the check move the page home to read the session.
 		probe: () => hasPerplexitySession(page),
 		readinessProbe: probePerplexitySession,
 		readinessProbeOnHandoffPage: true,
+		reason: state === "challenge" ? "captcha" : "login",
 		sendInteraction,
-		timeoutSeconds: 30 * 60,
+		timeoutSeconds: SIGN_IN_TIMEOUT_SECONDS,
 	});
 	if (!ready) {
-		throw new Error("perplexity_session_dead");
+		connectorDiagnostic("perplexity", "sign_in_not_completed", { state });
+		throw new Error("perplexity_auth_failed");
 	}
 }
 
@@ -448,7 +555,19 @@ async function walkList(ctx: BrowserCollectContext): Promise<ListWalk> {
 				threads.push(thread);
 			}
 		}
-		if (parsed.page.items.length === 0 || !parsed.page.hasNextPage) {
+		if (parsed.page.items.length === 0) {
+			// An empty page proves the end only from a signed-in session: a
+			// session that lapsed mid-walk may answer an empty list rather than
+			// a 401, and that must not read as "nothing more" (or as an empty
+			// library, checkpointed).
+			if (!(await probePerplexitySession(ctx.page))) {
+				throw new Error(
+					"perplexity_auth_failed: the list came back empty from a session that is not signed in",
+				);
+			}
+			return { threads, unreadable, pages: pageIndex + 1 };
+		}
+		if (!parsed.page.hasNextPage) {
 			return { threads, unreadable, pages: pageIndex + 1 };
 		}
 		offset += parsed.page.items.length;
@@ -468,27 +587,52 @@ function walkSignature(walk: ListWalk): string {
 }
 
 /**
- * The library list, proven stable. The list is ordered by recent activity
- * and paged by offset, so a thread answered while the walk runs moves to the
- * top and can shift another past the walk unseen. One page is atomic; a
- * walk that needed more than one page is repeated until two consecutive
- * walks see the same threads, or the run fails without a checkpoint.
+ * The library list, and whether it is proven complete. The list is ordered
+ * by recent activity and paged by offset, so a thread answered while the
+ * walk runs moves to the top and can shift another past the walk unseen. One
+ * page is atomic; a walk that needed more than one page is repeated until
+ * two consecutive walks see the same threads. A list that never holds still
+ * is returned unproven: its threads are real, but the run cannot claim it saw
+ * all of them, so neither stream is checkpointed.
  */
-async function stableList(ctx: BrowserCollectContext): Promise<ListWalk> {
+async function stableList(
+	ctx: BrowserCollectContext,
+): Promise<ListWalk & { readonly proven: boolean }> {
 	let walk = await walkList(ctx);
 	if (walk.pages <= 1) {
-		return walk;
+		return { ...walk, proven: true };
 	}
 	for (let attempt = 0; attempt < MAX_LIST_WALKS; attempt += 1) {
 		const again = await walkList(ctx);
 		if (walkSignature(again) === walkSignature(walk)) {
-			return again;
+			return { ...again, proven: true };
 		}
 		walk = again;
 	}
-	throw new Error(
-		"perplexity_list_unstable: the library kept changing while it was read",
-	);
+	connectorDiagnostic("perplexity", "list_unstable", {
+		walks: MAX_LIST_WALKS + 1,
+	});
+	return { ...walk, proven: false };
+}
+
+/**
+ * Report one stream as failed. A context without the runtime's reporter (a
+ * hand-built caller) cannot carry a stream failure, so the run fails instead
+ * of finishing as if the stream were complete.
+ */
+async function failStream(
+	ctx: BrowserCollectContext,
+	stream: string,
+	message: string,
+	retryable: boolean,
+): Promise<void> {
+	connectorDiagnostic("perplexity", "stream_failed", { stream, retryable });
+	if (!ctx.reportStreamFailure) {
+		throw createConnectorFailure("perplexity_stream_incomplete", message, {
+			retryable,
+		});
+	}
+	await ctx.reportStreamFailure(stream, message, { retryable });
 }
 
 /** A remembered thread, read defensively from a prior STATE. */
@@ -726,13 +870,37 @@ export async function collectPerplexity(
 
 	// 1. The library list, proven complete and stable. `total_threads` is not
 	// used: live list items carry a number unrelated to the library size.
-	const { threads: listed, unreadable: unreadableThreads } =
-		await stableList(ctx);
+	const {
+		threads: listed,
+		unreadable: unreadableThreads,
+		proven,
+	} = await stableList(ctx);
+	if (!proven) {
+		// The threads seen are real and are kept, but nothing is checkpointed
+		// and no thread is read in depth: both requested streams fail, and a
+		// later run (with a library that holds still) can finish them.
+		if (wantsConversations) {
+			for (const thread of listed) {
+				await ctx.emitRecord("conversations", {
+					...conversationRecord(thread, null),
+				});
+			}
+		}
+		const why =
+			"Your Perplexity library kept changing while it was read, so this run could not confirm it saw every thread. Nothing was checkpointed; the next run reads it again.";
+		for (const stream of ["conversations", "messages"] as const) {
+			if (ctx.requested.has(stream)) {
+				await failStream(ctx, stream, why, true);
+			}
+		}
+		return;
+	}
 	if (unreadableThreads > 0) {
-		await ctx.reportStreamFailure?.(
+		await failStream(
+			ctx,
 			"conversations",
 			`${String(unreadableThreads)} Perplexity thread(s) could not be read from the library list and were skipped. Everything else was collected normally.`,
-			{ retryable: false },
+			false,
 		);
 	}
 
@@ -848,10 +1016,11 @@ export async function collectPerplexity(
 	}
 
 	if (unreadableEntries > 0) {
-		await ctx.reportStreamFailure?.(
+		await failStream(
+			ctx,
 			"messages",
 			`${String(unreadableEntries)} Perplexity answer(s) could not be read safely and were not stored. Everything else was collected normally.`,
-			{ retryable: false },
+			false,
 		);
 	}
 	if (incompleteEntries > 0) {
@@ -915,7 +1084,7 @@ if (isMainModule(import.meta.url)) {
 		name: "perplexity",
 		validateRecord,
 		retryablePattern:
-			/perplexity_internal_api_(?:429|5\d\d)|fetch failed|network|timeout|aborted/i,
+			/perplexity_internal_api_(?:429|5\d\d)|perplexity_interrupted|fetch failed|network|timeout|aborted/i,
 		browser: { profileName: "perplexity" },
 		ensureSession: ensurePerplexitySession,
 		probeSession: ({ page }) => hasPerplexitySession(page),
