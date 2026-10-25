@@ -2224,6 +2224,10 @@ test("read boundary: malformed and temporary HTTP 200 account objects remain unk
 			data: { error_code: 1, description: "Temporary error" },
 		},
 		{ message: "error", data: { description: "Please log in" } },
+		{
+			message: "error",
+			data: { error_code: 13, name: "other_error", description: "sign in again" },
+		},
 	]) {
 		const { page, gotos } = fakePage(() => ok(json));
 		assert.equal(
@@ -2243,6 +2247,17 @@ test("read boundary: only positive unauthenticated evidence reports signed out",
 			data: { error_code: 1, description: "Please log in" },
 		}),
 		ok({ message: "error", data: { error_code: 1, description: "log in" } }),
+		// What a browser that never signed in gets (live, 2026-10-24).
+		ok({
+			message: "error",
+			data: {
+				error_code: 13,
+				name: "account_info_error",
+				description: "session expired, please sign in again",
+				session_key: "",
+				user_id: 0,
+			},
+		}),
 	]) {
 		const { page, gotos } = fakePage(() => answer);
 		assert.equal(await checkTikTokSession(page, noDelay.delay), "signed_out");

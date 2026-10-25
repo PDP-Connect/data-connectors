@@ -103,13 +103,26 @@ export function parseAccount(json: unknown): Account | null {
 
 // Only the observed login-required error is positive sign-out evidence.
 // Other error codes/descriptions may be transient and must stay unknown.
-const signedOutAccountSchema = z.object({
-	message: z.literal("error"),
-	data: z.object({
-		error_code: z.literal(1),
-		description: z.string().regex(/^(?:Please )?log in$/i),
+// Two signed-out answers seen live: `1 / "log in"` once a session ends, and
+// `13 / account_info_error / "session expired, please sign in again"` in a
+// browser that never signed in (2026-10-24, clean profile).
+const signedOutAccountSchema = z.union([
+	z.object({
+		message: z.literal("error"),
+		data: z.object({
+			error_code: z.literal(1),
+			description: z.string().regex(/^(?:Please )?log in$/i),
+		}),
 	}),
-});
+	z.object({
+		message: z.literal("error"),
+		data: z.object({
+			error_code: z.literal(13),
+			name: z.literal("account_info_error"),
+			description: z.string().regex(/sign in again$/i),
+		}),
+	}),
+]);
 
 export function isSignedOutAccount(json: unknown): boolean {
 	return signedOutAccountSchema.safeParse(json).success;
