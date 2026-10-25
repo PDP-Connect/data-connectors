@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { fixturesDir } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	type CollectInstinctArgs,
 	collectInstinct,
 	describeGraphqlErrors,
 	graphqlEvaluateArgs,
@@ -68,14 +69,21 @@ type ScriptedResponse =
 function scriptedGraphql(
 	responses: Readonly<Record<string, ScriptedResponse>>,
 	overrides: Readonly<Record<string, GraphqlFetchResult>> = {},
-): { calls: string[]; graphql: InstinctGraphql; variables: unknown[] } {
+): {
+	calls: string[];
+	documents: string[];
+	graphql: InstinctGraphql;
+	variables: unknown[];
+} {
 	const calls: string[] = [];
+	const documents: string[] = [];
 	const variables: unknown[] = [];
 	const graphql: InstinctGraphql = (query, vars) => {
 		const match = /query Pdpp(\w+)/.exec(query);
 		assert.ok(match, `unrecognized GraphQL document: ${query.slice(0, 60)}`);
 		const operation = match[1] ?? "";
 		calls.push(operation);
+		documents.push(query);
 		variables.push(vars);
 		const override = overrides[operation];
 		if (override) {
@@ -90,7 +98,83 @@ function scriptedGraphql(
 			typeof scripted === "function" ? scripted(vars ?? {}) : scripted;
 		return Promise.resolve({ json, status: 200 });
 	};
-	return { calls, graphql, variables };
+	return { calls, documents, graphql, variables };
+}
+
+interface StreamFailureReport {
+	readonly message: string;
+	readonly retryable: boolean | undefined;
+	readonly stream: string;
+}
+
+/**
+ * Stands in for the runtime's `reportStreamFailure`: records each report and
+ * puts the SKIP_RESULT the runtime would emit on the recorded wire.
+ */
+function failureRecorder(harness: ReturnType<typeof makeRecordingEmit>): {
+	report: NonNullable<CollectInstinctArgs["reportStreamFailure"]>;
+	reports: StreamFailureReport[];
+} {
+	const reports: StreamFailureReport[] = [];
+	return {
+		report: async (stream, message, options = {}) => {
+			reports.push({ message, retryable: options.retryable, stream });
+			await harness.emit({
+				message,
+				reason: "stream_collection_failed",
+				recovery_hint: {
+					action: "retry_by_runtime",
+					retryable: options.retryable === true,
+				},
+				stream,
+				type: "SKIP_RESULT",
+			});
+		},
+		reports,
+	};
+}
+
+type WireMessage = { type: string } & Record<string, unknown>;
+
+function wire(harness: ReturnType<typeof makeRecordingEmit>): WireMessage[] {
+	return harness.protocolMessages as unknown as WireMessage[];
+}
+
+/** Streams the run checkpointed, in order. */
+function stateStreams(harness: ReturnType<typeof makeRecordingEmit>): string[] {
+	return wire(harness)
+		.filter((message) => message.type === "STATE")
+		.map((message) => String(message.stream));
+}
+
+/** Run collectInstinct over the happy-path fixtures with some operations replaced. */
+async function runCollect(
+	requested: ReadonlySet<string>,
+	overrides: Readonly<Record<string, ScriptedResponse>> = {},
+	transport: Readonly<Record<string, GraphqlFetchResult>> = {},
+): Promise<{
+	failures: StreamFailureReport[];
+	harness: ReturnType<typeof makeRecordingEmit>;
+	source: ReturnType<typeof scriptedGraphql>;
+}> {
+	const source = scriptedGraphql(
+		{ ...(await loadHappyPathResponses()), ...overrides },
+		transport,
+	);
+	const harness = makeRecordingEmit(validateRecord);
+	const failures = failureRecorder(harness);
+	await collectInstinct({
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		graphql: source.graphql,
+		observedAt: OBSERVED_AT,
+		progress: async () => {
+			/* unused */
+		},
+		reportStreamFailure: failures.report,
+		requested,
+	});
+	return { failures: failures.reports, harness, source };
 }
 
 const MAIN_CHAT = "chat-01TESTMAINTESTTESTTESTTEST";
@@ -279,52 +363,6 @@ test("connections flatten every provider into stable `<provider>:<id>` keys", as
 			service_id: "drive",
 		},
 	]);
-});
-
-test("a failed GraphQL path skips that stream instead of losing the run", async () => {
-	const responses = await loadHappyPathResponses();
-	const source = scriptedGraphql(responses, {
-		InstinctConnections: {
-			json: await fixture("connections-partial-error"),
-			status: 200,
-		},
-		InstinctImessageDevice: {
-			json: await fixture("imessage-device-error"),
-			status: 200,
-		},
-	});
-	const harness = makeRecordingEmit(validateRecord);
-
-	await collectInstinct({
-		emit: harness.emit,
-		emitRecord: harness.emitRecord,
-		graphql: source.graphql,
-		observedAt: OBSERVED_AT,
-		progress: async () => {
-			/* unused */
-		},
-		requested: ALL_STREAMS,
-	});
-
-	const skip = skipResults(harness).find(
-		(entry) => entry.stream === "connections",
-	);
-	assert.ok(skip, "the failed resolver must surface as a SKIP_RESULT");
-	assert.match(String(skip.message), /whoopConnection/);
-	assert.match(String(skip.message), /imessageLocalConnection/);
-
-	// Everything that did not depend on the broken resolver still collected,
-	// and WhatsApp still made it through from the healthy messaging query.
-	assert.ok(
-		harness.emitted.some((record) => record.stream === "profile"),
-		"profile must survive a connections-side failure",
-	);
-	assert.ok(
-		harness.emitted.some(
-			(record) => record.data.id === "whatsapp:user-01TESTTESTTESTTESTTESTTEST",
-		),
-		"healthy messaging records must still be emitted",
-	);
 });
 
 test("trusted-network pagination dedupes the unpaginated sent requests", async () => {
@@ -522,17 +560,26 @@ interface ChatRun {
 
 async function runChats(
 	options: {
+		readonly collectionMode?: "full_refresh" | "incremental";
+		readonly detailGaps?: CollectInstinctArgs["detailGaps"];
 		readonly overrides?: Readonly<Record<string, ScriptedResponse>>;
+		readonly recoveryOnly?: boolean;
+		readonly requestDetailGapPage?: CollectInstinctArgs["requestDetailGapPage"];
 		readonly state?: Readonly<Record<string, unknown>>;
 	} = {},
-): Promise<ChatRun> {
+): Promise<ChatRun & { failures: StreamFailureReport[] }> {
 	const responses = {
 		...(await loadHappyPathResponses()),
 		...options.overrides,
 	};
 	const source = scriptedGraphql(responses);
 	const harness = makeRecordingEmit(validateRecord);
+	const failures = failureRecorder(harness);
 	await collectInstinct({
+		...(options.collectionMode
+			? { collectionMode: options.collectionMode }
+			: {}),
+		detailGaps: options.detailGaps ?? [],
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		graphql: source.graphql,
@@ -540,10 +587,15 @@ async function runChats(
 		progress: async () => {
 			/* unused */
 		},
+		recoveryOnly: options.recoveryOnly === true,
+		reportStreamFailure: failures.report,
+		...(options.requestDetailGapPage
+			? { requestDetailGapPage: options.requestDetailGapPage }
+			: {}),
 		requested: new Set(["chats", "chat_events"]),
 		state: options.state ?? {},
 	});
-	return { harness, source };
+	return { failures: failures.reports, harness, source };
 }
 
 function chatEventIds(harness: ChatRun["harness"]): string[] {
@@ -552,16 +604,20 @@ function chatEventIds(harness: ChatRun["harness"]): string[] {
 		.map((record) => String(record.data.id));
 }
 
-/** The `chat_events` STATE cursor the run ended with, as START would hand it back. */
+/**
+ * The chats STATE cursor the run ended with, as START would hand it back.
+ * It carries the per-chat event checkpoints: chat_events is a parent-detail
+ * stream with no STATE of its own.
+ */
 function chatEventsState(harness: ChatRun["harness"]): Record<string, unknown> {
 	const state = harness.protocolMessages.findLast(
 		(message) =>
 			message.type === "STATE" &&
-			(message as { stream?: unknown }).stream === "chat_events",
+			(message as { stream?: unknown }).stream === "chats",
 	) as { cursor?: unknown } | undefined;
-	assert.ok(state, "chat_events must end with a STATE checkpoint");
+	assert.ok(state, "chats must end with a STATE checkpoint");
 	// Hosts hand back the last cursor unwrapped: START.state[stream] = cursor.
-	return { chat_events: state.cursor };
+	return { chats: state.cursor };
 }
 
 function historyCalls(
@@ -666,14 +722,14 @@ test("a new event in the checkpoint's own second is collected, the old ones are 
 	// is past the checkpoint.
 	assert.deepEqual(chatEventIds(harness), [sameSecond.id]);
 	const state = chatEventsState(harness) as {
-		chat_events: {
+		chats: {
 			chats: Record<
 				string,
 				{ newest_created_at: number; newest_ids: string[] }
 			>;
 		};
 	};
-	assert.deepEqual(state.chat_events.chats[MAIN_CHAT], {
+	assert.deepEqual(state.chats.chats[MAIN_CHAT], {
 		newest_created_at: 1_789_070_050,
 		newest_ids: [
 			"00000000-0000-4000-8000-000000000107",
@@ -681,36 +737,6 @@ test("a new event in the checkpoint's own second is collected, the old ones are 
 			sameSecond.id,
 		],
 	});
-});
-
-test("a chatHistory failure on one chat skips it and still collects the other", async () => {
-	const pages = await loadChatHistoryPages();
-	const failure = await fixture("chat-history-error");
-	const healthy = chatHistoryRouter(pages);
-	const { harness } = await runChats({
-		overrides: {
-			InstinctChatHistory: (variables: Readonly<Record<string, unknown>>) =>
-				variables.chatId === MAIN_CHAT ? failure : healthy(variables),
-		},
-	});
-
-	const skip = skipResults(harness).find(
-		(entry) => entry.stream === "chat_events",
-	);
-	assert.ok(skip, "the failed chat must surface as a SKIP_RESULT");
-	assert.match(String(skip.message), new RegExp(MAIN_CHAT));
-	assert.match(String(skip.message), /internal server error/);
-
-	assert.deepEqual(chatEventIds(harness), [
-		"00000000-0000-4000-8000-000000000201",
-	]);
-	// The failed chat keeps no checkpoint, so the next run backfills it.
-	const state = chatEventsState(harness) as {
-		chat_events: { chats: Record<string, unknown> };
-	};
-	assert.deepEqual(Object.keys(state.chat_events.chats), [
-		WHATSAPP_CHAT,
-	]);
 });
 
 test("chat events never carry attachment or screenshot links", async () => {
@@ -764,4 +790,881 @@ test("chat event epoch-second timestamps become ISO", async () => {
 			);
 		}
 	}
+});
+
+// ─── Completeness on the current runtime ───────────────────────────────────
+
+const LIST_STREAMS = [
+	"connections",
+	"devices",
+	"trusted_people",
+	"vault_entries",
+	"chats",
+] as const;
+
+test("every proven list ends with full-scan coverage, then its STATE", async () => {
+	const { failures, harness } = await runCollect(ALL_STREAMS);
+	assert.deepEqual(failures, []);
+	const messages = wire(harness);
+	for (const stream of LIST_STREAMS) {
+		const coverageAt = messages.findIndex(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === stream &&
+				message.state_stream === stream,
+		);
+		const stateAt = messages.findIndex(
+			(message) => message.type === "STATE" && message.stream === stream,
+		);
+		assert.ok(coverageAt >= 0, `${stream} must report full-scan coverage`);
+		assert.ok(stateAt > coverageAt, `${stream} STATE must follow its coverage`);
+		const emitted = harness.emitted.filter(
+			(record) => record.stream === stream,
+		).length;
+		assert.equal(messages[coverageAt]?.considered, emitted);
+		assert.equal(messages[coverageAt]?.covered, emitted);
+	}
+	const chatCoverage = messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "chat_events",
+	);
+	assert.ok(chatCoverage, "chat_events must report its per-chat coverage");
+	assert.deepEqual(
+		[...(chatCoverage.required_keys as string[])].sort(),
+		[MAIN_CHAT, WHATSAPP_CHAT].sort(),
+	);
+	assert.deepEqual(chatCoverage?.hydrated_keys, chatCoverage?.required_keys);
+	assert.equal(chatCoverage?.gap_keys, undefined);
+});
+
+test("a GraphQL error on connected services fails that stream with no checkpoint; the rest completes", async () => {
+	const { failures, harness } = await runCollect(ALL_STREAMS, {
+		InstinctConnections: await fixture("connections-partial-error"),
+	});
+	assert.equal(failures.length, 1);
+	assert.equal(failures[0]?.stream, "connections");
+	assert.equal(failures[0]?.retryable, true);
+	assert.match(String(failures[0]?.message), /whoopConnection/);
+	assert.ok(!stateStreams(harness).includes("connections"));
+	assert.ok(
+		!harness.emitted.some((record) => record.stream === "connections"),
+		"a failed list emits no partial inventory",
+	);
+	for (const stream of [
+		"profile",
+		"agent_contact",
+		"devices",
+		"trusted_people",
+		"vault_entries",
+		"chats",
+	]) {
+		assert.ok(stateStreams(harness).includes(stream), `${stream} checkpoints`);
+	}
+});
+
+test("Instinct's no-relay answer on the local iMessage read is not a failure", async () => {
+	const { failures, harness } = await runCollect(new Set(["connections"]), {
+		InstinctImessageDevice: await fixture("imessage-device-error"),
+	});
+	assert.deepEqual(failures, []);
+	assert.ok(
+		!wire(harness).some((message) => message.type === "SKIP_RESULT"),
+		"the no-relay answer is not reported as a skipped part of the stream",
+	);
+	assert.deepEqual(stateStreams(harness), ["connections"]);
+	const imessage = harness.emitted.filter(
+		(record) => record.data.provider === "imessage",
+	);
+	assert.equal(imessage.length, 1);
+	assert.equal(imessage[0]?.data.id, "imessage:default");
+	assert.equal(imessage[0]?.data.account_email, "ada@icloud.example");
+});
+
+test("any other error on the local iMessage read fails connections", async () => {
+	const { failures, harness } = await runCollect(new Set(["connections"]), {
+		InstinctImessageDevice: {
+			data: { imessageLocalConnection: null },
+			errors: [
+				{ message: "relay timed out", path: ["imessageLocalConnection"] },
+			],
+		},
+	});
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["connections"],
+	);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("a 500 on one stream fails that stream only, retryably", async () => {
+	const { failures, harness } = await runCollect(
+		ALL_STREAMS,
+		{},
+		{ InstinctDevices: { json: null, status: 500 } },
+	);
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["devices"],
+	);
+	assert.equal(failures[0]?.retryable, true);
+	assert.ok(!stateStreams(harness).includes("devices"));
+	assert.ok(stateStreams(harness).includes("chats"));
+});
+
+test("an unrecognised answer fails the stream as not retryable", async () => {
+	const { failures } = await runCollect(new Set(["vault_entries"]), {
+		InstinctVault: { data: { vaultEntries: [{ kind: 7 }] } },
+	});
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["vault_entries"],
+	);
+	assert.equal(failures[0]?.retryable, false);
+});
+
+test("a GraphQL error on devices fails devices with no checkpoint", async () => {
+	const { failures, harness } = await runCollect(new Set(["devices"]), {
+		InstinctDevices: {
+			data: { devices: null },
+			errors: [{ message: "internal server error", path: ["devices"] }],
+		},
+	});
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["devices"],
+	);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("a signed-out answer mid-run stops the whole run with a bare code", async () => {
+	await assert.rejects(
+		runCollect(ALL_STREAMS, {}, { InstinctVault: { json: null, status: 401 } }),
+		(error: unknown) =>
+			(error as { code?: unknown }).code === "instinct_auth_failed",
+	);
+});
+
+interface TrustedPage {
+	readonly cursor: string | null;
+	readonly items: readonly Record<string, unknown>[];
+}
+
+function person(id: string): Record<string, unknown> {
+	return {
+		createdAt: 1_789_068_259,
+		displayName: `Person ${id}`,
+		generation: 1,
+		id,
+		phoneNumbers: ["+15550100000"],
+	};
+}
+
+/** Answer the trusted-network query per list from its own cursor. */
+function trustedRouter(lists: {
+	readonly blocked?: Readonly<Record<string, TrustedPage>>;
+	readonly contacts: Readonly<Record<string, TrustedPage>>;
+	readonly requests: Readonly<Record<string, TrustedPage>>;
+	readonly sent?: readonly Record<string, unknown>[];
+}): (variables: Readonly<Record<string, unknown>>) => unknown {
+	const page = (
+		table: Readonly<Record<string, TrustedPage>>,
+		cursor: unknown,
+	): TrustedPage => {
+		const key = typeof cursor === "string" ? cursor : "start";
+		const found = table[key];
+		assert.ok(found, `unexpected trusted cursor ${key}`);
+		return found;
+	};
+	return (variables) => ({
+		data: {
+			agentToAgentSettings: { enabled: true },
+			trustedNetworkBlockedPeople: page(
+				lists.blocked ?? { start: { cursor: null, items: [] } },
+				variables.blockedCursor,
+			),
+			trustedNetworkContacts: page(lists.contacts, variables.contactsCursor),
+			trustedNetworkRequests: page(lists.requests, variables.requestsCursor),
+			trustedNetworkSentRequests: lists.sent ?? [],
+		},
+	});
+}
+
+test("a trust list that ends early does not restart while another keeps paging", async () => {
+	const { failures, harness, source } = await runCollect(
+		new Set(["trusted_people"]),
+		{
+			InstinctTrustedNetwork: trustedRouter({
+				contacts: {
+					c2: { cursor: null, items: [person("c-2")] },
+					start: { cursor: "c2", items: [person("c-1")] },
+				},
+				requests: {
+					r2: { cursor: "r3", items: [person("r-2")] },
+					r3: { cursor: null, items: [person("r-3")] },
+					start: { cursor: "r2", items: [person("r-1")] },
+				},
+			}),
+		},
+	);
+	assert.deepEqual(failures, []);
+	assert.equal(
+		source.calls.filter((call) => call === "InstinctTrustedNetwork").length,
+		3,
+	);
+	assert.deepEqual(
+		harness.emitted.map((record) => String(record.data.id)).sort(),
+		[
+			"contact:c-1",
+			"contact:c-2",
+			"incoming_request:r-1",
+			"incoming_request:r-2",
+			"incoming_request:r-3",
+		],
+	);
+	assert.deepEqual(stateStreams(harness), ["trusted_people"]);
+});
+
+test("a full page of sent trust requests cannot be proven complete", async () => {
+	const sent = Array.from({ length: 20 }, (_, index) => ({
+		createdAt: 1_789_068_400,
+		expiresAt: 1_789_154_800,
+		id: `sent-${String(index)}`,
+		phoneNumber: "+15550105555",
+	}));
+	const { failures, harness } = await runCollect(new Set(["trusted_people"]), {
+		InstinctTrustedNetwork: trustedRouter({
+			contacts: { start: { cursor: null, items: [] } },
+			requests: { start: { cursor: null, items: [] } },
+			sent,
+		}),
+	});
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["trusted_people"],
+	);
+	assert.equal(failures[0]?.retryable, false);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.equal(harness.emitted.length, 0);
+});
+
+test("a trust-list cursor that comes back again fails the stream instead of the run", async () => {
+	const { failures, harness } = await runCollect(new Set(["trusted_people"]), {
+		InstinctTrustedNetwork: trustedRouter({
+			contacts: {
+				again: { cursor: "again", items: [person("c-2")] },
+				start: { cursor: "again", items: [person("c-1")] },
+			},
+			requests: { start: { cursor: null, items: [] } },
+		}),
+	});
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["trusted_people"],
+	);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("a chat-list cursor that repeats fails chats and chat_events with no checkpoint", async () => {
+	const chats = (await fixture("chats")) as {
+		data: { chats: { cursor: string | null } };
+	};
+	chats.data.chats.cursor = "again";
+	const { failures, harness, source } = await runChats({
+		overrides: { InstinctChats: chats },
+	});
+	assert.deepEqual(failures.map((failure) => failure.stream).sort(), [
+		"chat_events",
+		"chats",
+	]);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.ok(!source.calls.includes("InstinctChatHistory"));
+});
+
+function failingMainChat(
+	pages: ChatHistoryPages,
+	failure: unknown,
+): (variables: Readonly<Record<string, unknown>>) => unknown {
+	const healthy = chatHistoryRouter(pages);
+	return (variables) =>
+		variables.chatId === MAIN_CHAT ? failure : healthy(variables);
+}
+
+test("a chat whose history fails gets a DETAIL_GAP; the other chat checkpoints", async () => {
+	const pages = await loadChatHistoryPages();
+	const { failures, harness } = await runChats({
+		overrides: {
+			InstinctChatHistory: failingMainChat(
+				pages,
+				await fixture("chat-history-error"),
+			),
+		},
+	});
+	assert.deepEqual(failures, []);
+	const gap = wire(harness).find((message) => message.type === "DETAIL_GAP");
+	assert.equal(gap?.stream, "chat_events");
+	assert.equal(gap?.parent_stream, "chats");
+	assert.equal(gap?.record_key, MAIN_CHAT);
+	assert.equal(gap?.reason, "temporary_unavailable");
+	assert.deepEqual(gap?.detail_locator, {
+		chat_id: MAIN_CHAT,
+		kind: "instinct.chat_history",
+	});
+	const coverage = wire(harness).find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "chat_events",
+	);
+	assert.deepEqual(coverage?.gap_keys, [MAIN_CHAT]);
+	assert.deepEqual(coverage?.hydrated_keys, [WHATSAPP_CHAT]);
+	assert.deepEqual(chatEventIds(harness), [
+		"00000000-0000-4000-8000-000000000201",
+	]);
+	const state = chatEventsState(harness) as {
+		chats: { chats: Record<string, unknown> };
+	};
+	assert.deepEqual(Object.keys(state.chats.chats), [WHATSAPP_CHAT]);
+});
+
+test("a gapped chat keeps its prior checkpoint", async () => {
+	const first = await runChats();
+	const prior = chatEventsState(first.harness) as {
+		chats: { chats: Record<string, unknown> };
+	};
+	const pages = await loadChatHistoryPages();
+	const { harness } = await runChats({
+		overrides: {
+			InstinctChatHistory: failingMainChat(pages, { data: null }),
+		},
+		state: prior,
+	});
+	const state = chatEventsState(harness) as {
+		chats: { chats: Record<string, unknown> };
+	};
+	assert.deepEqual(state.chats.chats[MAIN_CHAT], prior.chats.chats[MAIN_CHAT]);
+});
+
+test("a rate-limited history read is a rate_limited gap, not a failed run", async () => {
+	const source = scriptedGraphql(await loadHappyPathResponses(), {
+		InstinctChatHistory: { json: null, status: 429 },
+	});
+	const harness = makeRecordingEmit(validateRecord);
+	const failures = failureRecorder(harness);
+	await collectInstinct({
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		graphql: source.graphql,
+		observedAt: OBSERVED_AT,
+		progress: async () => {
+			/* unused */
+		},
+		reportStreamFailure: failures.report,
+		requested: new Set(["chats", "chat_events"]),
+	});
+	assert.deepEqual(failures.reports, []);
+	const gaps = wire(harness).filter((message) => message.type === "DETAIL_GAP");
+	assert.deepEqual(
+		gaps.map((gap) => [
+			gap.reason,
+			(gap.detail as { http_status?: unknown }).http_status,
+		]),
+		[
+			["rate_limited", 429],
+			["rate_limited", 429],
+		],
+	);
+	assert.deepEqual(stateStreams(harness), ["chats"]);
+});
+
+function pendingGap(
+	chatId: string,
+	gapId: string,
+): NonNullable<CollectInstinctArgs["detailGaps"]>[number] {
+	return {
+		detail_locator: { chat_id: chatId, kind: "instinct.chat_history" },
+		gap_id: gapId,
+		lease_id: `lease-${gapId}`,
+		parent_stream: "chats",
+		record_key: chatId,
+		status: "pending",
+		stream: "chat_events",
+	};
+}
+
+test("a chat read completely resolves the gap an earlier run left for it", async () => {
+	const { harness } = await runChats({
+		detailGaps: [pendingGap(MAIN_CHAT, "gap-1")],
+	});
+	const recovered = wire(harness).filter(
+		(message) => message.type === "DETAIL_GAP_RECOVERED",
+	);
+	assert.deepEqual(recovered, [
+		{
+			gap_id: "gap-1",
+			lease_id: "lease-gap-1",
+			record_key: MAIN_CHAT,
+			reference_only: true,
+			stream: "chat_events",
+			type: "DETAIL_GAP_RECOVERED",
+		},
+	]);
+});
+
+test("a recovery-only run reads only the gapped chats and writes no STATE", async () => {
+	const { harness, source } = await runChats({
+		detailGaps: [pendingGap(WHATSAPP_CHAT, "gap-2")],
+		recoveryOnly: true,
+	});
+	assert.deepEqual(source.calls, ["InstinctChatHistory"]);
+	assert.deepEqual(chatEventIds(harness), [
+		"00000000-0000-4000-8000-000000000201",
+	]);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.ok(
+		wire(harness).some(
+			(message) =>
+				message.type === "DETAIL_GAP_RECOVERED" && message.gap_id === "gap-2",
+		),
+	);
+});
+
+test("a full_refresh run ignores the chat checkpoints", async () => {
+	const first = await runChats();
+	const { harness } = await runChats({
+		collectionMode: "full_refresh",
+		state: chatEventsState(first.harness),
+	});
+	assert.equal(chatEventIds(harness).length, 14);
+});
+
+// ─── Review round 1 ────────────────────────────────────────────────────────
+
+test("a list record that would fail its schema fails the stream instead of being checkpointed", async () => {
+	const devices = (await fixture("devices")) as {
+		data: { devices: Array<Record<string, unknown>> };
+	};
+	const first = devices.data.devices[0];
+	assert.ok(first);
+	first.name = "x".repeat(201);
+	const { failures, harness } = await runCollect(new Set(["devices"]), {
+		InstinctDevices: devices,
+	});
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["devices"],
+	);
+	assert.equal(failures[0]?.retryable, false);
+	assert.match(String(failures[0]?.message), /name/);
+	assert.ok(!String(failures[0]?.message).includes("xxxx"), "no values");
+	assert.deepEqual(stateStreams(harness), []);
+	assert.equal(harness.emitted.length, 0);
+});
+
+test("a chat event that would fail its schema makes the chat a gap and keeps its checkpoint", async () => {
+	const first = await runChats();
+	const prior = chatEventsState(first.harness) as {
+		chats: { chats: Record<string, unknown> };
+	};
+	const whatsapp = (await fixture("chat-history-whatsapp")) as {
+		data: { chatHistory: { events: Array<Record<string, unknown>> } };
+	};
+	whatsapp.data.chatHistory.events.push({
+		createdAt: 1_789_999_999,
+		id: "00000000-0000-4000-8000-000000000299",
+		message: {
+			attachments: [],
+			content: "late",
+			id: "msg-0299TEST",
+			origin: { agentDisplayName: "y".repeat(201), kind: "agent" },
+			readAt: null,
+			role: "user",
+		},
+		type: "message",
+	});
+	const pages = await loadChatHistoryPages();
+	const { harness } = await runChats({
+		overrides: {
+			InstinctChatHistory: chatHistoryRouter({ ...pages, whatsapp }),
+		},
+		state: prior,
+	});
+	const gap = wire(harness).find((message) => message.type === "DETAIL_GAP");
+	assert.ok(gap, "the chat must surface as a DETAIL_GAP");
+	assert.equal(gap.record_key, WHATSAPP_CHAT);
+	assert.equal(gap.reason, "retry_exhausted");
+	assert.equal(
+		(gap.detail as { class?: unknown }).class,
+		"instinct_record_invalid",
+	);
+	assert.ok(
+		!harness.emitted.some((record) => record.data.chat_id === WHATSAPP_CHAT),
+	);
+	const state = chatEventsState(harness) as {
+		chats: { chats: Record<string, unknown> };
+	};
+	assert.deepEqual(
+		state.chats.chats[WHATSAPP_CHAT],
+		prior.chats.chats[WHATSAPP_CHAT],
+	);
+});
+
+test("without the account's feature flags, connections fails instead of skipping gated resolvers", async () => {
+	const profile = (await fixture("profile")) as {
+		data: { authSession: { user: Record<string, unknown> } };
+	};
+	profile.data.authSession.user.enabledFeatureFlags = null;
+	const { failures, harness, source } = await runCollect(
+		new Set(["connections", "profile"]),
+		{ InstinctProfile: profile },
+	);
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["connections"],
+	);
+	assert.ok(!source.calls.includes("InstinctConnections"));
+	assert.deepEqual(stateStreams(harness), ["profile"]);
+});
+
+test("an account read that errors without a user fails streams, not the session", async () => {
+	const { failures, harness } = await runCollect(
+		new Set(["profile", "connections", "devices"]),
+		{
+			InstinctProfile: {
+				data: null,
+				errors: [{ message: "internal server error", path: ["authSession"] }],
+			},
+		},
+	);
+	assert.deepEqual(failures.map((failure) => failure.stream).sort(), [
+		"connections",
+		"profile",
+	]);
+	assert.deepEqual(stateStreams(harness), ["devices"]);
+});
+
+test("the chat history query never selects a bearer link", async () => {
+	const { source } = await runChats();
+	const history = source.documents.find((document) =>
+		document.includes("PdppInstinctChatHistory"),
+	);
+	assert.ok(history);
+	assert.doesNotMatch(history, /\burl\b|signedUrl/);
+});
+
+test("nested chat blocks drop strings that cannot be stored", async () => {
+	const page1 = (await fixture("chat-history-page1")) as {
+		data: { chatHistory: { events: Array<Record<string, unknown>> } };
+	};
+	page1.data.chatHistory.events.push({
+		createdAt: 1_789_070_055,
+		draftField: {
+			content: "ok",
+			label: "Note",
+			userValue: "a\u0000b",
+			nested: [{ value: "c\u0000d", keep: "fine" }],
+		},
+		id: "00000000-0000-4000-8000-000000000110",
+		type: "draft_field",
+	});
+	const pages = await loadChatHistoryPages();
+	const { harness } = await runChats({
+		overrides: {
+			InstinctChatHistory: chatHistoryRouter({ ...pages, page1 }),
+		},
+	});
+	const record = harness.emitted.find(
+		(entry) => entry.data.id === "00000000-0000-4000-8000-000000000110",
+	);
+	assert.ok(record, "the event is still emitted");
+	assert.ok(!JSON.stringify(record.data).includes("\\u0000"));
+	assert.deepEqual(record.data.draft_field, {
+		content: "ok",
+		label: "Note",
+		nested: [{ keep: "fine" }],
+	});
+});
+
+// ─── Review round 2 ────────────────────────────────────────────────────────
+
+test("singleton streams prove their one record before STATE", async () => {
+	const { harness } = await runCollect(new Set(["profile", "agent_contact"]));
+	const messages = wire(harness);
+	for (const stream of ["profile", "agent_contact"]) {
+		const coverageAt = messages.findIndex(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === stream,
+		);
+		const stateAt = messages.findIndex(
+			(message) => message.type === "STATE" && message.stream === stream,
+		);
+		assert.ok(coverageAt >= 0 && stateAt > coverageAt, stream);
+		assert.equal(messages[coverageAt]?.considered, 1);
+	}
+});
+
+test("an agent with no contact details is proven empty, not skipped", async () => {
+	const { harness } = await runCollect(new Set(["agent_contact"]), {
+		InstinctAgentContact: { data: { agentContact: null } },
+	});
+	const messages = wire(harness);
+	assert.ok(!messages.some((message) => message.type === "SKIP_RESULT"));
+	const coverage = messages.find(
+		(message) => message.type === "DETAIL_COVERAGE",
+	);
+	assert.equal(coverage?.considered, 0);
+	assert.deepEqual(stateStreams(harness), ["agent_contact"]);
+});
+
+test("a missing list in an answer is not an empty list", async () => {
+	const connections = await runCollect(new Set(["connections"]), {
+		InstinctConnections: { data: {} },
+	});
+	assert.deepEqual(
+		connections.failures.map((failure) => failure.stream),
+		["connections"],
+	);
+	assert.deepEqual(stateStreams(connections.harness), []);
+
+	const trusted = await runCollect(new Set(["trusted_people"]), {
+		InstinctTrustedNetwork: {
+			data: {
+				trustedNetworkBlockedPeople: { cursor: null, items: [] },
+				trustedNetworkContacts: { cursor: null, items: null },
+				trustedNetworkRequests: { cursor: null, items: [] },
+				trustedNetworkSentRequests: [],
+			},
+		},
+	});
+	assert.deepEqual(
+		trusted.failures.map((failure) => failure.stream),
+		["trusted_people"],
+	);
+
+	const pages = await loadChatHistoryPages();
+	const chats = await runChats({
+		overrides: {
+			InstinctChatHistory: failingMainChat(pages, {
+				data: { chatHistory: { cursor: null, events: null } },
+			}),
+		},
+	});
+	const gap = wire(chats.harness).find(
+		(message) => message.type === "DETAIL_GAP",
+	);
+	assert.equal(gap?.record_key, MAIN_CHAT);
+});
+
+test("records that would share a key fail the list instead of overwriting each other", async () => {
+	const vault = (await fixture("vault")) as {
+		data: { vaultEntries: Array<Record<string, unknown>> };
+	};
+	const first = vault.data.vaultEntries[0];
+	assert.ok(first);
+	vault.data.vaultEntries.push({ ...first });
+	const { failures, harness } = await runCollect(new Set(["vault_entries"]), {
+		InstinctVault: vault,
+	});
+	assert.deepEqual(
+		failures.map((failure) => failure.stream),
+		["vault_entries"],
+	);
+	assert.equal(failures[0]?.retryable, false);
+	assert.ok(
+		!String(failures[0]?.message).includes("Example Airline"),
+		"no entry names in the failure",
+	);
+	assert.equal(harness.emitted.length, 0);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("every page of pending gaps is read, and a gap is handled once", async () => {
+	const pages: Array<NonNullable<CollectInstinctArgs["detailGaps"]>> = [
+		[pendingGap(MAIN_CHAT, "gap-1"), pendingGap(WHATSAPP_CHAT, "gap-2")],
+		[],
+	];
+	let requests = 0;
+	const { harness } = await runChats({
+		detailGaps: [pendingGap(MAIN_CHAT, "gap-1")],
+		requestDetailGapPage: () => {
+			const page = pages[Math.min(requests, pages.length - 1)] ?? [];
+			requests += 1;
+			return Promise.resolve(page);
+		},
+	});
+	const recovered = wire(harness)
+		.filter((message) => message.type === "DETAIL_GAP_RECOVERED")
+		.map((message) => message.gap_id);
+	assert.deepEqual(recovered, ["gap-1", "gap-2"]);
+	assert.equal(requests, 2);
+});
+
+test("a recovery-only run asks for a gap page when START carried none", async () => {
+	let requests = 0;
+	const { harness, source } = await runChats({
+		recoveryOnly: true,
+		requestDetailGapPage: () => {
+			requests += 1;
+			return Promise.resolve(
+				requests === 1 ? [pendingGap(WHATSAPP_CHAT, "gap-3")] : [],
+			);
+		},
+	});
+	assert.deepEqual(source.calls, ["InstinctChatHistory"]);
+	assert.ok(
+		wire(harness).some(
+			(message) =>
+				message.type === "DETAIL_GAP_RECOVERED" && message.gap_id === "gap-3",
+		),
+	);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+// ─── Review round 3 ────────────────────────────────────────────────────────
+
+test("chat_events keeps its checkpoints in the chats STATE, written after the event coverage", async () => {
+	const { harness } = await runChats();
+	const messages = wire(harness);
+	assert.deepEqual(stateStreams(harness), ["chats"]);
+	const coverageAt = messages.findIndex(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "chat_events",
+	);
+	const stateAt = messages.findIndex((message) => message.type === "STATE");
+	assert.equal(messages[coverageAt]?.state_stream, "chats");
+	assert.ok(
+		stateAt > coverageAt,
+		"the parent STATE follows the child coverage",
+	);
+	const lastEvent = harness.events.findLastIndex(
+		(event) => event.kind === "record" && event.stream === "chat_events",
+	);
+	const stateEvent = harness.events.findIndex(
+		(event) => event.kind === "message" && event.message.type === "STATE",
+	);
+	assert.ok(stateEvent > lastEvent);
+});
+
+test("chat_events without chats is out of scope, not collected orphaned", async () => {
+	const source = scriptedGraphql(await loadHappyPathResponses());
+	const harness = makeRecordingEmit(validateRecord);
+	await collectInstinct({
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		graphql: source.graphql,
+		observedAt: OBSERVED_AT,
+		progress: async () => {
+			/* unused */
+		},
+		requested: new Set(["chat_events"]),
+	});
+	const skip = wire(harness).find((message) => message.type === "SKIP_RESULT");
+	assert.equal(skip?.reason, "scope_not_supported");
+	assert.equal(skip?.stream, "chat_events");
+	assert.ok(!source.calls.includes("InstinctChatHistory"));
+	assert.equal(harness.emitted.length, 0);
+});
+
+test("a chat record that cannot be stored fails chat_events too", async () => {
+	const chats = (await fixture("chats")) as {
+		data: { chats: { chats: Array<Record<string, unknown>> } };
+	};
+	const first = chats.data.chats.chats[0];
+	assert.ok(first);
+	first.title = "t".repeat(501);
+	const { failures, harness, source } = await runChats({
+		overrides: { InstinctChats: chats },
+	});
+	assert.deepEqual(failures.map((failure) => failure.stream).sort(), [
+		"chat_events",
+		"chats",
+	]);
+	assert.ok(!source.calls.includes("InstinctChatHistory"));
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("a page without its cursor is not the end of the list", async () => {
+	const chats = (await fixture("chats")) as {
+		data: { chats: Record<string, unknown> };
+	};
+	delete chats.data.chats.cursor;
+	const list = await runChats({ overrides: { InstinctChats: chats } });
+	assert.deepEqual(list.failures.map((failure) => failure.stream).sort(), [
+		"chat_events",
+		"chats",
+	]);
+
+	const pages = await loadChatHistoryPages();
+	const page1 = structuredClone(pages.page1) as {
+		data: { chatHistory: Record<string, unknown> };
+	};
+	delete page1.data.chatHistory.cursor;
+	const history = await runChats({
+		overrides: {
+			InstinctChatHistory: chatHistoryRouter({ ...pages, page1 }),
+		},
+	});
+	const gap = wire(history.harness).find(
+		(message) => message.type === "DETAIL_GAP",
+	);
+	assert.equal(gap?.record_key, MAIN_CHAT);
+
+	const trusted = await runCollect(new Set(["trusted_people"]), {
+		InstinctTrustedNetwork: {
+			data: {
+				trustedNetworkBlockedPeople: { cursor: null, items: [] },
+				trustedNetworkContacts: { items: [] },
+				trustedNetworkRequests: { cursor: null, items: [] },
+				trustedNetworkSentRequests: [],
+			},
+		},
+	});
+	assert.deepEqual(
+		trusted.failures.map((failure) => failure.stream),
+		["trusted_people"],
+	);
+});
+
+test("a new event in the checkpoint's second on the next page is still read", async () => {
+	const first = await runChats();
+	const pages = await loadChatHistoryPages();
+	// The newest window holds only the already-collected events of the
+	// checkpoint's second; the next window holds a new event of that second.
+	const page1 = structuredClone(pages.page1) as {
+		data: {
+			chatHistory: {
+				cursor: string | null;
+				events: Array<{ createdAt: number }>;
+			};
+		};
+	};
+	page1.data.chatHistory.events = page1.data.chatHistory.events.filter(
+		(event) => event.createdAt === 1_789_070_050,
+	);
+	assert.ok(page1.data.chatHistory.events.length > 0);
+	const sameSecond = {
+		createdAt: 1_789_070_050,
+		id: "00000000-0000-4000-8000-000000000111",
+		message: {
+			attachments: [],
+			content: "same second, older window",
+			id: "msg-0111TEST",
+			origin: null,
+			readAt: null,
+			role: "user",
+		},
+		type: "message",
+	};
+	const page2 = structuredClone(pages.page2) as {
+		data: { chatHistory: { events: unknown[] } };
+	};
+	page2.data.chatHistory.events.push(sameSecond);
+	const { harness, source } = await runChats({
+		overrides: {
+			InstinctChatHistory: chatHistoryRouter({ ...pages, page1, page2 }),
+		},
+		state: chatEventsState(first.harness),
+	});
+	assert.deepEqual(chatEventIds(harness), [sameSecond.id]);
+	assert.deepEqual(
+		historyCalls(source, MAIN_CHAT).map((vars) => vars.cursor),
+		[null, "chat-cursor-page-2"],
+	);
 });

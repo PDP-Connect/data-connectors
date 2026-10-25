@@ -388,7 +388,8 @@ export const chatEventSchema = z.object({
 			role: z.string().nullish(),
 		})
 		.nullish(),
-	screenshot: z.object({ url: z.string().nullish() }).nullish(),
+	// Selected by `__typename` only: its `url` is a bearer link and is never asked for.
+	screenshot: z.object({ __typename: z.string().nullish() }).nullish(),
 	thinking: z.object({ thinking: z.string().nullish() }).nullish(),
 	toolInvocation: z
 		.object({

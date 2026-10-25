@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Instinct Connector (v0.1.0).
+ * PDPP Instinct Connector.
  *
  * Instinct (instinct.com, Spear Street Technology) is an invite-only personal
  * AI agent the owner reaches over SMS, WhatsApp, voice, and email. The web
@@ -11,7 +11,7 @@
  * /trusted-networks, /settings), plus an /agent chat page hidden behind the
  * `agent_chat` / `mobile_chat` feature flags. The flag gates only the page:
  * the `chats` and `chatHistory` resolvers behind it answer for any signed-in
- * owner, and they hold the agent's full conversation log across channels.
+ * owner, and they hold the agent's conversation log across channels.
  *
  *   chats           — the owner's chats with the agent (e.g. `main`, which
  *                     aggregates every channel, and `whatsapp_channel`)
@@ -40,10 +40,21 @@
  * Auth: cookie session on api.instinct.com, established by signing in at
  * app.instinct.com. Sign-in is a phone number plus an SMS one-time code behind
  * a Cloudflare Turnstile challenge, so there is no credential pair to seal and
- * no scriptable login. First connection is an owner `manual_action` in the
- * isolated Instinct browser profile; the session then persists in that profile
- * and later runs reuse it. `ensureSession` proves the session with a real
- * `authSession` read before any collection starts.
+ * no scriptable login. `ensureSession` reads `authSession` from the page as
+ * it is (one navigation to the app only when the page is elsewhere). A
+ * signed-out answer opens the app's own sign-in page and hands it to the
+ * person through `manualBrowserLogin`; readiness is the same `authSession`
+ * read on that page, which never navigates it. Session errors are thrown as
+ * bare codes so the runtime keeps them.
+ *
+ * Completeness: a stream is checkpointed only after its whole list was read
+ * and Instinct reported no error on it. List streams end with a full-scan
+ * DETAIL_COVERAGE and then STATE. A list that cannot be proven (a GraphQL
+ * error on its path, an unrecognised answer, a repeated cursor, the page
+ * guard) fails that stream through `reportStreamFailure` with no STATE, and
+ * the other streams continue. `chat_events` accounts per chat: a chat whose
+ * history cannot be read to the checkpoint gets a DETAIL_GAP, keeps its prior
+ * checkpoint, and is read again on the next run.
  *
  * Pagination: account-state streams are one small read each. `chats` pages by
  * `limit`/`cursor`; `chatHistory` returns the newest window first with a
@@ -65,12 +76,16 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
 import { z } from "zod";
-import { manualAction } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
+	buildFullScanCoverageMessage,
+	createConnectorFailure,
 	type EmittedMessage,
-	type InteractionRequest,
-	type InteractionResponse,
+	type EnsureSessionArgs,
+	emitDetailCoverage,
+	emitDetailGap,
 	type RecordData,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -109,11 +124,33 @@ import type {
 	ConnectionFeatureGates,
 	GraphqlError,
 	GraphqlFetchResult,
+	ImessageDeviceResponse,
 	InstinctGraphql,
+	ProfileResponse,
+	TrustedNetworkResponse,
 } from "./types.ts";
 
-const APP_URL = "https://app.instinct.com/workspace";
+const APP_ORIGIN = "https://app.instinct.com";
+const APP_URL = `${APP_ORIGIN}/workspace`;
+/** The app's own sign-in route; `returnTo` brings the person back to the workspace. */
+export const SIGN_IN_URL = `${APP_ORIGIN}/signin?returnTo=%2Fworkspace`;
 const API_URL = "https://api.instinct.com/-/api/graphql";
+
+// ─── Error codes ───────────────────────────────────────────────────────────
+//
+// Every code is bare snake_case so the runtime keeps it as the terminal
+// `code` (session-establish.ts recovers a code only when the whole message is
+// one). Each has owner-facing copy in manifest.json reason_display_messages.
+
+/** Signed out, or the person did not finish signing in. Not retryable. */
+export const INSTINCT_AUTH_FAILED = "instinct_auth_failed";
+/** The session check got no usable answer. Retryable. */
+export const INSTINCT_INTERRUPTED = "instinct_interrupted";
+const INSTINCT_RATE_LIMITED = "instinct_rate_limited";
+const INSTINCT_SERVER_ERROR = "instinct_server_error";
+const INSTINCT_REQUEST_REJECTED = "instinct_request_rejected";
+const INSTINCT_SOURCE_UNREADABLE = "instinct_source_unreadable";
+const INSTINCT_STREAM_INCOMPLETE = "instinct_stream_incomplete";
 
 /**
  * Instinct's own feature flags for the two connection resolvers the web app
@@ -131,6 +168,12 @@ const TRUSTED_PAGE_SIZE = 20;
 //
 // Read out of app.instinct.com's JS bundles (introspection is disabled in
 // production) and each one verified against a live account.
+
+// The session check asks for the signed-in user alone, so no other resolver's
+// failure can be read as a sign-out.
+const SESSION_QUERY = `query PdppInstinctSession {
+  authSession { user { id } }
+}`;
 
 const PROFILE_QUERY = `query PdppInstinctProfile {
   authSession { user { id name email roles enabledFeatureFlags onboardingStep profilePictureUrl phoneNumber preferences { trainingDataOptOut } } }
@@ -186,8 +229,9 @@ const VAULT_QUERY = `query PdppInstinctVault {
 }`;
 
 // The app's own /agent page issues these two. Attachment and screenshot
-// `signedUrl`/`url` values are short-lived bearer links: attachments are asked
-// for without them, and screenshots only report whether one exists.
+// `signedUrl`/`url` values are short-lived bearer links, so neither is asked
+// for: attachments come without them, and a screenshot is selected only by
+// its type name, which says one exists.
 const CHATS_QUERY = `query PdppInstinctChats($limit: Int, $cursor: String) {
   chats(limit: $limit, cursor: $cursor) { cursor chats { id title source status pendingTurnStartedAt } }
 }`;
@@ -203,7 +247,7 @@ const CHAT_HISTORY_QUERY = `query PdppInstinctChatHistory($chatId: ID!, $limit: 
       toolResponse { toolName toolId response isError }
       interaction { interactionId interactionType title body question options actionSummary targetMode deviceName plan }
       interactionResponse { interactionId approved selected text summary dismissed }
-      screenshot { url }
+      screenshot { __typename }
       thinking { thinking }
       action { actionType coordinate text key scrollDirection scrollAmount command }
       draftField { label before content userValue userEditedAt }
@@ -219,13 +263,6 @@ const MAX_CHAT_HISTORY_PAGES = 400;
 
 // ─── Transport ─────────────────────────────────────────────────────────────
 
-/**
- * Build the in-page GraphQL caller.
- *
- * The request runs inside the signed-in app origin with `credentials:
- * "include"`, so the session cookie rides along without this connector ever
- * reading, storing, or forwarding it.
- */
 export interface GraphqlEvaluateArgs {
 	readonly apiUrl: string;
 	readonly document: string;
@@ -284,28 +321,63 @@ export function makeInstinctGraphql(page: Page): InstinctGraphql {
 }
 
 /**
- * Turn a transport-level outcome into either the JSON body or a thrown,
- * classified error. GraphQL-level `errors[]` are deliberately NOT thrown here
- * — Instinct answers 200 with partial data when one resolver fails, and the
- * right response is to skip that stream, not to lose the whole run.
+ * The classified failure for a transport-level outcome, or null when the
+ * response is a readable 2xx. GraphQL-level `errors[]` are not judged here:
+ * Instinct answers 200 with partial data when one resolver fails, and each
+ * stream decides what that means for its own completeness.
  */
+function transportFailure(
+	result: GraphqlFetchResult,
+	operation: string,
+): Error | null {
+	const { status } = result;
+	if (status === 401 || status === 403) {
+		return createConnectorFailure(
+			INSTINCT_AUTH_FAILED,
+			`Instinct answered ${String(status)} on ${operation}; the session is no longer signed in.`,
+			{ retryable: false },
+		);
+	}
+	if (status === 429) {
+		return createConnectorFailure(
+			INSTINCT_RATE_LIMITED,
+			`Instinct asked to slow down (429) on ${operation}.`,
+			{ retryable: true },
+		);
+	}
+	if (status === 0 || status >= 500) {
+		return createConnectorFailure(
+			INSTINCT_SERVER_ERROR,
+			status === 0
+				? `The ${operation} request did not complete.`
+				: `Instinct answered ${String(status)} on ${operation}.`,
+			{ retryable: true },
+		);
+	}
+	if (status < 200 || status >= 300) {
+		return createConnectorFailure(
+			INSTINCT_REQUEST_REJECTED,
+			`Instinct refused ${operation} with ${String(status)}.`,
+			{ retryable: false },
+		);
+	}
+	if (result.invalidJson === true) {
+		return createConnectorFailure(
+			INSTINCT_SOURCE_UNREADABLE,
+			`Instinct answered ${operation} with a body that is not JSON.`,
+			{ retryable: false },
+		);
+	}
+	return null;
+}
+
 function assertTransport(
 	result: GraphqlFetchResult,
 	operation: string,
 ): unknown {
-	if (result.status === 401 || result.status === 403) {
-		throw new Error(
-			`instinct_owner_repair_required: ${String(result.status)} on ${operation}`,
-		);
-	}
-	if (result.status === 429) {
-		throw new Error(`instinct_rate_limited: 429 on ${operation}`);
-	}
-	if (result.status < 200 || result.status >= 300) {
-		throw new Error(`instinct_http_${String(result.status)}: ${operation}`);
-	}
-	if (result.invalidJson === true) {
-		throw new Error(`instinct_parse_error: ${operation}`);
+	const failure = transportFailure(result, operation);
+	if (failure !== null) {
+		throw failure;
 	}
 	return result.json;
 }
@@ -323,6 +395,60 @@ export function describeGraphqlErrors(
 			return path.length > 0 ? `${path}: ${error.message}` : error.message;
 		})
 		.join("; ");
+}
+
+// ─── Stream failures ───────────────────────────────────────────────────────
+
+/** A stream whose list could not be proven complete this run. */
+export class StreamIncomplete extends Error {
+	readonly retryable: boolean;
+	constructor(message: string, retryable: boolean) {
+		super(message);
+		this.name = "StreamIncomplete";
+		this.retryable = retryable;
+	}
+}
+
+function errorCode(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null) {
+		return undefined;
+	}
+	const { code } = error as { code?: unknown };
+	return typeof code === "string" ? code : undefined;
+}
+
+function errorRetryable(error: unknown): boolean {
+	if (error instanceof StreamIncomplete) {
+		return error.retryable;
+	}
+	const { retryable } = error as { retryable?: unknown };
+	return retryable === true;
+}
+
+/** An unrecognised response shape: retrying will not help, a connector update will. */
+function unreadable(operation: string, error: z.ZodError): StreamIncomplete {
+	const issues = error.issues
+		.slice(0, 3)
+		.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+		.join("; ");
+	return new StreamIncomplete(
+		`Instinct answered ${operation} in a shape this connector does not recognise (${issues}).`,
+		false,
+	);
+}
+
+/** Instinct reported an error on this read, so its answer cannot be trusted as whole. */
+function graphqlFailure(
+	operation: string,
+	errors: readonly GraphqlError[] | null | undefined,
+): StreamIncomplete | null {
+	const note = describeGraphqlErrors(errors);
+	return note === null
+		? null
+		: new StreamIncomplete(
+				`Instinct reported an error on ${operation} (${note}), so it was not read completely.`,
+				true,
+			);
 }
 
 // ─── Session ───────────────────────────────────────────────────────────────
@@ -349,64 +475,171 @@ export function hasSignedInUser(json: unknown): boolean {
 	);
 }
 
-export async function ensureInstinctSession(args: {
-	capture?: Parameters<typeof manualAction>[0]["capture"];
-	graphql: InstinctGraphql;
-	interactive: boolean;
-	page: Page;
-	sendInteraction: (
-		request: InteractionRequest,
-	) => Promise<InteractionResponse>;
-}): Promise<void> {
-	await args.page
-		.goto(APP_URL, { timeout: 30_000, waitUntil: "domcontentloaded" })
-		.catch((): undefined => undefined);
+export type SessionState = "signed_in" | "signed_out" | "unknown";
 
-	const initial = await args.graphql(PROFILE_QUERY);
-	if (
-		initial.status >= 200 &&
-		initial.status < 300 &&
-		hasSignedInUser(initial.json)
+/** GraphQL error wording that means "not signed in". */
+const SIGNED_OUT_ERROR =
+	/\b(?:unauthenticated|unauthori[sz]ed|not authenticated|not logged in|not signed in|login required|sign-?in required)\b/i;
+
+/**
+ * What one `authSession` read says about the session. 401/403, a readable
+ * answer with no user and no error, or one whose every error says the
+ * request is not signed in, is signed out. A request that did not complete,
+ * a 429 or 5xx, a body this connector cannot read, or any other GraphQL
+ * error says nothing either way.
+ */
+export function classifySession(result: GraphqlFetchResult): SessionState {
+	const { status } = result;
+	if (status === 401 || status === 403) {
+		return "signed_out";
+	}
+	if (status < 200 || status >= 300 || result.invalidJson === true) {
+		return "unknown";
+	}
+	const parsed = profileResponseSchema.safeParse(result.json);
+	if (!parsed.success) {
+		return "unknown";
+	}
+	if (typeof parsed.data.data?.authSession?.user?.id === "string") {
+		return "signed_in";
+	}
+	const errors = parsed.data.errors ?? [];
+	return errors.every((error) => SIGNED_OUT_ERROR.test(error.message))
+		? "signed_out"
+		: "unknown";
+}
+
+/** One `authSession` read on the page as it is. Never navigates. */
+async function readSession(graphql: InstinctGraphql): Promise<SessionState> {
+	try {
+		return classifySession(await graphql(SESSION_QUERY));
+	} catch {
+		// The page was mid-navigation or closed: no evidence either way.
+		return "unknown";
+	}
+}
+
+const SESSION_CHECK_RETRIES = 2;
+const SESSION_RETRY_DELAY_MS = 2000;
+const SIGN_IN_TIMEOUT_SECONDS = 30 * 60;
+const SIGN_IN_PROBE_INTERVAL_MS = 5000;
+
+const SIGN_IN_MESSAGE =
+	"Sign in to Instinct in the secure browser: enter your phone number, complete the check, and type the SMS code. Collection starts once Instinct answers for your account.";
+
+const realDelay = (ms: number): Promise<void> =>
+	new Promise((resolve) => setTimeout(resolve, ms));
+
+export interface EnsureInstinctSessionArgs
+	extends Pick<
+		EnsureSessionArgs,
+		"assist" | "capture" | "completeAssistance" | "sendInteraction"
+	> {
+	readonly graphql: InstinctGraphql;
+	readonly interactive: boolean;
+	readonly page: Pick<Page, "goto" | "url">;
+}
+
+/** Test seams: production uses the real clock and the default cadence. */
+export interface SessionTimings {
+	readonly delay?: (ms: number) => Promise<void>;
+	readonly probeIntervalMs?: number;
+}
+
+function onAppOrigin(page: Pick<Page, "url">): boolean {
+	try {
+		return new URL(page.url()).origin === APP_ORIGIN;
+	} catch {
+		return false;
+	}
+}
+
+export async function ensureInstinctSession(
+	args: EnsureInstinctSessionArgs,
+	timings: SessionTimings = {},
+): Promise<void> {
+	const delay = timings.delay ?? realDelay;
+	const { page } = args;
+	// The GraphQL call runs from the app origin, so a page that is elsewhere
+	// (a fresh about:blank) is moved there once. A page already on the app is
+	// read where it is.
+	if (!onAppOrigin(page)) {
+		await page
+			.goto(APP_URL, { timeout: 30_000, waitUntil: "domcontentloaded" })
+			.catch((): undefined => undefined);
+	}
+	let state = await readSession(args.graphql);
+	for (
+		let retry = 0;
+		state === "unknown" && retry < SESSION_CHECK_RETRIES;
+		retry += 1
 	) {
+		await delay(SESSION_RETRY_DELAY_MS);
+		state = await readSession(args.graphql);
+	}
+	if (state === "signed_in") {
 		return;
 	}
-	if (
-		initial.status !== 200 &&
-		initial.status !== 401 &&
-		initial.status !== 403
-	) {
-		assertTransport(initial, "authSession");
+	if (state === "unknown") {
+		connectorDiagnostic("instinct", "session_check_no_answer", {
+			reads: SESSION_CHECK_RETRIES + 1,
+		});
+		throw new Error(INSTINCT_INTERRUPTED);
 	}
 	if (!args.interactive) {
-		throw new Error(
-			"instinct_owner_repair_required: unattended refresh cannot open interactive login",
-		);
+		connectorDiagnostic("instinct", "signed_out_unattended", {});
+		throw new Error(INSTINCT_AUTH_FAILED);
 	}
 
-	await manualAction(
-		{
-			...(args.capture ? { capture: args.capture } : {}),
-			message:
-				"Sign in to Instinct in the secure browser — enter your phone number, complete the Turnstile check, and type the SMS code — then respond success. PDPP will verify the session before collecting.",
-			page: args.page,
-			reason: "login",
-			timeoutSeconds: 1800,
-		},
-		args.sendInteraction,
-	);
-
-	const reprobe = await args.graphql(PROFILE_QUERY);
-	assertTransport(reprobe, "authSession");
-	if (!hasSignedInUser(reprobe.json)) {
-		throw new Error(
-			"instinct_owner_repair_required: still signed out after manual login",
-		);
+	await page.goto(SIGN_IN_URL, {
+		timeout: 30_000,
+		waitUntil: "domcontentloaded",
+	});
+	const readiness = async (): Promise<boolean> =>
+		(await readSession(args.graphql)) === "signed_in";
+	const ready = await manualBrowserLogin({
+		assist: args.assist,
+		autoProbeIntervalMs: timings.probeIntervalMs ?? SIGN_IN_PROBE_INTERVAL_MS,
+		capture: args.capture,
+		completeAssistance: args.completeAssistance,
+		isProbeSuccessful: (ok) => ok,
+		message: SIGN_IN_MESSAGE,
+		page: page as Page,
+		probe: readiness,
+		readinessProbe: readiness,
+		readinessProbeOnHandoffPage: true,
+		sendInteraction: args.sendInteraction,
+		timeoutSeconds: SIGN_IN_TIMEOUT_SECONDS,
+	});
+	if (!ready) {
+		connectorDiagnostic("instinct", "sign_in_not_completed", {});
+		throw new Error(INSTINCT_AUTH_FAILED);
+	}
+	// The person is signed in and nothing of this connector is in flight. The
+	// sign-in page may still be redirecting, so collection starts from the
+	// workspace, and only a signed-out answer there stops it.
+	await page
+		.goto(APP_URL, { timeout: 30_000, waitUntil: "domcontentloaded" })
+		.catch((): undefined => undefined);
+	if ((await readSession(args.graphql)) === "signed_out") {
+		connectorDiagnostic("instinct", "signed_out_after_sign_in", {});
+		throw new Error(INSTINCT_AUTH_FAILED);
 	}
 }
 
 // ─── Collection ────────────────────────────────────────────────────────────
 
-export interface CollectInstinctArgs {
+export interface CollectInstinctArgs
+	extends Partial<
+		Pick<
+			BrowserCollectContext,
+			| "collectionMode"
+			| "detailGaps"
+			| "recoveryOnly"
+			| "reportStreamFailure"
+			| "requestDetailGapPage"
+		>
+	> {
 	readonly emit: (message: EmittedMessage) => Promise<void>;
 	readonly emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	readonly graphql: InstinctGraphql;
@@ -431,13 +664,52 @@ export function resolveConnectionGates(
 	};
 }
 
-async function skipStream(
-	emit: CollectInstinctArgs["emit"],
-	stream: string,
-	reason: string,
-	message: string,
+/**
+ * Fail the requested ones of `streams` for this run: no STATE, and the
+ * runtime ends the run failed while the other streams keep going. A signed-out
+ * answer stops the whole run instead, and an error that is neither a
+ * classified Instinct failure nor a StreamIncomplete is a bug and propagates.
+ */
+async function failStreams(
+	args: CollectInstinctArgs,
+	streams: readonly string[],
+	error: unknown,
 ): Promise<void> {
-	await emit({ message, reason, stream, type: "SKIP_RESULT" });
+	const code = errorCode(error);
+	if (code === INSTINCT_AUTH_FAILED) {
+		throw error;
+	}
+	if (!(error instanceof StreamIncomplete) && code === undefined) {
+		throw error;
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	const retryable = errorRetryable(error);
+	for (const stream of streams) {
+		if (!args.requested.has(stream)) {
+			continue;
+		}
+		connectorDiagnostic("instinct", "stream_failed", { retryable, stream });
+		if (!args.reportStreamFailure) {
+			throw createConnectorFailure(INSTINCT_STREAM_INCOMPLETE, message, {
+				retryable,
+			});
+		}
+		await args.reportStreamFailure(stream, message, { retryable });
+	}
+}
+
+/** Run one read; on failure, fail `streams` and answer null. */
+async function readOrFail<T>(
+	args: CollectInstinctArgs,
+	streams: readonly string[],
+	read: () => Promise<T>,
+): Promise<{ value: T } | null> {
+	try {
+		return { value: await read() };
+	} catch (error) {
+		await failStreams(args, streams, error);
+		return null;
+	}
 }
 
 async function checkpoint(
@@ -449,349 +721,687 @@ async function checkpoint(
 }
 
 /**
- * Read the profile. Returns the parsed feature flags even when the `profile`
- * stream was not requested, because the connections query needs them to decide
- * which feature-gated resolvers it may ask for.
+ * Why some of these records would not pass the stream's schema (counts and
+ * field paths only, never values), or null when every one passes. The
+ * runtime drops a record that fails its schema, so a stream must not claim
+ * completeness over one.
  */
-async function collectProfile(
+export function schemaProblems(
+	stream: string,
+	records: readonly RecordData[],
+): string | null {
+	let failed = 0;
+	const paths = new Set<string>();
+	for (const record of records) {
+		const result = validateRecord(stream, record);
+		if (!result.ok) {
+			failed += 1;
+			for (const issue of result.issues) {
+				paths.add(issue.path || "(record)");
+			}
+		}
+	}
+	return failed === 0
+		? null
+		: `${String(failed)} ${stream} record(s) did not pass this connector's schema (${[...paths].slice(0, 5).join(", ")}).`;
+}
+
+/**
+ * Records sharing one primary key would overwrite each other while coverage
+ * counts both, so a list holding any cannot be checkpointed as complete.
+ */
+export function duplicateKeys(
+	stream: string,
+	records: readonly RecordData[],
+): string | null {
+	const ids = new Set(records.map((record) => String(record.id)));
+	const repeated = records.length - ids.size;
+	return repeated === 0
+		? null
+		: `${String(repeated)} ${stream} record(s) share a key with another record, so the list cannot be stored without losing one.`;
+}
+
+/**
+ * Emit a proven list: its records, the full-scan coverage that says the
+ * whole list was read, then its STATE. Only called once the list's end was
+ * observed with no error on its path. A record that would fail its schema
+ * fails the stream instead, before anything is emitted.
+ */
+async function emitProvenList(
 	args: CollectInstinctArgs,
-): Promise<readonly string[]> {
+	stream: string,
+	records: readonly RecordData[],
+): Promise<void> {
+	const problems =
+		schemaProblems(stream, records) ?? duplicateKeys(stream, records);
+	if (problems !== null) {
+		await failStreams(args, [stream], new StreamIncomplete(problems, false));
+		return;
+	}
+	for (const record of records) {
+		await args.emitRecord(stream, record);
+	}
+	await args.emit(buildFullScanCoverageMessage(stream, records.length));
+	await checkpoint(args.emit, stream, args.observedAt);
+}
+
+interface ProfileRead {
+	/** The account's feature flags, or null when the read did not prove them. */
+	readonly flags: readonly string[] | null;
+	readonly profile: ProfileResponse;
+}
+
+async function readProfile(args: CollectInstinctArgs): Promise<ProfileRead> {
 	const raw = assertTransport(await args.graphql(PROFILE_QUERY), "authSession");
 	const parsed = profileResponseSchema.safeParse(raw);
 	if (!parsed.success) {
-		throw new Error(
-			`instinct_parse_error: authSession: ${parsed.error.issues
-				.map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-				.join("; ")}`,
+		throw unreadable("authSession", parsed.error);
+	}
+	const user = parsed.data.data?.authSession?.user;
+	if (typeof user?.id !== "string") {
+		const failure = graphqlFailure("the account read", parsed.data.errors);
+		if (failure !== null) {
+			// An error, not an empty session: it says nothing about sign-in.
+			throw failure;
+		}
+		throw createConnectorFailure(
+			INSTINCT_AUTH_FAILED,
+			"Instinct no longer answers for a signed-in account.",
+			{ retryable: false },
 		);
 	}
-	const flags = parsed.data.data?.authSession?.user?.enabledFeatureFlags ?? [];
+	const flagsFailed = (parsed.data.errors ?? []).some(
+		(error) => error.path?.[0] === "authSession",
+	);
+	return {
+		flags:
+			Array.isArray(user.enabledFeatureFlags) && !flagsFailed
+				? user.enabledFeatureFlags
+				: null,
+		profile: parsed.data,
+	};
+}
+
+/**
+ * Read the profile. Returns the account's feature flags, which the
+ * connections query needs to decide which feature-gated resolvers it may ask
+ * for; null when they could not be read, in which case connections fails
+ * rather than skip a resolver the account may use.
+ */
+async function collectProfile(
+	args: CollectInstinctArgs,
+): Promise<readonly string[] | null> {
+	const read = await readOrFail(args, ["profile", "connections"], () =>
+		readProfile(args),
+	);
+	if (read === null) {
+		return null;
+	}
+	const { flags, profile } = read.value;
+	if (flags === null) {
+		await failStreams(
+			args,
+			["connections"],
+			new StreamIncomplete(
+				"Instinct did not return this account's feature flags, so it is unknown which connected services to ask for.",
+				true,
+			),
+		);
+	}
 	if (!args.requested.has("profile")) {
 		return flags;
 	}
-	const record = profileRecord(parsed.data, args.observedAt);
-	if (record === null) {
-		await skipStream(
-			args.emit,
-			"profile",
-			"not_available",
-			describeGraphqlErrors(parsed.data.errors) ??
-				"authSession returned no user",
+	const failure = graphqlFailure("the profile read", profile.errors);
+	const record = profileRecord(profile, args.observedAt);
+	if (failure !== null || record === null) {
+		await failStreams(
+			args,
+			["profile"],
+			failure ?? new StreamIncomplete("Instinct returned no profile.", true),
 		);
 		return flags;
 	}
-	await args.emitRecord("profile", record);
-	await checkpoint(args.emit, "profile", args.observedAt);
+	await emitProvenList(args, "profile", [record]);
 	return flags;
 }
 
 async function collectAgentContact(args: CollectInstinctArgs): Promise<void> {
-	const raw = assertTransport(
-		await args.graphql(AGENT_CONTACT_QUERY),
-		"agentContact",
-	);
-	const parsed = agentContactResponseSchema.safeParse(raw);
-	const agentContact = parsed.success ? parsed.data.data?.agentContact : null;
-	if (!(parsed.success && agentContact)) {
-		await skipStream(
-			args.emit,
-			"agent_contact",
-			parsed.success ? "not_available" : "parse_error",
-			parsed.success
-				? (describeGraphqlErrors(parsed.data.errors) ??
-						"agentContact returned no contact details")
-				: parsed.error.message,
+	const read = await readOrFail(args, ["agent_contact"], async () => {
+		const raw = assertTransport(
+			await args.graphql(AGENT_CONTACT_QUERY),
+			"agentContact",
 		);
+		const parsed = agentContactResponseSchema.safeParse(raw);
+		if (!parsed.success) {
+			throw unreadable("agentContact", parsed.error);
+		}
+		const failure = graphqlFailure("agentContact", parsed.data.errors);
+		if (failure !== null) {
+			throw failure;
+		}
+		return parsed.data.data?.agentContact ?? null;
+	});
+	if (read === null) {
 		return;
 	}
-	await args.emitRecord(
+	// Answered without error and without details: this agent has no contact
+	// channels assigned yet, which is proven-empty rather than unknown.
+	await emitProvenList(
+		args,
 		"agent_contact",
-		agentContactRecord(agentContact, args.observedAt),
+		read.value === null
+			? []
+			: [agentContactRecord(read.value, args.observedAt)],
 	);
-	await checkpoint(args.emit, "agent_contact", args.observedAt);
+}
+
+/**
+ * Whether every error on the local-iMessage read is the one Instinct gives
+ * an account with no local iMessage relay: `internal server error` on the
+ * `imessageLocalConnection` path, observed live. That answer means "no
+ * relay", not a failed read.
+ */
+export function isNoRelayAnswer(
+	errors: readonly GraphqlError[] | null | undefined,
+): boolean {
+	return (
+		errors !== null &&
+		errors !== undefined &&
+		errors.length > 0 &&
+		errors.every(
+			(error) =>
+				error.path?.length === 1 &&
+				error.path[0] === "imessageLocalConnection" &&
+				error.message === "internal server error",
+		)
+	);
+}
+
+async function readConnections(
+	args: CollectInstinctArgs,
+	gates: ConnectionFeatureGates,
+): Promise<RecordData[]> {
+	const connections = connectionsResponseSchema.safeParse(
+		assertTransport(
+			await args.graphql(CONNECTIONS_QUERY, {
+				showStripeLink: gates.showStripeLink,
+				showWhoop: gates.showWhoop,
+			}),
+			"connections",
+		),
+	);
+	if (!connections.success) {
+		throw unreadable("connections", connections.error);
+	}
+	const connectionsError = graphqlFailure(
+		"connected services",
+		connections.data.errors,
+	);
+	if (connectionsError !== null) {
+		throw connectionsError;
+	}
+	const connected = connections.data.data;
+	if (
+		connected === null ||
+		!Array.isArray(connected.googleWorkspaceConnections) ||
+		!Array.isArray(connected.outlookConnections) ||
+		!Array.isArray(connected.linearConnections) ||
+		!Array.isArray(connected.notionConnections)
+	) {
+		throw new StreamIncomplete(
+			"Instinct did not return every connected-service list.",
+			true,
+		);
+	}
+
+	const messaging = messagingResponseSchema.safeParse(
+		assertTransport(await args.graphql(MESSAGING_QUERY), "messaging"),
+	);
+	if (!messaging.success) {
+		throw unreadable("messaging", messaging.error);
+	}
+	const messagingError = graphqlFailure(
+		"messaging connections",
+		messaging.data.errors,
+	);
+	if (messagingError !== null) {
+		throw messagingError;
+	}
+	if (messaging.data.data === null) {
+		throw new StreamIncomplete(
+			"Instinct returned no messaging connections.",
+			true,
+		);
+	}
+
+	const imessage = imessageDeviceResponseSchema.safeParse(
+		assertTransport(
+			await args.graphql(IMESSAGE_DEVICE_QUERY),
+			"imessageLocalConnection",
+		),
+	);
+	if (!imessage.success) {
+		throw unreadable("imessageLocalConnection", imessage.error);
+	}
+	let relay: ImessageDeviceResponse = imessage.data;
+	if (isNoRelayAnswer(imessage.data.errors)) {
+		relay = { data: null };
+	} else {
+		const relayError = graphqlFailure(
+			"the local iMessage relay",
+			imessage.data.errors,
+		);
+		if (relayError !== null) {
+			throw relayError;
+		}
+	}
+
+	const records = [
+		...connectionRecords(connections.data, args.observedAt),
+		...messagingConnectionRecords(messaging.data, args.observedAt),
+	];
+	// Both iMessage resolvers feed one record, built after both answered.
+	const imessageRecord = imessageConnectionRecord(
+		messaging.data,
+		relay,
+		args.observedAt,
+	);
+	if (imessageRecord !== null) {
+		records.push(imessageRecord);
+	}
+	return records;
 }
 
 async function collectConnections(
 	args: CollectInstinctArgs,
 	gates: ConnectionFeatureGates,
 ): Promise<void> {
-	const records: RecordData[] = [];
-	const notes: string[] = [];
-
-	const connectionsRaw = assertTransport(
-		await args.graphql(CONNECTIONS_QUERY, {
-			showStripeLink: gates.showStripeLink,
-			showWhoop: gates.showWhoop,
-		}),
-		"connections",
+	const read = await readOrFail(args, ["connections"], () =>
+		readConnections(args, gates),
 	);
-	const connections = connectionsResponseSchema.safeParse(connectionsRaw);
-	if (connections.success) {
-		records.push(...connectionRecords(connections.data, args.observedAt));
-		const errorNote = describeGraphqlErrors(connections.data.errors);
-		if (errorNote !== null) {
-			notes.push(errorNote);
-		}
-	} else {
-		notes.push(`connections: ${connections.error.message}`);
+	if (read !== null) {
+		await emitProvenList(args, "connections", read.value);
 	}
-
-	const messagingRaw = assertTransport(
-		await args.graphql(MESSAGING_QUERY),
-		"messaging",
-	);
-	const messaging = messagingResponseSchema.safeParse(messagingRaw);
-	if (messaging.success) {
-		records.push(
-			...messagingConnectionRecords(messaging.data, args.observedAt),
-		);
-		const errorNote = describeGraphqlErrors(messaging.data.errors);
-		if (errorNote !== null) {
-			notes.push(errorNote);
-		}
-	} else {
-		notes.push(`messaging: ${messaging.error.message}`);
-	}
-
-	const imessageRaw = assertTransport(
-		await args.graphql(IMESSAGE_DEVICE_QUERY),
-		"imessageLocalConnection",
-	);
-	const imessage = imessageDeviceResponseSchema.safeParse(imessageRaw);
-	if (imessage.success) {
-		const errorNote = describeGraphqlErrors(imessage.data.errors);
-		if (errorNote !== null) {
-			notes.push(errorNote);
-		}
-	} else {
-		notes.push(`imessageLocalConnection: ${imessage.error.message}`);
-	}
-
-	// Both iMessage resolvers feed one record, so it is built after both have
-	// answered rather than pushed twice and reconciled afterwards.
-	if (messaging.success) {
-		const record = imessageConnectionRecord(
-			messaging.data,
-			imessage.success ? imessage.data : { data: null },
-			args.observedAt,
-		);
-		if (record !== null) {
-			records.push(record);
-		}
-	}
-
-	if (notes.length > 0) {
-		await skipStream(
-			args.emit,
-			"connections",
-			"not_available",
-			notes.join("; "),
-		);
-	}
-	for (const record of records) {
-		await args.emitRecord("connections", record);
-	}
-	await checkpoint(args.emit, "connections", args.observedAt);
 }
 
 async function collectDevices(args: CollectInstinctArgs): Promise<void> {
-	const raw = assertTransport(await args.graphql(DEVICES_QUERY), "devices");
-	const parsed = devicesResponseSchema.safeParse(raw);
-	if (!parsed.success) {
-		await skipStream(args.emit, "devices", "parse_error", parsed.error.message);
-		return;
+	const read = await readOrFail(args, ["devices"], async () => {
+		const parsed = devicesResponseSchema.safeParse(
+			assertTransport(await args.graphql(DEVICES_QUERY), "devices"),
+		);
+		if (!parsed.success) {
+			throw unreadable("devices", parsed.error);
+		}
+		const failure = graphqlFailure("devices", parsed.data.errors);
+		if (failure !== null) {
+			throw failure;
+		}
+		if (!Array.isArray(parsed.data.data?.devices)) {
+			throw new StreamIncomplete("Instinct returned no device list.", true);
+		}
+		return deviceRecords(parsed.data, args.observedAt);
+	});
+	if (read !== null) {
+		await emitProvenList(args, "devices", read.value);
 	}
-	const errorNote = describeGraphqlErrors(parsed.data.errors);
-	if (errorNote !== null) {
-		await skipStream(args.emit, "devices", "not_available", errorNote);
-	}
-	for (const record of deviceRecords(parsed.data, args.observedAt)) {
-		await args.emitRecord("devices", record);
-	}
-	await checkpoint(args.emit, "devices", args.observedAt);
 }
 
-async function collectTrustedPeople(args: CollectInstinctArgs): Promise<void> {
-	let blockedCursor: string | null = null;
-	let contactsCursor: string | null = null;
-	let requestsCursor: string | null = null;
-	let sentRequestsDone = false;
-	const seen = new Set<string>();
+type TrustedList = "blocked" | "contacts" | "requests";
+
+const TRUSTED_LIST_FIELD = {
+	blocked: "trustedNetworkBlockedPeople",
+	contacts: "trustedNetworkContacts",
+	requests: "trustedNetworkRequests",
+} as const satisfies Record<TrustedList, string>;
+
+const TRUSTED_LISTS: readonly TrustedList[] = [
+	"contacts",
+	"blocked",
+	"requests",
+];
+
+/**
+ * Walk the three paginated trust lists side by side. One query pages all
+ * three, so a list that already ended is still answered (from its first page,
+ * since its cursor goes back to null); its items and cursor are ignored from
+ * then on, which keeps a short list from restarting while a longer one is
+ * still paging. Sent requests have no cursor at all: the first page's are
+ * kept, and a full page of them cannot be proven to be all of them.
+ */
+async function readTrustedPeople(
+	args: CollectInstinctArgs,
+): Promise<RecordData[]> {
+	const cursors: Record<TrustedList, string | null> = {
+		blocked: null,
+		contacts: null,
+		requests: null,
+	};
+	const ended = new Set<TrustedList>();
+	const seenCursors = new Set<string>();
+	const records = new Map<string, RecordData>();
 
 	for (let page = 0; page < MAX_TRUSTED_PAGES; page += 1) {
-		const raw = assertTransport(
-			await args.graphql(TRUSTED_QUERY, {
-				blockedCursor,
-				contactsCursor,
-				limit: TRUSTED_PAGE_SIZE,
-				requestsCursor,
-			}),
-			"trustedNetwork",
+		const parsed = trustedNetworkResponseSchema.safeParse(
+			assertTransport(
+				await args.graphql(TRUSTED_QUERY, {
+					blockedCursor: cursors.blocked,
+					contactsCursor: cursors.contacts,
+					limit: TRUSTED_PAGE_SIZE,
+					requestsCursor: cursors.requests,
+				}),
+				"trustedNetwork",
+			),
 		);
-		const parsed = trustedNetworkResponseSchema.safeParse(raw);
 		if (!parsed.success) {
-			await skipStream(
-				args.emit,
-				"trusted_people",
-				"parse_error",
-				parsed.error.message,
+			throw unreadable("trustedNetwork", parsed.error);
+		}
+		const failure = graphqlFailure("the trusted network", parsed.data.errors);
+		if (failure !== null) {
+			throw failure;
+		}
+		const data = parsed.data.data;
+		if (data === null) {
+			throw new StreamIncomplete("Instinct returned no trusted network.", true);
+		}
+		const sent = page === 0 ? data.trustedNetworkSentRequests : [];
+		if (!Array.isArray(sent)) {
+			throw new StreamIncomplete(
+				"Instinct returned no list of sent trust requests.",
+				true,
 			);
-			return;
 		}
-		const errorNote = describeGraphqlErrors(parsed.data.errors);
-		if (errorNote !== null) {
-			await skipStream(args.emit, "trusted_people", "not_available", errorNote);
+		if (sent.length >= TRUSTED_PAGE_SIZE) {
+			throw new StreamIncomplete(
+				`Instinct returned a full page of ${String(TRUSTED_PAGE_SIZE)} sent trust requests and offers no way to read past it, so the list may be longer than what was read.`,
+				false,
+			);
 		}
-		for (const record of trustedPeopleRecords(parsed.data, args.observedAt)) {
-			const key = String(record.id);
-			// Sent requests are unpaginated, so they repeat on every page.
-			if (
-				seen.has(key) ||
-				(sentRequestsDone && key.startsWith("sent_request:"))
-			) {
+		const open: NonNullable<TrustedNetworkResponse["data"]> = {
+			...data,
+			trustedNetworkSentRequests: sent,
+		};
+		for (const list of TRUSTED_LISTS) {
+			const field = TRUSTED_LIST_FIELD[list];
+			if (ended.has(list)) {
+				open[field] = null;
+			} else if (!Array.isArray(data[field]?.items)) {
+				throw new StreamIncomplete(
+					`Instinct returned no ${list} page for the trusted network.`,
+					true,
+				);
+			}
+		}
+		for (const record of trustedPeopleRecords(
+			{ data: open },
+			args.observedAt,
+		)) {
+			records.set(String(record.id), record);
+		}
+		for (const list of TRUSTED_LISTS) {
+			if (ended.has(list)) {
 				continue;
 			}
-			seen.add(key);
-			await args.emitRecord("trusted_people", record);
+			const cursor = data[TRUSTED_LIST_FIELD[list]]?.cursor;
+			if (cursor === undefined) {
+				throw new StreamIncomplete(
+					`Instinct's ${list} page for the trusted network carried no cursor, so its end is unknown.`,
+					true,
+				);
+			}
+			const next = cursor;
+			if (next === null) {
+				ended.add(list);
+				continue;
+			}
+			const key = `${list}:${next}`;
+			if (seenCursors.has(key)) {
+				throw new StreamIncomplete(
+					`Instinct handed back a ${list} cursor it had already given, so the trusted network did not page to its end.`,
+					true,
+				);
+			}
+			seenCursors.add(key);
+			cursors[list] = next;
 		}
-		sentRequestsDone = true;
-
-		const data = parsed.data.data;
-		blockedCursor = data?.trustedNetworkBlockedPeople?.cursor ?? null;
-		contactsCursor = data?.trustedNetworkContacts?.cursor ?? null;
-		requestsCursor = data?.trustedNetworkRequests?.cursor ?? null;
-		if (
-			blockedCursor === null &&
-			contactsCursor === null &&
-			requestsCursor === null
-		) {
-			await checkpoint(args.emit, "trusted_people", args.observedAt);
-			return;
+		if (ended.size === TRUSTED_LISTS.length) {
+			return [...records.values()];
 		}
 	}
-	throw new Error(
-		"instinct_incomplete_pagination: trusted network exceeded the bounded page guard",
+	throw new StreamIncomplete(
+		`Instinct's trusted network still had more after ${String(MAX_TRUSTED_PAGES)} pages, so it was not read to its end.`,
+		true,
 	);
 }
 
-async function collectVaultEntries(args: CollectInstinctArgs): Promise<void> {
-	const raw = assertTransport(await args.graphql(VAULT_QUERY), "vault");
-	const parsed = vaultResponseSchema.safeParse(raw);
-	if (!parsed.success) {
-		await skipStream(
-			args.emit,
-			"vault_entries",
-			"parse_error",
-			parsed.error.message,
-		);
-		return;
+async function collectTrustedPeople(args: CollectInstinctArgs): Promise<void> {
+	const read = await readOrFail(args, ["trusted_people"], () =>
+		readTrustedPeople(args),
+	);
+	if (read !== null) {
+		await emitProvenList(args, "trusted_people", read.value);
 	}
-	const errorNote = describeGraphqlErrors(parsed.data.errors);
-	if (errorNote !== null) {
-		await skipStream(args.emit, "vault_entries", "not_available", errorNote);
-	}
-	for (const record of vaultEntryRecords(parsed.data, args.observedAt)) {
-		await args.emitRecord("vault_entries", record);
-	}
-	await checkpoint(args.emit, "vault_entries", args.observedAt);
 }
+
+async function collectVaultEntries(args: CollectInstinctArgs): Promise<void> {
+	const read = await readOrFail(args, ["vault_entries"], async () => {
+		const parsed = vaultResponseSchema.safeParse(
+			assertTransport(await args.graphql(VAULT_QUERY), "vault"),
+		);
+		if (!parsed.success) {
+			throw unreadable("vault", parsed.error);
+		}
+		const failure = graphqlFailure("the vault", parsed.data.errors);
+		if (failure !== null) {
+			throw failure;
+		}
+		if (!Array.isArray(parsed.data.data?.vaultEntries)) {
+			throw new StreamIncomplete("Instinct returned no vault inventory.", true);
+		}
+		return vaultEntryRecords(parsed.data, args.observedAt);
+	});
+	if (read !== null) {
+		await emitProvenList(args, "vault_entries", read.value);
+	}
+}
+
+// ─── Chats ─────────────────────────────────────────────────────────────────
 
 const chatCheckpointSchema = z.object({
 	newest_created_at: z.number().int(),
 	newest_ids: z.array(z.string()),
 });
 // START.state carries each stream's last STATE cursor as-is, so this is the
-// `{ chats }` object the run emits below, not a `{ cursor }` wrapper.
+// `{ chats }` object the chats STATE below carries, not a `{ cursor }` wrapper.
 const chatEventsStateSchema = z
 	.object({ chats: z.record(z.string(), chatCheckpointSchema) })
 	.partial();
 
-/** Prior per-chat checkpoints, or none when state is absent or unreadable. */
+/**
+ * Prior per-chat event checkpoints, from the chats STATE (chat_events is a
+ * parent-detail stream with no STATE of its own), or none when state is
+ * absent or unreadable.
+ */
 export function readChatCheckpoints(
 	state: Readonly<Record<string, unknown>> | undefined,
 ): Record<string, ChatCheckpoint> {
-	const parsed = chatEventsStateSchema.safeParse(state?.chat_events ?? {});
+	const parsed = chatEventsStateSchema.safeParse(state?.chats ?? {});
 	if (!parsed.success) {
 		return {};
 	}
 	return { ...(parsed.data.chats ?? {}) };
 }
 
-async function listChats(args: CollectInstinctArgs): Promise<Chat[] | null> {
-	const chats: Chat[] = [];
+/** The whole chat list, or a StreamIncomplete when its end was not observed. */
+async function readChatList(args: CollectInstinctArgs): Promise<Chat[]> {
+	const chats = new Map<string, Chat>();
+	const seenCursors = new Set<string>();
 	let cursor: string | null = null;
 	for (let page = 0; page < MAX_CHAT_LIST_PAGES; page += 1) {
-		const raw = assertTransport(
-			await args.graphql(CHATS_QUERY, { cursor, limit: CHATS_PAGE_SIZE }),
-			"chats",
-		);
-		const parsed = chatsResponseSchema.safeParse(raw);
-		if (!parsed.success) {
-			await skipStream(args.emit, "chats", "parse_error", parsed.error.message);
-			return null;
-		}
-		const errorNote = describeGraphqlErrors(parsed.data.errors);
-		const pageData = parsed.data.data?.chats;
-		if (!pageData) {
-			await skipStream(
-				args.emit,
+		const parsed = chatsResponseSchema.safeParse(
+			assertTransport(
+				await args.graphql(CHATS_QUERY, { cursor, limit: CHATS_PAGE_SIZE }),
 				"chats",
-				"not_available",
-				errorNote ?? "chats returned no list",
+			),
+		);
+		if (!parsed.success) {
+			throw unreadable("chats", parsed.error);
+		}
+		const failure = graphqlFailure("the chat list", parsed.data.errors);
+		if (failure !== null) {
+			throw failure;
+		}
+		const pageData = parsed.data.data?.chats;
+		if (!(pageData && Array.isArray(pageData.chats))) {
+			throw new StreamIncomplete("Instinct returned no chat list.", true);
+		}
+		for (const chat of pageData.chats) {
+			chats.set(chat.id, chat);
+		}
+		if (pageData.cursor === undefined) {
+			throw new StreamIncomplete(
+				"Instinct's chat-list page carried no cursor, so its end is unknown.",
+				true,
 			);
-			return null;
 		}
-		chats.push(...(pageData.chats ?? []));
-		cursor = pageData.cursor ?? null;
-		if (cursor === null) {
-			return chats;
+		const next = pageData.cursor;
+		if (next === null) {
+			return [...chats.values()];
 		}
+		if (seenCursors.has(next)) {
+			throw new StreamIncomplete(
+				"Instinct handed back a chat-list cursor it had already given, so the chat list did not page to its end.",
+				true,
+			);
+		}
+		seenCursors.add(next);
+		cursor = next;
 	}
-	throw new Error(
-		"instinct_incomplete_pagination: chat list exceeded the bounded page guard",
+	throw new StreamIncomplete(
+		`Instinct's chat list still had more after ${String(MAX_CHAT_LIST_PAGES)} pages, so it was not read to its end.`,
+		true,
 	);
 }
+
+type HistoryOutcome =
+	| { readonly kind: "read"; readonly events: ChatEvent[] }
+	| {
+			readonly errorClass: string;
+			readonly httpStatus?: number;
+			readonly kind: "gap";
+			readonly message: string;
+			readonly reason:
+				| "rate_limited"
+				| "retry_exhausted"
+				| "temporary_unavailable";
+	  };
 
 /**
  * Read one chat's events newer than its checkpoint. `chatHistory` returns
  * the newest window first and a cursor to older windows, so paging stops at
- * the first window that reaches already-collected events.
+ * the first window that reaches already-collected events, or at the end of
+ * the history. Anything short of that is a gap for this chat; a signed-out
+ * answer stops the run.
  */
 async function readNewChatEvents(
 	args: CollectInstinctArgs,
 	chatId: string,
 	prior: ChatCheckpoint | null,
-): Promise<ChatEvent[] | string> {
+): Promise<HistoryOutcome> {
 	const fresh: ChatEvent[] = [];
+	const seenCursors = new Set<string>();
 	let cursor: string | null = null;
 	for (let page = 0; page < MAX_CHAT_HISTORY_PAGES; page += 1) {
-		const raw = assertTransport(
-			await args.graphql(CHAT_HISTORY_QUERY, {
-				chatId,
-				cursor,
-				limit: CHAT_HISTORY_PAGE_SIZE,
-			}),
-			"chatHistory",
-		);
-		const parsed = chatHistoryResponseSchema.safeParse(raw);
+		const result = await args.graphql(CHAT_HISTORY_QUERY, {
+			chatId,
+			cursor,
+			limit: CHAT_HISTORY_PAGE_SIZE,
+		});
+		const failure = transportFailure(result, "chatHistory");
+		if (failure !== null) {
+			const code = errorCode(failure) ?? INSTINCT_SERVER_ERROR;
+			if (code === INSTINCT_AUTH_FAILED) {
+				throw failure;
+			}
+			return {
+				errorClass: code,
+				...(result.status > 0 ? { httpStatus: result.status } : {}),
+				kind: "gap",
+				message: failure.message,
+				reason:
+					code === INSTINCT_RATE_LIMITED
+						? "rate_limited"
+						: "temporary_unavailable",
+			};
+		}
+		const parsed = chatHistoryResponseSchema.safeParse(result.json);
 		if (!parsed.success) {
-			return `${chatId}: ${parsed.error.message}`;
+			return {
+				errorClass: INSTINCT_SOURCE_UNREADABLE,
+				kind: "gap",
+				message: unreadable("chatHistory", parsed.error).message,
+				reason: "temporary_unavailable",
+			};
 		}
 		const history = parsed.data.data?.chatHistory;
-		if (!history) {
-			return `${chatId}: ${describeGraphqlErrors(parsed.data.errors) ?? "chatHistory returned nothing"}`;
+		const errorNote = describeGraphqlErrors(parsed.data.errors);
+		if (!history || errorNote !== null) {
+			return {
+				errorClass: "instinct_graphql_error",
+				kind: "gap",
+				message: errorNote ?? "chatHistory returned nothing",
+				reason: "temporary_unavailable",
+			};
 		}
-		const events = history.events ?? [];
-		const newOnes = events.filter((event) => isNewEvent(event, prior));
-		fresh.push(...newOnes);
-		cursor = history.cursor ?? null;
-		if (cursor === null || newOnes.length < events.length) {
-			return fresh;
+		if (!Array.isArray(history.events)) {
+			return {
+				errorClass: "instinct_graphql_error",
+				kind: "gap",
+				message: "chatHistory returned no event list",
+				reason: "temporary_unavailable",
+			};
 		}
+		const events = history.events;
+		if (history.cursor === undefined) {
+			return {
+				errorClass: "instinct_graphql_error",
+				kind: "gap",
+				message:
+					"chatHistory carried no cursor, so the end of the history is unknown",
+				reason: "temporary_unavailable",
+			};
+		}
+		fresh.push(...events.filter((event) => isNewEvent(event, prior)));
+		const next = history.cursor;
+		// Windows are newest first. Only an event older than the checkpoint's
+		// second proves everything beyond this window was read before: a known
+		// event in that very second does not, since the next window can still
+		// hold a new event from the same second.
+		const reachedOlder =
+			prior !== null &&
+			events.some((event) => {
+				const seconds = eventEpochSeconds(event);
+				return seconds !== null && seconds < prior.newest_created_at;
+			});
+		if (next === null || reachedOlder) {
+			return { events: fresh, kind: "read" };
+		}
+		if (seenCursors.has(next)) {
+			return {
+				errorClass: "instinct_cursor_repeated",
+				kind: "gap",
+				message: "chatHistory handed back a cursor it had already given",
+				reason: "temporary_unavailable",
+			};
+		}
+		seenCursors.add(next);
+		cursor = next;
 	}
-	throw new Error(
-		`instinct_incomplete_pagination: chat history for ${chatId} exceeded the bounded page guard`,
-	);
+	return {
+		errorClass: "instinct_history_page_guard",
+		kind: "gap",
+		message: `chatHistory still had more after ${String(MAX_CHAT_HISTORY_PAGES)} pages`,
+		reason: "retry_exhausted",
+	};
 }
 
 function byCreatedAt(left: ChatEvent, right: ChatEvent): number {
@@ -800,58 +1410,288 @@ function byCreatedAt(left: ChatEvent, right: ChatEvent): number {
 	return leftSeconds - rightSeconds || left.id.localeCompare(right.id);
 }
 
-async function collectChats(args: CollectInstinctArgs): Promise<void> {
-	const chats = await listChats(args);
-	if (chats === null) {
-		if (args.requested.has("chat_events")) {
-			await skipStream(
-				args.emit,
-				"chat_events",
-				"not_available",
-				"chat list unavailable, so no chat history could be read",
-			);
-		}
-		return;
-	}
+/** A chat_events gap an earlier run left pending. */
+interface PendingGap {
+	readonly gapId: string;
+	readonly leaseId?: string;
+}
 
-	if (args.requested.has("chats")) {
-		for (const chat of chats) {
-			await args.emitRecord("chats", chatRecord(chat, args.observedAt));
-		}
-		await checkpoint(args.emit, "chats", args.observedAt);
-	}
-	if (!args.requested.has("chat_events")) {
-		return;
-	}
-
-	const checkpoints = readChatCheckpoints(args.state);
-	const failures: string[] = [];
-	for (const chat of chats) {
-		const prior = checkpoints[chat.id] ?? null;
-		const events = await readNewChatEvents(args, chat.id, prior);
-		if (typeof events === "string") {
-			failures.push(events);
+/** chat_events gaps on one page of the host's pending gaps, by chat id. */
+function pendingChatGaps(
+	detailGaps: CollectInstinctArgs["detailGaps"],
+): Map<string, PendingGap[]> {
+	const byChat = new Map<string, PendingGap[]>();
+	for (const gap of detailGaps ?? []) {
+		if (gap.stream !== "chat_events") {
 			continue;
 		}
-		for (const event of [...events].sort(byCreatedAt)) {
-			await args.emitRecord("chat_events", chatEventRecord(chat.id, event));
+		const raw = gap.record_key;
+		const key =
+			typeof raw === "string"
+				? raw
+				: typeof raw === "number"
+					? String(raw)
+					: "";
+		if (key === "") {
+			continue;
 		}
-		const next = advanceCheckpoint(prior, events);
-		if (next !== null) {
-			checkpoints[chat.id] = next;
-		}
+		const list = byChat.get(key) ?? [];
+		list.push({
+			gapId: gap.gap_id,
+			...(gap.lease_id ? { leaseId: gap.lease_id } : {}),
+		});
+		byChat.set(key, list);
 	}
-	if (failures.length > 0) {
-		await skipStream(
-			args.emit,
-			"chat_events",
-			"not_available",
-			failures.join("; "),
+	return byChat;
+}
+
+/**
+ * Hand every pending chat_events gap to `handle` once: the START page first,
+ * then further pages from the runtime until a page holds no gap not already
+ * handled (the runtime answers with the gaps still pending, so recovered ones
+ * drop out and a re-emitted one comes back once, already handled).
+ */
+async function forEachPendingGapPage(
+	args: CollectInstinctArgs,
+	first: CollectInstinctArgs["detailGaps"],
+	handle: (fresh: ReadonlyMap<string, readonly PendingGap[]>) => Promise<void>,
+): Promise<void> {
+	const seen = new Set<string>();
+	let page = first ?? [];
+	for (;;) {
+		const fresh = new Map<string, PendingGap[]>();
+		for (const [chatId, gaps] of pendingChatGaps(page)) {
+			const unseen = gaps.filter((gap) => !seen.has(gap.gapId));
+			for (const gap of unseen) {
+				seen.add(gap.gapId);
+			}
+			if (unseen.length > 0) {
+				fresh.set(chatId, unseen);
+			}
+		}
+		if (fresh.size === 0 || !args.requestDetailGapPage) {
+			if (fresh.size > 0) {
+				await handle(fresh);
+			}
+			return;
+		}
+		await handle(fresh);
+		page = await args.requestDetailGapPage({ streams: ["chat_events"] });
+	}
+}
+
+type ChatGap = Extract<HistoryOutcome, { kind: "gap" }>;
+
+async function emitChatGap(
+	args: CollectInstinctArgs,
+	chatId: string,
+	gap: ChatGap,
+): Promise<void> {
+	await emitDetailGap(args, {
+		error: {
+			class: gap.errorClass,
+			...(gap.httpStatus === undefined ? {} : { httpStatus: gap.httpStatus }),
+			message: gap.message,
+		},
+		locator: { chat_id: chatId, kind: "instinct.chat_history" },
+		parentStream: "chats",
+		reason: gap.reason,
+		recordKey: chatId,
+		stream: "chat_events",
+	});
+}
+
+/**
+ * Read chats' new events and account for them. A chat read to its
+ * checkpoint (or its start) emits its events oldest first, gets a new
+ * checkpoint, and resolves the gaps earlier runs left for it. A chat that
+ * could not be read, or whose events would not pass the schema, gets a
+ * DETAIL_GAP and keeps its prior checkpoint.
+ *
+ * `listed` chats are read first. Then every page of pending gaps: a gapped
+ * chat not read yet (a recovery-only run, or a chat no longer listed) is
+ * read directly, since deletion is never inferred. One DETAIL_COVERAGE
+ * closes the chats considered. Returns the checkpoints to carry forward.
+ */
+async function hydrateChats(
+	args: CollectInstinctArgs,
+	listed: readonly string[],
+	firstGapPage: CollectInstinctArgs["detailGaps"],
+	prior: Readonly<Record<string, ChatCheckpoint>>,
+): Promise<Record<string, ChatCheckpoint>> {
+	const next: Record<string, ChatCheckpoint> = {};
+	const required: string[] = [];
+	const hydrated: string[] = [];
+	const gaps: string[] = [];
+	const readChat = async (chatId: string): Promise<void> => {
+		required.push(chatId);
+		await args.progress(`Reading chat ${String(required.length)}`, {
+			stream: "chat_events",
+		});
+		const mark = prior[chatId] ?? null;
+		const keepMark = (): void => {
+			if (mark !== null) {
+				next[chatId] = mark;
+			}
+		};
+		const outcome = await readNewChatEvents(args, chatId, mark);
+		if (outcome.kind === "gap") {
+			await emitChatGap(args, chatId, outcome);
+			gaps.push(chatId);
+			keepMark();
+			return;
+		}
+		const records = [...outcome.events]
+			.sort(byCreatedAt)
+			.map((event) => chatEventRecord(chatId, event));
+		const problems = schemaProblems("chat_events", records);
+		if (problems !== null) {
+			// Emitting the rest and advancing would leave the failed events
+			// behind the checkpoint for good: the chat is a gap instead.
+			await emitChatGap(args, chatId, {
+				errorClass: "instinct_record_invalid",
+				kind: "gap",
+				message: problems,
+				reason: "retry_exhausted",
+			});
+			gaps.push(chatId);
+			keepMark();
+			return;
+		}
+		for (const record of records) {
+			await args.emitRecord("chat_events", record);
+		}
+		const advanced = advanceCheckpoint(mark, outcome.events);
+		if (advanced !== null) {
+			next[chatId] = advanced;
+		}
+		hydrated.push(chatId);
+	};
+
+	for (const chatId of listed) {
+		await readChat(chatId);
+	}
+	await forEachPendingGapPage(args, firstGapPage, async (fresh) => {
+		for (const [chatId, pending] of fresh) {
+			if (!required.includes(chatId)) {
+				await readChat(chatId);
+			}
+			if (!hydrated.includes(chatId)) {
+				continue;
+			}
+			for (const gap of pending) {
+				await args.emit({
+					gap_id: gap.gapId,
+					...(gap.leaseId ? { lease_id: gap.leaseId } : {}),
+					record_key: chatId,
+					reference_only: true,
+					stream: "chat_events",
+					type: "DETAIL_GAP_RECOVERED",
+				});
+			}
+		}
+	});
+	if (required.length > 0 || args.recoveryOnly !== true) {
+		await emitDetailCoverage(args, {
+			gapKeys: gaps,
+			hydratedKeys: hydrated,
+			requiredKeys: required,
+			stateStream: "chats",
+			stream: "chat_events",
+		});
+	}
+	return next;
+}
+
+async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
+	const wantChats = args.requested.has("chats");
+	let wantEvents = args.requested.has("chat_events");
+	if (wantEvents && !wantChats) {
+		// Collection Profile 5.1: a connector must not broaden scope. Chat
+		// events hang off their chat records and their checkpoints live in
+		// the chats STATE, so they are collected only together.
+		await args.emit({
+			message:
+				"Instinct chat events are collected together with their chats; request both streams.",
+			reason: "scope_not_supported",
+			recovery_hint: { action: "not_retriable", retryable: false },
+			stream: "chat_events",
+			type: "SKIP_RESULT",
+		});
+		wantEvents = false;
+	}
+	if (!wantChats) {
+		return;
+	}
+	const prior =
+		args.collectionMode === "full_refresh"
+			? {}
+			: readChatCheckpoints(args.state);
+
+	if (args.recoveryOnly === true) {
+		// Recovery-only: re-read just the chats earlier runs left gaps for,
+		// from their checkpoints, and stop before any forward walk. No STATE:
+		// the next full run reads from the same checkpoints, and the events
+		// emitted here upsert by id.
+		if (!wantEvents) {
+			return;
+		}
+		let firstGapPage = args.detailGaps ?? [];
+		if (pendingChatGaps(firstGapPage).size === 0 && args.requestDetailGapPage) {
+			firstGapPage = await args.requestDetailGapPage({
+				streams: ["chat_events"],
+			});
+		}
+		if (pendingChatGaps(firstGapPage).size > 0) {
+			await hydrateChats(args, [], firstGapPage, prior);
+		}
+		return;
+	}
+
+	const listed = await readOrFail(args, ["chats", "chat_events"], () =>
+		readChatList(args),
+	);
+	if (listed === null) {
+		return;
+	}
+	const chats = listed.value;
+	const records = chats.map((chat) => chatRecord(chat, args.observedAt));
+	const problems =
+		schemaProblems("chats", records) ?? duplicateKeys("chats", records);
+	if (problems !== null) {
+		// No chat record, so no event may be stored under it either.
+		await failStreams(
+			args,
+			["chats", "chat_events"],
+			new StreamIncomplete(problems, false),
 		);
+		return;
+	}
+	for (const record of records) {
+		await args.emitRecord("chats", record);
+	}
+	await args.emit(buildFullScanCoverageMessage("chats", records.length));
+	// The per-chat event checkpoints live in the chats STATE, written after
+	// the events and their coverage. A chats-only run carries them forward.
+	let marks: Record<string, ChatCheckpoint> = {};
+	if (wantEvents) {
+		marks = await hydrateChats(
+			args,
+			chats.map((chat) => chat.id),
+			args.detailGaps,
+			prior,
+		);
+	} else {
+		for (const chat of chats) {
+			const mark = prior[chat.id];
+			if (mark !== undefined) {
+				marks[chat.id] = mark;
+			}
+		}
 	}
 	await args.emit({
-		cursor: { chats: checkpoints },
-		stream: "chat_events",
+		cursor: { chats: marks },
+		stream: "chats",
 		type: "STATE",
 	});
 }
@@ -859,42 +1699,44 @@ async function collectChats(args: CollectInstinctArgs): Promise<void> {
 export async function collectInstinct(
 	args: CollectInstinctArgs,
 ): Promise<void> {
-	await args.progress("Reading your Instinct account", { stream: "profile" });
-	const flags = await collectProfile(args);
+	if (args.recoveryOnly !== true) {
+		await args.progress("Reading your Instinct account", { stream: "profile" });
+		const flags = await collectProfile(args);
 
-	if (args.requested.has("agent_contact")) {
-		await args.progress("Reading how you reach your agent", {
-			stream: "agent_contact",
-		});
-		await collectAgentContact(args);
-	}
-	if (args.requested.has("connections")) {
-		await args.progress("Reading connected services", {
-			stream: "connections",
-		});
-		await collectConnections(args, resolveConnectionGates(flags));
-	}
-	if (args.requested.has("devices")) {
-		await args.progress("Reading enrolled devices", { stream: "devices" });
-		await collectDevices(args);
-	}
-	if (args.requested.has("trusted_people")) {
-		await args.progress("Reading your trusted people", {
-			stream: "trusted_people",
-		});
-		await collectTrustedPeople(args);
-	}
-	if (args.requested.has("vault_entries")) {
-		await args.progress("Reading your vault inventory", {
-			stream: "vault_entries",
-		});
-		await collectVaultEntries(args);
+		if (args.requested.has("agent_contact")) {
+			await args.progress("Reading how you reach your agent", {
+				stream: "agent_contact",
+			});
+			await collectAgentContact(args);
+		}
+		if (args.requested.has("connections") && flags !== null) {
+			await args.progress("Reading connected services", {
+				stream: "connections",
+			});
+			await collectConnections(args, resolveConnectionGates(flags));
+		}
+		if (args.requested.has("devices")) {
+			await args.progress("Reading enrolled devices", { stream: "devices" });
+			await collectDevices(args);
+		}
+		if (args.requested.has("trusted_people")) {
+			await args.progress("Reading your trusted people", {
+				stream: "trusted_people",
+			});
+			await collectTrustedPeople(args);
+		}
+		if (args.requested.has("vault_entries")) {
+			await args.progress("Reading your vault inventory", {
+				stream: "vault_entries",
+			});
+			await collectVaultEntries(args);
+		}
 	}
 	if (args.requested.has("chats") || args.requested.has("chat_events")) {
 		await args.progress("Reading your conversations with your agent", {
 			stream: "chat_events",
 		});
-		await collectChats(args);
+		await collectChatStreams(args);
 	}
 }
 
@@ -903,7 +1745,7 @@ if (isMainModule(import.meta.url)) {
 		browser: { profileName: "instinct" },
 		name: "instinct",
 		retryablePattern:
-			/ECONN|ETIMEDOUT|timeout|fetch failed|instinct_rate_limited|instinct_http_5\d\d/i,
+			/ECONN|ETIMEDOUT|timeout|fetch failed|instinct_interrupted|instinct_rate_limited|instinct_server_error/i,
 		timeRangeField: (stream) =>
 			stream === "devices" || stream === "chat_events"
 				? "created_at"
@@ -911,22 +1753,31 @@ if (isMainModule(import.meta.url)) {
 		validateRecord,
 		async collect(ctx: BrowserCollectContext): Promise<void> {
 			await collectInstinct({
+				...(ctx.collectionMode ? { collectionMode: ctx.collectionMode } : {}),
+				detailGaps: ctx.detailGaps,
 				emit: ctx.emit,
 				emitRecord: ctx.emitRecord,
 				graphql: makeInstinctGraphql(ctx.page),
 				observedAt: ctx.emittedAt,
 				progress: ctx.progress,
+				recoveryOnly: ctx.recoveryOnly === true,
+				...(ctx.reportStreamFailure
+					? { reportStreamFailure: ctx.reportStreamFailure }
+					: {}),
+				requestDetailGapPage: ctx.requestDetailGapPage,
 				requested: new Set(ctx.requested.keys()),
 				state: ctx.state,
 			});
 		},
-		async ensureSession({ capture, page, sendInteraction }) {
+		async ensureSession(args: EnsureSessionArgs) {
 			await ensureInstinctSession({
-				...(capture ? { capture } : {}),
-				graphql: makeInstinctGraphql(page),
+				assist: args.assist,
+				capture: args.capture,
+				completeAssistance: args.completeAssistance,
+				graphql: makeInstinctGraphql(args.page),
 				interactive: instinctAllowsInteractiveAuthRepair(),
-				page,
-				sendInteraction,
+				page: args.page,
+				sendInteraction: args.sendInteraction,
 			});
 		},
 	});

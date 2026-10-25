@@ -473,6 +473,41 @@ function chatText(value: unknown): string | null {
 	return result.kind === "text" ? result.preview : null;
 }
 
+/** Nesting bound for a copied block; deeper values are dropped. */
+const BLOCK_MAX_DEPTH = 8;
+
+/**
+ * One value of a copied block, with every string routed through
+ * `safeTextPreview` (an unsafe string or key is dropped) so no nested leaf can
+ * carry a NUL or other control byte past the JSONB invariant.
+ */
+function safeBlockValue(value: unknown, depth: number): unknown {
+	if (typeof value === "string") {
+		return chatText(value);
+	}
+	if (typeof value === "number") {
+		return Number.isFinite(value) ? value : null;
+	}
+	if (typeof value === "boolean" || value === null || value === undefined) {
+		return value ?? null;
+	}
+	if (depth >= BLOCK_MAX_DEPTH || typeof value !== "object") {
+		return null;
+	}
+	if (Array.isArray(value)) {
+		return value.map((item) => safeBlockValue(item, depth + 1));
+	}
+	const entries: [string, unknown][] = [];
+	for (const [key, field] of Object.entries(value)) {
+		const safeKey = chatText(key);
+		const safe = safeBlockValue(field, depth + 1);
+		if (safeKey !== null && safeKey === key && safe !== null) {
+			entries.push([key, safe]);
+		}
+	}
+	return Object.fromEntries(entries);
+}
+
 function plainBlock(value: unknown): Record<string, unknown> | null {
 	if (value === null || value === undefined || typeof value !== "object") {
 		return null;
@@ -480,10 +515,8 @@ function plainBlock(value: unknown): Record<string, unknown> | null {
 	if (Array.isArray(value)) {
 		return null;
 	}
-	const entries = Object.entries(value).filter(
-		([, field]) => field !== null && field !== undefined,
-	);
-	return entries.length === 0 ? null : Object.fromEntries(entries);
+	const safe = safeBlockValue(value, 0) as Record<string, unknown>;
+	return Object.keys(safe).length === 0 ? null : safe;
 }
 
 export function chatRecord(chat: Chat, observedAt: string): RecordData {
@@ -518,7 +551,7 @@ export function chatEventRecord(chatId: string, event: ChatEvent): RecordData {
 		created_at: toIso(event.createdAt),
 		draft_field: plainBlock(event.draftField),
 		error_message: chatText(event.error?.message),
-		has_screenshot: nullableText(event.screenshot?.url) !== null,
+		has_screenshot: event.screenshot !== null && event.screenshot !== undefined,
 		id: event.id,
 		interaction: plainBlock(event.interaction),
 		interaction_response: plainBlock(event.interactionResponse),
