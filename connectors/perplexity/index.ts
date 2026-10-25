@@ -591,10 +591,13 @@ async function walkList(ctx: BrowserCollectContext): Promise<ListWalk> {
  * the membership the walk has to prove.
  */
 function walkSignature(walk: ListWalk): string {
-	return walk.threads
+	// Unkeyed rows count too: a walk that saw one and a walk that missed it
+	// (shifted past it) must not agree, or the second could prove a list
+	// that lacks a thread.
+	return `${walk.threads
 		.map((thread) => thread.id)
 		.sort()
-		.join("|");
+		.join("|")}#unreadable=${String(walk.unreadable)}`;
 }
 
 /**
@@ -785,7 +788,7 @@ async function recoverDetailGapsOnly(
 ): Promise<void> {
 	const gapsByThread = new Map<
 		string,
-		{ slug: string | null; gapIds: string[] }
+		{ slug: string | null; gaps: PendingGap[] }
 	>();
 	for (const gap of startGaps(ctx)) {
 		if (gap.stream !== "messages" || typeof gap.record_key !== "string") {
@@ -793,13 +796,13 @@ async function recoverDetailGapsOnly(
 		}
 		const entry = gapsByThread.get(gap.record_key) ?? {
 			slug: null,
-			gapIds: [],
+			gaps: [],
 		};
 		entry.slug ??= threadLocatorSlug(gap.detail_locator);
-		entry.gapIds.push(gap.gap_id);
+		entry.gaps.push(pendingGap(gap));
 		gapsByThread.set(gap.record_key, entry);
 	}
-	for (const [conversationId, { slug, gapIds }] of gapsByThread) {
+	for (const [conversationId, { slug, gaps }] of gapsByThread) {
 		if (slug === null) {
 			continue;
 		}
@@ -811,14 +814,8 @@ async function recoverDetailGapsOnly(
 		for (const message of read.messages) {
 			await ctx.emitRecord("messages", { ...message });
 		}
-		for (const gapId of gapIds) {
-			await ctx.emit({
-				type: "DETAIL_GAP_RECOVERED",
-				reference_only: true,
-				gap_id: gapId,
-				stream: "messages",
-				record_key: conversationId,
-			});
+		for (const gap of gaps) {
+			await ctx.emit(gapRecovered(gap, conversationId));
 		}
 	}
 }
@@ -836,16 +833,46 @@ function startGaps(
 		: [];
 }
 
-/** Pending `messages` gap ids by thread, for the forward walk to resolve. */
+/** A pending gap as START carried it: its id and, on a leased gap, the lease. */
+interface PendingGap {
+	readonly gapId: string;
+	readonly leaseId?: string;
+}
+
+function pendingGap(
+	gap: BrowserCollectContext["detailGaps"][number],
+): PendingGap {
+	const leaseId: unknown = (gap as { lease_id?: unknown }).lease_id;
+	return typeof leaseId === "string" && leaseId.length > 0
+		? { gapId: gap.gap_id, leaseId }
+		: { gapId: gap.gap_id };
+}
+
+/** The receipt for a recovered gap; a leased gap's lease is echoed back. */
+function gapRecovered(
+	gap: PendingGap,
+	conversationId: string,
+): Parameters<BrowserCollectContext["emit"]>[0] {
+	return {
+		type: "DETAIL_GAP_RECOVERED",
+		reference_only: true,
+		gap_id: gap.gapId,
+		...(gap.leaseId === undefined ? {} : { lease_id: gap.leaseId }),
+		stream: "messages",
+		record_key: conversationId,
+	};
+}
+
+/** Pending `messages` gaps by thread, for the forward walk to resolve. */
 function pendingGapsByThread(
 	ctx: BrowserCollectContext,
-): Map<string, string[]> {
-	const pending = new Map<string, string[]>();
+): Map<string, PendingGap[]> {
+	const pending = new Map<string, PendingGap[]>();
 	for (const gap of startGaps(ctx)) {
 		if (gap.stream === "messages" && typeof gap.record_key === "string") {
 			pending.set(gap.record_key, [
 				...(pending.get(gap.record_key) ?? []),
-				gap.gap_id,
+				pendingGap(gap),
 			]);
 		}
 	}
@@ -877,7 +904,7 @@ export async function collectPerplexity(
 	}
 	const pending = wantsMessages
 		? pendingGapsByThread(ctx)
-		: new Map<string, string[]>();
+		: new Map<string, PendingGap[]>();
 
 	// 1. The library list, proven complete and stable. `total_threads` is not
 	// used: live list items carry a number unrelated to the library size.
@@ -999,14 +1026,8 @@ export async function collectPerplexity(
 					complete: true,
 				};
 			}
-			for (const gapId of pending.get(thread.id) ?? []) {
-				await ctx.emit({
-					type: "DETAIL_GAP_RECOVERED",
-					reference_only: true,
-					gap_id: gapId,
-					stream: "messages",
-					record_key: thread.id,
-				});
+			for (const gap of pending.get(thread.id) ?? []) {
+				await ctx.emit(gapRecovered(gap, thread.id));
 			}
 			continue;
 		}

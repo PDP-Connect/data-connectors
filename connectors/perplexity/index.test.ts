@@ -1652,3 +1652,78 @@ test("a thread whose entries span two pages is read in full, then remembered", a
 		assert.equal(synced[threadId(1)]?.entry_count, 12);
 	});
 });
+
+test("a leased pending gap is recovered with its lease echoed, in recovery-only and forward runs", async () => {
+	const gap = {
+		status: "pending",
+		stream: "messages",
+		record_key: threadId(1),
+		detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+	};
+	for (const recoveryOnly of [true, false]) {
+		const library = perplexityLibrary({ total: 1 });
+		await withBrowser(library.serve, async () => {
+			const h = harness(ALL_STREAMS, page());
+			Object.assign(h.ctx, {
+				recoveryOnly,
+				detailGaps: [
+					{ ...gap, gap_id: "gap-leased", lease_id: "lease-1" },
+					{ ...gap, gap_id: "gap-plain" },
+				],
+			});
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			const recovered = h.messages
+				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+				.map((m) => ({
+					gap_id: (m as { gap_id?: string }).gap_id,
+					lease_id: (m as { lease_id?: string }).lease_id,
+				}));
+			assert.deepEqual(
+				recovered,
+				[
+					{ gap_id: "gap-leased", lease_id: "lease-1" },
+					{ gap_id: "gap-plain", lease_id: undefined },
+				],
+				`recoveryOnly=${String(recoveryOnly)}`,
+			);
+		});
+	}
+});
+
+test("a walk that saw an unkeyed row and one that shifted past it do not agree", async () => {
+	const unkeyed = {
+		uuid: "aaaaaaaa-0000-4000-8000-000000000099",
+		title: "a thread with no id of its own",
+		has_next_page: true,
+	};
+	const ids = Array.from({ length: PAGE_SIZE + 2 }, (_, i) => i + 1);
+	// Walk 1 sees the unkeyed row on page 2; walk 2 shifts past it; walk 3
+	// and later see it again. Only walks 3 and 4 may agree, so the run must
+	// end with the unkeyed row reported and no checkpoint.
+	const library = scriptedLibrary({
+		listPage: (offset, walk) => {
+			const rows: unknown[] = listItems(ids, false);
+			if (walk !== 2) rows.splice(PAGE_SIZE, 0, unkeyed);
+			const slice = rows.slice(offset, offset + PAGE_SIZE);
+			return offset + PAGE_SIZE >= rows.length
+				? slice.map((row, index) =>
+						index === slice.length - 1
+							? { ...(row as object), has_next_page: false }
+							: row,
+					)
+				: slice;
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["conversations", "messages"],
+		);
+		assert.equal(
+			h.messages.some((m) => m.type === "STATE"),
+			false,
+		);
+	});
+});
