@@ -125,6 +125,22 @@
 					"history_state"
 				]
 			},
+			"query": {
+				"search": {
+					"lexical_fields": ["title"],
+					"semantic_fields": ["title"]
+				},
+				"range_filters": {
+					"last_activity_at": ["gte", "gt", "lte", "lt"],
+					"muted_until": ["gte", "gt", "lte", "lt"],
+					"unread_count": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["last_activity_at"],
+					"group_by": ["kind", "archived"]
+				}
+			},
 			"primary_key": ["id"],
 			"cursor_field": "last_activity_at",
 			"consent_time_field": "last_activity_at",
@@ -254,6 +270,20 @@
 					"location_lng"
 				]
 			},
+			"query": {
+				"search": {
+					"lexical_fields": ["text", "author", "poll_name", "media_filename"],
+					"semantic_fields": ["text"]
+				},
+				"range_filters": {
+					"sent_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["sent_at"],
+					"group_by": ["type", "from_me"]
+				}
+			},
 			"primary_key": ["id"],
 			"cursor_field": "sent_at",
 			"consent_time_field": "sent_at",
@@ -312,6 +342,15 @@
 					"is_business",
 					"verified_name"
 				]
+			},
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "short_name", "push_name", "verified_name"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["is_business"]
+				}
 			},
 			"primary_key": ["id"],
 			"selection": {
@@ -377,6 +416,19 @@
 					}
 				},
 				"required": ["id", "subject", "created_at", "owner", "participants"]
+			},
+			"query": {
+				"search": {
+					"lexical_fields": ["subject"],
+					"semantic_fields": ["subject"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"]
+				}
 			},
 			"primary_key": ["id"],
 			"cursor_field": "created_at",
