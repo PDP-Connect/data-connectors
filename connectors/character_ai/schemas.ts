@@ -60,8 +60,9 @@ export const apiChatSchema = z.looseObject({
  */
 const paginationMeta = z.looseObject({ next_token: z.string().nullable() });
 
+/** Rows are validated one by one (parseChatsPage), so one bad row never hides the rest. */
 export const apiChatsPageSchema = z.looseObject({
-	chats: z.array(apiChatSchema),
+	chats: z.array(z.unknown()),
 	meta: paginationMeta,
 });
 

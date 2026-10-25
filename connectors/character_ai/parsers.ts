@@ -10,14 +10,19 @@ import {
 	type PdppSafeText,
 	pdppSafeText,
 } from "@pdpp/connector-protocol/pdpp-safe-text";
-import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
+import {
+	safeTextPreview,
+	stripForbiddenControlChars,
+} from "@pdpp/connector-protocol/safe-text-preview";
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type ApiChat,
 	type ApiTurn,
 	apiChatDetailSchema,
+	apiChatSchema,
 	apiChatsPageSchema,
 	apiTurnsPageSchema,
+	uuidSchema,
 } from "./schemas.ts";
 
 /** Upper bound for one message body; far above anything the chat UI accepts. */
@@ -34,6 +39,8 @@ export class CharacterAiPayloadError extends Error {
 export interface Page<T> {
 	items: T[];
 	nextToken: string | null;
+	/** Rows on this page that carry no usable key: nothing can account for them. */
+	unkeyed?: number;
 }
 
 /** The end of a list is an explicit empty (or null) `meta.next_token`; the schema requires the field. */
@@ -51,12 +58,55 @@ function issuesOf(error: {
 		.join("; ");
 }
 
-export function parseChatsPage(json: unknown): Page<ApiChat> {
+/**
+ * One row of the chat list. A row whose chat id is usable but whose other
+ * fields are not is kept as `chat: null` with the reason, so only that chat
+ * goes unread (a gap) instead of the whole list.
+ */
+export type ChatRow =
+	| { chatId: string; chat: ApiChat }
+	| { chatId: string; chat: null; detail: string };
+
+/** Display text arrives with stray control characters at times; they are dropped, never the row. */
+function withCleanName(row: unknown): unknown {
+	if (typeof row !== "object" || row === null || Array.isArray(row)) {
+		return row;
+	}
+	const name = (row as Record<string, unknown>).character_name;
+	return typeof name === "string"
+		? { ...row, character_name: stripForbiddenControlChars(name) }
+		: row;
+}
+
+export function parseChatsPage(json: unknown): Page<ChatRow> {
 	const parsed = apiChatsPageSchema.safeParse(json);
 	if (!parsed.success) {
 		throw new CharacterAiPayloadError("chats/recent", issuesOf(parsed.error));
 	}
-	return { items: parsed.data.chats, nextToken: nextTokenOf(parsed.data.meta) };
+	const items: ChatRow[] = [];
+	let unkeyed = 0;
+	for (const row of parsed.data.chats) {
+		const chat = apiChatSchema.safeParse(withCleanName(row));
+		if (chat.success) {
+			items.push({ chatId: chat.data.chat_id, chat: chat.data });
+			continue;
+		}
+		const id = uuidSchema.safeParse(
+			typeof row === "object" && row !== null
+				? (row as Record<string, unknown>).chat_id
+				: undefined,
+		);
+		if (id.success) {
+			items.push({ chatId: id.data, chat: null, detail: issuesOf(chat.error) });
+		} else {
+			unkeyed += 1;
+		}
+	}
+	return {
+		items,
+		nextToken: nextTokenOf(parsed.data.meta),
+		...(unkeyed > 0 ? { unkeyed } : {}),
+	};
 }
 
 export function parseTurnsPage(json: unknown, chatId: string): Page<ApiTurn> {
@@ -89,6 +139,7 @@ export function parseChatDetail(json: unknown): ApiChat {
 	return { ...parsed.data.chat, character_name: null };
 }
 
+/** The character's name from its own turns; null when no turn names it safely. */
 export function characterNameFromTurns(
 	chat: ApiChat,
 	turns: readonly ApiTurn[],
@@ -103,14 +154,8 @@ export function characterNameFromTurns(
 	if (typeof name !== "string") {
 		return null;
 	}
-	const safe = pdppSafeText.safeParse(name);
-	if (!safe.success) {
-		throw new CharacterAiPayloadError(
-			"turns",
-			"the character's name is not PDPP-safe text",
-		);
-	}
-	return safe.data;
+	const safe = pdppSafeText.safeParse(stripForbiddenControlChars(name));
+	return safe.success ? safe.data : null;
 }
 
 function isSafeText(value: string): boolean {
@@ -233,7 +278,12 @@ export function buildChatRecord(
  * it would commit a missing or altered body.
  */
 export type TurnCheck =
-	| { ok: true; text: string; candidate: ApiTurn["candidates"][number] }
+	| {
+			ok: true;
+			text: string;
+			authorName: string | null;
+			candidate: ApiTurn["candidates"][number];
+	  }
 	| { ok: false; kind: "generating" | "unreadable"; detail: string };
 
 export function checkTurn(turn: ApiTurn): TurnCheck {
@@ -248,9 +298,14 @@ export function checkTurn(turn: ApiTurn): TurnCheck {
 			detail: "the selected candidate is missing",
 		};
 	}
+	// Display text loses stray control characters; ids must be clean as sent.
+	const authorName =
+		typeof turn.author.name === "string"
+			? stripForbiddenControlChars(turn.author.name)
+			: null;
 	const unsafe = unsafeField({
 		author_id: turn.author.author_id,
-		author_name: turn.author.name,
+		author_name: authorName,
 		candidate_id: candidate.candidate_id,
 	});
 	const badEnum = badEnumField({
@@ -280,7 +335,10 @@ export function checkTurn(turn: ApiTurn): TurnCheck {
 			detail: "the selected candidate has no text",
 		};
 	}
-	const safe = safeTextPreview(candidate.raw_content, MESSAGE_TEXT_MAX_CHARS);
+	const safe = safeTextPreview(
+		stripForbiddenControlChars(candidate.raw_content),
+		MESSAGE_TEXT_MAX_CHARS,
+	);
 	if (safe.kind === "binary" || safe.truncated) {
 		return {
 			ok: false,
@@ -288,7 +346,7 @@ export function checkTurn(turn: ApiTurn): TurnCheck {
 			detail: `the selected candidate's text is not storable (${safe.reason ?? "too long"})`,
 		};
 	}
-	return { ok: true, text: safe.preview ?? "", candidate };
+	return { ok: true, text: safe.preview ?? "", authorName, candidate };
 }
 
 /** Build a message record from a turn that passed checkTurn. */
@@ -301,7 +359,7 @@ export function buildMessageRecord(
 		chat_id: turn.turn_key.chat_id,
 		author_kind: turn.author.is_human === true ? "user" : "character",
 		author_id: turn.author.author_id ?? null,
-		author_name: turn.author.name ?? null,
+		author_name: checked.authorName,
 		text: checked.text,
 		primary_candidate_id: checked.candidate.candidate_id,
 		candidate_count: turn.candidates.length,
@@ -316,8 +374,8 @@ export function buildMessageRecord(
 // ─── Pagination ──────────────────────────────────────────────────────────
 
 export type WalkResult<T> =
-	| { complete: true; items: T[] }
-	| { complete: false; items: T[]; reason: string };
+	| { complete: true; items: T[]; unkeyed: number }
+	| { complete: false; items: T[]; unkeyed: number; reason: string };
 
 /**
  * Walk a next-token list until the source itself says it ended: a page with
@@ -335,8 +393,10 @@ export async function walkTokenPages<T>(args: {
 	const seenKeys = new Set<string>();
 	const seenTokens = new Set<string>();
 	let token: string | null = null;
+	let unkeyed = 0;
 	for (let pageIndex = 0; pageIndex < args.maxPages; pageIndex += 1) {
 		const page = await args.fetchPage(token);
+		unkeyed += page.unkeyed ?? 0;
 		let added = 0;
 		for (const item of page.items) {
 			const key = args.keyOf(item);
@@ -347,12 +407,13 @@ export async function walkTokenPages<T>(args: {
 			}
 		}
 		if (page.nextToken === null) {
-			return { complete: true, items };
+			return { complete: true, items, unkeyed };
 		}
-		if (page.items.length === 0) {
+		if (page.items.length === 0 && (page.unkeyed ?? 0) === 0) {
 			return {
 				complete: false,
 				items,
+				unkeyed,
 				reason: "an empty page still carried a next-page token",
 			};
 		}
@@ -360,11 +421,17 @@ export async function walkTokenPages<T>(args: {
 			return {
 				complete: false,
 				items,
+				unkeyed,
 				reason: "a page repeated items already read",
 			};
 		}
 		if (seenTokens.has(page.nextToken)) {
-			return { complete: false, items, reason: "the next-page token repeated" };
+			return {
+				complete: false,
+				items,
+				unkeyed,
+				reason: "the next-page token repeated",
+			};
 		}
 		seenTokens.add(page.nextToken);
 		token = page.nextToken;
@@ -372,6 +439,7 @@ export async function walkTokenPages<T>(args: {
 	return {
 		complete: false,
 		items,
+		unkeyed,
 		reason: `stopped at the ${args.maxPages}-page cap before the list ended`,
 	};
 }
