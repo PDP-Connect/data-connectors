@@ -717,7 +717,7 @@ async function sessionCookies(
  * count). Otherwise the account endpoint answering signed in, when the page
  * holds client parameters.
  */
-function signInReadiness(
+export function signInReadiness(
 	context: unknown,
 	before: Map<string, number> | null,
 	delay: (ms: number) => Promise<void>,
@@ -726,7 +726,10 @@ function signInReadiness(
 	return {
 		byCookie: () => byCookie,
 		probe: async (page) => {
-			const now = await sessionCookies(context);
+			// Without a baseline (the jar could not be read when the handoff
+			// began) a cookie cannot be told apart from one left by an old
+			// session, so only the account endpoint can say the person is in.
+			const now = before === null ? null : await sessionCookies(context);
 			if (now !== null) {
 				for (const [name, expires] of now) {
 					if (before?.get(name) !== expires) {

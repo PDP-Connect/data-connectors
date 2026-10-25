@@ -23,6 +23,7 @@ import {
 	LOGIN_URL,
 	PROFILE_URL,
 	readSessionState,
+	signInReadiness,
 	TIKTOK_RETRYABLE_PATTERN,
 	type TikTokCollectContext,
 	type TikTokPage,
@@ -2367,6 +2368,21 @@ test("signin handoff: a signed-out answer opens the sign-in page and waits for t
 	assert.match(h.assists[0] ?? "", /Sign in to TikTok/);
 	assert.deepEqual(h.completions, ["resolved"]);
 	assert.ok(calls.every((c) => c.path === "/passport/account/info/v2/"));
+});
+
+test("signin handoff: with no cookie baseline, an existing sign-in cookie is not taken as a new sign-in", async () => {
+	// The jar could not be read when the handoff began (before = null); later
+	// reads see a session cookie that may be left from an old session.
+	const jar = cookieJar(() => ["sessionid"]);
+	const { page } = fakePage(() => ok({ message: "error", data: { name: "session_expired" } }));
+	const readiness = signInReadiness(jar, null, noDelay.delay);
+	assert.equal(await readiness.probe(page), false);
+	assert.equal(readiness.byCookie(), false);
+	assert.equal(jar.reads(), 0);
+	// With a baseline that lacks the cookie, the same cookie is a new sign-in.
+	const fresh = signInReadiness(jar, new Map(), noDelay.delay);
+	assert.equal(await fresh.probe(page), true);
+	assert.equal(fresh.byCookie(), true);
 });
 
 test("signin handoff: a fresh profile whose app never made a request gets the sign-in page after the one profile-page open", async () => {
