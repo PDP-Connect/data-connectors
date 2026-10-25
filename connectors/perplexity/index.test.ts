@@ -542,26 +542,49 @@ test("a list body of the wrong shape fails the run, not the stream", async () =>
 	});
 });
 
-test("a library whose only item cannot be read reports it and completes", async () => {
-	const serve: typeof fetch = async () =>
-		Response.json([
-			{
-				uuid: "aaaaaaaa-0000-4000-8000-000000000001",
-				title: "a thread with no id of its own",
-				total_threads: 1,
-				has_next_page: false,
-			},
-		]);
-	await withBrowser(serve, async () => {
+test("a list row that cannot be keyed fails both streams and checkpoints neither, keeping the readable threads", async () => {
+	const rows = [
+		threadItem(1, true),
+		{
+			uuid: "aaaaaaaa-0000-4000-8000-000000000009",
+			title: "a thread with no id of its own",
+			total_threads: 1,
+			has_next_page: false,
+		},
+	];
+	const library = scriptedLibrary({
+		listPage: (offset) => (offset === 0 ? rows : []),
+	});
+	await withBrowser(library.serve, async () => {
 		const h = harness(ALL_STREAMS, page());
 		// `total_threads` must not gate completeness: the walk proved its own
-		// end (the last item said has_next_page: false), so the run
-		// completes, reports the unreadable thread, and emits no records.
+		// end (the last item said has_next_page: false). The unkeyed row is a
+		// thread neither stream can account for, so both fail without a
+		// coverage claim or a checkpoint; the readable thread is still kept.
 		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
-		assert.deepEqual(h.records, []);
-		assert.equal(h.failures.length, 1);
-		assert.equal(h.failures[0]?.stream, "conversations");
-		assert.equal(h.failures[0]?.retryable, false);
+		assert.equal(
+			h.records.filter((r) => r.stream === "conversations").length,
+			1,
+		);
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 2);
+		assert.deepEqual(h.failures, [
+			{ stream: "conversations", retryable: false },
+			{ stream: "messages", retryable: false },
+		]);
+		assert.equal(
+			h.messages.some(
+				(m) =>
+					m.type === "STATE" ||
+					(m as { type: string }).type === "DETAIL_COVERAGE",
+			),
+			false,
+		);
+	});
+	// A messages-only run reports only the stream it was asked for.
+	await withBrowser(library.serve, async () => {
+		const h = harness(["messages"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, [{ stream: "messages", retryable: false }]);
 	});
 });
 
@@ -1526,5 +1549,106 @@ test("a stream failure without the runtime's reporter fails the run instead of f
 				error instanceof Error &&
 				(error as { code?: string }).code === "perplexity_stream_incomplete",
 		);
+	});
+});
+
+test("the session check is bounded by an abort signal", async () => {
+	let signal: unknown;
+	await withBrowser(
+		async (_input, init) => {
+			signal = init?.signal;
+			return Response.json({ user: { id: "synthetic-owner" } });
+		},
+		async () => {
+			assert.equal(await checkPerplexitySession(page()), "signed_in");
+		},
+	);
+	assert.ok(signal instanceof AbortSignal);
+});
+
+test("a host without the streamed handoff never moves the page to check the finished sign-in", async () => {
+	const visits: string[] = [];
+	const browserPage = page(HOME, visits);
+	let thrown: unknown;
+	await withBrowser(
+		async () => Response.json({}),
+		async () => {
+			try {
+				await ensurePerplexitySession(
+					Object.assign(Object.create(null) as EnsureSessionArgs, {
+						page: browserPage,
+						sendInteraction: async () => {
+							// The owner is still on the identity provider's page.
+							await browserPage.goto("https://accounts.example.com/sign-in");
+							return {
+								type: "INTERACTION_RESPONSE",
+								request_id: "synthetic",
+								status: "success",
+							};
+						},
+					}),
+					noDelay,
+				);
+			} catch (error) {
+				thrown = error;
+			}
+		},
+	);
+	assert.ok(thrown instanceof Error);
+	assert.equal(thrown.message, "perplexity_auth_failed");
+	assert.deepEqual(visits, ["https://accounts.example.com/sign-in"]);
+});
+
+test("a thread whose entries span two pages is read in full, then remembered", async () => {
+	const entry = (k: number) => ({
+		uuid: entryId(100 + k),
+		status: "COMPLETED",
+		context_uuid: threadId(1),
+		query_str: `Synthetic question 1.${String(k)}?`,
+		entry_created_datetime: entryStamp(k),
+		entry_updated_datetime: entryStamp(k),
+		display_model: "sonar",
+		blocks: [
+			{
+				intended_usage: "ask_text",
+				markdown_block: { answer: `Synthetic answer 1.${String(k)}.` },
+			},
+		],
+	});
+	const all = Array.from({ length: 12 }, (_, k) => entry(k + 1));
+	const offsets: number[] = [];
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0 ? [{ ...threadItem(1, false), query_count: 12 }] : [],
+		thread: (_slug, offset) => {
+			offsets.push(offset);
+			const slice = all.slice(offset, offset + 10);
+			return Response.json({
+				entries: slice,
+				has_next_page: offset + slice.length < all.length,
+			});
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(offsets, [0, 10]);
+		const ids = h.records
+			.filter((r) => r.stream === "messages" && r.data.role === "user")
+			.map((r) => r.data.id);
+		assert.deepEqual(
+			ids,
+			all.map((item) => `${item.uuid}:user`),
+		);
+		assert.deepEqual(h.failures, []);
+		assert.deepEqual(detailCoverage(h.messages, "messages").hydrated_keys, [
+			threadId(1),
+		]);
+		const synced = (
+			stateCursor(h.messages, "messages") as {
+				synced: Record<string, { entry_count: number }>;
+			}
+		).synced;
+		assert.equal(synced[threadId(1)]?.entry_count, 12);
 	});
 });

@@ -13,6 +13,7 @@ import {
 	parseListedThread,
 	parseThreadDetailPage,
 	parseThreadListPage,
+	readAnswer,
 	readContent,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -267,4 +268,25 @@ test("an unsafe answer is unreadable, never stored as null or as a partial join"
 	assert.equal(missing.kind, "unreadable");
 	assert.equal(readContent("bad\u0000text").ok, false);
 	assert.deepEqual(readContent(""), { ok: true, text: null });
+});
+
+test("answer sections with a hole are unreadable, never joined into a partial answer", () => {
+	const sectioned = (indices: readonly number[]) => ({
+		blocks: indices.map((index) => ({
+			intended_usage: `ask_text_${String(index)}_markdown`,
+			markdown_block: { answer: `Synthetic part ${String(index)}.` },
+		})),
+	});
+	assert.deepEqual(readAnswer(sectioned([0, 2])), {
+		ok: false,
+		reason: "answer_sections_not_contiguous",
+	});
+	assert.deepEqual(readAnswer(sectioned([1, 2])), {
+		ok: false,
+		reason: "answer_sections_not_contiguous",
+	});
+	assert.deepEqual(readAnswer(sectioned([1, 0])), {
+		ok: true,
+		text: "Synthetic part 0.\n\nSynthetic part 1.",
+	});
 });

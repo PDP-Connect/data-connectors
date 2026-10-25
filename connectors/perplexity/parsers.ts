@@ -276,7 +276,8 @@ export function parseThreadDetailPage(
 /**
  * The assistant's answer. The `ask_text` block carries the whole answer; the
  * `ask_text_<n>_markdown` blocks are consecutive pieces of the same text, so
- * they are only joined, in n order, when there is no `ask_text` block. An
+ * they are only joined, in n order, when there is no `ask_text` block, and
+ * only when they run from 0 with no hole (otherwise unreadable). An
  * unsafe `ask_text` is unreadable: it is never replaced by a partial join of
  * the section blocks.
  */
@@ -299,10 +300,14 @@ export function readAnswer(entry: Record<string, unknown>): ContentRead {
 			sections.set(Number(section[1]), payload.answer);
 		}
 	}
+	// The pieces are numbered from 0 with no hole. A missing piece would
+	// make the join a partial answer stored as if whole, so it is unreadable.
+	const order = [...sections.keys()].sort((left, right) => left - right);
+	if (order.some((index, position) => index !== position)) {
+		return { ok: false, reason: "answer_sections_not_contiguous" };
+	}
 	const parts: string[] = [];
-	for (const index of [...sections.keys()].sort(
-		(left, right) => left - right,
-	)) {
+	for (const index of order) {
 		const part = readContent(sections.get(index));
 		if (!part.ok) {
 			return part;

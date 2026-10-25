@@ -151,9 +151,19 @@ export async function checkPerplexitySession(
 				if (cf !== undefined || doc?.title === "Just a moment...") {
 					return "challenge";
 				}
-				const response = await fetch("/api/auth/session", {
-					credentials: "include",
-				});
+				// Bounded: a stalled session check must not hold a handoff
+				// watcher or an end-of-list proof forever.
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), 15_000);
+				let response: Response;
+				try {
+					response = await fetch("/api/auth/session", {
+						credentials: "include",
+						signal: controller.signal,
+					});
+				} finally {
+					clearTimeout(timer);
+				}
 				const type = response.headers.get("content-type") ?? "";
 				if (
 					response.headers.get("cf-mitigated") === "challenge" ||
@@ -282,9 +292,10 @@ export async function ensurePerplexitySession(
 		isProbeSuccessful: (ok) => ok === true,
 		message: state === "challenge" ? CHALLENGE_MESSAGE : SIGN_IN_MESSAGE,
 		page,
-		// Only after the owner says they are done (hosts without the streamed
-		// handoff) may the check move the page home to read the session.
-		probe: () => hasPerplexitySession(page),
+		// Never navigates, also after the owner says they are done on a host
+		// without the streamed handoff: a sign-in still finishing on a Google
+		// or Apple page must not be pulled away.
+		probe: () => probePerplexitySession(page),
 		readinessProbe: probePerplexitySession,
 		readinessProbeOnHandoffPage: true,
 		reason: state === "challenge" ? "captcha" : "login",
@@ -895,13 +906,21 @@ export async function collectPerplexity(
 		}
 		return;
 	}
-	if (unreadableThreads > 0) {
-		await failStream(
-			ctx,
-			"conversations",
-			`${String(unreadableThreads)} Perplexity thread(s) could not be read from the library list and were skipped. Everything else was collected normally.`,
-			false,
-		);
+	// A list row that cannot be keyed is a thread neither stream can account
+	// for: both requested streams fail, and neither claims coverage or saves
+	// a checkpoint, while every readable thread is still collected.
+	const inventoryWhole = unreadableThreads === 0;
+	if (!inventoryWhole) {
+		for (const stream of ["conversations", "messages"] as const) {
+			if (ctx.requested.has(stream)) {
+				await failStream(
+					ctx,
+					stream,
+					`${String(unreadableThreads)} Perplexity thread(s) could not be read from the library list and were skipped. Everything else was collected normally.`,
+					false,
+				);
+			}
+		}
 	}
 
 	// 2. Per thread: read its detail first, then emit the conversation, then
@@ -1036,7 +1055,11 @@ export async function collectPerplexity(
 	}
 
 	// 3. Prove the boundaries, then checkpoint. Reaching here means the list
-	// walk ended on its own proof and stayed stable.
+	// walk ended on its own proof and stayed stable; a list with a row that
+	// could not be keyed was reported above and is not checkpointed.
+	if (!inventoryWhole) {
+		return;
+	}
 	if (wantsConversations) {
 		await emitDetailCoverage(ctx, {
 			stream: "conversations",
