@@ -84,6 +84,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["usaa", "usaa"],
     ["venmo", "venmo"],
     ["whatsapp", "whatsapp"],
+    ["whatsapp_web", "whatsapp-web"],
     ["wholefoods", "wholefoods"],
     ["x_browser", "x-browser"],
     ["whoop", "whoop"],
