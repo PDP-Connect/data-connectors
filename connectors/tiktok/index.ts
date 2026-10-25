@@ -22,8 +22,10 @@
  * client parameters (aid, app_name, device_id, ...) from a request the web
  * app itself made, then sends its own GET through the page's own fetch, so
  * TikTok's page scripts sign it (msToken, X-Bogus, X-Gnarly) as they sign the
- * app's requests. No signature, token or cookie is read by this code, logged
- * or kept in STATE: the page reports only whether a request left signed.
+ * app's requests. No signature, token or cookie value is read by this code,
+ * logged or kept in STATE: the page reports only whether a request left
+ * signed. The sign-in handoff looks only at whether TikTok's sign-in cookies
+ * are present and when they expire, never at their values.
  *
  * The in-page request is the only transport: an unsigned request from the
  * owner's session would be a bot signal, so a request the page cannot make or
@@ -39,10 +41,16 @@
  * Session check. Signed in is decided from the account endpoint the
  * collection itself starts with, in the page as it is. The check opens the
  * profile page only when the page is not on www.tiktok.com, or when the page
- * it is on made no request the reader can copy from. When the check
- * does not prove a signed-in session (signed out, or no answer, as in a
- * browser that never signed in), it opens the sign-in page and hands it to
- * the person; collection starts only once the session is verified.
+ * it is on made no request the reader can copy from. A check without an
+ * answer keeps its reason. Only an explicit signed-out answer, or a page
+ * that still holds no client parameters after that one profile-page open (a
+ * browser that never signed in), opens the sign-in page and hands it to the
+ * person. A bot check is handed to the person on the page as it is. A
+ * temporary or malformed answer is read again a few times in place, then
+ * stops the run as tiktok_interrupted, with no navigation and no handoff.
+ * Sign-in is ready once TikTok sets its sign-in cookie (or the account
+ * endpoint answers signed in); the page then moves to the profile page and
+ * collection verifies the account before anything else.
  *
  *   GET /passport/account/info/v2/      -> the owner's id, secUid, handle
  *   GET /api/user/settings/             -> profile.private_account
@@ -104,6 +112,15 @@
  *     coverage and checkpoints are written and the difference is only a
  *     count_above_listed diagnostic. Collection video lists follow the same
  *     rule. Unconfirmed walks, empty reads and repeats still fail.
+ *   v0.3.6 (2026-10-24): a session check without an answer keeps its reason:
+ *     only a signed-out answer or a page with no client parameters opens the
+ *     sign-in page; a bot check is handed to the person in place; a
+ *     temporary or malformed answer is re-read twice, then stops as
+ *     tiktok_interrupted with no navigation and no handoff. Sign-in readiness
+ *     no longer needs client parameters: a new sign-in cookie (names and
+ *     expiry only) is enough, then the profile page opens. A count above the
+ *     listed entries is accepted only when no entry was read twice. Session
+ *     errors are thrown as bare codes so the runtime keeps them.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -148,6 +165,10 @@ import {
 	type User,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
+
+/** The error classes a fresh run may retry. */
+export const TIKTOK_RETRYABLE_PATTERN =
+	/tiktok_rate_limited|tiktok_server_error|tiktok_interrupted|tiktok_run_limit_reached/;
 
 export const PROFILE_URL = `${TIKTOK_ORIGIN}/profile`;
 export const LOGIN_URL = `${TIKTOK_ORIGIN}/login`;
@@ -539,17 +560,55 @@ async function prepareReader(
 export type SessionState = "signed_in" | "signed_out" | "unknown";
 
 /**
- * Whether the account endpoint (the same unsigned request the collection
- * starts with) names a signed-in account. "signed_out" requires an explicit
- * unauthenticated answer; malformed or temporary failures are "unknown".
- * It never navigates.
+ * Why a session check has no answer:
+ *   no_client  the page holds no client parameters (a fresh profile whose app
+ *              never made a request of its own, or a page off the site), so
+ *              the account request was never sent;
+ *   challenge  TikTok answered with a bot check (an HTML page, a
+ *              cf-mitigated header, a 403, or a body that is not JSON);
+ *   transient  the request did not complete, or answered 429, 5xx, another
+ *              non-200 status or an empty body;
+ *   malformed  a 200 JSON answer that names neither an account nor a
+ *              signed-out session.
  */
-export async function readSessionState(
+export type UnknownReason =
+	| "no_client"
+	| "challenge"
+	| "transient"
+	| "malformed";
+
+export type SessionCheck =
+	| { state: "signed_in" | "signed_out" }
+	| { state: "unknown"; reason: UnknownReason };
+
+/** Re-reads of the account endpoint after a transient or malformed answer. */
+const SESSION_CHECK_RETRIES = 2;
+/** Pause before each of those re-reads. */
+const SESSION_RETRY_DELAY_MS = 3000;
+/**
+ * The cookies TikTok sets on sign-in. Only their names and expiry are looked
+ * at, never their values.
+ */
+const SESSION_COOKIES: ReadonlySet<string> = new Set([
+	"sessionid",
+	"sessionid_ss",
+	"sid_tt",
+]);
+
+/**
+ * The account endpoint (the same request the collection starts with), read
+ * in the page as it is, with the reason behind a missing answer. "signed_out"
+ * requires an explicit unauthenticated answer. It never navigates.
+ */
+export async function readSessionCheck(
 	page: TikTokPage,
 	delay: (ms: number) => Promise<void> = realDelay,
-): Promise<SessionState> {
+): Promise<SessionCheck> {
+	const noClient = { state: "unknown", reason: "no_client" } as const;
+	const challenge = { state: "unknown", reason: "challenge" } as const;
+	const transient = { state: "unknown", reason: "transient" } as const;
 	let status = await watch(page);
-	if (!status || status.wrongPage === true) return "unknown";
+	if (!status || status.wrongPage === true) return noClient;
 	// A page that just loaded may not have finished its own first request, so
 	// the reader holds no client parameters yet. Wait for it (bounded, no
 	// navigation) instead of reading "no answer" as a missing session.
@@ -560,23 +619,48 @@ export async function readSessionState(
 	) {
 		await delay(POLL_INTERVAL_MS);
 		status = await watch(page);
-		if (!status || status.wrongPage === true) return "unknown";
+		if (!status || status.wrongPage === true) return noClient;
 	}
 	const result = await fetchApi(page, "/passport/account/info/v2/", {});
-	if (result?.kind !== "response") return "unknown";
-	if (result.html || result.challengeHeader === true) return "unknown";
-	if (result.status === 401) return "signed_out";
-	if (result.status !== 200 || result.empty) return "unknown";
-	if (parseAccount(result.json) !== null) return "signed_in";
-	return isSignedOutAccount(result.json) ? "signed_out" : "unknown";
+	if (result?.kind === "no_client" || result?.kind === "wrong_origin")
+		return noClient;
+	if (result?.kind !== "response") return transient;
+	// A bot check comes before every status rule, as in the collection.
+	if (result.html || result.challengeHeader === true) return challenge;
+	if (
+		!result.empty &&
+		(result.json === null || typeof result.json !== "object")
+	)
+		return challenge;
+	if (result.status === 401) return { state: "signed_out" };
+	if (result.status === 403) return challenge;
+	if (result.status !== 200 || result.empty) return transient;
+	if (parseAccount(result.json) !== null) return { state: "signed_in" };
+	return isSignedOutAccount(result.json)
+		? { state: "signed_out" }
+		: { state: "unknown", reason: "malformed" };
+}
+
+/**
+ * Whether the account endpoint names a signed-in account (readSessionCheck
+ * without the reason). It never navigates.
+ */
+export async function readSessionState(
+	page: TikTokPage,
+	delay: (ms: number) => Promise<void> = realDelay,
+): Promise<SessionState> {
+	return (await readSessionCheck(page, delay)).state;
 }
 
 /**
  * Whether the page holds a signed-in TikTok session. It does not navigate:
  * safe to repeat while the owner signs in.
  */
-export async function probeTikTokSession(page: TikTokPage): Promise<boolean> {
-	return (await readSessionState(page)) === "signed_in";
+export async function probeTikTokSession(
+	page: TikTokPage,
+	delay: (ms: number) => Promise<void> = realDelay,
+): Promise<boolean> {
+	return (await readSessionState(page, delay)) === "signed_in";
 }
 
 /**
@@ -584,15 +668,82 @@ export async function probeTikTokSession(page: TikTokPage): Promise<boolean> {
  * opens the profile page only when the page is not on www.tiktok.com or made
  * no request the reader can copy from.
  */
+export async function checkTikTokSessionDetail(
+	page: TikTokPage,
+	delay: (ms: number) => Promise<void> = realDelay,
+): Promise<SessionCheck> {
+	const first = await readSessionCheck(page, delay);
+	if (first.state !== "unknown") return first;
+	await prepareReader(page, delay);
+	return readSessionCheck(page, delay);
+}
+
 export async function checkTikTokSession(
 	page: TikTokPage,
 	delay: (ms: number) => Promise<void> = realDelay,
 ): Promise<SessionState> {
-	const first = await readSessionState(page, delay);
-	if (first !== "unknown") return first;
-	await prepareReader(page, delay);
-	return readSessionState(page, delay);
+	return (await checkTikTokSessionDetail(page, delay)).state;
 }
+
+/** The part of the browser context the sign-in readiness reads. */
+interface CookieJar {
+	cookies(
+		urls?: string | string[],
+	): Promise<readonly { expires?: number; name: string }[]>;
+}
+
+/** Sign-in cookies present now, by name, with their expiry. */
+async function sessionCookies(
+	context: unknown,
+): Promise<Map<string, number> | null> {
+	const jar = context as Partial<CookieJar> | null | undefined;
+	if (typeof jar?.cookies !== "function") return null;
+	try {
+		const cookies = await jar.cookies(`${TIKTOK_ORIGIN}/`);
+		const found = new Map<string, number>();
+		for (const cookie of cookies)
+			if (SESSION_COOKIES.has(cookie.name))
+				found.set(cookie.name, cookie.expires ?? -1);
+		return found;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Sign-in readiness that needs no client parameters and never navigates:
+ * TikTok set a sign-in cookie that was not there, or not with that expiry,
+ * when the handoff began (a stale cookie of a signed-out session does not
+ * count). Otherwise the account endpoint answering signed in, when the page
+ * holds client parameters.
+ */
+function signInReadiness(
+	context: unknown,
+	before: Map<string, number> | null,
+	delay: (ms: number) => Promise<void>,
+): { byCookie: () => boolean; probe: (page: TikTokPage) => Promise<boolean> } {
+	let byCookie = false;
+	return {
+		byCookie: () => byCookie,
+		probe: async (page) => {
+			const now = await sessionCookies(context);
+			if (now !== null) {
+				for (const [name, expires] of now) {
+					if (before?.get(name) !== expires) {
+						byCookie = true;
+						return true;
+					}
+				}
+			}
+			return probeTikTokSession(page, delay);
+		},
+	};
+}
+
+const SIGN_IN_MESSAGE =
+	"Sign in to TikTok in the secure browser, then continue. Collection starts once the session is verified.";
+const CHALLENGE_MESSAGE =
+	"TikTok is showing a check in the secure browser. Complete it there, then continue. Collection starts once TikTok answers again.";
 
 export async function ensureTikTokSession(
 	args: EnsureSessionArgs,
@@ -600,39 +751,87 @@ export async function ensureTikTokSession(
 	delay: (ms: number) => Promise<void> = realDelay,
 ): Promise<void> {
 	const { assist, capture, completeAssistance, page, sendInteraction } = args;
+	const context: unknown = args.context;
 	// One non-navigating check, then at most one navigation to the web app
-	// (checkTikTokSession). Only a verified signed-in answer skips the
+	// (checkTikTokSessionDetail). Only a verified signed-in answer skips the
 	// handoff; the page is never moved away from a session that answered.
-	const state = await checkTikTokSession(page, delay);
-	if (state === "signed_in") return;
-	// "unknown" is what a browser that never signed in usually reads as: the
-	// app makes no account request of its own, or a bot check answers first.
-	// Hand the sign-in page to the person either way; they can clear a bot
-	// check there too. Collection still waits for a verified session.
-	await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
-	const ready = await manualBrowserLogin({
-		assist,
-		autoProbeIntervalMs: 5000,
-		capture,
-		completeAssistance,
-		isProbeSuccessful: (ok) => ok === true,
-		message:
-			"Sign in to TikTok in the secure browser, then continue. Collection starts once the session is verified.",
-		page,
-		probe: async () => (await checkTikTokSession(page, delay)) === "signed_in",
-		readinessProbe: probeTikTokSession,
-		readinessProbeOnHandoffPage: true,
-		sendInteraction,
-		timeoutSeconds: 30 * 60,
-	});
-	if (!ready) {
-		throw new Error("tiktok_auth_failed: TikTok sign-in was not completed");
+	let check = await checkTikTokSessionDetail(page, delay);
+	// A transient or malformed answer is not evidence of anything: re-read a
+	// few times in place (no navigation, no handoff), then stop retryably.
+	for (
+		let retry = 0;
+		check.state === "unknown" &&
+		(check.reason === "transient" || check.reason === "malformed") &&
+		retry < SESSION_CHECK_RETRIES;
+		retry += 1
+	) {
+		await delay(SESSION_RETRY_DELAY_MS);
+		check = await readSessionCheck(page, delay);
 	}
+	if (check.state === "signed_in") return;
+	if (
+		check.state === "unknown" &&
+		(check.reason === "transient" || check.reason === "malformed")
+	) {
+		// The runtime keeps a thrown session error's code only when the whole
+		// message is the code, so the detail goes to a diagnostic.
+		connectorDiagnostic("tiktok", "session_check_no_answer", {
+			reason: check.reason,
+			reads: SESSION_CHECK_RETRIES + 2,
+		});
+		throw new Error("tiktok_interrupted");
+	}
+	const handOff = async (
+		message: string,
+		readiness: (page: TikTokPage) => Promise<boolean>,
+	): Promise<void> => {
+		const ready = await manualBrowserLogin({
+			assist,
+			autoProbeIntervalMs: 5000,
+			capture,
+			completeAssistance,
+			isProbeSuccessful: (ok) => ok === true,
+			message,
+			page,
+			probe: () => readiness(page),
+			readinessProbe: readiness,
+			readinessProbeOnHandoffPage: true,
+			sendInteraction,
+			timeoutSeconds: 30 * 60,
+		});
+		if (!ready) {
+			connectorDiagnostic("tiktok", "sign_in_not_completed", {});
+			throw new Error("tiktok_auth_failed");
+		}
+	};
+	if (check.state === "unknown" && check.reason === "challenge") {
+		// A signed-in session behind a bot check: the person clears it on the
+		// page as it is. Done once the account endpoint answers signed in.
+		await handOff(CHALLENGE_MESSAGE, (p) => probeTikTokSession(p, delay));
+		return;
+	}
+	// Signed out, or a fresh profile whose app never made a request the
+	// reader copies from even after the one profile-page open: the sign-in
+	// page goes to the person.
+	await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
+	const before = await sessionCookies(context);
+	const readiness = signInReadiness(context, before, delay);
+	await handOff(SIGN_IN_MESSAGE, readiness.probe);
 	// The person is signed in and nothing of this connector is in flight. The
 	// page is the sign-in page or wherever TikTok sent them after it, which
 	// may make no request the reader copies from, and TikTok may still replace
-	// it. Start collection from the profile page instead.
+	// it. Start collection from the profile page, where collection verifies
+	// the account before it reads anything else.
 	await page.goto(PROFILE_URL, { waitUntil: "domcontentloaded" });
+	if (!readiness.byCookie()) return;
+	// Ready on the cookie alone: the account endpoint, now reachable from the
+	// profile page, must not answer signed out. Any other answer is left to
+	// the collection's own first request.
+	const after = await readSessionCheck(page, delay);
+	if (after.state === "signed_out") {
+		connectorDiagnostic("tiktok", "sign_in_cookie_not_signed_in", {});
+		throw new Error("tiktok_auth_failed");
+	}
 }
 
 // ─── list walks ──────────────────────────────────────────────────────────
@@ -857,8 +1056,8 @@ function assertComplete(
  * removed collection, an unavailable video), so the list is complete and the
  * difference is only a diagnostic, counts only. It is still the incomplete
  * failure when the walk was not confirmed, when nothing was read, or when the
- * pages returned at least as many entries as counted (a repeat stood in for
- * an entry). Returns true when such a difference was accepted.
+ * pages returned any entry twice (a repeat may stand in for an entry,
+ * whatever the count). Returns true when such a difference was accepted.
  */
 function settleCount(
 	stream: Stream,
@@ -870,7 +1069,9 @@ function settleCount(
 	},
 ): boolean {
 	if (walk.total === null || walk.read >= walk.total) return false;
-	if (walk.confirmed && walk.read > 0 && walk.entries < walk.total) {
+	// Only a walk without duplicate rows: a repeated entry may stand in for
+	// one TikTok counts but did not return.
+	if (walk.confirmed && walk.read > 0 && walk.entries === walk.read) {
 		connectorDiagnostic("tiktok", "count_above_listed", {
 			stream,
 			counted: walk.total,
@@ -1550,9 +1751,7 @@ export async function collectTikTok(
 		}
 		const failure = await hydrateAll(
 			targets,
-			short
-				? null
-				: new Set(list.map((collection) => collection.collectionId)),
+			short ? null : new Set(list.map((collection) => collection.collectionId)),
 		);
 		if (failure) await fail(COLLECTION_ITEMS, failure);
 	};
@@ -1695,8 +1894,7 @@ if (isMainModule(import.meta.url)) {
 		name: "tiktok",
 		validateRecord,
 		browser: { profileName: "tiktok" },
-		retryablePattern:
-			/tiktok_rate_limited|tiktok_server_error|tiktok_interrupted|tiktok_run_limit_reached/,
+		retryablePattern: TIKTOK_RETRYABLE_PATTERN,
 		ensureSession: (args) => ensureTikTokSession(args),
 		probeSession: async ({ page }) =>
 			(await checkTikTokSession(page)) === "signed_in",
