@@ -571,18 +571,17 @@ export async function ensureCharacterAiSession(
 		});
 	} catch (error) {
 		// The handoff's own failures, under this connector's bare codes: the
-		// owner not finishing (a timeout, a cancelled sign-in) is a sign-in
-		// failure; readiness checks that kept failing (the page went away) are
-		// an interruption, retried as a whole.
+		// owner not finishing in time is a sign-in failure; a page closed
+		// during the handoff (browser_sign_in_cancelled is how the handoff
+		// reports it) or readiness checks that kept failing are an
+		// interruption, retried as a whole.
 		const code = errorCode(error);
-		if (
-			code === "browser_handoff_readiness_timed_out" ||
-			code === "browser_sign_in_cancelled"
-		) {
+		if (code === "browser_handoff_readiness_timed_out") {
 			connectorDiagnostic("character_ai", "sign_in_not_completed", { code });
 			throw new Error(AUTH_FAILED);
 		}
 		if (
+			code === "browser_sign_in_cancelled" ||
 			code === "browser_handoff_readiness_probe_failed" ||
 			isPageInterruption(error)
 		) {
@@ -865,11 +864,14 @@ async function forEachLaterGapPage(
 		for (const gap of unseen) {
 			seen.add(gap.gap_id);
 		}
-		const fresh = pendingGapsByChat(unseen);
-		if (fresh.size === 0) {
+		if (unseen.length === 0) {
 			return;
 		}
-		await handle(fresh);
+		// A page of gaps that are not this connector's still leads to the next.
+		const fresh = pendingGapsByChat(unseen);
+		if (fresh.size > 0) {
+			await handle(fresh);
+		}
 	}
 }
 

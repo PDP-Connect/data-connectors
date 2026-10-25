@@ -1814,7 +1814,7 @@ test("a later-page gap for an unlisted chat that still exists is read parent fir
 	assert.equal(coverageOf(h.messages, "chats")?.considered, 2);
 });
 
-test("handoff failures reach the runtime as bare codes: not finishing is a sign-in failure, a page that went away is retryable", async () => {
+test("handoff failures reach the runtime as bare codes: not finishing in time is a sign-in failure, a page that went away is retryable", async () => {
 	const cases: Array<[string, Error, string]> = [
 		[
 			"timeout",
@@ -1824,11 +1824,11 @@ test("handoff failures reach the runtime as bare codes: not finishing is a sign-
 			"character_ai_auth_failed",
 		],
 		[
-			"cancelled",
+			"page closed during the handoff",
 			Object.assign(new Error("browser_sign_in_cancelled"), {
 				code: "browser_sign_in_cancelled",
 			}),
-			"character_ai_auth_failed",
+			"character_ai_interrupted",
 		],
 		[
 			"probe failed",
@@ -1939,5 +1939,22 @@ test("any other handoff failure still reaches the runtime as the bare interrupte
 		),
 		(error: unknown) =>
 			error instanceof Error && error.message === "character_ai_interrupted",
+	);
+});
+
+test("a page of gaps that are not this connector's does not end the paging", async () => {
+	const [first] = CHAT_IDS;
+	assert.ok(first);
+	const h = harness(fakePage(defaultRoute(), []), {
+		gapPages: [
+			[{ gap_id: "x1", stream: "messages", record_key: "not-a-chat" }],
+			[gap("g10", first, "l10")],
+		],
+		recoveryOnly: true,
+	});
+	await collectCharacterAi(h.ctx);
+	assert.deepEqual(
+		ofType(h.messages, "DETAIL_GAP_RECOVERED").map((m) => m.gap_id),
+		["g10"],
 	);
 });
