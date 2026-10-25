@@ -1473,7 +1473,8 @@ test("recovery-only reads the pending gaps on every page, not just the first", a
 	const seen: Seen[] = [];
 	const h = harness(fakePage(defaultRoute(), seen), {
 		detailGaps: [gap("g1", first)],
-		gapPages: [[gap("g2", second, "l2")]],
+		// A second gap for the first chat arrives on the later page as well.
+		gapPages: [[gap("g2", second, "l2"), gap("g5", first, "l5")]],
 		recoveryOnly: true,
 	});
 	await collectCharacterAi(h.ctx);
@@ -1489,6 +1490,7 @@ test("recovery-only reads the pending gaps on every page, not just the first", a
 		[
 			["g1", undefined],
 			["g2", "l2"],
+			["g5", "l5"],
 		],
 	);
 	assert.deepEqual(coverageOf(h.messages, "messages")?.required_keys, [

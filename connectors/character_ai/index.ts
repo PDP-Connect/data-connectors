@@ -1012,6 +1012,11 @@ async function recoverOnly(
 	const handle = async (fresh: Map<string, PendingGap[]>) => {
 		for (const [chatId, gaps] of fresh) {
 			if (keys.includes(chatId)) {
+				// A further gap for a chat already read this run: closed only if that
+				// read was complete; otherwise the chat's re-emitted gap stands.
+				if (deps.tally.hydratedKeys.includes(chatId)) {
+					await recoverGaps(ctx, chatId, gaps);
+				}
 				continue;
 			}
 			keys.push(chatId);
