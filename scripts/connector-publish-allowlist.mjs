@@ -61,6 +61,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["notion", "notion"],
     ["oura", "oura"],
     ["oura_browser", "oura-browser"],
+    ["perplexity", "perplexity"],
     ["pocket", "pocket"],
     ["reddit", "reddit"],
     ["shopify", "shopify"],

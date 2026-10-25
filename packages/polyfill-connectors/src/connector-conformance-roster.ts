@@ -103,6 +103,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	netflix_export: { testFile: "connectors/netflix_export/integration.test.ts" },
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
+	perplexity: { testFile: "connectors/perplexity/index.test.ts" },
 	strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
 	// Tier development. Reads the signed-in WhatsApp Web page's own in-page
 	// stores (chats, messages, contacts, groups); the oracle is the collection
