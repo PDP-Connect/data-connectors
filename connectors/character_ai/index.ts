@@ -27,6 +27,9 @@
  * alone and is retried next run (pending gaps on every page the runtime
  * serves, also in a recovery-only run); the stream is not failed for it.
  * Stray control characters are dropped from display text, never the record.
+ * A list row whose fields cannot be stored is read from GET /chat/:id/; a
+ * chat that cannot be read there either is left out of this run (chats
+ * coverage reads partial) and no child is accounted under it.
  * Rate limits, outages, auth failures and bot checks stop the whole run
  * (retryable where the cause is transient); a page that navigates or closes
  * under a request is retried once, then stops the run as
@@ -477,6 +480,20 @@ export async function hasCharacterAiSession(
 	return probeCharacterAiSession(page);
 }
 
+function errorCode(error: unknown): string | null {
+	if (typeof error !== "object" || error === null) {
+		return null;
+	}
+	const code = (error as { code?: unknown }).code;
+	if (typeof code === "string") {
+		return code;
+	}
+	const message = (error as { message?: unknown }).message;
+	return typeof message === "string" && /^[a-z][a-z0-9_]*$/.test(message)
+		? message
+		: null;
+}
+
 function currentUrl(page: PageHandle): string | null {
 	try {
 		return page.url();
@@ -534,22 +551,46 @@ export async function ensureCharacterAiSession(
 			throw new Error(INTERRUPTED);
 		}
 	}
-	const ready = await manualBrowserLogin({
-		assist,
-		capture,
-		completeAssistance,
-		isProbeSuccessful: (ok) => ok === true,
-		message: state === "challenge" ? CHALLENGE_MESSAGE : SIGN_IN_MESSAGE,
-		page,
-		// Never navigates, also after the owner says they are done on a host
-		// without the streamed handoff.
-		probe: () => probeCharacterAiSession(page),
-		readinessProbe: probeCharacterAiSession,
-		readinessProbeOnHandoffPage: true,
-		reason: state === "challenge" ? "captcha" : "login",
-		sendInteraction,
-		timeoutSeconds: SIGN_IN_TIMEOUT_SECONDS,
-	});
+	let ready: boolean | undefined;
+	try {
+		ready = await manualBrowserLogin({
+			assist,
+			capture,
+			completeAssistance,
+			isProbeSuccessful: (ok) => ok === true,
+			message: state === "challenge" ? CHALLENGE_MESSAGE : SIGN_IN_MESSAGE,
+			page,
+			// Never navigates, also after the owner says they are done on a host
+			// without the streamed handoff.
+			probe: () => probeCharacterAiSession(page),
+			readinessProbe: probeCharacterAiSession,
+			readinessProbeOnHandoffPage: true,
+			reason: state === "challenge" ? "captcha" : "login",
+			sendInteraction,
+			timeoutSeconds: SIGN_IN_TIMEOUT_SECONDS,
+		});
+	} catch (error) {
+		// The handoff's own failures, under this connector's bare codes: the
+		// owner not finishing (a timeout, a cancelled sign-in) is a sign-in
+		// failure; readiness checks that kept failing (the page went away) are
+		// an interruption, retried as a whole.
+		const code = errorCode(error);
+		if (
+			code === "browser_handoff_readiness_timed_out" ||
+			code === "browser_sign_in_cancelled"
+		) {
+			connectorDiagnostic("character_ai", "sign_in_not_completed", { code });
+			throw new Error(AUTH_FAILED);
+		}
+		if (
+			code === "browser_handoff_readiness_probe_failed" ||
+			isPageInterruption(error)
+		) {
+			connectorDiagnostic("character_ai", "sign_in_interrupted", { code });
+			throw new Error(INTERRUPTED);
+		}
+		throw error;
+	}
 	if (!ready) {
 		connectorDiagnostic("character_ai", "sign_in_not_completed", { state });
 		throw new Error(AUTH_FAILED);
@@ -892,6 +933,8 @@ async function recoverGaps(
 interface RunDeps {
 	pending: Map<string, PendingGap[]>;
 	tally: MessagesTally;
+	/** Chats whose parent could not be read this run; nothing was emitted for them. */
+	unread: string[];
 	wantMessages: boolean;
 }
 
@@ -929,21 +972,29 @@ async function processChat(
 }
 
 /**
- * A pending gap for a chat the list did not return this run: its parent is
- * read from GET /chat/:id/ and emitted before any child. A chat that cannot
- * be read there keeps its gap open (re-emitted).
+ * A chat read from GET /chat/:id/ rather than the list (a pending gap for a
+ * chat the list did not return, or a list row whose fields cannot be
+ * stored): its parent record is emitted before any child. When the detail
+ * cannot be read either, nothing is emitted for the chat: no child may be
+ * accounted under a parent this run did not emit, so a pending gap stays
+ * pending as it was and the chat is left out of coverage. Returns whether
+ * the parent was emitted.
  */
-async function processUnlistedChat(
+async function processChatByDetail(
 	ctx: BrowserCollectContext,
 	chatId: string,
 	deps: RunDeps,
-): Promise<void> {
+): Promise<boolean> {
 	const detail = await fetchChatDetail(ctx.page, chatId);
 	if (!detail.ok) {
-		await recordGap(ctx, chatId, detail, deps.tally);
-		return;
+		deps.unread.push(chatId);
+		connectorDiagnostic("character_ai", "chat_detail_unread", {
+			class: detail.errorClass,
+		});
+		return false;
 	}
 	await processChat(ctx, detail.chat, deps);
+	return true;
 }
 
 /**
@@ -1021,14 +1072,19 @@ async function recoverOnly(
 			}
 			keys.push(chatId);
 			deps.pending.set(chatId, gaps);
-			await processUnlistedChat(ctx, chatId, deps);
+			await processChatByDetail(ctx, chatId, deps);
 		}
 	};
 	await handle(pendingGapsByChat(first));
 	await forEachLaterGapPage(ctx, seen, handle);
 	// Coverage is reported even for an empty recovery pass: it is the run's
 	// evidence that there was nothing pending to read.
-	await finishMessages(ctx, keys, deps.tally, 0);
+	await finishMessages(
+		ctx,
+		keys.filter((chatId) => !deps.unread.includes(chatId)),
+		deps.tally,
+		0,
+	);
 }
 
 export async function collectCharacterAi(
@@ -1054,6 +1110,7 @@ export async function collectCharacterAi(
 	const deps: RunDeps = {
 		pending: pendingGapsByChat(firstGaps),
 		tally: { gapKeys: [], hydratedKeys: [], turnsEmitted: 0 },
+		unread: [],
 		wantMessages,
 	};
 	if (ctx.recoveryOnly === true) {
@@ -1111,22 +1168,14 @@ export async function collectCharacterAi(
 			stream: "messages",
 		});
 		if (row.chat === null) {
-			// This row's fields cannot be stored as a chat record; only this chat
-			// is left out (its messages wait on a gap), the rest of the list is not.
+			// This row's fields cannot be stored as a chat record: the chat is
+			// read from its own endpoint instead. If that fails too, only this
+			// chat is left out (chats coverage reads partial); the rest is not.
 			connectorDiagnostic("character_ai", "chat_row_unreadable", {
 				detail: row.detail,
 			});
-			if (wantMessages) {
-				await recordGap(
-					ctx,
-					row.chatId,
-					gapOutcome(
-						"retry_exhausted",
-						"chat_row_unreadable",
-						`the chat list row cannot be stored: ${row.detail}`,
-					),
-					deps.tally,
-				);
+			if (await processChatByDetail(ctx, row.chatId, deps)) {
+				chatRecords += 1;
 			}
 			continue;
 		}
@@ -1137,7 +1186,7 @@ export async function collectCharacterAi(
 		}
 	}
 	for (const chatId of unlisted) {
-		await processUnlistedChat(ctx, chatId, deps);
+		await processChatByDetail(ctx, chatId, deps);
 	}
 	// Pending gaps beyond START's first page: a chat read completely this run
 	// has its gaps acknowledged, one gapped again this run already re-emitted
@@ -1152,11 +1201,15 @@ export async function collectCharacterAi(
 					if (deps.tally.hydratedKeys.includes(chatId)) {
 						await recoverGaps(ctx, chatId, gaps);
 					} else if (
-						!(deps.tally.gapKeys.includes(chatId) || extra.includes(chatId))
+						!(
+							deps.tally.gapKeys.includes(chatId) ||
+							deps.unread.includes(chatId) ||
+							extra.includes(chatId)
+						)
 					) {
 						extra.push(chatId);
 						deps.pending.set(chatId, gaps);
-						await processUnlistedChat(ctx, chatId, deps);
+						await processChatByDetail(ctx, chatId, deps);
 					}
 				}
 			},
@@ -1173,10 +1226,18 @@ export async function collectCharacterAi(
 		considered: rows.length,
 		covered: chatRecords,
 	});
+	if (chatRecords < rows.length) {
+		await ctx.progress(
+			`${String(rows.length - chatRecords)} Character.AI chat(s) could not be read from the chat list and were skipped this run`,
+			{ stream: "chats" },
+		);
+	}
 	if (wantMessages) {
 		await finishMessages(
 			ctx,
-			[...rows.map((row) => row.chatId), ...unlisted, ...extra],
+			[...rows.map((row) => row.chatId), ...unlisted, ...extra].filter(
+				(chatId) => !deps.unread.includes(chatId),
+			),
 			deps.tally,
 			rows.length,
 		);
@@ -1196,7 +1257,7 @@ if (isMainModule(import.meta.url)) {
 		name: "character_ai",
 		validateRecord,
 		retryablePattern:
-			/character_ai_api_(?:429|5\d\d)|character_ai_timeout|character_ai_network_error|character_ai_interrupted|fetch failed/i,
+			/character_ai_api_(?:408|429|5\d\d)|character_ai_timeout|character_ai_network_error|character_ai_interrupted|fetch failed/i,
 		browser: { profileName: "character_ai" },
 		ensureSession: ensureCharacterAiSession,
 		probeSession: ({ page }) => hasCharacterAiSession(page),

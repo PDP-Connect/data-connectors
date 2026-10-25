@@ -921,7 +921,7 @@ function pendingGaps(first: string) {
 	];
 }
 
-test("recovery-only: parents come from the chat endpoint, recovered gaps are closed, a 404 keeps its gap open", async () => {
+test("recovery-only: parents come from the chat endpoint, recovered gaps are closed, a 404 leaves its gap pending untouched", async () => {
 	const [first] = CHAT_IDS;
 	assert.ok(first);
 	const seen: Seen[] = [];
@@ -958,11 +958,10 @@ test("recovery-only: parents come from the chat endpoint, recovered gaps are clo
 		recovered.map((m) => [m.gap_id, m.record_key, m.lease_id]),
 		[["g1", first, "l1"]],
 	);
-	// A 404 on the chat endpoint proves nothing was read: g2 stays open (re-emitted).
-	assert.deepEqual(
-		ofType(h.messages, "DETAIL_GAP").map((gap) => [gap.record_key, gap.reason]),
-		[[GONE_CHAT, "temporary_unavailable"]],
-	);
+	// A 404 on the chat endpoint proves nothing was read and no parent was
+	// emitted: g2 is neither recovered nor re-emitted under a missing parent,
+	// and the chat is left out of coverage.
+	assert.equal(ofType(h.messages, "DETAIL_GAP").length, 0);
 	assert.deepEqual(h.failures, []);
 	const recoveredAt = h.messages.findIndex(
 		(m) => m.type === "DETAIL_GAP_RECOVERED",
@@ -975,9 +974,9 @@ test("recovery-only: parents come from the chat endpoint, recovered gaps are clo
 		"a gap is closed only after its chat's messages",
 	);
 	const coverage = coverageOf(h.messages, "messages");
-	assert.deepEqual(coverage?.required_keys, [first, GONE_CHAT]);
+	assert.deepEqual(coverage?.required_keys, [first]);
 	assert.deepEqual(coverage?.hydrated_keys, [first]);
-	assert.deepEqual(coverage?.gap_keys, [GONE_CHAT]);
+	assert.equal(coverage?.gap_keys, undefined);
 	assert.equal(ofType(h.messages, "STATE").length, 0);
 });
 
@@ -1035,9 +1034,10 @@ test("a normal run retries pending gaps the list no longer returns, parent first
 	});
 	await collectCharacterAi(full.ctx);
 	const coverage = coverageOf(full.messages, "messages");
-	assert.deepEqual(coverage?.required_keys, [...CHAT_IDS, GONE_CHAT]);
+	assert.deepEqual(coverage?.required_keys, CHAT_IDS);
 	assert.deepEqual(coverage?.hydrated_keys, CHAT_IDS);
-	assert.deepEqual(coverage?.gap_keys, [GONE_CHAT]);
+	assert.equal(coverage?.gap_keys, undefined);
+	assert.equal(ofType(full.messages, "DETAIL_GAP").length, 0);
 	assert.deepEqual(
 		ofType(full.messages, "DETAIL_GAP_RECOVERED").map((m) => m.gap_id),
 		["g1"],
@@ -1298,33 +1298,63 @@ test("control characters are dropped from display text; other unsafe values make
 	assert.deepEqual(h.failures, []);
 	assert.equal(ofType(h.messages, "STATE").length, 1);
 
-	// A chat row that cannot be stored: no chat record and a gap for that chat
-	// only; the rest is collected, covered and checkpointed.
+	// A chat row that cannot be stored is read from the chat's own endpoint,
+	// parent first, and then collected like any other.
 	const badRow = structuredClone(chats);
 	assert.ok(badRow.chats[1]);
 	badRow.chats[1].state = "not an enum";
+	const seen: Seen[] = [];
 	const rows = harness(
-		fakePage(defaultRoute({ chats: () => json(badRow) }), []),
+		fakePage(defaultRoute({ chats: () => json(badRow) }), seen),
 	);
 	await collectCharacterAi(rows.ctx);
+	assert.ok(seen.some((request) => request.pathname === `/chat/${second}/`));
 	assert.deepEqual(
 		rows.records
 			.filter((record) => record.stream === "chats")
 			.map((record) => record.data.id),
+		[first, second, third],
+	);
+	assert.deepEqual(coverageOf(rows.messages, "messages")?.hydrated_keys, [
+		first,
+		second,
+		third,
+	]);
+	// When the chat's endpoint cannot be read either, only that chat is left
+	// out: no record, no child accounting under a missing parent, chats
+	// coverage partial; the rest is collected, covered and checkpointed.
+	const unread = harness(
+		fakePage(
+			defaultRoute({
+				chats: () => json(badRow),
+				[`chat:${second}`]: () => json({ detail: "Not found" }, 404),
+			}),
+			[],
+		),
+	);
+	await collectCharacterAi(unread.ctx);
+	assert.deepEqual(
+		unread.records
+			.filter((record) => record.stream === "chats")
+			.map((record) => record.data.id),
 		[first, third],
 	);
-	assert.deepEqual(
-		ofType(rows.messages, "DETAIL_GAP").map((gap) => [
-			gap.record_key,
-			(gap.last_error as { class?: string } | undefined)?.class,
-		]),
-		[[second, "chat_row_unreadable"]],
+	assert.equal(
+		unread.records.filter(
+			(record) =>
+				record.stream === "messages" && record.data.chat_id === second,
+		).length,
+		0,
 	);
-	const chatsCoverage = coverageOf(rows.messages, "chats");
+	assert.equal(ofType(unread.messages, "DETAIL_GAP").length, 0);
+	const chatsCoverage = coverageOf(unread.messages, "chats");
 	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [3, 2]);
-	assert.deepEqual(coverageOf(rows.messages, "messages")?.gap_keys, [second]);
-	assert.deepEqual(rows.failures, []);
-	assert.equal(ofType(rows.messages, "STATE").length, 1);
+	assert.deepEqual(coverageOf(unread.messages, "messages")?.required_keys, [
+		first,
+		third,
+	]);
+	assert.deepEqual(unread.failures, []);
+	assert.equal(ofType(unread.messages, "STATE").length, 1);
 });
 
 test("a chat list row with no usable id fails both streams without a checkpoint; the readable chats are kept", async () => {
@@ -1450,15 +1480,13 @@ test("pending gaps on later pages are recovered too, each after its chat's messa
 		);
 		assert.ok(lastChild >= 0 && at > lastChild);
 	}
-	// The chat on a later page that the list did not return is read from its detail.
+	// The chat on a later page that the list did not return is looked up by
+	// its detail; it is gone (404), so its gap is left pending untouched.
 	assert.ok(seen.some((request) => request.pathname === `/chat/${GONE_CHAT}/`));
-	assert.deepEqual(
-		ofType(h.messages, "DETAIL_GAP").map((m) => m.record_key),
-		[GONE_CHAT],
-	);
+	assert.equal(ofType(h.messages, "DETAIL_GAP").length, 0);
 	const coverage = coverageOf(h.messages, "messages");
-	assert.deepEqual(coverage?.required_keys, [...CHAT_IDS, GONE_CHAT]);
-	assert.deepEqual(coverage?.gap_keys, [GONE_CHAT]);
+	assert.deepEqual(coverage?.required_keys, CHAT_IDS);
+	assert.equal(coverage?.gap_keys, undefined);
 	// Every gap page was asked for before coverage and STATE.
 	const lastRequest = h.messages.findLastIndex(
 		(m) => m.type === "DETAIL_GAPS_PAGE_REQUEST",
@@ -1753,4 +1781,101 @@ test("a sign-in that is never completed fails with the bare auth code, and the c
 		},
 	);
 	assert.deepEqual(visits, ["https://accounts.example.com/sign-in"]);
+});
+
+test("a later-page gap for an unlisted chat that still exists is read parent first and recovered", async () => {
+	const [first, second, third] = CHAT_IDS;
+	assert.ok(first && second && third);
+	const listed = fixture("get-neo-chats-recent.json") as {
+		chats: Array<{ chat_id: string }>;
+	};
+	listed.chats = listed.chats.filter((chat) => chat.chat_id !== third);
+	const h = harness(fakePage(defaultRoute({ chats: () => json(listed) }), []), {
+		gapPages: [[gap("g7", third, "l7")]],
+	});
+	await collectCharacterAi(h.ctx);
+	const parentAt = h.messages.findIndex(
+		(m) => m.type === "RECORD" && m.stream === "chats" && m.key === third,
+	);
+	const recoveredAt = h.messages.findIndex(
+		(m) => m.type === "DETAIL_GAP_RECOVERED",
+	);
+	assert.ok(parentAt >= 0 && parentAt < recoveredAt);
+	assert.equal(
+		(h.messages[recoveredAt] as unknown as Record<string, unknown>).lease_id,
+		"l7",
+	);
+	assert.deepEqual(coverageOf(h.messages, "messages")?.required_keys, [
+		first,
+		second,
+		third,
+	]);
+	// The chats coverage counts the list only.
+	assert.equal(coverageOf(h.messages, "chats")?.considered, 2);
+});
+
+test("handoff failures reach the runtime as bare codes: not finishing is a sign-in failure, a page that went away is retryable", async () => {
+	const cases: Array<[string, Error, string]> = [
+		[
+			"timeout",
+			Object.assign(new Error("browser_handoff_readiness_timed_out"), {
+				code: "browser_handoff_readiness_timed_out",
+			}),
+			"character_ai_auth_failed",
+		],
+		[
+			"cancelled",
+			Object.assign(new Error("browser_sign_in_cancelled"), {
+				code: "browser_sign_in_cancelled",
+			}),
+			"character_ai_auth_failed",
+		],
+		[
+			"probe failed",
+			new Error("browser_handoff_readiness_probe_failed"),
+			"character_ai_interrupted",
+		],
+		[
+			"page closed",
+			new Error("Target page, context or browser has been closed"),
+			"character_ai_interrupted",
+		],
+	];
+	for (const [label, failure, code] of cases) {
+		const browserPage = fakePage(defaultRoute(), [], {
+			token: null,
+			url: "https://character.ai/",
+		});
+		await assert.rejects(
+			ensureCharacterAiSession(
+				Object.assign(Object.create(null) as EnsureSessionArgs, {
+					page: browserPage,
+					sendInteraction: async () => {
+						throw failure;
+					},
+				}),
+				noDelay,
+			),
+			(error: unknown) => {
+				assert.ok(error instanceof Error, label);
+				assert.equal(error.message, code, label);
+				assert.equal(isConnectorErrorCodeShaped(error.message), true);
+				return true;
+			},
+		);
+	}
+});
+
+test("HTTP 408 is a transient answer the runtime retries", async () => {
+	const h = harness(fakePage(defaultRoute({ chats: () => json({}, 408) }), []));
+	const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+	const literal = /retryablePattern:\s*(\/.*\/)i,/.exec(source)?.[1];
+	assert.ok(literal);
+	const retryable = new RegExp(literal.slice(1, -1), "i");
+	await assert.rejects(collectCharacterAi(h.ctx), (error: unknown) => {
+		assert.ok(error instanceof Error);
+		assert.match(error.message, /character_ai_api_408/);
+		assert.match(error.message, retryable);
+		return true;
+	});
 });
