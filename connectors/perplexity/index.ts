@@ -31,7 +31,7 @@
  *
  * Session: a signed-in page is never moved. A Cloudflare human check is
  * handed to the owner in place; a signed-out page goes to the sign-in page
- * (the home page) and is handed over with `manualBrowserLogin`. Readiness is
+ * (`/auth/signin`) and is handed over with `manualBrowserLogin`. Readiness is
  * read without navigation. Session errors are bare codes
  * (`perplexity_auth_failed`, `perplexity_interrupted`).
  *
@@ -74,8 +74,12 @@ import type { MessageRecord } from "./types.ts";
 
 const ORIGIN = "https://www.perplexity.ai";
 const HOME = `${ORIGIN}/`;
-/** Perplexity signs in from its home page (a sign-in dialog), as the manifest's login_url says. */
-const SIGN_IN_URL = HOME;
+/**
+ * Perplexity's own sign-in page (Google, Apple, email, SSO), the address its
+ * web app builds for a signed-out visitor; the callback lands back on home.
+ * The manifest's login_url says the same.
+ */
+const SIGN_IN_URL = `${ORIGIN}/auth/signin?callbackUrl=%2F`;
 const LIST_PATH = "/rest/thread/list_ask_threads";
 const THREAD_PATH = "/rest/thread/";
 /** The web app's own list page size; 20 was observed working. */
@@ -241,8 +245,8 @@ const realDelay = (ms: number): Promise<void> =>
  * One non-navigating check (after at most one navigation to the home page
  * when the run page is elsewhere). A signed-in page is never moved. A human
  * check is handed to the owner in place, on the page as it is. A signed-out
- * page is moved to the sign-in page (the home page, where Perplexity offers
- * its sign-in) and handed over. Readiness during either handoff is read
+ * page is moved to Perplexity's sign-in page (`/auth/signin`, the form
+ * itself rather than the home page's sign-in button) and handed over. Readiness during either handoff is read
  * without navigation, so a sign-in that passes through Google or Apple is
  * never pulled away. Errors thrown here are bare codes: the runtime keeps a
  * session error's code only when the whole message is the code.

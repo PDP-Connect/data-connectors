@@ -28,6 +28,8 @@ import {
 } from "./schemas.ts";
 
 const HOME = "https://www.perplexity.ai/";
+/** Perplexity's own sign-in page, where a signed-out run is handed over. */
+const SIGN_IN = "https://www.perplexity.ai/auth/signin?callbackUrl=%2F";
 const pad = (n: number) => String(n).padStart(12, "0");
 const threadId = (n: number) => `cccccccc-0000-4000-8000-${pad(n)}`;
 const threadSlug = (n: number) => `bbbbbbbb-0000-4000-8000-${pad(n)}`;
@@ -650,7 +652,8 @@ test("an expired session hands off to the owner and resolves when they sign in",
 			);
 		},
 	);
-	assert.deepEqual(visits, [HOME]);
+	// Home first to read the session, then the sign-in form for the handoff.
+	assert.deepEqual(visits, [HOME, SIGN_IN]);
 	assert.deepEqual(statuses, ["resolved"]);
 });
 
@@ -1356,10 +1359,30 @@ test("a signed-out page elsewhere on the site is moved to the sign-in page, then
 			Response.json(authenticated ? { user: { id: "synthetic-owner" } } : {}),
 		() => ensurePerplexitySession(session.args, noDelay),
 	);
-	assert.deepEqual(visits, [HOME]);
+	assert.deepEqual(visits, [SIGN_IN]);
 	assert.equal(session.handoffs.length, 1);
 	assert.match(session.handoffs[0] ?? "", /^Sign in to Perplexity/);
 	assert.deepEqual(session.statuses, ["resolved"]);
+});
+
+async function signedOutHandoffVisits(start: string): Promise<string[]> {
+	let authenticated = false;
+	const visits: string[] = [];
+	const session = sessionArgs(page(start, visits), () => {
+		authenticated = true;
+	});
+	await withBrowser(
+		async () =>
+			Response.json(authenticated ? { user: { id: "synthetic-owner" } } : {}),
+		() => ensurePerplexitySession(session.args, noDelay),
+	);
+	assert.equal(session.handoffs.length, 1);
+	return visits;
+}
+
+test("a signed-out home page is moved to the sign-in form; one already there is not moved", async () => {
+	assert.deepEqual(await signedOutHandoffVisits(HOME), [SIGN_IN]);
+	assert.deepEqual(await signedOutHandoffVisits(SIGN_IN), []);
 });
 
 test("a human check is handed over in place, never navigated away from", async () => {
@@ -1584,7 +1607,7 @@ test("the session check is bounded by an abort signal", async () => {
 
 test("a host without the streamed handoff never moves the page to check the finished sign-in", async () => {
 	const visits: string[] = [];
-	const browserPage = page(HOME, visits);
+	const browserPage = page(SIGN_IN, visits);
 	let thrown: unknown;
 	await withBrowser(
 		async () => Response.json({}),
