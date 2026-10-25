@@ -18501,7 +18501,7 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Perplexity (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -18742,7 +18742,7 @@
 				"mobile": {
 					"pageshim": {
 						"scope_prefix": "perplexity",
-						"login_url": "https://www.perplexity.ai/",
+						"login_url": "https://www.perplexity.ai/auth/signin?callbackUrl=%2F",
 						"login_message": "Sign in to Perplexity, then return here.",
 						"collect_export": "collectPerplexity",
 						"probe_export": "probePerplexitySession",
