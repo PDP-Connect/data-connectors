@@ -72,6 +72,7 @@ import {
 	parseStoresReadiness,
 	parseSyncState,
 	storesReady,
+	type SyncState,
 	syncSettled,
 	TextTally,
 	type WaChat,
@@ -108,6 +109,15 @@ export interface CollectionTimings {
 	/** Reads of the chat list while a chat's on-demand history settles. */
 	historyAttempts: number;
 	historyMs: number;
+	/**
+	 * Reads of the client's sync state right after a phone linked this
+	 * browser in this run, while the client downloads its chats from the
+	 * phone. Unset means the defaults below.
+	 */
+	initialSyncAttempts?: number;
+	initialSyncMs?: number;
+	/** Every this many initial-sync reads, one progress message. */
+	initialSyncProgressEvery?: number;
 }
 
 export const DEFAULT_TIMINGS: CollectionTimings = {
@@ -115,7 +125,15 @@ export const DEFAULT_TIMINGS: CollectionTimings = {
 	settleMs: 1_500,
 	historyAttempts: 20,
 	historyMs: 1_500,
+	// Up to five minutes for a freshly linked client's first sync.
+	initialSyncAttempts: 100,
+	initialSyncMs: 3_000,
+	initialSyncProgressEvery: 10,
 };
+
+/** The progress line shown while a freshly linked client syncs. */
+export const INITIAL_SYNC_MESSAGE =
+	"WhatsApp is syncing your chats from your phone";
 
 /** What the store helpers need from a page: run a script string in it. */
 export interface ScriptRunner {
@@ -566,9 +584,11 @@ export class StreamFailure extends Error {
 	}
 }
 
+const AUTH_FAILED_CODE = "whatsapp_web_auth_failed";
+
 /** The signed-in session is gone: the owner has to sign in again. */
 export function authFailure(message: string): Error {
-	return createConnectorFailure("whatsapp_web_auth_failed", message, {
+	return createConnectorFailure(AUTH_FAILED_CODE, message, {
 		retryable: false,
 		recoveryHint: { action: "refresh_credentials", retryable: false },
 	});
@@ -632,6 +652,12 @@ export type WhatsAppCollectContext = Pick<
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 	/** Further pages of pending gaps; absent means the START page is all. */
 	requestDetailGapPage?: BrowserCollectContext["requestDetailGapPage"];
+	/**
+	 * True when a phone linked this browser earlier in this run: the client's
+	 * first sync gets the longer initial-sync budget.
+	 */
+	freshLink?: boolean;
+	progress?: (message: string) => Promise<void>;
 };
 
 /** The requested streams this connector serves. */
@@ -754,6 +780,61 @@ function sameIds(a: readonly WaChat[], b: readonly WaChat[]): boolean {
 	return b.every((c) => ids.has(c.id));
 }
 
+/** Reads the client's own sync state, failing closed on a shape it cannot read. */
+async function readSync(stores: WhatsAppWebStores): Promise<SyncState> {
+	const sync = parseSyncState(await stores.syncState());
+	if (sync === null) {
+		throw new StreamFailure(
+			"whatsapp_web_unexpected_shape",
+			"WhatsApp Web's sync state came back in a shape the connector cannot read; nothing was checkpointed.",
+		);
+	}
+	if (sync.mode === "QR") {
+		throw authFailure(
+			"WhatsApp Web is showing its sign-in QR code: the session is no longer signed in",
+		);
+	}
+	return sync;
+}
+
+function neverSettled(): Error {
+	return createConnectorFailure(
+		"whatsapp_web_chat_list_never_settled",
+		"WhatsApp Web did not finish catching up, or its chat collection kept changing, while the run read it; the inventory is not known to be complete, so nothing was checkpointed.",
+		{ retryable: true },
+	);
+}
+
+/**
+ * Right after a phone links this browser, the client knows its own user
+ * long before it has downloaded the chats from the phone. This waits, with
+ * a budget of minutes instead of seconds, until the client's own signals say
+ * it has caught up (the same signals settleChatList then proves the
+ * inventory with). It only reads the sync state; a client that never
+ * catches up fails the run, retryable, before anything is emitted.
+ */
+async function waitForInitialSync(
+	stores: WhatsAppWebStores,
+	timings: CollectionTimings,
+	progress: ((message: string) => Promise<void>) | undefined,
+): Promise<void> {
+	const attempts =
+		timings.initialSyncAttempts ?? DEFAULT_TIMINGS.initialSyncAttempts ?? 0;
+	const waitMs = timings.initialSyncMs ?? DEFAULT_TIMINGS.initialSyncMs ?? 0;
+	const every = Math.max(
+		1,
+		timings.initialSyncProgressEvery ??
+			DEFAULT_TIMINGS.initialSyncProgressEvery ??
+			1,
+	);
+	for (let i = 0; i <= attempts; i++) {
+		if (i > 0) await wait(waitMs);
+		if (syncSettled(await readSync(stores))) return;
+		if (i % every === 0) await progress?.(INITIAL_SYNC_MESSAGE);
+	}
+	throw neverSettled();
+}
+
 /**
  * The chat list is the page's own collection, still filling while the app
  * boots and catches up. It is taken as the inventory's end only when the
@@ -769,18 +850,7 @@ async function settleChatList(
 	let previous: WaChat[] | null = null;
 	for (let i = 0; i <= timings.settleAttempts; i++) {
 		if (i > 0) await wait(timings.settleMs);
-		const sync = parseSyncState(await stores.syncState());
-		if (sync === null) {
-			throw new StreamFailure(
-				"whatsapp_web_unexpected_shape",
-				"WhatsApp Web's sync state came back in a shape the connector cannot read; nothing was checkpointed.",
-			);
-		}
-		if (sync.mode === "QR") {
-			throw authFailure(
-				"WhatsApp Web is showing its sign-in QR code: the session is no longer signed in",
-			);
-		}
+		const sync = await readSync(stores);
 		const page = parseChatsPage(await stores.listChats());
 		if (page === null) {
 			throw new StreamFailure(
@@ -796,11 +866,7 @@ async function settleChatList(
 		if (previous !== null && sameIds(previous, current)) return current;
 		previous = current;
 	}
-	throw createConnectorFailure(
-		"whatsapp_web_chat_list_never_settled",
-		"WhatsApp Web did not finish catching up, or its chat collection kept changing, while the run read it; the inventory is not known to be complete, so nothing was checkpointed.",
-		{ retryable: true },
-	);
+	throw neverSettled();
 }
 
 /**
@@ -917,6 +983,9 @@ export async function collectWith(
 		if (pendingMessageGaps(firstGapPage).size === 0) return;
 	}
 
+	if (ctx.freshLink === true) {
+		await waitForInitialSync(stores, timings, ctx.progress);
+	}
 	const chats = await settleChatList(stores, timings);
 	if (chats.length === 0) {
 		throw createConnectorFailure(
@@ -1369,8 +1438,16 @@ export type WhatsAppRunContext = Pick<
 			| "recoveryOnly"
 			| "reportStreamFailure"
 			| "requestDetailGapPage"
+			| "progress"
 		>
 	> & { page: Pick<Page, "evaluate"> };
+
+/**
+ * Pages a phone linked during this run's ensureSession. The runtime hands
+ * collect() the same page object, so collect() knows the client is on its
+ * first sync. A WeakSet holds nothing alive and nothing about the account.
+ */
+const freshlyLinkedPages = new WeakSet<object>();
 
 export async function collect(
 	ctx: WhatsAppRunContext,
@@ -1382,6 +1459,7 @@ export async function collect(
 	if (want.size === 0) return;
 	// Every script runs in the page's MAIN world: the app's module loader is
 	// not visible to an isolated world.
+	const freshLink = freshlyLinkedPages.delete(ctx.page);
 	const main = mainWorld(ctx.page);
 	await waitForStores(main, STORE_WAIT_ATTEMPTS, STORE_WAIT_MS, want);
 	const stores = new WhatsAppWebStore(main);
@@ -1394,6 +1472,8 @@ export async function collect(
 				requested: ctx.requested,
 				detailGaps: ctx.detailGaps ?? [],
 				recoveryOnly: ctx.recoveryOnly === true,
+				freshLink,
+				...(ctx.progress ? { progress: ctx.progress } : {}),
 				...(ctx.reportStreamFailure
 					? { reportStreamFailure: ctx.reportStreamFailure }
 					: {}),
@@ -1594,28 +1674,47 @@ export async function ensureSession(
 		});
 	} catch (error) {
 		if (error instanceof BrowserHandoffReadinessTimedOutError) {
-			throw authFailure(
+			throw sessionAuthFailure(
 				"WhatsApp Web stayed on its sign-in QR code: no phone linked this browser before the sign-in window closed",
 			);
 		}
 		throw error;
 	}
 	if (!ready) {
-		throw authFailure(
+		throw sessionAuthFailure(
 			"WhatsApp Web is showing its sign-in QR code: the session is not signed in",
 		);
 	}
+	// A phone linked this browser during this run: the client now downloads
+	// its chats from the phone, which collect() waits for with a longer budget.
+	freshlyLinkedPages.add(page);
+}
+
+/**
+ * The sign-in failure ensureSession throws. The runtime's session wrapper
+ * keeps a code only when the whole thrown message is one bare snake_case
+ * token (it drops the error's own code and retryable flag), so the message
+ * is exactly the code and the human sentence goes to stderr as a diagnostic.
+ * `whatsapp_web_auth_failed` does not match the connector's retryable
+ * pattern, so the run ends non-retryable.
+ */
+function sessionAuthFailure(diagnostic: string): Error {
+	console.error(`whatsapp_web: ${diagnostic}`);
+	return new Error(AUTH_FAILED_CODE);
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────
+
+/** The failures a later run can clear on its own. */
+export const RETRYABLE_PATTERN =
+	/whatsapp_web_stores_not_ready|whatsapp_web_chat_list_never_settled|whatsapp_web_empty_chat_list|net::ERR|ECONN|fetch failed/i;
 
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "whatsapp_web",
 		browser: { profileName: "whatsapp_web" },
 		validateRecord,
-		retryablePattern:
-			/whatsapp_web_stores_not_ready|whatsapp_web_chat_list_never_settled|whatsapp_web_empty_chat_list|net::ERR|ECONN|fetch failed/i,
+		retryablePattern: RETRYABLE_PATTERN,
 		ensureSession,
 		probeSession,
 		probeSessionIsAuthoritative: true,
