@@ -13,6 +13,7 @@ import {
 	ensureInstinctSession,
 	INSTINCT_AUTH_FAILED,
 	INSTINCT_INTERRUPTED,
+	makeInstinctGraphql,
 	SIGN_IN_URL,
 } from "./index.ts";
 import type { GraphqlFetchResult } from "./types.ts";
@@ -46,7 +47,11 @@ interface Harness {
  */
 function harness(
 	answers: readonly GraphqlFetchResult[],
-	options: { interactive?: boolean; url?: string } = {},
+	options: {
+		failGoto?: (target: string) => boolean;
+		interactive?: boolean;
+		url?: string;
+	} = {},
 ): Harness {
 	let url = options.url ?? "https://app.instinct.com/vault";
 	let reads = 0;
@@ -57,6 +62,9 @@ function harness(
 	const page = {
 		goto: (target: string) => {
 			gotos.push(target);
+			if (options.failGoto?.(target) === true) {
+				return Promise.reject(new Error("net::ERR_TIMED_OUT"));
+			}
 			url = target;
 			return Promise.resolve(null);
 		},
@@ -225,4 +233,55 @@ test("an error that only mentions a session is not a sign-out", () => {
 		}),
 		"unknown",
 	);
+});
+
+// ─── Final review (P3) ─────────────────────────────────────────────────────
+
+test("a sign-in page that does not open stops as the bare retryable code", async () => {
+	const h = harness([SIGNED_OUT], {
+		failGoto: (target) => target === SIGN_IN_URL,
+	});
+	await assert.rejects(ensureInstinctSession(h.args, timings(h)), (error) => {
+		assert.ok(error instanceof Error);
+		assert.equal(error.message, INSTINCT_INTERRUPTED);
+		return true;
+	});
+	assert.deepEqual(h.assists, []);
+});
+
+test("a sign-in the person never finishes ends as instinct_auth_failed", async () => {
+	const h = harness([SIGNED_OUT]);
+	await assert.rejects(
+		ensureInstinctSession(h.args, { ...timings(h), probeWindowMs: 5 }),
+		(error) => {
+			assert.ok(error instanceof Error);
+			assert.equal(error.message, INSTINCT_AUTH_FAILED);
+			return true;
+		},
+	);
+	assert.equal(h.assists.length, 1);
+	assert.deepEqual(h.completions, ["escalated"]);
+});
+
+test("a page that moves under a GraphQL call reads as a request that did not complete", async () => {
+	const moving = makeInstinctGraphql({
+		evaluate: () =>
+			Promise.reject(
+				new Error(
+					"page.evaluate: Execution context was destroyed, most likely because of a navigation",
+				),
+			),
+	} as unknown as Parameters<typeof makeInstinctGraphql>[0]);
+	assert.deepEqual(await moving("query PdppInstinctSession { a }"), {
+		json: null,
+		status: 0,
+	});
+	assert.equal(
+		classifySession(await moving("query PdppInstinctSession { a }")),
+		"unknown",
+	);
+	const broken = makeInstinctGraphql({
+		evaluate: () => Promise.reject(new TypeError("boom")),
+	} as unknown as Parameters<typeof makeInstinctGraphql>[0]);
+	await assert.rejects(broken("query PdppInstinctSession { a }"), TypeError);
 });

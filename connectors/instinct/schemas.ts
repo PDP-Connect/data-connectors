@@ -88,7 +88,6 @@ export const profileResponseSchema = graphqlEnvelope(
 						preferences: z
 							.object({ trainingDataOptOut: z.boolean().nullish() })
 							.nullish(),
-						profilePictureUrl: z.string().nullish(),
 						roles: z.array(z.string()).nullish(),
 					})
 					.nullish(),
@@ -435,7 +434,6 @@ export const profileRecordSchema = z.object({
 	observed_at: nullableIsoDateTime,
 	onboarding_step: pdppSafeText.max(64).nullable(),
 	phone_number: nullableE164,
-	profile_picture_url: z.string().url().nullable(),
 	roles: stringArray,
 	training_data_opt_out: nullableBool,
 });

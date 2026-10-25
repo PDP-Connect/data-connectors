@@ -112,7 +112,6 @@ export function profileRecord(
 		observed_at: observedAt,
 		onboarding_step: nullableText(user.onboardingStep),
 		phone_number: nullableText(user.phoneNumber),
-		profile_picture_url: nullableText(user.profilePictureUrl),
 		roles: [...(user.roles ?? [])].sort(),
 		training_data_opt_out: nullableFlag(user.preferences?.trainingDataOptOut),
 	};

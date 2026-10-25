@@ -1668,3 +1668,37 @@ test("a new event in the checkpoint's second on the next page is still read", as
 		[null, "chat-cursor-page-2"],
 	);
 });
+
+// ─── Final review (P3) ─────────────────────────────────────────────────────
+
+test("a trust list that ended is asked for with a null cursor, not its last one", async () => {
+	const { source } = await runCollect(new Set(["trusted_people"]), {
+		InstinctTrustedNetwork: trustedRouter({
+			contacts: {
+				c2: { cursor: null, items: [person("c-2")] },
+				start: { cursor: "c2", items: [person("c-1")] },
+			},
+			requests: {
+				r2: { cursor: "r3", items: [person("r-2")] },
+				r3: { cursor: null, items: [person("r-3")] },
+				start: { cursor: "r2", items: [person("r-1")] },
+			},
+		}),
+	});
+	const contactCursors = source.calls
+		.map((call, index) => ({ call, vars: source.variables[index] }))
+		.filter(({ call }) => call === "InstinctTrustedNetwork")
+		.map(({ vars }) => (vars as { contactsCursor?: unknown }).contactsCursor);
+	assert.deepEqual(contactCursors, [null, "c2", null]);
+});
+
+test("the profile carries no picture link", async () => {
+	const { harness, source } = await runCollect(new Set(["profile"]));
+	const profile = source.documents.find((document) =>
+		document.includes("PdppInstinctProfile"),
+	);
+	assert.doesNotMatch(String(profile), /profilePictureUrl/);
+	const record = harness.emitted.find((entry) => entry.stream === "profile");
+	assert.ok(record);
+	assert.equal("profile_picture_url" in record.data, false);
+});

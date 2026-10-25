@@ -90,11 +90,6 @@
 						"type": ["string", "null"],
 						"description": "Where the account sits in Instinct onboarding ('done' once complete)."
 					},
-					"profile_picture_url": {
-						"type": ["string", "null"],
-						"description": "URL of the profile picture, if one is set.",
-						"format": "uri"
-					},
 					"training_data_opt_out": {
 						"type": ["boolean", "null"],
 						"description": "True when the owner opted this account's data out of model training."
@@ -641,10 +636,10 @@
 		{
 			"name": "chat_events",
 			"required": true,
-			"description": "Every event in the owner's chats with their Instinct agent: the owner's messages and the agent's tool calls, tool responses, interactions, thinking, and errors. The agent's replies over WhatsApp and SMS are sent through tool calls, so they appear in tool_arguments rather than as message events.",
+			"description": "Every event in the owner's chats with their Instinct agent: the owner's messages and the agent's tool calls, tool responses, interactions, thinking, and errors. The agent's replies over WhatsApp and SMS are sent through tool calls, so they appear in tool_arguments rather than as message events. Message text, draft field values, interactions, thinking, and tool arguments and results are copied as the app shows them, so they can hold anything the agent typed or read, including values it took from the vault.",
 			"display": {
 				"label": "Your conversations with your agent",
-				"detail": "Each event in your chats: messages you sent and their read time, the tools your agent called with their arguments and responses, approvals it asked for and your answers, and errors. Attachments are listed by name, type, and size; their download links are not kept."
+				"detail": "Each event in your chats: messages you sent and their read time, the tools your agent called with their arguments and responses, approvals it asked for and your answers, and errors. Attachments are listed by name, type, and size; their download links are not kept. Message text, form values, approvals, and tool inputs and outputs are kept as the app shows them, so they can include anything your agent typed or read, such as details it filled in from your vault."
 			},
 			"semantics": "append_only",
 			"schema": {

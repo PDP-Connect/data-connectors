@@ -176,7 +176,7 @@ const SESSION_QUERY = `query PdppInstinctSession {
 }`;
 
 const PROFILE_QUERY = `query PdppInstinctProfile {
-  authSession { user { id name email roles enabledFeatureFlags onboardingStep profilePictureUrl phoneNumber preferences { trainingDataOptOut } } }
+  authSession { user { id name email roles enabledFeatureFlags onboardingStep phoneNumber preferences { trainingDataOptOut } } }
   agentToAgentSettings { enabled }
   locationDataStatus { hasData }
   linkedProviders { provider sub }
@@ -287,37 +287,68 @@ export function graphqlEvaluateArgs(
  * "include"`, so the session cookie rides along without this connector ever
  * reading, storing, or forwarding it.
  */
-export function makeInstinctGraphql(page: Page): InstinctGraphql {
-	return async (query, variables = {}) =>
-		await page.evaluate(
-			async ({
-				apiUrl,
-				document,
-				vars,
-			}: GraphqlEvaluateArgs): Promise<GraphqlFetchResult> => {
-				let response: Response;
-				try {
-					response = await fetch(apiUrl, {
-						body: JSON.stringify({ query: document, variables: vars }),
-						credentials: "include",
-						headers: {
-							accept: "application/json",
-							"content-type": "application/json",
-						},
-						method: "POST",
-					});
-				} catch {
-					return { json: null, status: 0 };
-				}
-				const text = await response.text();
-				try {
-					return { json: JSON.parse(text) as unknown, status: response.status };
-				} catch {
-					return { invalidJson: true, json: null, status: response.status };
-				}
-			},
-			graphqlEvaluateArgs(query, variables),
-		);
+/**
+ * A page.evaluate that failed because the page moved or closed under it
+ * (the app still redirecting after sign-in, a reload): the request never
+ * reached Instinct, so it is read like one that did not complete (status 0),
+ * which is retryable.
+ */
+export function isPageInterruption(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /Execution context was destroyed|context or browser has been closed|Target (?:page, context or browser )?(?:has been )?closed|frame was detached|Navigating frame was detached|navigation/i.test(
+		message,
+	);
+}
+
+export function makeInstinctGraphql(
+	page: Pick<Page, "evaluate">,
+): InstinctGraphql {
+	return async (query, variables = {}) => {
+		try {
+			return await evaluateGraphql(page, query, variables);
+		} catch (error) {
+			if (isPageInterruption(error)) {
+				return { json: null, status: 0 };
+			}
+			throw error;
+		}
+	};
+}
+
+async function evaluateGraphql(
+	page: Pick<Page, "evaluate">,
+	query: string,
+	variables: Readonly<Record<string, unknown>>,
+): Promise<GraphqlFetchResult> {
+	return await page.evaluate(
+		async ({
+			apiUrl,
+			document,
+			vars,
+		}: GraphqlEvaluateArgs): Promise<GraphqlFetchResult> => {
+			let response: Response;
+			try {
+				response = await fetch(apiUrl, {
+					body: JSON.stringify({ query: document, variables: vars }),
+					credentials: "include",
+					headers: {
+						accept: "application/json",
+						"content-type": "application/json",
+					},
+					method: "POST",
+				});
+			} catch {
+				return { json: null, status: 0 };
+			}
+			const text = await response.text();
+			try {
+				return { json: JSON.parse(text) as unknown, status: response.status };
+			} catch {
+				return { invalidJson: true, json: null, status: response.status };
+			}
+		},
+		graphqlEvaluateArgs(query, variables),
+	);
 }
 
 /**
@@ -544,6 +575,7 @@ export interface EnsureInstinctSessionArgs
 export interface SessionTimings {
 	readonly delay?: (ms: number) => Promise<void>;
 	readonly probeIntervalMs?: number;
+	readonly probeWindowMs?: number;
 }
 
 function onAppOrigin(page: Pick<Page, "url">): boolean {
@@ -591,29 +623,48 @@ export async function ensureInstinctSession(
 		throw new Error(INSTINCT_AUTH_FAILED);
 	}
 
-	await page.goto(SIGN_IN_URL, {
-		timeout: 30_000,
-		waitUntil: "domcontentloaded",
-	});
+	try {
+		await page.goto(SIGN_IN_URL, {
+			timeout: 30_000,
+			waitUntil: "domcontentloaded",
+		});
+	} catch {
+		connectorDiagnostic("instinct", "sign_in_page_not_opened", {});
+		throw new Error(INSTINCT_INTERRUPTED);
+	}
 	const readiness = async (): Promise<boolean> =>
 		(await readSession(args.graphql)) === "signed_in";
-	const ready = await manualBrowserLogin({
-		assist: args.assist,
-		autoProbeIntervalMs: timings.probeIntervalMs ?? SIGN_IN_PROBE_INTERVAL_MS,
-		capture: args.capture,
-		completeAssistance: args.completeAssistance,
-		isProbeSuccessful: (ok) => ok,
-		message: SIGN_IN_MESSAGE,
-		page: page as Page,
-		probe: readiness,
-		readinessProbe: readiness,
-		readinessProbeOnHandoffPage: true,
-		sendInteraction: args.sendInteraction,
-		timeoutSeconds: SIGN_IN_TIMEOUT_SECONDS,
-	});
-	if (!ready) {
-		connectorDiagnostic("instinct", "sign_in_not_completed", {});
-		throw new Error(INSTINCT_AUTH_FAILED);
+	// The streamed handoff (assist + readiness on the page) either resolves
+	// with a ready session or throws: a timeout or a closed page are the
+	// person not finishing the sign-in, reported under this connector's code.
+	try {
+		await manualBrowserLogin({
+			assist: args.assist,
+			autoProbeIntervalMs: timings.probeIntervalMs ?? SIGN_IN_PROBE_INTERVAL_MS,
+			...(timings.probeWindowMs === undefined
+				? {}
+				: { autoProbeWindowMs: timings.probeWindowMs }),
+			capture: args.capture,
+			completeAssistance: args.completeAssistance,
+			isProbeSuccessful: (ok) => ok,
+			message: SIGN_IN_MESSAGE,
+			page: page as Page,
+			probe: readiness,
+			readinessProbe: readiness,
+			readinessProbeOnHandoffPage: true,
+			sendInteraction: args.sendInteraction,
+			timeoutSeconds: SIGN_IN_TIMEOUT_SECONDS,
+		});
+	} catch (error) {
+		const code = errorCode(error);
+		if (
+			code === "browser_handoff_readiness_timed_out" ||
+			code === "browser_sign_in_cancelled"
+		) {
+			connectorDiagnostic("instinct", "sign_in_not_completed", { code });
+			throw new Error(INSTINCT_AUTH_FAILED);
+		}
+		throw error;
 	}
 	// The person is signed in and nothing of this connector is in flight. The
 	// sign-in page may still be redirecting, so collection starts from the
@@ -1151,6 +1202,7 @@ async function readTrustedPeople(
 			const next = cursor;
 			if (next === null) {
 				ended.add(list);
+				cursors[list] = null;
 				continue;
 			}
 			const key = `${list}:${next}`;

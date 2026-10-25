@@ -13,7 +13,6 @@
 					"agent_to_agent"
 				],
 				"onboardingStep": "done",
-				"profilePictureUrl": null,
 				"phoneNumber": "+15550101234",
 				"preferences": {
 					"trainingDataOptOut": false
