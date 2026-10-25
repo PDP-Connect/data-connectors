@@ -1,0 +1,10 @@
+{
+	"data": {
+		"imessageLocalConnection": {
+			"userId": "user-01TESTTESTTESTTESTTESTTEST",
+			"connectedAt": 1789068259,
+			"preferredDeviceId": "device-01TEST",
+			"accountHandle": "ada@icloud.example"
+		}
+	}
+}

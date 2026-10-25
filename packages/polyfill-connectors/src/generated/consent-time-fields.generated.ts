@@ -212,6 +212,16 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		messages: { field: "date", format: "date-time" },
 		participants: null,
 	},
+	instinct: {
+		agent_contact: { field: "observed_at", format: "date-time" },
+		chat_events: { field: "created_at", format: "date-time" },
+		chats: { field: "observed_at", format: "date-time" },
+		connections: { field: "observed_at", format: "date-time" },
+		devices: { field: "created_at", format: "date-time" },
+		profile: { field: "observed_at", format: "date-time" },
+		trusted_people: { field: "created_at", format: "date-time" },
+		vault_entries: { field: "observed_at", format: "date-time" },
+	},
 	jellyfin: {
 		items: { field: "last_played_date", format: "date-time" },
 		libraries: null,
