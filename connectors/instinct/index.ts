@@ -1798,10 +1798,6 @@ if (isMainModule(import.meta.url)) {
 		name: "instinct",
 		retryablePattern:
 			/ECONN|ETIMEDOUT|timeout|fetch failed|instinct_interrupted|instinct_rate_limited|instinct_server_error/i,
-		timeRangeField: (stream) =>
-			stream === "devices" || stream === "chat_events"
-				? "created_at"
-				: "observed_at",
 		validateRecord,
 		async collect(ctx: BrowserCollectContext): Promise<void> {
 			await collectInstinct({
