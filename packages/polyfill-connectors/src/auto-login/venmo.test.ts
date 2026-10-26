@@ -1597,7 +1597,13 @@ test("ensureVenmoSession: a rendered but disabled code box never asks the owner 
 
 /** Distinct DOM-like fields reject unusable fills and enforce maxlength. */
 function otpFields(
-	specs: { visible?: boolean; enabled?: boolean; maxlength?: number }[],
+	specs: {
+		visible?: boolean;
+		enabled?: boolean;
+		maxlength?: number;
+		invalid?: () => boolean;
+		describedBy?: string;
+	}[],
 ): { locator: Locator; values: string[] } {
 	const values = specs.map(() => "");
 	const fields = specs.map(
@@ -1607,12 +1613,19 @@ function otpFields(
 					visible: spec.visible ?? true,
 					enabled: spec.enabled ?? true,
 				}),
-				getAttribute: (name: string): Promise<string | null> =>
-					Promise.resolve(
+				getAttribute: (name: string): Promise<string | null> => {
+					if (name === "aria-invalid") {
+						return Promise.resolve(spec.invalid?.() ? "true" : null);
+					}
+					if (name === "aria-describedby") {
+						return Promise.resolve(spec.describedBy ?? null);
+					}
+					return Promise.resolve(
 						name === "maxlength" && spec.maxlength !== undefined
 							? String(spec.maxlength)
 							: null,
-					),
+					);
+				},
 				fill: (value: string): Promise<void> => {
 					if (spec.visible === false || spec.enabled === false) {
 						return Promise.reject(new Error("cannot fill unusable field"));
@@ -1844,6 +1857,7 @@ function makeTwoStepVenmoPage({
 	passwordAppearsAfterNext = true,
 	passwordClearedBySubmit = false,
 	passwordFillSticks = true,
+	passwordSubmitStalls = false,
 	passwordScreenDelayMs = 0,
 	semanticSubmitVisible = true,
 	stepOneUnnamedPassword = false,
@@ -1879,6 +1893,8 @@ function makeTwoStepVenmoPage({
 	 * resolves, but the field's value stays empty.
 	 */
 	passwordFillSticks?: boolean;
+	/** The click leaves the filled password step in place with no auth outcome. */
+	passwordSubmitStalls?: boolean;
 	/**
 	 * How long Venmo's second screen takes to render after the identifier is
 	 * submitted. Non-zero is the realistic case and the ONLY one that can tell a
@@ -1927,6 +1943,9 @@ function makeTwoStepVenmoPage({
 			if (stepTwoPasswordValue === "") {
 				// Venmo's client-side "Required" validation: nothing is sent and the
 				// page stays on the password step.
+				return;
+			}
+			if (passwordSubmitStalls) {
 				return;
 			}
 			// The provider, not an account probe, leaves identity after submit.
@@ -2414,13 +2433,12 @@ test("ensureVenmoSession: a login that never settles fails as incomplete, never 
 	});
 });
 
-// (2d) The real 2026-08-26 production failure. Venmo scored the automated
-// browser with reCAPTCHA Enterprise v3 — invisible, no widget, no checkbox, no
-// error copy — and simply never completed the login. Reported as a generic
-// timeout it is indistinguishable from a slow provider, which sends the owner
-// hunting a network fault that does not exist. It must name the mechanism, and
-// it must NOT route to the ordinary captcha handoff: there is nothing to solve.
-test("ensureVenmoSession: an invisible v3 scoring challenge is named, not reported as a generic timeout", async () => {
+// (2d) Venmo's reCAPTCHA v3 script loads on successful sign-ins too, so a
+// stall with it loaded is still an unexplained timeout. The script is named as
+// context, never as the proven cause, and retrying is not declared futile. It
+// must not route to the captcha handoff either: there is nothing visible to
+// solve. (A 2026-10-21 stall reported as a v3 verdict was an empty password.)
+test("ensureVenmoSession: a stall with the v3 script loaded is a timeout with the script as context", async () => {
 	await withVenmoCredentials(async () => {
 		const { page } = makeTwoStepVenmoPage({
 			deadProbesAfterSubmit: Number.MAX_SAFE_INTEGER,
@@ -2438,15 +2456,16 @@ test("ensureVenmoSession: an invisible v3 scoring challenge is named, not report
 				sendInteraction,
 			}),
 			(error: Error) => {
+				assert.match(error.message, /^venmo_login_did_not_complete:/);
 				assert.match(
 					error.message,
-					/^venmo_invisible_scoring_challenge:/,
-					"a v3 score-block must name itself; a bare timeout blames the network for a bot verdict",
+					/reCAPTCHA v3 check was loaded/,
+					"the loaded script is reported as context",
 				);
-				assert.match(
+				assert.doesNotMatch(
 					error.message,
-					/retrying unattended will not clear it/,
-					"the message must say the retry is futile — otherwise the scheduler and the owner both keep trying",
+					/will not clear|scored this sign-in/,
+					"presence of the script does not prove a score blocked the sign-in",
 				);
 				return true;
 			},
@@ -2599,6 +2618,33 @@ test("ensureVenmoSession: a post-submit stall on the password step with an empty
 			},
 		);
 		assert.deepEqual(requests, []);
+	});
+});
+
+test("ensureVenmoSession: a filled password step that never advances reports the observed stall", async () => {
+	await withVenmoCredentials(async () => {
+		const { page, submittedPasswords } = makeTwoStepVenmoPage({
+			passwordSubmitStalls: true,
+			scoringChallengeLoaded: true,
+		});
+		const { sendInteraction } = recordingSendInteraction();
+		await assert.rejects(
+			ensureVenmoSession({
+				credentials: {
+					VENMO_PASSWORD: "test-password",
+					VENMO_USERNAME: "test-user",
+				},
+				page,
+				postSubmitSettleTimeoutMs: 20,
+				sendInteraction,
+			}),
+			(error: Error) => {
+				assert.match(error.message, /^venmo_password_submit_stalled:/);
+				assert.doesNotMatch(error.message, /scored|test-password/);
+				return true;
+			},
+		);
+		assert.deepEqual(submittedPasswords, ["test-password"]);
 	});
 });
 
@@ -2810,6 +2856,29 @@ test("ensureVenmoSession: a page with no username field still hands off with the
 			"nothing may be typed into a form the connector does not recognize",
 		);
 		assert.equal(fillCalls.password, undefined);
+	});
+});
+
+test("ensureVenmoSession: a visible CAPTCHA with no identifier is named as the challenge", async () => {
+	await withVenmoCredentials(async () => {
+		const { page } = makeTwoStepVenmoPage({
+			captchaVisible: true,
+			identifierSelectorMatches: false,
+		});
+		const { requests, sendInteraction } = recordingSendInteraction();
+		await ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "test-password",
+				VENMO_USERNAME: "test-user",
+			},
+			page,
+			sendInteraction,
+		});
+		assert.match(requests[0]?.message ?? "", /CAPTCHA/);
+		assert.doesNotMatch(
+			requests[0]?.message ?? "",
+			/sign-in form did not render/,
+		);
 	});
 });
 
@@ -4224,9 +4293,13 @@ test("waitForManualLogin: a surface that never paints still reaches the owner, w
  * reached the fields, which is the step that was missing.
  */
 function makePageWithChallengeThenForm({
+	captchaAfterOtpSubmit = false,
+	passwordOnlyAfterReveal = false,
 	transportFaultAfterSubmit = false,
 	unrecognizedVerificationAfterSubmit = false,
 }: {
+	captchaAfterOtpSubmit?: boolean;
+	passwordOnlyAfterReveal?: boolean;
 	transportFaultAfterSubmit?: boolean;
 	/**
 	 * After the replay submits the password, render verification COPY with no
@@ -4240,6 +4313,7 @@ function makePageWithChallengeThenForm({
 	page: Page;
 	reveal: () => void;
 	submitClicks: string[];
+	gotoUrls: string[];
 } {
 	const fillCalls: Record<string, string> = {};
 	let formPresent = false;
@@ -4252,10 +4326,18 @@ function makePageWithChallengeThenForm({
 	});
 	const absent = makeLocator({ count: 0, visible: false });
 	const submitClicks: string[] = [];
+	const gotoUrls: string[] = [];
+	const otp = otpFields([{ maxlength: 6 }]);
+	let currentUrl = "https://venmo.com/";
 	const submit = makeSubmitRecordingLocator(() => {
 		submitClicks.push("click");
+		if (captchaAfterOtpSubmit) {
+			currentUrl = "https://id.venmo.com/signin";
+		}
+		if (passwordOnlyAfterReveal) {
+			currentUrl = "https://venmo.com/";
+		}
 	});
-	let currentUrl = "https://venmo.com/";
 	const page: Pick<
 		Page,
 		| "evaluate"
@@ -4292,7 +4374,11 @@ function makePageWithChallengeThenForm({
 			return submit;
 		},
 		goto(url: string): ReturnType<Page["goto"]> {
-			currentUrl = url;
+			gotoUrls.push(url);
+			currentUrl =
+				passwordOnlyAfterReveal && url === "https://venmo.com/login"
+					? "https://id.venmo.com/signin"
+					: url;
 			return Promise.resolve(null);
 		},
 		locator(selector: string): Locator {
@@ -4303,10 +4389,24 @@ function makePageWithChallengeThenForm({
 			if (selector === "body") {
 				return makeLocator({
 					innerText:
-						unrecognizedVerificationAfterSubmit && submitClicks.length > 0
-							? "Enter the code we texted you to finish signing in."
-							: "",
+						captchaAfterOtpSubmit && submitClicks.length === 1
+							? "Enter the verification code we sent."
+							: unrecognizedVerificationAfterSubmit && submitClicks.length > 0
+								? "Enter the code we texted you to finish signing in."
+								: "",
 				});
+			}
+			if (captchaAfterOtpSubmit && selector.includes("recaptcha")) {
+				return makeLocator({
+					count: submitClicks.length > 1 ? 1 : 0,
+					visible: submitClicks.length > 1,
+				});
+			}
+			if (
+				captchaAfterOtpSubmit &&
+				(selector.includes("otp") || selector.includes("code"))
+			) {
+				return submitClicks.length === 1 ? otp.locator : absent;
 			}
 			// Before the owner clears the interstitial there is no form at all —
 			// exactly what the captured DataDome DOM contains.
@@ -4314,7 +4414,7 @@ function makePageWithChallengeThenForm({
 				return absent;
 			}
 			if (selector.includes("username")) {
-				return username;
+				return passwordOnlyAfterReveal ? absent : username;
 			}
 			if (selector.includes("password")) {
 				return password;
@@ -4333,6 +4433,7 @@ function makePageWithChallengeThenForm({
 	};
 	return {
 		fillCalls,
+		gotoUrls,
 		page: page as Page,
 		reveal: () => {
 			formPresent = true;
@@ -4340,6 +4441,43 @@ function makePageWithChallengeThenForm({
 		submitClicks,
 	};
 }
+
+test("a CAPTCHA after challenge replay and OTP submit cannot complete a suppressed handoff", async () => {
+	const { page, reveal, submitClicks } = makePageWithChallengeThenForm({
+		captchaAfterOtpSubmit: true,
+	});
+	const kinds: string[] = [];
+	await assert.rejects(
+		ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "pw-stored",
+				VENMO_USERNAME: "user-stored",
+			},
+			page,
+			sendInteraction: (request) => {
+				kinds.push(request.kind);
+				if (request.kind === "manual_action") {
+					reveal();
+				}
+				return Promise.resolve({
+					value: request.kind === "otp" ? "123456" : "success",
+				} as InteractionResponse);
+			},
+		}),
+		(error: Error) => {
+			assert.match(error.message, /venmo_login_challenge_during_replay/);
+			assert.equal(
+				VENMO_RETRYABLE_PATTERN.test(error.message),
+				false,
+				"a submitted password and OTP must not be retried automatically",
+			);
+			return true;
+		},
+	);
+	assert.deepEqual(kinds, ["manual_action", "otp"]);
+	assert.equal(submitClicks.length, 2, "password and OTP were both submitted");
+	assert.equal(page.url(), "https://id.venmo.com/signin");
+});
 
 /** A visible, enabled locator that records every click — used to prove submit happened. */
 function makeSubmitRecordingLocator(onClick: () => void): Locator {
@@ -4413,6 +4551,40 @@ test("a bot-check handoff resumes by SUBMITTING the revealed form, not by fillin
 	assert.ok(
 		submitClicks.length > 0,
 		"the revealed form must be SUBMITTED — filling it and probing an unsubmitted form loses the run",
+	);
+});
+
+test("a solved CAPTCHA revealing the password step resumes there and submits it once", async () => {
+	const { fillCalls, gotoUrls, page, reveal, submitClicks } =
+		makePageWithChallengeThenForm({ passwordOnlyAfterReveal: true });
+	let navigationsAtResponse = -1;
+	const result = await ensureVenmoSession({
+		credentials: { VENMO_PASSWORD: "pw-stored", VENMO_USERNAME: "user-stored" },
+		page,
+		sendInteraction: (
+			_req: InteractionRequest,
+		): Promise<InteractionResponse> => {
+			reveal();
+			navigationsAtResponse = gotoUrls.length;
+			return Promise.resolve({ ok: true } as unknown as InteractionResponse);
+		},
+	});
+	assert.equal(result, null, "a handoff remains unverified until collection");
+	assert.equal(
+		gotoUrls.length,
+		navigationsAtResponse,
+		"resuming must preserve the solved CAPTCHA's password screen",
+	);
+	assert.equal(fillCalls.password, "pw-stored");
+	assert.equal(
+		fillCalls.username,
+		undefined,
+		"the identifier step has already completed",
+	);
+	assert.equal(
+		submitClicks.length,
+		1,
+		"one password attempt must click Log in once",
 	);
 });
 
@@ -4733,6 +4905,15 @@ function makePendingIdentityPage(
 	outcome: "otp" | "captcha" | "complete" | "pending",
 	otpOutcome: "complete" | "pending" | "rejected" | "captcha" = "complete",
 	otpDelayMs = 5,
+	{
+		keepOtpInputWhileVerifying = false,
+		missingOtpDescription = false,
+		staleOtpError = false,
+	}: {
+		keepOtpInputWhileVerifying?: boolean;
+		missingOtpDescription?: boolean;
+		staleOtpError?: boolean;
+	} = {},
 ) {
 	const { page } = makeOtpDecisionPage({ bodyText: "" });
 	const baseLocator = page.locator.bind(page);
@@ -4742,7 +4923,14 @@ function makePendingIdentityPage(
 	let destroyed = false;
 	let postSubmitProbes = 0;
 	let otpSubmittedAt = 0;
-	const fields = otpFields([{ maxlength: 6 }]);
+	const descriptionReadTimeouts: (number | undefined)[] = [];
+	const fields = otpFields([
+		{
+			maxlength: 6,
+			invalid: () => stage === "rejected" || staleOtpError,
+			...(missingOtpDescription ? { describedBy: "otp-error" } : {}),
+		},
+	]);
 	page.url = () => url;
 	// biome-ignore lint/suspicious/useAwait: mirrors Playwright's Promise-returning signature
 	page.goto = async (target) => {
@@ -4775,18 +4963,30 @@ function makePendingIdentityPage(
 			: { kind: "dead" };
 	}) as Page["evaluate"];
 	page.locator = ((selector: string) => {
+		if (selector === '[id="otp-error"]') {
+			const missing = makeLocator({ count: 0 });
+			missing.innerText = ((options?: { timeout?: number }) => {
+				descriptionReadTimeouts.push(options?.timeout);
+				return Promise.reject(new Error("description was removed"));
+			}) as Locator["innerText"];
+			return missing;
+		}
 		if (selector === "body") {
 			return makeLocator({
 				innerText:
 					stage === "rejected"
 						? "Incorrect or expired verification code. Try again."
-						: stage === "otp"
-							? "Enter the code we sent"
+						: stage === "otp" || stage === "verifying"
+							? staleOtpError
+								? "Enter the code we sent. Previous code was incorrect. Try again."
+								: "Enter the code we sent. Need help? Try again."
 							: "",
 			});
 		}
 		if (selector.includes("otp") || selector.includes("code")) {
-			return stage === "otp" || stage === "rejected"
+			return stage === "otp" ||
+				stage === "rejected" ||
+				(stage === "verifying" && keepOtpInputWhileVerifying)
 				? fields.locator
 				: makeLocator({ count: 0, visible: false });
 		}
@@ -4826,7 +5026,63 @@ function makePendingIdentityPage(
 		get postSubmitProbes() {
 			return postSubmitProbes;
 		},
+		descriptionReadTimeouts,
 	};
+}
+
+test("OTP validation reads bound a missing described error element", async () => {
+	const fake = makePendingIdentityPage("otp", "complete", 50, {
+		keepOtpInputWhileVerifying: true,
+		missingOtpDescription: true,
+	});
+	const kinds: string[] = [];
+	await ensureVenmoSession({
+		credentials: {
+			VENMO_USERNAME: "test-user",
+			VENMO_PASSWORD: "test-password",
+		},
+		page: fake.page,
+		postSubmitSettleTimeoutMs: 300,
+		sendInteraction: (request) => {
+			kinds.push(request.kind);
+			return Promise.resolve({ value: "123456" } as InteractionResponse);
+		},
+	});
+	assert.deepEqual(kinds, ["otp"]);
+	assert.equal(fake.page.url(), "https://venmo.com/");
+	assert.ok(fake.descriptionReadTimeouts.length > 0);
+	assert.ok(
+		fake.descriptionReadTimeouts.every(
+			(timeout) => timeout !== undefined && timeout <= 250,
+		),
+		"a detached validation region must not outlive the verification deadline",
+	);
+});
+
+for (const staleOtpError of [false, true]) {
+	test(`OTP verification ignores ${staleOtpError ? "a previous field error" : "unrelated help copy"} while a visible code input persists`, async () => {
+		const fake = makePendingIdentityPage("otp", "complete", 50, {
+			keepOtpInputWhileVerifying: true,
+			staleOtpError,
+		});
+		const kinds: string[] = [];
+		const result = await ensureVenmoSession({
+			credentials: {
+				VENMO_USERNAME: "test-user",
+				VENMO_PASSWORD: "test-password",
+			},
+			page: fake.page,
+			postSubmitSettleTimeoutMs: 300,
+			sendInteraction: (request) => {
+				kinds.push(request.kind);
+				return Promise.resolve({ value: "123456" } as InteractionResponse);
+			},
+		});
+		assert.equal(result, null);
+		assert.equal(fake.page.url(), "https://venmo.com/");
+		assert.deepEqual(kinds, ["otp"]);
+		assert.equal(fake.destroyed, false);
+	});
 }
 
 test("pending identity XHR survives until a delayed OTP is filled", async () => {
@@ -4905,7 +5161,7 @@ test("an identity XHR that never completes times out without navigation or probi
 			postSubmitSettleTimeoutMs: 20,
 			sendInteraction,
 		}),
-		/venmo_login_did_not_complete/,
+		/venmo_password_submit_stalled/,
 	);
 	assert.equal(fake.destroyed, false);
 	assert.equal(fake.postSubmitProbes, 0);
