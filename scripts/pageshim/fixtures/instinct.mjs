@@ -5,8 +5,9 @@
 // on api.instinct.com for the PageShim harness, answering every operation the
 // instinct connector sends with its own synthetic fixtures
 // (connectors/instinct/fixtures, invented values). The API answers only a
-// POST that comes from the app origin, so a passing run proves the connector
-// posts from the signed-in app page as it does on desktop. Signed out,
+// POST that comes from the app origin and carries the session cookie the app
+// pages set on instinct.com, so a passing run proves the connector posts from
+// the signed-in app page with its cookies, as it does on desktop. Signed out,
 // `authSession` is null and every other operation is refused as
 // unauthenticated. CORS (including the preflight) is fulfilled by the
 // harness. The real Instinct API, its cookie session and a WebView on a
@@ -62,9 +63,16 @@ function chatHistory(variables) {
 
 export const requests = [];
 
+// Every app page sets the session cookie on the shared instinct.com site, as
+// the real app's sign-in does; the API reads the session only from it, so a
+// request sent without the page's cookies is signed out.
+const SESSION_COOKIE = "instinct_session=synthetic-instinct-session";
 const page = () => ({
 	status: 200,
 	contentType: "text/html; charset=utf-8",
+	headers: {
+		"set-cookie": `${SESSION_COOKIE}; Domain=instinct.com; Path=/; Secure; SameSite=Lax`,
+	},
 	body: "<!doctype html><html><head><title>Instinct</title></head><body>Instinct fixture</body></html>",
 });
 
@@ -88,14 +96,19 @@ export function resolveFixture(raw, request = {}) {
 	const operation = /query Pdpp(\w+)/.exec(String(body?.query))?.[1] ?? "";
 	const variables = body?.variables ?? {};
 	requests.push({ operation, variables });
+	const signedIn =
+		loggedIn &&
+		String(request.headers?.cookie ?? "")
+			.split(/;\s*/)
+			.includes(SESSION_COOKIE);
 	if (operation === "InstinctSession") {
 		return json({
 			data: {
-				authSession: loggedIn ? { user: { id: profileUser.id } } : null,
+				authSession: signedIn ? { user: { id: profileUser.id } } : null,
 			},
 		});
 	}
-	if (!loggedIn) {
+	if (!signedIn) {
 		return json({
 			data: null,
 			errors: [{ message: "Unauthenticated" }],

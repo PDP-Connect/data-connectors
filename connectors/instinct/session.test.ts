@@ -303,6 +303,18 @@ test("on PageShim, an evaluation that answered nothing reads as a request that d
 		json: null,
 		status: 0,
 	});
+	const movedMidTransfer = makeInstinctGraphql({
+		evaluate: () =>
+			Promise.reject(
+				new Error(
+					"PageShim evaluation transfer failed: PageShim evaluation chunk exceeded its transfer bound",
+				),
+			),
+	} as unknown as Parameters<typeof makeInstinctGraphql>[0]);
+	assert.deepEqual(
+		await movedMidTransfer("query PdppInstinctChatHistory { a }"),
+		{ json: null, status: 0 },
+	);
 });
 
 /** A page whose only member is evaluate, answering each GraphQL call. */

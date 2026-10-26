@@ -299,11 +299,13 @@ export function graphqlEvaluateArgs(
  * reached Instinct, so it is read like one that did not complete (status 0),
  * which is retryable. On the mobile PageShim host the same event surfaces as
  * an evaluation that answered nothing (the host turns a page error into
- * null), which the host adapter reports as an invalid transfer marker.
+ * null), which the host adapter reports as an invalid transfer marker, or
+ * as a failed transfer when the page moved while a large answer was being
+ * read back in chunks.
  */
 export function isPageInterruption(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
-	return /Execution context was destroyed|context or browser has been closed|Target (?:page, context or browser )?(?:has been )?closed|frame was detached|Navigating frame was detached|navigation|PageShim evaluation returned an invalid transfer marker/i.test(
+	return /Execution context was destroyed|context or browser has been closed|Target (?:page, context or browser )?(?:has been )?closed|frame was detached|Navigating frame was detached|navigation|PageShim evaluation (?:returned an invalid transfer marker|transfer failed)/i.test(
 		message,
 	);
 }
