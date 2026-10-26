@@ -47,6 +47,12 @@
  * read on that page, which never navigates it. Session errors are thrown as
  * bare codes so the runtime keeps them.
  *
+ * Mobile (PageShim): the same collector runs in the phone's WebView through
+ * `collectInstinctOnPage`, and `probeInstinctSession` is the host's
+ * non-navigating session probe. The host opens the app's sign-in page, so the
+ * GraphQL POST leaves from app.instinct.com exactly as on desktop: a
+ * same-site request to api.instinct.com with the page's own cookies.
+ *
  * Completeness: a stream is checkpointed only after its whole list was read
  * and Instinct reported no error on it. List streams end with a full-scan
  * DETAIL_COVERAGE and then STATE. A list that cannot be proven (a GraphQL
@@ -291,11 +297,15 @@ export function graphqlEvaluateArgs(
  * A page.evaluate that failed because the page moved or closed under it
  * (the app still redirecting after sign-in, a reload): the request never
  * reached Instinct, so it is read like one that did not complete (status 0),
- * which is retryable.
+ * which is retryable. On the mobile PageShim host the same event surfaces as
+ * an evaluation that answered nothing (the host turns a page error into
+ * null), which the host adapter reports as an invalid transfer marker, or
+ * as a failed transfer when the page moved while a large answer was being
+ * read back in chunks.
  */
 export function isPageInterruption(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
-	return /Execution context was destroyed|context or browser has been closed|Target (?:page, context or browser )?(?:has been )?closed|frame was detached|Navigating frame was detached|navigation/i.test(
+	return /Execution context was destroyed|context or browser has been closed|Target (?:page, context or browser )?(?:has been )?closed|frame was detached|Navigating frame was detached|navigation|PageShim evaluation (?:returned an invalid transfer marker|transfer failed)/i.test(
 		message,
 	);
 }
@@ -548,6 +558,19 @@ async function readSession(graphql: InstinctGraphql): Promise<SessionState> {
 		// The page was mid-navigation or closed: no evidence either way.
 		return "unknown";
 	}
+}
+
+/**
+ * Whether the page's own session is signed in: one `authSession` read on the
+ * page as it is. Never navigates, so it is the PageShim probe, polled while
+ * the person signs in on the app's sign-in page. A page that is not on the
+ * app (the request then cannot carry the session) or an answer that says
+ * nothing either way reads as not signed in.
+ */
+export async function probeInstinctSession(
+	page: Pick<Page, "evaluate">,
+): Promise<boolean> {
+	return (await readSession(makeInstinctGraphql(page))) === "signed_in";
 }
 
 const SESSION_CHECK_RETRIES = 2;
@@ -1792,6 +1815,55 @@ export async function collectInstinct(
 	}
 }
 
+/**
+ * The runtime's collect context, narrowed to what the collector reads. The
+ * desktop runtime supplies every member; the mobile PageShim host supplies
+ * the page, emit, progress, requested streams, STATE and stream failures, but
+ * no run clock, collection mode or detail-gap pages.
+ */
+export type InstinctPageCollectContext = Pick<
+	BrowserCollectContext,
+	"emit" | "emitRecord" | "progress" | "requested" | "state"
+> &
+	Partial<
+		Pick<
+			BrowserCollectContext,
+			| "collectionMode"
+			| "detailGaps"
+			| "emittedAt"
+			| "recoveryOnly"
+			| "reportStreamFailure"
+			| "requestDetailGapPage"
+		>
+	> & { readonly page: Pick<Page, "evaluate"> };
+
+/**
+ * Collect from the signed-in page. The one entry point both hosts call: the
+ * desktop runtime's `collect` and the PageShim `collect_export`.
+ */
+export async function collectInstinctOnPage(
+	ctx: InstinctPageCollectContext,
+): Promise<void> {
+	await collectInstinct({
+		...(ctx.collectionMode ? { collectionMode: ctx.collectionMode } : {}),
+		...(ctx.detailGaps ? { detailGaps: ctx.detailGaps } : {}),
+		emit: ctx.emit,
+		emitRecord: ctx.emitRecord,
+		graphql: makeInstinctGraphql(ctx.page),
+		observedAt: ctx.emittedAt ?? new Date().toISOString(),
+		progress: ctx.progress,
+		recoveryOnly: ctx.recoveryOnly === true,
+		...(ctx.reportStreamFailure
+			? { reportStreamFailure: ctx.reportStreamFailure }
+			: {}),
+		...(ctx.requestDetailGapPage
+			? { requestDetailGapPage: ctx.requestDetailGapPage }
+			: {}),
+		requested: new Set(ctx.requested.keys()),
+		state: ctx.state,
+	});
+}
+
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		browser: { profileName: "instinct" },
@@ -1799,24 +1871,7 @@ if (isMainModule(import.meta.url)) {
 		retryablePattern:
 			/ECONN|ETIMEDOUT|timeout|fetch failed|instinct_interrupted|instinct_rate_limited|instinct_server_error/i,
 		validateRecord,
-		async collect(ctx: BrowserCollectContext): Promise<void> {
-			await collectInstinct({
-				...(ctx.collectionMode ? { collectionMode: ctx.collectionMode } : {}),
-				detailGaps: ctx.detailGaps,
-				emit: ctx.emit,
-				emitRecord: ctx.emitRecord,
-				graphql: makeInstinctGraphql(ctx.page),
-				observedAt: ctx.emittedAt,
-				progress: ctx.progress,
-				recoveryOnly: ctx.recoveryOnly === true,
-				...(ctx.reportStreamFailure
-					? { reportStreamFailure: ctx.reportStreamFailure }
-					: {}),
-				requestDetailGapPage: ctx.requestDetailGapPage,
-				requested: new Set(ctx.requested.keys()),
-				state: ctx.state,
-			});
-		},
+		collect: collectInstinctOnPage,
 		async ensureSession(args: EnsureSessionArgs) {
 			await ensureInstinctSession({
 				assist: args.assist,

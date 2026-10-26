@@ -14934,15 +14934,17 @@
 				},
 				"connector_key": "instinct",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Instinct",
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
 						}
 					}
 				},
@@ -15822,7 +15824,20 @@
 							}
 						]
 					}
-				]
+				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "instinct",
+						"login_url": "https://app.instinct.com/signin?returnTo=%2Fworkspace",
+						"login_message": "Sign in to Instinct with your phone number and the SMS code, then return here.",
+						"collect_export": "collectInstinctOnPage",
+						"probe_export": "probeInstinctSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				}
 			}
 		},
 		{

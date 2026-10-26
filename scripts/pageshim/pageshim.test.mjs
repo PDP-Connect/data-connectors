@@ -190,8 +190,20 @@ for (const name of pageShimConnectors(
 			assert.equal(r.result, null, "a thin host never gets a one-message result");
 			assert.equal(r.streamResult.completed, true);
 			assert.equal(r.streamResult.scopeCount, c.scopes.length);
-			// fetchedAt is wall-clock time, so it differs between the two runs.
-			const withoutFetchedAt = ({ fetchedAt, ...value }) => value;
+			// fetchedAt is wall-clock time, so it differs between the two runs,
+			// as does any record field the case names as a per-run clock.
+			const volatile = c.volatileRecordFields ?? [];
+			const withoutFetchedAt = ({ fetchedAt, ...value }) =>
+				volatile.length === 0 || !Array.isArray(value.records)
+					? value
+					: {
+							...value,
+							records: value.records.map((record) =>
+								Object.fromEntries(
+									Object.entries(record).filter(([key]) => !volatile.includes(key)),
+								),
+							),
+						};
 			for (const scope of c.scopes)
 				assert.deepEqual(
 					withoutFetchedAt(

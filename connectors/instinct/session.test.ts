@@ -7,15 +7,21 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fixturesDir } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import { isConnectorErrorCodeShaped } from "../../packages/polyfill-connectors/src/terminal-error.ts";
+import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	classifySession,
+	collectInstinctOnPage,
 	type EnsureInstinctSessionArgs,
 	ensureInstinctSession,
+	type GraphqlEvaluateArgs,
 	INSTINCT_AUTH_FAILED,
 	INSTINCT_INTERRUPTED,
+	type InstinctPageCollectContext,
 	makeInstinctGraphql,
+	probeInstinctSession,
 	SIGN_IN_URL,
 } from "./index.ts";
+import { validateRecord } from "./schemas.ts";
 import type { GraphqlFetchResult } from "./types.ts";
 
 const APP_URL = "https://app.instinct.com/workspace";
@@ -284,4 +290,173 @@ test("a page that moves under a GraphQL call reads as a request that did not com
 		evaluate: () => Promise.reject(new TypeError("boom")),
 	} as unknown as Parameters<typeof makeInstinctGraphql>[0]);
 	await assert.rejects(broken("query PdppInstinctSession { a }"), TypeError);
+});
+
+test("on PageShim, an evaluation that answered nothing reads as a request that did not complete", async () => {
+	const moving = makeInstinctGraphql({
+		evaluate: () =>
+			Promise.reject(
+				new Error("PageShim evaluation returned an invalid transfer marker"),
+			),
+	} as unknown as Parameters<typeof makeInstinctGraphql>[0]);
+	assert.deepEqual(await moving("query PdppInstinctSession { a }"), {
+		json: null,
+		status: 0,
+	});
+	const movedMidTransfer = makeInstinctGraphql({
+		evaluate: () =>
+			Promise.reject(
+				new Error(
+					"PageShim evaluation transfer failed: PageShim evaluation chunk exceeded its transfer bound",
+				),
+			),
+	} as unknown as Parameters<typeof makeInstinctGraphql>[0]);
+	assert.deepEqual(
+		await movedMidTransfer("query PdppInstinctChatHistory { a }"),
+		{ json: null, status: 0 },
+	);
+});
+
+/** A page whose only member is evaluate, answering each GraphQL call. */
+function evaluatingPage(
+	answer: (args: GraphqlEvaluateArgs) => GraphqlFetchResult | Error,
+): {
+	readonly page: Pick<Parameters<typeof probeInstinctSession>[0], "evaluate">;
+	readonly sent: GraphqlEvaluateArgs[];
+} {
+	const sent: GraphqlEvaluateArgs[] = [];
+	const page = {
+		evaluate: (_fn: unknown, args: GraphqlEvaluateArgs) => {
+			sent.push(args);
+			const result = answer(args);
+			return result instanceof Error
+				? Promise.reject(result)
+				: Promise.resolve(result);
+		},
+	} as unknown as Parameters<typeof probeInstinctSession>[0];
+	return { page, sent };
+}
+
+test("probeInstinctSession reads authSession once from the page as it is", async () => {
+	const profile = await signedIn();
+	const yes = evaluatingPage(() => profile);
+	assert.equal(await probeInstinctSession(yes.page), true);
+	assert.equal(yes.sent.length, 1);
+	assert.equal(yes.sent[0]?.apiUrl, "https://api.instinct.com/-/api/graphql");
+	assert.match(yes.sent[0]?.document ?? "", /query PdppInstinctSession/);
+
+	assert.equal(
+		await probeInstinctSession(evaluatingPage(() => SIGNED_OUT).page),
+		false,
+	);
+	assert.equal(
+		await probeInstinctSession(
+			evaluatingPage(() => ({ json: null, status: 403 })).page,
+		),
+		false,
+	);
+	// No answer either way is not signed in: the host keeps polling.
+	assert.equal(
+		await probeInstinctSession(
+			evaluatingPage(() => ({ json: null, status: 0 })).page,
+		),
+		false,
+	);
+	assert.equal(
+		await probeInstinctSession(
+			evaluatingPage(
+				() =>
+					new Error("PageShim evaluation returned an invalid transfer marker"),
+			).page,
+		),
+		false,
+	);
+	assert.equal(
+		await probeInstinctSession(
+			evaluatingPage(() => new TypeError("boom")).page,
+		),
+		false,
+	);
+});
+
+async function fixtureJson(name: string): Promise<unknown> {
+	return JSON.parse(
+		await readFile(join(fixturesDir("instinct"), `${name}.json`), "utf8"),
+	) as unknown;
+}
+
+async function accountPage(): Promise<ReturnType<typeof evaluatingPage>> {
+	const answers: Record<string, unknown> = {
+		InstinctDevices: await fixtureJson("devices"),
+		InstinctProfile: await fixtureJson("profile"),
+		InstinctVault: await fixtureJson("vault"),
+	};
+	return evaluatingPage((args) => {
+		const operation = /query Pdpp(\w+)/.exec(args.document)?.[1] ?? "";
+		const json = answers[operation];
+		return json === undefined
+			? new Error(`unexpected operation ${operation}`)
+			: { json, status: 200 };
+	});
+}
+
+const ACCOUNT_STREAMS = ["profile", "devices", "vault_entries"];
+
+function pageContext(
+	page: InstinctPageCollectContext["page"],
+	harness: ReturnType<typeof makeRecordingEmit>,
+	extra: Partial<InstinctPageCollectContext> = {},
+): InstinctPageCollectContext {
+	return {
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		page,
+		progress: () => Promise.resolve(),
+		requested: new Map(
+			ACCOUNT_STREAMS.map((name) => [name, { name }] as const),
+		) as InstinctPageCollectContext["requested"],
+		state: {},
+		...extra,
+	};
+}
+
+test("collectInstinctOnPage runs with the PageShim context: no run clock, mode or gap pages", async () => {
+	const { page, sent } = await accountPage();
+	const harness = makeRecordingEmit(validateRecord);
+	const failures: string[] = [];
+	const before = Date.now();
+	await collectInstinctOnPage(
+		pageContext(page, harness, {
+			reportStreamFailure: (stream) => {
+				failures.push(stream);
+				return Promise.resolve();
+			},
+		}),
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(harness.skipped, []);
+	assert.deepEqual(
+		[...new Set(harness.emitted.map((record) => record.stream))].sort(),
+		[...ACCOUNT_STREAMS].sort(),
+	);
+	// Without a run clock, records are observed at the collection time.
+	const observed = Date.parse(String(harness.emitted[0]?.data.observed_at));
+	assert.ok(observed >= before - 1000 && observed <= Date.now() + 1000);
+	assert.ok(
+		sent.every(
+			(args) => args.apiUrl === "https://api.instinct.com/-/api/graphql",
+		),
+	);
+});
+
+test("collectInstinctOnPage keeps the desktop run clock", async () => {
+	const { page } = await accountPage();
+	const harness = makeRecordingEmit(validateRecord);
+	await collectInstinctOnPage(
+		pageContext(page, harness, { emittedAt: "2026-09-22T19:30:00.000Z" }),
+	);
+	assert.ok(harness.emitted.length > 0);
+	for (const record of harness.emitted) {
+		assert.equal(record.data.observed_at, "2026-09-22T19:30:00.000Z");
+	}
 });
