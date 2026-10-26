@@ -110,6 +110,12 @@ async function waitForFile(
 
 function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve) => {
+		// An abort listener added after the abort never fires, so a signal that
+		// is already aborted must resolve now, not after the full timer.
+		if (signal?.aborted) {
+			resolve();
+			return;
+		}
 		const onAbort = () => {
 			clearTimeout(timer);
 			resolve();
@@ -463,4 +469,5 @@ export const __testing = {
 	normalizeStatus,
 	respondViaTerminal,
 	SECRET_FIELD_RE,
+	sleepUnlessAborted,
 };

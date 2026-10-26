@@ -14,8 +14,13 @@ import {
 	type InteractionMessage,
 } from "./interaction-handler.ts";
 
-const { buildClickUrl, normalizeStatus, respondViaTerminal, SECRET_FIELD_RE } =
-	__testing;
+const {
+	buildClickUrl,
+	normalizeStatus,
+	respondViaTerminal,
+	SECRET_FIELD_RE,
+	sleepUnlessAborted,
+} = __testing;
 
 // Drop a synthetic response file before invoking the handler so waitForFile
 // resolves on the first poll.
@@ -516,6 +521,27 @@ describe("handleInteraction file drop", () => {
 		);
 		assert.equal(out.status, "success");
 		assert.deepEqual(out.data, { u: "x" });
+	});
+});
+
+describe("sleepUnlessAborted", () => {
+	// The file poll sleeps after a failed read. When the terminal won while
+	// that read was pending, the signal is already aborted at this point; a
+	// fresh 1.5 s timer would hold the process open after the answer.
+	test("resolves at once for an already-aborted signal", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const started = Date.now();
+		await sleepUnlessAborted(1500, controller.signal);
+		assert.ok(Date.now() - started < 100);
+	});
+
+	test("resolves when the signal aborts during the sleep", async () => {
+		const controller = new AbortController();
+		const started = Date.now();
+		setTimeout(() => controller.abort(), 20);
+		await sleepUnlessAborted(1500, controller.signal);
+		assert.ok(Date.now() - started < 500);
 	});
 });
 
