@@ -9,14 +9,10 @@
 	},
 	"connector_key": "muse",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-	"version": "0.1.3",
+	"version": "0.1.4",
 	"display_name": "Muse (Meta)",
 	"runtime_requirements": {
 		"bindings": {
-			"network": {
-				"required": true,
-				"features": ["same_origin_page_fetch"]
-			},
 			"browser": {
 				"required": true,
 				"features": [
@@ -45,7 +41,7 @@
 	"streams": [
 		{
 			"name": "conversations",
-			"description": "Muse chats: the main chat and side chats, active and archived, as sessions.list reports them.",
+			"description": "Muse chats: the main chat and side chats, active and archived, as sessions.list reports them. A time window selects chats by their last update.",
 			"display": {
 				"label": "Your Muse chats",
 				"detail": "Chat title, snippet of the latest message, create and update times, and whether the chat is the main chat, a thread, archived or pinned."
@@ -93,7 +89,7 @@
 			},
 			"primary_key": ["id"],
 			"cursor_field": "updated_at",
-			"consent_time_field": "created_at",
+			"consent_time_field": "updated_at",
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -119,12 +115,12 @@
 		},
 		{
 			"name": "messages",
-			"description": "Messages in Muse chats, yours and the agent's, from chat.history, paged back to the start of each chat. Collected only together with conversations (each message's chat record is emitted before it); a request for messages without conversations is answered with scope_not_supported.",
+			"description": "Messages in Muse chats, yours and the agent's, from chat.history, paged back to the start of each chat, or to the start of the requested time window. Collected only together with conversations (each message's chat record is emitted before it, unless the chat record itself is outside the requested window or resources); a request for messages without conversations is answered with scope_not_supported. A message is emitted again under the same id when its chat's transcript changes.",
 			"display": {
 				"label": "Your Muse messages",
 				"detail": "Role, message text, time, the message it replies to, source and visibility."
 			},
-			"semantics": "append_only",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
@@ -207,7 +203,7 @@
 				"label": "Your Muse agent activity",
 				"detail": "Activity type, title, status, the task it belonged to and when it happened."
 			},
-			"semantics": "append_only",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
