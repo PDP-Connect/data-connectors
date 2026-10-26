@@ -26,6 +26,10 @@ import { artifactInputHash, ArtifactInputError } from "./connector-artifact-inpu
 import { PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
 import { lookupManifest } from "./lookup-manifest.mjs";
 
+// execFileSync defaults to a 1 MiB output buffer; connector-implementation-index.json
+// alone passed that in October 2026, and git show then fails with ENOBUFS.
+const GIT_SHOW_MAX_BUFFER = 64 * 1024 * 1024;
+
 const MANIFEST_ROOT = "connectors";
 const INDEX_PATH = "connector-implementation-index.json";
 const ZERO_SHA = /^0{40}$/;
@@ -44,6 +48,7 @@ function readJsonAtCommit(commit, relativePath, { cwd = process.cwd() } = {}) {
     text = execFileSync("git", ["show", `${commit}:${relativePath}`], {
       cwd,
       encoding: "utf8",
+      maxBuffer: GIT_SHOW_MAX_BUFFER,
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
