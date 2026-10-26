@@ -6,7 +6,7 @@ import { test } from "node:test";
 import {
 	dollarsToCents,
 	profileRecord,
-	transactionRecord,
+	parseTransactionStory,
 	userRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -37,10 +37,12 @@ test("dollarsToCents rounds floating-point drift instead of truncating (25.005 -
 	assert.equal(dollarsToCents(25.005), 2501);
 });
 
-test("dollarsToCents returns 0 for a missing or NaN amount rather than throwing", () => {
-	assert.equal(dollarsToCents(null), 0);
-	assert.equal(dollarsToCents(undefined), 0);
-	assert.equal(dollarsToCents(Number.NaN), 0);
+test("dollarsToCents returns null for missing or non-finite amounts", () => {
+	assert.equal(dollarsToCents(null), null);
+	assert.equal(dollarsToCents(undefined), null);
+	assert.equal(dollarsToCents(Number.NaN), null);
+	assert.equal(dollarsToCents(Number.POSITIVE_INFINITY), null);
+	assert.equal(dollarsToCents(Number.NEGATIVE_INFINITY), null);
 });
 
 test("userRecord maps every documented field and passes the friends schema", () => {
@@ -108,21 +110,46 @@ const RAW_PAY_STORY: VenmoStory = {
 	},
 };
 
-test("transactionRecord converts a pay story to a valid record, correctly deriving is_owner_actor", () => {
-	const record = transactionRecord(RAW_PAY_STORY, "1234567890123456789");
-	assert.ok(record);
-	assert.equal(record?.payment_type, "pay");
-	assert.equal(record?.amount_cents, 2500);
+function validTransactionRecord(
+	...args: Parameters<typeof parseTransactionStory>
+) {
+	const parsed = parseTransactionStory(...args);
+	assert.equal(parsed.kind, "record");
+	if (parsed.kind !== "record") throw new Error("expected a modeled payment");
+	return parsed.record;
+}
+
+test("parseTransactionStory converts a pay story to a valid record, correctly deriving is_owner_actor", () => {
+	const record = validTransactionRecord(RAW_PAY_STORY, "1234567890123456789");
+	assert.equal(record.payment_type, "pay");
+	assert.equal(record.amount_cents, 2500);
 	assert.equal(
-		record?.is_owner_actor,
+		record.is_owner_actor,
 		true,
 		"owner is the actor (sender) on a pay story",
 	);
 	assert.equal(validateRecord("transactions", record).ok, true);
 });
 
-test("transactionRecord normalizes zone-less dates and retains alphanumeric payment ids", () => {
-	const record = transactionRecord(
+test("parseTransactionStory preserves an unknown payment amount as null", () => {
+	const missingAmountPayment = { ...RAW_PAY_STORY.payment };
+	delete missingAmountPayment.amount;
+	for (const payment of [
+		{ ...RAW_PAY_STORY.payment, amount: null },
+		missingAmountPayment,
+	]) {
+		const record = validTransactionRecord(
+			{ ...RAW_PAY_STORY, payment },
+			"1234567890123456789",
+		);
+		assert.ok(record);
+		assert.equal(record.amount_cents, null);
+		assert.equal(validateRecord("transactions", record).ok, true);
+	}
+});
+
+test("parseTransactionStory normalizes zone-less dates and retains alphanumeric payment ids", () => {
+	const record = validTransactionRecord(
 		{
 			...RAW_PAY_STORY,
 			date_created: "2026-07-15T14:30:00",
@@ -142,8 +169,8 @@ test("transactionRecord normalizes zone-less dates and retains alphanumeric paym
 	assert.equal(validateRecord("transactions", record).ok, true);
 });
 
-test("transactionRecord accepts an alphanumeric id on an ordinary payment story", () => {
-	const record = transactionRecord(
+test("parseTransactionStory accepts an alphanumeric id on an ordinary payment story", () => {
+	const record = validTransactionRecord(
 		{
 			...RAW_PAY_STORY,
 			payment: { ...RAW_PAY_STORY.payment, id: "12A34567890123456" },
@@ -155,41 +182,52 @@ test("transactionRecord accepts an alphanumeric id on an ordinary payment story"
 	assert.equal(validateRecord("transactions", record).ok, true);
 });
 
-test("transactionRecord sets is_owner_actor false when the owner is the target, not the actor", () => {
-	const record = transactionRecord(RAW_PAY_STORY, "9876543210987654321");
-	assert.equal(record?.is_owner_actor, false);
+test("parseTransactionStory sets is_owner_actor false when the owner is the target, not the actor", () => {
+	const record = validTransactionRecord(RAW_PAY_STORY, "9876543210987654321");
+	assert.equal(record.is_owner_actor, false);
 });
 
-test("transactionRecord returns null for a story with no payment object (refund/transfer/top_up/etc.)", () => {
-	const record = transactionRecord(
+test("parseTransactionStory marks stories without payments unsupported", () => {
+	const record = parseTransactionStory(
 		{ id: "1", date_created: "2026-01-01T00:00:00Z", type: "transfer" },
 		"1234567890123456789",
 	);
-	assert.equal(record, null);
+	assert.deepEqual(record, { kind: "unsupported" });
 });
 
-test("transactionRecord returns null for an unmodeled payment.action (not pay/charge)", () => {
-	const record = transactionRecord(
+test("parseTransactionStory marks unmodeled payment actions unsupported", () => {
+	const record = parseTransactionStory(
 		{
 			...RAW_PAY_STORY,
 			payment: { ...RAW_PAY_STORY.payment, action: "refund" },
 		},
 		"1234567890123456789",
 	);
-	assert.equal(record, null);
+	assert.deepEqual(record, { kind: "unsupported" });
 });
 
-test("transactionRecord returns null when date_created is missing (required cursor field)", () => {
+test("parseTransactionStory marks a supported payment without date_created invalid", () => {
 	const { date_created: _omit, ...withoutDate } = RAW_PAY_STORY;
-	const record = transactionRecord(
+	const record = parseTransactionStory(
 		withoutDate as VenmoStory,
 		"1234567890123456789",
 	);
-	assert.equal(record, null);
+	assert.deepEqual(record, { kind: "invalid", reason: "missing_date_created" });
 });
 
-test("transactionRecord returns a null counterparty (not a throw) when actor/target is absent", () => {
-	const record = transactionRecord(
+test("parseTransactionStory marks a supported payment without a story id invalid", () => {
+	const { id: _omit, ...withoutId } = RAW_PAY_STORY;
+	assert.deepEqual(
+		parseTransactionStory(withoutId as VenmoStory, RAW_USER.id),
+		{
+			kind: "invalid",
+			reason: "missing_id",
+		},
+	);
+});
+
+test("parseTransactionStory returns a null counterparty (not a throw) when actor/target is absent", () => {
+	const record = validTransactionRecord(
 		{
 			...RAW_PAY_STORY,
 			payment: { ...RAW_PAY_STORY.payment, actor: null, target: null },
@@ -197,10 +235,10 @@ test("transactionRecord returns a null counterparty (not a throw) when actor/tar
 		"1234567890123456789",
 	);
 	assert.ok(record);
-	assert.equal(record?.actor, null);
-	assert.equal(record?.target, null);
+	assert.equal(record.actor, null);
+	assert.equal(record.target, null);
 	assert.equal(
-		record?.is_owner_actor,
+		record.is_owner_actor,
 		false,
 		"no actor id means the owner cannot be the actor",
 	);

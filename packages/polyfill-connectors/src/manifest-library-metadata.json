@@ -858,8 +858,9 @@
 		"manifest": {
 			"connector_key": "venmo",
 			"reason_display_messages": {
-				"friends_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo friends, so some friends haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
-				"transactions_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo transactions, so older transactions haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
+				"transactions_deferred_page_budget": "Some Venmo transaction history is still pending. Saved positions let later runs resume it while refreshing recent activity. A large volume of new activity may delay completion",
+				"transactions_schema_blocked": "A Venmo transaction could not be validated. The unread history after that record will be retried"
 			}
 		}
 	},
