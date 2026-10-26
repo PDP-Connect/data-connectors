@@ -31,6 +31,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type {
 	CollectContext,
@@ -38,7 +39,12 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
-	runConversationsAndMessagesStreams,
+	NO_DETAIL_WAITS,
+	withEmptyConversationDetails,
+} from "./__fixtures__/empty-conversation-details.ts";
+import {
+	ChatGptRunBudget,
+	runConversationsAndMessagesStreams as runStreams,
 	type StreamDeps,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -48,6 +54,17 @@ import type {
 	ChatGptNode,
 	ConversationListItem,
 } from "./types.ts";
+
+/** These tests exercise listing and serve no conversation detail; see the helper. */
+const runConversationsAndMessagesStreams: typeof runStreams = (
+	deps,
+	state,
+	options,
+) =>
+	runStreams({ ...deps, api: withEmptyConversationDetails(deps.api) }, state, {
+		...options,
+		detailPacing: { ...NO_DETAIL_WAITS, ...options?.detailPacing },
+	});
 
 // ─── Synthetic fixtures ────────────────────────────────────────────────────
 
@@ -422,57 +439,230 @@ test("runConversationsAndMessagesStreams: STATE waits for slow required detail l
 	);
 });
 
-test("runConversationsAndMessagesStreams: conversations-only (no messages scope) — STILL parent-first, no detail fetches, STATE still lands", async () => {
-	// This is the "scope suppresses messages" path. processConversationDetail
-	// is never invoked; emitConversation is called with detail=null for each
-	// item in the list. There are no messages, so the parent-first invariant
-	// is vacuously preserved — but we still need the STATE cursor to fire.
-	const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
-	// Ensure the detail endpoint fails loudly if it's ever called — the
-	// conversations-only path must NOT fetch details.
-	const api: ChatGptApi = {
-		auth: (): Promise<never> =>
-			Promise.reject(new Error("auth not used in fake")),
-		fetch: (path: string): Promise<ChatGptFetchResult> => {
-			if (path.startsWith("/conversations/search?")) {
-				const cursor = Number(
-					new URLSearchParams(path.split("?")[1]).get("cursor"),
-				);
-				return Promise.resolve({
-					status: 200,
-					json: {
-						items: cursor === 0 ? list : [],
-						has_missing_conversations: false,
-						total: cursor === 0 ? list.length + 1 : list.length,
-					},
-				});
-			}
-			throw new Error(
-				`conversations-only path must not fetch detail; got ${path}`,
-			);
+const modelSwitch = JSON.parse(
+	readFileSync(
+		new URL("./__fixtures__/conversation-model-switch.json", import.meta.url),
+		"utf8",
+	),
+) as { mapping: Record<string, ChatGptNode>; current_node: string };
+
+/** A conversation detail whose branch switches models (gpt-4o, then o3). */
+function makeModelSwitchDetail(convoId: string): ChatGptFetchResult {
+	return {
+		status: 200,
+		json: {
+			conversation_id: convoId,
+			title: `Conversation ${convoId}`,
+			create_time: 1_700_000_000,
+			update_time: 1_700_001_000,
+			...modelSwitch,
 		},
 	};
-	const { deps, emitted, protocolMessages } = makeDeps(api, ["conversations"]);
+}
 
-	await runConversationsAndMessagesStreams(deps, {});
+const MODEL_SWITCH_COUNTS = { "gpt-4o": 2, o3: 2 };
+const MODEL_SWITCH_BRANCH_MESSAGES = 11;
 
+/** An api that serves the list, a model-switch detail per id, and logs detail reads. */
+function makeDetailLoggingApi(
+	list: ConversationListItem[],
+	detailFor: (id: string) => ChatGptFetchResult,
+): { api: ChatGptApi; detailReads: string[] } {
+	const detailReads: string[] = [];
+	const inner = makeFakeApi(
+		list,
+		new Map(list.map((item) => [item.id, detailFor(item.id)])),
+	);
+	return {
+		detailReads,
+		api: {
+			auth: inner.auth,
+			fetch: (path: string): Promise<ChatGptFetchResult> => {
+				if (path.startsWith("/conversation/")) {
+					detailReads.push(
+						decodeURIComponent(path.slice("/conversation/".length)),
+					);
+				}
+				return inner.fetch(path);
+			},
+		},
+	};
+}
+
+// `runStreams`, not the listing wrapper above: these tests serve their details.
+test("runConversationsAndMessagesStreams: conversations alone reads each detail once, fills the counts, and emits no message, gap or messages progress", async () => {
+	const list = [
+		makeListItem("conv-A", "2026-04-22T09:00:00Z"),
+		makeListItem("conv-B", "2026-04-22T10:00:00Z"),
+	];
+	const { api, detailReads } = makeDetailLoggingApi(
+		list,
+		makeModelSwitchDetail,
+	);
+	const { deps, emitted, events, protocolMessages } = makeDeps(api, [
+		"conversations",
+	]);
+
+	await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+
+	assert.deepEqual(detailReads.sort(), ["conv-A", "conv-B"]);
 	assert.equal(
 		emitted.filter((r) => r.stream === "messages").length,
 		0,
-		"messages scope off → zero message records",
+		"messages is not requested: no message record",
+	);
+	const conversations = emitted.filter((r) => r.stream === "conversations");
+	assert.deepEqual(
+		conversations.map((r) => [
+			r.data.id,
+			r.data.model_counts,
+			r.data.message_count_on_current_branch,
+		]),
+		[
+			["conv-A", MODEL_SWITCH_COUNTS, MODEL_SWITCH_BRANCH_MESSAGES],
+			["conv-B", MODEL_SWITCH_COUNTS, MODEL_SWITCH_BRANCH_MESSAGES],
+		],
+	);
+	// Nothing names the unrequested stream: no gap, no progress, no coverage.
+	assert.equal(
+		protocolMessages.filter(
+			(m: EmittedMessage) =>
+				m.type === "DETAIL_GAP" ||
+				("stream" in m &&
+					m.stream === "messages" &&
+					(m.type === "PROGRESS" ||
+						m.type === "STATE" ||
+						m.type === "DETAIL_COVERAGE")),
+		).length,
+		0,
+	);
+	const lastRecord = events.findLastIndex((e) => e.kind === "record");
+	const stateIndex = events.findIndex(
+		(e) =>
+			e.kind === "message" &&
+			e.message.type === "STATE" &&
+			e.message.stream === "conversations",
+	);
+	assert.ok(stateIndex > lastRecord, "STATE lands after the last record");
+});
+
+test("runConversationsAndMessagesStreams: conversations alone does not read message text into any message record or blob", async () => {
+	const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
+	const { api } = makeDetailLoggingApi(list, makeModelSwitchDetail);
+	const { deps, protocolMessages } = makeDeps(api, ["conversations"]);
+	let selectionChecks = 0;
+	deps.isRecordSelected = (): boolean => {
+		selectionChecks += 1;
+		return true;
+	};
+
+	await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+
+	assert.equal(selectionChecks, 0, "no message is offered for selection");
+	assert.equal(
+		protocolMessages.some((m: EmittedMessage) => m.type === "BLOB"),
+		false,
+	);
+});
+
+test("runConversationsAndMessagesStreams: both streams read each detail once", async () => {
+	const list = [
+		makeListItem("conv-A", "2026-04-22T09:00:00Z"),
+		makeListItem("conv-B", "2026-04-22T10:00:00Z"),
+	];
+	const { api, detailReads } = makeDetailLoggingApi(
+		list,
+		makeModelSwitchDetail,
+	);
+	const { deps, emitted } = makeDeps(api, ["conversations", "messages"]);
+
+	await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+
+	assert.deepEqual(detailReads.sort(), ["conv-A", "conv-B"]);
+	assert.deepEqual(
+		emitted
+			.filter((r) => r.stream === "conversations")
+			.map((r) => r.data.model_counts),
+		[MODEL_SWITCH_COUNTS, MODEL_SWITCH_COUNTS],
+	);
+	assert.equal(emitted.filter((r) => r.stream === "messages").length > 0, true);
+});
+
+test("runConversationsAndMessagesStreams: a conversation only the conversations cursor still owes gets its detail once and no messages", async () => {
+	// The messages cursor is ahead of the conversations cursor, so conv-mid is
+	// owed to `conversations` only.
+	const list = [
+		makeListItem("conv-new", "2026-04-22T11:00:00Z"),
+		makeListItem("conv-mid", "2026-04-22T09:30:00Z"),
+	];
+	const { api, detailReads } = makeDetailLoggingApi(
+		list,
+		makeModelSwitchDetail,
+	);
+	const { deps, emitted } = makeDeps(api, ["conversations", "messages"]);
+
+	await runStreams(
+		deps,
+		{
+			conversations: { last_update_time: "2026-04-22T09:00:00.000Z" },
+			messages: { last_update_time: "2026-04-22T10:00:00.000Z" },
+		},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
+
+	assert.deepEqual(detailReads.sort(), ["conv-mid", "conv-new"]);
+	const byId = new Map(
+		emitted
+			.filter((r) => r.stream === "conversations")
+			.map((r) => [r.data.id, r.data]),
+	);
+	assert.deepEqual(byId.get("conv-mid")?.model_counts, MODEL_SWITCH_COUNTS);
+	assert.deepEqual(byId.get("conv-new")?.model_counts, MODEL_SWITCH_COUNTS);
+	const messageParents = new Set(
+		emitted
+			.filter((r) => r.stream === "messages")
+			.map((r) => r.data.conversation_id),
+	);
+	assert.deepEqual([...messageParents], ["conv-new"]);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone fails the run on a hard detail failure, as the messages path does", async () => {
+	const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
+	const { deps } = makeDeps(makeFakeApi(list, new Map()), ["conversations"]);
+
+	await assert.rejects(
+		runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
+		/required conversation detail conv-A failed with http 404/,
+	);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone emits a list-only record, and no gap, for a detail the run budget defers", async () => {
+	const list = [
+		makeListItem("conv-A", "2026-04-22T10:00:00Z"),
+		makeListItem("conv-B", "2026-04-22T09:00:00Z"),
+	];
+	const { api, detailReads } = makeDetailLoggingApi(
+		list,
+		makeModelSwitchDetail,
+	);
+	const { deps, emitted, protocolMessages } = makeDeps(api, ["conversations"]);
+	deps.runBudget = new ChatGptRunBudget({ maxFetches: 1 });
+
+	await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+
+	assert.deepEqual(detailReads, ["conv-A"]);
+	assert.deepEqual(
+		emitted
+			.filter((r) => r.stream === "conversations")
+			.map((r) => [r.data.id, r.data.model_counts]),
+		[
+			["conv-A", MODEL_SWITCH_COUNTS],
+			["conv-B", null],
+		],
 	);
 	assert.equal(
-		emitted.filter((r) => r.stream === "conversations").length,
-		1,
-		"one conversation record",
-	);
-	const states = protocolMessages.filter(
-		(m: EmittedMessage) => m.type === "STATE" && m.stream === "conversations",
-	);
-	assert.equal(
-		states.length,
-		1,
-		"STATE still fires on the conversations-only path",
+		protocolMessages.some((m: EmittedMessage) => m.type === "DETAIL_GAP"),
+		false,
 	);
 });
 

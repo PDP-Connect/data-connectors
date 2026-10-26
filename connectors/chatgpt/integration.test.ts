@@ -76,6 +76,11 @@ import {
 	type SkippedRecord,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	emptyConversationDetail,
+	NO_DETAIL_WAITS,
+	withEmptyConversationDetails,
+} from "./__fixtures__/empty-conversation-details.ts";
+import {
 	applyChatGptColdStatePreflight,
 	buildChatGptCollectionRateProgress,
 	buildChatGptPacingStateFields,
@@ -1547,7 +1552,7 @@ function makeConversationListingHarness(
 	const paths: string[] = [];
 	const delays: number[] = [];
 	const callsByCursor = new Map<number, number>();
-	const api: ChatGptApi = {
+	const listApi: ChatGptApi = {
 		auth: (): Promise<never> => Promise.reject(new Error("auth unused")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
 			if (!path.startsWith("/conversations/search?query=&cursor=")) {
@@ -1575,6 +1580,9 @@ function makeConversationListingHarness(
 			});
 		},
 	};
+	// A listing harness serves only list pages; the detail read for the
+	// `conversations` stream gets an empty detail.
+	const api = withEmptyConversationDetails(listApi);
 	return {
 		deps: {
 			api,
@@ -1740,7 +1748,11 @@ test("cursor search follows a short page and confirms an empty terminal", async 
 		]),
 	);
 
-	await runConversationsAndMessagesStreams(fixture.deps, {});
+	await runConversationsAndMessagesStreams(
+		fixture.deps,
+		{},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 
 	assert.deepEqual(fixture.listCursors(), [0, 30, 30, 30, 60, 60]);
 	assert.equal(
@@ -1779,7 +1791,11 @@ test("an empty cursor page with a continuation is followed", async () => {
 		]),
 	);
 
-	await runConversationsAndMessagesStreams(fixture.deps, {});
+	await runConversationsAndMessagesStreams(
+		fixture.deps,
+		{},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 
 	assert.deepEqual(fixture.listCursors(), [0, 30, 30, 30, 60, 60, 60, 90, 90]);
 	assert.equal(
@@ -1808,7 +1824,11 @@ test("a short cursor page followed by more items is complete", async () => {
 		]),
 	);
 
-	await runConversationsAndMessagesStreams(fixture.deps, {});
+	await runConversationsAndMessagesStreams(
+		fixture.deps,
+		{},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 
 	assert.equal(
 		fixture.messages.some(
@@ -1865,7 +1885,11 @@ test("recorded early-end patterns on search cursors stay partial", async () => {
 			]);
 			const fixture = makeConversationListingHarness(responses);
 
-			await runConversationsAndMessagesStreams(fixture.deps, {});
+			await runConversationsAndMessagesStreams(
+				fixture.deps,
+				{},
+				{ detailPacing: NO_DETAIL_WAITS },
+			);
 
 			assert.equal(
 				fixture.messages.some(
@@ -1898,7 +1922,11 @@ test("disagreeing short-page retries union ids and follow the cursor", async () 
 		]),
 	);
 
-	await runConversationsAndMessagesStreams(fixture.deps, {});
+	await runConversationsAndMessagesStreams(
+		fixture.deps,
+		{},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 
 	const skip = fixture.messages.find(
 		(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
@@ -1953,7 +1981,11 @@ test("tapped ChatGPT cursor-120 shapes union retry ids and continue at cursor 15
 		);
 		pages.set(150, [{ items: [] }]);
 		const fixture = makeConversationListingHarness(pages);
-		await runConversationsAndMessagesStreams(fixture.deps, {});
+		await runConversationsAndMessagesStreams(
+			fixture.deps,
+			{},
+			{ detailPacing: NO_DETAIL_WAITS },
+		);
 		assert.equal(
 			new Set(fixture.emitted.map((record) => record.data.id)).size,
 			150,
@@ -2001,7 +2033,11 @@ test("round-2 B1: a stable short page with a next cursor cannot end the full lis
 	}
 	pages.set(630, [{ items: [] }]);
 	const fixture = makeConversationListingHarness(pages);
-	await runConversationsAndMessagesStreams(fixture.deps, {});
+	await runConversationsAndMessagesStreams(
+		fixture.deps,
+		{},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 	assert.equal(
 		new Set(fixture.emitted.map((record) => record.data.id)).size,
 		600,
@@ -2030,6 +2066,9 @@ test("round-2 B2: a changing continuation page stays partial without coverage", 
 	const api: ChatGptApi = {
 		auth: () => Promise.reject(new Error("auth unused")),
 		fetch: (path) => {
+			if (path.startsWith("/conversation/")) {
+				return Promise.resolve(emptyConversationDetail(path));
+			}
 			paths.push(path);
 			const cursor = Number(
 				new URLSearchParams(path.split("?")[1]).get("cursor"),
@@ -2099,6 +2138,9 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	const api: ChatGptApi = {
 		auth: () => Promise.reject(new Error("auth unused")),
 		fetch: (path) => {
+			if (path.startsWith("/conversation/")) {
+				return Promise.resolve(emptyConversationDetail(path));
+			}
 			const cursor = Number(
 				new URLSearchParams(path.split("?")[1]).get("cursor"),
 			);
@@ -6430,6 +6472,9 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 				}
 				return { status: 200, json: null };
 			}
+			if (path.startsWith("/conversation/")) {
+				return emptyConversationDetail(path);
+			}
 			throw new Error(`unexpected fetch ${path}`);
 		},
 	};
@@ -6512,6 +6557,9 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 					return { status: 200, json: { items: missingTail } };
 				}
 				return { status: 200, json: { items: [] } };
+			}
+			if (path.startsWith("/conversation/")) {
+				return emptyConversationDetail(path);
 			}
 			throw new Error(`unexpected fetch ${path}`);
 		},
@@ -6735,6 +6783,9 @@ test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversat
 				}
 				return { status: 500, json: null };
 			}
+			if (path.startsWith("/conversation/")) {
+				return emptyConversationDetail(path);
+			}
 			throw new Error(`unexpected fetch ${path}`);
 		},
 	};
@@ -6882,6 +6933,9 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 						makeConvo({ id: `convo-${calls}-${idx}`, update_time: base - idx }),
 				);
 				return { status: 200, json: { items } };
+			}
+			if (path.startsWith("/conversation/")) {
+				return emptyConversationDetail(path);
 			}
 			throw new Error(`unexpected fetch ${path}`);
 		},

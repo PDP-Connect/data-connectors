@@ -2380,6 +2380,12 @@ export interface StreamDeps {
 	runBudget?: ChatGptRunBudget;
 	/** Run-scoped latch so the batch-fallback diagnostic logs once per run, not once per detail pass. */
 	batchFallbackLog?: ChatGptBatchFallbackLog;
+	/**
+	 * Set by `conversationDetailOnlyDeps`: the detail is fetched only to fill the
+	 * `conversations` record (branch message count, model counts). No message
+	 * record, blob or `messages` DETAIL_GAP is produced from it.
+	 */
+	conversationDetailOnly?: boolean;
 }
 
 /** Mutable holder shared by the recovery and forward detail passes of one run. */
@@ -2814,7 +2820,9 @@ export async function processConversationDetail(
 		await emitConversation(c, null);
 		const reason =
 			detail.status === 200 ? "detail_mapping_missing" : "detail_http_error";
-		await deps.emit(makeIncompleteConversationDetailGap(c, reason));
+		if (!deps.conversationDetailOnly) {
+			await deps.emit(makeIncompleteConversationDetailGap(c, reason));
+		}
 		return { complete: false, reason };
 	}
 	const { mapping } = detail.json;
@@ -2843,6 +2851,9 @@ export async function processConversationDetail(
 	let rejectedByShapeAnywhere = 0;
 	const omitted =
 		deps.omittedMessageContent ?? createOmittedMessageContentTally();
+	// A detail fetched only for the conversations stream builds the same branch
+	// counts from the same filters, but selects, spools and emits no message.
+	const emitMessages = deps.conversationDetailOnly !== true;
 	// Messages the source cannot represent: the unknown-shape fallback cut (see
 	// source-unrepresentable.ts).
 	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
@@ -2883,6 +2894,7 @@ export async function processConversationDetail(
 			continue;
 		}
 		if (
+			emitMessages &&
 			deps.isRecordSelected &&
 			!deps.isRecordSelected("messages", toMessageRecord(msg, c.id))
 		) {
@@ -2902,7 +2914,7 @@ export async function processConversationDetail(
 		// not emitted again, so it is neither measured nor counted again.
 		let blob: { ref: MessageBlobRef; spoolDir: string } | null = null;
 		let omission: keyof OmittedMessageContentTally | null = null;
-		if (extracted.oversize && !alreadyEmitted) {
+		if (emitMessages && extracted.oversize && !alreadyEmitted) {
 			const spoolDir = blobSpoolDir();
 			// The text is measured here and dropped; the spool step re-derives it.
 			const ref =
@@ -3005,7 +3017,7 @@ export async function processConversationDetail(
 				`current_node_filtered=${currentNodeFilteredReason ?? "no"})`,
 		);
 	}
-	for (const candidate of candidates) {
+	for (const candidate of emitMessages ? candidates : []) {
 		const { msg } = candidate;
 		if (candidate.alreadyEmitted) continue;
 		const messageId =
@@ -3051,7 +3063,7 @@ export async function processConversationDetail(
 			: branchStructurallyIncomplete || emittedParentConflict
 				? "branch_structurally_incomplete"
 				: null;
-	if (incompleteReason) {
+	if (incompleteReason && emitMessages) {
 		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
 	}
 	if (candidates.length === 0) {
@@ -7262,17 +7274,19 @@ async function walkConversationsAndMessages(
 
 	if (wantsConversations) {
 		const detailedIds = new Set(messageDetailConversations.map((c) => c.id));
-		// Emit list-only parents for conversation rows not already repaired by
-		// message-detail fetches in this run. These rows were genuinely listed
-		// before any truncation, so emitting them is still lose-nothing even on a
-		// truncated pass — only the coverage CLAIM and cursor advance below are
-		// withheld.
-		for (const c of conversationsToSync) {
-			if (detailedIds.has(c.id)) {
-				continue;
-			}
-			await emitConversation(c, null);
-		}
+		// Rows the message-detail pass already repaired are done. The rest get
+		// their detail here, so `conversations` carries the branch message count
+		// and model counts even when `messages` is not requested. A row whose
+		// detail could not be fetched is still emitted list-only (null counts).
+		// These rows were genuinely listed before any truncation, so emitting them
+		// is still lose-nothing even on a truncated pass — only the coverage CLAIM
+		// and cursor advance below are withheld.
+		await emitConversationsWithDetail(
+			runDeps,
+			conversationsToSync.filter((c) => !detailedIds.has(c.id)),
+			emitConversation,
+			options.detailPacing,
+		);
 		// A truncated list proved it did not see everything newer than
 		// priorConversationsCursor, so `conversationsToSync.length` is a prefix,
 		// not the true boundary — claiming it as `considered === covered` would
@@ -7286,6 +7300,72 @@ async function walkConversationsAndMessages(
 			conversationsListTruncated,
 			priorConversationsCursor,
 		});
+	}
+}
+
+/**
+ * `deps` for a detail pass that serves only the `conversations` stream. The pass
+ * rides the same lane, pacing, circuit and run budget as the messages path, but
+ * `messages` is not requested here: a `DETAIL_GAP` would name an unrequested
+ * stream, and the lane's progress would be filed under it. Progress moves to
+ * `conversations` and gaps are dropped; a conversation whose detail is deferred
+ * is emitted list-only instead (see `emitConversationsWithDetail`).
+ */
+function conversationDetailOnlyDeps(deps: StreamDeps): StreamDeps {
+	return {
+		...deps,
+		conversationDetailOnly: true,
+		emit: (message) => {
+			if (message.type === "DETAIL_GAP") return Promise.resolve();
+			if (message.type === "PROGRESS" && message.stream === "messages") {
+				return deps.emit({ ...message, stream: "conversations" });
+			}
+			return deps.emit(message);
+		},
+		progress: (message, extra) =>
+			deps.progress(
+				message,
+				extra?.stream === "messages"
+					? { ...extra, stream: "conversations" }
+					: extra,
+			),
+	};
+}
+
+/**
+ * Fetch each conversation's detail once and emit the merged `conversations`
+ * record, without emitting messages. A detail that arrives (200) fills the
+ * record. A hard HTTP failure throws, as it does in the messages path. A
+ * deferral for pressure or the run budget leaves the row list-only, as it was
+ * before this fetch existed; the messages path would write a `DETAIL_GAP` for it
+ * instead, but the stream that gap belongs to is not requested here.
+ */
+async function emitConversationsWithDetail(
+	deps: StreamDeps,
+	conversations: ConversationListItem[],
+	emitConversation: (
+		c: ConversationListItem,
+		detail: ConversationDetail | null,
+	) => Promise<void>,
+	pacing: ConversationDetailPacingOptions = {},
+): Promise<void> {
+	if (conversations.length === 0) {
+		return;
+	}
+	const emitted = new Set<string>();
+	await runMessagesAndConversationsWithDetail(
+		conversationDetailOnlyDeps(deps),
+		conversations,
+		async (c, detail) => {
+			emitted.add(c.id);
+			await emitConversation(c, detail);
+		},
+		pacing,
+	);
+	for (const c of conversations) {
+		if (!emitted.has(c.id)) {
+			await emitConversation(c, null);
+		}
 	}
 }
 

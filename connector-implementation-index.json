@@ -4710,7 +4710,7 @@
 								},
 								"model_counts": {
 									"type": ["object", "null"],
-									"description": "Assistant messages on the current branch per model slug, as {\"<model_slug>\": <count>}. Model names and counts only, never message text. A message with no usable slug (absent, longer than 80 characters, or not safe text) adds no entry. Null when the conversation detail was not fetched (the same condition that leaves message_count_on_current_branch null); an empty object means a fetched branch with no named assistant model. Like message_count_on_current_branch, it counts the messages emitted for the branch, so a requested time range or record selection can narrow it.",
+									"description": "Assistant messages on the current branch per model slug, as {\"<model_slug>\": <count>}. Model names and counts only, never message text. A message with no usable slug (absent, longer than 80 characters, or not safe text) adds no entry. The connector reads each conversation's detail for this stream, whether or not messages is requested. Null when that detail could not be read (the same condition that leaves message_count_on_current_branch null), for example when a run limit deferred it; an empty object means a read branch with no named assistant model. When messages is also requested, the count follows the messages emitted for the branch, so a requested time range or record selection can narrow it.",
 									"additionalProperties": {
 										"type": "integer",
 										"minimum": 1
@@ -25520,7 +25520,7 @@
 									}
 								},
 								"is_owner_actor": {
-									"type": "boolean"
+									"type": ["boolean", "null"]
 								}
 							},
 							"required": [
