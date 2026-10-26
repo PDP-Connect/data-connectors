@@ -10,7 +10,7 @@
 	},
 	"connector_key": "whatsapp-web",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "WhatsApp (web)",
 	"brand": {
 		"icon": "icon.svg",
@@ -91,12 +91,12 @@
 					},
 					"muted": {
 						"type": "boolean",
-						"description": "True when the chat is muted now: muted with no end, or muted until a time still in the future."
+						"description": "True when the source holds a mute for the chat: muted with no end, or muted until muted_until. It is not compared with the run's clock; whether a timed mute is still in force is muted_until against the reader's clock."
 					},
 					"muted_until": {
 						"type": ["string", "null"],
 						"format": "date-time",
-						"description": "The time the chat's mute ends; null when the chat is not muted or is muted with no end."
+						"description": "The time the chat's mute ends, as the source holds it (it can be in the past); null when no mute is set or the mute has no end."
 					},
 					"unread_count": {
 						"type": "integer",
@@ -148,7 +148,7 @@
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "scheduled_window"
 		},
@@ -160,7 +160,7 @@
 				"label": "Your WhatsApp messages",
 				"detail": "Message text or caption, who sent it, when, whether it was forwarded or starred, media metadata, calls, polls and locations."
 			},
-			"semantics": "append_only",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
@@ -291,7 +291,7 @@
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"coverage_strategy": "parent_detail_accounting",
 			"parent_streams": ["chats"],
 			"freshness_strategy": "scheduled_window"
@@ -432,12 +432,11 @@
 			},
 			"primary_key": ["id"],
 			"cursor_field": "created_at",
-			"consent_time_field": "created_at",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "scheduled_window"
 		}

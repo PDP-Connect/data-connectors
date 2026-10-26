@@ -410,15 +410,12 @@ test("fix 3: collect passes the owner id and chat kind through, so every message
 
 // ─── mute ────────────────────────────────────────────────────────────────
 
-test("fix 4: muteExpiration 0/absent is not muted, -1 is muted with no end, a time is the mute's end", () => {
+test("fix 4: muteExpiration 0/absent is not muted, -1 is muted with no end, a time is the mute's end, with no clock read", () => {
 	const chat = chatsFixture[0];
 	assert.ok(chat !== undefined);
 	const build = (mute: unknown) =>
-		buildChat(
-			{ ...chat, mute_expiration: mute } as never,
-			new TextTally(),
-			1_791_000_000,
-		).record;
+		buildChat({ ...chat, mute_expiration: mute } as never, new TextTally())
+			.record;
 
 	for (const notMuted of [0, null, undefined]) {
 		const r = build(notMuted);
@@ -431,8 +428,11 @@ test("fix 4: muteExpiration 0/absent is not muted, -1 is muted with no end, a ti
 	const until = build(1_792_000_000);
 	assert.equal(until.muted, true);
 	assert.equal(until.muted_until, iso(1_792_000_000));
-	const expired = build(1_790_000_000);
-	assert.equal(expired.muted, false, "an expired mute is not muted now");
+	// A mute whose end has passed is still the mute the source holds: the
+	// record does not change with the run's clock, only with the source.
+	const expired = build(1_000_000_000);
+	assert.equal(expired.muted, true, "a mute set in the source, end passed");
+	assert.equal(expired.muted_until, iso(1_000_000_000));
 	for (const r of [build(0), forever, until, expired]) {
 		assert.equal(validateRecord("chats", r).ok, true);
 	}
@@ -855,4 +855,46 @@ test("review 1 #2: a chat longer than one chunk is walked to its store's own end
 	// msgFindBefore refuses anything but the store's own key objects, so a
 	// resumed chunk anchored on a rebuilt key would have thrown above.
 	assert.ok(stub.anchors.length >= 80);
+});
+
+test("since: the in-page walk stops after a full page wholly older than the window's start", async () => {
+	const total = MESSAGE_PAGE_SIZE * 3;
+	const stub = stubChat({ chatId: "peer-one@lid", total, inMemory: 1 });
+	// The window starts at message 2P: the first page back (2P-1 .. 3P-2)
+	// straddles it, the second (P-1 .. 2P-2) is wholly older.
+	const sinceMs = (1_700_000_000 + MESSAGE_PAGE_SIZE * 2) * 1000;
+	const walk = parseChatWalk(
+		await readChatMessages(
+			vmRunner(stub.modules),
+			"peer-one@lid",
+			null,
+			sinceMs,
+		),
+	);
+	assert.ok(walk !== null);
+	assert.equal(walk.complete, true);
+	assert.equal(walk.stop, "before_since");
+	assert.equal(stub.calls(), 2, "no page older than the wholly-old one");
+	const ids = new Set([...walk.memory, ...walk.messages].map((m) => m.id));
+	for (const m of stub.all.slice(MESSAGE_PAGE_SIZE * 2)) {
+		assert.ok(ids.has(m.id.toString()), "every message inside the window");
+	}
+	// Without a window the same store is read to its own short page.
+	const full = stubChat({ chatId: "peer-one@lid", total, inMemory: 1 });
+	const all = parseChatWalk(
+		await readChatMessages(vmRunner(full.modules), "peer-one@lid"),
+	);
+	assert.equal(all?.stop, "short_page");
+	assert.equal(full.calls(), 3);
+});
+
+test("manifest: no stream claims incremental reads, messages are mutable, groups have no consent time", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { streams: Array<Record<string, unknown>> };
+	const byName = new Map(manifest.streams.map((s) => [s.name, s]));
+	for (const s of manifest.streams)
+		assert.equal(s.incremental, false, String(s.name));
+	assert.equal(byName.get("messages")?.semantics, "mutable_state");
+	assert.equal(byName.get("groups")?.consent_time_field, undefined);
 });

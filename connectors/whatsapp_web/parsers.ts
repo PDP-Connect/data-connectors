@@ -179,21 +179,21 @@ export function historyOutOfReach(historyState: string | null): boolean {
 
 /**
  * The chat's mute, from the model's `muteExpiration` (epoch seconds, default
- * 0): 0 or absent is not muted; the app's mute-always value (-1, any negative)
- * is muted with no end; a positive value is the time the mute ends, muted now
- * only while that time is in the future.
+ * 0), exactly as the source holds it: 0 or absent is no mute; the app's
+ * mute-always value (-1, any negative) is a mute with no end; a positive
+ * value is a mute that ends at that time. `muted` says a mute is set; it is
+ * not compared with the run's clock, so the record changes only when the
+ * source does, and whether a timed mute is still in force is `muted_until`
+ * against the reader's own clock.
  */
-export function chatMute(
-	muteExpiration: number | null | undefined,
-	nowSeconds: number,
-): { muted: boolean; muted_until: string | null } {
+export function chatMute(muteExpiration: number | null | undefined): {
+	muted: boolean;
+	muted_until: string | null;
+} {
 	if (typeof muteExpiration !== "number" || muteExpiration === 0)
 		return { muted: false, muted_until: null };
 	if (muteExpiration < 0) return { muted: true, muted_until: null };
-	return {
-		muted: muteExpiration > nowSeconds,
-		muted_until: secondsToIso(muteExpiration),
-	};
+	return { muted: true, muted_until: secondsToIso(muteExpiration) };
 }
 
 /**
@@ -210,10 +210,9 @@ export function historyRemainsOnPhone(historyState: string | null): boolean {
 export function buildChat(
 	chat: WaChat,
 	tally: TextTally,
-	nowSeconds: number = Date.now() / 1000,
 ): { record: RecordData; replaced: number } {
 	const scope = new TextScope();
-	const mute = chatMute(chat.mute_expiration, nowSeconds);
+	const mute = chatMute(chat.mute_expiration);
 	const record: RecordData = {
 		id: chat.id,
 		kind: chatKind(chat.id, chat.server),
