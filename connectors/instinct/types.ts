@@ -90,11 +90,45 @@ export type ConnectionProvider =
 	| "whoop";
 
 /**
- * Per-chat incremental checkpoint. `chatHistory` pages newest-first, so the
- * high-water mark is the newest event seen; several events can share one
- * epoch second, so the ids at that second are kept to avoid re-emitting them.
+ * Per-chat checkpoint. `chatHistory` pages newest-first, so a chat's events
+ * are known as one band of time: every event created at or after
+ * `covered_since` (epoch seconds; null means from the start of the history)
+ * and up to `newest_created_at` was delivered. Several events can share one
+ * epoch second, so the ids at the newest second are kept to avoid re-emitting
+ * them. `newest_created_at` is null when no event was in the band.
+ *
+ * The lower bound is what keeps a time-bounded run honest: a run under
+ * `since` reads and delivers only the newer part of a history, and a later
+ * run with an earlier `since` (or none) sees from `covered_since` that the
+ * older part was never delivered and reads down to it.
  */
 export interface ChatCheckpoint {
-	readonly newest_created_at: number;
+	readonly covered_since: number | null;
+	readonly newest_created_at: number | null;
 	readonly newest_ids: readonly string[];
+}
+
+/**
+ * How this run reads chat histories, derived from the `chat_events` scope.
+ * Bounds are in whole epoch seconds, the precision of Instinct's `createdAt`.
+ */
+export interface ChatReadPlan {
+	/**
+	 * The oldest second the scope admits: `since` rounded up to a whole
+	 * second, or null when the scope has no `since`. Paging stops below it.
+	 */
+	readonly floor: number | null;
+	/**
+	 * The first second the scope no longer admits: `until` rounded up to a
+	 * whole second, or null when the scope has no `until`.
+	 */
+	readonly untilSecond: number | null;
+	/** True when the scope carries a `time_range`. */
+	readonly bounded: boolean;
+	/**
+	 * False when the runtime drops events by something other than time (a
+	 * `resources` list, or a bound this connector cannot read): what was read
+	 * is then not what was delivered, so no checkpoint may move.
+	 */
+	readonly mayAdvance: boolean;
 }

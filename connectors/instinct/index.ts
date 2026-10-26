@@ -66,7 +66,21 @@
  * `limit`/`cursor`; `chatHistory` returns the newest window first with a
  * cursor to older windows (each window ascending by `createdAt`, epoch
  * seconds). A first run backfills everything; later runs page only until they
- * reach the per-chat checkpoint in `chat_events` STATE. All loops are bounded.
+ * reach the per-chat checkpoint in the chats STATE. All loops are bounded.
+ *
+ * Time ranges (Collection Profile 5.1, 5.2): records carry only times
+ * Instinct reports. profile, agent_contact, connections and vault_entries
+ * have no source time, so they declare no consent_time_field and are not
+ * collected under a time_range (the runtime reports scope_not_supported).
+ * devices and trusted_people filter on `created_at`, chats on
+ * `last_event_at` (its newest event), chat_events on `created_at`. A
+ * `chat_events` `since` is pushed down: paging stops at the first window
+ * older than it. The per-chat checkpoint records how far down the history
+ * was delivered (`covered_since`), so a later run with an earlier `since`
+ * reads the older part instead of skipping it. A run whose events are
+ * filtered by `resources`, or that read an event at or after `until`, keeps
+ * the prior checkpoints. `until` cannot be pushed down: the history is
+ * newest first and has no upper-bound parameter.
  *
  * Reachability probe: permanently exempt. api.instinct.com answers nothing
  * useful unauthenticated and Instinct is invite-only private beta, so there is
@@ -96,17 +110,24 @@ import {
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
-	advanceCheckpoint,
 	agentContactRecord,
+	type ChatEventsScope,
 	chatEventRecord,
+	chatReadPlan,
 	chatRecord,
 	connectionRecords,
 	deviceRecords,
 	eventEpochSeconds,
+	hasSubSecondTime,
 	imessageConnectionRecord,
-	isNewEvent,
 	messagingConnectionRecords,
+	newestEventAt,
+	nextCheckpoint,
 	profileRecord,
+	shouldEmitEvent,
+	stopBelowSecond,
+	toIso,
+	deliveredAll,
 	trustedPeopleRecords,
 	vaultEntryRecords,
 } from "./parsers.ts";
@@ -127,6 +148,7 @@ import type {
 	Chat,
 	ChatCheckpoint,
 	ChatEvent,
+	ChatReadPlan,
 	ConnectionFeatureGates,
 	GraphqlError,
 	GraphqlFetchResult,
@@ -440,13 +462,22 @@ export function describeGraphqlErrors(
 
 // ─── Stream failures ───────────────────────────────────────────────────────
 
+/**
+ * Portable recovery hints (Collection Profile 5.5) for a failure retrying
+ * cannot fix. A retryable failure carries none and keeps the runtime's
+ * default.
+ */
+type RecoveryAction = "not_retriable" | "retry_on_connector_upgrade";
+
 /** A stream whose list could not be proven complete this run. */
 export class StreamIncomplete extends Error {
+	readonly hint: RecoveryAction | undefined;
 	readonly retryable: boolean;
-	constructor(message: string, retryable: boolean) {
+	constructor(message: string, retryable: boolean, hint?: RecoveryAction) {
 		super(message);
 		this.name = "StreamIncomplete";
 		this.retryable = retryable;
+		this.hint = retryable ? undefined : hint;
 	}
 }
 
@@ -456,6 +487,25 @@ function errorCode(error: unknown): string | undefined {
 	}
 	const { code } = error as { code?: unknown };
 	return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * The recovery hint for a failure retrying cannot fix: an answer this
+ * connector cannot read needs a connector update, a refused request needs
+ * nothing this connector can do.
+ */
+function errorHint(error: unknown): RecoveryAction | undefined {
+	if (error instanceof StreamIncomplete) {
+		return error.hint;
+	}
+	switch (errorCode(error)) {
+		case INSTINCT_SOURCE_UNREADABLE:
+			return "retry_on_connector_upgrade";
+		case INSTINCT_REQUEST_REJECTED:
+			return "not_retriable";
+		default:
+			return undefined;
+	}
 }
 
 function errorRetryable(error: unknown): boolean {
@@ -475,6 +525,7 @@ function unreadable(operation: string, error: z.ZodError): StreamIncomplete {
 	return new StreamIncomplete(
 		`Instinct answered ${operation} in a shape this connector does not recognise (${issues}).`,
 		false,
+		"retry_on_connector_upgrade",
 	);
 }
 
@@ -717,14 +768,64 @@ export interface CollectInstinctArgs
 	readonly emit: (message: EmittedMessage) => Promise<void>;
 	readonly emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	readonly graphql: InstinctGraphql;
+	/**
+	 * The run's clock, kept only in STATE cursors of the account-state
+	 * streams (Collection Profile 5.3). Never written into a record.
+	 */
 	readonly observedAt: string;
 	readonly progress: (
 		message: string,
 		extra?: Record<string, unknown>,
 	) => Promise<void>;
 	readonly requested: ReadonlySet<string>;
-	/** Stream-keyed state from START; only `chat_events` reads it. */
+	/**
+	 * Each requested stream's START scope (`resources`, `time_range`). The
+	 * runtime applies both to every record; the collector reads them to push
+	 * the bounds down to Instinct and to keep checkpoints honest.
+	 */
+	readonly scopes?: ReadonlyMap<string, InstinctStreamScope>;
+	/** Stream-keyed state from START; only the chats STATE is read. */
 	readonly state?: Readonly<Record<string, unknown>>;
+}
+
+/** The part of one START scope stream this collector reads. */
+export type InstinctStreamScope = ChatEventsScope;
+
+/**
+ * Streams Instinct reports no time for. They declare no consent_time_field,
+ * so a time_range cannot apply to them: the desktop runtime withholds them
+ * before collect and reports scope_not_supported; the PageShim host reports
+ * it after collect, so the collector itself must not read them either.
+ */
+export const UNTIMED_STREAMS: ReadonlySet<string> = new Set([
+	"agent_contact",
+	"connections",
+	"profile",
+	"vault_entries",
+]);
+
+/** True when this run collects `stream`. */
+function collects(args: CollectInstinctArgs, stream: string): boolean {
+	if (!args.requested.has(stream)) {
+		return false;
+	}
+	return !(
+		UNTIMED_STREAMS.has(stream) &&
+		args.scopes?.get(stream)?.time_range !== undefined
+	);
+}
+
+/**
+ * False when the stream's `resources` list leaves out `key`: the runtime
+ * would drop the record, so it is not read at all.
+ */
+function resourceWanted(
+	args: CollectInstinctArgs,
+	stream: string,
+	key: string,
+): boolean {
+	const resources = args.scopes?.get(stream)?.resources;
+	return resources === undefined || resources.includes(key);
 }
 
 /** Feature gates the account is actually flagged for, mirroring the web app. */
@@ -758,17 +859,24 @@ async function failStreams(
 	}
 	const message = error instanceof Error ? error.message : String(error);
 	const retryable = errorRetryable(error);
+	const hint = errorHint(error);
+	const recoveryHint =
+		hint === undefined ? undefined : { action: hint, retryable };
 	for (const stream of streams) {
-		if (!args.requested.has(stream)) {
+		if (!collects(args, stream)) {
 			continue;
 		}
 		connectorDiagnostic("instinct", "stream_failed", { retryable, stream });
 		if (!args.reportStreamFailure) {
 			throw createConnectorFailure(INSTINCT_STREAM_INCOMPLETE, message, {
 				retryable,
+				...(recoveryHint === undefined ? {} : { recoveryHint }),
 			});
 		}
-		await args.reportStreamFailure(stream, message, { retryable });
+		await args.reportStreamFailure(stream, message, {
+			retryable,
+			...(recoveryHint === undefined ? {} : { recoveryHint }),
+		});
 	}
 }
 
@@ -849,7 +957,11 @@ async function emitProvenList(
 	const problems =
 		schemaProblems(stream, records) ?? duplicateKeys(stream, records);
 	if (problems !== null) {
-		await failStreams(args, [stream], new StreamIncomplete(problems, false));
+		await failStreams(
+			args,
+			[stream],
+			new StreamIncomplete(problems, false, "retry_on_connector_upgrade"),
+		);
 		return;
 	}
 	for (const record of records) {
@@ -922,11 +1034,11 @@ async function collectProfile(
 			),
 		);
 	}
-	if (!args.requested.has("profile")) {
+	if (!collects(args, "profile")) {
 		return flags;
 	}
 	const failure = graphqlFailure("the profile read", profile.errors);
-	const record = profileRecord(profile, args.observedAt);
+	const record = profileRecord(profile);
 	if (failure !== null || record === null) {
 		await failStreams(
 			args,
@@ -963,9 +1075,7 @@ async function collectAgentContact(args: CollectInstinctArgs): Promise<void> {
 	await emitProvenList(
 		args,
 		"agent_contact",
-		read.value === null
-			? []
-			: [agentContactRecord(read.value, args.observedAt)],
+		read.value === null ? [] : [agentContactRecord(read.value)],
 	);
 }
 
@@ -1071,15 +1181,11 @@ async function readConnections(
 	}
 
 	const records = [
-		...connectionRecords(connections.data, args.observedAt),
-		...messagingConnectionRecords(messaging.data, args.observedAt),
+		...connectionRecords(connections.data),
+		...messagingConnectionRecords(messaging.data),
 	];
 	// Both iMessage resolvers feed one record, built after both answered.
-	const imessageRecord = imessageConnectionRecord(
-		messaging.data,
-		relay,
-		args.observedAt,
-	);
+	const imessageRecord = imessageConnectionRecord(messaging.data, relay);
 	if (imessageRecord !== null) {
 		records.push(imessageRecord);
 	}
@@ -1113,7 +1219,7 @@ async function collectDevices(args: CollectInstinctArgs): Promise<void> {
 		if (!Array.isArray(parsed.data.data?.devices)) {
 			throw new StreamIncomplete("Instinct returned no device list.", true);
 		}
-		return deviceRecords(parsed.data, args.observedAt);
+		return deviceRecords(parsed.data);
 	});
 	if (read !== null) {
 		await emitProvenList(args, "devices", read.value);
@@ -1188,6 +1294,7 @@ async function readTrustedPeople(
 			throw new StreamIncomplete(
 				`Instinct returned a full page of ${String(TRUSTED_PAGE_SIZE)} sent trust requests and offers no way to read past it, so the list may be longer than what was read.`,
 				false,
+				"not_retriable",
 			);
 		}
 		const open: NonNullable<TrustedNetworkResponse["data"]> = {
@@ -1205,10 +1312,7 @@ async function readTrustedPeople(
 				);
 			}
 		}
-		for (const record of trustedPeopleRecords(
-			{ data: open },
-			args.observedAt,
-		)) {
+		for (const record of trustedPeopleRecords({ data: open })) {
 			records.set(String(record.id), record);
 		}
 		for (const list of TRUSTED_LISTS) {
@@ -1272,7 +1376,7 @@ async function collectVaultEntries(args: CollectInstinctArgs): Promise<void> {
 		if (!Array.isArray(parsed.data.data?.vaultEntries)) {
 			throw new StreamIncomplete("Instinct returned no vault inventory.", true);
 		}
-		return vaultEntryRecords(parsed.data, args.observedAt);
+		return vaultEntryRecords(parsed.data);
 	});
 	if (read !== null) {
 		await emitProvenList(args, "vault_entries", read.value);
@@ -1282,28 +1386,40 @@ async function collectVaultEntries(args: CollectInstinctArgs): Promise<void> {
 // ─── Chats ─────────────────────────────────────────────────────────────────
 
 const chatCheckpointSchema = z.object({
-	newest_created_at: z.number().int(),
+	covered_since: z.number().int().nullable(),
+	newest_created_at: z.number().int().nullable(),
 	newest_ids: z.array(z.string()),
 });
-// START.state carries each stream's last STATE cursor as-is, so this is the
-// `{ chats }` object the chats STATE below carries, not a `{ cursor }` wrapper.
-const chatEventsStateSchema = z
-	.object({ chats: z.record(z.string(), chatCheckpointSchema) })
-	.partial();
 
 /**
  * Prior per-chat event checkpoints, from the chats STATE (chat_events is a
- * parent-detail stream with no STATE of its own), or none when state is
- * absent or unreadable.
+ * parent-detail stream with no STATE of its own). START.state carries each
+ * stream's last STATE cursor as-is, so this reads the `{ chats }` object the
+ * chats STATE below carries. A chat whose checkpoint is unreadable has none,
+ * and its history is read again from the start. That includes checkpoints
+ * from 0.1.1 and earlier, which carry no `covered_since`: a time-bounded run
+ * could have moved them past events it never delivered, so they are not
+ * trusted.
  */
 export function readChatCheckpoints(
 	state: Readonly<Record<string, unknown>> | undefined,
 ): Record<string, ChatCheckpoint> {
-	const parsed = chatEventsStateSchema.safeParse(state?.chats ?? {});
-	if (!parsed.success) {
+	const cursor = state?.chats;
+	if (typeof cursor !== "object" || cursor === null) {
 		return {};
 	}
-	return { ...(parsed.data.chats ?? {}) };
+	const chats = (cursor as { chats?: unknown }).chats;
+	if (typeof chats !== "object" || chats === null || Array.isArray(chats)) {
+		return {};
+	}
+	const marks: Record<string, ChatCheckpoint> = {};
+	for (const [chatId, value] of Object.entries(chats)) {
+		const parsed = chatCheckpointSchema.safeParse(value);
+		if (parsed.success) {
+			marks[chatId] = parsed.data;
+		}
+	}
+	return marks;
 }
 
 /** The whole chat list, or a StreamIncomplete when its end was not observed. */
@@ -1357,108 +1473,150 @@ async function readChatList(args: CollectInstinctArgs): Promise<Chat[]> {
 	);
 }
 
-type HistoryOutcome =
-	| { readonly kind: "read"; readonly events: ChatEvent[] }
+type ChatGap = {
+	readonly errorClass: string;
+	readonly httpStatus?: number;
+	readonly kind: "gap";
+	readonly message: string;
+	readonly reason: "rate_limited" | "retry_exhausted" | "temporary_unavailable";
+};
+
+/** One `chatHistory` window: its events (ascending) and the cursor to older ones. */
+type HistoryWindow =
 	| {
-			readonly errorClass: string;
-			readonly httpStatus?: number;
-			readonly kind: "gap";
-			readonly message: string;
-			readonly reason:
-				| "rate_limited"
-				| "retry_exhausted"
-				| "temporary_unavailable";
-	  };
+			readonly cursor: string | null;
+			readonly events: ChatEvent[];
+			readonly kind: "window";
+	  }
+	| ChatGap;
+
+type HistoryOutcome =
+	| {
+			/** Every event on the windows read, delivered or not. */
+			readonly events: ChatEvent[];
+			/** True when the start of the history was reached. */
+			readonly ended: boolean;
+			readonly kind: "read";
+	  }
+	| ChatGap;
 
 /**
- * Read one chat's events newer than its checkpoint. `chatHistory` returns
- * the newest window first and a cursor to older windows, so paging stops at
- * the first window that reaches already-collected events, or at the end of
- * the history. Anything short of that is a gap for this chat; a signed-out
- * answer stops the run.
+ * Read one `chatHistory` window. Anything but a readable window with a
+ * cursor is a gap for this chat; a signed-out answer stops the run.
  */
-async function readNewChatEvents(
+async function readHistoryWindow(
+	args: CollectInstinctArgs,
+	chatId: string,
+	cursor: string | null,
+	limit: number,
+): Promise<HistoryWindow> {
+	const result = await args.graphql(CHAT_HISTORY_QUERY, {
+		chatId,
+		cursor,
+		limit,
+	});
+	const failure = transportFailure(result, "chatHistory");
+	if (failure !== null) {
+		const code = errorCode(failure) ?? INSTINCT_SERVER_ERROR;
+		if (code === INSTINCT_AUTH_FAILED) {
+			throw failure;
+		}
+		return {
+			errorClass: code,
+			...(result.status > 0 ? { httpStatus: result.status } : {}),
+			kind: "gap",
+			message: failure.message,
+			reason:
+				code === INSTINCT_RATE_LIMITED
+					? "rate_limited"
+					: "temporary_unavailable",
+		};
+	}
+	const parsed = chatHistoryResponseSchema.safeParse(result.json);
+	if (!parsed.success) {
+		return {
+			errorClass: INSTINCT_SOURCE_UNREADABLE,
+			kind: "gap",
+			message: unreadable("chatHistory", parsed.error).message,
+			reason: "temporary_unavailable",
+		};
+	}
+	const history = parsed.data.data?.chatHistory;
+	const errorNote = describeGraphqlErrors(parsed.data.errors);
+	if (!history || errorNote !== null) {
+		return {
+			errorClass: "instinct_graphql_error",
+			kind: "gap",
+			message: errorNote ?? "chatHistory returned nothing",
+			reason: "temporary_unavailable",
+		};
+	}
+	if (!Array.isArray(history.events)) {
+		return {
+			errorClass: "instinct_graphql_error",
+			kind: "gap",
+			message: "chatHistory returned no event list",
+			reason: "temporary_unavailable",
+		};
+	}
+	if (history.cursor === undefined) {
+		return {
+			errorClass: "instinct_graphql_error",
+			kind: "gap",
+			message:
+				"chatHistory carried no cursor, so the end of the history is unknown",
+			reason: "temporary_unavailable",
+		};
+	}
+	return { cursor: history.cursor, events: history.events, kind: "window" };
+}
+
+/**
+ * Read one chat's history from the newest window down to where this run may
+ * stop: the start of the history, or the first window holding an event older
+ * than `stopBelowSecond` (the checkpoint's band, or the scope's `since`).
+ * `first` is the newest window when it was already read for the chat's
+ * `last_event_at`. Anything short of the stop is a gap for this chat.
+ */
+async function readChatHistory(
 	args: CollectInstinctArgs,
 	chatId: string,
 	prior: ChatCheckpoint | null,
+	plan: ChatReadPlan,
+	first: HistoryWindow | undefined,
 ): Promise<HistoryOutcome> {
-	const fresh: ChatEvent[] = [];
+	const read: ChatEvent[] = [];
 	const seenCursors = new Set<string>();
+	let stopBelow = stopBelowSecond(prior, plan);
 	let cursor: string | null = null;
 	for (let page = 0; page < MAX_CHAT_HISTORY_PAGES; page += 1) {
-		const result = await args.graphql(CHAT_HISTORY_QUERY, {
-			chatId,
-			cursor,
-			limit: CHAT_HISTORY_PAGE_SIZE,
-		});
-		const failure = transportFailure(result, "chatHistory");
-		if (failure !== null) {
-			const code = errorCode(failure) ?? INSTINCT_SERVER_ERROR;
-			if (code === INSTINCT_AUTH_FAILED) {
-				throw failure;
-			}
-			return {
-				errorClass: code,
-				...(result.status > 0 ? { httpStatus: result.status } : {}),
-				kind: "gap",
-				message: failure.message,
-				reason:
-					code === INSTINCT_RATE_LIMITED
-						? "rate_limited"
-						: "temporary_unavailable",
-			};
+		const window: HistoryWindow =
+			page === 0 && first !== undefined
+				? first
+				: await readHistoryWindow(args, chatId, cursor, CHAT_HISTORY_PAGE_SIZE);
+		if (window.kind === "gap") {
+			return window;
 		}
-		const parsed = chatHistoryResponseSchema.safeParse(result.json);
-		if (!parsed.success) {
-			return {
-				errorClass: INSTINCT_SOURCE_UNREADABLE,
-				kind: "gap",
-				message: unreadable("chatHistory", parsed.error).message,
-				reason: "temporary_unavailable",
-			};
+		read.push(...window.events);
+		if (window.events.some(hasSubSecondTime)) {
+			// Stops are kept in whole seconds (Instinct's precision). A finer
+			// time would be floored, so this chat is read to its start.
+			stopBelow = null;
 		}
-		const history = parsed.data.data?.chatHistory;
-		const errorNote = describeGraphqlErrors(parsed.data.errors);
-		if (!history || errorNote !== null) {
-			return {
-				errorClass: "instinct_graphql_error",
-				kind: "gap",
-				message: errorNote ?? "chatHistory returned nothing",
-				reason: "temporary_unavailable",
-			};
-		}
-		if (!Array.isArray(history.events)) {
-			return {
-				errorClass: "instinct_graphql_error",
-				kind: "gap",
-				message: "chatHistory returned no event list",
-				reason: "temporary_unavailable",
-			};
-		}
-		const events = history.events;
-		if (history.cursor === undefined) {
-			return {
-				errorClass: "instinct_graphql_error",
-				kind: "gap",
-				message:
-					"chatHistory carried no cursor, so the end of the history is unknown",
-				reason: "temporary_unavailable",
-			};
-		}
-		fresh.push(...events.filter((event) => isNewEvent(event, prior)));
-		const next = history.cursor;
-		// Windows are newest first. Only an event older than the checkpoint's
-		// second proves everything beyond this window was read before: a known
-		// event in that very second does not, since the next window can still
-		// hold a new event from the same second.
+		const next: string | null = window.cursor;
+		// Windows are newest first. Only an event older than the stop second
+		// proves everything beyond this window is older still: an event in that
+		// very second does not, since the next window can still hold another
+		// event from the same second.
+		const stop = stopBelow;
 		const reachedOlder =
-			prior !== null &&
-			events.some((event) => {
+			stop !== null &&
+			window.events.some((event) => {
 				const seconds = eventEpochSeconds(event);
-				return seconds !== null && seconds < prior.newest_created_at;
+				return seconds !== null && seconds < stop;
 			});
 		if (next === null || reachedOlder) {
-			return { events: fresh, kind: "read" };
+			return { ended: next === null, events: read, kind: "read" };
 		}
 		if (seenCursors.has(next)) {
 			return {
@@ -1555,8 +1713,6 @@ async function forEachPendingGapPage(
 	}
 }
 
-type ChatGap = Extract<HistoryOutcome, { kind: "gap" }>;
-
 async function emitChatGap(
 	args: CollectInstinctArgs,
 	chatId: string,
@@ -1577,26 +1733,30 @@ async function emitChatGap(
 }
 
 /**
- * Read chats' new events and account for them. A chat read to its
- * checkpoint (or its start) emits its events oldest first, gets a new
- * checkpoint, and resolves the gaps earlier runs left for it. A chat that
- * could not be read, or whose events would not pass the schema, gets a
- * DETAIL_GAP and keeps its prior checkpoint.
+ * Read chats' new events and account for them. A chat read down to its stop
+ * emits its new in-scope events oldest first and gets its next checkpoint;
+ * when the runtime delivered everything read, the gaps earlier runs left for
+ * it are resolved. A chat that could not be read, or whose events would not
+ * pass the schema, gets a DETAIL_GAP and keeps its prior checkpoint.
  *
- * `listed` chats are read first. Then every page of pending gaps: a gapped
- * chat not read yet (a recovery-only run, or a chat no longer listed) is
- * read directly, since deletion is never inferred. One DETAIL_COVERAGE
- * closes the chats considered. Returns the checkpoints to carry forward.
+ * `listed` chats are read first, each from its prefetched newest window when
+ * there is one. Then every page of pending gaps: a gapped chat not read yet
+ * (a recovery-only run, or a chat no longer listed) is read directly, since
+ * deletion is never inferred. One DETAIL_COVERAGE closes the chats
+ * considered. Returns the checkpoints to carry forward.
  */
 async function hydrateChats(
 	args: CollectInstinctArgs,
 	listed: readonly string[],
 	firstGapPage: CollectInstinctArgs["detailGaps"],
 	prior: Readonly<Record<string, ChatCheckpoint>>,
+	plan: ChatReadPlan,
+	firstWindows: ReadonlyMap<string, HistoryWindow>,
 ): Promise<Record<string, ChatCheckpoint>> {
 	const next: Record<string, ChatCheckpoint> = {};
 	const required: string[] = [];
 	const hydrated: string[] = [];
+	const delivered: string[] = [];
 	const gaps: string[] = [];
 	const readChat = async (chatId: string): Promise<void> => {
 		required.push(chatId);
@@ -1609,14 +1769,21 @@ async function hydrateChats(
 				next[chatId] = mark;
 			}
 		};
-		const outcome = await readNewChatEvents(args, chatId, mark);
+		const outcome = await readChatHistory(
+			args,
+			chatId,
+			mark,
+			plan,
+			firstWindows.get(chatId),
+		);
 		if (outcome.kind === "gap") {
 			await emitChatGap(args, chatId, outcome);
 			gaps.push(chatId);
 			keepMark();
 			return;
 		}
-		const records = [...outcome.events]
+		const records = outcome.events
+			.filter((event) => shouldEmitEvent(event, mark, plan))
 			.sort(byCreatedAt)
 			.map((event) => chatEventRecord(chatId, event));
 		const problems = schemaProblems("chat_events", records);
@@ -1636,11 +1803,21 @@ async function hydrateChats(
 		for (const record of records) {
 			await args.emitRecord("chat_events", record);
 		}
-		const advanced = advanceCheckpoint(mark, outcome.events);
+		const advanced = nextCheckpoint(mark, outcome.events, plan, outcome.ended);
 		if (advanced !== null) {
 			next[chatId] = advanced;
 		}
 		hydrated.push(chatId);
+		// A pending gap is about the chat's whole history, so it is resolved
+		// only when the history is now delivered from its start: a walk that
+		// stopped at a `since` floor leaves the older part unrecovered.
+		if (
+			deliveredAll(outcome.events, plan) &&
+			advanced !== null &&
+			advanced.covered_since === null
+		) {
+			delivered.push(chatId);
+		}
 	};
 
 	for (const chatId of listed) {
@@ -1651,7 +1828,9 @@ async function hydrateChats(
 			if (!required.includes(chatId)) {
 				await readChat(chatId);
 			}
-			if (!hydrated.includes(chatId)) {
+			// A chat whose events were filtered by `resources` was read but not
+			// delivered: its gap stays pending for a run that delivers it.
+			if (!delivered.includes(chatId)) {
 				continue;
 			}
 			for (const gap of pending) {
@@ -1678,9 +1857,78 @@ async function hydrateChats(
 	return next;
 }
 
+/**
+ * The newest history window of each chat whose record this run delivers:
+ * its newest event is the chat's `last_event_at`, and when events are read
+ * it is also their first window. A chat the `resources` list leaves out is
+ * not read unless its events are wanted.
+ */
+async function readNewestWindows(
+	args: CollectInstinctArgs,
+	chats: readonly Chat[],
+	wantEvents: boolean,
+): Promise<Map<string, HistoryWindow>> {
+	const windows = new Map<string, HistoryWindow>();
+	for (const chat of chats) {
+		if (!(wantEvents || resourceWanted(args, "chats", chat.id))) {
+			continue;
+		}
+		windows.set(
+			chat.id,
+			await readHistoryWindow(
+				args,
+				chat.id,
+				null,
+				wantEvents ? CHAT_HISTORY_PAGE_SIZE : 1,
+			),
+		);
+	}
+	return windows;
+}
+
+/**
+ * What the newest window says about a chat's latest activity: `known` with
+ * the newest readable event time (null for a proven-empty chat), or
+ * `unknown`, with whether a retry can help. An answer whose shape this
+ * connector cannot read, or a window none of whose events has a readable
+ * time, needs a connector upgrade; a refused or failed request may not.
+ */
+type LatestActivity =
+	| { readonly at: string | null; readonly kind: "known" }
+	| { readonly kind: "unknown"; readonly retryable: boolean };
+
+function latestActivity(
+	window: HistoryWindow | undefined,
+	mark: ChatCheckpoint | undefined,
+): LatestActivity {
+	if (window?.kind === "window") {
+		if (window.events.length === 0) {
+			return window.cursor === null
+				? { at: null, kind: "known" }
+				: { kind: "unknown", retryable: true };
+		}
+		// The newest window holds the newest events, so the newest readable
+		// time among them is the chat's latest activity even when another
+		// event on it has no readable time.
+		const at = newestEventAt(window.events);
+		return at === null
+			? { kind: "unknown", retryable: false }
+			: { at, kind: "known" };
+	}
+	// The newest window did not answer: the newest event an earlier run
+	// delivered is the best known value, a lower bound of the real one.
+	if (mark !== undefined && mark.newest_created_at !== null) {
+		return { at: toIso(mark.newest_created_at), kind: "known" };
+	}
+	return {
+		kind: "unknown",
+		retryable: window?.errorClass !== INSTINCT_SOURCE_UNREADABLE,
+	};
+}
+
 async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
-	const wantChats = args.requested.has("chats");
-	let wantEvents = args.requested.has("chat_events");
+	const wantChats = collects(args, "chats");
+	let wantEvents = collects(args, "chat_events");
 	if (wantEvents && !wantChats) {
 		// Collection Profile 5.1: a connector must not broaden scope. Chat
 		// events hang off their chat records and their checkpoints live in
@@ -1698,6 +1946,7 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 	if (!wantChats) {
 		return;
 	}
+	const plan = chatReadPlan(args.scopes?.get("chat_events"));
 	const prior =
 		args.collectionMode === "full_refresh"
 			? {}
@@ -1718,7 +1967,7 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 			});
 		}
 		if (pendingChatGaps(firstGapPage).size > 0) {
-			await hydrateChats(args, [], firstGapPage, prior);
+			await hydrateChats(args, [], firstGapPage, prior, plan, new Map());
 		}
 		return;
 	}
@@ -1730,15 +1979,58 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 		return;
 	}
 	const chats = listed.value;
-	const records = chats.map((chat) => chatRecord(chat, args.observedAt));
+	// Checked before any history is read: a record that cannot be stored
+	// fails both streams whatever its latest activity (always a valid time).
+	const unread = chats.map((chat) => chatRecord(chat, null));
 	const problems =
-		schemaProblems("chats", records) ?? duplicateKeys("chats", records);
+		schemaProblems("chats", unread) ?? duplicateKeys("chats", unread);
 	if (problems !== null) {
 		// No chat record, so no event may be stored under it either.
 		await failStreams(
 			args,
 			["chats", "chat_events"],
-			new StreamIncomplete(problems, false),
+			new StreamIncomplete(problems, false, "retry_on_connector_upgrade"),
+		);
+		return;
+	}
+	const windows = await readNewestWindows(args, chats, wantEvents);
+	const latest = new Map(
+		chats.map(
+			(chat) =>
+				[
+					chat.id,
+					windows.has(chat.id)
+						? latestActivity(windows.get(chat.id), prior[chat.id])
+						: undefined,
+				] as const,
+		),
+	);
+	const records = chats.map((chat) => {
+		const known = latest.get(chat.id);
+		return chatRecord(chat, known?.kind === "known" ? known.at : null);
+	});
+	const unknown = chats
+		.filter((chat) => resourceWanted(args, "chats", chat.id))
+		.map((chat) => latest.get(chat.id))
+		.filter(
+			(value): value is LatestActivity & { kind: "unknown" } =>
+				value?.kind === "unknown",
+		);
+	if (
+		unknown.length > 0 &&
+		args.scopes?.get("chats")?.time_range !== undefined
+	) {
+		// Under a time range a chat's latest activity decides whether it is
+		// in scope, and an unknown one would be dropped without a word.
+		const retryable = unknown.every((value) => value.retryable);
+		await failStreams(
+			args,
+			["chats", "chat_events"],
+			new StreamIncomplete(
+				`Instinct did not answer with the latest activity of ${String(unknown.length)} chat(s), so it is unknown which chats fall in the time range.`,
+				retryable,
+				retryable ? undefined : "retry_on_connector_upgrade",
+			),
 		);
 		return;
 	}
@@ -1755,6 +2047,8 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 			chats.map((chat) => chat.id),
 			args.detailGaps,
 			prior,
+			plan,
+			windows,
 		);
 	} else {
 		for (const chat of chats) {
@@ -1775,39 +2069,48 @@ export async function collectInstinct(
 	args: CollectInstinctArgs,
 ): Promise<void> {
 	if (args.recoveryOnly !== true) {
-		await args.progress("Reading your Instinct account", { stream: "profile" });
-		const flags = await collectProfile(args);
-
-		if (args.requested.has("agent_contact")) {
+		// The account read serves profile and, through its feature flags,
+		// connections; neither requested means it is not made at all.
+		let flags: readonly string[] | null = null;
+		if (collects(args, "profile") || collects(args, "connections")) {
+			await args.progress("Reading your Instinct account", {
+				stream: "profile",
+			});
+			flags = await collectProfile(args);
+		}
+		if (
+			collects(args, "agent_contact") &&
+			resourceWanted(args, "agent_contact", "agent_contact")
+		) {
 			await args.progress("Reading how you reach your agent", {
 				stream: "agent_contact",
 			});
 			await collectAgentContact(args);
 		}
-		if (args.requested.has("connections") && flags !== null) {
+		if (collects(args, "connections") && flags !== null) {
 			await args.progress("Reading connected services", {
 				stream: "connections",
 			});
 			await collectConnections(args, resolveConnectionGates(flags));
 		}
-		if (args.requested.has("devices")) {
+		if (collects(args, "devices")) {
 			await args.progress("Reading enrolled devices", { stream: "devices" });
 			await collectDevices(args);
 		}
-		if (args.requested.has("trusted_people")) {
+		if (collects(args, "trusted_people")) {
 			await args.progress("Reading your trusted people", {
 				stream: "trusted_people",
 			});
 			await collectTrustedPeople(args);
 		}
-		if (args.requested.has("vault_entries")) {
+		if (collects(args, "vault_entries")) {
 			await args.progress("Reading your vault inventory", {
 				stream: "vault_entries",
 			});
 			await collectVaultEntries(args);
 		}
 	}
-	if (args.requested.has("chats") || args.requested.has("chat_events")) {
+	if (collects(args, "chats") || collects(args, "chat_events")) {
 		await args.progress("Reading your conversations with your agent", {
 			stream: "chat_events",
 		});
@@ -1860,6 +2163,7 @@ export async function collectInstinctOnPage(
 			? { requestDetailGapPage: ctx.requestDetailGapPage }
 			: {}),
 		requested: new Set(ctx.requested.keys()),
+		scopes: ctx.requested,
 		state: ctx.state,
 	});
 }

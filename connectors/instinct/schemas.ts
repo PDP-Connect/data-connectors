@@ -40,6 +40,12 @@ const nullableEmail = z.string().email().nullable();
 const nullableBool = z.boolean().nullable();
 const nullableInt = z.number().int().nullable();
 const stringArray = z.array(z.string());
+/**
+ * The run clock 0.1.1 and earlier wrote into every record. Records no longer
+ * carry it (Collection Profile 5.2); the field stays declared, optional, so
+ * the stored schema evolves additively.
+ */
+const deprecatedObservedAt = nullableIsoDateTime.optional();
 
 // ─── Upstream response shapes ──────────────────────────────────────────────
 
@@ -431,7 +437,7 @@ export const profileRecordSchema = z.object({
 		z.object({ provider: z.string(), subject: z.string().nullable() }),
 	),
 	name: pdppSafeText.max(200).nullable(),
-	observed_at: nullableIsoDateTime,
+	observed_at: deprecatedObservedAt,
 	onboarding_step: pdppSafeText.max(64).nullable(),
 	phone_number: nullableE164,
 	roles: stringArray,
@@ -444,7 +450,7 @@ export const agentContactRecordSchema = z.object({
 	agent_phone_status: pdppSafeText.max(64).nullable(),
 	email: nullableEmail,
 	id: z.literal("agent_contact"),
-	observed_at: nullableIsoDateTime,
+	observed_at: deprecatedObservedAt,
 	sms_phone_number: nullableE164,
 	voice_calls_enabled: nullableBool,
 	voice_phone_number: nullableE164,
@@ -454,12 +460,13 @@ export const agentContactRecordSchema = z.object({
 export const connectionRecordSchema = z.object({
 	account_email: nullableEmail,
 	account_name: pdppSafeText.max(200).nullable(),
+	connected_at: nullableIsoDateTime,
 	connection_id: pdppSafeText.max(200).nullable(),
 	id: z.string().min(3),
 	is_connected: nullableBool,
 	is_default: nullableBool,
 	is_revoked: nullableBool,
-	observed_at: nullableIsoDateTime,
+	observed_at: deprecatedObservedAt,
 	provider: z.enum([
 		"github",
 		"google_workspace",
@@ -498,7 +505,7 @@ export const deviceRecordSchema = z.object({
 	is_charging: nullableBool,
 	is_connected: nullableBool,
 	name: pdppSafeText.max(200).nullable(),
-	observed_at: nullableIsoDateTime,
+	observed_at: deprecatedObservedAt,
 	os_version: pdppSafeText.max(100).nullable(),
 });
 
@@ -508,7 +515,7 @@ export const trustedPersonRecordSchema = z.object({
 	expires_at: nullableIsoDateTime,
 	generation: nullableInt,
 	id: z.string().min(3),
-	observed_at: nullableIsoDateTime,
+	observed_at: deprecatedObservedAt,
 	person_id: z.string().min(1).nullable(),
 	phone_numbers: stringArray,
 	relationship: z.enum([
@@ -526,13 +533,14 @@ export const vaultEntryRecordSchema = z.object({
 	is_agent_entry: nullableBool,
 	kind: pdppSafeText.max(64),
 	name: pdppSafeText.max(200).nullable(),
-	observed_at: nullableIsoDateTime,
+	observed_at: deprecatedObservedAt,
 	populated_field_keys: stringArray,
 });
 
 export const chatRecordSchema = z.object({
 	id: z.string().min(1),
-	observed_at: nullableIsoDateTime,
+	last_event_at: nullableIsoDateTime,
+	observed_at: deprecatedObservedAt,
 	pending_turn_started_at: nullableIsoDateTime,
 	source: pdppSafeText.max(64).nullable(),
 	status: pdppSafeText.max(64).nullable(),

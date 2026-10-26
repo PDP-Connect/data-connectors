@@ -16,13 +16,13 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
 > = {
 	instinct: {
-		agent_contact: { field: "observed_at", format: "date-time" },
+		agent_contact: null,
 		chat_events: { field: "created_at", format: "date-time" },
-		chats: { field: "observed_at", format: "date-time" },
-		connections: { field: "observed_at", format: "date-time" },
+		chats: { field: "last_event_at", format: "date-time" },
+		connections: null,
 		devices: { field: "created_at", format: "date-time" },
-		profile: { field: "observed_at", format: "date-time" },
+		profile: null,
 		trusted_people: { field: "created_at", format: "date-time" },
-		vault_entries: { field: "observed_at", format: "date-time" },
+		vault_entries: null,
 	},
 };
