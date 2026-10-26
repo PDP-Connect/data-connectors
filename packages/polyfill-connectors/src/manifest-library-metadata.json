@@ -230,7 +230,11 @@
 		"manifest": {
 			"connector_key": "facebook",
 			"reason_display_messages": {
-				"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time."
+				"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time.",
+				"shape_check_failed": "Facebook sent an item this connector could not read, so it was not saved.",
+				"scope_not_supported": "Facebook does not date this list, so it cannot be limited to a time range. Choose it without a time range to import it.",
+				"facebook_auth_failed": "Facebook needs you to sign in again before this can continue.",
+				"facebook_interrupted": "The Facebook page stopped answering while signing in. Nothing was read; try again."
 			}
 		}
 	},
