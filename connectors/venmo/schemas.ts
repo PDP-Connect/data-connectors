@@ -29,44 +29,48 @@ const NUMERIC_ID_RE = /^\d+$/;
 const PAYMENT_ID_RE = /^[A-Za-z0-9]+$/;
 const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
+// Core source fields are required, even when nullable. Optional observations
+// may be absent, but explicit null is preserved rather than synthesized.
 export const profileSchema = z.object({
 	id: z.string().regex(NUMERIC_ID_RE, "id must be a numeric string"),
 	username: z.string().nullable(),
-	first_name: nullablePdppSafeText,
-	last_name: nullablePdppSafeText,
+	first_name: nullablePdppSafeText.optional(),
+	last_name: nullablePdppSafeText.optional(),
 	display_name: nullablePdppSafeText,
-	phone: z.string().nullable(),
-	profile_picture_url: z.string().url().nullable(),
-	about: nullablePdppSafeText,
+	phone: z.string().nullable().optional(),
+	profile_picture_url: z.string().url().nullable().optional(),
+	about: nullablePdppSafeText.optional(),
 	date_joined: z
 		.string()
 		.regex(ISO_DATETIME_RE, "date_joined must be ISO-8601 datetime")
-		.nullable(),
-	is_business: z.boolean().nullable(),
+		.nullable()
+		.optional(),
+	is_business: z.boolean().nullable().optional(),
 });
 
 export const friendsSchema = z.object({
 	id: z.string().regex(NUMERIC_ID_RE, "id must be a numeric string"),
 	username: z.string().nullable(),
-	first_name: nullablePdppSafeText,
-	last_name: nullablePdppSafeText,
+	first_name: nullablePdppSafeText.optional(),
+	last_name: nullablePdppSafeText.optional(),
 	display_name: nullablePdppSafeText,
-	phone: z.string().nullable(),
-	profile_picture_url: z.string().url().nullable(),
-	about: nullablePdppSafeText,
+	phone: z.string().nullable().optional(),
+	profile_picture_url: z.string().url().nullable().optional(),
+	about: nullablePdppSafeText.optional(),
 	date_joined: z
 		.string()
 		.regex(ISO_DATETIME_RE, "date_joined must be ISO-8601 datetime")
-		.nullable(),
-	is_group: z.boolean().nullable(),
-	is_active: z.boolean().nullable(),
+		.nullable()
+		.optional(),
+	is_group: z.boolean().nullable().optional(),
+	is_active: z.boolean().nullable().optional(),
 });
 
 const transactionCounterpartySchema = z
 	.object({
 		id: z.string().regex(NUMERIC_ID_RE, "id must be a numeric string"),
-		username: z.string().nullable(),
-		display_name: nullablePdppSafeText,
+		username: z.string().nullable().optional(),
+		display_name: nullablePdppSafeText.optional(),
 	})
 	.nullable();
 
@@ -82,27 +86,29 @@ export const transactionsSchema = z.object({
 	date_updated: z
 		.string()
 		.regex(ISO_DATETIME_RE, "date_updated must be ISO-8601 datetime")
-		.nullable(),
+		.nullable()
+		.optional(),
 	date_completed: z
 		.string()
 		.regex(ISO_DATETIME_RE, "date_completed must be ISO-8601 datetime")
-		.nullable(),
+		.nullable()
+		.optional(),
 	// Venmo's own vocabulary: "pay" (sent) or "charge" (requested). Open
 	// vocabulary — see makeValidateRecord's enum-drift retention policy.
 	payment_type: z.enum(["pay", "charge"]),
 	amount_cents: z.number().int().nullable(),
-	audience: z.enum(["private", "friends", "public"]).nullable(),
+	audience: z.enum(["private", "friends", "public"]).nullable().optional(),
 	status: z
 		.enum(["settled", "cancelled", "pending", "failed", "expired"])
 		.nullable(),
-	note: nullablePdppSafeText,
-	device_used: z.string().nullable(),
+	note: nullablePdppSafeText.optional(),
+	device_used: z.string().nullable().optional(),
 	actor: transactionCounterpartySchema,
 	target: transactionCounterpartySchema,
 	// true when the authenticated owner is the actor (sender/requester) rather
 	// than the target — lets an owner-view UI show "you paid X" vs "X paid you"
 	// without re-deriving it from actor.id === profile.id at query time.
-	is_owner_actor: z.boolean(),
+	is_owner_actor: z.boolean().nullable(),
 });
 
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {

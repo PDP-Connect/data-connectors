@@ -1580,13 +1580,13 @@ async function resumeSignInAfterChallenge(
 		// discard that diagnosis in favor of a generic "handoff complete" that
 		// hides what actually happened after a real password went out.
 		//
-		// Before submission there is nothing to preserve: the replay simply did not
-		// find a form, and the caller's fallback (report the handoff as over,
-		// unverified) is the honest answer.
+		// Verification can already be in flight after the owner's challenge.
+		// Preserve its timeout even if this replay did not submit a password.
 		if (
 			submitted ||
 			(error instanceof Error &&
-				error.message.startsWith(VENMO_LOGIN_CHALLENGE_DURING_REPLAY))
+				(error.message.startsWith(VENMO_LOGIN_CHALLENGE_DURING_REPLAY) ||
+					error.message.startsWith("venmo_login_did_not_complete:")))
 		) {
 			throw error;
 		}
@@ -2085,13 +2085,25 @@ async function loginWithSavedCredentials({
 				.then((): true => true)
 				.catch((): false => false);
 	if (!(resumeOnPasswordStep || usernameAppeared)) {
-		// On the REPLAY (attempt 1) the owner has already been asked once and the
-		// form still is not here: a genuinely unrecognized page, not a cleared bot
-		// check. Nothing probes here either — see waitForManualLogin's doc — so
-		// this reports the handoff as over, unverified, and guarantees the owner
-		// is never prompted twice for the same run.
 		if (attempt === 1) {
-			return OWNER_HANDOFF_COMPLETE;
+			// Preserve the solved challenge while OTP or verification settles.
+			const outcome = await pollForLiveSessionAfterSubmit(
+				{
+					...assistHooks,
+					...(capture ? { capture } : {}),
+					page,
+					postSubmitSettleTimeoutMs,
+					sendInteraction,
+				},
+				postSubmitSettleTimeoutMs,
+			);
+			if (outcome.settled && !isVenmoSignInUrl(page.url())) {
+				if (outcome.handoff) return outcome.handoff;
+				if (outcome.probe?.live) return outcome.probe;
+			}
+			throw new Error(
+				`venmo_login_did_not_complete: no sign-in outcome within ${postSubmitSettleTimeoutMs}ms after challenge replay`,
+			);
 		}
 		return await requestManualLoginForChallenge({
 			...assistHooks,

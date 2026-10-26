@@ -25083,7 +25083,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.26",
+				"version": "0.2.27",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
@@ -25417,13 +25417,12 @@
 							]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "date_created",
 						"consent_time_field": "date_created",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": [
