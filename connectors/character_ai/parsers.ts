@@ -259,9 +259,14 @@ export interface ChatHydration {
 	turnCount: number;
 }
 
+/**
+ * A chat record always carries values read from its turns this run: a chat
+ * whose turns could not be read is not emitted at all (a mutable_state
+ * upsert with nulls would overwrite the values a previous run stored).
+ */
 export function buildChatRecord(
 	chat: ApiChat,
-	hydration: ChatHydration | null,
+	hydration: ChatHydration,
 ): RecordData {
 	return {
 		id: chat.chat_id,
@@ -272,8 +277,8 @@ export function buildChatRecord(
 		state: chat.state ?? null,
 		visibility: chat.visibility ?? null,
 		create_time: chat.create_time,
-		last_interaction_time: hydration?.lastInteractionTime ?? null,
-		turn_count: hydration?.turnCount ?? null,
+		last_interaction_time: hydration.lastInteractionTime,
+		turn_count: hydration.turnCount,
 	};
 }
 

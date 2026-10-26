@@ -20,16 +20,36 @@
  *
  * Completeness: the chat list and every chat's turns are walked until the
  * source's own end signal (no next token). Coverage and STATE are written
- * only after the list proved its end; a list that did not keeps the chats it
- * saw and fails both streams retryably with no checkpoint. A chat whose turns
- * are missing (404), never prove their end, cannot be parsed, are still
- * generating, or cannot be stored faithfully gets a DETAIL_GAP for that chat
- * alone and is retried next run (pending gaps on every page the runtime
- * serves, also in a recovery-only run); the stream is not failed for it.
+ * only after the list proved its end; a list that did not emits nothing and
+ * fails both streams retryably with no checkpoint. A chat whose turns are
+ * missing (404), never prove their end, cannot be parsed, or are still
+ * generating gets a DETAIL_GAP for that chat alone and is retried next run
+ * (pending gaps on every page the runtime serves, also in a recovery-only
+ * run); the stream is not failed for it. Its chat record is withheld for the
+ * run too (chats coverage reads partial): `chats` is mutable state, and a
+ * record whose turn values are unknown would overwrite the stored ones. A
+ * turn that can never be stored as it is (no selected candidate, unsafe or
+ * oversized text) is left out; the rest of its chat is stored, and the chat
+ * keeps its gap until the turn can be read.
  * Stray control characters are dropped from display text, never the record.
  * A list row whose fields cannot be stored is read from GET /chat/:id/; a
  * chat that cannot be read there either is left out of this run (chats
  * coverage reads partial) and no child is accounted under it.
+ *
+ * Scope (see RunScope): `chats.resources` reads only the named chats, from
+ * GET /chat/:id/, and only their messages; the list is not walked. A chat
+ * outside the chats window whose messages cannot fall inside the messages
+ * window (created at or after its end) is not read; one read only for its
+ * messages emits no chat record. A chat with a turn outside the chats window
+ * emits no record either (partial chats coverage): a count of the turns
+ * inside would lower the stored one, a full count would show turns outside
+ * the grant. A chat GET /chat/:id/ answers 404 for is proven gone: not
+ * counted, and its pending gaps are closed. Turns are still read to the
+ * end of each chat's list: the list's order is not verified on a live
+ * account, so stopping at the window's start could drop turns. A pending gap
+ * is closed only by a run whose messages scope is unbounded.
+ * `messages.resources` cannot narrow a read (turns are listed per chat); the
+ * runtime filters by turn id.
  * Rate limits, outages, auth failures and bot checks stop the whole run
  * (retryable where the cause is transient); a page that navigates or closes
  * under a request is retried once, then stops the run as
@@ -42,29 +62,36 @@
  * Session errors are bare codes (`character_ai_auth_failed`,
  * `character_ai_interrupted`).
  *
- * Each run re-reads every listed chat (the list carries no last-activity
- * time to skip unchanged chats safely). `messages` is mutable state keyed by
- * turn id: a re-read replaces a turn whose selected candidate was swiped.
+ * Each run re-reads every chat in scope (the list carries no last-activity
+ * time to skip unchanged chats safely), so neither stream is incremental and
+ * no STATE is read back; a wider window later reads what a narrow one left
+ * out. `messages` is mutable state keyed by turn id: a re-read replaces a
+ * turn whose selected candidate was swiped. Deleted chats and turns are not
+ * reported as deletions.
  *
  * Tested surfaces (as of 2026-10-19): factory test account, EN, one-on-one
  * chats only. Known untested: group chats/rooms, accounts with very long chat
  * lists (the list's paging parameter name is inferred, see fetchChats).
  */
 
-import { isMainModule } from "@pdpp/connector-protocol";
+import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
+	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	createConnectorFailure,
 	emitDetailCoverage,
 	emitDetailGap,
+	type NormalizeTerminalError,
 	politeDelay,
 	runConnector,
+	type StreamFailureOptions,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	buildChatRecord,
 	buildMessageRecord,
@@ -78,6 +105,7 @@ import {
 	parseChatDetail,
 	parseChatsPage,
 	parseTurnsPage,
+	type TurnCheck,
 	type WalkResult,
 	walkTokenPages,
 } from "./parsers.ts";
@@ -624,6 +652,89 @@ async function onCharacterAi(page: PageHandle): Promise<boolean> {
 	}
 }
 
+// ─── Scope ───────────────────────────────────────────────────────────────
+
+type TimeRange = { since?: string; until?: string };
+
+/**
+ * What this run may emit, read from START's scope the way the runtime applies
+ * it: `resources` by record id, `time_range` on `create_time` (the consent
+ * field of both streams), `since` inclusive and `until` exclusive. The
+ * connector uses it to read less from Character.AI and to keep values built
+ * from turns inside the grant; it never widens what is emitted, and the
+ * runtime still filters every record.
+ */
+export interface RunScope {
+	/** `chats.resources`: only these chats are read, each from GET /chat/:id/. Null reads the whole list. */
+	chatIds: readonly string[] | null;
+	chatsRange: TimeRange | null;
+	/** `messages.resources`: turn ids. Turns are only listed per chat, so this filters, it cannot narrow a read. */
+	messageIds: ReadonlySet<string> | null;
+	messagesRange: TimeRange | null;
+	wantMessages: boolean;
+}
+
+function rangeOf(scope: StreamScope | undefined): TimeRange | null {
+	const range = scope?.time_range;
+	if (range === undefined || (!range.since && !range.until)) {
+		return null;
+	}
+	return {
+		...(range.since ? { since: range.since } : {}),
+		...(range.until ? { until: range.until } : {}),
+	};
+}
+
+export function runScopeOf(ctx: BrowserCollectContext): RunScope {
+	const chats = ctx.requested.get("chats");
+	const messages = ctx.requested.get("messages");
+	const chatResources = resourceSet(chats);
+	return {
+		// A resource that is not a chat id cannot name a chat; it is not read.
+		chatIds:
+			chatResources === null
+				? null
+				: [...chatResources].filter((id) => uuidSchema.safeParse(id).success),
+		chatsRange: rangeOf(chats),
+		messageIds: resourceSet(messages),
+		messagesRange: rangeOf(messages),
+		wantMessages: messages !== undefined,
+	};
+}
+
+function inRange(range: TimeRange | null, time: string): boolean {
+	return range === null || !isOutsideTimeRange(range, time, "date-time");
+}
+
+/** The turns of a chat that `messages` may emit this run. */
+function scopedTurns(scope: RunScope, turns: readonly ApiTurn[]): ApiTurn[] {
+	return turns.filter(
+		(turn) =>
+			inRange(scope.messagesRange, turn.create_time) &&
+			(scope.messageIds === null ||
+				scope.messageIds.has(turn.turn_key.turn_id)),
+	);
+}
+
+/**
+ * Whether a chat has to be read at all. Its record is in scope when its id
+ * and creation time are. Its messages can be in scope only when they can be
+ * no later than the messages window's end: a turn is never older than its
+ * chat, so a chat created at or after that end has none inside it. A chat
+ * that is neither is out of scope and is not read (a proven scope exclusion).
+ */
+function chatNeedsRead(scope: RunScope, chat: ApiChat): boolean {
+	if (inRange(scope.chatsRange, chat.create_time)) {
+		return true;
+	}
+	const until = scope.messagesRange?.until;
+	return (
+		scope.wantMessages &&
+		(until === undefined ||
+			!isOutsideTimeRange({ until }, chat.create_time, "date-time"))
+	);
+}
+
 // ─── Collection ──────────────────────────────────────────────────────────
 
 /**
@@ -675,12 +786,10 @@ function gapOutcome(
 }
 
 /**
- * Every turn of a chat, read to the list's end. Per-chat conditions become a
- * gap for that chat only: the turns answer 404, the turn list never proved
- * its end, or a page of turns cannot be read. Rate limits, outages, auth, bot
- * checks and a page that went away throw and stop the run, so it is retried
- * as a whole. Whether each turn can be stored as a message is a separate
- * question (unstorableTurns): a complete walk always hydrates the chat record.
+ * Every turn of a chat, read to the list's end. Per-chat conditions become a gap for that chat only: the turns answer 404,
+ * the turn list never proved its end, or a page of turns cannot be read.
+ * Rate limits, outages, auth, bot checks and a page that went away throw and
+ * stop the run, so it is retried as a whole.
  */
 async function fetchTurns(
 	page: PageHandle,
@@ -730,29 +839,36 @@ async function fetchTurns(
 	return { ok: true, turns: walk.items };
 }
 
-/**
- * The messages-side check, before any message of a chat is emitted: every
- * turn needs a final, PDPP-safe selected candidate. Returns the gap outcome
- * for the first turn that fails, or null when all can be stored.
- */
-function unstorableTurns(turns: ApiTurn[]): GapOutcome | null {
+interface TurnSort {
+	/** In-scope turns whose selected candidate is final and storable. */
+	storable: Array<{ turn: ApiTurn; checked: Extract<TurnCheck, { ok: true }> }>;
+	/** The first in-scope turn still generating: the chat is retried as a whole. */
+	generating: GapOutcome | null;
+	/** In-scope turns that can never be stored as they are (a connector upgrade may read them). */
+	unstorable: Array<{ turnId: string; detail: string }>;
+}
+
+/** The messages-side check, before any message of a chat is emitted. */
+function sortTurns(turns: readonly ApiTurn[]): TurnSort {
+	const sorted: TurnSort = { storable: [], generating: null, unstorable: [] };
 	for (const turn of turns) {
 		const checked = checkTurn(turn);
-		if (!checked.ok) {
-			return checked.kind === "generating"
-				? gapOutcome(
-						"temporary_unavailable",
-						"turn_still_generating",
-						`a turn is still generating: ${checked.detail}`,
-					)
-				: gapOutcome(
-						"retry_exhausted",
-						"turn_unstorable",
-						`a turn cannot be stored: ${checked.detail}`,
-					);
+		if (checked.ok) {
+			sorted.storable.push({ turn, checked });
+		} else if (checked.kind === "generating") {
+			sorted.generating ??= gapOutcome(
+				"temporary_unavailable",
+				"turn_still_generating",
+				`a turn is still generating: ${checked.detail}`,
+			);
+		} else {
+			sorted.unstorable.push({
+				turnId: turn.turn_key.turn_id,
+				detail: checked.detail,
+			});
 		}
 	}
-	return null;
+	return sorted;
 }
 
 /** GET /chat/:chat_id/ for a chat the list did not return; a gap outcome when it cannot be read. */
@@ -875,33 +991,54 @@ async function forEachLaterGapPage(
 	}
 }
 
+/**
+ * Pending gaps for chats this run may read: with `chats.resources`, only the
+ * named chats. A gap for any other chat stays pending, untouched.
+ */
+function gapsInScope(
+	gaps: Map<string, PendingGap[]>,
+	scope: RunScope,
+): Map<string, PendingGap[]> {
+	const { chatIds } = scope;
+	if (chatIds === null) {
+		return gaps;
+	}
+	return new Map([...gaps].filter(([chatId]) => chatIds.includes(chatId)));
+}
+
 interface MessagesTally {
 	gapKeys: string[];
 	hydratedKeys: string[];
-	turnsEmitted: number;
+	/** Turns read from Character.AI for chats read completely, in scope or not. */
+	turnsRead: number;
 }
 
-function hydrationOf(turns: ApiTurn[]): ChatHydration {
+/** Chat values from all of a chat's turns. */
+function hydrationOf(turns: readonly ApiTurn[]): ChatHydration {
 	return {
 		lastInteractionTime: latestTime(turns.map((turn) => turn.create_time)),
 		turnCount: turns.length,
 	};
 }
 
+/**
+ * Whether a chat's record can be emitted whole inside the chats window. A
+ * chat created inside the window can have turns after its end: a count of
+ * only the earlier turns would roll back the fuller values a wider run
+ * stored (`chats` is mutable state), and a full count would reveal turns
+ * outside the grant. Such a chat's record is withheld. (No turn should be
+ * older than its chat, so `since` cannot cut one off; it is checked anyway.)
+ */
+function wholeInWindow(scope: RunScope, turns: readonly ApiTurn[]): boolean {
+	return turns.every((turn) => inRange(scope.chatsRange, turn.create_time));
+}
+
 async function emitTurns(
 	ctx: BrowserCollectContext,
-	turns: ApiTurn[],
-	tally: MessagesTally,
+	turns: TurnSort["storable"],
 ): Promise<void> {
-	for (const turn of turns) {
-		const checked = checkTurn(turn);
-		if (!checked.ok) {
-			throw new Error(
-				`character_ai_internal: an unchecked turn reached emission (${checked.detail})`,
-			);
-		}
+	for (const { turn, checked } of turns) {
 		await ctx.emitRecord("messages", buildMessageRecord(turn, checked));
-		tally.turnsEmitted += 1;
 	}
 }
 
@@ -915,8 +1052,22 @@ async function recordGap(
 	ctx: BrowserCollectContext,
 	chatId: string,
 	outcome: GapOutcome,
-	tally: MessagesTally,
+	deps: RunDeps,
 ): Promise<void> {
+	const { tally } = deps;
+	// A leased pending gap for this chat was attempted and failed again: the
+	// runtime is told so by its lease, and the DETAIL_GAP below folds into it.
+	for (const gap of deps.pending.get(chatId) ?? []) {
+		if (gap.leaseId) {
+			await ctx.emit({
+				type: "DETAIL_GAP_ATTEMPTED",
+				reference_only: true,
+				gap_id: gap.gapId,
+				lease_id: gap.leaseId,
+				stream: "messages",
+			});
+		}
+	}
 	await emitDetailGap(ctx, {
 		stream: "messages",
 		parentStream: "chats",
@@ -936,7 +1087,7 @@ async function recordGap(
 	});
 }
 
-/** Close each pending gap for a chat whose parent was emitted and whose turns were fully read and emitted. */
+/** Close each pending gap for a chat whose turns were fully read and accounted. */
 async function recoverGaps(
 	ctx: BrowserCollectContext,
 	chatId: string,
@@ -956,97 +1107,198 @@ async function recoverGaps(
 
 interface RunDeps {
 	pending: Map<string, PendingGap[]>;
+	scope: RunScope;
+	/** Chats left out of the run's scope without being read. */
+	excluded: string[];
 	tally: MessagesTally;
 	/** Chats whose parent could not be read this run; nothing was emitted for them. */
 	unread: string[];
-	wantMessages: boolean;
+	/** Chats Character.AI answered 404 for: proven not to exist. */
+	absent: string[];
+}
+
+/**
+ * What processChat did with a chat: `emitted` its record (and its messages or
+ * gap), left it `excluded` as out of scope without reading it, or `withheld`
+ * everything because its turns could not be read (its gap, when messages are
+ * in scope, says so).
+ */
+interface ChatOutcome {
+	status: "emitted" | "excluded" | "withheld" | "absent";
+	/** Whether the chat record itself is in the chats scope (true when unknown). */
+	recordInScope: boolean;
+	/** Whether the chat record was emitted this run. */
+	recordEmitted: boolean;
+}
+
+/** Whether a run's messages scope can leave turns of a chat unemitted. */
+function messagesBounded(scope: RunScope): boolean {
+	return scope.messagesRange !== null || scope.messageIds !== null;
 }
 
 /**
  * Read one chat's turns, then emit, in order: its chat record (the parent),
- * then its messages and any gap recovery, or its DETAIL_GAP.
+ * then its messages and any gap recovery, or its DETAIL_GAP. A chat whose
+ * turns could not be read emits no record: `chats` is mutable state, and a
+ * record with its turn values unknown would overwrite the values a previous
+ * run stored. Its messages gap says it is read again next run.
  */
 async function processChat(
 	ctx: BrowserCollectContext,
 	chat: ApiChat,
 	deps: RunDeps,
-): Promise<ApiTurn[] | null> {
+): Promise<ChatOutcome> {
+	const { scope } = deps;
+	const recordInScope = inRange(scope.chatsRange, chat.create_time);
+	if (!chatNeedsRead(scope, chat)) {
+		deps.excluded.push(chat.chat_id);
+		return { status: "excluded", recordInScope, recordEmitted: false };
+	}
 	const outcome = await fetchTurns(ctx.page, chat.chat_id);
-	const parent =
-		outcome.ok && !chat.character_name
-			? { ...chat, character_name: characterNameFromTurns(chat, outcome.turns) }
-			: chat;
-	await ctx.emitRecord(
-		"chats",
-		buildChatRecord(parent, outcome.ok ? hydrationOf(outcome.turns) : null),
-	);
-	const turns = outcome.ok ? outcome.turns : null;
-	if (!deps.wantMessages) {
-		return turns;
+	if (!outcome.ok) {
+		connectorDiagnostic("character_ai", "chat_withheld", {
+			class: outcome.errorClass,
+		});
+		if (scope.wantMessages) {
+			await recordGap(ctx, chat.chat_id, outcome, deps);
+		}
+		return { status: "withheld", recordInScope, recordEmitted: false };
 	}
-	const failure = outcome.ok ? unstorableTurns(outcome.turns) : outcome;
-	if (failure) {
-		await recordGap(ctx, chat.chat_id, failure, deps.tally);
-		return turns;
+	const { turns } = outcome;
+	// A chat outside the chats scope is read only for its messages: its
+	// record is not emitted (the runtime would drop it, and a dropped record
+	// holds back the run's bounded progress).
+	const recordEmitted = recordInScope && wholeInWindow(scope, turns);
+	if (recordEmitted) {
+		const parent = chat.character_name
+			? chat
+			: { ...chat, character_name: characterNameFromTurns(chat, turns) };
+		await ctx.emitRecord("chats", buildChatRecord(parent, hydrationOf(turns)));
+	} else if (recordInScope) {
+		connectorDiagnostic("character_ai", "chat_record_past_window", {});
 	}
-	await emitTurns(ctx, turns ?? [], deps.tally);
-	await recoverGaps(ctx, chat.chat_id, deps.pending.get(chat.chat_id) ?? []);
+	if (!scope.wantMessages) {
+		return { status: "emitted", recordInScope, recordEmitted };
+	}
+	deps.tally.turnsRead += turns.length;
+	const sorted = sortTurns(scopedTurns(scope, turns));
+	if (sorted.generating) {
+		await recordGap(ctx, chat.chat_id, sorted.generating, deps);
+		return { status: "emitted", recordInScope, recordEmitted };
+	}
+	// The storable turns are stored either way. A turn that can never be
+	// stored as it is keeps the chat as a gap (it is not covered), but no
+	// longer holds back the rest of the chat.
+	await emitTurns(ctx, sorted.storable);
+	const [unstorable] = sorted.unstorable;
+	if (unstorable) {
+		await recordGap(
+			ctx,
+			chat.chat_id,
+			gapOutcome(
+				"retry_exhausted",
+				"turn_unstorable",
+				`${String(sorted.unstorable.length)} turn(s) cannot be stored: ${unstorable.detail}`,
+			),
+			deps,
+		);
+		return { status: "emitted", recordInScope, recordEmitted };
+	}
+	// A pending gap is about the whole chat: only a read whose messages scope
+	// left no turn out can close it.
+	if (!messagesBounded(scope)) {
+		await recoverGaps(ctx, chat.chat_id, deps.pending.get(chat.chat_id) ?? []);
+	}
 	deps.tally.hydratedKeys.push(chat.chat_id);
-	return turns;
+	return { status: "emitted", recordInScope, recordEmitted };
 }
 
 /**
- * A chat read from GET /chat/:id/ rather than the list (a pending gap for a
- * chat the list did not return, or a list row whose fields cannot be
- * stored): its parent record is emitted before any child. When the detail
- * cannot be read either, nothing is emitted for the chat: no child may be
- * accounted under a parent this run did not emit, so a pending gap stays
- * pending as it was and the chat is left out of coverage. Returns whether
- * the parent was emitted.
+ * A chat read from GET /chat/:id/ rather than the list (a chat named in
+ * `chats.resources`, a pending gap for a chat the list did not return, or a
+ * list row whose fields cannot be stored): its parent record is emitted
+ * before any child. When the detail cannot be read either, nothing is
+ * emitted for the chat: no child may be accounted under a parent this run
+ * did not emit, so a pending gap stays pending as it was and the chat is
+ * left out of coverage.
  */
 async function processChatByDetail(
 	ctx: BrowserCollectContext,
 	chatId: string,
 	deps: RunDeps,
-): Promise<boolean> {
+): Promise<ChatOutcome> {
 	const detail = await fetchChatDetail(ctx.page, chatId);
+	if (!detail.ok && detail.errorClass === "chat_not_found") {
+		// Character.AI says the chat does not exist: a proven absence, not a
+		// chat this run failed to read. It is not part of the boundary, and its
+		// pending gaps are closed, since no turn of it is left to collect.
+		deps.absent.push(chatId);
+		connectorDiagnostic("character_ai", "chat_absent", {});
+		await recoverGaps(ctx, chatId, deps.pending.get(chatId) ?? []);
+		return { status: "absent", recordInScope: false, recordEmitted: false };
+	}
 	if (!detail.ok) {
 		deps.unread.push(chatId);
 		connectorDiagnostic("character_ai", "chat_detail_unread", {
 			class: detail.errorClass,
 		});
-		return false;
+		return { status: "withheld", recordInScope: true, recordEmitted: false };
 	}
-	await processChat(ctx, detail.chat, deps);
-	return true;
+	return processChat(ctx, detail.chat, deps);
 }
 
 /**
- * Report one stream as failed. A context without the runtime's reporter (a
- * hand-built caller) cannot carry a stream failure, so the run fails instead
- * of finishing as if the stream were complete.
+ * Report one stream as failed, with the portable recovery hint that says who
+ * can act. A context without the runtime's reporter (a hand-built caller)
+ * cannot carry a stream failure, so the run fails instead of finishing as if
+ * the stream were complete.
  */
 async function failStream(
 	ctx: BrowserCollectContext,
 	stream: string,
 	message: string,
-	retryable: boolean,
+	recoveryHint: NonNullable<StreamFailureOptions["recoveryHint"]> & {
+		retryable: boolean;
+	},
 ): Promise<void> {
-	connectorDiagnostic("character_ai", "stream_failed", { stream, retryable });
+	connectorDiagnostic("character_ai", "stream_failed", {
+		stream,
+		retryable: recoveryHint.retryable,
+	});
 	if (!ctx.reportStreamFailure) {
 		throw createConnectorFailure("character_ai_stream_incomplete", message, {
-			retryable,
+			retryable: recoveryHint.retryable,
+			recoveryHint,
 		});
 	}
-	await ctx.reportStreamFailure(stream, message, { retryable });
+	await ctx.reportStreamFailure(stream, message, {
+		retryable: recoveryHint.retryable,
+		recoveryHint,
+	});
+}
+
+const RETRY_BY_RUNTIME = { action: "retry_by_runtime", retryable: true };
+const NEEDS_CONNECTOR_UPGRADE = {
+	action: "retry_on_connector_upgrade",
+	retryable: false,
+};
+
+/** Whether this run's scope can leave a chat with no turn to emit (a window or a resource filter). */
+function messagesNarrowed(scope: RunScope): boolean {
+	return (
+		scope.messagesRange !== null ||
+		scope.messageIds !== null ||
+		scope.chatIds !== null
+	);
 }
 
 async function finishMessages(
 	ctx: BrowserCollectContext,
 	requiredKeys: string[],
-	tally: MessagesTally,
+	deps: RunDeps,
 	listed: number,
 ) {
+	const { tally } = deps;
 	await emitDetailCoverage(ctx, {
 		stream: "messages",
 		stateStream: "chats",
@@ -1062,20 +1314,25 @@ async function finishMessages(
 			{ stream: "messages" },
 		);
 	}
-	if (listed > 0 && tally.hydratedKeys.length > 0 && tally.turnsEmitted === 0) {
+	if (
+		listed > 0 &&
+		!messagesNarrowed(deps.scope) &&
+		tally.hydratedKeys.length > 0 &&
+		tally.turnsRead === 0
+	) {
 		await failStream(
 			ctx,
 			"messages",
 			`Character.AI listed ${listed} chat(s) but returned no turns for any of them.`,
-			true,
+			RETRY_BY_RUNTIME,
 		);
 	}
 }
 
 /**
- * A recovery-only run: every pending `messages` gap, on every page of gaps,
- * is re-read from its chat (detail, then turns) without walking the list.
- * Nothing is checkpointed.
+ * A recovery-only run: every pending `messages` gap in scope, on every page
+ * of gaps, is re-read from its chat (detail, then turns) without walking the
+ * list. Nothing is checkpointed.
  */
 async function recoverOnly(
 	ctx: BrowserCollectContext,
@@ -1085,11 +1342,14 @@ async function recoverOnly(
 	const seen = new Set(first.map((gap) => gap.gap_id));
 	const keys: string[] = [];
 	const handle = async (fresh: Map<string, PendingGap[]>) => {
-		for (const [chatId, gaps] of fresh) {
+		for (const [chatId, gaps] of gapsInScope(fresh, deps.scope)) {
 			if (keys.includes(chatId)) {
 				// A further gap for a chat already read this run: closed only if that
 				// read was complete; otherwise the chat's re-emitted gap stands.
-				if (deps.tally.hydratedKeys.includes(chatId)) {
+				if (
+					deps.tally.hydratedKeys.includes(chatId) &&
+					!messagesBounded(deps.scope)
+				) {
 					await recoverGaps(ctx, chatId, gaps);
 				}
 				continue;
@@ -1105,62 +1365,199 @@ async function recoverOnly(
 	// evidence that there was nothing pending to read.
 	await finishMessages(
 		ctx,
-		keys.filter((chatId) => !deps.unread.includes(chatId)),
-		deps.tally,
+		keys.filter(
+			(chatId) =>
+				!(
+					deps.unread.includes(chatId) ||
+					deps.absent.includes(chatId) ||
+					deps.excluded.includes(chatId)
+				),
+		),
+		deps,
 		0,
 	);
+}
+
+/**
+ * Pending gaps beyond START's first page: a chat read completely this run
+ * has its gaps acknowledged, one gapped again this run already re-emitted
+ * its gap, and any other chat in scope is read the way an unlisted one is.
+ * Returns the chats read here.
+ */
+async function laterGaps(
+	ctx: BrowserCollectContext,
+	firstGaps: readonly GapEntry[],
+	deps: RunDeps,
+): Promise<string[]> {
+	const extra: string[] = [];
+	await forEachLaterGapPage(
+		ctx,
+		new Set(firstGaps.map((gap) => gap.gap_id)),
+		async (fresh) => {
+			for (const [chatId, gaps] of gapsInScope(fresh, deps.scope)) {
+				if (deps.tally.hydratedKeys.includes(chatId)) {
+					if (!messagesBounded(deps.scope)) {
+						await recoverGaps(ctx, chatId, gaps);
+					}
+				} else if (
+					!(
+						deps.tally.gapKeys.includes(chatId) ||
+						deps.unread.includes(chatId) ||
+						deps.absent.includes(chatId) ||
+						deps.excluded.includes(chatId) ||
+						extra.includes(chatId)
+					)
+				) {
+					extra.push(chatId);
+					deps.pending.set(chatId, gaps);
+					await processChatByDetail(ctx, chatId, deps);
+				}
+			}
+		},
+	);
+	return extra;
+}
+
+/**
+ * Chats coverage counts the chats whose record is in the chats scope: one
+ * outside it is not part of the boundary, one withheld is not covered.
+ */
+function countChat(
+	tally: { considered: number; covered: number },
+	outcome: ChatOutcome,
+): void {
+	if (!outcome.recordInScope) {
+		return;
+	}
+	tally.considered += 1;
+	if (outcome.recordEmitted) {
+		tally.covered += 1;
+	}
+}
+
+/** The chats coverage, the messages coverage and the checkpoint of a run whose inventory is whole. */
+async function finishRun(
+	ctx: BrowserCollectContext,
+	deps: RunDeps,
+	inventory: { considered: number; covered: number; keys: string[] },
+): Promise<void> {
+	await emitDetailCoverage(ctx, {
+		stream: "chats",
+		stateStream: "chats",
+		requiredKeys: [],
+		hydratedKeys: [],
+		considered: inventory.considered,
+		covered: inventory.covered,
+	});
+	if (inventory.covered < inventory.considered) {
+		await ctx.progress(
+			`${String(inventory.considered - inventory.covered)} Character.AI chat(s) could not be read this run and were left as previously stored`,
+			{ stream: "chats" },
+		);
+	}
+	if (deps.scope.wantMessages) {
+		await finishMessages(
+			ctx,
+			inventory.keys.filter(
+				(chatId) =>
+					!(
+						deps.unread.includes(chatId) ||
+						deps.absent.includes(chatId) ||
+						deps.excluded.includes(chatId)
+					),
+			),
+			deps,
+			inventory.considered,
+		);
+	}
+	// Not read back by any run (the streams are not incremental): every run
+	// reads every chat in scope again. It marks the inventory as whole.
+	await ctx.emit({
+		type: "STATE",
+		stream: "chats",
+		cursor: { chat_count: inventory.considered },
+	});
+}
+
+/**
+ * A run with `chats.resources`: only the named chats are read, each from GET
+ * /chat/:id/, and only their messages. The chat list is not walked.
+ */
+async function collectNamedChats(
+	ctx: BrowserCollectContext,
+	chatIds: readonly string[],
+	firstGaps: readonly GapEntry[],
+	deps: RunDeps,
+): Promise<void> {
+	const tally = { considered: 0, covered: 0 };
+	let index = 0;
+	for (const chatId of chatIds) {
+		index += 1;
+		await ctx.progress(
+			`Reading Character.AI chat ${index} of ${chatIds.length}`,
+			{ stream: "messages" },
+		);
+		countChat(tally, await processChatByDetail(ctx, chatId, deps));
+	}
+	const extra = deps.scope.wantMessages
+		? await laterGaps(ctx, firstGaps, deps)
+		: [];
+	await finishRun(ctx, deps, { ...tally, keys: [...chatIds, ...extra] });
 }
 
 export async function collectCharacterAi(
 	ctx: BrowserCollectContext,
 ): Promise<void> {
-	const wantChats = ctx.requested.has("chats");
-	if (!wantChats) {
+	const scope = runScopeOf(ctx);
+	if (!ctx.requested.has("chats")) {
 		// Every message hangs off a chat record that must precede it in the run;
 		// without the parent stream in scope no child can be emitted honestly.
-		if (ctx.requested.has("messages")) {
-			await failStream(
-				ctx,
-				"messages",
-				"Character.AI messages need the chats stream in scope: each chat record is emitted before its messages.",
-				false,
-			);
+		if (scope.wantMessages) {
+			await ctx.emit({
+				type: "SKIP_RESULT",
+				stream: "messages",
+				reason: "scope_not_supported",
+				message:
+					"Character.AI messages are collected together with their chats; request both streams.",
+				recovery_hint: { action: "not_retriable", retryable: false },
+			});
 		}
 		return;
 	}
-	const wantMessages = ctx.requested.has("messages");
 	await landOnCharacterAi(ctx.page);
-	const firstGaps = wantMessages ? startGaps(ctx) : [];
+	const firstGaps = scope.wantMessages ? startGaps(ctx) : [];
 	const deps: RunDeps = {
-		pending: pendingGapsByChat(firstGaps),
-		tally: { gapKeys: [], hydratedKeys: [], turnsEmitted: 0 },
+		pending: gapsInScope(pendingGapsByChat(firstGaps), scope),
+		scope,
+		excluded: [],
+		tally: { gapKeys: [], hydratedKeys: [], turnsRead: 0 },
 		unread: [],
-		wantMessages,
+		absent: [],
 	};
 	if (ctx.recoveryOnly === true) {
-		if (wantMessages) {
+		if (scope.wantMessages) {
 			await recoverOnly(ctx, deps);
 		}
+		return;
+	}
+	if (scope.chatIds !== null) {
+		await collectNamedChats(ctx, scope.chatIds, firstGaps, deps);
 		return;
 	}
 
 	await ctx.progress("Reading the Character.AI chat list", { stream: "chats" });
 	const walk = await fetchChats(ctx.page);
 	if (!walk.complete) {
-		// The chats seen are real and are kept, but none is read in depth and
-		// nothing is checkpointed: a later run can prove the list's end.
-		for (const row of walk.items) {
-			if (row.chat !== null) {
-				await ctx.emitRecord("chats", buildChatRecord(row.chat, null));
-			}
-		}
+		// Nothing is emitted: a chat record built without its turns would
+		// overwrite what a previous run stored, and nothing is checkpointed. A
+		// later run can prove the list's end.
 		connectorDiagnostic("character_ai", "chat_list_unproven", {
 			reason: walk.reason,
 		});
-		const why = `Character.AI's chat list did not prove its end (${walk.reason}), so this run could not confirm it saw every chat. Nothing was checkpointed; the next run reads it again.`;
+		const why = `Character.AI's chat list did not prove its end (${walk.reason}), so this run could not confirm it saw every chat. Nothing was stored or checkpointed; the next run reads it again.`;
 		for (const stream of ["chats", "messages"] as const) {
 			if (ctx.requested.has(stream)) {
-				await failStream(ctx, stream, why, true);
+				await failStream(ctx, stream, why, RETRY_BY_RUNTIME);
 			}
 		}
 		return;
@@ -1174,7 +1571,7 @@ export async function collectCharacterAi(
 		const why = `${String(walk.unkeyed)} row(s) of the Character.AI chat list carry no usable chat id and were skipped; the connector needs an update to read them.`;
 		for (const stream of ["chats", "messages"] as const) {
 			if (ctx.requested.has(stream)) {
-				await failStream(ctx, stream, why, false);
+				await failStream(ctx, stream, why, NEEDS_CONNECTOR_UPGRADE);
 			}
 		}
 	}
@@ -1183,8 +1580,7 @@ export async function collectCharacterAi(
 	const unlisted = [...deps.pending.keys()].filter(
 		(chatId) => !listedIds.has(chatId),
 	);
-	const latest: Array<string | null> = [];
-	let chatRecords = 0;
+	const tally = { considered: 0, covered: 0 };
 	let index = 0;
 	for (const row of rows) {
 		index += 1;
@@ -1198,90 +1594,96 @@ export async function collectCharacterAi(
 			connectorDiagnostic("character_ai", "chat_row_unreadable", {
 				detail: row.detail,
 			});
-			if (await processChatByDetail(ctx, row.chatId, deps)) {
-				chatRecords += 1;
-			}
-			continue;
 		}
-		const turns = await processChat(ctx, row.chat, deps);
-		chatRecords += 1;
-		if (turns) {
-			latest.push(hydrationOf(turns).lastInteractionTime);
-		}
+		const outcome =
+			row.chat === null
+				? await processChatByDetail(ctx, row.chatId, deps)
+				: await processChat(ctx, row.chat, deps);
+		countChat(tally, outcome);
 	}
 	for (const chatId of unlisted) {
 		await processChatByDetail(ctx, chatId, deps);
 	}
-	// Pending gaps beyond START's first page: a chat read completely this run
-	// has its gaps acknowledged, one gapped again this run already re-emitted
-	// its gap, and any other chat is read the way an unlisted one is.
-	const extra: string[] = [];
-	if (wantMessages) {
-		await forEachLaterGapPage(
-			ctx,
-			new Set(firstGaps.map((gap) => gap.gap_id)),
-			async (fresh) => {
-				for (const [chatId, gaps] of fresh) {
-					if (deps.tally.hydratedKeys.includes(chatId)) {
-						await recoverGaps(ctx, chatId, gaps);
-					} else if (
-						!(
-							deps.tally.gapKeys.includes(chatId) ||
-							deps.unread.includes(chatId) ||
-							extra.includes(chatId)
-						)
-					) {
-						extra.push(chatId);
-						deps.pending.set(chatId, gaps);
-						await processChatByDetail(ctx, chatId, deps);
-					}
-				}
-			},
-		);
-	}
+	const extra = scope.wantMessages ? await laterGaps(ctx, firstGaps, deps) : [];
 	if (!inventoryWhole) {
 		return;
 	}
-	await emitDetailCoverage(ctx, {
-		stream: "chats",
-		stateStream: "chats",
-		requiredKeys: [],
-		hydratedKeys: [],
-		considered: rows.length,
-		covered: chatRecords,
-	});
-	if (chatRecords < rows.length) {
-		await ctx.progress(
-			`${String(rows.length - chatRecords)} Character.AI chat(s) could not be read from the chat list and were skipped this run`,
-			{ stream: "chats" },
-		);
-	}
-	if (wantMessages) {
-		await finishMessages(
-			ctx,
-			[...rows.map((row) => row.chatId), ...unlisted, ...extra].filter(
-				(chatId) => !deps.unread.includes(chatId),
-			),
-			deps.tally,
-			rows.length,
-		);
-	}
-	await ctx.emit({
-		type: "STATE",
-		stream: "chats",
-		cursor: {
-			last_interaction_time: latestTime(latest),
-			chat_count: rows.length,
-		},
+	await finishRun(ctx, deps, {
+		...tally,
+		keys: [...rows.map((row) => row.chatId), ...unlisted, ...extra],
 	});
 }
+
+/**
+ * The portable recovery hint for a run that stopped on one of this
+ * connector's run-level codes. A failure that already carries a hint, or that
+ * is not one of these codes, is left as it is.
+ */
+export const normalizeCharacterAiTerminalError: NormalizeTerminalError = (
+	error,
+) => {
+	if (error.recovery_hint !== undefined) {
+		return error;
+	}
+	// A session failure arrives as `character_ai_session_failed: <code>`.
+	const code =
+		/^(?:character_ai_session_failed: )?(character_ai_[a-z0-9_]+)/.exec(
+			error.message,
+		)?.[1] ?? null;
+	if (code === null) {
+		return error;
+	}
+	let action: string | null = null;
+	let retryable = error.retryable;
+	if (code === AUTH_FAILED) {
+		action = "refresh_credentials";
+		retryable = false;
+	} else if (code === "character_ai_challenge") {
+		// A new run hands the human check to the owner in place.
+		action = "manual_action_required";
+		retryable = true;
+	} else if (
+		code === INTERRUPTED ||
+		code === "character_ai_timeout" ||
+		code === "character_ai_network_error" ||
+		/^character_ai_api_(?:408|429|5\d\d)$/.test(code)
+	) {
+		action = "retry_by_runtime";
+		retryable = true;
+	} else if (
+		code === "character_ai_invalid_payload" ||
+		code === "character_ai_internal" ||
+		/^character_ai_api_\d{3}$/.test(code)
+	) {
+		action = "retry_on_connector_upgrade";
+		retryable = false;
+	}
+	if (action === null) {
+		return error;
+	}
+	return {
+		...error,
+		// The connector's own code, so DONE.error.code names it and its display
+		// copy is found. Every 5xx shares one code: the owner's next step is the same.
+		...(error.code === undefined
+			? {
+					code: /^character_ai_api_5\d\d$/.test(code)
+						? "character_ai_api_5xx"
+						: code,
+				}
+			: {}),
+		retryable,
+		recovery_hint: { action, retryable },
+	};
+};
 
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "character_ai",
 		validateRecord,
 		retryablePattern:
-			/character_ai_api_(?:408|429|5\d\d)|character_ai_timeout|character_ai_network_error|character_ai_interrupted|fetch failed/i,
+			/character_ai_api_(?:408|429|5\d\d)|character_ai_timeout|character_ai_network_error|character_ai_interrupted|character_ai_challenge|fetch failed/i,
+		normalizeTerminalError: normalizeCharacterAiTerminalError,
 		browser: { profileName: "character_ai" },
 		ensureSession: ensureCharacterAiSession,
 		probeSession: ({ page }) => hasCharacterAiSession(page),
