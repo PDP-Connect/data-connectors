@@ -32,48 +32,59 @@ export function dollarsToCents(
 	return Math.round(amount * 100);
 }
 
+// Never manufacture source nulls. Core snapshot fields remain required by the
+// schemas; optional absent fields are omitted under the declared source contract.
+function presentFields(record: Record<string, unknown>): RecordData {
+	return Object.fromEntries(
+		Object.entries(record).filter(([, value]) => value !== undefined),
+	);
+}
 export function userRecord(u: VenmoUser): RecordData {
-	return {
+	return presentFields({
 		id: u.id,
-		username: u.username ?? null,
-		first_name: u.first_name ?? null,
-		last_name: u.last_name ?? null,
-		display_name: u.display_name ?? null,
-		phone: u.phone ?? null,
-		profile_picture_url: u.profile_picture_url ?? null,
-		about: u.about ?? null,
-		date_joined: normalizeVenmoDate(u.date_joined),
-		is_group: u.is_group ?? null,
-		is_active: u.is_active ?? null,
-	};
+		username: u.username,
+		first_name: u.first_name,
+		last_name: u.last_name,
+		display_name: u.display_name,
+		phone: u.phone,
+		profile_picture_url: u.profile_picture_url,
+		about: u.about,
+		date_joined:
+			u.date_joined === undefined
+				? undefined
+				: normalizeVenmoDate(u.date_joined),
+		is_group: u.is_group,
+		is_active: u.is_active,
+	});
 }
 
 export function profileRecord(u: VenmoUser): RecordData {
-	return {
+	return presentFields({
 		id: u.id,
-		username: u.username ?? null,
-		first_name: u.first_name ?? null,
-		last_name: u.last_name ?? null,
-		display_name: u.display_name ?? null,
-		phone: u.phone ?? null,
-		profile_picture_url: u.profile_picture_url ?? null,
-		about: u.about ?? null,
-		date_joined: normalizeVenmoDate(u.date_joined),
-		is_business: u.is_business ?? null,
-	};
+		username: u.username,
+		first_name: u.first_name,
+		last_name: u.last_name,
+		display_name: u.display_name,
+		phone: u.phone,
+		profile_picture_url: u.profile_picture_url,
+		about: u.about,
+		date_joined:
+			u.date_joined === undefined
+				? undefined
+				: normalizeVenmoDate(u.date_joined),
+		is_business: u.is_business,
+	});
 }
 
 function counterpartyRecord(
 	u: VenmoUser | null | undefined,
-): RecordData | null {
-	if (!u?.id) {
-		return null;
-	}
-	return {
+): RecordData | null | undefined {
+	if (u == null) return u;
+	return presentFields({
 		id: u.id,
-		username: u.username ?? null,
-		display_name: u.display_name ?? null,
-	};
+		username: u.username,
+		display_name: u.display_name,
+	});
 }
 
 /**
@@ -112,21 +123,41 @@ export function parseTransactionStory(
 	}
 	return {
 		kind: "record",
-		record: {
+		record: presentFields({
 			id: story.id,
-			payment_id: payment.id ?? null,
+			payment_id: payment.id,
 			date_created: normalizeVenmoDate(dateCreated),
-			date_updated: normalizeVenmoDate(story.date_updated),
-			date_completed: normalizeVenmoDate(payment.date_completed),
+			date_updated:
+				story.date_updated === undefined
+					? undefined
+					: normalizeVenmoDate(story.date_updated),
+			date_completed:
+				payment.date_completed === undefined
+					? undefined
+					: normalizeVenmoDate(payment.date_completed),
 			payment_type: actionRaw,
-			amount_cents: dollarsToCents(payment.amount),
-			audience: story.audience ?? null,
-			status: payment.status ?? null,
-			note: payment.note ?? null,
-			device_used: story.app?.name ?? null,
+			amount_cents:
+				payment.amount == null
+					? payment.amount
+					: typeof payment.amount === "number" &&
+							Number.isFinite(payment.amount)
+						? dollarsToCents(payment.amount)
+						: Number.NaN,
+			audience: story.audience,
+			status: payment.status,
+			note: payment.note,
+			device_used: story.app === null ? null : story.app?.name,
 			actor: counterpartyRecord(payment.actor),
-			target: counterpartyRecord(payment.target?.user),
-			is_owner_actor: payment.actor?.id === ownerId,
-		},
+			target:
+				payment.target === null
+					? null
+					: counterpartyRecord(payment.target?.user),
+			is_owner_actor:
+				payment.actor == null
+					? payment.actor
+					: payment.actor.id === undefined
+						? undefined
+						: payment.actor.id === ownerId,
+		}),
 	};
 }

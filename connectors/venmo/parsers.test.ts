@@ -53,12 +53,12 @@ test("userRecord maps every documented field and passes the friends schema", () 
 	assert.equal(validateRecord("friends", record).ok, true);
 });
 
-test("userRecord defaults every optional field to null, never undefined or a sentinel string", () => {
+test("userRecord keeps missing fields absent so a partial snapshot is invalid", () => {
 	const record = userRecord({ id: "1" });
-	assert.equal(record.username, null);
-	assert.equal(record.about, null);
-	assert.equal(record.is_active, null);
-	assert.ok(!("username" in record) || record.username === null);
+	assert.equal(record.username, undefined);
+	assert.equal(record.about, undefined);
+	assert.equal(record.is_active, undefined);
+	assert.equal(validateRecord("friends", record).ok, false);
 });
 
 test("profileRecord uses is_business (not is_group/is_active) and passes the profile schema", () => {
@@ -134,10 +134,7 @@ test("parseTransactionStory converts a pay story to a valid record, correctly de
 test("parseTransactionStory preserves an unknown payment amount as null", () => {
 	const missingAmountPayment = { ...RAW_PAY_STORY.payment };
 	delete missingAmountPayment.amount;
-	for (const payment of [
-		{ ...RAW_PAY_STORY.payment, amount: null },
-		missingAmountPayment,
-	]) {
+	for (const payment of [{ ...RAW_PAY_STORY.payment, amount: null }]) {
 		const record = validTransactionRecord(
 			{ ...RAW_PAY_STORY, payment },
 			"1234567890123456789",
@@ -239,7 +236,75 @@ test("parseTransactionStory returns a null counterparty (not a throw) when actor
 	assert.equal(record.target, null);
 	assert.equal(
 		record.is_owner_actor,
-		false,
-		"no actor id means the owner cannot be the actor",
+		null,
+		"explicit null actor leaves ownership unknown",
 	);
+});
+
+test("optional user observations remain absent without fabricated null", () => {
+	for (const field of ["phone", "about"] as const) {
+		const partial = { ...RAW_USER };
+		delete partial[field];
+		for (const [stream, parse] of [
+			["profile", profileRecord],
+			["friends", userRecord],
+		] as const) {
+			const record = parse(partial);
+			assert.equal(record[field], undefined);
+			assert.equal(validateRecord(stream, record).ok, true);
+			assert.equal(Object.hasOwn(record, field), false);
+		}
+	}
+});
+
+test("partial payment snapshots cannot validate as complete", () => {
+	for (const field of ["amount", "actor"] as const) {
+		const payment = { ...RAW_PAY_STORY.payment };
+		delete payment[field];
+		const parsed = parseTransactionStory(
+			{ ...RAW_PAY_STORY, payment },
+			RAW_USER.id,
+		);
+		if (parsed.kind === "record") {
+			assert.equal(validateRecord("transactions", parsed.record).ok, false);
+			if (field === "actor")
+				assert.notEqual(parsed.record.is_owner_actor, false);
+		} else assert.equal(parsed.kind, "invalid");
+	}
+});
+
+test("explicit source nulls remain null, including unknown actor ownership", () => {
+	const user = { ...RAW_USER, phone: null, about: null };
+	for (const parse of [profileRecord, userRecord]) {
+		assert.equal(parse(user).phone, null);
+		assert.equal(parse(user).about, null);
+	}
+	const record = validTransactionRecord(
+		{
+			...RAW_PAY_STORY,
+			payment: {
+				...RAW_PAY_STORY.payment,
+				amount: null,
+				note: null,
+				actor: null,
+			},
+		},
+		RAW_USER.id,
+	);
+	assert.equal(record.amount_cents, null);
+	assert.equal(record.note, null);
+	assert.equal(record.actor, null);
+	assert.equal(record.is_owner_actor, null);
+	assert.equal(validateRecord("transactions", record).ok, true);
+});
+
+test("optional payment note remains absent rather than a source null", () => {
+	const payment = { ...RAW_PAY_STORY.payment };
+	delete payment.note;
+	const record = validTransactionRecord(
+		{ ...RAW_PAY_STORY, payment },
+		RAW_USER.id,
+	);
+	assert.equal(Object.hasOwn(record, "note"), false);
+	assert.equal(validateRecord("transactions", record).ok, true);
 });

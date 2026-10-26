@@ -388,7 +388,7 @@ test("schema-rejected friends do not enter the fingerprint checkpoint", async ()
 				body: {
 					data: [
 						{ id: "5101", profile_picture_url: "not-a-url" },
-						{ id: "5102", username: "valid" },
+						{ id: "5102", username: "valid", display_name: "Valid" },
 					],
 				},
 			},
@@ -1902,4 +1902,149 @@ test("semantics: completed-run metadata does not claim date cursor incrementalit
 	assert.equal(transactions.incremental, false);
 	assert.equal(transactions.cursor_field, undefined);
 	assert.equal(manifest.version, "0.2.27");
+});
+
+test("partial mutable payments never replace a complete record and are retried", async () => {
+	const complete = {
+		...story("8701", "2026-07-01T00:00:00Z"),
+		audience: "private",
+		date_updated: null,
+		app: null,
+	};
+	Object.assign(complete.payment, { note: "lunch", date_completed: null });
+	const first = makeCtx({}, ["transactions"]);
+	await collectAllStreams(
+		first.ctx,
+		makeScriptedFetch({
+			[`/stories/target-or-actor/${OWNER_ID}`]: [
+				{ body: { data: [complete] } },
+				{ body: { data: [] } },
+			],
+		}).fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	assert.equal(first.emitted.length, 1);
+	const firstState = first.messages.find((m) => m.type === "STATE");
+	assert.ok(firstState?.type === "STATE");
+	for (const field of ["amount", "actor"]) {
+		const partial = structuredClone(complete) as unknown as {
+			payment: Record<string, unknown>;
+		};
+		delete partial.payment[field];
+		const next = makeCtx({ transactions: firstState.cursor }, ["transactions"]);
+		const failures: { retryable?: boolean }[] = [];
+		next.ctx.reportStreamFailure = async (_stream, _message, options) => {
+			failures.push(options ?? {});
+		};
+		await collectAllStreams(
+			next.ctx,
+			makeScriptedFetch({
+				[`/stories/target-or-actor/${OWNER_ID}`]: [
+					{ body: { data: [partial] } },
+					{ body: { data: [] } },
+				],
+			}).fetchPath,
+			OWNER_ID,
+			accountUser(),
+			NO_DELAY,
+		);
+		assert.equal(next.emitted.length, 0, field);
+		assert.equal(next.skipped.length, 1, field);
+		assert.ok(
+			failures.some((f) => f.retryable === true),
+			field,
+		);
+		const coverage = next.messages.find((m) => m.type === "DETAIL_COVERAGE");
+		assert.equal(
+			coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : -1,
+			0,
+		);
+		const rejectedState = next.messages.find((m) => m.type === "STATE");
+		assert.ok(rejectedState?.type === "STATE");
+		const repaired = makeCtx({ transactions: rejectedState.cursor }, [
+			"transactions",
+		]);
+		await collectAllStreams(
+			repaired.ctx,
+			makeScriptedFetch({
+				[`/stories/target-or-actor/${OWNER_ID}`]: [
+					{ body: { data: [complete] } },
+					{ body: { data: [] } },
+				],
+			}).fetchPath,
+			OWNER_ID,
+			accountUser(),
+			NO_DELAY,
+		);
+		assert.equal(repaired.emitted.length, 1);
+	}
+});
+
+test("profile and friend snapshots missing core identity are skipped without coverage credit", async () => {
+	const complete = {
+		...accountUser(),
+		first_name: null,
+		last_name: null,
+		phone: null,
+		about: null,
+		profile_picture_url: null,
+		is_business: false,
+		is_group: false,
+		is_active: true,
+	};
+	for (const stream of ["profile", "friends"])
+		for (const field of ["username", "display_name"] as const) {
+			const partial = { ...complete };
+			delete (partial as Record<string, unknown>)[field];
+			const run = makeCtx({}, [stream]);
+			const failures: { retryable?: boolean }[] = [];
+			run.ctx.reportStreamFailure = async (_stream, _message, options) => {
+				failures.push(options ?? {});
+			};
+			await collectAllStreams(
+				run.ctx,
+				makeScriptedFetch({
+					[`/users/${OWNER_ID}/friends`]: [
+						{ body: { data: [partial] } },
+						{ body: { data: [] } },
+					],
+				}).fetchPath,
+				OWNER_ID,
+				partial,
+				NO_DELAY,
+			);
+			assert.equal(run.emitted.length, 0);
+			assert.equal(run.skipped.length, 1);
+			assert.ok(failures.some((f) => f.retryable === true));
+			const coverage = run.messages.find((m) => m.type === "DETAIL_COVERAGE");
+			assert.equal(
+				coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : -1,
+				0,
+			);
+		}
+});
+
+test("unselected incomplete user snapshots do not fail requested coverage", async () => {
+	for (const stream of ["profile", "friends"]) {
+		const run = makeCtx({}, [stream]);
+		run.ctx.isRecordSelected = () => false;
+		run.ctx.reportStreamFailure = async () => {
+			throw new Error("unselected row failed stream");
+		};
+		await collectAllStreams(
+			run.ctx,
+			makeScriptedFetch({
+				[`/users/${OWNER_ID}/friends`]: [
+					{ body: { data: [{ id: OWNER_ID }] } },
+					{ body: { data: [] } },
+				],
+			}).fetchPath,
+			OWNER_ID,
+			{ id: OWNER_ID },
+			NO_DELAY,
+		);
+		assert.equal(run.emitted.length, 0);
+	}
 });

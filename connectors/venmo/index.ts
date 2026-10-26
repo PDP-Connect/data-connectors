@@ -899,6 +899,17 @@ async function collectProfile(
 			});
 		} else {
 			await emitRecord("profile", record);
+			if (
+				(ctx.isRecordSelected?.("profile", record) ?? true) &&
+				!validateRecord("profile", record).ok
+			) {
+				await reportVenmoStreamFailure(
+					ctx,
+					"profile",
+					"Venmo returned an incomplete or invalid profile snapshot",
+					{ retryable: true },
+				);
+			}
 		}
 	}
 	await emit(
@@ -931,6 +942,7 @@ async function collectFriends(
 		excludeFromFingerprint: [],
 	});
 	let covered = 0;
+	let rejected = false;
 	for (const friend of friends) {
 		const record = userRecord(friend);
 		if (isAcceptedRecord(ctx, "friends", record)) {
@@ -938,8 +950,21 @@ async function collectFriends(
 			if (!cursor.shouldEmit(record)) continue;
 		}
 		await emitRecord("friends", record);
+		if (
+			(ctx.isRecordSelected?.("friends", record) ?? true) &&
+			!validateRecord("friends", record).ok
+		)
+			rejected = true;
 	}
-	if (!truncated) {
+	if (rejected) {
+		await reportVenmoStreamFailure(
+			ctx,
+			"friends",
+			"Venmo returned incomplete or invalid friend snapshots; retry this inventory",
+			{ retryable: true },
+		);
+	}
+	if (!truncated && !rejected) {
 		cursor.dropUnseenIds();
 	}
 	const priorCursor = ctx.state.friends;
@@ -950,7 +975,7 @@ async function collectFriends(
 			? (priorCursor as { fingerprints?: unknown }).fingerprints
 			: undefined;
 	const fingerprints =
-		truncated &&
+		(truncated || rejected) &&
 		priorFingerprints &&
 		typeof priorFingerprints === "object" &&
 		!Array.isArray(priorFingerprints)
@@ -1036,7 +1061,7 @@ export async function collectAllStreams(
 				ctx,
 				"transactions",
 				`Venmo returned a supported payment with ${reason}; this page remains unfinished`,
-				{ retryable: false },
+				{ retryable: true },
 			);
 		}
 		const normalizedPrior =
