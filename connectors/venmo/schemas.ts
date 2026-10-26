@@ -25,6 +25,8 @@ import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schem
 // since no documented source pins the exact width and a too-tight regex
 // would reject legitimate ids the first time Venmo's id space grows.
 const NUMERIC_ID_RE = /^\d+$/;
+// Live payment stories also use opaque alphanumeric payment ids; story/user ids remain numeric.
+const PAYMENT_ID_RE = /^[A-Za-z0-9]+$/;
 const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
 export const profileSchema = z.object({
@@ -72,7 +74,7 @@ export const transactionsSchema = z.object({
 	id: z.string().regex(NUMERIC_ID_RE, "id must be a numeric story id"),
 	payment_id: z
 		.string()
-		.regex(NUMERIC_ID_RE, "payment_id must be a numeric string")
+		.regex(PAYMENT_ID_RE, "payment_id must be alphanumeric")
 		.nullable(),
 	date_created: z
 		.string()

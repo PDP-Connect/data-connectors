@@ -10,6 +10,18 @@ import type { VenmoStory, VenmoUser } from "./types.ts";
 
 export const API_BASE = "https://api.venmo.com/v1";
 
+const ZONELESS_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+
+/** Venmo's zone-less API timestamps are treated as UTC; preserve their fractional precision. */
+export function normalizeVenmoDate(
+	value: string | null | undefined,
+): string | null {
+	if (value == null) {
+		return null;
+	}
+	return ZONELESS_DATETIME_RE.test(value) ? `${value}Z` : value;
+}
+
 /** Venmo's `amount` is a float in major units (dollars); PDPP records integer cents. */
 export function dollarsToCents(amount: number | null | undefined): number {
 	if (typeof amount !== "number" || Number.isNaN(amount)) {
@@ -28,7 +40,7 @@ export function userRecord(u: VenmoUser): RecordData {
 		phone: u.phone ?? null,
 		profile_picture_url: u.profile_picture_url ?? null,
 		about: u.about ?? null,
-		date_joined: u.date_joined ?? null,
+		date_joined: normalizeVenmoDate(u.date_joined),
 		is_group: u.is_group ?? null,
 		is_active: u.is_active ?? null,
 	};
@@ -44,7 +56,7 @@ export function profileRecord(u: VenmoUser): RecordData {
 		phone: u.phone ?? null,
 		profile_picture_url: u.profile_picture_url ?? null,
 		about: u.about ?? null,
-		date_joined: u.date_joined ?? null,
+		date_joined: normalizeVenmoDate(u.date_joined),
 		is_business: u.is_business ?? null,
 	};
 }
@@ -93,9 +105,9 @@ export function transactionRecord(
 	return {
 		id: story.id,
 		payment_id: payment.id ?? null,
-		date_created: dateCreated,
-		date_updated: story.date_updated ?? null,
-		date_completed: payment.date_completed ?? null,
+		date_created: normalizeVenmoDate(dateCreated),
+		date_updated: normalizeVenmoDate(story.date_updated),
+		date_completed: normalizeVenmoDate(payment.date_completed),
 		payment_type: actionRaw,
 		amount_cents: dollarsToCents(payment.amount),
 		audience: story.audience ?? null,
