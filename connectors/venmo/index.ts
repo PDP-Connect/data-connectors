@@ -1056,7 +1056,9 @@ export async function collectAllStreams(
 					? "missing story id"
 					: rejectionReason === "missing_date_created"
 						? "missing date_created"
-						: "schema validation failed";
+						: rejectionReason === "missing_action"
+							? "missing action"
+							: "schema validation failed";
 			await reportVenmoStreamFailure(
 				ctx,
 				"transactions",

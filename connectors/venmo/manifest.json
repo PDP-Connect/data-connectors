@@ -319,7 +319,7 @@
 						}
 					},
 					"is_owner_actor": {
-						"type": "boolean"
+						"type": ["boolean", "null"]
 					}
 				},
 				"required": [

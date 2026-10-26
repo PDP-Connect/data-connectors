@@ -1928,7 +1928,7 @@ test("partial mutable payments never replace a complete record and are retried",
 	assert.equal(first.emitted.length, 1);
 	const firstState = first.messages.find((m) => m.type === "STATE");
 	assert.ok(firstState?.type === "STATE");
-	for (const field of ["amount", "actor"]) {
+	for (const field of ["amount", "actor", "action"]) {
 		const partial = structuredClone(complete) as unknown as {
 			payment: Record<string, unknown>;
 		};
@@ -1951,7 +1951,9 @@ test("partial mutable payments never replace a complete record and are retried",
 			NO_DELAY,
 		);
 		assert.equal(next.emitted.length, 0, field);
-		assert.equal(next.skipped.length, 1, field);
+		// The schema rejects a built record (one skip); the parser rejects a
+		// payment without an action before any record exists (no skip).
+		assert.equal(next.skipped.length, field === "action" ? 0 : 1, field);
 		assert.ok(
 			failures.some((f) => f.retryable === true),
 			field,

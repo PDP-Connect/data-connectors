@@ -105,12 +105,20 @@ export function parseTransactionStory(
 ):
 	| { kind: "record"; record: RecordData }
 	| { kind: "unsupported" }
-	| { kind: "invalid"; reason: "missing_id" | "missing_date_created" } {
+	| {
+			kind: "invalid";
+			reason: "missing_id" | "missing_date_created" | "missing_action";
+	  } {
 	const { payment } = story;
 	if (!payment) {
 		return { kind: "unsupported" };
 	}
 	const actionRaw = payment.action;
+	// A payment without an action is a partial payload, not a story type this
+	// connector skips by design, so it must stay unfinished and be read again.
+	if (actionRaw === undefined || actionRaw === null || actionRaw === "") {
+		return { kind: "invalid", reason: "missing_action" };
+	}
 	if (actionRaw !== "pay" && actionRaw !== "charge") {
 		return { kind: "unsupported" };
 	}

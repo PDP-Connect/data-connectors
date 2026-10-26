@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { Ajv2020 } from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import {
 	dollarsToCents,
 	parseTransactionStory,
@@ -296,6 +299,31 @@ test("explicit source nulls remain null, including unknown actor ownership", () 
 	assert.equal(record.actor, null);
 	assert.equal(record.is_owner_actor, null);
 	assert.equal(validateRecord("transactions", record).ok, true);
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { streams: { name: string; schema: object }[] };
+	const schema = manifest.streams.find(
+		(s) => s.name === "transactions",
+	)?.schema;
+	assert.ok(schema);
+	const ajv = new Ajv2020({ allErrors: true, strict: false });
+	addFormats.default(ajv);
+	const manifestAccepts = ajv.compile(schema);
+	assert.equal(
+		manifestAccepts(record),
+		true,
+		JSON.stringify(manifestAccepts.errors),
+	);
+});
+
+test("parseTransactionStory treats a payment without an action as unfinished, not unsupported", () => {
+	const story = structuredClone(RAW_PAY_STORY);
+	assert.ok(story.payment);
+	delete story.payment.action;
+	assert.deepEqual(parseTransactionStory(story, RAW_USER.id), {
+		kind: "invalid",
+		reason: "missing_action",
+	});
 });
 
 test("optional payment note remains absent rather than a source null", () => {
