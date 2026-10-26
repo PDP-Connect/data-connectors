@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	dollarsToCents,
-	profileRecord,
 	parseTransactionStory,
+	profileRecord,
 	userRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";

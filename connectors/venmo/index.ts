@@ -83,8 +83,8 @@ import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/pag
 import {
 	API_BASE,
 	normalizeVenmoDate,
-	profileRecord,
 	parseTransactionStory,
+	profileRecord,
 	userRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -92,6 +92,24 @@ import type { VenmoStory, VenmoUser } from "./types.ts";
 
 const FRIENDS_PAGE_SIZE = 200;
 const TRANSACTIONS_PAGE_SIZE = 50;
+/**
+ * Fail loudly when the runtime did not supply reportStreamFailure: an
+ * incomplete enumeration must never be silently treated as complete.
+ */
+async function reportVenmoStreamFailure(
+	ctx: Pick<BrowserCollectContext, "reportStreamFailure">,
+	stream: string,
+	message: string,
+	options: { retryable?: boolean },
+): Promise<void> {
+	if (!ctx.reportStreamFailure) {
+		throw new Error(
+			"venmo_stream_failure_unreported: the runtime did not supply reportStreamFailure",
+		);
+	}
+	await ctx.reportStreamFailure(stream, message, options);
+}
+
 export const MAX_FRIENDS_PAGES = 200;
 export const MAX_TRANSACTION_PAGES = 400;
 const HEAD_REFRESH_PAGES_WITH_PENDING_WORK = 100;
@@ -608,7 +626,8 @@ export async function collectTransactions(
 				.digest("hex");
 			if (
 				pagesFetched <= MUTABLE_REFRESH_PAGES &&
-				Object.keys(refreshFingerprints).length < MUTABLE_REFRESH_PAGES * TRANSACTIONS_PAGE_SIZE
+				Object.keys(refreshFingerprints).length <
+					MUTABLE_REFRESH_PAGES * TRANSACTIONS_PAGE_SIZE
 			) {
 				refreshFingerprints[id] = fingerprint;
 			}
@@ -938,7 +957,8 @@ async function collectFriends(
 			? (priorFingerprints as Record<string, string>)
 			: cursor.toState();
 	if (truncated) {
-		ctx.reportStreamFailure(
+		await reportVenmoStreamFailure(
+			ctx,
 			"friends",
 			`Venmo friends stopped at the ${MAX_FRIENDS_PAGES}-page limit with unread history`,
 			{ retryable: false },
@@ -998,7 +1018,8 @@ export async function collectAllStreams(
 						.last_seen_date_created
 				: undefined;
 		if (truncated) {
-			ctx.reportStreamFailure(
+			await reportVenmoStreamFailure(
+				ctx,
 				"transactions",
 				`Venmo transaction enumeration is incomplete; saved positions retain unread history (limit ${MAX_TRANSACTION_PAGES} pages per run)`,
 				{ retryable: false },
@@ -1011,7 +1032,8 @@ export async function collectAllStreams(
 					: rejectionReason === "missing_date_created"
 						? "missing date_created"
 						: "schema validation failed";
-			ctx.reportStreamFailure(
+			await reportVenmoStreamFailure(
+				ctx,
 				"transactions",
 				`Venmo returned a supported payment with ${reason}; this page remains unfinished`,
 				{ retryable: false },

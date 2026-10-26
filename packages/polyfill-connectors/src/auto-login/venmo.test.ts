@@ -5259,8 +5259,10 @@ for (const outcome of ["otp", "pending"] as const) {
 		page.goto = async (target) => {
 			if (isVenmoSignInUrl(url)) identityNavigations += 1;
 			gotoUrls.push(target);
-			url = target === "https://venmo.com/login"
-				? "https://id.venmo.com/signin" : target;
+			url =
+				target === "https://venmo.com/login"
+					? "https://id.venmo.com/signin"
+					: target;
 			return null;
 		};
 		page.evaluate = (async () => {
@@ -5268,22 +5270,25 @@ for (const outcome of ["otp", "pending"] as const) {
 			return { kind: "dead" };
 		}) as Page["evaluate"];
 		page.locator = ((selector: string) => {
-			if (selector === "body") return makeLocator({
-				innerText: stage === "otp" ? "Enter the code we sent." : "",
-			});
-			if (selector.includes("recaptcha")) return makeLocator({
-				count: stage === "captcha" ? 1 : 0,
-				visible: stage === "captcha",
-			});
+			if (selector === "body")
+				return makeLocator({
+					innerText: stage === "otp" ? "Enter the code we sent." : "",
+				});
+			if (selector.includes("recaptcha"))
+				return makeLocator({
+					count: stage === "captcha" ? 1 : 0,
+					visible: stage === "captcha",
+				});
 			if (selector.includes("otp") || selector.includes("code")) {
 				return stage === "otp" ? fields.locator : absent;
 			}
 			return absent;
 		}) as Page["locator"];
-		page.getByRole = (() => makeClickRecordingLocator(() => {
-			otpSubmits += 1;
-			stage = "verifying";
-		})) as Page["getByRole"];
+		page.getByRole = (() =>
+			makeClickRecordingLocator(() => {
+				otpSubmits += 1;
+				stage = "verifying";
+			})) as Page["getByRole"];
 		page.waitForTimeout = async () => {
 			if (stage === "verifying" && ++verificationTicks === 3) {
 				stage = "complete";
@@ -5292,7 +5297,10 @@ for (const outcome of ["otp", "pending"] as const) {
 			await new Promise((resolve) => setTimeout(resolve, 1));
 		};
 		const run = ensureVenmoSession({
-			credentials: { VENMO_USERNAME: "test-user", VENMO_PASSWORD: "test-password" },
+			credentials: {
+				VENMO_USERNAME: "test-user",
+				VENMO_PASSWORD: "test-password",
+			},
 			page,
 			postSubmitSettleTimeoutMs: 100,
 			sendInteraction: (request) => {
@@ -5310,7 +5318,11 @@ for (const outcome of ["otp", "pending"] as const) {
 			assert.equal(otpSubmits, 0);
 		} else {
 			await run;
-			assert.equal(stage, "complete", "collector handoff must wait for OTP verification");
+			assert.equal(
+				stage,
+				"complete",
+				"collector handoff must wait for OTP verification",
+			);
 			assert.deepEqual(kinds, ["manual_action", "otp"]);
 			assert.deepEqual(fields.values, ["123456"]);
 			assert.equal(otpSubmits, 1);
