@@ -23297,7 +23297,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.6",
+				"version": "0.3.7",
 				"display_name": "TikTok (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -23446,7 +23446,7 @@
 					{
 						"name": "videos",
 						"required": false,
-						"description": "Videos the owner posted, newest first, with their caption, length, who may see them, and their counts when collected. Every run reads the whole list again so the counts stay current. The video files are not collected.",
+						"description": "Videos the owner posted, newest first, with their caption, length, who may see them, and their counts when collected. Every run reads the whole list again so the counts stay current; a run limited to a start date stops once TikTok's newest-first list has passed it. The video files are not collected.",
 						"display": {
 							"label": "Your TikTok videos",
 							"detail": "Each video's caption, when you posted it, its length, who can see it, and its views, likes, comments, shares, saves and reposts."
@@ -23464,7 +23464,7 @@
 								"created_at": {
 									"type": "string",
 									"format": "date-time",
-									"description": "When the video was posted, in UTC. This is the stream's cursor and consent time field.",
+									"description": "When the video was posted, in UTC. This is the stream's consent time field.",
 									"x_pdpp_role": "event-time"
 								},
 								"caption": {
@@ -23529,7 +23529,6 @@
 							]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "created_at",
 						"consent_time_field": "created_at",
 						"selection": {
 							"fields": true,
@@ -23558,12 +23557,12 @@
 					{
 						"name": "likes",
 						"required": false,
-						"description": "Videos the owner liked, newest first: who posted each and its caption. TikTok does not say when a video was liked, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected.",
+						"description": "Videos the owner liked, in the order TikTok lists them: who posted each and its caption. TikTok does not say when a video was liked, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal, so a caption or author name can change between runs; a video unliked since an earlier run is no longer listed and is not reported as removed. The video files are not collected.",
 						"display": {
 							"label": "Videos you liked on TikTok",
 							"detail": "The videos you liked: who posted each, its caption and when it was posted."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -23638,12 +23637,12 @@
 					{
 						"name": "favorites",
 						"required": false,
-						"description": "Videos the owner saved to Favorites, newest first: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected.",
+						"description": "Videos the owner saved to Favorites, in the order TikTok lists them: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal, so a caption or author name can change between runs; a video removed from Favorites since an earlier run is no longer listed and is not reported as removed. The video files are not collected.",
 						"display": {
 							"label": "Your TikTok Favorites",
 							"detail": "The videos you saved to Favorites: who posted each, its caption and when it was posted."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -23770,7 +23769,7 @@
 					{
 						"name": "collection_items",
 						"required": false,
-						"description": "Which saved videos sit in which Favorites collection: one record per video in a collection, with who posted it and its caption. Each collection is read to TikTok's own end signal; a collection that could not be read is retried on the next run. The video files are not collected.",
+						"description": "Which saved videos sit in which Favorites collection: one record per video in a collection, with who posted it and its caption. Each collection is read to TikTok's own end signal; a collection whose list TikTok did not finish is retried on the next run, and one whose answer cannot be read fails the stream. The video files are not collected.",
 						"display": {
 							"label": "Videos in your TikTok Favorites collections",
 							"detail": "For each collection, the videos in it: who posted each, its caption and when it was posted."
@@ -24003,6 +24002,7 @@
 					"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
 					"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
 					"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
+					"stream_collection_failed": "TikTok did not let this part be read in full, so it was not saved as complete. What was read is saved.",
 					"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
 				},
 				"mobile": {

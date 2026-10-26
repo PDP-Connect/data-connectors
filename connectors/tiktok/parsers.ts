@@ -212,6 +212,11 @@ const itemSchema = z.object({
 	privateItem: z.boolean().optional(),
 	secret: z.boolean().optional(),
 	forFriend: z.boolean().optional(),
+	/**
+	 * TikTok's web app marks a video the owner pinned to the top of their
+	 * profile; it is listed first whatever its posting time.
+	 */
+	isPinnedItem: z.boolean().optional(),
 });
 
 export type Item = z.infer<typeof itemSchema>;
@@ -262,6 +267,7 @@ const DROPPABLE_KEYS = new Set([
 	"privateItem",
 	"secret",
 	"forFriend",
+	"isPinnedItem",
 ]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
