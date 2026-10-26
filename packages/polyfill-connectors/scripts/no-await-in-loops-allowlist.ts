@@ -3500,14 +3500,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 392,
+			line: 406,
 			column: 9,
 			category: "ordered_protocol_emission",
 			note: "Acknowledge a previously complete range in requested stream order.",
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 412,
+			line: 426,
 			column: 7,
 			category: "ordered_protocol_emission",
 			note: "Emit each Oura record before the stream checkpoint.",
