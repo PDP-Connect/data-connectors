@@ -376,18 +376,18 @@ test("a full run reads every stream from its own path and checkpoints each after
 			"/passport/account/info/v2/",
 			"/api/post/item_list/",
 			"/api/user/settings/",
+			"/api/user/list/",
+			"/api/user/list/",
 			"/api/favorite/item_list/",
 			"/api/user/collect/item_list/",
-			"/api/user/list/",
-			"/api/user/list/",
 		],
 	);
 	const owner = parseAccount(ACCOUNT);
 	assert.ok(owner);
 	assert.equal(calls[1]?.params.secUid, owner.secUid);
 	assert.equal(calls[1]?.params.cursor, "0");
-	assert.equal(calls[5]?.params.scene, "21");
-	assert.equal(calls[6]?.params.scene, "67");
+	assert.equal(calls[3]?.params.scene, "21");
+	assert.equal(calls[4]?.params.scene, "67");
 
 	const count = (stream: string) =>
 		h.records.filter((record) => record.stream === stream).length;
@@ -2226,7 +2226,11 @@ test("read boundary: malformed and temporary HTTP 200 account objects remain unk
 		{ message: "error", data: { description: "Please log in" } },
 		{
 			message: "error",
-			data: { error_code: 13, name: "other_error", description: "sign in again" },
+			data: {
+				error_code: 13,
+				name: "other_error",
+				description: "sign in again",
+			},
 		},
 	]) {
 		const { page, gotos } = fakePage(() => ok(json));
@@ -2389,7 +2393,9 @@ test("signin handoff: with no cookie baseline, an existing sign-in cookie is not
 	// The jar could not be read when the handoff began (before = null); later
 	// reads see a session cookie that may be left from an old session.
 	const jar = cookieJar(() => ["sessionid"]);
-	const { page } = fakePage(() => ok({ message: "error", data: { name: "session_expired" } }));
+	const { page } = fakePage(() =>
+		ok({ message: "error", data: { name: "session_expired" } }),
+	);
 	const readiness = signInReadiness(jar, null, noDelay.delay);
 	assert.equal(await readiness.probe(page), false);
 	assert.equal(readiness.byCookie(), false);
@@ -2660,10 +2666,10 @@ const FULL_RUN_PATHS = [
 	ACCOUNT_PATH,
 	"/api/post/item_list/",
 	"/api/user/settings/",
+	"/api/user/list/",
+	"/api/user/list/",
 	"/api/favorite/item_list/",
 	"/api/user/collect/item_list/",
-	"/api/user/list/",
-	"/api/user/list/",
 ];
 
 const onlyProfileHasClient = (url: string): PageSpec => ({

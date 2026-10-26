@@ -14,6 +14,7 @@ import type {
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	collectTikTok,
 	pageBeforeSince,
@@ -332,32 +333,41 @@ test("time_range: until alone is not pushed down; the whole list is read", async
 	assert.match(h.failures[0]?.message ?? "", /^tiktok_list_incomplete/);
 });
 
-test("time_range: narrow then wide: a later run with an earlier since reads the older pages again", async () => {
+test("time_range: narrow then wide: STATE holds no list position, so a wider later run delivers every video the narrow run left out", async () => {
+	const WIDE = "2025-12-01T00:00:00Z";
+	/** The records the runtime keeps under `since` (selectRecord's rule). */
+	const kept = (h: ReturnType<typeof harness>, since: string) =>
+		h.records
+			.filter(
+				(r) =>
+					r.stream === "videos" &&
+					!isOutsideTimeRange({ since }, r.data.created_at),
+			)
+			.map((r) => String(r.data.id));
 	const narrow = fakePage(postPages(POST_PAGES));
 	const first = harness(
 		[{ name: "videos", time_range: { since: SINCE } } as StreamScope],
 		narrow.page,
 	);
 	await collectTikTok(first.ctx, noDelay);
-	assert.equal(ids(first, "videos").includes("905"), false);
-	// The second run starts from the first run's STATE and an earlier since.
+	assert.deepEqual(kept(first, SINCE), ["901", "902"]);
+	// The STATE the narrow run leaves is a count only: no cursor, newest time
+	// or "already read" set a later run could skip from.
 	const state: Record<string, unknown> = {};
 	for (const message of ofType(first, "STATE"))
 		state[String(message.stream)] = message.cursor;
+	assert.deepEqual(state, { videos: { count: 5 } });
 	const wide = fakePage(postPages(POST_PAGES));
 	const second = harness(
-		[
-			{
-				name: "videos",
-				time_range: { since: "2025-12-01T00:00:00Z" },
-			} as StreamScope,
-		],
+		[{ name: "videos", time_range: { since: WIDE } } as StreamScope],
 		wide.page,
-		{ state },
+		{ state, collectionMode: "incremental" },
 	);
 	await collectTikTok(second.ctx, noDelay);
-	assert.deepEqual(postCursors(wide.calls).length, 3);
-	assert.ok(ids(second, "videos").includes("905"));
+	// Every video posted since WIDE is delivered by the wider run, including
+	// 903-905, which the narrow run read but the runtime dropped (903, 904)
+	// or never read (905).
+	assert.deepEqual(kept(second, WIDE), ["901", "902", "903", "904", "905"]);
 });
 
 test("time_range: pageBeforeSince needs every unpinned video and the cursor before since", () => {
@@ -821,5 +831,133 @@ test("review 1: likes that repeat a row are not settled below TikTok's count, ho
 	await collectTikTok(h.ctx, noDelay);
 	assert.equal(h.failures.length, 1);
 	assert.match(h.failures[0]?.message ?? "", /^tiktok_list_incomplete/);
+	assert.equal(stateOf(h, "likes"), undefined);
+});
+
+// ─── review 2 ────────────────────────────────────────────────────────────
+
+test("review 2: a cursor exactly at since does not stop the walk", () => {
+	const second = POST_PAGES[String((SINCE_S + 5 * DAY) * 1000)] as Json;
+	const parsed = parseItemPage({
+		...second,
+		itemList: [video("903", SINCE_S - 2 * DAY), video("904", SINCE_S)],
+	});
+	assert.ok(parsed);
+	// A video posted at since is inside the window, so the page proves nothing.
+	assert.equal(pageBeforeSince(parsed, SINCE), false);
+	const atSince = parseItemPage({
+		...second,
+		cursor: String(SINCE_S * 1000),
+		itemList: [video("903", SINCE_S + 1), video("904", SINCE_S + 1)],
+	});
+	assert.ok(atSince);
+	assert.equal(pageBeforeSince(atSince, SINCE), false);
+	// One millisecond earlier, with every video before since, is a proof.
+	const justBefore = parseItemPage({
+		...second,
+		cursor: String(SINCE_S * 1000 - 1),
+		itemList: [video("903", SINCE_S - 1), video("904", SINCE_S - 1)],
+	});
+	assert.ok(justBefore);
+	assert.equal(pageBeforeSince(justBefore, SINCE), true);
+});
+
+test("review 2: a recovery run with favorite_collections resources does not read a gapped collection outside them from a later page", async () => {
+	const { calls, page } = fakePage(standardAnswer);
+	const pages = [[pendingGap("g2", COLLECTION_B)], []];
+	let asked = 0;
+	const h = harness(
+		[
+			{
+				name: "favorite_collections",
+				resources: [COLLECTION_A],
+			} as StreamScope,
+			"collection_items",
+		],
+		page,
+		{
+			recoveryOnly: true,
+			detailGaps: [pendingGap("g1", COLLECTION_A)],
+			requestDetailGapPage: async () => pages[asked++] ?? [],
+		},
+	);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(h.failures, []);
+	assert.deepEqual(
+		calls
+			.filter((c) => c.path === "/api/collection/item_list/")
+			.map((c) => c.params.collectionId),
+		[COLLECTION_A],
+	);
+	assert.equal(
+		h.records.some((r) => r.data.id === COLLECTION_B),
+		false,
+	);
+	assert.deepEqual(
+		ofType(h, "DETAIL_GAP_RECOVERED").map((m) => m.gap_id),
+		["g1"],
+	);
+});
+
+test("review 2: a gap page holding only gaps this run cannot settle still leads to the next page", async () => {
+	const { page } = fakePage(standardAnswer);
+	const pages = [
+		// Not this connector's stream, and a locator that names no collection.
+		[
+			{ ...pendingGap("x1", COLLECTION_A), stream: "other" },
+			{
+				...pendingGap("x2", "not-a-collection"),
+				detail_locator: { kind: "tiktok.collection" },
+			},
+		],
+		[pendingGap("g2", COLLECTION_B)],
+		[],
+	];
+	let asked = 0;
+	const h = harness(BOTH, page, {
+		detailGaps: [],
+		requestDetailGapPage: async () => pages[asked++] ?? [],
+	});
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(
+		ofType(h, "DETAIL_GAP_RECOVERED").map((m) => m.gap_id),
+		["g2"],
+	);
+});
+
+test("review 2: a count re-read the request budget cannot cover fails only that stream, and likes run after the others", async () => {
+	const liked = LIKED.itemList as Json[];
+	const { calls, page } = fakePage((call) => {
+		if (call.path === "/api/favorite/item_list/") {
+			const n = calls.filter((c) => c.path === call.path).length;
+			return ok({
+				...LIKED,
+				total: 99,
+				hasMore: n < 3,
+				cursor: `c${n}`,
+				itemList: liked.map((item) => ({ ...item, id: `${item.id}${n}` })),
+			});
+		}
+		return standardAnswer(call);
+	});
+	const h = harness(["likes", "following"], page);
+	// account + following + 3 likes pages, then 2 left: not enough for a
+	// 3-page re-read.
+	await collectTikTok(h.ctx, { ...noDelay, maxRequests: 7 });
+	assert.deepEqual(
+		calls.map((c) => c.path),
+		[
+			"/passport/account/info/v2/",
+			"/api/user/list/",
+			"/api/favorite/item_list/",
+			"/api/favorite/item_list/",
+			"/api/favorite/item_list/",
+		],
+	);
+	assert.deepEqual(
+		h.failures.map((f) => [f.stream, f.message.split(":")[0]]),
+		[["likes", "tiktok_list_incomplete"]],
+	);
+	assert.ok(stateOf(h, "following"));
 	assert.equal(stateOf(h, "likes"), undefined);
 });

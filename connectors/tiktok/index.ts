@@ -228,15 +228,20 @@ const FOLLOWING = "following";
 const FOLLOWERS = "followers";
 const FAVORITE_COLLECTIONS = "favorite_collections";
 const COLLECTION_ITEMS = "collection_items";
+/**
+ * The order streams run in. likes and favorites come last: they can be the
+ * longest lists and may be read twice to settle a count (walkSaved), so the
+ * request budget they spend cannot starve the other streams.
+ */
 const STREAMS = [
 	VIDEOS,
 	PROFILE,
-	LIKES,
-	FAVORITES,
 	FAVORITE_COLLECTIONS,
 	COLLECTION_ITEMS,
 	FOLLOWING,
 	FOLLOWERS,
+	LIKES,
+	FAVORITES,
 ] as const;
 type Stream = (typeof STREAMS)[number];
 
@@ -549,6 +554,8 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 	return {
 		get,
 		requests: () => requests,
+		/** Requests this run may still send before its limit. */
+		remaining: () => Math.max(0, maxRequests - requests),
 		transport: () => transport,
 		signed: () => signed,
 	};
@@ -1570,32 +1577,37 @@ export async function collectTikTok(
 	/** Every collection_items gap id seen this run, from START or a page. */
 	const seenGapIds = new Set<string>();
 	/**
-	 * Take the collection_items gaps of one page (START's, or one the runtime
-	 * pages in) that were not seen yet; returns the collection ids they name.
+	 * Take the gaps of one page (START's, or one the runtime pages in). Every
+	 * gap id on the page counts as seen, whether or not it names a collection
+	 * this connector can read, so a page of gaps that do not close still
+	 * leads to the next page. Returns how many gap ids were new (paging ends
+	 * at a page with none) and the collection ids the new valid gaps name.
 	 */
 	const addPendingGaps = (
 		entries: TikTokCollectContext["detailGaps"],
-	): string[] => {
+	): { fresh: string[]; unseen: number } => {
 		const fresh: string[] = [];
+		let unseen = 0;
 		for (const gap of entries ?? []) {
+			if (seenGapIds.has(gap.gap_id)) continue;
+			seenGapIds.add(gap.gap_id);
+			unseen += 1;
 			const id = gap.detail_locator?.collection_id ?? gap.record_key;
 			if (gap.stream !== COLLECTION_ITEMS) continue;
 			if (typeof id !== "string" || !/^[0-9]{1,30}$/.test(id)) continue;
-			if (seenGapIds.has(gap.gap_id)) continue;
-			seenGapIds.add(gap.gap_id);
 			pendingGaps.set(id, [...(pendingGaps.get(id) ?? []), gap]);
 			if (!fresh.includes(id)) fresh.push(id);
 		}
-		return fresh;
+		return { fresh, unseen };
 	};
 	addPendingGaps(ctx.detailGaps);
 	/** The next page of pending gaps; empty on a host that pages none. */
-	const nextGapPage = async (): Promise<string[]> =>
+	const nextGapPage = async (): Promise<{ fresh: string[]; unseen: number }> =>
 		ctx.requestDetailGapPage
 			? addPendingGaps(
 					await ctx.requestDetailGapPage({ streams: [COLLECTION_ITEMS] }),
 				)
-			: [];
+			: { fresh: [], unseen: 0 };
 
 	/** Acknowledge every pending gap of one collection that is now settled. */
 	const recoverGaps = async (collectionId: string): Promise<void> => {
@@ -1750,9 +1762,9 @@ export async function collectTikTok(
 		for (const id of [...pendingGaps.keys()]) await settle(id);
 		// START carries a bounded page of gaps; the rest come one page at a
 		// time, each settled before the next is asked for.
-		for (let fresh = await nextGapPage(); fresh.length > 0; ) {
-			for (const id of fresh) await settle(id);
-			fresh = await nextGapPage();
+		for (let page = await nextGapPage(); page.unseen > 0; ) {
+			for (const id of page.fresh) await settle(id);
+			page = await nextGapPage();
 		}
 		await emitDetailCoverage(ctx, {
 			stream: COLLECTION_ITEMS,
@@ -1996,7 +2008,11 @@ export async function collectTikTok(
 	 * START carries none, one page is asked of the runtime first.
 	 */
 	const recoverCollections = async (): Promise<void> => {
-		if (pendingGaps.size === 0) await nextGapPage();
+		for (
+			let page = { fresh: [] as string[], unseen: 1 };
+			pendingGaps.size === 0 && page.unseen > 0;
+		)
+			page = await nextGapPage();
 		if (pendingGaps.size === 0) return;
 		if (!ctx.requested.has(FAVORITE_COLLECTIONS)) {
 			await fail(COLLECTION_ITEMS, parentRequired);
@@ -2180,7 +2196,9 @@ export async function collectTikTok(
 		let confirmed = false;
 		// TikTok counts more than it listed (a video its author removed stays
 		// in the count): the list is complete only when a walk without repeated
-		// rows reads the same ids twice in a row (settleCount).
+		// rows reads the same ids twice in a row (settleCount). A re-read is
+		// sent only while the run's request budget covers it: otherwise only
+		// this stream ends incomplete, and no other stream loses its requests.
 		for (
 			let attempt = 1;
 			!walk.stopped &&
@@ -2192,6 +2210,14 @@ export async function collectTikTok(
 			attempt < MAX_STABLE_READS;
 			attempt += 1
 		) {
+			if (api.remaining() < walk.pages) {
+				connectorDiagnostic("tiktok", "count_reread_skipped", {
+					stream,
+					pages: walk.pages,
+					remaining: api.remaining(),
+				});
+				break;
+			}
 			const again = await readOnce();
 			assertSafe(stream);
 			if (again.walk.total !== null) total = Math.max(total, again.walk.total);
