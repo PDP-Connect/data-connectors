@@ -33,6 +33,7 @@ import {
 	museReadiness,
 	pageGateway,
 	READ_METHODS,
+	windowCovers,
 } from "./index.ts";
 import { buildFileRecord, MEMORY_FILE_NAMES } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -2604,6 +2605,19 @@ function scopeEvents(chat: string): Json[] {
 	}));
 }
 
+/** One chat.history page of the scope chats, newest first by seq. */
+function scopeHistory(p: Json): Json {
+	const all = scopeEvents(String(p.session_id));
+	const before = typeof p.before_seq === "number" ? p.before_seq : Infinity;
+	const older = all.filter((e) => Number(e.seq) < before);
+	const page = older.slice(-Number(p.limit));
+	return {
+		chat_events: page,
+		has_more: older.length > page.length,
+		transcript_revision: 7,
+	};
+}
+
 /** Two chats; the old one was created long before SINCE but last updated after it. */
 function scopeGateway(overrides: Record<string, Handler> = {}) {
 	const template = (SESSIONS.sessions as Json[])[0] ?? {};
@@ -2627,17 +2641,7 @@ function scopeGateway(overrides: Record<string, Handler> = {}) {
 				throw new MuseRpcError("not_found", "muse_rpc_failed: not_found");
 			return { session: session(String(p.id)) };
 		},
-		"chat.history": (p) => {
-			const all = scopeEvents(String(p.session_id));
-			const before = typeof p.before_seq === "number" ? p.before_seq : Infinity;
-			const older = all.filter((e) => Number(e.seq) < before);
-			const page = older.slice(-Number(p.limit));
-			return {
-				chat_events: page,
-				has_more: older.length > page.length,
-				transcript_revision: 7,
-			};
-		},
+		"chat.history": scopeHistory,
 		...overrides,
 	});
 }
@@ -3150,4 +3154,95 @@ test("scope: an unbounded recovery-only read still clears the pending gap", asyn
 		1,
 	);
 	assert.equal(h.records("messages").length, 150);
+});
+
+test("window cover compares bounds at full fractional precision", () => {
+	const narrow = { since: "2026-05-01T00:00:00.0005Z", until: null };
+	const wide = { since: "2026-05-01T00:00:00.000Z", until: null };
+	assert.equal(windowCovers(narrow, wide), false);
+	assert.equal(windowCovers(wide, narrow), true);
+	const shortEnd = { since: null, until: "2026-05-01T00:00:00.000Z" };
+	const longEnd = { since: null, until: "2026-05-01T00:00:00.0005Z" };
+	assert.equal(windowCovers(shortEnd, longEnd), false);
+	assert.equal(windowCovers(longEnd, shortEnd), true);
+	assert.equal(windowCovers({ since: "nope", until: null }, wide), false);
+});
+
+test("scope until finer than a millisecond: the activity ceiling rounds up, never cutting the window", async () => {
+	const { gateway, calls } = scopeActivities(40);
+	const h = scopedHarness({
+		scopes: [
+			{
+				name: "activities",
+				time_range: { until: "2026-01-31T11:50:00.0005Z" },
+			},
+		],
+	});
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(calls[0]?.before, "2026-01-31T11:50:00.001Z");
+	// 11:50 itself is inside the window.
+	assert.equal(h.records("activities").length, 30);
+	assert.ok(
+		h
+			.records("activities")
+			.some((r) => r.timestamp === "2026-01-31T11:50:00.000Z"),
+	);
+});
+
+/** OLD_CHAT's message m-<n> is still being generated. */
+function runningMessage(n: number): Handler {
+	return (p) => {
+		const page = scopeHistory(p);
+		for (const e of page.chat_events as Json[])
+			if (e.message_id === `${OLD_CHAT}:m-${n}`)
+				e.payload = { ...(e.payload as Json), status: "running" };
+		return page;
+	};
+}
+
+test("scope since: a message outside the window that is still being generated does not gap the chat", async () => {
+	// m-100 (2026-04-10) is on the page where the walk stops.
+	const { gateway } = scopeGateway({ "chat.history": runningMessage(100) });
+	const h = scopedHarness({
+		scopes: chatScopes({}, { time_range: { since: SINCE } }),
+	});
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.emitted.filter((m) => m.type === "DETAIL_GAP").length, 0);
+	const marks = (h.states("conversations")[0]?.chats ?? {}) as Json;
+	assert.ok(marks[OLD_CHAT]);
+});
+
+test("scope resources: an unselected message still being generated does not gap the chat", async () => {
+	const { gateway } = scopeGateway({ "chat.history": runningMessage(100) });
+	const h = scopedHarness({
+		scopes: chatScopes({}, { resources: [`${OLD_CHAT}:m-150`] }),
+	});
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.emitted.filter((m) => m.type === "DETAIL_GAP").length, 0);
+	assert.deepEqual(
+		h.records("messages").map((r) => r.id),
+		[`${OLD_CHAT}:m-150`],
+	);
+});
+
+test("standalone: one retryable failure keeps the run retryable beside a non-retryable one", async () => {
+	const { gateway } = fakeGateway({
+		"activity.list": () => ({ unexpected: true }),
+		"goals.list": () => {
+			const g = fixture("goals-tracking");
+			g.pagination = { has_next_page: true };
+			return g;
+		},
+	});
+	const h = harness({ streams: ["activities", "goals"] });
+	delete h.ctx.reportStreamFailure;
+	await assert.rejects(collectMuseWith(h.ctx, gateway), (error: Error) => {
+		const e = error as { retryable?: unknown; recoveryHint?: unknown };
+		assert.equal(e.retryable, true);
+		assert.deepEqual(e.recoveryHint, {
+			action: "retry_by_runtime",
+			retryable: true,
+		});
+		return true;
+	});
 });

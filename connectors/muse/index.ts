@@ -61,6 +61,10 @@ import {
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
+	isOutsideTimeRange,
+	parseIsoInstant,
+} from "../../packages/polyfill-connectors/src/time-range.ts";
+import {
 	activityId,
 	buildActivityRecord,
 	buildConnectedAppRecord,
@@ -548,22 +552,23 @@ function boundMs(bound: string | null): number | null {
  * side; an unparseable one covers nothing.
  */
 export function windowCovers(held: TimeWindow, wanted: TimeWindow): boolean {
-	const heldSince = boundMs(held.since);
-	const wantedSince = boundMs(wanted.since);
-	const heldUntil = boundMs(held.until);
-	const wantedUntil = boundMs(wanted.until);
+	// The runtime's own instant comparison, at full fractional precision
+	// (Date.parse drops digits past the millisecond).
+	const valid = (bound: string) => parseIsoInstant(bound) !== null;
 	const sinceOk =
-		heldSince === null ||
-		(wantedSince !== null &&
-			!Number.isNaN(heldSince) &&
-			!Number.isNaN(wantedSince) &&
-			heldSince <= wantedSince);
+		held.since === null ||
+		(wanted.since !== null &&
+			valid(held.since) &&
+			valid(wanted.since) &&
+			// held.since <= wanted.since
+			!isOutsideTimeRange({ since: held.since }, wanted.since));
 	const untilOk =
-		heldUntil === null ||
-		(wantedUntil !== null &&
-			!Number.isNaN(heldUntil) &&
-			!Number.isNaN(wantedUntil) &&
-			wantedUntil <= heldUntil);
+		held.until === null ||
+		(wanted.until !== null &&
+			valid(held.until) &&
+			valid(wanted.until) &&
+			// wanted.until <= held.until
+			isOutsideTimeRange({ until: wanted.until }, held.until));
 	return sinceOk && untilOk;
 }
 
@@ -932,11 +937,15 @@ async function hydrateChat(
 		);
 		for (const event of fresh) {
 			seen.add(event.message_id);
+			const built = buildMessageRecord(event, sessionId);
+			// A message the scope leaves out (before `since`, not a selected
+			// resource) is neither stored nor a reason to gap the chat.
+			if (ctx.isRecordSelected && !ctx.isRecordSelected(MESSAGES, built.record))
+				continue;
 			if (!isFinalEvent(event)) {
 				notFinal += 1;
 				continue;
 			}
-			const built = buildMessageRecord(event, sessionId);
 			if (built.replaced > 0) {
 				unsafe += 1;
 				continue;
@@ -1606,8 +1615,16 @@ function priorActivityWatermark(ctx: MuseCtx): string | null {
 /** A time bound in the shape activity.list takes: UTC `Z`, whole seconds unless the bound had a fraction. */
 function activityBound(bound: string | null): string | null {
 	if (bound === null) return null;
-	const ms = Date.parse(bound);
-	if (!Number.isFinite(ms)) return null;
+	const instant = parseIsoInstant(bound);
+	if (instant === null) return null;
+	// `before` is exclusive: a bound finer than a millisecond is rounded up,
+	// never down, so nothing inside the window is cut off (anything the
+	// round-up admits past `until` is the runtime's to withhold).
+	const fraction = instant.fraction.padEnd(3, "0");
+	const ms =
+		instant.second +
+		Number(fraction.slice(0, 3)) +
+		(/[1-9]/.test(fraction.slice(3)) ? 1 : 0);
 	const iso = new Date(ms).toISOString();
 	return iso.endsWith(".000Z") ? iso.replace(".000Z", "Z") : iso;
 }
@@ -2055,13 +2072,14 @@ export async function collectMuseWith(
 	// before throwing, rather than silently treating an incomplete run as success.
 	const failures: string[] = [];
 	const hints = new Set<string>();
-	let retryable = true;
+	let retryable = false;
 	if (!ctx.reportStreamFailure) {
 		ctx = {
 			...ctx,
 			reportStreamFailure: async (stream, message, options) => {
 				failures.push(`${stream}: ${message}`);
-				retryable &&= options?.retryable !== false;
+				// The run can gain from a retry when any failed stream can.
+				retryable ||= options?.retryable !== false;
 				if (options?.recoveryHint) hints.add(options.recoveryHint.action);
 			},
 		};
