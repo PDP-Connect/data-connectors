@@ -813,7 +813,7 @@ function turnsWithCandidate(
 	};
 }
 
-test("an unfinished turn makes its chat a gap; an unstorable turn is left out and reported, the rest of its chat is stored", async () => {
+test("an unfinished turn makes its chat a gap; an unstorable turn is left out, the rest of its chat is stored and the chat stays a gap", async () => {
 	const [first, second, third] = CHAT_IDS;
 	assert.ok(first && second && third);
 	const h = harness(
@@ -829,7 +829,10 @@ test("an unfinished turn makes its chat a gap; an unstorable turn is left out an
 	const gaps = ofType(h.messages, "DETAIL_GAP");
 	assert.deepEqual(
 		gaps.map((gap) => [gap.record_key, gap.reason]),
-		[[third, "temporary_unavailable"]],
+		[
+			[second, "retry_exhausted"],
+			[third, "temporary_unavailable"],
+		],
 	);
 	const messagesOf = (chatId: string) =>
 		h.records.filter(
@@ -841,21 +844,10 @@ test("an unfinished turn makes its chat a gap; an unstorable turn is left out an
 	// not held as a pending gap forever for it.
 	assert.equal(messagesOf(second).length, 2);
 	assert.equal(messagesOf(third).length, 0);
-	const skips = ofType(h.messages, "SKIP_RESULT");
-	assert.equal(skips.length, 1);
-	assert.equal(skips[0]?.stream, "messages");
-	assert.equal(skips[0]?.reason, "character_ai_turn_unstorable");
-	assert.deepEqual(skips[0]?.recovery_hint, {
-		action: "retry_on_connector_upgrade",
-		retryable: false,
-	});
-	assert.equal(
-		(skips[0]?.diagnostics as { chat_id?: string } | undefined)?.chat_id,
-		second,
-	);
+	assert.equal(ofType(h.messages, "SKIP_RESULT").length, 0);
 	const coverage = coverageOf(h.messages, "messages");
-	assert.deepEqual(coverage?.hydrated_keys, [first, second]);
-	assert.deepEqual(coverage?.gap_keys, [third]);
+	assert.deepEqual(coverage?.hydrated_keys, [first]);
+	assert.deepEqual(coverage?.gap_keys, [second, third]);
 	// The gap covers only those chats: the stream is not failed, so the
 	// checkpoint is not held back by one bad turn.
 	assert.deepEqual(h.failures, []);
@@ -1330,8 +1322,8 @@ test("control characters are dropped from display text; other unsafe values make
 			[false, "unreadable"],
 		);
 	}
-	// In a run, the turn with the unsafe author id is left out and reported;
-	// the rest of its chat and every other chat is stored.
+	// In a run, the turn with the unsafe author id is left out and its chat
+	// is a gap; the rest of that chat and every other chat is stored.
 	const [first, second, third] = CHAT_IDS;
 	assert.ok(first && second && third);
 	const unsafeAuthor = () => {
@@ -1345,16 +1337,15 @@ test("control characters are dropped from display text; other unsafe values make
 	};
 	const h = harness(fakePage(defaultRoute({ [second]: unsafeAuthor }), []));
 	await collectCharacterAi(h.ctx);
-	assert.equal(ofType(h.messages, "DETAIL_GAP").length, 0);
+	assert.deepEqual(
+		ofType(h.messages, "DETAIL_GAP").map((gap) => gap.record_key),
+		[second],
+	);
 	assert.equal(
 		h.records.filter(
 			(r) => r.stream === "messages" && r.data.chat_id === second,
 		).length,
 		2,
-	);
-	assert.deepEqual(
-		ofType(h.messages, "SKIP_RESULT").map((skip) => skip.reason),
-		["character_ai_turn_unstorable"],
 	);
 	assert.deepEqual(h.failures, []);
 	assert.equal(ofType(h.messages, "STATE").length, 1);
@@ -2138,72 +2129,73 @@ test("chat values count only the turns inside the chats window, and a chat out o
 	);
 	// The third chat was created after the window's end: no request reads it.
 	assert.equal(turnCalls(seen, third).length, 0);
+	// Coverage counts the chats whose record is inside the window.
 	const chatsCoverage = coverageOf(h.messages, "chats");
-	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [3, 3]);
+	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [2, 2]);
 });
 
-test("a newest-first turn list is read only down to the window's start", async () => {
-	const [first, second, third] = CHAT_IDS;
-	assert.ok(first && second && third);
-	const seen: Seen[] = [];
+test("a time window never cuts a chat's turn walk short, whatever the order of its pages", async () => {
+	const [, second, third] = CHAT_IDS;
+	assert.ok(second && third);
 	const since = "2026-01-05T00:00:00Z";
-	const h = harness(fakePage(defaultRoute(everyChat(newestFirstTurns)), seen), {
-		scope: {
-			chats: { time_range: { since } },
-			messages: { time_range: { since } },
-		},
-	});
-	await collectCharacterAi(h.ctx);
-	for (const chatId of CHAT_IDS) {
-		// The second page lies wholly before `since`: the end page is never asked for.
+	for (const order of [newestFirstTurns, oldestFirstTurns]) {
+		const seen: Seen[] = [];
+		const h = harness(fakePage(defaultRoute(everyChat(order)), seen), {
+			scope: {
+				chats: { time_range: { since } },
+				messages: { time_range: { since } },
+			},
+		});
+		await collectCharacterAi(h.ctx);
+		for (const chatId of CHAT_IDS) {
+			assert.equal(turnCalls(seen, chatId).length, 3);
+		}
+		assert.equal(messageRecords(h).length, 6);
+		assert.ok(
+			messageRecords(h).every(
+				(message) => String(message.create_time) >= "2026-01-10",
+			),
+		);
+		// The first chat was created before `since`: the runtime withholds its
+		// record, its in-window messages are still read.
 		assert.deepEqual(
-			turnCalls(seen, chatId).map((call) => call.search.get("next_token")),
-			[null, "older"],
+			chatRecords(h).map((chat) => [chat.id, chat.turn_count]),
+			[
+				[second, 2],
+				[third, 2],
+			],
+		);
+		assert.deepEqual(
+			coverageOf(h.messages, "messages")?.hydrated_keys,
+			CHAT_IDS,
 		);
 	}
-	assert.equal(messageRecords(h).length, 6);
-	assert.ok(
-		messageRecords(h).every(
-			(message) => String(message.create_time) >= "2026-01-10",
-		),
-	);
-	// The first chat was created before `since`: the runtime withholds its
-	// record, its in-window messages are still read.
-	assert.deepEqual(
-		chatRecords(h).map((chat) => [chat.id, chat.turn_count]),
-		[
-			[second, 2],
-			[third, 2],
-		],
-	);
-	assert.deepEqual(coverageOf(h.messages, "messages")?.hydrated_keys, CHAT_IDS);
 });
 
-test("an order the source does not prove never cuts a turn read short", async () => {
-	const seen: Seen[] = [];
-	const since = "2026-01-05T00:00:00Z";
-	const h = harness(fakePage(defaultRoute(everyChat(oldestFirstTurns)), seen), {
-		scope: {
-			chats: { time_range: { since } },
-			messages: { time_range: { since } },
-		},
+test("a pending gap is closed only by a run whose messages scope leaves no turn out", async () => {
+	const [first] = CHAT_IDS;
+	assert.ok(first);
+	for (const messages of [
+		{ time_range: { since: "2026-01-05T00:00:00Z" } },
+		{ resources: ["00000000-0000-4000-8000-000000000000"] },
+	]) {
+		const bounded = harness(fakePage(defaultRoute(), []), {
+			detailGaps: pendingGaps(first),
+			scope: { messages },
+		});
+		await collectCharacterAi(bounded.ctx);
+		assert.equal(
+			ofType(bounded.messages, "DETAIL_GAP_RECOVERED").length,
+			0,
+			JSON.stringify(messages),
+		);
+	}
+	const open = harness(fakePage(defaultRoute(), []), {
+		detailGaps: pendingGaps(first),
+		scope: {},
 	});
-	await collectCharacterAi(h.ctx);
-	for (const chatId of CHAT_IDS) {
-		assert.equal(turnCalls(seen, chatId).length, 3);
-	}
-	assert.equal(messageRecords(h).length, 6);
-	// Without a start for the chats window every turn is needed, whatever the order.
-	const all: Seen[] = [];
-	const wide = harness(
-		fakePage(defaultRoute(everyChat(newestFirstTurns)), all),
-		{ scope: { messages: { time_range: { since } } } },
-	);
-	await collectCharacterAi(wide.ctx);
-	for (const chatId of CHAT_IDS) {
-		assert.equal(turnCalls(all, chatId).length, 3);
-	}
-	assert.ok(chatRecords(wide).every((chat) => chat.turn_count === 3));
+	await collectCharacterAi(open.ctx);
+	assert.equal(ofType(open.messages, "DETAIL_GAP_RECOVERED").length, 1);
 });
 
 test("narrow then wide: a later run with a wider window collects what the narrow one withheld", async () => {
@@ -2350,6 +2342,15 @@ test("run-level codes reach DONE with a portable recovery hint", () => {
 		action: "refresh_credentials",
 		retryable: false,
 	});
+	// The connector's code reaches DONE.error.code, where its display copy is looked up.
+	assert.equal(
+		hintOf("character_ai_api_429 on /turns/:chat_id/", true).code,
+		"character_ai_api_429",
+	);
+	assert.equal(
+		hintOf("character_ai_session_failed: character_ai_auth_failed").code,
+		"character_ai_auth_failed",
+	);
 	assert.deepEqual(
 		hintOf("character_ai_session_failed: character_ai_auth_failed")
 			.recovery_hint,

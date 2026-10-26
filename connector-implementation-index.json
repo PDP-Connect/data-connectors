@@ -3758,7 +3758,7 @@
 					},
 					{
 						"name": "messages",
-						"description": "Every turn of every chat, one record per turn, with the text of the turn's currently selected (primary) candidate. Turns are read to the end of each chat's turn list, or down to the start of the time range once the list shows newest-first order. Collected only together with chats. A turn that cannot be stored as it is is left out and reported. Mutable: when the owner swipes a turn to another candidate, the next run replaces that turn's record with the newly selected candidate's text.",
+						"description": "Every turn of every chat, one record per turn, with the text of the turn's currently selected (primary) candidate. Turns are read to the end of each chat's turn list. Collected only together with chats. A turn that cannot be stored as it is is left out, the rest of its chat is stored, and the chat is read again next time. Mutable: when the owner swipes a turn to another candidate, the next run replaces that turn's record with the newly selected candidate's text.",
 						"display": {
 							"label": "Your messages",
 							"detail": "Each message in each chat: whether you or the character wrote it, the author's name, the message text, and when it was sent."
@@ -3868,7 +3868,6 @@
 				"reason_display_messages": {
 					"stream_collection_failed": "Character.AI could not be read completely this time. Nothing was lost; the next sync tries again.",
 					"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
-					"character_ai_turn_unstorable": "Some Character.AI messages could not be saved as they are and were left out. A connector update may read them.",
 					"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
 					"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
 					"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",

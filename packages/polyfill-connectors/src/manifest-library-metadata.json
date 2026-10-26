@@ -100,7 +100,6 @@
 			"reason_display_messages": {
 				"stream_collection_failed": "Character.AI could not be read completely this time. Nothing was lost; the next sync tries again.",
 				"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
-				"character_ai_turn_unstorable": "Some Character.AI messages could not be saved as they are and were left out. A connector update may read them.",
 				"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
 				"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
 				"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",

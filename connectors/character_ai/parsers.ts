@@ -399,12 +399,6 @@ export async function walkTokenPages<T>(args: {
 	fetchPage: (token: string | null) => Promise<Page<T>>;
 	keyOf: (item: T) => string;
 	maxPages: number;
-	/**
-	 * Optional: whether this page proves that nothing the run needs lies past
-	 * it (for a time-bounded read: a page wholly older than the window, in a
-	 * list proven newest first). The walk then ends complete for that need.
-	 */
-	windowEnded?: (page: Page<T>) => boolean;
 }): Promise<WalkResult<T>> {
 	const items: T[] = [];
 	const seenKeys = new Set<string>();
@@ -424,9 +418,6 @@ export async function walkTokenPages<T>(args: {
 			}
 		}
 		if (page.nextToken === null) {
-			return { complete: true, items, unkeyed };
-		}
-		if (args.windowEnded?.(page) === true) {
 			return { complete: true, items, unkeyed };
 		}
 		if (page.items.length === 0 && (page.unkeyed ?? 0) === 0) {
