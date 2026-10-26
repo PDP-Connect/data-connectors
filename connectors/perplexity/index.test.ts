@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Page } from "playwright";
 import { z } from "zod";
+import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	type EmittedMessage,
@@ -401,6 +402,8 @@ test("the manifest declares the browser-session profile and its two streams", ()
 	// threads stream keeps no cursor; messages are remembered per thread.
 	assert.equal(manifest.streams[0]?.coverage_strategy, "full_inventory");
 	assert.equal(manifest.streams[0]?.cursor_field, undefined);
+	// Messages are remembered per thread, not behind a time cursor.
+	assert.equal(manifest.streams[1]?.cursor_field, undefined);
 	assert.equal(manifest.streams[0]?.incremental, false);
 	assert.equal(manifest.streams[1]?.semantics, "mutable_state");
 	assert.equal(
@@ -512,9 +515,15 @@ test("both streams prove their boundary and checkpoint their cursors", async () 
 		assert.equal((coverage.required_keys as string[]).length, 3);
 		assert.equal((coverage.hydrated_keys as string[]).length, 3);
 
-		// The threads STATE is a commit marker for the inventory the run
-		// listed, not a position: nothing reads it back.
-		assert.deepEqual(stateCursor(h.messages, "conversations"), { listed: 3 });
+		// The threads stream is a full inventory and keeps no STATE; the
+		// messages STATE is versioned.
+		assert.equal(
+			h.messages.some(
+				(m) => m.type === "STATE" && m.stream === "conversations",
+			),
+			false,
+		);
+		assert.equal(stateCursor(h.messages, "messages").v, 2);
 		const messagesCursor = stateCursor(h.messages, "messages") as {
 			synced: Record<
 				string,
@@ -531,13 +540,11 @@ test("an unchanged thread is not re-read, but its conversation stays whole", asy
 		const first = harness(ALL_STREAMS, page());
 		await collectPerplexity(first.ctx, { threadDelayMs: 0 });
 		const messagesState = stateCursor(first.messages, "messages");
-		const conversationsState = stateCursor(first.messages, "conversations");
 		// Second run with the saved state: nothing has changed upstream.
 		const before = library.requests.filter((r) =>
 			r.url.pathname.startsWith("/rest/thread/"),
 		).length;
 		const second = harness(ALL_STREAMS, page(), {
-			conversations: conversationsState,
 			messages: messagesState,
 		});
 		await collectPerplexity(second.ctx, { threadDelayMs: 0 });
@@ -674,7 +681,16 @@ test("an empty library is proven empty, with zero records and an empty inventory
 		assert.deepEqual(h.failures, []);
 		assert.equal(detailCoverage(h.messages, "conversations").considered, 0);
 		assert.equal(detailCoverage(h.messages, "messages").covered, 0);
-		assert.deepEqual(stateCursor(h.messages, "conversations"), { listed: 0 });
+		assert.equal(
+			h.messages.some(
+				(m) => m.type === "STATE" && m.stream === "conversations",
+			),
+			false,
+		);
+		assert.deepEqual(stateCursor(h.messages, "messages"), {
+			v: 2,
+			synced: {},
+		});
 	});
 });
 
@@ -2050,7 +2066,7 @@ test("an answer that cannot be read is reported once for a connector upgrade, no
 	});
 });
 
-test("a thread the list gives no slug is reported unreadable once and closes its pending gap", async () => {
+test("a thread the list gives no slug is reported unreadable once and its pending gap stays pending", async () => {
 	const library = scriptedLibrary({
 		listPage: (offset) =>
 			offset === 0 ? [{ ...threadItem(1, false), slug: null }] : [],
@@ -2074,7 +2090,8 @@ test("a thread the list gives no slug is reported unreadable once and closes its
 		assert.equal(h.messages.filter((m) => m.type === "DETAIL_GAP").length, 0);
 		assert.equal(
 			h.messages.filter((m) => m.type === "DETAIL_GAP_RECOVERED").length,
-			1,
+			0,
+			"closing the gap would claim messages that were never read",
 		);
 		const coverage = detailCoverage(h.messages, "messages");
 		assert.deepEqual(coverage.optional_skip_keys, [threadId(1)]);
@@ -2302,9 +2319,10 @@ test("since: the newest-first walk stops two old pages past it, and threads that
 		const h = harness(ALL_STREAMS, page(), {}, { since: stamp(90) });
 		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
 		assert.deepEqual(h.failures, []);
-		// Pages 120-101 .. 40-21: the cutoff is a day before since (thread
-		// 66), so 60-41 still holds threads inside it and 40-21 is the second
-		// wholly old page. Each walk reads five pages; two walks agree.
+		// The cutoff is a day before since (thread 66). Pages 120-101,
+		// 100-81 and 80-61 hold threads at or after it; 60-41 is the first
+		// wholly older page and 40-21 the second, where the walk stops. Each
+		// walk reads five pages; two walks agree.
 		assert.equal(listReads(library.requests).length, 10);
 		// A thread whose last query is more than a day before since is listed
 		// but not read: its answers cannot reach since.
@@ -2708,5 +2726,193 @@ test("an until within a millisecond of a thread's first entry is compared to the
 		);
 		await collectPerplexity(bounded.ctx, { threadDelayMs: 0 });
 		assert.deepEqual(readThreadNumbers(library.requests.slice(before)), [1]);
+	});
+});
+
+test("a STATE from before windows were recorded is used only for creation times, and its threads are read again once", async () => {
+	const library = perplexityLibrary({ total: 3 });
+	await withBrowser(library.serve, async () => {
+		// 0.1.1 remembered every thread even when the runtime withheld its
+		// messages: here a since-bounded run delivered thread 3 only.
+		const bounded = harness(ALL_STREAMS, page(), {}, { since: stamp(3) });
+		await collectPerplexity(bounded.ctx, { threadDelayMs: 0 });
+		const legacy: Record<string, Record<string, unknown>> = {};
+		for (const [id, entry] of Object.entries(syncedOf(bounded.messages))) {
+			const { window: _window, ...rest } = entry as Record<string, unknown>;
+			legacy[id] = rest;
+		}
+		assert.equal(Object.keys(legacy).length, 3);
+
+		const before = library.requests.length;
+		const unrestricted = harness(ALL_STREAMS, page(), {
+			messages: { synced: legacy },
+		});
+		await collectPerplexity(unrestricted.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			readThreadNumbers(library.requests.slice(before)),
+			[1, 2, 3],
+		);
+		assert.deepEqual(deliveredThreads(unrestricted.records), [1, 2, 3]);
+		assert.equal(stateCursor(unrestricted.messages, "messages").v, 2);
+
+		// A conversations-only run still takes creation times from it.
+		const threadsOnly = harness(["conversations"], page(), {
+			messages: { synced: legacy },
+		});
+		await collectPerplexity(threadsOnly.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			threadsOnly.records.map((r) => r.data.create_time),
+			[instant(1), instant(2), instant(3)],
+		);
+	});
+});
+
+/** A list row and a one-entry thread whose answer finished at `answered`. */
+function trailingThread(
+	n: number,
+	asked: number,
+	answered: number,
+	status = "COMPLETED",
+) {
+	return {
+		item: {
+			...threadItem(n, true),
+			last_query_datetime: listStamp(asked),
+			status,
+		},
+		detail: {
+			entries: [
+				{
+					uuid: entryId(n),
+					status: "COMPLETED",
+					context_uuid: threadId(n),
+					query_str: `Synthetic question ${String(n)}?`,
+					entry_created_datetime: entryStamp(asked),
+					entry_updated_datetime: entryStamp(answered),
+					display_model: "sonar",
+					blocks: [
+						{
+							intended_usage: "ask_text",
+							markdown_block: { answer: `Synthetic answer ${String(n)}.` },
+						},
+					],
+				},
+			],
+			has_next_page: false,
+		},
+	};
+}
+
+test("since: an answer that finished after its thread's last query is delivered within the margin; past it only an unfinished thread is read", async () => {
+	// since = stamp(100). Thread 1 was asked 20 hours before and answered
+	// after since; thread 2 was asked 30 hours before (past the one-day
+	// margin); thread 3 likewise, but the list says it is still running.
+	const threads = [
+		trailingThread(1, 80, 101),
+		trailingThread(2, 70, 101),
+		trailingThread(3, 69, 101, "IN_PROGRESS"),
+	];
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0
+				? threads.map((t, i) => ({
+						...t.item,
+						has_next_page: i < threads.length - 1,
+					}))
+				: [],
+		thread: (slug) =>
+			Response.json(
+				threads.find((t) => (t.item as Record<string, unknown>).slug === slug)
+					?.detail ?? {
+					entries: [],
+					has_next_page: false,
+				},
+			),
+	});
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		await withBrowser(library.serve, async () => {
+			const h = harness(ALL_STREAMS, page(), {}, { since: stamp(100) });
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			assert.deepEqual(readThreadNumbers(library.requests), [1, 3]);
+			assert.deepEqual(
+				h.records
+					.filter((r) => r.stream === "messages")
+					.map((r) => r.data.id)
+					.sort(),
+				[`${entryId(1)}:assistant`, `${entryId(3)}:assistant`],
+			);
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	// Each trailing answer is reported, so the margin is checked against
+	// real libraries.
+	const trailing = lines.filter((line) =>
+		line.includes("answer_trails_last_query"),
+	);
+	assert.equal(trailing.length, 2);
+	assert.ok(trailing.some((line) => line.includes('"beyond_margin":true')));
+});
+
+test("an until finer than a microsecond is rounded up, so an entry just before it is read", async () => {
+	const library = perplexityLibrary({ total: 1 });
+	await withBrowser(library.serve, async () => {
+		const full = harness(ALL_STREAMS, page());
+		await collectPerplexity(full.ctx, { threadDelayMs: 0 });
+		const state = stateCursor(full.messages, "messages") as {
+			synced: Record<string, Record<string, unknown>>;
+		};
+		const remembered = state.synced[threadId(1)];
+		assert.ok(remembered);
+		remembered.entry_count = 0;
+		const base = stamp(1).slice(0, 23);
+		const runWith = async (until: string) => {
+			const before = library.requests.length;
+			const h = harness(["messages"], page(), { messages: state }, { until });
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			return readThreadNumbers(library.requests.slice(before));
+		};
+		// First entry at .xxx000 µs; until .xxx0000001 is just after it.
+		remembered.create_time = `${base}000Z`;
+		assert.deepEqual(await runWith(`${base}0000001Z`), [1]);
+		// An until of exactly the first entry's time excludes it.
+		assert.deepEqual(await runWith(`${base}0000000Z`), []);
+		// Rounding carries across the second.
+		remembered.create_time = `${stamp(1).slice(0, 19)}.999999Z`;
+		assert.deepEqual(
+			await runWith(`${stamp(1).slice(0, 19)}.9999990001Z`),
+			[1],
+		);
+	});
+});
+
+test("since: unkeyed list rows older than the cutoff neither fail the streams nor unsettle the walk", async () => {
+	const total = 120;
+	const library = scriptedLibrary({
+		listPage: (offset, walk) => {
+			const ns: number[] = [];
+			for (
+				let n = total - offset;
+				n > Math.max(0, total - offset - PAGE_SIZE);
+				n -= 1
+			) {
+				ns.push(n);
+			}
+			// Old rows without an id; the second walk sees one more of them.
+			return listItems(ns, total - offset - PAGE_SIZE > 0).map((item, i) =>
+				ns[i] !== undefined && ns[i] < (walk === 1 ? 30 : 35)
+					? { ...item, context_uuid: undefined, uuid: undefined }
+					: item,
+			);
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page(), {}, { since: stamp(90) });
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, []);
+		assert.equal(listReads(library.requests).length, 10);
+		assert.ok(stateCursor(h.messages, "messages"));
 	});
 });

@@ -139,7 +139,7 @@
 		{
 			"name": "messages",
 			"required": false,
-			"description": "The questions and answers inside each Perplexity thread. Every entry becomes two records: the user's question and the assistant's answer, including the citations the answer used.",
+			"description": "The questions and answers inside each Perplexity thread. Every entry becomes two records: the user's question and the assistant's answer, including the citations the answer used. A thread is read again when it changes or when a run asks for messages outside the time range or resources it was collected under. A full refresh limited to a time range re-reads the threads inside it and keeps what earlier runs collected about threads outside it.",
 			"display": {
 				"label": "Your Perplexity messages",
 				"detail": "Each question you asked and each answer Perplexity gave, with the model, the time, and the web citations behind the answer."
@@ -204,7 +204,6 @@
 				]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "create_time",
 			"consent_time_field": "create_time",
 			"parent_streams": ["conversations"],
 			"selection": {

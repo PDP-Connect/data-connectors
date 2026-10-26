@@ -17,18 +17,22 @@
  *     by `offset` the same way.
  *
  * Streams: `conversations` (one record per thread, mutable_state, a full
- * inventory of the requested window on every run) and `messages` (the
- * question and the answer of every entry, mutable_state, child of
- * `conversations`). A thread's messages are re-read only when the list shows
- * it changed, or when the run selects messages outside the window they were
- * delivered under. Time ranges are pushed down: a run whose every stream has
- * a `since` stops walking the newest-first list once it is past it, and a
+ * inventory of the requested window on every run, so it keeps no STATE) and
+ * `messages` (the question and the answer of every entry, mutable_state,
+ * child of `conversations`; its STATE remembers each thread it delivered).
+ * A thread's messages are re-read only when the list shows it changed, or
+ * when the run selects messages outside the window they were delivered
+ * under. Time ranges are pushed down: a run whose every stream has a
+ * `since` stops walking the newest-first list once it is past it, and a
  * thread whose messages cannot fall inside the range is not read in depth.
+ * A full refresh re-reads every thread it reads, but keeps what earlier runs
+ * remembered about threads outside its time range (or past the walk's
+ * stop), since it delivered nothing that could change them.
  * The list walk must prove it ended
  * (the last item's `has_next_page: false`, or an empty page read from a
  * session that is still signed in; a short page that claims more is
  * followed) and, when it took more than one page, two consecutive walks must
- * see the same threads, before either stream is checkpointed. A list that
+ * see the same threads, before `messages` is checkpointed. A list that
  * never holds still keeps its conversation records and fails both streams
  * retryably with no checkpoint; a thread whose entries cannot be proven
  * complete is a DETAIL_GAP. `total_threads` on list items is NOT the
@@ -107,8 +111,17 @@ const MAX_LIST_WALKS = 3;
  * list carries only the last query time, while an answer's record time is
  * its entry's last update (when the answer finished), so a thread whose last
  * query is just before a window's start can still hold an answer inside it.
- * A thread is only treated as wholly older than `since` when its last query
- * is more than this margin before it.
+ * A thread is only treated as wholly older than `since` when the list marks
+ * it complete and its last query is more than this margin before it.
+ *
+ * Why a day: an answer is generated right after its question and finishes
+ * within minutes (the recon threads finished in seconds); a new question
+ * moves the thread's last query time. A day is two orders of magnitude of
+ * headroom. An entry updated later than that without a new question (a
+ * shape the connector has not observed) would be missed by a time-bounded
+ * run that skips its thread; such trailing times are reported as the
+ * `answer_trails_last_query` diagnostic whenever a thread is read, so the
+ * assumption is checked against real libraries.
  */
 export const ANSWER_TIME_MARGIN_MS = 24 * 3_600_000;
 /**
@@ -130,15 +143,6 @@ interface PageRequest {
 	readonly method: "GET" | "POST";
 	readonly url: string;
 	readonly body?: string;
-}
-
-/**
- * The `conversations` STATE: a commit marker for the inventory boundary the
- * messages coverage is accounted against. Nothing reads it back; the stream
- * is a full inventory (of the granted window) on every run.
- */
-interface ConversationsCursor {
-	listed: number;
 }
 
 /**
@@ -171,8 +175,18 @@ interface ThreadSync {
 	parser?: number;
 }
 
-/** The `messages` STATE cursor: one entry per listed thread. */
+/**
+ * Version of the `messages` STATE. Version 2 is the first that records the
+ * window a thread was delivered under. Earlier cursors remembered a thread
+ * even when the runtime withheld some of its messages, so an entry from them
+ * is never skipped on: it only supplies the thread's creation time, and the
+ * thread is read once more.
+ */
+const SYNC_STATE_VERSION = 2;
+
+/** The `messages` STATE cursor: one entry per remembered thread. */
 interface MessagesCursor {
+	v: typeof SYNC_STATE_VERSION;
 	synced: Record<string, ThreadSync>;
 }
 
@@ -575,7 +589,8 @@ function errorMessage(error: unknown): string {
 
 interface ListWalk {
 	readonly threads: ListedThread[];
-	readonly unreadable: number;
+	/** The list time of each row that could not be keyed (null: none). */
+	readonly unreadable: readonly (string | null)[];
 	/** List pages this walk requested; one page is a single atomic answer. */
 	readonly pages: number;
 	/**
@@ -632,7 +647,7 @@ async function walkList(
 ): Promise<ListWalk> {
 	const threads: ListedThread[] = [];
 	const seen = new Set<string>();
-	let unreadable = 0;
+	const unreadable: (string | null)[] = [];
 	let offset = 0;
 	let ordered = cutoff !== null;
 	let previous: string | null = null;
@@ -655,7 +670,7 @@ async function walkList(
 		for (const item of parsed.page.items) {
 			const thread = parseListedThread(item);
 			if (thread === null) {
-				unreadable += 1;
+				unreadable.push(listItemTime(item));
 			} else if (!seen.has(thread.id)) {
 				seen.add(thread.id);
 				threads.push(thread);
@@ -744,22 +759,30 @@ async function confirmSignedIn(
  * out on purpose: a thread answered between walks changes its time but not
  * the membership the walk has to prove.
  */
+/**
+ * Whether a list time can still select anything under the cutoff. A row
+ * without a time, or with one this engine cannot parse, always can.
+ */
+function insideCutoff(time: string | null, cutoff: number | null): boolean {
+	return cutoff === null || time === null || !(Date.parse(time) < cutoff);
+}
+
+/** The unkeyed rows of a walk that can still select anything. */
+function unreadableInWindow(walk: ListWalk, cutoff: number | null): number {
+	return walk.unreadable.filter((time) => insideCutoff(time, cutoff)).length;
+}
+
 function walkSignature(walk: ListWalk, cutoff: number | null): string {
 	// Unkeyed rows count too: a walk that saw one and a walk that missed it
 	// (shifted past it) must not agree, or the second could prove a list
-	// that lacks a thread. Under a cutoff, threads older than it select
-	// nothing, so a walk that read one more of them past its stop still
+	// that lacks a thread. Under a cutoff, rows older than it, keyed or not,
+	// select nothing, so a walk that read more of them past its stop still
 	// agrees with one that did not.
 	return `${walk.threads
-		.filter(
-			(thread) =>
-				cutoff === null ||
-				thread.updateTime === null ||
-				!(Date.parse(thread.updateTime) < cutoff),
-		)
+		.filter((thread) => insideCutoff(thread.updateTime, cutoff))
 		.map((thread) => thread.id)
 		.sort()
-		.join("|")}#unreadable=${String(walk.unreadable)}`;
+		.join("|")}#unreadable=${String(unreadableInWindow(walk, cutoff))}`;
 }
 
 /**
@@ -908,31 +931,43 @@ function readThreadSync(value: unknown): ThreadSync | null {
 	};
 }
 
-/**
- * Every thread the last `messages` STATE remembered, whatever the run's
- * collection mode. A full refresh must not skip on it (see
- * `previousSyncedThreads`), but a thread's creation time is a fact about the
- * source, kept so a run that does not read the thread does not blank it.
- */
-function storedSyncedThreads(
-	ctx: BrowserCollectContext,
-): Map<string, ThreadSync> {
+/** What the last `messages` STATE says, read defensively. */
+interface StoredState {
+	/**
+	 * Every thread a current-version STATE remembered, whatever the run's
+	 * collection mode. A full refresh must not skip on it (see
+	 * `previousSyncedThreads`) but keeps it for threads it does not read.
+	 */
+	readonly synced: Map<string, ThreadSync>;
+	/**
+	 * Each remembered thread's creation time, from a STATE of any version: a
+	 * fact about the source, kept so a run that does not read the thread
+	 * does not blank it.
+	 */
+	readonly createTimes: Map<string, string>;
+}
+
+function storedState(ctx: BrowserCollectContext): StoredState {
 	const synced = new Map<string, ThreadSync>();
+	const createTimes = new Map<string, string>();
 	const cursor = ctx.state.messages;
-	const raw =
-		typeof cursor === "object" && cursor !== null && !Array.isArray(cursor)
-			? (cursor as Record<string, unknown>).synced
-			: undefined;
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-		return synced;
+	if (!isPlainObject(cursor) || !isPlainObject(cursor.synced)) {
+		return { synced, createTimes };
 	}
-	for (const [id, value] of Object.entries(raw)) {
+	const current = cursor.v === SYNC_STATE_VERSION;
+	for (const [id, value] of Object.entries(cursor.synced)) {
 		const sync = readThreadSync(value);
-		if (sync !== null) {
+		if (sync === null) {
+			continue;
+		}
+		if (sync.create_time !== null) {
+			createTimes.set(id, sync.create_time);
+		}
+		if (current) {
 			synced.set(id, sync);
 		}
 	}
-	return synced;
+	return { synced, createTimes };
 }
 
 /** The remembered threads a run may skip on: none on a full refresh. */
@@ -1114,7 +1149,13 @@ function outsideMessagesRange(
 	if (range === null) {
 		return false;
 	}
-	if (range.since !== undefined && thread.updateTime !== null) {
+	// Only a thread the list marks complete: one still being answered can
+	// finish at any time.
+	if (
+		range.since !== undefined &&
+		thread.complete &&
+		thread.updateTime !== null
+	) {
 		const since = Date.parse(range.since);
 		if (Date.parse(thread.updateTime) < since - ANSWER_TIME_MARGIN_MS) {
 			return true;
@@ -1125,15 +1166,69 @@ function outsideMessagesRange(
 		known?.create_time != null &&
 		known.unreadable_entries === undefined
 	) {
-		// Compared to the microsecond, as the runtime compares the bound:
-		// both sides are fixed-width UTC instants, which sort by time.
-		const until = normalizeInstant(range.until);
+		// Compared to the microsecond: both sides are fixed-width UTC
+		// instants, which sort by time. A bound finer than a microsecond is
+		// rounded up, so an entry just before it is never taken as after it.
+		const until = ceilInstant(range.until);
 		const created = normalizeInstant(known.create_time);
 		if (until !== null && created !== null && created >= until) {
 			return true;
 		}
 	}
 	return false;
+}
+
+/**
+ * `normalizeInstant`, rounded up to the next microsecond when the value
+ * carries a nonzero digit finer than that (normalizing truncates them).
+ */
+function ceilInstant(value: string): string | null {
+	const normalized = normalizeInstant(value);
+	if (normalized === null) {
+		return null;
+	}
+	const finer = /T[^.]*\.\d{6}(\d+)/.exec(value)?.[1];
+	if (finer === undefined || /^0+$/.test(finer)) {
+		return normalized;
+	}
+	const micros =
+		Date.parse(`${normalized.slice(0, 19)}Z`) * 1000 +
+		Number(normalized.slice(20, 26)) +
+		1;
+	const seconds = Math.floor(micros / 1_000_000);
+	const fraction = String(micros - seconds * 1_000_000).padStart(6, "0");
+	return `${new Date(seconds * 1000).toISOString().slice(0, 19)}.${fraction}Z`;
+}
+
+/** An answer this much later than its thread's last query is reported. */
+const TRAILING_ANSWER_REPORT_MS = 3_600_000;
+
+/**
+ * Report a thread whose latest answer finished well after the list's last
+ * query time: the evidence for (or against) ANSWER_TIME_MARGIN_MS.
+ */
+function reportTrailingAnswer(
+	thread: ListedThread,
+	messages: readonly MessageRecord[],
+): void {
+	if (thread.updateTime === null) {
+		return;
+	}
+	const lastQuery = Date.parse(thread.updateTime);
+	let latest = Number.NEGATIVE_INFINITY;
+	for (const message of messages) {
+		if (message.role === "assistant" && message.create_time !== null) {
+			latest = Math.max(latest, Date.parse(message.create_time));
+		}
+	}
+	const trail = latest - lastQuery;
+	if (Number.isFinite(trail) && trail > TRAILING_ANSWER_REPORT_MS) {
+		connectorDiagnostic("perplexity", "answer_trails_last_query", {
+			thread: thread.id,
+			hours: Math.round(trail / 3_600_000),
+			beyond_margin: trail > ANSWER_TIME_MARGIN_MS,
+		});
+	}
 }
 
 /** One thread's detail, read before anything about it is emitted. */
@@ -1456,15 +1551,13 @@ export async function collectPerplexity(
 	// run whose every stream starts at a `since` may stop the walk once the
 	// list is past it (`listCutoff`).
 	const cutoff = listCutoff(ctx);
-	const {
-		threads: listed,
-		unreadable: unreadableThreads,
-		proven,
-		truncated,
-	} = await stableList(ctx, delay, cutoff);
-	// Every thread the last messages STATE remembered: creation times are
-	// reused from it on any run, while skipping on it is for incremental runs.
-	const stored = storedSyncedThreads(ctx);
+	const walk = await stableList(ctx, delay, cutoff);
+	const { threads: listed, proven, truncated } = walk;
+	// A row older than the cutoff selects nothing, readable or not.
+	const unreadableThreads = unreadableInWindow(walk, cutoff);
+	// What the last messages STATE remembered: creation times are reused
+	// from it on any run, while skipping on it is for incremental runs.
+	const { synced: stored, createTimes } = storedState(ctx);
 	if (!proven) {
 		// The threads seen are real and are kept, but nothing is checkpointed
 		// and no thread is read in depth: both requested streams fail, and a
@@ -1472,10 +1565,7 @@ export async function collectPerplexity(
 		if (wantsConversations) {
 			for (const thread of listed) {
 				await ctx.emitRecord("conversations", {
-					...conversationRecord(
-						thread,
-						stored.get(thread.id)?.create_time ?? null,
-					),
+					...conversationRecord(thread, createTimes.get(thread.id) ?? null),
 				});
 			}
 		}
@@ -1515,6 +1605,7 @@ export async function collectPerplexity(
 	const skippedUnchanged: string[] = [];
 	const outsideRange: string[] = [];
 	const unreadableKeys: string[] = [];
+	const slugless: string[] = [];
 	const gapKeys: string[] = [];
 	let incompleteEntries = 0;
 	let unreadableEntries = 0;
@@ -1523,7 +1614,7 @@ export async function collectPerplexity(
 
 	for (const thread of listed) {
 		const known = previousSynced.get(thread.id);
-		const createTimeKnown = stored.get(thread.id)?.create_time ?? null;
+		const createTimeKnown = createTimes.get(thread.id) ?? null;
 		if (!wantsMessages) {
 			await ctx.emitRecord("conversations", {
 				...conversationRecord(thread, createTimeKnown),
@@ -1581,16 +1672,19 @@ export async function collectPerplexity(
 		}
 		// A thread the list gives no slug cannot be read by this connector:
 		// reported once as unreadable, not gapped (a gap would never recover).
+		// A gap already pending for it stays pending: closing it would claim
+		// messages that were never read. (The profile has no terminal gap
+		// outcome yet; that is a runtime ask.)
 		if (read === null) {
 			threadsWithoutSlug += 1;
-			unreadableKeys.push(thread.id);
+			slugless.push(thread.id);
 			connectorDiagnostic("perplexity", "thread_has_no_slug", {
 				thread: thread.id,
 			});
-			for (const gap of pending.get(thread.id) ?? []) {
-				await ctx.emit(gapRecovered(gap, thread.id));
-			}
 			continue;
+		}
+		if (read.kind === "read") {
+			reportTrailingAnswer(thread, read.messages);
 		}
 		if (read.kind === "read" && read.incomplete === 0) {
 			// Decided before the records go out, from the same gates the
@@ -1680,11 +1774,12 @@ export async function collectPerplexity(
 	}
 
 	// Pending gaps beyond START's first page. A thread settled this run (read
-	// completely, skipped as unchanged, or reported unreadable) has its gaps
-	// acknowledged: an unchanged thread is remembered only after a complete
-	// read, which can postdate a gap the first page did not carry. A thread
-	// gapped again this run already re-emitted its gap; one not listed or
-	// outside the time range is left pending.
+	// completely, skipped as unchanged, or read with entries reported
+	// unreadable) has its gaps acknowledged: an unchanged thread is
+	// remembered only after a complete read, which can postdate a gap the
+	// first page did not carry. A thread gapped again this run already
+	// re-emitted its gap; one with no slug, not listed, or outside the time
+	// range is left pending.
 	const firstPage = startGaps(ctx);
 	if (wantsMessages && pending.size > 0) {
 		const settled = new Set([
@@ -1734,6 +1829,7 @@ export async function collectPerplexity(
 				...skippedUnchanged,
 				...outsideRange,
 				...unreadableKeys,
+				...slugless,
 			],
 			gapKeys,
 			considered: listed.length,
@@ -1756,14 +1852,7 @@ export async function collectPerplexity(
 		await ctx.emit({
 			type: "STATE",
 			stream: "messages",
-			cursor: { synced } satisfies MessagesCursor,
-		});
-	}
-	if (wantsConversations) {
-		await ctx.emit({
-			type: "STATE",
-			stream: "conversations",
-			cursor: { listed: listed.length } satisfies ConversationsCursor,
+			cursor: { v: SYNC_STATE_VERSION, synced } satisfies MessagesCursor,
 		});
 	}
 }
