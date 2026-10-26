@@ -4445,14 +4445,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/venmo/integration.test.ts",
-			line: 656,
+			line: 663,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "collectAllStreams(): each run consumes the preceding run's emitted STATE cursor",
 		},
 		{
 			path: "connectors/venmo/integration.test.ts",
-			line: 714,
+			line: 721,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "collectAllStreams(): the second burst starts from the first burst's emitted STATE cursor",

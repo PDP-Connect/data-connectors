@@ -840,7 +840,7 @@
 			"connector_key": "venmo",
 			"reason_display_messages": {
 				"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
-				"transactions_deferred_page_budget": "We stopped after reading 400 pages of your Venmo transactions. A saved position lets later runs resume older history after refreshing recent activity. A large volume of new activity may delay that backfill",
+				"transactions_deferred_page_budget": "Some Venmo transaction history is still pending. Saved positions let later runs resume it while refreshing recent activity. A large volume of new activity may delay completion",
 				"transactions_schema_blocked": "A Venmo transaction could not be validated. The unread history after that record will be retried"
 			}
 		}
