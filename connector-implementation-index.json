@@ -18768,7 +18768,7 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Perplexity (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -18847,7 +18847,7 @@
 								"update_time": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "The thread's last activity (its last query time), the stream's cursor."
+									"description": "The thread's last activity (its last query time)."
 								},
 								"entry_count": {
 									"type": ["integer", "null"],
@@ -18871,13 +18871,12 @@
 							]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "update_time",
 						"consent_time_field": "update_time",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["title"],
@@ -18893,7 +18892,7 @@
 								"group_by": ["mode"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					},
 					{
@@ -18904,7 +18903,7 @@
 							"label": "Your Perplexity messages",
 							"detail": "Each question you asked and each answer Perplexity gave, with the model, the time, and the web citations behind the answer."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -19001,10 +19000,11 @@
 					"covered_in_full": "All Perplexity threads in the selected time range have already been collected.",
 					"collection_interrupted": "Perplexity stopped answering partway through, so some threads are missing. The next run continues from where this one stopped.",
 					"nothing_in_range": "There are no Perplexity threads in the selected time range.",
-					"records_unreadable": "Some threads in your Perplexity library couldn't be read and were skipped — everything else was collected normally.",
+					"records_unreadable": "Some Perplexity threads or answers couldn't be read by this version of the connector and were skipped. Everything else was collected normally.",
 					"sign_in_required": "Perplexity needs you to sign in (and pass its human check) before this can continue.",
 					"source_limit_reached": "This run reached a Perplexity limit. The next run will retry the remaining threads.",
-					"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site — please report this rather than retrying."
+					"stream_collection_failed": "Perplexity's library could not be read completely in this run, so nothing was checkpointed. A later run, or a newer version of this connector, can finish it.",
+					"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site, so please report this rather than retrying."
 				},
 				"mobile": {
 					"pageshim": {
