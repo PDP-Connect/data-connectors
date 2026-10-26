@@ -4662,7 +4662,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/interaction-handler.ts",
-			line: 264,
+			line: 270,
 			column: 18,
 			category: "bounded_retry_polling",
 			note: "ask(): retry/backoff/poll loop gated on the prior attempt's outcome",
