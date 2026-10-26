@@ -6,6 +6,7 @@
 // browser-context auth, API client, and the collect() orchestrator live in
 // index.ts.
 
+import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type {
 	ChatGptContent,
@@ -997,6 +998,48 @@ export function countBranchMessages(
 	).length;
 }
 
+/** The longest model slug a record may carry; the same bound as `messages.model_slug`. */
+export const MODEL_SLUG_MAX_LENGTH = 80;
+
+function isModelSlug(slug: unknown): slug is string {
+	return (
+		typeof slug === "string" &&
+		slug.length > 0 &&
+		slug.length <= MODEL_SLUG_MAX_LENGTH &&
+		pdppSafeText.safeParse(slug).success
+	);
+}
+
+/**
+ * Count the assistant messages on the conversation's current branch per model
+ * slug, with the same branch walk as `countBranchMessages`. Only model names
+ * and counts leave this function: no message text, id or time. A message
+ * without a usable slug (absent, over the length bound, or not safe text) adds
+ * no entry, so the counts can sum to less than the assistant message count.
+ * Returns null when we have no detail mapping.
+ */
+export function countBranchModels(
+	mapping: Record<string, ChatGptNode> | null | undefined,
+	currentNode: string | null | undefined,
+): Record<string, number> | null {
+	if (!(mapping && currentNode)) {
+		return null;
+	}
+	const counts = new Map<string, number>();
+	for (const { node } of flattenTreeCurrentBranch(mapping, currentNode)) {
+		const message = node?.message;
+		if (message?.author?.role !== "assistant") {
+			continue;
+		}
+		const slug = message.metadata?.model_slug;
+		if (isModelSlug(slug)) {
+			counts.set(slug, (counts.get(slug) ?? 0) + 1);
+		}
+	}
+	// fromEntries defines own properties, so a slug named "__proto__" stays a key.
+	return Object.fromEntries(counts);
+}
+
 /**
  * Derive legacy projection metadata from the records retained for the current
  * branch. `messages` must be in provider root-to-tip order. Re-linking retained
@@ -1029,7 +1072,7 @@ export function reconcileEmittedBranchMessages(
 /**
  * Merge the list-endpoint and detail-endpoint views into a single conversation
  * record. Fields that only appear on detail (gizmo_id, workspace_id,
- * current_node, message_count_on_current_branch) fall back to list when
+ * current_node, message_count_on_current_branch, model_counts) fall back to list when
  * `detail` is null (conversations-only sync path).
  */
 export function buildConversationRecord(
@@ -1051,6 +1094,13 @@ export function buildConversationRecord(
 			? currentNode
 				? countBranchMessages(mapping, currentNode)
 				: 0
+			: null,
+		// null exactly when message_count_on_current_branch is null: no detail
+		// mapping was fetched, so the models are unknown (not "none").
+		model_counts: mapping
+			? currentNode
+				? countBranchModels(mapping, currentNode)
+				: {}
 			: null,
 		gizmo_id: (detail?.gizmo_id ?? c.gizmo_id) || null,
 	};

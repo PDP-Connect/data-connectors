@@ -248,7 +248,13 @@ function makeContext(overrides: {
 }
 
 const ORG_RESPONSE = [
-	{ uuid: "org-1", capabilities: ["chat", "claude_pro"] },
+	{
+		uuid: "org-1",
+		// A personal organization is named after its owner.
+		name: "Fictional Owner's Organization",
+		capabilities: ["chat", "claude_pro"],
+		created_at: "2025-03-01T12:00:00.123456Z",
+	},
 	{ uuid: "org-2", capabilities: ["api"] },
 ];
 
@@ -825,6 +831,193 @@ for (const scenario of [
 		assertUserFacingProgress(protocolMessages);
 	});
 }
+
+const ACCOUNT_PLAN_RECORD = {
+	id: "org-1",
+	account_id: "org-1",
+	account_structure: null,
+	account_created_at: "2025-03-01T12:00:00.123456Z",
+	plan_type: "pro",
+	plan_display_name: null,
+	subscription_plan: null,
+	has_active_subscription: null,
+	billing_period: null,
+	will_renew: null,
+	renews_at: null,
+	expires_at: null,
+	cancels_at: null,
+	scheduled_plan_change: null,
+};
+
+test("collectAnthropic: account_plan carries the organization's plan family and creation time, and no name", async () => {
+	const zipBytes = await buildZipBytes([{ full_name: "Export Owner" }]);
+	const { download } = makeFakeDownload(zipBytes);
+	const organizationReads = { count: 0 };
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data")) {
+			organizationReads.count += 1;
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		}
+		if (url.includes("/export_data"))
+			return Promise.resolve(jsonResponse(200, { nonce: "nonce-abc" }));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages, page } = makeContext({
+		streams: ["account_plan"],
+		fetchStub,
+	});
+	page.menuSpans = ["Export Owner", "Pro plan"];
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted.map((record) => [record.stream, record.data]),
+		[["account_plan", ACCOUNT_PLAN_RECORD]],
+	);
+	// One organization read serves both the plan and the export request.
+	assert.equal(organizationReads.count, 1);
+	// No name reaches any message: not the menu's, not users.json's, not the
+	// organization's own name.
+	const everything = JSON.stringify([...protocolMessages, ...diagnostics]);
+	for (const name of ["Export Owner", "Fictional", "Owner's Organization"])
+		assert.equal(everything.includes(name), false, name);
+	// Like account_profile: no coverage proof, no checkpoint.
+	assert.equal(
+		protocolMessages.some(
+			(message) =>
+				(message.type === "DETAIL_COVERAGE" || message.type === "STATE") &&
+				message.stream === "account_plan",
+		),
+		false,
+	);
+	assert.equal(
+		diagnostics.some((line) => line.includes("account_plan_incomplete")),
+		false,
+	);
+});
+
+test("collectAnthropic: account_plan reports an organization entry without a plan or a creation time as null, with a diagnostic", async () => {
+	const zipBytes = await buildZipBytes();
+	const { download } = makeFakeDownload(zipBytes);
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(
+				jsonResponse(200, [
+					{ uuid: "org-1", capabilities: ["chat"], billing_type: "stripe" },
+				]),
+			);
+		if (url.includes("/export_data"))
+			return Promise.resolve(jsonResponse(200, { nonce: "nonce-abc" }));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, page } = makeContext({
+		streams: ["account_plan"],
+		fetchStub,
+	});
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(emitted[0]?.data, {
+		...ACCOUNT_PLAN_RECORD,
+		account_created_at: null,
+		plan_type: null,
+	});
+	assert.match(
+		diagnostics.find((line) => line.includes("account_plan_incomplete")) ?? "",
+		/"plan_type":"absent".*"account_created_at":"absent"/,
+	);
+});
+
+test("collectAnthropic: a resumed export whose organization is not in the signed-in account skips account_plan instead of emitting an empty plan", async () => {
+	const zipBytes = await buildZipBytes();
+	const { download } = makeFakeDownload(zipBytes);
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages, page } = makeContext({
+		streams: ["account_plan"],
+		state: {
+			conversations: {
+				pending_export: {
+					organization_id: "old-org",
+					nonce: "old-nonce",
+					requested_at: "2025-12-31T00:00:00.000Z",
+				},
+			},
+		},
+		fetchStub,
+	});
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(
+		skips.map((skip) => [skip.stream, skip.reason]),
+		[["account_plan", "organization_unavailable"]],
+	);
+	assert.deepEqual(skips[0]?.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+});
+
+test("collectAnthropic: a resumed export finds its own organization's plan in the account's list", async () => {
+	const zipBytes = await buildZipBytes();
+	const { download } = makeFakeDownload(zipBytes);
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, page } = makeContext({
+		streams: ["account_plan"],
+		state: {
+			conversations: {
+				pending_export: {
+					organization_id: "org-1",
+					nonce: "old-nonce",
+					requested_at: "2025-12-31T00:00:00.000Z",
+				},
+			},
+		},
+		fetchStub,
+	});
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(emitted[0]?.data, ACCOUNT_PLAN_RECORD);
+});
 
 test("collectAnthropic: scope filtering — requesting only 'projects' emits no conversations/messages/project_documents", async () => {
 	const zipBytes = await buildZipBytes();

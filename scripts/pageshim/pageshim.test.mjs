@@ -1648,6 +1648,7 @@ test("anthropic: export paths on the PageShim host", {
 			);
 			assert.deepEqual(streamed, {
 				"claude.account_profile": 1,
+				"claude.account_plan": 1,
 				"claude.conversations": 1,
 				"claude.messages": 0,
 				"claude.projects": 0,

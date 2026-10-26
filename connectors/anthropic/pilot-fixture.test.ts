@@ -7,5 +7,9 @@ import { validateRecord } from "./schemas.ts";
 registerPilotFixtureTests({
 	connector: "anthropic",
 	evidence: "shape-only",
+	exemptStreams: {
+		account_plan:
+			"No reviewed real-derived capture yet. schemas.test.ts, parsers.test.ts and integration.test.ts cover its shape with labeled synthetic records.",
+	},
 	validateRecord,
 });

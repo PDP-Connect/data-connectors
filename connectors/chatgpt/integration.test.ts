@@ -2636,6 +2636,11 @@ test("processConversationDetail: detail.status=404 — still emits conversation 
 		null,
 		"detail=null ⇒ message_count_on_current_branch is null (list-only fallback)",
 	);
+	assert.equal(
+		convo.data.model_counts,
+		null,
+		"detail=null ⇒ model_counts is null: the models are unknown, not none",
+	);
 
 	// No message records — detail had no mapping.
 	assert.equal(emitted.filter((r) => r.stream === "messages").length, 0);

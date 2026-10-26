@@ -20,7 +20,9 @@ import {
 	type ZipReadPolicy,
 	zipBasename,
 } from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
+import { buildAccountPlanRecord as buildLiveAccountPlanRecord } from "../anthropic_live/parsers.ts";
 import {
+	buildAccountPlanRecord,
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	flattenMessageText,
@@ -34,6 +36,7 @@ import {
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
+	type RawOrganization,
 	resolveExportedProfile,
 } from "./parsers.ts";
 import { decodeEscapedText } from "./safe-escape.ts";
@@ -1018,4 +1021,85 @@ test("parseConversationHeader: a title or identity field reported over the cap i
 	assert.equal(parseConversationHeader({ id: "i" }, 0, over("uuid")), null);
 	assert.equal(parseConversationHeader({ uuid: "c" }, 0, over("id"))?.id, "c");
 	assert.equal(parseConversationHeader({}, 0, over("id")), null);
+});
+
+const PLAN_ORGS: Array<[string, Record<string, unknown>, string | null]> = [
+	["max", { uuid: "o", capabilities: ["chat", "claude_max"] }, "max"],
+	["pro", { uuid: "o", capabilities: ["chat", "claude_pro"] }, "pro"],
+	[
+		"team",
+		{ uuid: "o", capabilities: ["raven"], raven_type: "enterprise" },
+		"enterprise",
+	],
+	["raven without a type", { uuid: "o", capabilities: ["raven"] }, "team"],
+	["free", { uuid: "o", capabilities: ["chat"], billing_type: null }, "free"],
+	[
+		"free, billing none",
+		{ uuid: "o", capabilities: ["chat"], billing_type: "none" },
+		"free",
+	],
+	[
+		"unknown",
+		{ uuid: "o", capabilities: ["chat"], billing_type: "stripe" },
+		null,
+	],
+	["no capabilities", { uuid: "o" }, null],
+];
+
+for (const [label, org, expected] of PLAN_ORGS) {
+	test(`buildAccountPlanRecord: ${label} organization gives plan_type ${expected}, the same value anthropic_live gives`, () => {
+		const record = buildAccountPlanRecord(org);
+		assert.equal(record?.plan_type, expected);
+		assert.equal(
+			record?.plan_type,
+			buildLiveAccountPlanRecord(org, null)?.plan_type,
+		);
+		assert.equal(validateRecord("account_plan", record).ok, true);
+	});
+}
+
+test("buildAccountPlanRecord: carries only the organization id, creation time and plan; every other field is null", () => {
+	// The cast stands for the real API entry, which has fields this parser never reads.
+	const entry = {
+		uuid: "org-1",
+		name: "Fictional Owner's Organization",
+		capabilities: ["chat", "claude_pro"],
+		created_at: "2025-03-01T12:00:00.123456Z",
+		billing_type: "stripe",
+		rate_limit_tier: "default_claude_ai",
+		plan_display_name: "Claude Pro",
+		email: "someone@example.invalid",
+	} as RawOrganization;
+	const record = buildAccountPlanRecord(entry);
+	assert.deepEqual(record, {
+		id: "org-1",
+		account_id: "org-1",
+		account_structure: null,
+		account_created_at: "2025-03-01T12:00:00.123456Z",
+		plan_type: "pro",
+		plan_display_name: null,
+		subscription_plan: null,
+		has_active_subscription: null,
+		billing_period: null,
+		will_renew: null,
+		renews_at: null,
+		expires_at: null,
+		cancels_at: null,
+		scheduled_plan_change: null,
+	});
+	const live = buildLiveAccountPlanRecord(
+		{ uuid: "org-1", created_at: "2025-03-01T12:00:00.123456Z" },
+		null,
+	);
+	assert.equal(record?.account_created_at, live?.account_created_at);
+});
+
+test("buildAccountPlanRecord: an entry without an id gives no record; a bad creation time gives null", () => {
+	assert.equal(buildAccountPlanRecord({ capabilities: ["claude_pro"] }), null);
+	assert.equal(buildAccountPlanRecord({ uuid: "" }), null);
+	for (const created_at of ["yesterday", "", 1740830400, null])
+		assert.equal(
+			buildAccountPlanRecord({ uuid: "o", created_at })?.account_created_at,
+			null,
+		);
 });
