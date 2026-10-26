@@ -252,6 +252,20 @@ async function fetchWindow(
   return { data, failedWindows };
 }
 
+// One record per id: Oura repeats chunk-boundary days; keep the copy with more filled fields, ties keep the first.
+function oneRecordPerId(records: RecordData[]): RecordData[] {
+  const byId = new Map<unknown, RecordData>();
+  for (const record of records) {
+    const known = byId.get(record.id);
+    if (!known || filledFields(record) > filledFields(known)) byId.set(record.id, record);
+  }
+  return [...byId.values()];
+}
+
+function filledFields(record: RecordData): number {
+  return Object.values(record).filter((value) => value !== null && value !== undefined).length;
+}
+
 function sleepRecord(session: SleepSession, daily?: DailySleep): RecordData {
   return {
     record_type: "sleep_session",
@@ -406,7 +420,7 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
     } else {
       records = (data.daily_activities ?? []).map(activityRecord);
     }
-    for (const record of records) {
+    for (const record of oneRecordPerId(records)) {
       const recordDay = record.day;
       if (typeof recordDay !== "string" || recordDay < startDate || recordDay > endDate) continue;
       await ctx.emitRecord(stream, record);
