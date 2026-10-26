@@ -60,6 +60,13 @@
  * CHANGES
  *   v0.1.0 (2026-10-22): first version.
  *   v0.1.1 (2026-10-22): posts gain title, shared_text and attachment_title.
+ *   v0.1.4 (2026-10-26): a bounded grant narrows the walk at the source (the
+ *     walk stops past `since`, the timeline's own date variables carry
+ *     `until`, a walk for chosen ids stops once all were read); posts,
+ *     reactions and comments are declared non-incremental, reactions and
+ *     comments mutable; failures that need a newer connector say so; a record
+ *     the schema rejects fails its stream; the session probe reads the page
+ *     only, not the cookie jar, which the manifest never declared.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -106,7 +113,6 @@ const PROBE_DEADLINE_MS = 30_000;
  * proven ends with a clear auth failure instead of sitting silent.
  */
 const SIGN_IN_TIMEOUT_SECONDS = 300;
-const SESSION_COOKIES = ["c_user", "xs"];
 
 /** JSON keys whose string values are blanked out of server-rendered scripts before they leave the page. */
 const SECRET_KEYS = ["token", "async_get_token"];
@@ -450,20 +456,13 @@ export function createPageServices(
 
 // ─── Session ────────────────────────────────────────────────────────────
 
-async function hasSessionCookies(
-	context: ProbeSessionArgs["context"],
-): Promise<boolean> {
-	const cookies = await context.cookies(`${FB_ORIGIN}/`);
-	return SESSION_COOKIES.every((name) =>
-		cookies.some((cookie) => cookie.name === name && cookie.value.length > 0),
-	);
-}
-
-async function probeOnce({
-	context,
-	page,
-}: ProbeSessionArgs): Promise<boolean> {
-	if (!(await hasSessionCookies(context))) return false;
+/**
+ * The page itself proves the session: a signed-in page names the person, a
+ * signed-out one names user "0" or lands on the sign-in form. The cookie jar
+ * is not read; the manifest does not declare `cookie_read`, which the mobile
+ * host does not provide, and the mobile probe already relies on the page alone.
+ */
+async function probeOnce({ page }: ProbeSessionArgs): Promise<boolean> {
 	if (!page.url().startsWith(FB_ORIGIN))
 		await gotoWithRetry(page, `${FB_ORIGIN}/`);
 	assertLandedOnContent(page.url());
@@ -471,7 +470,7 @@ async function probeOnce({
 	return isNumericId(viewerId) && viewerId !== "0";
 }
 
-/** Signed in when the session cookies are there and the page names a person. Bounded; never hangs. */
+/** Signed in when the page names a person. Bounded; never hangs. */
 export async function probeFacebookSession(
 	args: ProbeSessionArgs,
 	deadlineMs = PROBE_DEADLINE_MS,

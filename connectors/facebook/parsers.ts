@@ -1399,6 +1399,11 @@ export function buildVariables(args: {
 	defaults: JsonRecord;
 	overrides: JsonRecord;
 	provided: JsonRecord;
+	/**
+	 * Values set only for names the query already has (the source's own date
+	 * filters): a name this build of the query does not declare is never sent.
+	 */
+	ifDeclared?: JsonRecord | undefined;
 	template: JsonRecord | null;
 }): JsonRecord {
 	const variables: JsonRecord = { ...(args.template ?? args.defaults) };
@@ -1406,6 +1411,8 @@ export function buildVariables(args: {
 		if (!(key in variables)) variables[key] = value;
 	for (const [key, value] of Object.entries(args.overrides))
 		variables[key] = value;
+	for (const [key, value] of Object.entries(args.ifDeclared ?? {}))
+		if (key in variables) variables[key] = value;
 	variables.cursor = args.cursor;
 	return variables;
 }
