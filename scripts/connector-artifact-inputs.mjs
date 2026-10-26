@@ -14,6 +14,10 @@ import {
   consentSliceProblem,
 } from "./consent-slice-resolution.mjs";
 
+// execFileSync defaults to a 1 MiB output buffer; connector-implementation-index.json
+// alone passed that in October 2026, and git show then fails with ENOBUFS.
+const GIT_SHOW_MAX_BUFFER = 64 * 1024 * 1024;
+
 const PACKAGE_ROOT = "packages/polyfill-connectors";
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
 const SHARED_ARTIFACT_INPUTS = [
@@ -71,6 +75,7 @@ function readFileAtCommit(commit, path, { cwd }) {
     return execFileSync("git", ["show", `${commit}:${path}`], {
       cwd,
       encoding: "buffer",
+      maxBuffer: GIT_SHOW_MAX_BUFFER,
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
