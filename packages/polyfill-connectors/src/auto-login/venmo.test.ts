@@ -2823,19 +2823,18 @@ test("ensureVenmoSession: a page with no username field still hands off with the
 			identifierSelectorMatches: false,
 		});
 		const { requests, sendInteraction } = recordingSendInteraction();
-		// The handoff happened. It no longer probes, so it resolves with `null`
-		// rather than throwing — a session that did not really sign in now fails
-		// at the collection step as venmo_session_expired.
-		assert.equal(
-			await ensureVenmoSession({
+		// Owner acknowledgement is not completion while identity is unresolved.
+		await assert.rejects(
+			ensureVenmoSession({
 				credentials: {
 					VENMO_PASSWORD: "test-password",
 					VENMO_USERNAME: "test-user",
 				},
 				page,
+				postSubmitSettleTimeoutMs: 20,
 				sendInteraction,
 			}),
-			null,
+			/venmo_login_did_not_complete/,
 		);
 		const manual = requests.filter(
 			(req): boolean => req.kind === "manual_action",
@@ -2866,14 +2865,19 @@ test("ensureVenmoSession: a visible CAPTCHA with no identifier is named as the c
 			identifierSelectorMatches: false,
 		});
 		const { requests, sendInteraction } = recordingSendInteraction();
-		await ensureVenmoSession({
-			credentials: {
-				VENMO_PASSWORD: "test-password",
-				VENMO_USERNAME: "test-user",
-			},
-			page,
-			sendInteraction,
-		});
+		await assert.rejects(
+			ensureVenmoSession({
+				credentials: {
+					VENMO_PASSWORD: "test-password",
+					VENMO_USERNAME: "test-user",
+				},
+				page,
+				postSubmitSettleTimeoutMs: 20,
+				sendInteraction,
+			}),
+			/venmo_login_challenge_during_replay/,
+		);
+		assert.equal(requests.length, 1);
 		assert.match(requests[0]?.message ?? "", /CAPTCHA/);
 		assert.doesNotMatch(
 			requests[0]?.message ?? "",
@@ -5236,5 +5240,82 @@ for (const outcome of ["rejected", "captcha"] as const) {
 		assert.deepEqual(kinds, ["otp", "manual_action"]);
 		assert.equal(fake.destroyed, false);
 		assert.equal(fake.postSubmitProbes, 0);
+	});
+}
+
+for (const outcome of ["otp", "pending"] as const) {
+	test(`CAPTCHA replay preserves unresolved ${outcome} before collector handoff`, async () => {
+		const { page, gotoUrls } = makeProbePage(false);
+		const absent = makeLocator({ count: 0, visible: false });
+		const fields = otpFields([{ maxlength: 6 }]);
+		let stage: string = "captcha";
+		let url = "https://venmo.com/";
+		let otpSubmits = 0;
+		let identityProbes = 0;
+		let identityNavigations = 0;
+		let verificationTicks = 0;
+		const kinds: string[] = [];
+		page.url = () => url;
+		page.goto = async (target) => {
+			if (isVenmoSignInUrl(url)) identityNavigations += 1;
+			gotoUrls.push(target);
+			url = target === "https://venmo.com/login"
+				? "https://id.venmo.com/signin" : target;
+			return null;
+		};
+		page.evaluate = (async () => {
+			if (isVenmoSignInUrl(url)) identityProbes += 1;
+			return { kind: "dead" };
+		}) as Page["evaluate"];
+		page.locator = ((selector: string) => {
+			if (selector === "body") return makeLocator({
+				innerText: stage === "otp" ? "Enter the code we sent." : "",
+			});
+			if (selector.includes("recaptcha")) return makeLocator({
+				count: stage === "captcha" ? 1 : 0,
+				visible: stage === "captcha",
+			});
+			if (selector.includes("otp") || selector.includes("code")) {
+				return stage === "otp" ? fields.locator : absent;
+			}
+			return absent;
+		}) as Page["locator"];
+		page.getByRole = (() => makeClickRecordingLocator(() => {
+			otpSubmits += 1;
+			stage = "verifying";
+		})) as Page["getByRole"];
+		page.waitForTimeout = async () => {
+			if (stage === "verifying" && ++verificationTicks === 3) {
+				stage = "complete";
+				url = "https://venmo.com/";
+			}
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		};
+		const run = ensureVenmoSession({
+			credentials: { VENMO_USERNAME: "test-user", VENMO_PASSWORD: "test-password" },
+			page,
+			postSubmitSettleTimeoutMs: 100,
+			sendInteraction: (request) => {
+				kinds.push(request.kind);
+				if (request.kind === "manual_action") stage = outcome;
+				return Promise.resolve({
+					value: request.kind === "otp" ? "123456" : "success",
+				} as InteractionResponse);
+			},
+		});
+		if (outcome === "pending") {
+			await assert.rejects(run, /venmo_login_did_not_complete/);
+			assert.equal(url, "https://id.venmo.com/signin");
+			assert.deepEqual(kinds, ["manual_action"]);
+			assert.equal(otpSubmits, 0);
+		} else {
+			await run;
+			assert.equal(stage, "complete", "collector handoff must wait for OTP verification");
+			assert.deepEqual(kinds, ["manual_action", "otp"]);
+			assert.deepEqual(fields.values, ["123456"]);
+			assert.equal(otpSubmits, 1);
+		}
+		assert.equal(identityNavigations, 0);
+		assert.equal(identityProbes, 0);
 	});
 }
