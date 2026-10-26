@@ -1801,7 +1801,14 @@ async function hydrateChats(
 			next[chatId] = advanced;
 		}
 		hydrated.push(chatId);
-		if (deliveredAll(outcome.events, plan)) {
+		// A pending gap is about the chat's whole history, so it is resolved
+		// only when the history is now delivered from its start: a walk that
+		// stopped at a `since` floor leaves the older part unrecovered.
+		if (
+			deliveredAll(outcome.events, plan) &&
+			advanced !== null &&
+			advanced.covered_since === null
+		) {
 			delivered.push(chatId);
 		}
 	};
@@ -1873,14 +1880,29 @@ async function readNewestWindows(
 }
 
 /** A chat's `last_event_at` as an ISO string, or null. */
+/**
+ * True when the newest window proves the chat's latest activity: it
+ * answered, every event on it has a readable time, and an empty window is
+ * the whole (empty) history rather than a page with more behind it.
+ */
+function provesLatest(window: HistoryWindow | undefined): boolean {
+	if (window?.kind !== "window") {
+		return false;
+	}
+	if (window.events.length === 0) {
+		return window.cursor === null;
+	}
+	return window.events.every((event) => eventEpochSeconds(event) !== null);
+}
+
 function lastEventAt(
 	window: HistoryWindow | undefined,
 	mark: ChatCheckpoint | undefined,
 ): string | null {
-	if (window?.kind === "window") {
+	if (window?.kind === "window" && provesLatest(window)) {
 		return newestEventAt(window.events);
 	}
-	// The newest window did not answer: the newest event an earlier run
+	// The newest window did not prove it: the newest event an earlier run
 	// delivered is the best known value.
 	return mark === undefined || mark.newest_created_at === null
 		? null
@@ -1960,7 +1982,8 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 	);
 	const unanswered = chats.filter(
 		(chat) =>
-			windows.get(chat.id)?.kind === "gap" &&
+			windows.has(chat.id) &&
+			!provesLatest(windows.get(chat.id)) &&
 			resourceWanted(args, "chats", chat.id),
 	);
 	if (

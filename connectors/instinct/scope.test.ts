@@ -168,6 +168,8 @@ interface RunOptions {
 	readonly detailGaps?: CollectInstinctArgs["detailGaps"];
 	/** A chat whose every history read answers with a GraphQL error. */
 	readonly failHistoryFor?: string;
+	/** A chat whose newest window is empty but has a cursor to older ones. */
+	readonly emptyFirstWindowFor?: string;
 	readonly histories?: Readonly<Record<string, readonly ChatEvent[]>>;
 	readonly overrides?: Readonly<Record<string, unknown>>;
 	/** Skip the runtime: the collector's own messages, unfiltered. */
@@ -201,6 +203,16 @@ async function run(options: RunOptions): Promise<Run> {
 		) {
 			return Promise.resolve({
 				json: { data: null, errors: [{ message: "internal server error" }] },
+				status: 200,
+			});
+		}
+		if (
+			operation === "InstinctChatHistory" &&
+			vars.chatId === options.emptyFirstWindowFor &&
+			(vars.cursor ?? null) === null
+		) {
+			return Promise.resolve({
+				json: { data: { chatHistory: { cursor: "skip:0", events: [] } } },
 				status: 200,
 			});
 		}
@@ -561,25 +573,60 @@ test("resources on chat_events: a pending gap stays pending", async () => {
 	);
 });
 
-test("a since-bounded run resolves a chat's pending gap once the window was read", async () => {
-	const result = await run({
-		detailGaps: [
-			{
-				detail_locator: { chat_id: CHAT_A, kind: "instinct.chat_history" },
-				gap_id: "gap-1",
-				parent_stream: "chats",
-				record_key: CHAT_A,
-				status: "pending",
-				stream: "chat_events",
-			},
-		],
-		scopes: CHATS_AND_EVENTS({ time_range: { since: iso(T0 + 1000) } }),
-	});
-	assert.ok(
+test("a since-bounded walk leaves a pending gap pending; an unbounded one resolves it", async () => {
+	const gaps = [
+		{
+			detail_locator: { chat_id: CHAT_A, kind: "instinct.chat_history" },
+			gap_id: "gap-1",
+			parent_stream: "chats",
+			record_key: CHAT_A,
+			status: "pending" as const,
+			stream: "chat_events",
+		},
+	];
+	const recovered = (result: Run): boolean =>
 		result.messages.some(
 			(message) =>
 				message.type === "DETAIL_GAP_RECOVERED" && message.gap_id === "gap-1",
-		),
+		);
+	const bounded = await run({
+		detailGaps: gaps,
+		scopes: CHATS_AND_EVENTS({ time_range: { since: iso(T0 + 1050) } }),
+	});
+	assert.equal(recovered(bounded), false);
+	// A since below the whole history reads it to its start: resolved.
+	const below = await run({
+		detailGaps: gaps,
+		scopes: CHATS_AND_EVENTS({ time_range: { since: iso(T0 - 10) } }),
+	});
+	assert.equal(recovered(below), true);
+	const unbounded = await run({ detailGaps: gaps, scopes: CHATS_AND_EVENTS() });
+	assert.equal(recovered(unbounded), true);
+});
+
+test("a newest window with an unreadable event time does not prove a chat's latest activity", async () => {
+	const histories = defaultHistories();
+	histories[CHAT_B]?.push({ ...event("b-x", 0), createdAt: null } as never);
+	const bounded = await run({
+		histories,
+		scopes: { chats: { time_range: { since: iso(T0) } } },
+	});
+	assert.deepEqual(
+		bounded.failures.map((failure) => failure.stream),
+		["chats"],
+	);
+	assert.deepEqual(ids(bounded, "chats"), []);
+});
+
+test("an empty newest window with a cursor behind it does not prove an empty chat", async () => {
+	const result = await run({
+		overrides: {},
+		scopes: { chats: { time_range: { since: iso(T0) } } },
+		emptyFirstWindowFor: CHAT_B,
+	});
+	assert.deepEqual(
+		result.failures.map((failure) => failure.stream),
+		["chats"],
 	);
 });
 
