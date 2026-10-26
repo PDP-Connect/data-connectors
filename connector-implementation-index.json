@@ -14945,7 +14945,7 @@
 				},
 				"connector_key": "instinct",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Instinct",
 				"runtime_requirements": {
 					"bindings": {
@@ -15050,27 +15050,21 @@
 								"observed_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When this connector read the profile.",
-									"x_pdpp_role": "event-time"
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
 								}
 							},
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "observed_at",
-						"consent_time_field": "observed_at",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["name", "email", "onboarding_step"],
 								"semantic_fields": ["name"]
-							},
-							"range_filters": {
-								"observed_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true
@@ -15132,20 +15126,17 @@
 								"observed_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When this connector read the agent contact details.",
-									"x_pdpp_role": "event-time"
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
 								}
 							},
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "observed_at",
-						"consent_time_field": "observed_at",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": [
@@ -15153,9 +15144,6 @@
 									"agent_mail_status",
 									"agent_phone_status"
 								]
-							},
-							"range_filters": {
-								"observed_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true
@@ -15221,23 +15209,25 @@
 									},
 									"description": "Per-service grants inside this connection, each as {service_id, label, connected, read_only, notification_issue}. Google Workspace only."
 								},
+								"connected_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the connection was made, as Instinct reports it (ISO 8601). Instinct reports it only for the local iMessage relay; null for every other connection."
+								},
 								"observed_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When this connector read the connection.",
-									"x_pdpp_role": "event-time"
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
 								}
 							},
 							"required": ["id", "provider"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "observed_at",
-						"consent_time_field": "observed_at",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": [
@@ -15248,7 +15238,7 @@
 								]
 							},
 							"range_filters": {
-								"observed_at": ["gte", "gt", "lte", "lt"]
+								"connected_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -15312,19 +15302,18 @@
 								"observed_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When this connector read the device list."
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
 								}
 							},
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "observed_at",
 						"consent_time_field": "created_at",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": [
@@ -15336,7 +15325,6 @@
 							},
 							"range_filters": {
 								"created_at": ["gte", "gt", "lte", "lt"],
-								"observed_at": ["gte", "gt", "lte", "lt"],
 								"battery_level": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
@@ -15406,19 +15394,18 @@
 								"observed_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When this connector read the trust list."
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
 								}
 							},
 							"required": ["id", "relationship"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "observed_at",
 						"consent_time_field": "created_at",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["display_name", "relationship", "status"],
@@ -15426,8 +15413,7 @@
 							},
 							"range_filters": {
 								"created_at": ["gte", "gt", "lte", "lt"],
-								"expires_at": ["gte", "gt", "lte", "lt"],
-								"observed_at": ["gte", "gt", "lte", "lt"]
+								"expires_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -15484,26 +15470,20 @@
 								"observed_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When this connector read the vault inventory.",
-									"x_pdpp_role": "event-time"
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
 								}
 							},
 							"required": ["id", "kind"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "observed_at",
-						"consent_time_field": "observed_at",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["kind", "name"]
-							},
-							"range_filters": {
-								"observed_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -15547,17 +15527,22 @@
 									"format": "date-time",
 									"description": "When the agent's in-progress turn started, or null when no turn is pending (ISO 8601)."
 								},
+								"last_event_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the newest event in this chat happened, as Instinct reports it (ISO 8601, second precision), or null when the chat has no events. A time range selects the chats whose latest activity falls in it.",
+									"x_pdpp_role": "event-time"
+								},
 								"observed_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When this connector read the chat list."
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
 								}
 							},
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "observed_at",
-						"consent_time_field": "observed_at",
+						"consent_time_field": "last_event_at",
 						"selection": {
 							"fields": true,
 							"resources": true
@@ -15569,12 +15554,13 @@
 								"semantic_fields": ["title"]
 							},
 							"range_filters": {
-								"observed_at": ["gte", "gt", "lte", "lt"],
+								"last_event_at": ["gte", "gt", "lte", "lt"],
 								"pending_turn_started_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
-								"group_by": ["source"]
+								"group_by": ["source"],
+								"group_by_time": ["last_event_at"]
 							}
 						},
 						"coverage_strategy": "full_inventory",
@@ -15588,7 +15574,7 @@
 							"label": "Your conversations with your agent",
 							"detail": "Each event in your chats: messages you sent and their read time, the tools your agent called with their arguments and responses, approvals it asked for and your answers, and errors. Attachments are listed by name, type, and size; their download links are not kept. Message text, form values, approvals, and tool inputs and outputs are kept as the app shows them, so they can include anything your agent typed or read, such as details it filled in from your vault."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -15627,7 +15613,7 @@
 								"read_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When the message was read, if Instinct recorded it (ISO 8601)."
+									"description": "When the message was read, if Instinct had recorded it when the event was collected (ISO 8601). Instinct sets it later for a message read later, and a collected event is read again only on a full refresh."
 								},
 								"origin_kind": {
 									"type": ["string", "null"],
@@ -15754,7 +15740,6 @@
 					}
 				],
 				"reason_display_messages": {
-					"not_available": "Instinct did not return this part of your account",
 					"shape_check_failed": "The data from Instinct did not look like we expected",
 					"instinct_auth_failed": "Instinct needs you to sign in again before this can continue.",
 					"instinct_interrupted": "Instinct did not answer when we checked your sign-in. Nothing was collected; try again.",
@@ -15763,7 +15748,8 @@
 					"instinct_request_rejected": "Instinct refused one of the requests, so collection stopped.",
 					"instinct_source_unreadable": "Instinct answered in a form this connector does not recognise. Instinct may have changed its app; please report this.",
 					"instinct_stream_incomplete": "Instinct did not show the end of this list, so it was not saved as complete.",
-					"scope_not_supported": "Chat events are collected together with your chats. Select both and run again."
+					"scope_not_supported": "This part of your Instinct data cannot be collected with the selection you made: account details have no date to limit by, and chat events are collected only together with your chats.",
+					"stream_collection_failed": "Instinct did not show all of this part of your account, so it was not saved as complete. Try again later."
 				},
 				"profiles": [
 					{

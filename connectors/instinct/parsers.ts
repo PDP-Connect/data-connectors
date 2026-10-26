@@ -2,17 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Pure record builders for the Instinct connector. No fetch, no Node I/O, no
-// clock reads — every builder takes the already-parsed upstream shape plus the
-// run's single `observedAt` timestamp, so the whole mapping layer is unit
-// testable without a browser (see integration.test.ts).
+// clock reads: every builder takes the already-parsed upstream shape alone, so
+// the whole mapping layer is unit testable without a browser (see
+// integration.test.ts). Records carry only values Instinct itself reports; the
+// time this connector ran is never put in a record (Collection Profile 5.2).
 
 import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { parseIsoInstant } from "../../packages/polyfill-connectors/src/time-range.ts";
 import type {
 	AgentContact,
 	Chat,
 	ChatCheckpoint,
 	ChatEvent,
+	ChatReadPlan,
 	ConnectionProvider,
 	ConnectionsResponse,
 	DevicesResponse,
@@ -86,10 +89,7 @@ function roundedPercent(value: number | null | undefined): number | null {
 	return Math.round(percent);
 }
 
-export function profileRecord(
-	response: ProfileResponse,
-	observedAt: string,
-): RecordData | null {
+export function profileRecord(response: ProfileResponse): RecordData | null {
 	const user = response.data?.authSession?.user;
 	if (!user) {
 		return null;
@@ -109,7 +109,6 @@ export function profileRecord(
 			}),
 		),
 		name: nullableText(user.name),
-		observed_at: observedAt,
 		onboarding_step: nullableText(user.onboardingStep),
 		phone_number: nullableText(user.phoneNumber),
 		roles: [...(user.roles ?? [])].sort(),
@@ -117,17 +116,13 @@ export function profileRecord(
 	};
 }
 
-export function agentContactRecord(
-	agentContact: AgentContact,
-	observedAt: string,
-): RecordData {
+export function agentContactRecord(agentContact: AgentContact): RecordData {
 	return {
 		agent_mail_status: nullableText(agentContact.agentMailStatus),
 		agent_phone_number: nullableText(agentContact.agentPhoneNumber),
 		agent_phone_status: nullableText(agentContact.agentPhoneStatus),
 		email: nullableText(agentContact.email),
 		id: "agent_contact",
-		observed_at: observedAt,
 		sms_phone_number: nullableText(agentContact.smsPhoneNumber),
 		voice_calls_enabled: nullableFlag(agentContact.voiceCallsEnabled),
 		voice_phone_number: nullableText(agentContact.voicePhoneNumber),
@@ -140,6 +135,7 @@ export function agentContactRecord(
 interface ConnectionSeed {
 	readonly accountEmail?: string | null | undefined;
 	readonly accountName?: string | null | undefined;
+	readonly connectedAt?: unknown;
 	readonly connectionId?: string | null | undefined;
 	readonly isConnected?: boolean | null | undefined;
 	readonly isDefault?: boolean | null | undefined;
@@ -149,32 +145,26 @@ interface ConnectionSeed {
 	readonly workspaceName?: string | null | undefined;
 }
 
-function connectionRecord(
-	seed: ConnectionSeed,
-	observedAt: string,
-): RecordData {
+function connectionRecord(seed: ConnectionSeed): RecordData {
 	// The provider is always present, so `<provider>:<id>` is stable even when
 	// Instinct gives a singleton connection no id of its own.
 	const suffix = nullableText(seed.connectionId) ?? "default";
 	return {
 		account_email: nullableText(seed.accountEmail),
 		account_name: nullableText(seed.accountName),
+		connected_at: toIso(seed.connectedAt),
 		connection_id: nullableText(seed.connectionId),
 		id: `${seed.provider}:${suffix}`,
 		is_connected: nullableFlag(seed.isConnected),
 		is_default: nullableFlag(seed.isDefault),
 		is_revoked: nullableFlag(seed.isRevoked),
-		observed_at: observedAt,
 		provider: seed.provider,
 		services: seed.services ?? [],
 		workspace_name: nullableText(seed.workspaceName),
 	};
 }
 
-export function connectionRecords(
-	response: ConnectionsResponse,
-	observedAt: string,
-): RecordData[] {
+export function connectionRecords(response: ConnectionsResponse): RecordData[] {
 	const data = response.data;
 	if (!data) {
 		return [];
@@ -280,27 +270,23 @@ export function connectionRecords(
 			provider: "stripe_link",
 		});
 	}
-	return seeds.map((seed) => connectionRecord(seed, observedAt));
+	return seeds.map((seed) => connectionRecord(seed));
 }
 
 export function messagingConnectionRecords(
 	response: MessagingResponse,
-	observedAt: string,
 ): RecordData[] {
 	const whatsapp = response.data?.whatsappChannelConnection;
 	if (!whatsapp) {
 		return [];
 	}
 	return [
-		connectionRecord(
-			{
-				accountName: whatsapp.phoneNumber,
-				connectionId: whatsapp.userId,
-				isConnected: true,
-				provider: "whatsapp",
-			},
-			observedAt,
-		),
+		connectionRecord({
+			accountName: whatsapp.phoneNumber,
+			connectionId: whatsapp.userId,
+			isConnected: true,
+			provider: "whatsapp",
+		}),
 	];
 }
 
@@ -313,7 +299,6 @@ export function messagingConnectionRecords(
 export function imessageConnectionRecord(
 	messaging: MessagingResponse,
 	device: ImessageDeviceResponse,
-	observedAt: string,
 ): RecordData | null {
 	const icloudEmail = nullableText(
 		messaging.data?.imessageConnection?.icloudEmail,
@@ -322,24 +307,21 @@ export function imessageConnectionRecord(
 	if (icloudEmail === null && local === null) {
 		return null;
 	}
-	return connectionRecord(
-		{
-			accountEmail: icloudEmail,
-			accountName: local?.accountHandle ?? icloudEmail,
-			// The relay device is the connection's own id when one exists; the
-			// iCloud-only case has no id of its own and falls back to `default`.
-			connectionId: local?.preferredDeviceId ?? null,
-			isConnected: local === null ? null : true,
-			provider: "imessage",
-		},
-		observedAt,
-	);
+	return connectionRecord({
+		accountEmail: icloudEmail,
+		accountName: local?.accountHandle ?? icloudEmail,
+		// When the local relay was linked, as Instinct reports it. No other
+		// connection resolver reports a time.
+		connectedAt: local?.connectedAt ?? null,
+		// The relay device is the connection's own id when one exists; the
+		// iCloud-only case has no id of its own and falls back to `default`.
+		connectionId: local?.preferredDeviceId ?? null,
+		isConnected: local === null ? null : true,
+		provider: "imessage",
+	});
 }
 
-export function deviceRecords(
-	response: DevicesResponse,
-	observedAt: string,
-): RecordData[] {
+export function deviceRecords(response: DevicesResponse): RecordData[] {
 	return (response.data?.devices ?? []).map((device) => ({
 		battery_level: roundedPercent(device.batteryLevel),
 		created_at: toIso(device.createdAt),
@@ -349,7 +331,6 @@ export function deviceRecords(
 		is_charging: nullableFlag(device.isCharging),
 		is_connected: nullableFlag(device.isConnected),
 		name: nullableText(device.name),
-		observed_at: observedAt,
 		os_version: nullableText(device.osVersion),
 	}));
 }
@@ -358,7 +339,6 @@ type Relationship = "blocked" | "contact" | "incoming_request" | "sent_request";
 
 export function trustedPeopleRecords(
 	response: TrustedNetworkResponse,
-	observedAt: string,
 ): RecordData[] {
 	const data = response.data;
 	if (!data) {
@@ -392,7 +372,6 @@ export function trustedPeopleRecords(
 				// carry `generation`; both are the same concurrency token.
 				generation: person.generation ?? person.decisionGeneration ?? null,
 				id: `${page.relationship}:${person.id}`,
-				observed_at: observedAt,
 				person_id: person.id,
 				phone_numbers: [...(person.phoneNumbers ?? [])].sort(),
 				relationship: page.relationship,
@@ -408,7 +387,6 @@ export function trustedPeopleRecords(
 			expires_at: toIso(request.expiresAt),
 			generation: null,
 			id: `sent_request:${request.id}`,
-			observed_at: observedAt,
 			person_id: request.id,
 			phone_numbers: phone === null ? [] : [phone],
 			relationship: "sent_request",
@@ -422,11 +400,14 @@ export function trustedPeopleRecords(
  * Vault records are an inventory, never a disclosure: entry kind, label, and
  * which field *names* hold a value. No vault value is ever requested from
  * Instinct (the `vaultEntries` resolver does not return them) or emitted.
+ *
+ * Instinct gives an entry no id, so the key is `<kind>:<label>`. Two entries
+ * of one kind can share a label (or both have none); the second and later
+ * ones, in Instinct's order, get `#2`, `#3`, ... so neither overwrites the
+ * other. The first keeps the plain key, which is what earlier versions
+ * emitted.
  */
-export function vaultEntryRecords(
-	response: VaultResponse,
-	observedAt: string,
-): RecordData[] {
+export function vaultEntryRecords(response: VaultResponse): RecordData[] {
 	const data = response.data;
 	if (!data) {
 		return [];
@@ -435,19 +416,22 @@ export function vaultEntryRecords(
 	for (const kind of data.vaultKinds ?? []) {
 		kindFieldKeys.set(kind.kind, [...(kind.subfieldKeys ?? [])]);
 	}
+	const seen = new Map<string, number>();
 	return (data.vaultEntries ?? []).map((entry) => {
 		const fields = entry.fields ?? [];
 		const declaredKeys = kindFieldKeys.get(entry.kind) ?? [];
 		const entryKeys = fields.map((field) => field.key);
 		const fieldKeys = [...new Set([...declaredKeys, ...entryKeys])].sort();
 		const name = nullableText(entry.name);
+		const base = `${entry.kind}:${name ?? "unnamed"}`;
+		const occurrence = (seen.get(base) ?? 0) + 1;
+		seen.set(base, occurrence);
 		return {
 			field_keys: fieldKeys,
-			id: `${entry.kind}:${name ?? "unnamed"}`,
+			id: occurrence === 1 ? base : `${base}#${String(occurrence)}`,
 			is_agent_entry: nullableFlag(entry.isAgentEntry),
 			kind: entry.kind,
 			name,
-			observed_at: observedAt,
 			populated_field_keys: fields
 				.filter((field) => field.populated === true)
 				.map((field) => field.key)
@@ -518,10 +502,16 @@ function plainBlock(value: unknown): Record<string, unknown> | null {
 	return Object.keys(safe).length === 0 ? null : safe;
 }
 
-export function chatRecord(chat: Chat, observedAt: string): RecordData {
+/**
+ * A chat record. `lastEventAt` is the time of the newest event in the chat's
+ * history (the first window `chatHistory` returns), or null when the history
+ * is empty or could not be read. It is the chat's consent time: the chat
+ * falls inside a time range when its latest activity does.
+ */
+export function chatRecord(chat: Chat, lastEventAt: string | null): RecordData {
 	return {
 		id: chat.id,
-		observed_at: observedAt,
+		last_event_at: lastEventAt,
 		pending_turn_started_at: toIso(chat.pendingTurnStartedAt),
 		source: nullableText(chat.source),
 		status: nullableText(chat.status),
@@ -575,49 +565,215 @@ export function eventEpochSeconds(event: ChatEvent): number | null {
 	return iso === null ? null : Math.floor(Date.parse(iso) / 1000);
 }
 
-/** True when the event is newer than the checkpoint (or there is none). */
-export function isNewEvent(
+/** Whole epoch seconds at or after an RFC 3339 instant, or null when unreadable. */
+export function ceilEpochSeconds(instant: string | undefined): number | null {
+	if (instant === undefined) {
+		return null;
+	}
+	const parsed = parseIsoInstant(instant);
+	if (parsed === null) {
+		return null;
+	}
+	const whole = Math.floor(parsed.second / 1000);
+	return /[1-9]/.test(parsed.fraction) ? whole + 1 : whole;
+}
+
+/** The `chat_events` scope as this connector reads it. */
+export interface ChatEventsScope {
+	readonly resources?: readonly string[];
+	readonly time_range?: { readonly since?: string; readonly until?: string };
+}
+
+/**
+ * How to read chat histories for this `chat_events` scope. A bound this
+ * connector cannot read leaves the runtime to withhold every event, so
+ * nothing is pushed down and nothing advances.
+ */
+export function chatReadPlan(scope: ChatEventsScope | undefined): ChatReadPlan {
+	const range = scope?.time_range;
+	const floor = ceilEpochSeconds(range?.since);
+	const untilSecond = ceilEpochSeconds(range?.until);
+	const unreadable =
+		(range?.since !== undefined && floor === null) ||
+		(range?.until !== undefined && untilSecond === null);
+	return {
+		bounded: range !== undefined,
+		floor: unreadable ? null : floor,
+		mayAdvance: !unreadable && scope?.resources === undefined,
+		untilSecond: unreadable ? null : untilSecond,
+	};
+}
+
+/** True when the checkpoint's band reaches down to `floor` (null: the start). */
+function coversDownTo(
+	checkpoint: ChatCheckpoint,
+	floor: number | null,
+): boolean {
+	if (checkpoint.covered_since === null) {
+		return true;
+	}
+	return floor !== null && checkpoint.covered_since <= floor;
+}
+
+/**
+ * True when the band keeps its place in the next checkpoint: it has an
+ * event, reaches down to the floor, and is not wholly older than the floor.
+ */
+function bandContinues(
+	checkpoint: ChatCheckpoint | null,
+	floor: number | null,
+): checkpoint is ChatCheckpoint & { newest_created_at: number } {
+	return (
+		checkpoint !== null &&
+		checkpoint.newest_created_at !== null &&
+		coversDownTo(checkpoint, floor) &&
+		(floor === null || floor <= checkpoint.newest_created_at)
+	);
+}
+
+/**
+ * The second paging may stop above: once a window holds an event older than
+ * it, every older window is older still and already delivered or out of
+ * scope. Null means read to the start of the history.
+ */
+export function stopBelowSecond(
+	checkpoint: ChatCheckpoint | null,
+	plan: ChatReadPlan,
+): number | null {
+	if (bandContinues(checkpoint, plan.floor)) {
+		return plan.floor === null
+			? checkpoint.newest_created_at
+			: Math.max(plan.floor, checkpoint.newest_created_at);
+	}
+	return plan.floor;
+}
+
+/** True when this event was delivered by an earlier run (it is in the band). */
+export function isKnownEvent(
 	event: ChatEvent,
 	checkpoint: ChatCheckpoint | null,
 ): boolean {
-	if (checkpoint === null) {
-		return true;
+	if (checkpoint === null || checkpoint.newest_created_at === null) {
+		return false;
 	}
 	const seconds = eventEpochSeconds(event);
 	if (seconds === null) {
 		// Unreadable timestamps are emitted rather than silently dropped; the
 		// record key is the event id, so a repeat upserts instead of duplicating.
-		return true;
+		return false;
 	}
-	if (seconds > checkpoint.newest_created_at) {
+	if (checkpoint.covered_since !== null && seconds < checkpoint.covered_since) {
+		return false;
+	}
+	if (seconds < checkpoint.newest_created_at) {
 		return true;
 	}
 	return (
 		seconds === checkpoint.newest_created_at &&
-		!checkpoint.newest_ids.includes(event.id)
+		checkpoint.newest_ids.includes(event.id)
 	);
 }
 
-/** Advance a checkpoint over a batch of events. */
-export function advanceCheckpoint(
+/** True when an event read this run is one this run should emit. */
+export function shouldEmitEvent(
+	event: ChatEvent,
 	checkpoint: ChatCheckpoint | null,
+	plan: ChatReadPlan,
+): boolean {
+	if (isKnownEvent(event, checkpoint)) {
+		return false;
+	}
+	const seconds = eventEpochSeconds(event);
+	// Older than `since`: read only because a window straddles the bound.
+	return seconds === null || plan.floor === null || seconds >= plan.floor;
+}
+
+/**
+ * True when the runtime delivered every in-scope event this run read, so a
+ * checkpoint may move past them. False when the plan does not allow it (a
+ * `resources` filter), when an event at or after `until` was read (the
+ * runtime withholds it), or when a bounded run read an event with no
+ * readable time (the runtime withholds that too).
+ */
+export function deliveredAll(
 	events: readonly ChatEvent[],
-): ChatCheckpoint | null {
-	let newest = checkpoint?.newest_created_at ?? null;
-	let ids = new Set(checkpoint?.newest_ids ?? []);
-	for (const event of events) {
+	plan: ChatReadPlan,
+): boolean {
+	if (!plan.mayAdvance) {
+		return false;
+	}
+	const { untilSecond } = plan;
+	return events.every((event) => {
 		const seconds = eventEpochSeconds(event);
 		if (seconds === null) {
-			continue;
+			return !plan.bounded;
 		}
-		if (newest === null || seconds > newest) {
-			newest = seconds;
+		return untilSecond === null || seconds < untilSecond;
+	});
+}
+
+/**
+ * The checkpoint a chat carries after this run read `events` (every event on
+ * the windows it read) and either reached the start of the history (`ended`)
+ * or stopped above `stopBelowSecond`. The prior checkpoint is kept unchanged
+ * unless `deliveredAll` holds.
+ */
+export function nextCheckpoint(
+	checkpoint: ChatCheckpoint | null,
+	events: readonly ChatEvent[],
+	plan: ChatReadPlan,
+	ended: boolean,
+): ChatCheckpoint | null {
+	if (!deliveredAll(events, plan)) {
+		return checkpoint;
+	}
+	const seconds = events.map(eventEpochSeconds);
+	const { floor } = plan;
+	const keepBand = bandContinues(checkpoint, floor);
+	let coveredSince: number | null;
+	if (keepBand) {
+		coveredSince = checkpoint.covered_since;
+	} else if (
+		ended &&
+		!seconds.some((value) => value !== null && floor !== null && value < floor)
+	) {
+		// The whole history was read and nothing in it was out of scope.
+		coveredSince = null;
+	} else {
+		coveredSince = floor;
+	}
+	let newest = keepBand ? checkpoint.newest_created_at : null;
+	let ids = new Set(keepBand ? checkpoint.newest_ids : []);
+	events.forEach((event, index) => {
+		const value = seconds[index];
+		if (value === null || value === undefined) {
+			return;
+		}
+		if (floor !== null && value < floor) {
+			return;
+		}
+		if (newest === null || value > newest) {
+			newest = value;
 			ids = new Set([event.id]);
-		} else if (seconds === newest) {
+		} else if (value === newest) {
 			ids.add(event.id);
 		}
+	});
+	return {
+		covered_since: coveredSince,
+		newest_created_at: newest,
+		newest_ids: [...ids].sort(),
+	};
+}
+
+/** The newest event time in one window, as ISO, or null for an empty window. */
+export function newestEventAt(events: readonly ChatEvent[]): string | null {
+	let newest: number | null = null;
+	for (const event of events) {
+		const seconds = eventEpochSeconds(event);
+		if (seconds !== null && (newest === null || seconds > newest)) {
+			newest = seconds;
+		}
 	}
-	return newest === null
-		? null
-		: { newest_created_at: newest, newest_ids: [...ids].sort() };
+	return newest === null ? null : toIso(newest);
 }

@@ -439,8 +439,15 @@ test("collectInstinctOnPage runs with the PageShim context: no run clock, mode o
 		[...new Set(harness.emitted.map((record) => record.stream))].sort(),
 		[...ACCOUNT_STREAMS].sort(),
 	);
-	// Without a run clock, records are observed at the collection time.
-	const observed = Date.parse(String(harness.emitted[0]?.data.observed_at));
+	// Without a run clock, only STATE carries the collection time; no record
+	// does (Collection Profile 5.2).
+	for (const record of harness.emitted) {
+		assert.equal("observed_at" in record.data, false, record.stream);
+	}
+	const state = harness.protocolMessages.find(
+		(message) => message.type === "STATE",
+	) as { cursor?: { observed_at?: unknown } } | undefined;
+	const observed = Date.parse(String(state?.cursor?.observed_at));
 	assert.ok(observed >= before - 1000 && observed <= Date.now() + 1000);
 	assert.ok(
 		sent.every(
@@ -449,7 +456,7 @@ test("collectInstinctOnPage runs with the PageShim context: no run clock, mode o
 	);
 });
 
-test("collectInstinctOnPage keeps the desktop run clock", async () => {
+test("collectInstinctOnPage keeps the desktop run clock in STATE, never in records", async () => {
 	const { page } = await accountPage();
 	const harness = makeRecordingEmit(validateRecord);
 	await collectInstinctOnPage(
@@ -457,6 +464,13 @@ test("collectInstinctOnPage keeps the desktop run clock", async () => {
 	);
 	assert.ok(harness.emitted.length > 0);
 	for (const record of harness.emitted) {
-		assert.equal(record.data.observed_at, "2026-09-22T19:30:00.000Z");
+		assert.equal("observed_at" in record.data, false, record.stream);
+	}
+	const states = harness.protocolMessages.filter(
+		(message) => message.type === "STATE",
+	) as Array<{ cursor?: { observed_at?: unknown } }>;
+	assert.ok(states.length > 0);
+	for (const state of states) {
+		assert.equal(state.cursor?.observed_at, "2026-09-22T19:30:00.000Z");
 	}
 });

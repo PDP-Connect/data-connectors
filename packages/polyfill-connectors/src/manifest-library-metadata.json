@@ -465,7 +465,6 @@
 		"manifest": {
 			"connector_key": "instinct",
 			"reason_display_messages": {
-				"not_available": "Instinct did not return this part of your account",
 				"shape_check_failed": "The data from Instinct did not look like we expected",
 				"instinct_auth_failed": "Instinct needs you to sign in again before this can continue.",
 				"instinct_interrupted": "Instinct did not answer when we checked your sign-in. Nothing was collected; try again.",
@@ -474,7 +473,8 @@
 				"instinct_request_rejected": "Instinct refused one of the requests, so collection stopped.",
 				"instinct_source_unreadable": "Instinct answered in a form this connector does not recognise. Instinct may have changed its app; please report this.",
 				"instinct_stream_incomplete": "Instinct did not show the end of this list, so it was not saved as complete.",
-				"scope_not_supported": "Chat events are collected together with your chats. Select both and run again."
+				"scope_not_supported": "This part of your Instinct data cannot be collected with the selection you made: account details have no date to limit by, and chat events are collected only together with your chats.",
+				"stream_collection_failed": "Instinct did not show all of this part of your account, so it was not saved as complete. Try again later."
 			}
 		}
 	},

@@ -290,7 +290,14 @@ test("collectInstinct emits every stream, every record schema-valid", async () =
 	assert.equal(profile?.id, "user-01TESTTESTTESTTESTTESTTEST");
 	assert.equal(profile?.agent_to_agent_enabled, true);
 	assert.equal(profile?.has_location_data, false);
-	assert.equal(profile?.observed_at, OBSERVED_AT);
+	// Collection Profile 5.2: no record carries the time this connector ran.
+	for (const record of harness.emitted) {
+		assert.equal(
+			"observed_at" in record.data,
+			false,
+			`${record.stream} must not carry the run clock`,
+		);
+	}
 
 	const agentContact = harness.emitted.find(
 		(record) => record.stream === "agent_contact",
@@ -725,11 +732,16 @@ test("a new event in the checkpoint's own second is collected, the old ones are 
 		chats: {
 			chats: Record<
 				string,
-				{ newest_created_at: number; newest_ids: string[] }
+				{
+					covered_since: number | null;
+					newest_created_at: number;
+					newest_ids: string[];
+				}
 			>;
 		};
 	};
 	assert.deepEqual(state.chats.chats[MAIN_CHAT], {
+		covered_since: null,
 		newest_created_at: 1_789_070_050,
 		newest_ids: [
 			"00000000-0000-4000-8000-000000000107",
@@ -1453,23 +1465,23 @@ test("a missing list in an answer is not an empty list", async () => {
 });
 
 test("records that would share a key fail the list instead of overwriting each other", async () => {
-	const vault = (await fixture("vault")) as {
-		data: { vaultEntries: Array<Record<string, unknown>> };
+	const devices = (await fixture("devices")) as {
+		data: { devices: Array<Record<string, unknown>> };
 	};
-	const first = vault.data.vaultEntries[0];
+	const first = devices.data.devices[0];
 	assert.ok(first);
-	vault.data.vaultEntries.push({ ...first });
-	const { failures, harness } = await runCollect(new Set(["vault_entries"]), {
-		InstinctVault: vault,
+	devices.data.devices.push({ ...first });
+	const { failures, harness } = await runCollect(new Set(["devices"]), {
+		InstinctDevices: devices,
 	});
 	assert.deepEqual(
 		failures.map((failure) => failure.stream),
-		["vault_entries"],
+		["devices"],
 	);
 	assert.equal(failures[0]?.retryable, false);
 	assert.ok(
-		!String(failures[0]?.message).includes("Example Airline"),
-		"no entry names in the failure",
+		!String(failures[0]?.message).includes(String(first.name)),
+		"no device names in the failure",
 	);
 	assert.equal(harness.emitted.length, 0);
 	assert.deepEqual(stateStreams(harness), []);

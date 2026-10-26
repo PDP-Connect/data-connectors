@@ -145,8 +145,6 @@ const STREAMS = [
 export const pageshimCase = {
 	fixtures: instinctFixtures,
 	scopes: STREAMS.map((stream) => `instinct.${stream}`),
-	// Every record carries the time this run observed it.
-	volatileRecordFields: ["observed_at"],
 	exportSummary: {
 		count: 33,
 		label: "records",
