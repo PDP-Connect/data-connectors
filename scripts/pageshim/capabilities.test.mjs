@@ -218,7 +218,6 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
 		muse: {
-			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
 		whatsapp_web: {
