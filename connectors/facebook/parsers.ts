@@ -1323,6 +1323,21 @@ export function edgeCreationSeconds(edge: unknown): number | null {
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/** A friend's record id from the raw edge, as `parseFriendNode` derives it. */
+export function friendRecordKey(edge: unknown): string | null {
+	const node = edgeNode(edge);
+	if (!node) return null;
+	const inner = asRecord(node.node)?.id;
+	if (isNumericId(inner)) return inner;
+	const owner = getPath(node, [
+		"actions_renderer",
+		"action",
+		"profile_owner",
+		"id",
+	]);
+	return isNumericId(owner) ? owner : null;
+}
+
 /**
  * A joined group's record id from the raw edge, as `parseGroupNode` derives
  * it: the numeric node id, else the id in the group's URL.

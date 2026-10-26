@@ -59,6 +59,7 @@ import {
 	type FoundConnection,
 	FRIENDS_OPERATION,
 	facebookError,
+	friendRecordKey,
 	GROUPS_OPERATION,
 	groupRecordKey,
 	isNumericId,
@@ -796,7 +797,11 @@ async function collectPosts(run: StreamRun): Promise<void> {
 			snapshot: run.snapshot,
 			viewerId: run.viewer.id,
 			overrides: {},
-			...(dates ? { fromQuery: true, ifDeclared: dates } : {}),
+			// The plain walk clears the date variables: a template captured from
+			// the page may be this run's own dated request.
+			...(dates
+				? { fromQuery: true, ifDeclared: dates }
+				: { ifDeclared: { afterTime: null, beforeTime: null } }),
 			maxPages: MAX_PAGES.posts ?? 600,
 			stopAfterPage: () => stop.done(),
 			skipsEdge: (edge) => stop.skips(edge),
@@ -1035,7 +1040,7 @@ async function runStream(
 				"friends",
 				FRIENDS_OPERATION,
 				parseFriendNode,
-				numericKey(FRIENDS_OPERATION.itemKey),
+				friendRecordKey,
 			);
 		case "groups":
 			return collectInventory(

@@ -264,6 +264,8 @@ function variablesOf(call: GraphqlCall | undefined): JsonRecord {
 }
 
 function runOf(args: {
+	/** As the real page observer does: the connector's own requests are captured too. */
+	capturesOwnRequests?: boolean;
 	captured?: CapturedOperation[];
 	pages: Record<string, PageSnapshot>;
 	scopes: Record<string, Scope>;
@@ -288,9 +290,25 @@ function runOf(args: {
 				return page;
 			},
 			scroll: async () => undefined,
-			takeCaptured: (spec) =>
-				args.captured?.find((op) => operationMatches(spec, op.friendlyName)) ??
-				null,
+			takeCaptured: (spec) => {
+				const own = args.capturesOwnRequests
+					? run.calls.findLast((call) =>
+							operationMatches(spec, call.friendlyName),
+						)
+					: undefined;
+				if (own)
+					return {
+						friendlyName: own.friendlyName,
+						docId: own.docId,
+						variables: JSON.parse(own.variables) as JsonRecord,
+						asbdId: null,
+					};
+				return (
+					args.captured?.find((op) =>
+						operationMatches(spec, op.friendlyName),
+					) ?? null
+				);
+			},
 			resolveModule: async (name) => ({
 				docId: name in args.sources ? "9876543210123" : null,
 				provided: {},
@@ -1082,5 +1100,58 @@ describe("review round 2", () => {
 		await collectFacebook(run.ctx, run.services);
 		assert.deepEqual(run.failures, []);
 		assert.deepEqual(delivered(run, "groups"), ["222"]);
+	});
+});
+
+// ─── review round 3 ─────────────────────────────────────────────────────
+
+describe("review round 3", () => {
+	it("the plain fallback clears the date filter even when the page captured the dated request (P1)", async () => {
+		const source = listSource(POSTS, POST_PAGE, timelinePage, "empties");
+		const run = runOf({
+			capturesOwnRequests: true,
+			scopes: { posts: { time_range: { until: dayStart(6) } } },
+			pages: { [ME]: meSnapshot(source({ cursor: null })) },
+			sources: { [TIMELINE_QUERY]: source },
+		});
+		await collectFacebook(run.ctx, run.services);
+		assert.deepEqual(run.failures, []);
+		assert.deepEqual(delivered(run, "posts"), ids(1, 5));
+	});
+
+	it("skips an unrequested friend keyed by its profile owner id (P1)", async () => {
+		const first = loadFixture(FRIENDS);
+		const items = asRecord(asRecord(asRecord(first.data)?.node)?.pageItems);
+		assert.ok(items && Array.isArray(items.edges));
+		items.page_info = { end_cursor: null, has_next_page: false };
+		const unrequested = asRecord(asRecord(items.edges[0])?.node);
+		assert.ok(unrequested);
+		// An opaque inner id, a numeric owner id, and no readable name.
+		const inner = asRecord(unrequested.node);
+		assert.ok(inner);
+		inner.id = "opaque-id";
+		unrequested.title = null;
+		const owner = asRecord(
+			asRecord(asRecord(unrequested.actions_renderer)?.action)?.profile_owner,
+		);
+		assert.ok(owner);
+		owner.name = null;
+		const wanted = String(
+			asRecord(asRecord(asRecord(items.edges[1])?.node)?.node)?.id,
+		);
+		const run = runOf({
+			scopes: { friends: { resources: [wanted] } },
+			pages: {
+				[ME]: meSnapshot(null),
+				[FRIENDS_URL]: {
+					landedUrl: FRIENDS_URL,
+					scripts: [VIEWER_SCRIPT, preloaded("adp_f", { data: first.data })],
+				},
+			},
+			sources: {},
+		});
+		await collectFacebook(run.ctx, run.services);
+		assert.deepEqual(run.failures, []);
+		assert.deepEqual(delivered(run, "friends"), [wanted]);
 	});
 });
