@@ -1323,6 +1323,18 @@ export function edgeCreationSeconds(edge: unknown): number | null {
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * A joined group's record id from the raw edge, as `parseGroupNode` derives
+ * it: the numeric node id, else the id in the group's URL.
+ */
+export function groupRecordKey(edge: unknown): string | null {
+	const node = edgeNode(edge);
+	if (!node) return null;
+	if (isNumericId(node.id)) return node.id;
+	const url = httpsUrl(node.url);
+	return (url ? GROUP_PATH_ID_RE.exec(url)?.[1] : undefined) ?? null;
+}
+
 // ─── Captured requests and variables ────────────────────────────────────
 
 export interface CapturedOperation {
@@ -1491,6 +1503,8 @@ export function erroredItemCount(
 	errors: readonly GraphqlErrorInfo[],
 	connection: FoundConnection,
 	readPaths: readonly (readonly string[])[],
+	/** Items the run will not read at all (left out by the grant's resources). */
+	ignore: (index: number) => boolean = () => false,
 ): number {
 	const items = new Set<number>();
 	// The error must point inside this very list: its path starts with the
@@ -1507,7 +1521,7 @@ export function erroredItemCount(
 			field.length === 0 ||
 			readPaths.some((path) => pathsIntersect(field, path))
 		)
-			items.add(index);
+			if (!ignore(index)) items.add(index);
 	}
 	return items.size;
 }

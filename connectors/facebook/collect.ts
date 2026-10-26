@@ -60,6 +60,7 @@ import {
 	FRIENDS_OPERATION,
 	facebookError,
 	GROUPS_OPERATION,
+	groupRecordKey,
 	isNumericId,
 	isRunEndingError,
 	isValidDocId,
@@ -371,6 +372,8 @@ interface WalkPlan {
 	onEdges: (edges: unknown[]) => Promise<void>;
 	/** Asked after each page: true when the grant's window or resources are fully read. */
 	stopAfterPage?: () => boolean;
+	/** True for an edge the grant's resources leave out: it is not read, so its errors do not count. */
+	skipsEdge?: (edge: unknown) => boolean;
 }
 
 interface WalkState {
@@ -448,6 +451,7 @@ function assertItemsReadable(
 		payload.errors,
 		connection,
 		plan.spec.readPaths,
+		(index) => plan.skipsEdge?.(connection.edges[index]) ?? false,
 	);
 	if (errored > 0) {
 		throw facebookError(
@@ -795,6 +799,7 @@ async function collectPosts(run: StreamRun): Promise<void> {
 			...(dates ? { fromQuery: true, ifDeclared: dates } : {}),
 			maxPages: MAX_PAGES.posts ?? 600,
 			stopAfterPage: () => stop.done(),
+			skipsEdge: (edge) => stop.skips(edge),
 			onEdges: async (edges) => {
 				stop.observeEdges(edges);
 				for (const edge of edges) {
@@ -847,14 +852,11 @@ async function collectInventory(
 	stream: "friends" | "groups",
 	spec: OperationSpec,
 	parse: (node: JsonRecord, counter: TextCounter) => { id: string } | null,
+	recordKey: (edge: unknown) => string | null,
 ): Promise<void> {
 	const counter = newTextCounter();
 	const grant = streamGrant(run.ctx, stream);
-	const stop = new GrantStop(
-		grant,
-		Number.POSITIVE_INFINITY,
-		numericKey(spec.itemKey),
-	);
+	const stop = new GrantStop(grant, Number.POSITIVE_INFINITY, recordKey);
 	const seen = new Set<string>();
 	let unreadable = 0;
 	let rejected = 0;
@@ -866,6 +868,7 @@ async function collectInventory(
 		overrides: {},
 		maxPages: MAX_PAGES[stream] ?? 200,
 		stopAfterPage: () => stop.done(),
+		skipsEdge: (edge) => stop.skips(edge),
 		onEdges: async (edges) => {
 			for (const edge of edges) {
 				if (stop.allMet()) break;
@@ -923,6 +926,7 @@ async function collectActivity(
 		overrides: { category_key: ACTIVITY_CATEGORIES[kind] },
 		maxPages: MAX_PAGES[stream] ?? 400,
 		stopAfterPage: () => stop.done(),
+		skipsEdge: (edge) => stop.skips(edge),
 		onEdges: async (edges) => {
 			stop.observeEdges(edges);
 			for (const edge of edges) {
@@ -1031,6 +1035,7 @@ async function runStream(
 				"friends",
 				FRIENDS_OPERATION,
 				parseFriendNode,
+				numericKey(FRIENDS_OPERATION.itemKey),
 			);
 		case "groups":
 			return collectInventory(
@@ -1038,6 +1043,7 @@ async function runStream(
 				"groups",
 				GROUPS_OPERATION,
 				parseGroupNode,
+				groupRecordKey,
 			);
 		case "reactions":
 			return collectActivity(

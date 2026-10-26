@@ -508,11 +508,17 @@ export function makeEnsureFacebookSession(
 			live = await signIn(args, login);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (isConnectorErrorCodeShaped(message)) throw error;
-			connectorDiagnostic("facebook", "sign_in_interrupted", {
-				error: error instanceof Error ? error.name : typeof error,
+			const code = sessionCodeFor(message);
+			connectorDiagnostic("facebook", "sign_in_failed", {
+				code,
+				// Only a bare code is kept; free text may hold page content.
+				cause: isConnectorErrorCodeShaped(message)
+					? message
+					: error instanceof Error
+						? error.name
+						: typeof error,
 			});
-			throw new Error(SESSION_CODES.interrupted, { cause: error });
+			throw new Error(code, { cause: error });
 		}
 		if (!live) {
 			connectorDiagnostic("facebook", "sign_in_not_completed", {});
@@ -525,6 +531,19 @@ const SESSION_CODES = {
 	authFailed: "facebook_auth_failed",
 	interrupted: "facebook_interrupted",
 } as const;
+
+/**
+ * The connector's own code for a sign-in failure. The person cancelling the
+ * hand-off is an unfinished sign-in; a hand-off whose page never became
+ * ready, or any other break (a navigation that failed), is an interruption
+ * worth retrying.
+ */
+function sessionCodeFor(message: string): string {
+	return message === SESSION_CODES.authFailed ||
+		message === "browser_sign_in_cancelled"
+		? SESSION_CODES.authFailed
+		: SESSION_CODES.interrupted;
+}
 
 async function signIn(
 	args: EnsureSessionArgs,

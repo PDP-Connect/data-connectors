@@ -13,6 +13,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
+	BrowserHandoffReadinessTimedOutError,
+	BrowserSignInCancelledError,
+} from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import {
 	consentTimeFieldResolver,
 	makeEmitRecord,
 	withholdsBoundedProgress,
@@ -959,8 +963,124 @@ describe("sign-in failures through the runtime's establishSession", () => {
 		assert.equal(error.retryable, true);
 	});
 
+	it("a cancelled hand-off is an unfinished sign-in; a hand-off that never got ready is retryable (review round 2)", async () => {
+		const cancelled = await establish(async () => {
+			throw new BrowserSignInCancelledError();
+		}).then(
+			() => null,
+			(caught: unknown) => caught,
+		);
+		assert.ok(cancelled instanceof TerminalError);
+		assert.equal(cancelled.code, "facebook_auth_failed");
+		const timedOut = await establish(async () => {
+			throw new BrowserHandoffReadinessTimedOutError();
+		}).then(
+			() => null,
+			(caught: unknown) => caught,
+		);
+		assert.ok(timedOut instanceof TerminalError);
+		assert.equal(timedOut.code, "facebook_interrupted");
+		assert.equal(timedOut.retryable, true);
+	});
+
 	it("has copy for both codes", () => {
 		assert.ok(manifest.reason_display_messages.facebook_auth_failed);
 		assert.ok(manifest.reason_display_messages.facebook_interrupted);
+	});
+});
+
+// ─── review round 2 ─────────────────────────────────────────────────────
+
+describe("review round 2", () => {
+	it("does not fail a resource-scoped walk on a GraphQL error on an unrequested entry (P1)", async () => {
+		const items = daily(3, activityId);
+		const page = activityPage(items, {
+			end_cursor: null,
+			has_next_page: false,
+		});
+		page.errors = [
+			{
+				message: "field error",
+				path: ["node", "activity_log_stories", "edges", 0, "node", "title"],
+			},
+		];
+		const url = activityUrl(TIMELINE_VIEWER, "reaction");
+		const run = runOf({
+			scopes: { reactions: { resources: [activityId(2)] } },
+			pages: {
+				[ME]: meSnapshot(null),
+				[url]: { landedUrl: url, scripts: [preloaded("adp_al", page)] },
+			},
+			sources: {},
+		});
+		await collectFacebook(run.ctx, run.services);
+		assert.deepEqual(run.failures, []);
+		assert.deepEqual(delivered(run, "reactions"), [activityId(2)]);
+	});
+
+	it("still fails on a GraphQL error on the requested entry", async () => {
+		const items = daily(3, activityId);
+		const page = activityPage(items, {
+			end_cursor: null,
+			has_next_page: false,
+		});
+		page.errors = [
+			{
+				message: "field error",
+				path: ["node", "activity_log_stories", "edges", 1, "node", "title"],
+			},
+		];
+		const url = activityUrl(TIMELINE_VIEWER, "reaction");
+		const run = runOf({
+			scopes: { reactions: { resources: [activityId(2)] } },
+			pages: {
+				[ME]: meSnapshot(null),
+				[url]: { landedUrl: url, scripts: [preloaded("adp_al", page)] },
+			},
+			sources: {},
+		});
+		await collectFacebook(run.ctx, run.services);
+		assert.equal(run.failures.length, 1);
+		assert.equal(stateOf(run, "reactions"), undefined);
+	});
+
+	it("skips an unrequested group known only by its URL (P2)", async () => {
+		const group = (id: number, extra: JsonRecord = {}) => ({
+			node: {
+				__typename: "Group",
+				name: `Group ${id}`,
+				url: `https://www.facebook.com/groups/${id}/`,
+				viewer_join_state: "MEMBER",
+				...extra,
+			},
+		});
+		const groupsUrl = "https://www.facebook.com/groups/joins/";
+		const script = preloaded("adp_groups", {
+			data: {
+				viewer: {
+					all_joined_groups: {
+						tab_groups_list: {
+							edges: [
+								// Unrequested, URL-keyed, and unreadable (no name).
+								group(111, { name: null }),
+								group(222, { id: "222" }),
+							],
+							page_info: { end_cursor: null, has_next_page: false },
+						},
+					},
+				},
+			},
+		});
+		const run = runOf({
+			scopes: { groups: { resources: ["222"] } },
+			pages: {
+				[ME]: meSnapshot(null),
+				[groupsUrl]: { landedUrl: groupsUrl, scripts: [script] },
+			},
+			sources: {},
+		});
+		await collectFacebook(run.ctx, run.services);
+		assert.deepEqual(run.failures, []);
+		assert.deepEqual(delivered(run, "groups"), ["222"]);
 	});
 });
