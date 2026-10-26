@@ -31,7 +31,11 @@
  *     newest messages the client holds in memory plus older ones paged back
  *     with msgFindBefore until its own short page, always anchored on the
  *     client's own message keys. Every message the local store holds is
- *     emitted. A chat whose walk cannot complete, or whose history state
+ *     emitted. Under a time_range with `since` the walk stops after a full
+ *     page that is wholly older than `since`, and a chat whose own last
+ *     activity is older than `since` is not walked at all; under `resources`
+ *     only the chats the requested message ids name are walked, each until
+ *     its requested ids are found. A chat whose walk cannot complete, or whose history state
  *     still says messages remain on the phone after its one on-demand
  *     history request (0, 2 or 4) or can never be answered (state 5, no
  *     access), then gets a visible DETAIL_GAP for that remainder, never a
@@ -40,7 +44,7 @@
  *   - groups: one record per group in the page's group metadata collection.
  */
 
-import { isMainModule } from "@pdpp/connector-protocol";
+import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
 import {
 	BrowserHandoffReadinessTimedOutError,
 	manualBrowserLogin,
@@ -54,7 +58,9 @@ import {
 	type ProbeSessionArgs,
 	type RecordData,
 	runConnector,
+	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { parseIsoInstant } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	buildChat,
 	buildContact,
@@ -71,6 +77,7 @@ import {
 	parseHistoryAck,
 	parseStoresReadiness,
 	parseSyncState,
+	secondsToIso,
 	storesReady,
 	type SyncState,
 	syncSettled,
@@ -100,6 +107,13 @@ const STORE_WAIT_ATTEMPTS = 40;
 const STORE_WAIT_MS = 1_500;
 /** Version of the streams' cursors. */
 const CURSOR_VERSION = 2;
+
+/** Portable recovery hints (Collection Profile 5.5). */
+const RETRY_BY_RUNTIME = { action: "retry_by_runtime", retryable: true };
+const RETRY_ON_UPGRADE = {
+	action: "retry_on_connector_upgrade",
+	retryable: false,
+};
 
 /** The collection's pacing, overridable so tests do not sleep. */
 export interface CollectionTimings {
@@ -186,7 +200,7 @@ export function assertReadOnlyCall(
 		throw createConnectorFailure(
 			"whatsapp_web_refused_call",
 			"chatId required for the on-demand history request",
-			{ retryable: false },
+			{ retryable: false, recoveryHint: RETRY_ON_UPGRADE },
 		);
 	}
 }
@@ -304,6 +318,11 @@ export async function listChats(page: ScriptRunner): Promise<unknown> {
  * a string. A chat with activity but nothing in memory has no key to page
  * back from; the walk says so (`stop: "no_anchor"`) and never makes one up.
  *
+ * With `sinceMs` (a time_range's start, epoch milliseconds) the walk also
+ * ends, `complete` with `stop: "before_since"`, after a full page whose every
+ * message is older than that start: the store pages strictly backward, so
+ * nothing older can fall inside the window.
+ *
  * The first chunk (`token` null) also returns the in-memory messages. Each
  * chunk returns the older rows it read, `more: true` when it stopped only
  * because its page budget ran out (the caller asks for the next chunk with
@@ -314,6 +333,7 @@ export async function readChatMessages(
 	page: ScriptRunner,
 	chatId: string,
 	token: string | null = null,
+	sinceMs: number | null = null,
 ): Promise<unknown> {
 	assertReadOnlyCall("readChatMessages", { chatId });
 	return page.evaluate(`
@@ -322,6 +342,7 @@ export async function readChatMessages(
 		${MESSAGE_ROW_MAPPER}
 		const chatId = ${JSON.stringify(chatId)};
 		const resumeToken = ${JSON.stringify(token)};
+		const sinceMs = ${JSON.stringify(sinceMs)};
 		const PAGE_SIZE = ${MESSAGE_PAGE_SIZE};
 		const MAX_PAGES = ${MAX_CHUNK_PAGES};
 		const walks = (globalThis.__pdppWhatsAppWebWalks = globalThis.__pdppWhatsAppWebWalks || new Map());
@@ -362,6 +383,15 @@ export async function readChatMessages(
 			for (const m of rows) out.push(mapRow(m));
 			if (rows.length < PAGE_SIZE) {
 				return done({ status: 200, memory, messages: out, complete: true, anchored: true, stop: "short_page" });
+			}
+			// The store answers each page strictly before its anchor, in the
+			// chat's own message order, and that order follows the messages'
+			// timestamps \`t\` (the app sorts a chat by them). So once a full
+			// page is wholly older than the window's start, every older page
+			// is too: the window is covered and the walk stops here. A message
+			// with no \`t\` keeps the page from counting as wholly older.
+			if (sinceMs !== null && rows.every((m) => typeof m.t === "number" && m.t * 1000 < sinceMs)) {
+				return done({ status: 200, memory, messages: out, complete: true, anchored: true, stop: "before_since" });
 			}
 			const oldest = rows[0];
 			if (!oldest || !oldest.id || w(oldest.id) === w(anchor)) {
@@ -503,7 +533,11 @@ export async function readSyncState(page: ScriptRunner): Promise<unknown> {
 export interface WhatsAppWebStores {
 	listChats(): Promise<unknown>;
 	syncState(): Promise<unknown>;
-	readChatMessages(chatId: string, token?: string | null): Promise<unknown>;
+	readChatMessages(
+		chatId: string,
+		token?: string | null,
+		sinceMs?: number | null,
+	): Promise<unknown>;
 	releaseChatWalk(chatId: string, token: string): Promise<unknown>;
 	listContacts(ids: readonly string[]): Promise<unknown>;
 	listGroups(): Promise<unknown>;
@@ -524,8 +558,9 @@ export class WhatsAppWebStore implements WhatsAppWebStores {
 	readChatMessages(
 		chatId: string,
 		token: string | null = null,
+		sinceMs: number | null = null,
 	): Promise<unknown> {
-		return readChatMessages(this.page, chatId, token);
+		return readChatMessages(this.page, chatId, token, sinceMs);
 	}
 	releaseChatWalk(chatId: string, token: string): Promise<unknown> {
 		return releaseChatWalk(this.page, chatId, token);
@@ -563,7 +598,7 @@ export async function waitForStores(
 	throw createConnectorFailure(
 		"whatsapp_web_stores_not_ready",
 		"the WhatsApp Web page's own module stores did not become available in time",
-		{ retryable: true },
+		{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
 	);
 }
 
@@ -576,12 +611,17 @@ function issuesText(
 	return issues.map((i) => `${i.path}: ${i.message}`).join("; ");
 }
 
-export class StreamFailure extends Error {
-	readonly code: string;
-	constructor(code: string, message: string) {
-		super(message);
-		this.code = code;
-	}
+/**
+ * A failure only a newer connector can clear: the page answered in a shape
+ * the connector cannot read, or a record failed its own schema. It carries
+ * its code and a portable hint instead of reaching the runtime as an
+ * untyped error with no recovery hint.
+ */
+export function upgradeFailure(code: string, message: string): Error {
+	return createConnectorFailure(code, message, {
+		retryable: false,
+		recoveryHint: RETRY_ON_UPGRADE,
+	});
 }
 
 const AUTH_FAILED_CODE = "whatsapp_web_auth_failed";
@@ -611,7 +651,7 @@ export function assertWalkStatusIsPerChat(status: number): void {
 		throw createConnectorFailure(
 			"whatsapp_web_local_store_unavailable",
 			`the WhatsApp Web local message store answered ${String(status)}; the run stops for a retry`,
-			{ retryable: true },
+			{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
 		);
 	}
 }
@@ -636,7 +676,114 @@ interface ChatItem {
 	record: RecordData;
 	needsHistory: boolean;
 	t: number;
+	/** The chat's last activity (its `last_activity_at`), epoch ms; null when unknown. */
+	lastActivityMs: number | null;
 	history_state: string | null;
+}
+
+// ─── Scope bounds ────────────────────────────────────────────────────────
+
+/**
+ * What one stream's scope bounds this run to. The runtime still applies the
+ * scope to every record (its filter is the authority); these bounds only let
+ * the connector read less from the page and not fail a stream over items
+ * the scope excludes. Every comparison leans inclusive: a bound read less
+ * tightly than the runtime's only reads more, never less.
+ */
+export interface StreamBounds {
+	/** `time_range.since`, epoch ms, rounded down to the whole second. */
+	sinceMs: number | null;
+	/** `time_range.until`, epoch ms, rounded up to the whole second. */
+	untilMs: number | null;
+	/** True when the scope carries a time_range at all. */
+	timeBounded: boolean;
+	/** `resources`, as the runtime reads them; null for no filter. */
+	resources: ReadonlySet<string> | null;
+}
+
+const UNBOUNDED: StreamBounds = {
+	sinceMs: null,
+	untilMs: null,
+	timeBounded: false,
+	resources: null,
+};
+
+/** One stream's bounds from its requested scope; absent means unbounded. */
+export function streamBounds(scope: unknown): StreamBounds {
+	if (typeof scope !== "object" || scope === null) return UNBOUNDED;
+	const s = scope as StreamScope;
+	const range = s.time_range;
+	const since =
+		range?.since === undefined ? null : parseIsoInstant(range.since);
+	const until =
+		range?.until === undefined ? null : parseIsoInstant(range.until);
+	return {
+		sinceMs: since === null ? null : since.second,
+		untilMs:
+			until === null
+				? null
+				: until.second + (/[1-9]/u.test(until.fraction) ? 1000 : 0),
+		timeBounded: range?.since !== undefined || range?.until !== undefined,
+		resources: resourceSet(s),
+	};
+}
+
+/**
+ * Whether an item could be one the scope selects: its id is in `resources`
+ * (when set) and, under a time_range, its consent time is known and inside
+ * the window. An item this says no to is one the runtime would withhold.
+ */
+function mayBeSelected(
+	bounds: StreamBounds,
+	id: string,
+	timeMs: number | null,
+): boolean {
+	if (bounds.resources !== null && !bounds.resources.has(id)) return false;
+	if (!bounds.timeBounded) return true;
+	if (timeMs === null) return false;
+	if (bounds.sinceMs !== null && timeMs < bounds.sinceMs) return false;
+	if (bounds.untilMs !== null && timeMs >= bounds.untilMs) return false;
+	return true;
+}
+
+/** An RFC 3339 instant the connector built itself, as epoch ms. */
+function isoMs(value: unknown): number | null {
+	if (typeof value !== "string") return null;
+	const ms = Date.parse(value);
+	return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * The chat a message id names. A serialized message key is
+ * `<fromMe>_<remote>_<key>[_<participant>]`, and a WhatsApp id holds no `_`,
+ * so the remote is the part between the first two underscores. This only
+ * reads the requested id string; it never builds a key to page from.
+ */
+export function chatOfMessageId(id: string): string | null {
+	const match = /^(?:true|false)_([^_@]+@[^_]+)_./u.exec(id);
+	return match?.[1] ?? null;
+}
+
+/**
+ * The requested message ids by chat, when every one of them names a chat of
+ * this run's inventory; null (walk every chat) when any does not, since a
+ * message can sit under another id of the same person (the app's lid/c.us
+ * dual ids).
+ */
+export function messageResourcesByChat(
+	resources: ReadonlySet<string> | null,
+	chatIds: ReadonlySet<string>,
+): Map<string, Set<string>> | null {
+	if (resources === null) return null;
+	const byChat = new Map<string, Set<string>>();
+	for (const id of resources) {
+		const chat = chatOfMessageId(id);
+		if (chat === null || !chatIds.has(chat)) return null;
+		const ids = byChat.get(chat) ?? new Set<string>();
+		ids.add(id);
+		byChat.set(chat, ids);
+	}
+	return byChat;
 }
 
 /** What the collection walk needs from the run's context, and nothing more. */
@@ -754,12 +901,17 @@ async function failStream(
 	message: string,
 	retryable: boolean,
 ): Promise<void> {
+	// A portable hint, never the runtime's default `retry_by_runtime` with
+	// `retryable: false`: what a retry can clear goes back to the runtime,
+	// and what it cannot (text that cannot be stored) needs a newer connector.
+	const recoveryHint = retryable ? RETRY_BY_RUNTIME : RETRY_ON_UPGRADE;
 	if (!ctx.reportStreamFailure) {
 		throw createConnectorFailure("whatsapp_web_stream_incomplete", message, {
 			retryable,
+			recoveryHint,
 		});
 	}
-	await ctx.reportStreamFailure(stream, message, { retryable });
+	await ctx.reportStreamFailure(stream, message, { retryable, recoveryHint });
 }
 
 /** The chats of one read, each id once (the first occurrence wins). */
@@ -784,7 +936,7 @@ function sameIds(a: readonly WaChat[], b: readonly WaChat[]): boolean {
 async function readSync(stores: WhatsAppWebStores): Promise<SyncState> {
 	const sync = parseSyncState(await stores.syncState());
 	if (sync === null) {
-		throw new StreamFailure(
+		throw upgradeFailure(
 			"whatsapp_web_unexpected_shape",
 			"WhatsApp Web's sync state came back in a shape the connector cannot read; nothing was checkpointed.",
 		);
@@ -801,7 +953,7 @@ function neverSettled(): Error {
 	return createConnectorFailure(
 		"whatsapp_web_chat_list_never_settled",
 		"WhatsApp Web did not finish catching up, or its chat collection kept changing, while the run read it; the inventory is not known to be complete, so nothing was checkpointed.",
-		{ retryable: true },
+		{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
 	);
 }
 
@@ -853,7 +1005,7 @@ async function settleChatList(
 		const sync = await readSync(stores);
 		const page = parseChatsPage(await stores.listChats());
 		if (page === null) {
-			throw new StreamFailure(
+			throw upgradeFailure(
 				"whatsapp_web_unexpected_shape",
 				"WhatsApp Web's chat collection came back in a shape the connector cannot read; nothing was checkpointed.",
 			);
@@ -886,7 +1038,7 @@ async function settleGroups(
 		if (i > 0) await wait(timings.settleMs);
 		const parsed = parseGroupsPage(await stores.listGroups());
 		if (parsed === null) {
-			throw new StreamFailure(
+			throw upgradeFailure(
 				"whatsapp_web_unexpected_shape",
 				"WhatsApp Web's group metadata collection came back in a shape the connector cannot read; nothing was checkpointed.",
 			);
@@ -927,7 +1079,7 @@ async function requestHistory(
 		await wait(timings.historyMs);
 		const fresh = parseChatsPage(await stores.listChats());
 		if (fresh === null) {
-			throw new StreamFailure(
+			throw upgradeFailure(
 				"whatsapp_web_unexpected_shape",
 				"WhatsApp Web's chat collection came back in a shape the connector cannot read mid-run; nothing was checkpointed.",
 			);
@@ -971,6 +1123,12 @@ export async function collectWith(
 		want.delete(MESSAGES);
 	}
 	if (want.size === 0) return;
+	const bounds = (stream: string): StreamBounds =>
+		streamBounds(ctx.requested?.get(stream));
+	const chatBounds = bounds(CHATS);
+	const messageBounds = bounds(MESSAGES);
+	const groupBounds = bounds(GROUPS);
+	const contactBounds = bounds(CONTACTS);
 	let firstGapPage = ctx.detailGaps ?? [];
 	if (ctx.recoveryOnly) {
 		if (!want.has(MESSAGES)) return;
@@ -991,16 +1149,20 @@ export async function collectWith(
 		throw createConnectorFailure(
 			"whatsapp_web_empty_chat_list",
 			"WhatsApp Web's chat collection is empty: the page may not be signed in, so the run cannot tell an empty account from a signed-out one and checkpoints nothing.",
-			{ retryable: true },
+			{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
 		);
 	}
 
 	// Every chat's record, built once. A chat whose text cannot be stored is
 	// not emitted with that text silently emptied: it is withheld, and the
-	// chats stream (and the messages under it) are not checkpointed.
+	// chats stream (and the messages under it) are not checkpointed, unless
+	// the scope excludes that chat anyway.
 	const items = new Map<string, ChatItem>();
 	const unsafeChatIds = new Set<string>();
+	const lastActivityById = new Map<string, number | null>();
 	for (const chat of chats) {
+		const lastActivityMs = isoMs(secondsToIso(chat.t));
+		lastActivityById.set(chat.id, lastActivityMs);
 		const built = buildChat(chat, tally);
 		if (built.replaced > 0) {
 			unsafeChatIds.add(chat.id);
@@ -1008,7 +1170,7 @@ export async function collectWith(
 		}
 		const checked = validateRecord(CHATS, built.record);
 		if (!checked.ok) {
-			throw new StreamFailure(
+			throw upgradeFailure(
 				"whatsapp_web_invalid_record",
 				`chats record failed schema validation: ${issuesText(checked.issues)}`,
 			);
@@ -1019,26 +1181,134 @@ export async function collectWith(
 			record: built.record,
 			needsHistory: needsHistoryRequest(chat.history_state ?? null),
 			t: typeof chat.t === "number" ? chat.t : 0,
+			lastActivityMs,
 			history_state: chat.history_state ?? null,
 		});
 	}
-	const unsafeChats = ctx.recoveryOnly ? 0 : unsafeChatIds.size;
+	const chatSelected = (id: string): boolean =>
+		mayBeSelected(chatBounds, id, lastActivityById.get(id) ?? null);
+	const unsafeChats = ctx.recoveryOnly
+		? 0
+		: [...unsafeChatIds].filter(chatSelected).length;
+
+	// The message walk's bounds. Every chat is walked: a chat's own last
+	// activity is not proof that it holds nothing inside the window (system
+	// messages such as e2e notifications may not move it), and under
+	// `since` the walk ends after one full page older than the window
+	// anyway. What a chat whose last activity is older than the window does
+	// not get is a history request: the phone's remainder is older than the
+	// local store, so it is not asked for. Requested message ids name their
+	// chats, so only those are walked, each until its ids are found, and
+	// the rest only when some requested id was not found under the chat it
+	// names, then only looking for those ids.
+	const sinceMs = messageBounds.sinceMs;
+	const wantedByChat = messageResourcesByChat(
+		messageBounds.resources,
+		new Set(items.keys()),
+	);
+	const olderThanWindow = (activityMs: number | null): boolean =>
+		sinceMs !== null && activityMs !== null && activityMs < sinceMs;
+	const foundMessageIds = new Set<string>();
+	let walkedEveryChat = wantedByChat === null;
+	/**
+	 * Whether this run's messages scope reads a chat: every chat, unless the
+	 * requested message ids name other chats (and were all found there).
+	 */
+	const messagesReadChat = (id: string): boolean =>
+		walkedEveryChat || (wantedByChat?.has(id) ?? true);
 
 	// One chat's messages: its one history request when it needs one, the
 	// walk of its local store, then its gap when the walk or the history
 	// state says something remains. Every message the store holds is
-	// emitted either way.
+	// emitted either way. A chat read to the store's own end with nothing
+	// left on the phone is "hydrated" and acknowledges its earlier gaps,
+	// bounded run or not; one whose read stopped at this run's bounds (the
+	// window's start, or every requested id found) is "window", and leaves
+	// earlier gaps pending.
 	const requiredKeys: string[] = [];
 	const hydratedKeys: string[] = [];
 	const gapKeys: string[] = [];
-	const outcomes = new Map<string, "hydrated" | "gapped">();
-	const hydrateChat = async (item: ChatItem): Promise<void> => {
+	const outcomes = new Map<
+		string,
+		"hydrated" | "window" | "gapped" | "unselected"
+	>();
+	const hydrateChat = async (
+		item: ChatItem,
+		wanted: ReadonlySet<string> | undefined,
+		options: { askPhone: boolean } = { askPhone: true },
+	): Promise<void> => {
 		requiredKeys.push(item.id);
-		const history = await requestHistory(stores, item, timings);
-		const walk = await walkMessagesForChat(ctx, stores, tally, item);
+		const walkState: WalkState = {
+			seen: new Set(),
+			unsafe: new Set(),
+			found: foundMessageIds,
+		};
+		const walkOptions = { sinceMs, wanted, bounds: messageBounds };
+		// The phone is not asked for history that is older than the window
+		// (the chat's own last activity is), nor while only searching other
+		// chats for requested ids not found where they point.
+		const askPhone = options.askPhone && !olderThanWindow(item.lastActivityMs);
+		let history: { state: string | null; requested: boolean } = {
+			state: item.history_state,
+			requested: false,
+		};
+		let walk: WalkOutcome;
+		if (sinceMs !== null || wanted !== undefined) {
+			// Bounded: the local store first. When it already covers the
+			// bounds, the history on the phone is outside them and is not
+			// asked for; otherwise (the store ended, or could not be walked,
+			// e.g. no in-memory anchor) the one history request, then the
+			// walk again from the newest message (what it read before is not
+			// emitted twice).
+			walk = await walkMessagesForChat(
+				ctx,
+				stores,
+				tally,
+				item,
+				walkState,
+				walkOptions,
+			);
+			if (walk.reached === "end" && askPhone && item.needsHistory) {
+				history = await requestHistory(stores, item, timings);
+				if (history.requested) {
+					walk = await walkMessagesForChat(
+						ctx,
+						stores,
+						tally,
+						item,
+						walkState,
+						walkOptions,
+					);
+				}
+			}
+		} else {
+			if (askPhone) history = await requestHistory(stores, item, timings);
+			walk = await walkMessagesForChat(
+				ctx,
+				stores,
+				tally,
+				item,
+				walkState,
+				walkOptions,
+			);
+		}
+		if (walk.gap === null && walk.reached !== "end") {
+			hydratedKeys.push(item.id);
+			outcomes.set(item.id, "window");
+			return;
+		}
+		const remains = walk.gap === null && historyRemainsOnPhone(history.state);
+		if (remains && !askPhone) {
+			// The local store was read to its end and the remainder on the
+			// phone was not asked for by policy: it is outside this run's
+			// bounds, so the chat is covered for the run, not hydrated.
+			hydratedKeys.push(item.id);
+			outcomes.set(item.id, "window");
+			return;
+		}
 		const gap =
 			walk.gap ??
-			(historyRemainsOnPhone(history.state)
+			(remains
 				? {
 						reason: "retry_exhausted" as const,
 						class: "history_remains_on_phone",
@@ -1065,44 +1335,89 @@ export async function collectWith(
 	if (!ctx.recoveryOnly) {
 		// Parents first, then each chat's messages.
 		if (want.has(CHATS)) {
-			for (const item of items.values())
+			for (const item of items.values()) {
+				if (!chatSelected(item.id)) continue;
 				await ctx.emitRecord(CHATS, item.record);
+			}
 		}
 		if (want.has(MESSAGES)) {
-			for (const item of items.values()) await hydrateChat(item);
+			for (const item of items.values()) {
+				const wanted = wantedByChat?.get(item.id);
+				if (wantedByChat !== null && wanted === undefined) {
+					outcomes.set(item.id, "unselected");
+					continue;
+				}
+				await hydrateChat(item, wanted);
+			}
+			const missing = [...(messageBounds.resources ?? [])].some(
+				(id) => !foundMessageIds.has(id),
+			);
+			if (wantedByChat !== null && missing) {
+				// A requested id was not under the chat it names: look for the
+				// missing ids in the other chats too rather than call them
+				// absent, within the same bounds and without asking the phone.
+				const missingIds = new Set(
+					[...(messageBounds.resources ?? [])].filter(
+						(id) => !foundMessageIds.has(id),
+					),
+				);
+				for (const item of items.values()) {
+					if (outcomes.get(item.id) !== "unselected") continue;
+					if ([...missingIds].every((id) => foundMessageIds.has(id))) break;
+					await hydrateChat(item, missingIds, { askPhone: false });
+				}
+				// Still missing after every chat: any chat could have held it,
+				// including the ones that could not be imported.
+				if ([...missingIds].some((id) => !foundMessageIds.has(id)))
+					walkedEveryChat = true;
+			}
 		}
 	}
 
 	if (want.has(MESSAGES)) {
 		// Pending gaps from earlier runs, every page of them. A chat read
 		// completely this run acknowledges its gaps; a chat gapped again this
-		// run already re-emitted its gap. A recovery-only run reads the
-		// pending chats here, and only those. A pending chat that is not in
-		// this run's inventory (or cannot be imported) has no parent record
-		// this run, so no child gap is emitted for it: its gap stays pending
-		// untouched, and messages fail for a retry instead of checkpointing.
-		// Deletion is never inferred from absence.
+		// run already re-emitted its gap; a chat read only within this run's
+		// bounds (or left out by them) leaves its gaps pending. A
+		// recovery-only run reads the pending chats here, and only those. A
+		// pending chat that is not in this run's inventory (or cannot be
+		// imported) has no parent record this run, so no child gap is
+		// emitted for it: its gap stays pending untouched, and messages fail
+		// for a retry instead of checkpointing. Deletion is never inferred
+		// from absence.
 		const blockedPending = new Set<string>();
 		await forEachPendingGapPage(ctx, firstGapPage, async (fresh) => {
 			for (const [chatId, gaps] of fresh) {
 				const item = items.get(chatId);
 				if (!outcomes.has(chatId) && ctx.recoveryOnly && item !== undefined) {
-					if (want.has(CHATS)) await ctx.emitRecord(CHATS, item.record);
-					await hydrateChat(item);
+					if (!messagesReadChat(chatId)) {
+						outcomes.set(chatId, "unselected");
+						continue;
+					}
+					if (want.has(CHATS) && chatSelected(item.id))
+						await ctx.emitRecord(CHATS, item.record);
+					await hydrateChat(item, wantedByChat?.get(chatId));
 				}
 				const outcome = outcomes.get(chatId);
 				if (outcome === "hydrated") {
 					await emitRecovered(ctx, chatId, gaps);
 					continue;
 				}
-				if (outcome === undefined) blockedPending.add(chatId);
+				if (outcome !== undefined) continue;
+				// A pending chat this run's scope would not have read stays
+				// pending without holding the scoped run back.
+				if (!messagesReadChat(chatId)) continue;
+				blockedPending.add(chatId);
 			}
 		});
-		if (unsafeChats > 0) {
+		const unsafeForMessages = ctx.recoveryOnly
+			? 0
+			: [...unsafeChatIds].filter(messagesReadChat).length;
+		if (unsafeForMessages > 0) {
 			await failStream(
 				ctx,
 				MESSAGES,
-				`${unsafeChats} chats could not be imported (their text holds characters that cannot be stored), so their messages were not read and messages are not checkpointed as complete.`,
+				`${unsafeForMessages} chats could not be imported (their text holds characters that cannot be stored), so their messages were not read and messages are not checkpointed as complete.`,
 				false,
 			);
 		} else if (blockedPending.size > 0) {
@@ -1122,6 +1437,9 @@ export async function collectWith(
 				requiredKeys,
 				hydratedKeys,
 				gapKeys,
+				optionalSkipKeys: [...outcomes]
+					.filter(([, outcome]) => outcome === "unselected")
+					.map(([id]) => id),
 			});
 		}
 	}
@@ -1130,7 +1448,8 @@ export async function collectWith(
 
 	// groups: the page's own group metadata collection, proven against the
 	// group chats of the settled chat list. Its participant ids widen the
-	// contact set.
+	// contact set. Under `resources`, only the requested groups are proven
+	// and emitted, unless contacts need every group's participants.
 	let groupsMissing: string[] = [];
 	const contactIds = new Set<string>();
 	for (const chat of chats) {
@@ -1139,13 +1458,24 @@ export async function collectWith(
 	if (want.has(GROUPS) || want.has(CONTACTS)) {
 		const groupChatIds = chats
 			.filter((c) => chatKind(c.id, c.server) === "group")
-			.map((c) => c.id);
+			.map((c) => c.id)
+			.filter(
+				(id) =>
+					want.has(CONTACTS) ||
+					groupBounds.resources === null ||
+					groupBounds.resources.has(id),
+			);
 		const settled = await settleGroups(stores, groupChatIds, timings);
 		groupsMissing = settled.missing;
 		const groupRecords: RecordData[] = [];
 		let unsafeGroups = 0;
 		for (const group of settled.groups) {
 			for (const p of group.participants ?? []) contactIds.add(p.id);
+			if (
+				groupBounds.resources !== null &&
+				!groupBounds.resources.has(group.id)
+			)
+				continue;
 			const built = buildGroup(group, tally);
 			if (built.replaced > 0) {
 				unsafeGroups += 1;
@@ -1153,7 +1483,7 @@ export async function collectWith(
 			}
 			const checked = validateRecord(GROUPS, built.record);
 			if (!checked.ok) {
-				throw new StreamFailure(
+				throw upgradeFailure(
 					"whatsapp_web_invalid_record",
 					`groups record failed schema validation: ${issuesText(checked.issues)}`,
 				);
@@ -1161,12 +1491,15 @@ export async function collectWith(
 			groupRecords.push(built.record);
 		}
 		if (want.has(GROUPS)) {
+			const groupsMissingSelected = groupsMissing.filter(
+				(id) => groupBounds.resources === null || groupBounds.resources.has(id),
+			);
 			for (const record of groupRecords) await ctx.emitRecord(GROUPS, record);
-			if (groupsMissing.length > 0) {
+			if (groupsMissingSelected.length > 0) {
 				await failStream(
 					ctx,
 					GROUPS,
-					`${groupsMissing.length} group chats have no group metadata in the page yet; groups are not checkpointed as complete.`,
+					`${groupsMissingSelected.length} group chats have no group metadata in the page yet; groups are not checkpointed as complete.`,
 					true,
 				);
 			} else if (unsafeGroups > 0) {
@@ -1190,27 +1523,34 @@ export async function collectWith(
 	}
 
 	// contacts: the page's contact collection filtered to the chat and group
-	// participant ids seen above. An id the collection holds no contact for
-	// is still a contact that appears in the owner's chats: it gets a record
-	// with its id and no names, never a silent omission.
+	// participant ids seen above, and to the requested ones under
+	// `resources` (the page is asked for those ids only). An id the
+	// collection holds no contact for is still a contact that appears in the
+	// owner's chats: it gets a record with its id and no names, never a
+	// silent omission.
 	if (want.has(CONTACTS)) {
+		const selectedContactIds = [...contactIds].filter(
+			(id) =>
+				contactBounds.resources === null || contactBounds.resources.has(id),
+		);
 		const contacts = parseContactsPage(
-			await stores.listContacts([...contactIds]),
+			await stores.listContacts(selectedContactIds),
 		);
 		if (contacts === null) {
-			throw new StreamFailure(
+			throw upgradeFailure(
 				"whatsapp_web_unexpected_shape",
 				"WhatsApp Web's contact collection came back in a shape the connector cannot read; nothing was checkpointed.",
 			);
 		}
+		const wantedContacts = new Set(selectedContactIds);
 		const byId = new Map<string, WaContact>();
 		for (const contact of contacts) {
-			if (contactIds.has(contact.id) && !byId.has(contact.id))
+			if (wantedContacts.has(contact.id) && !byId.has(contact.id))
 				byId.set(contact.id, contact);
 		}
 		const contactRecords: RecordData[] = [];
 		let unsafeContacts = 0;
-		for (const id of contactIds) {
+		for (const id of selectedContactIds) {
 			const built = buildContact(byId.get(id) ?? { id }, tally);
 			if (built.replaced > 0) {
 				unsafeContacts += 1;
@@ -1218,7 +1558,7 @@ export async function collectWith(
 			}
 			const checked = validateRecord(CONTACTS, built.record);
 			if (!checked.ok) {
-				throw new StreamFailure(
+				throw upgradeFailure(
 					"whatsapp_web_invalid_record",
 					`contacts record failed schema validation: ${issuesText(checked.issues)}`,
 				);
@@ -1252,7 +1592,8 @@ export async function collectWith(
 		}
 	}
 
-	// chats' STATE after all its records and its child's coverage.
+	// chats' STATE after all its records and its child's coverage. It marks
+	// only the chats this run's scope selects.
 	if (want.has(CHATS)) {
 		if (unsafeChats > 0) {
 			await failStream(ctx, CHATS, unsafeChatsMessage(unsafeChats), false);
@@ -1260,6 +1601,7 @@ export async function collectWith(
 		}
 		const marks: Record<string, ChatMark> = {};
 		for (const item of items.values()) {
+			if (!chatSelected(item.id)) continue;
 			marks[item.id] = { t: item.t, history_state: item.history_state };
 		}
 		await ctx.emit({
@@ -1283,11 +1625,32 @@ interface WalkGap {
 
 /**
  * The per-chat walk's outcome: every message it read is emitted either way;
- * `gap` is set when the walk did not reach the local store's own end.
+ * `gap` is set when the walk did not reach the end it was after. `reached`
+ * says which end that was: the local store's own end, the start of the
+ * time window, or every requested message id of the chat.
  */
 interface WalkOutcome {
 	emitted: number;
 	gap: WalkGap | null;
+	reached: "end" | "since" | "wanted";
+}
+
+/**
+ * What one chat's walks share across a re-walk after its history request:
+ * the ids already handled (emitted, or withheld as unstorable) and the
+ * run-wide set of message ids found.
+ */
+interface WalkState {
+	seen: Set<string>;
+	unsafe: Set<string>;
+	found: Set<string>;
+}
+
+interface WalkOptions {
+	sinceMs: number | null;
+	/** The requested message ids of this chat; the walk stops once all are found. */
+	wanted: ReadonlySet<string> | undefined;
+	bounds: StreamBounds;
 }
 
 /** The gap a walk's stop reason means, or null for a walk that covered the store. */
@@ -1329,22 +1692,44 @@ export function walkGap(walk: {
 
 /**
  * Walk one chat's local store chunk by chunk until the store's own short
- * page (or a stop that is not the end, which becomes the chat's gap).
+ * page (or a stop that is not the end, which becomes the chat's gap). Under
+ * `sinceMs` the in-page walk also ends at the first full page wholly older
+ * than the window (`reached: "since"`); with `wanted` the walk ends once
+ * every requested id of the chat has been found (`reached: "wanted"`). Every
+ * page is anchored on the client's own message keys; a requested id is only
+ * compared, never used to page from.
+ *
+ * `state` is shared by the walks of one chat (a re-walk after its history
+ * request does not emit a message twice) and holds the run-wide found ids.
  */
 async function walkMessagesForChat(
 	ctx: WhatsAppCollectContext,
 	stores: WhatsAppWebStores,
 	tally: TextTally,
 	item: Pick<ChatItem, "id" | "kind">,
+	state: WalkState,
+	options: WalkOptions,
 ): Promise<WalkOutcome> {
 	const chatId = item.id;
-	const seen = new Set<string>();
-	let unsafe = 0;
+	// What this walk read, for its own progress check: a re-walk reads
+	// messages an earlier walk already emitted, and that is still progress.
+	const read = new Set<string>();
 	let token: string | null = null;
+	const unsafeGap = (): WalkGap | null =>
+		state.unsafe.size > 0
+			? {
+					reason: "retry_exhausted",
+					class: "unsafe_text",
+					message: `${state.unsafe.size} messages hold text that cannot be stored and were not imported`,
+				}
+			: null;
+	const allWanted = (): boolean =>
+		options.wanted !== undefined &&
+		[...options.wanted].every((id) => state.found.has(id));
 	for (;;) {
 		let raw: unknown;
 		try {
-			raw = await stores.readChatMessages(chatId, token);
+			raw = await stores.readChatMessages(chatId, token, options.sinceMs);
 		} catch (error) {
 			console.error(
 				`whatsapp_web: failed to read messages of chat ${chatId}:`,
@@ -1353,19 +1738,20 @@ async function walkMessagesForChat(
 			if (token !== null)
 				await stores.releaseChatWalk(chatId, token).catch(() => undefined);
 			return {
-				emitted: seen.size,
+				emitted: state.seen.size,
 				gap: {
 					reason: "temporary_unavailable",
 					class: "local_walk_failed",
 					message: "the in-page message walk threw",
 				},
+				reached: "end",
 			};
 		}
 		// Fail loudly on shape/schema problems: they are not source
 		// unavailability, so they must not become a DETAIL_GAP.
 		const parsed = parseChatWalk(raw);
 		if (parsed === null || parsed.chat_id !== chatId) {
-			throw new StreamFailure(
+			throw upgradeFailure(
 				"whatsapp_web_unexpected_shape",
 				"WhatsApp Web's message walk came back in a shape the connector cannot read.",
 			);
@@ -1373,9 +1759,13 @@ async function walkMessagesForChat(
 		assertWalkStatusIsPerChat(parsed.status);
 		let fresh = 0;
 		for (const row of [...parsed.memory, ...parsed.messages]) {
-			if (seen.has(row.id)) continue;
-			seen.add(row.id);
+			if (read.has(row.id)) continue;
+			read.add(row.id);
 			fresh += 1;
+			if (options.bounds.resources?.has(row.id) === true)
+				state.found.add(row.id);
+			if (state.seen.has(row.id)) continue;
+			state.seen.add(row.id);
 			// chat_id is the walk's own chat id — the same string the chats
 			// stream emitted — not the message model's id.remote, which can
 			// serialize differently (lid/c.us dual ids) and break the parent
@@ -1386,32 +1776,37 @@ async function walkMessagesForChat(
 			});
 			if (built.replaced > 0) {
 				// Text that cannot be stored is not emitted as an empty value:
-				// the message is withheld and the chat gaps visibly below.
-				unsafe += 1;
+				// the message is withheld and, when the scope selects it, the
+				// chat gaps visibly below.
+				if (mayBeSelected(options.bounds, row.id, isoMs(built.record.sent_at)))
+					state.unsafe.add(row.id);
 				continue;
 			}
 			const checked = validateRecord(MESSAGES, built.record);
 			if (!checked.ok) {
-				throw new StreamFailure(
+				throw upgradeFailure(
 					"whatsapp_web_invalid_record",
 					`messages record failed schema validation: ${issuesText(checked.issues)}`,
 				);
 			}
 			await ctx.emitRecord(MESSAGES, built.record);
 		}
-		const unsafeGap: WalkGap | null =
-			unsafe > 0
-				? {
-						reason: "retry_exhausted",
-						class: "unsafe_text",
-						message: `${unsafe} messages hold text that cannot be stored and were not imported`,
-					}
-				: null;
 		if (!parsed.more || parsed.token === null) {
-			return { emitted: seen.size, gap: walkGap(parsed) ?? unsafeGap };
+			const gap = walkGap(parsed) ?? unsafeGap();
+			if (gap === null && allWanted())
+				return { emitted: state.seen.size, gap, reached: "wanted" };
+			return {
+				emitted: state.seen.size,
+				gap,
+				reached: parsed.stop === "before_since" ? "since" : "end",
+			};
 		}
 		token = parsed.token;
-		// A chunk that brought no message the walk had not seen is not
+		if (allWanted()) {
+			await stores.releaseChatWalk(chatId, token).catch(() => undefined);
+			return { emitted: state.seen.size, gap: unsafeGap(), reached: "wanted" };
+		}
+		// A chunk that brought no message the walk had not read is not
 		// progress toward the store's end: stop and gap instead of spinning.
 		// Otherwise the walk goes on, chunk after chunk, until the store's own
 		// short page; there is no per-run cap that would leave older
@@ -1419,8 +1814,9 @@ async function walkMessagesForChat(
 		if (fresh === 0) {
 			await stores.releaseChatWalk(chatId, token).catch(() => undefined);
 			return {
-				emitted: seen.size,
+				emitted: state.seen.size,
 				gap: walkGap({ status: 200, complete: false, stop: "no_progress" }),
+				reached: "end",
 			};
 		}
 	}

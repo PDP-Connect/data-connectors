@@ -383,7 +383,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	whatsapp_web: {
 		chats: { field: "last_activity_at", format: "date-time" },
 		contacts: null,
-		groups: { field: "created_at", format: "date-time" },
+		groups: null,
 		messages: { field: "sent_at", format: "date-time" },
 	},
 	wholefoods: {
