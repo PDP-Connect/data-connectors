@@ -32,6 +32,7 @@ import {
 	fetchAllFriends,
 	MAX_FRIENDS_PAGES,
 	MAX_TRANSACTION_PAGES,
+	VENMO_RETRYABLE_PATTERN,
 	type VenmoPageFetch,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -165,6 +166,9 @@ function makeCtx(
 		page: {} as BrowserCollectContext["page"],
 		progress: () => Promise.resolve(),
 		requestDetailGapPage: () => Promise.resolve([]),
+		reportStreamFailure: (stream: string, message: string) => {
+			harness.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message });
+		},
 		requested,
 		scope: { streams: [] },
 		sendInteraction: () => Promise.reject(new Error("not used")),
@@ -656,6 +660,7 @@ test("a burst beyond the head budget eventually fills the head gap and old tail"
 	).reverse();
 	let cursor: Record<string, unknown> = {};
 	const collected = new Set<string>();
+	const snapshots = new Map<string, string>();
 	const history = [...burst, ...original];
 	for (let run = 0; run < 5; run += 1) {
 		const backend = makeStatefulVenmoFetch(run === 0 ? original : history);
@@ -674,8 +679,11 @@ test("a burst beyond the head budget eventually fills the head gap and old tail"
 			ids.length,
 			`run ${run + 1} emitted duplicates`,
 		);
-		for (const id of ids) {
-			assert.ok(!collected.has(id), `run ${run + 1} re-emitted ${id}`);
+		for (const entry of result.emitted) {
+			const id = String(entry.data.id);
+			const snapshot = JSON.stringify(entry.data);
+			assert.notEqual(snapshots.get(id), snapshot, `run ${run + 1} re-emitted unchanged ${id}`);
+			snapshots.set(id, snapshot);
 			collected.add(id);
 		}
 		const state = result.messages.find(
@@ -750,7 +758,7 @@ test("a second burst preserves the first head gap's continuation", async () => {
 				result.messages.some(
 					(message) =>
 						message.type === "SKIP_RESULT" &&
-						message.reason === "transactions_deferred_page_budget",
+						message.reason === "stream_collection_failed",
 				),
 			);
 		}
@@ -843,7 +851,7 @@ test("a malformed supported payment is retried after its date is corrected", asy
 		first.messages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "transactions_schema_blocked",
+				message.reason === "stream_collection_failed",
 		),
 	);
 	assert.equal(
@@ -890,7 +898,7 @@ test("a supported payment missing its story id keeps the prior backfill checkpoi
 		first.messages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "transactions_schema_blocked" &&
+				message.reason === "stream_collection_failed" &&
 				message.message.includes("missing story id"),
 		),
 	);
@@ -946,7 +954,7 @@ test("a rejected backfill record keeps its position for a later retry", async ()
 		first.messages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "transactions_schema_blocked",
+				message.reason === "stream_collection_failed",
 		),
 	);
 
@@ -1403,7 +1411,9 @@ test("collectAllStreams: a capped Venmo transactions walk advances the head date
 		(m) => m.type === "STATE" && m.stream === "transactions",
 	);
 	assert.ok(state && state.type === "STATE");
-	assert.deepEqual(state.cursor, {
+	assert.equal(Object.keys((state.cursor as Record<string, unknown>).refresh_fingerprints as object).length, 100);
+	const { refresh_fingerprints, ...checkpoint } = state.cursor as Record<string, unknown>;
+	assert.deepEqual(checkpoint, {
 		last_seen_date_created: "2026-01-01T00:00:00Z",
 		version: 2,
 		head_anchor_id: "40000",
@@ -1442,7 +1452,7 @@ test("collectTransactions: a 401 mid-run terminals as venmo_session_expired, nev
 	);
 });
 
-test("collectTransactions: a 5xx terminals as venmo_http_5xx naming the endpoint", async () => {
+test("collectTransactions: a 5xx terminals as venmo_server_error naming the endpoint", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [
 			{ body: "upstream boom", status: 500 },
@@ -1453,7 +1463,7 @@ test("collectTransactions: a 5xx terminals as venmo_http_5xx naming the endpoint
 		collectTransactions(ctx, fetchPath, OWNER_ID),
 		(err: unknown) => {
 			assert.ok(err instanceof Error);
-			assert.match(err.message, /venmo_http_500/);
+			assert.match(err.message, /venmo_server_error/);
 			assert.match(err.message, /\/stories\/target-or-actor/);
 			return true;
 		},
@@ -1682,4 +1692,78 @@ test("establishVenmoCollectOrigin: a successful navigation to venmo.com resolves
 		},
 	};
 	await assert.doesNotReject(establishVenmoCollectOrigin(page as Page));
+});
+
+
+
+test("semantics: mutable anchor and older collected payment refresh while malformed tail remains", async () => {
+	const history = Array.from({ length: MAX_TRANSACTION_PAGES * 50 + 50 }, (_, i) =>
+		story(String(900000 - i), "2026-01-01T00:00:00Z"));
+	history[0]!.payment.status = "pending";
+	history[75]!.payment.status = "pending";
+	const first = makeCtx({}, ["transactions"]);
+	await collectAllStreams(first.ctx, makeStatefulVenmoFetch(history).fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	const state = first.messages.find(m => m.type === "STATE" && m.stream === "transactions");
+	assert.ok(state && state.type === "STATE");
+	history[0]!.payment.status = "settled";
+	history[75]!.payment.status = "settled";
+	history[75]!.payment.amount = 22;
+	delete (history[MAX_TRANSACTION_PAGES * 50] as { date_created?: string }).date_created;
+	const second = makeCtx({ transactions: state.cursor }, ["transactions"]);
+	await collectAllStreams(second.ctx, makeStatefulVenmoFetch(history).fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.deepEqual(second.emitted.filter(e => [history[0]!.id, history[75]!.id].includes(String(e.data.id))).map(e => e.data.id).sort(),
+		[history[0]!.id, history[75]!.id].sort());
+	assert.ok(!second.emitted.some(e => e.data.id === history[1]!.id), "unchanged head must not repeat");
+	const next = second.messages.find(m => m.type === "STATE" && m.stream === "transactions");
+	assert.ok(next && next.type === "STATE" && (next.cursor as Record<string, unknown>).backfill_before_id);
+});
+
+test("semantics: capped enumeration reports portable failure then resumes to observed exhaustion", async () => {
+	const history = Array.from({ length: MAX_TRANSACTION_PAGES * 50 + 1 }, (_, i) =>
+		story(String(800000 - i), "2026-01-01T00:00:00Z"));
+	const first = makeCtx({}, ["transactions"]);
+	await collectAllStreams(first.ctx, makeStatefulVenmoFetch(history).fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.deepEqual(first.messages.filter(m => m.type === "SKIP_RESULT").map(m => m.reason), ["stream_collection_failed"]);
+	const state = first.messages.find(m => m.type === "STATE" && m.stream === "transactions");
+	assert.ok(state && state.type === "STATE");
+	const second = makeCtx({ transactions: state.cursor }, ["transactions"]);
+	await collectAllStreams(second.ctx, makeStatefulVenmoFetch(history).fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.ok(second.emitted.some(e => e.data.id === history.at(-1)!.id));
+	const next = second.messages.find(m => m.type === "STATE" && m.stream === "transactions");
+	assert.ok(next && next.type === "STATE");
+	assert.equal((next.cursor as Record<string, unknown>).backfill_before_id, undefined);
+	assert.equal(second.messages.filter(m => m.type === "SKIP_RESULT").length, 0);
+});
+
+test("semantics: empty stale continuation does not close a head gap", async () => {
+	const history = Array.from({ length: 150 }, (_, i) => story(String(700000 - i), "2026-01-01T00:00:00Z"));
+	const gap = { start_id: history[0]!.id, before_id: "600000", end_id: "500000" };
+	const result = makeCtx({ transactions: { version: 2, head_anchor_id: history[0]!.id, head_gaps: [gap] } }, ["transactions"]);
+	const outcome = await collectTransactions(result.ctx, makeStatefulVenmoFetch(history).fetchPath, OWNER_ID, NO_DELAY);
+	assert.deepEqual(outcome.headGaps, [gap]);
+	assert.equal(outcome.truncated, true);
+});
+
+for (const status of [401, 403, 429, 500, 502, 503, 504]) {
+	test(`semantics: HTTP ${status} has a stable safe retry classification`, async () => {
+		const backend = makeScriptedFetch({ [`/stories/target-or-actor/${OWNER_ID}`]: [{ status, body: {} }] });
+		await assert.rejects(collectTransactions(makeCtx({}, ["transactions"]).ctx, backend.fetchPath, OWNER_ID, NO_DELAY), (error: unknown) => {
+			assert.ok(error instanceof Error);
+			const code = status === 401 || status === 403 ? "venmo_session_expired" : status === 429 ? "venmo_rate_limited" : "venmo_server_error";
+			assert.ok(error.message.startsWith(code));
+			assert.equal(VENMO_RETRYABLE_PATTERN.test(error.message), status >= 429);
+			return true;
+		});
+		assert.equal(backend.calls.length, 1, "collector must not retry or submit credentials");
+		assert.equal(VENMO_RETRYABLE_PATTERN.test(
+			"venmo_post_submit_probe_transport_error: venmo_server_error"), false);
+	});
+}
+
+test("semantics: completed-run metadata does not claim date cursor incrementality", () => {
+	const manifest = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
+	const transactions = manifest.streams.find((s: { name: string }) => s.name === "transactions");
+	assert.equal(transactions.incremental, false);
+	assert.equal(transactions.cursor_field, undefined);
+	assert.equal(manifest.version, "0.2.27");
 });

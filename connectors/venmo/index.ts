@@ -64,6 +64,7 @@
  *   v0.1.0 — initial (unproven, never listed) password-grant connector.
  */
 
+import { createHash } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { redactTransportDetail } from "@pdpp/connector-protocol/http-retry";
 import type { Page } from "playwright";
@@ -95,6 +96,8 @@ export const MAX_FRIENDS_PAGES = 200;
 export const MAX_TRANSACTION_PAGES = 400;
 const HEAD_REFRESH_PAGES_WITH_PENDING_WORK = 100;
 const MAX_HEAD_GAPS = 4;
+// Refresh mutable records independently of the unfinished history position.
+const MUTABLE_REFRESH_PAGES = 2;
 
 /** Unread story IDs between before_id and end_id; start_id anchors fresh refreshes. */
 interface HeadGap {
@@ -135,7 +138,7 @@ interface HeadGap {
  * hand-copied stand-in that could silently drift from it.
  */
 export const VENMO_RETRYABLE_PATTERN =
-	/venmo_rate_limited|venmo_transport_error|venmo_probe_transport_error/i;
+	/^(?:venmo_rate_limited|venmo_server_error|venmo_transport_error|venmo_probe_transport_error)\b/i;
 
 // The redesign dropped `venmoPacingProfile`/the HTTP governor (page-context
 // fetch has no direct outbound Node HTTP to pace — F10 in
@@ -275,6 +278,9 @@ function assertVenmoOk(status: number, body: string, path: string): void {
 	}
 	if (status === 429) {
 		throw new Error(`venmo_rate_limited [endpoint ${path}]`);
+	}
+	if (status >= 500 && status <= 599) {
+		throw new Error(`venmo_server_error [endpoint ${path}]: HTTP ${status}`);
 	}
 	if (status < 200 || status >= 300) {
 		throw new Error(
@@ -421,6 +427,7 @@ async function emitTransactionsPage(
 	ctx: BrowserCollectContext,
 	stories: VenmoStory[],
 	ownerId: string,
+	shouldEmit: (record: Record<string, unknown>) => boolean,
 ): Promise<{
 	accepted: number;
 	firstSafeId: string | null;
@@ -449,7 +456,9 @@ async function emitTransactionsPage(
 		const schemaAccepted = selected
 			? validateRecord("transactions", record).ok
 			: false;
-		await ctx.emitRecord("transactions", record);
+		if (!selected || !schemaAccepted || shouldEmit(record)) {
+			await ctx.emitRecord("transactions", record);
+		}
 		if (!selected) {
 			firstSafeId ??= story.id;
 			continue;
@@ -491,6 +500,7 @@ export async function collectTransactions(
 	covered: number;
 	headAnchorId: string | null;
 	headGaps: HeadGap[];
+	refreshFingerprints: Record<string, string>;
 	latestSeenAt: string | null;
 	rejectionReason: string | null;
 	truncated: boolean;
@@ -528,6 +538,14 @@ export async function collectTransactions(
 					)
 					.slice(0, MAX_HEAD_GAPS)
 			: [];
+	const priorFingerprints =
+		prior.refresh_fingerprints &&
+		typeof prior.refresh_fingerprints === "object" &&
+		!Array.isArray(prior.refresh_fingerprints)
+			? (prior.refresh_fingerprints as Record<string, unknown>)
+			: {};
+	const refreshFingerprints: Record<string, string> = {};
+	const emittedFingerprints = new Map<string, string>();
 	let totalSeen = 0;
 	let totalAccepted = 0;
 	let pagesFetched = 0;
@@ -539,6 +557,7 @@ export async function collectTransactions(
 		beforeId: string | undefined,
 		seenBeforeIds: Set<string>,
 		stopAtId?: string,
+		refreshPastStop = false,
 	): Promise<
 		| (Awaited<ReturnType<typeof emitTransactionsPage>> & {
 				stories: VenmoStory[];
@@ -563,7 +582,8 @@ export async function collectTransactions(
 			? fetched.findIndex((story) => story.id === stopAtId)
 			: -1;
 		const reachedStop = stopIndex >= 0;
-		const stories = reachedStop ? fetched.slice(0, stopIndex) : fetched;
+		const stories =
+			reachedStop && !refreshPastStop ? fetched.slice(0, stopIndex) : fetched;
 		const lastStoryId = fetched.at(-1)?.id ?? "";
 		const finalStory = fetched.at(-1);
 		const finalOutcome = finalStory
@@ -581,7 +601,21 @@ export async function collectTransactions(
 				"venmo_pagination_stalled [endpoint /stories/target-or-actor/{id}]",
 			);
 		}
-		const page = await emitTransactionsPage(ctx, stories, ownerId);
+		const page = await emitTransactionsPage(ctx, stories, ownerId, (record) => {
+			const id = String(record.id);
+			const fingerprint = createHash("sha256")
+				.update(JSON.stringify(record))
+				.digest("hex");
+			if (
+				pagesFetched <= MUTABLE_REFRESH_PAGES &&
+				Object.keys(refreshFingerprints).length < MUTABLE_REFRESH_PAGES * TRANSACTIONS_PAGE_SIZE
+			) {
+				refreshFingerprints[id] = fingerprint;
+			}
+			const previous = emittedFingerprints.get(id) ?? priorFingerprints[id];
+			emittedFingerprints.set(id, fingerprint);
+			return previous !== fingerprint;
+		});
 		if (lastStoryId) seenBeforeIds.add(lastStoryId);
 		totalSeen += stories.length;
 		totalAccepted += page.accepted;
@@ -634,7 +668,8 @@ export async function collectTransactions(
 			const page = await fetchAndEmitPage(
 				headBeforeId,
 				headSeenIds,
-				headStopId,
+				headReachedAnchor ? undefined : headStopId,
+				true,
 			);
 			if (!page) {
 				headExhausted = true;
@@ -652,11 +687,8 @@ export async function collectTransactions(
 				return false;
 			}
 			headBeforeId = page.lastStoryId;
-			if (page.reachedStop) {
-				headReachedAnchor = true;
-				return false;
-			}
-			return true;
+			if (page.reachedStop) headReachedAnchor = true;
+			return !headReachedAnchor || pagesFetched < MUTABLE_REFRESH_PAGES;
 		},
 	});
 
@@ -710,7 +742,8 @@ export async function collectTransactions(
 						oldestGap.end_id,
 					);
 					if (!page) {
-						gapDone = true;
+						// An old cursor returning nothing does not prove this interval closed.
+						gapBlocked = true;
 						return false;
 					}
 					if (page.firstRejectedIndex !== null) {
@@ -751,9 +784,11 @@ export async function collectTransactions(
 		!headExhausted &&
 		priorBackfill &&
 		backfillBeforeId &&
+		!(blockedByRejected && headBeforeId === backfillBeforeId) &&
 		pagesFetched < MAX_TRANSACTION_PAGES
 	) {
 		let backfillExhausted = false;
+		let backfillAdvanced = false;
 		let backfillBefore = backfillBeforeId;
 		const backfillSeenIds = new Set([backfillBefore]);
 		await walkPagesWithCeiling({
@@ -761,7 +796,7 @@ export async function collectTransactions(
 			fetchPage: async () => {
 				const page = await fetchAndEmitPage(backfillBefore, backfillSeenIds);
 				if (!page) {
-					backfillExhausted = true;
+					backfillExhausted = backfillAdvanced;
 					return false;
 				}
 				if (page.firstRejectedIndex !== null) {
@@ -776,6 +811,7 @@ export async function collectTransactions(
 					return false;
 				}
 				backfillBefore = page.lastStoryId;
+				backfillAdvanced = true;
 				return true;
 			},
 		});
@@ -806,6 +842,7 @@ export async function collectTransactions(
 		covered: totalAccepted,
 		headAnchorId,
 		headGaps,
+		refreshFingerprints,
 		latestSeenAt,
 		rejectionReason,
 		truncated,
@@ -901,17 +938,11 @@ async function collectFriends(
 			? (priorFingerprints as Record<string, string>)
 			: cursor.toState();
 	if (truncated) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "friends",
-			reason: "friends_deferred_page_budget",
-			message: `Venmo friends stopped at the ${MAX_FRIENDS_PAGES}-page limit with more rows still listed`,
-			diagnostics: {
-				page_limit: MAX_FRIENDS_PAGES,
-				total_seen: friends.length,
-				unread_pages: 1,
-			},
-		});
+		ctx.reportStreamFailure(
+			"friends",
+			`Venmo friends stopped at the ${MAX_FRIENDS_PAGES}-page limit with unread history`,
+			{ retryable: false },
+		);
 	}
 	await emit({ type: "STATE", stream: "friends", cursor: { fingerprints } });
 	await emit(
@@ -953,6 +984,7 @@ export async function collectAllStreams(
 			covered,
 			headAnchorId,
 			headGaps,
+			refreshFingerprints,
 			latestSeenAt,
 			rejectionReason,
 			truncated,
@@ -966,17 +998,11 @@ export async function collectAllStreams(
 						.last_seen_date_created
 				: undefined;
 		if (truncated) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "transactions",
-				reason: "transactions_deferred_page_budget",
-				message: `Venmo has more transaction history than this run could read; saved positions will resume it in later runs (limit ${MAX_TRANSACTION_PAGES} pages per run)`,
-				diagnostics: {
-					page_limit: MAX_TRANSACTION_PAGES,
-					total_seen: considered - 1,
-					unread_pages: 1,
-				},
-			});
+			ctx.reportStreamFailure(
+				"transactions",
+				`Venmo transaction enumeration is incomplete; saved positions retain unread history (limit ${MAX_TRANSACTION_PAGES} pages per run)`,
+				{ retryable: false },
+			);
 		}
 		if (blockedByRejected) {
 			const reason =
@@ -985,12 +1011,11 @@ export async function collectAllStreams(
 					: rejectionReason === "missing_date_created"
 						? "missing date_created"
 						: "schema validation failed";
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "transactions",
-				reason: "transactions_schema_blocked",
-				message: `Venmo returned a supported payment with ${reason}; this page will be retried after Venmo corrects it`,
-			});
+			ctx.reportStreamFailure(
+				"transactions",
+				`Venmo returned a supported payment with ${reason}; this page remains unfinished`,
+				{ retryable: false },
+			);
 		}
 		const normalizedPrior =
 			typeof priorLatestSeenAt === "string" || priorLatestSeenAt === null
@@ -1009,6 +1034,7 @@ export async function collectAllStreams(
 				...((backfillBeforeId || headGaps.length > 0) && headAnchorId
 					? {
 							version: 2,
+							refresh_fingerprints: refreshFingerprints,
 							...(backfillBeforeId
 								? { backfill_before_id: backfillBeforeId }
 								: {}),
