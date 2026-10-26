@@ -39,8 +39,12 @@
  * Scope (see RunScope): `chats.resources` reads only the named chats, from
  * GET /chat/:id/, and only their messages; the list is not walked. A chat
  * outside the chats window whose messages cannot fall inside the messages
- * window (created at or after its end) is not read. A chat's turn values
- * count only the turns inside the chats window. Turns are still read to the
+ * window (created at or after its end) is not read; one read only for its
+ * messages emits no chat record. A chat with a turn outside the chats window
+ * emits no record either (partial chats coverage): a count of the turns
+ * inside would lower the stored one, a full count would show turns outside
+ * the grant. A chat GET /chat/:id/ answers 404 for is proven gone: not
+ * counted, and its pending gaps are closed. Turns are still read to the
  * end of each chat's list: the list's order is not verified on a live
  * account, so stopping at the window's start could drop turns. A pending gap
  * is closed only by a run whose messages scope is unbounded.
@@ -1009,18 +1013,24 @@ interface MessagesTally {
 	turnsRead: number;
 }
 
-/** Chat values from the turns inside the chats window: nothing outside the grant shows through them. */
-function hydrationOf(
-	scope: RunScope,
-	turns: readonly ApiTurn[],
-): ChatHydration {
-	const counted = turns.filter((turn) =>
-		inRange(scope.chatsRange, turn.create_time),
-	);
+/** Chat values from all of a chat's turns. */
+function hydrationOf(turns: readonly ApiTurn[]): ChatHydration {
 	return {
-		lastInteractionTime: latestTime(counted.map((turn) => turn.create_time)),
-		turnCount: counted.length,
+		lastInteractionTime: latestTime(turns.map((turn) => turn.create_time)),
+		turnCount: turns.length,
 	};
+}
+
+/**
+ * Whether a chat's record can be emitted whole inside the chats window. A
+ * chat created inside the window can have turns after its end: a count of
+ * only the earlier turns would roll back the fuller values a wider run
+ * stored (`chats` is mutable state), and a full count would reveal turns
+ * outside the grant. Such a chat's record is withheld. (No turn should be
+ * older than its chat, so `since` cannot cut one off; it is checked anyway.)
+ */
+function wholeInWindow(scope: RunScope, turns: readonly ApiTurn[]): boolean {
+	return turns.every((turn) => inRange(scope.chatsRange, turn.create_time));
 }
 
 async function emitTurns(
@@ -1042,8 +1052,22 @@ async function recordGap(
 	ctx: BrowserCollectContext,
 	chatId: string,
 	outcome: GapOutcome,
-	tally: MessagesTally,
+	deps: RunDeps,
 ): Promise<void> {
+	const { tally } = deps;
+	// A leased pending gap for this chat was attempted and failed again: the
+	// runtime is told so by its lease, and the DETAIL_GAP below folds into it.
+	for (const gap of deps.pending.get(chatId) ?? []) {
+		if (gap.leaseId) {
+			await ctx.emit({
+				type: "DETAIL_GAP_ATTEMPTED",
+				reference_only: true,
+				gap_id: gap.gapId,
+				lease_id: gap.leaseId,
+				stream: "messages",
+			});
+		}
+	}
 	await emitDetailGap(ctx, {
 		stream: "messages",
 		parentStream: "chats",
@@ -1089,6 +1113,8 @@ interface RunDeps {
 	tally: MessagesTally;
 	/** Chats whose parent could not be read this run; nothing was emitted for them. */
 	unread: string[];
+	/** Chats Character.AI answered 404 for: proven not to exist. */
+	absent: string[];
 }
 
 /**
@@ -1098,9 +1124,11 @@ interface RunDeps {
  * in scope, says so).
  */
 interface ChatOutcome {
-	status: "emitted" | "excluded" | "withheld";
+	status: "emitted" | "excluded" | "withheld" | "absent";
 	/** Whether the chat record itself is in the chats scope (true when unknown). */
 	recordInScope: boolean;
+	/** Whether the chat record was emitted this run. */
+	recordEmitted: boolean;
 }
 
 /** Whether a run's messages scope can leave turns of a chat unemitted. */
@@ -1124,7 +1152,7 @@ async function processChat(
 	const recordInScope = inRange(scope.chatsRange, chat.create_time);
 	if (!chatNeedsRead(scope, chat)) {
 		deps.excluded.push(chat.chat_id);
-		return { status: "excluded", recordInScope };
+		return { status: "excluded", recordInScope, recordEmitted: false };
 	}
 	const outcome = await fetchTurns(ctx.page, chat.chat_id);
 	if (!outcome.ok) {
@@ -1132,26 +1160,31 @@ async function processChat(
 			class: outcome.errorClass,
 		});
 		if (scope.wantMessages) {
-			await recordGap(ctx, chat.chat_id, outcome, deps.tally);
+			await recordGap(ctx, chat.chat_id, outcome, deps);
 		}
-		return { status: "withheld", recordInScope };
+		return { status: "withheld", recordInScope, recordEmitted: false };
 	}
 	const { turns } = outcome;
-	const parent = chat.character_name
-		? chat
-		: { ...chat, character_name: characterNameFromTurns(chat, turns) };
-	await ctx.emitRecord(
-		"chats",
-		buildChatRecord(parent, hydrationOf(scope, turns)),
-	);
+	// A chat outside the chats scope is read only for its messages: its
+	// record is not emitted (the runtime would drop it, and a dropped record
+	// holds back the run's bounded progress).
+	const recordEmitted = recordInScope && wholeInWindow(scope, turns);
+	if (recordEmitted) {
+		const parent = chat.character_name
+			? chat
+			: { ...chat, character_name: characterNameFromTurns(chat, turns) };
+		await ctx.emitRecord("chats", buildChatRecord(parent, hydrationOf(turns)));
+	} else if (recordInScope) {
+		connectorDiagnostic("character_ai", "chat_record_past_window", {});
+	}
 	if (!scope.wantMessages) {
-		return { status: "emitted", recordInScope };
+		return { status: "emitted", recordInScope, recordEmitted };
 	}
 	deps.tally.turnsRead += turns.length;
 	const sorted = sortTurns(scopedTurns(scope, turns));
 	if (sorted.generating) {
-		await recordGap(ctx, chat.chat_id, sorted.generating, deps.tally);
-		return { status: "emitted", recordInScope };
+		await recordGap(ctx, chat.chat_id, sorted.generating, deps);
+		return { status: "emitted", recordInScope, recordEmitted };
 	}
 	// The storable turns are stored either way. A turn that can never be
 	// stored as it is keeps the chat as a gap (it is not covered), but no
@@ -1167,9 +1200,9 @@ async function processChat(
 				"turn_unstorable",
 				`${String(sorted.unstorable.length)} turn(s) cannot be stored: ${unstorable.detail}`,
 			),
-			deps.tally,
+			deps,
 		);
-		return { status: "emitted", recordInScope };
+		return { status: "emitted", recordInScope, recordEmitted };
 	}
 	// A pending gap is about the whole chat: only a read whose messages scope
 	// left no turn out can close it.
@@ -1177,7 +1210,7 @@ async function processChat(
 		await recoverGaps(ctx, chat.chat_id, deps.pending.get(chat.chat_id) ?? []);
 	}
 	deps.tally.hydratedKeys.push(chat.chat_id);
-	return { status: "emitted", recordInScope };
+	return { status: "emitted", recordInScope, recordEmitted };
 }
 
 /**
@@ -1195,12 +1228,21 @@ async function processChatByDetail(
 	deps: RunDeps,
 ): Promise<ChatOutcome> {
 	const detail = await fetchChatDetail(ctx.page, chatId);
+	if (!detail.ok && detail.errorClass === "chat_not_found") {
+		// Character.AI says the chat does not exist: a proven absence, not a
+		// chat this run failed to read. It is not part of the boundary, and its
+		// pending gaps are closed, since no turn of it is left to collect.
+		deps.absent.push(chatId);
+		connectorDiagnostic("character_ai", "chat_absent", {});
+		await recoverGaps(ctx, chatId, deps.pending.get(chatId) ?? []);
+		return { status: "absent", recordInScope: false, recordEmitted: false };
+	}
 	if (!detail.ok) {
 		deps.unread.push(chatId);
 		connectorDiagnostic("character_ai", "chat_detail_unread", {
 			class: detail.errorClass,
 		});
-		return { status: "withheld", recordInScope: true };
+		return { status: "withheld", recordInScope: true, recordEmitted: false };
 	}
 	return processChat(ctx, detail.chat, deps);
 }
@@ -1325,7 +1367,11 @@ async function recoverOnly(
 		ctx,
 		keys.filter(
 			(chatId) =>
-				!(deps.unread.includes(chatId) || deps.excluded.includes(chatId)),
+				!(
+					deps.unread.includes(chatId) ||
+					deps.absent.includes(chatId) ||
+					deps.excluded.includes(chatId)
+				),
 		),
 		deps,
 		0,
@@ -1357,6 +1403,7 @@ async function laterGaps(
 					!(
 						deps.tally.gapKeys.includes(chatId) ||
 						deps.unread.includes(chatId) ||
+						deps.absent.includes(chatId) ||
 						deps.excluded.includes(chatId) ||
 						extra.includes(chatId)
 					)
@@ -1383,7 +1430,7 @@ function countChat(
 		return;
 	}
 	tally.considered += 1;
-	if (outcome.status === "emitted") {
+	if (outcome.recordEmitted) {
 		tally.covered += 1;
 	}
 }
@@ -1413,7 +1460,11 @@ async function finishRun(
 			ctx,
 			inventory.keys.filter(
 				(chatId) =>
-					!(deps.unread.includes(chatId) || deps.excluded.includes(chatId)),
+					!(
+						deps.unread.includes(chatId) ||
+						deps.absent.includes(chatId) ||
+						deps.excluded.includes(chatId)
+					),
 			),
 			deps,
 			inventory.considered,
@@ -1481,6 +1532,7 @@ export async function collectCharacterAi(
 		excluded: [],
 		tally: { gapKeys: [], hydratedKeys: [], turnsRead: 0 },
 		unread: [],
+		absent: [],
 	};
 	if (ctx.recoveryOnly === true) {
 		if (scope.wantMessages) {
@@ -1611,8 +1663,15 @@ export const normalizeCharacterAiTerminalError: NormalizeTerminalError = (
 	}
 	return {
 		...error,
-		// The connector's own code, so DONE.error.code names it.
-		...(error.code === undefined ? { code } : {}),
+		// The connector's own code, so DONE.error.code names it and its display
+		// copy is found. Every 5xx shares one code: the owner's next step is the same.
+		...(error.code === undefined
+			? {
+					code: /^character_ai_api_5\d\d$/.test(code)
+						? "character_ai_api_5xx"
+						: code,
+				}
+			: {}),
 		retryable,
 		recovery_hint: { action, retryable },
 	};

@@ -46,7 +46,7 @@
 	"streams": [
 		{
 			"name": "chats",
-			"description": "Every chat the Character.AI chat list returns, one record per chat. Last interaction time and turn count come from the chat's own turns; a chat whose turns could not be read this run is not emitted, so its stored values stay as last read. Last interaction time is null only for a chat with no turns. Under a time range both count only the turns inside it. The time range applies to when the chat was created.",
+			"description": "Every chat the Character.AI chat list returns, one record per chat. Last interaction time and turn count come from the chat's own turns; a chat whose turns could not be read this run is not emitted, so its stored values stay as last read. Last interaction time is null only for a chat with no turns. The time range applies to when the chat was created; a chat with turns after the range's end is not emitted, so its stored values are never lowered and no later turn shows through them.",
 			"display": {
 				"label": "Your chats",
 				"detail": "Per chat: the character's id and name, chat type and state, when the chat was created, when its latest message was sent, and how many messages it has."
@@ -237,12 +237,16 @@
 		}
 	],
 	"reason_display_messages": {
-		"stream_collection_failed": "Character.AI could not be read completely this time. Nothing was lost; the next sync tries again.",
+		"stream_collection_failed": "Character.AI could not be read completely this time. Nothing already saved was lost.",
 		"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
 		"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
 		"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
 		"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",
 		"character_ai_api_429": "Character.AI is limiting requests right now. The sync will try again later.",
+		"character_ai_api_408": "Character.AI took too long to answer. The sync will try again later.",
+		"character_ai_api_5xx": "Character.AI is having trouble right now. The sync will try again later.",
+		"character_ai_timeout": "Character.AI took too long to answer. The sync will try again later.",
+		"character_ai_network_error": "Character.AI could not be reached. Check your connection; the sync will try again later.",
 		"character_ai_invalid_payload": "Character.AI answered in a format this connector does not recognize. A connector update is needed."
 	},
 	"mobile": {

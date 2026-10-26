@@ -243,6 +243,8 @@ interface Harness {
 	}>;
 	messages: EmittedMessage[];
 	records: Array<{ stream: string; data: RecordData }>;
+	/** Every emitRecord call the connector made, before the runtime's gates. */
+	calls: Array<{ stream: string; id: unknown }>;
 }
 
 function harness(
@@ -267,6 +269,7 @@ function harness(
 		failures: [],
 		messages: [],
 		records: [],
+		calls: [],
 	};
 	const requested = new Map(
 		names.map((name) => [
@@ -302,7 +305,10 @@ function harness(
 			h.messages.push(message);
 		},
 		emitRecord: gate
-			? gate.emit
+			? async (stream: string, data: RecordData) => {
+					h.calls.push({ stream, id: data.id });
+					await gate.emit(stream, data);
+				}
 			: async (stream: string, data: RecordData) => {
 					const parsed = validateRecord(stream, data);
 					assert.equal(parsed.ok, true, JSON.stringify(parsed));
@@ -965,7 +971,7 @@ function pendingGaps(first: string) {
 	];
 }
 
-test("recovery-only: parents come from the chat endpoint, recovered gaps are closed, a 404 leaves its gap pending untouched", async () => {
+test("recovery-only: parents come from the chat endpoint, recovered gaps are closed, a chat proven gone (404) has its gap closed", async () => {
 	const [first] = CHAT_IDS;
 	assert.ok(first);
 	const seen: Seen[] = [];
@@ -1000,11 +1006,14 @@ test("recovery-only: parents come from the chat endpoint, recovered gaps are clo
 	const recovered = ofType(h.messages, "DETAIL_GAP_RECOVERED");
 	assert.deepEqual(
 		recovered.map((m) => [m.gap_id, m.record_key, m.lease_id]),
-		[["g1", first, "l1"]],
+		[
+			["g1", first, "l1"],
+			["g2", GONE_CHAT, undefined],
+		],
 	);
-	// A 404 on the chat endpoint proves nothing was read and no parent was
-	// emitted: g2 is neither recovered nor re-emitted under a missing parent,
-	// and the chat is left out of coverage.
+	// A 404 on the chat endpoint proves the chat is gone: nothing of it is
+	// left to collect, so g2 is closed (not asked for again every run), no
+	// record is emitted for it, and it is left out of coverage.
 	assert.equal(ofType(h.messages, "DETAIL_GAP").length, 0);
 	assert.deepEqual(h.failures, []);
 	const recoveredAt = h.messages.findIndex(
@@ -1082,7 +1091,7 @@ test("a normal run retries pending gaps the list no longer returns, parent first
 	assert.equal(ofType(full.messages, "DETAIL_GAP").length, 0);
 	assert.deepEqual(
 		ofType(full.messages, "DETAIL_GAP_RECOVERED").map((m) => m.gap_id),
-		["g1"],
+		["g1", "g2"],
 	);
 });
 
@@ -1400,7 +1409,8 @@ test("control characters are dropped from display text; other unsafe values make
 	);
 	assert.equal(ofType(unread.messages, "DETAIL_GAP").length, 0);
 	const chatsCoverage = coverageOf(unread.messages, "chats");
-	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [3, 2]);
+	// The chat endpoint answered 404: the chat is gone, not part of the boundary.
+	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [2, 2]);
 	assert.deepEqual(coverageOf(unread.messages, "messages")?.required_keys, [
 		first,
 		third,
@@ -1520,9 +1530,10 @@ test("pending gaps on later pages are recovered too, each after its chat's messa
 		[
 			["g1", first, "l1"],
 			["g3", second, "l3"],
+			["g4", GONE_CHAT, undefined],
 		],
 	);
-	for (const message of recovered) {
+	for (const message of recovered.filter((m) => m.record_key !== GONE_CHAT)) {
 		const at = h.messages.indexOf(message as never);
 		const lastChild = h.messages.findLastIndex(
 			(m) =>
@@ -1533,7 +1544,7 @@ test("pending gaps on later pages are recovered too, each after its chat's messa
 		assert.ok(lastChild >= 0 && at > lastChild);
 	}
 	// The chat on a later page that the list did not return is looked up by
-	// its detail; it is gone (404), so its gap is left pending untouched.
+	// its detail; it is gone (404), so its gap is closed.
 	assert.ok(seen.some((request) => request.pathname === `/chat/${GONE_CHAT}/`));
 	assert.equal(ofType(h.messages, "DETAIL_GAP").length, 0);
 	const coverage = coverageOf(h.messages, "messages");
@@ -2100,7 +2111,7 @@ test("a chat whose turns could not be read is not emitted, so its stored turn va
 	}
 });
 
-test("chat values count only the turns inside the chats window, and a chat out of every window is not read", async () => {
+test("a chat with turns past the chats window's end is withheld, and a chat out of every window is not read", async () => {
 	const [first, second, third] = CHAT_IDS;
 	assert.ok(first && second && third);
 	const seen: Seen[] = [];
@@ -2116,22 +2127,16 @@ test("chat values count only the turns inside the chats window, and a chat out o
 		},
 	});
 	await collectCharacterAi(h.ctx);
-	assert.deepEqual(
-		chatRecords(h).map((chat) => [
-			chat.id,
-			chat.turn_count,
-			chat.last_interaction_time,
-		]),
-		[
-			[first, 2, "2026-01-10T10:09:03.123456Z"],
-			[second, 2, "2026-01-10T10:09:03.123456Z"],
-		],
-	);
+	// Both chats in the window have a turn on 2026-01-16: a count of the
+	// earlier turns would roll back what a wider run stored, a full count
+	// would show a turn outside the grant. Neither record is emitted.
+	assert.deepEqual(chatRecords(h), []);
+	assert.deepEqual(h.calls, []);
 	// The third chat was created after the window's end: no request reads it.
 	assert.equal(turnCalls(seen, third).length, 0);
-	// Coverage counts the chats whose record is inside the window.
+	// Coverage counts the chats whose record is inside the window; neither is covered.
 	const chatsCoverage = coverageOf(h.messages, "chats");
-	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [2, 2]);
+	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [2, 0]);
 });
 
 test("a time window never cuts a chat's turn walk short, whatever the order of its pages", async () => {
@@ -2156,14 +2161,12 @@ test("a time window never cuts a chat's turn walk short, whatever the order of i
 				(message) => String(message.create_time) >= "2026-01-10",
 			),
 		);
-		// The first chat was created before `since`: the runtime withholds its
-		// record, its in-window messages are still read.
+		// The first chat was created before `since` and is read only for its
+		// messages; in this fixture every chat also has a turn before `since`,
+		// so no chat record is whole inside the window and none is emitted.
 		assert.deepEqual(
-			chatRecords(h).map((chat) => [chat.id, chat.turn_count]),
-			[
-				[second, 2],
-				[third, 2],
-			],
+			h.calls.filter((call) => call.stream === "chats"),
+			[],
 		);
 		assert.deepEqual(
 			coverageOf(h.messages, "messages")?.hydrated_keys,
@@ -2184,9 +2187,9 @@ test("a pending gap is closed only by a run whose messages scope leaves no turn 
 			scope: { messages },
 		});
 		await collectCharacterAi(bounded.ctx);
-		assert.equal(
-			ofType(bounded.messages, "DETAIL_GAP_RECOVERED").length,
-			0,
+		assert.deepEqual(
+			ofType(bounded.messages, "DETAIL_GAP_RECOVERED").map((m) => m.gap_id),
+			["g2"],
 			JSON.stringify(messages),
 		);
 	}
@@ -2195,7 +2198,10 @@ test("a pending gap is closed only by a run whose messages scope leaves no turn 
 		scope: {},
 	});
 	await collectCharacterAi(open.ctx);
-	assert.equal(ofType(open.messages, "DETAIL_GAP_RECOVERED").length, 1);
+	assert.deepEqual(
+		ofType(open.messages, "DETAIL_GAP_RECOVERED").map((m) => m.gap_id),
+		["g1", "g2"],
+	);
 });
 
 test("narrow then wide: a later run with a wider window collects what the narrow one withheld", async () => {
@@ -2252,7 +2258,7 @@ test("chats.resources reads only the named chats, from their own endpoint, and o
 	assert.equal(ofType(h.messages, "DETAIL_GAP_RECOVERED").length, 0);
 	assert.equal(ofType(h.messages, "STATE").length, 1);
 
-	// A named chat that cannot be read is not covered and emits nothing.
+	// A named chat Character.AI answers 404 for emits nothing.
 	const missing = harness(fakePage(defaultRoute(), []), {
 		scope: { chats: { resources: [second, GONE_CHAT] } },
 	});
@@ -2261,10 +2267,11 @@ test("chats.resources reads only the named chats, from their own endpoint, and o
 		chatRecords(missing).map((chat) => chat.id),
 		[second],
 	);
+	// The missing chat answered 404: it is proven gone, not part of the boundary.
 	const missingCoverage = coverageOf(missing.messages, "chats");
 	assert.deepEqual(
 		[missingCoverage?.considered, missingCoverage?.covered],
-		[2, 1],
+		[1, 1],
 	);
 });
 
@@ -2351,6 +2358,10 @@ test("run-level codes reach DONE with a portable recovery hint", () => {
 		hintOf("character_ai_session_failed: character_ai_auth_failed").code,
 		"character_ai_auth_failed",
 	);
+	assert.equal(
+		hintOf("character_ai_api_503 on /chats/recent/", true).code,
+		"character_ai_api_5xx",
+	);
 	assert.deepEqual(
 		hintOf("character_ai_session_failed: character_ai_auth_failed")
 			.recovery_hint,
@@ -2395,4 +2406,86 @@ test("run-level codes reach DONE with a portable recovery hint", () => {
 		recovery_hint: "not_retriable",
 	};
 	assert.deepEqual(normalizeCharacterAiTerminalError(hinted), hinted);
+});
+
+test("a wide run then a narrow-until run never lowers a stored chat's values", async () => {
+	const store = new Map<unknown, Record<string, unknown>>();
+	const upsert = (h: Harness) => {
+		for (const chat of chatRecords(h)) {
+			store.set(chat.id, chat);
+		}
+	};
+	const wide = harness(fakePage(defaultRoute(), []), { scope: {} });
+	await collectCharacterAi(wide.ctx);
+	upsert(wide);
+	const before = new Map(
+		[...store].map(([id, chat]) => [id, chat.turn_count as number]),
+	);
+	assert.equal(before.size, 3);
+	for (const until of [
+		"2026-01-12T00:00:00Z",
+		"2026-01-16T10:15:45.123456Z",
+		"2026-01-17T00:00:00Z",
+	]) {
+		const narrow = harness(fakePage(defaultRoute(), []), {
+			scope: {
+				chats: { time_range: { until } },
+				messages: { time_range: { until } },
+			},
+		});
+		await collectCharacterAi(narrow.ctx);
+		upsert(narrow);
+		for (const [id, count] of before) {
+			assert.ok(
+				(store.get(id)?.turn_count as number) >= count,
+				`${until}: ${String(id)}`,
+			);
+			assert.notEqual(store.get(id)?.last_interaction_time, null);
+		}
+	}
+});
+
+test("a chat created after the chats window's end is read for its messages, but its record is never emitted", async () => {
+	const [, , third] = CHAT_IDS;
+	assert.ok(third);
+	const until = "2026-01-12T00:00:00Z";
+	const h = harness(fakePage(defaultRoute(), []), {
+		scope: { chats: { time_range: { until } } },
+	});
+	await collectCharacterAi(h.ctx);
+	assert.ok(messageRecords(h).some((message) => message.chat_id === third));
+	assert.ok(
+		!h.calls.some((call) => call.stream === "chats" && call.id === third),
+	);
+	assert.equal(ofType(h.messages, "STATE").length, 1);
+});
+
+test("a leased gap that fails again is reported as attempted, by its lease", async () => {
+	const [first] = CHAT_IDS;
+	assert.ok(first);
+	const h = harness(
+		fakePage(
+			defaultRoute({ [first]: () => json({ detail: "Not found" }, 404) }),
+			[],
+		),
+		{ detailGaps: pendingGaps(first) },
+	);
+	await collectCharacterAi(h.ctx);
+	const attempted = ofType(h.messages, "DETAIL_GAP_ATTEMPTED");
+	assert.deepEqual(
+		attempted.map((m) => [m.gap_id, m.lease_id, m.stream, m.reference_only]),
+		[["g1", "l1", "messages", true]],
+	);
+	const attemptedAt = h.messages.indexOf(attempted[0] as never);
+	const gapAt = h.messages.findIndex(
+		(m) =>
+			m.type === "DETAIL_GAP" &&
+			(m as { record_key?: string }).record_key === first,
+	);
+	assert.ok(attemptedAt >= 0 && attemptedAt < gapAt);
+	assert.equal(
+		ofType(h.messages, "DETAIL_GAP_RECOVERED").filter((m) => m.gap_id === "g1")
+			.length,
+		0,
+	);
 });
