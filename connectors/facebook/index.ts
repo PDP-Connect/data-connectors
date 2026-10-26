@@ -72,12 +72,14 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page, Request } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	type EnsureSessionArgs,
 	type ProbeSessionArgs,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isConnectorErrorCodeShaped } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import {
 	type CollectorContext,
 	collectFacebook,
@@ -486,7 +488,48 @@ export async function probeFacebookSession(
 	}
 }
 
-async function ensureFacebookSession(args: EnsureSessionArgs): Promise<void> {
+/**
+ * A sign-in failure leaves as a bare code, the only shape the runtime keeps
+ * as the run's error code (`session-establish.ts` drops a code inside a
+ * sentence): `facebook_auth_failed` when the person did not finish signing
+ * in, `facebook_interrupted` (retryable) when the page broke on the way.
+ * What went wrong goes to a diagnostic, never into the code.
+ */
+export type FacebookSignIn = (
+	args: Parameters<typeof manualBrowserLogin<boolean>>[0],
+) => Promise<boolean>;
+
+export function makeEnsureFacebookSession(
+	login: FacebookSignIn = manualBrowserLogin,
+): (args: EnsureSessionArgs) => Promise<void> {
+	return async (args) => {
+		let live: boolean;
+		try {
+			live = await signIn(args, login);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (isConnectorErrorCodeShaped(message)) throw error;
+			connectorDiagnostic("facebook", "sign_in_interrupted", {
+				error: error instanceof Error ? error.name : typeof error,
+			});
+			throw new Error(SESSION_CODES.interrupted, { cause: error });
+		}
+		if (!live) {
+			connectorDiagnostic("facebook", "sign_in_not_completed", {});
+			throw new Error(SESSION_CODES.authFailed);
+		}
+	};
+}
+
+const SESSION_CODES = {
+	authFailed: "facebook_auth_failed",
+	interrupted: "facebook_interrupted",
+} as const;
+
+async function signIn(
+	args: EnsureSessionArgs,
+	login: FacebookSignIn,
+): Promise<boolean> {
 	const {
 		assist,
 		capture,
@@ -495,9 +538,9 @@ async function ensureFacebookSession(args: EnsureSessionArgs): Promise<void> {
 		page,
 		sendInteraction,
 	} = args;
-	if (await probeFacebookSession({ context, page })) return;
+	if (await probeFacebookSession({ context, page })) return true;
 	await gotoWithRetry(page, LOGIN_URL);
-	const live = await manualBrowserLogin({
+	return login({
 		assist,
 		capture,
 		completeAssistance,
@@ -512,9 +555,9 @@ async function ensureFacebookSession(args: EnsureSessionArgs): Promise<void> {
 		sendInteraction,
 		timeoutSeconds: SIGN_IN_TIMEOUT_SECONDS,
 	});
-	if (!live)
-		throw new Error("facebook_auth_failed: the sign-in was not completed");
 }
+
+export const ensureFacebookSession = makeEnsureFacebookSession();
 
 // ─── Collect ────────────────────────────────────────────────────────────
 

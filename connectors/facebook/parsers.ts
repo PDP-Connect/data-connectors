@@ -57,7 +57,7 @@ export function isRunEndingError(error: unknown): boolean {
 }
 
 export const RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|timeout|facebook_rate_limited|facebook_http_5xx|fetch failed/i;
+	/ECONN|ETIMEDOUT|timeout|facebook_rate_limited|facebook_http_5xx|facebook_interrupted|fetch failed/i;
 
 // ─── Read-only guard ────────────────────────────────────────────────────
 

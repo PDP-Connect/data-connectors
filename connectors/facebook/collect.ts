@@ -60,6 +60,7 @@ import {
 	FRIENDS_OPERATION,
 	facebookError,
 	GROUPS_OPERATION,
+	isNumericId,
 	isRunEndingError,
 	isValidDocId,
 	type JsonRecord,
@@ -76,6 +77,7 @@ import {
 	parsePostNode,
 	pickConnection,
 	pickPreloadedConnection,
+	postIdKey,
 	type TextCounter,
 	type Viewer,
 } from "./parsers.ts";
@@ -635,23 +637,52 @@ function streamGrant(ctx: CollectorContext, stream: string): StreamGrant {
 class GrantStop {
 	private olderRun = 0;
 	private readonly grant: StreamGrant;
+	private readonly keyOf: (edge: unknown) => string | null;
+	private readonly observed = new Set<string>();
 	private readonly olderToStop: number;
 	private readonly pending: Set<string> | null;
 
-	constructor(grant: StreamGrant, olderToStop: number) {
+	/** `keyOf` gives an edge's record id when the raw edge proves it, else null. */
+	constructor(
+		grant: StreamGrant,
+		olderToStop: number,
+		keyOf: (edge: unknown) => string | null,
+	) {
 		this.grant = grant;
+		this.keyOf = keyOf;
 		this.olderToStop = olderToStop;
 		this.pending = grant.resources ? new Set(grant.resources) : null;
 	}
 
+	/** Items met again (a re-read page, a restart from the top) do not add to the older run. */
 	observeEdges(edges: readonly unknown[]): void {
 		const since = this.grant.sinceSeconds;
 		if (since === null) return;
 		for (const edge of edges) {
+			const key = this.keyOf(edge);
+			if (key !== null) {
+				if (this.observed.has(key)) continue;
+				this.observed.add(key);
+			}
 			const seconds = edgeCreationSeconds(edge);
 			this.olderRun =
 				seconds !== null && seconds < since ? this.olderRun + 1 : 0;
 		}
+	}
+
+	/**
+	 * True for an edge the grant's resources leave out, by its raw id: it is
+	 * not parsed, so an unrequested item cannot fail the stream.
+	 */
+	skips(edge: unknown): boolean {
+		if (this.pending === null || this.grant.resources === null) return false;
+		const key = this.keyOf(edge);
+		return key !== null && !this.grant.resources.has(key);
+	}
+
+	/** True once every requested id was met; the rest of the page need not be read. */
+	allMet(): boolean {
+		return this.pending !== null && this.pending.size === 0;
 	}
 
 	met(id: string): void {
@@ -676,6 +707,16 @@ async function emitChecked(
 	const valid = !selected || validateRecord(stream, record).ok;
 	await ctx.emitRecord(stream, record);
 	return valid;
+}
+
+/** An item key that is a numeric id (the record id of posts, friends and groups), else null. */
+function numericKey(
+	itemKey: (edge: unknown) => string | null,
+): (edge: unknown) => string | null {
+	return (edge) => {
+		const key = itemKey(edge);
+		return isNumericId(key) ? key : null;
+	};
 }
 
 function rejectedError(stream: string, rejected: number): Error {
@@ -733,12 +774,19 @@ function timelineDateVariables(grant: StreamGrant): JsonRecord | null {
 async function collectPosts(run: StreamRun): Promise<void> {
 	const counter = newTextCounter();
 	const grant = streamGrant(run.ctx, "posts");
-	let unreadable = 0;
 	let rejected = 0;
 	const handled = new Set<string>();
-	const walk = (dates: JsonRecord | null) => {
-		const stop = new GrantStop(grant, OLDER_ITEMS_TO_STOP.posts ?? 9);
-		return walkList(run.services, {
+	/** One attempt; its unreadable count is its own, so a discarded dated walk cannot fail the plain one. */
+	const walk = async (
+		dates: JsonRecord | null,
+	): Promise<{ edges: number; unreadable: number }> => {
+		const stop = new GrantStop(
+			grant,
+			OLDER_ITEMS_TO_STOP.posts ?? 9,
+			numericKey(postIdKey),
+		);
+		let unreadable = 0;
+		const walked = await walkList(run.services, {
 			stream: "posts",
 			spec: POSTS_OPERATION,
 			snapshot: run.snapshot,
@@ -750,6 +798,8 @@ async function collectPosts(run: StreamRun): Promise<void> {
 			onEdges: async (edges) => {
 				stop.observeEdges(edges);
 				for (const edge of edges) {
+					if (stop.allMet()) break;
+					if (stop.skips(edge)) continue;
 					const node = nodeOf(edge);
 					const parsed = node
 						? parsePostNode(node, run.viewer.id, counter)
@@ -763,23 +813,25 @@ async function collectPosts(run: StreamRun): Promise<void> {
 				}
 			},
 		});
+		return { edges: walked.edges, unreadable };
 	};
 	const dates = timelineDateVariables(grant);
-	let bounded: { edges: number } | null = null;
+	let trusted: { edges: number; unreadable: number } | null = null;
 	if (dates) {
 		try {
-			bounded = await walk(dates);
+			trusted = await walk(dates);
 		} catch (error) {
-			// A bounded walk that failed before reading anything may be the date
-			// filter itself; the plain walk below is the proof instead.
-			if (isRunEndingError(error) || handled.size > 0 || unreadable > 0)
-				throw error;
+			// A dated walk that failed at any page may be the date filter itself;
+			// the plain walk below is the proof instead. Posts it already
+			// delivered are not delivered twice (`handled`).
+			if (isRunEndingError(error)) throw error;
 			connectorDiagnostic(SOURCE, "date_filter_unused", { stream: "posts" });
 		}
 	}
 	// No item under the source's date filter is not proof of an empty window:
 	// the filter may have been read differently. Walk without it.
-	if (bounded === null || bounded.edges === 0) await walk(null);
+	if (trusted === null || trusted.edges === 0) trusted = await walk(null);
+	const { unreadable } = trusted;
 	reportText("posts", counter);
 	if (unreadable > 0)
 		throw facebookError(
@@ -798,7 +850,11 @@ async function collectInventory(
 ): Promise<void> {
 	const counter = newTextCounter();
 	const grant = streamGrant(run.ctx, stream);
-	const stop = new GrantStop(grant, Number.POSITIVE_INFINITY);
+	const stop = new GrantStop(
+		grant,
+		Number.POSITIVE_INFINITY,
+		numericKey(spec.itemKey),
+	);
 	const seen = new Set<string>();
 	let unreadable = 0;
 	let rejected = 0;
@@ -812,6 +868,8 @@ async function collectInventory(
 		stopAfterPage: () => stop.done(),
 		onEdges: async (edges) => {
 			for (const edge of edges) {
+				if (stop.allMet()) break;
+				if (stop.skips(edge)) continue;
 				const node = nodeOf(edge);
 				const record = node ? parse(node, counter) : null;
 				if (!record) {
@@ -849,7 +907,11 @@ async function collectActivity(
 ): Promise<void> {
 	const counter = newTextCounter();
 	const grant = streamGrant(run.ctx, stream);
-	const stop = new GrantStop(grant, OLDER_ITEMS_TO_STOP[stream] ?? 30);
+	const stop = new GrantStop(
+		grant,
+		OLDER_ITEMS_TO_STOP[stream] ?? 30,
+		ACTIVITY_OPERATION.itemKey,
+	);
 	const seen = new Set<string>();
 	let unreadable = 0;
 	let rejected = 0;
@@ -864,6 +926,8 @@ async function collectActivity(
 		onEdges: async (edges) => {
 			stop.observeEdges(edges);
 			for (const edge of edges) {
+				if (stop.allMet()) break;
+				if (stop.skips(edge)) continue;
 				const node = nodeOf(edge);
 				const record = node ? parseActivityNode(node, kind, counter) : null;
 				if (!record) {

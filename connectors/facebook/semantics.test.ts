@@ -17,6 +17,8 @@ import {
 	makeEmitRecord,
 	withholdsBoundedProgress,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { establishSession } from "../../packages/polyfill-connectors/src/session-establish.ts";
+import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import {
 	activityUrl,
 	type CollectorContext,
@@ -29,7 +31,7 @@ import {
 	PUSHED_BOUND_SLACK_SECONDS,
 	streamFailureHint,
 } from "./collect.ts";
-import { probeFacebookSession } from "./index.ts";
+import { makeEnsureFacebookSession, probeFacebookSession } from "./index.ts";
 import {
 	asRecord,
 	type CapturedOperation,
@@ -37,6 +39,7 @@ import {
 	GRAPHQL_PATH,
 	type JsonRecord,
 	operationMatches,
+	RETRYABLE_PATTERN,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import {
@@ -169,7 +172,12 @@ function activityPage(
 	return page;
 }
 
-type DateHandling = "honors" | "ignores" | "empties" | "rejects";
+type DateHandling =
+	| "honors"
+	| "ignores"
+	| "empties"
+	| "rejects"
+	| "rejects-later";
 
 /**
  * A newest-first list served `size` items a page with numeric cursors, as
@@ -187,7 +195,11 @@ function listSource(
 		const after = variables.afterTime;
 		const before = variables.beforeTime;
 		const dated = typeof after === "number" || typeof before === "number";
-		if (dated && dates === "rejects")
+		if (
+			dated &&
+			(dates === "rejects" ||
+				(dates === "rejects-later" && variables.cursor !== null))
+		)
 			return {
 				errors: [{ message: "Variable beforeTime got an invalid value" }],
 			};
@@ -817,5 +829,138 @@ describe("manifest says what the code does", () => {
 			"scope_not_supported",
 		])
 			assert.ok(manifest.reason_display_messages[reason], reason);
+	});
+});
+
+// ─── review round 1 ─────────────────────────────────────────────────────
+
+describe("review round 1", () => {
+	it("falls back to the plain walk when the dated walk fails after a good page (P1)", async () => {
+		const run = postsRun(
+			{ time_range: { since: dayStart(10), until: dayStart(16) } },
+			"rejects-later",
+		);
+		await collectFacebook(run.ctx, run.services);
+		assert.deepEqual(run.failures, []);
+		assert.deepEqual(delivered(run, "posts"), ids(10, 15));
+		assert.equal(
+			new Set(delivered(run, "posts")).size,
+			6,
+			"none delivered twice",
+		);
+	});
+
+	it("does not count a re-read first page twice toward the stop past since (P1)", async () => {
+		// Five old posts head the timeline (pinned or back-dated), newer ones follow.
+		const old = Array.from({ length: 5 }, (_, index) => ({
+			id: postId(100 + index),
+			time: day(1) - 86_400 * (400 + index),
+		}));
+		const items = [...old, ...POSTS];
+		const source = listSource(items, 5, timelinePage);
+		const first = source({ cursor: null });
+		const units = asRecord(
+			asRecord(asRecord(first.data)?.node)?.timeline_list_feed_units,
+		);
+		assert.ok(units);
+		// No usable cursor on the rendered page: the walk restarts from the top.
+		units.page_info = { end_cursor: null, has_next_page: true };
+		const run = runOf({
+			scopes: { posts: { time_range: { since: dayStart(25) } } },
+			pages: { [ME]: meSnapshot(first) },
+			sources: { [TIMELINE_QUERY]: source },
+		});
+		await collectFacebook(run.ctx, run.services);
+		assert.deepEqual(run.failures, []);
+		assert.deepEqual(delivered(run, "posts"), ids(25, 30));
+	});
+
+	it("does not parse, or fail on, an unrequested entry before the requested one (P1)", async () => {
+		const items = daily(3, activityId);
+		const page = activityPage(items, {
+			end_cursor: null,
+			has_next_page: false,
+		});
+		const stories = asRecord(
+			asRecord(asRecord(page.data)?.node)?.activity_log_stories,
+		);
+		assert.ok(stories && Array.isArray(stories.edges));
+		const unrequested = asRecord(asRecord(stories.edges[0])?.node);
+		assert.ok(unrequested);
+		delete unrequested.creation_time;
+		const url = activityUrl(TIMELINE_VIEWER, "reaction");
+		const run = runOf({
+			scopes: { reactions: { resources: [activityId(2)] } },
+			pages: {
+				[ME]: meSnapshot(null),
+				[url]: {
+					landedUrl: url,
+					scripts: [preloaded("adp_al", { data: page.data })],
+				},
+			},
+			sources: {},
+		});
+		await collectFacebook(run.ctx, run.services);
+		assert.deepEqual(run.failures, []);
+		assert.deepEqual(delivered(run, "reactions"), [activityId(2)]);
+	});
+});
+
+// ─── sign-in failures keep their code ───────────────────────────────────
+
+describe("sign-in failures through the runtime's establishSession", () => {
+	const establish = (login: Parameters<typeof makeEnsureFacebookSession>[0]) =>
+		establishSession(
+			{
+				ensureSession: makeEnsureFacebookSession(login),
+				probeSession: (args) => probeFacebookSession(args, 1000),
+				probeSessionIsAuthoritative: true,
+			},
+			{
+				assist: async () => "assist-1",
+				capture: null,
+				checkpoint: async () => undefined,
+				completeAssistance: async () => undefined,
+				context: {} as never,
+				name: "facebook",
+				page: {
+					url: () => "https://www.facebook.com/",
+					goto: async () => null,
+					waitForFunction: async () => undefined,
+					evaluate: async () => "0",
+				} as never,
+				progress: async () => undefined,
+				retryablePattern: RETRYABLE_PATTERN,
+				sendInteraction: async () => ({ status: "cancelled" }) as never,
+			},
+		);
+
+	it("an unfinished sign-in ends as facebook_auth_failed, not retryable", async () => {
+		const error = await establish(async () => false).then(
+			() => null,
+			(caught: unknown) => caught,
+		);
+		assert.ok(error instanceof TerminalError);
+		assert.equal(error.code, "facebook_auth_failed");
+		assert.equal(error.retryable, false);
+	});
+
+	it("a page that breaks during sign-in ends as facebook_interrupted, retryable", async () => {
+		const error = await establish(async () => {
+			throw new Error(
+				"page.goto: Target page, context or browser has been closed",
+			);
+		}).then(
+			() => null,
+			(caught: unknown) => caught,
+		);
+		assert.ok(error instanceof TerminalError);
+		assert.equal(error.code, "facebook_interrupted");
+		assert.equal(error.retryable, true);
+	});
+
+	it("has copy for both codes", () => {
+		assert.ok(manifest.reason_display_messages.facebook_auth_failed);
+		assert.ok(manifest.reason_display_messages.facebook_interrupted);
 	});
 });
