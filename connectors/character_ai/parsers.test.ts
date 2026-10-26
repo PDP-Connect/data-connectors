@@ -6,11 +6,13 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Page } from "playwright";
 import { z } from "zod";
-import type {
-	BrowserCollectContext,
-	EmittedMessage,
-	RecordData,
-	StreamScope,
+import {
+	type BrowserCollectContext,
+	type EmittedMessage,
+	makeEmitRecord,
+	type RecordData,
+	type StreamFailureOptions,
+	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
 import { isConnectorErrorCodeShaped } from "../../packages/polyfill-connectors/src/terminal-error.ts";
@@ -19,6 +21,7 @@ import {
 	collectCharacterAi,
 	ensureCharacterAiSession,
 	hasCharacterAiSession,
+	normalizeCharacterAiTerminalError,
 	probeCharacterAiSession,
 } from "./index.ts";
 import {
@@ -233,7 +236,11 @@ function defaultRoute(overrides: Partial<Record<string, Route>> = {}): Route {
 
 interface Harness {
 	ctx: BrowserCollectContext;
-	failures: Array<{ stream: string; message: string }>;
+	failures: Array<{
+		stream: string;
+		message: string;
+		options?: StreamFailureOptions;
+	}>;
 	messages: EmittedMessage[];
 	records: Array<{ stream: string; data: RecordData }>;
 }
@@ -246,6 +253,11 @@ function harness(
 		recoveryOnly?: boolean;
 		/** Pages the runtime answers DETAIL_GAPS_PAGE_REQUEST with, in order; then empty. */
 		gapPages?: unknown[][];
+		/**
+		 * START scope per stream (resources, time_range). Records then pass the
+		 * runtime's own gates (makeEmitRecord), as in a real run.
+		 */
+		scope?: Record<string, Omit<StreamScope, "name">>;
 	} = {},
 ) {
 	const gapPages = [...(options.gapPages ?? [])];
@@ -256,28 +268,62 @@ function harness(
 		messages: [],
 		records: [],
 	};
+	const requested = new Map(
+		names.map((name) => [
+			name,
+			{ name, ...(options.scope?.[name] ?? {}) } as StreamScope,
+		]),
+	);
+	const gate = options.scope
+		? makeEmitRecord({
+				requested,
+				emit: async (message) => {
+					h.messages.push(message);
+					if (message.type === "RECORD") {
+						h.records.push({ stream: message.stream, data: message.data });
+					}
+				},
+				emittedAt: "2026-10-26T00:00:00Z",
+				validateRecord,
+				isTombstone: undefined,
+				timeRangeFieldFor: () => ({
+					field: "create_time",
+					format: "date-time",
+				}),
+			})
+		: null;
 	Object.assign(h.ctx, {
 		page,
 		state: {},
 		detailGaps: options.detailGaps ?? [],
 		recoveryOnly: options.recoveryOnly === true,
-		requested: new Map(names.map((name) => [name, { name } as StreamScope])),
+		requested,
 		emit: async (message: EmittedMessage) => {
 			h.messages.push(message);
 		},
-		emitRecord: async (stream: string, data: RecordData) => {
-			const parsed = validateRecord(stream, data);
-			assert.equal(parsed.ok, true, JSON.stringify(parsed));
-			h.records.push({ stream, data });
-			h.messages.push({
-				type: "RECORD",
+		emitRecord: gate
+			? gate.emit
+			: async (stream: string, data: RecordData) => {
+					const parsed = validateRecord(stream, data);
+					assert.equal(parsed.ok, true, JSON.stringify(parsed));
+					h.records.push({ stream, data });
+					h.messages.push({
+						type: "RECORD",
+						stream,
+						key: String(data.id),
+						data,
+					} as EmittedMessage);
+				},
+		reportStreamFailure: async (
+			stream: string,
+			message: string,
+			failureOptions?: StreamFailureOptions,
+		) => {
+			h.failures.push({
 				stream,
-				key: String(data.id),
-				data,
-			} as EmittedMessage);
-		},
-		reportStreamFailure: async (stream: string, message: string) => {
-			h.failures.push({ stream, message });
+				message,
+				...(failureOptions ? { options: failureOptions } : {}),
+			});
 		},
 		requestDetailGapPage: async () => {
 			h.messages.push({ type: "DETAIL_GAPS_PAGE_REQUEST" } as never);
@@ -640,10 +686,9 @@ test("full run: chats then their messages, coverage, STATE last; token stays in 
 	};
 	assert.equal(last.type, "STATE");
 	assert.equal(last.stream, "chats");
-	assert.deepEqual(last.cursor, {
-		last_interaction_time: "2026-01-16T10:15:45.123456Z",
-		chat_count: 3,
-	});
+	// The streams are not incremental: the checkpoint carries no cursor a
+	// later run would read, only the size of the inventory it closed.
+	assert.deepEqual(last.cursor, { chat_count: 3 });
 	assert.deepEqual(h.failures, []);
 	assert.ok(!JSON.stringify(h.messages).includes(TOKEN));
 });
@@ -673,22 +718,16 @@ test("the chat list follows meta.next_token until it is empty", async () => {
 	assert.equal(ofType(h.messages, "STATE").length, 1);
 });
 
-test("a chat list whose token repeats keeps the chats seen, fails both streams, and checkpoints nothing", async () => {
+test("a chat list whose token repeats emits nothing, fails both streams, and checkpoints nothing", async () => {
 	const seen: Seen[] = [];
 	const route = defaultRoute({
 		chats: () => json(fixture("get-neo-chats-recent-page1.json")),
 	});
 	const h = harness(fakePage(route, seen));
 	await collectCharacterAi(h.ctx);
-	const page1 = (
-		fixture("get-neo-chats-recent-page1.json").chats as Array<{
-			chat_id: string;
-		}>
-	).map((chat) => chat.chat_id);
-	assert.deepEqual(
-		h.records.map((record) => [record.stream, record.data.id]),
-		page1.map((id) => ["chats", id]),
-	);
+	// A chat record built without its turns would overwrite the values a
+	// previous run stored, so none of the chats seen is emitted.
+	assert.deepEqual(h.records, []);
 	assert.equal(
 		seen.filter((request) => request.pathname.startsWith("/turns/")).length,
 		0,
@@ -774,7 +813,7 @@ function turnsWithCandidate(
 	};
 }
 
-test("a chat with an unstorable or unfinished turn emits no messages and is a gap", async () => {
+test("an unfinished turn makes its chat a gap; an unstorable turn is left out and reported, the rest of its chat is stored", async () => {
 	const [first, second, third] = CHAT_IDS;
 	assert.ok(first && second && third);
 	const h = harness(
@@ -790,20 +829,33 @@ test("a chat with an unstorable or unfinished turn emits no messages and is a ga
 	const gaps = ofType(h.messages, "DETAIL_GAP");
 	assert.deepEqual(
 		gaps.map((gap) => [gap.record_key, gap.reason]),
-		[
-			[second, "retry_exhausted"],
-			[third, "temporary_unavailable"],
-		],
+		[[third, "temporary_unavailable"]],
 	);
-	const messageChats = new Set(
-		h.records
-			.filter((record) => record.stream === "messages")
-			.map((record) => record.data.chat_id),
+	const messagesOf = (chatId: string) =>
+		h.records.filter(
+			(record) =>
+				record.stream === "messages" && record.data.chat_id === chatId,
+		);
+	assert.equal(messagesOf(first).length, 3);
+	// The one turn that can never be stored as it is is left out; its chat is
+	// not held as a pending gap forever for it.
+	assert.equal(messagesOf(second).length, 2);
+	assert.equal(messagesOf(third).length, 0);
+	const skips = ofType(h.messages, "SKIP_RESULT");
+	assert.equal(skips.length, 1);
+	assert.equal(skips[0]?.stream, "messages");
+	assert.equal(skips[0]?.reason, "character_ai_turn_unstorable");
+	assert.deepEqual(skips[0]?.recovery_hint, {
+		action: "retry_on_connector_upgrade",
+		retryable: false,
+	});
+	assert.equal(
+		(skips[0]?.diagnostics as { chat_id?: string } | undefined)?.chat_id,
+		second,
 	);
-	assert.deepEqual([...messageChats], [first]);
 	const coverage = coverageOf(h.messages, "messages");
-	assert.deepEqual(coverage?.hydrated_keys, [first]);
-	assert.deepEqual(coverage?.gap_keys, [second, third]);
+	assert.deepEqual(coverage?.hydrated_keys, [first, second]);
+	assert.deepEqual(coverage?.gap_keys, [third]);
 	// The gap covers only those chats: the stream is not failed, so the
 	// checkpoint is not held back by one bad turn.
 	assert.deepEqual(h.failures, []);
@@ -980,7 +1032,7 @@ test("recovery-only: parents come from the chat endpoint, recovered gaps are clo
 	assert.equal(ofType(h.messages, "STATE").length, 0);
 });
 
-test("a pending gap that still fails is re-emitted, not recovered", async () => {
+test("a pending gap that still fails is re-emitted, not recovered, and its chat record is withheld", async () => {
 	const [first] = CHAT_IDS;
 	assert.ok(first);
 	const h = harness(
@@ -999,11 +1051,9 @@ test("a pending gap that still fails is re-emitted, not recovered", async () => 
 		ofType(h.messages, "DETAIL_GAP").map((gap) => gap.record_key),
 		[first],
 	);
-	const parentAt = h.messages.findIndex(
-		(m) => m.type === "RECORD" && m.stream === "chats",
-	);
-	const gapAt = h.messages.findIndex((m) => m.type === "DETAIL_GAP");
-	assert.ok(parentAt >= 0 && parentAt < gapAt, "the parent precedes its gap");
+	// The turns were not read, so the chat's values are unknown: no record
+	// overwrites what a previous run stored.
+	assert.deepEqual(h.records, []);
 });
 
 test("recovery-only with no pending gaps still reports (empty) coverage", async () => {
@@ -1050,7 +1100,16 @@ test("a messages-only scope emits no orphan children", async () => {
 	await collectCharacterAi(h.ctx);
 	assert.equal(h.records.length, 0);
 	assert.equal(seen.length, 0);
-	assert.equal(h.failures[0]?.stream, "messages");
+	assert.deepEqual(h.failures, []);
+	const [skip] = ofType(h.messages, "SKIP_RESULT");
+	assert.deepEqual(
+		[skip?.stream, skip?.reason, skip?.recovery_hint],
+		[
+			"messages",
+			"scope_not_supported",
+			{ action: "not_retriable", retryable: false },
+		],
+	);
 });
 
 test("session probe reads the user endpoint with the page token", async () => {
@@ -1271,7 +1330,8 @@ test("control characters are dropped from display text; other unsafe values make
 			[false, "unreadable"],
 		);
 	}
-	// In a run, the chat with the unsafe author id is a gap; nothing else is held back.
+	// In a run, the turn with the unsafe author id is left out and reported;
+	// the rest of its chat and every other chat is stored.
 	const [first, second, third] = CHAT_IDS;
 	assert.ok(first && second && third);
 	const unsafeAuthor = () => {
@@ -1285,15 +1345,16 @@ test("control characters are dropped from display text; other unsafe values make
 	};
 	const h = harness(fakePage(defaultRoute({ [second]: unsafeAuthor }), []));
 	await collectCharacterAi(h.ctx);
-	assert.deepEqual(
-		ofType(h.messages, "DETAIL_GAP").map((gap) => gap.record_key),
-		[second],
-	);
+	assert.equal(ofType(h.messages, "DETAIL_GAP").length, 0);
 	assert.equal(
 		h.records.filter(
 			(r) => r.stream === "messages" && r.data.chat_id === second,
 		).length,
-		0,
+		2,
+	);
+	assert.deepEqual(
+		ofType(h.messages, "SKIP_RESULT").map((skip) => skip.reason),
+		["character_ai_turn_unstorable"],
 	);
 	assert.deepEqual(h.failures, []);
 	assert.equal(ofType(h.messages, "STATE").length, 1);
@@ -1957,4 +2018,380 @@ test("a page of gaps that are not this connector's does not end the paging", asy
 		ofType(h.messages, "DETAIL_GAP_RECOVERED").map((m) => m.gap_id),
 		["g10"],
 	);
+});
+
+// ─── Withheld reads, scope push-down, recovery hints ─────────────────────
+
+function chatRecords(h: Harness): Array<Record<string, unknown>> {
+	return h.records
+		.filter((record) => record.stream === "chats")
+		.map((record) => record.data);
+}
+
+function messageRecords(h: Harness): Array<Record<string, unknown>> {
+	return h.records
+		.filter((record) => record.stream === "messages")
+		.map((record) => record.data);
+}
+
+function turnCalls(seen: Seen[], chatId: string): Seen[] {
+	return seen.filter((request) => request.pathname === `/turns/${chatId}/`);
+}
+
+/** The fixture's three turns (2026-01-02, -10, -16) for a chat. */
+function fixtureTurns(chatId: string): Array<Record<string, unknown>> {
+	return (turnsFor(chatId, "") as { turns: Array<Record<string, unknown>> })
+		.turns;
+}
+
+/** Newest first over two pages ([-16, -10], then [-02]), then an empty end page. */
+function newestFirstTurns(chatId: string): Route {
+	const [oldest, middle, newest] = fixtureTurns(chatId);
+	return (url) => {
+		const token = url.searchParams.get("next_token");
+		if (token === null) {
+			return json({ turns: [newest, middle], meta: { next_token: "older" } });
+		}
+		if (token === "older") {
+			return json({ turns: [oldest], meta: { next_token: "end" } });
+		}
+		return json({ turns: [], meta: { next_token: "" } });
+	};
+}
+
+/** Oldest first, one turn on the first page ([-02], then [-10, -16]), then an empty end page. */
+function oldestFirstTurns(chatId: string): Route {
+	const [oldest, middle, newest] = fixtureTurns(chatId);
+	return (url) => {
+		const token = url.searchParams.get("next_token");
+		if (token === null) {
+			return json({ turns: [oldest], meta: { next_token: "newer" } });
+		}
+		if (token === "newer") {
+			return json({ turns: [middle, newest], meta: { next_token: "end" } });
+		}
+		return json({ turns: [], meta: { next_token: "" } });
+	};
+}
+
+function everyChat(route: (chatId: string) => Route): Record<string, Route> {
+	return Object.fromEntries(CHAT_IDS.map((chatId) => [chatId, route(chatId)]));
+}
+
+test("a chat whose turns could not be read is not emitted, so its stored turn values are never overwritten with nulls", async () => {
+	const [first, second, third] = CHAT_IDS;
+	assert.ok(first && second && third);
+	const route = defaultRoute({
+		[second]: () => json({ detail: "Not found" }, 404),
+	});
+	for (const streams of [["chats", "messages"], ["chats"]]) {
+		const h = harness(fakePage(route, []), { streams });
+		await collectCharacterAi(h.ctx);
+		assert.deepEqual(
+			chatRecords(h).map((chat) => chat.id),
+			[first, third],
+			streams.join("+"),
+		);
+		for (const chat of chatRecords(h)) {
+			assert.equal(chat.turn_count, 3);
+			assert.notEqual(chat.last_interaction_time, null);
+		}
+		const chatsCoverage = coverageOf(h.messages, "chats");
+		assert.deepEqual(
+			[chatsCoverage?.considered, chatsCoverage?.covered],
+			[3, 2],
+		);
+		assert.deepEqual(
+			ofType(h.messages, "DETAIL_GAP").map((gap) => gap.record_key),
+			streams.includes("messages") ? [second] : [],
+		);
+		assert.deepEqual(h.failures, []);
+	}
+});
+
+test("chat values count only the turns inside the chats window, and a chat out of every window is not read", async () => {
+	const [first, second, third] = CHAT_IDS;
+	assert.ok(first && second && third);
+	const seen: Seen[] = [];
+	const h = harness(fakePage(defaultRoute(), seen), {
+		streams: ["chats"],
+		scope: {
+			chats: {
+				time_range: {
+					since: "2026-01-01T00:00:00Z",
+					until: "2026-01-12T00:00:00Z",
+				},
+			},
+		},
+	});
+	await collectCharacterAi(h.ctx);
+	assert.deepEqual(
+		chatRecords(h).map((chat) => [
+			chat.id,
+			chat.turn_count,
+			chat.last_interaction_time,
+		]),
+		[
+			[first, 2, "2026-01-10T10:09:03.123456Z"],
+			[second, 2, "2026-01-10T10:09:03.123456Z"],
+		],
+	);
+	// The third chat was created after the window's end: no request reads it.
+	assert.equal(turnCalls(seen, third).length, 0);
+	const chatsCoverage = coverageOf(h.messages, "chats");
+	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [3, 3]);
+});
+
+test("a newest-first turn list is read only down to the window's start", async () => {
+	const [first, second, third] = CHAT_IDS;
+	assert.ok(first && second && third);
+	const seen: Seen[] = [];
+	const since = "2026-01-05T00:00:00Z";
+	const h = harness(fakePage(defaultRoute(everyChat(newestFirstTurns)), seen), {
+		scope: {
+			chats: { time_range: { since } },
+			messages: { time_range: { since } },
+		},
+	});
+	await collectCharacterAi(h.ctx);
+	for (const chatId of CHAT_IDS) {
+		// The second page lies wholly before `since`: the end page is never asked for.
+		assert.deepEqual(
+			turnCalls(seen, chatId).map((call) => call.search.get("next_token")),
+			[null, "older"],
+		);
+	}
+	assert.equal(messageRecords(h).length, 6);
+	assert.ok(
+		messageRecords(h).every(
+			(message) => String(message.create_time) >= "2026-01-10",
+		),
+	);
+	// The first chat was created before `since`: the runtime withholds its
+	// record, its in-window messages are still read.
+	assert.deepEqual(
+		chatRecords(h).map((chat) => [chat.id, chat.turn_count]),
+		[
+			[second, 2],
+			[third, 2],
+		],
+	);
+	assert.deepEqual(coverageOf(h.messages, "messages")?.hydrated_keys, CHAT_IDS);
+});
+
+test("an order the source does not prove never cuts a turn read short", async () => {
+	const seen: Seen[] = [];
+	const since = "2026-01-05T00:00:00Z";
+	const h = harness(fakePage(defaultRoute(everyChat(oldestFirstTurns)), seen), {
+		scope: {
+			chats: { time_range: { since } },
+			messages: { time_range: { since } },
+		},
+	});
+	await collectCharacterAi(h.ctx);
+	for (const chatId of CHAT_IDS) {
+		assert.equal(turnCalls(seen, chatId).length, 3);
+	}
+	assert.equal(messageRecords(h).length, 6);
+	// Without a start for the chats window every turn is needed, whatever the order.
+	const all: Seen[] = [];
+	const wide = harness(
+		fakePage(defaultRoute(everyChat(newestFirstTurns)), all),
+		{ scope: { messages: { time_range: { since } } } },
+	);
+	await collectCharacterAi(wide.ctx);
+	for (const chatId of CHAT_IDS) {
+		assert.equal(turnCalls(all, chatId).length, 3);
+	}
+	assert.ok(chatRecords(wide).every((chat) => chat.turn_count === 3));
+});
+
+test("narrow then wide: a later run with a wider window collects what the narrow one withheld", async () => {
+	const route = defaultRoute(everyChat(newestFirstTurns));
+	for (const narrow of [
+		{ until: "2026-01-12T00:00:00Z" },
+		{ since: "2026-01-12T00:00:00Z" },
+	]) {
+		const first = harness(fakePage(route, []), {
+			scope: {
+				chats: { time_range: narrow },
+				messages: { time_range: narrow },
+			},
+		});
+		await collectCharacterAi(first.ctx);
+		assert.ok(messageRecords(first).length < 9, JSON.stringify(narrow));
+		const state = ofType(first.messages, "STATE").at(-1);
+		assert.ok(state, "the narrow run closes its inventory");
+
+		const second = harness(fakePage(route, []), { scope: {} });
+		second.ctx.state = { chats: state.cursor };
+		await collectCharacterAi(second.ctx);
+		assert.equal(messageRecords(second).length, 9, JSON.stringify(narrow));
+		assert.deepEqual(
+			chatRecords(second).map((chat) => [chat.id, chat.turn_count]),
+			CHAT_IDS.map((id) => [id, 3]),
+		);
+	}
+});
+
+test("chats.resources reads only the named chats, from their own endpoint, and only their messages", async () => {
+	const [first, second] = CHAT_IDS;
+	assert.ok(first && second);
+	const seen: Seen[] = [];
+	const h = harness(fakePage(defaultRoute(), seen), {
+		detailGaps: pendingGaps(first),
+		scope: { chats: { resources: [second] } },
+	});
+	await collectCharacterAi(h.ctx);
+	assert.deepEqual(
+		[...new Set(seen.map((request) => request.pathname))],
+		[`/chat/${second}/`, `/turns/${second}/`],
+	);
+	assert.deepEqual(
+		chatRecords(h).map((chat) => [chat.id, chat.turn_count]),
+		[[second, 3]],
+	);
+	assert.equal(messageRecords(h).length, 3);
+	assert.ok(messageRecords(h).every((message) => message.chat_id === second));
+	const chatsCoverage = coverageOf(h.messages, "chats");
+	assert.deepEqual([chatsCoverage?.considered, chatsCoverage?.covered], [1, 1]);
+	assert.deepEqual(coverageOf(h.messages, "messages")?.required_keys, [second]);
+	// A pending gap for a chat outside the resources is left as it is.
+	assert.equal(ofType(h.messages, "DETAIL_GAP_RECOVERED").length, 0);
+	assert.equal(ofType(h.messages, "STATE").length, 1);
+
+	// A named chat that cannot be read is not covered and emits nothing.
+	const missing = harness(fakePage(defaultRoute(), []), {
+		scope: { chats: { resources: [second, GONE_CHAT] } },
+	});
+	await collectCharacterAi(missing.ctx);
+	assert.deepEqual(
+		chatRecords(missing).map((chat) => chat.id),
+		[second],
+	);
+	const missingCoverage = coverageOf(missing.messages, "chats");
+	assert.deepEqual(
+		[missingCoverage?.considered, missingCoverage?.covered],
+		[2, 1],
+	);
+});
+
+test("messages.resources and the messages window decide which turns can gap a chat", async () => {
+	const [first, , third] = CHAT_IDS;
+	assert.ok(first && third);
+	const [wanted] = fixtureTurns(first) as Array<{
+		turn_key: { turn_id: string };
+	}>;
+	assert.ok(wanted);
+	// The third chat's middle turn is still generating, but it is not a
+	// message this run may emit: it does not hold the chat as a gap.
+	const route = defaultRoute({
+		[third]: turnsWithCandidate(third, { is_final: false }),
+	});
+	const h = harness(fakePage(route, []), {
+		scope: { messages: { resources: [wanted.turn_key.turn_id] } },
+	});
+	await collectCharacterAi(h.ctx);
+	assert.deepEqual(
+		messageRecords(h).map((message) => message.id),
+		[wanted.turn_key.turn_id],
+	);
+	assert.equal(ofType(h.messages, "DETAIL_GAP").length, 0);
+	assert.deepEqual(coverageOf(h.messages, "messages")?.hydrated_keys, CHAT_IDS);
+	assert.deepEqual(h.failures, []);
+
+	const windowed = harness(fakePage(route, []), {
+		scope: { messages: { time_range: { since: "2026-01-12T00:00:00Z" } } },
+	});
+	await collectCharacterAi(windowed.ctx);
+	assert.equal(ofType(windowed.messages, "DETAIL_GAP").length, 0);
+	assert.equal(messageRecords(windowed).length, 3);
+});
+
+test("stream failures carry the portable recovery hint for who can act", async () => {
+	const body = structuredClone(CHATS) as {
+		chats: Array<Record<string, unknown>>;
+	};
+	assert.ok(body.chats[2]);
+	body.chats[2].chat_id = "not-a-uuid";
+	const unkeyed = harness(
+		fakePage(defaultRoute({ chats: () => json(body) }), []),
+	);
+	await collectCharacterAi(unkeyed.ctx);
+	assert.deepEqual(
+		unkeyed.failures.map((failure) => failure.options?.recoveryHint),
+		[
+			{ action: "retry_on_connector_upgrade", retryable: false },
+			{ action: "retry_on_connector_upgrade", retryable: false },
+		],
+	);
+	const unproven = harness(
+		fakePage(
+			defaultRoute({
+				chats: () => json(fixture("get-neo-chats-recent-page1.json")),
+			}),
+			[],
+		),
+	);
+	await collectCharacterAi(unproven.ctx);
+	assert.deepEqual(
+		unproven.failures.map((failure) => failure.options?.recoveryHint),
+		[
+			{ action: "retry_by_runtime", retryable: true },
+			{ action: "retry_by_runtime", retryable: true },
+		],
+	);
+});
+
+test("run-level codes reach DONE with a portable recovery hint", () => {
+	const hintOf = (message: string, retryable = false) =>
+		normalizeCharacterAiTerminalError({ message, retryable });
+	assert.deepEqual(hintOf("character_ai_auth_failed").recovery_hint, {
+		action: "refresh_credentials",
+		retryable: false,
+	});
+	assert.deepEqual(
+		hintOf("character_ai_session_failed: character_ai_auth_failed")
+			.recovery_hint,
+		{ action: "refresh_credentials", retryable: false },
+	);
+	const challenge = hintOf(
+		"character_ai_challenge: non-JSON answer (HTTP 403) on /chats/recent/",
+	);
+	assert.deepEqual(
+		[challenge.retryable, challenge.recovery_hint],
+		[true, { action: "manual_action_required", retryable: true }],
+	);
+	for (const message of [
+		"character_ai_interrupted",
+		"character_ai_api_429 on /turns/:chat_id/",
+		"character_ai_api_503 on /chats/recent/",
+		"character_ai_timeout after 30000ms",
+	]) {
+		assert.deepEqual(hintOf(message, true).recovery_hint, {
+			action: "retry_by_runtime",
+			retryable: true,
+		});
+	}
+	for (const message of [
+		"character_ai_invalid_payload: chats/recent: chats: Required",
+		"character_ai_api_404 on /chats/recent/",
+	]) {
+		assert.deepEqual(hintOf(message).recovery_hint, {
+			action: "retry_on_connector_upgrade",
+			retryable: false,
+		});
+	}
+	// Anything else, and a failure that already has a hint, is left alone.
+	const other = {
+		message: "stream collection failed: chats: x",
+		retryable: true,
+	};
+	assert.deepEqual(normalizeCharacterAiTerminalError(other), other);
+	const hinted = {
+		message: "character_ai_auth_failed",
+		retryable: false,
+		recovery_hint: "not_retriable",
+	};
+	assert.deepEqual(normalizeCharacterAiTerminalError(hinted), hinted);
 });

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "character-ai",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Character.AI",
 	"runtime_requirements": {
 		"bindings": {
@@ -46,7 +46,7 @@
 	"streams": [
 		{
 			"name": "chats",
-			"description": "Every chat the Character.AI chat list returns, one record per chat. Last interaction time and turn count come from the chat's own turns and are null when the turns could not be read this run.",
+			"description": "Every chat the Character.AI chat list returns, one record per chat. Last interaction time and turn count come from the chat's own turns; a chat whose turns could not be read this run is not emitted, so its stored values stay as last read. Last interaction time is null only for a chat with no turns. Under a time range both count only the turns inside it. The time range applies to when the chat was created.",
 			"display": {
 				"label": "Your chats",
 				"detail": "Per chat: the character's id and name, chat type and state, when the chat was created, when its latest message was sent, and how many messages it has."
@@ -103,14 +103,13 @@
 				]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "last_interaction_time",
 			"consent_time_field": "create_time",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
 			"required": true,
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["character_name"]
@@ -130,7 +129,7 @@
 		},
 		{
 			"name": "messages",
-			"description": "Every turn of every chat, one record per turn, with the text of the turn's currently selected (primary) candidate. Turns are read to the end of each chat's turn list. Mutable: when the owner swipes a turn to another candidate, the next run replaces that turn's record with the newly selected candidate's text.",
+			"description": "Every turn of every chat, one record per turn, with the text of the turn's currently selected (primary) candidate. Turns are read to the end of each chat's turn list, or down to the start of the time range once the list shows newest-first order. Collected only together with chats. A turn that cannot be stored as it is is left out and reported. Mutable: when the owner swipes a turn to another candidate, the next run replaces that turn's record with the newly selected candidate's text.",
 			"display": {
 				"label": "Your messages",
 				"detail": "Each message in each chat: whether you or the character wrote it, the author's name, the message text, and when it was sent."
@@ -202,14 +201,13 @@
 				]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "create_time",
 			"consent_time_field": "create_time",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
 			"required": true,
-			"incremental": true,
+			"incremental": false,
 			"relationships": [
 				{
 					"name": "chat",
@@ -238,6 +236,16 @@
 			"freshness_strategy": "scheduled_window"
 		}
 	],
+	"reason_display_messages": {
+		"stream_collection_failed": "Character.AI could not be read completely this time. Nothing was lost; the next sync tries again.",
+		"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
+		"character_ai_turn_unstorable": "Some Character.AI messages could not be saved as they are and were left out. A connector update may read them.",
+		"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
+		"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
+		"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",
+		"character_ai_api_429": "Character.AI is limiting requests right now. The sync will try again later.",
+		"character_ai_invalid_payload": "Character.AI answered in a format this connector does not recognize. A connector update is needed."
+	},
 	"mobile": {
 		"pageshim": {
 			"scope_prefix": "character_ai",
