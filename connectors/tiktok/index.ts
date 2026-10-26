@@ -121,6 +121,17 @@
  *     expiry only) is enough, then the profile page opens. A count above the
  *     listed entries is accepted only when no entry was read twice. Session
  *     errors are thrown as bare codes so the runtime keeps them.
+ *   v0.3.7 (2026-10-26): Collection Profile semantics. A run limited to a
+ *     start date stops the own-videos list once a page proves the rest is
+ *     older (newest-first order held, pinned videos aside, a millisecond
+ *     cursor before the start); requested resources end a list once all were
+ *     read, and collection_items reads only the collections its resources
+ *     name. Failures carry portable recovery hints. likes and favorites are
+ *     mutable_state and follow the count-above-listed rule; videos declares
+ *     no cursor_field (STATE is never read). A collection without an owner
+ *     name no longer fails the others; a collection whose answer cannot be
+ *     read fails the stream instead of a gap retried forever; pending gaps
+ *     beyond START's page are paged in and settled.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -136,6 +147,10 @@ import {
 	emitDetailGap,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	isOutsideTimeRange,
+	parseIsoInstant,
+} from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	type AllowedPath,
 	apiGetExpression,
@@ -154,6 +169,7 @@ import {
 	collectionItemCount,
 	envelopeStatus,
 	type Item,
+	type ItemPage,
 	isSignedOutAccount,
 	newTextNotes,
 	parseAccount,
@@ -212,15 +228,20 @@ const FOLLOWING = "following";
 const FOLLOWERS = "followers";
 const FAVORITE_COLLECTIONS = "favorite_collections";
 const COLLECTION_ITEMS = "collection_items";
+/**
+ * The order streams run in. likes and favorites come last: they can be the
+ * longest lists and may be read twice to settle a count (walkSaved), so the
+ * request budget they spend cannot starve the other streams.
+ */
 const STREAMS = [
 	VIDEOS,
 	PROFILE,
-	LIKES,
-	FAVORITES,
 	FAVORITE_COLLECTIONS,
 	COLLECTION_ITEMS,
 	FOLLOWING,
 	FOLLOWERS,
+	LIKES,
+	FAVORITES,
 ] as const;
 type Stream = (typeof STREAMS)[number];
 
@@ -255,6 +276,11 @@ export interface TikTokCollectContext {
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 	/** Pending detail gaps from earlier runs; absent on hosts that keep none. */
 	detailGaps?: BrowserCollectContext["detailGaps"];
+	/**
+	 * Asks the runtime for the next page of pending detail gaps (START carries
+	 * a bounded first page); absent on hosts that page none.
+	 */
+	requestDetailGapPage?: BrowserCollectContext["requestDetailGapPage"];
 	/** When true, only retry `detailGaps`, then return. */
 	recoveryOnly?: boolean;
 	requested: BrowserCollectContext["requested"];
@@ -331,6 +357,38 @@ const STOP_CODES: Record<StopClass, string> = {
 	missing_param: "tiktok_app_value_not_seen",
 	scope: "tiktok_parent_stream_required",
 	incomplete: "tiktok_list_incomplete",
+};
+
+/**
+ * The portable recovery hint (Collection Profile 5.5) each stop suggests. Its
+ * `retryable` agrees with RETRYABLE_STOPS, so a hint never says "retry" while
+ * the failure says it is not retryable.
+ */
+export const STOP_HINTS: Record<
+	StopClass,
+	{ action: string; retryable: boolean }
+> = {
+	auth: { action: "refresh_credentials", retryable: false },
+	// The person clears TikTok's check in their own browser first.
+	challenge: { action: "manual_action_required", retryable: false },
+	// The page stopped signing as TikTok's own app does: the reader must change.
+	unsigned: { action: "retry_on_connector_upgrade", retryable: false },
+	rate_limited: { action: "retry_by_runtime", retryable: true },
+	server_error: { action: "retry_by_runtime", retryable: true },
+	interrupted: { action: "retry_by_runtime", retryable: true },
+	request_limit: { action: "retry_by_runtime", retryable: true },
+	// An answer this connector does not recognise, or a value TikTok's app no
+	// longer sends: a fresh run reads the same; a new connector version must.
+	unreadable: { action: "retry_on_connector_upgrade", retryable: false },
+	missing_param: { action: "retry_on_connector_upgrade", retryable: false },
+	// TikTok refused with its own status code: whether a later run helps is
+	// not known.
+	status_error: { action: "unknown", retryable: false },
+	// The person selects favorite_collections together with collection_items.
+	scope: { action: "manual_action_required", retryable: false },
+	// The list did not show its end (a repeated cursor, the page cap, fewer
+	// entries than counted): not known to clear on a retry.
+	incomplete: { action: "unknown", retryable: false },
 };
 
 export class TikTokStop extends Error {
@@ -496,6 +554,8 @@ function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 	return {
 		get,
 		requests: () => requests,
+		/** Requests this run may still send before its limit. */
+		remaining: () => Math.max(0, maxRequests - requests),
 		transport: () => transport,
 		signed: () => signed,
 	};
@@ -848,6 +908,12 @@ interface WalkResult {
 	failedFields?: string[];
 	/** Distinct items handed to `onItem`. */
 	read: number;
+	/**
+	 * True when `stopAfterPage` ended the walk before TikTok's hasMore:false:
+	 * the run asked for less than the whole list (a time range or resources),
+	 * so TikTok's count of the whole list does not apply.
+	 */
+	stopped: boolean;
 	total: number | null;
 	unreadable: number;
 }
@@ -857,7 +923,9 @@ interface WalkResult {
  * TikTok says `hasMore: false`. That is the only way a walk completes: a
  * known id is not an end (a list can hold new items below one), and any
  * other ending throws: a repeated cursor, a page that adds nothing while
- * hasMore is true, a missing cursor or the page cap.
+ * hasMore is true, a missing cursor or the page cap. The one exception is
+ * `stopAfterPage`: after a page whose items were all handed on, it may end a
+ * walk the run's scope proves needs nothing more (`stopped: true`).
  */
 async function walkItemList(
 	api: Api,
@@ -865,6 +933,7 @@ async function walkItemList(
 	base: Params,
 	maxPages: number,
 	onItem: (item: Item) => Promise<void>,
+	stopAfterPage?: (page: ItemPage) => boolean,
 ): Promise<WalkResult> {
 	const seenCursors = new Set<string>();
 	const seenIds = new Set<string>();
@@ -919,10 +988,11 @@ async function walkItemList(
 			await onItem(item);
 			read += 1;
 		}
-		if (!page.hasMore) {
+		if (!page.hasMore || stopAfterPage?.(page) === true) {
 			return {
 				entries,
 				read,
+				stopped: page.hasMore,
 				total,
 				unreadable,
 				failedFields: [...failedFields],
@@ -953,7 +1023,13 @@ async function walkUserList(
 	scene: string,
 	maxPages: number,
 	onUser: (user: User) => Promise<void>,
-): Promise<{ read: number; total: number | null; unreadable: number }> {
+	stopAfterPage?: () => boolean,
+): Promise<{
+	read: number;
+	stopped: boolean;
+	total: number | null;
+	unreadable: number;
+}> {
 	const seenCursors = new Set<number>();
 	const seenIds = new Set<string>();
 	let minCursor = 0;
@@ -997,7 +1073,10 @@ async function walkUserList(
 					`TikTok cut this list short after ${seenIds.size} accounts`,
 				);
 			}
-			return { read: seenIds.size, total, unreadable };
+			return { read: seenIds.size, stopped: false, total, unreadable };
+		}
+		if (stopAfterPage?.() === true) {
+			return { read: seenIds.size, stopped: true, total, unreadable };
 		}
 		if (added === 0 && page.unreadable === 0) {
 			throw new TikTokStop(
@@ -1023,13 +1102,16 @@ async function walkUserList(
 /**
  * The checks every finished list goes through before its STATE: unreadable
  * entries and fewer distinct entries than TikTok counted both fail the
- * stream. A terminal page does not account for missing entries.
+ * stream. A terminal page does not account for missing entries. A walk the
+ * run's scope ended early (`stopped`) read only part of the list on purpose,
+ * so TikTok's count of the whole list is not held against it.
  */
 function assertComplete(
 	stream: Stream,
 	walk: {
 		failedFields?: string[];
 		read: number;
+		stopped?: boolean;
 		total: number | null;
 		unreadable: number;
 	},
@@ -1044,7 +1126,7 @@ function assertComplete(
 			`${walk.unreadable} ${stream} ${walk.unreadable === 1 ? "entry" : "entries"} did not match the recorded shape${fields}`,
 		);
 	}
-	if (walk.total !== null && walk.read < walk.total) {
+	if (walk.stopped !== true && walk.total !== null && walk.read < walk.total) {
 		throw new TikTokStop(
 			"incomplete",
 			`TikTok counted ${walk.total} ${stream} but only ${walk.read} distinct entries could be read`,
@@ -1086,6 +1168,37 @@ function settleCount(
 	return false;
 }
 
+/**
+ * Whether a page of the owner's own videos proves that the rest of the list
+ * lies before `since`. TikTok lists them newest first, with pinned videos on
+ * top whatever their age, and pages on a cursor that is a posting time in
+ * milliseconds. The proof needs all of: no unreadable entry on the page, at
+ * least one unpinned video, every unpinned video posted before `since`, no
+ * pin marker dropped for its type, and a next cursor that is a millisecond
+ * time no later than the page's oldest unpinned video and itself before
+ * `since`. The caller also requires that
+ * every unpinned video read so far came newest first; any doubt reads on.
+ */
+export function pageBeforeSince(page: ItemPage, since: string): boolean {
+	if (page.unreadable > 0) return false;
+	// A pin marker TikTok sent in another type was dropped: which videos are
+	// pinned is then unknown, so nothing is proved.
+	if (page.dropped.includes("isPinnedItem")) return false;
+	const listed = page.items.filter((item) => item.isPinnedItem !== true);
+	if (listed.length === 0) return false;
+	const before = (instant: string): boolean =>
+		isOutsideTimeRange({ since }, instant);
+	if (!listed.every((item) => before(secondsToInstant(item.createTime))))
+		return false;
+	const cursor = page.cursor;
+	if (cursor === null || !/^[0-9]{13}$/.test(cursor)) return false;
+	const cursorMs = Number(cursor);
+	const oldest = Math.min(...listed.map((item) => item.createTime));
+	return (
+		cursorMs <= oldest * 1000 + 999 && before(new Date(cursorMs).toISOString())
+	);
+}
+
 export async function collectTikTok(
 	ctx: TikTokCollectContext,
 	options: TikTokCollectOptions = {},
@@ -1100,15 +1213,19 @@ export async function collectTikTok(
 	const fail = async (stream: Stream, error: TikTokStop): Promise<void> => {
 		finished.add(stream);
 		const retryable = RETRYABLE_STOPS.has(error.stop);
+		const recoveryHint = { ...STOP_HINTS[error.stop], retryable };
 		if (ctx.reportStreamFailure) {
-			await ctx.reportStreamFailure(stream, error.message, { retryable });
+			await ctx.reportStreamFailure(stream, error.message, {
+				retryable,
+				recoveryHint,
+			});
 		} else {
 			await ctx.emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: STOP_CODES[error.stop],
+				reason: "stream_collection_failed",
 				message: error.message,
-				recovery_hint: { action: "retry_by_runtime", retryable },
+				recovery_hint: recoveryHint,
 			});
 		}
 	};
@@ -1147,6 +1264,35 @@ export async function collectTikTok(
 	const secUid = account.secUid;
 	/** Base query of the owner's own item lists. */
 	const ownList: Params = { secUid, coverFormat: "2" };
+
+	/**
+	 * The ids the run asked for in `stream` (its resources), tracked as the
+	 * list is read: `done` once every one was read, so the walk can end there.
+	 * Null when the run asked for the whole stream. Record ids are TikTok's
+	 * own video or account ids, so a list entry and a resource compare as is.
+	 */
+	const resourceTracker = (
+		stream: Stream,
+	): { done: () => boolean; see: (id: string) => void } | null => {
+		const resources = ctx.requested.get(stream)?.resources;
+		if (!Array.isArray(resources) || resources.length === 0) return null;
+		const wanted = new Set(resources.map(String));
+		const found = new Set<string>();
+		return {
+			done: () => found.size === wanted.size,
+			see: (id) => {
+				if (wanted.has(id)) found.add(id);
+			},
+		};
+	};
+
+	/** The run's `since` for `stream`, when it is a valid RFC 3339 instant. */
+	const pushableSince = (stream: Stream): string | null => {
+		const since = ctx.requested.get(stream)?.time_range?.since;
+		return typeof since === "string" && parseIsoInstant(since) !== null
+			? since
+			: null;
+	};
 
 	/** Records withheld per stream because a present text was not safe text. */
 	const unsafe = new Map<Stream, number>();
@@ -1274,39 +1420,59 @@ export async function collectTikTok(
 	};
 
 	/**
-	 * Make sure the page holds the `sourceType` the web app sends on
-	 * /api/collection/item_list/. The connector never guesses it: when this
-	 * page has no such request, it opens the collection's own page (where the
-	 * app makes that request itself) once, and waits for it. Returns false
-	 * when the app still did not send one.
+	 * Whether the page holds the `sourceType` the web app sends on
+	 * /api/collection/item_list/ (copied from the app's own request; never
+	 * guessed). It never navigates.
+	 */
+	const collectionSourceReady = async (): Promise<boolean> => {
+		const status = await watch(ctx.page);
+		return (
+			status?.client === true &&
+			status.copied?.["/api/collection/item_list/"] === true
+		);
+	};
+
+	/**
+	 * Make sure the page holds that `sourceType` before any collection is
+	 * read. The value belongs to the page, not to one collection, so when this
+	 * page has no such request the connector opens, once, the page of the first
+	 * collection whose owner name is known (a target first, else any listed
+	 * collection in `inventory`; the app makes the request itself there) and
+	 * waits for it. A collection without an owner name is read with the value
+	 * another collection's page gave. Returns false when the app still did not
+	 * send one.
 	 */
 	let collectionPageOpened = false;
 	const ensureCollectionSource = async (
-		collection: Collection,
+		targets: readonly Collection[],
+		inventory: readonly Collection[] = targets,
 	): Promise<boolean> => {
-		const ready = async (): Promise<boolean> => {
-			const status = await watch(ctx.page);
-			return (
-				status?.client === true &&
-				status.copied?.["/api/collection/item_list/"] === true
-			);
-		};
-		if (await ready()) return true;
-		if (collectionPageOpened || !collection.userName) return false;
+		if (await collectionSourceReady()) return true;
+		const opener =
+			targets.find((collection) => collection.userName) ??
+			inventory.find((collection) => collection.userName);
+		if (collectionPageOpened || !opener?.userName) return false;
 		collectionPageOpened = true;
-		const slug = `${encodeURIComponent(collection.name)}-${collection.collectionId}`;
+		const slug = `${encodeURIComponent(opener.name)}-${opener.collectionId}`;
 		await ctx.page.goto(
-			`${TIKTOK_ORIGIN}/@${encodeURIComponent(collection.userName)}/collection/${slug}`,
+			`${TIKTOK_ORIGIN}/@${encodeURIComponent(opener.userName)}/collection/${slug}`,
 			{ waitUntil: "domcontentloaded" },
 		);
 		for (let waited = 0; waited < CLIENT_WAIT_MS; waited += POLL_INTERVAL_MS) {
 			await delay(POLL_INTERVAL_MS);
-			if (await ready()) return true;
+			if (await collectionSourceReady()) return true;
 		}
 		return false;
 	};
 
-	/** Item-level outcomes of one collection's item list: a gap, not a stop. */
+	/**
+	 * Item-level outcomes of one collection's item list: they end that
+	 * collection, not the run. Only `incomplete` (TikTok did not show the end
+	 * of the list, or it changed while read) is a DETAIL_GAP a later run may
+	 * clear; an answer this connector cannot read, or TikTok's own refusal,
+	 * would come back the same, so it fails the stream instead of leaving a
+	 * gap that is retried forever.
+	 */
 	const ITEM_STOPS: ReadonlySet<StopClass> = new Set([
 		"unreadable",
 		"status_error",
@@ -1408,12 +1574,40 @@ export async function collectTikTok(
 	/** Pending collection_items gaps from earlier runs, by collection id. */
 	type PendingGap = NonNullable<TikTokCollectContext["detailGaps"]>[number];
 	const pendingGaps = new Map<string, PendingGap[]>();
-	for (const gap of ctx.detailGaps ?? []) {
-		const id = gap.detail_locator?.collection_id ?? gap.record_key;
-		if (gap.stream !== COLLECTION_ITEMS) continue;
-		if (typeof id !== "string" || !/^[0-9]{1,30}$/.test(id)) continue;
-		pendingGaps.set(id, [...(pendingGaps.get(id) ?? []), gap]);
-	}
+	/** Every collection_items gap id seen this run, from START or a page. */
+	const seenGapIds = new Set<string>();
+	/**
+	 * Take the gaps of one page (START's, or one the runtime pages in). Every
+	 * gap id on the page counts as seen, whether or not it names a collection
+	 * this connector can read, so a page of gaps that do not close still
+	 * leads to the next page. Returns how many gap ids were new (paging ends
+	 * at a page with none) and the collection ids the new valid gaps name.
+	 */
+	const addPendingGaps = (
+		entries: TikTokCollectContext["detailGaps"],
+	): { fresh: string[]; unseen: number } => {
+		const fresh: string[] = [];
+		let unseen = 0;
+		for (const gap of entries ?? []) {
+			if (seenGapIds.has(gap.gap_id)) continue;
+			seenGapIds.add(gap.gap_id);
+			unseen += 1;
+			const id = gap.detail_locator?.collection_id ?? gap.record_key;
+			if (gap.stream !== COLLECTION_ITEMS) continue;
+			if (typeof id !== "string" || !/^[0-9]{1,30}$/.test(id)) continue;
+			pendingGaps.set(id, [...(pendingGaps.get(id) ?? []), gap]);
+			if (!fresh.includes(id)) fresh.push(id);
+		}
+		return { fresh, unseen };
+	};
+	addPendingGaps(ctx.detailGaps);
+	/** The next page of pending gaps; empty on a host that pages none. */
+	const nextGapPage = async (): Promise<{ fresh: string[]; unseen: number }> =>
+		ctx.requestDetailGapPage
+			? addPendingGaps(
+					await ctx.requestDetailGapPage({ streams: [COLLECTION_ITEMS] }),
+				)
+			: { fresh: [], unseen: 0 };
 
 	/** Acknowledge every pending gap of one collection that is now settled. */
 	const recoverGaps = async (collectionId: string): Promise<void> => {
@@ -1431,30 +1625,107 @@ export async function collectTikTok(
 	};
 
 	/**
+	 * Collections whose videos the run asked for: all of them, unless a
+	 * stream names resources. collection_items record ids are
+	 * `<collection id>:<video id>`, so only the collections they name are read
+	 * from TikTok. favorite_collections resources name the parents the run
+	 * keeps; a collection whose parent record is not kept gets no videos read
+	 * (a child is never emitted without its parent).
+	 */
+	const childTargets = (list: readonly Collection[]): Collection[] => {
+		const named = (
+			stream: Stream,
+			idOf: (resource: string) => string | null,
+		) => {
+			const resources = ctx.requested.get(stream)?.resources;
+			if (!Array.isArray(resources) || resources.length === 0) return null;
+			const ids = new Set<string>();
+			for (const resource of resources) {
+				const id = idOf(String(resource));
+				if (id !== null) ids.add(id);
+			}
+			return ids;
+		};
+		const children = named(
+			COLLECTION_ITEMS,
+			(resource) => /^([0-9]{1,30}):[0-9]{1,30}$/.exec(resource)?.[1] ?? null,
+		);
+		const parents = named(FAVORITE_COLLECTIONS, (resource) => resource);
+		return list.filter(
+			(collection) =>
+				(children === null || children.has(collection.collectionId)) &&
+				(parents === null || parents.has(collection.collectionId)),
+		);
+	};
+
+	/**
 	 * Hydrate each collection in `targets` (their parent records are already
 	 * emitted), give every one exactly one outcome (hydrated, which also
-	 * acknowledges its pending gaps, or a fresh DETAIL_GAP), acknowledge gaps
-	 * of collections no longer in the complete list `listed` (null when TikTok
-	 * counted more collections than it listed: an absent one may be among
-	 * those, so its gap stays pending), then one
-	 * DETAIL_COVERAGE and the child STATE. A run-level stop propagates and
-	 * leaves no coverage and no checkpoint.
+	 * acknowledges its pending gaps; a fresh DETAIL_GAP when TikTok did not
+	 * show the end of its list or the page lost the app's value; or a stream
+	 * failure when its answer cannot be read), acknowledge gaps of collections
+	 * no longer in the complete list `listed` (null when TikTok counted more
+	 * collections than it listed: an absent one may be among those, so its gap
+	 * stays pending), page in the pending gaps START did not carry and settle
+	 * them the same way (in a recovery run, `extraTarget` names the collections
+	 * those pages ask for), then one DETAIL_COVERAGE and the child STATE. A
+	 * run-level stop propagates and leaves no coverage and no checkpoint.
 	 */
 	const hydrateAll = async (
 		targets: Collection[],
+		inventory: readonly Collection[],
 		listed: ReadonlySet<string> | null,
+		extraTarget?: (
+			collectionId: string,
+		) => Promise<Collection | TikTokStop | null>,
 	): Promise<TikTokStop | null> => {
+		const requiredKeys: string[] = [];
 		const hydratedKeys: string[] = [];
 		const gapKeys: string[] = [];
+		const failures: TikTokStop[] = [];
 		let items = 0;
-		for (const collection of targets) {
-			if (!(await ensureCollectionSource(collection))) {
-				// No child record was emitted yet: the stream fails visibly and
-				// writes no coverage; nothing is guessed.
-				return new TikTokStop(
-					"missing_param",
-					"the TikTok web app did not send the sourceType it uses for a collection's videos, so collection contents were not read",
+		if (
+			targets.length > 0 &&
+			!(await ensureCollectionSource(targets, inventory))
+		) {
+			// No child record was emitted yet: the stream fails visibly and
+			// writes no coverage; nothing is guessed.
+			return new TikTokStop(
+				"missing_param",
+				"the TikTok web app did not send the sourceType it uses for a collection's videos, so collection contents were not read",
+			);
+		}
+		const gap = async (collection: Collection, error: TikTokStop) => {
+			await emitDetailGap(ctx, {
+				stream: COLLECTION_ITEMS,
+				parentStream: FAVORITE_COLLECTIONS,
+				recordKey: collection.collectionId,
+				reason: "temporary_unavailable",
+				locator: {
+					kind: "tiktok.collection",
+					collection_id: collection.collectionId,
+					name: collection.name,
+					user_name: collection.userName ?? null,
+				},
+				error: { class: STOP_CODES[error.stop], message: error.message },
+			});
+			gapKeys.push(collection.collectionId);
+		};
+		const hydrateOne = async (collection: Collection): Promise<void> => {
+			requiredKeys.push(collection.collectionId);
+			if (!(await ensureCollectionSource([collection], inventory))) {
+				// The page does not hold the app's value for this collection
+				// (TikTok replaced the page after it was seen, and the one
+				// collection-page open is spent): only this collection is
+				// retried later.
+				await gap(
+					collection,
+					new TikTokStop(
+						"missing_param",
+						"the page no longer held the sourceType the web app sends for a collection's videos",
+					),
 				);
+				return;
 			}
 			try {
 				items += await hydrateCollection(collection);
@@ -1464,34 +1735,55 @@ export async function collectTikTok(
 				if (!(error instanceof TikTokStop) || !ITEM_STOPS.has(error.stop)) {
 					throw error;
 				}
-				await emitDetailGap(ctx, {
-					stream: COLLECTION_ITEMS,
-					parentStream: FAVORITE_COLLECTIONS,
-					recordKey: collection.collectionId,
-					reason: "temporary_unavailable",
-					locator: {
-						kind: "tiktok.collection",
-						collection_id: collection.collectionId,
-						name: collection.name,
-						user_name: collection.userName ?? null,
-					},
-					error: { class: STOP_CODES[error.stop], message: error.message },
-				});
-				gapKeys.push(collection.collectionId);
+				if (error.stop === "incomplete") await gap(collection, error);
+				else failures.push(error);
 			}
-		}
-		// A gapped collection the complete list no longer holds was deleted:
-		// there is nothing left to read for it.
-		for (const id of listed ? [...pendingGaps.keys()] : []) {
-			if (!listed?.has(id)) await recoverGaps(id);
+		};
+		for (const collection of targets) await hydrateOne(collection);
+		/** Settle the pending gaps of one collection, as far as this run can. */
+		const settle = async (id: string): Promise<void> => {
+			if (hydratedKeys.includes(id)) {
+				await recoverGaps(id);
+				return;
+			}
+			// A gapped collection the complete list no longer holds was
+			// deleted: there is nothing left to read for it.
+			if (listed && !listed.has(id)) {
+				await recoverGaps(id);
+				return;
+			}
+			if (requiredKeys.includes(id) || !extraTarget) return;
+			const collection = await extraTarget(id);
+			if (collection instanceof TikTokStop) {
+				requiredKeys.push(id);
+				failures.push(collection);
+			} else if (collection) await hydrateOne(collection);
+		};
+		for (const id of [...pendingGaps.keys()]) await settle(id);
+		// START carries a bounded page of gaps; the rest come one page at a
+		// time, each settled before the next is asked for.
+		for (let page = await nextGapPage(); page.unseen > 0; ) {
+			for (const id of page.fresh) await settle(id);
+			page = await nextGapPage();
 		}
 		await emitDetailCoverage(ctx, {
 			stream: COLLECTION_ITEMS,
 			stateStream: FAVORITE_COLLECTIONS,
-			requiredKeys: targets.map((collection) => collection.collectionId),
+			requiredKeys,
 			hydratedKeys,
 			gapKeys,
 		});
+		const [first] = failures;
+		if (first) {
+			// Required but neither hydrated nor gapped: the coverage leaves
+			// them unaccounted, and the stream fails without its STATE.
+			return failures.length === 1
+				? first
+				: new TikTokStop(
+						first.stop,
+						`${failures.length} collections could not be read; the first: ${first.message}`,
+					);
+		}
 		await ctx.emit({
 			type: "STATE",
 			stream: COLLECTION_ITEMS,
@@ -1689,6 +1981,7 @@ export async function collectTikTok(
 		let childFailure: TikTokStop | null = null;
 		if (childRequested) {
 			childFailure = await hydrateAll(
+				childTargets(list),
 				list,
 				short
 					? null
@@ -1711,9 +2004,15 @@ export async function collectTikTok(
 	/**
 	 * Recovery-only: retry earlier collection gaps. The complete list is read
 	 * so each recovered collection's parent record is emitted before its
-	 * videos, and gaps of collections no longer listed are acknowledged.
+	 * videos, and gaps of collections no longer listed are acknowledged. When
+	 * START carries none, one page is asked of the runtime first.
 	 */
 	const recoverCollections = async (): Promise<void> => {
+		for (
+			let page = { fresh: [] as string[], unseen: 1 };
+			pendingGaps.size === 0 && page.unseen > 0;
+		)
+			page = await nextGapPage();
 		if (pendingGaps.size === 0) return;
 		if (!ctx.requested.has(FAVORITE_COLLECTIONS)) {
 			await fail(COLLECTION_ITEMS, parentRequired);
@@ -1730,7 +2029,7 @@ export async function collectTikTok(
 			throw error;
 		}
 		const { list } = walk;
-		const targets = list.filter((collection) =>
+		const targets = childTargets(list).filter((collection) =>
 			pendingGaps.has(collection.collectionId),
 		);
 		const parents = buildParents(targets);
@@ -1752,16 +2051,38 @@ export async function collectTikTok(
 			await fail(COLLECTION_ITEMS, error);
 			return;
 		}
+		const byId = new Map(
+			list.map((collection) => [collection.collectionId, collection]),
+		);
+		/** A collection a later gap page names: its parent record, then it. */
+		const extraTarget = async (
+			id: string,
+		): Promise<Collection | TikTokStop | null> => {
+			const collection = byId.get(id);
+			if (!collection || childTargets([collection]).length === 0) return null;
+			const parent = buildParents([collection]);
+			if ("failure" in parent) return parent.failure;
+			for (const record of parent.records)
+				await ctx.emitRecord(FAVORITE_COLLECTIONS, record);
+			return collection;
+		};
 		const failure = await hydrateAll(
 			targets,
+			list,
 			short ? null : new Set(list.map((collection) => collection.collectionId)),
+			extraTarget,
 		);
 		if (failure) await fail(COLLECTION_ITEMS, failure);
 	};
 
 	const run: Record<Stream, () => Promise<void>> = {
 		[VIDEOS]: async () => {
-			let newest: string | null = null;
+			const named = resourceTracker(VIDEOS);
+			const since = pushableSince(VIDEOS);
+			/** Posting time of the last unpinned video handed on. */
+			let previous: number | null = null;
+			/** Whether every unpinned video so far came newest first. */
+			let newestFirst = true;
 			const walk = await walkItemList(
 				api,
 				"/api/post/item_list/",
@@ -1769,23 +2090,34 @@ export async function collectTikTok(
 				maxPages,
 				async (item) => {
 					if (ownFirstItem === null && isOwnerItem(item)) ownFirstItem = item;
-					const created = secondsToInstant(item.createTime);
-					if (newest === null || String(created) > newest) {
-						newest = String(created);
+					named?.see(item.id);
+					if (item.isPinnedItem !== true) {
+						if (previous !== null && item.createTime > previous)
+							newestFirst = false;
+						previous = item.createTime;
 					}
 					await emitBuilt(VIDEOS, () => buildVideoRecord(item, notes));
 				},
+				(page) =>
+					named?.done() === true ||
+					(since !== null && newestFirst && pageBeforeSince(page, since)),
 			);
+			if (walk.stopped)
+				connectorDiagnostic("tiktok", "list_stopped_in_scope", {
+					stream: VIDEOS,
+					pages: walk.pages,
+				});
 			assertComplete(VIDEOS, walk);
 			assertSafe(VIDEOS);
 			// A proved-empty list, or a usable own video, settles the profile
-			// counts; listed videos without the counts leave it to findOwnItem,
-			// which fails the profile.
-			ownFirstItemRead = ownFirstItem !== null || walk.read === 0;
+			// counts; listed videos without the counts, or a walk the scope
+			// ended early without one, leave it to findOwnItem.
+			ownFirstItemRead =
+				ownFirstItem !== null || (walk.read === 0 && !walk.stopped);
 			await ctx.emit({
 				type: "STATE",
 				stream: VIDEOS,
-				cursor: { newest_created_at: newest, count: walk.read },
+				cursor: { count: walk.read },
 			});
 		},
 		[PROFILE]: async () => {
@@ -1830,13 +2162,75 @@ export async function collectTikTok(
 		stream: typeof LIKES | typeof FAVORITES,
 		path: AllowedPath,
 	): Promise<void> {
-		// Every run walks the whole list to hasMore:false; the host keeps one
-		// record per video id, so videos seen before are not duplicated.
-		const walk = await walkItemList(api, path, ownList, maxPages, (item) =>
-			emitBuilt(stream, () => buildSavedVideoRecord(item, notes)),
-		);
-		assertComplete(stream, walk);
+		// Every run walks the whole list to hasMore:false (or until every
+		// requested resource was read); the host keeps one record per video
+		// id, so videos seen before are not duplicated.
+		const named = resourceTracker(stream);
+		const emitted = new Set<string>();
+		const onItem = async (item: Item): Promise<void> => {
+			named?.see(item.id);
+			if (emitted.has(item.id)) return;
+			emitted.add(item.id);
+			await emitBuilt(stream, () => buildSavedVideoRecord(item, notes));
+		};
+		const readOnce = async (): Promise<{ ids: string[]; walk: WalkResult }> => {
+			const ids: string[] = [];
+			const walk = await walkItemList(
+				api,
+				path,
+				ownList,
+				maxPages,
+				async (item) => {
+					ids.push(item.id);
+					await onItem(item);
+				},
+				() => named?.done() === true,
+			);
+			// Unreadable entries fail the stream whatever the count says.
+			assertComplete(stream, { ...walk, total: null });
+			return { ids, walk };
+		};
+		let { ids, walk } = await readOnce();
 		assertSafe(stream);
+		let total = walk.total;
+		let confirmed = false;
+		// TikTok counts more than it listed (a video its author removed stays
+		// in the count): the list is complete only when a walk without repeated
+		// rows reads the same ids twice in a row (settleCount). A re-read is
+		// sent only while the run's request budget covers it: otherwise only
+		// this stream ends incomplete, and no other stream loses its requests.
+		for (
+			let attempt = 1;
+			!walk.stopped &&
+			!confirmed &&
+			total !== null &&
+			walk.read < total &&
+			walk.read > 0 &&
+			walk.entries === walk.read &&
+			attempt < MAX_STABLE_READS;
+			attempt += 1
+		) {
+			if (api.remaining() < walk.pages) {
+				connectorDiagnostic("tiktok", "count_reread_skipped", {
+					stream,
+					pages: walk.pages,
+					remaining: api.remaining(),
+				});
+				break;
+			}
+			const again = await readOnce();
+			assertSafe(stream);
+			if (again.walk.total !== null) total = Math.max(total, again.walk.total);
+			confirmed = sameIds(ids, again.ids);
+			({ ids, walk } = again);
+		}
+		if (!walk.stopped)
+			settleCount(stream, {
+				confirmed,
+				entries: walk.entries,
+				read: walk.read,
+				total,
+			});
 		await ctx.emit({ type: "STATE", stream, cursor: { count: walk.read } });
 	}
 
@@ -1844,8 +2238,17 @@ export async function collectTikTok(
 		stream: typeof FOLLOWING | typeof FOLLOWERS,
 		scene: string,
 	): Promise<void> {
-		const walk = await walkUserList(api, secUid, scene, maxPages, (user) =>
-			emitBuilt(stream, () => buildUserRecord(user, notes)),
+		const named = resourceTracker(stream);
+		const walk = await walkUserList(
+			api,
+			secUid,
+			scene,
+			maxPages,
+			(user) => {
+				named?.see(user.id);
+				return emitBuilt(stream, () => buildUserRecord(user, notes));
+			},
+			() => named?.done() === true,
 		);
 		assertComplete(stream, walk);
 		assertSafe(stream);

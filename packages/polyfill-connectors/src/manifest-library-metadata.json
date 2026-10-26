@@ -777,6 +777,7 @@
 				"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
 				"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
 				"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
+				"stream_collection_failed": "TikTok did not let this part be read in full, so it was not saved as complete. What was read is saved.",
 				"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
 			}
 		}
