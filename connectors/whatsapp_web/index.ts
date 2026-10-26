@@ -384,9 +384,12 @@ export async function readChatMessages(
 			if (rows.length < PAGE_SIZE) {
 				return done({ status: 200, memory, messages: out, complete: true, anchored: true, stop: "short_page" });
 			}
-			// The store answers each page strictly before its anchor, so once a
-			// full page is wholly older than the window's start, every older
-			// page is too: the window is covered and the walk stops here.
+			// The store answers each page strictly before its anchor, in the
+			// chat's own message order, and that order follows the messages'
+			// timestamps \`t\` (the app sorts a chat by them). So once a full
+			// page is wholly older than the window's start, every older page
+			// is too: the window is covered and the walk stops here. A message
+			// with no \`t\` keeps the page from counting as wholly older.
 			if (sinceMs !== null && rows.every((m) => typeof m.t === "number" && m.t * 1000 < sinceMs)) {
 				return done({ status: 200, memory, messages: out, complete: true, anchored: true, stop: "before_since" });
 			}
@@ -723,11 +726,6 @@ export function streamBounds(scope: unknown): StreamBounds {
 		timeBounded: range?.since !== undefined || range?.until !== undefined,
 		resources: resourceSet(s),
 	};
-}
-
-/** True when `bounds` are no narrower than the whole source. */
-function unbounded(bounds: StreamBounds): boolean {
-	return !bounds.timeBounded && bounds.resources === null;
 }
 
 /**
@@ -1193,37 +1191,40 @@ export async function collectWith(
 		? 0
 		: [...unsafeChatIds].filter(chatSelected).length;
 
-	// The message walk's bounds. A chat whose own last activity is older
-	// than the window's start holds no message inside it (the app moves a
-	// chat's last activity forward with every message), so it is not walked
-	// and needs no history request. Requested message ids name their chats,
-	// so only those are walked, each until its ids are found, and the rest
-	// only when some requested id was not found under the chat it names.
+	// The message walk's bounds. Every chat is walked: a chat's own last
+	// activity is not proof that it holds nothing inside the window (system
+	// messages such as e2e notifications may not move it), and under
+	// `since` the walk ends after one full page older than the window
+	// anyway. What a chat whose last activity is older than the window does
+	// not get is a history request: the phone's remainder is older than the
+	// local store, so it is not asked for. Requested message ids name their
+	// chats, so only those are walked, each until its ids are found, and
+	// the rest only when some requested id was not found under the chat it
+	// names, then only looking for those ids.
 	const sinceMs = messageBounds.sinceMs;
 	const wantedByChat = messageResourcesByChat(
 		messageBounds.resources,
 		new Set(items.keys()),
 	);
-	const messagesBounded = !unbounded(messageBounds);
 	const olderThanWindow = (activityMs: number | null): boolean =>
 		sinceMs !== null && activityMs !== null && activityMs < sinceMs;
 	const foundMessageIds = new Set<string>();
 	let walkedEveryChat = wantedByChat === null;
 	/**
-	 * Whether this run's messages scope reads a chat: not when its own last
-	 * activity is older than the window, nor when the requested message ids
-	 * name other chats (and were all found there).
+	 * Whether this run's messages scope reads a chat: every chat, unless the
+	 * requested message ids name other chats (and were all found there).
 	 */
 	const messagesReadChat = (id: string): boolean =>
-		!olderThanWindow(lastActivityById.get(id) ?? null) &&
-		(walkedEveryChat || (wantedByChat?.has(id) ?? true));
+		walkedEveryChat || (wantedByChat?.has(id) ?? true);
 
 	// One chat's messages: its one history request when it needs one, the
 	// walk of its local store, then its gap when the walk or the history
 	// state says something remains. Every message the store holds is
 	// emitted either way. A chat read to the store's own end with nothing
-	// left on the phone is "hydrated"; one whose read covered only this
-	// run's bounds is "window", and never acknowledges an earlier gap.
+	// left on the phone is "hydrated" and acknowledges its earlier gaps,
+	// bounded run or not; one whose read stopped at this run's bounds (the
+	// window's start, or every requested id found) is "window", and leaves
+	// earlier gaps pending.
 	const requiredKeys: string[] = [];
 	const hydratedKeys: string[] = [];
 	const gapKeys: string[] = [];
@@ -1234,28 +1235,31 @@ export async function collectWith(
 	const hydrateChat = async (
 		item: ChatItem,
 		wanted: ReadonlySet<string> | undefined,
+		options: { askPhone: boolean } = { askPhone: true },
 	): Promise<void> => {
 		requiredKeys.push(item.id);
-		if (olderThanWindow(item.lastActivityMs)) {
-			hydratedKeys.push(item.id);
-			outcomes.set(item.id, "window");
-			return;
-		}
 		const walkState: WalkState = {
 			seen: new Set(),
 			unsafe: new Set(),
 			found: foundMessageIds,
 		};
 		const walkOptions = { sinceMs, wanted, bounds: messageBounds };
-		let history: { state: string | null; requested: boolean };
+		// The phone is not asked for history that is older than the window
+		// (the chat's own last activity is), nor while only searching other
+		// chats for requested ids not found where they point.
+		const askPhone = options.askPhone && !olderThanWindow(item.lastActivityMs);
+		let history: { state: string | null; requested: boolean } = {
+			state: item.history_state,
+			requested: false,
+		};
 		let walk: WalkOutcome;
 		if (sinceMs !== null || wanted !== undefined) {
 			// Bounded: the local store first. When it already covers the
 			// bounds, the history on the phone is outside them and is not
-			// asked for; otherwise the one history request, then the walk
-			// again from the newest message (what it read before is not
+			// asked for; otherwise (the store ended, or could not be walked,
+			// e.g. no in-memory anchor) the one history request, then the
+			// walk again from the newest message (what it read before is not
 			// emitted twice).
-			history = { state: item.history_state, requested: false };
 			walk = await walkMessagesForChat(
 				ctx,
 				stores,
@@ -1264,12 +1268,7 @@ export async function collectWith(
 				walkState,
 				walkOptions,
 			);
-			if (walk.gap === null && walk.reached !== "end") {
-				hydratedKeys.push(item.id);
-				outcomes.set(item.id, "window");
-				return;
-			}
-			if (walk.gap === null && item.needsHistory) {
+			if (walk.reached === "end" && askPhone && item.needsHistory) {
 				history = await requestHistory(stores, item, timings);
 				if (history.requested) {
 					walk = await walkMessagesForChat(
@@ -1280,15 +1279,10 @@ export async function collectWith(
 						walkState,
 						walkOptions,
 					);
-					if (walk.gap === null && walk.reached !== "end") {
-						hydratedKeys.push(item.id);
-						outcomes.set(item.id, "window");
-						return;
-					}
 				}
 			}
 		} else {
-			history = await requestHistory(stores, item, timings);
+			if (askPhone) history = await requestHistory(stores, item, timings);
 			walk = await walkMessagesForChat(
 				ctx,
 				stores,
@@ -1298,9 +1292,23 @@ export async function collectWith(
 				walkOptions,
 			);
 		}
+		if (walk.gap === null && walk.reached !== "end") {
+			hydratedKeys.push(item.id);
+			outcomes.set(item.id, "window");
+			return;
+		}
+		const remains = walk.gap === null && historyRemainsOnPhone(history.state);
+		if (remains && !askPhone) {
+			// The local store was read to its end and the remainder on the
+			// phone was not asked for by policy: it is outside this run's
+			// bounds, so the chat is covered for the run, not hydrated.
+			hydratedKeys.push(item.id);
+			outcomes.set(item.id, "window");
+			return;
+		}
 		const gap =
 			walk.gap ??
-			(historyRemainsOnPhone(history.state)
+			(remains
 				? {
 						reason: "retry_exhausted" as const,
 						class: "history_remains_on_phone",
@@ -1321,7 +1329,7 @@ export async function collectWith(
 			return;
 		}
 		hydratedKeys.push(item.id);
-		outcomes.set(item.id, messagesBounded ? "window" : "hydrated");
+		outcomes.set(item.id, "hydrated");
 	};
 
 	if (!ctx.recoveryOnly) {
@@ -1345,13 +1353,23 @@ export async function collectWith(
 				(id) => !foundMessageIds.has(id),
 			);
 			if (wantedByChat !== null && missing) {
-				// A requested id was not under the chat it names: walk the
-				// other chats too rather than call it absent.
-				walkedEveryChat = true;
+				// A requested id was not under the chat it names: look for the
+				// missing ids in the other chats too rather than call them
+				// absent, within the same bounds and without asking the phone.
+				const missingIds = new Set(
+					[...(messageBounds.resources ?? [])].filter(
+						(id) => !foundMessageIds.has(id),
+					),
+				);
 				for (const item of items.values()) {
 					if (outcomes.get(item.id) !== "unselected") continue;
-					await hydrateChat(item, undefined);
+					if ([...missingIds].every((id) => foundMessageIds.has(id))) break;
+					await hydrateChat(item, missingIds, { askPhone: false });
 				}
+				// Still missing after every chat: any chat could have held it,
+				// including the ones that could not be imported.
+				if ([...missingIds].some((id) => !foundMessageIds.has(id)))
+					walkedEveryChat = true;
 			}
 		}
 	}

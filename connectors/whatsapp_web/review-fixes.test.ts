@@ -724,13 +724,24 @@ const moreWalk = (chatId: string, rows: unknown[], token: string) => ({
 	token,
 });
 
-test("since: a chat whose last activity is older than the window is not walked and gets no history request", async () => {
+test("since: a chat whose last activity is older than the window is still walked (no history request), so an in-window system message is kept", async () => {
+	const inWindow = Math.floor(SINCE_MS / 1000) + 60;
 	const r = await run(
 		{
 			chats: () => [
 				chatRow(PEER),
 				chatRow(OTHER, { t: OLD_T, history_state: STATE_0 }),
 			],
+			walk: (id) =>
+				id === OTHER
+					? completeWalk(id, [
+							messageRow(id, 1, {
+								type: "e2e_notification",
+								body: null,
+								t: inWindow,
+							}),
+						])
+					: completeWalk(id),
 		},
 		{
 			streams: ["chats", "messages"],
@@ -739,10 +750,17 @@ test("since: a chat whose last activity is older than the window is not walked a
 	);
 	assert.deepEqual(
 		r.calls.walks.map((w) => [w.chatId, w.sinceMs]),
-		[[PEER, SINCE_MS]],
-		"only the chat inside the window is walked, with the window's start",
+		[
+			[PEER, SINCE_MS],
+			[OTHER, SINCE_MS],
+		],
+		"every chat is walked, each with the window's start",
 	);
 	assert.deepEqual(r.calls.sends, [], "no history request for the old chat");
+	assert.ok(
+		recordsOf(r, "messages").some((m) => m.data.id === `false_${OTHER}_SYNTH1`),
+		"the system message inside the window is emitted",
+	);
 	const coverage = messagesOf(r, "DETAIL_COVERAGE")[0];
 	assert.deepEqual(coverage?.hydrated_keys, [PEER, OTHER]);
 	assert.deepEqual(coverage?.gap_keys ?? [], []);
@@ -798,7 +816,10 @@ test("since: a local store that ends inside the window gets the history request,
 
 test("bounded: a chat read only within the window leaves its earlier gap pending", async () => {
 	const r = await run(
-		{ chats: () => [chatRow(PEER)] },
+		{
+			chats: () => [chatRow(PEER)],
+			walk: (id) => ({ ...completeWalk(id), stop: "before_since" }),
+		},
 		{
 			streams: ["chats", "messages"],
 			detailGaps: [pendingGap(PEER)],
@@ -807,6 +828,56 @@ test("bounded: a chat read only within the window leaves its earlier gap pending
 	);
 	assert.equal(messagesOf(r, "DETAIL_GAP_RECOVERED").length, 0);
 	assert.deepEqual(r.failures, []);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
+});
+
+test("bounded: a recovery run that reads a chat to its store's own end, nothing left on the phone, closes its gap", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER)] },
+		{
+			streams: ["chats", "messages"],
+			detailGaps: [pendingGap(PEER)],
+			recoveryOnly: true,
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	const recovered = messagesOf(r, "DETAIL_GAP_RECOVERED");
+	assert.deepEqual(
+		recovered.map((g) => g.gap_id),
+		[`gap-${PEER}`],
+	);
+	assert.deepEqual(r.failures, []);
+});
+
+test("bounded: a chat with no in-memory anchor still gets its history request, then the walk again", async () => {
+	let walks = 0;
+	const r = await run(
+		{
+			chats: (call) =>
+				call < 2
+					? [chatRow(PEER, { history_state: STATE_0, msgs_in_memory: 0 })]
+					: [chatRow(PEER, { history_state: STATE_1 })],
+			send: () => ({ sent: true }),
+			walk: (id) => {
+				walks += 1;
+				return walks === 1
+					? {
+							...completeWalk(id, []),
+							complete: false,
+							anchored: false,
+							stop: "no_anchor",
+						}
+					: completeWalk(id);
+			},
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.deepEqual(r.calls.sends, [PEER]);
+	assert.equal(r.calls.walks.length, 2);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
 	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
 });
 
@@ -853,6 +924,7 @@ test("resources: an id not found under the chat it names sends the walk over the
 		[PEER, OTHER],
 	);
 	assert.ok(recordsOf(r, "messages").some((m) => m.data.id === wanted));
+	assert.deepEqual(r.calls.sends, [], "the fallback search asks no phone");
 });
 
 test("resources: contacts asks the page for the requested ids only", async () => {
@@ -899,11 +971,8 @@ test("bounded: a chat title that cannot be stored fails chats only when the scop
 	const outside = await run(
 		{ chats: () => [chatRow(PEER), chatRow(OTHER, { t: OLD_T, ...unsafe })] },
 		{
-			streams: ["chats", "messages"],
-			scopes: {
-				chats: { time_range: { since: SINCE } },
-				messages: { time_range: { since: SINCE } },
-			},
+			streams: ["chats"],
+			scopes: { chats: { time_range: { since: SINCE } } },
 		},
 	);
 	assert.deepEqual(outside.failures, []);
@@ -911,11 +980,8 @@ test("bounded: a chat title that cannot be stored fails chats only when the scop
 	const inside = await run(
 		{ chats: () => [chatRow(PEER), chatRow(OTHER, unsafe)] },
 		{
-			streams: ["chats", "messages"],
-			scopes: {
-				chats: { time_range: { since: SINCE } },
-				messages: { time_range: { since: SINCE } },
-			},
+			streams: ["chats"],
+			scopes: { chats: { time_range: { since: SINCE } } },
 		},
 	);
 	assert.ok(inside.failures.some((f) => f.stream === "chats"));
@@ -1023,4 +1089,39 @@ test("resources: a recovery-only run does not walk a pending chat the requested 
 	assert.deepEqual(r.calls.sends, []);
 	assert.deepEqual(r.failures, []);
 	assert.equal(messagesOf(r, "DETAIL_GAP_RECOVERED").length, 0);
+});
+
+test("resources: the fallback search for a missing id stops once it is found and asks no phone", async () => {
+	const THIRD = "15550000004@c.us";
+	const wanted = `false_${PEER}_SYNTH9`;
+	const r = await run(
+		{
+			chats: () => [
+				chatRow(PEER),
+				chatRow(OTHER, { history_state: STATE_0 }),
+				chatRow(THIRD, { history_state: STATE_0 }),
+			],
+			send: () => ({ sent: true }),
+			walk: (id) =>
+				id === OTHER
+					? moreWalk(id, [messageRow(PEER, 9, { remote: OTHER })], "1")
+					: completeWalk(id),
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { resources: [wanted] } },
+		},
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => w.chatId),
+		[PEER, OTHER],
+		"the third chat is not walked once the id is found",
+	);
+	assert.deepEqual(r.calls.sends, []);
+	assert.equal(releasesOf(r), 1);
+	assert.deepEqual(r.failures, []);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.optional_skip_keys, [
+		THIRD,
+	]);
 });
