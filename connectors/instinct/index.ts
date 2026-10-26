@@ -118,6 +118,7 @@ import {
 	connectionRecords,
 	deviceRecords,
 	eventEpochSeconds,
+	hasSubSecondTime,
 	imessageConnectionRecord,
 	messagingConnectionRecords,
 	newestEventAt,
@@ -1586,7 +1587,7 @@ async function readChatHistory(
 ): Promise<HistoryOutcome> {
 	const read: ChatEvent[] = [];
 	const seenCursors = new Set<string>();
-	const stopBelow = stopBelowSecond(prior, plan);
+	let stopBelow = stopBelowSecond(prior, plan);
 	let cursor: string | null = null;
 	for (let page = 0; page < MAX_CHAT_HISTORY_PAGES; page += 1) {
 		const window: HistoryWindow =
@@ -1597,16 +1598,22 @@ async function readChatHistory(
 			return window;
 		}
 		read.push(...window.events);
+		if (window.events.some(hasSubSecondTime)) {
+			// Stops are kept in whole seconds (Instinct's precision). A finer
+			// time would be floored, so this chat is read to its start.
+			stopBelow = null;
+		}
 		const next: string | null = window.cursor;
 		// Windows are newest first. Only an event older than the stop second
 		// proves everything beyond this window is older still: an event in that
 		// very second does not, since the next window can still hold another
 		// event from the same second.
+		const stop = stopBelow;
 		const reachedOlder =
-			stopBelow !== null &&
+			stop !== null &&
 			window.events.some((event) => {
 				const seconds = eventEpochSeconds(event);
-				return seconds !== null && seconds < stopBelow;
+				return seconds !== null && seconds < stop;
 			});
 		if (next === null || reachedOlder) {
 			return { ended: next === null, events: read, kind: "read" };
@@ -1879,34 +1886,44 @@ async function readNewestWindows(
 	return windows;
 }
 
-/** A chat's `last_event_at` as an ISO string, or null. */
 /**
- * True when the newest window proves the chat's latest activity: it
- * answered, every event on it has a readable time, and an empty window is
- * the whole (empty) history rather than a page with more behind it.
+ * What the newest window says about a chat's latest activity: `known` with
+ * the newest readable event time (null for a proven-empty chat), or
+ * `unknown`, with whether a retry can help. An answer whose shape this
+ * connector cannot read, or a window none of whose events has a readable
+ * time, needs a connector upgrade; a refused or failed request may not.
  */
-function provesLatest(window: HistoryWindow | undefined): boolean {
-	if (window?.kind !== "window") {
-		return false;
-	}
-	if (window.events.length === 0) {
-		return window.cursor === null;
-	}
-	return window.events.every((event) => eventEpochSeconds(event) !== null);
-}
+type LatestActivity =
+	| { readonly at: string | null; readonly kind: "known" }
+	| { readonly kind: "unknown"; readonly retryable: boolean };
 
-function lastEventAt(
+function latestActivity(
 	window: HistoryWindow | undefined,
 	mark: ChatCheckpoint | undefined,
-): string | null {
-	if (window?.kind === "window" && provesLatest(window)) {
-		return newestEventAt(window.events);
+): LatestActivity {
+	if (window?.kind === "window") {
+		if (window.events.length === 0) {
+			return window.cursor === null
+				? { at: null, kind: "known" }
+				: { kind: "unknown", retryable: true };
+		}
+		// The newest window holds the newest events, so the newest readable
+		// time among them is the chat's latest activity even when another
+		// event on it has no readable time.
+		const at = newestEventAt(window.events);
+		return at === null
+			? { kind: "unknown", retryable: false }
+			: { at, kind: "known" };
 	}
-	// The newest window did not prove it: the newest event an earlier run
-	// delivered is the best known value.
-	return mark === undefined || mark.newest_created_at === null
-		? null
-		: toIso(mark.newest_created_at);
+	// The newest window did not answer: the newest event an earlier run
+	// delivered is the best known value, a lower bound of the real one.
+	if (mark !== undefined && mark.newest_created_at !== null) {
+		return { at: toIso(mark.newest_created_at), kind: "known" };
+	}
+	return {
+		kind: "unknown",
+		retryable: window?.errorClass !== INSTINCT_SOURCE_UNREADABLE,
+	};
 }
 
 async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
@@ -1977,27 +1994,42 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 		return;
 	}
 	const windows = await readNewestWindows(args, chats, wantEvents);
-	const records = chats.map((chat) =>
-		chatRecord(chat, lastEventAt(windows.get(chat.id), prior[chat.id])),
+	const latest = new Map(
+		chats.map(
+			(chat) =>
+				[
+					chat.id,
+					windows.has(chat.id)
+						? latestActivity(windows.get(chat.id), prior[chat.id])
+						: undefined,
+				] as const,
+		),
 	);
-	const unanswered = chats.filter(
-		(chat) =>
-			windows.has(chat.id) &&
-			!provesLatest(windows.get(chat.id)) &&
-			resourceWanted(args, "chats", chat.id),
-	);
+	const records = chats.map((chat) => {
+		const known = latest.get(chat.id);
+		return chatRecord(chat, known?.kind === "known" ? known.at : null);
+	});
+	const unknown = chats
+		.filter((chat) => resourceWanted(args, "chats", chat.id))
+		.map((chat) => latest.get(chat.id))
+		.filter(
+			(value): value is LatestActivity & { kind: "unknown" } =>
+				value?.kind === "unknown",
+		);
 	if (
-		unanswered.length > 0 &&
+		unknown.length > 0 &&
 		args.scopes?.get("chats")?.time_range !== undefined
 	) {
 		// Under a time range a chat's latest activity decides whether it is
 		// in scope, and an unknown one would be dropped without a word.
+		const retryable = unknown.every((value) => value.retryable);
 		await failStreams(
 			args,
 			["chats", "chat_events"],
 			new StreamIncomplete(
-				`Instinct did not answer with the latest activity of ${String(unanswered.length)} chat(s), so it is unknown which chats fall in the time range.`,
-				true,
+				`Instinct did not answer with the latest activity of ${String(unknown.length)} chat(s), so it is unknown which chats fall in the time range.`,
+				retryable,
+				retryable ? undefined : "retry_on_connector_upgrade",
 			),
 		);
 		return;

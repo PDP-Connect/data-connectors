@@ -402,10 +402,10 @@ export function trustedPeopleRecords(
  * Instinct (the `vaultEntries` resolver does not return them) or emitted.
  *
  * Instinct gives an entry no id, so the key is `<kind>:<label>`. Two entries
- * of one kind can share a label (or both have none); the second and later
- * ones, in Instinct's order, get `#2`, `#3`, ... so neither overwrites the
- * other. The first keeps the plain key, which is what earlier versions
- * emitted.
+ * of one kind can share a label (or both have none); one keeps the plain
+ * key, which is what earlier versions emitted, and the others take the next
+ * suffix `#2`, `#3`, ... that no other entry uses. Duplicates are numbered
+ * by their field keys and agent flag, not by Instinct's list order.
  */
 export function vaultEntryRecords(response: VaultResponse): RecordData[] {
 	const data = response.data;
@@ -416,19 +416,15 @@ export function vaultEntryRecords(response: VaultResponse): RecordData[] {
 	for (const kind of data.vaultKinds ?? []) {
 		kindFieldKeys.set(kind.kind, [...(kind.subfieldKeys ?? [])]);
 	}
-	const seen = new Map<string, number>();
-	return (data.vaultEntries ?? []).map((entry) => {
+	const records = (data.vaultEntries ?? []).map((entry) => {
 		const fields = entry.fields ?? [];
 		const declaredKeys = kindFieldKeys.get(entry.kind) ?? [];
 		const entryKeys = fields.map((field) => field.key);
 		const fieldKeys = [...new Set([...declaredKeys, ...entryKeys])].sort();
 		const name = nullableText(entry.name);
-		const base = `${entry.kind}:${name ?? "unnamed"}`;
-		const occurrence = (seen.get(base) ?? 0) + 1;
-		seen.set(base, occurrence);
 		return {
+			base: `${entry.kind}:${name ?? "unnamed"}`,
 			field_keys: fieldKeys,
-			id: occurrence === 1 ? base : `${base}#${String(occurrence)}`,
 			is_agent_entry: nullableFlag(entry.isAgentEntry),
 			kind: entry.kind,
 			name,
@@ -438,6 +434,54 @@ export function vaultEntryRecords(response: VaultResponse): RecordData[] {
 				.sort(),
 		};
 	});
+	// Every plain key is issued first, so a real label such as "Foo#2" keeps
+	// its own key; duplicates then take the next free suffix, in an order
+	// that does not depend on Instinct's list order.
+	const counts = new Map<string, number>();
+	for (const record of records) {
+		counts.set(record.base, (counts.get(record.base) ?? 0) + 1);
+	}
+	const issued = new Set(records.map((record) => record.base));
+	const order = records
+		.map((record, index) => ({ index, record, sortKey: vaultSortKey(record) }))
+		.sort(
+			(left, right) =>
+				left.record.base.localeCompare(right.record.base) ||
+				left.sortKey.localeCompare(right.sortKey) ||
+				left.index - right.index,
+		);
+	const ids = new Map<number, string>();
+	const firstTaken = new Set<string>();
+	for (const { index, record } of order) {
+		if ((counts.get(record.base) ?? 0) === 1 || !firstTaken.has(record.base)) {
+			firstTaken.add(record.base);
+			ids.set(index, record.base);
+			continue;
+		}
+		let suffix = 2;
+		while (issued.has(`${record.base}#${String(suffix)}`)) {
+			suffix += 1;
+		}
+		const id = `${record.base}#${String(suffix)}`;
+		issued.add(id);
+		ids.set(index, id);
+	}
+	return records.map(({ base: _base, ...record }, index) => ({
+		...record,
+		id: ids.get(index) ?? _base,
+	}));
+}
+
+function vaultSortKey(record: {
+	field_keys: readonly string[];
+	is_agent_entry: boolean | null;
+	populated_field_keys: readonly string[];
+}): string {
+	return JSON.stringify([
+		record.field_keys,
+		record.is_agent_entry,
+		record.populated_field_keys,
+	]);
 }
 
 /** Upper bound for one chat-event text field (content, tool I/O, thinking). */
@@ -563,6 +607,17 @@ export function chatEventRecord(chatId: string, event: ChatEvent): RecordData {
 export function eventEpochSeconds(event: ChatEvent): number | null {
 	const iso = toIso(event.createdAt);
 	return iso === null ? null : Math.floor(Date.parse(iso) / 1000);
+}
+
+/**
+ * True when an event's time has a part below the second. Instinct sends
+ * whole epoch seconds (types.ts); paging stops and checkpoints are kept in
+ * whole seconds, which floor a finer time. A chat that shows one is read to
+ * the start of its history instead of trusting a floored stop.
+ */
+export function hasSubSecondTime(event: ChatEvent): boolean {
+	const iso = toIso(event.createdAt);
+	return iso !== null && Date.parse(iso) % 1000 !== 0;
 }
 
 /** Whole epoch seconds at or after an RFC 3339 instant, or null when unreadable. */

@@ -15496,7 +15496,7 @@
 					{
 						"name": "chats",
 						"required": true,
-						"description": "The owner's chats with their Instinct agent, as listed by the app's /agent page.",
+						"description": "The owner's chats with their Instinct agent, as listed by the app's /agent page. A time range selects chats by last_event_at, the time of their newest event: a chat with events inside the range but a newer event after its end is not included, although its events in the range are. A chat with no events has no last_event_at, so while any chat has none, a run with an end time does not save its progress for chats and chat events.",
 						"display": {
 							"label": "Your chats with your agent",
 							"detail": "Each chat Instinct keeps with your agent (for example the main chat that gathers every channel, and a WhatsApp channel chat): its title, source, status, and whether a turn is in progress."
@@ -15569,7 +15569,7 @@
 					{
 						"name": "chat_events",
 						"required": true,
-						"description": "Every event in the owner's chats with their Instinct agent: the owner's messages and the agent's tool calls, tool responses, interactions, thinking, and errors. The agent's replies over WhatsApp and SMS are sent through tool calls, so they appear in tool_arguments rather than as message events. Message text, draft field values, interactions, thinking, and tool arguments and results are copied as the app shows them, so they can hold anything the agent typed or read, including values it took from the vault.",
+						"description": "Every event in the owner's chats with their Instinct agent: the owner's messages and the agent's tool calls, tool responses, interactions, thinking, and errors. The agent's replies over WhatsApp and SMS are sent through tool calls, so they appear in tool_arguments rather than as message events. Message text, draft field values, interactions, thinking, and tool arguments and results are copied as the app shows them, so they can hold anything the agent typed or read, including values it took from the vault. A regular run reads only events newer than those already collected, so a change Instinct makes to an older event later, such as read_at or an answer to an interaction, is picked up only by a full refresh or when that part of the history is read again.",
 						"display": {
 							"label": "Your conversations with your agent",
 							"detail": "Each event in your chats: messages you sent and their read time, the tools your agent called with their arguments and responses, approvals it asked for and your answers, and errors. Attachments are listed by name, type, and size; their download links are not kept. Message text, form values, approvals, and tool inputs and outputs are kept as the app shows them, so they can include anything your agent typed or read, such as details it filled in from your vault."

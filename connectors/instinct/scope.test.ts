@@ -28,6 +28,7 @@ import {
 import {
 	ceilEpochSeconds,
 	chatReadPlan,
+	hasSubSecondTime,
 	nextCheckpoint,
 	stopBelowSecond,
 	vaultEntryRecords,
@@ -168,6 +169,8 @@ interface RunOptions {
 	readonly detailGaps?: CollectInstinctArgs["detailGaps"];
 	/** A chat whose every history read answers with a GraphQL error. */
 	readonly failHistoryFor?: string;
+	/** A chat whose every history read answers with this body. */
+	readonly historyAnswerFor?: { chatId: string; json: unknown };
 	/** A chat whose newest window is empty but has a cursor to older ones. */
 	readonly emptyFirstWindowFor?: string;
 	readonly histories?: Readonly<Record<string, readonly ChatEvent[]>>;
@@ -197,6 +200,17 @@ async function run(options: RunOptions): Promise<Run> {
 	const graphql: InstinctGraphql = (query, vars = {}) => {
 		const operation = /query Pdpp(\w+)/.exec(query)?.[1] ?? "";
 		calls.push(operation);
+		const answer = options.historyAnswerFor;
+		if (
+			operation === "InstinctChatHistory" &&
+			answer !== undefined &&
+			vars.chatId === answer.chatId
+		) {
+			return Promise.resolve({
+				json: answer.json,
+				status: 200,
+			});
+		}
 		if (
 			operation === "InstinctChatHistory" &&
 			vars.chatId === options.failHistoryFor
@@ -604,18 +618,90 @@ test("a since-bounded walk leaves a pending gap pending; an unbounded one resolv
 	assert.equal(recovered(unbounded), true);
 });
 
-test("a newest window with an unreadable event time does not prove a chat's latest activity", async () => {
+test("one unreadable event time on the newest window does not hide the chat's latest activity", async () => {
+	const histories = defaultHistories();
+	histories[CHAT_B]?.push({ ...event("b-x", 0), createdAt: null } as never);
+	const result = await run({
+		histories,
+		scopes: CHATS_AND_EVENTS({}, { time_range: { since: iso(T0) } }),
+	});
+	assert.deepEqual(result.failures, []);
+	const chatB = result.records.find((record) => record.data.id === CHAT_B);
+	assert.equal(chatB?.data.last_event_at, iso(T0 + 2905));
+});
+
+test("a newest window with no readable event time asks for a connector upgrade", async () => {
 	const histories = defaultHistories();
 	histories[CHAT_B]?.push({ ...event("b-x", 0), createdAt: null } as never);
 	const bounded = await run({
 		histories,
 		scopes: { chats: { time_range: { since: iso(T0) } } },
 	});
-	assert.deepEqual(
-		bounded.failures.map((failure) => failure.stream),
-		["chats"],
-	);
+	assert.deepEqual(bounded.failures, [
+		{
+			hint: { action: "retry_on_connector_upgrade", retryable: false },
+			retryable: false,
+			stream: "chats",
+		},
+	]);
 	assert.deepEqual(ids(bounded, "chats"), []);
+});
+
+test("a history answer this connector cannot read, for a chat never collected, asks for a connector upgrade", async () => {
+	const result = await run({
+		historyAnswerFor: {
+			chatId: CHAT_B,
+			json: { data: { chatHistory: { cursor: 7, events: "none" } } },
+		},
+		scopes: { chats: { time_range: { since: iso(T0) } } },
+	});
+	assert.deepEqual(
+		result.failures.map((failure) => [failure.stream, failure.retryable]),
+		[["chats", false]],
+	);
+	assert.equal(result.failures[0]?.hint?.action, "retry_on_connector_upgrade");
+});
+
+test("a chat whose history keeps failing is placed by its checkpoint once collected", async () => {
+	const prior = (await run({ scopes: CHATS_AND_EVENTS() })).nextState;
+	const result = await run({
+		failHistoryFor: CHAT_B,
+		scopes: { chats: { time_range: { since: iso(T0) } } },
+		state: prior,
+	});
+	assert.deepEqual(result.failures, []);
+	const chatB = result.records.find((record) => record.data.id === CHAT_B);
+	assert.equal(chatB?.data.last_event_at, iso(T0 + 2905));
+});
+
+test("a chat with a sub-second event time is read to its start instead of stopping at since", async () => {
+	assert.equal(
+		hasSubSecondTime({
+			...event("x", 0),
+			createdAt: "2026-09-10T00:00:00.500Z",
+		} as never),
+		true,
+	);
+	assert.equal(hasSubSecondTime(event("x", T0)), false);
+	const histories = defaultHistories();
+	const chatA = histories[CHAT_A] ?? [];
+	chatA[25] = {
+		...event("a-25", 0),
+		createdAt: new Date((T0 + 2500) * 1000 + 500).toISOString(),
+	} as never;
+	const result = await run({
+		histories,
+		scopes: CHATS_AND_EVENTS({ time_range: { since: iso(T0 + 1500) } }),
+	});
+	assert.deepEqual(historyCursors(result, CHAT_A), [
+		null,
+		"skip:10",
+		"skip:20",
+	]);
+	assert.deepEqual(
+		ids(result, "chat_events"),
+		[...chatAIds(T0 + 1500), "b-1", "b-2"].sort(),
+	);
 });
 
 test("an empty newest window with a cursor behind it does not prove an empty chat", async () => {
@@ -874,6 +960,36 @@ test("two vault entries of one kind with the same label (or none) keep distinct 
 	assert.equal(ids(result, "vault_entries").length, 3);
 });
 
+test("a duplicate vault label never takes a key a real label holds, whatever Instinct's order", () => {
+	const entry = (name: string, fields: string[]) => ({
+		fields: fields.map((key) => ({ key, populated: true })),
+		isAgentEntry: false,
+		kind: "login",
+		name,
+	});
+	const entries = [
+		entry("Foo", ["password"]),
+		entry("Foo", ["username"]),
+		entry("Foo#2", ["password"]),
+	];
+	const keyed = (list: typeof entries) =>
+		Object.fromEntries(
+			vaultEntryRecords({
+				data: { vaultEntries: list, vaultKinds: [] },
+			} as never).map((record) => [
+				`${String(record.name)}|${JSON.stringify(record.field_keys)}`,
+				record.id,
+			]),
+		);
+	const forward = keyed(entries);
+	assert.deepEqual(forward, {
+		'Foo#2|["password"]': "login:Foo#2",
+		'Foo|["password"]': "login:Foo",
+		'Foo|["username"]': "login:Foo#3",
+	});
+	assert.deepEqual(keyed([...entries].reverse()), forward);
+});
+
 interface ManifestStream {
 	readonly consent_time_field?: string;
 	readonly cursor_field?: string;
@@ -935,4 +1051,23 @@ test("manifest: owner copy for every reason this connector or its runtime emits"
 	assert.ok(reasons.stream_collection_failed);
 	assert.ok(reasons.scope_not_supported);
 	assert.equal(reasons.not_available, undefined, "never emitted");
+});
+
+test("manifest: the chats and chat_events descriptions state their time and refresh limits", async () => {
+	const { streams } = await manifest();
+	const describe = (name: string) =>
+		String(
+			(
+				streams.find((stream) => stream.name === name) as {
+					description?: string;
+				}
+			)?.description,
+		);
+	const chats = describe("chats");
+	assert.match(chats, /last_event_at/);
+	assert.match(chats, /newer event after its end is not included/);
+	assert.match(chats, /does not save its progress/);
+	const events = describe("chat_events");
+	assert.match(events, /read_at/);
+	assert.match(events, /full refresh/);
 });
