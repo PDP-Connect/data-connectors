@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Perplexity connector (v0.1.0).
+ * PDPP Perplexity connector (v0.1.2).
  *
  * Collects the owner's own Perplexity library through the signed-in
  * www.perplexity.ai page the host provides (past login and any human check):
@@ -16,13 +16,23 @@
  *   - `GET /rest/thread/:slug` — one thread's entries (oldest first), paged
  *     by `offset` the same way.
  *
- * Streams: `conversations` (one record per thread, mutable_state, cursor
- * `update_time`) and `messages` (the question and the answer of every entry,
- * append_only, child of `conversations`). The list walk must prove it ended
+ * Streams: `conversations` (one record per thread, mutable_state, a full
+ * inventory of the requested window on every run, so it keeps no STATE) and
+ * `messages` (the question and the answer of every entry, mutable_state,
+ * child of `conversations`; its STATE remembers each thread it delivered).
+ * A thread's messages are re-read only when the list shows it changed, or
+ * when the run selects messages outside the window they were delivered
+ * under. Time ranges are pushed down: a run whose every stream has a
+ * `since` stops walking the newest-first list once it is past it, and a
+ * thread whose messages cannot fall inside the range is not read in depth.
+ * A full refresh re-reads every thread it reads, but keeps what earlier runs
+ * remembered about threads outside its time range (or past the walk's
+ * stop), since it delivered nothing that could change them.
+ * The list walk must prove it ended
  * (the last item's `has_next_page: false`, or an empty page read from a
  * session that is still signed in; a short page that claims more is
  * followed) and, when it took more than one page, two consecutive walks must
- * see the same threads, before either stream is checkpointed. A list that
+ * see the same threads, before `messages` is checkpointed. A list that
  * never holds still keeps its conversation records and fails both streams
  * retryably with no checkpoint; a thread whose entries cannot be proven
  * complete is a DETAIL_GAP. `total_threads` on list items is NOT the
@@ -47,7 +57,7 @@
  *   - spaces/collections, files, bookmarks (out of scope for v1)
  */
 
-import { isMainModule } from "@pdpp/connector-protocol";
+import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
@@ -61,10 +71,13 @@ import {
 	politeDelay,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	conversationRecord,
 	entryMessages,
 	type ListedThread,
+	listItemTime,
+	normalizeInstant,
 	parseListedThread,
 	parseThreadDetailPage,
 	parseThreadListPage,
@@ -93,6 +106,37 @@ const MAX_LIST_PAGES = 500;
 const MAX_THREAD_PAGES = 200;
 /** Extra list walks allowed to see the library hold still. */
 const MAX_LIST_WALKS = 3;
+/**
+ * How long an answer may finish after its thread's last query time. The
+ * list carries only the last query time, while an answer's record time is
+ * its entry's last update (when the answer finished), so a thread whose last
+ * query is just before a window's start can still hold an answer inside it.
+ * A thread is only treated as wholly older than `since` when the list marks
+ * it complete and its last query is more than this margin before it.
+ *
+ * Why a day: an answer is generated right after its question and finishes
+ * within minutes (the recon threads finished in seconds); a new question
+ * moves the thread's last query time. A day is two orders of magnitude of
+ * headroom. An entry updated later than that without a new question (a
+ * shape the connector has not observed) would be missed by a time-bounded
+ * run that skips its thread; such trailing times are reported as the
+ * `answer_trails_last_query` diagnostic whenever a thread is read, so the
+ * assumption is checked against real libraries.
+ */
+export const ANSWER_TIME_MARGIN_MS = 24 * 3_600_000;
+/**
+ * Consecutive list pages, wholly older than a time-bounded run's cutoff and
+ * in newest-first order, after which the walk stops. One would do if the
+ * order were guaranteed; the second is margin for an order the connector
+ * only observes.
+ */
+const OLD_PAGES_TO_STOP = 2;
+/**
+ * Revision of the entry parser. A thread remembered with entries this parser
+ * could not read is read again once the revision changes, so a connector
+ * upgrade that learns the shape recovers them (`retry_on_connector_upgrade`).
+ */
+const ENTRY_PARSER_REVISION = 1;
 
 /** Headers the web app sends on these calls (observed, not invented). */
 interface PageRequest {
@@ -101,25 +145,48 @@ interface PageRequest {
 	readonly body?: string;
 }
 
-/** The `conversations` STATE cursor. */
-interface ConversationsCursor {
-	last_update_time: string | null;
+/**
+ * The selection a thread's messages were delivered under, when the runtime
+ * withheld some of them. `since`/`until` are the messages time range of that
+ * run; `resources` is a digest of its messages resource list. Absent means
+ * every message read was delivered.
+ */
+interface SyncWindow {
+	since?: string;
+	until?: string;
+	resources?: string;
 }
 
 /**
  * One thread's remembered detail state. A thread is remembered only after
- * every entry was complete and read; it is skipped next run only while its
- * update time (to the microsecond) and entry count are unchanged.
+ * every entry was complete and read (or, for an entry this parser cannot
+ * read, reported as unreadable); it is skipped next run only while its
+ * update time (to the microsecond) and entry count are unchanged, the run's
+ * messages selection lies inside the one it was delivered under (`window`),
+ * and, when it has unreadable entries, the parser revision is the same.
  */
 interface ThreadSync {
 	update_time: string | null;
 	create_time: string | null;
 	entry_count: number;
 	complete: true;
+	window?: SyncWindow;
+	unreadable_entries?: number;
+	parser?: number;
 }
 
-/** The `messages` STATE cursor: one entry per listed thread. */
+/**
+ * Version of the `messages` STATE. Version 2 is the first that records the
+ * window a thread was delivered under. Earlier cursors remembered a thread
+ * even when the runtime withheld some of its messages, so an entry from them
+ * is never skipped on: it only supplies the thread's creation time, and the
+ * thread is read once more.
+ */
+const SYNC_STATE_VERSION = 2;
+
+/** The `messages` STATE cursor: one entry per remembered thread. */
 interface MessagesCursor {
+	v: typeof SYNC_STATE_VERSION;
 	synced: Record<string, ThreadSync>;
 }
 
@@ -512,20 +579,6 @@ function earlier(
 	return candidate < current ? candidate : current;
 }
 
-/** The later of two normalized instants. */
-function later(
-	current: string | null,
-	candidate: string | null,
-): string | null {
-	if (candidate === null) {
-		return current;
-	}
-	if (current === null) {
-		return candidate;
-	}
-	return candidate > current ? candidate : current;
-}
-
 function bounded(message: string): string {
 	return message.slice(0, 240);
 }
@@ -536,25 +589,69 @@ function errorMessage(error: unknown): string {
 
 interface ListWalk {
 	readonly threads: ListedThread[];
-	readonly unreadable: number;
+	/** The list time of each row that could not be keyed (null: none). */
+	readonly unreadable: readonly (string | null)[];
 	/** List pages this walk requested; one page is a single atomic answer. */
 	readonly pages: number;
+	/**
+	 * The walk stopped at the time-bounded run's cutoff instead of at the end
+	 * of the list: every thread past it is older than the cutoff.
+	 */
+	readonly truncated: boolean;
 }
 
 /**
- * One pass over the library list. The walk ends only on an empty page or on
- * a last item that says `has_next_page: false`; a short page that says there
- * is more is followed. A thread seen twice (the list moved under the walk)
- * is kept once.
+ * The instant (epoch ms) below which no requested stream can select
+ * anything from a thread, or null when the run must walk the whole list.
+ * Every requested stream must carry a `since`: `conversations` selects by the
+ * list's own last activity time, `messages` by entry times that can trail it
+ * by up to ANSWER_TIME_MARGIN_MS.
+ */
+function listCutoff(ctx: BrowserCollectContext): number | null {
+	let cutoff = Number.POSITIVE_INFINITY;
+	for (const stream of ["conversations", "messages"] as const) {
+		const scope = ctx.requested.get(stream);
+		if (scope === undefined) {
+			continue;
+		}
+		const since = scope.time_range?.since;
+		const at = since === undefined ? Number.NaN : Date.parse(since);
+		if (!Number.isFinite(at)) {
+			return null;
+		}
+		cutoff = Math.min(
+			cutoff,
+			stream === "messages" ? at - ANSWER_TIME_MARGIN_MS : at,
+		);
+	}
+	return Number.isFinite(cutoff) ? cutoff : null;
+}
+
+/**
+ * One pass over the library list. The walk ends on an empty page or on a
+ * last item that says `has_next_page: false`; a short page that says there is
+ * more is followed. A thread seen twice (the list moved under the walk) is
+ * kept once.
+ *
+ * With a cutoff (a run whose every stream is bounded by `since`), the walk
+ * also ends after OLD_PAGES_TO_STOP consecutive pages wholly older than the
+ * cutoff, but only while every row seen so far, keyed or not, had a readable
+ * time no newer than the row before it: the list is requested newest first
+ * (`ascending: false`), and a row out of that order, or one without a time,
+ * turns the early stop off for the rest of the walk.
  */
 async function walkList(
 	ctx: BrowserCollectContext,
 	delay: (ms: number) => Promise<void>,
+	cutoff: number | null,
 ): Promise<ListWalk> {
 	const threads: ListedThread[] = [];
 	const seen = new Set<string>();
-	let unreadable = 0;
+	const unreadable: (string | null)[] = [];
 	let offset = 0;
+	let ordered = cutoff !== null;
+	let previous: string | null = null;
+	let oldPages = 0;
 	for (let pageIndex = 0; ; pageIndex += 1) {
 		if (pageIndex >= MAX_LIST_PAGES) {
 			throw new Error(
@@ -569,13 +666,32 @@ async function walkList(
 		if (!parsed.ok) {
 			throw new Error(`perplexity_source_unreadable: ${parsed.message}`);
 		}
+		let pageOld = true;
 		for (const item of parsed.page.items) {
 			const thread = parseListedThread(item);
 			if (thread === null) {
-				unreadable += 1;
+				unreadable.push(listItemTime(item));
 			} else if (!seen.has(thread.id)) {
 				seen.add(thread.id);
 				threads.push(thread);
+			}
+			if (ordered) {
+				const time = listItemTime(item);
+				// A time this engine cannot parse (NaN) must not read as old:
+				// it turns the early stop off like a missing time does.
+				const at = time === null ? Number.NaN : Date.parse(time);
+				if (
+					time === null ||
+					!Number.isFinite(at) ||
+					(previous !== null && time > previous)
+				) {
+					ordered = false;
+				} else {
+					previous = time;
+					if (cutoff === null || at >= cutoff) {
+						pageOld = false;
+					}
+				}
 			}
 		}
 		if (parsed.page.items.length === 0) {
@@ -584,10 +700,17 @@ async function walkList(
 			// a 401, and that must not read as "nothing more" (or as an empty
 			// library, checkpointed).
 			await confirmSignedIn(ctx.page, delay);
-			return { threads, unreadable, pages: pageIndex + 1 };
+			return { threads, unreadable, pages: pageIndex + 1, truncated: false };
 		}
 		if (!parsed.page.hasNextPage) {
-			return { threads, unreadable, pages: pageIndex + 1 };
+			return { threads, unreadable, pages: pageIndex + 1, truncated: false };
+		}
+		oldPages = ordered && pageOld ? oldPages + 1 : 0;
+		if (oldPages >= OLD_PAGES_TO_STOP) {
+			connectorDiagnostic("perplexity", "list_walk_stopped_at_window", {
+				pages: pageIndex + 1,
+			});
+			return { threads, unreadable, pages: pageIndex + 1, truncated: true };
 		}
 		offset += parsed.page.items.length;
 	}
@@ -636,14 +759,30 @@ async function confirmSignedIn(
  * out on purpose: a thread answered between walks changes its time but not
  * the membership the walk has to prove.
  */
-function walkSignature(walk: ListWalk): string {
+/**
+ * Whether a list time can still select anything under the cutoff. A row
+ * without a time, or with one this engine cannot parse, always can.
+ */
+function insideCutoff(time: string | null, cutoff: number | null): boolean {
+	return cutoff === null || time === null || !(Date.parse(time) < cutoff);
+}
+
+/** The unkeyed rows of a walk that can still select anything. */
+function unreadableInWindow(walk: ListWalk, cutoff: number | null): number {
+	return walk.unreadable.filter((time) => insideCutoff(time, cutoff)).length;
+}
+
+function walkSignature(walk: ListWalk, cutoff: number | null): string {
 	// Unkeyed rows count too: a walk that saw one and a walk that missed it
 	// (shifted past it) must not agree, or the second could prove a list
-	// that lacks a thread.
+	// that lacks a thread. Under a cutoff, rows older than it, keyed or not,
+	// select nothing, so a walk that read more of them past its stop still
+	// agrees with one that did not.
 	return `${walk.threads
+		.filter((thread) => insideCutoff(thread.updateTime, cutoff))
 		.map((thread) => thread.id)
 		.sort()
-		.join("|")}#unreadable=${String(walk.unreadable)}`;
+		.join("|")}#unreadable=${String(unreadableInWindow(walk, cutoff))}`;
 }
 
 /**
@@ -658,14 +797,15 @@ function walkSignature(walk: ListWalk): string {
 async function stableList(
 	ctx: BrowserCollectContext,
 	delay: (ms: number) => Promise<void>,
+	cutoff: number | null,
 ): Promise<ListWalk & { readonly proven: boolean }> {
-	let walk = await walkList(ctx, delay);
+	let walk = await walkList(ctx, delay, cutoff);
 	if (walk.pages <= 1) {
 		return { ...walk, proven: true };
 	}
 	for (let attempt = 0; attempt < MAX_LIST_WALKS; attempt += 1) {
-		const again = await walkList(ctx, delay);
-		if (walkSignature(again) === walkSignature(walk)) {
+		const again = await walkList(ctx, delay, cutoff);
+		if (walkSignature(again, cutoff) === walkSignature(walk, cutoff)) {
 			return { ...again, proven: true };
 		}
 		walk = again;
@@ -676,6 +816,23 @@ async function stableList(
 	return { ...walk, proven: false };
 }
 
+/** A portable recovery hint (Collection Profile 5.5) for a stream failure. */
+interface RecoveryHint {
+	readonly action: "retry_by_runtime" | "retry_on_connector_upgrade";
+	readonly retryable: boolean;
+}
+
+/** A list that did not hold still: the next run can read it whole. */
+const RETRY_BY_RUNTIME: RecoveryHint = {
+	action: "retry_by_runtime",
+	retryable: true,
+};
+/** A row or entry this parser cannot place: only a newer connector can. */
+const RETRY_ON_CONNECTOR_UPGRADE: RecoveryHint = {
+	action: "retry_on_connector_upgrade",
+	retryable: false,
+};
+
 /**
  * Report one stream as failed. A context without the runtime's reporter (a
  * hand-built caller) cannot carry a stream failure, so the run fails instead
@@ -685,23 +842,58 @@ async function failStream(
 	ctx: BrowserCollectContext,
 	stream: string,
 	message: string,
-	retryable: boolean,
+	hint: RecoveryHint,
 ): Promise<void> {
+	const { retryable } = hint;
 	connectorDiagnostic("perplexity", "stream_failed", { stream, retryable });
 	if (!ctx.reportStreamFailure) {
 		throw createConnectorFailure("perplexity_stream_incomplete", message, {
 			retryable,
+			recoveryHint: { ...hint },
 		});
 	}
-	await ctx.reportStreamFailure(stream, message, { retryable });
+	await ctx.reportStreamFailure(stream, message, {
+		retryable,
+		recoveryHint: { ...hint },
+	});
+}
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * A remembered delivery window. `undefined` when the field is absent (every
+ * message was delivered, which is also how a thread remembered before the
+ * field existed is read); null when it is present but malformed, so the
+ * thread is not trusted at all.
+ */
+function readSyncWindow(value: unknown): SyncWindow | null | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!isPlainObject(value)) {
+		return null;
+	}
+	const window: SyncWindow = {};
+	for (const key of ["since", "until", "resources"] as const) {
+		const field = value[key];
+		if (field === undefined) {
+			continue;
+		}
+		if (typeof field !== "string") {
+			return null;
+		}
+		window[key] = field;
+	}
+	return window;
 }
 
 /** A remembered thread, read defensively from a prior STATE. */
 function readThreadSync(value: unknown): ThreadSync | null {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+	if (!isPlainObject(value)) {
 		return null;
 	}
-	const record = value as Record<string, unknown>;
+	const record = value;
 	const text = (field: unknown): string | null =>
 		typeof field === "string" ? field : null;
 	if (
@@ -711,36 +903,332 @@ function readThreadSync(value: unknown): ThreadSync | null {
 	) {
 		return null;
 	}
+	const window = readSyncWindow(record.window);
+	if (window === null) {
+		return null;
+	}
+	const unreadable = record.unreadable_entries;
+	if (
+		unreadable !== undefined &&
+		!(
+			typeof unreadable === "number" &&
+			Number.isSafeInteger(unreadable) &&
+			unreadable > 0 &&
+			typeof record.parser === "number"
+		)
+	) {
+		return null;
+	}
 	return {
 		update_time: record.update_time,
 		create_time: text(record.create_time),
 		entry_count: record.entry_count,
 		complete: true,
+		...(window === undefined ? {} : { window }),
+		...(typeof unreadable === "number" && typeof record.parser === "number"
+			? { unreadable_entries: unreadable, parser: record.parser }
+			: {}),
 	};
 }
 
-function previousSyncedThreads(
-	ctx: BrowserCollectContext,
-): Map<string, ThreadSync> {
+/** What the last `messages` STATE says, read defensively. */
+interface StoredState {
+	/**
+	 * Every thread a current-version STATE remembered, whatever the run's
+	 * collection mode. A full refresh must not skip on it (see
+	 * `previousSyncedThreads`) but keeps it for threads it does not read.
+	 */
+	readonly synced: Map<string, ThreadSync>;
+	/**
+	 * Each remembered thread's creation time, from a STATE of any version: a
+	 * fact about the source, kept so a run that does not read the thread
+	 * does not blank it.
+	 */
+	readonly createTimes: Map<string, string>;
+}
+
+function storedState(ctx: BrowserCollectContext): StoredState {
 	const synced = new Map<string, ThreadSync>();
-	if (ctx.collectionMode === "full_refresh") {
-		return synced;
-	}
+	const createTimes = new Map<string, string>();
 	const cursor = ctx.state.messages;
-	const raw =
-		typeof cursor === "object" && cursor !== null && !Array.isArray(cursor)
-			? (cursor as Record<string, unknown>).synced
-			: undefined;
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-		return synced;
+	if (!isPlainObject(cursor) || !isPlainObject(cursor.synced)) {
+		return { synced, createTimes };
 	}
-	for (const [id, value] of Object.entries(raw)) {
+	const current = cursor.v === SYNC_STATE_VERSION;
+	for (const [id, value] of Object.entries(cursor.synced)) {
 		const sync = readThreadSync(value);
-		if (sync !== null) {
+		if (sync === null) {
+			continue;
+		}
+		if (sync.create_time !== null) {
+			createTimes.set(id, sync.create_time);
+		}
+		if (current) {
 			synced.set(id, sync);
 		}
 	}
-	return synced;
+	return { synced, createTimes };
+}
+
+/** The remembered threads a run may skip on: none on a full refresh. */
+function previousSyncedThreads(
+	ctx: BrowserCollectContext,
+	stored: Map<string, ThreadSync>,
+): Map<string, ThreadSync> {
+	return ctx.collectionMode === "full_refresh" ? new Map() : stored;
+}
+
+// ─── the run's messages selection ────────────────────────────────────────
+
+/** What the runtime will deliver of `messages` in this run. */
+interface MessagesSelection {
+	readonly range: { readonly since?: string; readonly until?: string } | null;
+	readonly resources: ReadonlySet<string> | null;
+	/** Digest of the resource list, stored instead of the list itself. */
+	readonly resourcesKey: string | null;
+}
+
+/**
+ * A short digest (cyrb53, two 32-bit lanes) of the sorted resource list. A
+ * thread remembered under a resource list is reused only by a run with the
+ * same list; the digest keeps STATE small. Pure JS, so it also runs on the
+ * mobile PageShim host.
+ */
+function resourcesDigest(resources: ReadonlySet<string>): string {
+	const text = [...resources].sort().join("\n");
+	let h1 = 0xdeadbeef;
+	let h2 = 0x41c6ce57;
+	for (let index = 0; index < text.length; index += 1) {
+		const code = text.charCodeAt(index);
+		h1 = Math.imul(h1 ^ code, 2_654_435_761);
+		h2 = Math.imul(h2 ^ code, 1_597_334_677);
+	}
+	h1 = Math.imul(h1 ^ (h1 >>> 16), 2_246_822_507);
+	h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3_266_489_909);
+	h2 = Math.imul(h2 ^ (h2 >>> 16), 2_246_822_507);
+	h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3_266_489_909);
+	const hex = (n: number) => (n >>> 0).toString(16).padStart(8, "0");
+	return `${String(resources.size)}:${hex(h2)}${hex(h1)}`;
+}
+
+function messagesSelection(ctx: BrowserCollectContext): MessagesSelection {
+	const scope = ctx.requested.get("messages");
+	const range = scope?.time_range;
+	const resources = scope === undefined ? null : resourceSet(scope);
+	return {
+		range:
+			range !== undefined &&
+			(range.since !== undefined || range.until !== undefined)
+				? range
+				: null,
+		resources,
+		resourcesKey: resources === null ? null : resourcesDigest(resources),
+	};
+}
+
+/**
+ * Whether everything this run's messages selection can deliver was already
+ * delivered under a remembered window: the run's range lies inside the
+ * window's and its resource list is the same one.
+ */
+function windowCovers(
+	window: SyncWindow | undefined,
+	selection: MessagesSelection,
+): boolean {
+	if (window === undefined) {
+		return true;
+	}
+	if (window.since !== undefined) {
+		const since = normalizeInstant(selection.range?.since);
+		const stored = normalizeInstant(window.since);
+		if (since === null || stored === null || since < stored) {
+			return false;
+		}
+	}
+	if (window.until !== undefined) {
+		const until = normalizeInstant(selection.range?.until);
+		const stored = normalizeInstant(window.until);
+		if (until === null || stored === null || until > stored) {
+			return false;
+		}
+	}
+	if (
+		window.resources !== undefined &&
+		window.resources !== selection.resourcesKey
+	) {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * The window a thread's messages were delivered under in this run, or
+ * `remember: false` when the runtime withheld one for a reason the connector
+ * cannot name (it is then read again next run rather than remembered). A
+ * thread whose every message was delivered gets no window: any later
+ * selection is covered.
+ */
+function deliveryWindow(
+	ctx: BrowserCollectContext,
+	selection: MessagesSelection,
+	messages: readonly MessageRecord[],
+): { readonly remember: boolean; readonly window?: SyncWindow } {
+	let byTime = false;
+	let byResource = false;
+	for (const message of messages) {
+		const timeOut =
+			selection.range !== null &&
+			isOutsideTimeRange(selection.range, message.create_time);
+		const resourceOut =
+			selection.resources !== null && !selection.resources.has(message.id);
+		const selected =
+			typeof ctx.isRecordSelected === "function"
+				? ctx.isRecordSelected("messages", { ...message })
+				: !(timeOut || resourceOut);
+		if (selected) {
+			// The runtime's selection does not run the shape check, which
+			// drops a record the schema refuses. Such a message was not
+			// delivered, for a reason no window can name. (The parsers bound
+			// every field the schema checks; this guards against the two
+			// drifting apart.)
+			if (!validateRecord("messages", { ...message }).ok) {
+				return { remember: false };
+			}
+			continue;
+		}
+		if (!(timeOut || resourceOut)) {
+			return { remember: false };
+		}
+		byTime ||= timeOut;
+		byResource ||= resourceOut;
+	}
+	if (!(byTime || byResource)) {
+		return { remember: true };
+	}
+	const window: SyncWindow = {};
+	if (byTime && selection.range?.since !== undefined) {
+		window.since = selection.range.since;
+	}
+	if (byTime && selection.range?.until !== undefined) {
+		window.until = selection.range.until;
+	}
+	if (byResource && selection.resourcesKey !== null) {
+		window.resources = selection.resourcesKey;
+	}
+	return { remember: true, window };
+}
+
+/** A remembered thread the list still shows exactly as it was remembered. */
+function isUnchanged(thread: ListedThread, known: ThreadSync): boolean {
+	return (
+		thread.complete &&
+		thread.updateTime !== null &&
+		known.update_time === thread.updateTime &&
+		known.entry_count === thread.entryCount &&
+		(known.unreadable_entries === undefined ||
+			known.parser === ENTRY_PARSER_REVISION)
+	);
+}
+
+/**
+ * Whether no message of the thread can fall inside the run's messages time
+ * range, so its detail need not be read:
+ *   - since: its last query is more than ANSWER_TIME_MARGIN_MS before it
+ *     (every entry was created no later than the last query, and an answer
+ *     finishes within the margin);
+ *   - until: its remembered first entry was created at or after it (no
+ *     entry is created before the first, and an answer finishes after its
+ *     question). Only a fully read thread's creation time is trusted here.
+ */
+function outsideMessagesRange(
+	thread: ListedThread,
+	known: ThreadSync | undefined,
+	selection: MessagesSelection,
+): boolean {
+	const range = selection.range;
+	if (range === null) {
+		return false;
+	}
+	// Only a thread the list marks complete: one still being answered can
+	// finish at any time.
+	if (
+		range.since !== undefined &&
+		thread.complete &&
+		thread.updateTime !== null
+	) {
+		const since = Date.parse(range.since);
+		if (Date.parse(thread.updateTime) < since - ANSWER_TIME_MARGIN_MS) {
+			return true;
+		}
+	}
+	if (
+		range.until !== undefined &&
+		known?.create_time != null &&
+		known.unreadable_entries === undefined
+	) {
+		// Compared to the microsecond: both sides are fixed-width UTC
+		// instants, which sort by time. A bound finer than a microsecond is
+		// rounded up, so an entry just before it is never taken as after it.
+		const until = ceilInstant(range.until);
+		const created = normalizeInstant(known.create_time);
+		if (until !== null && created !== null && created >= until) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * `normalizeInstant`, rounded up to the next microsecond when the value
+ * carries a nonzero digit finer than that (normalizing truncates them).
+ */
+function ceilInstant(value: string): string | null {
+	const normalized = normalizeInstant(value);
+	if (normalized === null) {
+		return null;
+	}
+	const finer = /T[^.]*\.\d{6}(\d+)/.exec(value)?.[1];
+	if (finer === undefined || /^0+$/.test(finer)) {
+		return normalized;
+	}
+	const micros =
+		Date.parse(`${normalized.slice(0, 19)}Z`) * 1000 +
+		Number(normalized.slice(20, 26)) +
+		1;
+	const seconds = Math.floor(micros / 1_000_000);
+	const fraction = String(micros - seconds * 1_000_000).padStart(6, "0");
+	return `${new Date(seconds * 1000).toISOString().slice(0, 19)}.${fraction}Z`;
+}
+
+/** An answer this much later than its thread's last query is reported. */
+const TRAILING_ANSWER_REPORT_MS = 3_600_000;
+
+/**
+ * Report a thread whose latest answer finished well after the list's last
+ * query time: the evidence for (or against) ANSWER_TIME_MARGIN_MS.
+ */
+function reportTrailingAnswer(
+	thread: ListedThread,
+	messages: readonly MessageRecord[],
+): void {
+	if (thread.updateTime === null) {
+		return;
+	}
+	const lastQuery = Date.parse(thread.updateTime);
+	let latest = Number.NEGATIVE_INFINITY;
+	for (const message of messages) {
+		if (message.role === "assistant" && message.create_time !== null) {
+			latest = Math.max(latest, Date.parse(message.create_time));
+		}
+	}
+	const trail = latest - lastQuery;
+	if (Number.isFinite(trail) && trail > TRAILING_ANSWER_REPORT_MS) {
+		connectorDiagnostic("perplexity", "answer_trails_last_query", {
+			thread: thread.id,
+			hours: Math.round(trail / 3_600_000),
+			beyond_margin: trail > ANSWER_TIME_MARGIN_MS,
+		});
+	}
 }
 
 /** One thread's detail, read before anything about it is emitted. */
@@ -881,8 +1369,10 @@ async function forEachPendingGapPage(
  * re-read from its locator, page by page, without walking the list. A
  * thread that now reads completely, and to at least the entry count its
  * locator recorded, gets its messages and a DETAIL_GAP_RECOVERED for each of
- * its pending gaps; one that still fails or is still short stays pending,
- * and one whose locator has no count is left to the forward walk. Nothing is
+ * its pending gaps (an entry it still cannot read is reported unreadable
+ * rather than kept pending); one that still fails, is still short or is
+ * still being answered stays pending, and one whose locator has no count is
+ * left to the forward walk. Nothing is
  * checkpointed here. Its conversation record was emitted by the run that
  * wrote the gap.
  */
@@ -890,6 +1380,7 @@ async function recoverDetailGapsOnly(
 	ctx: BrowserCollectContext,
 	threadDelayMs: number,
 ): Promise<void> {
+	let unreadableEntries = 0;
 	await forEachPendingGapPage(ctx, startGaps(ctx), async (fresh) => {
 		const gapsByThread = new Map<
 			string,
@@ -913,16 +1404,54 @@ async function recoverDetailGapsOnly(
 				locator.expected,
 			);
 			await politeDelay(threadDelayMs);
-			if (read.kind !== "read" || !read.complete) {
+			// An answer still being written keeps the gap pending. An entry this
+			// parser cannot read does not: only a connector upgrade can read it,
+			// so it is reported as unreadable and the gap is closed.
+			if (read.kind !== "read" || read.incomplete > 0) {
 				continue;
 			}
 			for (const message of read.messages) {
 				await ctx.emitRecord("messages", { ...message });
 			}
+			unreadableEntries += read.unreadable;
 			for (const gap of gaps) {
 				await ctx.emit(gapRecovered(gap, conversationId));
 			}
 		}
+	});
+	await reportUnreadable(ctx, unreadableEntries, 0);
+}
+
+/**
+ * One SKIP_RESULT for everything in `messages` this connector version cannot
+ * read: entries whose shape it does not know, and threads the list gave no
+ * slug to read them by. Retrying cannot help, so the hint is a connector
+ * upgrade, and the threads are not gapped (a gap would be retried forever).
+ */
+async function reportUnreadable(
+	ctx: BrowserCollectContext,
+	entries: number,
+	threads: number,
+): Promise<void> {
+	if (entries === 0 && threads === 0) {
+		return;
+	}
+	const parts = [
+		...(entries > 0
+			? [`${String(entries)} Perplexity answer(s) could not be read`]
+			: []),
+		...(threads > 0
+			? [
+					`${String(threads)} Perplexity thread(s) had no address to read them by`,
+				]
+			: []),
+	];
+	await ctx.emit({
+		type: "SKIP_RESULT",
+		stream: "messages",
+		reason: "records_unreadable",
+		message: `${parts.join(" and ")}, so they were skipped. Everything else was collected normally. A newer version of this connector may read them.`,
+		recovery_hint: { ...RETRY_ON_CONNECTOR_UPGRADE },
 	});
 }
 
@@ -1018,12 +1547,17 @@ export async function collectPerplexity(
 		: new Map<string, PendingGap[]>();
 
 	// 1. The library list, proven complete and stable. `total_threads` is not
-	// used: live list items carry a number unrelated to the library size.
-	const {
-		threads: listed,
-		unreadable: unreadableThreads,
-		proven,
-	} = await stableList(ctx, delay);
+	// used: live list items carry a number unrelated to the library size. A
+	// run whose every stream starts at a `since` may stop the walk once the
+	// list is past it (`listCutoff`).
+	const cutoff = listCutoff(ctx);
+	const walk = await stableList(ctx, delay, cutoff);
+	const { threads: listed, proven, truncated } = walk;
+	// A row older than the cutoff selects nothing, readable or not.
+	const unreadableThreads = unreadableInWindow(walk, cutoff);
+	// What the last messages STATE remembered: creation times are reused
+	// from it on any run, while skipping on it is for incremental runs.
+	const { synced: stored, createTimes } = storedState(ctx);
 	if (!proven) {
 		// The threads seen are real and are kept, but nothing is checkpointed
 		// and no thread is read in depth: both requested streams fail, and a
@@ -1031,7 +1565,7 @@ export async function collectPerplexity(
 		if (wantsConversations) {
 			for (const thread of listed) {
 				await ctx.emitRecord("conversations", {
-					...conversationRecord(thread, null),
+					...conversationRecord(thread, createTimes.get(thread.id) ?? null),
 				});
 			}
 		}
@@ -1039,14 +1573,15 @@ export async function collectPerplexity(
 			"Your Perplexity library kept changing while it was read, so this run could not confirm it saw every thread. Nothing was checkpointed; the next run reads it again.";
 		for (const stream of ["conversations", "messages"] as const) {
 			if (ctx.requested.has(stream)) {
-				await failStream(ctx, stream, why, true);
+				await failStream(ctx, stream, why, RETRY_BY_RUNTIME);
 			}
 		}
 		return;
 	}
 	// A list row that cannot be keyed is a thread neither stream can account
 	// for: both requested streams fail, and neither claims coverage or saves
-	// a checkpoint, while every readable thread is still collected.
+	// a checkpoint, while every readable thread is still collected. Only a
+	// connector that can read the row can account for it.
 	const inventoryWhole = unreadableThreads === 0;
 	if (!inventoryWhole) {
 		for (const stream of ["conversations", "messages"] as const) {
@@ -1055,7 +1590,7 @@ export async function collectPerplexity(
 					ctx,
 					stream,
 					`${String(unreadableThreads)} Perplexity thread(s) could not be read from the library list and were skipped. Everything else was collected normally.`,
-					false,
+					RETRY_ON_CONNECTOR_UPGRADE,
 				);
 			}
 		}
@@ -1063,26 +1598,51 @@ export async function collectPerplexity(
 
 	// 2. Per thread: read its detail first, then emit the conversation, then
 	// its messages (or a gap), so a child never arrives before its parent.
-	const previousSynced = previousSyncedThreads(ctx);
+	const previousSynced = previousSyncedThreads(ctx, stored);
+	const selection = messagesSelection(ctx);
 	const synced: Record<string, ThreadSync> = {};
 	const hydrated: string[] = [];
 	const skippedUnchanged: string[] = [];
+	const outsideRange: string[] = [];
+	const unreadableKeys: string[] = [];
+	const slugless: string[] = [];
 	const gapKeys: string[] = [];
 	let incompleteEntries = 0;
 	let unreadableEntries = 0;
+	let threadsWithoutSlug = 0;
 	let messagesRead = 0;
 
 	for (const thread of listed) {
 		const known = previousSynced.get(thread.id);
-		const unchanged =
-			wantsMessages &&
+		const createTimeKnown = createTimes.get(thread.id) ?? null;
+		if (!wantsMessages) {
+			await ctx.emitRecord("conversations", {
+				...conversationRecord(thread, createTimeKnown),
+			});
+			continue;
+		}
+		// Nothing of this thread can fall inside the messages time range, so
+		// its detail is not read. A remembered state is kept as it was, also
+		// on a full refresh: this run delivered nothing that could change it.
+		if (outsideMessagesRange(thread, known, selection)) {
+			outsideRange.push(thread.id);
+			const kept = stored.get(thread.id);
+			if (kept !== undefined) {
+				synced[thread.id] = kept;
+			}
+			if (wantsConversations) {
+				await ctx.emitRecord("conversations", {
+					...conversationRecord(thread, createTimeKnown),
+				});
+			}
+			continue;
+		}
+		if (
 			known !== undefined &&
-			thread.complete &&
-			thread.updateTime !== null &&
-			known.update_time === thread.updateTime &&
-			known.entry_count === thread.entryCount &&
-			!pending.has(thread.id);
-		if (unchanged) {
+			isUnchanged(thread, known) &&
+			windowCovers(known.window, selection) &&
+			!pending.has(thread.id)
+		) {
 			synced[thread.id] = known;
 			skippedUnchanged.push(thread.id);
 			if (wantsConversations) {
@@ -1094,7 +1654,7 @@ export async function collectPerplexity(
 		}
 
 		let read: ThreadRead | null = null;
-		if (wantsMessages && thread.slug !== null) {
+		if (thread.slug !== null) {
 			read = await readThread(
 				ctx.page,
 				thread.slug,
@@ -1104,28 +1664,44 @@ export async function collectPerplexity(
 			await politeDelay(threadDelayMs);
 		}
 		const createTime =
-			(read?.kind === "read" ? read.createTime : null) ??
-			known?.create_time ??
-			null;
+			(read?.kind === "read" ? read.createTime : null) ?? createTimeKnown;
 		if (wantsConversations) {
 			await ctx.emitRecord("conversations", {
 				...conversationRecord(thread, createTime),
 			});
 		}
-		if (!wantsMessages) {
+		// A thread the list gives no slug cannot be read by this connector:
+		// reported once as unreadable, not gapped (a gap would never recover).
+		// A gap already pending for it stays pending: closing it would claim
+		// messages that were never read. (The profile has no terminal gap
+		// outcome yet; that is a runtime ask.)
+		if (read === null) {
+			threadsWithoutSlug += 1;
+			slugless.push(thread.id);
+			connectorDiagnostic("perplexity", "thread_has_no_slug", {
+				thread: thread.id,
+			});
 			continue;
 		}
-		if (read?.kind === "read") {
+		if (read.kind === "read") {
+			reportTrailingAnswer(thread, read.messages);
+		}
+		if (read.kind === "read" && read.incomplete === 0) {
+			// Decided before the records go out, from the same gates the
+			// runtime applies to them.
+			const delivery = deliveryWindow(ctx, selection, read.messages);
 			for (const message of read.messages) {
 				await ctx.emitRecord("messages", { ...message });
 			}
 			messagesRead += read.messages.length;
-			incompleteEntries += read.incomplete;
 			unreadableEntries += read.unreadable;
-		}
-		if (read?.kind === "read" && read.complete) {
-			hydrated.push(thread.id);
+			if (read.unreadable > 0) {
+				unreadableKeys.push(thread.id);
+			} else {
+				hydrated.push(thread.id);
+			}
 			if (
+				delivery.remember &&
 				thread.complete &&
 				thread.updateTime !== null &&
 				thread.entryCount !== null
@@ -1135,6 +1711,13 @@ export async function collectPerplexity(
 					create_time: read.createTime,
 					entry_count: thread.entryCount,
 					complete: true,
+					...(delivery.window === undefined ? {} : { window: delivery.window }),
+					...(read.unreadable > 0
+						? {
+								unreadable_entries: read.unreadable,
+								parser: ENTRY_PARSER_REVISION,
+							}
+						: {}),
 				};
 			}
 			for (const gap of pending.get(thread.id) ?? []) {
@@ -1142,15 +1725,20 @@ export async function collectPerplexity(
 			}
 			continue;
 		}
+		if (read.kind === "read") {
+			// Its readable answers are kept; the thread is read again next run.
+			for (const message of read.messages) {
+				await ctx.emitRecord("messages", { ...message });
+			}
+			messagesRead += read.messages.length;
+			incompleteEntries += read.incomplete;
+			unreadableEntries += read.unreadable;
+		}
 		gapKeys.push(thread.id);
 		const why =
-			read === null
-				? { class: "thread_has_no_slug" }
-				: read.kind === "failed"
-					? { class: "thread_detail_failed", message: bounded(read.message) }
-					: read.incomplete > 0
-						? { class: "answer_still_generating" }
-						: { class: "entry_unreadable" };
+			read.kind === "failed"
+				? { class: "thread_detail_failed", message: bounded(read.message) }
+				: { class: "answer_still_generating" };
 		// Every key in gap_keys gets a DETAIL_GAP in this run, including one
 		// whose gap is already pending from an earlier run: the commit gate
 		// credits a gap key only against a gap emitted alongside it, and the
@@ -1172,15 +1760,7 @@ export async function collectPerplexity(
 		connectorDiagnostic("perplexity", why.class, { thread: thread.id });
 	}
 
-	// Each thread with an unreadable entry already carries its own DETAIL_GAP
-	// (and is not remembered), so it is re-read next run. Failing the whole
-	// stream as well would keep messages from ever checkpointing.
-	if (unreadableEntries > 0) {
-		await ctx.progress(
-			`${String(unreadableEntries)} Perplexity answer(s) could not be read safely and were not stored; their threads will be read again next time`,
-			{ stream: "messages" },
-		);
-	}
+	await reportUnreadable(ctx, unreadableEntries, threadsWithoutSlug);
 	if (incompleteEntries > 0) {
 		await ctx.progress(
 			`${String(incompleteEntries)} Perplexity answer(s) were still being written and will be read next time`,
@@ -1193,14 +1773,20 @@ export async function collectPerplexity(
 		});
 	}
 
-	// Pending gaps beyond START's first page. A thread read completely this
-	// run, or skipped as unchanged (it is remembered only after a complete
-	// read, which can postdate a gap the first page did not carry), has its
-	// gaps acknowledged. A thread gapped again this run already re-emitted its
-	// gap; one not listed this run is left pending.
+	// Pending gaps beyond START's first page. A thread settled this run (read
+	// completely, skipped as unchanged, or read with entries reported
+	// unreadable) has its gaps acknowledged: an unchanged thread is
+	// remembered only after a complete read, which can postdate a gap the
+	// first page did not carry. A thread gapped again this run already
+	// re-emitted its gap; one with no slug, not listed, or outside the time
+	// range is left pending.
 	const firstPage = startGaps(ctx);
 	if (wantsMessages && pending.size > 0) {
-		const settled = new Set([...hydrated, ...skippedUnchanged]);
+		const settled = new Set([
+			...hydrated,
+			...skippedUnchanged,
+			...unreadableKeys,
+		]);
 		await forEachPendingGapPage(
 			ctx,
 			[],
@@ -1217,8 +1803,9 @@ export async function collectPerplexity(
 	}
 
 	// 3. Prove the boundaries, then checkpoint. Reaching here means the list
-	// walk ended on its own proof and stayed stable; a list with a row that
-	// could not be keyed was reported above and is not checkpointed.
+	// walk ended on its own proof (its end, or the time range's cutoff) and
+	// stayed stable; a list with a row that could not be keyed was reported
+	// above and is not checkpointed.
 	if (!inventoryWhole) {
 		return;
 	}
@@ -1238,28 +1825,34 @@ export async function collectPerplexity(
 			stateStream: "conversations",
 			requiredKeys: listed.map((thread) => thread.id),
 			hydratedKeys: hydrated,
-			optionalSkipKeys: skippedUnchanged,
+			optionalSkipKeys: [
+				...skippedUnchanged,
+				...outsideRange,
+				...unreadableKeys,
+				...slugless,
+			],
 			gapKeys,
 			considered: listed.length,
-			covered: hydrated.length + skippedUnchanged.length,
+			covered: hydrated.length + skippedUnchanged.length + outsideRange.length,
 		});
-		await ctx.emit({
-			type: "STATE",
-			stream: "messages",
-			cursor: { synced } satisfies MessagesCursor,
-		});
-	}
-	if (wantsConversations) {
-		let lastUpdateTime: string | null = null;
-		for (const thread of listed) {
-			lastUpdateTime = later(lastUpdateTime, thread.updateTime);
+		// A walk stopped at the cutoff never saw the older threads. What was
+		// remembered about them still holds (a full refresh skips nothing on
+		// it, but does not forget it), so it is carried forward; a walk that
+		// reached the end drops threads no longer listed. A thread listed
+		// this run is never carried: it was remembered above, or on purpose
+		// not.
+		if (truncated) {
+			const listedIds = new Set(listed.map((thread) => thread.id));
+			for (const [id, kept] of stored) {
+				if (!listedIds.has(id)) {
+					synced[id] = kept;
+				}
+			}
 		}
 		await ctx.emit({
 			type: "STATE",
-			stream: "conversations",
-			cursor: {
-				last_update_time: lastUpdateTime,
-			} satisfies ConversationsCursor,
+			stream: "messages",
+			cursor: { v: SYNC_STATE_VERSION, synced } satisfies MessagesCursor,
 		});
 	}
 }

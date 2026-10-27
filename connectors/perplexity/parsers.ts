@@ -190,6 +190,15 @@ export function parseListedThread(item: unknown): ListedThread | null {
 	};
 }
 
+/**
+ * A raw list item's last activity time, read even from an item that cannot
+ * be keyed: the walk checks the list's newest-first order on every row it
+ * sees, so a row it cannot place still counts toward (or breaks) that order.
+ */
+export function listItemTime(item: unknown): string | null {
+	return isRecord(item) ? normalizeInstant(item.last_query_datetime) : null;
+}
+
 /** The conversations record for a listed thread, with its create time if known. */
 export function conversationRecord(
 	listed: ListedThread,
@@ -391,7 +400,7 @@ export type EntryRead =
 			readonly user: MessageRecord;
 			readonly assistant: MessageRecord;
 			/** The entry's creation time, the best proxy for the thread's create time. */
-			readonly firstCreateTime: string | null;
+			readonly firstCreateTime: string;
 	  }
 	/** The answer is still being written (`status` is not `COMPLETED`). */
 	| { readonly kind: "incomplete"; readonly id: string }
@@ -440,7 +449,17 @@ export function entryMessages(
 			reason: answer.ok ? "entry has no answer" : `answer: ${answer.reason}`,
 		};
 	}
+	// The question's time is the messages stream's consent time. A question
+	// without one would be dropped silently by a time-bounded run, so the
+	// entry is unreadable instead of emitted with a null time.
 	const createTime = normalizeInstant(entryValue.entry_created_datetime);
+	if (createTime === null) {
+		return {
+			kind: "unreadable",
+			id: uuid,
+			reason: "entry has no readable creation time",
+		};
+	}
 	const updateTime =
 		normalizeInstant(entryValue.entry_updated_datetime) ?? createTime;
 	const model =

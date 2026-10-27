@@ -9,6 +9,7 @@ import {
 	conversationRecord,
 	entryCitations,
 	entryMessages,
+	listItemTime,
 	normalizeInstant,
 	parseListedThread,
 	parseThreadDetailPage,
@@ -233,6 +234,33 @@ test("an entry without a usable uuid cannot be keyed", () => {
 	assert.equal(entryMessages({ uuid: "" }, "c1").kind, "unreadable");
 });
 
+test("an entry without a readable creation time is unreadable, never emitted with a null time", () => {
+	const entry = {
+		uuid: "e4",
+		status: "COMPLETED",
+		query_str: "when?",
+		entry_updated_datetime: "2026-10-01T09:00:00.000000+00:00",
+		blocks: [{ intended_usage: "ask_text", markdown_block: { answer: "now" } }],
+	};
+	const missing = entryMessages(entry, "c1");
+	assert.equal(missing.kind, "unreadable");
+	const garbled = entryMessages(
+		{ ...entry, entry_created_datetime: "yesterday" },
+		"c1",
+	);
+	assert.equal(garbled.kind, "unreadable");
+});
+
+test("a list row's time is read even when the row cannot be keyed", () => {
+	assert.equal(
+		listItemTime({ last_query_datetime: "2026-10-01T09:00:00.123456" }),
+		"2026-10-01T09:00:00.123456Z",
+	);
+	assert.equal(listItemTime({ uuid: "x" }), null);
+	assert.equal(listItemTime(null), null);
+	assert.equal(listItemTime([]), null);
+});
+
 test("an answer still being written is incomplete, not a record", () => {
 	const read = entryMessages(
 		{ uuid: "e1", status: "IN_PROGRESS", query_str: "q?", blocks: [] },
@@ -284,6 +312,7 @@ test("C0 and C1 control characters are stripped from question and answer bodies,
 		{
 			uuid: "e3",
 			status: "COMPLETED",
+			entry_created_datetime: "2026-10-01T09:00:00.000000+00:00",
 			query_str: "why\u0001?",
 			blocks: [
 				{
