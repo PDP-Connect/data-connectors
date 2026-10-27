@@ -12,6 +12,42 @@ export function emptyConversationDetail(path: string): ChatGptFetchResult {
 }
 
 /**
+ * The detail of a conversation with one user message: a read that settles the
+ * conversation, for a listing test that follows a cursor across runs and so
+ * must not have every row held back as unread.
+ */
+export function readConversationDetail(path: string): ChatGptFetchResult {
+	const id = decodeURIComponent(path.slice(DETAIL_PATH.length));
+	return {
+		status: 200,
+		json: {
+			id,
+			conversation_id: id,
+			current_node: `${id}-m0`,
+			mapping: {
+				[`${id}-root`]: {
+					id: `${id}-root`,
+					parent: null,
+					children: [`${id}-m0`],
+				},
+				[`${id}-m0`]: {
+					id: `${id}-m0`,
+					parent: `${id}-root`,
+					children: [],
+					message: {
+						id: `${id}-m0`,
+						author: { role: "user" },
+						content: { content_type: "text", parts: ["hello"] },
+						create_time: 1_700_000_000,
+						metadata: {},
+					},
+				},
+			},
+		},
+	};
+}
+
+/**
  * A listing test asks for `conversations` and serves only list pages. The
  * connector also reads each conversation's detail for that stream, so a detail
  * path the test does not serve (a 404, or a fake that throws on a path it does

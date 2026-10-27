@@ -77,6 +77,7 @@ import {
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	emptyConversationDetail,
+	readConversationDetail,
 	NO_DETAIL_WAITS,
 	withEmptyConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
@@ -158,7 +159,7 @@ test("persistent listing circuit publishes completed metadata through successful
 				].map((name) => ({ name })),
 			},
 			state: {
-				conversations: { last_update_time: prior },
+				conversations: { last_update_time: prior, detail_version: 1 },
 				messages: { last_update_time: prior },
 			},
 		},
@@ -312,7 +313,10 @@ test("backlog re-list and differing forward cursors share one listing pressure e
 		],
 	};
 	const prior = {
-		conversations: { last_update_time: "2023-11-14T22:13:20.000Z" },
+		conversations: {
+			last_update_time: "2023-11-14T22:13:20.000Z",
+			detail_version: 1,
+		},
 		messages: { last_update_time: "2023-11-15T22:13:20.000Z" },
 	};
 	await runConversationsAndMessagesStreams(deps, prior);
@@ -2098,7 +2102,7 @@ test("round-2 B2: a changing continuation page stays partial without coverage", 
 		requested: new Map([["conversations", { name: "conversations" }]]),
 	} as StreamDeps;
 	await runConversationsAndMessagesStreams(deps, {
-		conversations: { last_update_time: priorCursor },
+		conversations: { last_update_time: priorCursor, detail_version: 1 },
 	});
 	assert.deepEqual(
 		paths.map((path) =>
@@ -2139,7 +2143,7 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 		auth: () => Promise.reject(new Error("auth unused")),
 		fetch: (path) => {
 			if (path.startsWith("/conversation/")) {
-				return Promise.resolve(emptyConversationDetail(path));
+				return Promise.resolve(readConversationDetail(path));
 			}
 			const cursor = Number(
 				new URLSearchParams(path.split("?")[1]).get("cursor"),
@@ -2180,7 +2184,11 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 		progress: () => Promise.resolve(),
 		requested: new Map([["conversations", { name: "conversations" }]]),
 	} as StreamDeps;
-	await runConversationsAndMessagesStreams(deps, {});
+	await runConversationsAndMessagesStreams(
+		deps,
+		{},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 	const firstState = first.protocolMessages.find(
 		(message) => message.type === "STATE" && message.stream === "conversations",
 	);
@@ -2203,9 +2211,13 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 		emit: second.emit,
 		emitRecord: second.emitRecord,
 	};
-	await runConversationsAndMessagesStreams(secondDeps, {
-		conversations: firstCursor,
-	});
+	await runConversationsAndMessagesStreams(
+		secondDeps,
+		{
+			conversations: firstCursor,
+		},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 	assert.equal(
 		cursorZeroCalls,
 		2,
@@ -2224,9 +2236,13 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 		true,
 		"the pinned update-time watermark safely replays already-reached newer rows",
 	);
-	const finalState = second.protocolMessages.find(
-		(message) => message.type === "STATE" && message.stream === "conversations",
-	);
+	// The detail pass checkpoints every 25 settled rows; the last STATE is final.
+	const finalState = second.protocolMessages
+		.filter(
+			(message) =>
+				message.type === "STATE" && message.stream === "conversations",
+		)
+		.at(-1);
 	assert.ok(finalState && finalState.type === "STATE");
 	const finalCursor = finalState.cursor as Record<string, unknown>;
 	assert.equal(
@@ -6003,7 +6019,10 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: "2026-06-15T00:00:00.000Z" },
+			conversations: {
+				last_update_time: "2026-06-15T00:00:00.000Z",
+				detail_version: 1,
+			},
 			messages: { last_update_time: "2026-06-15T00:00:00.000Z" },
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
@@ -6048,7 +6067,10 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 		states.map((state) => [state.stream, state.cursor]),
 		[
 			["messages", { last_update_time: "2026-06-15T00:00:00.000Z" }],
-			["conversations", { last_update_time: "2026-06-15T00:00:00.000Z" }],
+			[
+				"conversations",
+				{ last_update_time: "2026-06-15T00:00:00.000Z", detail_version: 1 },
+			],
 		],
 	);
 });
@@ -6084,7 +6106,7 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: priorCursor },
+			conversations: { last_update_time: priorCursor, detail_version: 1 },
 			messages: { last_update_time: priorCursor },
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
@@ -6099,6 +6121,7 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 		[
 			{
 				last_update_time: "2026-06-15T00:00:00.000Z",
+				detail_version: 1,
 				backfill: {
 					position_hint: 0,
 					oldest_update_time: null,
@@ -6473,7 +6496,7 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 				return { status: 200, json: null };
 			}
 			if (path.startsWith("/conversation/")) {
-				return emptyConversationDetail(path);
+				return readConversationDetail(path);
 			}
 			throw new Error(`unexpected fetch ${path}`);
 		},
@@ -6486,9 +6509,13 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		requested: new Map(["conversations"].map((name) => [name, { name }])),
 	};
 
-	await runConversationsAndMessagesStreams(run1Deps, {
-		conversations: { last_update_time: priorCursorIso },
-	} as CollectContext["state"]);
+	await runConversationsAndMessagesStreams(
+		run1Deps,
+		{
+			conversations: { last_update_time: priorCursorIso, detail_version: 1 },
+		} as CollectContext["state"],
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 
 	const run1ConvoRecords = run1.emitted.filter(
 		(r) => r.stream === "conversations",
@@ -6520,19 +6547,20 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 			m.type === "STATE" && m.stream === "conversations",
 	);
+	// One checkpoint after 25 settled detail reads, then the final state.
 	assert.equal(
 		run1States.length,
-		1,
+		2,
 		"STATE persists both the newest-seen watermark and the backfill continuation",
 	);
 	assert.equal(
-		(run1States[0]?.cursor as { last_update_time?: string } | undefined)
+		(run1States.at(-1)?.cursor as { last_update_time?: string } | undefined)
 			?.last_update_time,
 		priorCursorIso,
 		"a partial walk keeps the watermark pinned before the unread page",
 	);
 	const partialBackfill = (
-		run1States[0]?.cursor as
+		run1States.at(-1)?.cursor as
 			| { backfill?: { position_hint: number; boundary_ids: string[] } }
 			| undefined
 	)?.backfill;
@@ -6559,7 +6587,7 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 				return { status: 200, json: { items: [] } };
 			}
 			if (path.startsWith("/conversation/")) {
-				return emptyConversationDetail(path);
+				return readConversationDetail(path);
 			}
 			throw new Error(`unexpected fetch ${path}`);
 		},
@@ -6572,9 +6600,15 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		requested: new Map(["conversations"].map((name) => [name, { name }])),
 	};
 
-	await runConversationsAndMessagesStreams(run2Deps, {
-		conversations: { ...(run1States[0]?.cursor as Record<string, unknown>) },
-	} as CollectContext["state"]);
+	await runConversationsAndMessagesStreams(
+		run2Deps,
+		{
+			conversations: {
+				...(run1States.at(-1)?.cursor as Record<string, unknown>),
+			},
+		} as CollectContext["state"],
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
 
 	const run2ConvoRecords = run2.emitted.filter(
 		(r) => r.stream === "conversations",
@@ -6617,20 +6651,18 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 			m.type === "STATE" && m.stream === "conversations",
 	);
+	// Two checkpoints (25 and 50 settled detail reads), then the final state.
+	assert.equal(run2States.length, 3);
 	assert.equal(
-		run2States.length,
-		1,
-		"the completed backfill clears its continuation",
-	);
-	assert.equal(
-		(run2States[0]?.cursor as { last_update_time?: string } | undefined)
+		(run2States.at(-1)?.cursor as { last_update_time?: string } | undefined)
 			?.last_update_time,
 		trueMaxUpdateIso,
 		"older backfill items do not move the newest-seen watermark backwards",
 	);
 	assert.equal(
-		(run2States[0]?.cursor as { backfill?: unknown } | undefined)?.backfill,
+		(run2States.at(-1)?.cursor as { backfill?: unknown } | undefined)?.backfill,
 		undefined,
+		"the completed backfill clears its continuation",
 	);
 });
 
@@ -6712,7 +6744,7 @@ for (const [label, body] of CHATGPT_WRONG_SHAPE_BODIES) {
 		await runConversationsAndMessagesStreams(
 			deps,
 			{
-				conversations: { last_update_time: priorCursor },
+				conversations: { last_update_time: priorCursor, detail_version: 1 },
 				messages: { last_update_time: priorCursor },
 			} as CollectContext["state"],
 			{ detailPacing: { random: () => 0, sleep: () => undefined } },
@@ -6801,7 +6833,7 @@ test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversat
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: priorCursor },
+			conversations: { last_update_time: priorCursor, detail_version: 1 },
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -6878,7 +6910,7 @@ test("runConversationsAndMessagesStreams: a genuine empty /conversations page re
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: priorCursor },
+			conversations: { last_update_time: priorCursor, detail_version: 1 },
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -6952,7 +6984,7 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: priorCursor },
+			conversations: { last_update_time: priorCursor, detail_version: 1 },
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -7327,7 +7359,10 @@ test("a follow-up run expands the backlog gap (older window) before any forward 
 		await runConversationsAndMessagesStreams(
 			deps,
 			{
-				conversations: { last_update_time: conversationsCursor },
+				conversations: {
+					last_update_time: conversationsCursor,
+					detail_version: 1,
+				},
 				messages: { last_update_time: messagesCursor },
 			} as CollectContext["state"],
 			{

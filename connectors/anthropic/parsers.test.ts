@@ -1055,6 +1055,9 @@ for (const [label, org, expected] of PLAN_ORGS) {
 			buildLiveAccountPlanRecord(org, null)?.plan_type,
 		);
 		assert.equal(validateRecord("account_plan", record).ok, true);
+		// One record per connection: both Claude connectors key it the same way.
+		assert.equal(record?.id, "account_plan");
+		assert.equal(record?.id, buildLiveAccountPlanRecord(org, null)?.id);
 	});
 }
 
@@ -1072,7 +1075,7 @@ test("buildAccountPlanRecord: carries only the organization id, creation time an
 	} as RawOrganization;
 	const record = buildAccountPlanRecord(entry);
 	assert.deepEqual(record, {
-		id: "org-1",
+		id: "account_plan",
 		account_id: "org-1",
 		account_structure: null,
 		account_created_at: "2025-03-01T12:00:00.123456Z",

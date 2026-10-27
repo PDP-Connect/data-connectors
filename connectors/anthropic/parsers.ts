@@ -1172,9 +1172,9 @@ export function planTypeOf(org: RawOrganization): string | null {
 }
 
 /**
- * The account_plan record for the organization the export came from, or null
- * when the entry has no id. It names the organization, its creation time and
- * its plan family, and nothing else: every other field of the stream is null.
+ * The account_plan record for one organization, or null when the entry has no
+ * id. It names the organization (`account_id`), its creation time and its plan
+ * family, and nothing else: every other field of the stream is null.
  */
 export function buildAccountPlanRecord(
 	org: RawOrganization,
@@ -1183,7 +1183,9 @@ export function buildAccountPlanRecord(
 	if (organizationId === null) return null;
 	const createdAt = nonEmptyString(org.created_at);
 	return {
-		id: organizationId,
+		// The key every account_plan record uses, as anthropic_live and chatgpt
+		// write it: the stream holds one record per connection.
+		id: "account_plan",
 		account_id: organizationId,
 		account_structure: null,
 		account_created_at:

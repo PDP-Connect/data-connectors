@@ -189,8 +189,10 @@ export const accountProfileSchema = z.object({
  * account_plan stream. The claude source shares this stream with the
  * anthropic-live artifact, and a source declares one contract per stream name,
  * so this schema is the live one field for field (and the chatgpt connector's).
- * The export fills only what the account's organization entry gives it: `id`
- * and `account_id` (the organization id), `account_created_at` and `plan_type`.
+ * The export fills only what the account's organization entry gives it:
+ * `account_id` (the organization id), `account_created_at` and `plan_type`. `id`
+ * is the constant "account_plan", the key the live connector and chatgpt use,
+ * so one connection holds one record.
  * Everything else stays null: no name, no email, no billing data.
  */
 export const accountPlanSchema = z.object({

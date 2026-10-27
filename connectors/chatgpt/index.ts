@@ -2386,6 +2386,16 @@ export interface StreamDeps {
 	 * record, blob or `messages` DETAIL_GAP is produced from it.
 	 */
 	conversationDetailOnly?: boolean;
+	/**
+	 * Set with `conversationDetailOnly`: told, per conversation, whether its
+	 * detail is settled (read, or a definite 404/410) or must be retried by a
+	 * later run (any other failure to read it). A conversation the pass never
+	 * reached (a deferral) is reported as neither.
+	 */
+	reportConversationDetail?: (
+		c: ConversationListItem,
+		outcome: "settled" | "retry",
+	) => Promise<void>;
 }
 
 /** Mutable holder shared by the recovery and forward detail passes of one run. */
@@ -3920,8 +3930,7 @@ async function walkConversationSearch(
 							// A missing boundary found during a resumed suffix scan does not
 							// establish anything about the skipped prefix. Force the next
 							// attempt to read from the start before accepting this new anchor.
-							position_hint:
-								resumeStartCursor > 0 ? 0 : cursor,
+							position_hint: resumeStartCursor > 0 ? 0 : cursor,
 						};
 			return {
 				items: [...conversationsById.values()],
@@ -5417,6 +5426,8 @@ interface ConversationDetailCoverage {
 	// become required when a later run re-lists and materializes them). Absent
 	// (undefined) when the run materialized every tail conversation per-key.
 	backlogGapKey?: string;
+	/** True once a deferral (pressure, circuit, run cap) stopped this pass short. */
+	deferred: boolean;
 	gapKeys: Array<string | number>;
 	hydratedKeys: Array<string | number>;
 	// Conversations the source cannot represent (source-unrepresentable.ts). A
@@ -5827,6 +5838,7 @@ export async function runMessagesAndConversationsWithDetail(
 		requestedTuning,
 	);
 	const coverage: ConversationDetailCoverage = {
+		deferred: false,
 		gapKeys: [],
 		hydratedKeys: [],
 		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
@@ -6168,6 +6180,7 @@ export async function runMessagesAndConversationsWithDetail(
 			convosToSync.findIndex((item) => item.id === from.id),
 		);
 		const tail = convosToSync.slice(start);
+		coverage.deferred = true;
 		for (const [index, item] of tail.entries()) {
 			await emitConversationDetailGapOnce(item, makeGap(item, index));
 		}
@@ -6199,6 +6212,7 @@ export async function runMessagesAndConversationsWithDetail(
 			convosToSync.findIndex((item) => item.id === from.id),
 		);
 		const tail = convosToSync.slice(start);
+		coverage.deferred = true;
 		const perKey = Number.isFinite(tailGapBound)
 			? tail.slice(0, tailGapBound)
 			: tail;
@@ -6697,6 +6711,16 @@ export async function runMessagesAndConversationsWithDetail(
 				// Reset the progress-based give-up counter: any successful fetch proves the
 				// account is alive, so N consecutive no-progress waits restarts from 0.
 				consecutiveWaitOutsWithoutSuccess = 0;
+				if (deps.conversationDetailOnly) {
+					await deps.reportConversationDetail?.(
+						c,
+						detailOutcome.complete ||
+							isSourceUnrepresentable(detailOutcome) ||
+							isDeletedConversationStatus(detail.status)
+							? "settled"
+							: "retry",
+					);
+				}
 				if (detailOutcome.complete) {
 					hydratedKeys.add(c.id);
 					coverage.hydratedKeys.push(c.id);
@@ -7143,6 +7167,8 @@ async function walkConversationsAndMessages(
 		| {
 				last_update_time?: string | null;
 				backfill?: unknown;
+				detail_version?: unknown;
+				detail_failures?: unknown;
 		  }
 		| undefined;
 	const messagesCursor = state.messages as
@@ -7151,11 +7177,19 @@ async function walkConversationsAndMessages(
 				backfill?: unknown;
 		  }
 		| undefined;
-	const priorConversationsCursor =
-		conversationsCursor?.last_update_time || null;
-	const priorMessagesCursor = messagesCursor?.last_update_time || null;
 	const wantsConversations = deps.requested.has("conversations");
 	const wantsMessages = deps.requested.has("messages");
+	// A cursor written before conversations carried model counts says nothing
+	// about which conversations had their detail read. Read from the start once;
+	// the oldest-first pass below then re-earns the watermark and checkpoints it.
+	const priorConversationsCursor =
+		conversationsCursor?.detail_version === CONVERSATION_DETAIL_VERSION
+			? conversationsCursor.last_update_time || null
+			: null;
+	const priorDetailFailures = readConversationDetailFailures(
+		conversationsCursor?.detail_failures,
+	);
+	const priorMessagesCursor = messagesCursor?.last_update_time || null;
 	const savedBackfills = [
 		wantsConversations
 			? readConversationBackfill(conversationsCursor?.backfill)
@@ -7256,6 +7290,7 @@ async function walkConversationsAndMessages(
 		deps.emit(foundProgressMsg);
 	}
 
+	let messageDetailDeferred = false;
 	if (wantsMessages) {
 		const foundMessageDetailProgressMsg = {
 			type: "PROGRESS",
@@ -7271,6 +7306,7 @@ async function walkConversationsAndMessages(
 			emitConversation,
 			options.detailPacing,
 		);
+		messageDetailDeferred = coverage.deferred;
 		await emitMessagesCoverageAndState(deps, {
 			messageDetailConversations,
 			coverage,
@@ -7281,32 +7317,64 @@ async function walkConversationsAndMessages(
 	}
 
 	if (wantsConversations) {
-		const detailedIds = new Set(messageDetailConversations.map((c) => c.id));
-		// Rows the message-detail pass already repaired are done. The rest get
-		// their detail here, so `conversations` carries the branch message count
-		// and model counts even when `messages` is not requested. A row whose
-		// detail could not be fetched is still emitted list-only (null counts).
-		// These rows were genuinely listed before any truncation, so emitting them
-		// is still lose-nothing even on a truncated pass — only the coverage CLAIM
-		// and cursor advance below are withheld.
-		await emitConversationsWithDetail(
+		// Rows the message-detail pass already took are done: it read their detail,
+		// or left a durable `messages` DETAIL_GAP that recovery fills in.
+		const settled = new Set(messageDetailConversations.map((c) => c.id));
+		const stateInput = {
+			rows: conversationsToSync,
+			backfill,
+			conversationsListTruncated,
+			priorConversationsCursor,
+			legacyConversationsCursor: conversationsCursor?.last_update_time || null,
+		};
+		// The rest get their detail here, so `conversations` carries the branch
+		// message count and model counts even when `messages` is not requested.
+		// A row whose detail could not be fetched is still emitted list-only (null
+		// counts); the cursor is held at the oldest such row so a later run reads
+		// it again. These rows were genuinely listed before any truncation, so
+		// emitting them is still lose-nothing.
+		const outcome = await emitConversationsWithDetail(
 			runDeps,
-			conversationsToSync.filter((c) => !detailedIds.has(c.id)),
+			conversationsToSync.filter((c) => !settled.has(c.id)),
 			emitConversation,
-			options.detailPacing,
+			options.detailPacing ?? {},
+			{
+				// A messages pass that deferred shared an account under pressure or a
+				// spent run budget; do not send a second pass into it.
+				fetchDetail: !messageDetailDeferred,
+				checkpoint: (settledIds) =>
+					emitConversationsState(deps, {
+						...stateInput,
+						settled: new Set([...settled, ...settledIds]),
+						detailFailures: priorDetailFailures,
+					}),
+			},
 		);
+		for (const id of outcome.settled) settled.add(id);
+		const { released, failures } = applyConversationDetailRetryLimit(
+			conversationsToSync,
+			settled,
+			outcome.retry,
+			priorDetailFailures,
+		);
+		for (const id of released) settled.add(id);
 		// A truncated list proved it did not see everything newer than
 		// priorConversationsCursor, so `conversationsToSync.length` is a prefix,
 		// not the true boundary — claiming it as `considered === covered` would
 		// fabricate completion the same way the malformed-200 defect did upstream.
+		// Rows still owed a detail read are considered but not covered.
 		if (!conversationsListTruncated) {
-			await deps.emit(makeConversationListCoverage(conversationsToSync.length));
+			await deps.emit(
+				makeConversationListCoverage(
+					conversationsToSync.length,
+					conversationsToSync.filter((c) => settled.has(c.id)).length,
+				),
+			);
 		}
 		emitConversationsState(deps, {
-			conversationsToSync,
-			backfill,
-			conversationsListTruncated,
-			priorConversationsCursor,
+			...stateInput,
+			settled,
+			detailFailures: failures,
 		});
 	}
 }
@@ -7330,17 +7398,29 @@ function isPerConversationDetailFailure(status: number): boolean {
 }
 
 /**
+ * The one answer that proves a conversation is gone: 404 or 410. Its counts stay
+ * null for good. Every other failure to read a detail is retried by a later run.
+ */
+function isDeletedConversationStatus(status: number): boolean {
+	return status === 404 || status === 410;
+}
+
+/**
  * `deps` for a detail pass that serves only the `conversations` stream. The pass
  * rides the same lane, pacing, circuit and run budget as the messages path, but
  * `messages` is not requested here: a `DETAIL_GAP` would name an unrequested
  * stream, and the lane's progress would be filed under it. Progress moves to
- * `conversations` and gaps are dropped; a conversation whose detail is deferred
- * is emitted list-only instead (see `emitConversationsWithDetail`).
+ * `conversations` and gaps are dropped. What a later run still owes is carried
+ * by the `conversations` cursor instead (see `emitConversationsState`).
  */
-function conversationDetailOnlyDeps(deps: StreamDeps): StreamDeps {
+function conversationDetailOnlyDeps(
+	deps: StreamDeps,
+	reportConversationDetail: NonNullable<StreamDeps["reportConversationDetail"]>,
+): StreamDeps {
 	return {
 		...deps,
 		conversationDetailOnly: true,
+		reportConversationDetail,
 		emit: (message) => {
 			if (message.type === "DETAIL_GAP") return Promise.resolve();
 			if (message.type === "PROGRESS" && message.stream === "messages") {
@@ -7358,16 +7438,23 @@ function conversationDetailOnlyDeps(deps: StreamDeps): StreamDeps {
 	};
 }
 
+/** Settled rows between two checkpoints of the `conversations` cursor. */
+const CONVERSATION_CHECKPOINT_EVERY = 25;
+
 /**
  * Fetch each conversation's detail once and emit the merged `conversations`
  * record, without emitting messages. A detail that arrives (200) fills the
- * record. A per-conversation hard failure (for example a 404 for a conversation
- * deleted mid-run) leaves that row list-only with null counts and does not fail
- * the run: the detail only feeds optional fields. Failures that speak for the
- * whole account (401/403, an open circuit, an exhausted retry budget) still
- * throw. A deferral for pressure or the run budget also leaves the row
- * list-only; the messages path would write a `DETAIL_GAP` for it instead, but
- * the stream that gap belongs to is not requested here.
+ * record. A conversation that is gone (404/410) stays list-only for good. Any
+ * other per-conversation failure (a different 4xx, a 200 with no mapping) also
+ * leaves the row list-only but is reported as `retry`, and a deferral for
+ * pressure, a circuit or the run budget leaves the rest unreached; the caller
+ * holds the cursor at the oldest such row. Failures that speak for the whole
+ * account (401/403, an exhausted retry budget) still throw.
+ *
+ * Rows are read oldest first. Progress is then a prefix of the list in
+ * `update_time` order, so the cursor can move up behind it as the pass runs and
+ * a pass that dies or defers keeps what it finished. Newest-first would leave
+ * the finished rows above the oldest unfinished one, to be read again.
  */
 async function emitConversationsWithDetail(
 	deps: StreamDeps,
@@ -7376,26 +7463,140 @@ async function emitConversationsWithDetail(
 		c: ConversationListItem,
 		detail: ConversationDetail | null,
 	) => Promise<void>,
-	pacing: ConversationDetailPacingOptions = {},
-): Promise<void> {
+	pacing: ConversationDetailPacingOptions,
+	{
+		fetchDetail,
+		checkpoint,
+	}: {
+		fetchDetail: boolean;
+		checkpoint: (settled: ReadonlySet<string>) => void;
+	},
+): Promise<{ settled: Set<string>; retry: Set<string> }> {
+	const settled = new Set<string>();
+	const retry = new Set<string>();
 	if (conversations.length === 0) {
-		return;
+		return { settled, retry };
 	}
 	const emitted = new Set<string>();
-	await runMessagesAndConversationsWithDetail(
-		conversationDetailOnlyDeps(deps),
-		conversations,
-		async (c, detail) => {
-			emitted.add(c.id);
-			await emitConversation(c, detail);
-		},
-		pacing,
-	);
-	for (const c of conversations) {
+	if (fetchDetail) {
+		let settledAtCheckpoint = 0;
+		await runMessagesAndConversationsWithDetail(
+			conversationDetailOnlyDeps(deps, (c, outcome) => {
+				if (outcome === "retry") {
+					retry.add(c.id);
+					return Promise.resolve();
+				}
+				settled.add(c.id);
+				if (
+					settled.size - settledAtCheckpoint >=
+					CONVERSATION_CHECKPOINT_EVERY
+				) {
+					settledAtCheckpoint = settled.size;
+					checkpoint(settled);
+				}
+				return Promise.resolve();
+			}),
+			oldestFirst(conversations),
+			async (c, detail) => {
+				emitted.add(c.id);
+				await emitConversation(c, detail);
+			},
+			pacing,
+		);
+	}
+	for (const c of oldestFirst(conversations)) {
 		if (!emitted.has(c.id)) {
 			await emitConversation(c, null);
 		}
 	}
+	return { settled, retry };
+}
+
+/** Rows in ascending `update_time`; a row with no time first, so it is not starved. */
+function oldestFirst(
+	conversations: readonly ConversationListItem[],
+): ConversationListItem[] {
+	const timed = conversations.map((c) => ({
+		c,
+		iso: c.update_time ? tsToIso(c.update_time) : null,
+	}));
+	return timed
+		.sort((a, b) =>
+			a.iso === b.iso
+				? a.c.id.localeCompare(b.c.id)
+				: a.iso === null
+					? -1
+					: b.iso === null
+						? 1
+						: a.iso < b.iso
+							? -1
+							: 1,
+		)
+		.map(({ c }) => c);
+}
+
+/** Bump to make the next run read every conversation's detail once (model counts). */
+const CONVERSATION_DETAIL_VERSION = 1;
+
+/**
+ * Consecutive runs a conversation may fail to read before it is left list-only.
+ * A failure other than 404/410 that repeats this often is not transient, and
+ * holding the cursor behind it would make every run read the rows above it again.
+ */
+const CONVERSATION_DETAIL_RETRY_LIMIT = 3;
+/** Failure counts kept in the cursor; a row beyond it is left list-only at once. */
+const CONVERSATION_DETAIL_FAILURES_MAX = 50;
+
+type ConversationDetailFailures = Record<string, number>;
+
+function readConversationDetailFailures(
+	value: unknown,
+): ConversationDetailFailures {
+	if (!isChatGptJsonObject(value)) return {};
+	const failures: ConversationDetailFailures = {};
+	for (const [id, count] of Object.entries(value)) {
+		if (
+			typeof count === "number" &&
+			Number.isSafeInteger(count) &&
+			count > 0 &&
+			Object.keys(failures).length < CONVERSATION_DETAIL_FAILURES_MAX
+		) {
+			failures[id] = count;
+		}
+	}
+	return failures;
+}
+
+/**
+ * Count this run's failed reads against the cursor's earlier counts. A row that
+ * failed `CONVERSATION_DETAIL_RETRY_LIMIT` runs in a row is released: left
+ * list-only, no longer held. A row this run did not reach keeps its count.
+ */
+function applyConversationDetailRetryLimit(
+	rows: readonly ConversationListItem[],
+	settled: ReadonlySet<string>,
+	retry: ReadonlySet<string>,
+	prior: ConversationDetailFailures,
+): { failures: ConversationDetailFailures; released: Set<string> } {
+	const failures: ConversationDetailFailures = {};
+	const released = new Set<string>();
+	for (const c of oldestFirst(rows)) {
+		if (settled.has(c.id)) continue;
+		const count = (prior[c.id] ?? 0) + (retry.has(c.id) ? 1 : 0);
+		if (count === 0) continue;
+		if (
+			count >= CONVERSATION_DETAIL_RETRY_LIMIT ||
+			Object.keys(failures).length >= CONVERSATION_DETAIL_FAILURES_MAX
+		) {
+			released.add(c.id);
+			chatGptDiagnostic(
+				"conversation_detail_unavailable: a conversation detail could not be read in several runs; its counts stay null",
+			);
+			continue;
+		}
+		failures[c.id] = count;
+	}
+	return { failures, released };
 }
 
 /**
@@ -7466,35 +7667,61 @@ async function emitMessagesCoverageAndState(
 
 /**
  * Emit the safe update-time watermark and the remaining list continuation.
+ *
+ * The watermark says every row at or below it has its detail settled. When some
+ * rows are not settled (a deferral, a failed read), it is held just below the
+ * oldest of them, so the next run lists it again. `settled` is every row whose
+ * detail needs no further read. Also called mid-pass as a checkpoint with the
+ * rows settled so far.
  */
 function emitConversationsState(
 	deps: StreamDeps,
 	{
-		conversationsToSync,
+		rows,
+		settled,
 		backfill,
 		conversationsListTruncated,
 		priorConversationsCursor,
+		legacyConversationsCursor,
+		detailFailures,
 	}: {
-		conversationsToSync: ConversationListItem[];
+		rows: ConversationListItem[];
+		settled: ReadonlySet<string>;
 		backfill: ConversationBackfill | null;
 		conversationsListTruncated: boolean;
 		priorConversationsCursor: string | null;
+		/** The cursor as stored, before the detail-version migration dropped it. */
+		legacyConversationsCursor: string | null;
+		detailFailures: ConversationDetailFailures;
 	},
 ): void {
-	const maxUpdate = conversationsListTruncated
-		? oldestAvailableConversationCursor(
-				minUpdateTimeIso(conversationsToSync),
-				priorConversationsCursor,
-			)
-		: newestConversationCursor(
-				maxUpdateTimeIso(conversationsToSync),
-				priorConversationsCursor,
-			);
+	// An empty list gives the migrated walk nothing to read, so the stored
+	// watermark stands.
+	const listedFrom =
+		rows.length === 0
+			? (priorConversationsCursor ?? legacyConversationsCursor)
+			: priorConversationsCursor;
+	const listed = conversationsListTruncated
+		? oldestAvailableConversationCursor(minUpdateTimeIso(rows), listedFrom)
+		: newestConversationCursor(maxUpdateTimeIso(rows), listedFrom);
+	const oldestUnsettled = minUpdateTimeIso(
+		rows.filter((c) => !settled.has(c.id)),
+	);
+	// A held watermark sits one millisecond below the oldest unsettled row, so
+	// the strict "newer than the cursor" test lists it again.
+	const held = oldestUnsettled
+		? new Date(Date.parse(oldestUnsettled) - 1).toISOString()
+		: null;
 	deps.emit({
 		type: "STATE",
 		stream: "conversations",
 		cursor: {
-			last_update_time: maxUpdate,
+			last_update_time:
+				held !== null && (!listed || held < listed) ? held : listed,
+			detail_version: CONVERSATION_DETAIL_VERSION,
+			...(Object.keys(detailFailures).length === 0
+				? {}
+				: { detail_failures: detailFailures }),
 			...(backfill === null ? {} : { backfill }),
 		},
 	});

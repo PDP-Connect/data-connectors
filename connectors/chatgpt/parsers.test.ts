@@ -39,6 +39,7 @@ import {
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
+	ChatGptMessage,
 	ChatGptNode,
 	ConversationListItem,
 	RawAccountsCheckBody,
@@ -1448,6 +1449,44 @@ test("countBranchModels: drops slugs that are not safe model names", () => {
 		validateRecord("conversations", conversationWith(counts)).ok,
 		true,
 	);
+});
+
+test("countBranchModels: counts only replies, not the tool calls and intermediate steps the messages stream reports as such", () => {
+	const assistant = (
+		id: string,
+		parent: string,
+		message: Partial<ChatGptMessage>,
+	): [string, ChatGptNode] => [
+		id,
+		{
+			parent,
+			children: [],
+			message: {
+				author: { role: "assistant" },
+				metadata: { model_slug: "gpt-4o" },
+				...message,
+			},
+		},
+	];
+	const mapping: Record<string, ChatGptNode> = Object.fromEntries([
+		["root", { parent: null, children: ["a1"] }],
+		// A reply to the user, with and without an explicit "all" recipient.
+		assistant("a1", "root", {}),
+		assistant("a2", "a1", { recipient: "all", end_turn: true }),
+		// Not replies: a call to a tool, a call listed in metadata, a plugin call,
+		// and a step that does not end the turn.
+		assistant("t1", "a2", { recipient: "python" }),
+		assistant("t2", "t1", {
+			metadata: { model_slug: "gpt-4o", tool_calls: [{ name: "search" }] },
+		}),
+		assistant("t3", "t2", {
+			metadata: { model_slug: "gpt-4o", invoked_plugin: { name: "x" } },
+		}),
+		assistant("t4", "t3", { end_turn: false }),
+		assistant("a3", "t4", { metadata: { model_slug: "o3" } }),
+	]);
+
+	assert.deepEqual(countBranchModels(mapping, "a3"), { "gpt-4o": 2, o3: 1 });
 });
 
 function conversationWith(modelCounts: unknown): Record<string, unknown> {

@@ -110,7 +110,7 @@
 		{
 			"name": "account_plan",
 			"required": false,
-			"description": "The plan family and creation date of the Claude organization the export came from. Same stream, and same fields, as the live-session connector's account_plan; this export fills only the organization id, plan_type and account_created_at.",
+			"description": "The plan family and creation date of the Claude organization the export came from. Same stream, and same fields, as the live-session connector's account_plan; this export fills only account_id (the organization id), plan_type and account_created_at. The record id is the constant account_plan, as in the live connector. A run that asks for this stream alone reads the organization list and requests no export.",
 			"compaction_fingerprint": {
 				"exclude_keys": []
 			},

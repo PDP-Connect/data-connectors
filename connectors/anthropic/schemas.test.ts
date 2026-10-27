@@ -421,7 +421,7 @@ test("the manifest declares pdpp-safe-escape-v1 on exactly the fields the parser
 });
 
 const ACCOUNT_PLAN_RECORD = {
-	id: "synthetic-org-id",
+	id: "account_plan",
 	account_id: "synthetic-org-id",
 	account_structure: null,
 	account_created_at: "2025-03-01T12:00:00.123456Z",

@@ -43,6 +43,7 @@ import {
 	withEmptyConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
 import {
+	ChatGptRecoverableRetryExhaustedError,
 	ChatGptRunBudget,
 	runConversationsAndMessagesStreams as runStreams,
 	type StreamDeps,
@@ -604,7 +605,10 @@ test("runConversationsAndMessagesStreams: a conversation only the conversations 
 	await runStreams(
 		deps,
 		{
-			conversations: { last_update_time: "2026-04-22T09:00:00.000Z" },
+			conversations: {
+				last_update_time: "2026-04-22T09:00:00.000Z",
+				detail_version: 1,
+			},
 			messages: { last_update_time: "2026-04-22T10:00:00.000Z" },
 		},
 		{ detailPacing: NO_DETAIL_WAITS },
@@ -773,7 +777,10 @@ test("runConversationsAndMessagesStreams: a conversation only the conversations 
 	await runStreams(
 		deps,
 		{
-			conversations: { last_update_time: "2026-04-22T09:00:00.000Z" },
+			conversations: {
+				last_update_time: "2026-04-22T09:00:00.000Z",
+				detail_version: 1,
+			},
 			messages: { last_update_time: "2026-04-22T10:00:00.000Z" },
 		},
 		{ detailPacing: NO_DETAIL_WAITS },
@@ -788,33 +795,369 @@ test("runConversationsAndMessagesStreams: a conversation only the conversations 
 	assert.deepEqual(byId.get("conv-new")?.model_counts, MODEL_SWITCH_COUNTS);
 });
 
-test("runConversationsAndMessagesStreams: conversations alone emits a list-only record, and no gap, for a detail the run budget defers", async () => {
-	const list = [
-		makeListItem("conv-A", "2026-04-22T10:00:00Z"),
-		makeListItem("conv-B", "2026-04-22T09:00:00Z"),
-	];
-	const { api, detailReads } = makeDetailLoggingApi(
-		list,
+/** The cursor of the last `conversations` STATE a run emitted. */
+function lastConversationsCursor(
+	protocolMessages: readonly EmittedMessage[],
+): Record<string, unknown> {
+	const state = protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "conversations",
+	);
+	assert.ok(state, "a conversations STATE was emitted");
+	return state.cursor as Record<string, unknown>;
+}
+
+/**
+ * Run `conversations` alone over `list`, from `state`, and report which details
+ * it read, the records it emitted and the cursor it left for the next run.
+ */
+async function runConversationsOnly(
+	list: ConversationListItem[],
+	detailFor: (id: string) => ChatGptFetchResult,
+	state: Record<string, unknown>,
+	configure: (deps: StreamDeps) => void = () => undefined,
+): Promise<{
+	detailReads: string[];
+	cursor: Record<string, unknown>;
+	byId: Map<unknown, Record<string, unknown>>;
+	protocolMessages: readonly EmittedMessage[];
+}> {
+	const { api, detailReads } = makeDetailLoggingApi(list, detailFor);
+	const { deps, emitted, protocolMessages } = makeDeps(api, ["conversations"]);
+	configure(deps);
+	await runStreams(deps, state, { detailPacing: NO_DETAIL_WAITS });
+	return {
+		detailReads,
+		cursor: lastConversationsCursor(protocolMessages),
+		byId: new Map(
+			emitted
+				.filter((r) => r.stream === "conversations")
+				.map((r) => [r.data.id, r.data as Record<string, unknown>]),
+		),
+		protocolMessages,
+	};
+}
+
+const THREE = [
+	makeListItem("conv-C", "2026-04-22T11:00:00Z"),
+	makeListItem("conv-B", "2026-04-22T10:00:00Z"),
+	makeListItem("conv-A", "2026-04-22T09:00:00Z"),
+];
+const ALL_READ_CURSOR = {
+	last_update_time: "2026-04-22T11:00:00.000Z",
+	detail_version: 1,
+};
+
+test("runConversationsAndMessagesStreams: conversations alone reads the oldest conversation first and holds the cursor below the first one the run budget defers", async () => {
+	const first = await runConversationsOnly(
+		THREE,
+		makeModelSwitchDetail,
+		{},
+		(deps) => {
+			deps.runBudget = new ChatGptRunBudget({ maxFetches: 1 });
+		},
+	);
+
+	assert.deepEqual(first.detailReads, ["conv-A"]);
+	assert.deepEqual(first.byId.get("conv-A")?.model_counts, MODEL_SWITCH_COUNTS);
+	// The deferred rows keep a record, with unknown counts, and no gap names a stream.
+	assert.equal(first.byId.get("conv-B")?.model_counts, null);
+	assert.equal(first.byId.get("conv-C")?.model_counts, null);
+	assert.equal(
+		first.protocolMessages.some((m) => m.type === "DETAIL_GAP"),
+		false,
+	);
+	// One millisecond below the oldest row not read, so the next run lists it again.
+	assert.deepEqual(first.cursor, {
+		last_update_time: "2026-04-22T09:59:59.999Z",
+		detail_version: 1,
+	});
+
+	// The next run reads only the two that were deferred, and then the cursor is clear.
+	const second = await runConversationsOnly(
+		THREE,
+		makeModelSwitchDetail,
+		first.cursor ? { conversations: first.cursor } : {},
+	);
+	assert.deepEqual(second.detailReads, ["conv-B", "conv-C"]);
+	assert.deepEqual(
+		second.byId.get("conv-B")?.model_counts,
+		MODEL_SWITCH_COUNTS,
+	);
+	assert.deepEqual(
+		second.byId.get("conv-C")?.model_counts,
+		MODEL_SWITCH_COUNTS,
+	);
+	assert.deepEqual(second.cursor, ALL_READ_CURSOR);
+
+	const third = await runConversationsOnly(THREE, makeModelSwitchDetail, {
+		conversations: second.cursor,
+	});
+	assert.deepEqual(third.detailReads, []);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone retries, on the next run, the details a rate-limit exhaustion deferred", async () => {
+	const exhausted = (id: string): boolean => id === "conv-B";
+	const { api: inner, detailReads } = makeDetailLoggingApi(
+		THREE,
 		makeModelSwitchDetail,
 	);
-	const { deps, emitted, protocolMessages } = makeDeps(api, ["conversations"]);
-	deps.runBudget = new ChatGptRunBudget({ maxFetches: 1 });
+	const pressured: ChatGptApi = {
+		auth: inner.auth,
+		fetch: (path, options) =>
+			path === "/conversation/conv-B" && exhausted("conv-B")
+				? Promise.reject(
+						new ChatGptRecoverableRetryExhaustedError("429 after retries", {
+							class: "rate_limited",
+							httpStatus: 429,
+						}),
+					)
+				: inner.fetch(path, options),
+	};
+	const { deps, emitted, protocolMessages } = makeDeps(pressured, [
+		"conversations",
+	]);
 
 	await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
 
+	// conv-A was read; conv-B exhausted the lane; conv-C was never reached.
 	assert.deepEqual(detailReads, ["conv-A"]);
 	assert.deepEqual(
 		emitted
 			.filter((r) => r.stream === "conversations")
-			.map((r) => [r.data.id, r.data.model_counts]),
+			.map((r) => [r.data.id, r.data.model_counts === null]),
 		[
-			["conv-A", MODEL_SWITCH_COUNTS],
-			["conv-B", null],
+			["conv-A", false],
+			["conv-B", true],
+			["conv-C", true],
 		],
 	);
+	const cursor = lastConversationsCursor(protocolMessages);
+	assert.equal(cursor.last_update_time, "2026-04-22T09:59:59.999Z");
+
+	// The source recovers: the next run reads exactly the rows the cursor held back.
+	const next = await runConversationsOnly(THREE, makeModelSwitchDetail, {
+		conversations: cursor,
+	});
+	assert.deepEqual(next.detailReads, ["conv-B", "conv-C"]);
+	assert.deepEqual(next.cursor, ALL_READ_CURSOR);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone holds the cursor at a conversation whose detail failed with a transient 4xx, and lets it go after three runs", async () => {
+	const failing = (id: string): ChatGptFetchResult =>
+		id === "conv-B" ? { status: 422, json: null } : makeModelSwitchDetail(id);
+
+	const run1 = await runConversationsOnly(THREE, failing, {});
+	assert.deepEqual(run1.detailReads, ["conv-A", "conv-B", "conv-C"]);
+	assert.equal(run1.byId.get("conv-B")?.model_counts, null);
+	assert.deepEqual(run1.byId.get("conv-C")?.model_counts, MODEL_SWITCH_COUNTS);
+	assert.deepEqual(run1.cursor, {
+		last_update_time: "2026-04-22T09:59:59.999Z",
+		detail_version: 1,
+		detail_failures: { "conv-B": 1 },
+	});
+
+	// The run after it, the source answers: conv-B is read again and the hold clears.
+	const recovered = await runConversationsOnly(THREE, makeModelSwitchDetail, {
+		conversations: run1.cursor,
+	});
+	assert.deepEqual(recovered.detailReads, ["conv-B", "conv-C"]);
+	assert.deepEqual(
+		recovered.byId.get("conv-B")?.model_counts,
+		MODEL_SWITCH_COUNTS,
+	);
+	assert.deepEqual(recovered.cursor, ALL_READ_CURSOR);
+
+	// If it keeps failing, it is retried twice more and then left list-only, so
+	// the rows above it are not read again for ever.
+	const run2 = await runConversationsOnly(THREE, failing, {
+		conversations: run1.cursor,
+	});
+	assert.deepEqual(run2.detailReads, ["conv-B", "conv-C"]);
+	assert.deepEqual(run2.cursor.detail_failures, { "conv-B": 2 });
+	const run3 = await runConversationsOnly(THREE, failing, {
+		conversations: run2.cursor,
+	});
+	assert.deepEqual(run3.cursor, ALL_READ_CURSOR);
+	const run4 = await runConversationsOnly(THREE, failing, {
+		conversations: run3.cursor,
+	});
+	assert.deepEqual(run4.detailReads, []);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone retries a 200 whose detail has no mapping", async () => {
+	const noMapping = (id: string): ChatGptFetchResult =>
+		id === "conv-B"
+			? { status: 200, json: { id, current_node: null } }
+			: makeModelSwitchDetail(id);
+
+	const run = await runConversationsOnly(THREE, noMapping, {});
+
+	assert.equal(run.byId.get("conv-B")?.model_counts, null);
+	assert.deepEqual(run.cursor, {
+		last_update_time: "2026-04-22T09:59:59.999Z",
+		detail_version: 1,
+		detail_failures: { "conv-B": 1 },
+	});
+});
+
+test("runConversationsAndMessagesStreams: conversations alone treats a 404 or a 410 as a deleted conversation and does not hold the cursor", async () => {
+	for (const status of [404, 410]) {
+		const run = await runConversationsOnly(
+			THREE,
+			(id) =>
+				id === "conv-B" ? { status, json: null } : makeModelSwitchDetail(id),
+			{},
+		);
+		assert.equal(run.byId.get("conv-B")?.model_counts, null);
+		assert.deepEqual(run.cursor, ALL_READ_CURSOR, `http ${status}`);
+		const next = await runConversationsOnly(THREE, makeModelSwitchDetail, {
+			conversations: run.cursor,
+		});
+		assert.deepEqual(next.detailReads, [], `http ${status} is not read again`);
+	}
+});
+
+test("runConversationsAndMessagesStreams: a conversations cursor from before model counts reads every conversation once, oldest first, and survives a stop partway", async () => {
+	const legacy = {
+		conversations: { last_update_time: "2026-04-22T11:00:00.000Z" },
+	};
+
+	// A cursor already at the newest row would list nothing; the missing
+	// version makes the run read every conversation anyway, oldest first.
+	const capped = await runConversationsOnly(
+		THREE,
+		makeModelSwitchDetail,
+		legacy,
+		(deps) => {
+			deps.runBudget = new ChatGptRunBudget({ maxFetches: 2 });
+		},
+	);
+	assert.deepEqual(capped.detailReads, ["conv-A", "conv-B"]);
+	assert.deepEqual(
+		capped.byId.get("conv-A")?.model_counts,
+		MODEL_SWITCH_COUNTS,
+	);
+	assert.deepEqual(capped.cursor, {
+		last_update_time: "2026-04-22T10:59:59.999Z",
+		detail_version: 1,
+	});
+
+	// The stopped run resumes at the row it did not reach, not from the start.
+	const resumed = await runConversationsOnly(THREE, makeModelSwitchDetail, {
+		conversations: capped.cursor,
+	});
+	assert.deepEqual(resumed.detailReads, ["conv-C"]);
+	assert.deepEqual(resumed.cursor, ALL_READ_CURSOR);
+
+	// Once versioned, a cursor at the newest row owes nothing.
+	const done = await runConversationsOnly(THREE, makeModelSwitchDetail, {
+		conversations: resumed.cursor,
+	});
+	assert.deepEqual(done.detailReads, []);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone checkpoints the cursor during the pass, so a run that dies keeps its progress", async () => {
+	const many = Array.from({ length: 30 }, (_, i) =>
+		makeListItem(
+			`conv-${String(i).padStart(2, "0")}`,
+			new Date(Date.parse("2026-04-22T00:00:00Z") + i * 60_000).toISOString(),
+		),
+	).reverse();
+	const { api: inner, detailReads } = makeDetailLoggingApi(
+		many,
+		makeModelSwitchDetail,
+	);
+	// The client throws on the 28th detail (index 27): an account-level failure.
+	const dying: ChatGptApi = {
+		auth: inner.auth,
+		fetch: (path, options) =>
+			path === "/conversation/conv-27"
+				? Promise.reject(new Error("apiFetch got 401 (auth - not retryable)"))
+				: inner.fetch(path, options),
+	};
+	const { deps, protocolMessages } = makeDeps(dying, ["conversations"]);
+
+	await assert.rejects(
+		runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
+		/apiFetch got 401/,
+	);
+
+	// 25 conversations settled before the run died, and that was checkpointed: the
+	// cursor sits just below the 26th, the oldest one not settled.
+	const checkpoint = lastConversationsCursor(protocolMessages);
+	assert.deepEqual(checkpoint, {
+		last_update_time: "2026-04-22T00:24:59.999Z",
+		detail_version: 1,
+	});
+	assert.equal(detailReads.length, 27, "conv-27 died before it was served");
+
+	// The next run picks up after the checkpoint instead of redoing the 25.
+	const resumed = await runConversationsOnly(many, makeModelSwitchDetail, {
+		conversations: checkpoint,
+	});
+	assert.deepEqual(resumed.detailReads, [
+		"conv-25",
+		"conv-26",
+		"conv-27",
+		"conv-28",
+		"conv-29",
+	]);
+});
+
+test("runConversationsAndMessagesStreams: both streams do not start a second detail pass into an account the messages pass deferred", async () => {
+	// conv-n1 and conv-n2 are owed to messages; conv-mid only to conversations.
+	const list = [
+		makeListItem("conv-n1", "2026-04-22T12:00:00Z"),
+		makeListItem("conv-n2", "2026-04-22T11:00:00Z"),
+		makeListItem("conv-mid", "2026-04-22T09:30:00Z"),
+	];
+	const { api: inner, detailReads } = makeDetailLoggingApi(
+		list,
+		makeModelSwitchDetail,
+	);
+	const pressured: ChatGptApi = {
+		auth: inner.auth,
+		fetch: (path, options) =>
+			path === "/conversation/conv-n2"
+				? Promise.reject(
+						new ChatGptRecoverableRetryExhaustedError("429 after retries", {
+							class: "rate_limited",
+							httpStatus: 429,
+						}),
+					)
+				: inner.fetch(path, options),
+	};
+	const { deps, emitted, protocolMessages } = makeDeps(pressured, [
+		"conversations",
+		"messages",
+	]);
+
+	await runStreams(
+		deps,
+		{
+			conversations: {
+				last_update_time: "2026-04-22T09:00:00.000Z",
+				detail_version: 1,
+			},
+			messages: { last_update_time: "2026-04-22T10:00:00.000Z" },
+		},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
+
 	assert.equal(
-		protocolMessages.some((m: EmittedMessage) => m.type === "DETAIL_GAP"),
+		detailReads.includes("conv-mid"),
 		false,
+		"the pressured account is not read again by the conversations pass",
+	);
+	const mid = emitted.find(
+		(r) => r.stream === "conversations" && r.data.id === "conv-mid",
+	);
+	assert.equal(mid?.data.model_counts, null, "listed, counts unknown");
+	// conv-mid is the only row still owed: the cursor sits just below it.
+	assert.equal(
+		lastConversationsCursor(protocolMessages).last_update_time,
+		"2026-04-22T09:29:59.999Z",
 	);
 });
 
@@ -897,7 +1240,10 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	]);
 
 	await runConversationsAndMessagesStreams(deps, {
-		conversations: { last_update_time: "2026-04-22T10:00:00.000Z" },
+		conversations: {
+			last_update_time: "2026-04-22T10:00:00.000Z",
+			detail_version: 1,
+		},
 		messages: { last_update_time: "2026-04-22T09:00:00.000Z" },
 	});
 
@@ -928,6 +1274,7 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	assert.ok(conversationsState && conversationsState.type === "STATE");
 	assert.deepEqual(conversationsState.cursor, {
 		last_update_time: "2026-04-22T11:00:00.000Z",
+		detail_version: 1,
 	});
 
 	const messagesState = protocolMessages.find(
