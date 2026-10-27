@@ -48,6 +48,7 @@ import {
 	runConversationsAndMessagesStreams as runStreams,
 	type StreamDeps,
 } from "./index.ts";
+import { makePagingApi } from "./__fixtures__/paging-conversation-api.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
 	ChatGptApi,
@@ -607,7 +608,8 @@ test("runConversationsAndMessagesStreams: a conversation only the conversations 
 		{
 			conversations: {
 				last_update_time: "2026-04-22T09:00:00.000Z",
-				detail_version: 1,
+				detail_version: 2,
+				detail_frontier: null,
 			},
 			messages: { last_update_time: "2026-04-22T10:00:00.000Z" },
 		},
@@ -779,7 +781,8 @@ test("runConversationsAndMessagesStreams: a conversation only the conversations 
 		{
 			conversations: {
 				last_update_time: "2026-04-22T09:00:00.000Z",
-				detail_version: 1,
+				detail_version: 2,
+				detail_frontier: null,
 			},
 			messages: { last_update_time: "2026-04-22T10:00:00.000Z" },
 		},
@@ -843,16 +846,19 @@ const THREE = [
 	makeListItem("conv-B", "2026-04-22T10:00:00Z"),
 	makeListItem("conv-A", "2026-04-22T09:00:00Z"),
 ];
+/** The cursor of a run that read THREE to the bottom: only the newest key is kept. */
 const ALL_READ_CURSOR = {
 	last_update_time: "2026-04-22T11:00:00.000Z",
-	detail_version: 1,
+	detail_version: 2,
+	detail_frontier: null,
+	detail_ids: { "2026-04-22T11:00:00.000Z": ["conv-C"] },
 };
 
-/** The cursor fields that say which conversations are read, as a run leaves them. */
-const detailDone = (
-	lo: { t: string; id: string | null } | null,
-	hi: { t: string; id: string | null },
-): unknown => [lo === null ? { hi } : { lo, hi }];
+/** ALL_READ_CURSOR, except conv-B answered a retryable failure once. */
+const WITH_B_FAILED = {
+	...ALL_READ_CURSOR,
+	detail_failures: { "conv-B": { n: 1, t: "2026-04-22T10:00:00.000Z" } },
+};
 
 test("runConversationsAndMessagesStreams: conversations alone reads the newest conversation first and the next run reads only the ones the run budget deferred", async () => {
 	const first = await runConversationsOnly(
@@ -873,14 +879,13 @@ test("runConversationsAndMessagesStreams: conversations alone reads the newest c
 		first.protocolMessages.some((m) => m.type === "DETAIL_GAP"),
 		false,
 	);
-	// What was read is kept as an interval; the list watermark is not held back.
+	// The watermark and the history frontier both stand at the one row read, and
+	// the exact key says which row it was.
 	assert.deepEqual(first.cursor, {
 		last_update_time: "2026-04-22T11:00:00.000Z",
-		detail_version: 1,
-		detail_done: detailDone(
-			{ t: "2026-04-22T10:00:00.000Z", id: "conv-B" },
-			{ t: "2026-04-22T11:00:00.000Z", id: null },
-		),
+		detail_version: 2,
+		detail_frontier: "2026-04-22T11:00:00.000Z",
+		detail_ids: { "2026-04-22T11:00:00.000Z": ["conv-C"] },
 	});
 
 	// The next run reads only the two that were deferred, and then the cursor is clear.
@@ -888,8 +893,14 @@ test("runConversationsAndMessagesStreams: conversations alone reads the newest c
 		conversations: first.cursor,
 	});
 	assert.deepEqual(second.detailReads, ["conv-B", "conv-A"]);
-	assert.deepEqual(second.byId.get("conv-B")?.model_counts, MODEL_SWITCH_COUNTS);
-	assert.deepEqual(second.byId.get("conv-A")?.model_counts, MODEL_SWITCH_COUNTS);
+	assert.deepEqual(
+		second.byId.get("conv-B")?.model_counts,
+		MODEL_SWITCH_COUNTS,
+	);
+	assert.deepEqual(
+		second.byId.get("conv-A")?.model_counts,
+		MODEL_SWITCH_COUNTS,
+	);
 	assert.equal(
 		second.byId.has("conv-C"),
 		false,
@@ -976,12 +987,11 @@ test("runConversationsAndMessagesStreams: conversations alone keeps asking for a
 		const cursor = lastConversationsCursor(protocolMessages);
 		// Run 1 reads conv-C; the later runs have nothing the source will serve.
 		assert.deepEqual(detailReads, run === 1 ? ["conv-C"] : [], `run ${run}`);
-		// conv-C is never emitted again, so its counts are never overwritten.
+		// Rows already emitted are never emitted again, so counts are never
+		// overwritten, and a history row that was not read has no new record.
 		assert.deepEqual(
-			emitted
-				.filter((r) => r.stream === "conversations")
-				.map((r) => r.data.id),
-			run === 1 ? ["conv-C", "conv-B", "conv-A"] : ["conv-B", "conv-A"],
+			emitted.filter((r) => r.stream === "conversations").map((r) => r.data.id),
+			run === 1 ? ["conv-C", "conv-B", "conv-A"] : [],
 			`run ${run}`,
 		);
 		// Pressure never counts against a row, so the cursor does not change and
@@ -989,7 +999,11 @@ test("runConversationsAndMessagesStreams: conversations alone keeps asking for a
 		assert.equal(cursor.detail_failures, undefined, `run ${run}`);
 		state = { conversations: cursor };
 	}
-	const recovered = await runConversationsOnly(THREE, makeModelSwitchDetail, state);
+	const recovered = await runConversationsOnly(
+		THREE,
+		makeModelSwitchDetail,
+		state,
+	);
 	assert.deepEqual(recovered.detailReads, ["conv-B", "conv-A"]);
 	assert.deepEqual(recovered.cursor, ALL_READ_CURSOR);
 });
@@ -1002,13 +1016,7 @@ test("runConversationsAndMessagesStreams: conversations alone retries a conversa
 	assert.deepEqual(run1.detailReads, ["conv-C", "conv-B", "conv-A"]);
 	assert.equal(run1.byId.get("conv-B")?.model_counts, null);
 	assert.deepEqual(run1.byId.get("conv-C")?.model_counts, MODEL_SWITCH_COUNTS);
-	assert.deepEqual(run1.cursor, {
-		last_update_time: "2026-04-22T11:00:00.000Z",
-		detail_version: 1,
-		detail_failures: {
-			"conv-B": { n: 1, t: "2026-04-22T10:00:00.000Z" },
-		},
-	});
+	assert.deepEqual(run1.cursor, WITH_B_FAILED);
 
 	// The run after it, the source answers: only conv-B is read, and the others
 	// keep the counts they have.
@@ -1072,13 +1080,7 @@ test("runConversationsAndMessagesStreams: conversations alone retries a 200 whos
 	const run = await runConversationsOnly(THREE, noMapping, {});
 
 	assert.equal(run.byId.get("conv-B")?.model_counts, null);
-	assert.deepEqual(run.cursor, {
-		last_update_time: "2026-04-22T11:00:00.000Z",
-		detail_version: 1,
-		detail_failures: {
-			"conv-B": { n: 1, t: "2026-04-22T10:00:00.000Z" },
-		},
-	});
+	assert.deepEqual(run.cursor, WITH_B_FAILED);
 });
 
 test("runConversationsAndMessagesStreams: conversations alone treats a 404 or a 410 as a deleted conversation and does not retry it", async () => {
@@ -1103,8 +1105,8 @@ test("runConversationsAndMessagesStreams: a conversations cursor from before mod
 		conversations: { last_update_time: "2026-04-22T11:00:00.000Z" },
 	};
 
-	// A cursor already at the newest row would list nothing; the missing
-	// version makes the run read every conversation anyway, newest first.
+	// A cursor in the published shape keeps its watermark but says no detail is
+	// read: the run reads the row at the watermark, then history newest first.
 	const capped = await runConversationsOnly(
 		THREE,
 		makeModelSwitchDetail,
@@ -1116,12 +1118,18 @@ test("runConversationsAndMessagesStreams: a conversations cursor from before mod
 	assert.deepEqual(capped.detailReads, ["conv-C", "conv-B"]);
 	assert.deepEqual(capped.cursor, {
 		last_update_time: "2026-04-22T11:00:00.000Z",
-		detail_version: 1,
-		detail_done: detailDone(
-			{ t: "2026-04-22T09:00:00.000Z", id: "conv-A" },
-			{ t: "2026-04-22T11:00:00.000Z", id: null },
-		),
+		detail_version: 2,
+		detail_frontier: "2026-04-22T10:00:00.000Z",
+		detail_ids: {
+			"2026-04-22T10:00:00.000Z": ["conv-B"],
+			"2026-04-22T11:00:00.000Z": ["conv-C"],
+		},
 	});
+	assert.equal(
+		capped.byId.has("conv-A"),
+		false,
+		"a history row that was not read keeps the record it has",
+	);
 
 	// The stopped run resumes at the row it did not reach, not from the start.
 	const resumed = await runConversationsOnly(THREE, makeModelSwitchDetail, {
@@ -1169,7 +1177,11 @@ test("runConversationsAndMessagesStreams: conversations alone reads fresh conver
 		{ conversations: run1.cursor },
 		capped,
 	);
-	assert.deepEqual(run2.detailReads, ["new-2", "new-1"], "fresh rows go first");
+	assert.deepEqual(
+		run2.detailReads,
+		["new-1", "new-2"],
+		"fresh rows go first, oldest first, so the watermark advances without a gap",
+	);
 	for (const id of ["new-2", "new-1"]) {
 		assert.deepEqual(run2.byId.get(id)?.model_counts, MODEL_SWITCH_COUNTS);
 	}
@@ -1195,7 +1207,9 @@ test("runConversationsAndMessagesStreams: conversations alone reads fresh conver
 	assert.equal(allReads.length, withArrivals.length);
 	assert.deepEqual(cursor, {
 		last_update_time: "2026-04-22T13:00:00.000Z",
-		detail_version: 1,
+		detail_version: 2,
+		detail_frontier: null,
+		detail_ids: { "2026-04-22T13:00:00.000Z": ["new-2"] },
 	});
 });
 
@@ -1220,11 +1234,13 @@ test("runConversationsAndMessagesStreams: conversations alone reaches every conv
 		state = { conversations: result.cursor };
 	}
 	// Each run takes one of the two, then nothing is left.
-	assert.deepEqual(reads, ["conv-B", "conv-A"]);
+	assert.deepEqual(reads, ["conv-A", "conv-B"]);
 	assert.deepEqual(state, {
 		conversations: {
 			last_update_time: "2026-04-22T10:00:00.000Z",
-			detail_version: 1,
+			detail_version: 2,
+			detail_frontier: null,
+			detail_ids: { "2026-04-22T10:00:00.000Z": ["conv-A", "conv-B"] },
 		},
 	});
 });
@@ -1256,15 +1272,16 @@ test("runConversationsAndMessagesStreams: conversations alone checkpoints the cu
 	);
 
 	// 25 conversations settled before the run died, and that was checkpointed: the
-	// interval reaches down to just above conv-04, the newest one not settled.
+	// frontier reaches down to conv-05, the oldest of them, just above conv-04.
 	const checkpoint = lastConversationsCursor(protocolMessages);
 	assert.deepEqual(checkpoint, {
 		last_update_time: "2026-04-22T00:29:00.000Z",
-		detail_version: 1,
-		detail_done: detailDone(
-			{ t: "2026-04-22T00:04:00.000Z", id: "conv-04" },
-			{ t: "2026-04-22T00:29:00.000Z", id: null },
-		),
+		detail_version: 2,
+		detail_frontier: "2026-04-22T00:05:00.000Z",
+		detail_ids: {
+			"2026-04-22T00:05:00.000Z": ["conv-05"],
+			"2026-04-22T00:29:00.000Z": ["conv-29"],
+		},
 	});
 	assert.equal(detailReads.length, 27, "conv-02 died before it was served");
 
@@ -1314,7 +1331,8 @@ test("runConversationsAndMessagesStreams: both streams do not start a second det
 		{
 			conversations: {
 				last_update_time: "2026-04-22T09:00:00.000Z",
-				detail_version: 1,
+				detail_version: 2,
+				detail_frontier: null,
 			},
 			messages: { last_update_time: "2026-04-22T10:00:00.000Z" },
 		},
@@ -1330,14 +1348,17 @@ test("runConversationsAndMessagesStreams: both streams do not start a second det
 		(r) => r.stream === "conversations" && r.data.id === "conv-mid",
 	);
 	assert.equal(mid?.data.model_counts, null, "listed, counts unknown");
-	// conv-mid is the only row still owed: the read interval stops just above it.
-	assert.deepEqual(lastConversationsCursor(protocolMessages).detail_done, [
-		{ hi: { t: "2026-04-22T09:00:00.000Z", id: null } },
-		{
-			lo: { t: "2026-04-22T09:30:00.000Z", id: "conv-mid" },
-			hi: { t: "2026-04-22T12:00:00.000Z", id: null },
+	// conv-mid is the only row still owed, so the watermark stays below it. The
+	// two rows the messages pass took are kept as exact keys above it.
+	assert.deepEqual(lastConversationsCursor(protocolMessages), {
+		last_update_time: "2026-04-22T09:00:00.000Z",
+		detail_version: 2,
+		detail_frontier: null,
+		detail_ids: {
+			"2026-04-22T11:00:00.000Z": ["conv-n2"],
+			"2026-04-22T12:00:00.000Z": ["conv-n1"],
 		},
-	]);
+	});
 });
 
 test("runConversationsAndMessagesStreams: messages backfill is independent from conversations cursor", async () => {
@@ -1421,7 +1442,9 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	await runConversationsAndMessagesStreams(deps, {
 		conversations: {
 			last_update_time: "2026-04-22T10:00:00.000Z",
-			detail_version: 1,
+			detail_version: 2,
+			detail_frontier: null,
+			detail_ids: { "2026-04-22T10:00:00.000Z": ["conv-mid"] },
 		},
 		messages: { last_update_time: "2026-04-22T09:00:00.000Z" },
 	});
@@ -1453,7 +1476,9 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	assert.ok(conversationsState && conversationsState.type === "STATE");
 	assert.deepEqual(conversationsState.cursor, {
 		last_update_time: "2026-04-22T11:00:00.000Z",
-		detail_version: 1,
+		detail_version: 2,
+		detail_frontier: null,
+		detail_ids: { "2026-04-22T11:00:00.000Z": ["conv-new"] },
 	});
 
 	const messagesState = protocolMessages.find(
@@ -1463,4 +1488,238 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	assert.deepEqual(messagesState.cursor, {
 		last_update_time: "2026-04-22T11:00:00.000Z",
 	});
+});
+
+// ─── Cursor invariant: a conversation is done only for the (id, time) it was read at ───
+
+const iso = (hour: number, minute = 0): string =>
+	`2026-04-22T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00Z`;
+
+test("runConversationsAndMessagesStreams: conversations alone reads a conversation that arrives at the newest timestamp after the run listed it", async () => {
+	const first = await runConversationsOnly(
+		[makeListItem("conv-P", iso(11))],
+		makeModelSwitchDetail,
+		{},
+	);
+	assert.deepEqual(first.detailReads, ["conv-P"]);
+
+	// conv-Z took the same update time after the first run read its list page.
+	const second = await runConversationsOnly(
+		[makeListItem("conv-Z", iso(11)), makeListItem("conv-P", iso(11))],
+		makeModelSwitchDetail,
+		{ conversations: first.cursor },
+	);
+	assert.deepEqual(second.detailReads, ["conv-Z"], "the unseen tie is read");
+	assert.deepEqual(
+		second.byId.get("conv-Z")?.model_counts,
+		MODEL_SWITCH_COUNTS,
+	);
+	assert.equal(
+		second.byId.has("conv-P"),
+		false,
+		"the seen tie is not read again",
+	);
+	assert.deepEqual(second.cursor.detail_ids, {
+		"2026-04-22T11:00:00.000Z": ["conv-P", "conv-Z"],
+	});
+});
+
+test("runConversationsAndMessagesStreams: conversations alone does not mark an arrival done when it joins the newest timestamp between two list pages", async () => {
+	const rows = Array.from({ length: 40 }, (_, i) =>
+		makeListItem(`conv-${String(i).padStart(2, "0")}`, iso(10, 59 - i)),
+	);
+	let upstream = [...rows];
+	const reads: string[] = [];
+	let injected = false;
+	const api = makePagingApi({
+		list: () => upstream,
+		detail: (id) => {
+			reads.push(id);
+			return makeModelSwitchDetail(id);
+		},
+		onListPage: (cursor) => {
+			// The second page is requested after the first was read.
+			if (cursor === 30 && !injected) {
+				injected = true;
+				upstream = [makeListItem("conv-late", iso(10, 59)), ...upstream];
+			}
+			return undefined;
+		},
+	});
+	const run1 = makeDeps(api, ["conversations"]);
+	await runStreams(run1.deps, {}, { detailPacing: NO_DETAIL_WAITS });
+	assert.equal(injected, true);
+	let cursor = lastConversationsCursor(run1.protocolMessages);
+
+	// Later runs, with nothing else going wrong, reach it.
+	for (let run = 0; run < 3 && !reads.includes("conv-late"); run += 1) {
+		const next = makeDeps(api, ["conversations"]);
+		await runStreams(
+			next.deps,
+			{ conversations: cursor },
+			{ detailPacing: NO_DETAIL_WAITS },
+		);
+		cursor = lastConversationsCursor(next.protocolMessages);
+	}
+	assert.equal(reads.includes("conv-late"), true, "the late arrival is read");
+	assert.equal(
+		new Set(reads).size,
+		reads.length,
+		"and no conversation is read twice",
+	);
+	assert.equal(reads.length, 41);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone starts from the published watermark, reads a bounded slice of history per run, and emits only the rows it read", async () => {
+	const base = Date.parse(iso(8)) / 1000;
+	const history = Array.from({ length: 70 }, (_, i) => ({
+		...makeListItem(`old-${String(i).padStart(2, "0")}`, iso(8)),
+		update_time: base + 70 - i,
+	}));
+	// The published cursor: a watermark and nothing else.
+	const legacy = {
+		conversations: {
+			last_update_time: new Date((base + 70) * 1000).toISOString(),
+		},
+	};
+	const api = (): ReturnType<typeof makePagingApi> & { reads: string[] } => {
+		const reads: string[] = [];
+		return Object.assign(
+			makePagingApi({
+				list: () => history,
+				detail: (id) => {
+					reads.push(id);
+					return makeModelSwitchDetail(id);
+				},
+			}),
+			{ reads },
+		);
+	};
+	const runOnce = async (
+		state: Record<string, unknown>,
+	): Promise<{
+		reads: string[];
+		emitted: string[];
+		cursor: Record<string, unknown>;
+	}> => {
+		const fake = api();
+		const { deps, emitted, protocolMessages } = makeDeps(fake, [
+			"conversations",
+		]);
+		await runStreams(deps, state, {
+			detailPacing: NO_DETAIL_WAITS,
+			detailBackfillLimit: 20,
+		});
+		return {
+			reads: fake.reads,
+			emitted: emitted
+				.filter((r) => r.stream === "conversations")
+				.map((r) => String(r.data.id)),
+			cursor: lastConversationsCursor(protocolMessages),
+		};
+	};
+
+	const first = await runOnce(legacy);
+	// The row at the watermark has no recorded read, so it goes first; then 20 of history.
+	assert.equal(first.reads.length, 21);
+	assert.deepEqual(
+		[...first.emitted].sort(),
+		[...first.reads].sort(),
+		"only rows that were read are emitted: the first run does not re-emit the history",
+	);
+	assert.equal(
+		first.cursor.last_update_time,
+		legacy.conversations.last_update_time,
+		"the published watermark is kept for listing",
+	);
+
+	// The backfill carries on from where it stopped, without reading a row twice.
+	const reads = [...first.reads];
+	let cursor = first.cursor;
+	for (let run = 0; run < 3; run += 1) {
+		const next = await runOnce({ conversations: cursor });
+		assert.ok(next.reads.length <= 20);
+		assert.deepEqual([...next.emitted].sort(), [...next.reads].sort());
+		reads.push(...next.reads);
+		cursor = next.cursor;
+	}
+	assert.equal(new Set(reads).size, 70);
+	assert.equal(reads.length, 70);
+	assert.equal(cursor.detail_frontier, null);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone reads a conversation updated to exactly the watermark time", async () => {
+	const first = await runConversationsOnly(
+		[makeListItem("conv-A", iso(10)), makeListItem("conv-B", iso(9))],
+		makeModelSwitchDetail,
+		{},
+	);
+	assert.deepEqual(first.detailReads, ["conv-A", "conv-B"]);
+
+	// conv-B is updated to the time of the watermark, not past it.
+	const second = await runConversationsOnly(
+		[makeListItem("conv-A", iso(10)), makeListItem("conv-B", iso(10))],
+		makeModelSwitchDetail,
+		{ conversations: first.cursor },
+	);
+	assert.deepEqual(second.detailReads, ["conv-B"]);
+	assert.deepEqual(
+		second.byId.get("conv-B")?.model_counts,
+		MODEL_SWITCH_COUNTS,
+	);
+	assert.equal(second.byId.has("conv-A"), false);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone does not read a released conversation again after an incomplete list walk", async () => {
+	const rows = Array.from({ length: 100 }, (_, i) =>
+		makeListItem(`conv-${String(i).padStart(3, "0")}`, iso(9, 0)),
+	).map((c, i) => ({
+		...c,
+		update_time: Date.parse(iso(9, 0)) / 1000 - i * 60,
+	}));
+	const reads: string[] = [];
+	const makeApi = () =>
+		makePagingApi({
+			list: () => rows,
+			// Every detail answers a retryable failure.
+			detail: (id) => {
+				reads.push(id);
+				return { status: 422, json: null };
+			},
+			// The third page of the list never loads.
+			onListPage: (cursor) =>
+				cursor === 60 ? { status: 503, json: null } : undefined,
+		});
+
+	const run1 = makeDeps(makeApi(), ["conversations"]);
+	await runStreams(run1.deps, {}, { detailPacing: NO_DETAIL_WAITS });
+	const cursor1 = lastConversationsCursor(run1.protocolMessages);
+	const failing = Object.keys(
+		(cursor1.detail_failures ?? {}) as Record<string, unknown>,
+	);
+	const read1 = new Set(reads);
+	assert.equal(read1.size, 60, "the walk reached two pages");
+	assert.equal(failing.length, 50, "the retry table is capped");
+	const released = [...read1].filter((id) => !failing.includes(id));
+	assert.equal(released.length, 10);
+
+	reads.length = 0;
+	const run2 = makeDeps(makeApi(), ["conversations"]);
+	await runStreams(
+		run2.deps,
+		{ conversations: cursor1 },
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
+	assert.deepEqual(
+		[...new Set(reads)].sort(),
+		[...failing].sort(),
+		"only the rows on the retry table are asked for again",
+	);
+	for (const id of released) {
+		assert.equal(
+			reads.includes(id),
+			false,
+			`${id} was released and is not read`,
+		);
+	}
 });

@@ -159,7 +159,11 @@ test("persistent listing circuit publishes completed metadata through successful
 				].map((name) => ({ name })),
 			},
 			state: {
-				conversations: { last_update_time: prior, detail_version: 1 },
+				conversations: {
+					last_update_time: prior,
+					detail_version: 2,
+					detail_frontier: null,
+				},
 				messages: { last_update_time: prior },
 			},
 		},
@@ -315,7 +319,8 @@ test("backlog re-list and differing forward cursors share one listing pressure e
 	const prior = {
 		conversations: {
 			last_update_time: "2023-11-14T22:13:20.000Z",
-			detail_version: 1,
+			detail_version: 2,
+			detail_frontier: null,
 		},
 		messages: { last_update_time: "2023-11-15T22:13:20.000Z" },
 	};
@@ -2102,7 +2107,11 @@ test("round-2 B2: a changing continuation page stays partial without coverage", 
 		requested: new Map([["conversations", { name: "conversations" }]]),
 	} as StreamDeps;
 	await runConversationsAndMessagesStreams(deps, {
-		conversations: { last_update_time: priorCursor, detail_version: 1 },
+		conversations: {
+			last_update_time: priorCursor,
+			detail_version: 2,
+			detail_frontier: null,
+		},
 	});
 	assert.deepEqual(
 		paths.map((path) =>
@@ -2194,10 +2203,13 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	);
 	assert.ok(firstState && firstState.type === "STATE");
 	const firstCursor = firstState.cursor as Record<string, unknown>;
+	// The walk was cut short: the watermark and the history frontier both stand at
+	// the newest row seen, and the list continuation holds the rest.
 	assert.equal(
 		firstCursor.last_update_time,
-		new Date(1_700_000_971 * 1000).toISOString(),
+		new Date(1_700_001_000 * 1000).toISOString(),
 	);
+	assert.equal(firstCursor.detail_frontier, firstCursor.last_update_time);
 	assert.deepEqual(firstCursor.backfill, {
 		position_hint: 30,
 		oldest_update_time: new Date(1_700_000_971 * 1000).toISOString(),
@@ -2233,8 +2245,8 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	);
 	assert.equal(
 		second.emitted.some((record) => record.data.id === "old-0"),
-		true,
-		"the pinned update-time watermark safely replays already-reached newer rows",
+		false,
+		"the replayed overlap was read in run 1, so run 2 does not emit it again",
 	);
 	// The detail pass checkpoints every 25 settled rows; the last STATE is final.
 	const finalState = second.protocolMessages
@@ -6021,7 +6033,8 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 		{
 			conversations: {
 				last_update_time: "2026-06-15T00:00:00.000Z",
-				detail_version: 1,
+				detail_version: 2,
+				detail_frontier: null,
 			},
 			messages: { last_update_time: "2026-06-15T00:00:00.000Z" },
 		} as CollectContext["state"],
@@ -6069,7 +6082,11 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 			["messages", { last_update_time: "2026-06-15T00:00:00.000Z" }],
 			[
 				"conversations",
-				{ last_update_time: "2026-06-15T00:00:00.000Z", detail_version: 1 },
+				{
+					last_update_time: "2026-06-15T00:00:00.000Z",
+					detail_version: 2,
+					detail_frontier: null,
+				},
 			],
 		],
 	);
@@ -6106,7 +6123,11 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: priorCursor, detail_version: 1 },
+			conversations: {
+				last_update_time: priorCursor,
+				detail_version: 2,
+				detail_frontier: null,
+			},
 			messages: { last_update_time: priorCursor },
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
@@ -6121,7 +6142,8 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 		[
 			{
 				last_update_time: "2026-06-15T00:00:00.000Z",
-				detail_version: 1,
+				detail_version: 2,
+				detail_frontier: null,
 				backfill: {
 					position_hint: 0,
 					oldest_update_time: null,
@@ -6276,9 +6298,8 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 	assert.ok(listedAfterDeletion.has("old-30"));
 	assert.ok(listedAfterDeletion.has("old-59"));
 	assert.equal(listedAfterDeletion.has("old-29"), false);
-	const refreshedBackfill = (
-		partialState.cursor as Record<string, unknown>
-	).backfill;
+	const refreshedBackfill = (partialState.cursor as Record<string, unknown>)
+		.backfill;
 	assert.notDeepEqual(
 		(refreshedBackfill as Record<string, unknown>).boundary_ids,
 		(firstCursor.backfill as Record<string, unknown>).boundary_ids,
@@ -6301,7 +6322,10 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 	);
 	assert.ok(suffixState && suffixState.type === "STATE");
 	const suffixCursor = suffixState.cursor as Record<string, unknown>;
-	const suffixUpdatedBackfill = suffixCursor.backfill as Record<string, unknown>;
+	const suffixUpdatedBackfill = suffixCursor.backfill as Record<
+		string,
+		unknown
+	>;
 	assert.equal(
 		suffixUpdatedBackfill.position_hint,
 		0,
@@ -6311,11 +6335,17 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 	await runConversationsAndMessagesStreams(restartedSuffixRun.deps, {
 		conversations: suffixCursor,
 	});
-	assert.ok(
-		restartedSuffixRun.harness.emitted.some(
-			(record) =>
-				record.stream === "conversations" && record.data.id === "old-0",
-		),
+	// old-0 sits before the prior suffix cursor. It already has a record, so the
+	// walk reports it in its coverage count rather than emitting it again.
+	const restartedCoverage = restartedSuffixRun.harness.protocolMessages.find(
+		(
+			message,
+		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "conversations",
+	);
+	assert.equal(
+		restartedCoverage?.considered,
+		58,
 		"the restarted walk includes rows before the prior suffix cursor",
 	);
 	assert.ok(
@@ -6512,7 +6542,11 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	await runConversationsAndMessagesStreams(
 		run1Deps,
 		{
-			conversations: { last_update_time: priorCursorIso, detail_version: 1 },
+			conversations: {
+				last_update_time: priorCursorIso,
+				detail_version: 2,
+				detail_frontier: null,
+			},
 		} as CollectContext["state"],
 		{ detailPacing: NO_DETAIL_WAITS },
 	);
@@ -6615,8 +6649,8 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 	);
 	assert.equal(
 		run2ConvoRecords.length,
-		50,
-		"run 2 replays the reached overlap and emits the previously-missing 20-item tail",
+		20,
+		"run 2 replays the reached overlap without emitting it again: run 1 read it, and emits only the previously-missing 20-item tail",
 	);
 	const run2Ids = new Set(run2ConvoRecords.map((r) => r.data.id));
 	for (const tailItem of missingTail) {
@@ -6651,8 +6685,8 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 			m.type === "STATE" && m.stream === "conversations",
 	);
-	// Two checkpoints (25 and 50 settled detail reads), then the final state.
-	assert.equal(run2States.length, 3);
+	// Run 1 read the overlap; run 2 reads only the 20-item tail, so no checkpoint.
+	assert.equal(run2States.length, 1);
 	assert.equal(
 		(run2States.at(-1)?.cursor as { last_update_time?: string } | undefined)
 			?.last_update_time,
@@ -6744,7 +6778,11 @@ for (const [label, body] of CHATGPT_WRONG_SHAPE_BODIES) {
 		await runConversationsAndMessagesStreams(
 			deps,
 			{
-				conversations: { last_update_time: priorCursor, detail_version: 1 },
+				conversations: {
+					last_update_time: priorCursor,
+					detail_version: 2,
+					detail_frontier: null,
+				},
 				messages: { last_update_time: priorCursor },
 			} as CollectContext["state"],
 			{ detailPacing: { random: () => 0, sleep: () => undefined } },
@@ -6833,7 +6871,11 @@ test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversat
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: priorCursor, detail_version: 1 },
+			conversations: {
+				last_update_time: priorCursor,
+				detail_version: 2,
+				detail_frontier: null,
+			},
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -6910,7 +6952,11 @@ test("runConversationsAndMessagesStreams: a genuine empty /conversations page re
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: priorCursor, detail_version: 1 },
+			conversations: {
+				last_update_time: priorCursor,
+				detail_version: 2,
+				detail_frontier: null,
+			},
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -6984,7 +7030,11 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	await runConversationsAndMessagesStreams(
 		deps,
 		{
-			conversations: { last_update_time: priorCursor, detail_version: 1 },
+			conversations: {
+				last_update_time: priorCursor,
+				detail_version: 2,
+				detail_frontier: null,
+			},
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -7361,7 +7411,8 @@ test("a follow-up run expands the backlog gap (older window) before any forward 
 			{
 				conversations: {
 					last_update_time: conversationsCursor,
-					detail_version: 1,
+					detail_version: 2,
+					detail_frontier: null,
 				},
 				messages: { last_update_time: messagesCursor },
 			} as CollectContext["state"],
