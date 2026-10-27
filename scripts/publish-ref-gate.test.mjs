@@ -459,7 +459,7 @@ test("a main push uses the filtered matrix and a no-op skips publish jobs", () =
   );
   assert.match(
     readFileSync(join(repoRoot, "scripts", "select-publish-connectors.mjs"), "utf8"),
-    /No connector version changed/,
+    /Every connector version on main is already in GHCR/,
   );
 });
 
