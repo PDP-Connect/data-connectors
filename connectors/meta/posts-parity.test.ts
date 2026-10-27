@@ -1184,7 +1184,7 @@ for (const scenario of [
 		assert.equal(posts[0]?.data.like_count, scenario.count);
 		const likes = emitted.filter(row => row.stream === "post_likes");
 		assert.deepEqual(likes.map(row => row.data.user_id), scenario.likes);
-		assert.deepEqual(likes.map(row => row.data.liker_ordinal), scenario.likes.map((_, i) => i));
+		assert.deepEqual(likes.map(row => row.data.liker_ordinal), scenario.likes.map((_, i) => String(i)));
 		for (const stream of ["posts", "post_likes"]) {
 			assert.equal(messages.some(message => message.type === "STATE" && message.stream === stream), scenario.complete, `${stream} completion`);
 			const skips = messages.filter(message => message.type === "SKIP_RESULT" && message.stream === stream);

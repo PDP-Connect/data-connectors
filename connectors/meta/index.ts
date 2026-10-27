@@ -100,6 +100,9 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.36 — post_likes.liker_ordinal is emitted as a string (was integer)
+ *     so the (post_id, liker_ordinal) primary key meets the PDPP string
+ *     primary-key rule; values are unchanged ("0", "1", ...).
  *   v0.4.32 — scrape legacy targeting categories before advertiser pagination
  *     so slow advertiser expansion cannot consume their collection window.
  *   v0.4.25 — restores legacy profile capture, stream-gap reporting, initial
@@ -1009,7 +1012,7 @@ export async function fetchAllPosts(
 		try {
 			for (const like of postLikeRecords(edge, () => { likesReadable = false; })) {
 				if (!postLikesSchema.safeParse(like).success) { likesReadable = false; continue; }
-				likers.push(edge.node.facepile_top_likers![like.liker_ordinal]!);
+				likers.push(edge.node.facepile_top_likers![Number(like.liker_ordinal)]!);
 			}
 		} catch { likesReadable = false; }
 		if (!readable || !likesReadable) conflictingVersions = true;
@@ -1031,7 +1034,7 @@ export async function fetchAllPosts(
 		for (const candidate of [previous, { node: { ...edge.node, facepile_top_likers: likers } }]) {
 			for (const like of postLikeRecords(candidate)) {
 				if (!postLikesSchema.safeParse(like).success) continue;
-				const liker = candidate.node.facepile_top_likers![like.liker_ordinal]!;
+				const liker = candidate.node.facepile_top_likers![Number(like.liker_ordinal)]!;
 				const existing = union.findIndex(item => like.user_id
 					? (item.id || item.pk) === like.user_id
 					: isDeepStrictEqual(item, liker));

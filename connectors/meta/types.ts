@@ -161,7 +161,7 @@ export interface PostRecord {
  *  sample per post via this API; there is no full-likers listing endpoint
  *  reachable from a logged-in web session). */
 export interface PostLikeRecord {
-	liker_ordinal: number;
+	liker_ordinal: string;
 	post_id: string;
 	profile_pic_url: string | null;
 	pk: string;

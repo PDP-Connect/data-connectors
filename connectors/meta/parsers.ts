@@ -259,11 +259,11 @@ export function postLikeRecords(edge: InstagramTimelineEdge, onUnreadable?: () =
 	const likers = node.facepile_top_likers ?? [];
 	if (!Array.isArray(likers)) { onUnreadable?.(); return []; }
 	const out: PostLikeRecord[] = [];
-	for (const [liker_ordinal, liker] of likers.entries()) {
+	for (const [position, liker] of likers.entries()) {
 		if (!liker || typeof liker !== "object") { onUnreadable?.(); continue; }
 		const userId = liker.id || liker.pk || "";
 		out.push({
-			liker_ordinal,
+			liker_ordinal: String(position),
 			post_id: postId,
 			profile_pic_url: liker.profile_pic_url || "",
 			pk: liker.pk || liker.id || userId,

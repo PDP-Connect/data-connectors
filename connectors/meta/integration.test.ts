@@ -833,7 +833,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 		likes.map((like) => like.data),
 		[
 			{
-				liker_ordinal: 0,
+				liker_ordinal: "0",
 				post_id: "p1",
 				profile_pic_url: "https://example.com/alice.jpg",
 				pk: "liker-pk1",
@@ -842,7 +842,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 				username: "alice",
 			},
 			{
-				liker_ordinal: 1,
+				liker_ordinal: "1",
 				post_id: "p1",
 				profile_pic_url: "",
 				pk: "liker2",
@@ -851,7 +851,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 				username: "",
 			},
 			{
-				liker_ordinal: 2,
+				liker_ordinal: "2",
 				post_id: "p1",
 				profile_pic_url: "",
 				pk: "",
@@ -861,7 +861,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 			},
 		],
 	);
-	const unkeyedLike = likes.find((e) => e.data.liker_ordinal === 2)?.data;
+	const unkeyedLike = likes.find((e) => e.data.liker_ordinal === "2")?.data;
 	assert.ok(unkeyedLike, "an identity-free source liker must be preserved");
 	assert.equal(unkeyedLike.user_id, "");
 	assert.equal(unkeyedLike.id, "");

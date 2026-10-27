@@ -92,7 +92,7 @@ export const playlistsSchema = z.object({
  * Cursor: added_at.
  */
 export const savedTracksSchema = z.object({
-	id: z.string().min(1).max(200).nullable(),
+	id: z.string().min(1).max(200),
 	identity_unresolved: z.boolean(),
 	name: nameSchema,
 	artist_names: artistNamesSchema,

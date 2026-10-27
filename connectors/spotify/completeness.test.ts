@@ -1593,7 +1593,7 @@ test("Spotify schemas accept legacy owner identifiers and source URI variants", 
 	);
 	assert.equal(
 		validateRecord("saved_tracks", {
-			id: null,
+			id: "legacy-track",
 			identity_unresolved: true,
 			name: "Legacy row",
 			artist_names: [],

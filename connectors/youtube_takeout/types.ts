@@ -11,7 +11,7 @@ export interface ProfileRecord {
 	description: string | null;
 	email: string | null;
 	handle: string | null;
-	id: string | null;
+	id: string;
 	joined_at: string | null;
 	subscriber_count: number | null;
 	title: string | null;

@@ -76,7 +76,7 @@ export const postsSchema = z.object({
  * captured post and preserves duplicate or identity-free legacy rows.
  */
 export const postLikesSchema = z.object({
-	liker_ordinal: z.number().int().nonnegative(),
+	liker_ordinal: z.string().min(1),
 	post_id: igIdSchema,
 	profile_pic_url: z.url().or(z.literal("")).nullable().optional(),
 	pk: z.string().optional(),

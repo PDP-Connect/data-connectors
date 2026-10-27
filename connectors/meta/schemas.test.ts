@@ -47,7 +47,7 @@ const POST_RECORD = {
 };
 
 const POST_LIKE_RECORD = {
-	liker_ordinal: 0,
+	liker_ordinal: "0",
 	post_id: "3401234567890123456",
 	profile_pic_url: "https://scontent.cdninstagram.com/liker.jpg",
 	pk: "999",
@@ -196,10 +196,14 @@ test("post_likes schema requires the ordinal used by the new composite key", () 
 	assert.equal(postLikesSchema.safeParse(preParityRecord).success, false);
 });
 
+test("post_likes schema rejects a numeric liker_ordinal (the primary key is a string)", () => {
+	assert.equal(postLikesSchema.safeParse({ ...POST_LIKE_RECORD, liker_ordinal: 0 }).success, false);
+});
+
 test("post_likes schema accepts an empty username emitted by the legacy source", () => {
 	assert.ok(
 		postLikesSchema.safeParse({
-			liker_ordinal: 0,
+			liker_ordinal: "0",
 			post_id: "3401234567890123456",
 			user_id: "999",
 			username: "",
