@@ -4185,3 +4185,60 @@ test("scenario-verify: preserves multi-byte STATE cursors across pipe chunks", (
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });
+
+const GAP_PAGE_FIXTURE_PATH = join(
+	PACKAGE_ROOT,
+	"src",
+	"test-fixtures",
+	"connector-dev-gap-page-fixture.ts",
+);
+
+test("scenario-record and scenario-verify answer DETAIL_GAPS_PAGE_REQUEST with an empty page, so the run reaches DONE", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-gap-page-test-"));
+	const scenarioPath = join(tmpDir, "gap-page.scenario.json");
+	try {
+		// A short inactivity window: an unanswered request would be killed by
+		// it (exit non-zero, no DONE) instead of hanging the test.
+		const recordResult = runRecordCli(
+			[
+				"connector-dev-gap-page-fixture",
+				"--entrypoint",
+				GAP_PAGE_FIXTURE_PATH,
+				"--runs",
+				"1",
+				"--timeout",
+				"15",
+				"--out",
+				scenarioPath,
+			],
+			{},
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`scenario-record failed: stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
+		);
+		assert.match(recordResult.stdout, /complete: true/);
+		const scenario = JSON.parse(
+			readFileSync(scenarioPath, "utf8"),
+		) as ConnectorScenario;
+		assert.deepEqual(scenario.runs[0]?.expected.records.items?.ids, ["item-1"]);
+
+		const verifyResult = runVerifyCli([
+			"connector-dev-gap-page-fixture",
+			"--entrypoint",
+			GAP_PAGE_FIXTURE_PATH,
+			"--timeout",
+			"15",
+			scenarioPath,
+		]);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`scenario-verify failed: stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+		);
+		assert.match(verifyResult.stdout, /run 0: PASS/);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
