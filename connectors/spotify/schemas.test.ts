@@ -203,15 +203,18 @@ test("saved_tracks schema accepts a compilation with album artists distinct from
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("saved_tracks schema preserves a row with no URI identity or save date", () => {
+test("saved_tracks schema preserves a row with no save date or URI", () => {
 	const result = savedTracksSchema.safeParse({
 		...SAVED_TRACK_RECORD,
-		id: null,
-		identity_unresolved: true,
 		added_at: null,
 		uri: "",
 	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("saved_tracks schema rejects a null or empty id (the primary key must be a non-empty string)", () => {
+	assert.equal(savedTracksSchema.safeParse({ ...SAVED_TRACK_RECORD, id: null }).success, false);
+	assert.equal(savedTracksSchema.safeParse({ ...SAVED_TRACK_RECORD, id: "" }).success, false);
 });
 
 test("top_artists schema accepts a record whose genres field is absent", () => {

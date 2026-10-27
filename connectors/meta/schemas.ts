@@ -25,6 +25,7 @@ import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schem
 // Module-scoped regexes (Biome useTopLevelRegex).
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const AD_ID_RE = /^[0-9a-f]{32}$/;
+const LIKER_ORDINAL_RE = /^(0|[1-9][0-9]*)$/;
 
 const isoDateTimeSchema = z
 	.string()
@@ -76,7 +77,9 @@ export const postsSchema = z.object({
  * captured post and preserves duplicate or identity-free legacy rows.
  */
 export const postLikesSchema = z.object({
-	liker_ordinal: z.number().int().nonnegative(),
+	liker_ordinal: z
+		.string()
+		.regex(LIKER_ORDINAL_RE, "must be a canonical non-negative integer string"),
 	post_id: igIdSchema,
 	profile_pic_url: z.url().or(z.literal("")).nullable().optional(),
 	pk: z.string().optional(),

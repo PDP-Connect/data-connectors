@@ -391,7 +391,7 @@ test("postLikeRecords: one record per (post, liker) pair", () => {
 	});
 	assert.deepEqual(postLikeRecords(edge), [
 		{
-			liker_ordinal: 0,
+			liker_ordinal: "0",
 			post_id: "post1",
 			profile_pic_url: "https://cdn.example.com/alice.jpg",
 			pk: "pk1",
@@ -400,7 +400,7 @@ test("postLikeRecords: one record per (post, liker) pair", () => {
 			username: "alice",
 		},
 		{
-			liker_ordinal: 1,
+			liker_ordinal: "1",
 			post_id: "post1",
 			profile_pic_url: "",
 			pk: "u2",
@@ -421,7 +421,7 @@ test("postLikeRecords: preserves source order and empty legacy identifiers", () 
 	});
 	assert.deepEqual(postLikeRecords(edge), [
 		{
-			liker_ordinal: 0,
+			liker_ordinal: "0",
 			post_id: "post1",
 			profile_pic_url: "",
 			pk: "u1",
@@ -430,7 +430,7 @@ test("postLikeRecords: preserves source order and empty legacy identifiers", () 
 			username: "",
 		},
 		{
-			liker_ordinal: 1,
+			liker_ordinal: "1",
 			post_id: "post1",
 			profile_pic_url: "",
 			pk: "",
@@ -439,7 +439,7 @@ test("postLikeRecords: preserves source order and empty legacy identifiers", () 
 			username: "no-id",
 		},
 		{
-			liker_ordinal: 2,
+			liker_ordinal: "2",
 			post_id: "post1",
 			profile_pic_url: "",
 			pk: "u3",
