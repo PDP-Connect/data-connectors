@@ -1073,7 +1073,7 @@ export function reconcileEmittedBranchMessages(
  * Merge the list-endpoint and detail-endpoint views into a single conversation
  * record. Fields that only appear on detail (gizmo_id, workspace_id,
  * current_node, message_count_on_current_branch, model_counts) fall back to list when
- * `detail` is null (the detail could not be read, e.g. a run limit deferred it).
+ * `detail` is null (the detail could not be read, e.g. a run limit deferred it, or the conversation was deleted mid-run).
  */
 export function buildConversationRecord(
 	c: ConversationListItem,

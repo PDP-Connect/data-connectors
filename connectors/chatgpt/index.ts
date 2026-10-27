@@ -6648,7 +6648,15 @@ export async function runMessagesAndConversationsWithDetail(
 					// result from maybeDeferForFetchError — propagate it directly.
 					return detail;
 				}
-				if (detail.status !== 200) {
+				// A detail fetched only for the conversations stream feeds two optional
+				// fields. One conversation's own failure (a 404 for a conversation
+				// deleted mid-run) leaves that record list-only (null fields); it
+				// does not fail the run. The messages path still throws: a missing
+				// detail there would silently lose message records.
+				const degradesToListOnly =
+					deps.conversationDetailOnly === true &&
+					isPerConversationDetailFailure(detail.status);
+				if (detail.status !== 200 && !degradesToListOnly) {
 					providerBudget?.recordFailure();
 					await emitChatGptProviderBudgetTransitions({
 						emit: deps.emit,
@@ -7304,6 +7312,24 @@ async function walkConversationsAndMessages(
 }
 
 /**
+ * A detail response that says only "this conversation cannot be read": a
+ * non-retryable 4xx. Auth failures (401/403) and pressure (408/429) speak for
+ * the whole account, so they never count. The live client already throws on
+ * 401/403 and on an exhausted retry budget; this guards a client that returns
+ * those statuses instead.
+ */
+function isPerConversationDetailFailure(status: number): boolean {
+	return (
+		status >= 400 &&
+		status < 500 &&
+		status !== 401 &&
+		status !== 403 &&
+		status !== 408 &&
+		status !== 429
+	);
+}
+
+/**
  * `deps` for a detail pass that serves only the `conversations` stream. The pass
  * rides the same lane, pacing, circuit and run budget as the messages path, but
  * `messages` is not requested here: a `DETAIL_GAP` would name an unrequested
@@ -7335,10 +7361,13 @@ function conversationDetailOnlyDeps(deps: StreamDeps): StreamDeps {
 /**
  * Fetch each conversation's detail once and emit the merged `conversations`
  * record, without emitting messages. A detail that arrives (200) fills the
- * record. A hard HTTP failure throws, as it does in the messages path. A
- * deferral for pressure or the run budget leaves the row list-only, as it was
- * before this fetch existed; the messages path would write a `DETAIL_GAP` for it
- * instead, but the stream that gap belongs to is not requested here.
+ * record. A per-conversation hard failure (for example a 404 for a conversation
+ * deleted mid-run) leaves that row list-only with null counts and does not fail
+ * the run: the detail only feeds optional fields. Failures that speak for the
+ * whole account (401/403, an open circuit, an exhausted retry budget) still
+ * throw. A deferral for pressure or the run budget also leaves the row
+ * list-only; the messages path would write a `DETAIL_GAP` for it instead, but
+ * the stream that gap belongs to is not requested here.
  */
 async function emitConversationsWithDetail(
 	deps: StreamDeps,

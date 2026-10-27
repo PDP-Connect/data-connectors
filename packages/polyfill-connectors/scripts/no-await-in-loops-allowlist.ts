@@ -910,24 +910,24 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/chatgpt/index.ts",
-			line: 6809,
+			line: 6817,
 			column: 18,
 			category: "dependent_pagination",
 			note: "recoverPendingConversationDetailGaps(): each recovery page determines whether to request another.",
 		},
 		{
 			path: "connectors/chatgpt/index.ts",
-			line: 6971,
+			line: 6979,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "runConversationBackfill(): mark recovered gaps in recovery-item order after hydration.",
 		},
 		{
 			path: "connectors/chatgpt/index.ts",
-			line: 7367,
+			line: 7396,
 			column: 4,
 			category: "ordered_protocol_emission",
-			note: "emitConversationsWithDetail(): emit the list-only record of each conversation whose detail was deferred, in list order, before coverage.",
+			note: "emitConversationsWithDetail(): emit the list-only record of each conversation whose detail was deferred or failed, in list order, before coverage.",
 		},
 		{
 			path: "connectors/chatgpt/integration.test.ts",

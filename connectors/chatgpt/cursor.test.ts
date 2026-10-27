@@ -626,14 +626,166 @@ test("runConversationsAndMessagesStreams: a conversation only the conversations 
 	assert.deepEqual([...messageParents], ["conv-new"]);
 });
 
-test("runConversationsAndMessagesStreams: conversations alone fails the run on a hard detail failure, as the messages path does", async () => {
+/** Detail for every id, except `failing`, which answers with `status`. */
+function detailFailingFor(
+	failing: string,
+	status: number,
+): (id: string) => ChatGptFetchResult {
+	return (id) =>
+		id === failing ? { status, json: null } : makeModelSwitchDetail(id);
+}
+
+test("runConversationsAndMessagesStreams: conversations alone keeps every record, with null fields, and succeeds when one detail is a 404", async () => {
+	const list = [
+		makeListItem("conv-A", "2026-04-22T09:00:00Z"),
+		makeListItem("conv-B", "2026-04-22T10:00:00Z"),
+		makeListItem("conv-C", "2026-04-22T11:00:00Z"),
+	];
+	const { api, detailReads } = makeDetailLoggingApi(
+		list,
+		detailFailingFor("conv-B", 404),
+	);
+	const { deps, emitted, protocolMessages } = makeDeps(api, ["conversations"]);
+
+	await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+
+	// The failed conversation does not stop the others from being read.
+	assert.deepEqual(detailReads.sort(), ["conv-A", "conv-B", "conv-C"]);
+	const byId = new Map(
+		emitted
+			.filter((r) => r.stream === "conversations")
+			.map((r) => [r.data.id, r.data]),
+	);
+	assert.deepEqual([...byId.keys()].sort(), ["conv-A", "conv-B", "conv-C"]);
+	for (const id of ["conv-A", "conv-C"]) {
+		assert.deepEqual(byId.get(id)?.model_counts, MODEL_SWITCH_COUNTS);
+		assert.equal(
+			byId.get(id)?.message_count_on_current_branch,
+			MODEL_SWITCH_BRANCH_MESSAGES,
+		);
+	}
+	assert.equal(byId.get("conv-B")?.model_counts, null);
+	assert.equal(byId.get("conv-B")?.message_count_on_current_branch, null);
+	assert.equal(emitted.filter((r) => r.stream === "messages").length, 0);
+	// Nothing names the unrequested stream, and the stream still completes.
+	assert.equal(
+		protocolMessages.some(
+			(m: EmittedMessage) =>
+				m.type === "DETAIL_GAP" || ("stream" in m && m.stream === "messages"),
+		),
+		false,
+	);
+	assert.equal(
+		protocolMessages.some(
+			(m: EmittedMessage) => m.type === "STATE" && m.stream === "conversations",
+		),
+		true,
+	);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone does not retry a 404 detail", async () => {
 	const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
-	const { deps } = makeDeps(makeFakeApi(list, new Map()), ["conversations"]);
+	const { api, detailReads } = makeDetailLoggingApi(
+		list,
+		detailFailingFor("conv-A", 404),
+	);
+	const { deps } = makeDeps(api, ["conversations"]);
+
+	await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+
+	assert.deepEqual(detailReads, ["conv-A"]);
+});
+
+test("runConversationsAndMessagesStreams: both streams still fail the run on a 404 detail", async () => {
+	const list = [
+		makeListItem("conv-A", "2026-04-22T09:00:00Z"),
+		makeListItem("conv-B", "2026-04-22T10:00:00Z"),
+	];
+	const { api } = makeDetailLoggingApi(list, detailFailingFor("conv-B", 404));
+	const { deps } = makeDeps(api, ["conversations", "messages"]);
+
+	await assert.rejects(
+		runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
+		/required conversation detail conv-B failed with http 404/,
+	);
+});
+
+test("runConversationsAndMessagesStreams: messages alone still fails the run on a 404 detail", async () => {
+	const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
+	const { api } = makeDetailLoggingApi(list, detailFailingFor("conv-A", 404));
+	const { deps } = makeDeps(api, ["messages"]);
 
 	await assert.rejects(
 		runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
 		/required conversation detail conv-A failed with http 404/,
 	);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone still fails the run when a detail answers with an auth status", async () => {
+	await Promise.all(
+		[401, 403, 429].map(async (status) => {
+			const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
+			const { api } = makeDetailLoggingApi(
+				list,
+				detailFailingFor("conv-A", status),
+			);
+			const { deps } = makeDeps(api, ["conversations"]);
+
+			await assert.rejects(
+				runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
+				new RegExp(
+					`required conversation detail conv-A failed with http ${status}`,
+				),
+			);
+		}),
+	);
+});
+
+test("runConversationsAndMessagesStreams: conversations alone still fails the run when the client throws an auth error on a detail", async () => {
+	const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
+	const { api: inner } = makeDetailLoggingApi(list, makeModelSwitchDetail);
+	const api: ChatGptApi = {
+		auth: inner.auth,
+		fetch: (path: string): Promise<ChatGptFetchResult> =>
+			path.startsWith("/conversation/")
+				? Promise.reject(
+						new Error(`apiFetch got 401 on GET ${path} (auth - not retryable)`),
+					)
+				: inner.fetch(path),
+	};
+	const { deps } = makeDeps(api, ["conversations"]);
+
+	await assert.rejects(
+		runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
+		/apiFetch got 401/,
+	);
+});
+
+test("runConversationsAndMessagesStreams: a conversation only the conversations cursor owes keeps a null-field record on a 404 while messages still run", async () => {
+	// conv-mid is owed to `conversations` only; conv-new is owed to both.
+	const list = [
+		makeListItem("conv-new", "2026-04-22T11:00:00Z"),
+		makeListItem("conv-mid", "2026-04-22T09:30:00Z"),
+	];
+	const { api } = makeDetailLoggingApi(list, detailFailingFor("conv-mid", 404));
+	const { deps, emitted } = makeDeps(api, ["conversations", "messages"]);
+
+	await runStreams(
+		deps,
+		{
+			conversations: { last_update_time: "2026-04-22T09:00:00.000Z" },
+			messages: { last_update_time: "2026-04-22T10:00:00.000Z" },
+		},
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
+
+	const byId = new Map(
+		emitted
+			.filter((r) => r.stream === "conversations")
+			.map((r) => [r.data.id, r.data]),
+	);
+	assert.equal(byId.get("conv-mid")?.model_counts, null);
+	assert.deepEqual(byId.get("conv-new")?.model_counts, MODEL_SWITCH_COUNTS);
 });
 
 test("runConversationsAndMessagesStreams: conversations alone emits a list-only record, and no gap, for a detail the run budget defers", async () => {
