@@ -149,8 +149,14 @@ async function requestTagsPage(url, context) {
   if (challenge.service) tokenUrl.searchParams.set("service", challenge.service);
   tokenUrl.searchParams.set("scope", challenge.scope ?? `repository:${context.name}:pull`);
 
+  // The realm passed checkTokenRealm, so the registry credential may go to it.
+  // With a credential, GHCR answers a repository that does not exist with
+  // NAME_UNKNOWN; anonymously it answers 403, which reads as denial, not absence.
   const token = tokenFrom(await context.requestImpl(tokenUrl.toString(), {
     timeoutMs: context.timeoutMs,
+    ...(context.credential === undefined
+      ? {}
+      : { headers: { authorization: `Basic ${context.credential}` } }),
   }));
   response = await context.requestImpl(url, {
     headers: { authorization: `Bearer ${token}` },
@@ -193,6 +199,7 @@ export async function listRepositoryTags({
   timeoutMs,
   allowInsecureLoopback = false,
   requestImpl = requestText,
+  credential = undefined,
 }) {
   const path = `/v2/${name}/tags/list`;
   let url = `${scheme}://${registry}${path}?n=${PAGE_SIZE}`;
@@ -208,6 +215,7 @@ export async function listRepositoryTags({
       timeoutMs,
       allowInsecureLoopback,
       requestImpl,
+      credential,
     });
     if (response.status === 404 && seenPages.size === 1) {
       const codes = parseDistributionErrorCodes(response.body);
@@ -410,6 +418,7 @@ export async function generateConnectorCatalog({
   generatedAt,
   previousCatalog = null,
   connectors = PUBLISHABLE_CONNECTORS,
+  credential = undefined,
   scheme = "https",
   timeoutMs,
   allowInsecureLoopback = false,
@@ -437,6 +446,7 @@ export async function generateConnectorCatalog({
       timeoutMs,
       allowInsecureLoopback,
       requestImpl,
+      credential,
     }))
       .map(parseSemver)
       .filter(Boolean)
@@ -557,7 +567,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const previousCatalog = args["previous-catalog"]
       ? JSON.parse(readFileSync(args["previous-catalog"], "utf8"))
       : null;
+    const username = process.env.CONNECTOR_CATALOG_USERNAME ?? "";
+    const password = process.env.CONNECTOR_CATALOG_PASSWORD ?? "";
     const catalog = await generateConnectorCatalog({
+      credential: password ? Buffer.from(`${username}:${password}`).toString("base64") : undefined,
       registry: args.registry ?? DEFAULT_REGISTRY,
       namespace: args.namespace ?? DEFAULT_NAMESPACE,
       sourceCommit,

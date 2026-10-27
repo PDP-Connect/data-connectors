@@ -4,14 +4,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Select connectors whose shipped content changed in a push to main, then
- * keep only versions whose GHCR reference is definitely absent.
+ * Select every connector version that main declares and GHCR does not yet hold.
  *
- * The source-side decision is deliberately based on both version-bearing
- * representations. A manifest is the authoring source, while the generated
- * package connector-index.json is the file consumers install from. If they do
- * not agree at either endpoint, this script refuses instead of publishing a
- * version whose source and generated index disagree.
+ * The candidates are all connectors at their version on `after`, not only the
+ * ones this push changed. GHCR decides which candidates to publish, so a
+ * version that is missing for any reason, such as a run cancelled by the
+ * concurrency group, is published by the next push to main. Selecting from the
+ * push's diff could not heal that: a cancelled run's connector is unchanged by
+ * the later push that would have to publish it.
+ *
+ * The diff still does one job. It refuses a push that changes a connector's
+ * shipped content without bumping its version, so the same version cannot
+ * silently name different bytes. Two version-bearing representations are read
+ * at both endpoints: the manifest is the authoring source, and the generated
+ * package connector-index.json is what consumers install from. If they disagree,
+ * this script refuses rather than publish a version whose source and index
+ * differ.
  *
  * The registry-side decision reuses lookup-manifest.mjs. Its `unknown` result
  * is a refusal to decide, not evidence of absence, so only `absent` reaches the
@@ -122,17 +130,20 @@ function readCommitVersions(commit, connectors, { cwd = process.cwd() } = {}) {
   );
 }
 
-/**
- * Return connectors with changed shipped content after refusing a content
- * change that would overwrite an existing version. The index is still a
- * consistency gate, not an artifact input.
- */
 function isFirstRootLayoutTransition(before, after, cwd) {
   return Boolean(before && before !== after &&
     readJsonAtCommit(before, "packages/polyfill-connectors/connector-index.json", { cwd }) !== null &&
     readJsonAtCommit(after, INDEX_PATH, { cwd }) !== null);
 }
 
+/**
+ * Return connectors with changed shipped content after refusing a content
+ * change that would overwrite an existing version. The index is still a
+ * consistency gate, not an artifact input.
+ *
+ * The PR-time gate (scripts/check-publish-version-bumps.mjs) uses this list.
+ * The publish path uses selectPublishCandidates, which needs only the refusal.
+ */
 export async function selectChangedConnectors({
   before,
   after,
@@ -177,6 +188,28 @@ export async function selectChangedConnectors({
     selected.push({ connector: connectorKey, manifest, version: afterVersion });
   }
   return selected;
+}
+
+/**
+ * Return every connector version that `after` declares, whether or not this
+ * push changed it. The refusal in selectChangedConnectors still runs first, so
+ * a push that changes shipped content under an unchanged version is refused.
+ */
+export async function selectPublishCandidates({
+  before,
+  after,
+  cwd = process.cwd(),
+  connectors = PUBLISHABLE_CONNECTORS,
+}) {
+  if (!after) throw new PublishSelectionError("after commit is not set");
+  if (isFirstRootLayoutTransition(before, after, cwd)) return [];
+  await selectChangedConnectors({ before, after, cwd, connectors });
+
+  const afterVersions = readCommitVersions(after, connectors, { cwd });
+  return connectors.flatMap(({ manifest, connectorKey }) => {
+    const version = afterVersions.get(connectorKey);
+    return version === null ? [] : [{ connector: connectorKey, manifest, version }];
+  });
 }
 
 function connectorReference(owner, connector, version) {
@@ -250,46 +283,51 @@ function notice(message) {
   }
 }
 
+/**
+ * The publish matrix for a push: every candidate version that GHCR reports as
+ * definitely absent. Candidates come from `main` (see selectPublishCandidates),
+ * so a version missed by an earlier run is published by a later push.
+ */
+export async function selectPublishTargets({
+  before,
+  after,
+  cwd = process.cwd(),
+  connectors = PUBLISHABLE_CONNECTORS,
+  owner,
+  credential,
+  lookup = lookupManifest,
+  notice,
+}) {
+  const candidates = await selectPublishCandidates({ before, after, cwd, connectors });
+  return filterAbsentVersions(candidates, { owner, credential, lookup, notice });
+}
+
 async function main() {
-  const firstLayoutTransition = isFirstRootLayoutTransition(
-    process.env.BEFORE_SHA ?? null,
-    process.env.AFTER_SHA,
-    process.cwd(),
-  );
-  const candidates = await selectChangedConnectors({
-    before: process.env.BEFORE_SHA ?? null,
-    after: process.env.AFTER_SHA,
-  });
-  if (candidates.length === 0) {
-    notice(firstLayoutTransition
-      ? "First root-layout move: automatic connector publication is skipped. Release individual versioned connectors explicitly after consumer activation review."
-      : `No connector version changed and no shipped connector content changed between ${process.env.BEFORE_SHA} and ${process.env.AFTER_SHA}; nothing to publish.`);
-    emit({
-      matrix: JSON.stringify({ include: [] }),
-      "has-version-changes": "false",
-      "has-publishable-changes": "false",
-    });
-    return;
-  }
+  const before = process.env.BEFORE_SHA ?? null;
+  const after = process.env.AFTER_SHA;
+  const firstLayoutTransition = isFirstRootLayoutTransition(before, after, process.cwd());
 
   const username = process.env.LOOKUP_USERNAME ?? "";
   const password = process.env.LOOKUP_PASSWORD ?? "";
   const credential = password
     ? Buffer.from(`${username}:${password}`).toString("base64")
     : undefined;
-  const selected = await filterAbsentVersions(candidates, {
+  const selected = await selectPublishTargets({
+    before,
+    after,
     owner: (process.env.GITHUB_REPOSITORY_OWNER ?? "").toLowerCase(),
     credential,
     notice,
   });
-  if (selected.length === 0) {
-    notice("No changed connector version has a definite GHCR absence; nothing to publish.");
+  if (firstLayoutTransition) {
+    notice("First root-layout move: automatic connector publication is skipped. Release individual versioned connectors explicitly after consumer activation review.");
+  } else if (selected.length === 0) {
+    notice(`Every connector version on main is already in GHCR, or its lookup is unknown, between ${before} and ${after}; nothing to publish.`);
   } else {
-    notice(`Selected ${selected.length} changed connector version${selected.length === 1 ? "" : "s"} for publication.`);
+    notice(`Selected ${selected.length} connector version${selected.length === 1 ? "" : "s"} missing from GHCR for publication.`);
   }
   emit({
     matrix: JSON.stringify({ include: selected }),
-    "has-version-changes": "true",
     "has-publishable-changes": selected.length > 0 ? "true" : "false",
   });
 }
