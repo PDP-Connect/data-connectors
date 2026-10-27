@@ -910,10 +910,11 @@ test("chatgpt: a windowed conversations-only run keeps list items that carry onl
 	const conversations = JSON.parse(
 		await readFile(r.streamScopeFiles["chatgpt.conversations"], "utf8"),
 	);
-	assert.deepEqual(
-		conversations.records.map((record) => record.id),
-		["conv-1", "conv-2"],
-	);
+	// Record order is not part of the contract: the detail pass reads oldest first.
+	assert.deepEqual(conversations.records.map((record) => record.id).sort(), [
+		"conv-1",
+		"conv-2",
+	]);
 });
 
 test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed pages", {
