@@ -886,6 +886,10 @@ test("chatgpt: a windowed conversations-only run keeps list items that carry onl
 				update_time: now - (index < 2 ? index + 1 : 40 + index) * 86400,
 			}));
 			response.body = JSON.stringify(body);
+		} else if (/^\/backend-api\/conversation\//.test(path)) {
+			// A conversations-only run reads each detail for its model counts, and
+			// the record takes its times from that detail. Keep it inside the window.
+			stampChatGptDetail(response, now - 86400);
 		}
 		return response;
 	};
@@ -906,10 +910,11 @@ test("chatgpt: a windowed conversations-only run keeps list items that carry onl
 	const conversations = JSON.parse(
 		await readFile(r.streamScopeFiles["chatgpt.conversations"], "utf8"),
 	);
-	assert.deepEqual(
-		conversations.records.map((record) => record.id),
-		["conv-1", "conv-2"],
-	);
+	// Record order is not part of the contract: the detail pass reads oldest first.
+	assert.deepEqual(conversations.records.map((record) => record.id).sort(), [
+		"conv-1",
+		"conv-2",
+	]);
 });
 
 test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed pages", {
@@ -1648,6 +1653,7 @@ test("anthropic: export paths on the PageShim host", {
 			);
 			assert.deepEqual(streamed, {
 				"claude.account_profile": 1,
+				"claude.account_plan": 1,
 				"claude.conversations": 1,
 				"claude.messages": 0,
 				"claude.projects": 0,

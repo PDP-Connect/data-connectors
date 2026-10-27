@@ -31,15 +31,30 @@ import {
 	makeRecordingEmit,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
-	ChatGptRunBudget,
+	NO_DETAIL_WAITS,
+	withEmptyConversationDetails,
+} from "./__fixtures__/empty-conversation-details.ts";
+import {
 	ChatGptPlannedProviderBudgetDeferredError,
 	ChatGptRecoverableRetryExhaustedError,
+	ChatGptRunBudget,
 	createChatGptApi,
-	runConversationsAndMessagesStreams,
+	runConversationsAndMessagesStreams as runStreams,
 	type StreamDeps,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ChatGptApi, ChatGptFetchResult } from "./types.ts";
+
+/** These tests exercise listing and serve no conversation detail; see the helper. */
+const runConversationsAndMessagesStreams: typeof runStreams = (
+	deps,
+	state,
+	options,
+) =>
+	runStreams({ ...deps, api: withEmptyConversationDetails(deps.api) }, state, {
+		...options,
+		detailPacing: { ...NO_DETAIL_WAITS, ...options?.detailPacing },
+	});
 
 const PRODUCTION_WIDTH = 6;
 const SEARCH_PREFIX = "/conversations/search?query=&cursor=";

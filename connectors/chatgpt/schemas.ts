@@ -67,6 +67,13 @@ export const conversationSchema = z.object({
 		.min(0)
 		.max(100_000)
 		.nullable(),
+	// Assistant replies (not tool calls or other intermediate steps) on the
+	// current branch per model slug; null when the conversation detail has not
+	// been read. Keys follow `messages.model_slug`
+	// (safe text, 1 to 80 characters); values are counts. No message text.
+	model_counts: z
+		.record(pdppSafeText.min(1).max(80), z.number().int().min(1).max(100_000))
+		.nullable(),
 	gizmo_id: idSchema.nullable(),
 });
 

@@ -26,6 +26,7 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 const CLAUDE_ORIGIN = "https://claude.ai";
 const STREAMS = [
 	"account_profile",
+	"account_plan",
 	"conversations",
 	"messages",
 	"projects",
@@ -102,6 +103,7 @@ const count = (scope: unknown): number => {
 				"messages",
 				"conversations",
 				"account_profile",
+				"account_plan",
 				"projects",
 				"project_documents",
 			],

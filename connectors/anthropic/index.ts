@@ -183,6 +183,7 @@ import {
 	scanConversation,
 } from "./oversize-conversation.ts";
 import {
+	buildAccountPlanRecord,
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	JSON_ENTRY_READ_CHUNK_UNITS,
@@ -199,6 +200,7 @@ import {
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
+	type RawOrganization,
 	resolveExportedProfile,
 	type SourceRecordEnvelope,
 } from "./parsers.ts";
@@ -343,6 +345,7 @@ const CONVERSATION_SCAN_FIELDS: ReadonlySet<string> = new Set([
 
 const CONVERSATIONS_STREAM = "conversations";
 const ACCOUNT_PROFILE_STREAM = "account_profile";
+const ACCOUNT_PLAN_STREAM = "account_plan";
 const MESSAGES_STREAM = "messages";
 const PROJECTS_STREAM = "projects";
 const PROJECT_DOCUMENTS_STREAM = "project_documents";
@@ -397,6 +400,7 @@ async function* entryRangeChunks(
 
 const ALL_STREAMS = [
 	ACCOUNT_PROFILE_STREAM,
+	ACCOUNT_PLAN_STREAM,
 	CONVERSATIONS_STREAM,
 	MESSAGES_STREAM,
 	PROJECTS_STREAM,
@@ -521,7 +525,7 @@ function readExportReference(
 
 // ─── Claude API calls (in-page, cookie-authenticated) ───────────────────
 
-interface ClaudeOrganization {
+interface ClaudeOrganization extends RawOrganization {
 	uuid: string;
 	capabilities?: string[];
 }
@@ -1328,6 +1332,66 @@ export async function collectAnthropic({
 	const initialDelayMs = testOverrides?.initialDelayMs ?? 1500;
 	if (initialDelayMs > 0) await politeDelay(initialDelayMs);
 	const browserProfile = await readBrowserProfile(page);
+	// One read of the signed-in account's organizations, shared by the
+	// account_plan stream (plan family, creation time) and the export request
+	// (which organization to export). It runs here, on the claude.ai page and
+	// before any download navigation, and only when the plan stream was asked for.
+	let organizationsRead: Promise<ClaudeOrganization[]> | undefined;
+	const readOrganizations = (): Promise<ClaudeOrganization[]> => {
+		organizationsRead ??= fetchOrganizations(page);
+		return organizationsRead;
+	};
+	const organizations = requested.has(ACCOUNT_PLAN_STREAM)
+		? await readOrganizations()
+		: [];
+	// The plan comes from the organization entry of one organization, matched by
+	// id: not from the account menu, so it needs no name, and the entry's other
+	// fields are never read. Like account_profile it carries no coverage proof
+	// and no checkpoint.
+	const emitAccountPlan = async (organizationId: string): Promise<void> => {
+		const organization = organizations.find(
+			(candidate) => candidate.uuid === organizationId,
+		);
+		const plan = organization ? buildAccountPlanRecord(organization) : null;
+		if (plan === null) {
+			// No record and no skip would read as a verified empty stream.
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACCOUNT_PLAN_STREAM,
+				reason: "organization_unavailable",
+				message:
+					"The exported organization was not in the signed-in account's organization list, so its plan was not read.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+			return;
+		}
+		if (plan.plan_type === null || plan.account_created_at === null) {
+			connectorDiagnostic("anthropic", "account_plan_incomplete", {
+				plan_type: plan.plan_type === null ? "absent" : "read",
+				account_created_at:
+					plan.account_created_at === null ? "absent" : "read",
+			});
+		}
+		await emitRecord(ACCOUNT_PLAN_STREAM, plan);
+	};
+	// The plan needs no export. A run that asks for nothing else must not request
+	// one: each request emails the account owner.
+	if (![...requested.keys()].some((stream) => stream !== ACCOUNT_PLAN_STREAM)) {
+		const planOrganization = selectChatOrganization(organizations);
+		if (planOrganization) {
+			await emitAccountPlan(planOrganization.uuid);
+		} else {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACCOUNT_PLAN_STREAM,
+				reason: "no_chat_organization",
+				message:
+					"No chat-capable Claude organization could be resolved from the session.",
+				recovery_hint: { action: "refresh_credentials", retryable: false },
+			});
+		}
+		return;
+	}
 
 	const wantsConversations = requested.has(CONVERSATIONS_STREAM);
 	const wantsMessages = requested.has(MESSAGES_STREAM);
@@ -1796,7 +1860,9 @@ export async function collectAnthropic({
 					retryable: false,
 				},
 				diagnostics: {
-					...(conversationId === null ? {} : { conversation_id: conversationId }),
+					...(conversationId === null
+						? {}
+						: { conversation_id: conversationId }),
 					...(startOffset === undefined ? {} : { source_offset: startOffset }),
 				},
 			});
@@ -1911,6 +1977,10 @@ export async function collectAnthropic({
 				name_source: profile.nameSource,
 				metadata_status: profile.metadataStatus,
 			});
+		}
+		if (requested.has(ACCOUNT_PLAN_STREAM)) {
+			// The exported organization's plan; see emitAccountPlan.
+			await emitAccountPlan(organizationId);
 		}
 		if (wantsConversations) {
 			for (const { record: conversation, source } of selectedConversations) {
@@ -2323,10 +2393,10 @@ export async function collectAnthropic({
 					validatedEntry: Boolean(entriesValidated),
 					...(entriesValidated
 						? {
-							maxBufferedObjectUnits:
-								testOverrides?.maxBufferedObjectUnits ??
-								OVERSIZE_PARENT_UNITS,
-						}
+								maxBufferedObjectUnits:
+									testOverrides?.maxBufferedObjectUnits ??
+									OVERSIZE_PARENT_UNITS,
+							}
 						: {}),
 					onOversizedObject: async (_prefix, value) => {
 						await processOversizedConversation(value);
@@ -2422,7 +2492,7 @@ export async function collectAnthropic({
 		}
 	}
 
-	const orgs = await fetchOrganizations(page);
+	const orgs = await readOrganizations();
 	const org = selectChatOrganization(orgs);
 	if (!org) {
 		// Every export-derived stream is skipped: a stream with no record and
@@ -2842,10 +2912,7 @@ export async function collectAnthropic({
 				const items = Array.isArray(entry.json) ? entry.json : [entry.json];
 				if (result.category === "conversations") {
 					for (const item of items) {
-						if (
-							isPlainObject(item) &&
-							!Array.isArray(item.chat_messages)
-						) {
+						if (isPlainObject(item) && !Array.isArray(item.chat_messages)) {
 							// Report the named omission before shape classification can
 							// divert this conversation to projects or leave it unmatched.
 							await accountRawConversation(item);

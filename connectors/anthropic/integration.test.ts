@@ -248,7 +248,13 @@ function makeContext(overrides: {
 }
 
 const ORG_RESPONSE = [
-	{ uuid: "org-1", capabilities: ["chat", "claude_pro"] },
+	{
+		uuid: "org-1",
+		// A personal organization is named after its owner.
+		name: "Fictional Owner's Organization",
+		capabilities: ["chat", "claude_pro"],
+		created_at: "2025-03-01T12:00:00.123456Z",
+	},
 	{ uuid: "org-2", capabilities: ["api"] },
 ];
 
@@ -825,6 +831,243 @@ for (const scenario of [
 		assertUserFacingProgress(protocolMessages);
 	});
 }
+
+const ACCOUNT_PLAN_RECORD = {
+	id: "account_plan",
+	account_id: "org-1",
+	account_structure: null,
+	account_created_at: "2025-03-01T12:00:00.123456Z",
+	plan_type: "pro",
+	plan_display_name: null,
+	subscription_plan: null,
+	has_active_subscription: null,
+	billing_period: null,
+	will_renew: null,
+	renews_at: null,
+	expires_at: null,
+	cancels_at: null,
+	scheduled_plan_change: null,
+};
+
+test("collectAnthropic: account_plan carries the organization's plan family and creation time, and no name", async () => {
+	const organizationReads = { count: 0 };
+	const exportRequests: string[] = [];
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data")) {
+			organizationReads.count += 1;
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		}
+		if (url.includes("/export_data")) exportRequests.push(url);
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages, page } = makeContext({
+		streams: ["account_plan"],
+		fetchStub,
+	});
+	page.menuSpans = ["Export Owner", "Pro plan"];
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted.map((record) => [record.stream, record.data]),
+		[["account_plan", ACCOUNT_PLAN_RECORD]],
+	);
+	// One organization read serves the plan, and no export is requested: each
+	// request emails the account owner.
+	assert.equal(organizationReads.count, 1);
+	assert.deepEqual(exportRequests, []);
+	// No name reaches any message: not the menu's, not users.json's, not the
+	// organization's own name.
+	const everything = JSON.stringify([...protocolMessages, ...diagnostics]);
+	for (const name of ["Export Owner", "Fictional", "Owner's Organization"])
+		assert.equal(everything.includes(name), false, name);
+	// Like account_profile: no coverage proof, no checkpoint.
+	assert.equal(
+		protocolMessages.some(
+			(message) =>
+				(message.type === "DETAIL_COVERAGE" || message.type === "STATE") &&
+				message.stream === "account_plan",
+		),
+		false,
+	);
+	assert.equal(
+		diagnostics.some((line) => line.includes("account_plan_incomplete")),
+		false,
+	);
+});
+
+test("collectAnthropic: account_plan reports an organization entry without a plan or a creation time as null, with a diagnostic", async () => {
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(
+				jsonResponse(200, [
+					{ uuid: "org-1", capabilities: ["chat"], billing_type: "stripe" },
+				]),
+			);
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted } = makeContext({
+		streams: ["account_plan"],
+		fetchStub,
+	});
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(emitted[0]?.data, {
+		...ACCOUNT_PLAN_RECORD,
+		account_created_at: null,
+		plan_type: null,
+	});
+	assert.match(
+		diagnostics.find((line) => line.includes("account_plan_incomplete")) ?? "",
+		/"plan_type":"absent".*"account_created_at":"absent"/,
+	);
+});
+
+test("collectAnthropic: a resumed export whose organization is not in the signed-in account skips account_plan instead of emitting an empty plan, when the run reads the export", async () => {
+	const zipBytes = await buildZipBytes();
+	const { download } = makeFakeDownload(zipBytes);
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages, page } = makeContext({
+		streams: ["account_plan", "projects"],
+		state: {
+			conversations: {
+				pending_export: {
+					organization_id: "old-org",
+					nonce: "old-nonce",
+					requested_at: "2025-12-31T00:00:00.000Z",
+				},
+			},
+		},
+		fetchStub,
+	});
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+
+	await collectAnthropic(ctx);
+
+	assert.equal(
+		emitted.some((record) => record.stream === "account_plan"),
+		false,
+	);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(
+		skips.map((skip) => [skip.stream, skip.reason]),
+		[["account_plan", "organization_unavailable"]],
+	);
+	assert.deepEqual(skips[0]?.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+});
+
+test("collectAnthropic: a resumed export finds its own organization's plan in the account's list, when the run reads the export", async () => {
+	const zipBytes = await buildZipBytes();
+	const { download } = makeFakeDownload(zipBytes);
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, page } = makeContext({
+		streams: ["account_plan", "projects"],
+		state: {
+			conversations: {
+				pending_export: {
+					organization_id: "org-1",
+					nonce: "old-nonce",
+					requested_at: "2025-12-31T00:00:00.000Z",
+				},
+			},
+		},
+		fetchStub,
+	});
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted.find((record) => record.stream === "account_plan")?.data,
+		ACCOUNT_PLAN_RECORD,
+	);
+});
+
+test("collectAnthropic: a plan-only run reads the plan of the chat organization without touching a pending export", async () => {
+	const requests: string[] = [];
+	const fetchStub: FetchStub = (url) => {
+		requests.push(url);
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages } = makeContext({
+		streams: ["account_plan"],
+		state: {
+			conversations: {
+				pending_export: {
+					organization_id: "old-org",
+					nonce: "old-nonce",
+					requested_at: "2025-12-31T00:00:00.000Z",
+				},
+			},
+		},
+		fetchStub,
+	});
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted.map((record) => [record.stream, record.data]),
+		[["account_plan", ACCOUNT_PLAN_RECORD]],
+	);
+	assert.equal(
+		requests.some((url) => url.includes("/export")),
+		false,
+	);
+	assert.deepEqual(skipsOf(protocolMessages), []);
+});
+
+test("collectAnthropic: a plan-only run with no chat organization skips account_plan and requests no export", async () => {
+	const requests: string[] = [];
+	const fetchStub: FetchStub = (url) => {
+		requests.push(url);
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, []));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages } = makeContext({
+		streams: ["account_plan"],
+		fetchStub,
+	});
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(
+		skips.map((skip) => [skip.stream, skip.reason]),
+		[["account_plan", "no_chat_organization"]],
+	);
+	assert.equal(
+		requests.some((url) => url.includes("/export")),
+		false,
+	);
+});
 
 test("collectAnthropic: scope filtering — requesting only 'projects' emits no conversations/messages/project_documents", async () => {
 	const zipBytes = await buildZipBytes();
@@ -3791,7 +4034,9 @@ test("manifest category boundary: absent projects with a cross-classified projec
 	assert.equal(run.proofFor("messages").length, 0);
 	assert.equal(run.recordsOf("conversations").length, 1);
 	assert.equal(run.recordsOf("messages").length, 0);
-	const skip = skipsOf(run.protocolMessages).find((s) => s.stream === "messages");
+	const skip = skipsOf(run.protocolMessages).find(
+		(s) => s.stream === "messages",
+	);
 	assert.equal(skip?.reason, "export_conversation_incomplete");
 	assert.equal(
 		(skip?.diagnostics as Record<string, unknown>)?.conversation_id,
@@ -3873,7 +4118,9 @@ test("manifest category boundary: projects found in conversations do not count t
 	assert.equal(run.proofFor("messages").length, 0);
 	assert.equal(run.recordsOf("conversations").length, 1);
 	assert.equal(run.recordsOf("messages").length, 1);
-	const skip = skipsOf(run.protocolMessages).find((s) => s.stream === "messages");
+	const skip = skipsOf(run.protocolMessages).find(
+		(s) => s.stream === "messages",
+	);
 	assert.equal(skip?.reason, "export_conversation_incomplete");
 	assert.equal(
 		(skip?.diagnostics as Record<string, unknown>)?.conversation_id,
@@ -4853,11 +5100,7 @@ function blobsOf(messages: EmittedMessage[]) {
 
 test("collectAnthropic: a streamed oversized parent whose identity follows its messages is kept; its full envelope is streamed into one real blob and its messages are emitted in order", async () => {
 	// Cross the injected 64 Ki unit buffer and verify the complete source blob.
-	const parent = messagesFirstParent(
-		"late-id",
-		"2026-02-01T00:00:00.000Z",
-		3,
-	);
+	const parent = messagesFirstParent("late-id", "2026-02-01T00:00:00.000Z", 3);
 	const reads: number[] = [];
 	const meter = new BufferMeter();
 	const { emitted, events, protocolMessages } = await runOldFormat(
@@ -5416,7 +5659,12 @@ test("collectAnthropic: organization selection prefers chat, then claude_pro, th
 	]);
 });
 
-for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) {
+for (const mode of [
+	"buffered",
+	"streaming",
+	"oversized",
+	"manifest",
+] as const) {
 	for (const unboundedMessages of [false, true]) {
 		test(`scope union ${mode}: June conversations preserve May messages with ${unboundedMessages ? "unbounded" : "January"} messages`, async () => {
 			const conversation = (month: string) => ({
@@ -5494,7 +5742,8 @@ test("oversized omission: malformed envelope names the conversation and skips bo
 		assert.ok(skip, `${stream} must explicitly report a partial outcome`);
 		assert.equal(skip.reason, "export_oversized_conversation_incomplete");
 		assert.equal(
-			(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
+			(skip.diagnostics as Record<string, unknown> | undefined)
+				?.conversation_id,
 			"broken-envelope",
 		);
 		assert.equal(coverageOf(protocolMessages, stream).length, 0);
@@ -5538,15 +5787,13 @@ for (const [label, children] of [
 				testOverrides: { maxBufferedObjectUnits: 64 },
 			},
 		);
-		assert.equal(
-			emitted.filter((r) => r.stream === "conversations").length,
-			1,
-		);
+		assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
 		const skip = skipsOf(protocolMessages).find((s) => s.stream === "messages");
 		assert.ok(skip, "an omitted message must explicitly make messages partial");
 		assert.equal(skip.reason, "export_oversized_conversation_incomplete");
 		assert.equal(
-			(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
+			(skip.diagnostics as Record<string, unknown> | undefined)
+				?.conversation_id,
 			"partial-parent",
 		);
 		assert.equal(coverageOf(protocolMessages, "messages").length, 0);
@@ -5791,7 +6038,12 @@ for (const children of [undefined, null]) {
 	});
 }
 
-for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) {
+for (const mode of [
+	"buffered",
+	"streaming",
+	"oversized",
+	"manifest",
+] as const) {
 	for (const withConversations of [false, true]) {
 		for (const [label, parentTimes, children, outside] of [
 			[
@@ -5837,12 +6089,7 @@ for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) 
 				[null],
 				"before",
 			],
-			[
-				"non-object child with unknown time",
-				{},
-				[null],
-				null,
-			],
+			["non-object child with unknown time", {}, [null], null],
 			[
 				"malformed list in old parent",
 				{ updated_at: "2026-05-15T00:00:00Z" },
@@ -6068,7 +6315,8 @@ for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) 
 								: "export_conversation_incomplete",
 						);
 						assert.equal(
-							(skips[0]?.diagnostics as Record<string, unknown>)?.conversation_id,
+							(skips[0]?.diagnostics as Record<string, unknown>)
+								?.conversation_id,
 							"partial-parent",
 						);
 					}
