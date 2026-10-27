@@ -1,0 +1,87 @@
+{
+	"ok": true,
+	"messages": [
+		{
+			"type": "message",
+			"user": "U0123456789",
+			"text": "Reminder: the relayer ran out of VANA again, see <#C0987654321|eng-alerts>",
+			"ts": "1790450000.000200",
+			"team": "T0123456789",
+			"client_msg_id": "6b1a9d6e-0000-4000-8000-000000000001",
+			"blocks": [
+				{
+					"type": "rich_text",
+					"block_id": "a1",
+					"elements": []
+				}
+			],
+			"reactions": [
+				{
+					"name": "eyes",
+					"users": ["U0555555555", "U0987654321"],
+					"count": 2
+				},
+				{
+					"name": "+1",
+					"users": ["U0555555555"],
+					"count": 1
+				}
+			],
+			"attachments": [
+				{
+					"id": 1,
+					"fallback": "Vana docs: Personal Server",
+					"title": "Personal Server",
+					"title_link": "https://docs.vana.org/personal-server",
+					"text": "Run your own server.",
+					"from_url": "https://docs.vana.org/personal-server",
+					"service_name": "docs.vana.org",
+					"service_icon": "https://docs.vana.org/favicon.ico"
+				}
+			],
+			"files": [
+				{
+					"id": "F0987654321",
+					"created": 1790450000,
+					"timestamp": 1790450000,
+					"name": "incident.png",
+					"title": "incident.png",
+					"mimetype": "image/png",
+					"filetype": "png",
+					"pretty_type": "PNG",
+					"user": "U0123456789",
+					"size": 20480,
+					"mode": "hosted",
+					"is_external": false,
+					"external_type": "",
+					"is_public": true,
+					"url_private": "https://files.slack.com/files-pri/T0123456789-F0987654321/incident.png",
+					"permalink": "https://acme.slack.com/files/U0123456789/F0987654321/incident.png",
+					"original_w": 640,
+					"original_h": 480
+				}
+			]
+		},
+		{
+			"type": "message",
+			"user": "U0555555555",
+			"text": "Design review at 3pm <@U0123456789>?",
+			"ts": "1790400000.000100",
+			"team": "T0123456789",
+			"client_msg_id": "6b1a9d6e-0000-4000-8000-000000000002",
+			"thread_ts": "1790400000.000100",
+			"reply_count": 2,
+			"reply_users_count": 2,
+			"latest_reply": "1790500000.000500",
+			"reply_users": ["U0123456789", "U0555555555"],
+			"is_locked": false,
+			"subscribed": true,
+			"last_read": "1790500000.000500"
+		}
+	],
+	"has_more": true,
+	"pin_count": 0,
+	"response_metadata": {
+		"next_cursor": "bmV4dF90czoxNzkwMzAwMDAw"
+	}
+}

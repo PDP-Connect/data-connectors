@@ -1,0 +1,52 @@
+{
+	"ok": true,
+	"channels": [
+		{
+			"id": "C0123456789",
+			"last_read": "1790450000.000200",
+			"latest": "1790450000.000200",
+			"updated": "1790450000.000200",
+			"mention_count": 0,
+			"has_unreads": false
+		},
+		{
+			"id": "C0987654321",
+			"last_read": "1790000000.001200",
+			"latest": "1790460000.001100",
+			"updated": "1790460000.001100",
+			"mention_count": 0,
+			"has_unreads": true
+		},
+		{
+			"id": "C0555555555",
+			"last_read": "1790400000.000000",
+			"latest": "1790400000.000000",
+			"updated": "1790400000.000000",
+			"mention_count": 0,
+			"has_unreads": false
+		},
+		{
+			"id": "C0777777777",
+			"last_read": "1780000000.000000",
+			"latest": "1780000000.000000",
+			"updated": "1780000000.000000",
+			"mention_count": 0,
+			"has_unreads": false
+		}
+	],
+	"ims": [
+		{
+			"id": "D0123456789",
+			"last_read": "1790470000.001300",
+			"latest": "1790470000.001300",
+			"updated": "1790470000.001300",
+			"mention_count": 0,
+			"has_unreads": false
+		}
+	],
+	"mpims": [],
+	"threads": {
+		"has_unreads": false,
+		"mention_count": 0
+	}
+}
