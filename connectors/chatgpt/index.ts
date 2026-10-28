@@ -40,7 +40,6 @@ import {
 	CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE,
 	ensureChatGptSession,
 } from "../../packages/polyfill-connectors/src/auto-login/chatgpt.ts";
-import { browserConfigPreservationFor } from "../../packages/polyfill-connectors/src/browser-surface-policy.ts";
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
@@ -7838,11 +7837,7 @@ if (isMainModule(import.meta.url)) {
 		// unaffected: it arrives via the child env and never prompts at all.
 		authOptional: true,
 		normalizeTerminalError: normalizeChatGptTerminalError,
-		// Page-preservation flags come from the shared browser-surface policy so the
-		// page-level (child) and process-level (reference lease caller) retention
-		// facts stay a single source of truth. `profileName` stays connector-local.
 		browser: {
-			...browserConfigPreservationFor("chatgpt"),
 			profileName: "chatgpt",
 		},
 		async ensureSession({
