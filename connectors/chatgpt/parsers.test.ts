@@ -1078,6 +1078,7 @@ test("buildAccountPlanRecord: normalizes the default account from the fixture", 
 	const rec = buildAccountPlanRecord(raw);
 	assert.deepEqual(rec, {
 		id: "account_plan",
+		is_default: true,
 		account_id: "00000000-0000-4000-8000-000000000001",
 		account_structure: "personal",
 		account_created_at: "2023-01-15T10:00:00.000Z",

@@ -1,0 +1,138 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+import assert from "node:assert/strict";
+import test from "node:test";
+import { collectAnthropicLive } from "../anthropic_live/index.ts";
+import { harness, ORG, ORGS } from "../anthropic_live/test-support.ts";
+
+test("account_plan includes Team and personal without changing the conversation organization", async () => {
+	const orgs = [
+		{
+			uuid: "team",
+			capabilities: ["raven"],
+			raven_type: "team",
+			billing_type: "stripe",
+		},
+		{ uuid: ORG, capabilities: ["chat"], billing_type: null },
+	];
+	const h = harness([], {
+		streams: ["account_plan"],
+		orgs,
+		route: (url) =>
+			url.pathname.endsWith("/subscription_details")
+				? { status: url.pathname.includes("/team/") ? 403 : 404 }
+				: undefined,
+	});
+	await collectAnthropicLive(h.ctx);
+	assert.deepEqual(
+		h
+			.of("account_plan")
+			.map((r) => [r.id, r.account_id, r.is_default, r.plan_type]),
+		[
+			["account_plan", ORG, true, "free"],
+			["account_plan:team", "team", false, "team"],
+		],
+	);
+	assert.ok(h.of("account_plan").every((r) => r.renews_at === null));
+	assert.ok(
+		h.calls.every(
+			(url) =>
+				!url.includes("export_data") && !url.includes("chat_conversations"),
+		),
+	);
+	const again = harness([], {
+		streams: ["account_plan"],
+		orgs: [...orgs].reverse(),
+		state: { account_plan: h.states("account_plan")[0] },
+		route: (url) =>
+			url.pathname.endsWith("/subscription_details")
+				? { status: 404 }
+				: undefined,
+	});
+	await collectAnthropicLive(again.ctx);
+	assert.deepEqual(again.of("account_plan"), []);
+});
+test("Max ignores non-chat organizations; a single free org stays at the legacy id", async () => {
+	for (const orgs of [
+		ORGS,
+		[{ uuid: ORG, capabilities: ["chat"], billing_type: "none" }],
+	]) {
+		const h = harness([], { streams: ["account_plan"], orgs });
+		await collectAnthropicLive(h.ctx);
+		assert.equal(h.of("account_plan").length, 1);
+		assert.equal(h.of("account_plan")[0]?.id, "account_plan");
+		assert.equal(h.of("account_plan")[0]?.is_default, true);
+	}
+});
+test("failure reading any usable organization does not checkpoint a partial plan inventory", async () => {
+	const h = harness([], {
+		streams: ["account_plan"],
+		orgs: [...ORGS, { uuid: "team", capabilities: ["raven"] }],
+		route: (url) =>
+			url.pathname.includes("/team/") ? { status: 503 } : undefined,
+	});
+	await collectAnthropicLive(h.ctx);
+	assert.deepEqual(h.of("account_plan"), []);
+	assert.deepEqual(h.states("account_plan"), []);
+	assert.equal(h.skips()[0]?.reason, "http_error");
+});
+
+import { collectAnthropic } from "./index.ts";
+async function exportPlans(orgs: unknown[]) {
+	const records: Record<string, unknown>[] = [],
+		requests: string[] = [];
+	const page = {
+		goto: async () => null,
+		evaluate: async (fn: () => unknown) => {
+			const oldFetch = globalThis.fetch;
+			globalThis.fetch = (async (url: unknown) => {
+				requests.push(String(url));
+				return { ok: true, json: async () => orgs };
+			}) as typeof fetch;
+			try {
+				return await fn();
+			} finally {
+				globalThis.fetch = oldFetch;
+			}
+		},
+	};
+	await collectAnthropic({
+		page,
+		requested: new Map([["account_plan", { name: "account_plan" }]]),
+		state: {},
+		emit: async () => {},
+		emitRecord: async (_s: string, r: Record<string, unknown>) => {
+			records.push(r);
+		},
+		testOverrides: { initialDelayMs: 0 },
+	} as unknown as Parameters<typeof collectAnthropic>[0]);
+	return { records, requests };
+}
+test("export connector enumerates Team plus personal without requesting an export", async () => {
+	const { records, requests } = await exportPlans([
+		{ uuid: "team", capabilities: ["raven"], raven_type: "team" },
+		{ uuid: "personal", capabilities: ["chat"], billing_type: null },
+	]);
+	assert.deepEqual(
+		records.map((r) => [r.id, r.account_id, r.is_default, r.plan_type]),
+		[
+			["account_plan:team", "team", false, "team"],
+			["account_plan", "personal", true, "free"],
+		],
+	);
+	assert.deepEqual(requests, ["https://claude.ai/api/organizations"]);
+});
+test("export connector omits non-chat orgs and preserves single free legacy identity", async () => {
+	for (const orgs of [
+		[
+			{ uuid: "api", capabilities: [] },
+			{ uuid: "max", capabilities: ["chat", "claude_max"] },
+		],
+		[{ uuid: "free", capabilities: ["chat"], billing_type: "none" }],
+	]) {
+		const { records } = await exportPlans(orgs);
+		assert.equal(records.length, 1);
+		assert.equal(records[0]?.id, "account_plan");
+		assert.equal(records[0]?.is_default, true);
+	}
+});

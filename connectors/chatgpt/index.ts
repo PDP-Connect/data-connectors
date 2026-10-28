@@ -76,7 +76,7 @@ import {
 	spoolMessageBlob,
 } from "./message-blob.ts";
 import {
-	buildAccountPlanRecord,
+	buildAccountPlanRecords,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
 	buildGizmoRecord,
@@ -2614,7 +2614,7 @@ const CHATGPT_ACCOUNT_PLAN_STATELESS_ENV =
 
 /**
  * Fetch the accounts/check body the web app loads at startup and emit at most
- * one account_plan record: plan, renewal/expiry/cancellation dates, and any
+ * one account_plan record per usable account: plan, renewal/expiry dates, and any
  * scheduled plan change. 404/403 → SKIP "not_available"; other non-200 →
  * SKIP "http_error".
  *
@@ -2674,13 +2674,15 @@ export async function runAccountPlanStream(
 		});
 		return;
 	}
-	const record = isUnreadableJsonBody(res)
-		? null
-		: buildAccountPlanRecord(res.json as RawAccountsCheckBody);
+	const records = isUnreadableJsonBody(res)
+		? []
+		: buildAccountPlanRecords(res.json as RawAccountsCheckBody);
 	// A record the schema would reject (e.g. an over-long id) is dropped by
 	// emitRecord; without this check STATE would still advance past it.
-	const validation = record ? validateRecord("account_plan", record) : null;
-	if (!record || (validation && !validation.ok)) {
+	if (
+		!records.length ||
+		records.some((record) => !validateRecord("account_plan", record).ok)
+	) {
 		deps.emit({
 			type: "SKIP_RESULT",
 			stream: "account_plan",
@@ -2692,22 +2694,23 @@ export async function runAccountPlanStream(
 		return;
 	}
 	if (process.env[CHATGPT_ACCOUNT_PLAN_STATELESS_ENV] === "1") {
-		await deps.emitRecord("account_plan", record);
-		deps.emit(buildFullScanCoverageMessage("account_plan", 1));
+		for (const record of records) await deps.emitRecord("account_plan", record);
+		deps.emit(buildFullScanCoverageMessage("account_plan", records.length));
 		return;
 	}
 	// Same gate as custom_instructions: a stable synthetic id and no run-clock
 	// field, so the fingerprint suppresses a byte-identical re-emit.
 	const fingerprintCursor = openFingerprintCursor(state.account_plan);
-	if (fingerprintCursor.shouldEmit(record)) {
-		await deps.emitRecord("account_plan", record);
+	for (const record of records) {
+		if (fingerprintCursor.shouldEmit(record))
+			await deps.emitRecord("account_plan", record);
 	}
 	deps.emit({
 		type: "STATE",
 		stream: "account_plan",
 		cursor: { fetched_at: nowIso(), fingerprints: fingerprintCursor.toState() },
 	});
-	deps.emit(buildFullScanCoverageMessage("account_plan", 1));
+	deps.emit(buildFullScanCoverageMessage("account_plan", records.length));
 }
 
 /**

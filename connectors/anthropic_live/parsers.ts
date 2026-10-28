@@ -224,6 +224,7 @@ export function planTypeOf(org: RawOrganization): string | null {
 export function buildAccountPlanRecord(
 	org: RawOrganization,
 	subscription: RawSubscriptionDetails | null,
+	isDefault = true,
 ): RecordData | null {
 	const accountId = str(org.uuid);
 	if (accountId === null) return null;
@@ -233,7 +234,8 @@ export function buildAccountPlanRecord(
 		? isoOrNull(subscription.plan_ending_at)
 		: null;
 	return {
-		id: "account_plan",
+		id: isDefault ? "account_plan" : `account_plan:${accountId}`,
+		is_default: isDefault,
 		account_id: accountId,
 		account_structure: capabilities(org).includes("raven")
 			? "workspace"
@@ -331,4 +333,25 @@ export function buildUsageLimitRecords(raw: unknown): RecordData[] | null {
 		windowRecord(usage.five_hour, "session", "session"),
 		windowRecord(usage.seven_day, "weekly_all", "weekly"),
 	].filter((record): record is RecordData => record !== null);
+}
+
+/** Accounts with chat access only; never selects the conversation/export org. */
+export function usablePlanOrganizations(
+	orgs: RawOrganization[],
+): RawOrganization[] {
+	const seen = new Set<string>();
+	return orgs.filter((org) => {
+		if (
+			typeof org.uuid !== "string" ||
+			!org.uuid ||
+			seen.has(org.uuid) ||
+			!Array.isArray(org.capabilities) ||
+			!org.capabilities.some((c) =>
+				["chat", "claude_pro", "claude_max", "raven"].includes(c),
+			)
+		)
+			return false;
+		seen.add(org.uuid);
+		return true;
+	});
 }

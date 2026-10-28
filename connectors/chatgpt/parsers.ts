@@ -918,6 +918,7 @@ export function buildAccountPlanRecord(
 	const entitlement = entry.entitlement || {};
 	return {
 		id: "account_plan",
+		is_default: true,
 		account_id:
 			stringOrNull(account.account_id) ?? (key === "default" ? null : key),
 		account_structure: stringOrNull(account.structure),
@@ -935,6 +936,40 @@ export function buildAccountPlanRecord(
 			entitlement.scheduled_plan_change,
 		),
 	};
+}
+
+/** Enumerate usable account entries without changing the session-default rule. */
+export function buildAccountPlanRecords(
+	body: RawAccountsCheckBody | null | undefined,
+): RecordData[] {
+	const primary = buildAccountPlanRecord(body);
+	if (!primary) return [];
+	const records = [primary];
+	const seen = new Set<string>();
+	if (typeof primary.account_id === "string") seen.add(primary.account_id);
+	const entries = Object.entries(body?.accounts ?? {}).sort(([a], [b]) =>
+		a.localeCompare(b),
+	);
+	for (const [key, entry] of entries) {
+		if (key === "default" || !isAccountEntry(entry)) continue;
+		const record = buildAccountPlanRecord({
+			accounts: { [key]: entry },
+			account_ordering: [key],
+		});
+		if (
+			!record ||
+			typeof record.account_id !== "string" ||
+			seen.has(record.account_id)
+		)
+			continue;
+		seen.add(record.account_id);
+		records.push({
+			...record,
+			id: `account_plan:${record.account_id}`,
+			is_default: false,
+		});
+	}
+	return records;
 }
 
 // ─── Shared conversations ──────────────────────────────────────────────

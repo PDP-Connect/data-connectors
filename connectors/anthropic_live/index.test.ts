@@ -243,6 +243,7 @@ test("account_plan matches the chatgpt account_plan fields and omits payment dat
 	assert.deepEqual(h.of("account_plan"), [
 		{
 			id: "account_plan",
+			is_default: true,
 			account_id: ORG,
 			account_structure: "personal",
 			account_created_at: "2025-03-01T12:00:00.000000Z",

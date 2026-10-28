@@ -1178,14 +1178,15 @@ export function planTypeOf(org: RawOrganization): string | null {
  */
 export function buildAccountPlanRecord(
 	org: RawOrganization,
+	isDefault = true,
 ): Record<string, unknown> | null {
 	const organizationId = nonEmptyString(org.uuid);
 	if (organizationId === null) return null;
 	const createdAt = nonEmptyString(org.created_at);
 	return {
-		// The key every account_plan record uses, as anthropic_live and chatgpt
-		// write it: the stream holds one record per connection.
-		id: "account_plan",
+		// Keep the exported/default account at the legacy key.
+		id: isDefault ? "account_plan" : `account_plan:${organizationId}`,
+		is_default: isDefault,
 		account_id: organizationId,
 		account_structure: null,
 		account_created_at:
@@ -1414,4 +1415,25 @@ export function parseClassifiedExport(
 	rawProjects: readonly unknown[],
 ): ParsedExport {
 	return parseExport(rawConversations, rawProjects);
+}
+
+/** Accounts with chat access only; never selects the conversation/export org. */
+export function usablePlanOrganizations(
+	orgs: RawOrganization[],
+): RawOrganization[] {
+	const seen = new Set<string>();
+	return orgs.filter((org) => {
+		if (
+			typeof org.uuid !== "string" ||
+			!org.uuid ||
+			seen.has(org.uuid) ||
+			!Array.isArray(org.capabilities) ||
+			!org.capabilities.some((c) =>
+				["chat", "claude_pro", "claude_max", "raven"].includes(c),
+			)
+		)
+			return false;
+		seen.add(org.uuid);
+		return true;
+	});
 }

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.56",
+	"version": "0.2.57",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {
@@ -110,18 +110,22 @@
 		{
 			"name": "account_plan",
 			"required": false,
-			"description": "The plan family and creation date of the Claude organization the export came from. Same stream, and same fields, as the live-session connector's account_plan; this export fills only account_id (the organization id), plan_type and account_created_at. The record id is the constant account_plan, as in the live connector. A run that asks for this stream alone reads the organization list and requests no export.",
+			"description": "Plans for every usable Claude organization. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false. This export connector fills plan family and organization creation time only. A plan-only run requests no export.",
 			"compaction_fingerprint": {
 				"exclude_keys": []
 			},
 			"display": {
 				"label": "Your Claude plan",
-				"detail": "Which plan the exported organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Every other field of this stream is empty here; the live-session connector fills the subscription dates."
+				"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates."
 			},
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
+					"is_default": {
+						"type": "boolean",
+						"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+					},
 					"id": {
 						"type": "string"
 					},
@@ -208,7 +212,7 @@
 					"count": true
 				}
 			},
-			"coverage_strategy": "singleton_presence",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "scheduled_window"
 		},
 		{

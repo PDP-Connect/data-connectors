@@ -1076,6 +1076,7 @@ test("buildAccountPlanRecord: carries only the organization id, creation time an
 	const record = buildAccountPlanRecord(entry);
 	assert.deepEqual(record, {
 		id: "account_plan",
+		is_default: true,
 		account_id: "org-1",
 		account_structure: null,
 		account_created_at: "2025-03-01T12:00:00.123456Z",

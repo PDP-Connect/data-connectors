@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.56",
+				"version": "0.2.57",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -501,18 +501,22 @@
 					{
 						"name": "account_plan",
 						"required": false,
-						"description": "The plan family and creation date of the Claude organization the export came from. Same stream, and same fields, as the live-session connector's account_plan; this export fills only account_id (the organization id), plan_type and account_created_at. The record id is the constant account_plan, as in the live connector. A run that asks for this stream alone reads the organization list and requests no export.",
+						"description": "Plans for every usable Claude organization. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false. This export connector fills plan family and organization creation time only. A plan-only run requests no export.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},
 						"display": {
 							"label": "Your Claude plan",
-							"detail": "Which plan the exported organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Every other field of this stream is empty here; the live-session connector fills the subscription dates."
+							"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates."
 						},
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
+								"is_default": {
+									"type": "boolean",
+									"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+								},
 								"id": {
 									"type": "string"
 								},
@@ -599,7 +603,7 @@
 								"count": true
 							}
 						},
-						"coverage_strategy": "singleton_presence",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					},
 					{
@@ -1082,7 +1086,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.9",
+				"version": "0.3.10",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -1341,18 +1345,22 @@
 					{
 						"name": "account_plan",
 						"required": false,
-						"description": "The subscription plan of the signed-in Claude account's chat organization, with its renewal and end dates. Same fields as the ChatGPT account_plan stream.",
+						"description": "Plans for every usable Claude organization. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},
 						"display": {
 							"label": "Your Claude plan",
-							"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. Payment details and billing identifiers are not collected. Singleton — one record for the organization the session reads."
+							"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. Payment details and billing identifiers are not collected. One record per chat-capable organization; only conversations and usage remain scoped to the original selected organization."
 						},
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
+								"is_default": {
+									"type": "boolean",
+									"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+								},
 								"id": {
 									"type": "string"
 								},
@@ -1439,7 +1447,7 @@
 								"count": true
 							}
 						},
-						"coverage_strategy": "singleton_presence",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					},
 					{
@@ -4617,7 +4625,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.6",
+				"version": "0.3.7",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -5176,18 +5184,22 @@
 					{
 						"name": "account_plan",
 						"required": false,
-						"description": "The subscription plan of the signed-in ChatGPT account, with its renewal, expiry and cancellation dates and any scheduled plan change.",
+						"description": "Plans for every usable ChatGPT account. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},
 						"display": {
 							"label": "Your ChatGPT plan",
-							"detail": "Which plan the signed-in account is on (free, Plus, Pro, Team…), whether the subscription is active and set to renew, its billing period, the renewal/expiry/cancellation dates, any scheduled plan change, and when the account was created. Usage limits are not included. Payment details and billing identifiers are not collected. Singleton — one record for the account the session is signed in to."
+							"detail": "Which plan the signed-in account is on (free, Plus, Pro, Team…), whether the subscription is active and set to renew, its billing period, the renewal/expiry/cancellation dates, any scheduled plan change, and when the account was created. Usage limits are not included. Payment details and billing identifiers are not collected. One record per usable account, without changing the account used for conversations."
 						},
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
+								"is_default": {
+									"type": "boolean",
+									"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+								},
 								"id": {
 									"type": "string"
 								},
@@ -5274,7 +5286,7 @@
 								"count": true
 							}
 						},
-						"coverage_strategy": "singleton_presence",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					}
 				],

@@ -184,6 +184,7 @@ import {
 } from "./oversize-conversation.ts";
 import {
 	buildAccountPlanRecord,
+	usablePlanOrganizations,
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	JSON_ENTRY_READ_CHUNK_UNITS,
@@ -1344,35 +1345,35 @@ export async function collectAnthropic({
 	const organizations = requested.has(ACCOUNT_PLAN_STREAM)
 		? await readOrganizations()
 		: [];
-	// The plan comes from the organization entry of one organization, matched by
-	// id: not from the account menu, so it needs no name, and the entry's other
-	// fields are never read. Like account_profile it carries no coverage proof
-	// and no checkpoint.
+	// The legacy key stays bound to the actual export org (or unchanged selector
+	// in a plan-only run). Enumerating plans must never request another export.
 	const emitAccountPlan = async (organizationId: string): Promise<void> => {
-		const organization = organizations.find(
-			(candidate) => candidate.uuid === organizationId,
-		);
-		const plan = organization ? buildAccountPlanRecord(organization) : null;
-		if (plan === null) {
-			// No record and no skip would read as a verified empty stream.
+		const usable = usablePlanOrganizations(organizations);
+		if (!usable.some((org) => org.uuid === organizationId)) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream: ACCOUNT_PLAN_STREAM,
 				reason: "organization_unavailable",
-				message:
-					"The exported organization was not in the signed-in account's organization list, so its plan was not read.",
+				message: "The exported organization has no readable chat plan.",
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 			});
 			return;
 		}
-		if (plan.plan_type === null || plan.account_created_at === null) {
-			connectorDiagnostic("anthropic", "account_plan_incomplete", {
-				plan_type: plan.plan_type === null ? "absent" : "read",
-				account_created_at:
-					plan.account_created_at === null ? "absent" : "read",
-			});
+		for (const org of usable) {
+			const plan = buildAccountPlanRecord(org, org.uuid === organizationId);
+			if (!plan) continue;
+			if (plan.plan_type === null || plan.account_created_at === null) {
+				connectorDiagnostic("anthropic", "account_plan_incomplete", {
+					plan_type: plan.plan_type === null ? "absent" : "read",
+					account_created_at:
+						plan.account_created_at === null ? "absent" : "read",
+				});
+			}
+			await emitRecord(ACCOUNT_PLAN_STREAM, plan);
 		}
-		await emitRecord(ACCOUNT_PLAN_STREAM, plan);
+		await emit(
+			buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, usable.length),
+		);
 	};
 	// The plan needs no export. A run that asks for nothing else must not request
 	// one: each request emails the account owner.

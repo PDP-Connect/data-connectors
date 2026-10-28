@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.3.6",
+	"version": "0.3.7",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {
@@ -555,18 +555,22 @@
 		{
 			"name": "account_plan",
 			"required": false,
-			"description": "The subscription plan of the signed-in ChatGPT account, with its renewal, expiry and cancellation dates and any scheduled plan change.",
+			"description": "Plans for every usable ChatGPT account. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false.",
 			"compaction_fingerprint": {
 				"exclude_keys": []
 			},
 			"display": {
 				"label": "Your ChatGPT plan",
-				"detail": "Which plan the signed-in account is on (free, Plus, Pro, Team…), whether the subscription is active and set to renew, its billing period, the renewal/expiry/cancellation dates, any scheduled plan change, and when the account was created. Usage limits are not included. Payment details and billing identifiers are not collected. Singleton — one record for the account the session is signed in to."
+				"detail": "Which plan the signed-in account is on (free, Plus, Pro, Team…), whether the subscription is active and set to renew, its billing period, the renewal/expiry/cancellation dates, any scheduled plan change, and when the account was created. Usage limits are not included. Payment details and billing identifiers are not collected. One record per usable account, without changing the account used for conversations."
 			},
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
+					"is_default": {
+						"type": "boolean",
+						"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+					},
 					"id": {
 						"type": "string"
 					},
@@ -653,7 +657,7 @@
 					"count": true
 				}
 			},
-			"coverage_strategy": "singleton_presence",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "scheduled_window"
 		}
 	],
