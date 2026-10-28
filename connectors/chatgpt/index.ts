@@ -122,6 +122,7 @@ import type {
 	RawMemoryEntry,
 	RawSharedConversation,
 } from "./types.ts";
+import { drainDetailWindows } from "./detail-lane-drain.ts";
 
 // schemas.js is a plain-JS Zod validator; cast at the boundary to the
 // runtime's ValidateRecord contract. The JS module's safeParse already
@@ -321,8 +322,17 @@ const CHATGPT_RATE_LIMIT_MAX_RETRY_AFTER_MS = 15 * 60_000;
 const CHATGPT_LONG_SLEEP_PROGRESS_THRESHOLD_MS = 5000;
 const CHATGPT_CONVERSATION_BATCH_MAX_IDS = 10;
 const CHATGPT_BATCH_INITIAL_PARALLELISM = 2;
+// Batch requests in flight at most. The reference connector measured no
+// throttling up to three in a short burst and runs four.
 const CHATGPT_BATCH_MAX_PARALLELISM = 4;
+const CHATGPT_BATCH_MAX_PARALLELISM_ENV = "PDPP_CHATGPT_BATCH_MAX_PARALLELISM";
+const CHATGPT_BATCH_MAX_PARALLELISM_CEILING = 8;
+// Clean requests needed to add one more in flight: two full rounds at the
+// current width, as in the reference connector's two clean waves.
 const CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP = 2;
+// Consecutive failed batch requests before the rest of the pass uses single
+// fetches. One failure only falls back for that request's conversations.
+const CHATGPT_BATCH_FAILURES_TO_DISABLE = 3;
 const CHATGPT_DETAIL_PROGRESS_EVERY = 25;
 // Source-pressure fast-open. The live A/B probe (2026-06-02) showed ChatGPT's
 // private detail endpoint returns BARE 429s — no `Retry-After` — and that the
@@ -4257,7 +4267,7 @@ async function walkConversationSearch(
  * Pages pipelined ahead of a full search walk. Six matches the reference
  * connector, which measured no throttling at that width.
  */
-const CONVERSATION_SEARCH_PREFETCH_PAGES = 6;
+export const CONVERSATION_SEARCH_PREFETCH_PAGES = 6;
 
 /**
  * Where the walk gets each search response. `attempt` 0 is the first read of
@@ -4431,8 +4441,10 @@ type SettledSearchPage =
  * each response to the walk only when the walk asks for that cursor, in walk
  * order. Retries of a short page and the end re-probe are fresh requests sent
  * alone, once no prefetched read is in flight. A failed read is never used:
- * it is requested again alone. Any failure, new rate limiting or a short page
- * with no continuation stops further prefetching for this walk.
+ * it is requested again alone. Any failure or new rate limiting stops further
+ * prefetching for this walk. A short page with no continuation only pauses it:
+ * the provider returns such pages mid-list, and the next page that does not
+ * end the list resumes reading ahead.
  */
 function prefetchingConversationSearchPages(
 	deps: StreamDeps,
@@ -4458,6 +4470,8 @@ function prefetchingConversationSearchPages(
 	let outstanding = 0;
 	const rateLimitedAtStart = deps.preDetailPressure?.rateLimited ?? 0;
 	let enabled = true;
+	// Set while the newest page handed to the walk looked like the last one.
+	let paused = false;
 	let prefetched = false;
 	let overlapped = false;
 	const cursorById = new Map<string, number>();
@@ -4643,9 +4657,10 @@ function prefetchingConversationSearchPages(
 				await settle();
 				const response = await recovery.fetch(cursor);
 				noteRows(cursor, response);
+				paused = conversationSearchPageEnds(response);
 				return handed(cursor, response);
 			}
-			if (enabled) {
+			if (enabled && !paused) {
 				// A read of this cursor that is not prefetched is sent below.
 				const limit = inFlight.has(cursor) ? width : width - 1;
 				for (let ahead = 1; ahead < width; ahead += 1) {
@@ -4687,11 +4702,9 @@ function prefetchingConversationSearchPages(
 				response = await alone(cursor);
 			}
 			noteRows(cursor, response);
-			// A short page with no continuation is usually the last one. Stop
+			// A short page with no continuation may be the last one. Pause
 			// reading ahead, so the end re-probe does not wait on reads past it.
-			if (conversationSearchPageEnds(response)) {
-				enabled = false;
-			}
+			paused = conversationSearchPageEnds(response);
 			return handed(cursor, response);
 		},
 		settle,
@@ -5100,6 +5113,20 @@ const CHATGPT_DETAIL_PAUSE_MAX_MS_ENV =
 // a different, untested posture.
 const CHATGPT_DETAIL_PROBE_MAX_CONCURRENCY_CEILING = 5;
 
+/**
+ * Most `/conversations/batch` requests in flight at once. Defaults to 4, the
+ * reference connector's measured width; an override is capped at 8.
+ */
+export function resolveChatGptBatchMaxParallelism(
+	env: NodeJS.ProcessEnv = process.env,
+): number {
+	return resolvePositiveIntOverride(
+		env[CHATGPT_BATCH_MAX_PARALLELISM_ENV],
+		CHATGPT_BATCH_MAX_PARALLELISM,
+		CHATGPT_BATCH_MAX_PARALLELISM_CEILING,
+	);
+}
+
 function resolvePositiveIntOverride(
 	raw: string | undefined,
 	fallback: number,
@@ -5431,6 +5458,9 @@ interface ConversationDetailPacingOptions {
 	// source-pressure deferrals stay per-key (their backlog IS the cooldown signal).
 	tailGapBound?: number;
 	tuning?: ChatGptDetailLaneTuning;
+	// Most batch requests in flight. Defaults to
+	// resolveChatGptBatchMaxParallelism().
+	batchMaxParallelism?: number;
 }
 
 interface ConversationDetailCoverage {
@@ -5910,8 +5940,7 @@ export async function runMessagesAndConversationsWithDetail(
 		// the lane takes max(launchDelay, cooldown, hint).
 		...(providerBudget
 			? {
-					launchDelayHint: (): number =>
-						batchDetailCache.size > 0 ? 0 : providerBudget.pacingDelayHint(),
+					launchDelayHint: (): number => providerBudget.pacingDelayHint(),
 				}
 			: {}),
 		pressureMaxDelayMs: CHATGPT_RATE_LIMIT_MAX_DELAY_MS,
@@ -5970,8 +5999,15 @@ export async function runMessagesAndConversationsWithDetail(
 	const conversationIndexById = new Map(
 		convosToSync.map((conversation, index) => [conversation.id, index]),
 	);
+	// Start index of the next batch request; requests cover aligned chunks.
 	let nextBatchStart = 0;
+	const pendingBatches = new Map<number, Promise<void>>();
+	// Index of the conversation the serial lane works on.
+	let laneIndex = 0;
 	let batchEndpointUnavailable = false;
+	let consecutiveBatchFailures = 0;
+	const batchMaxParallelism =
+		pacing.batchMaxParallelism ?? resolveChatGptBatchMaxParallelism();
 	const batchFallbackLog = deps.batchFallbackLog ?? { logged: false };
 	// Once run-cap or source-pressure deferral trips, all later conversation
 	// details are local bookkeeping: emit durable DETAIL_GAP rows for the tail,
@@ -6050,124 +6086,144 @@ export async function runMessagesAndConversationsWithDetail(
 		return cached;
 	}
 
-	let batchParallelism =
+	let batchParallelism = Math.min(
+		batchMaxParallelism,
 		(deps.preDetailPressure?.rateLimited ?? 0) > 0
 			? 1
-			: CHATGPT_BATCH_INITIAL_PARALLELISM;
-	let cleanBatchWaves = 0;
-	let batchPrefetchStart = 0;
-	let batchPrefetchPromise: Promise<void> | null = null;
+			: CHATGPT_BATCH_INITIAL_PARALLELISM,
+	);
+	let cleanBatches = 0;
+	// Batch requests take their pacing turn one after another.
+	let batchPacingTurn: Promise<void> = Promise.resolve();
 
-	async function prefetchConversationDetailBatchWave(
-		start: number,
-	): Promise<void> {
+	function batchChunkStart(index: number): number {
+		return index - (index % CHATGPT_CONVERSATION_BATCH_MAX_IDS);
+	}
+
+	/**
+	 * Keeps up to `batchParallelism` batch requests in flight ahead of the
+	 * serial lane, so download and processing overlap. A request starts only
+	 * within `batchParallelism + 1` chunks of the lane, which bounds the
+	 * details held in memory.
+	 */
+	function pumpConversationDetailBatches(): void {
 		const { fetchBatch } = deps.api;
-		if (
-			!fetchBatch ||
-			batchEndpointUnavailable ||
-			start < nextBatchStart ||
-			start >= convosToSync.length ||
-			runBudget.shouldStop()
+		if (!fetchBatch) return;
+		while (
+			!batchEndpointUnavailable &&
+			!tailStopController.signal.aborted &&
+			!runBudget.shouldStop() &&
+			pendingBatches.size < batchParallelism &&
+			nextBatchStart < convosToSync.length &&
+			nextBatchStart <
+				batchChunkStart(laneIndex) +
+					(batchParallelism + 1) * CHATGPT_CONVERSATION_BATCH_MAX_IDS
 		) {
-			return;
-		}
-		const budgetIds = new Set(conversationIdsWithinDetailBudget());
-		const end = Math.min(
-			convosToSync.length,
-			start + batchParallelism * CHATGPT_CONVERSATION_BATCH_MAX_IDS,
-		);
-		const chunks: string[][] = [];
-		for (
-			let offset = start;
-			offset < end;
-			offset += CHATGPT_CONVERSATION_BATCH_MAX_IDS
-		) {
+			const start = nextBatchStart;
+			nextBatchStart = start + CHATGPT_CONVERSATION_BATCH_MAX_IDS;
+			const budgetIds = new Set(conversationIdsWithinDetailBudget());
 			const chunkIds = convosToSync
-				.slice(offset, offset + CHATGPT_CONVERSATION_BATCH_MAX_IDS)
+				.slice(start, nextBatchStart)
 				.map((conversation) => conversation.id)
 				.filter((id) => budgetIds.has(id));
-			if (chunkIds.length > 0) chunks.push(chunkIds);
+			if (chunkIds.length === 0) continue;
+			const request = fetchConversationDetailBatch(
+				fetchBatch,
+				chunkIds,
+			).finally(() => {
+				pendingBatches.delete(start);
+				pumpConversationDetailBatches();
+			});
+			pendingBatches.set(start, request);
 		}
-		batchPrefetchStart = start;
-		nextBatchStart = end;
-		if (chunks.length === 0) return;
+	}
 
-		const rateLimitedBeforeWave = deps.preDetailPressure?.rateLimited ?? 0;
-		let waveWasClean = true;
-		await Promise.all(
-			chunks.map(async (chunkIds) => {
-				const batchStarted = performance.now();
-				const setTimingConversation = (
-					globalThis as typeof globalThis & {
-						__pdppPageshimSetTimingConversation?: (
-							conversationIds: string[] | null,
-						) => void;
-					}
-				).__pdppPageshimSetTimingConversation;
-				setTimingConversation?.(chunkIds);
-				try {
-					const details = await fetchBatch(chunkIds);
-					const elapsedPerDetail =
-						details.length > 0
-							? (performance.now() - batchStarted) / details.length
-							: 0;
-					const recordDetailTiming = (
-						globalThis as typeof globalThis & {
-							__pdppPageshimDetailFetched?: (
-								conversationId: string,
-								detailMs: number,
-								providerFetchMs: number,
-							) => void;
-						}
-					).__pdppPageshimDetailFetched;
-					const chunkIdSet = new Set(chunkIds);
-					for (const detail of details) {
-						const id = cachedBatchDetailId(detail, chunkIdSet);
-						if (id) {
-							recordDetailTiming?.(
-								id,
-								elapsedPerDetail,
-								detail.providerFetchMs ?? elapsedPerDetail,
-							);
-						}
-					}
-					if (
-						cacheBatchConversationDetails(details, chunkIds) !== chunkIds.length
-					)
-						waveWasClean = false;
-					await recordConversationDetailProviderSuccess();
-				} catch (err) {
-					// Batch results are an optimization; the ordered per-id lane retries gaps.
-					// Log a bounded classification once per run: batching stops, and
-					// the slower per-id fetches would otherwise have no visible reason.
-					// Never log the error text; it can carry private page content.
-					if (!batchFallbackLog.logged) {
-						batchFallbackLog.logged = true;
-						chatGptDiagnostic(
-							`batch conversation-detail fetch failed (${classifyChatGptBatchFailure(err)}); fetching the remaining conversation details one at a time`,
-						);
-					}
-					batchEndpointUnavailable = true;
-					waveWasClean = false;
-				} finally {
-					setTimingConversation?.(null);
+	async function fetchConversationDetailBatch(
+		fetchBatch: NonNullable<ChatGptApi["fetchBatch"]>,
+		chunkIds: string[],
+	): Promise<void> {
+		const turn = batchPacingTurn.then(async () => {
+			const delayMs = providerBudget?.pacingDelayHint() ?? 0;
+			if (delayMs > 0) await sleep(delayMs);
+		});
+		batchPacingTurn = turn;
+		await turn;
+		const rateLimitedBefore = deps.preDetailPressure?.rateLimited ?? 0;
+		let clean = true;
+		const batchStarted = performance.now();
+		const setTimingConversation = (
+			globalThis as typeof globalThis & {
+				__pdppPageshimSetTimingConversation?: (
+					conversationIds: string[] | null,
+				) => void;
+			}
+		).__pdppPageshimSetTimingConversation;
+		setTimingConversation?.(chunkIds);
+		try {
+			const details = await fetchBatch(chunkIds);
+			const elapsedPerDetail =
+				details.length > 0
+					? (performance.now() - batchStarted) / details.length
+					: 0;
+			const recordDetailTiming = (
+				globalThis as typeof globalThis & {
+					__pdppPageshimDetailFetched?: (
+						conversationId: string,
+						detailMs: number,
+						providerFetchMs: number,
+					) => void;
 				}
-			}),
-		);
-		const rateLimitedDuringWave =
-			(deps.preDetailPressure?.rateLimited ?? 0) > rateLimitedBeforeWave;
-		if (!waveWasClean || rateLimitedDuringWave) {
+			).__pdppPageshimDetailFetched;
+			const chunkIdSet = new Set(chunkIds);
+			for (const detail of details) {
+				const id = cachedBatchDetailId(detail, chunkIdSet);
+				if (id) {
+					recordDetailTiming?.(
+						id,
+						elapsedPerDetail,
+						detail.providerFetchMs ?? elapsedPerDetail,
+					);
+				}
+			}
+			if (cacheBatchConversationDetails(details, chunkIds) !== chunkIds.length)
+				clean = false;
+			consecutiveBatchFailures = 0;
+			await recordConversationDetailProviderSuccess();
+		} catch (err) {
+			// Batch results are an optimization: the lane fetches this request's
+			// conversations one at a time. Log a bounded classification once per
+			// run, never the error text; it can carry private page content.
+			if (!batchFallbackLog.logged) {
+				batchFallbackLog.logged = true;
+				chatGptDiagnostic(
+					`batch conversation-detail fetch failed (${classifyChatGptBatchFailure(err)}); fetching its conversation details one at a time`,
+				);
+			}
+			consecutiveBatchFailures += 1;
+			if (consecutiveBatchFailures >= CHATGPT_BATCH_FAILURES_TO_DISABLE) {
+				batchEndpointUnavailable = true;
+			}
+			clean = false;
+		} finally {
+			setTimingConversation?.(null);
+		}
+		// A short or failed batch, or a 429 served while it was in flight, sends
+		// the next requests one at a time.
+		if (
+			!clean ||
+			(deps.preDetailPressure?.rateLimited ?? 0) > rateLimitedBefore
+		) {
 			batchParallelism = 1;
-			cleanBatchWaves = 0;
+			cleanBatches = 0;
 			return;
 		}
-		cleanBatchWaves += 1;
+		cleanBatches += 1;
 		if (
-			cleanBatchWaves >= CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP &&
-			batchParallelism < CHATGPT_BATCH_MAX_PARALLELISM
+			cleanBatches >= CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP * batchParallelism &&
+			batchParallelism < batchMaxParallelism
 		) {
 			batchParallelism += 1;
-			cleanBatchWaves = 0;
+			cleanBatches = 0;
 		}
 	}
 
@@ -6576,24 +6632,24 @@ export async function runMessagesAndConversationsWithDetail(
 		laneContext: AdaptiveLaneRunContext,
 	): Promise<ChatGptFetchResult> {
 		const conversationIndex = conversationIndexById.get(c.id);
-		if (conversationIndex !== undefined) {
-			if (conversationIndex >= nextBatchStart) {
-				const wave = prefetchConversationDetailBatchWave(conversationIndex);
-				batchPrefetchPromise = wave;
-				await wave;
-			} else if (
-				batchPrefetchPromise &&
-				conversationIndex >= batchPrefetchStart &&
-				conversationIndex < nextBatchStart
-			) {
-				await batchPrefetchPromise;
-			}
-		}
+		const pendingBatch =
+			conversationIndex === undefined
+				? undefined
+				: pendingBatches.get(batchChunkStart(conversationIndex));
+		const coveredByBatch =
+			pendingBatch !== undefined || batchDetailCache.has(c.id);
+		await pendingBatch;
 		const batchDetail = batchDetailCache.get(c.id);
 		if (batchDetail) {
 			batchDetailCache.delete(c.id);
 			batchDetailCacheHits.add(c.id);
 			return batchDetail;
+		}
+		if (coveredByBatch) {
+			// The lane skipped its launch pacing for a conversation the batch did
+			// not return, so this single request takes its own pacing turn.
+			const delayMs = providerBudget?.pacingDelayHint() ?? 0;
+			if (delayMs > 0) await sleep(delayMs);
 		}
 		// Progress-based give-up: the shared consecutiveWaitOutsWithoutSuccess
 		// counter (incremented in handleCircuitOpenForWaitOut, reset on each
@@ -6611,11 +6667,32 @@ export async function runMessagesAndConversationsWithDetail(
 		}
 	}
 
+	// Request batches before the lane's first launch, and again as each
+	// conversation finishes, so the next one finds its batch requested.
+	const pumpingBatches =
+		(
+			task: (
+				c: ConversationListItem,
+				laneContext: AdaptiveLaneRunContext,
+			) => Promise<ChatGptFetchResult>,
+		) =>
+		async (
+			c: ConversationListItem,
+			laneContext: AdaptiveLaneRunContext,
+		): Promise<ChatGptFetchResult> => {
+			try {
+				return await task(c, laneContext);
+			} finally {
+				laneIndex = (conversationIndexById.get(c?.id) ?? laneIndex) + 1;
+				pumpConversationDetailBatches();
+			}
+		};
+	pumpConversationDetailBatches();
 	await runLaneUntilTailStopped(
 		lane,
 		convosToSync,
 		tailStopController.signal,
-		async (c, laneContext) => {
+		pumpingBatches(async (c, laneContext) => {
 			if (!c) {
 				return { status: 404, json: null };
 			}
@@ -6767,14 +6844,20 @@ export async function runMessagesAndConversationsWithDetail(
 					} as const;
 					deps.emit(progressMsg);
 				}
-				return detail;
+				return { status: detail.status, json: null };
 			} finally {
 				setTimingConversation?.(null);
 			}
+		}),
+		// A conversation covered by a batch request needs no request of its own,
+		// so it skips the per-launch pacing that protects the provider.
+		(c) => {
+			const index = conversationIndexById.get(c.id);
+			return (
+				batchDetailCache.has(c.id) ||
+				(index !== undefined && pendingBatches.has(batchChunkStart(index)))
+			);
 		},
-		// A batch-cached detail needs no provider request, so it skips the
-		// per-launch pacing that protects the provider.
-		(c) => batchDetailCache.has(c.id),
 	);
 	return coverage;
 }
@@ -6804,10 +6887,12 @@ async function runLaneUntilTailStopped(
 	isLocalItem?: (c: ConversationListItem) => boolean,
 ): Promise<void> {
 	try {
-		await lane.runAll(items, task, {
-			signal: tailStopSignal,
-			...(isLocalItem ? { isLocalItem } : {}),
-		});
+		await drainDetailWindows(items, (window) =>
+			lane.runAll(window, task, {
+				signal: tailStopSignal,
+				...(isLocalItem ? { isLocalItem } : {}),
+			}),
+		);
 	} catch (err) {
 		if (tailStopSignal.aborted && err instanceof AdaptiveLaneCancelledError) {
 			return;

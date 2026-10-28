@@ -24,6 +24,7 @@ if (env.PDPP_CHATGPT_MAX_TAIL_DEFERRAL_GAPS_PER_RUN !== undefined) {
 for (const name of [
 	"PDPP_CHATGPT_PACING_INITIAL_INTERVAL_MS",
 	"PDPP_CHATGPT_PACING_MIN_INTERVAL_MS",
+	"PDPP_CHATGPT_BATCH_MAX_PARALLELISM",
 ]) {
 	if (env[name] !== undefined) process.env[name] = env[name];
 }

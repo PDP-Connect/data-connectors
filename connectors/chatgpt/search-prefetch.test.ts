@@ -1781,3 +1781,61 @@ test("a page short for three reads after a burst is read again after the walk", 
 	assert.equal(outcome.ids.size, 120);
 	assert.ok(outcome.complete);
 });
+
+test("a mid-list short page with no continuation pauses read-ahead instead of ending it", async () => {
+	// Phone runs saw 29-row pages with no continuation at cursors 120, 420
+	// and 1710. Each was followed by full pages, but read-ahead stopped at
+	// the first one, so the rest of the walk went one page at a time.
+	const time = (index: number) => 1_800_000_000 - index;
+	const pages = fullPages("phone", 3090, time);
+	for (const cursor of [120, 420, 1710]) {
+		pages.set(
+			cursor,
+			[0, 1, 0].map((read) => ({
+				items: range("phone", cursor + read, 29, time),
+			})),
+		);
+	}
+	pages.set(3090, [
+		{ items: range("phone", 3090, 10, time), next_cursor: null },
+	]);
+	pages.set(3120, [{ items: [] }]);
+	const { prefetched } = await assertSameDecisions("phone short pages", pages);
+	assert.equal(new Set(prefetched.records.map((r) => r.data.id)).size, 3100);
+
+	// Count the reads in flight together after the last short page.
+	let inFlight = 0;
+	let peakAfterShortPages = 0;
+	const harness = makeRecordingEmit(validateRecord);
+	const reads = new Map<number, number>();
+	const api: ChatGptApi = {
+		auth: () => Promise.reject(new Error("auth unused")),
+		fetch: async (path) => {
+			if (!path.startsWith(SEARCH_PREFIX)) return { status: 404, json: null };
+			const cursor = cursorOf(path);
+			const read = reads.get(cursor) ?? 0;
+			reads.set(cursor, read + 1);
+			inFlight += 1;
+			if (cursor > 1800) {
+				peakAfterShortPages = Math.max(peakAfterShortPages, inFlight);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 1));
+			inFlight -= 1;
+			const responses = pages.get(cursor);
+			return respond(responses?.[Math.min(read, (responses?.length ?? 1) - 1)]);
+		},
+	};
+	await runConversationsAndMessagesStreams(
+		{
+			api,
+			sleep: () => Promise.resolve(),
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: () => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+			conversationSearchPrefetchPages: PRODUCTION_WIDTH,
+		},
+		{},
+	);
+	assert.equal(peakAfterShortPages, PRODUCTION_WIDTH);
+});
