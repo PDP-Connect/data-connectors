@@ -252,6 +252,21 @@ test("a polyfill package test script does not change artifact identity, a depend
   }
 });
 
+test("a polyfill package export entry does not change artifact identity", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    repo.write(
+      "packages/polyfill-connectors/package.json",
+      JSON.stringify({ exports: { "./browser-launch": "./src/browser-launch.js" } }),
+    );
+    const exportCommit = repo.commit("export a module for hosts");
+    assert.equal(await artifactInputHash({ commit: exportCommit, manifest: "oura", cwd: repo.dir }), before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("sibling runtime metadata does not change shared SourceDeclaration identity", async () => {
   const repo = makeRepo();
   try {

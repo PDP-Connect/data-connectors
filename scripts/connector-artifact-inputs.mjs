@@ -95,6 +95,9 @@ function artifactInputContent(path, content) {
   if ((!SCRIPT_FREE_INPUTS.has(path) && !installerMetadata) || content === null) return content;
   const packageMetadata = JSON.parse(content.toString("utf8"));
   if (SCRIPT_FREE_INPUTS.has(path)) delete packageMetadata.scripts;
+  // The polyfill package's exports map is its npm surface for hosts. Connectors
+  // import its sources by relative path, so the bundler never resolves it.
+  if (path === `${PACKAGE_ROOT}/package.json`) delete packageMetadata.exports;
   // npm's pack allowlist controls the installer tools package, not the OCI
   // connector builder. Retiring a tool-only file must not release every connector.
   if (path === "package.json" || installerMetadata) delete packageMetadata.files;
