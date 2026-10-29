@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"connector": "character_ai",
+	"importer": null,
+	"shim": null,
+	"modules": [],
+	"inject": []
+}
