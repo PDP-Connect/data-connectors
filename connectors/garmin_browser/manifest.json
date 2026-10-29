@@ -7,7 +7,7 @@
 	},
 	"connector_key": "garmin-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/garmin-browser",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Garmin (Browser Sign-In)",
 	"runtime_requirements": {
 		"bindings": {

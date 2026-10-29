@@ -7,7 +7,8 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import { applyRequestedScopeEntries } from "../requested-scope-entries.ts";
 
 declare const PAGESHIM_CONNECTOR_VERSION: string;
-const streams = ["profile", "posts", "post_likes", "following", "ads"];
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
+const streams = PAGESHIM_CONNECTOR_STREAMS;
 (globalThis as Record<string, unknown>).__pageshimMain = (
  page: ShimPage, initialState: Record<string, unknown>, supportsState: boolean,
 ) => runOnPageShim(page, {
