@@ -1539,6 +1539,9 @@ export function messagesToRecordsAndState(
 		id: string;
 		op: "upsert" | "delete";
 		stream: string;
+		/** The wire `key` as emitted, kept typed because `id` flattens a
+		 *  string[] key to its JSON text and so cannot tell ["x"] from '["x"]'. */
+		wireKey: string | string[];
 	}>;
 	stateMessages: Array<{ cursor: unknown; stream: string }>;
 } {
@@ -1547,6 +1550,7 @@ export function messagesToRecordsAndState(
 		id: string;
 		op: "upsert" | "delete";
 		stream: string;
+		wireKey: string | string[];
 	}> = [];
 	const stateMessages: Array<{ cursor: unknown; stream: string }> = [];
 	for (const msg of messages) {
@@ -1563,6 +1567,7 @@ export function messagesToRecordsAndState(
 				id: key,
 				data: msg.data,
 				op: normalizeRecordOp(msg.op),
+				wireKey: msg.key as string | string[],
 			});
 		} else if (msg.type === "STATE") {
 			assertValidStateMessage(msg);
