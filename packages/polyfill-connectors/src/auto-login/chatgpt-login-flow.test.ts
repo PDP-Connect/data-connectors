@@ -248,11 +248,12 @@ function makeHiddenEmailPage(fills: string[]): Page {
 		waitFor: (): Promise<void> => Promise.reject(new Error("not visible")),
 	};
 	const page = makeChallengePage(() => false);
+	const originalLocator = page.locator.bind(page);
 	const fake: Pick<Page, "locator"> = {
 		locator(selector: string): Locator {
 			return selector.includes('input[type="email"]')
 				? (hiddenEmail as Locator)
-				: page.locator(selector);
+				: originalLocator(selector);
 		},
 	};
 	return Object.assign(page, fake);
@@ -306,4 +307,62 @@ test("a hidden email input is recorded as an expectation mismatch, never filled"
 			setObservationSink(undefined);
 		}
 	});
+});
+
+test("Spanish sign-in follows structural controls and confirms the session endpoint", async () => {
+	const { chromium } = await import("playwright");
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const context = await browser.newContext();
+		const page = await context.newPage();
+		let signedIn = false;
+		let confirmationProbes = 0;
+		await context.route("**/*", async (route) => {
+			const url = new URL(route.request().url());
+			if (url.pathname === "/api/auth/session") {
+				if (signedIn) confirmationProbes += 1;
+				await route.fulfill({
+					json: confirmationProbes >= 2 ? { user: { id: "fixture" } } : {},
+				});
+				return;
+			}
+			await route.fulfill({
+				contentType: "text/html",
+				body: `<html lang="es"><body>
+			<button data-testid="login-button" onclick="document.querySelector('#email').hidden=false;this.remove()">Iniciar sesión</button>
+			<form id="email" hidden onsubmit="event.preventDefault();this.hidden=true;document.querySelector('#method').hidden=false">
+			<input type="email"><button type="submit">Continuar</button></form>
+			<form id="method" hidden onsubmit="event.preventDefault();this.hidden=true;document.querySelector('#password').hidden=false">
+			<button name="intent" value="password" type="submit">Continuar con contraseña</button></form>
+			<form id="password" hidden action="/complete"><input type="password"><button type="submit">Continuar</button></form>
+			</body></html>`,
+			});
+		});
+		await context.route("**/complete*", async (route) => {
+			signedIn = true;
+			await route.fulfill({
+				contentType: "text/html",
+				body: "<html lang='es'><nav>Inicio</nav>Bienvenido</html>",
+			});
+		});
+		page.waitForTimeout = () => Promise.resolve();
+		assert.equal(
+			await ensureChatGptSession({
+				allowInteractiveAuthRepair: true,
+				context,
+				credentials: CHATGPT_TEST_CREDENTIALS,
+				page,
+				sendInteraction: () =>
+					Promise.reject(new Error("Unexpected manual fallback")),
+			}),
+			true,
+		);
+		assert.equal(signedIn, true);
+		assert.ok(
+			confirmationProbes >= 2,
+			"a nav must not replace session confirmation",
+		);
+	} finally {
+		await browser.close();
+	}
 });
