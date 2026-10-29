@@ -1058,6 +1058,7 @@
 					"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
 					"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
 					"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
+					"parse_error": "Claude sent back a plan we couldn't read. Your existing plan data was not changed. This will retry automatically.",
 					"organization_unavailable": "Your Claude plan could not be read: the organization this data export came from is not in your signed-in account's organization list. This will retry automatically.",
 					"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
 				},
@@ -1127,7 +1128,8 @@
 					"no_chat_organization": "No Claude organization with chat access could be found for this account.",
 					"http_error": "We hit a network problem talking to Claude",
 					"parse_error": "Claude sent back a response we couldn't read",
-					"not_available": "This data isn't available for this Claude account"
+					"not_available": "This data isn't available for this Claude account",
+					"organization_unavailable": "Your Claude plan could not be read: the organization this run reads from has no chat plan in your account's organization list. This will retry automatically."
 				},
 				"mobile": {
 					"pageshim": {

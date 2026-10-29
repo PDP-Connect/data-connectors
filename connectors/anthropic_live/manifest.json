@@ -50,7 +50,8 @@
 		"no_chat_organization": "No Claude organization with chat access could be found for this account.",
 		"http_error": "We hit a network problem talking to Claude",
 		"parse_error": "Claude sent back a response we couldn't read",
-		"not_available": "This data isn't available for this Claude account"
+		"not_available": "This data isn't available for this Claude account",
+		"organization_unavailable": "Your Claude plan could not be read: the organization this run reads from has no chat plan in your account's organization list. This will retry automatically."
 	},
 	"mobile": {
 		"pageshim": {
