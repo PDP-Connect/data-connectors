@@ -106,7 +106,8 @@ export const memoryFilesSchema = z.object({
 });
 
 export const filesSchema = z.object({
-	id: idSchema,
+	// The id is the path, which may be up to 4096 characters.
+	id: z.string().min(1).max(4096),
 	path: pdppSafeText.min(1).max(4096),
 	name: shortText,
 	size: z.number().int().min(0).nullable(),

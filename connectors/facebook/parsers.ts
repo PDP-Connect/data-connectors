@@ -57,7 +57,7 @@ export function isRunEndingError(error: unknown): boolean {
 }
 
 export const RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|timeout|facebook_rate_limited|facebook_http_5xx|fetch failed/i;
+	/ECONN|ETIMEDOUT|timeout|facebook_rate_limited|facebook_http_5xx|facebook_interrupted|fetch failed/i;
 
 // ─── Read-only guard ────────────────────────────────────────────────────
 
@@ -1323,6 +1323,33 @@ export function edgeCreationSeconds(edge: unknown): number | null {
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/** A friend's record id from the raw edge, as `parseFriendNode` derives it. */
+export function friendRecordKey(edge: unknown): string | null {
+	const node = edgeNode(edge);
+	if (!node) return null;
+	const inner = asRecord(node.node)?.id;
+	if (isNumericId(inner)) return inner;
+	const owner = getPath(node, [
+		"actions_renderer",
+		"action",
+		"profile_owner",
+		"id",
+	]);
+	return isNumericId(owner) ? owner : null;
+}
+
+/**
+ * A joined group's record id from the raw edge, as `parseGroupNode` derives
+ * it: the numeric node id, else the id in the group's URL.
+ */
+export function groupRecordKey(edge: unknown): string | null {
+	const node = edgeNode(edge);
+	if (!node) return null;
+	if (isNumericId(node.id)) return node.id;
+	const url = httpsUrl(node.url);
+	return (url ? GROUP_PATH_ID_RE.exec(url)?.[1] : undefined) ?? null;
+}
+
 // ─── Captured requests and variables ────────────────────────────────────
 
 export interface CapturedOperation {
@@ -1399,6 +1426,11 @@ export function buildVariables(args: {
 	defaults: JsonRecord;
 	overrides: JsonRecord;
 	provided: JsonRecord;
+	/**
+	 * Values set only for names the query already has (the source's own date
+	 * filters): a name this build of the query does not declare is never sent.
+	 */
+	ifDeclared?: JsonRecord | undefined;
 	template: JsonRecord | null;
 }): JsonRecord {
 	const variables: JsonRecord = { ...(args.template ?? args.defaults) };
@@ -1406,6 +1438,8 @@ export function buildVariables(args: {
 		if (!(key in variables)) variables[key] = value;
 	for (const [key, value] of Object.entries(args.overrides))
 		variables[key] = value;
+	for (const [key, value] of Object.entries(args.ifDeclared ?? {}))
+		if (key in variables) variables[key] = value;
 	variables.cursor = args.cursor;
 	return variables;
 }
@@ -1484,6 +1518,8 @@ export function erroredItemCount(
 	errors: readonly GraphqlErrorInfo[],
 	connection: FoundConnection,
 	readPaths: readonly (readonly string[])[],
+	/** Items the run will not read at all (left out by the grant's resources). */
+	ignore: (index: number) => boolean = () => false,
 ): number {
 	const items = new Set<number>();
 	// The error must point inside this very list: its path starts with the
@@ -1500,7 +1536,7 @@ export function erroredItemCount(
 			field.length === 0 ||
 			readPaths.some((path) => pathsIntersect(field, path))
 		)
-			items.add(index);
+			if (!ignore(index)) items.add(index);
 	}
 	return items.size;
 }

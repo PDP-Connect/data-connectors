@@ -40,7 +40,12 @@
 				"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
 				"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
 				"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
-				"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
+				"parse_error": "Claude sent back a plan we couldn't read. Your existing plan data was not changed. This will retry automatically.",
+				"organization_unavailable": "Your Claude plan could not be read: the organization this data export came from is not in your signed-in account's organization list. This will retry automatically.",
+				"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed.",
+				"export_manifest_incomplete": "Your Claude export is incomplete or inconsistent. Affected data was not marked as fully imported.",
+				"export_conversations_incomplete": "Your Claude export is missing some conversation files. Conversations and messages were not marked as fully imported.",
+				"export_projects_missing": "Your Claude export has no complete projects section. Projects and project documents were not marked as fully imported."
 			}
 		}
 	},
@@ -53,7 +58,8 @@
 				"no_chat_organization": "No Claude organization with chat access could be found for this account.",
 				"http_error": "We hit a network problem talking to Claude",
 				"parse_error": "Claude sent back a response we couldn't read",
-				"not_available": "This data isn't available for this Claude account"
+				"not_available": "This data isn't available for this Claude account",
+				"organization_unavailable": "Your Claude plan could not be read: the organization this run reads from has no chat plan in your account's organization list. This will retry automatically."
 			}
 		}
 	},
@@ -90,6 +96,25 @@
 			"connector_key": "apple-photos",
 			"reason_display_messages": {
 				"export_not_found": "We couldn't find an export to import"
+			}
+		}
+	},
+	{
+		"file": "character_ai.json",
+		"manifest": {
+			"connector_key": "character-ai",
+			"reason_display_messages": {
+				"stream_collection_failed": "Character.AI could not be read completely this time. Nothing already saved was lost.",
+				"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
+				"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
+				"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
+				"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",
+				"character_ai_api_429": "Character.AI is limiting requests right now. The sync will try again later.",
+				"character_ai_api_408": "Character.AI took too long to answer. The sync will try again later.",
+				"character_ai_api_5xx": "Character.AI is having trouble right now. The sync will try again later.",
+				"character_ai_timeout": "Character.AI took too long to answer. The sync will try again later.",
+				"character_ai_network_error": "Character.AI could not be reached. Check your connection; the sync will try again later.",
+				"character_ai_invalid_payload": "Character.AI answered in a format this connector does not recognize. A connector update is needed."
 			}
 		}
 	},
@@ -211,7 +236,11 @@
 		"manifest": {
 			"connector_key": "facebook",
 			"reason_display_messages": {
-				"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time."
+				"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time.",
+				"shape_check_failed": "Facebook sent an item this connector could not read, so it was not saved.",
+				"scope_not_supported": "Facebook does not date this list, so it cannot be limited to a time range. Choose it without a time range to import it.",
+				"facebook_auth_failed": "Facebook needs you to sign in again before this can continue.",
+				"facebook_interrupted": "The Facebook page stopped answering while signing in. Nothing was read; try again."
 			}
 		}
 	},
@@ -442,6 +471,24 @@
 		}
 	},
 	{
+		"file": "instinct.json",
+		"manifest": {
+			"connector_key": "instinct",
+			"reason_display_messages": {
+				"shape_check_failed": "The data from Instinct did not look like we expected",
+				"instinct_auth_failed": "Instinct needs you to sign in again before this can continue.",
+				"instinct_interrupted": "Instinct did not answer when we checked your sign-in. Nothing was collected; try again.",
+				"instinct_rate_limited": "Instinct asked us to slow down, so collection stopped early. What was collected is saved; try again later.",
+				"instinct_server_error": "Instinct's servers had a problem partway through. What was collected is saved; try again later.",
+				"instinct_request_rejected": "Instinct refused one of the requests, so collection stopped.",
+				"instinct_source_unreadable": "Instinct answered in a form this connector does not recognise. Instinct may have changed its app; please report this.",
+				"instinct_stream_incomplete": "Instinct did not show the end of this list, so it was not saved as complete.",
+				"scope_not_supported": "This part of your Instinct data cannot be collected with the selection you made: account details have no date to limit by, and chat events are collected only together with your chats.",
+				"stream_collection_failed": "Instinct did not show all of this part of your account, so it was not saved as complete. Try again later."
+			}
+		}
+	},
+	{
 		"file": "jellyfin.json",
 		"manifest": {
 			"connector_key": "jellyfin",
@@ -590,6 +637,22 @@
 		}
 	},
 	{
+		"file": "perplexity.json",
+		"manifest": {
+			"connector_key": "perplexity",
+			"reason_display_messages": {
+				"covered_in_full": "All Perplexity threads in the selected time range have already been collected.",
+				"collection_interrupted": "Perplexity stopped answering partway through, so some threads are missing. The next run continues from where this one stopped.",
+				"nothing_in_range": "There are no Perplexity threads in the selected time range.",
+				"records_unreadable": "Some Perplexity threads or answers couldn't be read by this version of the connector and were skipped. Everything else was collected normally.",
+				"sign_in_required": "Perplexity needs you to sign in (and pass its human check) before this can continue.",
+				"source_limit_reached": "This run reached a Perplexity limit. The next run will retry the remaining threads.",
+				"stream_collection_failed": "Perplexity's library could not be read completely in this run, so nothing was checkpointed. A later run, or a newer version of this connector, can finish it.",
+				"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site, so please report this rather than retrying."
+			}
+		}
+	},
+	{
 		"file": "shopify.json",
 		"manifest": {
 			"connector_key": "shopify",
@@ -683,6 +746,7 @@
 			"reason_display_messages": {
 				"stream_collection_failed": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
 				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+				"spotify_library_rows_unsupported": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing.",
 				"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 				"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
 				"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
@@ -744,6 +808,7 @@
 				"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
 				"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
 				"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
+				"stream_collection_failed": "TikTok did not let this part be read in full, so it was not saved as complete. What was read is saved.",
 				"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
 			}
 		}
@@ -805,8 +870,9 @@
 		"manifest": {
 			"connector_key": "venmo",
 			"reason_display_messages": {
-				"friends_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo friends, so some friends haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
-				"transactions_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo transactions, so older transactions haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
+				"transactions_deferred_page_budget": "Some Venmo transaction history is still pending. Saved positions let later runs resume it while refreshing recent activity. A large volume of new activity may delay completion",
+				"transactions_schema_blocked": "A Venmo transaction could not be validated. The unread history after that record will be retried"
 			}
 		}
 	},
@@ -820,6 +886,15 @@
 				"media_exceeds_bounded_read_policy": "Some media files in that WhatsApp export were too large to safely import",
 				"no_exports_found": "We couldn't find any exports yet",
 				"unsupported_export": "We could not read that WhatsApp export format yet"
+			}
+		}
+	},
+	{
+		"file": "whatsapp_web.json",
+		"manifest": {
+			"connector_key": "whatsapp-web",
+			"reason_display_messages": {
+				"scope_not_supported": "WhatsApp messages can only be imported together with their chats. Select both to import your messages."
 			}
 		}
 	},

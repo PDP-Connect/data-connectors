@@ -613,7 +613,7 @@ test("the prepare job pins Node 24 and runs the inventory guard before any matri
   assert.match(prepare.slice(nodeSetup, guard), /node-version: "24"/);
   assert.ok(guard > nodeSetup, "Node 24 must be set up before the guard runs");
   assert.ok(guard < position("- name: Derive the publish matrix from the reviewed allowlist"));
-  assert.ok(guard < position("- name: Select connectors with changed shipped content"));
+  assert.ok(guard < position("- name: Select connector versions missing from GHCR"));
   assert.ok(guard < position(`- name: ${POLICY_STEP}`));
   assert.match(prepare, /^      policy-changed: \$\{\{ steps\.policy\.outputs\.policy-changed \}\}$/m);
 });

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic-live",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-	"version": "0.3.8",
+	"version": "0.3.10",
 	"display_name": "Claude (Live Session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -50,7 +50,8 @@
 		"no_chat_organization": "No Claude organization with chat access could be found for this account.",
 		"http_error": "We hit a network problem talking to Claude",
 		"parse_error": "Claude sent back a response we couldn't read",
-		"not_available": "This data isn't available for this Claude account"
+		"not_available": "This data isn't available for this Claude account",
+		"organization_unavailable": "Your Claude plan could not be read: the organization this run reads from has no chat plan in your account's organization list. This will retry automatically."
 	},
 	"mobile": {
 		"pageshim": {
@@ -246,18 +247,22 @@
 		{
 			"name": "account_plan",
 			"required": false,
-			"description": "The subscription plan of the signed-in Claude account's chat organization, with its renewal and end dates. Same fields as the ChatGPT account_plan stream.",
+			"description": "Plans for every usable Claude organization. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false.",
 			"compaction_fingerprint": {
 				"exclude_keys": []
 			},
 			"display": {
 				"label": "Your Claude plan",
-				"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. Payment details and billing identifiers are not collected. Singleton — one record for the organization the session reads."
+				"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. Payment details and billing identifiers are not collected. One record per chat-capable organization; only conversations and usage remain scoped to the original selected organization."
 			},
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
+					"is_default": {
+						"type": "boolean",
+						"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+					},
 					"id": { "type": "string" },
 					"account_id": {
 						"type": ["string", "null"]
@@ -342,7 +347,7 @@
 					"count": true
 				}
 			},
-			"coverage_strategy": "singleton_presence",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "scheduled_window"
 		},
 		{

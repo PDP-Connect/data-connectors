@@ -459,8 +459,17 @@ test("a main push uses the filtered matrix and a no-op skips publish jobs", () =
   );
   assert.match(
     readFileSync(join(repoRoot, "scripts", "select-publish-connectors.mjs"), "utf8"),
-    /No connector version changed/,
+    /Every connector version on main is already in GHCR/,
   );
+});
+
+test("the catalog fan-in excludes failed and cancelled publish results", () => {
+  const workflow = readFileSync(workflowPath, "utf8");
+  const catalogIf = /^  catalog:[\s\S]*?^    if: \$\{\{ (.*) \}\}$/m.exec(workflow);
+  assert.ok(catalogIf, "the catalog job must have an if condition");
+  assert.match(catalogIf[1], /needs\.publish\.result == 'success'/);
+  assert.doesNotMatch(catalogIf[1], /needs\.publish\.result == '(?:failure|cancelled)'/);
+  assert.match(workflow, /CONNECTOR_CATALOG_PASSWORD: \$\{\{ github\.token \}\}/, "the generator must receive the registry credential");
 });
 
 test("the signed digest comes from the push, and the tag is never re-resolved", () => {

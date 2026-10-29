@@ -1,0 +1,126 @@
+{
+	"mapping": {
+		"root": { "parent": null, "children": ["u1"] },
+		"u1": {
+			"parent": "root",
+			"children": ["a1"],
+			"message": {
+				"author": { "role": "user" },
+				"create_time": 1700000000,
+				"content": { "content_type": "text", "parts": ["first question"] }
+			}
+		},
+		"a1": {
+			"parent": "u1",
+			"children": ["u2"],
+			"message": {
+				"author": { "role": "assistant" },
+				"create_time": 1700000001,
+				"content": { "content_type": "text", "parts": ["first answer"] },
+				"metadata": { "model_slug": "gpt-4o" }
+			}
+		},
+		"u2": {
+			"parent": "a1",
+			"children": ["a2"],
+			"message": {
+				"author": { "role": "user" },
+				"create_time": 1700000002,
+				"content": { "content_type": "text", "parts": ["second question"] }
+			}
+		},
+		"a2": {
+			"parent": "u2",
+			"children": ["t1"],
+			"message": {
+				"author": { "role": "assistant" },
+				"create_time": 1700000003,
+				"content": { "content_type": "text", "parts": ["second answer"] },
+				"metadata": { "model_slug": "gpt-4o" }
+			}
+		},
+		"t1": {
+			"parent": "a2",
+			"children": ["u3"],
+			"message": {
+				"author": { "role": "tool" },
+				"create_time": 1700000004,
+				"content": { "content_type": "text", "parts": ["tool output"] },
+				"metadata": { "model_slug": "gpt-4o" }
+			}
+		},
+		"u3": {
+			"parent": "t1",
+			"children": ["a3", "a3-alt"],
+			"message": {
+				"author": { "role": "user" },
+				"create_time": 1700000005,
+				"content": { "content_type": "text", "parts": ["third question"] }
+			}
+		},
+		"a3-alt": {
+			"parent": "u3",
+			"children": [],
+			"message": {
+				"author": { "role": "assistant" },
+				"create_time": 1700000006,
+				"content": {
+					"content_type": "text",
+					"parts": ["answer on a branch that was abandoned"]
+				},
+				"metadata": { "model_slug": "gpt-5" }
+			}
+		},
+		"a3": {
+			"parent": "u3",
+			"children": ["u4"],
+			"message": {
+				"author": { "role": "assistant" },
+				"create_time": 1700000007,
+				"content": { "content_type": "text", "parts": ["third answer"] },
+				"metadata": { "model_slug": "o3" }
+			}
+		},
+		"u4": {
+			"parent": "a3",
+			"children": ["a4"],
+			"message": {
+				"author": { "role": "user" },
+				"create_time": 1700000008,
+				"content": { "content_type": "text", "parts": ["fourth question"] }
+			}
+		},
+		"a4": {
+			"parent": "u4",
+			"children": ["u5"],
+			"message": {
+				"author": { "role": "assistant" },
+				"create_time": 1700000009,
+				"content": { "content_type": "text", "parts": ["fourth answer"] },
+				"metadata": { "model_slug": "o3" }
+			}
+		},
+		"u5": {
+			"parent": "a4",
+			"children": ["a5"],
+			"message": {
+				"author": { "role": "user" },
+				"create_time": 1700000010,
+				"content": { "content_type": "text", "parts": ["fifth question"] }
+			}
+		},
+		"a5": {
+			"parent": "u5",
+			"children": [],
+			"message": {
+				"author": { "role": "assistant" },
+				"create_time": 1700000011,
+				"content": {
+					"content_type": "text",
+					"parts": ["fifth answer, model not reported"]
+				}
+			}
+		}
+	},
+	"current_node": "a5"
+}
