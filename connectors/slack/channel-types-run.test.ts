@@ -537,6 +537,38 @@ for (const types of [undefined, "public,private,im,mpim"]) {
 	});
 }
 
+for (const types of [undefined, "public,private,im,mpim"]) {
+	for (const source of ["grant", "allowlist"]) {
+		const restriction = (id: string) =>
+			source === "grant" ? { grantChannels: [id] } : { allowlist: id };
+		test(`all-types channel IDs reject flag-like ${source} with ${types ?? "default"}`, async () => {
+			const outcome = await runWithFakeSlackdump({
+				...restriction("-files=false"),
+				types,
+			});
+			assert.equal(outcome.done?.status, "failed");
+			assert.match(outcome.done?.error?.message ?? "", /invalid channel ID/);
+			assert.equal(outcome.archiveCalls.length, 0);
+			assert.equal(outcome.resumeCalls.length, 0);
+			assert.deepEqual(outcome.recordChannels("messages"), []);
+			assert.deepEqual(outcome.state, {});
+		});
+		test(`all-types channel IDs accept valid single ${source} with ${types ?? "default"} without listing`, async () => {
+			const outcome = await runWithFakeSlackdump({
+				...restriction("C0PUBLIC1"),
+				types,
+				archiveEverything: true,
+			});
+			assert.equal(outcome.done?.status, "succeeded");
+			assert.equal(outcome.listCalls.length, 0);
+			assert.deepEqual(positionalChannels(outcome.archiveCalls[0] ?? []), [
+				"C0PUBLIC1",
+			]);
+			assert.deepEqual(outcome.recordChannels("messages"), ["C0PUBLIC1"]);
+		});
+	}
+}
+
 test("a grant that names no channel is no restriction, not an empty one", async () => {
 	const outcome = await runWithFakeSlackdump({
 		grantChannels: [],

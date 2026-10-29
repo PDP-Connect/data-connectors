@@ -182,6 +182,16 @@ export function channelsForRun(
 	restrictions: readonly (readonly string[])[],
 	typeSelected: readonly string[],
 ): string[] {
+	for (const restriction of restrictions) {
+		if (
+			restriction.some((id) => typeof id !== "string" || !CHANNEL_ID.test(id))
+		) {
+			throw new ChannelTypeError(
+				"unreadable",
+				"The channel restrictions contain an invalid channel ID, so no channel was downloaded.",
+			);
+		}
+	}
 	const sets = restrictions.map((restriction) => new Set(restriction));
 	return [...new Set(typeSelected)].filter((id) =>
 		sets.every((set) => set.has(id)),
