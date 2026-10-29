@@ -137,3 +137,89 @@ test("malformed manifest JSON exits with input-error status and path", (t) => {
   assert.match(cli.stderr, /connectors\/example\/manifest\.json: cannot parse manifest JSON/);
   assert.throws(() => checkRepository(root, join(root, "scripts/allowlist.json")), /cannot parse manifest JSON/);
 });
+
+test("local references visit targets outside structural schema keywords", () => {
+  const schema = { $ref: "#/payload", payload: runClockSchema("fetched_at") };
+  assert.deepEqual(findForbiddenProperties(schema, manifestPath), [{
+    propertyPath: "payload/properties/fetched_at",
+    schemaPath: "/payload/properties/fetched_at",
+  }]);
+});
+
+test("JSON pointers resolve only own members and validate target schema types", () => {
+  for (const ref of ["#/__proto__", "#/constructor", "#/toString", "#/missing"]) {
+    assert.throws(() => findForbiddenProperties({ $ref: ref }, manifestPath), /unresolved/);
+  }
+  for (const target of [7, "schema", null, []]) {
+    assert.throws(() => findForbiddenProperties({ $ref: "#/payload", payload: target }, manifestPath), /schema node/);
+  }
+  const own = JSON.parse('{"$ref":"#/__proto__","__proto__":{"properties":{"collected_at":true}}}');
+  assert.equal(findForbiddenProperties(own, manifestPath)[0].propertyPath, "__proto__/properties/collected_at");
+});
+
+test("local pointer escapes are strict and preserve target path attribution", () => {
+  const schema = { $ref: "#/a~1b~0c", "a/b~c": runClockSchema("synced_at") };
+  assert.equal(findForbiddenProperties(schema, manifestPath)[0].propertyPath, "a~1b~0c/properties/synced_at");
+  for (const ref of ["#/bad~2", "#/bad~"]) {
+    assert.throws(() => findForbiddenProperties({ $ref: ref, [ref.slice(2)]: true }, manifestPath), /pointer escape/);
+  }
+  for (const ref of ["other.json#/schema", "https://example.invalid/schema", "#named", "#/percent%20name"]) {
+    assert.throws(() => findForbiddenProperties({ $ref: ref }, manifestPath), /unsupported/);
+  }
+});
+
+test("boolean schemas work through manifest and repository entry points", (t) => {
+  for (const schema of [true, false]) {
+    assert.deepEqual(inspectManifest(manifest(schema), "example", manifestPath, new Map()), []);
+    const root = fixtureRepo(t, { manifest: JSON.stringify(manifest(schema)) });
+    assert.deepEqual(checkRepository(root, join(root, "scripts/allowlist.json")), []);
+    assert.deepEqual(findForbiddenProperties({ $ref: "#/payload", payload: schema }, manifestPath), []);
+  }
+});
+
+test("self and mutual references terminate with one canonical finding", () => {
+  const self = { $ref: "#", properties: { fetched_at: true } };
+  assert.deepEqual(findForbiddenProperties(self, manifestPath).map((f) => f.propertyPath), ["properties/fetched_at"]);
+  const mutual = {
+    $ref: "#/$defs/a",
+    $defs: {
+      a: { $ref: "#/$defs/b" },
+      b: { $ref: "#/$defs/a", properties: { retrieved_at: true } },
+    },
+  };
+  assert.deepEqual(findForbiddenProperties(mutual, manifestPath).map((f) => f.propertyPath), ["$defs/b/properties/retrieved_at"]);
+});
+
+test("a shared reference target consumes an exact exception only once", (t) => {
+  const schema = {
+    properties: { left: { $ref: "#/$defs/payload" }, right: { $ref: "#/$defs/payload" } },
+    $defs: { payload: runClockSchema("fetched_at") },
+  };
+  assert.equal(findForbiddenProperties(schema, manifestPath).length, 1);
+  const entry = allowedEntry({ propertyPath: "schema/$defs/payload/properties/fetched_at" });
+  const root = fixtureRepo(t, {
+    manifest: JSON.stringify(manifest(schema)),
+    allowlist: [entry],
+    evidencePath: entry.emitSideEvidence.path,
+  });
+  assert.deepEqual(checkRepository(root, join(root, "scripts/allowlist.json")), []);
+});
+
+test("unsupported URI scope and anchor keywords fail explicitly", () => {
+  for (const key of ["$id", "$anchor", "$dynamicAnchor", "$dynamicRef", "$recursiveAnchor", "$recursiveRef"]) {
+    assert.throws(() => findForbiddenProperties({ [key]: "unsupported" }, manifestPath), /unsupported/);
+    assert.throws(() => findForbiddenProperties({
+      $ref: "#/payload", payload: { [key]: "unsupported" },
+    }, manifestPath), /unsupported/);
+  }
+});
+
+test("schema traversal and reference parsing have explicit resource bounds", () => {
+  let schema = true;
+  for (let n = 0; n < 33; n++) schema = { additionalProperties: schema };
+  assert.throws(() => findForbiddenProperties(schema, manifestPath), /depth.*32/);
+  assert.throws(() => findForbiddenProperties({ allOf: Array(4096).fill(true) }, manifestPath), /work.*4096|node.*4096/);
+  assert.throws(() => findForbiddenProperties({ $ref: "#/" + "x".repeat(65536) }, manifestPath), /reference.*65536/);
+  const deepPointer = "#/" + Array(33).fill("x").join("/");
+  assert.throws(() => findForbiddenProperties({ $ref: deepPointer }, manifestPath), /depth.*32/);
+});

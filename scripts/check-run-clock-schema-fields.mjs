@@ -36,60 +36,87 @@ function fail(path, message) {
   throw new Error(`${path}: ${message}`);
 }
 
+// This deliberately supports only unencoded local JSON Pointers, not URI
+// scopes/anchors or dynamic resolution. Keep schema-name policy separate from
+// value semantics; unused definitions and negated/composed schemas are scanned.
+const MAX_DEPTH = 32;
+const MAX_WORK = 4096;
+const MAX_REF_LENGTH = 65536;
+const UNSUPPORTED_SCOPE = ["$id", "$anchor", "$dynamicAnchor", "$dynamicRef", "$recursiveAnchor", "$recursiveRef"];
+const pointerToken = (part) => part.replaceAll("~", "~0").replaceAll("/", "~1");
+
 function resolvePointer(root, ref, path) {
-  if (!ref.startsWith("#/")) fail(path, `unsupported schema $ref ${JSON.stringify(ref)}; only local JSON Pointers are supported`);
-  return ref.slice(2).split("/").map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))
-    .reduce((value, key) => {
-      if (!value || typeof value !== "object" || !(key in value)) {
-        fail(path, `unresolved schema $ref ${JSON.stringify(ref)}`);
-      }
-      return value[key];
-    }, root);
+  if (ref.length > MAX_REF_LENGTH) fail(path, "schema reference exceeds 65536 characters");
+  if (ref !== "#" && (!ref.startsWith("#/") || ref.includes("%"))) {
+    fail(path, "unsupported schema $ref; only unencoded local JSON Pointers are supported");
+  }
+  if (ref === "#") return { node: root, schemaPath: "" };
+  const parts = ref.slice(2).split("/");
+  if (parts.length > MAX_DEPTH) fail(path, "schema pointer depth exceeds 32");
+  const keys = parts.map((part) => {
+    if (/~(?:[^01]|$)/.test(part)) fail(path, "invalid JSON pointer escape; use ~0 or ~1");
+    return part.replaceAll("~1", "/").replaceAll("~0", "~");
+  });
+  let node = root;
+  for (const key of keys) {
+    if (node === null || typeof node !== "object" || !Object.hasOwn(node, key)) {
+      fail(path, `unresolved schema $ref ${JSON.stringify(ref)}`);
+    }
+    node = node[key];
+  }
+  return { node, schemaPath: "/" + keys.map(pointerToken).join("/") };
 }
 
 export function findForbiddenProperties(schema, manifestPath) {
   const findings = [];
-  function visit(node, schemaPath) {
+  const visited = new WeakSet();
+  const foundPaths = new Set();
+  let work = 0;
+  function visit(node, schemaPath, depth = 0) {
+    if (++work > MAX_WORK) fail(manifestPath, "schema work exceeds 4096 nodes/visits");
+    if (depth > MAX_DEPTH) fail(`${manifestPath}#${schemaPath}`, "schema depth exceeds 32");
     if (node === true || node === false) return;
     if (!node || typeof node !== "object" || Array.isArray(node)) {
       fail(`${manifestPath}#${schemaPath}`, "schema node must be an object or boolean");
     }
-
-    if (typeof node.$ref === "string") {
-      resolvePointer(schema, node.$ref, `${manifestPath}#${schemaPath}/$ref`);
-    } else if (node.$ref !== undefined) {
-      fail(`${manifestPath}#${schemaPath}/$ref`, "$ref must be a string");
+    // A reference target is attributed to its own pointer location. A shared
+    // target or ref cycle is visited once, so exceptions are consumed once.
+    if (visited.has(node)) return;
+    visited.add(node);
+    for (const keyword of UNSUPPORTED_SCOPE) {
+      if (Object.hasOwn(node, keyword)) fail(`${manifestPath}#${schemaPath}/${keyword}`, "unsupported schema scope/anchor keyword");
+    }
+    if (Object.hasOwn(node, "$ref")) {
+      if (typeof node.$ref !== "string") fail(`${manifestPath}#${schemaPath}/$ref`, "$ref must be a string");
+      const target = resolvePointer(schema, node.$ref, `${manifestPath}#${schemaPath}/$ref`);
+      visit(target.node, target.schemaPath, depth + 1);
     }
 
     for (const keyword of SCHEMA_MAPS) {
-      if (node[keyword] === undefined) continue;
+      if (!Object.hasOwn(node, keyword)) continue;
       if (!node[keyword] || typeof node[keyword] !== "object" || Array.isArray(node[keyword])) {
         fail(`${manifestPath}#${schemaPath}/${keyword}`, `${keyword} must be an object`);
       }
       for (const [name, child] of Object.entries(node[keyword])) {
-        const childPath = `${schemaPath}/${keyword}/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`;
-        if (keyword === "properties" && FORBIDDEN_NAMES.has(name)) {
-          findings.push({
-            propertyPath: `${schemaPath ? `${schemaPath}/` : ""}properties/${name}`.replace(/^\/+/, ""),
-            schemaPath: childPath,
-          });
+        const childPath = `${schemaPath}/${keyword}/${pointerToken(name)}`;
+        if (keyword === "properties" && FORBIDDEN_NAMES.has(name) && !foundPaths.has(childPath)) {
+          foundPaths.add(childPath);
+          findings.push({ propertyPath: childPath.slice(1), schemaPath: childPath });
         }
-        visit(child, childPath);
+        visit(child, childPath, depth + 1);
       }
     }
 
     for (const keyword of SCHEMA_CHILDREN) {
-      if (node[keyword] === undefined || typeof node[keyword] === "boolean") continue;
-      visit(node[keyword], `${schemaPath}/${keyword}`);
+      if (!Object.hasOwn(node, keyword)) continue;
+      visit(node[keyword], `${schemaPath}/${keyword}`, depth + 1);
     }
-
     for (const keyword of SCHEMA_ARRAYS) {
-      if (node[keyword] === undefined) continue;
+      if (!Object.hasOwn(node, keyword)) continue;
       if (!Array.isArray(node[keyword])) fail(`${manifestPath}#${schemaPath}/${keyword}`, `${keyword} must be an array`);
-      node[keyword].forEach((child, index) => visit(child, `${schemaPath}/${keyword}/${index}`));
+      node[keyword].forEach((child, index) => visit(child, `${schemaPath}/${keyword}/${index}`, depth + 1));
     }
   }
-
   visit(schema, "");
   return findings;
 }
@@ -143,7 +170,7 @@ export function inspectManifest(manifest, connector, manifestPath, allowlist) {
     if (typeof stream.name !== "string" || !stream.name.trim()) fail(`${streamPath}/name`, "stream name must be a non-empty string");
     if (seenStreams.has(stream.name)) fail(`${streamPath}/name`, `duplicate stream name ${JSON.stringify(stream.name)}`);
     seenStreams.add(stream.name);
-    if (!stream.schema || (typeof stream.schema !== "object" && typeof stream.schema !== "boolean") || Array.isArray(stream.schema)) {
+    if (!Object.hasOwn(stream, "schema") || stream.schema === null || (typeof stream.schema !== "object" && typeof stream.schema !== "boolean") || Array.isArray(stream.schema)) {
       fail(`${streamPath}/schema`, "schema must be an object or boolean");
     }
     for (const finding of findForbiddenProperties(stream.schema, `${manifestPath}#/streams/${index}`)) {
