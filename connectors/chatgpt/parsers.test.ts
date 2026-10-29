@@ -15,6 +15,7 @@ import {
 	buildMemoryRecord,
 	buildSharedConversationRecord,
 	countBranchMessages,
+	countBranchModels,
 	decodeEscapedText,
 	encodePdppSafeText,
 	encodeToolCallStrings,
@@ -38,6 +39,7 @@ import {
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
+	ChatGptMessage,
 	ChatGptNode,
 	ConversationListItem,
 	RawAccountsCheckBody,
@@ -1076,6 +1078,7 @@ test("buildAccountPlanRecord: normalizes the default account from the fixture", 
 	const rec = buildAccountPlanRecord(raw);
 	assert.deepEqual(rec, {
 		id: "account_plan",
+		is_default: true,
 		account_id: "00000000-0000-4000-8000-000000000001",
 		account_structure: "personal",
 		account_created_at: "2023-01-15T10:00:00.000Z",
@@ -1383,6 +1386,179 @@ test("buildConversationRecord: detail fields overlay list; branchCount uses mapp
 	assert.equal(rec.gizmo_id, "g-1");
 	assert.equal(rec.current_node, currentNode);
 	assert.equal(rec.message_count_on_current_branch, 2);
+});
+
+test("countBranchModels: a conversation that switches models counts assistant replies per model on the current branch only", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	// gpt-4o twice, then o3 twice. Not counted: the tool message that names
+	// gpt-4o, the abandoned-branch reply that names gpt-5, and the last
+	// assistant reply, which reports no model.
+	assert.deepEqual(countBranchModels(mapping, currentNode), {
+		"gpt-4o": 2,
+		o3: 2,
+	});
+	// The same tree read from the abandoned branch sees only its own replies.
+	assert.deepEqual(countBranchModels(mapping, "a3-alt"), {
+		"gpt-4o": 2,
+		"gpt-5": 1,
+	});
+});
+
+test("countBranchModels: null without a mapping or tip, empty when no assistant names a model", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	assert.equal(countBranchModels(null, currentNode), null);
+	assert.equal(countBranchModels(mapping, null), null);
+	assert.deepEqual(countBranchModels(mapping, "u2"), { "gpt-4o": 1 });
+	assert.deepEqual(countBranchModels(mapping, "u1"), {});
+});
+
+test("countBranchModels: drops slugs that are not safe model names", () => {
+	const reply = (
+		id: string,
+		parent: string,
+		slug: unknown,
+	): [string, ChatGptNode] => [
+		id,
+		{
+			parent,
+			children: [],
+			message: {
+				author: { role: "assistant" },
+				metadata: { model_slug: slug as string },
+			},
+		},
+	];
+	const mapping: Record<string, ChatGptNode> = Object.fromEntries([
+		["root", { parent: null, children: ["r1"] }],
+		reply("r1", "root", "x".repeat(80)),
+		reply("r2", "r1", "x".repeat(81)),
+		reply("r3", "r2", ""),
+		reply("r4", "r3", "bad\u0000slug"),
+		reply("r5", "r4", 4),
+		reply("r6", "r5", null),
+		reply("r7", "r6", "__proto__"),
+		reply("r8", "r7", "__proto__"),
+	]);
+	const counts = countBranchModels(mapping, "r8");
+	assert.deepEqual(Object.entries(counts ?? {}), [
+		["x".repeat(80), 1],
+		["__proto__", 2],
+	]);
+	assert.equal(
+		validateRecord("conversations", conversationWith(counts)).ok,
+		true,
+	);
+});
+
+test("countBranchModels: counts only replies, not the tool calls and intermediate steps the messages stream reports as such", () => {
+	const assistant = (
+		id: string,
+		parent: string,
+		message: Partial<ChatGptMessage>,
+	): [string, ChatGptNode] => [
+		id,
+		{
+			parent,
+			children: [],
+			message: {
+				author: { role: "assistant" },
+				metadata: { model_slug: "gpt-4o" },
+				...message,
+			},
+		},
+	];
+	const mapping: Record<string, ChatGptNode> = Object.fromEntries([
+		["root", { parent: null, children: ["a1"] }],
+		// A reply to the user, with and without an explicit "all" recipient.
+		assistant("a1", "root", {}),
+		assistant("a2", "a1", { recipient: "all", end_turn: true }),
+		// Not replies: a call to a tool, a call listed in metadata, a plugin call,
+		// and a step that does not end the turn.
+		assistant("t1", "a2", { recipient: "python" }),
+		assistant("t2", "t1", {
+			metadata: { model_slug: "gpt-4o", tool_calls: [{ name: "search" }] },
+		}),
+		assistant("t3", "t2", {
+			metadata: { model_slug: "gpt-4o", invoked_plugin: { name: "x" } },
+		}),
+		assistant("t4", "t3", { end_turn: false }),
+		assistant("a3", "t4", { metadata: { model_slug: "o3" } }),
+	]);
+
+	assert.deepEqual(countBranchModels(mapping, "a3"), { "gpt-4o": 2, o3: 1 });
+});
+
+function conversationWith(modelCounts: unknown): Record<string, unknown> {
+	return {
+		id: "c1",
+		title: null,
+		create_time: null,
+		update_time: null,
+		is_archived: null,
+		is_starred: null,
+		workspace_id: null,
+		current_node: null,
+		message_count_on_current_branch: null,
+		model_counts: modelCounts,
+		gizmo_id: null,
+	};
+}
+
+test("conversations schema: model_counts accepts null and name-to-count objects, refuses unsafe keys and counts", () => {
+	for (const ok of [null, {}, { "gpt-4o": 3 }]) {
+		assert.equal(
+			validateRecord("conversations", conversationWith(ok)).ok,
+			true,
+		);
+	}
+	for (const bad of [
+		{ ["x".repeat(81)]: 1 },
+		{ "": 1 },
+		{ "a\u0000b": 1 },
+		{ "gpt-4o": 0 },
+		{ "gpt-4o": 1.5 },
+		{ "gpt-4o": "3" },
+		["gpt-4o"],
+		"gpt-4o",
+	]) {
+		assert.equal(
+			validateRecord("conversations", conversationWith(bad)).ok,
+			false,
+			JSON.stringify(bad),
+		);
+	}
+	// A record without the field is not a valid conversation record any more.
+	const { model_counts: _omitted, ...without } = conversationWith(null);
+	assert.equal(validateRecord("conversations", without).ok, false);
+});
+
+test("buildConversationRecord: model_counts follows the detail mapping, like the branch count", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	const list: ConversationListItem = {
+		id: "conv1",
+		update_time: 1_700_000_000,
+	};
+	const withDetail = buildConversationRecord(list, {
+		current_node: currentNode,
+		mapping,
+	});
+	assert.deepEqual(withDetail.model_counts, { "gpt-4o": 2, o3: 2 });
+	assert.equal(validateRecord("conversations", withDetail).ok, true);
+	// A detail with a mapping but no tip: nothing is on the branch.
+	const noTip = buildConversationRecord(list, { current_node: null, mapping });
+	assert.equal(noTip.message_count_on_current_branch, 0);
+	assert.deepEqual(noTip.model_counts, {});
+	// No detail: unknown, not empty.
+	const listOnly = buildConversationRecord(list, null);
+	assert.equal(listOnly.message_count_on_current_branch, null);
+	assert.equal(listOnly.model_counts, null);
+	assert.equal(validateRecord("conversations", listOnly).ok, true);
+	// Nothing but model names and counts reaches the record: no message text.
+	assert.equal(JSON.stringify(withDetail).includes("question"), false);
+	assert.equal(JSON.stringify(withDetail).includes("answer"), false);
 });
 
 test("buildConversationRecord: null detail falls back to list fields", () => {

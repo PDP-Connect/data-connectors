@@ -27,12 +27,13 @@ export function summaryEvidence(summary: unknown, me: unknown):
 	if (!isRecord(me) || !isRecord(me.miniProfile) || !safeTotal(me.plainId) || !identity(me.miniProfile.dashEntityUrn)) {
 		return { reason: "owner_identity_missing" };
 	}
-	const member = String(me.plainId);
-	if (me.miniProfile.dashEntityUrn !== `urn:li:fsd_profile:${member}` ||
-		me.miniProfile.entityUrn !== `urn:li:fs_miniProfile:${member}` ||
-		me.miniProfile.objectUrn !== `urn:li:member:${member}`) return { reason: "owner_identity_missing" };
-	if (!member || !identity(summary.entityUrn) ||
-		!/^urn:li:[^:]+:[^:]+$/u.test(summary.entityUrn) || summary.entityUrn.split(":").at(-1) !== member) return { reason: "summary_owner_mismatch" };
+	// Profile IDs are opaque; only objectUrn is bound to the numeric plainId.
+	const profileId = /^urn:li:fsd_profile:([^:]+)$/u.exec(me.miniProfile.dashEntityUrn)?.[1];
+	if (!profileId || !profileId.trim() ||
+		me.miniProfile.entityUrn !== `urn:li:fs_miniProfile:${profileId}` ||
+		me.miniProfile.objectUrn !== `urn:li:member:${me.plainId}`) return { reason: "owner_identity_missing" };
+	if (summary.entityUrn !== `urn:li:fs_relConnectionsSummary:${profileId}` &&
+		summary.entityUrn !== `urn:li:fsd_connectionsSummary:${profileId}`) return { reason: "summary_owner_mismatch" };
 	return { total: summary.numConnections };
 }
 

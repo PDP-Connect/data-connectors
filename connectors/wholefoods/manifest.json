@@ -9,7 +9,7 @@
 	},
 	"connector_key": "wholefoods",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-	"version": "0.3.33",
+	"version": "0.3.43",
 	"display_name": "Whole Foods",
 	"runtime_requirements": {
 		"bindings": {
@@ -19,30 +19,6 @@
 			"browser": {
 				"required": true
 			}
-		}
-	},
-	"setup": {
-		"modality": "static_secret",
-		"credential_capture": {
-			"kind": "api_key",
-			"label": "USDA FoodData Central API key (optional)",
-			"description": "Optional. A free USDA FoodData Central API key improves nutrition-lookup coverage and rate limits for products the Whole Foods product page does not have nutrition facts for. Leave blank to use the public rate-limited DEMO_KEY.",
-			"submit_label": "Save USDA API key",
-			"fields": [
-				{
-					"name": "usda_api_key",
-					"label": "USDA FoodData Central API key",
-					"type": "password",
-					"required": false,
-					"secret": true,
-					"autocomplete": "off",
-					"help_url": "https://fdc.nal.usda.gov/api-key-signup",
-					"help_text": "Get a free key at https://fdc.nal.usda.gov/api-key-signup. Without one, nutrition lookups use the shared DEMO_KEY, which is more rate-limited.",
-					"env": [
-						"USDA_API_KEY"
-					]
-				}
-			]
 		}
 	},
 	"capabilities": {
@@ -294,10 +270,10 @@
 		{
 			"name": "nutrition",
 			"required": false,
-			"description": "Nutrition facts or observed lookup outcome per unique product. Sources are the Whole Foods product page and USDA FoodData Central. Joins to `order_items` on `product_id`.",
+			"description": "Nutrition facts per ordered product, read from the Amazon product page and the Whole Foods product pages the order links to, keyed by `product_id` and joinable to `order_items`. A product whose Nutrition Facts panel could not be read, or that has none, has no record: the connector collects only what these pages show, and it does not look nutrition up anywhere else. Records written by connector 0.3.34 may also carry `source` = `usda_fdc`, `not_found`, `error` or `blocked`; this connector writes none of those.",
 			"display": {
 				"label": "Nutrition facts",
-				"detail": "Nutrition facts when found, or a not found, blocked, or error outcome when lookup fails."
+				"detail": "Nutrition facts for each ordered product whose Nutrition Facts panel was read. A product whose panel could not be read has no row."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -317,11 +293,14 @@
 						"type": "string",
 						"enum": [
 							"wholefoods_product_page",
+							"wholefoods_structured_data",
+							"amazon_product_page",
 							"usda_fdc",
 							"not_found",
 							"error",
 							"blocked"
-						]
+						],
+						"description": "The page the facts were read from. `usda_fdc`, `not_found`, `error` and `blocked` appear only on records written by connector 0.3.34 or earlier."
 					},
 					"confidence": {
 						"type": "string",
@@ -387,6 +366,95 @@
 					},
 					"id": {
 						"type": "string"
+					},
+					"added_sugar_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"allergens": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"calcium_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"category": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"cholesterol_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"ingredients": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"iron_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"highlights": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"potassium_mg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"raw_nutrition_text": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"saturated_fat_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"trans_fat_g": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"upc": {
+						"type": [
+							"string",
+							"null"
+						]
+					},
+					"vitamin_d_mcg": {
+						"type": [
+							"number",
+							"null"
+						]
+					},
+					"type": {
+						"type": [
+							"string"
+						]
 					}
 				},
 				"required": [
@@ -419,6 +487,7 @@
 		"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
 		"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
 		"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
-		"inventory_not_proven_complete": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh."
+		"stream_collection_failed": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh.",
+		"wholefoods_nutrition_unread": "Some Whole Foods products' nutrition panels could not be read, so those products have no nutrition row. Retry to read them."
 	}
 }

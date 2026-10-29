@@ -36,6 +36,7 @@ const encodedText = pdppSafeText.max(INLINE_TEXT_MAX_UNITS);
 // Module-scoped regex (Biome useTopLevelRegex). Manifest declares date-time
 // format; accept an ISO-8601 datetime prefix.
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+const PLAN_TYPE_RE = /^[a-z][a-z_-]{0,39}$/;
 
 // Opaque bounded id — tighten to UUID once a real export is observed.
 const idSchema = z.string().min(1).max(128);
@@ -185,11 +186,49 @@ export const accountProfileSchema = z.object({
 });
 
 /**
+ * account_plan stream. The claude source shares this stream with the
+ * anthropic-live artifact, and a source declares one contract per stream name,
+ * so this schema is the live one field for field (and the chatgpt connector's).
+ * The export fills only what the account's organization entry gives it:
+ * `account_id` (the organization id), `account_created_at` and `plan_type`. `id`
+ * is the constant "account_plan", the key the live connector and chatgpt use,
+ * so one connection holds one record.
+ * Everything else stays null: no name, no email, no billing data.
+ */
+export const accountPlanSchema = z.object({
+	id: z.string().min(1).max(141),
+	is_default: z.boolean().optional(),
+	account_id: idSchema.nullable(),
+	// "personal" / "workspace"
+	account_structure: pdppSafeText.max(80).nullable(),
+	account_created_at: isoDateTimeNullable,
+	// "free" / "pro" / "max" / "team" / "enterprise"
+	plan_type: pdppSafeText.max(80).nullable(),
+	plan_display_name: pdppSafeText.max(120).nullable(),
+	subscription_plan: pdppSafeText.max(120).nullable(),
+	has_active_subscription: z.boolean().nullable(),
+	billing_period: pdppSafeText.max(40).nullable(),
+	will_renew: z.boolean().nullable(),
+	renews_at: isoDateTimeNullable,
+	expires_at: isoDateTimeNullable,
+	cancels_at: isoDateTimeNullable,
+	// Always null here; kept strict and identical to chatgpt's account_plan.
+	scheduled_plan_change: z
+		.object({
+			plan_type: z.string().regex(PLAN_TYPE_RE).nullable(),
+			changes_at: isoDateTimeNullable,
+		})
+		.strict()
+		.nullable(),
+});
+
+/**
  * Stream -> schema registry. Single source of truth for the streams this
  * connector declares and emits.
  */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	account_profile: accountProfileSchema,
+	account_plan: accountPlanSchema,
 	conversations: conversationsSchema,
 	messages: messagesSchema,
 	projects: projectsSchema,

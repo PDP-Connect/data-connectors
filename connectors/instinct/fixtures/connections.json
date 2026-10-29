@@ -1,0 +1,64 @@
+{
+	"data": {
+		"googleWorkspaceConnections": [
+			{
+				"id": "gw-conn-01TEST",
+				"email": "ada@example.com",
+				"isDefault": true,
+				"isRevoked": false,
+				"services": [
+					{
+						"serviceId": "gmail",
+						"label": "Gmail",
+						"connected": true,
+						"notificationIssue": false,
+						"readOnly": false
+					},
+					{
+						"serviceId": "calendar",
+						"label": "Calendar",
+						"connected": true,
+						"notificationIssue": false,
+						"readOnly": true
+					},
+					{
+						"serviceId": "drive",
+						"label": "Drive",
+						"connected": false,
+						"notificationIssue": null,
+						"readOnly": null
+					}
+				]
+			}
+		],
+		"outlookConnections": [],
+		"linearConnections": [
+			{
+				"id": "lin-conn-01TEST",
+				"organizationName": "Analytical Engines",
+				"displayName": "Ada L",
+				"email": "ada@example.com",
+				"isDefault": true,
+				"isRevoked": false
+			}
+		],
+		"notionConnections": [],
+		"githubConnection": {
+			"id": "gh-conn-01TEST",
+			"username": "ada",
+			"displayName": "Ada Lovelace",
+			"email": "ada@example.com",
+			"isRevoked": false
+		},
+		"slackCanvasConnection": {
+			"teamId": "T0TEST",
+			"teamName": "Analytical Engines",
+			"isRevoked": false
+		},
+		"granolaConnection": null,
+		"shopWalletConnection": null,
+		"stripeLinkConnection": {
+			"connected": false
+		}
+	}
+}

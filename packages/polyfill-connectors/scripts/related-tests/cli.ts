@@ -83,6 +83,7 @@ function diffPathsInPackage(
 	const output = execFileSync("git", [...args], {
 		cwd,
 		encoding: "utf8",
+		maxBuffer: 64 * 1024 * 1024,
 	});
 	const packagePrefix = relative(repoRoot, packageRoot);
 	const requiredPrefix = packagePrefix === "" ? "" : `${packagePrefix}/`;

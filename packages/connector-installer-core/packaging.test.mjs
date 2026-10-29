@@ -155,30 +155,37 @@ test("the packed root package works in an independent consumer", (t) => {
       "--input-type=module",
       "--eval",
       `import assert from "node:assert/strict";
-import {
-  DEFAULT_CONNECTOR_INDEX_URL,
-  checkForUpdates,
+import * as installerCore from "@opendatalabs/data-connectors-tools/installer-core";
+const {
   fetchCatalog,
-  generateLock,
+  fetchResolvedArtifact,
   installFromLock,
-  loadConnectorIndex,
+  parseConnectorOciReference,
   pruneInstalled,
   readJson,
   verifyInstalled,
-} from "@opendatalabs/data-connectors-tools/installer-core";
+} = installerCore;
 for (const value of [
-  checkForUpdates,
   fetchCatalog,
-  generateLock,
+  fetchResolvedArtifact,
   installFromLock,
-  loadConnectorIndex,
+  parseConnectorOciReference,
   pruneInstalled,
   readJson,
   verifyInstalled,
 ]) {
   assert.equal(typeof value, "function");
 }
-assert.equal(typeof DEFAULT_CONNECTOR_INDEX_URL, "string");
+for (const name of [
+  "DEFAULT_CONNECTOR_INDEX_URL",
+  "DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY",
+  "checkForUpdates",
+  "generateLock",
+  "loadConnectorIndex",
+  "lockNeedsIndexSource",
+]) {
+  assert.equal(name in installerCore, false, name + " is exported");
+}
 await assert.rejects(fetchCatalog({ lastAcceptedGeneratedAt: "invalid" }), /Invalid lastAcceptedGeneratedAt/);`,
     ],
     {

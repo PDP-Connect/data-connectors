@@ -839,3 +839,42 @@ test("rowsToTransactions: synthetic CSV fixture parses the expected count", {
 		assert.match(t.date, /^\d{4}-\d{2}-\d{2}$/);
 	}
 });
+
+test("CSV calendar dates reject rollover while preserving valid signed and zero amounts", () => {
+	const rows = parseCsv(
+		[
+			"Date,Description,Amount",
+			"02/29/2024,Leap,-4.50",
+			"2024-03-01,Zero,0.00",
+			"3/2/2024,Positive,+12.00",
+			"02/29/2026,Bad leap,1.00",
+			"04/31/2026,Bad month end,1.00",
+			"2026-02-30,Bad ISO,1.00",
+		].join("\n"),
+	);
+	const txns = rowsToTransactions(rows, {
+		accountId: "A",
+		accountName: null,
+		fetchedAt: "t",
+	});
+	assert.deepEqual(
+		txns.map((t) => [t.date, t.amount]),
+		[
+			["2024-02-29", -450],
+			["2024-03-01", 0],
+			["2024-03-02", 1200],
+		],
+	);
+});
+
+test("parseCsv compatibility retains legitimate quote contents exactly", () => {
+	assert.deepEqual(
+		parseCsv(
+			'Date,Description,Amount\r\n02/29/2024,"one, two\nPIZZA 5"" PAN",0.00',
+		),
+		[
+			["Date", "Description", "Amount"],
+			["02/29/2024", 'one, two\nPIZZA 5" PAN', "0.00"],
+		],
+	);
+});

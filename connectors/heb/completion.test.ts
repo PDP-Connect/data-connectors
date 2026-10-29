@@ -4,14 +4,25 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import type {
+	BrowserCollectContext,
+	StreamFailureOptions,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	type EmittedRecord,
+	makeRecordingEmit,
+	skipPoliteDelays,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { hebConnector } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 const FIXTURES_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -60,6 +71,8 @@ function makeCollectPage(routes: {
 	detailHtml?: string;
 	failProductNavigation?: boolean;
 	listHtml: string;
+	profileHtml?: string;
+	responseSucceeded?: boolean;
 	/** Overrides `listHtml` per `?page=N`, for multi-page order history. */
 	listHtmlForPage?: (pageNum: number) => string;
 	productHtml?: string;
@@ -92,9 +105,11 @@ function makeCollectPage(routes: {
 									requestedPage ? Number(requestedPage) : 1,
 								) ?? routes.listHtml;
 						} else {
-							currentHtml = "";
+							currentHtml = routes.profileHtml ?? "";
 						}
-						return Promise.resolve({ ok: () => true });
+						return Promise.resolve({
+							ok: () => routes.responseSucceeded ?? true,
+						});
 					};
 				}
 				if (prop === "waitForSelector") {
@@ -136,7 +151,7 @@ function makeCollectPage(routes: {
 }
 
 type TestContext = BrowserCollectContext & {
-	emitted: { stream: string }[];
+	emitted: EmittedRecord[];
 	protocolMessages: EmittedMessage[];
 	reportedStreamFailures: Extract<EmittedMessage, { type: "SKIP_RESULT" }>[];
 };
@@ -166,17 +181,21 @@ function makeContext(
 		reportStreamFailure: async (
 			stream: string,
 			message: string,
-			options: { retryable?: boolean } = {},
+			options: StreamFailureOptions = {},
 		): Promise<void> => {
+			// The same SKIP_RESULT the runtime's reportStreamFailure emits.
 			const skip: Extract<EmittedMessage, { type: "SKIP_RESULT" }> = {
 				type: "SKIP_RESULT",
 				stream,
 				reason: "stream_collection_failed",
 				message,
-				recovery_hint: {
+				recovery_hint: options.recoveryHint ?? {
 					action: "retry_by_runtime",
 					retryable: options.retryable === true,
 				},
+				...(options.diagnostics === undefined
+					? {}
+					: { diagnostics: options.diagnostics }),
 			};
 			reportedStreamFailures.push(skip);
 			await harness.emit(skip);
@@ -191,7 +210,7 @@ function makeContext(
 		state: {},
 		...overrides,
 	} satisfies Record<string, unknown> & {
-		emitted: { stream: string }[];
+		emitted: EmittedRecord[];
 		protocolMessages: EmittedMessage[];
 		reportedStreamFailures: Extract<EmittedMessage, { type: "SKIP_RESULT" }>[];
 	};
@@ -349,8 +368,14 @@ for (const [label, field, amount, expected] of [
 		);
 		await hebConnector.collect(ctx);
 		assertPartial(ctx);
-		assert.deepEqual(ctx.emitted.map((record) => record.stream), ["nutrition"]);
-		const record = ctx.emitted[0] as { stream: string; data: Record<string, unknown> };
+		assert.deepEqual(
+			ctx.emitted.map((record) => record.stream),
+			["nutrition"],
+		);
+		const record = ctx.emitted[0] as {
+			stream: string;
+			data: Record<string, unknown>;
+		};
 		assert.equal(record.data[field], expected);
 		assert.equal(record.data.source, "heb_product_page");
 		assert.equal(record.data.calories, null);
@@ -371,7 +396,7 @@ test("collect: a truly empty nutrition panel stays unemitted and retryable", asy
 	assert.equal(ctx.emitted.length, 0);
 });
 
-test("collect: a skipped nutrition product lookup keeps its skip and withholds the completion STATE", async () => {
+test("collect: a product page that fails to load is a failed nutrition read and withholds the completion STATE", async () => {
 	const ctx = makeContext(
 		["nutrition"],
 		makeCollectPage({
@@ -382,7 +407,28 @@ test("collect: a skipped nutrition product lookup keeps its skip and withholds t
 	);
 
 	await hebConnector.collect(ctx);
-	assertPartial(ctx);
+	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
+	assert.deepEqual(findMessages(ctx.protocolMessages, "SKIP_RESULT"), [
+		{
+			type: "SKIP_RESULT",
+			stream: "nutrition",
+			reason: "stream_collection_failed",
+			message:
+				"An H-E-B product page did not load, so its nutrition facts were not read.",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: { source_reason: "nutrition_navigation_failed" },
+		},
+		{
+			// The order list itself is still unproven, so nutrition coverage is.
+			type: "SKIP_RESULT",
+			stream: "nutrition",
+			reason: "inventory_not_proven_complete",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			message:
+				"Valid H-E-B records were retained, but source evidence did not prove this inventory complete.",
+		},
+	]);
+	assert.equal(ctx.reportedStreamFailures.length, 1);
 });
 
 test("collect: a failure that is not an enumeration-end problem keeps its own failure meaning", async () => {
@@ -542,5 +588,309 @@ test("collect: orders and order_items both fail when the page ceiling cuts the w
 	assert.ok(
 		ctx.emitted.some((record) => record.stream === "orders"),
 		"valid upserts survive a page ceiling",
+	);
+});
+
+test("recorded source shape: profile emits all account fields and addresses", async () => {
+	const page = makeCollectPage({
+		listHtml: "",
+		profileHtml: fixture("profile-nextdata-synthetic.html"),
+	});
+	const ctx = makeContext(["profile"], page);
+	await hebConnector.collect(ctx);
+	assert.equal(ctx.emitted.length, 1);
+	assert.equal(ctx.emitted[0]?.stream, "profile");
+	assert.deepEqual(ctx.emitted[0]?.data, {
+		id: "profile",
+		name: "Example Shopper",
+		email: "shopper@example.invalid",
+		phone: "2025550100",
+		delivery_addresses: [
+			{
+				address: "123 Example Street, Example City, TX 00000",
+				label: "Home",
+				is_primary: false,
+			},
+		],
+	});
+	assert.equal(findMessages(ctx.protocolMessages, "SKIP_RESULT").length, 0);
+});
+
+test("recorded source shape: first-page empty history completes all dependent streams", async () => {
+	const page = makeCollectPage({
+		listHtml: fixture("orders-empty-nextdata-synthetic.html"),
+	});
+	const ctx = makeContext(["orders", "order_items", "nutrition"], page);
+	await hebConnector.collect(ctx);
+	assert.equal(ctx.emitted.length, 0);
+	assert.equal(findMessages(ctx.protocolMessages, "SKIP_RESULT").length, 0);
+	assert.deepEqual(
+		findMessages(ctx.protocolMessages, "STATE")
+			.map((m) => m.stream)
+			.sort(),
+		["nutrition", "orders"],
+	);
+	assert.deepEqual(
+		findMessages(ctx.protocolMessages, "DETAIL_COVERAGE")
+			.map((m) => m.stream)
+			.sort(),
+		["order_items", "orders"],
+	);
+});
+
+test("recorded source shape: empty first page with a remaining page stays partial", async () => {
+	const html = fixture("orders-empty-nextdata-synthetic.html").replace(
+		'"pages":[]',
+		'"pages":[1,2]',
+	);
+	const ctx = makeContext(
+		["orders", "order_items", "nutrition"],
+		makeCollectPage({ listHtml: html }),
+	);
+	await hebConnector.collect(ctx);
+	assertPartial(ctx);
+});
+
+test("recorded source shape: failed HTTP response cannot complete profile or empty history", async () => {
+	const page = makeCollectPage({
+		listHtml: fixture("orders-empty-nextdata-synthetic.html"),
+		profileHtml: fixture("profile-nextdata-synthetic.html"),
+		responseSucceeded: false,
+	});
+	const ctx = makeContext(
+		["profile", "orders", "order_items", "nutrition"],
+		page,
+	);
+	await hebConnector.collect(ctx);
+	assert.equal(ctx.emitted.length, 0);
+	// Every page answered with a failed HTTP response: each stream is a
+	// failed read, not an unproven enumeration, and nothing is checkpointed.
+	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
+	assert.equal(findMessages(ctx.protocolMessages, "DETAIL_COVERAGE").length, 0);
+	assert.deepEqual(causeSkips(ctx), []);
+	assert.deepEqual(
+		ctx.reportedStreamFailures.map((skip) => skip.stream),
+		["profile", "orders", "order_items", "nutrition"],
+	);
+});
+
+test("recorded source shape: recent prior orders prevent empty-history completion", async () => {
+	const ctx = makeContext(
+		["orders", "order_items", "nutrition"],
+		makeCollectPage({
+			listHtml: fixture("orders-empty-nextdata-synthetic.html"),
+		}),
+		{
+			state: { orders: { checkpoint: new Date().toISOString().slice(0, 10) } },
+		},
+	);
+	await hebConnector.collect(ctx);
+	assertPartial(ctx);
+});
+
+test("recorded source shape: rendered continuation contradicts empty server payload", async () => {
+	const html = fixture("orders-empty-nextdata-synthetic.html").replace(
+		"</main>",
+		'<nav aria-label="Pagination"><a href="?page=1">1</a><a href="?page=2">2</a></nav></main>',
+	);
+	const ctx = makeContext(
+		["orders", "order_items", "nutrition"],
+		makeCollectPage({ listHtml: html }),
+	);
+	await hebConnector.collect(ctx);
+	assertPartial(ctx);
+});
+
+test("recorded source shape: empty history does not resolve pending item gaps", async () => {
+	const ctx = makeContext(
+		["orders", "order_items", "nutrition"],
+		makeCollectPage({
+			listHtml: fixture("orders-empty-nextdata-synthetic.html"),
+		}),
+		{ detailGaps: [PENDING_ORDER_ITEMS_GAP] },
+	);
+	await hebConnector.collect(ctx);
+	assert.equal(
+		findMessages(ctx.protocolMessages, "DETAIL_GAP_RECOVERED").length,
+		0,
+	);
+	assert.equal(
+		findMessages(ctx.protocolMessages, "STATE").some(
+			(m) => m.stream === "nutrition",
+		),
+		false,
+	);
+	assert.equal(
+		findMessages(ctx.protocolMessages, "DETAIL_COVERAGE").some(
+			(m) => m.stream === "order_items",
+		),
+		false,
+	);
+});
+
+for (const rel of ["next nofollow", "nofollow next"]) {
+	test(`recorded source shape: multi-token ${rel} continuation stays partial`, async () => {
+		const html = fixture("orders-empty-nextdata-synthetic.html").replace(
+			"</main>",
+			`<a rel="${rel}" href="?cursor=next-batch">Next</a></main>`,
+		);
+		const ctx = makeContext(
+			["orders", "order_items", "nutrition"],
+			makeCollectPage({ listHtml: html }),
+		);
+		await hebConnector.collect(ctx);
+		assertPartial(ctx);
+	});
+}
+
+// A sign-in page, an Incapsula block or a page that did not load is not an
+// unproven enumeration (Collection Profile 5.5). A session wall ends the run
+// with ensureSession's `heb_session_required`; a failed read is a reported
+// stream failure with the connector's own hint.
+const INCAPSULA_BLOCK_HTML =
+	'<html><body>{ "incidentId" : "0-0", "hostName" : "www.heb.com", "errorCode" : "15" }</body></html>';
+
+const ORDER_STREAMS = ["orders", "order_items", "nutrition"] as const;
+
+function causeSkips(ctx: TestContext): string[] {
+	return findMessages(ctx.protocolMessages, "SKIP_RESULT")
+		.filter((skip) => skip.reason === "inventory_not_proven_complete")
+		.map((skip) => skip.stream);
+}
+
+test("collect: an Incapsula block on the order list ends the run as heb_session_required", async () => {
+	const ctx = makeContext(
+		ORDER_STREAMS,
+		makeCollectPage({ listHtml: INCAPSULA_BLOCK_HTML }),
+	);
+	await assert.rejects(
+		() => hebConnector.collect(ctx),
+		(error: unknown) => {
+			assert.equal((error as Error).message, "heb_session_required");
+			return true;
+		},
+	);
+	assert.deepEqual(findMessages(ctx.protocolMessages, "SKIP_RESULT"), [
+		{
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "session_repair_required",
+			recovery_hint: { action: "refresh_credentials", retryable: false },
+			message:
+				"H-E-B list page 1 redirected to sign-in or was blocked by Incapsula.",
+		},
+	]);
+	assert.deepEqual(ctx.reportedStreamFailures, []);
+	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
+});
+
+test("collect: a failed order-list navigation is a failed read for every order stream", async () => {
+	const ctx = makeContext(
+		ORDER_STREAMS,
+		makeCollectPage({
+			listHtml: onePageOrdersList(),
+			responseSucceeded: false,
+		}),
+	);
+	await hebConnector.collect(ctx);
+	assert.deepEqual(causeSkips(ctx), []);
+	assert.deepEqual(
+		ctx.reportedStreamFailures,
+		ORDER_STREAMS.map((stream) => ({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "stream_collection_failed",
+			message:
+				"H-E-B list page 1: navigation failed; refusing to parse stale page content or advance the cursor.",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: { source_reason: "navigation_failed", error_class: "Error" },
+		})),
+	);
+	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
+});
+
+test("collect: an order list whose cards no longer match the parser is a failed read that needs a connector upgrade", async () => {
+	const ctx = makeContext(
+		["orders"],
+		makeCollectPage({
+			listHtml:
+				'<html><body><main><div class="OrderCard_card__x1">An order</div></main></body></html>',
+		}),
+	);
+	await hebConnector.collect(ctx);
+	assert.deepEqual(causeSkips(ctx), []);
+	assert.equal(ctx.reportedStreamFailures.length, 1);
+	const [failure] = ctx.reportedStreamFailures;
+	assert.equal(failure?.stream, "orders");
+	assert.equal(
+		failure?.message,
+		"H-E-B list page 1: empty page is not a proven terminal page (selector_drift).",
+	);
+	assert.deepEqual(failure?.recovery_hint, {
+		action: "retry_on_connector_upgrade",
+		retryable: false,
+	});
+	assert.equal(
+		(failure?.diagnostics as Record<string, unknown> | undefined)
+			?.source_reason,
+		"selector_drift",
+	);
+	assert.equal(
+		findMessages(ctx.protocolMessages, "SKIP_RESULT").length,
+		1,
+		"one SKIP_RESULT for the stream",
+	);
+});
+
+test("collect: a profile page that is not a readable account profile is a failed read", async () => {
+	const ctx = makeContext(
+		["profile"],
+		makeCollectPage({
+			listHtml: onePageOrdersList(),
+			profileHtml: "<main><p>Name</p><p>Example Person</p></main>",
+		}),
+	);
+	await hebConnector.collect(ctx);
+	assert.deepEqual(causeSkips(ctx), []);
+	assert.deepEqual(ctx.reportedStreamFailures, [
+		{
+			type: "SKIP_RESULT",
+			stream: "profile",
+			reason: "stream_collection_failed",
+			message: "H-E-B profile page did not load as a readable account profile.",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: {
+				response_succeeded: true,
+				landed_on_profile: true,
+				loading: false,
+				record_parsed: false,
+			},
+		},
+	]);
+});
+
+test("collect: an Incapsula block on a product page ends the run as heb_session_required", async () => {
+	const ctx = makeContext(
+		["nutrition"],
+		makeCollectPage({
+			detailHtml: WIDGET_DETAIL_HTML,
+			listHtml: singleItemOrdersList(),
+			productHtml: INCAPSULA_BLOCK_HTML,
+		}),
+	);
+	await assert.rejects(
+		() => hebConnector.collect(ctx),
+		(error: unknown) => {
+			assert.equal((error as Error).message, "heb_session_required");
+			return true;
+		},
+	);
+	assert.deepEqual(causeSkips(ctx), []);
+	assert.deepEqual(ctx.reportedStreamFailures, []);
+	assert.deepEqual(
+		findMessages(ctx.protocolMessages, "SKIP_RESULT").map(
+			(skip) => `${skip.stream}:${skip.reason}`,
+		),
+		["nutrition:session_repair_required"],
 	);
 });

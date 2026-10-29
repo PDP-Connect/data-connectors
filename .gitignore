@@ -6,19 +6,14 @@
 node_modules/
 
 # Test runner output
-connector-result.json
 test-results/
 
 # Non-connector projects (stray checkouts)
 clearcut/
 proxy-test/
 
-# Vendored playwright-runner's own install
-playwright-runner/node_modules/
-
 # Connector fixtures (moved from packages/polyfill-connectors/fixtures/ at the
-# hard cutover; see docs/migration/connector-cutover/CONTRACTS.md). Raw
-# captures hold UNSCRUBBED provider data — real names, emails, message
+# hard cutover). Raw captures hold UNSCRUBBED provider data — real names, emails, message
 # bodies. PDPP_CAPTURE_FIXTURES=1 writes them here during a real run, and a
 # DOM-capture connector leaks names by default (a bare name in an HTML text
 # node matches no structured field, so the deterministic scrubber cannot see
@@ -32,6 +27,3 @@ connectors/*/fixtures/fixture_capture*/
 # (otherwise swallowed by this file's *.log rule) stay committable.
 !connectors/claude_code/fixtures/source-home/**
 !connectors/codex/fixtures/source-home/**
-
-# Legacy artifact release lane output (build-connector-release-index.mjs)
-release/

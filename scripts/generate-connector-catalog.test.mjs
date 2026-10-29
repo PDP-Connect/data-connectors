@@ -507,6 +507,82 @@ test("a token endpoint 404 fails closed instead of claiming the repository is ab
   }
 });
 
+const ANONYMOUS_DENIAL = {
+  status: 403,
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ errors: [{ code: "DENIED", message: "requested access to the resource is denied" }] }),
+};
+const CREDENTIAL = Buffer.from("publisher:token").toString("base64");
+
+test("a never-created repository is omitted when the registry credential is sent, though anonymous auth answers 403", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry();
+  try {
+    registry.tagLists.delete("acme/connector/public-name");
+    registry.anonymousTokenFault = ANONYMOUS_DENIAL;
+    fixtureManifest(root);
+    const catalog = await generate(root, registry.registry, { credential: CREDENTIAL });
+    assert.deepEqual(catalog.connectors, []);
+    assert.ok(registry.requestHeaders.some((request) =>
+      request.url.startsWith("/token?") && request.authorization === `Basic ${CREDENTIAL}`,
+    ), "the credential must reach the token endpoint");
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a never-created repository without the credential fails closed on the anonymous 403", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry();
+  try {
+    registry.tagLists.delete("acme/connector/public-name");
+    registry.anonymousTokenFault = ANONYMOUS_DENIAL;
+    fixtureManifest(root);
+    await assert.rejects(generate(root, registry.registry), /token endpoint returned HTTP 403/);
+    assert.ok(registry.requestHeaders.every((request) => request.authorization === undefined));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an authenticated token denial still fails closed rather than omitting the connector", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({
+    tokenFault: ANONYMOUS_DENIAL,
+  });
+  try {
+    fixtureManifest(root);
+    await assert.rejects(
+      generate(root, registry.registry, { credential: CREDENTIAL }),
+      /token endpoint returned HTTP 403/,
+    );
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a partial publish leaves the last published version as latest, not the failed newer one", async () => {
+  // 1.1.0 failed to publish, so GHCR holds only the older tags. The catalog must
+  // keep 1.1.0-beta.1 as latest rather than omit the connector or invent 1.1.0.
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0", "1.1.0-beta.1"] });
+  try {
+    fixtureManifest(root);
+    const catalog = await generate(root, registry.registry);
+    assert.deepEqual(catalog.connectors[0].latest, {
+      version: "1.1.0-beta.1",
+      digest: registry.digests.get("1.1.0-beta.1"),
+    });
+    assert.deepEqual(catalog.connectors[0].versions.map((entry) => entry.version), ["1.0.0", "1.1.0-beta.1"]);
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the generated catalog validates against the shared schema", async () => {
   const root = fixtureDirectory();
   const registry = await startRegistry();

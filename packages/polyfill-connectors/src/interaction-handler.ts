@@ -26,6 +26,7 @@ import { access, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { notify } from "./ntfy.ts";
 
 const UNSAFE_ID = /[^a-zA-Z0-9_.-]/g;
@@ -79,22 +80,52 @@ function pathFor(id: string, suffix: string): string {
 	return join(tmpdir(), `pdpp-interaction-${safeId}${suffix}`);
 }
 
+// `signal` stops the poll once the terminal prompt wins the race. Without it
+// the poll timer kept the process alive until the interaction timeout (30
+// minutes by default): scenario-record printed its summary and then hung.
 async function waitForFile(
 	path: string,
 	timeoutMs: number,
-): Promise<InteractionResponseInner> {
+	signal?: AbortSignal,
+): Promise<InteractionResponseInner | null> {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
+		if (signal?.aborted) {
+			return null;
+		}
 		try {
 			await access(path, fsConstants.R_OK);
 			const raw = await readFile(path, "utf8");
+			// Parse before unlinking: a responder still writing the file leaves
+			// partial JSON, and deleting it then would lose the answer.
+			const response = JSON.parse(raw) as InteractionResponseInner;
 			await unlink(path).catch((): undefined => undefined);
-			return JSON.parse(raw) as InteractionResponseInner;
+			return response;
 		} catch {
-			await new Promise((r) => setTimeout(r, 1500));
+			await sleepUnlessAborted(1500, signal);
 		}
 	}
 	throw new Error("interaction_timeout");
+}
+
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		// An abort listener added after the abort never fires, so a signal that
+		// is already aborted must resolve now, not after the full timer.
+		if (signal?.aborted) {
+			resolve();
+			return;
+		}
+		const onAbort = () => {
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 interface StdIO {
@@ -145,44 +176,62 @@ const SECRET_FIELD_RE = /password|secret|token|passphrase|pin\b|api_key/i;
  * prompt when stdin has no raw mode (non-TTY callers never reach this —
  * they use --answer flags or fail loudly upstream).
  */
-function promptStdinMasked(question: string): Promise<string> {
+function promptStdinMasked(
+	question: string,
+	signal?: AbortSignal,
+): Promise<string> {
 	const { stdin } = process;
 	if (!stdin.isTTY || typeof stdin.setRawMode !== "function") {
-		return promptStdin(question);
+		return promptStdin(question, PROCESS_STDIO, signal);
 	}
 	return new Promise((resolve) => {
 		process.stdout.write(question);
 		stdin.setRawMode(true);
 		stdin.resume();
-		let buffer = "";
+		// Code points, so Backspace removes a whole character (not half of a
+		// surrogate pair), and a decoder that keeps a multi-byte character
+		// split across two chunks intact.
+		const chars: string[] = [];
+		const decoder = new StringDecoder("utf8");
+		// Restore the terminal and release stdin on every way out, including a
+		// file drop winning the race (`signal`): a raw-mode listener left on
+		// stdin keeps the process alive after the run ends.
+		const finish = (value: string) => {
+			stdin.setRawMode(false);
+			stdin.off("data", onData);
+			signal?.removeEventListener("abort", onAbort);
+			stdin.pause();
+			process.stdout.write("\n");
+			resolve(value);
+		};
+		const onAbort = () => finish("");
+		// A chunk can hold several keystrokes (a pasted code followed by
+		// Enter arrives as one chunk), so handle it one character at a time.
 		const onData = (chunk: Buffer) => {
-			const ch = chunk.toString("utf8");
-			if (ch === "\r" || ch === "\n") {
-				stdin.setRawMode(false);
-				stdin.off("data", onData);
-				stdin.pause();
-				process.stdout.write("\n");
-				resolve(buffer);
-				return;
-			}
-			if (ch === "\u0003") {
-				// Ctrl-C: restore the terminal before letting the process die.
-				stdin.setRawMode(false);
-				process.stdout.write("\n");
-				process.kill(process.pid, "SIGINT");
-				return;
-			}
-			if (ch === "\u007f" || ch === "\b") {
-				if (buffer.length > 0) {
-					buffer = buffer.slice(0, -1);
-					process.stdout.write("\b \b");
+			for (const ch of decoder.write(chunk)) {
+				if (ch === "\r" || ch === "\n") {
+					finish(chars.join(""));
+					return;
 				}
-				return;
+				if (ch === "\u0003") {
+					// Ctrl-C: restore the terminal before letting the process die.
+					stdin.setRawMode(false);
+					process.stdout.write("\n");
+					process.kill(process.pid, "SIGINT");
+					return;
+				}
+				if (ch === "\u007f" || ch === "\b") {
+					if (chars.pop() !== undefined) {
+						process.stdout.write("\b \b");
+					}
+					continue;
+				}
+				chars.push(ch);
+				process.stdout.write("*");
 			}
-			buffer += ch;
-			process.stdout.write("*".repeat(ch.length));
 		};
 		stdin.on("data", onData);
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
 
@@ -201,17 +250,24 @@ async function respondViaTerminal(
 	if (msg.kind === "otp") {
 		const code = await promptStdinMasked(
 			`[interaction] OTP required (${msg.message || ""}): `,
+			signal,
 		);
 		return { status: "success", data: { code: code.trim() } };
 	}
 	if (msg.kind === "credentials" && msg.schema?.properties) {
 		const data: Record<string, string> = {};
 		for (const [key, schema] of Object.entries(msg.schema.properties)) {
+			if (signal?.aborted) {
+				return null;
+			}
 			const hint = schema.description ? ` (${schema.description})` : "";
 			// Mask secret-named fields (passwords, tokens); usernames stay
 			// visible so the operator can see what they typed.
-			const ask = SECRET_FIELD_RE.test(key) ? promptStdinMasked : promptStdin;
-			const value = await ask(`[interaction] ${key}${hint}: `);
+			const question = `[interaction] ${key}${hint}: `;
+			const ask = SECRET_FIELD_RE.test(key)
+				? () => promptStdinMasked(question, signal)
+				: () => promptStdin(question, io, signal);
+			const value = await ask();
 			data[key] = value;
 		}
 		return { status: "success", data };
@@ -326,7 +382,7 @@ export async function handleInteraction(
 	const clickUrl = buildClickUrl(runId, msg.kind, id);
 
 	const ntfyPromise = notify({
-		title: `PDPP ${connectorName}: ${msg.kind} needed`,
+		title: `${connectorName}: ${msg.kind} needed`,
 		message: `${msg.message || ""}\n\nReply: write to ${respPath}`,
 		tags:
 			msg.kind === "otp" || msg.kind === "credentials"
@@ -343,16 +399,22 @@ export async function handleInteraction(
 	// a single interaction, but it would collide with a second prompt later
 	// in the same run).
 	const terminalAbort = new AbortController();
-	const terminalPromise: Promise<InteractionResponseInner | null> =
+	// A terminal that cannot answer (no prompt for this message shape, or a
+	// prompt error) must not win the race: it would cancel the interaction
+	// while the file drop could still answer it.
+	const neverAnswers = new Promise<InteractionResponseInner>(() => {
+		/* never resolves */
+	});
+	const terminalPromise: Promise<InteractionResponseInner> =
 		process.stdin.isTTY && terminalHandled
-			? respondViaTerminal(msg, PROCESS_STDIO, terminalAbort.signal).catch(
-					(): null => null,
+			? respondViaTerminal(msg, PROCESS_STDIO, terminalAbort.signal).then(
+					(answer) => answer ?? neverAnswers,
+					(): Promise<InteractionResponseInner> => neverAnswers,
 				)
-			: new Promise<InteractionResponseInner | null>(() => {
-					/* never resolves */
-				});
+			: neverAnswers;
 
-	const filePromise = waitForFile(respPath, timeoutMs);
+	const fileAbort = new AbortController();
+	const filePromise = waitForFile(respPath, timeoutMs, fileAbort.signal);
 
 	let response: InteractionResponseInner | null = null;
 	try {
@@ -365,6 +427,7 @@ export async function handleInteraction(
 		};
 	} finally {
 		terminalAbort.abort();
+		fileAbort.abort();
 	}
 	await ntfyPromise;
 	await unlink(reqPath).catch((): undefined => undefined);
@@ -383,12 +446,16 @@ export async function handleInteraction(
 	// we only ever reach this point when msg.request_id is a string. Falling
 	// back to the generated `id` keeps the envelope valid even if a future
 	// caller relaxes that upstream contract.
+	const status = normalizeStatus(response.status);
 	const out: InteractionResponse = {
 		type: "INTERACTION_RESPONSE",
 		request_id: msg.request_id ?? id,
-		status: normalizeStatus(response.status),
+		status,
 	};
-	if (response.data !== undefined) {
+	// `data` may be present only for `success` (collection-profile §5.4): a
+	// response file that says failed/cancelled but still carries data must not
+	// produce an envelope the runtime rejects.
+	if (status === "success" && response.data !== undefined) {
 		out.data = response.data;
 	}
 	if (response.error !== undefined) {
@@ -402,4 +469,5 @@ export const __testing = {
 	normalizeStatus,
 	respondViaTerminal,
 	SECRET_FIELD_RE,
+	sleepUnlessAborted,
 };

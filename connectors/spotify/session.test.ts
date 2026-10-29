@@ -281,7 +281,7 @@ for (const [label, env] of [
 		assert.deepEqual(calls.assist[0], {
 			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
 			message:
-				"Sign in to Spotify in the secure browser, then continue. PDPP will verify the session before collecting.",
+				"Sign in to Spotify in the secure browser, then continue. Collection starts once the session is verified.",
 			owner_action: "operate_attachment",
 			progress_posture: "blocked",
 			response_contract: "none",

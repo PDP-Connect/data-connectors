@@ -62,3 +62,23 @@ test("connections need stable owner summaries and a confirming empty page", () =
 	assert.equal(connectionEvidence({ ...args, confirmation: { elements: [], paging: { total: 2 } } }), "connection_confirmation_malformed");
 	assert.equal(connectionEvidence({ ...args, before: { total: 0 }, after: { total: 0 }, distinctCount: 0 }), undefined);
 });
+
+test("summary binds opaque profile IDs separately from numeric member IDs", () => {
+	const owner = { plainId: 42, miniProfile: {
+		entityUrn: "urn:li:fs_miniProfile:synthetic-owner",
+		dashEntityUrn: "urn:li:fsd_profile:synthetic-owner",
+		objectUrn: "urn:li:member:42",
+	} };
+	const summary = { entityUrn: "urn:li:fs_relConnectionsSummary:synthetic-owner", numConnections: 2 };
+	assert.deepEqual(summaryEvidence(summary, owner), { total: 2 });
+	for (const entityUrn of ["urn:li:fs_relConnectionsSummary:other", "urn:li:unrelated:synthetic-owner", "urn:li:fs_relConnectionsSummary:"]) {
+		assert.equal(summaryEvidence({ ...summary, entityUrn }, owner).reason, "summary_owner_mismatch");
+	}
+	for (const miniProfile of [
+		{ ...owner.miniProfile, objectUrn: "urn:li:member:43" },
+		{ ...owner.miniProfile, entityUrn: "urn:li:fs_miniProfile:other" },
+		{ ...owner.miniProfile, dashEntityUrn: "urn:li:fsd_profile:" },
+	]) {
+		assert.equal(summaryEvidence(summary, { ...owner, miniProfile }).reason, "owner_identity_missing");
+	}
+});

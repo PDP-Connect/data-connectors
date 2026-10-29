@@ -52,8 +52,8 @@ export type {
  * consumer does not vendor it yet (its committed
  * `collector-definitions.generated.ts` snapshot stops at Google Messages).
  * Adding Signal to this registry without a matching data-connect companion
- * change breaks the Cross-Repo Integrity Gate's collector-definitions-
- * snapshot drift check. Per the Move A execution plan §3b, Signal is
+ * change breaks the Cross-Repo Integrity Gate's collection-profile-pins
+ * check, which requires a data-connect pin for every published connector. Per the Move A execution plan §3b, Signal is
  * deferred to a later, separately-gated PR once data-connect support
  * lands — not dropped, just sequenced after this catch-up.
  *
