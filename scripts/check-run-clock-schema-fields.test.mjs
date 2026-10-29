@@ -146,6 +146,19 @@ test("local references visit targets outside structural schema keywords", () => 
   }]);
 });
 
+test("finds forbidden properties in unevaluated array items", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      events: { type: "array", unevaluatedItems: { properties: { fetched_at: true } } },
+    },
+  };
+  assert.deepEqual(findForbiddenProperties(schema, manifestPath), [{
+    propertyPath: "properties/events/unevaluatedItems/properties/fetched_at",
+    schemaPath: "/properties/events/unevaluatedItems/properties/fetched_at",
+  }]);
+});
+
 test("JSON pointers resolve only own members and validate target schema types", () => {
   for (const ref of ["#/__proto__", "#/constructor", "#/toString", "#/missing"]) {
     assert.throws(() => findForbiddenProperties({ $ref: ref }, manifestPath), /unresolved/);

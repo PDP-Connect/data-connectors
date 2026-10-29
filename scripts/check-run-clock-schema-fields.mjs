@@ -22,6 +22,7 @@ const SCHEMA_CHILDREN = [
   "unevaluatedProperties",
   "propertyNames",
   "items",
+  "unevaluatedItems",
   "contains",
   "not",
   "if",
@@ -63,6 +64,7 @@ function resolvePointer(root, ref, path) {
       fail(path, `unresolved schema $ref ${JSON.stringify(ref)}`);
     }
     // This guard cannot interpret a target across an inherited URI scope.
+    // It conservatively refuses maps with scope-like member names as well.
     for (const keyword of UNSUPPORTED_SCOPE) {
       if (Object.hasOwn(node, keyword)) fail(path, "schema reference crosses an unsupported scope/anchor keyword");
     }
