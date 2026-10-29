@@ -834,6 +834,7 @@ for (const scenario of [
 
 const ACCOUNT_PLAN_RECORD = {
 	id: "account_plan",
+	is_default: true,
 	account_id: "org-1",
 	account_structure: null,
 	account_created_at: "2025-03-01T12:00:00.123456Z",
@@ -881,12 +882,11 @@ test("collectAnthropic: account_plan carries the organization's plan family and 
 	const everything = JSON.stringify([...protocolMessages, ...diagnostics]);
 	for (const name of ["Export Owner", "Fictional", "Owner's Organization"])
 		assert.equal(everything.includes(name), false, name);
-	// Like account_profile: no coverage proof, no checkpoint.
+	// The inventory reports coverage but keeps no checkpoint.
 	assert.equal(
 		protocolMessages.some(
 			(message) =>
-				(message.type === "DETAIL_COVERAGE" || message.type === "STATE") &&
-				message.stream === "account_plan",
+				message.type === "STATE" && message.stream === "account_plan",
 		),
 		false,
 	);

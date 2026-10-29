@@ -184,6 +184,8 @@ import {
 } from "./oversize-conversation.ts";
 import {
 	buildAccountPlanRecord,
+	hasReadablePlanOrganizationInventory,
+	usablePlanOrganizations,
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	JSON_ENTRY_READ_CHUNK_UNITS,
@@ -555,12 +557,7 @@ async function fetchOrganizations(
 	if (!result.ok || !Array.isArray(result.json)) {
 		return [];
 	}
-	return result.json.filter(
-		(org): org is ClaudeOrganization =>
-			typeof org === "object" &&
-			org !== null &&
-			typeof (org as { uuid?: unknown }).uuid === "string",
-	);
+	return result.json as ClaudeOrganization[];
 }
 
 /** Selects the chat-capable org, mirroring the legacy connector's
@@ -1344,35 +1341,53 @@ export async function collectAnthropic({
 	const organizations = requested.has(ACCOUNT_PLAN_STREAM)
 		? await readOrganizations()
 		: [];
-	// The plan comes from the organization entry of one organization, matched by
-	// id: not from the account menu, so it needs no name, and the entry's other
-	// fields are never read. Like account_profile it carries no coverage proof
-	// and no checkpoint.
+	// The legacy key stays bound to the actual export org (or unchanged selector
+	// in a plan-only run). Enumerating plans must never request another export.
 	const emitAccountPlan = async (organizationId: string): Promise<void> => {
-		const organization = organizations.find(
-			(candidate) => candidate.uuid === organizationId,
-		);
-		const plan = organization ? buildAccountPlanRecord(organization) : null;
-		if (plan === null) {
-			// No record and no skip would read as a verified empty stream.
+		if (!hasReadablePlanOrganizationInventory(organizations)) {
+			await emit({ type: "SKIP_RESULT", stream: ACCOUNT_PLAN_STREAM, reason: "parse_error", message: "The organization list contains an unreadable entry.", recovery_hint: { action: "retry_by_runtime", retryable: true } });
+			return;
+		}
+		const usable = usablePlanOrganizations(organizations);
+		if (!usable.some((org) => org.uuid === organizationId)) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream: ACCOUNT_PLAN_STREAM,
 				reason: "organization_unavailable",
-				message:
-					"The exported organization was not in the signed-in account's organization list, so its plan was not read.",
+				message: "The exported organization has no readable chat plan.",
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 			});
 			return;
 		}
-		if (plan.plan_type === null || plan.account_created_at === null) {
-			connectorDiagnostic("anthropic", "account_plan_incomplete", {
-				plan_type: plan.plan_type === null ? "absent" : "read",
-				account_created_at:
-					plan.account_created_at === null ? "absent" : "read",
+		// The stream claims full inventory coverage, so emit every plan or none.
+		const plans = usable.map((org) =>
+			buildAccountPlanRecord(org, org.uuid === organizationId),
+		);
+		if (
+			plans.some(
+				(plan) => !plan || !validateRecord(ACCOUNT_PLAN_STREAM, plan).ok,
+			)
+		) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACCOUNT_PLAN_STREAM,
+				reason: "parse_error",
+				message: "An organization has no readable plan.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 			});
+			return;
 		}
-		await emitRecord(ACCOUNT_PLAN_STREAM, plan);
+		for (const plan of plans as Record<string, unknown>[]) {
+			if (plan.plan_type === null || plan.account_created_at === null) {
+				connectorDiagnostic("anthropic", "account_plan_incomplete", {
+					plan_type: plan.plan_type === null ? "absent" : "read",
+					account_created_at:
+						plan.account_created_at === null ? "absent" : "read",
+				});
+			}
+			await emitRecord(ACCOUNT_PLAN_STREAM, plan);
+		}
+		await emit(buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, plans.length));
 	};
 	// The plan needs no export. A run that asks for nothing else must not request
 	// one: each request emails the account owner.

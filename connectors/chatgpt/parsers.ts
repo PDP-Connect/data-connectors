@@ -918,6 +918,7 @@ export function buildAccountPlanRecord(
 	const entitlement = entry.entitlement || {};
 	return {
 		id: "account_plan",
+		is_default: true,
 		account_id:
 			stringOrNull(account.account_id) ?? (key === "default" ? null : key),
 		account_structure: stringOrNull(account.structure),
@@ -935,6 +936,46 @@ export function buildAccountPlanRecord(
 			entitlement.scheduled_plan_change,
 		),
 	};
+}
+
+// Keys under `accounts` that alias another entry rather than name an account.
+const ACCOUNT_ALIAS_KEYS = new Set(["default"]);
+
+/**
+ * Every account the session lists, session default first, or null when the
+ * list is not complete: no readable default, or a listed entry that is not a
+ * readable account. The stream claims full inventory coverage, so a dropped
+ * entry would read as an account the user no longer has.
+ */
+export function buildAccountPlanRecords(
+	body: RawAccountsCheckBody | null | undefined,
+): RecordData[] | null {
+	const primary = buildAccountPlanRecord(body);
+	if (!primary) return null;
+	const records = [primary];
+	const seen = new Set<string>();
+	if (typeof primary.account_id === "string") seen.add(primary.account_id);
+	const entries = Object.entries(body?.accounts ?? {}).sort(([a], [b]) =>
+		a.localeCompare(b),
+	);
+	for (const [key, entry] of entries) {
+		if (ACCOUNT_ALIAS_KEYS.has(key)) continue;
+		const record = isAccountEntry(entry)
+			? buildAccountPlanRecord({
+					accounts: { [key]: entry },
+					account_ordering: [key],
+				})
+			: null;
+		if (!record || typeof record.account_id !== "string") return null;
+		if (seen.has(record.account_id)) continue;
+		seen.add(record.account_id);
+		records.push({
+			...record,
+			id: `account_plan:${record.account_id}`,
+			is_default: false,
+		});
+	}
+	return records;
 }
 
 // ─── Shared conversations ──────────────────────────────────────────────

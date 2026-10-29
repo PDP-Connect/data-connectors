@@ -76,7 +76,7 @@ import {
 	spoolMessageBlob,
 } from "./message-blob.ts";
 import {
-	buildAccountPlanRecord,
+	buildAccountPlanRecords,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
 	buildGizmoRecord,
@@ -116,6 +116,7 @@ import type {
 	ChatGptFetchResult,
 	ChatGptJson,
 	ChatGptNode,
+	ChatGptUsageProjection,
 	ConversationListItem,
 	RawAccountsCheckBody,
 	RawCustomInstructionsBody,
@@ -123,6 +124,12 @@ import type {
 	RawSharedConversation,
 } from "./types.ts";
 import { drainDetailWindows } from "./detail-lane-drain.ts";
+import {
+	chatGptUsageFetchInBrowser,
+	usageCaptureBody,
+	usageCaptureRoute,
+} from "./usage.ts";
+import { runUsageStreams, type UsageStreamHooks } from "./usage-stream.ts";
 
 // schemas.js is a plain-JS Zod validator; cast at the boundary to the
 // runtime's ValidateRecord contract. The JS module's safeParse already
@@ -167,7 +174,7 @@ function scrubChatGptTerminalDiagnostic(message: string): string {
 			"$1[redacted]",
 		)
 		.replace(
-			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts)(?:[/?]|$))[^\s)"'<>]*/giu,
+			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts|settings|cdn-cgi|me|tasks)(?:[/?]|$))[^\s)"'<>]*/giu,
 			"[redacted-path]",
 		)
 		.replace(/\s+/g, " ")
@@ -1775,7 +1782,13 @@ export function createChatGptApi({
 			method,
 			body,
 			parseJson = true,
-		}: { method: string; body?: unknown; parseJson?: boolean },
+			projection,
+		}: {
+			method: string;
+			body?: unknown;
+			parseJson?: boolean;
+			projection?: ChatGptUsageProjection | undefined;
+		},
 	): Promise<ChatGptFetchResult> {
 		const timeoutMs = resolveChatGptBackendFetchTimeoutMs();
 		const measureProviderFetch =
@@ -1787,15 +1800,24 @@ export function createChatGptApi({
 			).__pdppPageshimDetailFetched === "function";
 		const evaluate = (a: ChatGptAuth): Promise<ChatGptFetchResult> =>
 			withTimeout(
-				page.evaluate(chatGptBackendFetchInBrowser, {
-					path,
-					method,
-					body,
-					parseJson,
-					...(measureProviderFetch ? { measureProviderFetch: true } : {}),
-					auth: a,
-					timeoutMs,
-				}),
+				projection
+					? page.evaluate(chatGptUsageFetchInBrowser, {
+							path,
+							method,
+							body,
+							projection,
+							auth: a,
+							timeoutMs,
+						})
+					: page.evaluate(chatGptBackendFetchInBrowser, {
+							path,
+							method,
+							body,
+							parseJson,
+							...(measureProviderFetch ? { measureProviderFetch: true } : {}),
+							auth: a,
+							timeoutMs,
+						}),
 				timeoutMs + CHATGPT_BACKEND_EVALUATE_TIMEOUT_BUFFER_MS,
 				`chatgpt_backend_fetch_evaluate_timeout after ${timeoutMs + CHATGPT_BACKEND_EVALUATE_TIMEOUT_BUFFER_MS}ms`,
 			);
@@ -1844,12 +1866,14 @@ export function createChatGptApi({
 			laneContext,
 			method,
 			parseJson,
+			projection,
 		}: {
 			body?: unknown;
 			captureResult: boolean;
 			laneContext?: AdaptiveLaneRunContext | undefined;
 			method: string;
 			parseJson: boolean;
+			projection?: ChatGptUsageProjection | undefined;
 		},
 	): Promise<ChatGptFetchResult> {
 		let plannedProviderBudgetDefer: ChatGptPlannedProviderBudgetDeferredError | null =
@@ -1935,15 +1959,28 @@ export function createChatGptApi({
 			},
 			request: async () => {
 				try {
-					const result = await fetchOnce(path, { method, body, parseJson });
+					const result = await fetchOnce(path, {
+						method,
+						body,
+						parseJson,
+						projection,
+					});
 					if (
 						captureResult &&
 						capture &&
 						!isChatGptRetryableStatus(result.status)
 					) {
-						capture.captureHttp(`${method}-${path}`, result.json, {
+						// Projected usage reads name provider ids in the path; capture
+						// them under a route template so no raw id reaches a fixture.
+						const capturePath = projection ? usageCaptureRoute(path) : path;
+						// Their bodies carry raw ids too (the connector needs them in
+						// memory); capture a copy with ids and cursors replaced.
+						const captureBody = projection
+							? usageCaptureBody(result.json)
+							: result.json;
+						capture.captureHttp(`${method}-${capturePath}`, captureBody, {
 							status: result.status,
-							path,
+							path: capturePath,
 							method,
 						});
 					}
@@ -2002,10 +2039,12 @@ export function createChatGptApi({
 				method = "GET",
 				body,
 				laneContext,
+				projection,
 			}: {
 				method?: string;
 				body?: unknown;
 				laneContext?: AdaptiveLaneRunContext | undefined;
+				projection?: ChatGptUsageProjection | undefined;
 			} = {},
 		): Promise<ChatGptFetchResult> {
 			return fetchWithRetry(path, {
@@ -2014,6 +2053,7 @@ export function createChatGptApi({
 				laneContext,
 				parseJson: true,
 				captureResult: true,
+				projection,
 			});
 		},
 		async fetchBatch(ids: readonly string[]): Promise<ChatGptFetchResult[]> {
@@ -2614,7 +2654,7 @@ const CHATGPT_ACCOUNT_PLAN_STATELESS_ENV =
 
 /**
  * Fetch the accounts/check body the web app loads at startup and emit at most
- * one account_plan record: plan, renewal/expiry/cancellation dates, and any
+ * one account_plan record per usable account: plan, renewal/expiry dates, and any
  * scheduled plan change. 404/403 → SKIP "not_available"; other non-200 →
  * SKIP "http_error".
  *
@@ -2674,13 +2714,16 @@ export async function runAccountPlanStream(
 		});
 		return;
 	}
-	const record = isUnreadableJsonBody(res)
+	const records = isUnreadableJsonBody(res)
 		? null
-		: buildAccountPlanRecord(res.json as RawAccountsCheckBody);
-	// A record the schema would reject (e.g. an over-long id) is dropped by
-	// emitRecord; without this check STATE would still advance past it.
-	const validation = record ? validateRecord("account_plan", record) : null;
-	if (!record || (validation && !validation.ok)) {
+		: buildAccountPlanRecords(res.json as RawAccountsCheckBody);
+	// The only place this stream decides between a complete inventory and a
+	// skip. A record the schema would reject (e.g. an over-long id) is dropped
+	// by emitRecord; without this check STATE and coverage would still claim it.
+	if (
+		!records ||
+		records.some((record) => !validateRecord("account_plan", record).ok)
+	) {
 		deps.emit({
 			type: "SKIP_RESULT",
 			stream: "account_plan",
@@ -2692,22 +2735,23 @@ export async function runAccountPlanStream(
 		return;
 	}
 	if (process.env[CHATGPT_ACCOUNT_PLAN_STATELESS_ENV] === "1") {
-		await deps.emitRecord("account_plan", record);
-		deps.emit(buildFullScanCoverageMessage("account_plan", 1));
+		for (const record of records) await deps.emitRecord("account_plan", record);
+		deps.emit(buildFullScanCoverageMessage("account_plan", records.length));
 		return;
 	}
 	// Same gate as custom_instructions: a stable synthetic id and no run-clock
 	// field, so the fingerprint suppresses a byte-identical re-emit.
 	const fingerprintCursor = openFingerprintCursor(state.account_plan);
-	if (fingerprintCursor.shouldEmit(record)) {
-		await deps.emitRecord("account_plan", record);
+	for (const record of records) {
+		if (fingerprintCursor.shouldEmit(record))
+			await deps.emitRecord("account_plan", record);
 	}
 	deps.emit({
 		type: "STATE",
 		stream: "account_plan",
 		cursor: { fetched_at: nowIso(), fingerprints: fingerprintCursor.toState() },
 	});
-	deps.emit(buildFullScanCoverageMessage("account_plan", 1));
+	deps.emit(buildFullScanCoverageMessage("account_plan", records.length));
 }
 
 /**
@@ -7980,7 +8024,26 @@ export async function collectChatGpt(
 	if (requested.has("conversations") || requested.has("messages")) {
 		await runConversationsAndMessagesStreams(deps, state);
 	}
+	if (requested.has("account_profile") || requested.has("usage_summary")) {
+		await runUsageStreams(deps, state, chatGptUsageHooks);
+	}
 }
+
+/** Wires the usage streams (usage-stream.ts) to this file's error classes. */
+export const chatGptUsageHooks: UsageStreamHooks = {
+	classifyError: (err) => {
+		if (
+			err instanceof ChatGptPlannedProviderBudgetDeferredError ||
+			err instanceof ChatGptRecoverableRetryExhaustedError
+		)
+			return "deferred";
+		const message = err instanceof Error ? err.message : "";
+		if (/^apiFetch got 401 /.test(message)) return "auth";
+		if (/^apiFetch got 403 /.test(message)) return "forbidden";
+		return "other";
+	},
+	accountsCheckPath: ACCOUNTS_CHECK_PATH,
+};
 
 // ─── Entry ─────────────────────────────────────────────────────────────
 
