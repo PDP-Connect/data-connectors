@@ -19,8 +19,11 @@ test("release completion and site updates share the release queue and assemble t
     assert.equal(workflow.concurrency["cancel-in-progress"], false);
     assert.equal(workflow.concurrency.queue, "max");
   }
-  assert.match(pages.jobs.build.if, /workflow_run\.head_repository\.full_name == github\.repository/);
-  assert.match(pages.jobs.build.if, /workflow_run\.head_branch == 'main'/);
+  assert.match(pages.jobs["publication-gate"].if, /workflow_run\.head_repository\.full_name == github\.repository/);
+  assert.match(pages.jobs["publication-gate"].if, /workflow_run\.head_branch == 'main'/);
+  assert.equal(pages.jobs.build.needs, "publication-gate");
+  assert.match(pages.jobs.build.if, /needs\.publication-gate\.outputs\.deploy == 'true'/);
+  assert.match(pages.jobs["publication-gate"].steps.find((step) => step.id === "gate").run, /attempts\/\$\{RELEASE_RUN_ATTEMPT\}\/jobs/);
   const steps = pages.jobs.build.steps;
   assert.equal(steps.find((step) => step.uses?.startsWith("actions/checkout@")).with.ref, "main");
   assert.match(steps.find((step) => step.id === "feed").run, /materialize-catalog\.sh registry-site\/catalog\/updates\.atom/);

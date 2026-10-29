@@ -26,6 +26,10 @@ verifies both signature formats, pulls that exact digest and checks that `latest
 did not move during the pull. It generates the feed and deploys the whole
 `registry-site` tree. A failed check does not deploy a partial site. All writers
 must use the same group; this is not a lock against other registry writers.
+On a release completion, one GitHub API read of that run's jobs skips the Pages
+build when catalog publication did not run. A failed publication attempt still
+reconciles because it may have moved `latest` before failing. A site push or
+manual dispatch always reconciles.
 
 Hub notification is opt-in: set the repository variable
 `CATALOG_WEBSUB_NOTIFY_ENABLED` to `true` after the topic and subscription have
@@ -49,5 +53,6 @@ scripts/test-sandbox/test-sandbox -- node --test \
   scripts/websub-publisher/test/static-feed.test.mjs \
   scripts/websub-publisher/test/static-notify.test.mjs \
   scripts/websub-publisher/test/materialize-catalog.test.mjs \
-  scripts/websub-publisher/test/pages-workflow.test.mjs
+  scripts/websub-publisher/test/pages-workflow.test.mjs \
+  scripts/websub-publisher/test/publication-ran.test.mjs
 ```
