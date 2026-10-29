@@ -1907,6 +1907,9 @@ export async function collectAnthropic({
 		/** The manifest has no recognized conversations source. That is not
 		 * an empty account, so conversations and messages are skipped. */
 		conversationsSourceMissing = false,
+		/** The manifest has no complete projects partition. That is not proof
+		 * of an empty account, so projects and project_documents are skipped. */
+		projectsBoundaryMissing = false,
 	): Promise<void> {
 		const selectedConversations: Array<{
 			record: (typeof parsed.conversations)[number];
@@ -2063,6 +2066,26 @@ export async function collectAnthropic({
 					reason: "export_conversations_missing",
 					message:
 						"The Claude export has no recognized conversations entry, so " +
+						`${stream} was not imported and was not checkpointed.`,
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
+				});
+			}
+		}
+		if (projectsBoundaryMissing) {
+			for (const stream of [PROJECTS_STREAM, PROJECT_DOCUMENTS_STREAM]) {
+				if (!requested.has(stream)) {
+					continue;
+				}
+				skipped.add(stream);
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "export_projects_missing",
+					message:
+						"The Claude export has no complete projects category, so " +
 						`${stream} was not imported and was not checkpointed.`,
 					recovery_hint: {
 						action: "retry_on_connector_upgrade",
@@ -3090,6 +3113,7 @@ export async function collectAnthropic({
 			exportBookkeeping,
 			unclassifiedEntries,
 			!conversationsSourceFound,
+			!projectsManifestBoundary,
 		);
 	}
 }

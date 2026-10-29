@@ -2013,6 +2013,52 @@ test("collectAnthropic: manifest with an empty conversations part is a verified 
 	assert.ok("synced_at" in (final.cursor as Record<string, unknown>));
 });
 
+test("collectAnthropic: manifest without a projects category skips projects and documents instead of checkpointing them empty", async () => {
+	const zip = await buildManifestPartZip([
+		{
+			name: "conversations.json",
+			content: [
+				{
+					uuid: "conv-1",
+					name: "Manifest conversation",
+					created_at: "2026-01-01T00:00:00.000Z",
+					chat_messages: [],
+				},
+			],
+		},
+	]);
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["conversations", "projects", "project_documents"],
+		fetchStub: manifestFetchStub([
+			{ category: "conversations", token: "tok-c" },
+		]),
+	});
+	serveDownloads(page, new Map([["tok-c", zip]]));
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted
+			.filter((record) => record.stream === "conversations")
+			.map((record) => record.data.id),
+		["conv-1"],
+	);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(skips.map((skip) => skip.stream).sort(), [
+		"project_documents",
+		"projects",
+	]);
+	assert.ok(skips.every((skip) => skip.reason === "export_projects_missing"));
+	assertNoSyncedAt(protocolMessages, ["projects", "project_documents"]);
+	assert.ok(
+		statesOf(protocolMessages).some(
+			(message) =>
+				message.stream === "conversations" &&
+				"synced_at" in (message.cursor as Record<string, unknown>),
+		),
+	);
+});
+
 test("collectAnthropic: manifest projects part with unknown content skips projects and project_documents only", async () => {
 	const convZip = await buildManifestPartZip([
 		{ name: "conversations.json", content: CONVERSATIONS_JSON },
@@ -2182,9 +2228,26 @@ test("collectAnthropic: manifest conversations entry with an unparseable item sk
 	assert.deepEqual(skips.map((s) => s.stream).sort(), [
 		"conversations",
 		"messages",
+		"project_documents",
+		"projects",
 	]);
-	assert.ok(skips.every((s) => s.reason === "export_items_unparseable"));
-	assertNoSyncedAt(protocolMessages, ["conversations", "messages"]);
+	assert.deepEqual(
+		skips
+			.map((skip) => `${skip.stream}:${skip.reason}`)
+			.sort(),
+		[
+			"conversations:export_items_unparseable",
+			"messages:export_items_unparseable",
+			"project_documents:export_projects_missing",
+			"projects:export_projects_missing",
+		].sort(),
+	);
+	assertNoSyncedAt(protocolMessages, [
+		"conversations",
+		"messages",
+		"projects",
+		"project_documents",
+	]);
 	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
 	const progressText = protocolMessages
 		.filter((m) => m.type === "PROGRESS")
@@ -2214,16 +2277,28 @@ test("collectAnthropic: manifest conversation without chat_messages imports its 
 	]);
 
 	const skips = skipsOf(protocolMessages);
-	assert.equal(skips.length, 1);
-	const skip = skips[0];
+	assert.deepEqual(
+		skips
+			.map((skip) => `${skip.stream}:${skip.reason}`)
+			.sort(),
+		[
+			"messages:export_conversation_incomplete",
+			"project_documents:export_projects_missing",
+			"projects:export_projects_missing",
+		].sort(),
+	);
+	const skip = skips.find((entry) => entry.stream === "messages");
 	assert.ok(skip);
-	assert.equal(skip.stream, "messages");
 	assert.equal(skip.reason, "export_conversation_incomplete");
 	assert.equal(
 		(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
 		"conv-2",
 	);
-	assertNoSyncedAt(protocolMessages, ["messages"]);
+	assertNoSyncedAt(protocolMessages, [
+		"messages",
+		"projects",
+		"project_documents",
+	]);
 	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 2);
 });
 
