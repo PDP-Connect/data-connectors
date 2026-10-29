@@ -32,7 +32,7 @@ import * as esbuild from "esbuild";
 import { consentSlicePlugin } from "../consent-slice-resolution.mjs";
 import { renderSlice } from "../../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 import { isPageShimCapable } from "./capabilities.mjs";
-import { resolvePageShimPortProfile } from "./port-profile.mjs";
+import { createPageShimPortFileReader, resolvePageShimPortProfile } from "./port-profile.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
@@ -175,14 +175,10 @@ export async function buildPageshim({
 	cryptoHashShim = true,
 }) {
 	const stubbed = new Set();
-	const selected = resolvePageShimPortProfile(connector, (path) => {
-		try {
-			return readFileSync(join(REPO, path));
-		} catch (error) {
-			if (error.code === "ENOENT") return null;
-			throw error;
-		}
-	});
+	const selected = resolvePageShimPortProfile(
+		connector,
+		createPageShimPortFileReader(REPO),
+	);
 	const port = selected.empty
 		? undefined
 		: {

@@ -19,11 +19,13 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	cpSync,
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -832,8 +834,93 @@ function portIsolationFixture(t, physical = true) {
 		git("commit", "--allow-empty", "-qm", "fixture");
 		return git("rev-parse", "HEAD");
 	};
-	return { cwd, put, commit, empty, selected };
+	return { cwd, put, commit, empty, selected, git };
 }
+for (const transitive of [false, true]) {
+	it(`PageShim port isolation rejects Git symlink ${transitive ? "child" : "shim"} despite stable unsafe hash`, async (t) => {
+		const { artifactInputHash } = await import(
+			"./connector-artifact-inputs.mjs"
+		);
+		const { buildSync } = await import(esbuildLib);
+		const f = portIsolationFixture(t);
+		const shim = "scripts/pageshim/shims/anthropic-export.ts";
+		const linked = transitive ? "scripts/pageshim/shims/port-child.js" : shim;
+		if (transitive) f.put(shim, 'export {value} from "./port-child.js";');
+		else rmSync(join(f.cwd, shim));
+		f.put(
+			"scripts/pageshim/shims/unreferenced.js",
+			'export const value=()=>"one";',
+		);
+		symlinkSync("unreferenced.js", join(f.cwd, linked));
+		const base = f.commit();
+		assert.match(f.git("ls-tree", base, "--", linked), /^120000 blob /);
+		const hash = (commit) =>
+			artifactInputHash({ commit, manifest: "anthropic", cwd: f.cwd });
+		const result = (commit) =>
+			hash(commit).then(
+				(value) => ({ value }),
+				(error) => ({ error }),
+			);
+		const compile = () =>
+			buildSync({
+				entryPoints: [join(f.cwd, shim)],
+				bundle: true,
+				write: false,
+				format: "esm",
+			}).outputFiles[0].text;
+		const before = await result(base),
+			compiledBefore = compile();
+		f.put(
+			"scripts/pageshim/shims/unreferenced.js",
+			'export const value=()=>"two";',
+		);
+		const after = await result(f.commit()),
+			compiledAfter = compile();
+		assert.notEqual(
+			compiledBefore,
+			compiledAfter,
+			"esbuild follows the selected symlink target",
+		);
+		if (!before.error && !after.error) {
+			assert.equal(
+				before.value,
+				after.value,
+				"baseline accepts a stale hash for changed compiled bytes",
+			);
+			t.diagnostic(
+				`unsafe accepted hash=${before.value}; compiled=${sha256(compiledBefore)} -> ${sha256(compiledAfter)}`,
+			);
+		}
+		for (const outcome of [before, after]) {
+			assert.ok(
+				outcome.error,
+				"must refuse Git mode 120000 instead of accepting an unsafe hash",
+			);
+			assert.match(outcome.error.message, /120000/);
+			assert.ok(outcome.error.message.includes(linked));
+		}
+	});
+}
+it("PageShim port isolation accepts executable regular files from a nested cwd", async (t) => {
+	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
+	const f = portIsolationFixture(t);
+	const shim = "scripts/pageshim/shims/anthropic-export.ts";
+	chmodSync(join(f.cwd, shim), 0o755);
+	const commit = f.commit();
+	assert.match(f.git("ls-tree", commit, "--", shim), /^100755 blob /);
+	const rootHash = await artifactInputHash({
+		commit,
+		manifest: "anthropic",
+		cwd: f.cwd,
+	});
+	const nestedHash = await artifactInputHash({
+		commit,
+		manifest: "anthropic",
+		cwd: join(f.cwd, "scripts"),
+	});
+	assert.equal(nestedHash, rootHash);
+});
+
 it("PageShim port isolation ignores unselected profile and port dependencies", async (t) => {
 	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
 	const f = portIsolationFixture(t),

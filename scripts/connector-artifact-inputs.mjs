@@ -77,7 +77,7 @@ const CONNECTOR_PORT_INPUTS = new Set([
   "scripts/pageshim/shims/buffer.js",
 ]);
 async function selectedPortAtCommit(commit, connector, options) {
-  const source = readFileAtCommit(commit, PORT_RESOLVER, options);
+  const source = readPageShimFileAtCommit(commit, PORT_RESOLVER, options);
   if (source === null) {
     const profiles = execFileSync(
       "git",
@@ -99,7 +99,7 @@ async function selectedPortAtCommit(commit, connector, options) {
     if (typeof module.resolvePageShimPortProfile !== "function")
       throw new Error("missing resolver export");
     const selected = module.resolvePageShimPortProfile(connector, (path) =>
-      readFileAtCommit(commit, path, options),
+      readPageShimFileAtCommit(commit, path, options),
     );
     return { selected, source };
   } catch (error) {
@@ -109,6 +109,44 @@ async function selectedPortAtCommit(commit, connector, options) {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// Physical port inputs must match the builder's regular-file policy. Keep this
+// separate from the historical reader so legacy artifact identities stay stable.
+function readPageShimFileAtCommit(commit, path, options) {
+  let entry;
+  try {
+    entry = execFileSync(
+      "git",
+      [
+        "--literal-pathspecs",
+        "ls-tree",
+        "--full-tree",
+        "-z",
+        commit,
+        "--",
+        path,
+      ],
+      {
+        cwd: options.cwd,
+        encoding: "utf8",
+        maxBuffer: GIT_SHOW_MAX_BUFFER,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  } catch (error) {
+    throw new ArtifactInputError(
+      `cannot inspect PageShim input ${path} at ${commit}: ${error.stderr?.toString().trim() || error.message}`,
+    );
+  }
+  if (!entry) return null;
+  const match = /^(100644|100755) blob [0-9a-f]+\t([^\0]+)\0$/.exec(entry);
+  if (!match || match[2] !== path) {
+    throw new ArtifactInputError(
+      `PageShim input ${path} at ${commit} is not a regular file (Git mode ${entry.slice(0, 6)})`,
+    );
+  }
+  return readFileAtCommit(commit, path, options);
 }
 
 function readFileAtCommit(commit, path, { cwd }) {
@@ -167,16 +205,16 @@ function candidatePaths(from, specifier) {
   return [resolved, `${resolved.slice(0, -extension.length)}${sourceExtension}`];
 }
 
-function resolveLocalImport(commit, from, specifier, options) {
+function resolveLocalImport(commit, from, specifier, options, readFile = readFileAtCommit) {
   for (const path of candidatePaths(from, specifier)) {
-    if (readFileAtCommit(commit, path, options) !== null) return path;
+    if (readFile(commit, path, options) !== null) return path;
   }
   throw new ArtifactInputError(
     `cannot resolve local import ${JSON.stringify(specifier)} from ${from} at ${commit}; refusing to compare incomplete artifact inputs`,
   );
 }
 
-function addLocalImportClosure(commit, entryPath, files, options, excluded = new Set(), remap = (path) => path) {
+function addLocalImportClosure(commit, entryPath, files, options, excluded = new Set(), remap = (path) => path, readFile = readFileAtCommit) {
   const pending = [remap(entryPath)];
   const visited = new Set();
   while (pending.length) {
@@ -185,14 +223,14 @@ function addLocalImportClosure(commit, entryPath, files, options, excluded = new
     visited.add(path);
     let source = files.get(path);
     if (source === undefined) {
-      source = readFileAtCommit(commit, path, options);
+      source = readFile(commit, path, options);
       if (source === null) {
         throw new ArtifactInputError(`cannot read local artifact input ${path} at ${commit}`);
       }
       files.set(path, source);
     }
     for (const specifier of localImportSpecifiers(source)) {
-      pending.push(remap(resolveLocalImport(commit, path, specifier, options)));
+      pending.push(remap(resolveLocalImport(commit, path, specifier, options, readFile)));
     }
   }
 }
@@ -457,17 +495,19 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       files.set(PORT_RESOLVER, physical.source);
       files.set(
         physical.selected.path,
-        readFileAtCommit(commit, physical.selected.path, options),
+        readPageShimFileAtCommit(commit, physical.selected.path, options),
       );
       // Audited createHash resolution is dynamic in the builder, so its bytes
       // must remain shared even when no connector-specific export shim imports it.
+      const portFiles = new Map();
       addLocalImportClosure(
         commit,
         "scripts/pageshim/shims/crypto.js",
-        files,
+        portFiles,
         options,
         new Set(),
         consentRemap ?? undefined,
+        readPageShimFileAtCommit,
       );
       if (!physical.selected.empty) {
         for (const path of [
@@ -477,13 +517,15 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
           addLocalImportClosure(
             commit,
             path,
-            files,
+            portFiles,
             options,
             new Set(["scripts/pageshim/capabilities.mjs", CONSENT_RENDERER]),
             consentRemap ?? undefined,
+            readPageShimFileAtCommit,
           );
         }
       }
+      for (const [path, content] of portFiles) files.set(path, content);
     }
     for (const path of sharedInputs) {
       const content = readFileAtCommit(commit, path, options);

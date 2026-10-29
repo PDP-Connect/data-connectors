@@ -8,9 +8,13 @@ import {
 	mkdirSync,
 	writeFileSync,
 	rmSync,
+	symlinkSync,
+	renameSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import * as esbuild from "esbuild";
 import test from "node:test";
 import { PUBLISHABLE_CONNECTORS } from "../connector-publish-allowlist.mjs";
@@ -287,4 +291,215 @@ test("two connector smoke bundles retain scope and state wiring", async (t) => {
 		assert.match(bundle, /initialState/);
 		assert.match(bundle, /requestedScopeEntries/);
 	}
+});
+
+function physicalBuilderFixture(t) {
+	const root = mkdtempSync(join(tmpdir(), "port-physical-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const repo = join(root, "repo");
+	const put = (path, content) => {
+		const target = join(repo, path);
+		mkdirSync(dirname(target), { recursive: true });
+		writeFileSync(target, content);
+		return target;
+	};
+	// Relocate the actual builder and resolver, not a replacement reader. Only
+	// unrelated consent rendering is stubbed; esbuild and capability checks are real.
+	const builder = readFileSync(new URL("./build.mjs", import.meta.url), "utf8")
+		.replace('"esbuild"', JSON.stringify(import.meta.resolve("esbuild")))
+		.replace(
+			'"./capabilities.mjs"',
+			JSON.stringify(new URL("./capabilities.mjs", import.meta.url).href),
+		);
+	put("scripts/pageshim/build.mjs", builder);
+	put(
+		"scripts/pageshim/port-profile.mjs",
+		readFileSync(new URL("./port-profile.mjs", import.meta.url)),
+	);
+	put(
+		"scripts/consent-slice-resolution.mjs",
+		'export const consentSlicePlugin = () => ({name: "fixture-consent", setup() {}});',
+	);
+	put(
+		"packages/polyfill-connectors/scripts/consent-time-fields-render.mjs",
+		"export const renderSlice = () => ({});",
+	);
+	const profile = "scripts/pageshim/ports/anthropic.json";
+	const shim = "scripts/pageshim/shims/selected.js";
+	const inject = "scripts/pageshim/inject/buffer.js";
+	put(
+		profile,
+		jsonProfile("anthropic", {
+			importer: "connectors/anthropic/index.ts",
+			shim,
+			modules: ["fs"],
+			inject: [inject],
+		}),
+	);
+	put(
+		"connectors/anthropic/manifest.json",
+		JSON.stringify({
+			version: "1.0.0",
+			mobile: { pageshim: { entry: "../../../connectors/anthropic/index.ts" } },
+		}),
+	);
+	put(
+		"connectors/anthropic/index.ts",
+		'import {marker} from "fs"; globalThis.fixtureResult = marker;',
+	);
+	put(shim, 'export const marker = "synthetic-regular-port";');
+	put(inject, 'globalThis.syntheticInjection = "synthetic-external-bytes";');
+	put("scripts/pageshim/shims/process.js", "export const process = {env: {}};");
+	const run = () =>
+		spawnSync(
+			process.execPath,
+			[
+				join(repo, "scripts/pageshim/build.mjs"),
+				"--connector",
+				"anthropic",
+				"--out",
+				join(root, "bundle.js"),
+			],
+			{ encoding: "utf8", timeout: 5000, killSignal: "SIGKILL" },
+		);
+	return { root, repo, put, profile, shim, inject, run };
+}
+
+test("public builder accepts regular physical port inputs", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	const result = fixture.run();
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(
+		readFileSync(join(fixture.root, "bundle.js"), "utf8"),
+		/synthetic-external-bytes/,
+	);
+});
+
+for (const selected of ["profile", "shim", "inject"]) {
+	test(`public builder rejects selected ${selected} link escape after regular control`, (t) => {
+		const fixture = physicalBuilderFixture(t);
+		const target = join(fixture.repo, fixture[selected]);
+		const outside = join(fixture.root, "outside");
+		writeFileSync(outside, readFileSync(target));
+		rmSync(target);
+		symlinkSync(outside, target);
+		const result = fixture.run();
+		assert.notEqual(
+			result.status,
+			0,
+			`Unsafe selected ${selected} link was accepted by the actual builder: ${result.stdout}`,
+		);
+		assert.match(result.stderr, /symbolic link/);
+	});
+}
+
+test("public builder rejects a selected input's linked ancestor", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	const ancestor = join(fixture.repo, "scripts/pageshim/inject");
+	const outside = join(fixture.root, "outside-directory");
+	renameSync(ancestor, outside);
+	symlinkSync(outside, ancestor, "dir");
+	const result = fixture.run();
+	assert.notEqual(
+		result.status,
+		0,
+		`Unsafe ancestor link was accepted: ${result.stdout}`,
+	);
+	assert.match(result.stderr, /symbolic link/);
+});
+
+test("public builder rejects directory and FIFO inputs without blocking", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	const target = join(fixture.repo, fixture.inject);
+	rmSync(target);
+	mkdirSync(target);
+	const directory = fixture.run();
+	assert.notEqual(directory.status, 0);
+	assert.match(directory.stderr, /not a regular file/);
+	rmSync(target, { recursive: true });
+	const fifo = spawnSync("mkfifo", [target], {
+		encoding: "utf8",
+		timeout: 1000,
+	});
+	assert.equal(fifo.status, 0, fifo.stderr);
+	const result = fixture.run();
+	assert.equal(
+		result.error,
+		undefined,
+		"FIFO must be rejected before read, not killed by timeout",
+	);
+	assert.notEqual(result.status, 0);
+	assert.match(result.stderr, /not a regular file/);
+});
+
+test("public builder rejects non-directory ancestors", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	const ancestor = join(fixture.repo, "scripts/pageshim/inject");
+	rmSync(ancestor, { recursive: true });
+	writeFileSync(ancestor, "not a directory");
+	const result = fixture.run();
+	assert.notEqual(result.status, 0);
+	assert.match(result.stderr, /ancestor is not a directory/);
+});
+
+test("relative module candidates do not hide unsafe input errors", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	const target = "connectors/anthropic/candidate.ts";
+	fixture.put(target, "export {};");
+	fixture.put(
+		fixture.profile,
+		jsonProfile("anthropic", {
+			importer: "connectors/anthropic/index.ts",
+			shim: fixture.shim,
+			modules: ["./candidate"],
+			inject: [fixture.inject],
+		}),
+	);
+	fixture.put("connectors/anthropic/index.ts", 'import "./candidate";');
+	fixture.put("connectors/anthropic/candidate.js", "export {};");
+	rmSync(join(fixture.repo, target));
+	mkdirSync(join(fixture.repo, target));
+	const result = fixture.run();
+	assert.notEqual(
+		result.status,
+		0,
+		"Unsafe .ts candidate must not fall through to regular .js",
+	);
+	assert.match(result.stderr, /not a regular file/);
+});
+
+test("physical reader loads with pure Node and validates normalized paths below its canonical root", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	const script = [
+		'import assert from "node:assert/strict";',
+		"import {createPageShimPortFileReader} from " +
+			JSON.stringify(
+				pathToFileURL(join(fixture.repo, "scripts/pageshim/port-profile.mjs"))
+					.href,
+			) +
+			";",
+		"const read = createPageShimPortFileReader(" +
+			JSON.stringify(fixture.repo + "/scripts/..") +
+			");",
+		"assert.ok(Buffer.isBuffer(read(" + JSON.stringify(fixture.inject) + ")));",
+		'assert.equal(read("missing/file.js"), null);',
+		"for (const path of " +
+			JSON.stringify([
+				"../escape",
+				"/absolute",
+				"./relative",
+				"a//b",
+				"a/../b",
+				"C:/escape",
+				"a\\b",
+				"a\0b",
+			]) +
+			") assert.throws(() => read(path), /invalid physical input path/);",
+	].join("\n");
+	const result = spawnSync(
+		process.execPath,
+		["--input-type=module", "-e", script],
+		{ encoding: "utf8", timeout: 5000 },
+	);
+	assert.equal(result.status, 0, result.stderr);
 });

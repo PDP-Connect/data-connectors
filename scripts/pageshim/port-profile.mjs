@@ -1,8 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { builtinModules } from "node:module";
-import { posix } from "node:path";
+import { join, posix } from "node:path";
 
 const PORT_PROFILE_DIRECTORY = "scripts/pageshim/ports";
 const BUILTINS = new Set(builtinModules);
@@ -18,6 +19,43 @@ const MODULE_EXTENSIONS = [
 ];
 
 export class PageShimPortProfileError extends Error {}
+
+/**
+ * Read only regular physical files below a canonical trusted repository root.
+ * The checkout must remain stable during validation and subsequent reads/builds;
+ * these path checks do not provide adversarial concurrent-mutation protection.
+ */
+export function createPageShimPortFileReader(repositoryRoot) {
+	const root = realpathSync(repositoryRoot);
+	if (!lstatSync(root).isDirectory())
+		throw new PageShimPortProfileError(
+			"PageShim repository root is not a directory",
+		);
+	return (path) => {
+		validateRepoPath(path, "physical input path", "trusted repository");
+		let current = root;
+		const parts = path.split("/");
+		for (const [index, part] of parts.entries()) {
+			current = join(current, part);
+			let stat;
+			try {
+				stat = lstatSync(current);
+			} catch (error) {
+				if (error.code === "ENOENT") return null;
+				throw error;
+			}
+			if (stat.isSymbolicLink())
+				throw new PageShimPortProfileError(
+					`symbolic link in PageShim input ${path}: ${parts.slice(0, index + 1).join("/")}`,
+				);
+			if (index < parts.length - 1 ? !stat.isDirectory() : !stat.isFile())
+				throw new PageShimPortProfileError(
+					`${path}: ${index < parts.length - 1 ? "ancestor is not a directory" : "not a regular file"}`,
+				);
+		}
+		return readFileSync(current);
+	};
+}
 
 function readRequired(readFile, path, label) {
 	try {
@@ -92,6 +130,7 @@ function validateRepoPath(path, label, profilePath) {
 	if (
 		typeof path !== "string" ||
 		path.length === 0 ||
+		/[:\0]/.test(path) ||
 		path.startsWith("/") ||
 		path.includes("\\") ||
 		path
@@ -126,9 +165,8 @@ function resolveModulePath(importer, specifier, readFile) {
 				...MODULE_EXTENSIONS.map((suffix) => `${resolved}/index${suffix}`),
 			];
 	for (const candidate of candidates) {
-		try {
-			if (readFile(candidate) !== null) return candidate;
-		} catch {}
+		// Missing candidates return null; unsafe physical inputs must fail closed.
+		if (readFile(candidate) !== null) return candidate;
 	}
 	return null;
 }
