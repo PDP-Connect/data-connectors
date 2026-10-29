@@ -9,7 +9,7 @@
 	},
 	"connector_key": "facebook",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"display_name": "Facebook",
 	"runtime_requirements": {
 		"bindings": {
