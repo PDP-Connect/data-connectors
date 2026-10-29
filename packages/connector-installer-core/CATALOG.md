@@ -18,6 +18,10 @@ Unchanged content reuses the previous timestamp. Changed source metadata or conn
 
 The workflow pushes the new artifact without moving `latest`, signs and verifies the returned digest, then tags that digest as `latest`. A signing or verification failure leaves the last signed catalog available, so the next run can retry.
 
+## Subscribe to updates
+
+When configured, the [WebSub publisher](../../scripts/websub-publisher/README.md) exposes a public Atom topic and notifies its hub after the signed catalog is tagged. Any consumer can subscribe through that hub. Notifications are hints: fetch and verify the catalog by digest before using it. The topic and hub are deployment configuration, so no public topic URL is assumed here.
+
 ## Fetch
 
 ```js

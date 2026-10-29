@@ -454,8 +454,8 @@ test("a main push uses the filtered matrix and a no-op skips publish jobs", () =
   assert.match(workflow, /run: node scripts\/select-publish-connectors\.mjs/);
   assert.match(
     workflow,
-    /^    if: \$\{\{ !inputs\.catalog-only && needs\.prepare\.outputs\.has-publishable-changes == 'true' \}\}$/m,
-    "an empty filtered matrix must not create skipped connector legs",
+    /^    if: \$\{\{ !inputs\.catalog-only && !inputs\.recover-latest && needs\.prepare\.outputs\.has-publishable-changes == 'true' \}\}$/m,
+    "an empty filtered matrix or recovery dispatch must not create connector publish legs",
   );
   assert.match(
     readFileSync(join(repoRoot, "scripts", "select-publish-connectors.mjs"), "utf8"),

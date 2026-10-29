@@ -96,6 +96,10 @@ if [ "\${1:-}" = "scripts/generate-connector-catalog.mjs" ]; then
   done
   exit 42
 fi
+if [[ "\${1:-}" == */scripts/websub-publisher/declare-catalog-ready.mjs ]]; then
+  if [ "\${FAIL_COMMAND:-}" = "declare" ]; then exit 52; fi
+  exit 0
+fi
 exec "$REAL_NODE" "$@"
 `,
   );
@@ -175,6 +179,7 @@ case "\${1:-}" in sign|verify) exit 0 ;; *) exit 48 ;; esac
       GITHUB_ACTOR: "fixture-actor",
       GITHUB_REPOSITORY: "PDP-Connect/data-connectors",
       GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
+      GITHUB_WORKSPACE: repoRoot,
       ...overrides,
     },
   });
@@ -236,6 +241,9 @@ test("the catalog is generated, pushed with its media type, then signs and verif
     const signIndex = run.commands.findIndex((line) => line === sign);
     const verifyIndex = run.commands.findIndex((line) => line === verify);
     const tagIndex = run.commands.findIndex((line) => line.startsWith("oras\ttag "));
+    const declarationIndex = run.commands.findIndex((line) =>
+      line.startsWith("node\t") && line.includes("/scripts/websub-publisher/declare-catalog-ready.mjs "),
+    );
     const digestReference = `ghcr.io/pdp-connect/connector-catalog@${catalogDigest}`;
     assert.match(sign ?? "", new RegExp(`^cosign\\tsign --yes ${digestReference}$`));
     assert.match(verify ?? "", new RegExp(`^cosign\\tverify ${digestReference} `));
@@ -256,6 +264,8 @@ test("the catalog is generated, pushed with its media type, then signs and verif
       pushIndex < signIndex && signIndex < verifyIndex && verifyIndex < tagIndex,
       "the untagged push must be signed and verified before latest moves",
     );
+    assert.notEqual(declarationIndex, -1, "the ready declaration must run after publication succeeds");
+    assert.ok(tagIndex < declarationIndex, "the ready declaration must follow verified tagging");
     assert.equal(run.tagDigest(), catalogDigest, "the successful publish must move latest");
     assert.equal(
       run.commands.some((line) => /^oras\t(resolve|manifest fetch)\b/.test(line)),
@@ -321,6 +331,11 @@ test("an unknown prior-catalog lookup aborts before generation or publication", 
     );
     assert.equal(run.commands.some((line) => line.startsWith("oras\tpush ")), false);
     assert.equal(run.commands.some((line) => line.startsWith("oras\ttag ")), false);
+    assert.equal(
+      run.commands.some((line) => line.includes("/scripts/websub-publisher/declare-catalog-ready.mjs ")),
+      false,
+      "an unknown prior catalog must not be declared ready",
+    );
     assert.equal(run.tagDigest(), previousCatalogDigest);
   } finally {
     run.cleanup();
@@ -344,6 +359,11 @@ for (const priorFailure of [
       );
       assert.equal(run.commands.some((line) => line.startsWith("oras\tpush ")), false);
       assert.equal(run.commands.some((line) => line.startsWith("oras\ttag ")), false);
+      assert.equal(
+        run.commands.some((line) => line.includes("/scripts/websub-publisher/declare-catalog-ready.mjs ")),
+        false,
+        "a prior catalog failure must not be declared ready",
+      );
       assert.equal(run.tagDigest(), previousCatalogDigest);
     } finally {
       run.cleanup();
@@ -368,6 +388,11 @@ for (const failure of [
         "a failed publish transaction must not move latest",
       );
       assert.equal(
+        run.commands.some((line) => line.includes("/scripts/websub-publisher/declare-catalog-ready.mjs ")),
+        false,
+        "a failed publish transaction must not be declared ready",
+      );
+      assert.equal(
         run.tagDigest(),
         previousCatalogDigest,
         "a failed publish transaction must preserve the prior latest digest",
@@ -377,6 +402,17 @@ for (const failure of [
     }
   });
 }
+
+test("a ready-declaration failure fails the job after the verified catalog is tagged", () => {
+  const run = runCatalogPublish({ FAIL_COMMAND: "declare" });
+  try {
+    assert.notEqual(run.result.status, 0);
+    assert.equal(run.tagDigest(), catalogDigest);
+    assert.ok(run.commands.some((line) => line.includes("/scripts/websub-publisher/declare-catalog-ready.mjs ")));
+  } finally {
+    run.cleanup();
+  }
+});
 
 test("the catalog publish runs once after successful publish legs or a catalog-only dispatch", () => {
   const { condition } = extractCatalogPublishStep();
@@ -413,12 +449,13 @@ test("all publishes remain serialized by one workflow-wide concurrency group", (
   assert.match(workflow, /^  cancel-in-progress:\s*false\s*$/m);
 });
 
-function evaluateCondition(expression, { catalogOnly, dryRun = false, selected = false, ref = "refs/heads/main" }) {
+function evaluateCondition(expression, { catalogOnly, dryRun = false, recoverLatest = false, selected = false, ref = "refs/heads/main" }) {
   const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "")
     .replaceAll("inputs.catalog-only", "inputs['catalog-only']")
-    .replaceAll("inputs.dry-run", "inputs['dry-run']");
+    .replaceAll("inputs.dry-run", "inputs['dry-run']")
+    .replaceAll("inputs.recover-latest", "inputs['recover-latest']");
   return Function("inputs", "steps", "github", `return (${source});`)(
-    { "catalog-only": catalogOnly, "dry-run": dryRun },
+    { "catalog-only": catalogOnly, "dry-run": dryRun, "recover-latest": recoverLatest },
     { target: { outputs: { selected: selected ? "true" : "false" } } },
     { ref },
   );
@@ -448,6 +485,11 @@ test("catalog-only dispatch skips connector selection and publication but runs c
   assert.equal(evaluateCondition(condition, { ...catalogOnly, dryRun: true }), false);
   assert.equal(evaluateCondition(condition, { ...catalogOnly, dryRun: false }), true);
   assert.equal(
+    evaluateCondition(condition, { ...catalogOnly, dryRun: false, recoverLatest: true }),
+    false,
+    "recovery must not run the normal catalog publication",
+  );
+  assert.equal(
     evaluateCondition(condition, { ...catalogOnly, dryRun: false, ref: "refs/heads/feature" }),
     false,
   );
@@ -455,6 +497,11 @@ test("catalog-only dispatch skips connector selection and publication but runs c
     evaluateCondition(condition, { ...catalogOnly, dryRun: false, ref: "refs/tags/connector-ynab-v0.3.0" }),
     false,
   );
+  const recovery = stepCondition("Recover the ready declaration for the verified latest catalog");
+  assert.equal(evaluateCondition(recovery, { catalogOnly: true, recoverLatest: true }), true);
+  assert.equal(evaluateCondition(recovery, { catalogOnly: true, recoverLatest: true, dryRun: true }), false);
+  assert.equal(evaluateCondition(recovery, { catalogOnly: true, recoverLatest: true, ref: "refs/heads/feature" }), false);
+  assert.equal(evaluateCondition(recovery, { catalogOnly: true, recoverLatest: false }), false);
   const catalog = workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1] ?? "";
   assert.match(catalog, /inputs\.catalog-only/);
   assert.match(catalog, /github\.ref\s*==\s*'refs\/heads\/main'/);
