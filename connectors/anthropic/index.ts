@@ -184,6 +184,7 @@ import {
 } from "./oversize-conversation.ts";
 import {
 	buildAccountPlanRecord,
+	hasReadablePlanOrganizationInventory,
 	usablePlanOrganizations,
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
@@ -556,12 +557,7 @@ async function fetchOrganizations(
 	if (!result.ok || !Array.isArray(result.json)) {
 		return [];
 	}
-	return result.json.filter(
-		(org): org is ClaudeOrganization =>
-			typeof org === "object" &&
-			org !== null &&
-			typeof (org as { uuid?: unknown }).uuid === "string",
-	);
+	return result.json as ClaudeOrganization[];
 }
 
 /** Selects the chat-capable org, mirroring the legacy connector's
@@ -1348,6 +1344,10 @@ export async function collectAnthropic({
 	// The legacy key stays bound to the actual export org (or unchanged selector
 	// in a plan-only run). Enumerating plans must never request another export.
 	const emitAccountPlan = async (organizationId: string): Promise<void> => {
+		if (!hasReadablePlanOrganizationInventory(organizations)) {
+			await emit({ type: "SKIP_RESULT", stream: ACCOUNT_PLAN_STREAM, reason: "parse_error", message: "The organization list contains an unreadable entry.", recovery_hint: { action: "retry_by_runtime", retryable: true } });
+			return;
+		}
 		const usable = usablePlanOrganizations(organizations);
 		if (!usable.some((org) => org.uuid === organizationId)) {
 			await emit({

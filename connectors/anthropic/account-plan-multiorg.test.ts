@@ -184,3 +184,21 @@ test("export connector skips the whole inventory when any plan record fails vali
 	assert.equal(skip?.recovery_hint?.retryable, true);
 	assert.ok(events.every((m) => m.type !== "DETAIL_COVERAGE"));
 });
+
+test("export connector rejects malformed raw secondary organizations before certifying inventory", async () => {
+	for (const malformed of [{ uuid: "team" }, { uuid: "team", capabilities: "raven" }, { capabilities: ["raven"] }, null]) {
+		const { records, events } = await exportPlans([{ uuid: "personal", capabilities: ["chat"] }, malformed]);
+		assert.deepEqual(records, []);
+		assert.ok(events.every((event) => event.type !== "DETAIL_COVERAGE"));
+		const skip = events.find((event) => event.type === "SKIP_RESULT") as { reason?: string; recovery_hint?: { retryable?: boolean } } | undefined;
+		assert.equal(skip?.reason, "parse_error");
+		assert.equal(skip?.recovery_hint?.retryable, true);
+	}
+});
+
+test("export connector treats a valid empty-capabilities secondary as a clean snapshot", async () => {
+	const { records, events } = await exportPlans([{ uuid: "personal", capabilities: ["chat"] }, { uuid: "api", capabilities: [] }]);
+	assert.equal(records.length, 1);
+	assert.ok(events.some((event) => event.type === "DETAIL_COVERAGE"));
+	assert.ok(events.every((event) => event.type !== "SKIP_RESULT"));
+});

@@ -76,6 +76,7 @@ import {
 } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	buildAccountPlanRecord,
+	hasReadablePlanOrganizationInventory,
 	usablePlanOrganizations,
 	buildConversationRecord,
 	buildMessageRecord,
@@ -323,6 +324,10 @@ export async function runAccountPlanStream(
 	organizations: RawOrganization[],
 ): Promise<void> {
 	await ctx.progress("Fetching account plans", { stream: ACCOUNT_PLAN_STREAM });
+	if (!hasReadablePlanOrganizationInventory(organizations)) {
+		await skip(ctx, ACCOUNT_PLAN_STREAM, "parse_error", "The organization list contains an unreadable entry.", true);
+		return;
+	}
 	const usable = usablePlanOrganizations(organizations);
 	// As in the export connector: the run's organization holds the id
 	// account_plan, so an inventory without it is not the full inventory.
@@ -1157,7 +1162,7 @@ export async function collectAnthropicLive(ctx: Ctx): Promise<void> {
 		await runAccountPlanStream(
 			ctx,
 			org,
-			Array.isArray(orgs.json) ? orgs.json.filter(isRecord) : [org],
+			Array.isArray(orgs.json) ? orgs.json : [org],
 		);
 	}
 	if (requested.has(USAGE_LIMITS_STREAM)) {

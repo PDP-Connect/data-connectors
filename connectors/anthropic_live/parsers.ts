@@ -355,3 +355,13 @@ export function usablePlanOrganizations(
 		return true;
 	});
 }
+
+/** A full inventory is safe only when every raw entry can be classified. */
+export function hasReadablePlanOrganizationInventory(orgs: unknown[]): boolean {
+	return orgs.every((value) => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+		const org = value as RawOrganization;
+		return typeof org.uuid === "string" && org.uuid.length > 0 &&
+			Array.isArray(org.capabilities) && org.capabilities.every((c) => typeof c === "string");
+	});
+}

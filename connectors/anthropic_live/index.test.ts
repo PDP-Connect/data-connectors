@@ -406,3 +406,27 @@ test("organization selection follows the export connector's rule", () => {
 	assert.equal(selectChatOrganization([{ name: "no uuid" }]), null);
 	assert.equal(selectChatOrganization({}), null);
 });
+
+test("account_plan rejects malformed raw secondary organizations before certifying inventory", async () => {
+	for (const malformed of [{ uuid: "team" }, { uuid: "team", capabilities: "raven" }, { capabilities: ["raven"] }, null]) {
+		const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed] });
+		await collectAnthropicLive(h.ctx);
+		assert.deepEqual(h.of("account_plan"), []);
+		assert.deepEqual(h.states("account_plan"), []);
+		assert.ok(h.emitted.every((event) => event.type !== "DETAIL_COVERAGE"));
+		assert.equal(h.skips().length, 1);
+		assert.equal(h.skips()[0]?.reason, "parse_error");
+		const skip = h.emitted.find((event) => event.type === "SKIP_RESULT") as
+			| { recovery_hint?: { retryable?: boolean } }
+			| undefined;
+		assert.equal(skip?.recovery_hint?.retryable, true);
+	}
+});
+
+test("account_plan treats a valid empty-capabilities secondary as a clean snapshot", async () => {
+	const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, { uuid: "api", capabilities: [] }] });
+	await collectAnthropicLive(h.ctx);
+	assert.equal(h.of("account_plan").length, 1);
+	assert.equal(h.skips().length, 0);
+	assert.ok(h.emitted.some((event) => event.type === "DETAIL_COVERAGE"));
+});
