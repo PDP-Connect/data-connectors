@@ -4,12 +4,6 @@
 export const REPOSITORY = "ghcr.io/pdp-connect/connector-catalog";
 export const TOPIC_URL = "https://registry.pdpp.dev/catalog/updates.atom";
 export const HUB_URL = "https://websubhub.com/hub";
-export class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
 export function httpsURL(value) {
   if (typeof value !== "string" || value.length > 2048) throw new Error("missing URL");
   const u = new URL(value);

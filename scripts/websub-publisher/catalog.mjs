@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { REPOSITORY, HttpError } from "./config.mjs";
+import { REPOSITORY } from "./config.mjs";
 export function readyRecord(x) {
   if (
     !x ||
@@ -19,7 +19,7 @@ export function readyRecord(x) {
     !Number.isFinite(Date.parse(x.generated_at)) ||
     new Date(x.generated_at).toISOString() !== x.generated_at
   ) {
-    throw new HttpError(400, "invalid ready declaration");
+    throw new Error("invalid catalog ready record");
   }
   return {
     schema: x.schema,
