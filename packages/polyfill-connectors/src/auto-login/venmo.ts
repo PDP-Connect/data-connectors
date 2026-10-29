@@ -1263,9 +1263,7 @@ let manualPromptSuppressed = false;
 /**
  * Hand the page to the owner, navigating to the real sign-in page first so
  * the handoff shows a Venmo sign-in screen rather than `about:blank` — the
- * page at handoff time has no `preservePageOnSuccess`/`preservePageOnFailure`
- * guarantee and may still be on its initial blank state (F2 in
- * /tmp/review-venmo-browser-redesign-0810.md).
+ * runtime creates a fresh run page, which may still be in its initial blank state.
  *
  * Deliberately does NOT probe after the owner responds. The probe it used to
  * run began with {@link ensureVenmoOrigin}, whose cross-origin `page.goto` is
