@@ -14,15 +14,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
       - name: Install contract tooling dependencies
         run: npm ci
-
-      - name: Check frozen historical scope, fixture, and artifact contracts
-        run: npm run historical-contract:check
 
       - name: Check packed library manifest projection
         run: npm run polyfill-library-metadata:check
@@ -33,10 +30,8 @@ jobs:
       - name: Test run-clock schema guard
         run: node --test scripts/check-run-clock-schema-fields.test.mjs
 
-      - name: Test historical artifact contracts
-        run: npm run historical-contract:test
-      - name: Test the legacy artifact release lane
-        run: npm run release-index:test
+      - name: Check permanent frozen scope IDs, schemas and generated docs
+        run: npm run legacy-shapes:check && npm run legacy-shapes:test
 
       - name: Test installer artifact contracts
         run: npm run installer:test
@@ -44,17 +39,14 @@ jobs:
       - name: Test the manifest schema against the Collection Profile and manifests
         run: npm run manifest-schema:test
 
+      - name: Check the vendored test-sandbox matches its recorded hash
+        run: npm run test:tooling
+
       - name: Test publish ref gate
         run: node --test scripts/publish-ref-gate.test.mjs
 
-      - name: Test publish tag guard
-        run: node --test scripts/publish-tag-guard.test.mjs
-
-      - name: Test manifest lookup classifier
-        run: node --test scripts/lookup-manifest.test.mjs
-
-      - name: Test registry rate-limit retry
-        run: node --test scripts/registry-rate-limit.test.mjs
+      - name: Test publish tag guard, manifest lookup, registry rate limit, additive schemas and connector brand icons
+        run: npm run scripts:test
 
       - name: Check scope schemas additive (HC-COMPAT-ADDITIVE-SCHEMA-001)
         env:

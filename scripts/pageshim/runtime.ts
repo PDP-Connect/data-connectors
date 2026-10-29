@@ -21,6 +21,11 @@ import {
 	withholdsBoundedProgress,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
+import {
+	CollectionOutcome,
+	fatalCollectionError,
+	type ConnectorError,
+} from "./collection-outcome.ts";
 
 /** Set by build.mjs: the connector directory whose manifest declares the streams. */
 declare const PAGESHIM_CONNECTOR_MANIFEST: string | undefined;
@@ -207,6 +212,7 @@ function boundedPageEvaluate(shim: ShimPage) {
 		if (
 			response?.type !== "chunked" ||
 			response.id !== id ||
+			typeof response.length !== "number" ||
 			!Number.isSafeInteger(response.length) ||
 			(response.length ?? 0) <= EVALUATE_INLINE_MAX_UNITS ||
 			(response.length ?? 0) > EVALUATE_RESULT_MAX_UNITS
@@ -351,9 +357,15 @@ export interface PageshimConnector {
 	prepareProbe?: (
 		page: ReturnType<typeof playwrightPageFacade>,
 	) => Promise<void>;
+	/** Runs before makeEmitRecord snapshots per-stream resource selection. */
+	prepareRequested?: (
+		requested: Parameters<typeof makeEmitRecord>[0]["requested"],
+	) => void;
 	collect: (ctx: Record<string, unknown>) => Promise<void>;
 	/** PDPP records of one stream -> the scope payload the host stores. */
 	toScope: (stream: string, records: Rec[]) => unknown;
+	/** Generic collectors use successful STATE to acknowledge empty covered ranges. */
+	emptyScopeFromCheckpoint?: boolean;
 	/** Optional incremental form for connectors whose scope value is one record array. */
 	streamScopeRecords?: {
 		/** Large streams first; later streams remain buffered until the active scope closes. */
@@ -374,33 +386,14 @@ export interface PageshimConnector {
 		label: string;
 		details: unknown;
 	};
-	/** Streams where pending DETAIL_GAPs mean the PageShim result is partial. */
-	partialStreamsFromDetailGaps?: (streams: string[]) => string[];
 }
-
-type ConnectorError = {
-	errorClass: string;
-	reason: string;
-	disposition: string;
-	scope?: string;
-	phase: string;
-};
 
 class FatalRunError extends Error {
-	constructor(readonly telemetryError: ConnectorError) {
+	readonly telemetryError: ConnectorError;
+	constructor(telemetryError: ConnectorError) {
 		super(telemetryError.reason);
+		this.telemetryError = telemetryError;
 	}
-}
-
-/** github-1.5.0.js inferErrorClass. */
-function inferErrorClass(message: string, fallback = "runtime_error"): string {
-	const text = message.toLowerCase();
-	if (["auth", "login", "credential"].some((w) => text.includes(w)))
-		return "auth_failed";
-	if (text.includes("timeout") || text.includes("timed out")) return "timeout";
-	if (["network", "fetch", "net::"].some((w) => text.includes(w)))
-		return "network_error";
-	return fallback;
 }
 
 /** github-1.5.0.js resolveRequestedScopes. */
@@ -472,16 +465,18 @@ export async function runOnPageShim(
 				},
 			]),
 	);
+	if (!initError && connector.prepareRequested) {
+		try {
+			connector.prepareRequested(requested);
+		} catch (error) {
+			initError = error;
+		}
+	}
 	const records: Record<string, Rec[]> = {};
-	const errors: ConnectorError[] = [];
 	const state: Record<string, unknown> = {};
 	for (const [stream, scope] of scopeByStream)
 		if (Object.hasOwn(initialState, scope)) state[stream] = initialState[scope];
-	const detailGapStreams = new Set<string>();
-	// A stream the connector checkpointed this run and never skipped was
-	// collected in full, so no records means the account has none.
-	const checkpointedStreams = new Set<string>();
-	const skippedStreams = new Set<string>();
+	const outcome = new CollectionOutcome(prefix, requested.keys());
 	const streamedStreams = new Set<string>();
 	// A thin host accepts streamed results only (mobile-host-v1 amendment A6).
 	const streamingHost = hostAcceptsStreamedResults(pageShim);
@@ -490,8 +485,9 @@ export async function runOnPageShim(
 			? connector.streamScopeRecords
 			: null;
 	const pendingRecords: Record<string, Rec[]> = {};
-	const streamCounts: Record<string, number> = {};
+	const streamCounts = outcome.counts;
 	let streamProtocolUsed = false;
+	let legacyResultAccepted = false;
 	let activeStream: string | null = null;
 	let activeSequence = 0;
 	let activeRecordCount = 0;
@@ -601,6 +597,10 @@ export async function runOnPageShim(
 		value: unknown,
 	): Promise<void> => {
 		try {
+			if (
+				JSON.stringify(["setData", [key, value]]).length > PAGE_BRIDGE_MAX_UNITS
+			)
+				throw new Error("PageShim result metadata exceeds the bridge limit");
 			await shim.setData(key, value);
 		} catch (error) {
 			streamSendFailed = true;
@@ -608,10 +608,7 @@ export async function runOnPageShim(
 			throw streamFailure;
 		}
 	};
-	const sendStreamText = async (
-		scope: string,
-		text: string,
-	): Promise<void> => {
+	const sendStreamText = async (scope: string, text: string): Promise<void> => {
 		for (let offset = 0; offset < text.length; ) {
 			let end = Math.min(offset + RESULT_CHUNK_MAX_UNITS, text.length);
 			if (end < text.length && isHighSurrogate(text.charCodeAt(end - 1))) end--;
@@ -728,7 +725,7 @@ export async function runOnPageShim(
 		switch (msg.type) {
 			case "RECORD": {
 				const stream = String(msg.stream);
-				streamCounts[stream] = (streamCounts[stream] ?? 0) + 1;
+				outcome.record(stream);
 				if (streamConfig) {
 					const target = streamConfig.order[0];
 					if (!streamConfig.order.includes(stream))
@@ -750,44 +747,20 @@ export async function runOnPageShim(
 				const stream = String(msg.stream);
 				const scope = scopeByStream.get(stream);
 				if (!scope) throw new Error(`unsupported STATE stream: ${stream}`);
-				// A checkpoint must not reach the host before the records it covers.
-				await flushStreamText(true);
-				if (supportsState)
-					await shim.setData("STATE", {
-						type: "STATE",
-						stream: scope,
-						cursor: msg.cursor,
-					});
+				// Retain candidates until every late coverage veto has settled.
+				outcome.checkpoint(stream, msg.cursor);
 				state[stream] = msg.cursor;
-				checkpointedStreams.add(stream);
 				return;
 			}
-			case "SKIP_RESULT": {
-				const stream = String(msg.stream);
-				skippedStreams.add(stream);
-				const reason = String(msg.message ?? msg.reason).slice(
-					0,
-					ERROR_TEXT_MAX_UNITS,
-				);
-				errors.push({
-					// A failed stream leaves requested data uncollected, so the
-					// run is partial; other skips are intentional omissions.
-					errorClass:
-						msg.reason === "stream_collection_failed"
-							? "partial"
-							: inferErrorClass(reason),
-					reason,
-					disposition: (streamCounts[stream] ?? 0) ? "degraded" : "omitted",
-					scope: `${prefix}${stream}`,
-					phase: "collect",
-				});
+			case "SKIP_RESULT":
+				outcome.skip(msg);
 				return;
-			}
-			case "DETAIL_GAP": {
-				const stream = String(msg.stream);
-				detailGapStreams.add(stream);
+			case "DETAIL_COVERAGE":
+				outcome.coverage(msg);
 				return;
-			}
+			case "DETAIL_GAP":
+				outcome.detailGap(String(msg.stream));
+				return;
 			case "PROGRESS":
 				await shim.setProgress({
 					phase: { label: String(msg.stream ?? "collect") },
@@ -894,7 +867,11 @@ export async function runOnPageShim(
 			reportStreamFailure: (
 				stream: string,
 				message: string,
-				options: { retryable?: boolean } = {},
+				options: {
+					diagnostics?: Record<string, unknown>;
+					recoveryHint?: { action: string; retryable?: boolean };
+					retryable?: boolean;
+				} = {},
 			) =>
 				emit({
 					type: "SKIP_RESULT",
@@ -902,9 +879,13 @@ export async function runOnPageShim(
 					reason: "stream_collection_failed",
 					message,
 					recovery_hint: {
-						action: "retry_by_runtime",
-						retryable: options.retryable === true,
+						action: options.recoveryHint?.action ?? "retry_by_runtime",
+						retryable:
+							options.recoveryHint?.retryable ?? options.retryable === true,
 					},
+					...(options.diagnostics === undefined
+						? {}
+						: { diagnostics: options.diagnostics }),
 				}),
 			state,
 		});
@@ -930,23 +911,34 @@ export async function runOnPageShim(
 					message: unsupported,
 				});
 		}
-		for (const stream of connector.partialStreamsFromDetailGaps?.([
-			...requested.keys(),
-		]) ?? []) {
-			if (detailGapStreams.has(stream)) {
-				errors.push({
-					errorClass: "partial",
-					reason:
-						"PageShim collected a bounded ChatGPT prefix with conversation details pending. PageShim does not persist STATE or DETAIL_GAP recovery state, so another PageShim run starts a new bounded walk instead of resuming this omitted tail.",
-					disposition:
-						records[stream]?.length || streamCounts[stream]
-							? "degraded"
-							: "omitted",
-					scope: `${prefix}${stream}`,
-					phase: "collect",
-				});
+		const finalized = outcome.finalize(
+			new Set(
+				[...requested]
+					.filter(
+						([, scope]) =>
+							(scope as { time_range?: unknown }).time_range !== undefined,
+					)
+					.map(([stream]) => stream),
+			),
+			emitRecord.withheldAtOrAfterUntil,
+		);
+		const errors = finalized.errors;
+		const outcomesByStream = new Map(
+			finalized.streams.map((stream) => [stream.stream, stream]),
+		);
+		const completionStatus = (summary: { count: number; label: string }) =>
+			`${finalized.partial ? "Partial:" : "Complete!"} ${summary.count} ${summary.label}`;
+		const flushCheckpoints = async (): Promise<void> => {
+			if (!supportsState) return;
+			for (const stream of finalized.streams) {
+				if (stream.checkpoint !== undefined)
+					await shim.setData("STATE", {
+						type: "STATE",
+						stream: stream.scope,
+						cursor: stream.checkpoint.cursor,
+					});
 			}
-		}
+		};
 		if (streamFailure) throw streamFailure;
 		if (streamConfig) {
 			await finishStreamScope();
@@ -956,15 +948,8 @@ export async function runOnPageShim(
 				// host can tell "collected, none" from "not collected". A
 				// windowed stream is not: no rows in the window says nothing
 				// about older ones.
-				const entry = requested.get(stream) as
-					| { time_range?: unknown }
-					| undefined;
 				const confirmedEmpty =
-					entry !== undefined &&
-					entry.time_range === undefined &&
-					checkpointedStreams.has(stream) &&
-					!skippedStreams.has(stream) &&
-					!detailGapStreams.has(stream) &&
+					outcomesByStream.get(stream)?.confirmedEmptyInventory === true &&
 					!streamedStreams.has(stream);
 				if (buffered.length === 0 && !confirmedEmpty) continue;
 				await beginStreamScope(stream);
@@ -972,27 +957,34 @@ export async function runOnPageShim(
 				await finishStreamScope();
 			}
 			if (streamedScopeCount > 0) {
+				await flushCheckpoints();
 				const exportSummary = streamConfig.summarizeCounts(streamCounts);
 				await sendStreamMessage("result:done", {
 					scopeCount: streamedScopeCount,
 					exportSummary,
 					errors,
 				});
-				const completion =
-					errors.length > 0
-						? `Partial: ${exportSummary.count} ${exportSummary.label}`
-						: `Complete! ${exportSummary.count} ${exportSummary.label}`;
-				await shim.setData("status", completion);
+				await shim.setData("status", completionStatus(exportSummary));
 				return;
 			}
 		}
 		const scopes: Record<string, unknown> = {};
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
-		const completionStatus = (summary: { count: number; label: string }) =>
-			errors.some((error) => error.errorClass === "partial")
-				? `Partial: ${summary.count} ${summary.label}`
-				: `Complete! ${summary.count} ${summary.label}`;
+		// A successful checkpoint proves coverage of this window, even when no
+		// rows exist in it. An empty scope is only this run's payload; requested
+		// bounds and deferred/partial errors still describe its coverage.
+		for (const stream of finalized.streams) {
+			if (connector.emptyScopeFromCheckpoint && stream.emptyFromCheckpoint)
+				scopes[stream.scope] ??= connector.toScope(stream.stream, []);
+		}
+		// An omitted scope still carries its incomplete outcome on thin hosts.
+		if (streamingHost && Object.keys(scopes).length === 0) {
+			for (const stream of finalized.streams) {
+				if (stream.partial)
+					scopes[stream.scope] = connector.toScope(stream.stream, []);
+			}
+		}
 		if (streamingHost) {
 			// The host rejects a stream without scopes, so a run that collected
 			// nothing reports its reason as a run error instead.
@@ -1012,6 +1004,7 @@ export async function runOnPageShim(
 					chunkCount: activeSequence,
 				});
 			}
+			await flushCheckpoints();
 			const exportSummary = connector.summarize(scopes);
 			await sendStreamMessage("result:done", {
 				scopeCount: scopeEntries.length,
@@ -1029,6 +1022,8 @@ export async function runOnPageShim(
 			);
 		}
 		await shim.setData("result", done);
+		legacyResultAccepted = true;
+		await flushCheckpoints();
 		await shim.setData("status", completionStatus(done.exportSummary));
 	} catch (error) {
 		const reason = (
@@ -1037,16 +1032,14 @@ export async function runOnPageShim(
 		const fatal =
 			error instanceof FatalRunError
 				? error.telemetryError
-				: {
-						errorClass: inferErrorClass(reason),
-						reason,
-						disposition: "fatal",
-						phase: "collect",
-					};
+				: fatalCollectionError(error, reason);
 		// Keep the records collected before the failure in the host's partial
 		// result, as when every record was sent on its own.
 		if (!streamSendFailed) await flushStreamText(true).catch(() => undefined);
-		if (!streamProtocolUsed && !streamingHost)
+		// A legacy payload can already back committed checkpoints. Preserve it
+		// after a later STATE or status failure, reporting the error separately.
+		// Only a run with no accepted payload may emit an empty fatal result.
+		if (!streamProtocolUsed && !streamingHost && !legacyResultAccepted)
 			await shim.setData("result", result({}, [fatal]));
 		await shim.setData("error", fatal.reason);
 	} finally {

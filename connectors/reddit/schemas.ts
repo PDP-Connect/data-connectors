@@ -60,10 +60,6 @@ export const submittedSchema = z.object({
 	selftext_len: textLenSchema,
 	is_self: nullableBoolSchema,
 	over_18: nullableBoolSchema,
-	score: scoreSchema,
-	num_comments: z.number().int().min(0).nullable(),
-	upvote_ratio: upvoteRatioSchema,
-	gilded: z.number().int().min(0).nullable(),
 	created_utc: isoDateTimeSchema,
 });
 
@@ -82,8 +78,6 @@ export const commentSchema = z.object({
 		.nullable(),
 	is_top_level: nullableBoolSchema,
 	permalink: permalinkSchema,
-	score: scoreSchema,
-	gilded: z.number().int().min(0).nullable(),
 	created_utc: isoDateTimeSchema,
 });
 
@@ -115,8 +109,37 @@ export const voteSchema = z.object({
 	body_len: textLenSchema,
 	url: pdppSafeText.max(4096).nullable(),
 	permalink: permalinkSchema,
+	created_utc: isoDateTimeSchema,
+});
+
+// ─── Current-stats streams ──────────────────────────────────────────────
+// Keyed by the same fullname as the parent content stream. `created_utc` is
+// the item's own creation time (source value), not when the counters were read.
+
+const nonNegativeCountSchema = z.number().int().min(0).nullable();
+
+export const submittedStatsSchema = z.object({
+	id: z.string().regex(FULLNAME_POST_RE, "submitted_stats id must be t3_*"),
 	score: scoreSchema,
-	num_comments: z.number().int().min(0).nullable(),
+	num_comments: nonNegativeCountSchema,
+	upvote_ratio: upvoteRatioSchema,
+	gilded: nonNegativeCountSchema,
+	created_utc: isoDateTimeSchema,
+});
+
+export const commentStatsSchema = z.object({
+	id: z.string().regex(FULLNAME_COMMENT_RE, "comments_stats id must be t1_*"),
+	score: scoreSchema,
+	gilded: nonNegativeCountSchema,
+	created_utc: isoDateTimeSchema,
+});
+
+export const voteStatsSchema = z.object({
+	id: z
+		.string()
+		.regex(FULLNAME_POST_OR_COMMENT_RE, "vote stats id must be t1_* or t3_*"),
+	score: scoreSchema,
+	num_comments: nonNegativeCountSchema,
 	created_utc: isoDateTimeSchema,
 });
 
@@ -130,6 +153,22 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	upvoted: voteSchema,
 	downvoted: voteSchema,
 	hidden: voteSchema,
+	submitted_stats: submittedStatsSchema,
+	comments_stats: commentStatsSchema,
+	upvoted_stats: voteStatsSchema,
+	downvoted_stats: voteStatsSchema,
+	hidden_stats: voteStatsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);
+
+/** Every top-level field each output's full record carries, by output name.
+ *  Derived from the same schemas that validate emitted records. */
+export const OUTPUT_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+	Object.entries(SCHEMAS).map(([name, schema]) => {
+		if (!(schema instanceof z.ZodObject)) {
+			throw new Error(`reddit schema for ${name} is not an object schema`);
+		}
+		return [name, new Set(Object.keys(schema.shape))];
+	}),
+);

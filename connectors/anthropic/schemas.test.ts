@@ -14,8 +14,10 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+	accountPlanSchema,
 	accountProfileSchema,
 	conversationsSchema,
 	messagesSchema,
@@ -167,9 +169,18 @@ test("conversations schema rejects a negative message_count", () => {
 	);
 });
 
-test("projects schema rejects a missing name (manifest-required field)", () => {
+test("projects schema accepts a record with no name: name is absent only when over the inline cap", () => {
 	const { name: _omit, ...withoutName } = PROJECT_RECORD;
-	assert.equal(projectsSchema.safeParse(withoutName).success, false);
+	assert.equal(projectsSchema.safeParse(withoutName).success, true);
+	assert.equal(validateRecord("projects", withoutName).ok, true);
+	// A name that is present is still bounded by the inline cap.
+	assert.equal(
+		projectsSchema.safeParse({
+			...PROJECT_RECORD,
+			name: "n".repeat(10_000_001),
+		}).success,
+		false,
+	);
 });
 
 test("project_documents schema accepts a contract-shaped record", () => {
@@ -205,4 +216,248 @@ test("validateRecord routes all five streams and passes unknown streams through"
 		true,
 	);
 	assert.equal(validateRecord("unknown_stream", { x: 1 }).ok, true);
+});
+
+test("conversations and projects validate with the raw-envelope blob_ref absent", () => {
+	const { blob_ref: _conversationBlob, ...conversation } = CONVERSATION_RECORD;
+	const { blob_ref: _projectBlob, ...project } = PROJECT_RECORD;
+	assert.equal(validateRecord("conversations", conversation).ok, true);
+	assert.equal(validateRecord("projects", project).ok, true);
+});
+
+test("messages and project_documents validate with content absent, and with a blob_ref instead of inline text", () => {
+	const { content: _messageContent, ...message } = MESSAGE_RECORD;
+	const { content: _documentContent, ...document } = PROJECT_DOCUMENT_RECORD;
+	assert.equal(validateRecord("messages", message).ok, true);
+	assert.equal(validateRecord("project_documents", document).ok, true);
+	assert.equal(
+		validateRecord("messages", {
+			...message,
+			content: null,
+			blob_ref: BLOB_REF,
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("project_documents", {
+			...document,
+			content: null,
+			blob_ref: BLOB_REF,
+		}).ok,
+		true,
+	);
+});
+
+test("a malformed blob_ref is still rejected", () => {
+	assert.equal(
+		validateRecord("messages", {
+			...MESSAGE_RECORD,
+			blob_ref: { ...BLOB_REF, blob_id: "sha256:nope" },
+		}).ok,
+		false,
+	);
+});
+
+test("the manifest declares the same blob fields and blob streams as the schemas", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	);
+	assert.deepEqual(manifest.capabilities.host_blob_write.streams.sort(), [
+		"conversations",
+		"messages",
+		"project_documents",
+		"projects",
+	]);
+	assert.equal(
+		manifest.capabilities.host_blob_write.max_blob_bytes,
+		33_554_432,
+	);
+	const byName = new Map(
+		manifest.streams.map(
+			(stream: { name: string; schema: Record<string, unknown> }) => [
+				stream.name,
+				stream.schema as {
+					properties: Record<string, unknown>;
+					required: string[];
+				},
+			],
+		),
+	);
+	for (const name of [
+		"conversations",
+		"messages",
+		"projects",
+		"project_documents",
+	]) {
+		const schema = byName.get(name) as {
+			properties: Record<string, unknown>;
+			required: string[];
+		};
+		assert.ok(schema.properties.blob_ref, `${name} declares blob_ref`);
+		assert.equal(schema.required.includes("blob_ref"), false, name);
+		assert.equal(schema.required.includes("content"), false, name);
+	}
+});
+
+test("the schemas accept pdpp-safe-escape-v1 text and the former caps no longer apply", () => {
+	const escaped = "a\\u0000b\\u007Fc\\u005Cu0001";
+	assert.equal(
+		validateRecord("conversations", {
+			...CONVERSATION_RECORD,
+			title: `${escaped}${"t".repeat(5000)}`,
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("messages", { ...MESSAGE_RECORD, content: escaped }).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("projects", {
+			...PROJECT_RECORD,
+			name: "n".repeat(3000),
+			description: "d".repeat(70_000),
+			prompt_template: "p".repeat(70_000),
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("project_documents", {
+			...PROJECT_DOCUMENT_RECORD,
+			filename: "f".repeat(2000),
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("account_profile", {
+			id: "o",
+			organization_id: "o",
+			full_name: escaped,
+			plan: "p".repeat(3000),
+			name_source: "none",
+			metadata_status: "absent",
+		}).ok,
+		true,
+	);
+	// Unescaped control characters are still not PDPP text.
+	assert.equal(
+		validateRecord("messages", { ...MESSAGE_RECORD, content: "a\u0000b" }).ok,
+		false,
+	);
+	// The inline cap itself still holds.
+	assert.equal(
+		validateRecord("conversations", {
+			...CONVERSATION_RECORD,
+			title: "t".repeat(10_000_001),
+		}).ok,
+		false,
+	);
+});
+
+test("the manifest declares pdpp-safe-escape-v1 on exactly the fields the parsers encode", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	);
+	const declared: string[] = [];
+	const walk = (node: unknown, path: string) => {
+		if (typeof node !== "object" || node === null) return;
+		if (Array.isArray(node)) {
+			for (const [index, item] of node.entries())
+				walk(item, `${path}[${index}]`);
+			return;
+		}
+		const record = node as Record<string, unknown>;
+		if (record.x_pdpp_text_encoding !== undefined) {
+			assert.equal(record.x_pdpp_text_encoding, "pdpp-safe-escape-v1", path);
+			declared.push(path);
+		}
+		for (const [key, value] of Object.entries(record))
+			walk(value, `${path}.${key}`);
+	};
+	for (const stream of manifest.streams) walk(stream.schema, stream.name);
+	assert.deepEqual(declared.sort(), [
+		"account_profile.properties.full_name",
+		"account_profile.properties.plan",
+		"conversations.properties.title",
+		"messages.properties.attachments",
+		"messages.properties.content",
+		"project_documents.properties.content",
+		"project_documents.properties.filename",
+		"projects.properties.archived_at",
+		"projects.properties.creator.properties.full_name",
+		"projects.properties.description",
+		"projects.properties.name",
+		"projects.properties.prompt_template",
+		"projects.properties.raw_docs.items.properties.content",
+		"projects.properties.raw_docs.items.properties.created_at",
+		"projects.properties.raw_docs.items.properties.filename",
+		"projects.properties.raw_docs.items.properties.updated_at",
+		"projects.properties.raw_docs.items.properties.uuid",
+	]);
+	const byName = new Map(
+		manifest.streams.map(
+			(stream: {
+				name: string;
+				schema: { properties: Record<string, unknown> };
+			}) => [stream.name, stream.schema.properties],
+		),
+	);
+	const projects = manifest.streams.find(
+		(stream: { name: string }) => stream.name === "projects",
+	);
+	// name is absent only when it is over the inline cap, so it is optional.
+	assert.deepEqual(projects.schema.required, ["id"]);
+	for (const name of ["messages", "project_documents"]) {
+		const blob = (byName.get(name) as Record<string, Record<string, unknown>>)
+			.blob_ref;
+		assert.equal(blob?.x_pdpp_blob_projects_field, "content", name);
+		assert.equal(blob?.x_pdpp_blob_codec, "json-string-v1", name);
+	}
+	for (const name of ["conversations", "projects"]) {
+		const blob = (byName.get(name) as Record<string, Record<string, unknown>>)
+			.blob_ref;
+		assert.equal(blob?.x_pdpp_blob_projects_field, undefined, name);
+	}
+});
+
+const ACCOUNT_PLAN_RECORD = {
+	id: "account_plan",
+	account_id: "synthetic-org-id",
+	account_structure: null,
+	account_created_at: "2025-03-01T12:00:00.123456Z",
+	plan_type: "pro",
+	plan_display_name: null,
+	subscription_plan: null,
+	has_active_subscription: null,
+	billing_period: null,
+	will_renew: null,
+	renews_at: null,
+	expires_at: null,
+	cancels_at: null,
+	scheduled_plan_change: null,
+};
+
+test("account_plan schema accepts the export's partial record and routes through validateRecord", () => {
+	assert.equal(accountPlanSchema.safeParse(ACCOUNT_PLAN_RECORD).success, true);
+	assert.equal(validateRecord("account_plan", ACCOUNT_PLAN_RECORD).ok, true);
+	assert.equal(
+		accountPlanSchema.safeParse({
+			...ACCOUNT_PLAN_RECORD,
+			plan_type: null,
+			account_created_at: null,
+		}).success,
+		true,
+	);
+});
+
+test("account_plan schema rejects a missing id, and a malformed creation time", () => {
+	const { id: _omit, ...withoutId } = ACCOUNT_PLAN_RECORD;
+	assert.equal(accountPlanSchema.safeParse(withoutId).success, false);
+	assert.equal(
+		accountPlanSchema.safeParse({
+			...ACCOUNT_PLAN_RECORD,
+			account_created_at: "yesterday",
+		}).success,
+		false,
+	);
 });

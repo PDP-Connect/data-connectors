@@ -26,17 +26,16 @@ import {
 	emitDetailGap,
 	type InteractionRequest,
 	isContextDisconnected,
-	isReusableBrowserRunPage,
 	makeBrowserInteractionKeepalive,
 	makeTracer,
 	resolveBrowserLaunchSource,
 	resolveBrowserRuntimeVisibility,
 	runtimeOwnsBrowserPages,
-	selectBrowserPageForRun,
 	shouldCloseBrowserPageAfterRun,
 	shouldPreserveRemotePagesOnAcquire,
 } from "./connector-runtime.ts";
 import type { CaptureSession } from "./fixture-capture.ts";
+import { TerminalError } from "./terminal-error.ts";
 
 const HEADLESS: BrowserRuntimeVisibility = {
 	envKey: "PDPP_BROWSER_HEADLESS",
@@ -76,26 +75,6 @@ function makeDiagnosticPage(url: string, closed = false): Page {
 		url: () => url,
 	};
 	return fake as Page;
-}
-
-function makePageSelectionContext(existingPages: Page[] = []): {
-	context: Pick<BrowserContext, "newPage" | "pages">;
-	newPage: Page;
-	newPageCalls: () => number;
-} {
-	let calls = 0;
-	const newPage = makeDiagnosticPage("about:blank");
-	return {
-		context: {
-			newPage: () => {
-				calls += 1;
-				return Promise.resolve(newPage);
-			},
-			pages: () => existingPages,
-		},
-		newPage,
-		newPageCalls: () => calls,
-	};
 }
 
 function makeClosablePage(closed = false): { closeCalls: number; page: Page } {
@@ -206,7 +185,7 @@ test("a self-resolved browser handoff registers before emission and unregisters 
 		completeAssistance: lifecycle.complete,
 		isProbeSuccessful: (ready: boolean) => ready,
 		message:
-			"Finish sign-in in the secure browser. PDPP continues automatically.",
+			"Finish sign-in in the secure browser. The import continues automatically.",
 		page: ownerPage,
 		probe: (): Promise<boolean> => Promise.resolve(false),
 		readinessProbe: (): Promise<boolean> => Promise.resolve(true),
@@ -247,113 +226,8 @@ test("closeBrowserPage abandons a wedged remote target close after the deadline"
 	assert.ok(Date.now() - startedAt < 1000);
 });
 
-test("selectBrowserPageForRun creates a fresh page by default", async () => {
-	const existing = makeDiagnosticPage("https://chatgpt.com/");
-	const { context, newPage, newPageCalls } = makePageSelectionContext([
-		existing,
-	]);
-
-	assert.equal(await selectBrowserPageForRun(context, {}), newPage);
-	assert.equal(newPageCalls(), 1);
-});
-
-test("selectBrowserPageForRun reuses a non-blank page when preserving successful pages", async () => {
-	const existing = makeDiagnosticPage("https://chatgpt.com/");
-	const { context, newPageCalls } = makePageSelectionContext([existing]);
-
-	assert.equal(
-		await selectBrowserPageForRun(context, { preservePageOnSuccess: true }),
-		existing,
-	);
-	assert.equal(newPageCalls(), 0);
-});
-
-test("selectBrowserPageForRun reuses a non-blank page when preserving failed pages", async () => {
-	const existing = makeDiagnosticPage("https://chatgpt.com/");
-	const { context, newPageCalls } = makePageSelectionContext([existing]);
-
-	assert.equal(
-		await selectBrowserPageForRun(context, { preservePageOnFailure: true }),
-		existing,
-	);
-	assert.equal(newPageCalls(), 0);
-});
-
-test("selectBrowserPageForRun ignores closed and blank pages", async () => {
-	const reusable = makeDiagnosticPage("https://chatgpt.com/");
-	const { context, newPageCalls } = makePageSelectionContext([
-		makeDiagnosticPage("https://chatgpt.com/", true),
-		makeDiagnosticPage("about:blank"),
-		makeDiagnosticPage("about:blank#owner-tab"),
-		makeDiagnosticPage("data:text/html,<html></html>"),
-		reusable,
-	]);
-
-	assert.equal(
-		await selectBrowserPageForRun(context, { preservePageOnSuccess: true }),
-		reusable,
-	);
-	assert.equal(newPageCalls(), 0);
-});
-
-test("isReusableBrowserRunPage treats non-blank open pages as reusable", () => {
-	assert.equal(
-		isReusableBrowserRunPage(makeDiagnosticPage("https://chatgpt.com/")),
-		true,
-	);
-	assert.equal(
-		isReusableBrowserRunPage(makeDiagnosticPage("about:blank")),
-		false,
-	);
-	assert.equal(
-		isReusableBrowserRunPage(makeDiagnosticPage("about:blank#owner-tab")),
-		false,
-	);
-	assert.equal(
-		isReusableBrowserRunPage(
-			makeDiagnosticPage("data:text/html,<html></html>"),
-		),
-		false,
-	);
-	assert.equal(
-		isReusableBrowserRunPage(makeDiagnosticPage("https://chatgpt.com/", true)),
-		false,
-	);
-});
-
-test("shouldCloseBrowserPageAfterRun preserves only opted-in run outcomes", () => {
-	assert.equal(shouldCloseBrowserPageAfterRun({}, true), true);
-	assert.equal(shouldCloseBrowserPageAfterRun({}, false), true);
-	assert.equal(
-		shouldCloseBrowserPageAfterRun({ preservePageOnSuccess: true }, false),
-		true,
-	);
-	assert.equal(
-		shouldCloseBrowserPageAfterRun({ preservePageOnSuccess: true }, true),
-		false,
-	);
-	assert.equal(
-		shouldCloseBrowserPageAfterRun({ preservePageOnFailure: true }, true),
-		true,
-	);
-	assert.equal(
-		shouldCloseBrowserPageAfterRun({ preservePageOnFailure: true }, false),
-		false,
-	);
-	assert.equal(
-		shouldCloseBrowserPageAfterRun(
-			{ preservePageOnFailure: true, preservePageOnSuccess: true },
-			true,
-		),
-		false,
-	);
-	assert.equal(
-		shouldCloseBrowserPageAfterRun(
-			{ preservePageOnFailure: true, preservePageOnSuccess: true },
-			false,
-		),
-		false,
-	);
+test("shouldCloseBrowserPageAfterRun closes ordinary run pages", () => {
+	assert.equal(shouldCloseBrowserPageAfterRun({}), true);
 });
 
 test("the recording env-var names mirrored in connector-runtime still match browser-launch's exported source of truth", async () => {
@@ -374,20 +248,20 @@ test("the recording env-var names mirrored in connector-runtime still match brow
 	);
 	// And prove the gate actually keys off those exact names.
 	assert.equal(
-		shouldCloseBrowserPageAfterRun({}, true, {
+		shouldCloseBrowserPageAfterRun({
 			[HAR_RECORD_PATH_ENV]: "/tmp/x.har",
 		}),
 		false,
 	);
 	assert.equal(
-		shouldCloseBrowserPageAfterRun({}, true, {
+		shouldCloseBrowserPageAfterRun({
 			[STORAGE_STATE_RECORD_PATH_ENV]: "/tmp/x.json",
 		}),
 		false,
 	);
 });
 
-test("shouldCloseBrowserPageAfterRun keeps the page open when --record-har is active, regardless of preserve flags or outcome", () => {
+test("shouldCloseBrowserPageAfterRun keeps the page open when --record-har is active, until recording release", () => {
 	// Root cause this guards: Patchright's launchPersistentContext ties the
 	// whole context's CDP transport to its pages — closing the connector's
 	// LAST page here (before release() reads storageState()) makes
@@ -400,21 +274,17 @@ test("shouldCloseBrowserPageAfterRun keeps the page open when --record-har is ac
 	const storageStateEnv = {
 		PDPP_SCENARIO_STORAGE_STATE_RECORD_PATH: "/tmp/run1.storage-state.json",
 	};
-	assert.equal(shouldCloseBrowserPageAfterRun({}, true, harEnv), false);
-	assert.equal(shouldCloseBrowserPageAfterRun({}, false, harEnv), false);
-	assert.equal(
-		shouldCloseBrowserPageAfterRun({}, true, storageStateEnv),
-		false,
-	);
+	assert.equal(shouldCloseBrowserPageAfterRun(harEnv), false);
+	assert.equal(shouldCloseBrowserPageAfterRun(storageStateEnv), false);
 	// Empty-string env values (unset-but-present key) must not count as active.
 	assert.equal(
-		shouldCloseBrowserPageAfterRun({}, true, {
+		shouldCloseBrowserPageAfterRun({
 			PDPP_SCENARIO_HAR_RECORD_PATH: "",
 		}),
 		true,
 	);
 	// Normal (non-recording) runs are unaffected — same behavior as before.
-	assert.equal(shouldCloseBrowserPageAfterRun({}, true, {}), true);
+	assert.equal(shouldCloseBrowserPageAfterRun({}), true);
 });
 
 test("shouldCloseBrowserPageAfterRun keeps a leased Desktop CDP page open through DONE", () => {
@@ -422,10 +292,15 @@ test("shouldCloseBrowserPageAfterRun keeps a leased Desktop CDP page open throug
 		PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: "http://127.0.0.1:9222",
 		PDPP_BROWSER_SURFACE_LEASE_ID: "lease-test",
 	};
-	assert.equal(shouldCloseBrowserPageAfterRun({}, true, leased), false);
-	assert.equal(shouldCloseBrowserPageAfterRun({}, false, leased), false);
+	assert.equal(shouldCloseBrowserPageAfterRun(leased), false);
 	assert.equal(
-		shouldCloseBrowserPageAfterRun({}, true, {
+		shouldCloseBrowserPageAfterRun({
+			PDPP_BROWSER_SURFACE_LEASE_ID: "lease-test",
+		}),
+		true,
+	);
+	assert.equal(
+		shouldCloseBrowserPageAfterRun({
 			PDPP_BROWSER_SURFACE_REMOTE_CDP_URL:
 				leased.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL,
 		}),
@@ -548,25 +423,11 @@ test("shouldPreserveRemotePagesOnAcquire leaves tabs alone in a browser the runt
 		kind: "managed_neko",
 		remoteCdpUrl: "http://managed-neko:9223",
 	};
-	assert.equal(shouldPreserveRemotePagesOnAcquire({}, legacy), true);
-	assert.equal(shouldPreserveRemotePagesOnAcquire({}, managed), false);
+	assert.equal(shouldPreserveRemotePagesOnAcquire(legacy), true);
+	assert.equal(shouldPreserveRemotePagesOnAcquire(managed), false);
 	assert.equal(
-		shouldPreserveRemotePagesOnAcquire({}, { kind: "isolated_local" }),
+		shouldPreserveRemotePagesOnAcquire({ kind: "isolated_local" }),
 		false,
-	);
-	assert.equal(
-		shouldPreserveRemotePagesOnAcquire(
-			{ preservePageOnSuccess: true },
-			managed,
-		),
-		true,
-	);
-	assert.equal(
-		shouldPreserveRemotePagesOnAcquire(
-			{ preservePageOnFailure: true },
-			managed,
-		),
-		true,
 	);
 });
 
@@ -1809,6 +1670,71 @@ test("createConnectorFailure defaults retryable to false when omitted", () => {
 		"discovery failed",
 	) as Error & { retryable?: boolean };
 	assert.equal(err.retryable, false);
+});
+
+test("typed recovery survives a normalizer that only returns message and retryability", () => {
+	const recoveryHint = { action: "manual_action_required", retryable: false };
+	const normalized = composeNormalizedTerminalError({
+		message: "Session rejected",
+		code: "meta_session_required",
+		retryable: false,
+		recoveryHint,
+		normalizeTerminalError: ({ message, retryable }) => ({
+			message,
+			retryable,
+		}),
+	});
+	assert.deepEqual(normalized.recovery_hint, recoveryHint);
+	const overridden = composeNormalizedTerminalError({
+		message: "Session rejected",
+		code: "meta_session_required",
+		retryable: false,
+		recoveryHint,
+		normalizeTerminalError: ({ message, retryable }) => ({
+			message,
+			retryable,
+			recovery_hint: "not_retriable",
+		}),
+	});
+	assert.equal(overridden.recovery_hint, "not_retriable");
+});
+
+test("typed recovery fills an omitted retryable bit independently of its action", () => {
+	for (const retryable of [false, true]) {
+		for (const hintRetryable of [undefined, false, true]) {
+			const error = createConnectorFailure(
+				"auth_failed",
+				"Authentication rejected.",
+				{
+					retryable,
+					recoveryHint: {
+						action: "manual_action_required",
+						...(hintRetryable === undefined
+							? {}
+							: { retryable: hintRetryable }),
+					},
+				},
+			);
+			assert.ok(error instanceof TerminalError);
+			assert.deepEqual(error.recoveryHint, {
+				action: "manual_action_required",
+				retryable: hintRetryable ?? retryable,
+			});
+		}
+	}
+});
+
+test("createConnectorFailure rejects recovery actions outside the machine-field contract", () => {
+	assert.throws(
+		() =>
+			createConnectorFailure("auth_failed", "Session rejected", {
+				recoveryHint: {
+					action: "https://example.invalid/private",
+					retryable: false,
+				},
+			}),
+		/connector_failure_invalid_code/,
+	);
 });
 
 test("createConnectorFailure accepts an explicit retryable: true", () => {

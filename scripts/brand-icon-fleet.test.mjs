@@ -8,15 +8,7 @@ import test from "node:test";
 
 const repoRoot = join(dirname(new URL(import.meta.url).pathname), "..");
 const manifestsDir = join(repoRoot, "connectors");
-const indexPath = join(repoRoot, "connector-index.json");
-const expectedUrlPrefix = "https://raw.githubusercontent.com/PDP-Connect/data-connectors/";
 const drawableElementPattern = /<(?:path|rect|circle|ellipse|line|polygon|polyline)\b[^>]*>/g;
-
-function iconPathFromUrl(url) {
-  const match = url.match(/\/(?:packages\/polyfill-connectors\/manifests\/icons\/([^/?#]+)\.svg|connectors\/([^/?#]+)\/icon\.svg)$/);
-  assert.ok(match, `${url}: must resolve to a pinned connector icon`);
-  return `connectors/${match[1] ?? match[2]}/icon.svg`;
-}
 
 function parseSquareViewBox(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);
@@ -66,11 +58,19 @@ function assertSafeRecognisableSvg(source, filename) {
 // original per-connector removal verdict.
 const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "heb.json",
+  "muse.json", // no vendored real mark; the console shows the monogram
+  "facebook.json", // no vendored real mark; the factory agent's drawn icon was removed
+  "tiktok.json", // no vendored real mark; the factory agent's drawn icon was removed
   "fitbit.json", // a mark exists; omitted by choice (trademark)
+  "character_ai.json", // no vendored real mark; the factory-drawn placeholder icon was removed
   "garmin_browser.json",
   "google_takeout.json",
+  // Instinct: invite-only product launched 2026; no mark in the vendored
+  // offline sources yet, so it takes the monogram fallback like the rest.
+  "instinct.json",
   "oura.json",
   "oura_browser.json",
+  "perplexity.json", // no vendored real mark; the console uses the monogram
   "pocket.json",
   "usaa.json",
   "wholefoods.json",
@@ -78,10 +78,6 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "whoop_browser.json",
   "ynab.json",
 ]);
-
-// These Collection Profiles are carried by signed OCI artifacts, not by the
-// frozen Desktop connector index. Their manifest-local icons still need proof.
-const MODERN_ONLY_PROFILE_ICONS = new Set(["discord_browser.json", "github_browser.json", "strava_browser.json", "x_browser.json", "youtube_takeout.json"]);
 
 function assertRealBrandMarkShape(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);
@@ -138,75 +134,29 @@ test("every shipped polyfill manifest either declares a local brand icon or has 
   for (const filename of CONNECTORS_WITHOUT_A_BRAND_MARK) {
     assert.ok(files.includes(filename), `${filename}: no longer exists — remove it from CONNECTORS_WITHOUT_A_BRAND_MARK`);
   }
-  for (const filename of MODERN_ONLY_PROFILE_ICONS) {
-    assert.ok(files.includes(filename), `${filename}: no longer exists — remove it from MODERN_ONLY_PROFILE_ICONS`);
-  }
 });
 
-test("connector index resolves every shipped polyfill brand icon, and omits connectors with none", () => {
-  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+test("every declared brand icon is a self-contained, intentionally inked SVG mark", () => {
   for (const filename of manifestFiles()) {
     const { path, manifest } = readManifest(filename);
-    if (MODERN_ONLY_PROFILE_ICONS.has(filename)) {
-      assert.equal(index.brandIcons?.[manifest.connector_id], undefined, `${filename}: modern profile must not change the frozen connector index`);
-      const iconPath = join(dirname(path), manifest.brand.icon);
-      const source = readFileSync(iconPath, "utf8");
-      assertSafeRecognisableSvg(source, iconPath);
-      assertRealBrandMarkShape(source, iconPath);
-      continue;
-    }
-    if (manifest.brand === undefined) {
-      assert.equal(index.brandIcons?.[manifest.connector_id], undefined, `${filename}: has no brand but connector-index.json still has a brandIcons entry`);
-      continue;
-    }
-    const icon = index.brandIcons?.[manifest.connector_id];
-    assert.ok(icon, `${filename}: connector-index.json is missing brandIcons.${manifest.connector_id}`);
-    assert.match(
-      icon.url,
-      new RegExp(`^${expectedUrlPrefix}[0-9a-f]{40}/(?:packages/polyfill-connectors/manifests/icons/${filename.replace(/\.json$/, "")}.svg|connectors/${filename.replace(/\.json$/, "")}/${manifest.brand.icon})$`),
-      `${filename}: resolved icon URL`,
-    );
-    if (manifest.brand.dark_icon !== undefined) {
-      assert.match(
-        icon.darkUrl,
-        new RegExp(`^${expectedUrlPrefix}[0-9a-f]{40}/(?:packages/polyfill-connectors/manifests/icons/${filename.replace(/\.json$/, "")}.svg|connectors/${filename.replace(/\.json$/, "")}/${manifest.brand.dark_icon})$`),
-        `${filename}: resolved dark icon URL`,
-      );
-    }
-    assert.equal(icon.backgroundColor, manifest.brand.background_color, `${filename}: background color`);
-  }
-});
-
-test("every indexed brand icon is a self-contained, intentionally inked SVG mark", () => {
-  const index = JSON.parse(readFileSync(indexPath, "utf8"));
-  const referenced = Object.values(index.brandIcons ?? {});
-  const expectedCount = manifestFiles().length - CONNECTORS_WITHOUT_A_BRAND_MARK.size - MODERN_ONLY_PROFILE_ICONS.size;
-  assert.equal(referenced.length, expectedCount, "expected every legacy connector with a brand mark to be indexed, and no others");
-
-  for (const icon of referenced) {
-    assert.equal(typeof icon?.url, "string", "brand icon URL is required");
-    const relativePath = iconPathFromUrl(icon.url);
-    const source = readFileSync(join(repoRoot, relativePath), "utf8");
-    assertSafeRecognisableSvg(source, relativePath);
-    if (icon.darkUrl !== undefined) {
-      assert.equal(typeof icon.darkUrl, "string", `${relativePath}: darkUrl must be a string`);
-      const darkPath = iconPathFromUrl(icon.darkUrl);
-      assertSafeRecognisableSvg(readFileSync(join(repoRoot, darkPath), "utf8"), darkPath);
+    if (manifest.brand === undefined) continue;
+    for (const field of ["icon", "dark_icon"]) {
+      if (manifest.brand[field] === undefined) continue;
+      const iconPath = join(dirname(path), manifest.brand[field]);
+      assertSafeRecognisableSvg(readFileSync(iconPath, "utf8"), iconPath);
     }
   }
 });
 
-test("every indexed brand icon is a real brand mark, not a hand-drawn glyph", () => {
-  // Every connector without a confidently-sourced brand mark has been dropped from the
-  // index (see CONNECTORS_WITHOUT_A_BRAND_MARK above) rather than shipping a placeholder,
-  // so nothing indexed here should need an exemption. This guard exists to catch a
-  // regression: a future manifest that adds a `brand.icon` pointing at a hand-drawn glyph.
-  const index = JSON.parse(readFileSync(indexPath, "utf8"));
-  const referenced = Object.values(index.brandIcons ?? {});
-
-  for (const icon of referenced) {
-    const relativePath = iconPathFromUrl(icon.url);
-    const source = readFileSync(join(repoRoot, relativePath), "utf8");
-    assertRealBrandMarkShape(source, relativePath);
+test("every declared brand icon is a real brand mark, not a hand-drawn glyph", () => {
+  // Every connector without a confidently-sourced brand mark declares none
+  // (see CONNECTORS_WITHOUT_A_BRAND_MARK above) rather than shipping a
+  // placeholder, so no declared icon here needs an exemption. This guard
+  // catches a future manifest whose `brand.icon` points at a hand-drawn glyph.
+  for (const filename of manifestFiles()) {
+    const { path, manifest } = readManifest(filename);
+    if (manifest.brand === undefined) continue;
+    const iconPath = join(dirname(path), manifest.brand.icon);
+    assertRealBrandMarkShape(readFileSync(iconPath, "utf8"), iconPath);
   }
 });

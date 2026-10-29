@@ -107,6 +107,8 @@ export interface ToolCallSynthetic {
 	language?: string;
 	recipient?: string;
 	text?: string;
+	/** "content": the body is the message's `content` (blob-backed or omitted), not repeated here. */
+	text_ref?: "content";
 }
 
 // ─── Auth / API client plumbing ─────────────────────────────────────────
@@ -124,6 +126,23 @@ export interface ChatGptFetchResult {
 	status: number;
 }
 
+/**
+ * In-page reductions applied by `chatGptUsageFetchInBrowser` (usage.ts)
+ * before a response leaves the page. Each returns counts, flags and slugs only.
+ */
+export type ChatGptUsageProjection =
+	| "conversation_detail"
+	| "conversation_list"
+	| "shared_conversation_ids"
+	| "memory_stats"
+	| "custom_instructions_flags"
+	| "me_profile"
+	| "account_check_facts"
+	| "beta_features"
+	| "project_sidebar"
+	| "task_stats"
+	| "client_context";
+
 export interface ChatGptApi {
 	auth: () => Promise<ChatGptAuth>;
 	fetch: (
@@ -132,6 +151,8 @@ export interface ChatGptApi {
 			method?: string;
 			body?: unknown;
 			laneContext?: AdaptiveLaneRunContext | undefined;
+			/** Reduce the body in the page; the raw body never reaches the connector. */
+			projection?: ChatGptUsageProjection | undefined;
 		},
 	) => Promise<ChatGptFetchResult>;
 	fetchBatch?: (ids: readonly string[]) => Promise<ChatGptFetchResult[]>;
@@ -148,12 +169,16 @@ export interface ChatGptApi {
 
 export interface RawMemoryEntry {
 	content?: string;
-	/** Epoch seconds; null on older memories. The API has no `created_at`. */
+	/** Legacy collector aliases, read in this order before `created_timestamp`. */
+	created_at?: string | number | null;
+	createdAt?: string | number | null;
+	/** Epoch seconds; null on older memories. */
 	created_timestamp?: number | null;
 	id?: string;
 	name?: string;
 	type?: string | null;
 	updated_at?: string | null;
+	updatedAt?: string | null;
 }
 
 export interface RawGizmoDisplay {

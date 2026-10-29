@@ -286,43 +286,121 @@ export function toIso(
 
 // ─── CSV parsing ─────────────────────────────────────────────────────────
 
-export function parseCsv(text: string): string[][] {
+export interface CsvParseResult {
+	rows: string[][];
+	malformed: boolean;
+}
+
+/** Invalid records are withheld; an unterminated quoted tail has unknown
+ * record boundaries and is never split into invented transaction rows. */
+export function parseCsvWithIntegrity(text: string): CsvParseResult {
 	const rows: string[][] = [];
 	let cur: string[] = [];
 	let field = "";
-	let inQuote = false;
-	for (let i = 0; i < text.length; i += 1) {
+	let state: "plain" | "quoted" | "closed" = "plain";
+	let invalidRow = false;
+	let malformed = false;
+	let started = false;
+	const endRow = () => {
+		// Keep an empty placeholder so a malformed header cannot promote a data row.
+		rows.push(invalidRow ? [] : [...cur, field]);
+		invalidRow = false;
+		cur = [];
+		field = "";
+		state = "plain";
+		started = false;
+	};
+	// Only the initial byte-order mark is framing, never strip field data.
+	for (let i = text.startsWith("\uFEFF") ? 1 : 0; i < text.length; i += 1) {
 		const c = text[i];
-		if (inQuote) {
+		if (state === "quoted") {
 			if (c === '"' && text[i + 1] === '"') {
 				field += '"';
 				i += 1;
-			} else if (c === '"') {
-				inQuote = false;
-			} else {
-				field += c;
-			}
-		} else if (c === '"') {
-			inQuote = true;
-		} else if (c === ",") {
+			} else if (c === '"') state = "closed";
+			else field += c;
+			continue;
+		}
+		if (c === "\n" || c === "\r") {
+			if (c === "\r" && text[i + 1] === "\n") i += 1;
+			endRow();
+			continue;
+		}
+		started = true;
+		if (c === ",") {
 			cur.push(field);
 			field = "";
-		} else if (c === "\n") {
-			cur.push(field);
-			field = "";
-			rows.push(cur);
-			cur = [];
-		} else if (c === "\r") {
-			// skip
-		} else if (c !== undefined) {
+			state = "plain";
+		} else if (c === '"' && state === "plain" && field === "") {
+			state = "quoted";
+		} else if (c === '"' || state === "closed") {
+			malformed = true;
+			invalidRow = true;
+			// A stray quote cannot open a quoted field. Keep scanning later
+			// comma-delimited fields so their quoted newlines stay in this row.
+			state = "plain";
+			field += c;
+		} else {
 			field += c;
 		}
 	}
-	if (field !== "" || cur.length) {
-		cur.push(field);
-		rows.push(cur);
+	if (state === "quoted") {
+		malformed = true;
+		invalidRow = true;
 	}
-	return rows;
+	if (started || cur.length || field !== "") endRow();
+	return { rows, malformed };
+}
+
+export function parseCsv(text: string): string[][] {
+	return parseCsvWithIntegrity(text).rows;
+}
+
+/** CSV exports use calendar dates, not Date's rollover or timezone parsing. */
+function csvDate(raw: string | null): string | null {
+	if (!raw) return null;
+	const value = raw.trim();
+	const iso = /^(?<y>\d{4})-(?<m>\d{1,2})-(?<d>\d{1,2})$/.exec(value)?.groups;
+	const us = /^(?<m>\d{1,2})\/(?<d>\d{1,2})\/(?<y>\d{4})$/.exec(value)?.groups;
+	const parts = iso ?? us;
+	if (!parts?.y || !parts.m || !parts.d) return null;
+	const year = Number(parts.y);
+	const month = Number(parts.m);
+	const day = Number(parts.d);
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+	if (
+		year < 1 ||
+		month < 1 ||
+		month > 12 ||
+		day < 1 ||
+		day > (days[month - 1] ?? 0)
+	)
+		return null;
+	return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/** Whole-field CSV money only; no substring match or fabricated zero. */
+function csvAmountToCents(raw: string): number | null {
+	const value = raw.trim();
+	const parens = value.startsWith("(") && value.endsWith(")");
+	const body = parens ? value.slice(1, -1) : value;
+	const parts =
+		/^(?<prefix>[+-]?\$?|\$[+-]?)(?<whole>\d+|\d{1,3}(?:,\d{3})+)\.(?<fraction>\d{2})$/.exec(
+			body,
+		)?.groups;
+	if (!parts?.whole || !parts.fraction) return null;
+	if (parens && /[+-]/.test(parts.prefix ?? "")) return null;
+	const cents =
+		BigInt(parts.whole.replace(COMMA_RE, "")) * 100n + BigInt(parts.fraction);
+	if (cents > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+	const sign = parens || parts.prefix?.includes("-") ? -1 : 1;
+	return cents === 0n ? 0 : Number(cents) * sign;
+}
+
+export function hasCsvTransactionHeader(header: string[] = []): boolean {
+	const idx = csvHeaderIndices(header);
+	return idx.idxDate >= 0 && idx.idxAmt >= 0;
 }
 
 interface CsvHeaderIndices {
@@ -336,12 +414,24 @@ interface CsvHeaderIndices {
 
 function csvHeaderIndices(header: string[]): CsvHeaderIndices {
 	const lower = header.map((h) => h.trim().toLowerCase());
+	// Only the evidenced single signed Amount column is supported. Other
+	// amount-like labels and duplicates cannot silently choose a debit/credit side.
+	const amountColumns = lower.flatMap((h, i) =>
+		AMOUNT_HEADER_RE.test(h) ? [i] : [],
+	);
+	const firstAmount = amountColumns[0];
+	const amountIndex =
+		amountColumns.length === 1 &&
+		firstAmount !== undefined &&
+		lower[firstAmount] === "amount"
+			? firstAmount
+			: -1;
 	return {
 		idxDate: lower.findIndex((h) => DATE_HEADER_RE.test(h)),
 		idxDesc: lower.findIndex((h) => DESCRIPTION_HEADER_RE.test(h)),
 		idxOrig: lower.findIndex((h) => ORIGINAL_HEADER_RE.test(h)),
 		idxCat: lower.findIndex((h) => CATEGORY_HEADER_RE.test(h)),
-		idxAmt: lower.findIndex((h) => AMOUNT_HEADER_RE.test(h)),
+		idxAmt: amountIndex,
 		idxBal: lower.findIndex((h) => BALANCE_HEADER_RE.test(h)),
 	};
 }
@@ -369,7 +459,7 @@ function csvRowToTransaction({
 		return null;
 	}
 	const rawDate = idx.idxDate >= 0 ? (row[idx.idxDate] ?? null) : null;
-	const date = isoDate(rawDate);
+	const date = csvDate(rawDate);
 	if (!date) {
 		return null;
 	}
@@ -379,6 +469,8 @@ function csvRowToTransaction({
 			? (row[idx.idxOrig] ?? "").trim() || description
 			: description;
 	const amount = idx.idxAmt >= 0 ? (row[idx.idxAmt] ?? "").trim() : "";
+	const amountCents = csvAmountToCents(amount);
+	if (amountCents === null) return null;
 	const tupleKey = `${date}|${amount}|${original}`;
 	const ord = tupleOrdinal.get(tupleKey) || 0;
 	tupleOrdinal.set(tupleKey, ord + 1);
@@ -395,7 +487,7 @@ function csvRowToTransaction({
 		description,
 		original_description: original,
 		category: categoryRaw,
-		amount: currencyToCents(amount) ?? 0,
+		amount: amountCents,
 		currency: "USD",
 		balance_after_cents: balanceRaw ? currencyToCents(balanceRaw) : null,
 		check_number: checkMatch?.[1] ?? null,

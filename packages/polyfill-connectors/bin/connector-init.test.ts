@@ -6,11 +6,9 @@
  * an immediately-green skeleton — the acceptance bar the module docstring
  * states. This test:
  *
- *   1. Runs init for a temp-named connector (zz_init_smoke_<pid>) directly
- *      against the real package tree (writeScaffold has no dry-run mode;
- *      there is nowhere safer to prove "init produces files the fleet's
- *      real test discovery picks up" than the real tree the fleet's tests
- *      already scan).
+ *   1. Runs init in a private fixture tree through the existing live path
+ *      override. The real fleet is linked for acceptance checks;
+ *      generated connectors never enter the shared checkout's inventory.
  *   2. Asserts every planned file exists.
  *   3. Runs the scaffolded connector's own pilot-fixture test AND the full
  *      manifest-honesty test family as real `node --test` subprocesses,
@@ -18,8 +16,8 @@
  *      fixture shape actually satisfies the fleet's build-time guardrails,
  *      not just that files were written.
  *   4. ALWAYS removes every created file/directory in a `finally`, so the
- *      tree is pristine afterward regardless of pass/fail. Verified with a
- *      `git status --porcelain` diff against a pre-run snapshot.
+ *      tree is pristine afterward regardless of pass/fail. Verified against
+ *      tracked connector content and this test's owned output paths.
  *
  * `assertScaffoldPassesAcceptanceSuite` runs steps 2-4 for any `InitArgs`;
  * it is exercised once for the default API-mode scaffold and once for
@@ -35,12 +33,27 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
+	connectorsDir,
 	fixturesDir,
+	manifestFileNames,
 	packageRoot as PACKAGE_ROOT,
+	repoRoot,
 } from "../src/connector-paths.ts";
 import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
 import {
@@ -55,6 +68,88 @@ import {
 const TEMP_NAME = `zz_init_smoke_${String(process.pid)}`;
 const TEMP_NAME_BROWSER = `zz_init_browser_smoke_${String(process.pid)}`;
 const TEMP_STREAM = "items";
+
+function withPrivateConnectorTree(
+	run: () => void,
+	sourceRoot = repoRoot,
+): void {
+	const realConnectors = join(sourceRoot, "connectors");
+	const previousRoot = process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
+	const root = mkdtempSync(join(tmpdir(), "connector-init-"));
+	try {
+		// Git is the inventory authority, not concurrent workers' untracked fixtures.
+		const tracked = spawnSync("git", ["ls-files", "-z", "--", "connectors"], {
+			cwd: sourceRoot,
+			encoding: "utf8",
+			maxBuffer: 16 * 1024 * 1024,
+		});
+		assert.equal(
+			tracked.status,
+			0,
+			`tracked connector inventory unavailable: ${tracked.stderr}`,
+		);
+		const paths = tracked.stdout.split("\0").filter(Boolean).sort();
+		const fingerprint = (path: string): string => {
+			const fullPath = join(sourceRoot, path);
+			assert.ok(
+				existsSync(fullPath),
+				`tracked connector input disappeared: ${path}`,
+			);
+			return `${lstatSync(fullPath).mode}:${createHash("sha256").update(readFileSync(fullPath)).digest("hex")}`;
+		};
+		const before = paths.map(fingerprint);
+		const privateConnectors = join(root, "connectors");
+		mkdirSync(privateConnectors);
+		for (const path of paths) {
+			const target = join(root, path);
+			mkdirSync(dirname(target), { recursive: true });
+			symlinkSync(join(sourceRoot, path), target);
+		}
+		// Bare dependencies and generated imports still use the ordinary installation.
+		symlinkSync(join(repoRoot, "packages"), join(root, "packages"), "dir");
+		symlinkSync(
+			join(repoRoot, "node_modules"),
+			join(root, "node_modules"),
+			"dir",
+		);
+		symlinkSync(join(repoRoot, "package.json"), join(root, "package.json"));
+		process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT = root;
+		const manifests = paths
+			.filter((path) => /^connectors\/[^/]+\/manifest\.json$/.test(path))
+			.map((path) => `${path.split("/")[1]}.json`)
+			.sort();
+		assert.deepEqual(manifestFileNames(), manifests);
+		try {
+			run();
+		} finally {
+			for (const name of [TEMP_NAME, TEMP_NAME_BROWSER]) {
+				assert.equal(
+					existsSync(join(realConnectors, name)),
+					false,
+					`connector-init leaked its own output into the real connector inventory: ${name}`,
+				);
+			}
+			assert.deepEqual(
+				paths.map(fingerprint),
+				before,
+				"connector-init changed tracked connector input",
+			);
+		}
+	} finally {
+		if (previousRoot === undefined) {
+			delete process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT;
+		} else {
+			process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT = previousRoot;
+		}
+		rmSync(root, { recursive: true, force: true });
+		assert.equal(
+			existsSync(root),
+			false,
+			"private fixture tree was not removed",
+		);
+		assert.equal(process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT, previousRoot);
+	}
+}
 
 interface CliResult {
 	code: number | null;
@@ -109,17 +204,6 @@ function tapFailCount(tapOutput: string): number {
 	return Number(match[1]);
 }
 
-function gitStatusPorcelain(): string {
-	const result = spawnSync("git", ["status", "--porcelain"], {
-		cwd: PACKAGE_ROOT,
-		encoding: "utf8",
-	});
-	// Not every checkout of this package is inside a git repo the CLI can see
-	// (e.g. a worktree-less copy) — treat a git failure as "nothing to check"
-	// rather than failing the whole test on an environment quirk.
-	return result.status === 0 ? result.stdout : "";
-}
-
 function cleanUp(
 	connectorDir: string,
 	fixtureDir: string,
@@ -149,10 +233,55 @@ function assertScaffoldPassesAcceptanceSuite(args: InitArgs): void {
 		`unexpected pre-existing path(s) for ${args.name}; clean up manually`,
 	);
 
-	const preStatus = gitStatusPorcelain();
-
 	try {
 		writeScaffold(args);
+
+		// Check the complete owned subtree, including empty directories and links,
+		// rather than a moving global git-status snapshot.
+		const expected = new Set<string>([plan.connectorDir]);
+		for (const path of Object.values(plan.files)) {
+			let current = path;
+			while (current !== plan.connectorDir) {
+				expected.add(current);
+				current = dirname(current);
+			}
+		}
+		const actual: string[] = [];
+		const visit = (path: string): void => {
+			actual.push(path);
+			const stat = lstatSync(path);
+			assert.equal(
+				stat.isSymbolicLink(),
+				false,
+				"scaffold output must not be a symlink",
+			);
+			if (stat.isDirectory()) {
+				for (const child of readdirSync(path)) {
+					visit(join(path, child));
+				}
+			} else {
+				assert.ok(stat.isFile(), "scaffold output must be a regular file");
+			}
+		};
+		visit(plan.connectorDir);
+		assert.deepEqual(
+			actual.sort(),
+			[...expected].sort(),
+			"scaffold wrote undeclared private output",
+		);
+		assert.equal(
+			existsSync(join(connectorsDir, args.name)),
+			false,
+			"scaffold must never appear in the real connector inventory",
+		);
+		assert.ok(
+			manifestFileNames().includes(`${args.name}.json`),
+			"the relocated inventory must discover the generated manifest",
+		);
+		assert.equal(
+			childTestEnv().PDPP_CONNECTOR_PATHS_TEST_ROOT,
+			process.env.PDPP_CONNECTOR_PATHS_TEST_ROOT,
+		);
 
 		// ── 2. Every planned file exists ──────────────────────────────────
 		assert.ok(
@@ -234,6 +363,11 @@ function assertScaffoldPassesAcceptanceSuite(args: InitArgs): void {
 			0,
 			`reconcile-manifests suite failed against the scaffolded connector:\n${reconcileResult.stdout}\n${reconcileResult.stderr}`,
 		);
+		assert.equal(
+			reconcileResult.code,
+			0,
+			`reconcile-manifests process exited nonzero: ${reconcileResult.stderr}`,
+		);
 	} finally {
 		// ── 4. Always clean up, regardless of pass/fail above ──────────────
 		cleanUp(plan.connectorDir, fixtureDir, plan.files.manifestJson);
@@ -241,13 +375,6 @@ function assertScaffoldPassesAcceptanceSuite(args: InitArgs): void {
 			findCollisions(plan),
 			[],
 			"cleanup left scaffold file(s) behind",
-		);
-
-		const postStatus = gitStatusPorcelain();
-		assert.equal(
-			postStatus,
-			preStatus,
-			"connector-init test left the working tree dirty after cleanup",
 		);
 	}
 }
@@ -260,7 +387,7 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 		"--stream",
 		TEMP_STREAM,
 	]);
-	assertScaffoldPassesAcceptanceSuite(args);
+	withPrivateConnectorTree(() => assertScaffoldPassesAcceptanceSuite(args));
 });
 
 test("connector-init --browser: scaffolds a browser connector whose pilot-fixture and manifest-honesty tests pass immediately", () => {
@@ -273,35 +400,42 @@ test("connector-init --browser: scaffolds a browser connector whose pilot-fixtur
 		"--browser",
 	]);
 	assert.equal(args.browser, true);
-	assertScaffoldPassesAcceptanceSuite(args);
+	withPrivateConnectorTree(() => assertScaffoldPassesAcceptanceSuite(args));
 });
 
 test("connector-init: refuses to overwrite an existing target and lists every collision", () => {
-	const args = parseArgs([TEMP_NAME, "--stream", TEMP_STREAM]);
-	const plan = planTargets(args.name, args.stream);
-	const fixtureDir = fixturesDir(args.name);
-	assert.deepEqual(
-		findCollisions(plan),
-		[],
-		`unexpected pre-existing path(s) for ${TEMP_NAME}`,
-	);
+	withPrivateConnectorTree(() => {
+		const args = parseArgs([TEMP_NAME, "--stream", TEMP_STREAM]);
+		const plan = planTargets(args.name, args.stream);
+		const fixtureDir = fixturesDir(args.name);
+		assert.deepEqual(
+			findCollisions(plan),
+			[],
+			`unexpected pre-existing path(s) for ${TEMP_NAME}`,
+		);
 
-	try {
-		writeScaffold(args);
-		const collisions = findCollisions(plan);
-		// Every real target file plus the connector directory itself should be
-		// reported — a partial collision list would let a second init silently
-		// clobber files it didn't list.
-		assert.ok(collisions.includes(plan.connectorDir));
-		assert.ok(collisions.includes(plan.files.manifestJson));
-		assert.ok(collisions.includes(plan.files.indexTs));
-		assert.ok(collisions.includes(plan.files.schemasTs));
-		assert.ok(collisions.includes(plan.files.pilotFixtureTestTs));
-		assert.ok(collisions.includes(plan.files.fixtureJsonl));
-		assert.ok(collisions.includes(plan.files.provenanceJson));
-	} finally {
-		cleanUp(plan.connectorDir, fixtureDir, plan.files.manifestJson);
-	}
+		try {
+			writeScaffold(args);
+			assert.equal(
+				existsSync(join(connectorsDir, args.name)),
+				false,
+				"collision test must not write into the real connector inventory",
+			);
+			const collisions = findCollisions(plan);
+			// Every real target file plus the connector directory itself should be
+			// reported — a partial collision list would let a second init silently
+			// clobber files it didn't list.
+			assert.ok(collisions.includes(plan.connectorDir));
+			assert.ok(collisions.includes(plan.files.manifestJson));
+			assert.ok(collisions.includes(plan.files.indexTs));
+			assert.ok(collisions.includes(plan.files.schemasTs));
+			assert.ok(collisions.includes(plan.files.pilotFixtureTestTs));
+			assert.ok(collisions.includes(plan.files.fixtureJsonl));
+			assert.ok(collisions.includes(plan.files.provenanceJson));
+		} finally {
+			cleanUp(plan.connectorDir, fixtureDir, plan.files.manifestJson);
+		}
+	});
 });
 
 test("connector-init: rejects a non-snake_case connector name before touching disk", () => {
@@ -312,4 +446,68 @@ test("connector-init: rejects a non-snake_case connector name before touching di
 			/invalid connector name/i.test(err.message),
 		"should reject on invalid name shape",
 	);
+});
+
+function withTrackedSource(run: (root: string) => void): void {
+	const root = mkdtempSync(join(tmpdir(), "connector-init-source-"));
+	try {
+		mkdirSync(join(root, "connectors", "existing"), { recursive: true });
+		writeFileSync(join(root, "connectors", "existing", "manifest.json"), "{}");
+		writeFileSync(
+			join(root, "connectors", "existing", "index.ts"),
+			"// tracked input\n",
+		);
+		for (const args of [
+			["init", "--quiet"],
+			["add", "--", "connectors"],
+		]) {
+			const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+			assert.equal(result.status, 0, result.stderr);
+		}
+		run(root);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+test("connector-init: unrelated untracked inventory changes do not break private isolation", () => {
+	withTrackedSource((root) => {
+		const removed = join(root, "connectors", "unrelated_before");
+		const added = join(root, "connectors", "unrelated_during");
+		mkdirSync(removed);
+		writeFileSync(join(removed, "manifest.json"), "{}");
+		withPrivateConnectorTree(() => {
+			assert.deepEqual(manifestFileNames(), ["existing.json"]);
+			rmSync(removed, { recursive: true });
+			mkdirSync(added);
+			writeFileSync(join(added, "manifest.json"), "{}");
+		}, root);
+	});
+});
+
+test("connector-init: its own leaked output is still rejected", () => {
+	withTrackedSource((root) => {
+		assert.throws(
+			() =>
+				withPrivateConnectorTree(() => {
+					mkdirSync(join(root, "connectors", TEMP_NAME));
+				}, root),
+			/real connector/,
+		);
+	});
+});
+
+test("connector-init: mutation of an existing tracked input is still rejected", () => {
+	withTrackedSource((root) => {
+		assert.throws(
+			() =>
+				withPrivateConnectorTree(() => {
+					writeFileSync(
+						join(root, "connectors", "existing", "index.ts"),
+						"// changed input\n",
+					);
+				}, root),
+			/tracked connector/,
+		);
+	});
 });

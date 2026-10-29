@@ -62,6 +62,10 @@ function resolvePointer(root, ref, path) {
     if (node === null || typeof node !== "object" || !Object.hasOwn(node, key)) {
       fail(path, `unresolved schema $ref ${JSON.stringify(ref)}`);
     }
+    // This guard cannot interpret a target across an inherited URI scope.
+    for (const keyword of UNSUPPORTED_SCOPE) {
+      if (Object.hasOwn(node, keyword)) fail(path, "schema reference crosses an unsupported scope/anchor keyword");
+    }
     node = node[key];
   }
   return { node, schemaPath: "/" + keys.map(pointerToken).join("/") };

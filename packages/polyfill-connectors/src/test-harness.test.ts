@@ -17,14 +17,22 @@
  */
 
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { assertUserFacingProgress } from "./connector-diagnostic.ts";
 import { packageRoot as PACKAGE_ROOT } from "./connector-paths.ts";
-import type { EmittedMessage, ValidateRecord } from "./connector-runtime.ts";
+import {
+	type EmittedMessage,
+	politeDelay,
+	type ValidateRecord,
+} from "./connector-runtime.ts";
 import {
 	makeRecordingEmit,
 	runConnectorProtocolSubprocess,
+	skipPoliteDelays,
 } from "./test-harness.ts";
 
 const fixturePath = (name: string): string =>
@@ -305,6 +313,106 @@ test("runConnectorProtocolSubprocess: rejects a child that exits without termina
 	);
 });
 
+test("runConnectorProtocolSubprocess: timeout kills the connector's grandchild", {
+	skip: process.platform !== "linux",
+}, async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "connector-subprocess-"));
+	const pidFile = join(tempDir, "grandchild.pid");
+	const entrypoint = join(tempDir, "leaking-connector.mjs");
+	const marker = `connector-grandchild-${randomUUID()}`;
+	await writeFile(
+		entrypoint,
+		[
+			'import { spawn } from "node:child_process";',
+			'import { writeFileSync } from "node:fs";',
+			'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", process.env.GRANDCHILD_MARKER], { stdio: "ignore" });',
+			"writeFileSync(process.env.GRANDCHILD_PID_FILE, String(child.pid));",
+			"setInterval(() => {}, 1000);",
+		].join("\n"),
+	);
+
+	let grandchildPid: number | undefined;
+	try {
+		await assert.rejects(
+			() =>
+				runConnectorProtocolSubprocess({
+					cwd: PACKAGE_ROOT,
+					entrypoint,
+					env: { GRANDCHILD_MARKER: marker, GRANDCHILD_PID_FILE: pidFile },
+					start: {
+						type: "START",
+						scope: { streams: [{ name: "items" }] },
+					},
+					timeoutMs: 5000,
+				}),
+			/connector subprocess timed out after 5000ms/,
+		);
+
+		grandchildPid = Number(await readFile(pidFile, "utf8"));
+		const deadline = Date.now() + 5000;
+		let grandchildExited = false;
+		while (Date.now() < deadline) {
+			try {
+				const stat = await readFile(`/proc/${grandchildPid}/stat`, "utf8");
+				const fields = stat
+					.slice(stat.lastIndexOf(")") + 1)
+					.trim()
+					.split(/\s+/u);
+				if (fields[0] === "Z") {
+					grandchildExited = true;
+					break;
+				}
+				const commandLine = await readFile(
+					`/proc/${grandchildPid}/cmdline`,
+					"utf8",
+				);
+				if (!commandLine.includes(marker)) {
+					grandchildExited = true;
+					break;
+				}
+				process.kill(grandchildPid, 0);
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			} catch (error) {
+				if (
+					["ENOENT", "ESRCH"].includes(
+						(error as NodeJS.ErrnoException).code ?? "",
+					)
+				) {
+					grandchildExited = true;
+					break;
+				}
+				throw error;
+			}
+		}
+		assert.ok(
+			grandchildExited,
+			`connector grandchild ${String(grandchildPid)} survived timeout`,
+		);
+	} finally {
+		if (!grandchildPid) {
+			try {
+				grandchildPid = Number(await readFile(pidFile, "utf8"));
+			} catch {
+				// The fixture may have failed before it spawned a grandchild.
+			}
+		}
+		if (grandchildPid && Number.isSafeInteger(grandchildPid)) {
+			try {
+				const commandLine = await readFile(
+					`/proc/${grandchildPid}/cmdline`,
+					"utf8",
+				);
+				if (commandLine.includes(marker)) {
+					process.kill(grandchildPid, "SIGKILL");
+				}
+			} catch {
+				// The process may have exited or the PID may have been reused.
+			}
+		}
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
 test("runConnectorProtocolSubprocess: rejects non-zero child exit even after terminal DONE", async () => {
 	await assert.rejects(
 		() =>
@@ -378,4 +486,276 @@ test("runConnectorProtocolSubprocess: stream failure evidence forces failed DONE
 	assert.equal(done.status, "failed");
 	assert.equal(done.error?.code, "stream_collection_failed");
 	assert.equal(done.error?.retryable, true);
+});
+
+/** `emitted_at` is each run's own clock; blank it so two runs of one fixture compare. */
+function withoutEmittedAt(
+	messages: readonly EmittedMessage[],
+): EmittedMessage[] {
+	return messages.map((message) => {
+		if (message.type !== "RECORD") {
+			return message;
+		}
+		return { ...message, emitted_at: "" };
+	});
+}
+
+test("runConnectorProtocolSubprocess: retainRawStdout false keeps the parsed messages and returns no raw text", async () => {
+	const retained = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: fixturePath("protocol-subprocess-non-browser.ts"),
+		start: { type: "START", scope: { streams: [{ name: "items" }] } },
+	});
+	const dropped = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: fixturePath("protocol-subprocess-non-browser.ts"),
+		retainRawStdout: false,
+		start: { type: "START", scope: { streams: [{ name: "items" }] } },
+	});
+
+	assert.deepEqual(
+		withoutEmittedAt(dropped.messages),
+		withoutEmittedAt(retained.messages),
+	);
+	assert.equal(dropped.rawStdout, "");
+
+	const rawLines = retained.rawStdout.split("\n").filter((line) => line !== "");
+	assert.deepEqual(
+		rawLines.map((line) => JSON.parse(line)),
+		retained.messages,
+	);
+});
+
+test("runConnectorProtocolSubprocess: a multi-byte character split across stdout chunks survives", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "connector-subprocess-utf8-"));
+	const entrypoint = join(tempDir, "utf8-connector.mjs");
+	// 3-byte characters, 300 KB in one line: pipe chunks (64 KiB) cannot all
+	// end on a character boundary, so per-chunk decoding would corrupt some.
+	const text = "\u20ac".repeat(100_000);
+	await writeFile(
+		entrypoint,
+		[
+			`const text = ${JSON.stringify(text)};`,
+			'process.stdout.write(JSON.stringify({ type: "RECORD", stream: "items", data: { id: "1", text } }) + "\\n");',
+			'process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");',
+		].join("\n"),
+	);
+	try {
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint,
+			start: { type: "START", scope: { streams: [{ name: "items" }] } },
+		});
+		const record = result.messages.find((m) => m.type === "RECORD") as
+			| { data: { text: string } }
+			| undefined;
+		assert.ok(record, "the RECORD reached messages");
+		assert.equal(
+			record.data.text.includes("\ufffd"),
+			false,
+			"no replacement characters",
+		);
+		assert.equal(record.data.text, text);
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("runConnectorProtocolSubprocess: a child that exits before the first RSS tick still has a sampled peak", {
+	skip: process.platform !== "linux",
+}, async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "connector-subprocess-rss-"));
+	const entrypoint = join(tempDir, "quick-connector.mjs");
+	await writeFile(
+		entrypoint,
+		'process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");\n',
+	);
+	try {
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint,
+			// Far longer than the child lives, so only the start and output
+			// samples can produce a value.
+			peakRssPollIntervalMs: 60_000,
+			start: { type: "START", scope: { streams: [{ name: "items" }] } },
+		});
+		assert.notEqual(result.peakRssBytes, null, "expected a sampled peak RSS");
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+// ─── skipPoliteDelays ────────────────────────────────────────────────────
+
+/** Run `body` while recording the delay every `setTimeout` call hands to the
+ *  timer underneath whatever `body` installs on top of it. */
+async function recordTimerDelays(
+	body: () => Promise<void>,
+): Promise<(number | undefined)[]> {
+	const seen: (number | undefined)[] = [];
+	const original = globalThis.setTimeout;
+	globalThis.setTimeout = ((
+		handler: () => void,
+		delay?: number,
+		...args: unknown[]
+	) => {
+		seen.push(delay);
+		return original(handler, delay, ...args);
+	}) as unknown as typeof setTimeout;
+	try {
+		await body();
+	} finally {
+		globalThis.setTimeout = original;
+	}
+	return seen;
+}
+
+test("skipPoliteDelays: a politeDelay pause fires on the next tick and other timers keep their delay", async () => {
+	const seen = await recordTimerDelays(async () => {
+		const restore = skipPoliteDelays();
+		try {
+			clearTimeout(setTimeout(() => undefined, 12_345));
+			await politeDelay(9_999);
+		} finally {
+			restore();
+		}
+	});
+
+	assert.deepEqual(
+		seen,
+		[12_345, 0],
+		"the watchdog-style timer keeps 12345 ms; only the pause armed inside politeDelay becomes 0 ms",
+	);
+});
+
+test("skipPoliteDelays: the restore function puts the previous timer back", () => {
+	const before = globalThis.setTimeout;
+	const restore = skipPoliteDelays();
+	assert.notEqual(globalThis.setTimeout, before);
+	restore();
+	assert.equal(globalThis.setTimeout, before);
+});
+
+test("skipPoliteDelays: overlapping installs restored first-in, first-out keep the pause skipped until the last restore", async () => {
+	const seen = await recordTimerDelays(async () => {
+		const original = globalThis.setTimeout;
+		const restoreFirst = skipPoliteDelays();
+		const restoreSecond = skipPoliteDelays();
+		try {
+			await politeDelay(1_000);
+			restoreFirst();
+			await politeDelay(1_000);
+			restoreSecond();
+			assert.equal(
+				globalThis.setTimeout,
+				original,
+				"the last restore puts the original timer back",
+			);
+		} finally {
+			restoreFirst();
+			restoreSecond();
+		}
+	});
+
+	assert.deepEqual(
+		seen,
+		[0, 0],
+		"the first restore must not disable the second installation",
+	);
+});
+
+test("skipPoliteDelays: overlapping installs restored last-in, first-out keep the pause skipped until the last restore", async () => {
+	const seen = await recordTimerDelays(async () => {
+		const original = globalThis.setTimeout;
+		const restoreFirst = skipPoliteDelays();
+		const restoreSecond = skipPoliteDelays();
+		try {
+			await politeDelay(1_000);
+			restoreSecond();
+			await politeDelay(1_000);
+			restoreFirst();
+			assert.equal(
+				globalThis.setTimeout,
+				original,
+				"the last restore puts the original timer back",
+			);
+		} finally {
+			restoreFirst();
+			restoreSecond();
+		}
+	});
+
+	assert.deepEqual(
+		seen,
+		[0, 0],
+		"the restore of the later installation must leave the earlier one live",
+	);
+});
+
+test("skipPoliteDelays: a repeated restore releases nothing twice", async () => {
+	const seen = await recordTimerDelays(async () => {
+		const original = globalThis.setTimeout;
+		const restoreFirst = skipPoliteDelays();
+		const restoreSecond = skipPoliteDelays();
+		try {
+			restoreFirst();
+			restoreFirst();
+			await politeDelay(1_000);
+			restoreSecond();
+			restoreSecond();
+			assert.equal(
+				globalThis.setTimeout,
+				original,
+				"the last restore puts the original timer back",
+			);
+
+			// The count stayed at zero rather than going negative, so a new
+			// installation still skips the pause.
+			const restoreThird = skipPoliteDelays();
+			try {
+				await politeDelay(1_000);
+			} finally {
+				restoreThird();
+			}
+			assert.equal(globalThis.setTimeout, original);
+		} finally {
+			restoreFirst();
+			restoreSecond();
+		}
+	});
+
+	assert.deepEqual(
+		seen,
+		[0, 0],
+		"a repeated restore must neither release the other installation nor push the count below zero",
+	);
+});
+
+test("skipPoliteDelays: a timer armed by a helper that politeDelay calls keeps its delay", async () => {
+	// The matcher keys on the `politeDelay` frame, so this stand-in carries
+	// that name. The stack assertion below shows the frame is really on the
+	// stack, so the helper's timer is kept for the right reason.
+	let stackAtHelper = "";
+	function politeDelay(ms: number): Promise<void> {
+		return armedByHelper(ms);
+	}
+	function armedByHelper(ms: number): Promise<void> {
+		stackAtHelper = new Error().stack ?? "";
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+	const seen = await recordTimerDelays(async () => {
+		const restore = skipPoliteDelays();
+		try {
+			await politeDelay(50);
+		} finally {
+			restore();
+		}
+	});
+
+	assert.match(stackAtHelper, /^\s+at politeDelay \(/m);
+	assert.deepEqual(
+		seen,
+		[50],
+		"a timer armed by a helper that politeDelay calls keeps its 50 ms delay",
+	);
 });

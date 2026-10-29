@@ -1,0 +1,92 @@
+{
+  "status": "COMPLETED",
+  "entries": [
+    {
+      "uuid": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1",
+      "backend_uuid": "ffffffff-ffff-4fff-8fff-fffffffffff1",
+      "context_uuid": "cccccccc-cccc-4ccc-8ccc-ccccccccccc1",
+      "frontend_uuid": "dddddddd-dddd-4ddd-8ddd-ddddddddddd1",
+      "thread_title": "Synthetic thread one",
+      "thread_url_slug": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+      "query_str": "What is a synthetic fixture?",
+      "entry_created_datetime": "2026-10-02T09:15:00.123456+00:00",
+      "entry_updated_datetime": "2026-10-02T09:15:04.654321+00:00",
+      "updated_datetime": "2026-10-02T09:15:04.654321+00:00",
+      "display_model": "sonar-pro",
+      "user_selected_model": "sonar",
+      "mode": "web",
+      "search_focus": "internet",
+      "search_mode": "web",
+      "query_language": "en",
+      "author_id": "00000000-0000-4000-8000-000000000001",
+      "author_username": "synthetic-owner",
+      "status": "COMPLETED",
+      "privacy_state": "private",
+      "thread_access": 1,
+      "related_queries": ["What is test data?"],
+      "sources": {},
+      "read_write_token": "kkkkkkkk-kkkk-4kkk-8kkk-kkkkkkkkkkk1",
+      "blocks": [
+        { "intended_usage": "plan", "plan_block": { "steps": [] } },
+        {
+          "intended_usage": "pro_search_steps",
+          "pro_search_steps_block": { "steps": [] }
+        },
+        {
+          "intended_usage": "web_results",
+          "web_result_block": {
+            "web_results": [
+              {
+                "name": "Synthetic source one",
+                "url": "https://example.com/synthetic-1",
+                "snippet": "A synthetic page about fixtures.",
+                "timestamp": "2026-09-30T00:00:00Z",
+                "is_attachment": false,
+                "is_image": false
+              },
+              {
+                "name": "Synthetic source two",
+                "url": "https://example.org/synthetic-2",
+                "snippet": "Another synthetic page.",
+                "timestamp": "2026-10-01T00:00:00Z",
+                "is_attachment": false,
+                "is_image": false
+              }
+            ]
+          }
+        },
+        {
+          "intended_usage": "ask_text",
+          "markdown_block": {
+            "answer": "A **synthetic fixture** is invented data shaped like the real thing.",
+            "chunks": ["A **synthetic fixture** is invented data shaped like the real thing."],
+            "progress": "COMPLETE",
+            "chunk_starting_offset": 0
+          }
+        },
+        {
+          "intended_usage": "ask_text_0_markdown",
+          "markdown_block": {
+            "answer": "A **synthetic fixture**",
+            "chunks": ["A **synthetic fixture**"],
+            "progress": "COMPLETE",
+            "chunk_starting_offset": 0
+          }
+        },
+        {
+          "intended_usage": "ask_text_1_markdown",
+          "markdown_block": {
+            "answer": "is invented data shaped like the real thing.",
+            "chunks": ["is invented data shaped like the real thing."],
+            "progress": "COMPLETE",
+            "chunk_starting_offset": 21
+          }
+        }
+      ]
+    }
+  ],
+  "has_next_page": false,
+  "next_cursor": null,
+  "thread_metadata": { "title": "Synthetic thread one" },
+  "background_entries": []
+}

@@ -17,8 +17,12 @@ on:
     paths:
       - "packages/polyfill-connectors/**"
       - "connectors/**"
+      - "scripts/test-sandbox/**"
       - ".github/workflows/polyfill-connectors.yml"
-  pull_request: {}
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # is checked locally instead; the batch PR into main runs this workflow.
+  pull_request:
+    branches: [main]
   workflow_dispatch: {}
 
 permissions:
@@ -57,14 +61,14 @@ jobs:
 
           echo "$CHANGED"
 
-          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
+          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|scripts/test-sandbox/|\.github/workflows/polyfill-connectors\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
           fi
 
   verify:
-    name: verify + test
+    name: verify
     needs: changes
     if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -77,49 +81,34 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Node 24: this package's node:test usage (--test-concurrency,
           # --test-timeout) and node:fs/promises glob() need it; the rest of
           # this repo's workflows run Node 20 for unrelated npm-only scripts.
           node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/polyfill-connectors/test-tools/package-lock.json
 
       - name: Install workspace dependencies
         # Root connector files resolve dependencies from the root workspace.
-        # --ignore-scripts skips patchright's
-        # postinstall browser download; the browser the tests DO need is
-        # installed explicitly in the next step, so the skip stays deliberate
-        # rather than accidental.
+        # --ignore-scripts skips patchright's postinstall browser download.
+        # Test shards install the Chromium browser they need explicitly.
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: npm ci --ignore-scripts
 
-      - name: Install Chromium for the capture-redaction proofs
-        # `src/capture-trace-redaction.test.ts` launches a real browser: the
-        # thing under test is what Playwright WRITES to disk (trace zips,
-        # screenshots, DOM snapshots), so a stub cannot prove the redaction.
-        # `--with-deps` because the runner image carries no shared libs for it.
-        # The root workspace install provides `playwright` to the package.
-        #
-        # Ported from PDP-Connect/pdpp's own polyfill-connectors workflow,
-        # which already installs exactly this for exactly this suite. Move A
-        # brought that suite into this repo but not the browser step, so the
-        # install comment above ("verify + test don't launch a browser") became
-        # false and six tests failed on a missing chrome-headless-shell.
-        working-directory: packages/polyfill-connectors
-        run: npx playwright install --with-deps chromium
-
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
         run: npm run verify
 
-      - name: Test
-        working-directory: packages/polyfill-connectors
-        # Excludes the @pdpp/reference-contract-dependent suites; see
-        # scripts/run-tests.mjs and tsconfig.json for the file list and the
-        # reinstatement note (that package isn't part of Move A's scope).
-        run: npm run test
+      - name: Check connector stdout stays protocol-only
+        # This scan targets connectors/ at the repository root, outside the
+        # package-local verification scope.
+        run: npm run connector-stdout-console:check
 
       - name: Pack, install, and run (proves a real npm install of the published tarball works)
         # This step's own dependency install above used --ignore-scripts, so
@@ -132,6 +121,70 @@ jobs:
         # any of that consumer's own code ran — see scripts/pack-install-run.mjs.
         working-directory: packages/polyfill-connectors
         run: npm run pack-install-run
+
+  test:
+    name: Test shard ${{ matrix.shard }}
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/polyfill-connectors/test-tools/package-lock.json
+
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Install isolated Vitest test tools
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+
+      - name: Install Chromium for the capture-redaction proofs
+        working-directory: packages/polyfill-connectors
+        run: npx playwright install --with-deps chromium
+
+      - name: Allow unprivileged user namespaces for the isolation tests
+        run: |
+          key=kernel.apparmor_restrict_unprivileged_userns
+          if sysctl -n "$key" >/dev/null 2>&1; then
+            sudo sysctl -w "$key=0"
+          else
+            echo "$key is not present on this runner; nothing to lift"
+          fi
+          command -v bwrap >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q bubblewrap; }
+          if unshare --user --map-root-user --net true; then
+            echo "unprivileged user and network namespaces: available"
+          else
+            echo "::error::unprivileged namespaces are unavailable; the scenario-isolation tests would skip"
+            exit 1
+          fi
+
+      - name: Test assigned file shard
+        working-directory: packages/polyfill-connectors
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/6
+        # Excludes the @pdpp/reference-contract-dependent suites; see
+        # scripts/run-tests.mjs and tsconfig.json for the file list and the
+        # reinstatement note (that package isn't part of Move A's scope).
+        run: npm test
 
   connector-evidence:
     name: Connector evidence summary
@@ -173,7 +226,7 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.connectors.outputs.list != ''
         with:
           node-version: "24"
@@ -253,7 +306,7 @@ jobs:
 
   gate:
     name: Polyfill Connectors Gate
-    needs: [changes, verify]
+    needs: [changes, verify, test]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -261,9 +314,11 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          TEST_RESULT: ${{ needs.test.result }}
         run: |
           echo "changes: $CHANGES_RESULT"
           echo "verify:  $VERIFY_RESULT"
+          echo "tests:   $TEST_RESULT"
 
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "::error::changes job did not succeed (result: $CHANGES_RESULT) — cannot trust downstream skip/run decisions"
@@ -278,4 +333,12 @@ jobs:
               ;;
           esac
 
-          echo "Polyfill Connectors Gate: verify succeeded or was correctly skipped as irrelevant."
+          case "$TEST_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::test shards reported '$TEST_RESULT' — expected all shards to succeed or be skipped"
+              exit 1
+              ;;
+          esac
+
+          echo "Polyfill Connectors Gate: verification and every test shard succeeded or were correctly skipped as irrelevant."

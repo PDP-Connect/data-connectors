@@ -8,7 +8,10 @@ name: PageShim target
 on:
   push:
     branches: [main]
-  pull_request: {}
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # is checked locally instead; the batch PR into main runs this workflow.
+  pull_request:
+    branches: [main]
   workflow_dispatch: {}
 
 permissions:
@@ -22,23 +25,29 @@ jobs:
   harness-shards:
     name: PageShim harness (${{ matrix.shard.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The job deadline covers a slow Chromium install as well as the tests.
+    # On 2026-10-22 `playwright install --with-deps` took 10-15 minutes on some
+    # runners and the old 15-minute deadline cancelled passing test runs. The
+    # test step keeps its own deadline so a hung harness still fails promptly.
+    timeout-minutes: 30
     # Keep the sequential connector gates separate from the regression tests.
-    # Together they exceed the job deadline; each shard takes about 8 minutes.
+    # Bound each shard independently; the connector gates can exceed 13 minutes.
     strategy:
       fail-fast: false
       matrix:
         shard:
-          - name: connector gates
-            args: --test-name-pattern="pageshim gate" scripts/pageshim/pageshim.test.mjs
+          - name: connector gates a-m
+            args: '--test-name-pattern="^[a-m].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
+          - name: connector gates other
+            args: '--test-name-pattern="^[^a-m].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
           - name: regressions
-            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs
+            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/harness-timing.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: packages/polyfill-connectors/package.json
 
@@ -49,9 +58,11 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Install Chromium for the harness
+        timeout-minutes: 16
         run: npx playwright install --with-deps chromium
 
       - name: Build and run the harness
+        timeout-minutes: 15
         run: node --test ${{ matrix.shard.args }}
 
   harness:
@@ -61,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - name: Require both shards to pass
+      - name: Require all shards to pass
         env:
           SHARD_RESULT: ${{ needs.harness-shards.result }}
         run: test "$SHARD_RESULT" = success

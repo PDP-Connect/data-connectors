@@ -7,6 +7,16 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  CONSENT_AGGREGATE,
+  CONSENT_RESOLUTION_MODULE,
+  consentSlicePath,
+  consentSliceProblem,
+} from "./consent-slice-resolution.mjs";
+
+// execFileSync defaults to a 1 MiB output buffer; connector-implementation-index.json
+// alone passed that in October 2026, and git show then fails with ENOBUFS.
+const GIT_SHOW_MAX_BUFFER = 64 * 1024 * 1024;
 
 const PACKAGE_ROOT = "packages/polyfill-connectors";
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
@@ -46,6 +56,14 @@ const PAGE_SHIM_SHARED_INPUTS = [
 	"scripts/pageshim/shims/process.js",
 	"scripts/pageshim/shims/url.js",
 ];
+// Rendering policy for the consent slices, as it exists at the commit being
+// compared. It decides whether a slice is current; it is not itself shipped,
+// so the PageShim builder's import of it is not an artifact input. The slice
+// bytes are what an artifact carries.
+const CONSENT_SLICE_DIRECTORY = "packages/polyfill-connectors/src/generated/consent-time-fields";
+const CONSENT_RUNTIME = "packages/polyfill-connectors/src/connector-runtime.ts";
+const CONSENT_BUILDERS = ["scripts/build-connector-oci-artifact.mjs", "scripts/pageshim/build.mjs"];
+const CONSENT_RENDERER = "packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 const STATIC_LOCAL_IMPORT = /^\s*(?:import|export)\s+(?!type\b)(?:[^\n]*\n)*?[^\n]*?\sfrom\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const SIDE_EFFECT_LOCAL_IMPORT = /^\s*import\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const DYNAMIC_LOCAL_IMPORT = /\bimport\s*\(\s*(["'])(\.{1,2}\/[^"]*?)\1/g;
@@ -57,6 +75,7 @@ function readFileAtCommit(commit, path, { cwd }) {
     return execFileSync("git", ["show", `${commit}:${path}`], {
       cwd,
       encoding: "buffer",
+      maxBuffer: GIT_SHOW_MAX_BUFFER,
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
@@ -66,10 +85,22 @@ function readFileAtCommit(commit, path, { cwd }) {
   }
 }
 
+// npm scripts in either package.json are developer and test commands. The
+// artifact builder reads only dependencies and engines from them, so a new or
+// changed script must not force every connector to take a version bump.
+const SCRIPT_FREE_INPUTS = new Set(["package.json", `${PACKAGE_ROOT}/package.json`]);
+
 function artifactInputContent(path, content) {
-  if (path !== "package.json" || content === null) return content;
+  const installerMetadata = path === "packages/connector-installer-core/package.json";
+  if ((!SCRIPT_FREE_INPUTS.has(path) && !installerMetadata) || content === null) return content;
   const packageMetadata = JSON.parse(content.toString("utf8"));
-  delete packageMetadata.scripts;
+  if (SCRIPT_FREE_INPUTS.has(path)) delete packageMetadata.scripts;
+  // The polyfill package's exports map is its npm surface for hosts. Connectors
+  // import its sources by relative path, so the bundler never resolves it.
+  if (path === `${PACKAGE_ROOT}/package.json`) delete packageMetadata.exports;
+  // npm's pack allowlist controls the installer tools package, not the OCI
+  // connector builder. Retiring a tool-only file must not release every connector.
+  if (path === "package.json" || installerMetadata) delete packageMetadata.files;
   return Buffer.from(JSON.stringify(packageMetadata));
 }
 
@@ -104,8 +135,8 @@ function resolveLocalImport(commit, from, specifier, options) {
   );
 }
 
-function addLocalImportClosure(commit, entryPath, files, options, excluded = new Set()) {
-  const pending = [entryPath];
+function addLocalImportClosure(commit, entryPath, files, options, excluded = new Set(), remap = (path) => path) {
+  const pending = [remap(entryPath)];
   const visited = new Set();
   while (pending.length) {
     const path = pending.pop();
@@ -120,7 +151,7 @@ function addLocalImportClosure(commit, entryPath, files, options, excluded = new
       files.set(path, source);
     }
     for (const specifier of localImportSpecifiers(source)) {
-      pending.push(resolveLocalImport(commit, path, specifier, options));
+      pending.push(remap(resolveLocalImport(commit, path, specifier, options)));
     }
   }
 }
@@ -160,6 +191,87 @@ async function pageShimEligibilityAtCommit(commit, profile, options) {
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+async function consentRendererAtCommit(commit, options) {
+  const source = readFileAtCommit(commit, CONSENT_RENDERER, options);
+  if (source === null) {
+    throw new ArtifactInputError(
+      `cannot read ${CONSENT_RENDERER} at ${commit}; cannot tell whether the consent-time-field slice is current`,
+    );
+  }
+  const dir = mkdtempSync(join(tmpdir(), "consent-time-fields-render-"));
+  try {
+    const file = join(dir, "consent-time-fields-render.mjs");
+    writeFileSync(file, source);
+    return await import(pathToFileURL(file).href);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A tree is either coherent legacy (no part of the slice layout) or the slice
+ * layout. Without the resolution policy file, any other layout part (the
+ * renderer, a slice, the bound identity in the runtime or aggregate, or a
+ * builder that imports the policy or renderer) means a broken
+ * checkout; hashing it as legacy would bundle the aggregate where the builders
+ * cannot, so it is refused.
+ */
+function rejectPartialSliceLayout(commit, options) {
+  const found = [];
+  if (readFileAtCommit(commit, CONSENT_RENDERER, options) !== null) found.push(CONSENT_RENDERER);
+  const slices = execFileSync("git", ["ls-tree", "-r", "--name-only", commit, "--", CONSENT_SLICE_DIRECTORY], {
+    cwd: options.cwd,
+    encoding: "utf8",
+  }).trim();
+  if (slices) found.push(`${slices.split("\n").length} file(s) under ${CONSENT_SLICE_DIRECTORY}`);
+  for (const builder of CONSENT_BUILDERS) {
+    const source = readFileAtCommit(commit, builder, options)?.toString() ?? "";
+    if (source.includes("consent-slice-resolution") || source.includes("consent-time-fields-render")) {
+      found.push(`${builder} imports the slice policy or renderer`);
+    }
+  }
+  // The runtime and the aggregate carry the bound identity only in the slice layout.
+  for (const path of [CONSENT_RUNTIME, CONSENT_AGGREGATE]) {
+    if (readFileAtCommit(commit, path, options)?.toString().includes("CONSENT_BOUND_CONNECTOR")) {
+      found.push(`${path} carries the bound identity`);
+    }
+  }
+  if (found.length) {
+    throw new ArtifactInputError(
+      `incomplete consent-time-field slice layout at ${commit}: ${CONSENT_RESOLUTION_MODULE} is missing but ${found.join(", ")} present; restore the layout or remove all of it`,
+    );
+  }
+}
+
+/**
+ * How a connector's import of the consent-time-field aggregate resolves at
+ * `commit`, or null before the slice layout existed. The Core and PageShim
+ * builders bundle the connector's own slice in its place
+ * (scripts/consent-slice-resolution.mjs), so the hash covers that slice and
+ * not the aggregate. A checkout that has the layout but lacks or has a stale
+ * slice fails here; it never falls back to hashing the aggregate. A commit
+ * before the layout still bundled the aggregate, so it keeps hashing it.
+ */
+async function consentSliceRemap(commit, manifest, profile, options) {
+  if (readFileAtCommit(commit, CONSENT_RESOLUTION_MODULE, options) === null) {
+    rejectPartialSliceLayout(commit, options);
+    return null;
+  }
+  const slice = consentSlicePath(manifest);
+  const { renderSlice } = await consentRendererAtCommit(commit, options);
+  const expected = renderSlice(manifest, profile);
+  let checked = false;
+  return (path) => {
+    if (path !== CONSENT_AGGREGATE) return path;
+    if (!checked) {
+      const problem = consentSliceProblem(slice, readFileAtCommit(commit, slice, options), expected);
+      if (problem) throw new ArtifactInputError(`${problem} (at ${commit})`);
+      checked = true;
+    }
+    return slice;
+  };
 }
 
 function readManifestAtCommit(commit, path, options) {
@@ -274,7 +386,13 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
   for (const [path, bytes] of await sourceSliceInputs(commit, profile, options)) {
     files.set(path, bytes);
   }
-  addLocalImportClosure(commit, `connectors/${manifest}/index.ts`, files, options);
+  // Policy files exist only in the slice layout; absent, nothing is hashed for
+  // them so a commit from before the layout keeps its identity.
+  const consentRemap = await consentSliceRemap(commit, manifest, profile, options);
+  if (consentRemap) {
+    files.set(CONSENT_RESOLUTION_MODULE, readFileAtCommit(commit, CONSENT_RESOLUTION_MODULE, options));
+  }
+  addLocalImportClosure(commit, `connectors/${manifest}/index.ts`, files, options, new Set(), consentRemap ?? undefined);
 
   // A PageShim bundle is a connector-specific artifact input. Detect it from
   // the entry file at the commit being compared so enabling a new target, and
@@ -296,9 +414,9 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       // packaging step; encode that prior state so it compares as a real
       // change when the first packaged bundle is introduced.
       if (content === null) files.set(path, Buffer.from("\0absent"));
-      else addLocalImportClosure(commit, path, files, options, new Set(["scripts/pageshim/capabilities.mjs"]));
+      else addLocalImportClosure(commit, path, files, options, new Set(["scripts/pageshim/capabilities.mjs", CONSENT_RENDERER]), consentRemap ?? undefined);
     }
-    if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options);
+    if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options, new Set(), consentRemap ?? undefined);
   }
 
   const hash = createHash("sha256");

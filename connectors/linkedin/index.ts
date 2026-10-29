@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.3)
+ * PDPP LinkedIn Connector (v0.3.30)
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -73,7 +73,8 @@ import type { Page } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
-	buildFullScanCoverageMessage,
+	buildDetailCoverageMessage,
+	createConnectorFailure,
 	type EmittedMessage,
 	type EnsureSessionArgs,
 	type ProbeSessionArgs,
@@ -83,15 +84,30 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import {
-	buildConnectionRecord,
-	buildEducationRecords,
-	buildExperienceRecords,
-	buildLanguageRecords,
-	buildProfileRecord,
-	buildSkillRecords,
+	type FieldRead,
+	firstOf,
+	isRecord,
+	read,
+	type StreamRows,
+	textAt,
+	unavailable,
+} from "./field-read.ts";
+import {
+	buildConnectionRows,
+	buildEducationRows,
+	buildExperienceRows,
+	buildLanguageRows,
+	buildProfileRows,
+	buildSkillRows,
+	collectionAt,
+	connectionEnrichmentHasMalformedFields,
+	connectionEnrichmentIsReadable,
+	type DashProfileSource,
 } from "./parsers.ts";
+import { connectionEvidence, profileEvidence, sectionEvidence, summaryEvidence } from "./evidence.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
+	VoyagerConnectionElement,
 	VoyagerConnectionsResponse,
 	VoyagerDashProfilesResponse,
 	VoyagerMeResponse,
@@ -119,7 +135,31 @@ const PROFILE_DECORATION_IDS = [
 	"com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-109",
 ];
 
-type VoyagerJsonResult<T> = { _error: string } | (T & { _error?: undefined });
+/** Why a Voyager read failed, as a closed set. A thrown message or a response
+ *  body can quote private text, so only these classes leave the page. */
+type VoyagerReadCause = `http_${number}` | "malformed_json_body" | "transport_failed";
+
+type PageVoyagerResult =
+	| { _error: VoyagerReadCause }
+	| { _body: unknown; _status: number };
+
+// JSON can contain any string key, including _error and recognized cause names.
+// Only envelopes created here carry this process-local, non-JSON brand.
+const VOYAGER_FAILURE = Symbol("voyager_failure");
+type VoyagerFailure = { [VOYAGER_FAILURE]: true; _error: VoyagerReadCause };
+type VoyagerJsonResult<T> = VoyagerFailure | (T & { [VOYAGER_FAILURE]?: never });
+
+function isVoyagerReadCause(value: unknown): value is VoyagerReadCause {
+	return value === "malformed_json_body" || value === "transport_failed" ||
+		(typeof value === "string" && /^http_[0-9]{1,3}$/u.test(value));
+}
+
+function voyagerFailure(cause: unknown): VoyagerFailure {
+	return {
+		[VOYAGER_FAILURE]: true,
+		_error: isVoyagerReadCause(cause) ? cause : "transport_failed",
+	};
+}
 
 /** Fetch a Voyager endpoint from inside the logged-in page context. Voyager
  *  has no public CORS allowance, so this must run via `page.evaluate` on a
@@ -138,7 +178,7 @@ async function voyagerFetch<T>(
 	label?: string,
 ): Promise<VoyagerJsonResult<T>> {
 	const result = await page.evaluate(
-		async ({ path }) => {
+		async ({ path }): Promise<PageVoyagerResult> => {
 			try {
 				const csrfMatch = document.cookie.match(/JSESSIONID="?([^";]+)/);
 				const csrfToken = csrfMatch ? csrfMatch[1] : "";
@@ -151,25 +191,65 @@ async function voyagerFetch<T>(
 				}
 				return { _body: await resp.json(), _status: resp.status };
 			} catch (err) {
-				return { _error: err instanceof Error ? err.message : String(err) };
+				// Classes only: a parse or transport error's message can quote the
+				// response body or the host.
+				return {
+					_error: err instanceof SyntaxError ? "malformed_json_body" : "transport_failed",
+				};
 			}
 		},
 		{ path: endpoint },
 	);
 	if ("_error" in result) {
-		return result as VoyagerJsonResult<T>;
+		return voyagerFailure(result._error);
 	}
 	capture?.captureHttp(label ?? endpoint, result._body, {
 		endpoint,
 		status: result._status,
 	});
-	return result._body as VoyagerJsonResult<T>;
+	if (
+		typeof result._body !== "object" ||
+		result._body === null ||
+		Array.isArray(result._body)
+	) {
+		return voyagerFailure("malformed_json_body");
+	}
+	return result._body as T & { [VOYAGER_FAILURE]?: never };
 }
 
 function isFetchError<T>(
 	result: VoyagerJsonResult<T>,
-): result is { _error: string } {
-	return typeof (result as { _error?: unknown })._error === "string";
+): result is VoyagerFailure {
+	return (
+		typeof result === "object" &&
+		result !== null &&
+		result[VOYAGER_FAILURE] === true &&
+		isVoyagerReadCause(result._error)
+	);
+}
+
+interface DashProfileResult {
+	profile: VoyagerProfileElement | null;
+	source: DashProfileSource;
+	failure?: VoyagerReadCause;
+}
+
+function hasRecognizedProfileField(profile: Record<string, unknown>): boolean {
+	return [
+		"firstName",
+		"geoLocation",
+		"headline",
+		"industry",
+		"lastName",
+		"location",
+		"profileEducations",
+		"profileLanguages",
+		"profilePicture",
+		"profilePositionGroups",
+		"profileSkills",
+		"publicIdentifier",
+		"summary",
+	].some((key) => Object.hasOwn(profile, key));
 }
 
 /** Session liveness: an authenticated `/voyager/api/me` call succeeds. Used
@@ -189,14 +269,15 @@ async function checkApiAuth(
 }
 
 /** Fetch the full dash profile, trying each known decoration id in turn.
- *  Returns the first successful element, or null if every attempt failed
- *  (the caller still has the basic `/me` fields to fall back to). */
+ *  A successful full decoration recovers earlier failures. A weaker basic
+ *  fallback retains the failed decoration cause for unavailable sections. */
 async function fetchDashProfile(
 	page: Page,
 	publicIdentifier: string,
 	capture?: CaptureSession | null,
-): Promise<VoyagerProfileElement | null> {
+): Promise<DashProfileResult> {
 	const publicIdStr = encodeURIComponent(publicIdentifier);
+	let decorationFailure: VoyagerReadCause | undefined;
 	for (const decorationId of PROFILE_DECORATION_IDS) {
 		const result = await voyagerFetch<VoyagerDashProfilesResponse>(
 			page,
@@ -204,12 +285,19 @@ async function fetchDashProfile(
 			capture,
 			`dash-profile-${decorationId.split("-").pop()}`,
 		);
-		if (
-			!isFetchError(result) &&
-			result.elements &&
-			result.elements.length > 0
-		) {
-			return result.elements[0] ?? null;
+		if (isFetchError(result) && isRejectedSession(result._error)) {
+			return { profile: null, source: "unavailable", failure: result._error };
+		}
+		if (isFetchError(result)) decorationFailure = result._error;
+		if (!isFetchError(result) && Array.isArray(result.elements)) {
+			for (const candidate of result.elements) {
+				if (isRecord(candidate) && hasRecognizedProfileField(candidate)) {
+					return {
+						profile: candidate as VoyagerProfileElement,
+						source: "decoration",
+					};
+				}
+			}
 		}
 		await politeDelay(300);
 	}
@@ -219,36 +307,65 @@ async function fetchDashProfile(
 		capture,
 		"dash-profile-basic",
 	);
-	if (!isFetchError(basic) && basic.elements && basic.elements.length > 0) {
-		return basic.elements[0] ?? null;
+	if (!isFetchError(basic) && Array.isArray(basic.elements)) {
+		const profile = basic.elements.find(isRecord);
+		if (profile) {
+			return { profile: profile as VoyagerProfileElement, source: "basic",
+				...(decorationFailure ? { failure: decorationFailure } : {}),
+			};
+		}
 	}
-	return null;
+	return { profile: null, source: "unavailable",
+		...(isFetchError(basic) ? { failure: basic._error } : decorationFailure ? { failure: decorationFailure } : {}),
+	};
+}
+
+function isRejectedSession(error: string): boolean {
+	return /^http_40[13]$/u.test(error);
 }
 
 interface ConnectionsResult {
-	elements: { connectedMember?: string; createdAt?: number }[];
+	elements: VoyagerConnectionElement[];
+	error?: string;
+	observed: number;
+	missingUrnCount: number;
+	terminationReason:
+		| "observed_end_unproven"
+		| "continuation_advertised"
+		| "page_error"
+		| "malformed_page"
+		| "repeated_page"
+		| "page_budget";
 	total: number | null;
-	truncated: boolean;
 }
 
-/** Paginate the owner's connections list. `paging.total` is coded as a
- *  fallback source for the running total (matching the legacy connector's
- *  inference), but a live-account capture (2026-09-22, 353 connections
- *  across 9 pages) never populated it on any page — this endpoint's real
- *  response carries only `{ count, start, links }` in `paging`. In
- *  practice the total is `elements.length` from a complete (non-truncated)
- *  walk; capped at `CONNECTIONS_MAX` (matches the legacy connector's cap)
- *  with `truncated` reported honestly when the cap — not the provider —
- *  stopped the walk, since a truncated walk's `elements.length` is not the
- *  true total either. */
+/** Walk the owner's connections list and retain why the walk stopped.
+ *  Empty/short pages and paging totals are observations, never inventory proof.
+ *  Stable owner summaries, distinct emitted URNs, and an independent empty
+ *  confirmation at the summary total are required by connectionEvidence. */
 async function fetchConnections(
 	page: Page,
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	capture?: CaptureSession | null,
 ): Promise<ConnectionsResult> {
-	const elements: { connectedMember?: string; createdAt?: number }[] = [];
+	const elements: VoyagerConnectionElement[] = [];
+	const seenUrns = new Set<string>();
+	const seenPageFingerprints = new Set<string>();
 	let start = 0;
+	let observed = 0;
+	let missingUrnCount = 0;
 	let total: number | null = null;
+	const finish = (
+		terminationReason: ConnectionsResult["terminationReason"],
+		error?: string,
+	): ConnectionsResult => ({
+		elements,
+		observed,
+		missingUrnCount,
+		terminationReason,
+		total,
+		...(error ? { error } : {}),
+	});
 
 	while (start < CONNECTIONS_MAX) {
 		const result = await voyagerFetch<VoyagerConnectionsResponse>(
@@ -258,54 +375,190 @@ async function fetchConnections(
 			`connections-page-${String(start).padStart(4, "0")}`,
 		);
 		if (isFetchError(result)) {
-			break;
+			return finish("page_error", result._error);
 		}
-		total = result.paging?.total ?? total;
-		const page_elements = result.elements ?? [];
+		const paging = result.paging;
+		if (paging !== undefined && !isRecord(paging)) {
+			return finish("malformed_page");
+		}
+		const reportedStart = paging?.start;
+		if (
+			reportedStart !== undefined &&
+			(!Number.isSafeInteger(reportedStart) || reportedStart !== start)
+		) {
+			return finish("malformed_page");
+		}
+		const reportedCount = paging?.count;
+		if (
+			reportedCount !== undefined &&
+			(!Number.isSafeInteger(reportedCount) ||
+				reportedCount < 0 ||
+				reportedCount !== CONNECTIONS_PAGE_SIZE)
+		) {
+			return finish("malformed_page");
+		}
+		const reportedTotal = paging?.total;
+		if (
+			reportedTotal !== undefined &&
+			(!Number.isSafeInteger(reportedTotal) || reportedTotal < 0)
+		) {
+			return finish("malformed_page");
+		}
+		if (
+			total !== null &&
+			reportedTotal !== undefined &&
+			reportedTotal !== total
+		) {
+			return finish("malformed_page");
+		}
+		total = reportedTotal ?? total;
+		if (!Array.isArray(result.elements)) {
+			return finish("malformed_page");
+		}
+		const page_elements = result.elements;
+		observed += page_elements.length;
+		if (
+			page_elements.length > CONNECTIONS_PAGE_SIZE ||
+			page_elements.some((element) => !isRecord(element))
+		) {
+			return finish("malformed_page");
+		}
+		if (reportedCount !== undefined && page_elements.length > reportedCount) {
+			return finish("malformed_page");
+		}
+		const continuationAdvertised =
+			paging?.links !== undefined &&
+			(!Array.isArray(paging.links) || paging.links.length > 0);
 		if (page_elements.length === 0) {
-			break;
+			if (continuationAdvertised) return finish("continuation_advertised");
+			return total === null || elements.length === total
+				? finish("observed_end_unproven")
+				: finish("malformed_page");
 		}
-		elements.push(...page_elements);
+		const fingerprint = JSON.stringify(
+			page_elements.map((element) => [
+				element.connectedMember,
+				element.createdAt,
+			]),
+		);
+		if (seenPageFingerprints.has(fingerprint)) {
+			return finish("repeated_page");
+		}
+		seenPageFingerprints.add(fingerprint);
+		let duplicateMember = false;
+		let missingUrn = false;
+		for (const element of page_elements) {
+			const urn = element.connectedMember;
+			if (typeof urn !== "string" || urn.trim().length === 0) {
+				missingUrnCount += 1;
+				missingUrn = true;
+				continue;
+			}
+			if (seenUrns.has(urn)) {
+				duplicateMember = true;
+				continue;
+			}
+			seenUrns.add(urn);
+			elements.push(element);
+		}
+		if (duplicateMember) {
+			return finish("repeated_page");
+		}
+		if (missingUrn) return finish("malformed_page");
 		await progress("Fetched LinkedIn connections page", {
 			count: elements.length,
 			stream: "connections",
-			...(total !== null ? { total } : {}),
+			...(total === null ? {} : { total }),
 		});
-		if (page_elements.length < CONNECTIONS_PAGE_SIZE) {
-			return { elements, total, truncated: false };
-		}
-		start += CONNECTIONS_PAGE_SIZE;
+		if (continuationAdvertised) return finish("continuation_advertised");
+		// Summaries and totals are proof inputs, never reasons to discard later rows.
+		// Advance by observed rows so short pages also reach the source's empty end.
+		start += page_elements.length;
 		await politeDelay(PAGE_DELAY_MS);
 	}
 
-	return {
-		elements,
-		total,
-		truncated: start >= CONNECTIONS_MAX && elements.length > 0,
-	};
+	return finish(start >= CONNECTIONS_MAX ? "page_budget" : "malformed_page");
 }
 
 /** Batch-resolve connection member URNs to profile summaries (name,
  *  headline, public identifier) via the same dash/profiles endpoint used
- *  for the owner's own profile, keyed by `ids=List(...)`. Failures degrade
- *  to a smaller retry (never silently drop the whole batch) and, past two
- *  consecutive batch failures, stop resolving — the connection edges
- *  themselves are still emitted with null enrichment fields. */
+ *  for the owner's own profile. Failed batches receive singleton retries
+ *  after the first two consecutive batch failures; only an explicit per-member
+ *  404 is treated as permanent. Other unresolved enrichment withholds rows. */
 async function resolveConnectionProfiles(
 	page: Page,
 	memberUrns: string[],
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	capture?: CaptureSession | null,
-): Promise<Map<string, VoyagerResolvedProfile>> {
-	const resolved = new Map<string, VoyagerResolvedProfile>();
+): Promise<ConnectionProfileResolution> {
+	const resolved = new Map<string, ResolvedConnectionProfile>();
+	const malformedUrns = new Set<string>();
+	const permanentlyMissingUrns = new Set<string>();
 	let consecutiveFailures = 0;
 	let batchIndex = 0;
+	let singletonIndex = 0;
+	const accept = (urn: string, value: unknown, requested: Set<string>) => {
+		if (!requested.has(urn) || !isRecord(value)) return;
+		const profileFields = [
+			"firstName",
+			"headline",
+			"lastName",
+			"occupation",
+			"publicIdentifier",
+		] as const;
+		const presentFields = profileFields.filter((field) =>
+			Object.hasOwn(value, field),
+		);
+		const malformed = connectionEnrichmentHasMalformedFields(value);
+		if (malformed) malformedUrns.add(urn);
+		if (presentFields.length === 0) return;
+		const profile = value as VoyagerResolvedProfile;
+		const complete = connectionEnrichmentIsReadable(value);
+		const prior = resolved.get(urn);
+		permanentlyMissingUrns.delete(urn);
+		if (!prior || (!prior.complete && complete)) {
+			resolved.set(urn, {
+				profile,
+				complete,
+			});
+		}
+	};
+	const acceptBatch = (
+		value: VoyagerProfilesByIdResponse,
+		requested: Set<string>,
+	) => {
+		if (isRecord(value.results)) {
+			for (const [urn, profile] of Object.entries(value.results)) {
+				accept(urn, profile, requested);
+			}
+		}
+		if (isRecord(value.errors)) {
+			for (const [urn, error] of Object.entries(value.errors)) {
+				if (
+					requested.has(urn) &&
+					isRecord(error) &&
+					error.status === 404 &&
+					!resolved.get(urn)?.complete
+				) {
+					resolved.delete(urn);
+					permanentlyMissingUrns.add(urn);
+					malformedUrns.delete(urn);
+				}
+			}
+		}
+		for (const profile of Array.isArray(value.elements) ? value.elements : []) {
+			if (!isRecord(profile)) continue;
+			const urn = profile.entityUrn ?? profile.dashEntityUrn;
+			if (typeof urn === "string") accept(urn, profile, requested);
+		}
+	};
 
 	for (let i = 0; i < memberUrns.length; i += RESOLVE_BATCH_SIZE) {
 		if (consecutiveFailures >= 5) {
 			break;
 		}
 		const batch = memberUrns.slice(i, i + RESOLVE_BATCH_SIZE);
+		const requested = new Set(batch);
 		const urnList = batch.map((u) => encodeURIComponent(u)).join(",");
 		const result = await voyagerFetch<VoyagerProfilesByIdResponse>(
 			page,
@@ -315,27 +568,51 @@ async function resolveConnectionProfiles(
 		);
 		batchIndex += 1;
 
-		if (isFetchError(result)) {
+		if (
+			isFetchError(result) ||
+			!(isRecord(result.results) || Array.isArray(result.elements) || isRecord(result.errors))
+		) {
 			consecutiveFailures += 1;
+			if (consecutiveFailures <= 2) {
+				for (const urn of batch) {
+					const label = `resolve-single-${String(singletonIndex).padStart(3, "0")}`;
+					singletonIndex += 1;
+					const singleton = await voyagerFetch<VoyagerProfilesByIdResponse>(
+						page,
+						`/voyager/api/identity/dash/profiles?ids=List(${encodeURIComponent(urn)})`,
+						capture,
+						label,
+					);
+					if (
+						!isFetchError(singleton) &&
+						(isRecord(singleton.results) || Array.isArray(singleton.elements) || isRecord(singleton.errors))
+					) {
+						acceptBatch(singleton, new Set([urn]));
+					}
+					await politeDelay(PAGE_DELAY_MS);
+				}
+			}
 			await politeDelay(PAGE_DELAY_MS);
 			continue;
 		}
 		consecutiveFailures = 0;
-
-		if (result.results) {
-			for (const [key, profile] of Object.entries(result.results)) {
-				if (profile && (profile.firstName || profile.publicIdentifier)) {
-					resolved.set(key, profile);
-				}
+		acceptBatch(result, requested);
+		for (const urn of batch) {
+			if (resolved.get(urn)?.complete || permanentlyMissingUrns.has(urn)) continue;
+			const singleton = await voyagerFetch<VoyagerProfilesByIdResponse>(
+				page,
+				`/voyager/api/identity/dash/profiles?ids=List(${encodeURIComponent(urn)})`,
+				capture,
+				`resolve-single-${String(singletonIndex).padStart(3, "0")}`,
+			);
+			singletonIndex += 1;
+			if (
+				!isFetchError(singleton) &&
+				(isRecord(singleton.results) || Array.isArray(singleton.elements) || isRecord(singleton.errors))
+			) {
+				acceptBatch(singleton, new Set([urn]));
 			}
-		}
-		if (result.elements) {
-			for (const profile of result.elements) {
-				const urn = profile.entityUrn ?? profile.dashEntityUrn;
-				if (urn && (profile.firstName || profile.publicIdentifier)) {
-					resolved.set(urn, profile);
-				}
-			}
+			await politeDelay(PAGE_DELAY_MS);
 		}
 
 		await progress("Resolved LinkedIn connection profiles", {
@@ -346,7 +623,34 @@ async function resolveConnectionProfiles(
 		await politeDelay(PAGE_DELAY_MS);
 	}
 
-	return resolved;
+	return { profiles: resolved, permanentlyMissingUrns, malformedCount: malformedUrns.size };
+}
+
+interface ResolvedConnectionProfile {
+	profile: VoyagerResolvedProfile;
+	complete: boolean;
+}
+
+interface ConnectionProfileResolution {
+	permanentlyMissingUrns: Set<string>;
+	profiles: Map<string, ResolvedConnectionProfile>;
+	malformedCount: number;
+}
+
+/** Observational PageShim probe: no navigation or cookie-jar access.
+ * Voyager reads the CSRF cookie inside the same-origin page. A successful
+ * JSON response alone is not evidence of an authenticated owner. */
+export async function probeLinkedInSession(page: Page): Promise<boolean> {
+	try {
+		const me = await voyagerFetch<VoyagerMeResponse>(page, "/voyager/api/me");
+		if (isFetchError(me) || !isRecord(me.miniProfile)) return false;
+		return profileEvidence(me, {
+			entityUrn: me.miniProfile.dashEntityUrn,
+			publicIdentifier: me.miniProfile.publicIdentifier,
+		}) === undefined;
+	} catch {
+		return false;
+	}
 }
 
 export async function hasLinkedInSessionCookie(
@@ -402,7 +706,7 @@ export async function ensureLinkedInSession(
 		completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
 		message:
-			"Sign in to LinkedIn in the secure browser. PDPP will verify the session and continue automatically.",
+			"Sign in to LinkedIn in the secure browser. The session is verified, then collection continues automatically.",
 		page,
 		probe: () => checkApiAuth(page, capture),
 		readinessProbe: (readinessPage) => checkApiAuth(readinessPage, capture),
@@ -410,11 +714,30 @@ export async function ensureLinkedInSession(
 		sendInteraction,
 		timeoutSeconds,
 	});
-	if (!ready || !(await checkApiAuth(page, capture))) {
+	if (!(ready && (await checkApiAuth(page, capture)))) {
 		throw new Error(
 			"linkedin_login_incomplete: no live Voyager session after owner handoff",
 		);
 	}
+}
+
+/** Keep desktop emission unchanged while using the canonical mobile gap code. */
+export async function collectLinkedInPageShim(ctx: BrowserCollectContext): Promise<void> {
+	await collectLinkedIn({
+		...ctx,
+		emit: (message) => ctx.emit(
+			message.type === "SKIP_RESULT" && message.reason === "linkedin_enumeration_unproven"
+				? {
+					...message,
+					reason: "inventory_not_proven_complete",
+					diagnostics: {
+						...(isRecord(message.diagnostics) ? message.diagnostics : {}),
+						original_reason: message.reason,
+					},
+				}
+				: message,
+		),
+	});
 }
 
 export async function collectLinkedIn(
@@ -432,8 +755,9 @@ export async function collectLinkedIn(
 
 	const isAuthenticated = await checkApiAuth(page, capture);
 	if (!isAuthenticated) {
-		throw new Error(
+		throw createConnectorFailure("linkedin_session_dead",
 			"linkedin_session_dead: no live Voyager session (li_at/JSESSIONID cookie missing or expired); manual login required in the connector's browser profile",
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
 		);
 	}
 
@@ -447,150 +771,396 @@ export async function collectLinkedIn(
 	if (isFetchError(meResult)) {
 		throw new Error(`linkedin_profile_fetch_failed: ${meResult._error}`);
 	}
-	const publicIdentifier =
-		meResult.miniProfile?.publicIdentifier ?? meResult.publicIdentifier;
-	if (!publicIdentifier) {
+	const publicIdentifier = firstOf(
+		[
+			textAt(meResult, ["miniProfile", "publicIdentifier"]),
+			textAt(meResult, ["publicIdentifier"]),
+		],
+		"unavailable",
+	);
+	if (publicIdentifier.kind !== "read" || publicIdentifier.value.length === 0) {
 		throw new Error(
 			"linkedin_profile_fetch_failed: no publicIdentifier on /voyager/api/me response",
 		);
 	}
 
 	const wantsProfileFields = requested.has("profile");
-	const wantsExperience = requested.has("experience");
-	const wantsEducation = requested.has("education");
-	const wantsSkills = requested.has("skills");
-	const wantsLanguages = requested.has("languages");
 	const wantsConnections = requested.has("connections");
+	const wantedSections = PROFILE_SECTIONS.filter((section) =>
+		requested.has(section.stream),
+	);
 
-	let dashProfile: VoyagerProfileElement | null = null;
-	if (
-		wantsProfileFields ||
-		wantsExperience ||
-		wantsEducation ||
-		wantsSkills ||
-		wantsLanguages
-	) {
-		dashProfile = await fetchDashProfile(page, publicIdentifier, capture);
+	let dashProfileResult: DashProfileResult = {
+		profile: null,
+		source: "unavailable",
+	};
+	if (wantsProfileFields || wantedSections.length > 0) {
+		dashProfileResult = await fetchDashProfile(
+			page,
+			publicIdentifier.value,
+			capture,
+		);
+	}
+	const dashProfile = dashProfileResult.profile;
+	if (dashProfileResult.failure && isRejectedSession(dashProfileResult.failure)) {
+		throw createConnectorFailure("linkedin_session_dead", "linkedin_session_dead: LinkedIn rejected the profile read; manual login required in the connector's browser profile",
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } });
 	}
 
-	// `profile.connection_count` is only available from the connections
-	// listing's `paging.total` (legacy: `profileResult.connections =
-	// totalAvailable || connectionRecords.length`, set AFTER the connections
-	// fetch completes) — nowhere on /me or the dash profile payload. Fetch the
-	// connections listing here, before emitting `profile`, whenever either
-	// stream is requested, and reuse the same walk for the `connections`
-	// stream below rather than fetching twice.
+	// The profile count is the owner-bound source summary, independent of
+	// connection enumeration or enrichment proof. Reuse the summary reads
+	// for the connections stream without coupling profile emission to its walk.
 	let connectionsResult: ConnectionsResult | null = null;
+	let beforeSummary: ReturnType<typeof summaryEvidence> = { reason: "summary_request_failed" };
+	let afterSummary: ReturnType<typeof summaryEvidence> = { reason: "summary_request_failed" };
+	let confirmation: unknown = null;
 	if (wantsProfileFields || wantsConnections) {
+		beforeSummary = summaryEvidence(await voyagerFetch(page,
+			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-before"), meResult);
 		await progress("Fetching LinkedIn connections", { stream: "connections" });
 		connectionsResult = await fetchConnections(page, progress, capture);
+		if (beforeSummary.total !== undefined && beforeSummary.total <= CONNECTIONS_MAX) {
+			confirmation = await voyagerFetch(page,
+				`/voyager/api/relationships/dash/connections?count=${CONNECTIONS_PAGE_SIZE}&q=search&sortType=RECENTLY_ADDED&start=${beforeSummary.total}`,
+				capture, "connections-confirmation");
+		}
+		afterSummary = summaryEvidence(await voyagerFetch(page,
+			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-after"), meResult);
 	}
-	// `elements.length` is only the true total when the walk completed
-	// (not truncated by CONNECTIONS_MAX) — a truncated count is a floor,
-	// not a fact, and must not be reported as connection_count.
-	const connectionCount =
-		connectionsResult === null || connectionsResult.truncated
-			? (connectionsResult?.total ?? null)
-			: (connectionsResult.total ?? connectionsResult.elements.length);
+	// Preserve the observed distinct count when no owner-bound summary is usable.
+	// This fallback is an observation, not evidence of a complete inventory.
+	const walkedDistinctCount = connectionsResult?.elements.length ?? 0;
+	const connectionCount: FieldRead<number> = read(beforeSummary.total ?? walkedDistinctCount);
+	if (wantsProfileFields && beforeSummary.reason) {
+		await progress(`LinkedIn profile connection_count=${walkedDistinctCount} (walked distinct fallback): ${beforeSummary.reason}`, {
+			stream: "profile",
+		});
+	}
+	const ownerEvidence = profileEvidence(meResult, dashProfile);
+
+	const sink: StreamSink = {
+		emit,
+		emitRecord,
+		progress,
+		isRecordSelected: ctx.isRecordSelected,
+		reportStreamFailure: ctx.reportStreamFailure,
+	};
 
 	if (wantsProfileFields) {
-		if (dashProfile) {
-			const record = buildProfileRecord(
-				publicIdentifier,
-				dashProfile,
-				meResult.miniProfile?.occupation,
-				meResult.miniProfile,
+		await emitRows(
+			sink,
+			"profile",
+			buildProfileRows({
 				connectionCount,
-			);
-			await emitRecord("profile", record);
-			await emit(buildFullScanCoverageMessage("profile", 1));
-		} else {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "profile",
-				reason: "linkedin_dash_profile_unavailable",
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
-				message:
-					"Every dash profile decoration attempt failed; only /me was reachable",
-			});
-		}
+				dash: dashProfile,
+				dashSource: dashProfileResult.source,
+				me: meResult,
+				publicIdentifier: publicIdentifier.value,
+			}),
+			{
+				enumerated: !ownerEvidence,
+				diagnostics: { evidence_reason: ownerEvidence },
+				gapReason:
+					dashProfileResult.source === "unavailable"
+						? "dashProfileUnavailable"
+						: "profileFieldsUnavailable",
+				...(dashProfileResult.failure ? { readFailure: "read_failed" as const } : {}),
+			},
+		);
 	}
 
-	if (wantsExperience) {
-		const records = dashProfile ? buildExperienceRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("experience", record);
+	for (const section of wantedSections) {
+		// Only a full decoration carries the profile sections; an empty list
+		// from the basic fallback is not evidence of an empty section.
+		const items =
+			dashProfileResult.source === "decoration"
+				? collectionAt(dashProfile, section.key)
+				: unavailable("source_unavailable");
+		if (items.kind !== "read") {
+			await emitUnavailableSection(section.stream, sink, dashProfileResult.failure);
+			continue;
 		}
-		await emit(buildFullScanCoverageMessage("experience", records.length));
-	}
-
-	if (wantsEducation) {
-		const records = dashProfile ? buildEducationRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("education", record);
-		}
-		await emit(buildFullScanCoverageMessage("education", records.length));
-	}
-
-	if (wantsSkills) {
-		const records = dashProfile ? buildSkillRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("skills", record);
-		}
-		await emit(buildFullScanCoverageMessage("skills", records.length));
-	}
-
-	if (wantsLanguages) {
-		const records = dashProfile ? buildLanguageRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("languages", record);
-		}
-		await emit(buildFullScanCoverageMessage("languages", records.length));
+		await emitRows(sink, section.stream, section.build(items.value), {
+			enumerated: !ownerEvidence && !sectionEvidence(dashProfile, section.key),
+			diagnostics: { evidence_reason: ownerEvidence ?? sectionEvidence(dashProfile, section.key) },
+			gapReason: "profileSectionFieldsUnreadable",
+		});
 	}
 
 	if (wantsConnections && connectionsResult) {
-		const { elements, truncated } = connectionsResult;
+		const { elements, terminationReason } = connectionsResult;
+
 		const memberUrns = elements
 			.map((e) => e.connectedMember)
-			.filter((u): u is string => Boolean(u));
-		const resolvedProfiles = await resolveConnectionProfiles(
+			.filter((u): u is string => typeof u === "string" && u.trim().length > 0);
+		const resolution = await resolveConnectionProfiles(
 			page,
 			memberUrns,
 			progress,
 			capture,
 		);
-
-		let covered = 0;
-		for (const element of elements) {
-			const record = buildConnectionRecord(
-				element,
-				element.connectedMember
-					? resolvedProfiles.get(element.connectedMember)
-					: undefined,
+		const resolvedProfiles = resolution.profiles;
+		const unresolved = memberUrns.filter(
+			(urn) => !resolvedProfiles.get(urn)?.complete && !resolution.permanentlyMissingUrns.has(urn),
+		).length;
+		const omittedWithoutUrn = connectionsResult.missingUrnCount;
+		if (omittedWithoutUrn > 0) {
+			await progress(
+				`LinkedIn connections omitted rows: missing_connected_member_urn=${omittedWithoutUrn}`,
+				{
+					stream: "connections",
+					count: omittedWithoutUrn,
+					total: elements.length,
+				},
 			);
-			if (record) {
-				await emitRecord("connections", record);
-				covered += 1;
-			}
 		}
-		await emit(buildFullScanCoverageMessage("connections", covered));
-
-		if (truncated) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "connections",
-				reason: "older_connections_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
+		if (unresolved > 0) {
+			await progress(
+				`LinkedIn connection enrichment unresolved: ${unresolved}`,
+				{
+					stream: "connections",
+					count: unresolved,
+					total: memberUrns.length,
 				},
-				message: `LinkedIn connections stopped at the ${CONNECTIONS_MAX}-connection cap`,
+			);
+		}
+		if (resolution.malformedCount > 0) {
+			await progress(
+				`LinkedIn connection enrichment malformed: malformed_enrichment=${resolution.malformedCount}`,
+				{
+					stream: "connections",
+					count: resolution.malformedCount,
+					total: memberUrns.length,
+				},
+			);
+		}
+		const rows = buildConnectionRows(
+			elements,
+			(urn) => resolvedProfiles.get(urn)?.profile,
+			(urn) => resolution.permanentlyMissingUrns.has(urn),
+		);
+		// Provider inventory proof includes readable rows the owner excluded.
+		const emittedUrns = new Set(rows.records.map((row) => row.id));
+		const withheldCount = elements.length - emittedUrns.size;
+		const evidenceReason = withheldCount > 0 ? "linkedin_connection_enrichment_incomplete" :
+			connectionEvidence({
+				before: beforeSummary, after: afterSummary, distinctCount: emittedUrns.size,
+				missingUrnCount: connectionsResult.missingUrnCount, terminationReason,
+				pageTotal: connectionsResult.total, confirmation,
+			});
+		const connectionsComplete = !evidenceReason;
+		// A failed connections page is a failed read: HTTP 401/403 means
+		// LinkedIn rejected the session, anything else (429, 5xx, a thrown
+		// fetch) means the read did not complete.
+		const readFailure = connectionsComplete || terminationReason !== "page_error"
+			? undefined
+			: isRejectedSession(connectionsResult.error ?? "")
+				? "session_rejected" as const
+				: "read_failed" as const;
+		await emitRows(
+			sink,
+			"connections",
+			rows,
+			{
+				enumerated: connectionsComplete,
+				...(readFailure === undefined ? {} : { readFailure }),
+				gapReason: "connectionFieldsUnreadable",
 				diagnostics: {
-					connections_cap: CONNECTIONS_MAX,
-					total_seen: elements.length,
+					evidence_reason: evidenceReason,
+					withheld_count: withheldCount,
+					distinct_emitted_count: emittedUrns.size,
+					summary_before: beforeSummary.total,
+					summary_after: afterSummary.total,
+					termination_reason: terminationReason,
+					observed_count: connectionsResult.observed,
+					total: connectionsResult.total,
+					missing_urn_count: connectionsResult.missingUrnCount,
+					...(!connectionsComplete
+						? {
+							page_reason: terminationReason === "page_budget"
+								? "older_connections_deferred_page_budget"
+								: terminationReason === "continuation_advertised"
+									? "linkedin_connections_continuation_advertised"
+								: terminationReason === "page_error"
+									? "linkedin_connections_page_failed"
+									: "linkedin_connections_page_malformed",
+						}
+						: {}),
+					...(connectionsResult.error ? { error: connectionsResult.error } : {}),
+					unresolved_count: unresolved,
+					malformed_count: resolution.malformedCount,
 				},
-			} satisfies EmittedMessage);
-		}
+			},
+		);
+	}
+}
+
+/** Profile sections read from the dash profile, one stream each. */
+const PROFILE_SECTIONS: ReadonlyArray<{
+	build: (items: readonly unknown[]) => StreamRows<Record<string, unknown>>;
+	key: string;
+	stream: string;
+}> = [
+	{
+		build: buildExperienceRows,
+		key: "profilePositionGroups",
+		stream: "experience",
+	},
+	{ build: buildEducationRows, key: "profileEducations", stream: "education" },
+	{ build: buildSkillRows, key: "profileSkills", stream: "skills" },
+	{ build: buildLanguageRows, key: "profileLanguages", stream: "languages" },
+];
+
+interface StreamSink {
+	isRecordSelected?: BrowserCollectContext["isRecordSelected"];
+	emit: BrowserCollectContext["emit"];
+	emitRecord: BrowserCollectContext["emitRecord"];
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
+	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
+}
+
+type RowGapReason =
+	| "dashProfileUnavailable"
+	| "profileFieldsUnavailable"
+	| "profileSectionFieldsUnreadable"
+	| "connectionFieldsUnreadable";
+
+const ROW_GAP_REASON: Record<RowGapReason, string> = {
+	dashProfileUnavailable: "linkedin_dash_profile_unavailable",
+	profileFieldsUnavailable: "linkedin_profile_fields_unavailable",
+	profileSectionFieldsUnreadable: "linkedin_fields_unreadable",
+	connectionFieldsUnreadable: "linkedin_fields_unreadable",
+};
+
+/** Only provider-proved inventories with every row covered advance STATE.
+ * Unproven streams retain readable upserts and one canonical retryable gap. */
+async function emitRows(
+	sink: StreamSink,
+	stream: string,
+	rows: StreamRows<Record<string, unknown>>,
+	options: {
+		diagnostics?: Record<string, unknown>;
+		enumerated: boolean;
+		gapReason: RowGapReason;
+		/** The walk stopped because a request failed, not because the end was
+		 *  unproven: a rejected session ends the run, any other failure is a
+		 *  failed read of this stream. */
+		readFailure?: "read_failed" | "session_rejected";
+	},
+): Promise<void> {
+	const { gapReason } = options;
+	await reportRowIssues(stream, rows, sink.progress);
+	for (const record of rows.records) {
+		await sink.emitRecord(stream, record);
+	}
+	if (options.readFailure === "session_rejected") {
+		throw createConnectorFailure("linkedin_session_dead",
+			`linkedin_session_dead: LinkedIn rejected the session while reading ${stream}; manual login required in the connector's browser profile`,
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
+		);
+	}
+	const selectedCount = rows.records.filter((record) => sink.isRecordSelected?.(stream, record) ?? true).length;
+	if (options.enumerated && rows.covered === rows.considered) {
+		// The requested subset is complete, but cannot certify a global cursor.
+		if (selectedCount !== rows.records.length) return;
+		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
+		await sink.emit({ type: "STATE", stream, cursor: { full_scan_at: new Date().toISOString() } });
+		return;
+	}
+	if (rows.covered < rows.considered &&
+		(stream !== "connections" || options.diagnostics?.missing_urn_count === 0)) {
+		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
+	}
+	const diagnostics = {
+		...(rows.covered < rows.considered
+			? { source_reason: ROW_GAP_REASON[gapReason] }
+			: {}),
+		selected_count: selectedCount,
+		considered: rows.considered,
+		covered: rows.covered,
+		omitted_rows: rows.omittedRows,
+		unavailable_fields: rows.unavailableFields,
+		...options.diagnostics,
+	};
+	const recoveryHint = { action: "retry_by_runtime", retryable: true };
+	if (options.readFailure === "read_failed") {
+		const message = `LinkedIn stopped returning ${stream} pages before the list ended; covered entries are upserted only`;
+		if (sink.reportStreamFailure)
+			await sink.reportStreamFailure(stream, message, { recoveryHint, diagnostics });
+		else
+			await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed",
+				recovery_hint: { action: "retry_by_runtime", retryable: true }, message, diagnostics });
+		return;
+	}
+	await sink.emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason: "linkedin_enumeration_unproven",
+		recovery_hint: recoveryHint,
+		message: `LinkedIn ${stream} enumeration is unproven; covered entries are upserted only`,
+		diagnostics,
+	});
+}
+
+function coverageMessage(
+	stream: string,
+	considered: number,
+	covered: number,
+): EmittedMessage {
+	return buildDetailCoverageMessage({
+		stream,
+		stateStream: stream,
+		requiredKeys: [],
+		hydratedKeys: [],
+		considered,
+		covered,
+	});
+}
+
+async function emitUnavailableSection(
+	stream: string,
+	sink: StreamSink,
+	failure?: VoyagerReadCause,
+): Promise<void> {
+	const diagnostics = { source_reason: "linkedin_profile_section_unavailable" };
+	if (failure) {
+		const message = `LinkedIn ${stream} read failed: ${failure}`;
+		const recoveryHint = { action: "retry_by_runtime", retryable: true };
+		if (sink.reportStreamFailure) await sink.reportStreamFailure(stream, message, { recoveryHint, retryable: true, diagnostics });
+		else await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message, recovery_hint: { action: "retry_by_runtime", retryable: true }, diagnostics });
+		return;
+	}
+	await sink.emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason: "linkedin_enumeration_unproven",
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		message: "LinkedIn enumeration is unproven; the profile section was unreadable",
+		diagnostics,
+	});
+}
+
+async function reportRowIssues(
+	stream: string,
+	rows: StreamRows<unknown>,
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+): Promise<void> {
+	const omitted = Object.entries(rows.omittedRows);
+	if (omitted.length > 0) {
+		await progress(
+			`LinkedIn ${stream} omitted rows: ${omitted.map(([reason, n]) => `${reason}=${n}`).join(",")}`,
+			{ stream, count: omitted.reduce((sum, [, n]) => sum + n, 0) },
+		);
+	}
+	const fields = Object.entries(rows.unavailableFields).flatMap(
+		([field, reasons]) =>
+			Object.entries(reasons).map(([reason, n]) => `${field}:${reason}=${n}`),
+	);
+	if (fields.length > 0) {
+		await progress(`LinkedIn ${stream} omitted fields: ${fields.join(",")}`, {
+			stream,
+			count: rows.records.length,
+		});
 	}
 }
 

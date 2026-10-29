@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.41",
+	"version": "0.2.59",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {
@@ -38,7 +38,7 @@
 		"host_blob_write": {
 			"version": 1,
 			"max_blob_bytes": 33554432,
-			"streams": ["conversations", "projects"]
+			"streams": ["conversations", "projects", "messages", "project_documents"]
 		},
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
@@ -71,9 +71,15 @@
 					"organization_id": { "type": "string" },
 					"full_name": {
 						"type": ["string", "null"],
-						"x_pdpp_role": "primary-title"
+						"x_pdpp_role": "primary-title",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Claude account holder name."
 					},
-					"plan": { "type": ["string", "null"] },
+					"plan": {
+						"type": ["string", "null"],
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Plan label."
+					},
 					"name_source": {
 						"type": "string",
 						"enum": ["browser_menu", "users_json", "none"]
@@ -93,11 +99,121 @@
 				]
 			},
 			"primary_key": ["id"],
-			"query": { "search": { "lexical_fields": ["full_name"] } },
+			"query": {
+				"search": { "lexical_fields": ["full_name"] }
+			},
 			"selection": { "fields": true, "resources": false },
 			"incremental": false,
 			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "account_plan",
+			"required": false,
+			"description": "Plans for every usable Claude organization. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false. This export connector fills plan family and organization creation time only. A plan-only run requests no export.",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
+			"display": {
+				"label": "Your Claude plan",
+				"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"is_default": {
+						"type": "boolean",
+						"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+					},
+					"id": {
+						"type": "string"
+					},
+					"account_id": {
+						"type": ["string", "null"]
+					},
+					"account_structure": {
+						"type": ["string", "null"]
+					},
+					"account_created_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"plan_type": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"plan_display_name": {
+						"type": ["string", "null"]
+					},
+					"subscription_plan": {
+						"type": ["string", "null"]
+					},
+					"has_active_subscription": {
+						"type": ["boolean", "null"]
+					},
+					"billing_period": {
+						"type": ["string", "null"]
+					},
+					"will_renew": {
+						"type": ["boolean", "null"]
+					},
+					"renews_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"expires_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"cancels_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"scheduled_plan_change": {
+						"type": ["object", "null"],
+						"properties": {
+							"plan_type": {
+								"type": ["string", "null"],
+								"pattern": "^[a-z][a-z_-]{0,39}$"
+							},
+							"changes_at": {
+								"type": ["string", "null"],
+								"format": "date-time"
+							}
+						},
+						"required": ["plan_type", "changes_at"],
+						"additionalProperties": false
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"plan_type",
+						"plan_display_name",
+						"subscription_plan"
+					]
+				},
+				"range_filters": {
+					"account_created_at": ["gte", "gt", "lte", "lt"],
+					"renews_at": ["gte", "gt", "lte", "lt"],
+					"expires_at": ["gte", "gt", "lte", "lt"],
+					"cancels_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
 		},
 		{
 			"name": "conversations",
@@ -111,12 +227,12 @@
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": {
-						"type": "string"
-					},
+					"id": { "type": "string" },
 					"title": {
 						"type": ["string", "null"],
-						"x_pdpp_role": "primary-title"
+						"x_pdpp_role": "primary-title",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Conversation title. Never truncated: when the escaped text is over 10000000 characters the field is absent from the record and the run reports an exceeds_inline_cap count."
 					},
 					"create_time": {
 						"type": ["string", "null"],
@@ -126,20 +242,15 @@
 						"type": ["string", "null"],
 						"format": "date-time"
 					},
-					"project_id": {
-						"type": ["string", "null"]
-					},
-					"model": {
-						"type": ["string", "null"]
-					},
+					"project_id": { "type": ["string", "null"] },
+					"model": { "type": ["string", "null"] },
 					"message_count": {
 						"type": ["integer", "null"]
 					},
-					"is_starred": {
-						"type": ["boolean", "null"]
-					},
+					"is_starred": { "type": ["boolean", "null"] },
 					"blob_ref": {
 						"type": "object",
+						"description": "The raw source envelope as a Core blob. Absent when the envelope is over the host blob cap (33554432 bytes); the typed record and its children are still complete.",
 						"properties": {
 							"blob_id": { "type": "string" },
 							"mime_type": { "type": "string" },
@@ -149,7 +260,7 @@
 						"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 					}
 				},
-				"required": ["id", "blob_ref"]
+				"required": ["id"]
 			},
 			"primary_key": ["id"],
 			"consent_time_field": "create_time",
@@ -187,26 +298,34 @@
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"conversation_id": {
-						"type": "string"
-					},
+					"id": { "type": "string" },
+					"conversation_id": { "type": "string" },
 					"role": {
 						"type": ["string", "null"],
 						"x_pdpp_role": "actor"
 					},
-					"parent_id": {
-						"type": ["string", "null"]
-					},
+					"parent_id": { "type": ["string", "null"] },
 					"content": {
 						"type": ["string", "null"],
-						"x_pdpp_role": "primary-title"
+						"x_pdpp_role": "primary-title",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Full message text. When the escaped text is over 10000000 characters it is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports an aggregate count.",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1"
 					},
-					"model": {
-						"type": ["string", "null"]
+					"blob_ref": {
+						"type": "object",
+						"description": "Present only when content is null because the message text is over the inline cap. The blob (application/json) is the JSON string of the exact source text, with no pdpp-safe-escape-v1 escaping: JSON.parse(bytes) returns the source text for the content field.",
+						"properties": {
+							"blob_id": { "type": "string" },
+							"mime_type": { "type": "string" },
+							"size_bytes": { "type": "integer" },
+							"sha256": { "type": "string" }
+						},
+						"required": ["blob_id", "mime_type", "size_bytes", "sha256"],
+						"x_pdpp_blob_projects_field": "content",
+						"x_pdpp_blob_codec": "json-string-v1"
 					},
+					"model": { "type": ["string", "null"] },
+					"model_source": { "type": ["string", "null"] },
 					"create_time": {
 						"type": ["string", "null"],
 						"format": "date-time",
@@ -220,7 +339,9 @@
 						"type": ["array", "null"],
 						"items": {
 							"type": "object"
-						}
+						},
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Attachment objects as exported. Every string key and string value inside is encoded as pdpp-safe-escape-v1 (see messages.content for the encoding)."
 					}
 				},
 				"required": ["id", "conversation_id"]
@@ -269,16 +390,18 @@
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": {
-						"type": "string"
-					},
+					"id": { "type": "string" },
 					"name": {
 						"type": "string",
-						"x_pdpp_role": "primary-title"
+						"x_pdpp_role": "primary-title",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Project name. Never truncated. Absent only when the escaped name is over 10000000 characters (the project is still delivered, and the run reports an exceeds_inline_cap count). A project with no name in the source carries the placeholder Untitled project."
 					},
 					"description": {
 						"type": ["string", "null"],
-						"x_pdpp_role": "secondary"
+						"x_pdpp_role": "secondary",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Project description. Never truncated: when the escaped text is over 10000000 characters the field is absent from the record and the run reports an exceeds_inline_cap count."
 					},
 					"create_time": {
 						"type": ["string", "null"],
@@ -288,39 +411,68 @@
 						"type": ["string", "null"],
 						"format": "date-time"
 					},
-					"is_archived": {
-						"type": ["boolean", "null"]
-					},
+					"is_archived": { "type": ["boolean", "null"] },
 					"prompt_template": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Project prompt template. Never truncated: when the escaped text is over 10000000 characters the field is absent from the record and the run reports an exceeds_inline_cap count."
 					},
 					"creator": {
 						"type": ["object", "null"],
 						"properties": {
 							"uuid": { "type": "string" },
-							"full_name": { "type": "string" }
+							"full_name": {
+								"type": "string",
+								"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+								"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Creator name. Never truncated: when the escaped text is over 10000000 characters the field is absent from the record and the run reports an exceeds_inline_cap count."
+							}
 						},
 						"additionalProperties": false
 					},
 					"is_private": { "type": ["boolean", "null"] },
 					"is_starter_project": { "type": ["boolean", "null"] },
-					"archived_at": { "type": ["string", "null"] },
+					"archived_at": {
+						"type": ["string", "null"],
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Archive timestamp as exported. Never truncated: when the escaped text is over 10000000 characters the field is absent from the record and the run reports an exceeds_inline_cap count."
+					},
 					"raw_docs": {
 						"type": "array",
 						"items": {
 							"type": "object",
 							"properties": {
-								"uuid": { "type": "string" },
-								"filename": { "type": "string" },
-								"content": { "type": "string" },
-								"created_at": { "type": "string" },
-								"updated_at": { "type": "string" }
+								"uuid": {
+									"type": "string",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Document id as exported."
+								},
+								"filename": {
+									"type": "string",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Document file name."
+								},
+								"content": {
+									"type": "string",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Document text copy; left out (not cut) when over the inline cap, since the document record holds the full text."
+								},
+								"created_at": {
+									"type": "string",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Created timestamp as exported."
+								},
+								"updated_at": {
+									"type": "string",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Updated timestamp as exported."
+								}
 							},
 							"additionalProperties": false
 						}
 					},
 					"blob_ref": {
 						"type": "object",
+						"description": "The raw source envelope as a Core blob. Absent when the envelope is over the host blob cap (33554432 bytes); the typed record and its children are still complete.",
 						"properties": {
 							"blob_id": { "type": "string" },
 							"mime_type": { "type": "string" },
@@ -330,7 +482,7 @@
 						"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 					}
 				},
-				"required": ["id", "name", "blob_ref"]
+				"required": ["id"]
 			},
 			"primary_key": ["id"],
 			"consent_time_field": "create_time",
@@ -368,18 +520,31 @@
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": {
-						"type": "string"
-					},
-					"project_id": {
-						"type": "string"
-					},
+					"id": { "type": "string" },
+					"project_id": { "type": "string" },
 					"filename": {
 						"type": ["string", "null"],
-						"x_pdpp_role": "primary-title"
+						"x_pdpp_role": "primary-title",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Document file name. Never truncated: when the escaped text is over 10000000 characters the field is absent from the record and the run reports an exceeds_inline_cap count."
 					},
 					"content": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"description": "Encoded as pdpp-safe-escape-v1: each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Full document text. When the escaped text is over 10000000 characters it is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports an aggregate count.",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1"
+					},
+					"blob_ref": {
+						"type": "object",
+						"description": "Present only when content is null because the document text is over the inline cap. The blob (application/json) is the JSON string of the exact source text, with no pdpp-safe-escape-v1 escaping: JSON.parse(bytes) returns the source text for the content field.",
+						"properties": {
+							"blob_id": { "type": "string" },
+							"mime_type": { "type": "string" },
+							"size_bytes": { "type": "integer" },
+							"sha256": { "type": "string" }
+						},
+						"required": ["blob_id", "mime_type", "size_bytes", "sha256"],
+						"x_pdpp_blob_projects_field": "content",
+						"x_pdpp_blob_codec": "json-string-v1"
 					},
 					"create_time": {
 						"type": ["string", "null"],
@@ -436,7 +601,14 @@
 		"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
 		"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
 		"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
-		"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
+		"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
+		"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
+		"parse_error": "Claude sent back a plan we couldn't read. Your existing plan data was not changed. This will retry automatically.",
+		"organization_unavailable": "Your Claude plan could not be read: the organization this data export came from is not in your signed-in account's organization list. This will retry automatically.",
+		"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed.",
+		"export_manifest_incomplete": "Your Claude export is incomplete or inconsistent. Affected data was not marked as fully imported.",
+		"export_conversations_incomplete": "Your Claude export is missing some conversation files. Conversations and messages were not marked as fully imported.",
+		"export_projects_missing": "Your Claude export has no complete projects section. Projects and project documents were not marked as fully imported."
 	},
 	"mobile": {
 		"pageshim": {

@@ -7,20 +7,21 @@ import {
 	appendNewChildren,
 	classifyListingStatus,
 	commentRecord,
+	commentStatsRecord,
 	dedupeByFullname,
 	domainOf,
 	isoFromUnix,
 	isTopLevelComment,
-	maxCreatedEpoch,
 	nextAfter,
 	pagePath,
 	savedRecord,
-	sinceFromState,
 	submittedRecord,
+	submittedStatsRecord,
 	TEXT_MAX_CHARS,
 	textLen,
 	truncateText,
 	voteRecord,
+	voteStatsRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { RedditChild, RedditChildData } from "./types.ts";
@@ -188,14 +189,141 @@ test("submittedRecord: missing optional fields → null, still passes schema", (
 	};
 	const r = submittedRecord(d, FETCHED_AT);
 	assert.equal(r.is_self, null);
-	assert.equal(r.score, null);
-	assert.equal(r.num_comments, null);
-	assert.equal(r.upvote_ratio, null);
 	assert.equal(r.over_18, null);
-	assert.equal(r.gilded, null);
 	assert.equal(r.domain, null);
 	const v = validateRecord("submitted", r);
 	assert.ok(v.ok, `schema failed: ${v.ok ? "" : JSON.stringify(v.issues)}`);
+});
+
+test("content records carry no volatile source metrics", () => {
+	const d: RedditChildData = {
+		name: "t3_metrics",
+		subreddit: "test",
+		title: "x",
+		permalink: "/r/test/comments/metrics/x/",
+		url: "https://example.com",
+		score: 9,
+		num_comments: 8,
+		upvote_ratio: 0.7,
+		gilded: 1,
+		created_utc: 1_712_055_174,
+	};
+	const c: RedditChild = { kind: "t3", data: d };
+	for (const record of [
+		submittedRecord(d, FETCHED_AT),
+		commentRecord(d, FETCHED_AT),
+		savedRecord(c, FETCHED_AT),
+		voteRecord(c, FETCHED_AT),
+	]) {
+		for (const key of ["score", "num_comments", "upvote_ratio", "gilded"]) {
+			assert.equal(
+				key in record,
+				false,
+				`content record must not carry ${key}`,
+			);
+		}
+	}
+});
+
+// ─── current-stats builders ─────────────────────────────────────────────
+
+test("submittedStatsRecord: same fullname key, source metrics verbatim, source created_utc, no clock", () => {
+	const d: RedditChildData = {
+		name: "t3_1btvpos",
+		score: 98,
+		num_comments: 127,
+		upvote_ratio: 0.83,
+		gilded: 2,
+		created_utc: 1_712_055_174,
+	};
+	const r = submittedStatsRecord(d);
+	assert.deepEqual(r, {
+		id: "t3_1btvpos",
+		score: 98,
+		num_comments: 127,
+		upvote_ratio: 0.83,
+		gilded: 2,
+		created_utc: "2024-04-02T10:52:54.000Z",
+	});
+	const v = validateRecord("submitted_stats", r);
+	assert.ok(v.ok, `schema failed: ${v.ok ? "" : JSON.stringify(v.issues)}`);
+});
+
+test("submittedStatsRecord: absent source metrics are null, not zero", () => {
+	const r = submittedStatsRecord({
+		name: "t3_minimal",
+		created_utc: 1_712_055_174,
+	});
+	assert.equal(r.score, null);
+	assert.equal(r.num_comments, null);
+	assert.equal(r.upvote_ratio, null);
+	assert.equal(r.gilded, null);
+	assert.ok(validateRecord("submitted_stats", r).ok);
+});
+
+test("commentStatsRecord: score and gilded only", () => {
+	const r = commentStatsRecord({
+		name: "t1_abc",
+		score: 16,
+		gilded: 0,
+		num_comments: 99,
+		created_utc: 1_717_981_114,
+	});
+	assert.deepEqual(Object.keys(r).sort(), [
+		"created_utc",
+		"gilded",
+		"id",
+		"score",
+	]);
+	assert.equal(r.score, 16);
+	assert.ok(validateRecord("comments_stats", r).ok);
+});
+
+test("voteStatsRecord: score and num_comments, valid for all three vote-shaped stats streams", () => {
+	const c: RedditChild = {
+		kind: "t3",
+		data: {
+			name: "t3_up1",
+			score: 1234,
+			num_comments: 56,
+			gilded: 3,
+			upvote_ratio: 0.5,
+			created_utc: 1_717_981_114,
+		},
+	};
+	const r = voteStatsRecord(c);
+	assert.deepEqual(r, {
+		id: "t3_up1",
+		score: 1234,
+		num_comments: 56,
+		created_utc: "2024-06-10T00:58:34.000Z",
+	});
+	for (const stream of ["upvoted_stats", "downvoted_stats", "hidden_stats"]) {
+		assert.ok(validateRecord(stream, r).ok, stream);
+	}
+});
+
+test("stats schemas reject a content-stream fullname kind mismatch", () => {
+	assert.equal(
+		validateRecord("submitted_stats", {
+			id: "t1_comment",
+			score: 1,
+			num_comments: 0,
+			upvote_ratio: 1,
+			gilded: 0,
+			created_utc: "2024-04-02T10:52:54.000Z",
+		}).ok,
+		false,
+	);
+	assert.equal(
+		validateRecord("comments_stats", {
+			id: "t3_post",
+			score: 1,
+			gilded: 0,
+			created_utc: "2024-04-02T10:52:54.000Z",
+		}).ok,
+		false,
+	);
 });
 
 // ─── commentRecord ──────────────────────────────────────────────────────
@@ -281,7 +409,7 @@ test("savedRecord: saved post (t3) → is_post=true, body derived from selftext"
 
 // ─── voteRecord ─────────────────────────────────────────────────────────
 
-test("voteRecord: upvoted post preserves score + num_comments", () => {
+test("voteRecord: upvoted post keeps identity, kind and text but not the metrics", () => {
 	const c: RedditChild = {
 		kind: "t3",
 		data: {
@@ -297,8 +425,9 @@ test("voteRecord: upvoted post preserves score + num_comments", () => {
 	};
 	const r = voteRecord(c, FETCHED_AT);
 	assert.equal(r.is_post, true);
-	assert.equal(r.score, 1234);
-	assert.equal(r.num_comments, 56);
+	assert.equal(r.id, "t3_up1");
+	assert.equal("score" in r, false);
+	assert.equal("num_comments" in r, false);
 	const v = validateRecord("upvoted", r);
 	assert.ok(v.ok, `schema failed: ${v.ok ? "" : JSON.stringify(v.issues)}`);
 	// Downvoted and hidden share the same shape.
@@ -419,8 +548,8 @@ test("appendNewChildren: action-ordered listing does not stop on an old item at 
 });
 
 test("appendNewChildren: created-ordered listing still stops at the cursor", () => {
-	// The incremental optimization must survive for submitted/comments, where
-	// created_utc IS the sort key. Losing this would make every run a full walk.
+	// The helper still supports safe early-stop semantics when a caller
+	// explicitly supplies a creation cursor.
 	const out: RedditChild[] = [];
 	const children: RedditChild[] = [
 		{ kind: "t3", data: { name: "t3_a", created_utc: 300 } },
@@ -465,38 +594,6 @@ test("dedupeByFullname: keeps children lacking a fullname rather than collapsing
 		{ kind: "t3", data: { created_utc: 200 } },
 	];
 	assert.equal(dedupeByFullname(children).length, 2);
-});
-
-test("maxCreatedEpoch: returns max across batch, clamped to current", () => {
-	const children: RedditChild[] = [
-		{ kind: "t3", data: { name: "t3_a", created_utc: 200 } },
-		{ kind: "t3", data: { name: "t3_b", created_utc: 400 } },
-		{ kind: "t3", data: { name: "t3_c", created_utc: 100 } },
-	];
-	assert.equal(maxCreatedEpoch(children, 0), 400);
-	assert.equal(
-		maxCreatedEpoch(children, 500),
-		500,
-		"never regresses the cursor",
-	);
-	assert.equal(maxCreatedEpoch([], 150), 150);
-});
-
-test("sinceFromState: reads last_created_utc, rejects garbage", () => {
-	assert.equal(sinceFromState({}, "submitted"), null);
-	assert.equal(sinceFromState({ submitted: {} }, "submitted"), null);
-	assert.equal(
-		sinceFromState({ submitted: { last_created_utc: 0 } }, "submitted"),
-		null,
-	);
-	assert.equal(
-		sinceFromState({ submitted: { last_created_utc: -1 } }, "submitted"),
-		null,
-	);
-	assert.equal(
-		sinceFromState({ submitted: { last_created_utc: 123 } }, "submitted"),
-		123,
-	);
 });
 
 // ─── Schema negative cases ──────────────────────────────────────────────

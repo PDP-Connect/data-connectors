@@ -33,7 +33,7 @@ function manifest(name: string): Manifest {
 }
 
 test("every shipped manifest declares exactly one typed public lifecycle tier", () => {
-	assert.equal(names.length, 56);
+	assert.equal(names.length, 64);
 	for (const name of names) {
 		const { capabilities } = manifest(name);
 		const { public_listing: listing } = capabilities ?? {};
@@ -64,7 +64,7 @@ test("development is the only non-offered lifecycle tier", () => {
 });
 
 test("recent or non-repeatable live evidence stays Preview", () => {
-	for (const name of ["apple_contacts.json"]) {
+	for (const name of ["apple_contacts.json", "anthropic_live.json"]) {
 		const { capabilities } = manifest(name);
 		const { public_listing: listing } = capabilities ?? {};
 		assert.equal(listing?.tier, "preview");

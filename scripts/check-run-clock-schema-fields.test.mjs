@@ -223,3 +223,23 @@ test("schema traversal and reference parsing have explicit resource bounds", () 
   const deepPointer = "#/" + Array(33).fill("x").join("/");
   assert.throws(() => findForbiddenProperties({ $ref: deepPointer }, manifestPath), /depth.*32/);
 });
+
+test("references cannot bypass a nested URI scope through its descendant", () => {
+  const schema = {
+    $ref: "#/payload/leaf",
+    payload: {
+      $id: "urn:nested",
+      leaf: { $ref: "#/target" },
+      target: runClockSchema("fetched_at"),
+    },
+    target: runClockSchema("created_at"),
+  };
+  assert.throws(() => findForbiddenProperties(schema, manifestPath), /unsupported.*scope/);
+  const unscoped = {
+    $ref: "#/payload/leaf",
+    payload: { leaf: { $ref: "#/target" } },
+    target: runClockSchema("fetched_at"),
+  };
+  assert.equal(findForbiddenProperties(unscoped, manifestPath)[0].propertyPath,
+    "target/properties/fetched_at");
+});

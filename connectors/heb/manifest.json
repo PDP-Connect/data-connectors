@@ -9,7 +9,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.6.15",
+	"version": "0.6.25",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -370,7 +370,7 @@
 		{
 			"name": "nutrition",
 			"required": false,
-			"description": "Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Incapsula blocks emit source=blocked with no nutrition values and a session-repair diagnostic. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
+			"description": "Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Unread, loading, mismatched or blocked product responses remain retryable unknown lookups; safely observed product fields are retained. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
 			"display": {
 				"label": "Your H-E-B product nutrition",
 				"detail": "Calories, macros, vitamins/minerals, serving size, ingredients, and allergens for products in your orders."
@@ -569,7 +569,7 @@
 		"list_page_shape_check_failed": "The page didn't look like we expected",
 		"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 		"nutrition_source_coverage_incomplete": "We did not mark H-E-B nutrition complete because the order history or order-item detail coverage is incomplete",
-		"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
+		"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Valid records were retained; the unread tail remains unproven",
 		"pagination_exhausted": "We reached the end of the available pages",
 		"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
 		"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",

@@ -295,7 +295,7 @@ export function makeEnsureSession(
 			sendInteraction,
 			isProbeSuccessful: (ok) => ok === true,
 			message:
-				"Sign in to Garmin Connect in the secure browser. PDPP continues on its own once you are signed in.",
+				"Sign in to Garmin Connect in the secure browser. The import continues on its own once you are signed in.",
 			probe: async () => isLive(await readOnOrigin(page, PROBE_PATH)),
 			readinessProbe: probeOnPage,
 			// The fifth of five streamed options; without all five the owner gets a Continue button.

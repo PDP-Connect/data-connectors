@@ -55,6 +55,10 @@ import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
 } from "../../packages/polyfill-connectors/src/connector-paths.ts";
+import {
+	consentTimeFieldResolver,
+	makeEmitRecord,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	makeRecordingEmit,
@@ -84,6 +88,10 @@ export type DriverResult =
 	| {
 			exercised: true;
 			messages: readonly EmittedMessage[];
+			/** In-process shape-checked records; this is not durable host storage. */
+			emittedCounts?: Readonly<Record<string, number>>;
+			/** Measured rows at the synthetic provider boundary, for conformance only. */
+			enumeratedCounts?: Readonly<Record<string, number>>;
 			skippedRecords?: readonly SkippedRecordFact[];
 	  }
 	| { exercised: false; reason: string };
@@ -113,6 +121,12 @@ async function runDirectImportDriver(
 	return {
 		exercised: true,
 		messages: harness.protocolMessages,
+		emittedCounts: Object.fromEntries(
+			[...new Set(harness.emitted.map((record) => record.stream))].map((stream) => [
+				stream,
+				harness.emitted.filter((record) => record.stream === stream).length,
+			]),
+		),
 		skippedRecords: harness.skipped.map((s) => ({ stream: s.stream })),
 	};
 }
@@ -164,15 +178,12 @@ function baseCollectContextStubs(
 
 // ─── Reddit: collectAllStreams, the exact function production's collect() ──
 // ─── callback calls — driven like reddit/integration.test.ts's own oracle ──
-// ─── tests ("collectAllStreams: ... emits DETAIL_COVERAGE").              ──
+// ─── tests (full inventory without self-coverage claims).                  ──
 //
 // collectAllStreams(ctx: BrowserCollectContext) is the top-level per-run
-// orchestrator: it loops buildStreamTable, calls collectStream per requested
-// stream, and emits the run-level DETAIL_COVERAGE. Driving the lower-level
-// collectStream directly (an earlier version of this driver did) would miss
-// that emission entirely once it lives one level up in collectAllStreams —
-// this driver must track wherever production's collect() callback actually
-// delegates, not a frozen mirror of an older internal shape. Reddit has no
+// orchestrator: it loops buildStreamTable and calls collectStream per
+// requested stream. This driver follows production's collect() callback,
+// not a frozen mirror of an older internal shape. Reddit has no
 // rate governor, so no real fetch/pacing occurs; the "browser" surface is a
 // minimal mock Page whose evaluate() redirects to a scripted in-memory
 // listing, the same createMockPageForFetch shape Reddit's own
@@ -207,7 +218,8 @@ function createMockRedditPage(
  * IDs must match `schemas.ts`'s `t[13]_[a-z0-9]+` fullname regexes exactly
  * (no underscores in the suffix) — an earlier version of this fixture used
  * `t3_coverage_conformance`, which every one of the 6 streams' schema
- * rejected, silently zeroing `covered` while `considered` stayed 1. Exported
+ * rejected, leaving no locally emitted record while source enumeration
+ * stayed 1. Exported
  * so the malformed-counterexample test below can build a deliberately
  * invalid sibling from the same valid base.
  */
@@ -254,6 +266,13 @@ const REDDIT_REQUESTED_STREAMS = [
 	"upvoted",
 	"downvoted",
 	"hidden",
+	// Current-stats streams over the same listings (required:false, but each
+	// still owes honest coverage when requested).
+	"submitted_stats",
+	"comments_stats",
+	"upvoted_stats",
+	"downvoted_stats",
+	"hidden_stats",
 ];
 
 /** Build the fully-typed BrowserCollectContext collectAllStreams needs, with
@@ -264,7 +283,17 @@ const REDDIT_REQUESTED_STREAMS = [
 function buildRedditCollectContext(
 	fetchPath: (path: string) => Promise<{ status: number; json: unknown }>,
 	harness: RecordingEmit,
+	requestedStreams: readonly string[] = REDDIT_REQUESTED_STREAMS,
+	resourceScope?: { stream: string; resources: readonly string[] },
 ) {
+	const requested = new Map(
+		requestedStreams.map((name) => [
+			name,
+			name === resourceScope?.stream
+				? { name, resources: resourceScope.resources }
+				: { name },
+		]),
+	);
 	return {
 		...baseCollectContextStubs(harness),
 		// biome-ignore lint/suspicious/noExplicitAny: no real Playwright BrowserContext exists in this fixture; collectAllStreams never reads `context` (only `page`), so an empty stand-in is honest, not a disguised real value.
@@ -272,11 +301,48 @@ function buildRedditCollectContext(
 		credentials: { REDDIT_USERNAME: "coverage-conformance" },
 		// biome-ignore lint/suspicious/noExplicitAny: no real Playwright Page exists in this fixture; only the one evaluate() call collectAllStreams's private redditFetch makes is implemented, matching Reddit's own createMockPageForFetch in integration.test.ts.
 		page: createMockRedditPage(fetchPath) as any,
-		requested: new Map(
-			REDDIT_REQUESTED_STREAMS.map((name) => [name, { name }]),
-		),
-		scope: { streams: REDDIT_REQUESTED_STREAMS.map((name) => ({ name })) },
+		requested,
+		scope: { streams: [...requested.values()] },
 		state: {},
+	};
+}
+
+async function driveRedditExcluded(): Promise<DriverResult> {
+	const { collectAllStreams } = await import("../reddit/index.ts");
+	const { validateRecord } = await import("../reddit/schemas.ts");
+	const messages: EmittedMessage[] = [];
+	const requested = new Map([
+		["submitted", { name: "submitted", resources: ["t3_not_selected"] }],
+	]);
+	const runtime = makeEmitRecord({
+		requested,
+		emit: async (message) => {
+			messages.push(message);
+		},
+		emittedAt: "2026-04-24T12:00:00.000Z",
+		validateRecord,
+		isTombstone: undefined,
+		timeRangeFieldFor: consentTimeFieldResolver("reddit"),
+	});
+	const listing = { data: { children: [validRedditPost()], after: null } };
+	const fetchPath = () => Promise.resolve({ status: 200, json: listing });
+	const captureHarness = makeRecordingEmit();
+	const ctx = {
+		...buildRedditCollectContext(fetchPath, captureHarness, ["submitted"], {
+			stream: "submitted",
+			resources: ["t3_not_selected"],
+		}),
+		emit: async (message: EmittedMessage) => {
+			messages.push(message);
+		},
+		emitRecord: runtime.emit,
+	};
+	await collectAllStreams(ctx);
+	return {
+		exercised: true,
+		messages,
+		enumeratedCounts: { submitted: 1 },
+		emittedCounts: { submitted: runtime.counters.totalEmitted },
 	};
 }
 
@@ -284,10 +350,11 @@ async function driveReddit(): Promise<DriverResult> {
 	const { collectAllStreams } = await import("../reddit/index.ts");
 	const { validateRecord } = await import("../reddit/schemas.ts");
 
-	return runDirectImportDriver(validateRecord, async (harness) => {
+	const result = await runDirectImportDriver(validateRecord, async (harness) => {
 		// submitted.json needs a t3 post; every other endpoint (comments, saved,
 		// upvoted, downvoted, hidden) needs a t1 comment — see submittedRecord /
 		// commentRecord / savedRecord / voteRecord in buildStreamTable's toRecord.
+		// The `*_stats` streams ride the same listing walks as their parents.
 		const postListing = {
 			data: { children: [validRedditPost()], after: null },
 		};
@@ -302,10 +369,18 @@ async function driveReddit(): Promise<DriverResult> {
 
 		await collectAllStreams(buildRedditCollectContext(fetchPath, harness));
 	});
+	return result.exercised
+		? {
+				...result,
+				enumeratedCounts: Object.fromEntries(
+					REDDIT_REQUESTED_STREAMS.map((name) => [name, 1]),
+				),
+			}
+		: result;
 }
 
 /**
- * Mutation counterexample: every one of Reddit's 6 streams sees a record
+ * Mutation counterexample: every one of Reddit's 11 streams sees a record
  * whose `id`/`name` fails its schema (an underscore in the fullname suffix,
  * exactly the earlier fixture bug this driver itself once had) — proving
  * the gate distinguishes "considered but validation-rejected" from
@@ -316,7 +391,7 @@ async function driveRedditMalformed(): Promise<DriverResult> {
 	const { collectAllStreams } = await import("../reddit/index.ts");
 	const { validateRecord } = await import("../reddit/schemas.ts");
 
-	return runDirectImportDriver(validateRecord, async (harness) => {
+	const result = await runDirectImportDriver(validateRecord, async (harness) => {
 		const malformedPost = {
 			kind: "t3" as const,
 			data: { ...validRedditPost().data, name: "t3_has_underscore" },
@@ -337,6 +412,14 @@ async function driveRedditMalformed(): Promise<DriverResult> {
 
 		await collectAllStreams(buildRedditCollectContext(fetchPath, harness));
 	});
+	return result.exercised
+		? {
+				...result,
+				enumeratedCounts: Object.fromEntries(
+					REDDIT_REQUESTED_STREAMS.map((name) => [name, 1]),
+				),
+			}
+		: result;
 }
 
 // ─── Jellyfin: real subprocess entrypoint against a fake local HTTP server ──
@@ -1174,6 +1257,11 @@ export const CONNECTOR_DRIVERS: Record<string, ConnectorDriver> = {
 			"upvoted",
 			"downvoted",
 			"hidden",
+			"submitted_stats",
+			"comments_stats",
+			"upvoted_stats",
+			"downvoted_stats",
+			"hidden_stats",
 		],
 		run: driveReddit,
 	},
@@ -1194,7 +1282,7 @@ export const AMAZON_ZERO_RESULT_DRIVER: ConnectorDriver = {
 };
 
 /**
- * Every one of Reddit's 6 streams sees one considered, schema-invalid
+ * Every one of Reddit's 11 streams sees one considered, schema-invalid
  * record; proves the gate correctly fails these streams (unresolved_attempt)
  * rather than laundering a validation-rejected record into proven coverage.
  */
@@ -1206,8 +1294,18 @@ export const REDDIT_MALFORMED_DRIVER: ConnectorDriver = {
 		"upvoted",
 		"downvoted",
 		"hidden",
+		"submitted_stats",
+		"comments_stats",
+		"upvoted_stats",
+		"downvoted_stats",
+		"hidden_stats",
 	],
 	run: driveRedditMalformed,
+};
+
+export const REDDIT_EXCLUDED_DRIVER: ConnectorDriver = {
+	coveredStreams: ["submitted"],
+	run: driveRedditExcluded,
 };
 
 // ─── Ratchet: the exact set of required proof-demanding streams this gate ──
@@ -1279,6 +1377,9 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"github.events",
 	"github.organizations",
 	"github.pinned_repositories",
+	// Facebook (browser-session-backed, auth-walled; no credential-free
+	// coverage driver yet). profile is its only required stream.
+	"facebook.profile",
 	// GitHub browser profile: auth-walled browser-session collection with no
 	// credential-free coverage driver yet. The PAT/API GitHub connector remains
 	// the supported setup profile; this profile is listed as development.
@@ -1295,6 +1396,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"linkedin.skills",
 	"linkedin.languages",
 	"linkedin.connections",
+	// WhatsApp (web): read from the owner's signed-in WhatsApp Web tab's own
+	// in-page stores; auth-walled (phone-linked session), no credential-free
+	// coverage driver. chats and messages are its required streams.
+	"whatsapp_web.chats",
+	"whatsapp_web.messages",
 	// Meta (browser-session-backed; no credential-free fixture yet).
 	"meta.profile",
 	// Shopify (browser Apollo-cache extraction; no credential-free fixture yet).
@@ -1338,6 +1444,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"oura.sleep",
 	"oura.readiness",
 	"oura.activity",
+	// Character.AI browser profile: auth-walled character.ai session whose API
+	// token lives only in the signed-in page; no credential-free coverage
+	// driver exists for it yet.
+	"character_ai.chats",
+	"character_ai.messages",
 	// Oura browser profile: auth-walled cloud.ouraring.com browser-session
 	// collection with no credential-free coverage driver yet. The PAT/API Oura
 	// connector remains the supported setup profile; this profile is listed as
@@ -1345,6 +1456,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"oura_browser.sleep",
 	"oura_browser.readiness",
 	"oura_browser.activity",
+	// Perplexity: auth-walled www.perplexity.ai browser-session collection
+	// behind a Cloudflare check, with no credential-free coverage driver yet.
+	// Development tier; its tests drive the collector against a synthetic
+	// library instead.
+	"perplexity.conversations",
 	"slack.channels",
 	"slack.channel_memberships",
 	"slack.channel_stats",
@@ -1372,6 +1488,14 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"venmo.profile",
 	"venmo.friends",
 	"venmo.transactions",
+	// Instinct (REAL_UNLISTED_CONNECTORS, development): browser-session
+	// connector behind an SMS-code + Turnstile login; its integration suite
+	// drives collectInstinct against fixtures, but no credential-free coverage
+	// driver exists yet.
+	"instinct.profile",
+	"instinct.agent_contact",
+	"instinct.chats",
+	"instinct.chat_events",
 	// WHOOP (Preview): the owner-visible browser connector has a real
 	// integration suite, but no credential-free coverage driver yet.
 	"whoop.profile",
