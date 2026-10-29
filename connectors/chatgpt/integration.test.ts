@@ -3892,6 +3892,73 @@ test("runMessagesAndConversationsWithDetail: unavailable batch endpoint degrades
 	);
 });
 
+test("runMessagesAndConversationsWithDetail: planned provider deferrals of batch requests do not turn batching off", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const batchCalls: string[][] = [];
+	const fetches: string[] = [];
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			fetches.push(path);
+			return Promise.resolve(
+				makeDetailOkForConversation(path.replace("/conversation/", "")),
+			);
+		},
+		fetchBatch: (ids: readonly string[]): Promise<ChatGptFetchResult[]> => {
+			batchCalls.push([...ids]);
+			// The circuit is open for the first three requests. Each is deferred
+			// before it reaches the endpoint.
+			if (batchCalls.length <= 3) {
+				return Promise.reject(
+					new ChatGptPlannedProviderBudgetDeferredError(
+						"ChatGPT provider budget gate closed (circuit_open); deferring remaining conversation details",
+						"circuit_open",
+					),
+				);
+			}
+			return Promise.resolve(ids.map((id) => makeDetailOkForConversation(id)));
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	const ids = Array.from({ length: 60 }, (_, index) => `convo-${index}`);
+
+	const coverage = await runMessagesAndConversationsWithDetail(
+		deps,
+		ids.map((id) => makeConvo({ id })),
+		makeEmitConversation(deps),
+		{ random: () => 0, sleep: () => undefined },
+	);
+
+	assert.deepEqual(
+		batchCalls,
+		Array.from({ length: 6 }, (_, chunk) =>
+			ids.slice(chunk * 10, chunk * 10 + 10),
+		),
+		"every chunk is still requested as a batch",
+	);
+	assert.deepEqual(
+		fetches,
+		ids.slice(0, 30).map((id) => `/conversation/${id}`),
+		"only the deferred chunks are fetched one at a time",
+	);
+	assert.deepEqual(coverage.hydratedKeys, ids);
+	assert.deepEqual(coverage.gapKeys, []);
+	assert.deepEqual(
+		diagnostics.filter((line) => line.includes("batch conversation-detail")),
+		[],
+		"a planned deferral is not reported as a batch endpoint failure",
+	);
+});
+
 test("runMessagesAndConversationsWithDetail: batch fallback diagnostic carries no error text", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const secrets = [

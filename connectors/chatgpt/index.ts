@@ -1663,7 +1663,9 @@ async function reportChatGptRetryPressure({
 }: {
 	delayMs: number;
 	emit?: CollectContext["emit"] | undefined;
-	onUnlanedRateLimited?: (() => void) | undefined;
+	onUnlanedRateLimited?:
+		| ((retryAfterWaitMs: number | undefined) => void)
+		| undefined;
 	laneContext?: AdaptiveLaneRunContext | undefined;
 	providerBudget?: ProviderBudgetController | null | undefined;
 	recordPacingThrottle: boolean;
@@ -1684,7 +1686,7 @@ async function reportChatGptRetryPressure({
 		...(retryAfterMs === undefined ? {} : { retryAfterMs }),
 	});
 	if (laneContext === undefined && response?.status === 429) {
-		onUnlanedRateLimited?.();
+		onUnlanedRateLimited?.(retryAfterMs === undefined ? undefined : delayMs);
 	}
 }
 
@@ -1702,7 +1704,9 @@ export function createChatGptApi({
 	// In-lane 429s are already counted by the detail lane's cooldown event, so
 	// they intentionally do NOT call this — avoiding a double count. Lets the run
 	// carry pre-detail source pressure into the detail-phase density stop.
-	onUnlanedRateLimited?: () => void;
+	// `retryAfterWaitMs` is the wait before the retry when the server sent
+	// Retry-After.
+	onUnlanedRateLimited?: (retryAfterWaitMs: number | undefined) => void;
 	page: Page;
 	providerBudget?: ProviderBudgetController | null;
 }): ChatGptApi {
@@ -2422,9 +2426,24 @@ export interface ChatGptBatchFallbackLog {
 	logged: boolean;
 }
 
-/** Mutable holder for the run-scoped pre-detail served-429 count. */
+/** Mutable holder for the run-scoped served 429s outside the detail lane. */
 export interface ChatGptPreDetailPressure {
 	rateLimited: number;
+	// When the latest server Retry-After wait among them ends (Date.now() ms).
+	retryAfterUntilMs?: number;
+}
+
+/** Counts one served 429 outside the detail lane and keeps its Retry-After. */
+export function recordChatGptUnlanedRateLimit(
+	pressure: ChatGptPreDetailPressure,
+	retryAfterWaitMs: number | undefined,
+): void {
+	pressure.rateLimited += 1;
+	if (retryAfterWaitMs === undefined) return;
+	pressure.retryAfterUntilMs = Math.max(
+		pressure.retryAfterUntilMs ?? 0,
+		Date.now() + retryAfterWaitMs,
+	);
 }
 
 const MEMORIES_PATH = "/memories?include_memory_entries=true";
@@ -6096,6 +6115,13 @@ export async function runMessagesAndConversationsWithDetail(
 	// Batch requests take their pacing turn one after another.
 	let batchPacingTurn: Promise<void> = Promise.resolve();
 
+	/** Waits out a server Retry-After that a batch or list request was served. */
+	async function waitOutBatchCooldown(): Promise<void> {
+		const waitMs =
+			(deps.preDetailPressure?.retryAfterUntilMs ?? 0) - Date.now();
+		if (waitMs > 0) await sleep(waitMs);
+	}
+
 	function batchChunkStart(index: number): number {
 		return index - (index % CHATGPT_CONVERSATION_BATCH_MAX_IDS);
 	}
@@ -6142,15 +6168,18 @@ export async function runMessagesAndConversationsWithDetail(
 		fetchBatch: NonNullable<ChatGptApi["fetchBatch"]>,
 		chunkIds: string[],
 	): Promise<void> {
+		// No batch request starts while a Retry-After wait runs, including one
+		// that starts during this request's pacing delay.
 		const turn = batchPacingTurn.then(async () => {
+			await waitOutBatchCooldown();
 			const delayMs = providerBudget?.pacingDelayHint() ?? 0;
 			if (delayMs > 0) await sleep(delayMs);
+			await waitOutBatchCooldown();
 		});
-		batchPacingTurn = turn;
-		await turn;
-		const rateLimitedBefore = deps.preDetailPressure?.rateLimited ?? 0;
+		batchPacingTurn = turn.catch(() => undefined);
+		let rateLimitedBefore = deps.preDetailPressure?.rateLimited ?? 0;
 		let clean = true;
-		const batchStarted = performance.now();
+		let batchStarted = performance.now();
 		const setTimingConversation = (
 			globalThis as typeof globalThis & {
 				__pdppPageshimSetTimingConversation?: (
@@ -6158,8 +6187,11 @@ export async function runMessagesAndConversationsWithDetail(
 				) => void;
 			}
 		).__pdppPageshimSetTimingConversation;
-		setTimingConversation?.(chunkIds);
 		try {
+			await turn;
+			rateLimitedBefore = deps.preDetailPressure?.rateLimited ?? 0;
+			batchStarted = performance.now();
+			setTimingConversation?.(chunkIds);
 			const details = await fetchBatch(chunkIds);
 			const elapsedPerDetail =
 				details.length > 0
@@ -6191,19 +6223,24 @@ export async function runMessagesAndConversationsWithDetail(
 			await recordConversationDetailProviderSuccess();
 		} catch (err) {
 			// Batch results are an optimization: the lane fetches this request's
-			// conversations one at a time. Log a bounded classification once per
-			// run, never the error text; it can carry private page content.
-			if (!batchFallbackLog.logged) {
-				batchFallbackLog.logged = true;
-				chatGptDiagnostic(
-					`batch conversation-detail fetch failed (${classifyChatGptBatchFailure(err)}); fetching its conversation details one at a time`,
-				);
-			}
-			consecutiveBatchFailures += 1;
-			if (consecutiveBatchFailures >= CHATGPT_BATCH_FAILURES_TO_DISABLE) {
-				batchEndpointUnavailable = true;
-			}
+			// conversations one at a time.
 			clean = false;
+			// A planned provider deferral never reached the endpoint, so it says
+			// nothing about whether batch requests work.
+			if (!(err instanceof ChatGptPlannedProviderBudgetDeferredError)) {
+				// Log a bounded classification once per run, never the error text;
+				// it can carry private page content.
+				if (!batchFallbackLog.logged) {
+					batchFallbackLog.logged = true;
+					chatGptDiagnostic(
+						`batch conversation-detail fetch failed (${classifyChatGptBatchFailure(err)}); fetching its conversation details one at a time`,
+					);
+				}
+				consecutiveBatchFailures += 1;
+				if (consecutiveBatchFailures >= CHATGPT_BATCH_FAILURES_TO_DISABLE) {
+					batchEndpointUnavailable = true;
+				}
+			}
 		} finally {
 			setTimingConversation?.(null);
 		}
@@ -6683,7 +6720,10 @@ export async function runMessagesAndConversationsWithDetail(
 			try {
 				return await task(c, laneContext);
 			} finally {
-				laneIndex = (conversationIndexById.get(c?.id) ?? laneIndex) + 1;
+				laneIndex = Math.max(
+					laneIndex,
+					(conversationIndexById.get(c?.id) ?? -1) + 1,
+				);
 				pumpConversationDetailBatches();
 			}
 		};
@@ -7832,9 +7872,8 @@ export async function collectChatGpt(
 		page,
 		capture,
 		emit,
-		onUnlanedRateLimited: () => {
-			preDetailPressure.rateLimited += 1;
-		},
+		onUnlanedRateLimited: (retryAfterWaitMs) =>
+			recordChatGptUnlanedRateLimit(preDetailPressure, retryAfterWaitMs),
 		providerBudget,
 	});
 	const emitRecord = makeEmitRecord(baseEmitRecord);

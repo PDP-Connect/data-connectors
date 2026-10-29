@@ -17,6 +17,7 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mock, type TestContext, test } from "node:test";
 import type { Page } from "playwright";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
@@ -25,8 +26,10 @@ import {
 	type ChatGptPreDetailPressure,
 	ChatGptRunBudget,
 	createChatGptApi,
+	recordChatGptUnlanedRateLimit,
 	resolveChatGptProviderBudget,
 	runConversationsAndMessagesStreams,
+	runMessagesAndConversationsWithDetail,
 	type StreamDeps,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -48,6 +51,12 @@ interface Throttle {
 	retryAfterSeconds?: number;
 }
 
+interface SimOptions {
+	throttle?: Throttle;
+	// No batch endpoint and no search read-ahead: every request alone.
+	oneAtATime?: boolean;
+}
+
 interface SimResult {
 	listingMs: number;
 	detailMs: number;
@@ -56,7 +65,14 @@ interface SimResult {
 	peakBatchesInFlight: number;
 	peakSearchesInFlight: number;
 	batchStarts: { atMs: number; inFlight: number }[];
+	// Every batch POST sent, including those answered with 429. A retry
+	// sends the same conversation ids again.
+	batchPosts: { atMs: number; ids: string; retry: boolean }[];
+	// From each 429 answer on a batch POST to the end of its Retry-After.
+	cooldowns: { ids: string; fromMs: number; untilMs: number }[];
 	throttled: number;
+	// Each emitted record as JSON, sorted by stream and record id.
+	records: string[];
 }
 
 function conversation(index: number) {
@@ -132,7 +148,10 @@ async function onFakeClock<T>(work: () => Promise<T>): Promise<T> {
 		await new Promise((resolve) => setImmediate(resolve));
 		if (outcome !== null) break;
 		mock.timers.tick(10);
-		assert.ok(Date.now() < 3_600_000, "the simulated run ends within an hour");
+		assert.ok(
+			Date.now() < 7_200_000,
+			"the simulated run ends within two hours",
+		);
 	}
 	const settled = outcome as
 		| { ok: true; value: T }
@@ -143,7 +162,7 @@ async function onFakeClock<T>(work: () => Promise<T>): Promise<T> {
 
 async function simulate(
 	batchMaxParallelism: number,
-	throttle?: Throttle,
+	{ throttle, oneAtATime = false }: SimOptions = {},
 ): Promise<SimResult> {
 	// Before anything reads the clock: the pacer keeps the Date.now it sees.
 	mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
@@ -155,6 +174,9 @@ async function simulate(
 	let lastSearchDoneAt = 0;
 	let throttled = 0;
 	const batchStarts: SimResult["batchStarts"] = [];
+	const batchPosts: SimResult["batchPosts"] = [];
+	const batchIdsSent = new Set<string>();
+	const cooldowns: SimResult["cooldowns"] = [];
 	const respondAfter = <T>(ms: number, value: () => T): Promise<T> =>
 		new Promise((resolve) => setTimeout(() => resolve(value()), ms));
 	const page = {
@@ -171,6 +193,11 @@ async function simulate(
 				body?: { conversation_ids?: string[] };
 			};
 			const now = Date.now();
+			if (path === "/conversations/batch") {
+				const key = (body?.conversation_ids ?? []).join(",");
+				batchPosts.push({ atMs: now, ids: key, retry: batchIdsSent.has(key) });
+				batchIdsSent.add(key);
+			}
 			if (
 				throttle &&
 				now >= throttle.fromMs &&
@@ -178,6 +205,16 @@ async function simulate(
 				!path.startsWith("/conversations/search")
 			) {
 				throttled += 1;
+				if (
+					path === "/conversations/batch" &&
+					throttle.retryAfterSeconds !== undefined
+				) {
+					cooldowns.push({
+						ids: (body?.conversation_ids ?? []).join(","),
+						fromMs: now + SINGLE_MS,
+						untilMs: now + SINGLE_MS + throttle.retryAfterSeconds * 1000,
+					});
+				}
 				return respondAfter(SINGLE_MS, () => ({
 					status: 429,
 					json: null,
@@ -237,13 +274,13 @@ async function simulate(
 		page: page as unknown as Page,
 		capture: null,
 		emit: harness.emit,
-		onUnlanedRateLimited: () => {
-			preDetailPressure.rateLimited += 1;
-		},
+		onUnlanedRateLimited: (retryAfterWaitMs) =>
+			recordChatGptUnlanedRateLimit(preDetailPressure, retryAfterWaitMs),
 		providerBudget,
 	});
+	const { fetchBatch: _batchEndpoint, ...withoutBatch } = api;
 	const deps: StreamDeps = {
-		api,
+		api: oneAtATime ? withoutBatch : api,
 		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 		emit: harness.emit,
 		emitRecord: async (stream, data, options) => {
@@ -253,7 +290,9 @@ async function simulate(
 			return harness.emitRecord(stream, data, options);
 		},
 		preDetailPressure,
-		conversationSearchPrefetchPages: CONVERSATION_SEARCH_PREFETCH_PAGES,
+		conversationSearchPrefetchPages: oneAtATime
+			? 1
+			: CONVERSATION_SEARCH_PREFETCH_PAGES,
 		progress: () => Promise.resolve(),
 		providerBudget,
 		requested: new Map(
@@ -296,7 +335,20 @@ async function simulate(
 			peakBatchesInFlight,
 			peakSearchesInFlight,
 			batchStarts,
+			batchPosts,
+			cooldowns,
 			throttled,
+			records: harness.emitted
+				.map((record) => ({
+					key: `${record.stream} ${String(record.data.id)}`,
+					json: JSON.stringify(record),
+				}))
+				.sort((a, b) =>
+					a.key === b.key
+						? a.json.localeCompare(b.json)
+						: a.key.localeCompare(b.key),
+				)
+				.map((record) => record.json),
 		};
 	} finally {
 		mock.timers.reset();
@@ -371,7 +423,7 @@ test("a 3,100-conversation first connect keeps pace with the reference at K=4 an
 
 test("served 429s during the download back off to one request in flight and the run still completes", async (t) => {
 	const throttle = { fromMs: 60_000, untilMs: 75_000, retryAfterSeconds: 5 };
-	const result = await simulate(4, throttle);
+	const result = await simulate(4, { throttle });
 	report(t, "429 window 60-75 s", result);
 	assert.ok(result.throttled > 0, "the throttle window was hit");
 	assert.equal(result.conversations, CONVERSATIONS);
@@ -385,7 +437,166 @@ test("served 429s during the download back off to one request in flight and the 
 		after.some((start) => start.inFlight > 1),
 		"concurrency ramps up again after the throttle",
 	);
-	// Nothing was sent into the window faster than the clean run sends.
+	// No new batch request starts while a server Retry-After wait runs, and
+	// a throttled request retries only after its own wait ends.
+	assert.ok(result.cooldowns.length > 0, "a batch request was throttled");
+	const inCooldown = (atMs: number, cooldown: SimResult["cooldowns"][number]) =>
+		atMs > cooldown.fromMs && atMs < cooldown.untilMs;
+	assert.deepEqual(
+		result.batchPosts
+			.filter(
+				(post) =>
+					!post.retry &&
+					result.cooldowns.some((cooldown) => inCooldown(post.atMs, cooldown)),
+			)
+			.map((post) => post.atMs),
+		[],
+		"new batch requests sent during a Retry-After wait",
+	);
+	assert.deepEqual(
+		result.batchPosts
+			.filter(
+				(post) =>
+					post.retry &&
+					result.cooldowns.some(
+						(cooldown) =>
+							cooldown.ids === post.ids && inCooldown(post.atMs, cooldown),
+					),
+			)
+			.map((post) => post.atMs),
+		[],
+		"retries sent before their own Retry-After ended",
+	);
 	const clean = await simulate(4);
 	assert.ok(result.detailMs > clean.detailMs, "the throttle cost time");
+});
+
+test("the overlapped download writes the same records as one request at a time", async (t) => {
+	const overlapped = await simulate(4);
+	const alone = await simulate(4, { oneAtATime: true });
+	report(t, "one at a time", alone);
+	assert.equal(alone.peakBatchesInFlight, 0);
+	assert.equal(alone.peakSearchesInFlight, 1);
+	assert.equal(alone.gaps, 0);
+	assert.equal(overlapped.gaps, 0);
+	// Each record is written once.
+	assert.equal(new Set(overlapped.records).size, overlapped.records.length);
+	assert.equal(overlapped.records.length, alone.records.length);
+	// Compare every record's bytes in key order; report the first difference.
+	const firstDifference = overlapped.records.findIndex(
+		(record, index) => record !== alone.records[index],
+	);
+	assert.equal(
+		firstDifference,
+		-1,
+		`first differing record: ${overlapped.records[firstDifference]} against ${alone.records[firstDifference]}`,
+	);
+	t.diagnostic(
+		`${overlapped.records.length} records identical, sha256 ${createHash("sha256").update(overlapped.records.join("\n")).digest("hex")}`,
+	);
+});
+
+test("a batch request waiting for its pacing turn does not start during another request's Retry-After wait", async () => {
+	mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	try {
+		const posts: { atMs: number; first: string }[] = [];
+		const cooldowns: { fromMs: number; untilMs: number }[] = [];
+		const page = {
+			evaluate: (fn: unknown, arg?: unknown) => {
+				if (arg === undefined) {
+					return Promise.resolve(
+						typeof fn === "function"
+							? "https://chatgpt.com/"
+							: { accessToken: "fixture", deviceId: "fixture" },
+					);
+				}
+				const ids =
+					(arg as { body?: { conversation_ids?: string[] } }).body
+						?.conversation_ids ?? [];
+				const now = Date.now();
+				const first = ids[0] ?? "";
+				const retry = posts.some((post) => post.first === first);
+				posts.push({ atMs: now, first });
+				const ok = () => ({
+					status: 200,
+					json: ids.map((id) => detail(id, Number(id.slice(2)))),
+				});
+				// The first chunk is answered with a 429 and Retry-After: 5 after
+				// 1.5 s. The others are answered at once, so the pump starts the
+				// next chunk while the first one is still out.
+				if (first === "c-0" && !retry) {
+					return new Promise((resolve) =>
+						setTimeout(() => {
+							cooldowns.push({
+								fromMs: Date.now(),
+								untilMs: Date.now() + 5000,
+							});
+							resolve({
+								status: 429,
+								json: null,
+								headers: { "retry-after": "5" },
+							});
+						}, 1500),
+					);
+				}
+				return new Promise((resolve) => setTimeout(() => resolve(ok()), 50));
+			},
+			goto: () => Promise.resolve(null),
+			waitForFunction: () => Promise.reject(new Error("unused")),
+		};
+		const harness = makeRecordingEmit(validateRecord);
+		const preDetailPressure: ChatGptPreDetailPressure = { rateLimited: 0 };
+		const providerBudget = resolveChatGptProviderBudget({});
+		const api = createChatGptApi({
+			page: page as unknown as Page,
+			capture: null,
+			emit: harness.emit,
+			onUnlanedRateLimited: (retryAfterWaitMs) =>
+				recordChatGptUnlanedRateLimit(preDetailPressure, retryAfterWaitMs),
+			providerBudget,
+		});
+		const deps: StreamDeps = {
+			api,
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			preDetailPressure,
+			progress: () => Promise.resolve(),
+			providerBudget,
+			requested: new Map(
+				["conversations", "messages"].map((name) => [name, { name }]),
+			),
+		};
+		let written = 0;
+		await onFakeClock(() =>
+			runMessagesAndConversationsWithDetail(
+				deps,
+				Array.from({ length: 40 }, (_, index) => conversation(index)),
+				async () => {
+					written += 1;
+				},
+				{ batchMaxParallelism: 4, random: () => 0 },
+			),
+		);
+		assert.equal(written, 40);
+		assert.equal(cooldowns.length, 1, "the first chunk was throttled once");
+		const [cooldown] = cooldowns;
+		assert.ok(
+			posts.some(
+				(post) => post.first !== "c-0" && post.atMs < (cooldown?.fromMs ?? 0),
+			),
+			"another chunk was sent while the first one was out",
+		);
+		assert.deepEqual(
+			posts.filter(
+				(post) =>
+					cooldown !== undefined &&
+					post.atMs > cooldown.fromMs &&
+					post.atMs < cooldown.untilMs,
+			),
+			[],
+			"batch requests sent during the Retry-After wait",
+		);
+	} finally {
+		mock.timers.reset();
+	}
 });
