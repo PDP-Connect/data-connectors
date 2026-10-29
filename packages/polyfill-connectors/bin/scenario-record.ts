@@ -252,6 +252,10 @@ import {
 	readManifest,
 } from "../src/orchestrator.ts";
 import {
+	emptyDetailGapsPage,
+	isDetailGapsPageRequestLine,
+} from "../src/scenario/detail-gaps-page.ts";
+import {
 	FilesystemInputError,
 	readDeclaredFilesystemInput,
 	resolveFilesystemInput,
@@ -1642,6 +1646,14 @@ function runRecordSubprocess(args: {
 				watchdog.suspend();
 				answerInteraction(parsed);
 				return;
+			}
+			if (isDetailGapsPageRequestLine(parsed)) {
+				// This host keeps no detail-gap ledger, so every page is empty. Left
+				// unanswered, a connector that pages pending gaps waits on stdin
+				// until the inactivity watchdog kills it, with no DONE.
+				child.stdin.write(
+					`${JSON.stringify(emptyDetailGapsPage(parsed.request_id))}\n`,
+				);
 			}
 			if (isDoneLine(parsed)) {
 				doneCount += 1;
