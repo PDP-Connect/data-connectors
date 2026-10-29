@@ -496,80 +496,136 @@ test("the overlapped download writes the same records as one request at a time",
 	);
 });
 
+type BatchPost = { atMs: number; first: string; retry: boolean };
+type RetryAfterWindow = { fromMs: number; untilMs: number };
+
+/**
+ * A detail pass against a fake page whose batch endpoint answers each POST
+ * after `answer(post).delayMs`, with a 429 and Retry-After when
+ * `retryAfterS` is set. Records every POST and every Retry-After window.
+ */
+function batchEndpointPass(
+	answer: (post: BatchPost) => { delayMs: number; retryAfterS?: number },
+) {
+	const posts: BatchPost[] = [];
+	const windows: RetryAfterWindow[] = [];
+	const page = {
+		evaluate: (fn: unknown, arg?: unknown) => {
+			if (arg === undefined) {
+				return Promise.resolve(
+					typeof fn === "function"
+						? "https://chatgpt.com/"
+						: { accessToken: "fixture", deviceId: "fixture" },
+				);
+			}
+			const ids =
+				(arg as { body?: { conversation_ids?: string[] } }).body
+					?.conversation_ids ?? [];
+			const first = ids[0] ?? "";
+			const post = {
+				atMs: Date.now(),
+				first,
+				retry: posts.some((earlier) => earlier.first === first),
+			};
+			posts.push(post);
+			const { delayMs, retryAfterS } = answer(post);
+			return new Promise((resolve) =>
+				setTimeout(() => {
+					if (retryAfterS === undefined) {
+						resolve({
+							status: 200,
+							json: ids.map((id) => detail(id, Number(id.slice(2)))),
+						});
+						return;
+					}
+					windows.push({
+						fromMs: Date.now(),
+						untilMs: Date.now() + retryAfterS * 1000,
+					});
+					resolve({
+						status: 429,
+						json: null,
+						headers: { "retry-after": String(retryAfterS) },
+					});
+				}, delayMs),
+			);
+		},
+		goto: () => Promise.resolve(null),
+		waitForFunction: () => Promise.reject(new Error("unused")),
+	};
+	const harness = makeRecordingEmit(validateRecord);
+	const gapsAtMs: number[] = [];
+	const preDetailPressure: ChatGptPreDetailPressure = { rateLimited: 0 };
+	const providerBudget = resolveChatGptProviderBudget({});
+	const api = createChatGptApi({
+		page: page as unknown as Page,
+		capture: null,
+		emit: harness.emit,
+		onUnlanedRateLimited: (retryAfterWaitMs) =>
+			recordChatGptUnlanedRateLimit(preDetailPressure, retryAfterWaitMs),
+		providerBudget,
+	});
+	const deps: StreamDeps = {
+		api,
+		emit: (message) => {
+			if (message.type === "DETAIL_GAP") gapsAtMs.push(Date.now());
+			return harness.emit(message);
+		},
+		emitRecord: harness.emitRecord,
+		preDetailPressure,
+		progress: () => Promise.resolve(),
+		providerBudget,
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	/** A list request outside the detail lane is served a 429 at `atMs`. */
+	function listRequestThrottledAt(atMs: number, waitMs: number): void {
+		setTimeout(() => {
+			windows.push({ fromMs: Date.now(), untilMs: Date.now() + waitMs });
+			recordChatGptUnlanedRateLimit(preDetailPressure, waitMs);
+		}, atMs);
+	}
+	/** New batch requests (not retries) sent inside a Retry-After window. */
+	function postsInsideRetryAfter(): BatchPost[] {
+		return posts.filter(
+			(post) =>
+				!post.retry &&
+				windows.some(
+					(window) => post.atMs > window.fromMs && post.atMs < window.untilMs,
+				),
+		);
+	}
+	return {
+		deps,
+		gapsAtMs,
+		listRequestThrottledAt,
+		posts,
+		postsInsideRetryAfter,
+		windows,
+	};
+}
+
+/** The first attempt of chunk c-0 gets a 429 with Retry-After: 5 after 1.5 s. */
+function throttleFirstChunkOnce(post: BatchPost): {
+	delayMs: number;
+	retryAfterS?: number;
+} {
+	return post.first === "c-0" && !post.retry
+		? { delayMs: 1500, retryAfterS: 5 }
+		: { delayMs: 50 };
+}
+
 test("a batch request waiting for its pacing turn does not start during another request's Retry-After wait", async () => {
 	mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
 	try {
-		const posts: { atMs: number; first: string }[] = [];
-		const cooldowns: { fromMs: number; untilMs: number }[] = [];
-		const page = {
-			evaluate: (fn: unknown, arg?: unknown) => {
-				if (arg === undefined) {
-					return Promise.resolve(
-						typeof fn === "function"
-							? "https://chatgpt.com/"
-							: { accessToken: "fixture", deviceId: "fixture" },
-					);
-				}
-				const ids =
-					(arg as { body?: { conversation_ids?: string[] } }).body
-						?.conversation_ids ?? [];
-				const now = Date.now();
-				const first = ids[0] ?? "";
-				const retry = posts.some((post) => post.first === first);
-				posts.push({ atMs: now, first });
-				const ok = () => ({
-					status: 200,
-					json: ids.map((id) => detail(id, Number(id.slice(2)))),
-				});
-				// The first chunk is answered with a 429 and Retry-After: 5 after
-				// 1.5 s. The others are answered at once, so the pump starts the
-				// next chunk while the first one is still out.
-				if (first === "c-0" && !retry) {
-					return new Promise((resolve) =>
-						setTimeout(() => {
-							cooldowns.push({
-								fromMs: Date.now(),
-								untilMs: Date.now() + 5000,
-							});
-							resolve({
-								status: 429,
-								json: null,
-								headers: { "retry-after": "5" },
-							});
-						}, 1500),
-					);
-				}
-				return new Promise((resolve) => setTimeout(() => resolve(ok()), 50));
-			},
-			goto: () => Promise.resolve(null),
-			waitForFunction: () => Promise.reject(new Error("unused")),
-		};
-		const harness = makeRecordingEmit(validateRecord);
-		const preDetailPressure: ChatGptPreDetailPressure = { rateLimited: 0 };
-		const providerBudget = resolveChatGptProviderBudget({});
-		const api = createChatGptApi({
-			page: page as unknown as Page,
-			capture: null,
-			emit: harness.emit,
-			onUnlanedRateLimited: (retryAfterWaitMs) =>
-				recordChatGptUnlanedRateLimit(preDetailPressure, retryAfterWaitMs),
-			providerBudget,
-		});
-		const deps: StreamDeps = {
-			api,
-			emit: harness.emit,
-			emitRecord: harness.emitRecord,
-			preDetailPressure,
-			progress: () => Promise.resolve(),
-			providerBudget,
-			requested: new Map(
-				["conversations", "messages"].map((name) => [name, { name }]),
-			),
-		};
+		// The other chunks are answered at once, so the pump starts the next
+		// chunk while the first one is still out.
+		const pass = batchEndpointPass(throttleFirstChunkOnce);
 		let written = 0;
 		await onFakeClock(() =>
 			runMessagesAndConversationsWithDetail(
-				deps,
+				pass.deps,
 				Array.from({ length: 40 }, (_, index) => conversation(index)),
 				async () => {
 					written += 1;
@@ -578,23 +634,101 @@ test("a batch request waiting for its pacing turn does not start during another 
 			),
 		);
 		assert.equal(written, 40);
-		assert.equal(cooldowns.length, 1, "the first chunk was throttled once");
-		const [cooldown] = cooldowns;
+		assert.equal(pass.windows.length, 1, "the first chunk was throttled once");
+		const [window] = pass.windows;
 		assert.ok(
-			posts.some(
-				(post) => post.first !== "c-0" && post.atMs < (cooldown?.fromMs ?? 0),
+			pass.posts.some(
+				(post) => post.first !== "c-0" && post.atMs < (window?.fromMs ?? 0),
 			),
 			"another chunk was sent while the first one was out",
 		);
 		assert.deepEqual(
-			posts.filter(
-				(post) =>
-					cooldown !== undefined &&
-					post.atMs > cooldown.fromMs &&
-					post.atMs < cooldown.untilMs,
-			),
+			pass.postsInsideRetryAfter(),
 			[],
 			"batch requests sent during the Retry-After wait",
+		);
+	} finally {
+		mock.timers.reset();
+	}
+});
+
+test("a batch request waits out a Retry-After wait that is extended while it waits", async () => {
+	mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	try {
+		const pass = batchEndpointPass(throttleFirstChunkOnce);
+		// The first chunk's 429 at 2.5 s sets a wait until 7.5 s. A list
+		// request's 429 at 3 s extends it to 10 s while a queued batch request
+		// sleeps toward 7.5 s, and another at 9 s extends it to 14 s while that
+		// request sleeps toward 10 s.
+		pass.listRequestThrottledAt(3000, 7000);
+		pass.listRequestThrottledAt(9000, 5000);
+		let written = 0;
+		await onFakeClock(() =>
+			runMessagesAndConversationsWithDetail(
+				pass.deps,
+				Array.from({ length: 40 }, (_, index) => conversation(index)),
+				async () => {
+					written += 1;
+				},
+				{ batchMaxParallelism: 4, random: () => 0 },
+			),
+		);
+		assert.equal(written, 40);
+		assert.equal(pass.windows.length, 3);
+		assert.deepEqual(
+			pass.postsInsideRetryAfter(),
+			[],
+			"batch requests sent during an extended Retry-After wait",
+		);
+	} finally {
+		mock.timers.reset();
+	}
+});
+
+test("no batch request starts after the detail pass defers its tail", async () => {
+	mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	try {
+		const pass = batchEndpointPass(throttleFirstChunkOnce);
+		// A list request's 429 at 2.2 s holds queued batch requests, chunk c-20
+		// among them, until 32.2 s. The run's wall-clock budget runs out at 4 s,
+		// and the lane defers the tail when the first chunk's retry comes back
+		// at 7.5 s.
+		pass.listRequestThrottledAt(2200, 30_000);
+		const runBudget = new ChatGptRunBudget({
+			maxWallClockMs: 4000,
+			now: () => Date.now(),
+		});
+		let written = 0;
+		await onFakeClock(() =>
+			runMessagesAndConversationsWithDetail(
+				pass.deps,
+				Array.from({ length: 40 }, (_, index) => conversation(index)),
+				async () => {
+					written += 1;
+				},
+				{ batchMaxParallelism: 4, random: () => 0, runBudget },
+			),
+		);
+		const returnedAtMs = Date.now();
+		// Let any batch request left behind by the pass run.
+		await onFakeClock(
+			() => new Promise<void>((resolve) => setTimeout(resolve, 60_000)),
+		);
+		const [deferredAtMs] = pass.gapsAtMs;
+		assert.ok(deferredAtMs !== undefined, "the pass deferred its tail");
+		assert.ok(written < 40, "the pass stopped before the end");
+		assert.deepEqual(
+			pass.posts.filter((post) => post.atMs >= deferredAtMs),
+			[],
+			"batch requests sent after the tail was deferred",
+		);
+		assert.ok(
+			pass.posts.every((post) => post.atMs <= returnedAtMs),
+			"batch requests sent after the pass returned",
+		);
+		assert.ok(
+			returnedAtMs < 32_200,
+			"the pass returned without waiting out the queued request's wait",
 		);
 	} finally {
 		mock.timers.reset();

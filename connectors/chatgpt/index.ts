@@ -6115,11 +6115,60 @@ export async function runMessagesAndConversationsWithDetail(
 	// Batch requests take their pacing turn one after another.
 	let batchPacingTurn: Promise<void> = Promise.resolve();
 
-	/** Waits out a server Retry-After that a batch or list request was served. */
+	// Stops queued batch requests when the tail is deferred or the pass ends.
+	const batchStopController = new AbortController();
+	tailStopController.signal.addEventListener(
+		"abort",
+		() => batchStopController.abort(),
+		{ once: true },
+	);
+
+	function batchRequestsStopped(): boolean {
+		return (
+			batchStopController.signal.aborted ||
+			observedRecoverablePressure !== null ||
+			runCapDeferReason !== null ||
+			runBudget.shouldStop()
+		);
+	}
+
+	/**
+	 * Stops queued batch requests and waits for those already sent, so no
+	 * batch request outlives the pass.
+	 */
+	async function stopBatchRequests(): Promise<void> {
+		batchStopController.abort();
+		await Promise.allSettled(pendingBatches.values());
+	}
+
+	/** Sleeps `ms`, or until batch requests stop. */
+	async function sleepUntilBatchesStop(ms: number): Promise<void> {
+		const { signal } = batchStopController;
+		if (signal.aborted) return;
+		let onStop: () => void = () => undefined;
+		await Promise.race([
+			sleep(ms),
+			new Promise<void>((resolve) => {
+				onStop = () => resolve();
+				signal.addEventListener("abort", onStop, { once: true });
+			}),
+		]);
+		signal.removeEventListener("abort", onStop);
+	}
+
+	/**
+	 * Waits out the server Retry-After that a batch or list request was
+	 * served, including extensions served during the wait.
+	 */
 	async function waitOutBatchCooldown(): Promise<void> {
-		const waitMs =
-			(deps.preDetailPressure?.retryAfterUntilMs ?? 0) - Date.now();
-		if (waitMs > 0) await sleep(waitMs);
+		const untilMs = deps.preDetailPressure?.retryAfterUntilMs ?? 0;
+		if (untilMs <= Date.now() || batchRequestsStopped()) return;
+		await sleepUntilBatchesStop(untilMs - Date.now());
+		// An unchanged deadline has passed. Comparing deadlines rather than the
+		// clock also ends the wait when an injected sleep does not advance time.
+		if ((deps.preDetailPressure?.retryAfterUntilMs ?? 0) !== untilMs) {
+			await waitOutBatchCooldown();
+		}
 	}
 
 	function batchChunkStart(index: number): number {
@@ -6137,8 +6186,7 @@ export async function runMessagesAndConversationsWithDetail(
 		if (!fetchBatch) return;
 		while (
 			!batchEndpointUnavailable &&
-			!tailStopController.signal.aborted &&
-			!runBudget.shouldStop() &&
+			!batchRequestsStopped() &&
 			pendingBatches.size < batchParallelism &&
 			nextBatchStart < convosToSync.length &&
 			nextBatchStart <
@@ -6173,7 +6221,7 @@ export async function runMessagesAndConversationsWithDetail(
 		const turn = batchPacingTurn.then(async () => {
 			await waitOutBatchCooldown();
 			const delayMs = providerBudget?.pacingDelayHint() ?? 0;
-			if (delayMs > 0) await sleep(delayMs);
+			if (delayMs > 0) await sleepUntilBatchesStop(delayMs);
 			await waitOutBatchCooldown();
 		});
 		batchPacingTurn = turn.catch(() => undefined);
@@ -6189,6 +6237,8 @@ export async function runMessagesAndConversationsWithDetail(
 		).__pdppPageshimSetTimingConversation;
 		try {
 			await turn;
+			// The tail may have been deferred, or the budget spent, during the turn.
+			if (batchRequestsStopped()) return;
 			rateLimitedBefore = deps.preDetailPressure?.rateLimited ?? 0;
 			batchStarted = performance.now();
 			setTimingConversation?.(chunkIds);
@@ -6898,7 +6948,7 @@ export async function runMessagesAndConversationsWithDetail(
 				(index !== undefined && pendingBatches.has(batchChunkStart(index)))
 			);
 		},
-	);
+	).finally(stopBatchRequests);
 	return coverage;
 }
 
