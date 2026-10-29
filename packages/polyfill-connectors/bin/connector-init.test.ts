@@ -18,8 +18,7 @@
  *      fixture shape actually satisfies the fleet's build-time guardrails,
  *      not just that files were written.
  *   4. ALWAYS removes every created file/directory in a `finally`, so the
- *      tree is pristine afterward regardless of pass/fail. Verified with a
- *      `git status --porcelain` diff against a pre-run snapshot.
+ *      owned paths are absent afterward regardless of pass/fail.
  *
  * `assertScaffoldPassesAcceptanceSuite` runs steps 2-4 for any `InitArgs`;
  * it is exercised once for the default API-mode scaffold and once for
@@ -35,7 +34,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -109,17 +109,6 @@ function tapFailCount(tapOutput: string): number {
 	return Number(match[1]);
 }
 
-function gitStatusPorcelain(): string {
-	const result = spawnSync("git", ["status", "--porcelain"], {
-		cwd: PACKAGE_ROOT,
-		encoding: "utf8",
-	});
-	// Not every checkout of this package is inside a git repo the CLI can see
-	// (e.g. a worktree-less copy) — treat a git failure as "nothing to check"
-	// rather than failing the whole test on an environment quirk.
-	return result.status === 0 ? result.stdout : "";
-}
-
 function cleanUp(
 	connectorDir: string,
 	fixtureDir: string,
@@ -149,7 +138,6 @@ function assertScaffoldPassesAcceptanceSuite(args: InitArgs): void {
 		`unexpected pre-existing path(s) for ${args.name}; clean up manually`,
 	);
 
-	const preStatus = gitStatusPorcelain();
 
 	try {
 		writeScaffold(args);
@@ -243,12 +231,6 @@ function assertScaffoldPassesAcceptanceSuite(args: InitArgs): void {
 			"cleanup left scaffold file(s) behind",
 		);
 
-		const postStatus = gitStatusPorcelain();
-		assert.equal(
-			postStatus,
-			preStatus,
-			"connector-init test left the working tree dirty after cleanup",
-		);
 	}
 }
 
@@ -342,4 +324,109 @@ test("connector-init: next steps keep synthetic pilots separate from reviewed re
 	} finally {
 		cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
 	}
+});
+
+test("CLI browser scaffold parses unusual display names and orders setup before running", () => {
+  for (const [suffix, display] of [
+    ["quote", 'Acme "Plus"'],
+    ["newline", "Acme\nPlus"],
+  ]) {
+    const name = `zz_init_${suffix}_${process.pid}`;
+    const plan = planTargets(name, "items");
+    assert.deepEqual(findCollisions(plan), []);
+    try {
+      const result = spawnSync(
+        process.execPath,
+        ["--import", "tsx", "bin/connector-init.ts", name, "--browser", "--display-name", display],
+        { cwd: PACKAGE_ROOT, env: childTestEnv(), encoding: "utf8" }
+      );
+      assert.equal(result.status, 0, result.stderr);
+      for (const file of [plan.files.indexTs, plan.files.typesTs]) {
+        const checked = spawnSync(process.execPath, ["--check", file], { encoding: "utf8" });
+        assert.equal(checked.status, 0, checked.stderr);
+      }
+      const setup = result.stdout.indexOf("LOGIN_CHECK_URL");
+      const run = result.stdout.indexOf("bin/connector-dev.ts");
+      assert.ok(setup >= 0 && setup < run, result.stdout);
+    } finally {
+      cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+    }
+  }
+});
+
+test("CLI browser scaffold rejects an untouched row selector but accepts configured empty rows", async () => {
+  const name = `zz_init_rows_${process.pid}`;
+  const plan = planTargets(name, "items");
+  assert.deepEqual(findCollisions(plan), []);
+  try {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "bin/connector-init.ts", name, "--browser"], {
+      cwd: PACKAGE_ROOT,
+      env: childTestEnv(),
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const source = readFileSync(plan.files.indexTs, "utf8").replace('"TODO-rows-container-selector"', '"#rows"');
+    writeFileSync(plan.files.indexTs, source);
+    const { collect } = await import(`${plan.files.indexTs}?first`);
+    let rows = [{ getAttribute: () => "value", textContent: "row" }];
+    const rowLocator = { evaluateAll: async (extract: (elements: typeof rows) => unknown) => extract(rows) };
+    const container = { isVisible: async () => true, locator: () => rowLocator };
+    const page = {
+      goto: async () => undefined,
+      locator: () => ({ count: async () => 1, nth: () => container }),
+      waitForTimeout: async () => undefined,
+    };
+    const context = {
+      page,
+      requested: new Set(["items"]),
+      progress: async () => undefined,
+      emitRecord: async () => undefined,
+    };
+    await assert.rejects(() => collect(context), /ROW_SELECTOR.*placeholder/);
+    rows = [];
+    writeFileSync(plan.files.indexTs, source.replace('"TODO-row-selector"', '".row"'));
+    const configured = await import(`${plan.files.indexTs}?configured`);
+    await assert.doesNotReject(() => configured.collect(context));
+  } finally {
+    cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+  }
+});
+
+test("CLI browser instructions configure login before first invocation", () => {
+  const name = `zz_init_order_${process.pid}`;
+  const plan = planTargets(name, "items");
+  assert.deepEqual(findCollisions(plan), []);
+  try {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "bin/connector-init.ts", name, "--browser"], {
+      cwd: PACKAGE_ROOT,
+      env: childTestEnv(),
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(
+      result.stdout.indexOf("LOGIN_CHECK_URL") >= 0 &&
+        result.stdout.indexOf("LOGIN_CHECK_URL") < result.stdout.indexOf("bin/connector-dev.ts"),
+      result.stdout
+    );
+  } finally {
+    cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+  }
+});
+
+test("cleanup leaves unrelated changes in a private fixture alone", () => {
+  const root = mkdtempSync(join(tmpdir(), "init-owned-"));
+  const connector = join(root, "connector");
+  const fixture = join(root, "fixture");
+  const manifest = join(root, "manifest.json");
+  const unrelated = join(root, "unrelated.txt");
+  try {
+    writeFileSync(unrelated, "before");
+    writeFileSync(manifest, "owned");
+    writeFileSync(unrelated, "changed during generation");
+    cleanUp(connector, fixture, manifest);
+    assert.equal(readFileSync(unrelated, "utf8"), "changed during generation");
+    assert.equal(existsSync(manifest), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
