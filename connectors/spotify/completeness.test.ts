@@ -8,6 +8,7 @@ import type {
 	EmittedMessage,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { completeSourceFields } from "./__fixtures__/complete-source-fields.ts";
 import { hasSpotifyEndProof } from "./completion-evidence.ts";
 import { spotifyCollect } from "./index.ts";
@@ -1058,19 +1059,159 @@ test("saved tracks reject a terminal response without a returned offset", async 
 	});
 });
 
-test("library rows require a recognized type and folders veto root-only coverage", async () => {
-	for (const row of [
-		{ item: { data: {} } },
-		{ item: { data: { __typename: "FutureType" } } },
-		{ item: { data: { __typename: "Folder", uri: "spotify:folder:f1" } } },
-	] as const) {
-		await assertRejectedWithoutAuthority(
-			() => ({
-				data: { me: { libraryV3: { items: [row], totalCount: 1, offset: 0 } } },
-			}),
-			{ requested: ["playlists"] },
+test("library rows without a type name still reject the run", async () => {
+	await assertRejectedWithoutAuthority(
+		() => ({
+			data: {
+				me: {
+					libraryV3: {
+						items: [{ item: { data: {} } }],
+						totalCount: 1,
+						offset: 0,
+					},
+				},
+			},
+		}),
+		{ requested: ["playlists"] },
+	);
+});
+
+test("unknown library row types and folders are skipped and reported as a coverage gap", async () => {
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	let result: Awaited<ReturnType<typeof collectSavedTracks>>;
+	try {
+		result = await collectSavedTracks(
+			(_offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") {
+					return {
+						data: {
+							me: {
+								libraryV3: {
+									offset: 0,
+									totalCount: 5,
+									items: [
+										{
+											item: {
+												data: {
+													__typename: "Playlist",
+													uri: "spotify:playlist:pl1",
+												},
+											},
+										},
+										{
+											item: {
+												data: {
+													__typename: "FutureType",
+													uri: "spotify:future:secret-owner-id",
+												},
+											},
+										},
+										{
+											item: {
+												data: {
+													__typename: "FutureType",
+													uri: "spotify:future:other",
+												},
+											},
+										},
+										{
+											item: {
+												data: {
+													__typename: "Folder",
+													uri: "spotify:user:alice:folder:f1",
+												},
+											},
+										},
+										{
+											item: {
+												data: {
+													__typename: "alice@example.com",
+													uri: "spotify:odd:x",
+												},
+											},
+										},
+									],
+								},
+							},
+						},
+					};
+				}
+				return {
+					data: {
+						playlistV2: {
+							uri: String(variables?.uri),
+							content: {
+								offset: variables?.offset,
+								totalCount: 1,
+								items: [
+									{
+										itemV2: {
+											data: {
+												__typename: "Track",
+												uri: "spotify:track:t1",
+												name: "Track",
+												artists: { items: [] },
+											},
+										},
+									},
+								],
+							},
+						},
+					},
+				};
+			},
+			{ requested: ["playlists", "playlist_items"] },
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const playlists = result.emittedRecords.filter(
+		(record) => record.stream === "playlists",
+	);
+	assert.deepEqual(
+		playlists.map((record) => record.data.id),
+		["pl1"],
+	);
+	assert.equal(
+		result.emittedRecords.filter((record) => record.stream === "playlist_items")
+			.length,
+		1,
+	);
+	const coverage = (stream: string) => {
+		const message = result.messages.find(
+			(candidate) =>
+				candidate.type === "DETAIL_COVERAGE" && candidate.stream === stream,
+		);
+		return message?.type === "DETAIL_COVERAGE"
+			? { considered: message.considered, covered: message.covered }
+			: null;
+	};
+	// Four skipped rows are weighed but not covered, so neither stream reads complete.
+	assert.deepEqual(coverage("playlists"), { considered: 5, covered: 1 });
+	assert.deepEqual(coverage("playlist_items"), { considered: 5, covered: 1 });
+	for (const stream of ["playlists", "playlist_items"]) {
+		assert.equal(
+			result.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.stream === stream &&
+					message.reason === "spotify_library_rows_unsupported",
+			),
+			true,
+			`SKIP_RESULT for ${stream}`,
 		);
 	}
+	const skipped = diagnostics.filter((line) =>
+		line.includes("library_rows_skipped"),
+	);
+	assert.equal(skipped.length, 1);
+	assert.match(skipped[0] ?? "", /"skipped":4/);
+	assert.match(
+		skipped[0] ?? "",
+		/"types":"Folder:1,FutureType:2,unparseable:1"/,
+	);
+	assert.doesNotMatch(skipped[0] ?? "", /alice|secret-owner-id|spotify:/);
 });
 
 test("known Spotify pseudo-playlists count in inventory proof without becoming playlists", async () => {

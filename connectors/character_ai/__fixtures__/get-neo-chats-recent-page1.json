@@ -1,0 +1,46 @@
+{
+  "chats": [
+    {
+      "chat_id": "b9f61186-a9f6-4a1c-87af-c1f2c4a0dbd0",
+      "create_time": "2026-01-02T10:01:07.123456Z",
+      "creator_id": "100002",
+      "character_id": "YntB_ZeqRq2l_aVf2gWDCZl4oBttQzDvhj9cXafWcF8",
+      "state": "STATE_ACTIVE",
+      "type": "TYPE_ONE_ON_ONE",
+      "visibility": "VISIBILITY_PRIVATE",
+      "character_name": "Synthetic character_name 4 lorem",
+      "character_avatar_uri": "LibrarianLinda.png",
+      "character_visibility": "PUBLIC",
+      "character_translations": {
+        "name": {
+          "ko": "",
+          "ru": "Synthetic ru 5 lorem lorem",
+          "ja_JP": "Synthetic ja_JP 6",
+          "zh_CN": "Synthetic zh_CN 7"
+        }
+      },
+      "default_voice_id": null,
+      "lorebook_id": null
+    },
+    {
+      "chat_id": "13f1ac4e-9faf-4d98-8f20-033b1b84d51a",
+      "create_time": "2026-01-09T10:08:56.123456Z",
+      "creator_id": "100009",
+      "character_id": "p0Xr7G3mT2hd9kQ1Lw5sVb8nZc4yHf6jA2eR3uIo9P1",
+      "state": "STATE_ACTIVE",
+      "type": "TYPE_ONE_ON_ONE",
+      "visibility": "VISIBILITY_PRIVATE",
+      "character_name": "Synthetic character_name 11",
+      "character_avatar_uri": "",
+      "character_visibility": "PUBLIC",
+      "character_translations": {
+        "name": {}
+      },
+      "default_voice_id": null,
+      "lorebook_id": null
+    }
+  ],
+  "meta": {
+    "next_token": "Synthetic next_token chats page 2"
+  }
+}

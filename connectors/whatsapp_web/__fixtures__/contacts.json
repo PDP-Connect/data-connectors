@@ -1,0 +1,26 @@
+[
+  {
+    "id": "Synthetic id 1 lorem lorem",
+    "name": null,
+    "short_name": null,
+    "push_name": null,
+    "is_business": false,
+    "verified_name": null
+  },
+  {
+    "id": "Synthetic id 2 lorem lorem",
+    "name": null,
+    "short_name": null,
+    "push_name": null,
+    "is_business": false,
+    "verified_name": null
+  },
+  {
+    "id": "Synthetic id 3 lorem lorem",
+    "name": null,
+    "short_name": null,
+    "push_name": null,
+    "is_business": true,
+    "verified_name": "Synthetic verified_name 4 lorem lorem"
+  }
+]

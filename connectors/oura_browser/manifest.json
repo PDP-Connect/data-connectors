@@ -9,17 +9,17 @@
   },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.40",
+  "version": "0.1.44",
   "display_name": "Oura (Browser Sign-In)",
   "runtime_requirements": {
     "bindings": {
       "network": {
         "required": true,
-        "features": ["same_origin_page_fetch"]
+        "features": ["same_origin_page_fetch", "host_http_request"]
       },
       "browser": {
         "required": true,
-        "features": ["page_script_evaluation", "page_navigation"]
+        "features": ["page_script_evaluation", "page_navigation", "host_http_request"]
       }
     }
   },
@@ -34,7 +34,7 @@
       "rate_limit_sensitivity": "medium",
       "bot_detection_sensitivity": "medium",
       "background_safe": false,
-      "rationale": "Collection reuses the owner’s cloud.ouraring.com browser session. Existing sessions can refresh without a prompt while valid; first collection and expired sessions require the owner to sign in through the browser handoff."
+      "rationale": "Collection uses an owner-created Oura Developer Portal app and scoped API v2 OAuth token. A cached refresh token supports unattended reads; first authorization or a revoked grant requires browser sign-in."
     },
     "public_listing": {
       "tier": "development"
@@ -43,7 +43,7 @@
   "streams": [
     {
       "name": "sleep",
-      "description": "Daily sleep sessions and one record per daily sleep score, including score-only days and multiple score documents for one date. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
+      "description": "Daily sleep sessions and one record per daily sleep score, including score-only days and multiple score documents for one date. A session carries its day's score fields only when that day has exactly one score document. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
       "display": {
         "label": "Your sleep sessions",
         "detail": "Per-night: total sleep duration, awake time, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing, and daily score contributors."
@@ -177,6 +177,10 @@
             "type": ["integer", "null"],
             "x_pdpp_role": "amount"
           },
+          "timestamp": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
           "temperature_deviation": {
             "type": ["number", "null"]
           },
@@ -200,7 +204,8 @@
       "incremental": true,
       "query": {
         "range_filters": {
-          "day": ["gte", "gt", "lte", "lt"]
+          "day": ["gte", "gt", "lte", "lt"],
+          "timestamp": ["gte", "gt", "lte", "lt"]
         },
         "aggregations": {
           "count": true,
@@ -232,6 +237,10 @@
           "score": {
             "type": ["integer", "null"],
             "x_pdpp_role": "amount"
+          },
+          "timestamp": {
+            "type": ["string", "null"],
+            "format": "date-time"
           },
           "active_calories": {
             "type": ["integer", "null"]
@@ -283,7 +292,8 @@
       "incremental": true,
       "query": {
         "range_filters": {
-          "day": ["gte", "gt", "lte", "lt"]
+          "day": ["gte", "gt", "lte", "lt"],
+          "timestamp": ["gte", "gt", "lte", "lt"]
         },
         "aggregations": {
           "count": true,
@@ -295,13 +305,15 @@
     }
   ],
   "reason_display_messages": {
-    "oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint."
+    "oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
+    "stream_collection_failed": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
   },
   "mobile": {
     "pageshim": {
+      "entry": "oura_browser.ts",
       "scope_prefix": "oura",
-      "login_url": "https://cloud.ouraring.com/user/sign-in",
-      "login_message": "Sign in to Oura, then return here.",
+      "login_url": "https://developer.ouraring.com/applications",
+      "login_message": "Sign in to the Oura Developer Portal, then return here.",
       "collect_export": "collectOuraBrowser",
       "probe_export": "probeOuraBrowserSession",
       "summary": {

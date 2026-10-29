@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-	"version": "0.2.39",
+	"version": "0.2.41",
 	"mobile": { "pageshim": { "entry": "youtube.ts", "scope_prefix": "youtube", "login_url": "https://www.youtube.com/" } },
 	"display_name": "YouTube",
 	"brand": {
@@ -494,7 +494,7 @@
 		}
 	],
 	"reason_display_messages": {
-		"inventory_not_proven_complete": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
+		"stream_collection_failed": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
 		"page_unreadable": "The signed-in page did not expose a trustworthy record.",
 		"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
 		"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",

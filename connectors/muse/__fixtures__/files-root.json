@@ -1,0 +1,20 @@
+{
+  "path": "",
+  "entries": [
+    {
+      "name": "Synthetic name 1",
+      "type": "directory",
+      "modifiedAt": "2026-01-03T10:02:14.123Z"
+    },
+    {
+      "name": "Synthetic name 3 lorem lorem",
+      "type": "directory",
+      "modifiedAt": "2026-01-05T10:04:28.123Z"
+    },
+    {
+      "name": "Synthetic name 5",
+      "type": "directory",
+      "modifiedAt": "2026-01-07T10:06:42.123Z"
+    }
+  ]
+}

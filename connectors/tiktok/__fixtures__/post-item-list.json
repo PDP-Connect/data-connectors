@@ -1,0 +1,364 @@
+{
+  "cursor": "1781564559000",
+  "extra": {
+    "fatal_item_ids": [],
+    "logid": "Synthetic logid 2 lorem lorem lorem lorem",
+    "now": 1792644428000
+  },
+  "hasMore": false,
+  "itemList": [
+    {
+      "AIGCDescription": "",
+      "CategoryType": 101,
+      "HasPromoteEntry": 1,
+      "IsHDBitrate": true,
+      "IsHDSelfView": true,
+      "ShowAIGC": true,
+      "aigcLabelType": 1,
+      "author": {
+        "UserStoryStatus": 0,
+        "avatarLarger": "https://example.com/item/3",
+        "avatarMedium": "https://example.com/item/4",
+        "avatarThumb": "https://example.com/item/5",
+        "commentSetting": 0,
+        "downloadSetting": 0,
+        "duetSetting": 0,
+        "ftc": false,
+        "id": "100007",
+        "isADVirtual": false,
+        "isEmbedBanned": false,
+        "nickname": "Synthetic nickname 7 lorem",
+        "openFavorite": false,
+        "privateAccount": false,
+        "relation": 0,
+        "secUid": "Synthetic secUid 8 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+        "secret": false,
+        "shortDramaCreator": {},
+        "signature": "Synthetic signature 9 lorem lorem lorem lorem lorem lorem lorem lorem",
+        "stitchSetting": 0,
+        "uniqueId": "synthetic_owner",
+        "verified": false
+      },
+      "authorStats": {
+        "diggCount": 10,
+        "followerCount": 1,
+        "followingCount": 1,
+        "friendCount": 0,
+        "heart": 4,
+        "heartCount": 4,
+        "videoCount": 8
+      },
+      "authorStatsV2": {
+        "diggCount": "100010",
+        "followerCount": "100011",
+        "followingCount": "100012",
+        "friendCount": "100013",
+        "heart": "100014",
+        "heartCount": "100015",
+        "videoCount": "100016"
+      },
+      "backendSourceEventTracking": "",
+      "collected": false,
+      "contents": [
+        {
+          "desc": "Synthetic desc 18 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+        }
+      ],
+      "createTime": 1781998438,
+      "creatorAIComment": {
+        "eligibleVideo": false,
+        "hasAITopic": false,
+        "notEligibleReason": 211
+      },
+      "desc": "Synthetic desc 18 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "digged": false,
+      "diversificationId": 10045,
+      "duetDisplay": 0,
+      "duetEnabled": true,
+      "forFriend": false,
+      "id": "100019",
+      "isAd": false,
+      "isProhibited": false,
+      "isReviewing": false,
+      "itemCommentStatus": 0,
+      "item_control": {
+        "can_repost": false
+      },
+      "officalItem": false,
+      "originalItem": false,
+      "penaltyContext": {
+        "display_penalty_type": 0,
+        "display_policy": 0,
+        "display_ui_type": 0,
+        "ec_global_verdict": 1,
+        "reviewed": 0,
+        "status": 102,
+        "tns_status": 102,
+        "video_status": 10
+      },
+      "privateItem": false,
+      "secret": false,
+      "shareEnabled": true,
+      "stats": {
+        "collectCount": 0,
+        "commentCount": 0,
+        "diggCount": 0,
+        "playCount": 0,
+        "shareCount": 0
+      },
+      "statsV2": {
+        "collectCount": "100027",
+        "commentCount": "100028",
+        "diggCount": "100029",
+        "playCount": "100030",
+        "repostCount": "100031",
+        "shareCount": "100032"
+      },
+      "stitchDisplay": 0,
+      "stitchEnabled": true,
+      "textLanguage": "Synthetic textLanguage 33",
+      "textTranslatable": true,
+      "video": {
+        "duration": 52,
+        "id": "100052"
+      }
+    },
+    {
+      "AIGCDescription": "",
+      "CategoryType": 116,
+      "HasPromoteEntry": 1,
+      "IsHDBitrate": true,
+      "IsHDSelfView": true,
+      "ShowAIGC": true,
+      "aigcLabelType": 1,
+      "author": {
+        "UserStoryStatus": 0,
+        "avatarLarger": "https://example.com/item/60",
+        "avatarMedium": "https://example.com/item/61",
+        "avatarThumb": "https://example.com/item/62",
+        "commentSetting": 0,
+        "downloadSetting": 0,
+        "duetSetting": 0,
+        "ftc": false,
+        "id": "100007",
+        "isADVirtual": false,
+        "isEmbedBanned": false,
+        "nickname": "Synthetic nickname 64 lorem",
+        "openFavorite": false,
+        "privateAccount": false,
+        "relation": 0,
+        "secUid": "Synthetic secUid 65 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+        "secret": false,
+        "shortDramaCreator": {},
+        "signature": "Synthetic signature 66 lorem lorem lorem lorem lorem lorem lorem lorem",
+        "stitchSetting": 0,
+        "uniqueId": "synthetic_owner",
+        "verified": false
+      },
+      "authorStats": {
+        "diggCount": 10,
+        "followerCount": 1,
+        "followingCount": 1,
+        "friendCount": 0,
+        "heart": 4,
+        "heartCount": 4,
+        "videoCount": 8
+      },
+      "authorStatsV2": {
+        "diggCount": "100067",
+        "followerCount": "100068",
+        "followingCount": "100069",
+        "friendCount": "100070",
+        "heart": "100071",
+        "heartCount": "100072",
+        "videoCount": "100073"
+      },
+      "backendSourceEventTracking": "",
+      "collected": false,
+      "createTime": 1781904178,
+      "creatorAIComment": {
+        "eligibleVideo": false,
+        "hasAITopic": false,
+        "notEligibleReason": 211
+      },
+      "desc": "",
+      "digged": true,
+      "diversificationId": 10092,
+      "duetDisplay": 0,
+      "duetEnabled": true,
+      "forFriend": false,
+      "id": "100074",
+      "isAd": false,
+      "isProhibited": false,
+      "isReviewing": false,
+      "itemCommentStatus": 0,
+      "item_control": {
+        "can_repost": false
+      },
+      "officalItem": false,
+      "originalItem": false,
+      "penaltyContext": {
+        "display_penalty_type": 0,
+        "display_policy": 0,
+        "display_ui_type": 0,
+        "ec_global_verdict": 1,
+        "reviewed": 0,
+        "status": 102,
+        "tns_status": 102,
+        "video_status": 10
+      },
+      "privateItem": false,
+      "secret": false,
+      "shareEnabled": true,
+      "stats": {
+        "collectCount": 0,
+        "commentCount": 0,
+        "diggCount": 1,
+        "playCount": 0,
+        "shareCount": 0
+      },
+      "statsV2": {
+        "collectCount": "100082",
+        "commentCount": "100083",
+        "diggCount": "100084",
+        "playCount": "100085",
+        "repostCount": "100086",
+        "shareCount": "100087"
+      },
+      "stitchDisplay": 0,
+      "stitchEnabled": true,
+      "textLanguage": "Synthetic textLanguage 88",
+      "textTranslatable": false,
+      "video": {
+        "duration": 44,
+        "id": "100106"
+      },
+      "contents": [
+        {
+          "desc": ""
+        }
+      ]
+    },
+    {
+      "AIGCDescription": "",
+      "CategoryType": 116,
+      "HasPromoteEntry": 1,
+      "IsHDBitrate": true,
+      "IsHDSelfView": true,
+      "ShowAIGC": true,
+      "aigcLabelType": 1,
+      "author": {
+        "UserStoryStatus": 0,
+        "avatarLarger": "https://example.com/item/114",
+        "avatarMedium": "https://example.com/item/115",
+        "avatarThumb": "https://example.com/item/116",
+        "commentSetting": 0,
+        "downloadSetting": 0,
+        "duetSetting": 0,
+        "ftc": false,
+        "id": "100007",
+        "isADVirtual": false,
+        "isEmbedBanned": false,
+        "nickname": "Synthetic nickname 118 lorem",
+        "openFavorite": false,
+        "privateAccount": false,
+        "relation": 0,
+        "secUid": "Synthetic secUid 119 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+        "secret": false,
+        "shortDramaCreator": {},
+        "signature": "Synthetic signature 120 lorem lorem lorem lorem lorem lorem lorem lorem",
+        "stitchSetting": 0,
+        "uniqueId": "synthetic_owner",
+        "verified": false
+      },
+      "authorStats": {
+        "diggCount": 10,
+        "followerCount": 1,
+        "followingCount": 1,
+        "friendCount": 0,
+        "heart": 4,
+        "heartCount": 4,
+        "videoCount": 8
+      },
+      "authorStatsV2": {
+        "diggCount": "100121",
+        "followerCount": "100122",
+        "followingCount": "100123",
+        "friendCount": "100124",
+        "heart": "100125",
+        "heartCount": "100126",
+        "videoCount": "100127"
+      },
+      "backendSourceEventTracking": "",
+      "collected": false,
+      "contents": [
+        {
+          "desc": "Synthetic desc 129 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+        }
+      ],
+      "createTime": 1781830907,
+      "creatorAIComment": {
+        "eligibleVideo": false,
+        "hasAITopic": false,
+        "notEligibleReason": 211
+      },
+      "desc": "Synthetic desc 129 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "digged": false,
+      "diversificationId": 10092,
+      "duetDisplay": 0,
+      "duetEnabled": true,
+      "forFriend": false,
+      "id": "100130",
+      "isAd": false,
+      "isProhibited": false,
+      "isReviewing": false,
+      "itemCommentStatus": 0,
+      "item_control": {
+        "can_repost": false
+      },
+      "officalItem": false,
+      "originalItem": false,
+      "penaltyContext": {
+        "display_penalty_type": 0,
+        "display_policy": 0,
+        "display_ui_type": 0,
+        "reviewed": 0,
+        "status": 102,
+        "tns_status": 102,
+        "video_status": 10
+      },
+      "privateItem": false,
+      "secret": false,
+      "shareEnabled": true,
+      "stats": {
+        "collectCount": 0,
+        "commentCount": 0,
+        "diggCount": 0,
+        "playCount": 0,
+        "shareCount": 0
+      },
+      "statsV2": {
+        "collectCount": "100138",
+        "commentCount": "100139",
+        "diggCount": "100140",
+        "playCount": "100141",
+        "repostCount": "100142",
+        "shareCount": "100143"
+      },
+      "stitchDisplay": 0,
+      "stitchEnabled": true,
+      "textLanguage": "Synthetic textLanguage 144",
+      "textTranslatable": true,
+      "video": {
+        "duration": 45,
+        "id": "100162"
+      }
+    }
+  ],
+  "log_pb": {
+    "impr_id": "Synthetic impr_id 170 lorem lorem lorem lorem"
+  },
+  "statusCode": 0,
+  "status_code": 0,
+  "status_msg": ""
+}
