@@ -14,6 +14,10 @@ import {
   consentSliceProblem,
 } from "./consent-slice-resolution.mjs";
 
+// execFileSync defaults to a 1 MiB output buffer; connector-implementation-index.json
+// alone passed that in October 2026, and git show then fails with ENOBUFS.
+const GIT_SHOW_MAX_BUFFER = 64 * 1024 * 1024;
+
 const PACKAGE_ROOT = "packages/polyfill-connectors";
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
 const SHARED_ARTIFACT_INPUTS = [
@@ -46,13 +50,11 @@ const PAGE_SHIM_SHARED_INPUTS = [
 	"scripts/pageshim/attach-to-artifact.mjs",
 	"scripts/pageshim/build.mjs",
 	"scripts/pageshim/runtime.ts",
+	"scripts/pageshim/shims/anthropic-export.ts",
+	"scripts/pageshim/shims/buffer.js",
 	"scripts/pageshim/shims/path.js",
 	"scripts/pageshim/shims/process.js",
 	"scripts/pageshim/shims/url.js",
-];
-const LEGACY_PAGE_SHIM_PORT_INPUTS = [
-	"scripts/pageshim/shims/anthropic-export.ts",
-	"scripts/pageshim/shims/buffer.js",
 ];
 // Rendering policy for the consent slices, as it exists at the commit being
 // compared. It decides whether a slice is current; it is not itself shipped,
@@ -73,6 +75,7 @@ function readFileAtCommit(commit, path, { cwd }) {
     return execFileSync("git", ["show", `${commit}:${path}`], {
       cwd,
       encoding: "buffer",
+      maxBuffer: GIT_SHOW_MAX_BUFFER,
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
@@ -82,10 +85,22 @@ function readFileAtCommit(commit, path, { cwd }) {
   }
 }
 
+// npm scripts in either package.json are developer and test commands. The
+// artifact builder reads only dependencies and engines from them, so a new or
+// changed script must not force every connector to take a version bump.
+const SCRIPT_FREE_INPUTS = new Set(["package.json", `${PACKAGE_ROOT}/package.json`]);
+
 function artifactInputContent(path, content) {
-  if (path !== "package.json" || content === null) return content;
+  const installerMetadata = path === "packages/connector-installer-core/package.json";
+  if ((!SCRIPT_FREE_INPUTS.has(path) && !installerMetadata) || content === null) return content;
   const packageMetadata = JSON.parse(content.toString("utf8"));
-  delete packageMetadata.scripts;
+  if (SCRIPT_FREE_INPUTS.has(path)) delete packageMetadata.scripts;
+  // The polyfill package's exports map is its npm surface for hosts. Connectors
+  // import its sources by relative path, so the bundler never resolves it.
+  if (path === `${PACKAGE_ROOT}/package.json`) delete packageMetadata.exports;
+  // npm's pack allowlist controls the installer tools package, not the OCI
+  // connector builder. Retiring a tool-only file must not release every connector.
+  if (path === "package.json" || installerMetadata) delete packageMetadata.files;
   return Buffer.from(JSON.stringify(packageMetadata));
 }
 
@@ -193,37 +208,6 @@ async function consentRendererAtCommit(commit, options) {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-}
-
-async function pageShimPortAtCommit(commit, connector, options) {
-	const resolverPath = "scripts/pageshim/port-profile.mjs";
-	const resolver = readFileAtCommit(commit, resolverPath, options);
-	const profilePath = `scripts/pageshim/ports/${connector}.json`;
-	if (resolver === null) {
-		if (readFileAtCommit(commit, profilePath, options) !== null) {
-			throw new ArtifactInputError(
-				`incomplete PageShim port-profile layout at ${commit}: ${profilePath} exists but ${resolverPath} is missing`,
-			);
-		}
-		return null;
-	}
-	const directory = mkdtempSync(join(tmpdir(), "pageshim-port-profile-"));
-	try {
-		const modulePath = join(directory, "port-profile.mjs");
-		writeFileSync(modulePath, resolver);
-		const { resolvePageShimPortProfile } = await import(
-			`${pathToFileURL(modulePath).href}?commit=${encodeURIComponent(commit)}`
-		);
-		if (typeof resolvePageShimPortProfile !== "function") {
-			throw new ArtifactInputError(`${resolverPath} at ${commit} does not export resolvePageShimPortProfile`);
-		}
-		return resolvePageShimPortProfile(connector, (path) => readFileAtCommit(commit, path, options));
-	} catch (error) {
-		if (error instanceof ArtifactInputError) throw error;
-		throw new ArtifactInputError(`cannot resolve PageShim port profile for ${connector} at ${commit}: ${error.message}`);
-	} finally {
-		rmSync(directory, { recursive: true, force: true });
-	}
 }
 
 /**
@@ -433,22 +417,6 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       else addLocalImportClosure(commit, path, files, options, new Set(["scripts/pageshim/capabilities.mjs", CONSENT_RENDERER]), consentRemap ?? undefined);
     }
     if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options, new Set(), consentRemap ?? undefined);
-		const port = await pageShimPortAtCommit(commit, manifest, options);
-		if (port === null) {
-			// Commits from before physical port profiles used the global Anthropic
-			// shim list. Keep their identity comparable to commits in that layout.
-			for (const path of LEGACY_PAGE_SHIM_PORT_INPUTS) {
-				addLocalImportClosure(commit, path, files, options, new Set(), consentRemap ?? undefined);
-			}
-		} else {
-			files.set(port.path, readFileAtCommit(commit, port.path, options));
-			if (!port.empty) {
-				addLocalImportClosure(commit, port.shim, files, options, new Set(), consentRemap ?? undefined);
-				for (const path of port.inject) {
-					addLocalImportClosure(commit, path, files, options, new Set(), consentRemap ?? undefined);
-				}
-			}
-		}
   }
 
   const hash = createHash("sha256");

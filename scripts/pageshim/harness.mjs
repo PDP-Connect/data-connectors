@@ -27,6 +27,31 @@ import { ResultStreamHarness } from "./result-stream-harness.mjs";
 
 const PAGE_BRIDGE_MAX_UNITS = 256 * 1024;
 
+// Fetch credentials mode is not a wire header: even include can send no cookie,
+// and preflights omit cookies. Default fixture policy allows the requesting
+// Origin with credentials. Public fixtures can explicitly select "wildcard";
+// explicit response CORS headers are authoritative (including negative tests).
+export function fixtureCorsHeaders(requestHeaders, responseHeaders = {}, policy = "origin") {
+	const headers = Object.fromEntries(
+		Object.entries(responseHeaders).map(([key, value]) => [key.toLowerCase(), value]),
+	);
+	const origin = requestHeaders.origin;
+	if (!("access-control-allow-origin" in headers)) {
+		headers["access-control-allow-origin"] = origin && policy !== "wildcard" ? origin : "*";
+		if (origin && policy !== "wildcard") headers["access-control-allow-credentials"] ??= "true";
+	}
+	if (headers["access-control-allow-origin"] !== "*") {
+		const vary = String(headers.vary ?? "").split(",").map((part) => part.trim()).filter(Boolean);
+		if (!vary.some((part) => part.toLowerCase() === "origin") && !vary.includes("*")) vary.push("Origin");
+		headers.vary = vary.join(", ");
+	}
+	if (requestHeaders["access-control-request-method"])
+		headers["access-control-allow-methods"] ??= requestHeaders["access-control-request-method"];
+	if (requestHeaders["access-control-request-headers"])
+		headers["access-control-allow-headers"] ??= requestHeaders["access-control-request-headers"];
+	return headers;
+}
+
 function jsonPayloadUnits(value) {
 	if (value === null) return 4;
 	if (typeof value === "string") {
@@ -108,8 +133,11 @@ async function hostMain({
 	timerScale,
 	clockNowMs,
 	includeScopeEntries,
+	omitScopeEntries,
 	thinHost,
 }) {
+	// Deadline time must continue advancing when fixture calendar time is frozen.
+	const elapsedNow = performance.now.bind(performance);
 	window.__pageshimEnv = env || {};
 	if (Number.isFinite(clockNowMs)) Date.now = () => clockNowMs;
 	if (timerScale !== 1) {
@@ -156,10 +184,10 @@ async function hostMain({
 		waitForSelector: async (selector, options) => {
 			const timeout = options?.timeout ?? 30000;
 			const state = options?.state || "visible";
-			const started = Date.now();
+			const started = elapsedNow();
 			for (;;) {
 				if (await call("selectorState", [String(selector), state])) return;
-				if (Date.now() - started >= timeout)
+				if (elapsedNow() - started >= timeout)
 					throw new Error(
 						`waitForSelector timed out after ${timeout}ms: ${selector}`,
 					);
@@ -193,8 +221,8 @@ async function hostMain({
 		promptUser: async (msg, check, interval) => {
 			await call("setData", ["status", msg]);
 			await call("promptUser", []);
-			const started = Date.now();
-			while (Date.now() - started < loginWaitMs) {
+			const started = elapsedNow();
+			while (elapsedNow() - started < loginWaitMs) {
 				let ok = false;
 				try {
 					ok = await check();
@@ -212,6 +240,7 @@ async function hostMain({
 	};
 	if (Object.keys(impl).join() !== methods.join())
 		throw new Error("harness shim drifted from SHIM_METHODS");
+	if (omitScopeEntries) delete impl.requestedScopeEntries;
 	const page = new Proxy(impl, {
 		get(t, k) {
 			if (typeof k === "symbol" || k === "then") return undefined;
@@ -456,6 +485,23 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 	};
 }
 
+// Settles like `promise`, but rejects with the signal's reason if the signal
+// aborts first. The run's finally block then closes the browser, which ends the
+// evaluate that the caller abandoned.
+function untilAborted(promise, signal) {
+	if (!signal) return promise;
+	return Promise.race([
+		promise,
+		new Promise((_, reject) => {
+			if (signal.aborted) reject(signal.reason);
+			else
+				signal.addEventListener("abort", () => reject(signal.reason), {
+					once: true,
+				});
+		}),
+	]);
+}
+
 /**
  * @param {object} o
  * @param {string} o.bundle path to the built bundle
@@ -465,13 +511,18 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {boolean} [o.supportsStateArgument] model an older shell with a two-argument runner
  * @param {boolean} [o.resultStreaming] model the thin host: offer page.input and accept only streamed results
  * @param {boolean} [o.acceptLegacyResult] also accept a one-message result (default: only without resultStreaming)
+ * @param {boolean} [o.fixtureReady] await fixture load instead of the host navigation delay
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
+ * @param {number} [o.failStateWriteAt] reject this one-based STATE attempt before acknowledgement or commit
+ * @param {boolean} [o.failFinalStatusWrite] reject Complete/Partial status before storing it
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {(args: {url:string,loggedIn:boolean,call:number}) => string|undefined} [o.fixtures.failGoto] return an error to emulate a PageShim navigation failure
+ * @param {boolean} [o.sampleHeap] poll the runner page's JS heap; maxHeapBytes is undefined without it
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
  * @param {(method: string, args: unknown[], result: unknown) => void} [o.observeBridge] sees every bridge call and its reply
+ * @param {AbortSignal} [o.signal] reject the run with the signal's reason when it aborts; the browser still closes
  */
 export async function runHarness({
 	bundle,
@@ -480,7 +531,9 @@ export async function runHarness({
 	initialState = {},
 	supportsStateArgument = true,
 	loginAfterMs = 0,
+	sampleHeap = false,
 	gotoDelayMs = 2000,
+	fixtureReady = false,
 	loginWaitMs = 120_000,
 	env = {},
 	resultStreaming = false,
@@ -493,12 +546,16 @@ export async function runHarness({
 	timerScale = 1,
 	stateAckDelayMs = 0,
 	failResultWrite = false,
+	failStateWriteAt = 0,
+	failFinalStatusWrite = false,
 	resultStreamNeverAck = false,
 	readBridgeLatencyMs = 0,
 	clockNowMs,
 	legacyScopeBridge = false,
+	missingScopeEntries = false,
 	acceptLegacyResult,
 	observeBridge,
+	signal,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -506,9 +563,11 @@ export async function runHarness({
 	const pageNavigations = [];
 	const data = {};
 	const states = { ...initialState };
-	const stagedStates = {};
+	const pendingStates = {};
 	const stateMessages = [];
+	let stateWriteAttempts = 0;
 	let failedResultWrite = false;
+	let acceptedLegacyResult = false;
 	let eventOrder = 0;
 	let stateAckOrder = 0;
 	let resultDoneAttemptOrder = 0;
@@ -527,12 +586,26 @@ export async function runHarness({
 		legacyResults: acceptLegacyResult ?? !resultStreaming,
 	});
 
+	let sampling = false;
+	let sampler;
+	let loginTimer;
 	const browser = await chromium.launch({
 		headless: true,
 		args: ["--enable-precise-memory-info"],
 	});
 	try {
 		const context = await browser.newContext();
+		// Default-deny: Playwright runs the last-registered matching route
+		// first, so the fixture route below wins for fixture hosts.
+		const blockedOrigins = new Set();
+		await context.route("**/*", (route) => {
+			const { origin } = new URL(route.request().url());
+			if (!blockedOrigins.has(origin)) {
+				blockedOrigins.add(origin);
+				log.push(`[harness] blocked request to ${origin}`);
+			}
+			return route.abort("blockedbyclient");
+		});
 		await context.route(fixtures.hosts, (route) => {
 			const request = route.request();
 			const f = fixtures.resolve(request.url(), {
@@ -542,7 +615,7 @@ export async function runHarness({
 			});
 			return route.fulfill({
 				...f,
-				headers: { "access-control-allow-origin": "*" },
+				headers: fixtureCorsHeaders(request.headers(), f.headers, fixtures.cors),
 			});
 		});
 		const target = await context.newPage();
@@ -589,9 +662,10 @@ export async function runHarness({
 						});
 						if (failure) return { __shimError: String(failure) };
 						await target
-							.goto(a[0], { waitUntil: "commit" })
+							.goto(a[0], { waitUntil: fixtureReady ? "load" : "commit" })
 							.catch((e) => log.push(`goto error ${e.message}`));
-						await new Promise((r) => setTimeout(r, gotoDelayMs));
+						if (!fixtureReady)
+							await new Promise((r) => setTimeout(r, gotoDelayMs));
 					}
 					return null;
 				case "setData":
@@ -599,13 +673,13 @@ export async function runHarness({
 						if (resultStreamNeverAck) return new Promise(() => {});
 						if (a[0] === "result:done") resultDoneAttemptOrder = ++eventOrder;
 						const ack = await streamHost.setData(a[0], a[1]);
-						if (a[0] === "result:done")
+						if (a[0] === "result:done") {
 							resultWriteOrder = resultDoneAttemptOrder;
+							Object.assign(states, pendingStates);
+						}
 						return ack;
 					}
 					if (a[0] === "result") {
-						await streamHost.setData("result", a[1]);
-						resultWriteOrder = ++eventOrder;
 						const nextResult = a[1] == null ? null : JSON.parse(a[1]);
 						if (
 							failResultWrite &&
@@ -616,7 +690,16 @@ export async function runHarness({
 							failedResultWrite = true;
 							return { __shimError: "synthetic result write failed" };
 						}
+						await streamHost.setData("result", a[1]);
+						resultWriteOrder = ++eventOrder;
+						// Accepted replacements really overwrite the payload; committed
+						// cursors are not rolled back if a later result is empty/fatal.
 						result = nextResult;
+						acceptedLegacyResult = nextResult !== null &&
+							Array.isArray(nextResult.errors) &&
+							!nextResult.errors.some((error) => error.disposition === "fatal");
+						if (acceptedLegacyResult)
+							Object.assign(states, pendingStates);
 					} else if (a[0] === "STATE") {
 						if (
 							!scopes.some(
@@ -626,6 +709,8 @@ export async function runHarness({
 							)
 						)
 							return { __shimError: "invalid PDPP STATE message" };
+						if (++stateWriteAttempts === failStateWriteAt)
+							return { __shimError: "synthetic STATE write failed" };
 						if (stateAckDelayMs > 0)
 							await new Promise((resolve) =>
 								setTimeout(resolve, stateAckDelayMs),
@@ -633,7 +718,17 @@ export async function runHarness({
 						const message = JSON.parse(JSON.stringify(a[1]));
 						stateAckOrder = ++eventOrder;
 						stateMessages.push(message);
-						stagedStates[message.stream] = message.cursor;
+						// Thin-host STATE stays staged until result:done. Legacy results
+						// arrive first, so their subsequent acknowledged STATE can commit.
+						pendingStates[message.stream] = message.cursor;
+						if (acceptedLegacyResult)
+							states[message.stream] = message.cursor;
+					} else if (
+						failFinalStatusWrite &&
+						a[0] === "status" &&
+						/^(Complete!|Partial:)/.test(String(a[1]))
+					) {
+						return { __shimError: "synthetic final status write failed" };
 					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":
@@ -737,32 +832,41 @@ export async function runHarness({
 		});
 		runner.on("pageerror", (e) => log.push(`runner pageerror: ${e.message}`));
 		await runner.goto("https://runner.local/");
-		const performanceSession = await context.newCDPSession(runner);
-		await performanceSession.send("Performance.enable");
-		let sampling = true;
-		let maxHeapBytes = 0;
-		const sampleHeap = async () => {
-			const { metrics } = await performanceSession.send(
-				"Performance.getMetrics",
-			);
-			const heap = metrics.find((metric) => metric.name === "JSHeapUsedSize");
-			if (heap) maxHeapBytes = Math.max(maxHeapBytes, heap.value);
-		};
-		const sampler = (async () => {
-			while (sampling) {
-				await sampleHeap();
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			}
-			await sampleHeap();
-		})();
+		let maxHeapBytes;
+		if (sampleHeap) {
+			const performanceSession = await context.newCDPSession(runner);
+			await performanceSession.send("Performance.enable");
+			maxHeapBytes = 0;
+			sampling = true;
+			const sample = async () => {
+				const { metrics } = await performanceSession.send(
+					"Performance.getMetrics",
+				);
+				const heap = metrics.find((metric) => metric.name === "JSHeapUsedSize");
+				if (heap) maxHeapBytes = Math.max(maxHeapBytes, heap.value);
+			};
+			sampler = (async () => {
+				while (sampling) {
+					await sample();
+					await new Promise((resolve) => setTimeout(resolve, 50));
+				}
+				await sample();
+				// The handler is attached here so a failed sample (closed session,
+				// crashed target) cannot go unhandled while evaluate runs. A partial
+				// measurement is not a measurement: report none, so a heap-bound
+				// assertion fails instead of passing on the samples taken so far.
+			})().catch(() => {
+				maxHeapBytes = undefined;
+			});
+		}
 
 		if (loginAfterMs === Number.POSITIVE_INFINITY) {
 			harnessLoggedIn = false;
-			fixtures.setLoggedIn(false); // the user never signs in
+			await fixtures.setLoggedIn(false, target); // the user never signs in
 		} else if (loginAfterMs > 0) {
 			harnessLoggedIn = false;
-			fixtures.setLoggedIn(false);
-			setTimeout(() => {
+			await fixtures.setLoggedIn(false, target);
+			loginTimer = setTimeout(() => {
 				log.push("[user] signs in");
 				harnessLoggedIn = true;
 				fixtures.setLoggedIn(true);
@@ -770,11 +874,11 @@ export async function runHarness({
 			}, loginAfterMs);
 		} else {
 			harnessLoggedIn = true;
-			fixtures.setLoggedIn(true);
+			await fixtures.setLoggedIn(true, target);
 		}
 
 		const started = Date.now();
-		const ret = await runner.evaluate(hostMain, {
+		const evaluated = runner.evaluate(hostMain, {
 			source,
 			scopes,
 			initialState,
@@ -785,22 +889,12 @@ export async function runHarness({
 			timerScale,
 			clockNowMs,
 			includeScopeEntries: !legacyScopeBridge,
+			omitScopeEntries: missingScopeEntries,
 			thinHost: resultStreaming,
 		});
+		const ret = await untilAborted(evaluated, signal);
 		sampling = false;
 		await sampler;
-		if (
-			ret?.ok &&
-			data.error == null &&
-			(result || streamHost.doneValue)
-		) {
-			for (const [scope, cursor] of Object.entries(stagedStates)) {
-				if (result && !Object.hasOwn(result, scope)) continue;
-				const errors = result?.errors ?? streamHost.doneValue?.errors ?? [];
-				if (errors.some((error) => error.scope === scope)) continue;
-				states[scope] = cursor;
-			}
-		}
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
 		return {
 			ret,
@@ -833,7 +927,24 @@ export async function runHarness({
 			log,
 		};
 	} finally {
-		for (const entry of streamHost.files.values()) await entry.handle?.close();
+		clearTimeout(loginTimer);
+		sampling = false;
+		await sampler;
+		for (const entry of streamHost.files.values())
+			await entry.handle?.close().catch(() => {});
 		await browser.close();
 	}
+}
+
+// Ordinary fixture runs opt into load readiness. Explicit timing controls keep
+// authentic wall-clock behavior, including the 45-second sign-in regression.
+export function runFixtureHarness(options) {
+	return runHarness({
+		...options,
+		fixtureReady: options.fixtureReady ?? (
+			options.loginAfterMs === undefined &&
+			options.gotoDelayMs === undefined &&
+			options.timerScale === undefined
+		),
+	});
 }

@@ -59,6 +59,21 @@ function str(v: unknown): string | null {
 	return typeof v === "string" && v.length > 0 ? v : null;
 }
 
+/** Shared with the incremental scan so omissions match parseMessage exactly. */
+export function messageIdentity(raw: unknown): string | null {
+	return isRecord(raw) ? str(raw.uuid) : null;
+}
+
+/** Raw time for omission eligibility, even when a message has no identity. */
+export function messageOmissionTimestamp(raw: unknown): number | null {
+	if (!isRecord(raw)) return null;
+	for (const value of [raw.created_at, raw.updated_at]) {
+		const time = typeof value === "string" ? Date.parse(value) : Number.NaN;
+		if (Number.isFinite(time)) return time;
+	}
+	return null;
+}
+
 /**
  * Fields left absent from records, counted so the run can report one aggregate
  * (see `omittedFieldCountOf`). A field is left absent only when its text is
@@ -294,7 +309,7 @@ export function parseMessage(
 	if (!isRecord(raw)) {
 		return null;
 	}
-	const id = str(raw.uuid);
+	const id = messageIdentity(raw);
 	if (id === null) {
 		return null;
 	}
@@ -1117,6 +1132,82 @@ export function resolveExportedProfile(
 	};
 }
 
+// ─── account_plan ─────────────────────────────────────────────────────────
+
+/** The fields of one `/api/organizations` entry that account_plan reads. The
+ * entry holds more (an organization name that can be a person's name, for one);
+ * nothing else is read. */
+export interface RawOrganization {
+	uuid?: unknown;
+	capabilities?: unknown;
+	raven_type?: unknown;
+	billing_type?: unknown;
+	created_at?: unknown;
+}
+
+const PLAN_ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+function nonEmptyString(value: unknown): string | null {
+	return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Plan family from an organization entry, as anthropic_live reads it
+ * (connectors/anthropic_live/parsers.ts `planTypeOf`): `claude_max` and
+ * `claude_pro` capabilities, `raven` for Team and Enterprise, and "free" for a
+ * chat organization with no billing. Anything else is null, never a guess.
+ */
+export function planTypeOf(org: RawOrganization): string | null {
+	const caps = Array.isArray(org.capabilities)
+		? org.capabilities.filter((c): c is string => typeof c === "string")
+		: [];
+	if (caps.includes("claude_max")) return "max";
+	if (caps.includes("claude_pro")) return "pro";
+	if (caps.includes("raven")) return nonEmptyString(org.raven_type) ?? "team";
+	const billing = nonEmptyString(org.billing_type);
+	if (caps.includes("chat") && (billing === null || billing === "none")) {
+		return "free";
+	}
+	return null;
+}
+
+/**
+ * The account_plan record for one organization, or null when the entry has no
+ * id. It names the organization (`account_id`), its creation time and its plan
+ * family, and nothing else: every other field of the stream is null.
+ */
+export function buildAccountPlanRecord(
+	org: RawOrganization,
+	isDefault = true,
+): Record<string, unknown> | null {
+	const organizationId = nonEmptyString(org.uuid);
+	if (organizationId === null) return null;
+	const createdAt = nonEmptyString(org.created_at);
+	return {
+		// Keep the exported/default account at the legacy key.
+		id: isDefault ? "account_plan" : `account_plan:${organizationId}`,
+		is_default: isDefault,
+		account_id: organizationId,
+		account_structure: null,
+		account_created_at:
+			createdAt !== null &&
+			PLAN_ISO_DT_RE.test(createdAt) &&
+			!Number.isNaN(Date.parse(createdAt))
+				? createdAt
+				: null,
+		plan_type: planTypeOf(org),
+		plan_display_name: null,
+		subscription_plan: null,
+		has_active_subscription: null,
+		billing_period: null,
+		will_renew: null,
+		renews_at: null,
+		expires_at: null,
+		cancels_at: null,
+		scheduled_plan_change: null,
+	};
+}
+
 /** Manifest `category` values this connector has a stream for. Any other
  * category (including ones not yet observed) is out-of-scope by default —
  * an allowlist, not a denylist, so a new unrecognized category never
@@ -1324,4 +1415,35 @@ export function parseClassifiedExport(
 	rawProjects: readonly unknown[],
 ): ParsedExport {
 	return parseExport(rawConversations, rawProjects);
+}
+
+/** Accounts with chat access only; never selects the conversation/export org. */
+export function usablePlanOrganizations(
+	orgs: RawOrganization[],
+): RawOrganization[] {
+	const seen = new Set<string>();
+	return orgs.filter((org) => {
+		if (
+			typeof org.uuid !== "string" ||
+			!org.uuid ||
+			seen.has(org.uuid) ||
+			!Array.isArray(org.capabilities) ||
+			!org.capabilities.some((c) =>
+				["chat", "claude_pro", "claude_max", "raven"].includes(c),
+			)
+		)
+			return false;
+		seen.add(org.uuid);
+		return true;
+	});
+}
+
+/** A full inventory is safe only when every raw entry can be classified. */
+export function hasReadablePlanOrganizationInventory(orgs: unknown[]): boolean {
+	return orgs.every((value) => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+		const org = value as RawOrganization;
+		return typeof org.uuid === "string" && org.uuid.length > 0 &&
+			Array.isArray(org.capabilities) && org.capabilities.every((c) => typeof c === "string");
+	});
 }

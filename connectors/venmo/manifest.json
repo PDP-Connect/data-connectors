@@ -9,7 +9,7 @@
 	},
 	"connector_key": "venmo",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-	"version": "0.2.19",
+	"version": "0.2.28",
 	"display_name": "Venmo",
 	"brand": {
 		"icon": "icon.svg",
@@ -62,10 +62,12 @@
 			"venmo_post_submit_probe_transport_error",
 			"venmo_origin_navigation_failed",
 			"venmo_password_screen_timeout",
-			"venmo_invisible_scoring_challenge",
+			"venmo_password_field_empty_after_submit",
+			"venmo_password_submit_stalled",
 			"venmo_sms_offer_checkbox_unavailable",
 			"venmo_sms_offer_send_code_unavailable",
-			"venmo_sms_offer_code_input_timeout"
+			"venmo_sms_offer_code_input_timeout",
+			"venmo_login_challenge_during_replay"
 		],
 		"refresh_policy": {
 			"recommended_mode": "manual",
@@ -276,7 +278,7 @@
 						"enum": ["pay", "charge"]
 					},
 					"amount_cents": {
-						"type": "integer"
+						"type": ["integer", "null"]
 					},
 					"audience": {
 						"type": ["string", "null"],
@@ -317,7 +319,7 @@
 						}
 					},
 					"is_owner_actor": {
-						"type": "boolean"
+						"type": ["boolean", "null"]
 					}
 				},
 				"required": [
@@ -329,13 +331,12 @@
 				]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "date_created",
 			"consent_time_field": "date_created",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["note", "status", "payment_type", "device_used"],
@@ -361,7 +362,8 @@
 		}
 	],
 	"reason_display_messages": {
-		"friends_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo friends, so some friends haven't been collected yet. Nothing was lost \u2014 the next run picks up where this one stopped",
-		"transactions_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo transactions, so older transactions haven't been collected yet. Nothing was lost \u2014 the next run picks up where this one stopped"
+		"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
+		"transactions_deferred_page_budget": "Some Venmo transaction history is still pending. Saved positions let later runs resume it while refreshing recent activity. A large volume of new activity may delay completion",
+		"transactions_schema_blocked": "A Venmo transaction could not be validated. The unread history after that record will be retried"
 	}
 }

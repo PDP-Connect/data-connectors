@@ -38,7 +38,14 @@
 				"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
 				"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
 				"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
-				"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
+				"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
+				"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
+				"parse_error": "Claude sent back a plan we couldn't read. Your existing plan data was not changed. This will retry automatically.",
+				"organization_unavailable": "Your Claude plan could not be read: the organization this data export came from is not in your signed-in account's organization list. This will retry automatically.",
+				"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed.",
+				"export_manifest_incomplete": "Your Claude export is incomplete or inconsistent. Affected data was not marked as fully imported.",
+				"export_conversations_incomplete": "Your Claude export is missing some conversation files. Conversations and messages were not marked as fully imported.",
+				"export_projects_missing": "Your Claude export has no complete projects section. Projects and project documents were not marked as fully imported."
 			}
 		}
 	},
@@ -51,7 +58,8 @@
 				"no_chat_organization": "No Claude organization with chat access could be found for this account.",
 				"http_error": "We hit a network problem talking to Claude",
 				"parse_error": "Claude sent back a response we couldn't read",
-				"not_available": "This data isn't available for this Claude account"
+				"not_available": "This data isn't available for this Claude account",
+				"organization_unavailable": "Your Claude plan could not be read: the organization this run reads from has no chat plan in your account's organization list. This will retry automatically."
 			}
 		}
 	},
@@ -92,6 +100,25 @@
 		}
 	},
 	{
+		"file": "character_ai.json",
+		"manifest": {
+			"connector_key": "character-ai",
+			"reason_display_messages": {
+				"stream_collection_failed": "Character.AI could not be read completely this time. Nothing already saved was lost.",
+				"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
+				"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
+				"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
+				"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",
+				"character_ai_api_429": "Character.AI is limiting requests right now. The sync will try again later.",
+				"character_ai_api_408": "Character.AI took too long to answer. The sync will try again later.",
+				"character_ai_api_5xx": "Character.AI is having trouble right now. The sync will try again later.",
+				"character_ai_timeout": "Character.AI took too long to answer. The sync will try again later.",
+				"character_ai_network_error": "Character.AI could not be reached. Check your connection; the sync will try again later.",
+				"character_ai_invalid_payload": "Character.AI answered in a format this connector does not recognize. A connector update is needed."
+			}
+		}
+	},
+	{
 		"file": "chase.json",
 		"manifest": {
 			"connector_key": "chase",
@@ -100,6 +127,7 @@
 				"ambiguous_multi_account_overview": "We couldn't tell which account view to use",
 				"qfx_download_failed": "We couldn't download the transactions file",
 				"qfx_parse_failed": "We couldn't read the transactions file",
+				"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 				"row_exception": "Something went wrong reading one of the rows",
 				"selectors_pending": "Support for this part of the connector isn't complete yet",
 				"statements_scrape_failed": "We couldn't read your statements page"
@@ -204,6 +232,19 @@
 		}
 	},
 	{
+		"file": "facebook.json",
+		"manifest": {
+			"connector_key": "facebook",
+			"reason_display_messages": {
+				"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time.",
+				"shape_check_failed": "Facebook sent an item this connector could not read, so it was not saved.",
+				"scope_not_supported": "Facebook does not date this list, so it cannot be limited to a time range. Choose it without a time range to import it.",
+				"facebook_auth_failed": "Facebook needs you to sign in again before this can continue.",
+				"facebook_interrupted": "The Facebook page stopped answering while signing in. Nothing was read; try again."
+			}
+		}
+	},
+	{
 		"file": "fitbit.json",
 		"manifest": {
 			"connector_key": "fitbit",
@@ -250,7 +291,8 @@
 		"manifest": {
 			"connector_key": "github-browser",
 			"reason_display_messages": {
-				"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+				"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
+				"stream_collection_failed": "GitHub did not show that this list was read in full, so the last complete copy was kept."
 			}
 		}
 	},
@@ -373,7 +415,7 @@
 				"list_page_shape_check_failed": "The page didn't look like we expected",
 				"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 				"nutrition_source_coverage_incomplete": "We did not mark H-E-B nutrition complete because the order history or order-item detail coverage is incomplete",
-				"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
+				"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Valid records were retained; the unread tail remains unproven",
 				"pagination_exhausted": "We reached the end of the available pages",
 				"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
 				"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
@@ -405,7 +447,15 @@
 		"manifest": {
 			"connector_key": "icloud-notes",
 			"reason_display_messages": {
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"stream_collection_failed": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
+				"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
+				"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
+				"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
+				"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
+				"icloud_omitted_rows": "Some iCloud Notes fields could not be read or stored. The affected rows are listed in the stream omission details, and the stream was not marked complete.",
+				"icloud_rate_limited": "iCloud Notes temporarily limited requests. Retry collection later.",
+				"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete.",
+				"icloud_readiness_exhausted": "The iCloud Notes page did not become ready within the retry budget. Collection did not start; retry when the Notes page is available."
 			}
 		}
 	},
@@ -417,6 +467,24 @@
 				"attachment_tables_missing": "Your Messages database is missing attachment data we need",
 				"chat_handle_join_table_missing": "Your Messages database is missing chat-participant data we need",
 				"message_date_unusable": "We skipped a message with a date we couldn't read"
+			}
+		}
+	},
+	{
+		"file": "instinct.json",
+		"manifest": {
+			"connector_key": "instinct",
+			"reason_display_messages": {
+				"shape_check_failed": "The data from Instinct did not look like we expected",
+				"instinct_auth_failed": "Instinct needs you to sign in again before this can continue.",
+				"instinct_interrupted": "Instinct did not answer when we checked your sign-in. Nothing was collected; try again.",
+				"instinct_rate_limited": "Instinct asked us to slow down, so collection stopped early. What was collected is saved; try again later.",
+				"instinct_server_error": "Instinct's servers had a problem partway through. What was collected is saved; try again later.",
+				"instinct_request_rejected": "Instinct refused one of the requests, so collection stopped.",
+				"instinct_source_unreadable": "Instinct answered in a form this connector does not recognise. Instinct may have changed its app; please report this.",
+				"instinct_stream_incomplete": "Instinct did not show the end of this list, so it was not saved as complete.",
+				"scope_not_supported": "This part of your Instinct data cannot be collected with the selection you made: account details have no date to limit by, and chat events are collected only together with your chats.",
+				"stream_collection_failed": "Instinct did not show all of this part of your account, so it was not saved as complete. Try again later."
 			}
 		}
 	},
@@ -437,8 +505,74 @@
 		"manifest": {
 			"connector_key": "linkedin",
 			"reason_display_messages": {
+				"absent": "LinkedIn did not provide this field",
+				"malformed": "LinkedIn returned this field in an unreadable format",
+				"invalid_value": "LinkedIn returned a value outside the expected format",
+				"source_unavailable": "LinkedIn did not return the source needed for this field",
+				"enrichment_unresolved": "LinkedIn could not resolve a connection's profile details",
+				"walk_unverified": "LinkedIn did not provide enough paging evidence to verify the full list",
+				"source_row_uncovered": "LinkedIn could not verify the source row for this derived field",
+				"withheld_unreadable_fields": "LinkedIn withheld an entry because one or more fields were unreadable",
+				"unreadable_nested_collection": "LinkedIn returned an unreadable nested collection",
+				"malformed_row": "LinkedIn returned an entry in an unreadable format",
+				"no_readable_content": "LinkedIn returned an entry with no readable content",
+				"invalid_record_shape": "LinkedIn returned an entry outside the expected record shape",
+				"id_absent": "LinkedIn did not provide the entry identifier",
+				"id_malformed": "LinkedIn returned the entry identifier in an unreadable format",
+				"id_invalid_value": "LinkedIn returned an entry identifier outside the expected format",
+				"id_source_unavailable": "LinkedIn did not return the source for the entry identifier",
+				"id_enrichment_unresolved": "LinkedIn could not resolve the connection identifier to a profile",
+				"id_walk_unverified": "LinkedIn did not verify the entry identifier in a complete list",
+				"id_source_row_uncovered": "LinkedIn could not verify the source row for the entry identifier",
+				"id_empty": "LinkedIn returned an empty entry identifier",
+				"name_absent": "LinkedIn did not provide the entry name",
+				"name_malformed": "LinkedIn returned the entry name in an unreadable format",
+				"name_invalid_value": "LinkedIn returned an entry name outside the expected format",
+				"name_source_unavailable": "LinkedIn did not return the source for the entry name",
+				"name_enrichment_unresolved": "LinkedIn could not resolve the connection name",
+				"name_walk_unverified": "LinkedIn did not verify the entry name in a complete list",
+				"name_source_row_uncovered": "LinkedIn could not verify the source row for the entry name",
+				"name_empty": "LinkedIn returned an empty entry name",
 				"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
-				"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
+				"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
+				"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
+				"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
+				"linkedin_connections_continuation_advertised": "LinkedIn advertised another connections page, so the exact connection count is unavailable",
+				"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
+				"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
+				"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
+				"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+				"stream_collection_failed": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
+				"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
+				"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
+				"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
+				"summary_total_invalid": "LinkedIn inventory could not be verified: summary total invalid",
+				"summary_owner_mismatch": "LinkedIn inventory could not be verified: summary owner mismatch",
+				"summary_total_changed": "LinkedIn inventory could not be verified: summary total changed",
+				"collection_malformed": "LinkedIn inventory could not be verified: collection malformed",
+				"collection_paging_invalid": "LinkedIn inventory could not be verified: collection paging invalid",
+				"collection_urn_missing": "LinkedIn inventory could not be verified: collection urn missing",
+				"collection_urn_duplicate": "LinkedIn inventory could not be verified: collection urn duplicate",
+				"collection_total_mismatch": "LinkedIn inventory could not be verified: collection total mismatch",
+				"collection_continuation_advertised": "LinkedIn inventory could not be verified: collection continuation advertised",
+				"skills_nested_unproven": "LinkedIn inventory could not be verified: skills nested unproven",
+				"connection_urn_missing": "LinkedIn inventory could not be verified: connection urn missing",
+				"connection_walk_continuation_advertised": "LinkedIn inventory could not be verified: connection walk continuation advertised",
+				"connection_walk_page_error": "LinkedIn inventory could not be verified: connection walk page error",
+				"connection_walk_malformed_page": "LinkedIn inventory could not be verified: connection walk malformed page",
+				"connection_walk_repeated_page": "LinkedIn inventory could not be verified: connection walk repeated page",
+				"connection_walk_page_budget": "LinkedIn inventory could not be verified: connection walk page budget",
+				"connection_paging_total_mismatch": "LinkedIn inventory could not be verified: connection paging total mismatch",
+				"connection_total_mismatch": "LinkedIn inventory could not be verified: connection total mismatch",
+				"connection_confirmation_missing": "LinkedIn inventory could not be verified: connection confirmation missing",
+				"connection_confirmation_malformed": "LinkedIn inventory could not be verified: connection confirmation malformed",
+				"connection_walk_unavailable": "LinkedIn inventory could not be verified: connection walk unavailable",
+				"experience_nested_collection_malformed": "LinkedIn inventory could not be verified: experience nested collection malformed",
+				"experience_nested_collection_paging_invalid": "LinkedIn inventory could not be verified: experience nested collection paging invalid",
+				"experience_nested_collection_urn_missing": "LinkedIn inventory could not be verified: experience nested collection urn missing",
+				"experience_nested_collection_urn_duplicate": "LinkedIn inventory could not be verified: experience nested collection urn duplicate",
+				"experience_nested_collection_total_mismatch": "LinkedIn inventory could not be verified: experience nested collection total mismatch",
+				"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised"
 			}
 		}
 	},
@@ -448,6 +582,24 @@
 			"connector_key": "loom",
 			"reason_display_messages": {
 				"loom_apollo_wiring_pending": "Loom support isn't wired up yet"
+			}
+		}
+	},
+	{
+		"file": "meta.json",
+		"manifest": {
+			"connector_key": "meta",
+			"reason_display_messages": {
+				"stream_collection_failed": "Instagram did not show that this list was read in full, so it will be read again next time."
+			}
+		}
+	},
+	{
+		"file": "muse.json",
+		"manifest": {
+			"connector_key": "muse",
+			"reason_display_messages": {
+				"scope_not_supported": "Muse messages can only be imported together with their conversations. Select both to import your messages."
 			}
 		}
 	},
@@ -479,7 +631,24 @@
 		"manifest": {
 			"connector_key": "oura-browser",
 			"reason_display_messages": {
-				"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint."
+				"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
+				"stream_collection_failed": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
+			}
+		}
+	},
+	{
+		"file": "perplexity.json",
+		"manifest": {
+			"connector_key": "perplexity",
+			"reason_display_messages": {
+				"covered_in_full": "All Perplexity threads in the selected time range have already been collected.",
+				"collection_interrupted": "Perplexity stopped answering partway through, so some threads are missing. The next run continues from where this one stopped.",
+				"nothing_in_range": "There are no Perplexity threads in the selected time range.",
+				"records_unreadable": "Some Perplexity threads or answers couldn't be read by this version of the connector and were skipped. Everything else was collected normally.",
+				"sign_in_required": "Perplexity needs you to sign in (and pass its human check) before this can continue.",
+				"source_limit_reached": "This run reached a Perplexity limit. The next run will retry the remaining threads.",
+				"stream_collection_failed": "Perplexity's library could not be read completely in this run, so nothing was checkpointed. A later run, or a newer version of this connector, can finish it.",
+				"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site, so please report this rather than retrying."
 			}
 		}
 	},
@@ -488,10 +657,14 @@
 		"manifest": {
 			"connector_key": "shopify",
 			"reason_display_messages": {
+				"shopify_browser_operation_timeout": "Shop did not respond within the collection time budget. Retry the collection.",
+				"shopify_signed_out_or_blocked": "Sign in to Shop and open your order history before retrying.",
 				"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
 				"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
 				"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",
+				"stream_collection_failed": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
 				"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
+				"shopify_order_rows_unresolved": "Some Shop orders could not be read completely; retry to collect them",
 				"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
 			}
 		}
@@ -571,7 +744,12 @@
 		"manifest": {
 			"connector_key": "spotify",
 			"reason_display_messages": {
-				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync."
+				"stream_collection_failed": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
+				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+				"spotify_library_rows_unsupported": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing.",
+				"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
+				"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
+				"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
 			}
 		}
 	},
@@ -615,6 +793,27 @@
 		}
 	},
 	{
+		"file": "tiktok.json",
+		"manifest": {
+			"connector_key": "tiktok",
+			"reason_display_messages": {
+				"tiktok_auth_failed": "TikTok needs you to sign in again before this can continue.",
+				"tiktok_bot_check": "TikTok showed a check or refused a request, so collection stopped without retrying. Open TikTok yourself and make sure your account works normally before running this again.",
+				"tiktok_request_unsigned": "TikTok's page did not sign a request the way it signs its own, so nothing more could be read safely. TikTok may have changed its site; please report this if it keeps happening.",
+				"tiktok_rate_limited": "TikTok asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait a while before running this again.",
+				"tiktok_server_error": "TikTok's servers had a problem partway through. What was collected is saved; try again later.",
+				"tiktok_interrupted": "The TikTok page stopped answering partway through. What was collected is saved; try again.",
+				"tiktok_run_limit_reached": "This run reached its safety limit on requests. What was collected is saved; the next run continues.",
+				"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
+				"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
+				"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
+				"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
+				"stream_collection_failed": "TikTok did not let this part be read in full, so it was not saved as complete. What was read is saved.",
+				"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
+			}
+		}
+	},
+	{
 		"file": "twitter_archive.json",
 		"manifest": {
 			"connector_key": "twitter-archive",
@@ -641,9 +840,11 @@
 				"credit_card_export_unverified": "We couldn't confirm the credit card export",
 				"csv_no_data_rows": "The transactions file had no rows to import",
 				"csv_no_usable_transactions": "We couldn't find any usable transactions in that file",
+				"csv_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 				"export_affordance_missing": "We couldn't find the export controls on this page — the site may have changed",
 				"export_error": "The export couldn't be downloaded",
 				"export_no_download": "The export didn't produce a downloadable file",
+				"export_window_incomplete": "The export did not cover all of the requested transaction history",
 				"hydrate_crashed": "Something went wrong while loading the page",
 				"inbox_rows_unresolved": "We found inbox messages but couldn't read them — the site may have changed",
 				"pdf_download_click_failed": "We couldn't click the download option for a statement PDF",
@@ -669,8 +870,9 @@
 		"manifest": {
 			"connector_key": "venmo",
 			"reason_display_messages": {
-				"friends_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo friends, so some friends haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
-				"transactions_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo transactions, so older transactions haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
+				"transactions_deferred_page_budget": "Some Venmo transaction history is still pending. Saved positions let later runs resume it while refreshing recent activity. A large volume of new activity may delay completion",
+				"transactions_schema_blocked": "A Venmo transaction could not be validated. The unread history after that record will be retried"
 			}
 		}
 	},
@@ -688,13 +890,24 @@
 		}
 	},
 	{
+		"file": "whatsapp_web.json",
+		"manifest": {
+			"connector_key": "whatsapp-web",
+			"reason_display_messages": {
+				"scope_not_supported": "WhatsApp messages can only be imported together with their chats. Select both to import your messages."
+			}
+		}
+	},
+	{
 		"file": "wholefoods.json",
 		"manifest": {
 			"connector_key": "wholefoods",
 			"reason_display_messages": {
 				"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
 				"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
-				"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history"
+				"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
+				"stream_collection_failed": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh.",
+				"wholefoods_nutrition_unread": "Some Whole Foods products' nutrition panels could not be read, so those products have no nutrition row. Retry to read them."
 			}
 		}
 	},
@@ -731,6 +944,7 @@
 		"manifest": {
 			"connector_key": "youtube",
 			"reason_display_messages": {
+				"stream_collection_failed": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
 				"page_unreadable": "The signed-in page did not expose a trustworthy record.",
 				"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
 				"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",

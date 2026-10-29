@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+	accountPlanSchema,
 	accountProfileSchema,
 	conversationsSchema,
 	messagesSchema,
@@ -417,4 +418,46 @@ test("the manifest declares pdpp-safe-escape-v1 on exactly the fields the parser
 			.blob_ref;
 		assert.equal(blob?.x_pdpp_blob_projects_field, undefined, name);
 	}
+});
+
+const ACCOUNT_PLAN_RECORD = {
+	id: "account_plan",
+	account_id: "synthetic-org-id",
+	account_structure: null,
+	account_created_at: "2025-03-01T12:00:00.123456Z",
+	plan_type: "pro",
+	plan_display_name: null,
+	subscription_plan: null,
+	has_active_subscription: null,
+	billing_period: null,
+	will_renew: null,
+	renews_at: null,
+	expires_at: null,
+	cancels_at: null,
+	scheduled_plan_change: null,
+};
+
+test("account_plan schema accepts the export's partial record and routes through validateRecord", () => {
+	assert.equal(accountPlanSchema.safeParse(ACCOUNT_PLAN_RECORD).success, true);
+	assert.equal(validateRecord("account_plan", ACCOUNT_PLAN_RECORD).ok, true);
+	assert.equal(
+		accountPlanSchema.safeParse({
+			...ACCOUNT_PLAN_RECORD,
+			plan_type: null,
+			account_created_at: null,
+		}).success,
+		true,
+	);
+});
+
+test("account_plan schema rejects a missing id, and a malformed creation time", () => {
+	const { id: _omit, ...withoutId } = ACCOUNT_PLAN_RECORD;
+	assert.equal(accountPlanSchema.safeParse(withoutId).success, false);
+	assert.equal(
+		accountPlanSchema.safeParse({
+			...ACCOUNT_PLAN_RECORD,
+			account_created_at: "yesterday",
+		}).success,
+		false,
+	);
 });

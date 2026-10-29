@@ -57,7 +57,8 @@ export const messagesSchema = z.object({
 });
 
 export const accountPlanSchema = z.object({
-	id: idSchema,
+	id: z.string().min(1).max(141),
+	is_default: z.boolean().optional(),
 	account_id: idSchema.nullable(),
 	// "personal" / "workspace"
 	account_structure: pdppSafeText.max(80).nullable(),

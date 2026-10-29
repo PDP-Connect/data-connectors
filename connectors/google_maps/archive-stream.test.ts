@@ -15,6 +15,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
 	createWriteStream,
 	mkdtempSync,
@@ -25,6 +26,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Worker } from "node:worker_threads";
 import {
 	GoogleMapsElementTooLargeError,
 	GoogleMapsUnsupportedShapeError,
@@ -233,17 +235,29 @@ test("a huge timelinePath stays bounded under a hard heap limit while unrelated 
 			point: "geo:37.4219999,-122.0840575",
 			time: "2024-06-05T13:45:22Z",
 		});
+		const prefix =
+			'{"semanticSegments":[{"duration":{"startTimestamp":"2024-06-05T13:45:22Z"},"timelinePath":[';
 		const out = createWriteStream(path);
-		out.write(
-			'{"semanticSegments":[{"duration":{"startTimestamp":"2024-06-05T13:45:22Z"},"timelinePath":[',
-		);
-		const repetitions = Math.ceil((70 * 1024 * 1024) / (point.length + 1));
+		out.write(prefix);
+		// This size still exhausts the whole-buffer control below at the same
+		// old-space limit, without making the streaming oracle a CPU-speed test.
+		const repetitions = Math.ceil((35 * 1024 * 1024) / (point.length + 1));
+		let wroteWhileBackpressured = false;
 		for (let index = 0; index < repetitions; index += 1) {
-			out.write((index === 0 ? "" : ",") + point);
+			wroteWhileBackpressured ||= out.writableNeedDrain;
+			if (!out.write((index === 0 ? "" : ",") + point)) {
+				await once(out, "drain");
+			}
 		}
 		out.write("]}]}");
 		await new Promise<void>((resolve, reject) =>
 			out.end((error?: Error | null) => (error ? reject(error) : resolve())),
+		);
+
+		assert.equal(
+			wroteWhileBackpressured,
+			false,
+			"fixture writer must honor stream backpressure",
 		);
 
 		const childPath = new URL(
@@ -263,12 +277,63 @@ test("a huge timelinePath stays bounded under a hard heap limit while unrelated 
 			],
 			{ encoding: "utf8", timeout: 60_000 },
 		);
+		const spawnError = result.error;
+		const errorCode =
+			spawnError && "code" in spawnError ? String(spawnError.code) : "none";
 		assert.equal(
 			result.status,
 			0,
-			`huge path must stream under the heap limit: ${result.stderr}`,
+			`huge path must stream under the heap limit (status=${result.status}, signal=${result.signal}, error=${errorCode}): ${result.stderr}`,
 		);
 		assert.equal(JSON.parse(result.stdout.trim()).status, "valid");
+		assert.equal(JSON.parse(result.stdout.trim()).elements, repetitions);
+
+		// Worker limits report the expected heap failure without aborting the
+		// parent process or creating a core dump for the negative control.
+		const runWholeBufferOracle = (filePath: string) =>
+			new Promise<{
+				errorCode: string | undefined;
+				exitCode: number;
+				timedOut: boolean;
+			}>((resolve, reject) => {
+				const worker = new Worker(childPath, {
+					argv: [filePath, String(statSync(filePath).size), "whole-buffer"],
+					execArgv: ["--import", "tsx"],
+					resourceLimits: { maxOldGenerationSizeMb: 96 },
+				});
+				let errorCode: string | undefined;
+				let timedOut = false;
+				const timeout = setTimeout(() => {
+					timedOut = true;
+					void worker.terminate().catch(reject);
+				}, 60_000);
+				worker.once("error", (error: Error) => {
+					errorCode = "code" in error ? String(error.code) : undefined;
+				});
+				worker.once("exit", (exitCode) => {
+					clearTimeout(timeout);
+					resolve({ errorCode, exitCode, timedOut });
+				});
+			});
+		const bootstrapPath = join(dir, "Bootstrap.json");
+		writeFileSync(bootstrapPath, `${prefix}${point},${point},${point}]}]}`);
+		assert.deepEqual(
+			await runWholeBufferOracle(bootstrapPath),
+			{
+				errorCode: undefined,
+				exitCode: 0,
+				timedOut: false,
+			},
+			"control worker must load and parse a small fixture before its heap-failure result counts",
+		);
+		const buffered = await runWholeBufferOracle(path);
+		assert.equal(
+			buffered.timedOut,
+			false,
+			"whole-buffer control must exhaust its heap, not time out",
+		);
+		assert.equal(buffered.errorCode, "ERR_WORKER_OUT_OF_MEMORY");
+		assert.notEqual(buffered.exitCode, 0);
 	} finally {
 		rmSync(dir, { force: true, recursive: true });
 	}

@@ -2,21 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   filterAbsentVersions,
   PublishSelectionError,
   selectChangedConnectors,
+  selectPublishCandidates,
+  selectPublishTargets,
 } from "./select-publish-connectors.mjs";
 import { artifactInputHash } from "./connector-artifact-inputs.mjs";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const scriptPath = join(repoRoot, "scripts", "select-publish-connectors.mjs");
 const CONNECTORS = [
   { manifest: "oura", connectorKey: "oura" },
   { manifest: "oura_browser", connectorKey: "oura_browser" },
@@ -213,6 +212,56 @@ test("a root developer script does not change non-PageShim artifact identity", a
     const afterCommit = repo.commit("add a local mobile bundle command");
     const after = await artifactInputHash({ commit: afterCommit, manifest: "oura", cwd: repo.dir });
     assert.equal(after, before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("installer npm pack file lists do not change connector artifact identity", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    for (const path of ["package.json", "packages/connector-installer-core/package.json"]) {
+      repo.write(path, JSON.stringify({ files: ["index.mjs"] }));
+      const after = repo.commit(`change ${path} pack list`);
+      assert.equal(await artifactInputHash({ commit: after, manifest: "oura", cwd: repo.dir }), before);
+    }
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a polyfill package test script does not change artifact identity, a dependency does", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    repo.write(
+      "packages/polyfill-connectors/package.json",
+      JSON.stringify({ scripts: { test: "../../scripts/test-sandbox/test-sandbox -- node scripts/run-tests.mjs" } }),
+    );
+    const scriptCommit = repo.commit("route the package test script through the sandbox");
+    assert.equal(await artifactInputHash({ commit: scriptCommit, manifest: "oura", cwd: repo.dir }), before);
+    repo.write(
+      "packages/polyfill-connectors/package.json",
+      JSON.stringify({ dependencies: { zod: "4.0.0" } }),
+    );
+    const depCommit = repo.commit("add a runtime dependency");
+    assert.notEqual(await artifactInputHash({ commit: depCommit, manifest: "oura", cwd: repo.dir }), before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a polyfill package export entry does not change artifact identity", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    repo.write(
+      "packages/polyfill-connectors/package.json",
+      JSON.stringify({ exports: { "./browser-launch": "./src/browser-launch.js" } }),
+    );
+    const exportCommit = repo.commit("export a module for hosts");
+    assert.equal(await artifactInputHash({ commit: exportCommit, manifest: "oura", cwd: repo.dir }), before);
   } finally {
     rmSync(repo.dir, { recursive: true, force: true });
   }
@@ -474,42 +523,91 @@ test("the layout transition skips once and later versioned releases select norma
   }
 });
 
-test("no changed version emits a clean no-op notice and an empty matrix", async () => {
-  const outputRoot = mkdtempSync(join(tmpdir(), "select-publish-noop-"));
+/**
+ * A fake GHCR: `published` maps `repository:tag` to a digest. Every reference
+ * not in it is definitely absent. `calls` records each lookup, so a test can
+ * assert how many registry questions a push asks.
+ */
+function fakeRegistry(published) {
+  const calls = [];
+  async function lookup({ registry, name, tag }) {
+    calls.push(`${registry}/${name}:${tag}`);
+    const digest = published[`${name}:${tag}`];
+    return digest ? { outcome: "present", digest } : { outcome: "absent" };
+  }
+  return { lookup, calls };
+}
+
+const DIGEST = `sha256:${"c".repeat(64)}`;
+
+test("every connector at its main version is a publish candidate, not only the bumped one", async () => {
+  const repo = makeRepo();
   try {
-    const sha = execFileSync("git", ["rev-parse", "HEAD"], {
-      cwd: repoRoot,
-      encoding: "utf8",
-    }).trim();
-    const outputFile = join(outputRoot, "output");
-    const result = spawnSync(process.execPath, [scriptPath], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      env: {
-        PATH: process.env.PATH,
-        BEFORE_SHA: sha,
-        AFTER_SHA: sha,
-        GITHUB_REPOSITORY_OWNER: "pdp-connect",
-        GITHUB_OUTPUT: outputFile,
-      },
+    assert.deepEqual(
+      await selectPublishCandidates({ before: repo.before, after: repo.after, cwd: repo.dir, connectors: CONNECTORS }),
+      [
+        { connector: "oura", manifest: "oura", version: "0.2.0" },
+        { connector: "oura_browser", manifest: "oura_browser", version: "0.1.0" },
+        { connector: "github", manifest: "github", version: "0.5.1" },
+      ],
+    );
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a push that changed no connector publishes the main version GHCR lacks", async () => {
+  const repo = makeRepo();
+  try {
+    // A README-only push. oura_browser@0.1.0 is on main but absent from GHCR,
+    // as after a run that was cancelled in the concurrency queue.
+    repo.write("README.md", "unrelated\n");
+    const after = repo.commit("unrelated push");
+    const registry = fakeRegistry({
+      "pdp-connect/connector/oura:0.2.0": DIGEST,
+      "pdp-connect/connector/github:0.5.1": DIGEST,
     });
 
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /No connector version changed/);
-    const outputs = Object.fromEntries(
-      readFileSync(outputFile, "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => {
-          const index = line.indexOf("=");
-          return [line.slice(0, index), line.slice(index + 1)];
-        }),
-    );
-    assert.deepEqual(JSON.parse(outputs.matrix), { include: [] });
-    assert.equal(outputs["has-version-changes"], "false");
-    assert.equal(outputs["has-publishable-changes"], "false");
+    const selected = await selectPublishTargets({
+      before: repo.after,
+      after,
+      cwd: repo.dir,
+      connectors: CONNECTORS,
+      owner: "pdp-connect",
+      lookup: registry.lookup,
+      notice: () => {},
+    });
+
+    assert.deepEqual(selected, [{ connector: "oura_browser", manifest: "oura_browser", version: "0.1.0" }]);
+    assert.equal(registry.calls.length, CONNECTORS.length, "one GHCR question per candidate, not per change");
   } finally {
-    rmSync(outputRoot, { recursive: true, force: true });
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("a main with every version already in GHCR publishes nothing", async () => {
+  const repo = makeRepo();
+  try {
+    const registry = fakeRegistry({
+      "pdp-connect/connector/oura:0.2.0": DIGEST,
+      "pdp-connect/connector/oura_browser:0.1.0": DIGEST,
+      "pdp-connect/connector/github:0.5.1": DIGEST,
+    });
+    const notices = [];
+    const selected = await selectPublishTargets({
+      before: null,
+      after: repo.after,
+      cwd: repo.dir,
+      connectors: CONNECTORS,
+      owner: "pdp-connect",
+      lookup: registry.lookup,
+      notice: (message) => notices.push(message),
+    });
+
+    assert.deepEqual(selected, []);
+    assert.match(notices.join("\n"), /already present in GHCR/);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
   }
 });
 
@@ -632,3 +730,26 @@ test("allowlist comments, formatting, and row order change no artifact hash", as
     rmSync(repo.dir, { recursive: true, force: true });
   }
 });
+
+for (const [label, path, metadata] of [
+  ["installer version", "packages/connector-installer-core/package.json", { version: "0.2.0" }],
+  ["installer dependency", "packages/connector-installer-core/package.json", { dependencies: { tar: "7.5.22" } }],
+  ["installer engine", "packages/connector-installer-core/package.json", { engines: { node: ">=24" } }],
+  ["polyfill engine", "packages/polyfill-connectors/package.json", { engines: { node: ">=24" } }],
+]) {
+  test(`${label} metadata remains an artifact input requiring a version bump`, async () => {
+    const repo = makeRepo();
+    try {
+      const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+      repo.write(path, JSON.stringify(metadata));
+      const after = repo.commit(`change ${label}`);
+      assert.notEqual(await artifactInputHash({ commit: after, manifest: "oura", cwd: repo.dir }), before);
+      await assert.rejects(
+        () => selectChangedConnectors({ before: repo.after, after, cwd: repo.dir, connectors: CONNECTORS }),
+        (error) => error instanceof PublishSelectionError && /oura shipped artifact content changed/.test(error.message),
+      );
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+}

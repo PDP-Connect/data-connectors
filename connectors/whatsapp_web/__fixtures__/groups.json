@@ -1,0 +1,52 @@
+[
+  {
+    "id": "user1@example.com",
+    "subject": "Synthetic subject 2 lorem",
+    "creation": 1691779976,
+    "owner": "Synthetic owner 3 lorem lorem",
+    "announce": false,
+    "restrict": false,
+    "participants": [
+      {
+        "id": "Synthetic id 4 lorem lorem",
+        "is_admin": false,
+        "is_super_admin": false
+      },
+      {
+        "id": "Synthetic id 5 lorem lorem",
+        "is_admin": false,
+        "is_super_admin": false
+      },
+      {
+        "id": "Synthetic id 6 lorem lorem",
+        "is_admin": true,
+        "is_super_admin": true
+      }
+    ]
+  },
+  {
+    "id": "user7@example.com",
+    "subject": "Synthetic subject 8 lorem",
+    "creation": 1740157920,
+    "owner": "Synthetic owner 9 lorem lorem",
+    "announce": false,
+    "restrict": false,
+    "participants": [
+      {
+        "id": "Synthetic id 10 lorem lorem",
+        "is_admin": false,
+        "is_super_admin": false
+      },
+      {
+        "id": "Synthetic id 11 lorem lorem",
+        "is_admin": true,
+        "is_super_admin": true
+      },
+      {
+        "id": "Synthetic id 12 lorem lorem",
+        "is_admin": false,
+        "is_super_admin": false
+      }
+    ]
+  }
+]

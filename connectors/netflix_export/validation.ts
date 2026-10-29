@@ -61,11 +61,11 @@ function remediationFor(status: NetflixExportValidationStatus): string | null {
 		case "empty":
 			return "This looks like a Netflix viewing activity export, but it does not contain importable rows.";
 		case "too_large":
-			return "This is a real Netflix export, but it (or the ViewingActivity.csv inside it) is larger than PDPP can safely process from a browser upload. Extract the archive yourself and upload just CONTENT_INTERACTION/ViewingActivity.csv instead of the whole archive.";
+			return "This is a real Netflix export, but it (or the ViewingActivity.csv inside it) is larger than can be safely processed from a browser upload. Extract the archive yourself and upload just CONTENT_INTERACTION/ViewingActivity.csv instead of the whole archive.";
 		case "unsupported":
 			return "Choose the CSV from Download all on netflix.com/viewingactivity, ViewingActivity.csv, or the .zip archive from netflix.com/account/getmyinfo. Other files are not supported.";
 		case "ambiguous_date_order":
-			return "Every date in this file is ambiguous between DD/MM and MM/DD order (no row's day exceeds 12), so PDPP can't tell which order Netflix used for your account's locale. Re-export a file that includes at least one date with a day above 12, or wait until your history includes one.";
+			return "Every date in this file is ambiguous between DD/MM and MM/DD order (no row's day exceeds 12), so the connector can't tell which order Netflix used for your account's locale. Re-export a file that includes at least one date with a day above 12, or wait until your history includes one.";
 		case "valid":
 			return null;
 		default:

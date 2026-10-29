@@ -190,16 +190,18 @@ export function buildChatDbFixture(
 ): void {
 	const db = new Database(dbPath);
 	try {
-		createSchema(db, opts);
-		insertHandles(db, opts.handles ?? []);
-		insertChats(db, opts.chatIds ?? []);
-		insertMessages(db, opts.messages);
-		if (opts.includeChatHandleJoin !== false) {
-			insertMemberships(db, opts.memberships ?? []);
-		}
-		if (opts.includeAttachmentTables !== false) {
-			insertAttachments(db, opts.attachments ?? []);
-		}
+		db.transaction(() => {
+			createSchema(db, opts);
+			insertHandles(db, opts.handles ?? []);
+			insertChats(db, opts.chatIds ?? []);
+			insertMessages(db, opts.messages);
+			if (opts.includeChatHandleJoin !== false) {
+				insertMemberships(db, opts.memberships ?? []);
+			}
+			if (opts.includeAttachmentTables !== false) {
+				insertAttachments(db, opts.attachments ?? []);
+			}
+		})();
 	} finally {
 		db.close();
 	}

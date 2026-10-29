@@ -9,7 +9,7 @@
 	},
 	"connector_key": "claude-code",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-	"version": "0.3.23",
+	"version": "0.3.27",
 	"display_name": "Claude Code",
 	"brand": {
 		"icon": "icon.svg",
@@ -300,6 +300,10 @@
 					},
 					"tool_use_id": {
 						"type": ["string", "null"]
+					},
+					"tool_name": {
+						"type": ["string", "null"],
+						"description": "Tool name of a tool_use block extracted from an assistant message."
 					},
 					"content_preview": {
 						"type": ["string", "null"]

@@ -1,0 +1,24 @@
+{
+  "entries": [
+    {
+      "name": "Synthetic name 1",
+      "path": "Synthetic path 2",
+      "size": 488,
+      "modified_ms": 1792612228050
+    },
+    {
+      "name": "Synthetic name 3 lorem",
+      "path": "Synthetic path 4 lorem lorem",
+      "size": 3331,
+      "modified_ms": 1792612162077
+    },
+    {
+      "name": "Synthetic name 5 lorem",
+      "path": "Synthetic path 6 lorem",
+      "size": 253,
+      "modified_ms": 1792608283653
+    }
+  ],
+  "total": 6,
+  "has_more": false
+}

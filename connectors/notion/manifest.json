@@ -9,7 +9,7 @@
 	},
 	"connector_key": "notion",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-	"version": "0.1.19",
+	"version": "0.1.22",
 	"display_name": "Notion",
 	"brand": {
 		"icon": "icon.svg",
@@ -38,7 +38,7 @@
 					"secret": true,
 					"autocomplete": "off",
 					"help_url": "https://www.notion.so/developers/tokens",
-					"help_text": "Go to Notion Developers (https://www.notion.so/developers/tokens), create a New token with read access, copy the token, and paste it here. The token acts as you in PDPP and accesses all pages in your workspace without requiring manual connections.",
+					"help_text": "Go to Notion Developers (https://www.notion.so/developers/tokens), create a New token with read access, copy the token, and paste it here. The token acts as you and accesses all pages in your workspace without requiring manual connections.",
 					"env": ["NOTION_API_TOKEN"]
 				}
 			]

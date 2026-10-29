@@ -11,9 +11,11 @@ const dir = new URL(
 	import.meta.url,
 );
 const fx = (n) => readFileSync(new URL(n, dir), "utf8");
-const profile = fx("profile.html");
-const repositories = fx("repositories.html");
-const starredEmpty = fx("starred-empty-current-github.html");
+const profile = fx("profile-pinned-listitem-current-github.html")
+	.replace("1,234 contributions", "365 contributions");
+const terminal = '<div class="paginate-container"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
+const repositories = fx("repositories.html") + terminal;
+const starredEmpty = fx("starred-empty-current-github.html") + terminal;
 const events = fx("events.json");
 const history = JSON.parse(fx("history-issue.json"));
 
@@ -32,7 +34,7 @@ function cells(start, end) {
 const html = (body) => ({
 	status: 200,
 	contentType: "text/html; charset=utf-8",
-	body: `<!doctype html><html><head>${body.startsWith("<meta") ? "" : '<meta name="user-login" content="sample-user">'}</head><body>${body}</body></html>`,
+	body: `<!doctype html><html><head>${body.startsWith("<meta") ? "" : '<meta name="user-login" content="sample-user">'}</head><body><span class="p-nickname">sample-user</span>${body}</body></html>`,
 });
 const json = (v) => ({
 	status: 200,
@@ -94,7 +96,7 @@ export function resolveFixture(raw) {
 		if (from) {
 			const y = from.slice(0, 4);
 			return html(
-				`<h2 class="f4 text-normal mb-2">${365} contributions in ${y}</h2>${cells(`${y}-01-01`, `${y}-12-31`)}`,
+				`<h2 id="js-contribution-activity-description" class="f4 text-normal mb-2">${(Date.UTC(Number(y) + 1, 0, 1) - Date.UTC(Number(y), 0, 1)) / 86_400_000} contributions in ${y}</h2>${cells(`${y}-01-01`, `${y}-12-31`)}`,
 			);
 		}
 		const today = new Date().toISOString().slice(0, 10);
@@ -132,7 +134,7 @@ export const pageshimCase = {
 	exportSummary: {
 		count: 2,
 		label: "items",
-		details: { repositories: 1, starred: 0, events: 1, contributions: 1234 },
+		details: { repositories: 1, starred: 0, events: 1, contributions: 365 },
 	},
 	emptyExportSummary: {
 		count: 0,

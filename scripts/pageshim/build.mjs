@@ -13,8 +13,9 @@
 //     package resolves to a stub whose exports throw when called. `path` and
 //     `url` resolve to small pure-JS versions, because connector modules call
 //     them at load time;
-//   - a selected connector port profile can resolve imports from its declared
-//     importer to a shim that maps host methods instead of the throwing stub.
+//   - per-connector ports (CONNECTOR_PORTS): for one connector file, some
+//     imports resolve to a shim that maps them onto host methods instead of
+//     the throwing stub (anthropic: the export download and ZIP read).
 //
 // attach-to-artifact.mjs packages an enabled bundle into the existing signed
 // connector artifact after the normal OCI build.
@@ -31,11 +32,34 @@ import * as esbuild from "esbuild";
 import { consentSlicePlugin } from "../consent-slice-resolution.mjs";
 import { renderSlice } from "../../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 import { isPageShimCapable } from "./capabilities.mjs";
-import { resolvePageShimPortProfile } from "./port-profile.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const require = createRequire(import.meta.url);
+
+/**
+ * Per-connector ports. `modules`: for imports made by `importer` only, these
+ * specifiers resolve to a shim that maps them onto the host (instead of the
+ * throwing stub or the real module). `inject`: extra globals. Unlike
+ * `modules`, esbuild applies them to every free reference in the whole
+ * connector bundle, not only to code under `importer`.
+ */
+const CONNECTOR_PORTS = {
+	anthropic: {
+		importer: join(REPO, "connectors", "anthropic", "index.ts"),
+		shim: join(HERE, "shims", "anthropic-export.ts"),
+		modules: [
+			"fs",
+			"fs/promises",
+			"os",
+			"crypto",
+			"../../packages/polyfill-connectors/src/bounded-zip-archive.ts",
+			"../../packages/polyfill-connectors/src/download-queue.ts",
+			"../../packages/polyfill-connectors/src/playwright-download.ts",
+		],
+		inject: [join(HERE, "shims", "buffer.js")],
+	},
+};
 
 const BROWSER_PACKAGES = [
 	"playwright",
@@ -45,6 +69,17 @@ const BROWSER_PACKAGES = [
 	"chromium-bidi",
 ];
 const PURE_SHIMS = { path: "shims/path.js", url: "shims/url.js" };
+// Audited browser hashing consumers only. Desktop-only helpers retain the
+// throwing crypto module even when bundled transitively into a connector.
+const HASH_IMPORTERS = new Set([
+	"packages/polyfill-connectors/src/fingerprint-cursor.ts",
+	"packages/polyfill-connectors/src/statement-content-fingerprint.ts",
+	"connectors/chatgpt/message-blob.ts",
+	"connectors/anthropic/source-blob.ts",
+	"connectors/youtube/index.ts",
+	"connectors/meta/parsers.ts",
+	"scripts/pageshim/test-fixtures/crypto-runtime.ts",
+].map(path => join(REPO, path)));
 const BUILTINS = new Set(builtinModules);
 
 function stubSource(spec) {
@@ -71,14 +106,14 @@ ${keys.map((k) => `export const ${k} = mk(${JSON.stringify(`${spec}.${k}`)});`).
 `;
 }
 
-const stubPlugin = (stubbed, port) => ({
+const stubPlugin = (stubbed, port, cryptoHashShim) => ({
 	name: "pageshim-stubs",
 	setup(build) {
-		if (port && !port.empty) {
+		if (port) {
 			build.onResolve({ filter: /.*/ }, (args) =>
-				args.importer === join(REPO, port.importer) &&
+				args.importer === port.importer &&
 				port.modules.includes(args.path.replace(/^node:/, ""))
-					? { path: join(REPO, port.shim) }
+					? { path: port.shim }
 					: undefined,
 			);
 		}
@@ -88,6 +123,18 @@ const stubPlugin = (stubbed, port) => ({
 				PURE_SHIMS[args.path.replace(/^node:/, "").replace("/posix", "")],
 			),
 		}));
+		// Only node:crypto imports opt into the audited hash implementation.
+		// Other crypto exports and bare crypto imports remain throwing stubs.
+		if (cryptoHashShim) {
+			build.onResolve({ filter: /^node:crypto$/ }, (args) => HASH_IMPORTERS.has(args.importer) ? ({
+				path: "crypto", namespace: "pageshim-crypto",
+			}) : undefined);
+			build.onLoad({ filter: /.*/, namespace: "pageshim-crypto" }, () => ({
+				contents: stubSource("crypto").split("\n").filter(line => !line.startsWith("export const createHash = ")).join("\n") +
+					"\nexport { createHash } from " + JSON.stringify(join(HERE, "shims/crypto.js")) + ";\n",
+				loader: "js", resolveDir: HERE,
+			}));
+		}
 		build.onResolve({ filter: /.*/ }, (args) => {
 			const bare = args.path.replace(/^node:/, "");
 			const isBuiltin = args.path.startsWith("node:") || BUILTINS.has(bare);
@@ -111,9 +158,11 @@ export async function buildPageshim({
 	bridgeCallTimeoutMs = 30_000,
 	entryPoint,
 	extraDefines = {},
-	includeMetafile = false,
+	// Internal regression diagnostic: reproduce the pre-shim bundle bytes.
+	cryptoHashShim = true,
 }) {
 	const stubbed = new Set();
+	const port = CONNECTOR_PORTS[connector];
 	const manifest = JSON.parse(
 		readFileSync(join(REPO, "connectors", connector, "manifest.json"), "utf8"),
 	);
@@ -122,34 +171,13 @@ export async function buildPageshim({
 	if (!isPageShimCapable(manifest) && !pageshim.entry) {
 		throw new Error(`PageShim does not provide the declared runtime bindings for ${connector}`);
 	}
-	const port = resolvePageShimPortProfile(connector, (path) => {
-		try {
-			return readFileSync(join(REPO, path));
-		} catch (error) {
-			if (error.code === "ENOENT") return null;
-			throw error;
-		}
-	});
 	const entry = pageshim.entry
 		? join(HERE, "entries", pageshim.entry)
 		: undefined;
 	const genericEntry = entry
 		? undefined
 		: genericPageshimEntry(connector, manifest, pageshim);
-	const defines = {
-		"import.meta.url": '"file:///pageshim/bundle.js"',
-		PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: String(bridgeCallTimeoutMs),
-		...extraDefines,
-		// The export's `version` is the connector manifest's semver.
-		PAGESHIM_CONNECTOR_VERSION: JSON.stringify(manifest.version),
-		// The runtime reads each stream's consent_time_field by this name.
-		PAGESHIM_CONNECTOR_MANIFEST: JSON.stringify(connector),
-	};
-	const injected = [
-		"scripts/pageshim/shims/process.js",
-		...port.inject,
-	].map((path) => join(REPO, path));
-	const result = await esbuild.build({
+	await esbuild.build({
 		...(entryPoint
 			? { entryPoints: [entryPoint] }
 			: entry
@@ -165,8 +193,18 @@ export async function buildPageshim({
 		logLevel: "warning",
 		// The host passes a frozen `process = {env: {}}`. Bundled Node code
 		// reads more than that, so every reference goes to a bundle-local copy.
-		inject: injected,
-		define: defines,
+		inject: [join(HERE, "shims", "process.js"), ...(port?.inject ?? [])],
+		define: {
+			"import.meta.url": '"file:///pageshim/bundle.js"',
+			PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: String(bridgeCallTimeoutMs),
+			...extraDefines,
+			// The export's `version` is the connector manifest's semver.
+			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
+				manifest.version,
+			),
+			// The runtime reads each stream's consent_time_field by this name.
+			PAGESHIM_CONNECTOR_MANIFEST: JSON.stringify(connector),
+		},
 		plugins: [
 			// The same slice the Core build bundles for this connector; the
 			// runtime reads it through PAGESHIM_CONNECTOR_MANIFEST.
@@ -175,9 +213,8 @@ export async function buildPageshim({
 				connectorDirectory: connector,
 				expectedSlice: renderSlice(connector, manifest),
 			}),
-			stubPlugin(stubbed, port),
+			stubPlugin(stubbed, port, cryptoHashShim),
 		],
-		metafile: includeMetafile,
 		// The host `return`s the LAST top-level `(async () => {` IIFE, so the
 		// run's promise must be that IIFE.
 		footer: {
@@ -191,9 +228,6 @@ export async function buildPageshim({
 		bytes: bytes.length,
 		gzipBytes: gzipSync(bytes).length,
 		stubbed: [...stubbed].sort(),
-		portProfile: port,
-		buildInputs: { inject: injected, defines, stubExportIntrospection: [...stubbed].sort() },
-		...(includeMetafile ? { metafile: result.metafile } : {}),
 	};
 }
 
@@ -211,6 +245,7 @@ function genericPageshimEntry(connector, manifest, config) {
 import * as implementation from ${JSON.stringify(connectorModule)};
 import * as schemaModule from ${JSON.stringify(schemasModule)};
 import { runOnPageShim, type ShimPage } from ${JSON.stringify(join(HERE, "runtime.ts"))};
+import { applyRequestedScopeEntries } from ${JSON.stringify(join(HERE, "requested-scope-entries.ts"))};
 type GenericConfig = {
 	platform: string;
 	scopes: string[];
@@ -232,13 +267,34 @@ const config: GenericConfig = ${JSON.stringify({
 const collect = implementation[${JSON.stringify(config.collect_export)}] as (ctx: never) => Promise<void>;
 const probe = implementation[${JSON.stringify(config.probe_export)}] as (page: never) => Promise<boolean>;
 const validateRecord = schemaModule[${JSON.stringify(config.validate_export ?? "validateRecord")}] as (stream: string, record: unknown) => boolean;
-(globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) =>
+// Older host Proxies throw when an optional member is absent. Guard only the
+// lookup: a present method must still fail closed on invalid scope metadata.
+function requestedScopeEntries(page: ShimPage): unknown {
+  let method: (() => unknown) | undefined;
+  try {
+    method = (page as ShimPage & { requestedScopeEntries?: () => unknown }).requestedScopeEntries;
+  } catch {
+    return undefined;
+  }
+  return method?.call(page);
+}
+(globalThis as Record<string, unknown>).__pageshimMain = (
+  page: ShimPage,
+  initialState: Record<string, unknown>,
+  supportsState: boolean,
+) =>
   runOnPageShim(page, {
     ...config,
     validateRecord: validateRecord as never,
     probe: (pw) => probe(pw as never),
+    prepareRequested: (requested) => applyRequestedScopeEntries(
+      requested,
+      requestedScopeEntries(page),
+      config.platform,
+    ),
     collect: (ctx) => collect(ctx as never),
     toScope: (_stream, records) => ({ records }),
+    emptyScopeFromCheckpoint: true,
     summarize: (scopes) => {
       const counts = Object.fromEntries(config.streams.map((stream) => [
         stream,
@@ -256,7 +312,7 @@ const validateRecord = schemaModule[${JSON.stringify(config.validate_export ?? "
         details,
       };
     },
-  });
+  }, initialState, supportsState);
 `,
 		loader: "ts",
 		resolveDir: REPO,

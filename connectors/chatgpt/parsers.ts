@@ -6,6 +6,7 @@
 // browser-context auth, API client, and the collect() orchestrator live in
 // index.ts.
 
+import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type {
 	ChatGptContent,
@@ -88,77 +89,40 @@ export function flattenTreeCurrentBranch(
 	});
 }
 
-/**
- * `String.prototype.trim` also strips VT (U+000B) and FF (U+000C), which are
- * forbidden control characters. Trimming them away before the safe-text pass
- * would lose them before the escape pass, so trim only the whitespace that is
- * not a forbidden control.
- */
-const EDGE_WHITESPACE =
-	/^[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+|[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+$/g;
-
-function trimKeepingControls(s: string): string {
-	return s.replace(EDGE_WHITESPACE, "");
-}
-
 // ─── extractContent per-content_type helpers ──────────────────────────
 //
 // Memory bound of extraction. The extractors below build the whole body: an
-// array with one entry per part, a joined string, and, when edge whitespace is
-// trimmed, possibly another copy. Transient memory is O(source payload size +
-// part count); the constants depend on the part format and the JS engine's
-// string representation (references, ropes, flattening), so no tighter factor
-// is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
+// array with one entry per part, and a joined string. Transient memory is
+// O(source payload size + part count); the constants depend on the part format
+// and the JS engine's string representation (references, ropes, flattening),
+// so no tighter factor is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
 // full text, and the cap decision uses `escapedLengthExceeds` on the result.
 // Oversize text is not retained per candidate (a blob-backed message re-extracts
 // it once to measure and once to spool, see message-blob.ts); inline content is
 // retained by design, at most the inline cap per message.
 
 /**
- * Stringify one `parts[]` entry from text / multimodal_text bodies. Returns
- * "" for unknown shapes so the caller can filter them out via `.filter(Boolean)`.
+ * Join the string entries of a `parts[]` array with "\n". Non-string entries
+ * (asset pointers, nested objects) are left out of the join, and are kept
+ * whole in `non_string_parts` (`extractNonStringParts`); empty strings are
+ * kept, so the result equals the legacy collector's
+ * `parts.filter(p => typeof p === "string").join("\n")`. A body whose joined
+ * text is empty yields null, so the message is omitted as the legacy one is.
  */
-function stringifyContentPart(p: unknown): string {
-	if (typeof p === "string") {
-		return p;
-	}
-	if (p && typeof p === "object") {
-		const po = p as {
-			asset_pointer?: unknown;
-			content_type?: unknown;
-			text?: unknown;
-		};
-		if (typeof po.text === "string") {
-			return po.text;
-		}
-		if (typeof po.asset_pointer === "string") {
-			return `[asset:${po.asset_pointer}]`;
-		}
-		if (typeof po.content_type === "string") {
-			return `[${po.content_type}]`;
-		}
-	}
-	return "";
+function joinStringParts(content: ChatGptContent): string | null {
+	const parts = Array.isArray(content.parts) ? content.parts : [];
+	const s = parts.filter((p): p is string => typeof p === "string").join("\n");
+	return s || null;
 }
 
-/** Canonical user/assistant text: `{ parts: ["...", {asset_pointer}...] }`. */
+/** Canonical user/assistant text: `{ parts: ["...", ...] }`. */
 function extractTextContent(content: ChatGptContent): string | null {
-	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = trimKeepingControls(parts.map(stringifyContentPart).join("\n"));
-	return s || null;
+	return joinStringParts(content);
 }
 
-/**
- * Multimodal variant: same part-stringifier, but filter empties before joining
- * (a `{content_type: "image_asset_pointer"}` entry without an asset_pointer or
- * text yields "" which we drop here).
- */
+/** Multimodal variant: same string-parts join as `text`. */
 function extractMultimodalContent(content: ChatGptContent): string | null {
-	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = trimKeepingControls(
-		parts.map(stringifyContentPart).filter(Boolean).join("\n"),
-	);
-	return s || null;
+	return joinStringParts(content);
 }
 
 /** Assistant-authored tool call bodies: `{ content_type: "code", language, text }`. */
@@ -177,9 +141,7 @@ function extractCodeContent(content: ChatGptContent): string | null {
  */
 function extractThoughtsContent(content: ChatGptContent): string | null {
 	const thoughts = Array.isArray(content.thoughts) ? content.thoughts : [];
-	const s = trimKeepingControls(
-		thoughts.map(stringifyThought).filter(Boolean).join("\n\n"),
-	);
+	const s = thoughts.map(stringifyThought).filter(Boolean).join("\n\n");
 	return s || null;
 }
 
@@ -216,7 +178,7 @@ function extractTetherBrowsingDisplay(content: ChatGptContent): string | null {
 	if (typeof content.result === "string" && content.result) {
 		pieces.push(content.result);
 	}
-	const s = trimKeepingControls(pieces.join("\n\n"));
+	const s = pieces.join("\n\n");
 	return s || null;
 }
 
@@ -232,7 +194,7 @@ function extractTetherQuote(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	const s = trimKeepingControls(pieces.join("\n"));
+	const s = pieces.join("\n");
 	return s || null;
 }
 
@@ -262,7 +224,7 @@ function extractModelEditableContext(content: ChatGptContent): string | null {
 	if (typeof content.repo_summary === "string" && content.repo_summary) {
 		pieces.push(content.repo_summary);
 	}
-	const s = trimKeepingControls(pieces.join("\n\n"));
+	const s = pieces.join("\n\n");
 	return s || null;
 }
 
@@ -275,7 +237,7 @@ function extractSystemError(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	return trimKeepingControls(pieces.join(": ")) || null;
+	return pieces.join(": ") || null;
 }
 
 /** User custom-instructions shape (observed on imported conversations). */
@@ -290,7 +252,7 @@ function extractUserEditableContext(content: ChatGptContent): string | null {
 	) {
 		pieces.push(content.user_instructions);
 	}
-	return trimKeepingControls(pieces.join("\n\n")) || null;
+	return pieces.join("\n\n") || null;
 }
 
 // Fallback for unrecognized shape — prefer an explicit handler. Stringify so
@@ -613,6 +575,35 @@ export interface ExtractedMessage {
 	sourceUnrepresentable: boolean;
 }
 
+/**
+ * The entries of a `text` or `multimodal_text` body's `parts` that are not
+ * strings (asset pointers with their size and generation metadata, audio
+ * transcripts, any other object), each as `{ index, part }` with its position in
+ * `parts`. `content` joins only the string parts, as the legacy collector does,
+ * so this field is where the rest of the body lives; an earlier collector wrote
+ * their `text` and `[asset:<pointer>]` markers into `content`, and the
+ * pointer and text are still here. Strings at any depth are
+ * pdpp-safe-escape-v1 encoded.
+ */
+export function extractNonStringParts(
+	content: ChatGptContent | undefined,
+): unknown[] {
+	if (
+		content?.content_type !== "text" &&
+		content?.content_type !== "multimodal_text"
+	) {
+		return [];
+	}
+	const kept: { index: number; part: unknown }[] = [];
+	for (const [index, part] of (Array.isArray(content.parts)
+		? content.parts
+		: []
+	).entries()) {
+		if (typeof part !== "string") kept.push({ index, part: part ?? null });
+	}
+	return encodeToolCallStrings(kept) as unknown[];
+}
+
 /** The source text of a message node, before escaping. */
 export function extractRawMessageText(node: ChatGptNode): string | null {
 	return extractContentParts(node.message?.content).raw;
@@ -641,6 +632,7 @@ export function extractMessageWithBlob(
 			role: m.author?.role ?? null,
 			content:
 				oversize || raw === null ? null : encodePdppSafeText(raw) || null,
+			non_string_parts: extractNonStringParts(m.content),
 			content_type: m.content?.content_type ?? null,
 			model_slug: m.metadata?.model_slug ?? null,
 			create_time: tsToIso(m.create_time),
@@ -655,6 +647,44 @@ export function extractMessageWithBlob(
 				.filter(Boolean),
 			on_current_branch: onCurrentBranch,
 		},
+	};
+}
+
+/**
+ * The `id` of a `messages` record: the conversation id and the source node id
+ * joined by ":". ChatGPT reuses a node id in several conversations (forks and
+ * branches copy nodes), so a node id names a message only within its
+ * conversation, and the record id has to carry both. ChatGPT conversation ids
+ * are UUIDs and never contain ":", so the pair is recoverable.
+ */
+export function messageRecordId(
+	conversationId: string,
+	nodeId: string,
+): string {
+	return `${conversationId}:${nodeId}`;
+}
+
+/**
+ * The wire form of a message extracted by `extractMessageWithBlob`: that record
+ * names messages by the source's node ids, which is how the rest of the
+ * collector walks the tree. On the wire `id`, `parent_id` and `children_ids`
+ * are record ids (`messageRecordId`), so each of them names a `messages`
+ * record, and `node_id` keeps the source node id.
+ */
+export function toMessageRecord(
+	record: RecordData,
+	conversationId: string,
+): RecordData {
+	const scope = (nodeId: unknown) =>
+		typeof nodeId === "string" ? messageRecordId(conversationId, nodeId) : null;
+	const ownId = scope(record.id);
+	return {
+		...record,
+		...(ownId === null ? {} : { id: ownId, node_id: record.id as string }),
+		parent_id: scope(record.parent_id),
+		children_ids: Array.isArray(record.children_ids)
+			? record.children_ids.map((child) => scope(child) ?? child)
+			: [],
 	};
 }
 
@@ -888,6 +918,7 @@ export function buildAccountPlanRecord(
 	const entitlement = entry.entitlement || {};
 	return {
 		id: "account_plan",
+		is_default: true,
 		account_id:
 			stringOrNull(account.account_id) ?? (key === "default" ? null : key),
 		account_structure: stringOrNull(account.structure),
@@ -905,6 +936,46 @@ export function buildAccountPlanRecord(
 			entitlement.scheduled_plan_change,
 		),
 	};
+}
+
+// Keys under `accounts` that alias another entry rather than name an account.
+const ACCOUNT_ALIAS_KEYS = new Set(["default"]);
+
+/**
+ * Every account the session lists, session default first, or null when the
+ * list is not complete: no readable default, or a listed entry that is not a
+ * readable account. The stream claims full inventory coverage, so a dropped
+ * entry would read as an account the user no longer has.
+ */
+export function buildAccountPlanRecords(
+	body: RawAccountsCheckBody | null | undefined,
+): RecordData[] | null {
+	const primary = buildAccountPlanRecord(body);
+	if (!primary) return null;
+	const records = [primary];
+	const seen = new Set<string>();
+	if (typeof primary.account_id === "string") seen.add(primary.account_id);
+	const entries = Object.entries(body?.accounts ?? {}).sort(([a], [b]) =>
+		a.localeCompare(b),
+	);
+	for (const [key, entry] of entries) {
+		if (ACCOUNT_ALIAS_KEYS.has(key)) continue;
+		const record = isAccountEntry(entry)
+			? buildAccountPlanRecord({
+					accounts: { [key]: entry },
+					account_ordering: [key],
+				})
+			: null;
+		if (!record || typeof record.account_id !== "string") return null;
+		if (seen.has(record.account_id)) continue;
+		seen.add(record.account_id);
+		records.push({
+			...record,
+			id: `account_plan:${record.account_id}`,
+			is_default: false,
+		});
+	}
+	return records;
 }
 
 // ─── Shared conversations ──────────────────────────────────────────────
@@ -968,6 +1039,64 @@ export function countBranchMessages(
 	).length;
 }
 
+/** The longest model slug a record may carry; the same bound as `messages.model_slug`. */
+export const MODEL_SLUG_MAX_LENGTH = 80;
+
+function isModelSlug(slug: unknown): slug is string {
+	return (
+		typeof slug === "string" &&
+		slug.length > 0 &&
+		slug.length <= MODEL_SLUG_MAX_LENGTH &&
+		pdppSafeText.safeParse(slug).success
+	);
+}
+
+/**
+ * An assistant reply is an assistant message that speaks to the user. It
+ * follows the `messages` stream's own classification of a node: an assistant
+ * node that `extractToolCalls` reads as a tool call, or that ends no turn
+ * (`end_turn: false`, which `messages` reports as finish_reason "tool_calls"),
+ * is an intermediate step, not a reply. `messages` has no further notion of
+ * visibility, so none is invented here.
+ */
+function isAssistantReply(message: ChatGptMessage | undefined): boolean {
+	return (
+		message?.author?.role === "assistant" &&
+		message.end_turn !== false &&
+		synthesizeToolCalls(message, false).length === 0
+	);
+}
+
+/**
+ * Count the assistant replies (see `isAssistantReply`) on the conversation's
+ * current branch per model slug, with the same branch walk as
+ * `countBranchMessages`. Only model names and counts leave this function: no
+ * message text, id or time. A reply without a usable slug (absent, over the
+ * length bound, or not safe text) adds no entry, so the counts can sum to less
+ * than the reply count. Returns null when we have no detail mapping.
+ */
+export function countBranchModels(
+	mapping: Record<string, ChatGptNode> | null | undefined,
+	currentNode: string | null | undefined,
+): Record<string, number> | null {
+	if (!(mapping && currentNode)) {
+		return null;
+	}
+	const counts = new Map<string, number>();
+	for (const { node } of flattenTreeCurrentBranch(mapping, currentNode)) {
+		const message = node?.message;
+		if (!isAssistantReply(message)) {
+			continue;
+		}
+		const slug = message?.metadata?.model_slug;
+		if (isModelSlug(slug)) {
+			counts.set(slug, (counts.get(slug) ?? 0) + 1);
+		}
+	}
+	// fromEntries defines own properties, so a slug named "__proto__" stays a key.
+	return Object.fromEntries(counts);
+}
+
 /**
  * Derive legacy projection metadata from the records retained for the current
  * branch. `messages` must be in provider root-to-tip order. Re-linking retained
@@ -1000,8 +1129,9 @@ export function reconcileEmittedBranchMessages(
 /**
  * Merge the list-endpoint and detail-endpoint views into a single conversation
  * record. Fields that only appear on detail (gizmo_id, workspace_id,
- * current_node, message_count_on_current_branch) fall back to list when
- * `detail` is null (conversations-only sync path).
+ * current_node, message_count_on_current_branch, model_counts) fall back to list when
+ * `detail` is null (the detail has not been read: a deferral, a failed read a later
+ * run retries, or a deleted conversation).
  */
 export function buildConversationRecord(
 	c: ConversationListItem,
@@ -1022,6 +1152,13 @@ export function buildConversationRecord(
 			? currentNode
 				? countBranchMessages(mapping, currentNode)
 				: 0
+			: null,
+		// null exactly when message_count_on_current_branch is null: no detail
+		// mapping was fetched, so the models are unknown (not "none").
+		model_counts: mapping
+			? currentNode
+				? countBranchModels(mapping, currentNode)
+				: {}
 			: null,
 		gizmo_id: (detail?.gizmo_id ?? c.gizmo_id) || null,
 	};

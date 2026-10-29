@@ -9,7 +9,7 @@
 	},
 	"connector_key": "google-maps",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
-	"version": "0.1.19",
+	"version": "0.1.22",
 	"display_name": "Google Maps Timeline Import",
 	"brand": {
 		"icon": "icon.svg",
@@ -29,7 +29,7 @@
 		"modality": "manual_or_upload",
 		"manual_or_upload": {
 			"label": "Google Maps Timeline export file",
-			"description": "Export Timeline data from the Google Maps mobile app or Android location settings, then provide the JSON export to PDPP.",
+			"description": "Export Timeline data from the Google Maps mobile app or Android location settings, then upload the JSON export.",
 			"acquisition_methods": [
 				{
 					"label": "Export from Android",
@@ -61,7 +61,7 @@
 			"import_dir_env_var": "GOOGLE_MAPS_TIMELINE_DIR",
 			"help_url": "https://support.google.com/maps/answer/6258979?co=GENIE.Platform%3DAndroid&hl=en",
 			"help_text": "Google Maps Timeline points and segments are not exposed by Google's documented Data Portability API. This source imports an owner-provided Timeline export file; no Google account sign-in is used.",
-			"large_file_fallback": "This connector accepts uploads up to the deployment limit shown above. There is currently no alternate upload path for larger files — ask your PDPP operator to raise the deployment limit if your export exceeds it.",
+			"large_file_fallback": "This connector accepts uploads up to the deployment limit shown above. There is currently no alternate upload path for larger files — ask your operator to raise the deployment limit if your export exceeds it.",
 			"validation": {
 				"kind": "google_maps_timeline",
 				"file_backed": true,
