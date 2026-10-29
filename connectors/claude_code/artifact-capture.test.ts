@@ -29,7 +29,14 @@ import {
 } from "@pdpp/collector-runtime";
 
 import type { ArtifactCaptureContext } from "../../packages/polyfill-connectors/src/artifact-capture.ts";
-import { buildAttachmentRecord, emitToolResultFile } from "./index.ts";
+import {
+	buildAttachmentRecord,
+	emitToolResultFile,
+	type LineEmitDeps,
+	makeJsonlObservations,
+	observeJsonlFields,
+	processJsonlLine,
+} from "./index.ts";
 import {
 	ATTACHMENT_PREVIEW_CHARS,
 	TOOL_RESULT_PREVIEW_CHARS,
@@ -319,5 +326,67 @@ describe("claude_code inline attachment artifact capture (tool_use/tool_result J
 		assert.equal(record.artifact_sha256, null);
 		assert.equal(record.content_preview, "still searchable inline");
 		assert.equal(validateRecord("attachments", record).ok, true);
+	});
+});
+
+/** Drive one assistant/user line through the production dispatcher. */
+async function emitMessageLine(
+	h: Harness,
+	content: unknown[],
+): Promise<Array<Record<string, unknown>>> {
+	const obj = {
+		message: { content },
+		sessionId: SESSION_ID,
+		timestamp: "2026-01-01T00:00:00.000Z",
+		type: "assistant",
+		uuid: "9a1b2c3d-4e5f-4071-8091-a1b2c3d4e5f9",
+	};
+	const emitted: Array<Record<string, unknown>> = [];
+	const deps: LineEmitDeps = {
+		captureContext: h.captureContext,
+		emitRecord: (stream, data) => {
+			if (stream === "attachments") {
+				emitted.push(data as Record<string, unknown>);
+			}
+			return Promise.resolve();
+		},
+		requested: new Map([
+			["messages", { name: "messages" }],
+			["attachments", { name: "attachments" }],
+		]),
+	};
+	const obs = makeJsonlObservations(null);
+	observeJsonlFields(obj, obs, null);
+	await processJsonlLine({ deps, obj, obs });
+	return emitted;
+}
+
+describe("claude_code tool blocks in message content", () => {
+	it("spools complete tool inputs and outputs far larger than the preview", async () => {
+		const h = makeHarness();
+		const command = "x".repeat(ATTACHMENT_PREVIEW_CHARS * 3);
+		const output = "y".repeat(ATTACHMENT_PREVIEW_CHARS * 3);
+		const records = await emitMessageLine(h, [
+			{ type: "tool_use", id: "toolu_1", name: "Bash", input: { command } },
+			{ type: "tool_result", tool_use_id: "toolu_1", content: output },
+		]);
+		assert.equal(records.length, 2);
+		const bodies = [JSON.stringify({ command }), output];
+		const spooled = await Promise.all(
+			records.map((record) =>
+				readFile(h.spool.pathFor(record.artifact_sha256 as string)),
+			),
+		);
+		for (const [index, record] of records.entries()) {
+			assert.equal(record.artifact_capture, "captured");
+			assert.deepEqual(
+				spooled[index],
+				Buffer.from(bodies[index] as string, "utf8"),
+			);
+			assert.equal(validateRecord("attachments", record).ok, true);
+		}
+		assert.equal(records[0]?.tool_name, "Bash");
+		assert.equal(records[1]?.tool_use_id, "toolu_1");
+		h.outbox.close();
 	});
 });
