@@ -57,7 +57,6 @@ export function createMetaFixtures(options = {}) {
 export const pageshimCase = {
  fixtures: createMetaFixtures(),
  scopes: ["instagram.profile", "instagram.following"],
- allScopes: ["profile", "posts", "post_likes", "following", "ads"].map(s => "instagram." + s),
  exportSummary: {count: 2, label: "records", details: {profile: 1, posts: 0, post_likes: 0, following: 1, ads: 0}},
  emptyExportSummary: {count: 0, label: "records", details: {profile: 0, posts: 0, post_likes: 0, following: 0, ads: 0}},
 };
