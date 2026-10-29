@@ -3669,7 +3669,7 @@ test("runMessagesAndConversationsWithDetail: batch-cached conversations skip per
 	);
 });
 
-test("runMessagesAndConversationsWithDetail: batch waves ramp to four and emit before the next bounded wave", async () => {
+test("runMessagesAndConversationsWithDetail: batch requests ramp to four in flight and stay a bounded distance ahead of emission", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	let activeBatchRequests = 0;
 	let maxActiveBatchRequests = 0;
@@ -3722,21 +3722,21 @@ test("runMessagesAndConversationsWithDetail: batch waves ramp to four and emit b
 
 	assert.equal(maxActiveBatchRequests, 4);
 	assert.deepEqual(
-		waveStarts.slice(0, 4).map((start) => start.emittedConversations),
-		[0, 0, 20, 20],
-		"each wave waits for the previous bounded wave to be emitted",
+		waveStarts.slice(0, 2).map((start) => start.emittedConversations),
+		[0, 0],
+		"the first two requests start before anything is emitted",
 	);
-	assert.equal(
-		waveStarts.find((start) => start.firstId === "convo-41")
-			?.emittedConversations,
-		40,
-		"the first three-request wave starts after the first 40 records emit",
+	const ahead = waveStarts.map(
+		(start) =>
+			Number(start.firstId.split("-")[1]) - 1 - start.emittedConversations,
 	);
-	assert.equal(
-		waveStarts.find((start) => start.firstId === "convo-101")
-			?.emittedConversations,
-		100,
-		"the next 40-detail wave starts after the previous 30 records emit",
+	assert.ok(
+		ahead.some((distance) => distance >= 20),
+		"requests run ahead of emission instead of waiting for it",
+	);
+	assert.ok(
+		ahead.every((distance) => distance < 50),
+		`requests stay within five chunks of emission: ${ahead.join(",")}`,
 	);
 	const synced = harness.protocolMessages
 		.filter(
@@ -3803,7 +3803,14 @@ test("runMessagesAndConversationsWithDetail: a short batch or served 429 resets 
 		{ random: () => 0, sleep: () => undefined },
 	);
 
-	assert.equal(starts.filter((start) => start.activeAtStart > 1).length, 5);
+	assert.equal(
+		starts.some(
+			(start) =>
+				start.activeAtStart > 1 && Number(start.firstId.split("-")[1]) < 41,
+		),
+		true,
+		"requests overlap before the pressure",
+	);
 	const afterPressure = starts.filter(
 		(start) => Number(start.firstId.split("-")[1]) >= 71,
 	);
@@ -3870,7 +3877,7 @@ test("runMessagesAndConversationsWithDetail: unavailable batch endpoint degrades
 	assert.deepEqual(
 		diagnostics.filter((line) => line.includes("batch conversation-detail")),
 		[
-			"batch conversation-detail fetch failed (kind=unknown); fetching the remaining conversation details one at a time",
+			"batch conversation-detail fetch failed (kind=unknown); fetching its conversation details one at a time",
 		],
 		"the downgrade is logged once, to diagnostics",
 	);
@@ -3882,6 +3889,73 @@ test("runMessagesAndConversationsWithDetail: unavailable batch endpoint degrades
 		),
 		false,
 		"the owner-facing progress stays free of technical detail",
+	);
+});
+
+test("runMessagesAndConversationsWithDetail: planned provider deferrals of batch requests do not turn batching off", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const batchCalls: string[][] = [];
+	const fetches: string[] = [];
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			fetches.push(path);
+			return Promise.resolve(
+				makeDetailOkForConversation(path.replace("/conversation/", "")),
+			);
+		},
+		fetchBatch: (ids: readonly string[]): Promise<ChatGptFetchResult[]> => {
+			batchCalls.push([...ids]);
+			// The circuit is open for the first three requests. Each is deferred
+			// before it reaches the endpoint.
+			if (batchCalls.length <= 3) {
+				return Promise.reject(
+					new ChatGptPlannedProviderBudgetDeferredError(
+						"ChatGPT provider budget gate closed (circuit_open); deferring remaining conversation details",
+						"circuit_open",
+					),
+				);
+			}
+			return Promise.resolve(ids.map((id) => makeDetailOkForConversation(id)));
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	const ids = Array.from({ length: 60 }, (_, index) => `convo-${index}`);
+
+	const coverage = await runMessagesAndConversationsWithDetail(
+		deps,
+		ids.map((id) => makeConvo({ id })),
+		makeEmitConversation(deps),
+		{ random: () => 0, sleep: () => undefined },
+	);
+
+	assert.deepEqual(
+		batchCalls,
+		Array.from({ length: 6 }, (_, chunk) =>
+			ids.slice(chunk * 10, chunk * 10 + 10),
+		),
+		"every chunk is still requested as a batch",
+	);
+	assert.deepEqual(
+		fetches,
+		ids.slice(0, 30).map((id) => `/conversation/${id}`),
+		"only the deferred chunks are fetched one at a time",
+	);
+	assert.deepEqual(coverage.hydratedKeys, ids);
+	assert.deepEqual(coverage.gapKeys, []);
+	assert.deepEqual(
+		diagnostics.filter((line) => line.includes("batch conversation-detail")),
+		[],
+		"a planned deferral is not reported as a batch endpoint failure",
 	);
 });
 
@@ -3930,7 +4004,7 @@ test("runMessagesAndConversationsWithDetail: batch fallback diagnostic carries n
 	assert.deepEqual(
 		diagnostics.filter((line) => line.includes("batch conversation-detail")),
 		[
-			"batch conversation-detail fetch failed (kind=parse); fetching the remaining conversation details one at a time",
+			"batch conversation-detail fetch failed (kind=parse); fetching its conversation details one at a time",
 		],
 	);
 });
