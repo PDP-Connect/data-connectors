@@ -137,7 +137,11 @@ if [ "\${1:-}" = "pull" ]; then
   while [ "$#" -gt 0 ]; do
     if [ "$1" = "--output" ]; then
       mkdir -p "$2"
-      printf '{"source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","connectors":[]}' > "$2/catalog.json"
+      if [ "\${MALFORMED_PREVIOUS:-}" = "1" ]; then
+        printf '{"source_commit":"bad","connectors":[]}' > "$2/catalog.json"
+      else
+        printf '{"source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","connectors":[]}' > "$2/catalog.json"
+      fi
       exit 0
     fi
     shift
@@ -320,6 +324,18 @@ test("a queued older source cannot replace the latest catalog", () => {
   try {
     assert.notEqual(run.result.status, 0);
     assert.match(run.result.stdout + run.result.stderr, /previous catalog source is not an ancestor/);
+    assert.equal(run.commands.some((line) => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), false);
+    assert.equal(run.commands.some((line) => line.startsWith("oras\ttag ")), false);
+    assert.equal(run.tagDigest(), previousCatalogDigest);
+  } finally {
+    run.cleanup();
+  }
+});
+
+test("a previous catalog without a valid source commit cannot move latest", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", MALFORMED_PREVIOUS: "1" });
+  try {
+    assert.notEqual(run.result.status, 0);
     assert.equal(run.commands.some((line) => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), false);
     assert.equal(run.commands.some((line) => line.startsWith("oras\ttag ")), false);
     assert.equal(run.tagDigest(), previousCatalogDigest);
