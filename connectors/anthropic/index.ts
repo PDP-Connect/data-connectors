@@ -1907,9 +1907,13 @@ export async function collectAnthropic({
 		/** The manifest has no recognized conversations source. That is not
 		 * an empty account, so conversations and messages are skipped. */
 		conversationsSourceMissing = false,
+		/** The conversations category has no complete contiguous partition. */
+		conversationsBoundaryMissing = false,
 		/** The manifest has no complete projects partition. That is not proof
 		 * of an empty account, so projects and project_documents are skipped. */
 		projectsBoundaryMissing = false,
+		/** An archive-wide manifest defect makes all export-derived streams uncertain. */
+		manifestArchiveIncomplete = false,
 	): Promise<void> {
 		const selectedConversations: Array<{
 			record: (typeof parsed.conversations)[number];
@@ -2054,18 +2058,48 @@ export async function collectAnthropic({
 			],
 		];
 		const skipped = new Set(conversationSkipped);
-		if (conversationsSourceMissing) {
-			for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
-				if (!requested.has(stream)) {
+		if (manifestArchiveIncomplete) {
+			for (const stream of [
+				ACCOUNT_PROFILE_STREAM,
+				CONVERSATIONS_STREAM,
+				MESSAGES_STREAM,
+				PROJECTS_STREAM,
+				PROJECT_DOCUMENTS_STREAM,
+			]) {
+				if (!requested.has(stream) || skipped.has(stream)) {
 					continue;
 				}
 				skipped.add(stream);
 				await emit({
 					type: "SKIP_RESULT",
 					stream,
-					reason: "export_conversations_missing",
+					reason: "export_manifest_incomplete",
 					message:
-						"The Claude export has no recognized conversations entry, so " +
+						"The Claude export manifest is incomplete or inconsistent, so " +
+						`${stream} was not imported and was not checkpointed.`,
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
+				});
+			}
+		} else if (conversationsSourceMissing || conversationsBoundaryMissing) {
+			for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
+				if (!requested.has(stream) || skipped.has(stream)) {
+					continue;
+				}
+				skipped.add(stream);
+				const missing = conversationsSourceMissing;
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: missing
+						? "export_conversations_missing"
+						: "export_conversations_incomplete",
+					message:
+						(missing
+							? "The Claude export has no recognized conversations entry, so "
+							: "The Claude export has no complete conversations partition, so ") +
 						`${stream} was not imported and was not checkpointed.`,
 					recovery_hint: {
 						action: "retry_on_connector_upgrade",
@@ -2074,9 +2108,9 @@ export async function collectAnthropic({
 				});
 			}
 		}
-		if (projectsBoundaryMissing) {
+		if (!manifestArchiveIncomplete && projectsBoundaryMissing) {
 			for (const stream of [PROJECTS_STREAM, PROJECT_DOCUMENTS_STREAM]) {
-				if (!requested.has(stream)) {
+				if (!requested.has(stream) || skipped.has(stream)) {
 					continue;
 				}
 				skipped.add(stream);
@@ -2888,12 +2922,16 @@ export async function collectAnthropic({
 			"light_metadata",
 			...knownUnconsumedCategories,
 		];
-		const partitionsContiguous = accountedCategories.every(
+		const archiveWidePartitionCategories = [
+			"light_metadata",
+			...knownUnconsumedCategories,
+		];
+		const partitionsContiguous = archiveWidePartitionCategories.every(
 			(category) =>
 				!dataFiles.some((part) => part.category === category) ||
 				categoryBoundary(category),
 		);
-		archiveComplete = completeMessages =
+		const manifestInventoryComplete =
 			manifest.version === "1.0" &&
 			Number.isSafeInteger(manifest.total_files) &&
 			manifest.total_files === dataFiles.length &&
@@ -2907,11 +2945,11 @@ export async function collectAnthropic({
 			) &&
 			new Set(dataFiles.map((part) => part.export_url)).size ===
 				dataFiles.length &&
-			new Set(dataFiles.map((part) => part.filename)).size ===
-				dataFiles.length &&
+			new Set(dataFiles.map((part) => part.filename)).size === dataFiles.length;
+		const archiveManifestComplete =
+			manifestInventoryComplete &&
 			partitionsContiguous &&
-			// Missing metadata is as incomplete as a partial metadata partition:
-			// conservatively withhold archive-wide proof, but keep record delivery.
+			// Missing metadata is as incomplete as a partial metadata partition.
 			categoryBoundary("light_metadata") &&
 			results.every(
 				(result) =>
@@ -2927,6 +2965,7 @@ export async function collectAnthropic({
 								entry.json !== null,
 						)),
 			);
+		archiveComplete = completeMessages = archiveManifestComplete;
 		completeMessages &&= conversationsManifestBoundary;
 		conversationsExact &&= conversationsManifestBoundary;
 		projectsExact &&= projectsManifestBoundary;
@@ -2976,6 +3015,8 @@ export async function collectAnthropic({
 			);
 			unaccountedEntries ||= classified.outOfScopeEntryNames.some(
 				(name) =>
+					result.category !== "conversations" &&
+					result.category !== "projects" &&
 					!knownUnconsumedCategories.has(result.category) &&
 					(result.category !== "light_metadata" ||
 						!knownUnconsumedMetadataFiles.has(name)),
@@ -3113,7 +3154,9 @@ export async function collectAnthropic({
 			exportBookkeeping,
 			unclassifiedEntries,
 			!conversationsSourceFound,
+			!conversationsManifestBoundary,
 			!projectsManifestBoundary,
+			!archiveManifestComplete || unaccountedEntries,
 		);
 	}
 }
