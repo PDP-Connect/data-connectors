@@ -1,0 +1,421 @@
+{
+	"_comment": "Synthetic, not captured. Shaped after the public ChatGPT data-export conversations.json layout and the content types parsers.ts handles. Every text, title, file name, tool name, url and email contains the token CANARY so tests can assert none reaches usage output.",
+	"title": "CANARY_TITLE secret conversation",
+	"create_time": 1760000000,
+	"update_time": 1760000720,
+	"mapping": {
+		"root": {
+			"id": "root",
+			"message": null,
+			"parent": null,
+			"children": ["sys"]
+		},
+		"sys": {
+			"id": "sys",
+			"message": {
+				"id": "m0",
+				"author": {
+					"role": "system",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000000,
+				"update_time": null,
+				"content": {
+					"content_type": "text",
+					"parts": ["CANARY_SYSTEM_PROMPT"]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"is_visually_hidden_from_conversation": true
+				},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "root",
+			"children": ["u1"]
+		},
+		"u1": {
+			"id": "u1",
+			"message": {
+				"id": "m1",
+				"author": {
+					"role": "user",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000060,
+				"update_time": null,
+				"content": {
+					"content_type": "text",
+					"parts": ["CANARY_USER_TEXT hello"]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"attachments": [
+						{
+							"id": "file-CANARYFILEID",
+							"name": "CANARY_secret_report.pdf",
+							"size": 123,
+							"mime_type": "application/pdf"
+						}
+					],
+					"user_email_canary": "canary.user@example.com"
+				},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "sys",
+			"children": ["a1", "a1alt"]
+		},
+		"a1": {
+			"id": "a1",
+			"message": {
+				"id": "m2",
+				"author": {
+					"role": "assistant",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000120,
+				"update_time": null,
+				"content": {
+					"content_type": "code",
+					"language": "unknown",
+					"text": "CANARY_SEARCH_QUERY"
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"model_slug": "gpt-4o"
+				},
+				"recipient": "web.run",
+				"channel": null
+			},
+			"parent": "u1",
+			"children": ["t1"]
+		},
+		"a1alt": {
+			"id": "a1alt",
+			"message": {
+				"id": "m3",
+				"author": {
+					"role": "assistant",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000180,
+				"update_time": null,
+				"content": {
+					"content_type": "text",
+					"parts": ["CANARY_ALT_BRANCH"]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"model_slug": "gpt-4o"
+				},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "u1",
+			"children": []
+		},
+		"t1": {
+			"id": "t1",
+			"message": {
+				"id": "m4",
+				"author": {
+					"role": "tool",
+					"name": "web.run",
+					"metadata": {}
+				},
+				"create_time": 1760000240,
+				"update_time": null,
+				"content": {
+					"content_type": "tether_browsing_display",
+					"result": "CANARY_WEB_RESULT",
+					"summary": "CANARY_WEB_SUMMARY"
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"search_result_groups": [
+						{
+							"domain": "canary-domain.example",
+							"entries": [
+								{
+									"title": "CANARY_RESULT_TITLE",
+									"url": "https://canary-domain.example/x"
+								}
+							]
+						}
+					]
+				},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "a1",
+			"children": ["a2"]
+		},
+		"a2": {
+			"id": "a2",
+			"message": {
+				"id": "m5",
+				"author": {
+					"role": "assistant",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000300,
+				"update_time": null,
+				"content": {
+					"content_type": "text",
+					"parts": ["CANARY_ASSISTANT_ANSWER"]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"model_slug": "gpt-4o",
+					"citations": [
+						{
+							"metadata": {
+								"title": "CANARY_CITATION"
+							}
+						}
+					]
+				},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "t1",
+			"children": ["u2"]
+		},
+		"u2": {
+			"id": "u2",
+			"message": {
+				"id": "m6",
+				"author": {
+					"role": "user",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000360,
+				"update_time": null,
+				"content": {
+					"content_type": "multimodal_text",
+					"parts": [
+						{
+							"content_type": "image_asset_pointer",
+							"asset_pointer": "file-service://CANARY_ASSET",
+							"size_bytes": 1000,
+							"width": 10,
+							"height": 10
+						},
+						"CANARY_SECOND_PROMPT"
+					]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "a2",
+			"children": ["a3"]
+		},
+		"a3": {
+			"id": "a3",
+			"message": {
+				"id": "m7",
+				"author": {
+					"role": "assistant",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000420,
+				"update_time": null,
+				"content": {
+					"content_type": "code",
+					"language": "python",
+					"text": "print('CANARY_CODE')"
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"model_slug": "gpt-4o"
+				},
+				"recipient": "python",
+				"channel": null
+			},
+			"parent": "u2",
+			"children": ["t2"]
+		},
+		"t2": {
+			"id": "t2",
+			"message": {
+				"id": "m8",
+				"author": {
+					"role": "tool",
+					"name": "python",
+					"metadata": {}
+				},
+				"create_time": 1760000480,
+				"update_time": null,
+				"content": {
+					"content_type": "execution_output",
+					"text": "CANARY_STDOUT"
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "a3",
+			"children": ["a4"]
+		},
+		"a4": {
+			"id": "a4",
+			"message": {
+				"id": "m9",
+				"author": {
+					"role": "assistant",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000540,
+				"update_time": null,
+				"content": {
+					"content_type": "thoughts",
+					"thoughts": [
+						{
+							"summary": "CANARY_THOUGHT_SUMMARY",
+							"content": "CANARY_THOUGHT"
+						}
+					]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"model_slug": "o3"
+				},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "t2",
+			"children": ["a5"]
+		},
+		"a5": {
+			"id": "a5",
+			"message": {
+				"id": "m10",
+				"author": {
+					"role": "assistant",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000600,
+				"update_time": null,
+				"content": {
+					"content_type": "text",
+					"parts": ["CANARY_FINAL"]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"model_slug": "o3"
+				},
+				"recipient": "acme_canaryco__jit_plugin.getCustomer",
+				"channel": null
+			},
+			"parent": "a4",
+			"children": ["t3"]
+		},
+		"t3": {
+			"id": "t3",
+			"message": {
+				"id": "m11",
+				"author": {
+					"role": "tool",
+					"name": "acme_canaryco__jit_plugin.getCustomer",
+					"metadata": {}
+				},
+				"create_time": 1760000660,
+				"update_time": null,
+				"content": {
+					"content_type": "text",
+					"parts": ["CANARY_PLUGIN_RESPONSE"]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "a5",
+			"children": ["a6"]
+		},
+		"a6": {
+			"id": "a6",
+			"message": {
+				"id": "m12",
+				"author": {
+					"role": "assistant",
+					"name": null,
+					"metadata": {}
+				},
+				"create_time": 1760000720,
+				"update_time": null,
+				"content": {
+					"content_type": "text",
+					"parts": ["CANARY_LAST"]
+				},
+				"status": "finished_successfully",
+				"end_turn": null,
+				"weight": 1.0,
+				"metadata": {
+					"model_slug": "CANARY Model Name!"
+				},
+				"recipient": "all",
+				"channel": null
+			},
+			"parent": "t3",
+			"children": []
+		}
+	},
+	"moderation_results": [],
+	"current_node": "a6",
+	"plugin_ids": null,
+	"conversation_id": "c0ffee00-0000-4000-8000-00000000ca1a",
+	"conversation_template_id": "g-p-CANARYPROJECT123",
+	"gizmo_id": "g-p-CANARYPROJECT123",
+	"gizmo_type": "snorlax",
+	"is_archived": false,
+	"is_starred": true,
+	"safe_urls": ["https://canary-domain.example/x"],
+	"blocked_urls": [],
+	"default_model_slug": "auto",
+	"conversation_origin": null,
+	"voice": null,
+	"async_status": null,
+	"disabled_tool_ids": [],
+	"is_do_not_remember": false,
+	"memory_scope": "global_enabled",
+	"workspace_id": null,
+	"sugar_item_id": null
+}
