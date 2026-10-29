@@ -24,6 +24,9 @@ jobs:
       - name: Check packed library manifest projection
         run: npm run polyfill-library-metadata:check
 
+      - name: Test PageShim port profiles
+        run: node --test scripts/pageshim/port-profile.test.mjs
+
       - name: Check permanent frozen scope IDs, schemas and generated docs
         run: npm run legacy-shapes:check && npm run legacy-shapes:test
 

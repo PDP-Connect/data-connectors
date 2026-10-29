@@ -726,3 +726,238 @@ describe("P2-1 — version agreement", () => {
 		);
 	});
 });
+
+function portIsolationFixture(t, physical = true) {
+	const cwd = mkdtempSync(join(tmpdir(), "port-identity-"));
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	const put = (path, content) => {
+		mkdirSync(dirname(join(cwd, path)), { recursive: true });
+		writeFileSync(join(cwd, path), content);
+	};
+	const git = (...args) =>
+		execFileSync("git", args, {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		}).trim();
+	git("init");
+	git("config", "user.email", "fixture@example.invalid");
+	git("config", "user.name", "Fixture");
+	git("config", "commit.gpgsign", "false");
+	git("config", "core.hooksPath", join(cwd, "empty-hooks"));
+	mkdirSync(join(cwd, "empty-hooks"));
+	for (const path of [
+		"LICENSE",
+		"NOTICE",
+		"package-lock.json",
+		"packages/polyfill-connectors/package-lock.json",
+		"scripts/build-connector-oci-artifact.mjs",
+		"scripts/connector-host-runtime-contract.mjs",
+	])
+		put(path, "");
+	for (const path of [
+		"package.json",
+		"packages/polyfill-connectors/package.json",
+		"packages/connector-installer-core/package.json",
+	])
+		put(path, "{}");
+	put(
+		"scripts/connector-publish-allowlist.mjs",
+		"export const CONNECTOR_PUBLISH_INVENTORY=[];",
+	);
+	put(
+		"scripts/pageshim/capabilities.mjs",
+		"export const isPageShimCapable=()=>true;",
+	);
+	for (const path of [
+		"attach-to-artifact.mjs",
+		"build.mjs",
+		"runtime.ts",
+		"shims/path.js",
+		"shims/process.js",
+		"shims/url.js",
+	])
+		put("scripts/pageshim/" + path, "");
+	put(
+		"scripts/pageshim/shims/anthropic-export.ts",
+		'export {value} from "./crypto.js";',
+	);
+	put("scripts/pageshim/shims/crypto.js", "export const value=1;");
+	put(
+		"scripts/pageshim/shims/buffer.js",
+		'export {buffer} from "./buffer-child.js";',
+	);
+	put("scripts/pageshim/shims/buffer-child.js", "export const buffer=1;");
+	for (const name of ["anthropic", "other"]) {
+		put(
+			"connectors/" + name + "/manifest.json",
+			JSON.stringify({
+				connector_key: name,
+				source: { id: name },
+				mobile: { pageshim: {} },
+				streams: [],
+			}),
+		);
+		put(
+			"connectors/" + name + "/index.ts",
+			name === "anthropic" ? 'import "fs";' : "export const value=0;",
+		);
+	}
+	const empty = {
+		schemaVersion: 1,
+		connector: "other",
+		importer: null,
+		shim: null,
+		modules: [],
+		inject: [],
+	};
+	const selected = {
+		schemaVersion: 1,
+		connector: "anthropic",
+		importer: "connectors/anthropic/index.ts",
+		shim: "scripts/pageshim/shims/anthropic-export.ts",
+		modules: ["fs"],
+		inject: ["scripts/pageshim/shims/buffer.js"],
+	};
+	if (physical) {
+		put(
+			"scripts/pageshim/port-profile.mjs",
+			readFileSync(new URL("./pageshim/port-profile.mjs", import.meta.url)),
+		);
+		put("scripts/pageshim/ports/other.json", JSON.stringify(empty));
+		put("scripts/pageshim/ports/anthropic.json", JSON.stringify(selected));
+	}
+	const commit = () => {
+		git("add", "-A");
+		git("commit", "--allow-empty", "-qm", "fixture");
+		return git("rev-parse", "HEAD");
+	};
+	return { cwd, put, commit, empty, selected };
+}
+it("PageShim port isolation ignores unselected profile and port dependencies", async (t) => {
+	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
+	const f = portIsolationFixture(t),
+		base = f.commit();
+	const hash = (commit, manifest) =>
+		artifactInputHash({ commit, manifest, cwd: f.cwd });
+	const before = await hash(base, "other"),
+		owner = await hash(base, "anthropic");
+	f.put(
+		"scripts/pageshim/shims/anthropic-export.ts",
+		'export {value} from "./crypto.js"; export const extra=2;',
+	);
+	f.put(
+		"scripts/pageshim/ports/anthropic.json",
+		JSON.stringify(f.selected, null, 2),
+	);
+	const next = f.commit();
+	assert.equal(await hash(next, "other"), before);
+	assert.notEqual(await hash(next, "anthropic"), owner);
+});
+it("PageShim port isolation hashes selected inject transitive closure and shared crypto", async (t) => {
+	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
+	const f = portIsolationFixture(t),
+		hash = (commit, manifest) =>
+			artifactInputHash({ commit, manifest, cwd: f.cwd });
+	const base = f.commit(),
+		owner = await hash(base, "anthropic"),
+		other = await hash(base, "other");
+	f.put("scripts/pageshim/shims/buffer-child.js", "export const buffer=2;");
+	const inject = f.commit();
+	assert.notEqual(await hash(inject, "anthropic"), owner);
+	assert.equal(await hash(inject, "other"), other);
+	f.put("scripts/pageshim/shims/crypto.js", "export const value=2;");
+	const shared = f.commit();
+	assert.notEqual(await hash(shared, "other"), other);
+});
+it("PageShim port isolation rejects missing malformed and mixed layouts", async (t) => {
+	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
+	for (const kind of ["missing", "malformed", "noresolver"]) {
+		const f = portIsolationFixture(t);
+		if (kind === "missing")
+			rmSync(join(f.cwd, "scripts/pageshim/ports/other.json"));
+		if (kind === "malformed") f.put("scripts/pageshim/ports/other.json", "{");
+		if (kind === "noresolver")
+			rmSync(join(f.cwd, "scripts/pageshim/port-profile.mjs"));
+		await assert.rejects(
+			artifactInputHash({ commit: f.commit(), manifest: "other", cwd: f.cwd }),
+			/profile|layout|resolver/,
+		);
+	}
+});
+it("PageShim port isolation preserves legacy history and selected profile identity", async (t) => {
+	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
+	const f = portIsolationFixture(t, false),
+		hash = (commit) =>
+			artifactInputHash({ commit, manifest: "other", cwd: f.cwd });
+	const base = f.commit(),
+		before = await hash(base);
+	f.put(
+		"scripts/pageshim/shims/anthropic-export.ts",
+		'export {value} from "./crypto.js"; export const extra=3;',
+	);
+	assert.notEqual(await hash(f.commit()), before);
+	const modern = portIsolationFixture(t),
+		b = modern.commit();
+	const prior = await artifactInputHash({
+		commit: b,
+		manifest: "other",
+		cwd: modern.cwd,
+	});
+	modern.put(
+		"scripts/pageshim/ports/other.json",
+		JSON.stringify(modern.empty, null, 2),
+	);
+	assert.notEqual(
+		await artifactInputHash({
+			commit: modern.commit(),
+			manifest: "other",
+			cwd: modern.cwd,
+		}),
+		prior,
+	);
+});
+
+it("PageShim port isolation tracks selected shim children and shared resolver while rejecting missing dependencies", async (t) => {
+	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
+	const f = portIsolationFixture(t),
+		hash = (commit, manifest) =>
+			artifactInputHash({ commit, manifest, cwd: f.cwd });
+	f.put(
+		"scripts/pageshim/shims/anthropic-export.ts",
+		'export {value} from "./port-child.js";',
+	);
+	f.put("scripts/pageshim/shims/port-child.js", "export const value=1;");
+	const base = f.commit(),
+		owner = await hash(base, "anthropic"),
+		other = await hash(base, "other");
+	f.put("scripts/pageshim/shims/port-child.js", "export const value=2;");
+	const child = f.commit();
+	assert.notEqual(await hash(child, "anthropic"), owner);
+	assert.equal(await hash(child, "other"), other);
+	const resolver = readFileSync(
+		join(f.cwd, "scripts/pageshim/port-profile.mjs"),
+		"utf8",
+	);
+	f.put(
+		"scripts/pageshim/port-profile.mjs",
+		resolver + "\n// shared resolver revision\n",
+	);
+	assert.notEqual(await hash(f.commit(), "other"), other);
+	for (const path of [
+		"scripts/pageshim/shims/anthropic-export.ts",
+		"scripts/pageshim/shims/buffer.js",
+		"scripts/pageshim/shims/buffer-child.js",
+	]) {
+		const missing = portIsolationFixture(t);
+		rmSync(join(missing.cwd, path));
+		await assert.rejects(
+			artifactInputHash({
+				commit: missing.commit(),
+				manifest: "anthropic",
+				cwd: missing.cwd,
+			}),
+			/cannot read|cannot resolve/,
+		);
+	}
+});

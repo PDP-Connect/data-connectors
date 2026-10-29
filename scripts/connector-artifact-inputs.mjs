@@ -70,6 +70,47 @@ const DYNAMIC_LOCAL_IMPORT = /\bimport\s*\(\s*(["'])(\.{1,2}\/[^"]*?)\1/g;
 
 export class ArtifactInputError extends Error {}
 
+const PORT_RESOLVER = "scripts/pageshim/port-profile.mjs";
+const PORT_DIRECTORY = "scripts/pageshim/ports";
+const CONNECTOR_PORT_INPUTS = new Set([
+  "scripts/pageshim/shims/anthropic-export.ts",
+  "scripts/pageshim/shims/buffer.js",
+]);
+async function selectedPortAtCommit(commit, connector, options) {
+  const source = readFileAtCommit(commit, PORT_RESOLVER, options);
+  if (source === null) {
+    const profiles = execFileSync(
+      "git",
+      ["ls-tree", "-r", "--name-only", commit, "--", PORT_DIRECTORY],
+      { cwd: options.cwd, encoding: "utf8", maxBuffer: GIT_SHOW_MAX_BUFFER },
+    ).trim();
+    if (profiles)
+      throw new ArtifactInputError(
+        "incomplete PageShim port layout: profiles exist without resolver at " +
+          commit,
+      );
+    return null;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "pageshim-port-resolver-"));
+  try {
+    const path = join(dir, "port-profile.mjs");
+    writeFileSync(path, source);
+    const module = await import(pathToFileURL(path).href);
+    if (typeof module.resolvePageShimPortProfile !== "function")
+      throw new Error("missing resolver export");
+    const selected = module.resolvePageShimPortProfile(connector, (path) =>
+      readFileAtCommit(commit, path, options),
+    );
+    return { selected, source };
+  } catch (error) {
+    throw new ArtifactInputError(
+      "invalid PageShim port profile at " + commit + ": " + error.message,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function readFileAtCommit(commit, path, { cwd }) {
   try {
     return execFileSync("git", ["show", `${commit}:${path}`], {
@@ -408,7 +449,43 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       "scripts/pageshim/capabilities.mjs#eligibility",
       await pageShimEligibilityAtCommit(commit, profile, options),
     );
-    for (const path of PAGE_SHIM_SHARED_INPUTS) {
+    const physical = await selectedPortAtCommit(commit, manifest, options);
+    const sharedInputs = physical
+      ? PAGE_SHIM_SHARED_INPUTS.filter((path) => !CONNECTOR_PORT_INPUTS.has(path))
+      : PAGE_SHIM_SHARED_INPUTS;
+    if (physical) {
+      files.set(PORT_RESOLVER, physical.source);
+      files.set(
+        physical.selected.path,
+        readFileAtCommit(commit, physical.selected.path, options),
+      );
+      // Audited createHash resolution is dynamic in the builder, so its bytes
+      // must remain shared even when no connector-specific export shim imports it.
+      addLocalImportClosure(
+        commit,
+        "scripts/pageshim/shims/crypto.js",
+        files,
+        options,
+        new Set(),
+        consentRemap ?? undefined,
+      );
+      if (!physical.selected.empty) {
+        for (const path of [
+          physical.selected.shim,
+          ...physical.selected.inject,
+        ]) {
+          addLocalImportClosure(
+            commit,
+            path,
+            files,
+            options,
+            new Set(["scripts/pageshim/capabilities.mjs", CONSENT_RENDERER]),
+            consentRemap ?? undefined,
+          );
+        }
+      }
+    }
+    for (const path of sharedInputs) {
       const content = readFileAtCommit(commit, path, options);
       // Older commits can contain PageShim entries without this OCI
       // packaging step; encode that prior state so it compares as a real
