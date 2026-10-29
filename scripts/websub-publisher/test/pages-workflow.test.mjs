@@ -30,6 +30,31 @@ test("release completion and site updates share the release queue and assemble t
   assert.equal(steps.find((step) => step.uses?.startsWith("actions/upload-pages-artifact@")).with.path, "registry-site");
 });
 
+test("the event gate accepts the trusted workflow path forms and rejects other sources", () => {
+  const expression = pages.jobs["publication-gate"].if.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+  const evaluate = Function("github", `return (${expression});`);
+  const github = {
+    repository: "PDP-Connect/data-connectors", ref: "refs/heads/main", event_name: "workflow_run",
+    event: { workflow_run: { path: "", head_repository: { full_name: "PDP-Connect/data-connectors" }, head_branch: "main" } },
+  };
+  const run = github.event.workflow_run;
+  for (const suffix of ["", "@main", "@refs/heads/main"]) {
+    run.path = `.github/workflows/publish-polyfill-connectors.yml${suffix}`;
+    assert.equal(evaluate(github), true, suffix);
+  }
+  for (const suffix of ["@evil", ".other", "@refs/heads/feature"]) {
+    run.path = `.github/workflows/publish-polyfill-connectors.yml${suffix}`;
+    assert.equal(evaluate(github), false, suffix);
+  }
+  run.path = ".github/workflows/publish-polyfill-connectors.yml";
+  run.head_repository.full_name = "someone/else";
+  assert.equal(evaluate(github), false);
+  run.head_repository.full_name = github.repository;
+  run.head_branch = "feature";
+  assert.equal(evaluate(github), false);
+  assert.equal(evaluate({ ...github, event_name: "push", event: {} }), true);
+});
+
 test("a publish hint follows a successful full-site deploy and is disabled until enabled", () => {
   assert.equal(pages.jobs.deploy.needs, "build");
   assert.deepEqual(pages.jobs.notify.needs, ["build", "deploy"]);
