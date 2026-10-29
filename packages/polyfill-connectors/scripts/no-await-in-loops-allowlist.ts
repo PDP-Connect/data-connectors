@@ -2709,14 +2709,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_maps/archive-stream.test.ts",
-			line: 201,
+			line: 202,
 			column: 4,
 			category: "dependent_file_cursor",
 			note: "large-path oracle writes one ordered JSON array to a shared stream",
 		},
 		{
 			path: "connectors/google_maps/archive-stream.test.ts",
-			line: 246,
+			line: 249,
 			column: 5,
 			category: "dependent_file_cursor",
 			note: 'once(out, "drain"): ordered fixture writes wait for stream backpressure to clear',
