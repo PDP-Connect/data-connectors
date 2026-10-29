@@ -234,15 +234,17 @@ async function runWithFakeSlackdump(options: {
 				type: "START",
 				...(options.state ? { state: options.state } : {}),
 				scope: {
-					streams: options.streams ? options.streams.map(name => ({ name })) : [
-						{
-							name: "messages",
-							...(options.grantChannels === undefined
-								? {}
-								: { resources: [...options.grantChannels] }),
-						},
-						{ name: "channels" },
-					],
+					streams: options.streams
+						? options.streams.map((name) => ({ name }))
+						: [
+								{
+									name: "messages",
+									...(options.grantChannels === undefined
+										? {}
+										: { resources: [...options.grantChannels] }),
+								},
+								{ name: "channels" },
+							],
 				},
 			},
 		});
@@ -497,6 +499,43 @@ test("a grant and an allowlist with no channel in common stop the run instead of
 	);
 	assert.deepEqual(outcome.recordChannels("messages"), []);
 });
+
+for (const types of [undefined, "public,private,im,mpim"]) {
+	const label = types === undefined ? "default" : "explicit";
+	test(`all-types ${label} intersects overlapping grant and allowlist`, async () => {
+		const outcome = await runWithFakeSlackdump({
+			allowlist: "C0PUBLIC2,G0PRIVATE1",
+			archiveEverything: true,
+			grantChannels: ["C0PUBLIC1", "C0PUBLIC2"],
+			types,
+		});
+		assert.equal(outcome.done?.status, "succeeded");
+		assert.deepEqual(positionalChannels(outcome.archiveCalls[0] ?? []), [
+			"C0PUBLIC2",
+		]);
+		assert.deepEqual(outcome.recordChannels("messages"), ["C0PUBLIC2"]);
+		assert.deepEqual(outcome.recordChannels("channels"), ["C0PUBLIC2"]);
+		assertNothingOutsideWasTouched(outcome, [
+			"C0PUBLIC1",
+			...PRIVATE,
+			...DIRECT,
+			...GROUP_DIRECT,
+		]);
+	});
+	test(`all-types ${label} refuses disjoint grant and allowlist before reading`, async () => {
+		const outcome = await runWithFakeSlackdump({
+			allowlist: "C0PUBLIC2",
+			grantChannels: ["C0PUBLIC1"],
+			types,
+		});
+		assert.equal(outcome.done?.status, "failed");
+		assert.match(outcome.done?.error?.message ?? "", /every list of channels/);
+		assert.equal(outcome.archiveCalls.length, 0);
+		assert.equal(outcome.resumeCalls.length, 0);
+		assert.deepEqual(outcome.recordChannels("messages"), []);
+		assert.deepEqual(outcome.state, {});
+	});
+}
 
 test("a grant that names no channel is no restriction, not an empty one", async () => {
 	const outcome = await runWithFakeSlackdump({

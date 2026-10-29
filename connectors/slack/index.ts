@@ -3413,7 +3413,8 @@ export async function runFilesStream(deps: StreamDeps): Promise<void> {
 		// a latest outside observation even if an older allowed share exists.
 		const allowed = deps.channelScope;
 		rows = rows.filter(
-			(row) => typeof row.channel_id === "string" && allowed.has(row.channel_id),
+			(row) =>
+				typeof row.channel_id === "string" && allowed.has(row.channel_id),
 		);
 	}
 	const { considered, covered } = await runFingerprintedFullSync(
@@ -4167,28 +4168,35 @@ if (isMainModule(import.meta.url)) {
 
 			const childEnv = buildChildEnv(token, cookie);
 			const msgResFilter = resFilters.get("messages");
-			const explicitChannels: string[] = [
-				...(msgResFilter ? [...msgResFilter] : []),
-				...opts.CHANNEL_ALLOWLIST,
+			const channelRestrictions = [
+				...(msgResFilter ? [[...msgResFilter]] : []),
+				...(opts.CHANNEL_ALLOWLIST.length > 0 ? [opts.CHANNEL_ALLOWLIST] : []),
 			];
-			// A narrowed CHANNEL_TYPES picks the channels before anything is
-			// downloaded; the default (every type) leaves the run as it was.
+			const explicitChannels = channelsForRun(
+				channelRestrictions,
+				channelRestrictions.flat(),
+			);
+			if (channelRestrictions.length > 0 && explicitChannels.length === 0) {
+				throw new ChannelTypeError(
+					"no_channels",
+					"No channel is in every list of channels this run names, so nothing was downloaded.",
+				);
+			}
+			// Grants and the allowlist restrict every type selection. Only a
+			// narrowed type selection needs the provider's channel listing.
 			const selectedTypes = parseChannelTypes(opts.CHANNEL_TYPES);
 			const typeScope = narrowsChannelTypes(selectedTypes)
 				? await resolveTypedChannelScope({
 						childEnv,
 						cookie,
 						progress,
-						restrictions: [
-							...(msgResFilter ? [[...msgResFilter]] : []),
-							...(opts.CHANNEL_ALLOWLIST.length > 0
-								? [opts.CHANNEL_ALLOWLIST]
-								: []),
-						],
+						restrictions: channelRestrictions,
 						selected: selectedTypes,
 						token,
 					})
-				: null;
+				: channelRestrictions.length > 0
+					? { channels: explicitChannels, allowed: new Set(explicitChannels) }
+					: null;
 			const positionalChannels: string[] = typeScope
 				? typeScope.channels
 				: explicitChannels;
