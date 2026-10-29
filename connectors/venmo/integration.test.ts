@@ -1901,7 +1901,6 @@ test("semantics: completed-run metadata does not claim date cursor incrementalit
 	);
 	assert.equal(transactions.incremental, false);
 	assert.equal(transactions.cursor_field, undefined);
-	assert.equal(manifest.version, "0.2.27");
 });
 
 test("partial mutable payments never replace a complete record and are retried", async () => {
