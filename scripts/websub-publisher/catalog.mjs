@@ -43,34 +43,3 @@ export function atom(record, { topic, hub }) {
     : "";
   return `<?xml version="1.0" encoding="utf-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><id>${escape(topic)}</id><title>PDPP connector catalog</title><author><name>PDP-Connect</name></author><updated>${escape(updated)}</updated><link rel="self" href="${escape(topic)}"/><link rel="hub" href="${escape(hub)}"/>${entry}</feed>`;
 }
-export async function boundedJSON(request) {
-  if (request.headers.get("content-type")?.split(";")[0].trim() !== "application/json")
-    throw new HttpError(415, "JSON required");
-  if (Number(request.headers.get("content-length")) > 2048) throw new HttpError(413, "body too large");
-  if (!request.body) throw new HttpError(400, "missing body");
-  const reader = request.body.getReader();
-  let length = 0;
-  const chunks = [];
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.length;
-      if (length > 2048) {
-        await reader.cancel();
-        throw new HttpError(413, "body too large");
-      }
-      chunks.push(value);
-    }
-    const bytes = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  } catch (e) {
-    if (e instanceof HttpError) throw e;
-    throw new HttpError(400, "invalid JSON");
-  }
-}

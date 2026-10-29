@@ -89,10 +89,6 @@ on:
         description: "Regenerate the signed catalog without publishing a connector."
         type: boolean
         default: false
-      recover-latest:
-        description: "Re-declare the exact verified latest catalog; no new build. Run on main with dry-run off."
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -107,6 +103,7 @@ concurrency:
   # that publish once per release.
   group: publish-polyfill-connectors
   cancel-in-progress: false
+  queue: max
 
 jobs:
   prepare:
@@ -148,7 +145,7 @@ jobs:
   publish:
     name: Publish ${{ matrix.connector }} to GHCR
     needs: prepare
-    if: ${{ !inputs.catalog-only && !inputs.recover-latest && needs.prepare.outputs.has-publishable-changes == 'true' }}
+    if: ${{ !inputs.catalog-only && needs.prepare.outputs.has-publishable-changes == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -611,7 +608,7 @@ jobs:
     # actually in GHCR, so a connector whose newest version failed keeps its last
     # published version. The run still fails, because publish failed. A cancelled
     # publish is not retried here: its outcome is unknown.
-    if: ${{ always() && needs.prepare.result == 'success' && (inputs.catalog-only || inputs.recover-latest || (github.ref == 'refs/heads/main' && !inputs.dry-run && (needs.publish.result == 'success' || needs.publish.result == 'failure') && needs.prepare.outputs.has-publishable-changes == 'true')) }}
+    if: ${{ always() && needs.prepare.result == 'success' && (inputs.catalog-only || (github.ref == 'refs/heads/main' && !inputs.dry-run && (needs.publish.result == 'success' || needs.publish.result == 'failure') && needs.prepare.outputs.has-publishable-changes == 'true')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -645,13 +642,6 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Check catalog publisher configuration
-        if: ${{ github.ref == 'refs/heads/main' && !inputs.dry-run }}
-        env:
-          CATALOG_PUBLISHER_URL: ${{ vars.CATALOG_PUBLISHER_URL }}
-          CATALOG_PUBLISHER_AUDIENCE: ${{ vars.CATALOG_PUBLISHER_AUDIENCE }}
-        run: node scripts/websub-publisher/declare-catalog-ready.mjs --check-config
-
       - name: Install dependencies
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
@@ -675,10 +665,8 @@ jobs:
           cosign-release: "v3.1.3"
 
       - name: Publish and verify the connector catalog
-        if: ${{ github.ref == 'refs/heads/main' && !inputs.dry-run && !inputs.recover-latest }}
+        if: ${{ github.ref == 'refs/heads/main' && !inputs.dry-run }}
         env:
-          CATALOG_PUBLISHER_URL: ${{ vars.CATALOG_PUBLISHER_URL }}
-          CATALOG_PUBLISHER_AUDIENCE: ${{ vars.CATALOG_PUBLISHER_AUDIENCE }}
           GH_TOKEN: ${{ github.token }}
           GITHUB_ACTOR: ${{ github.actor }}
           # The generator sends this only to the token endpoint. With it, GHCR answers a
@@ -709,6 +697,12 @@ jobs:
                 --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com
               oras pull "ghcr.io/pdp-connect/connector-catalog@${PREVIOUS_DIGEST}" --output "$CATALOG_DIR/previous"
+              # A queued older run must not replace a catalog from a newer commit.
+              PREVIOUS_SOURCE="$(node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).source_commit; if (typeof s !== "string" || !/^[0-9a-f]{40}$/.test(s)) process.exit(1); console.log(s)' "$CATALOG_DIR/previous/catalog.json")"
+              if ! git merge-base --is-ancestor "$PREVIOUS_SOURCE" "$GITHUB_SHA"; then
+                echo "::error::previous catalog source is not an ancestor of this run; refusing to replace it"
+                exit 1
+              fi
               PREVIOUS_ARGS=(--previous-catalog "$CATALOG_DIR/previous/catalog.json")
               ;;
             absent) ;;
@@ -737,15 +731,3 @@ jobs:
               --certificate-oidc-issuer https://token.actions.githubusercontent.com
           done
           oras tag "ghcr.io/pdp-connect/connector-catalog@${DIGEST}" latest
-          # Only after signing, verifying both formats, and tagging THE pushed digest.
-          node "${GITHUB_WORKSPACE}/scripts/websub-publisher/declare-catalog-ready.mjs" \
-            --digest "$DIGEST" --catalog "$CATALOG_DIR/catalog.json"
-
-      - name: Recover the ready declaration for the verified latest catalog
-        if: ${{ github.ref == 'refs/heads/main' && !inputs.dry-run && inputs.recover-latest }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          CATALOG_PUBLISHER_URL: ${{ vars.CATALOG_PUBLISHER_URL }}
-          CATALOG_PUBLISHER_AUDIENCE: ${{ vars.CATALOG_PUBLISHER_AUDIENCE }}
-        run: bash scripts/websub-publisher/recover-catalog-ready.sh

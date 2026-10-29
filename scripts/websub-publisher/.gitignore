@@ -1,5 +1,0 @@
-node_modules/
-.npm-cache/
-.runtime/
-dist/
-wrangler.toml

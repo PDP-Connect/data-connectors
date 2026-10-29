@@ -1,14 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-export const ISSUER = "https://token.actions.githubusercontent.com";
-export const JWKS_URL = `${ISSUER}/.well-known/jwks`;
-export const WORKFLOW =
-  "PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main";
 export const REPOSITORY = "ghcr.io/pdp-connect/connector-catalog";
-export const OWNER_ID = "306241814";
-export const REPOSITORY_ID = "1304197983";
-export const SUBJECT = `repo:PDP-Connect@${OWNER_ID}/data-connectors@${REPOSITORY_ID}:ref:refs/heads/main`;
+export const TOPIC_URL = "https://registry.pdpp.dev/catalog/updates.atom";
+export const HUB_URL = "https://websubhub.com/hub";
 export class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -21,20 +16,4 @@ export function httpsURL(value) {
   if (u.protocol !== "https:" || u.username || u.password || u.hash || u.search)
     throw new Error("invalid HTTPS URL");
   return u.href;
-}
-export function configuration(env) {
-  const topic = httpsURL(env.TOPIC_URL),
-    hub = httpsURL(env.HUB_URL);
-  if (
-    new URL(topic).pathname !== "/topic" ||
-    topic === hub ||
-    typeof env.OIDC_AUDIENCE !== "string" ||
-    env.OIDC_AUDIENCE.length < 8 ||
-    env.OIDC_AUDIENCE.length > 200 ||
-    /SET_|CHANGE|\s/.test(env.OIDC_AUDIENCE) ||
-    !env.PUBLISHER
-  ) {
-    throw new Error("invalid publisher configuration");
-  }
-  return { topic, hub, audience: env.OIDC_AUDIENCE };
 }
