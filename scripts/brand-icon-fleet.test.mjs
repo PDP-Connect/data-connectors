@@ -62,10 +62,15 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "facebook.json", // no vendored real mark; the factory agent's drawn icon was removed
   "tiktok.json", // no vendored real mark; the factory agent's drawn icon was removed
   "fitbit.json", // a mark exists; omitted by choice (trademark)
+  "character_ai.json", // no vendored real mark; the factory-drawn placeholder icon was removed
   "garmin_browser.json",
   "google_takeout.json",
+  // Instinct: invite-only product launched 2026; no mark in the vendored
+  // offline sources yet, so it takes the monogram fallback like the rest.
+  "instinct.json",
   "oura.json",
   "oura_browser.json",
+  "perplexity.json", // no vendored real mark; the console uses the monogram
   "pocket.json",
   "usaa.json",
   "wholefoods.json",

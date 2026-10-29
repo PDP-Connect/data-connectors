@@ -1,0 +1,24 @@
+{
+  "chats": [
+    {
+      "chat_id": "68703e9b-8d00-497d-8afa-be9d4043d9be",
+      "create_time": "2026-01-13T10:12:24.123456Z",
+      "creator_id": "100013",
+      "character_id": "Qm8sK2vT5xL9wR3pN7bY1cF4hJ6dG0eA2zU8iO5tE3k",
+      "state": "STATE_ACTIVE",
+      "type": "TYPE_ONE_ON_ONE",
+      "visibility": "VISIBILITY_PRIVATE",
+      "character_name": "Synthetic character_name 15 lorem",
+      "character_avatar_uri": "Synthetic character_avatar_uri 16 lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "character_visibility": "PUBLIC",
+      "character_translations": {
+        "name": {}
+      },
+      "default_voice_id": "",
+      "lorebook_id": null
+    }
+  ],
+  "meta": {
+    "next_token": ""
+  }
+}

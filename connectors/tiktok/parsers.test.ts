@@ -5,16 +5,26 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createContext, runInContext } from "node:vm";
+import type { Page } from "playwright";
+import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	EmittedMessage,
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { establishSession } from "../../packages/polyfill-connectors/src/session-establish.ts";
+import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import {
+	CLIENT_NOT_SEEN,
 	checkTikTokSession,
 	collectTikTok,
+	ensureTikTokSession,
 	fetchApi,
+	LOGIN_URL,
+	PROFILE_URL,
 	readSessionState,
+	signInReadiness,
+	TIKTOK_RETRYABLE_PATTERN,
 	type TikTokCollectContext,
 	type TikTokPage,
 } from "./index.ts";
@@ -366,18 +376,18 @@ test("a full run reads every stream from its own path and checkpoints each after
 			"/passport/account/info/v2/",
 			"/api/post/item_list/",
 			"/api/user/settings/",
+			"/api/user/list/",
+			"/api/user/list/",
 			"/api/favorite/item_list/",
 			"/api/user/collect/item_list/",
-			"/api/user/list/",
-			"/api/user/list/",
 		],
 	);
 	const owner = parseAccount(ACCOUNT);
 	assert.ok(owner);
 	assert.equal(calls[1]?.params.secUid, owner.secUid);
 	assert.equal(calls[1]?.params.cursor, "0");
-	assert.equal(calls[5]?.params.scene, "21");
-	assert.equal(calls[6]?.params.scene, "67");
+	assert.equal(calls[3]?.params.scene, "21");
+	assert.equal(calls[4]?.params.scene, "67");
 
 	const count = (stream: string) =>
 		h.records.filter((record) => record.stream === stream).length;
@@ -1150,8 +1160,8 @@ test("live run: an item whose id, time or caption is unreadable still fails, nam
 	);
 });
 
-test("completeness: a collection counting five videos but listing two stays gapped", async () => {
-	const { page } = fakePage((call) =>
+test("count above listed: a collection counting five videos that lists two on a confirmed walk is hydrated", async () => {
+	const { calls, page } = fakePage((call) =>
 		call.path === "/api/user/collection_list/"
 			? ok({
 					...COLLECTIONS,
@@ -1169,17 +1179,17 @@ test("completeness: a collection counting five videos but listing two stays gapp
 		h.records.filter((r) => r.stream === "collection_items").length,
 		4,
 	);
-	assert.equal(typeIndex(h, "DETAIL_GAP_RECOVERED"), -1);
+	// Each short single-page list is read a second time to confirm it.
+	assert.equal(
+		calls.filter((c) => c.path === "/api/collection/item_list/").length,
+		4,
+	);
+	assert.equal(typeIndex(h, "DETAIL_GAP"), -1);
 	const coverage = asRecord(
 		h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
 	);
-	assert.deepEqual(coverage.hydrated_keys, []);
-	assert.deepEqual(coverage.gap_keys, [COLLECTION_A, COLLECTION_B]);
-	const gapKeys = h.messages
-		.filter((m) => m.type === "DETAIL_GAP")
-		.map((m) => asRecord(m).record_key);
-	assert.deepEqual(gapKeys.sort(), [COLLECTION_A, COLLECTION_B]);
-	assert.ok(typeIndex(h, "DETAIL_GAP") < typeIndex(h, "DETAIL_COVERAGE"));
+	assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A, COLLECTION_B]);
+	assert.deepEqual(coverage.gap_keys ?? [], []);
 	assert.ok(
 		typeIndex(h, "STATE", "collection_items") > typeIndex(h, "DETAIL_COVERAGE"),
 	);
@@ -1188,7 +1198,138 @@ test("completeness: a collection counting five videos but listing two stays gapp
 			(m) => m.type === "STATE" && m.stream === "collection_items",
 		),
 	);
-	assert.deepEqual(state.cursor, { collections: 0, items: 0 });
+	assert.deepEqual(state.cursor, { collections: 2, items: 4 });
+});
+
+// ─── TikTok counts more than its list returns ────────────────────────────
+
+/**
+ * The owner's live shape, synthetic values: TikTok counts 3 collections (the
+ * count also holds one its list never returns), lists 2 on one page with
+ * hasMore:false, and the 2 hold 3 videos.
+ */
+function countedThreeListedTwo(
+	collectionPage: (call: Call) => Json = () => ({}),
+) {
+	const [a, b] = collectionRows();
+	const [first, second] = itemRows();
+	return fakePage((call) => {
+		if (call.path === "/api/user/collection_list/")
+			return ok({
+				...COLLECTIONS,
+				total: 3,
+				collectionList: [
+					{ ...a, total: "2" },
+					{ ...b, total: "1" },
+				],
+				hasMore: false,
+				...collectionPage(call),
+			});
+		if (call.path === "/api/collection/item_list/")
+			return ok({
+				...COLLECTION_ITEMS,
+				itemList:
+					call.params.collectionId === COLLECTION_A
+						? [first, second]
+						: [{ ...first, id: "7500000000000000099" }],
+				hasMore: false,
+			});
+		return standardAnswer(call);
+	});
+}
+
+test("count above listed: 3 counted, 2 listed and hasMore:false completes both streams and reads their videos", async () => {
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const { calls, page } = countedThreeListedTwo();
+		const h = harness(BOTH, page);
+		await collectTikTok(h.ctx, noDelay);
+		assert.deepEqual(h.failures, []);
+		assert.deepEqual(
+			h.records
+				.filter((r) => r.stream === "favorite_collections")
+				.map((r) => r.data.id),
+			[COLLECTION_A, COLLECTION_B],
+		);
+		assert.equal(
+			h.records.filter((r) => r.stream === "collection_items").length,
+			3,
+		);
+		// The short list is read twice and must hold the same ids both times.
+		assert.equal(
+			calls.filter((c) => c.path === "/api/user/collection_list/").length,
+			2,
+		);
+		const coverage = asRecord(
+			h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
+		);
+		assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A, COLLECTION_B]);
+		assert.deepEqual(coverage.gap_keys ?? [], []);
+		assert.equal(typeIndex(h, "DETAIL_GAP"), -1);
+		const parentState = asRecord(
+			h.messages.find(
+				(m) => m.type === "STATE" && m.stream === "favorite_collections",
+			),
+		);
+		assert.deepEqual(parentState.cursor, { count: 2 });
+		const childState = asRecord(
+			h.messages.find(
+				(m) => m.type === "STATE" && m.stream === "collection_items",
+			),
+		);
+		assert.deepEqual(childState.cursor, { collections: 2, items: 3 });
+		assert.ok(
+			typeIndex(h, "STATE", "collection_items") >
+				typeIndex(h, "DETAIL_COVERAGE"),
+		);
+		// The mismatch is a diagnostic with counts only, never names or ids.
+		const diagnostic = lines.filter((l) => l.includes("count_above_listed"));
+		assert.deepEqual(diagnostic, [
+			'[tiktok-diagnostic] count_above_listed {"stream":"favorite_collections","counted":3,"read":2}',
+		]);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+});
+
+test("count above listed: a walk that stops without hasMore:false still fails both streams", async () => {
+	const { calls, page } = countedThreeListedTwo(() => ({
+		hasMore: true,
+		cursor: "0",
+	}));
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		BOTH,
+	);
+	for (const failure of h.failures)
+		assert.match(failure.message, /^tiktok_list_incomplete: /);
+	assert.equal(typeIndex(h, "STATE"), -1);
+	assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+	assert.equal(h.records.length, 0);
+	assert.equal(
+		calls.some((c) => c.path === "/api/collection/item_list/"),
+		false,
+	);
+});
+
+test("count above listed: a short list that reads differently every time still fails", async () => {
+	let read = 0;
+	const { page } = countedThreeListedTwo(() => {
+		read += 1;
+		return {
+			collectionList: [
+				{ ...collectionRows()[0], collectionId: `74000000000000009${read}` },
+			],
+		};
+	});
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.match(h.failures[0]?.message ?? "", /changed on every read/);
+	assert.equal(typeIndex(h, "STATE"), -1);
+	assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
 });
 
 // ─── review round 4 ──────────────────────────────────────────────────────
@@ -1206,6 +1347,74 @@ const pendingGap = (gapId: string, collectionId: string, leaseId?: string) => ({
 		name: "Synthetic",
 		user_name: "synthetic_owner",
 	},
+});
+
+test("count above listed: a collections list that repeats a row is not complete, even when the rows are fewer than counted", async () => {
+	const [a] = collectionRows();
+	const { page } = fakePage((call) =>
+		call.path === "/api/user/collection_list/"
+			? ok({
+					...COLLECTIONS,
+					total: 5,
+					collectionList: [a, a],
+					hasMore: false,
+				})
+			: standardAnswer(call),
+	);
+	const h = harness(BOTH, page);
+	await collectTikTok(h.ctx, noDelay);
+	assert.deepEqual(
+		h.failures.map((f) => f.stream),
+		BOTH,
+	);
+	for (const failure of h.failures)
+		assert.match(failure.message, /^tiktok_list_incomplete: /);
+	assert.equal(typeIndex(h, "STATE", "favorite_collections"), -1);
+	assert.equal(typeIndex(h, "STATE", "collection_items"), -1);
+	assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+});
+
+test("count above listed: a collection's videos that repeat a row keep its gap open, even when the rows are fewer than counted", async () => {
+	const [first] = itemRows();
+	const { page } = fakePage((call) => {
+		if (call.path === "/api/user/collection_list/")
+			return ok({
+				...COLLECTIONS,
+				total: 1,
+				collectionList: [{ ...collectionRows()[0], total: "5" }],
+				hasMore: false,
+			});
+		if (call.path === "/api/collection/item_list/")
+			return ok({
+				...COLLECTION_ITEMS,
+				total: 5,
+				itemList: [first, first],
+				hasMore: false,
+			});
+		return standardAnswer(call);
+	});
+	const h = harness(
+		BOTH,
+		page,
+		{},
+		{ detailGaps: [pendingGap("gA", COLLECTION_A)] },
+	);
+	await collectTikTok(h.ctx, noDelay);
+	assert.equal(typeIndex(h, "DETAIL_GAP_RECOVERED"), -1);
+	const gap = asRecord(h.messages.find((m) => m.type === "DETAIL_GAP"));
+	assert.equal(gap.record_key, COLLECTION_A);
+	const coverage = asRecord(
+		h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
+	);
+	assert.deepEqual(coverage.hydrated_keys, []);
+	assert.deepEqual(coverage.gap_keys, [COLLECTION_A]);
+	// The collection's checkpoint does not count it as read.
+	const state = asRecord(
+		h.messages.find(
+			(m) => m.type === "STATE" && m.stream === "collection_items",
+		),
+	);
+	assert.deepEqual(state.cursor, { collections: 0, items: 0 });
 });
 
 test("review 4 #1: collection_items without favorite_collections emits no child and fails visibly", async () => {
@@ -1455,7 +1664,7 @@ test("completeness: withheld and duplicate child rows cannot satisfy parent or i
 	}
 });
 
-test("completeness: a pending child gap recovers only after all five distinct videos are read", async () => {
+test("completeness: a pending child gap recovers once its videos are read to a confirmed end, even below TikTok's count", async () => {
 	for (const recoveryOnly of [false, true]) {
 		const pending = [pendingGap("gA", COLLECTION_A, "lease-a")];
 		for (const count of [2, 5]) {
@@ -1487,31 +1696,22 @@ test("completeness: a pending child gap recovers only after all five distinct vi
 			const coverage = asRecord(
 				h.messages.find((m) => m.type === "DETAIL_COVERAGE"),
 			);
-			assert.deepEqual(
-				coverage.hydrated_keys,
-				count === 5 ? [COLLECTION_A] : [],
-			);
-			assert.deepEqual(
-				coverage.gap_keys ?? [],
-				count === 5 ? [] : [COLLECTION_A],
-			);
+			assert.deepEqual(coverage.hydrated_keys, [COLLECTION_A]);
+			assert.deepEqual(coverage.gap_keys ?? [], []);
 			const recovered = h.messages
 				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
 				.map(asRecord);
 			assert.deepEqual(
 				recovered.map((m) => [m.gap_id, m.record_key, m.lease_id]),
-				count === 5 ? [["gA", COLLECTION_A, "lease-a"]] : [],
+				[["gA", COLLECTION_A, "lease-a"]],
 			);
-			assert.equal(typeIndex(h, "DETAIL_GAP") >= 0, count !== 5);
+			assert.equal(typeIndex(h, "DETAIL_GAP"), -1);
 			const state = asRecord(
 				h.messages.find(
 					(m) => m.type === "STATE" && m.stream === "collection_items",
 				),
 			);
-			assert.deepEqual(state.cursor, {
-				collections: count === 5 ? 1 : 0,
-				items: count === 5 ? 5 : 0,
-			});
+			assert.deepEqual(state.cursor, { collections: 1, items: count });
 			assert.ok(
 				typeIndex(h, "STATE", "collection_items") >
 					typeIndex(h, "DETAIL_COVERAGE"),
@@ -1575,20 +1775,34 @@ test("completeness: a short collection inventory never settles missing pending B
 				{ recoveryOnly, detailGaps: [pendingGap("gB", COLLECTION_B)] },
 			);
 			await collectTikTok(h.ctx, noDelay);
-			assert.match(
-				h.failures[0]?.message ?? "",
-				/counted 2 favorite_collections/,
-			);
+			// B is never settled as deleted: with one listed of two counted, it
+			// may be the one TikTok counts but does not list.
 			assert.equal(typeIndex(h, "DETAIL_GAP_RECOVERED"), -1);
-			assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
-			assert.equal(typeIndex(h, "STATE"), -1);
-			assert.equal(
-				calls.some((c) => c.path === "/api/collection/item_list/"),
-				false,
-			);
+			if (duplicate) {
+				// A repeat stood in for an entry: still incomplete.
+				assert.match(
+					h.failures[0]?.message ?? "",
+					/^tiktok_list_incomplete: TikTok counted 2 favorite_collections/,
+				);
+				assert.equal(typeIndex(h, "DETAIL_COVERAGE"), -1);
+				assert.equal(typeIndex(h, "STATE"), -1);
+				assert.equal(
+					calls.some((c) => c.path === "/api/collection/item_list/"),
+					false,
+				);
+			} else {
+				// A confirmed walk that lists fewer than counted is complete.
+				assert.deepEqual(h.failures, []);
+				assert.ok(typeIndex(h, "DETAIL_COVERAGE") >= 0);
+				assert.ok(typeIndex(h, "STATE", "collection_items") >= 0);
+				if (!recoveryOnly)
+					assert.ok(typeIndex(h, "STATE", "favorite_collections") >= 0);
+			}
 			if (!recoveryOnly)
 				assert.deepEqual(
-					h.records.map((r) => r.data.id),
+					h.records
+						.filter((r) => r.stream === "favorite_collections")
+						.map((r) => r.data.id),
 					[COLLECTION_A],
 				);
 		}
@@ -2010,6 +2224,14 @@ test("read boundary: malformed and temporary HTTP 200 account objects remain unk
 			data: { error_code: 1, description: "Temporary error" },
 		},
 		{ message: "error", data: { description: "Please log in" } },
+		{
+			message: "error",
+			data: {
+				error_code: 13,
+				name: "other_error",
+				description: "sign in again",
+			},
+		},
 	]) {
 		const { page, gotos } = fakePage(() => ok(json));
 		assert.equal(
@@ -2029,6 +2251,17 @@ test("read boundary: only positive unauthenticated evidence reports signed out",
 			data: { error_code: 1, description: "Please log in" },
 		}),
 		ok({ message: "error", data: { error_code: 1, description: "log in" } }),
+		// What a browser that never signed in gets (live, 2026-10-24).
+		ok({
+			message: "error",
+			data: {
+				error_code: 13,
+				name: "account_info_error",
+				description: "session expired, please sign in again",
+				session_key: "",
+				user_id: 0,
+			},
+		}),
 	]) {
 		const { page, gotos } = fakePage(() => answer);
 		assert.equal(await checkTikTokSession(page, noDelay.delay), "signed_out");
@@ -2092,4 +2325,463 @@ test("read boundary: collection uses the installed reader and checkpoints after 
 		calls.map((call) => call.transport),
 		["fetch", "fetch", "xhr"],
 	);
+});
+
+// ─── sign-in handoff (2026-10-24) ────────────────────────────────────────
+
+/** A cookie jar answering, per read, the sign-in cookie names it holds. */
+function cookieJar(names: (read: number) => string[]) {
+	let reads = 0;
+	return {
+		cookies: async (url?: string | string[]) => {
+			assert.equal(url, "https://www.tiktok.com/");
+			const held = names(reads);
+			reads += 1;
+			// Values are synthetic: the connector looks at names and expiry only.
+			return held.map((name) => ({ name, value: "synthetic", expires: 1 }));
+		},
+		reads: () => reads,
+	};
+}
+
+function handoffArgs(page: TikTokPage, context: unknown = {}) {
+	const assists: string[] = [];
+	const completions: string[] = [];
+	return {
+		assists,
+		completions,
+		args: {
+			context,
+			assist: async (req: { message: string }) => {
+				assists.push(req.message);
+				return "tiktok_handoff";
+			},
+			capture: null,
+			checkpoint: async () => {},
+			completeAssistance: async (_id: string, status: string) => {
+				completions.push(status);
+			},
+			page: page as unknown as Page,
+			sendInteraction: async () => {
+				throw new Error("unexpected manual action fallback");
+			},
+		} as unknown as Parameters<typeof ensureTikTokSession>[0],
+	};
+}
+
+const SIGNED_OUT = {
+	message: "error",
+	data: { error_code: 1, description: "Please log in" },
+};
+
+test("signin handoff: a signed-out answer opens the sign-in page and waits for the person", async () => {
+	// The account endpoint answers signed out until the person signs in.
+	const { calls, gotos, page } = fakePage((_call, index) =>
+		index < 1 ? ok(SIGNED_OUT) : ok(ACCOUNT),
+	);
+	const h = handoffArgs(page);
+	await ensureTikTokSession(h.args, noDelay.delay);
+	// Signed in by hand: collection starts from the profile page.
+	assert.deepEqual(gotos, [LOGIN_URL, PROFILE_URL]);
+	assert.equal(h.assists.length, 1);
+	assert.match(h.assists[0] ?? "", /Sign in to TikTok/);
+	assert.deepEqual(h.completions, ["resolved"]);
+	assert.ok(calls.every((c) => c.path === "/passport/account/info/v2/"));
+});
+
+test("signin handoff: with no cookie baseline, an existing sign-in cookie is not taken as a new sign-in", async () => {
+	// The jar could not be read when the handoff began (before = null); later
+	// reads see a session cookie that may be left from an old session.
+	const jar = cookieJar(() => ["sessionid"]);
+	const { page } = fakePage(() =>
+		ok({ message: "error", data: { name: "session_expired" } }),
+	);
+	const readiness = signInReadiness(jar, null, noDelay.delay);
+	assert.equal(await readiness.probe(page), false);
+	assert.equal(readiness.byCookie(), false);
+	assert.equal(jar.reads(), 0);
+	// With a baseline that lacks the cookie, the same cookie is a new sign-in.
+	const fresh = signInReadiness(jar, new Map(), noDelay.delay);
+	assert.equal(await fresh.probe(page), true);
+	assert.equal(fresh.byCookie(), true);
+});
+
+test("signin handoff: a fresh profile whose app never made a request gets the sign-in page after the one profile-page open", async () => {
+	// No client parameters anywhere, so the reader sends nothing (no_client).
+	const { calls, gotos, page } = fakePage(() => ({ kind: "no_client" }), {
+		watch: { client: false, transport: null },
+	});
+	const jar = cookieJar((read) => (read === 0 ? [] : ["sessionid"]));
+	const h = handoffArgs(page, jar);
+	await ensureTikTokSession(h.args, noDelay.delay);
+	assert.deepEqual(gotos, [PROFILE_URL, LOGIN_URL, PROFILE_URL]);
+	assert.equal(h.assists.length, 1);
+	assert.deepEqual(h.completions, ["resolved"]);
+	// The check, its re-read after the profile page, and the check after the
+	// sign-in cookie; none left the page.
+	assert.equal(calls.length, 3);
+});
+
+test("signin handoff: repeated 503s on a signed-in page are retried in place, then stop retryably with no sign-in page and no handoff", async () => {
+	for (const answer of [
+		{ ...ok({}), status: 503 },
+		{ ...ok(null), empty: true },
+		ok({}),
+		ok({ message: "error", data: { error_code: 500 } }),
+	]) {
+		const { calls, gotos, page } = fakePage(() => answer);
+		const h = handoffArgs(page);
+		await assert.rejects(
+			ensureTikTokSession(h.args, noDelay.delay),
+			(error: Error) => error.message === "tiktok_interrupted",
+			JSON.stringify(answer),
+		);
+		assert.deepEqual(gotos, [], JSON.stringify(answer));
+		assert.deepEqual(h.assists, []);
+		// The check and its in-place re-read, then two bounded retries.
+		assert.equal(calls.length, 4);
+	}
+});
+
+test("signin handoff: a temporary failure that recovers continues without the sign-in page", async () => {
+	const { gotos, page } = fakePage((_call, index) =>
+		index < 3 ? { ...ok({}), status: 503 } : ok(ACCOUNT),
+	);
+	const h = handoffArgs(page);
+	await ensureTikTokSession(h.args, noDelay.delay);
+	assert.deepEqual(gotos, []);
+	assert.deepEqual(h.assists, []);
+});
+
+test("signin handoff: a bot check on a signed-in page is handed to the person in place, never to the sign-in page", async () => {
+	for (const challenge of [
+		{ ...ok({}), challengeHeader: true },
+		{ ...ok({}), html: true, status: 503 },
+		{ ...ok({}), status: 403 },
+	]) {
+		// The check and its re-read meet the bot check; once the person clears
+		// it the account endpoint answers again.
+		const { gotos, page } = fakePage((_call, index) =>
+			index < 2 ? challenge : ok(ACCOUNT),
+		);
+		const h = handoffArgs(page);
+		await ensureTikTokSession(h.args, noDelay.delay);
+		assert.deepEqual(gotos, [], JSON.stringify(challenge));
+		assert.equal(h.assists.length, 1);
+		assert.match(h.assists[0] ?? "", /check/);
+		assert.deepEqual(h.completions, ["resolved"]);
+	}
+});
+
+test("signin handoff: a signed-in session is never moved to the sign-in page", async () => {
+	const { gotos, page } = fakePage(standardAnswer);
+	const h = handoffArgs(page);
+	await ensureTikTokSession(h.args);
+	assert.deepEqual(gotos, []);
+	assert.deepEqual(h.assists, []);
+});
+
+/** ensureTikTokSession run through the runtime's own establishSession. */
+async function establishTikTok(page: TikTokPage, context: unknown = {}) {
+	const assists: string[] = [];
+	try {
+		await establishSession(
+			{
+				ensureSession: (args) => ensureTikTokSession(args, noDelay.delay),
+				probeSession: async ({ page: probed }) =>
+					(await checkTikTokSession(probed, noDelay.delay)) === "signed_in",
+				probeSessionIsAuthoritative: true,
+			},
+			{
+				assist: async (req) => {
+					assists.push(req.message);
+					return "tiktok_handoff";
+				},
+				capture: null,
+				checkpoint: async () => {},
+				completeAssistance: async () => {},
+				context: context as never,
+				name: "tiktok",
+				page: page as never,
+				progress: async () => {},
+				retryablePattern: TIKTOK_RETRYABLE_PATTERN,
+				sendInteraction: async () => {
+					throw new Error("unexpected manual action fallback");
+				},
+			},
+		);
+	} catch (error) {
+		return { assists, error };
+	}
+	return { assists, error: null };
+}
+
+test("session errors: a check that keeps failing reaches the runtime as tiktok_interrupted, retryable", async () => {
+	const { gotos, page } = fakePage(() => ({ ...ok({}), status: 503 }));
+	const { assists, error } = await establishTikTok(page);
+	assert.ok(error instanceof TerminalError, String(error));
+	assert.equal(error.code, "tiktok_interrupted");
+	assert.equal(error.retryable, true);
+	assert.deepEqual(gotos, []);
+	assert.deepEqual(assists, []);
+});
+
+test("session errors: a sign-in cookie on a session the account still calls signed out reaches the runtime as tiktok_auth_failed, not retryable", async () => {
+	const { gotos, page } = fakePage(() => ok(SIGNED_OUT));
+	const jar = cookieJar((read) => (read === 0 ? [] : ["sessionid"]));
+	const { assists, error } = await establishTikTok(page, jar);
+	assert.ok(error instanceof TerminalError, String(error));
+	assert.equal(error.code, "tiktok_auth_failed");
+	assert.equal(error.retryable, false);
+	assert.deepEqual(gotos, [LOGIN_URL, PROFILE_URL]);
+	assert.equal(assists.length, 1);
+});
+
+// ─── client parameters per page (2026-10-24) ─────────────────────────────
+
+// The installed page reader runs unchanged, one fresh context per document
+// (a navigation or TikTok's own redirect starts a new page with an empty
+// reader). Only the page's resource entries and the network are fake.
+interface PageSpec {
+	/** Whether the page's app makes a request the reader copies from. */
+	appRequest: boolean;
+	/** Reader evaluations before that request shows up (it is in flight). */
+	readyAfter?: number;
+}
+
+const WIRE_ACCOUNT = {
+	...ACCOUNT,
+	data: {
+		...(ACCOUNT.data as Json),
+		sec_user_id: "MS4wLjABAAAASyntheticSecUidOnlyForTheReaderTest",
+	},
+};
+
+function documentPages(
+	start: { url: string } & PageSpec,
+	pageAt: (url: string) => PageSpec,
+	options: { signedOutChecks?: number } = {},
+) {
+	const origin = "https://www.tiktok.com";
+	const calls: string[] = [];
+	const gotos: string[] = [];
+	let signedOutChecks = options.signedOutChecks ?? 0;
+	let replaceWhen: ((path: string) => boolean) | null = null;
+	let replacement: PageSpec | null = null;
+	/** TikTok's own redirect, landing before the next page evaluation. */
+	let pending: PageSpec | null = null;
+	const open = (spec: PageSpec) => {
+		const doc = { evals: 0, context: createContext({}) };
+		doc.context = createContext({
+			AbortController,
+			URL,
+			URLSearchParams,
+			clearTimeout,
+			setTimeout,
+			location: { origin },
+			performance: {
+				getEntriesByType: () => [
+					// Not an /api/ request: the reader never copies from it.
+					{ name: `${origin}/passport/web/account/info/?aid=1988` },
+					...(spec.appRequest && doc.evals > (spec.readyAfter ?? 0)
+						? [
+								{
+									name: `${origin}/api/post/item_list/?aid=1988&device_id=12345&app_name=tiktok_web&msToken=discarded&X-Bogus=discarded`,
+								},
+							]
+						: []),
+				],
+			},
+			fetch: async (input: string) => {
+				const url = new URL(input, origin);
+				// Only a request carrying the copied client fields leaves.
+				assert.equal(url.searchParams.get("aid"), "1988");
+				assert.equal(url.searchParams.get("device_id"), "12345");
+				calls.push(url.pathname);
+				const json =
+					url.pathname === ACCOUNT_PATH
+						? WIRE_ACCOUNT
+						: (
+								standardAnswer({
+									path: url.pathname,
+									params: Object.fromEntries(url.searchParams),
+								}) as { json?: unknown }
+							).json;
+				if (replaceWhen?.(url.pathname)) {
+					replaceWhen = null;
+					pending = replacement;
+				}
+				url.searchParams.set("X-Bogus", "synthetic");
+				return {
+					status: 200,
+					url: url.href,
+					headers: {
+						get: (name: string) =>
+							name === "content-type" ? "application/json" : null,
+					},
+					text: async () => JSON.stringify(json),
+				};
+			},
+		});
+		return doc;
+	};
+	let current = open(start);
+	const page: TikTokPage = {
+		evaluate: async (script) => {
+			if (pending) {
+				current = open(pending);
+				pending = null;
+			}
+			current.evals += 1;
+			if (
+				signedOutChecks > 0 &&
+				script.includes(`session.get(${JSON.stringify(ACCOUNT_PATH)}`)
+			) {
+				signedOutChecks -= 1;
+				return ok(SIGNED_OUT);
+			}
+			const result: unknown = runInContext(script, current.context);
+			return await result;
+		},
+		goto: async (url) => {
+			gotos.push(url);
+			// Our navigation supersedes a redirect TikTok had not made yet.
+			pending = null;
+			current = open(pageAt(url));
+		},
+	};
+	return {
+		calls,
+		gotos,
+		page,
+		/** After the response to `path`, TikTok replaces the page. */
+		replaceAfter: (when: (path: string) => boolean, spec: PageSpec) => {
+			replaceWhen = when;
+			replacement = spec;
+		},
+	};
+}
+
+const FULL_RUN_PATHS = [
+	ACCOUNT_PATH,
+	"/api/post/item_list/",
+	"/api/user/settings/",
+	"/api/user/list/",
+	"/api/user/list/",
+	"/api/favorite/item_list/",
+	"/api/user/collect/item_list/",
+];
+
+const onlyProfileHasClient = (url: string): PageSpec => ({
+	appRequest: url === PROFILE_URL,
+});
+
+test("client params: signed in on a page with no app request, the session check moves to the profile page and collection reads every stream", async () => {
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: false },
+		onlyProfileHasClient,
+	);
+	const h = handoffArgs(d.page);
+	await ensureTikTokSession(h.args, noDelay.delay);
+	assert.deepEqual(d.gotos, [PROFILE_URL]);
+	assert.deepEqual(h.assists, []);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.calls, [ACCOUNT_PATH, ...FULL_RUN_PATHS]);
+	assert.equal(run.records.filter((r) => r.stream === "videos").length, 3);
+	assert.deepEqual(d.gotos, [PROFILE_URL]);
+});
+
+test("client params: collection on a page with no app request opens the profile page once, then collects", async () => {
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: false },
+		onlyProfileHasClient,
+	);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(d.gotos, [PROFILE_URL]);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.calls, FULL_RUN_PATHS);
+});
+
+test("client params: after a hand sign-in the page moves to the profile page before collection", async () => {
+	// Not signed in at first; the person signs in on the sign-in page, whose
+	// readiness probe answers, then TikTok carries them to a page that makes
+	// no request the reader copies from.
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: true },
+		(url) => ({ appRequest: url === LOGIN_URL || url === PROFILE_URL }),
+		{ signedOutChecks: 1 },
+	);
+	d.replaceAfter((path) => path === ACCOUNT_PATH, { appRequest: false });
+	const h = handoffArgs(d.page);
+	await ensureTikTokSession(h.args, noDelay.delay);
+	assert.equal(h.assists.length, 1);
+	assert.deepEqual(h.completions, ["resolved"]);
+	assert.deepEqual(d.gotos, [LOGIN_URL, PROFILE_URL]);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.calls, [ACCOUNT_PATH, ...FULL_RUN_PATHS]);
+});
+
+test("client params: a sign-in that lands on a page with no app request is ready from TikTok's sign-in cookie, then collection runs", async () => {
+	// Signed out at first. The sign-in page, and where TikTok sends the person
+	// after it, make no request the reader copies from, so the account
+	// endpoint cannot answer there; the new sign-in cookie says it is done.
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: true },
+		(url) => ({ appRequest: url === PROFILE_URL }),
+		{ signedOutChecks: 1 },
+	);
+	const jar = cookieJar((read) => (read === 0 ? [] : ["sid_tt", "sessionid"]));
+	const h = handoffArgs(d.page, jar);
+	await ensureTikTokSession(h.args, noDelay.delay);
+	assert.equal(h.assists.length, 1);
+	assert.deepEqual(h.completions, ["resolved"]);
+	assert.deepEqual(d.gotos, [LOGIN_URL, PROFILE_URL]);
+	assert.equal(jar.reads(), 2);
+	// Ready on the cookie: one account check from the profile page.
+	assert.deepEqual(d.calls, [ACCOUNT_PATH]);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.calls, [ACCOUNT_PATH, ...FULL_RUN_PATHS]);
+	assert.equal(run.records.filter((r) => r.stream === "videos").length, 3);
+});
+
+test("client params: TikTok replacing the page mid-run is waited out in place, and the request is sent once on the new page", async () => {
+	// The live failure: the account read succeeds, then the page is replaced
+	// and the next request finds a reader with no client parameters.
+	const d = documentPages(
+		{ url: PROFILE_URL, appRequest: true },
+		onlyProfileHasClient,
+	);
+	d.replaceAfter((path) => path === ACCOUNT_PATH, {
+		appRequest: true,
+		readyAfter: 3,
+	});
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(run.failures, []);
+	assert.deepEqual(d.gotos, []);
+	assert.deepEqual(d.calls, FULL_RUN_PATHS);
+	assert.equal(run.records.filter((r) => r.stream === "videos").length, 3);
+});
+
+test("client params: still none after the profile page, the run stops early with client_params_not_seen and sends nothing", async () => {
+	const d = documentPages(
+		{ url: "https://www.tiktok.com/foryou", appRequest: false },
+		() => ({ appRequest: false }),
+	);
+	const run = harness(ALL, d.page);
+	await collectTikTok(run.ctx, noDelay);
+	assert.deepEqual(d.gotos, [PROFILE_URL]);
+	assert.deepEqual(d.calls, []);
+	assert.deepEqual(run.failures.map((f) => f.stream).sort(), [...ALL].sort());
+	for (const failure of run.failures) {
+		assert.equal(failure.message, `tiktok_interrupted: ${CLIENT_NOT_SEEN}`);
+		assert.equal(failure.retryable, true);
+	}
 });

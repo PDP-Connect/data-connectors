@@ -108,7 +108,7 @@ import {
 	createConnectorFailure,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import { openFingerprintCursor, recordFingerprint } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import type { FieldOmission as ParsedFieldOmission } from "./parsers.ts";
 import {
 	readCloudKitRecordType,
@@ -240,6 +240,7 @@ interface QueryFailure {
 		| "icloud_http_error"
 		| "icloud_invalid_config_response"
 		| "icloud_invalid_query_response"
+		| "icloud_inventory_changed"
 		| "icloud_navigation_changed"
 		| "icloud_no_progress"
 		| "icloud_omitted_rows"
@@ -267,6 +268,7 @@ const QUERY_FAILURE_REASON_CODES: Record<
 	icloud_http_error: "icloud_http_error",
 	icloud_invalid_config_response: "icloud_invalid_config_response",
 	icloud_invalid_query_response: "icloud_invalid_query_response",
+	icloud_inventory_changed: "icloud_inventory_changed",
 	icloud_navigation_changed: "icloud_navigation_changed",
 	icloud_no_progress: "icloud_no_progress",
 	icloud_omitted_rows: "icloud_omitted_rows",
@@ -635,7 +637,7 @@ async function walkQueryPages(
 ): Promise<QueryWalk> {
 	const records: CloudKitRecord[] = [];
 	const seenMarkers = new Set<string>();
-	const seenIds = new Set<string>();
+	const seenRows = new Map<string, string>();
 	let marker: string | undefined;
 	let pageCount = 0;
 	while (true) {
@@ -696,17 +698,26 @@ async function walkQueryPages(
 		}
 		let pageProgress = 0;
 		let malformedRows = 0;
+		let conflictingRows = 0;
 		for (const value of parsed.records) {
 			if (!validCloudKitRecord(value)) {
 				malformedRows += 1;
 				continue;
 			}
 			const id = resolveCloudKitRecordId(value);
-			if (id === null || seenIds.has(id)) {
+			if (id === null) {
 				malformedRows += 1;
 				continue;
 			}
-			seenIds.add(id);
+			// Compare source content independently of JSON object key order. A
+			// stable overlap is not a missing row; a changed revision needs a rescan.
+			const fingerprint = recordFingerprint({ ...value });
+			const previous = seenRows.get(id);
+			if (previous !== undefined) {
+				if (previous !== fingerprint) conflictingRows += 1;
+				continue;
+			}
+			seenRows.set(id, fingerprint);
 			pageProgress += 1;
 			records.push(value);
 		}
@@ -732,13 +743,27 @@ async function walkQueryPages(
 				pageCount,
 			};
 		}
+		if (conflictingRows > 0) {
+			return {
+				records,
+				complete: false,
+				failure: {
+					reason: "icloud_inventory_changed",
+					message: `iCloud Notes returned ${conflictingRows} conflicting ${stream} revision(s); a new scan is needed and the stream was not checkpointed.`,
+					cause: { kind: "transient" },
+					pageCount,
+					omittedRows: conflictingRows,
+				},
+				pageCount,
+			};
+		}
 		if (malformedRows > 0) {
 			return {
 				records,
 				complete: false,
 				failure: {
 					reason: "icloud_omitted_rows",
-					message: `iCloud Notes returned ${malformedRows} malformed, unidentified, or duplicate ${stream} row(s); the stream was not checkpointed.`,
+					message: `iCloud Notes returned ${malformedRows} malformed or unidentified ${stream} row(s); the stream was not checkpointed.`,
 					cause: { kind: "unrepresentable_rows" },
 					pageCount,
 					omittedRows: malformedRows,
@@ -808,7 +833,8 @@ function failureRoute(
 		return failureRoute(failure.cause.failure);
 	}
 	if (failure.cause.kind === "auth_rejected") return "auth_rejected";
-	return failure.reason === "icloud_no_progress" ||
+	return failure.reason === "icloud_inventory_changed" ||
+		failure.reason === "icloud_no_progress" ||
 		failure.reason === "icloud_omitted_rows"
 		? "unproven_enumeration"
 		: "read_failed";

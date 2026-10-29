@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.54",
+				"version": "0.2.58",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -497,6 +497,114 @@
 						"incremental": false,
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "account_plan",
+						"required": false,
+						"description": "Plans for every usable Claude organization. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false. This export connector fills plan family and organization creation time only. A plan-only run requests no export.",
+						"compaction_fingerprint": {
+							"exclude_keys": []
+						},
+						"display": {
+							"label": "Your Claude plan",
+							"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"is_default": {
+									"type": "boolean",
+									"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+								},
+								"id": {
+									"type": "string"
+								},
+								"account_id": {
+									"type": ["string", "null"]
+								},
+								"account_structure": {
+									"type": ["string", "null"]
+								},
+								"account_created_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"plan_type": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"plan_display_name": {
+									"type": ["string", "null"]
+								},
+								"subscription_plan": {
+									"type": ["string", "null"]
+								},
+								"has_active_subscription": {
+									"type": ["boolean", "null"]
+								},
+								"billing_period": {
+									"type": ["string", "null"]
+								},
+								"will_renew": {
+									"type": ["boolean", "null"]
+								},
+								"renews_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"expires_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"cancels_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"scheduled_plan_change": {
+									"type": ["object", "null"],
+									"properties": {
+										"plan_type": {
+											"type": ["string", "null"],
+											"pattern": "^[a-z][a-z_-]{0,39}$"
+										},
+										"changes_at": {
+											"type": ["string", "null"],
+											"format": "date-time"
+										}
+									},
+									"required": ["plan_type", "changes_at"],
+									"additionalProperties": false
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"plan_type",
+									"plan_display_name",
+									"subscription_plan"
+								]
+							},
+							"range_filters": {
+								"account_created_at": ["gte", "gt", "lte", "lt"],
+								"renews_at": ["gte", "gt", "lte", "lt"],
+								"expires_at": ["gte", "gt", "lte", "lt"],
+								"cancels_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
 					},
 					{
 						"name": "conversations",
@@ -950,7 +1058,12 @@
 					"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
 					"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
 					"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
-					"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
+					"parse_error": "Claude sent back a plan we couldn't read. Your existing plan data was not changed. This will retry automatically.",
+					"organization_unavailable": "Your Claude plan could not be read: the organization this data export came from is not in your signed-in account's organization list. This will retry automatically.",
+					"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed.",
+					"export_manifest_incomplete": "Your Claude export is incomplete or inconsistent. Affected data was not marked as fully imported.",
+					"export_conversations_incomplete": "Your Claude export is missing some conversation files. Conversations and messages were not marked as fully imported.",
+					"export_projects_missing": "Your Claude export has no complete projects section. Projects and project documents were not marked as fully imported."
 				},
 				"mobile": {
 					"pageshim": {
@@ -977,7 +1090,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.7",
+				"version": "0.3.10",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -1018,7 +1131,8 @@
 					"no_chat_organization": "No Claude organization with chat access could be found for this account.",
 					"http_error": "We hit a network problem talking to Claude",
 					"parse_error": "Claude sent back a response we couldn't read",
-					"not_available": "This data isn't available for this Claude account"
+					"not_available": "This data isn't available for this Claude account",
+					"organization_unavailable": "Your Claude plan could not be read: the organization this run reads from has no chat plan in your account's organization list. This will retry automatically."
 				},
 				"mobile": {
 					"pageshim": {
@@ -1236,18 +1350,22 @@
 					{
 						"name": "account_plan",
 						"required": false,
-						"description": "The subscription plan of the signed-in Claude account's chat organization, with its renewal and end dates. Same fields as the ChatGPT account_plan stream.",
+						"description": "Plans for every usable Claude organization. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},
 						"display": {
 							"label": "Your Claude plan",
-							"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. Payment details and billing identifiers are not collected. Singleton — one record for the organization the session reads."
+							"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. Payment details and billing identifiers are not collected. One record per chat-capable organization; only conversations and usage remain scoped to the original selected organization."
 						},
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
+								"is_default": {
+									"type": "boolean",
+									"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+								},
 								"id": {
 									"type": "string"
 								},
@@ -1334,7 +1452,7 @@
 								"count": true
 							}
 						},
-						"coverage_strategy": "singleton_presence",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window"
 					},
 					{
@@ -3625,6 +3743,275 @@
 			}
 		},
 		{
+			"connectorId": "https://registry.pdpp.dev/connectors/character-ai",
+			"entry": "./connectors/character_ai/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/character-ai",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/character_ai",
+					"display": {
+						"name": "Character.AI"
+					}
+				},
+				"connector_key": "character-ai",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
+				"version": "0.1.1",
+				"display_name": "Character.AI",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"],
+							"constraints": {
+								"hosts": ["https://character.ai", "https://neo.character.ai"]
+							}
+						},
+						"browser": {
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"recommended_interval_seconds": 21600,
+						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 86400,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": false,
+						"rationale": "Collection reuses the owner's character.ai browser session and the API token the signed-in page holds. Existing sessions can refresh without a prompt while valid; first collection and expired sessions require the owner to sign in through the browser handoff."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"streams": [
+					{
+						"name": "chats",
+						"description": "Every chat the Character.AI chat list returns, one record per chat. Last interaction time and turn count come from the chat's own turns; a chat whose turns could not be read this run is not emitted, so its stored values stay as last read. Last interaction time is null only for a chat with no turns. The time range applies to when the chat was created; a chat with turns after the range's end is not emitted, so its stored values are never lowered and no later turn shows through them.",
+						"display": {
+							"label": "Your chats",
+							"detail": "Per chat: the character's id and name, chat type and state, when the chat was created, when its latest message was sent, and how many messages it has."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"character_id": {
+									"type": "string"
+								},
+								"character_name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title"
+								},
+								"creator_id": {
+									"type": ["string", "null"]
+								},
+								"type": {
+									"type": ["string", "null"]
+								},
+								"state": {
+									"type": ["string", "null"]
+								},
+								"visibility": {
+									"type": ["string", "null"]
+								},
+								"create_time": {
+									"type": "string",
+									"format": "date-time"
+								},
+								"last_interaction_time": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"turn_count": {
+									"type": ["integer", "null"]
+								}
+							},
+							"required": [
+								"id",
+								"character_id",
+								"character_name",
+								"creator_id",
+								"type",
+								"state",
+								"visibility",
+								"create_time",
+								"last_interaction_time",
+								"turn_count"
+							]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "create_time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": true,
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["character_name"]
+							},
+							"range_filters": {
+								"create_time": ["gte", "gt", "lte", "lt"],
+								"last_interaction_time": ["gte", "gt", "lte", "lt"],
+								"turn_count": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["create_time"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "messages",
+						"description": "Every turn of every chat, one record per turn, with the text of the turn's currently selected (primary) candidate. Turns are read to the end of each chat's turn list. Collected only together with chats. A turn that cannot be stored as it is is left out, the rest of its chat is stored, and the chat is read again next time. Mutable: when the owner swipes a turn to another candidate, the next run replaces that turn's record with the newly selected candidate's text.",
+						"display": {
+							"label": "Your messages",
+							"detail": "Each message in each chat: whether you or the character wrote it, the author's name, the message text, and when it was sent."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"chat_id": {
+									"type": "string"
+								},
+								"author_kind": {
+									"type": "string",
+									"enum": ["user", "character"]
+								},
+								"author_id": {
+									"type": ["string", "null"]
+								},
+								"author_name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "actor"
+								},
+								"text": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"primary_candidate_id": {
+									"type": "string"
+								},
+								"candidate_count": {
+									"type": "integer"
+								},
+								"is_final": {
+									"type": "boolean",
+									"const": true
+								},
+								"model_type": {
+									"type": ["string", "null"]
+								},
+								"state": {
+									"type": ["string", "null"]
+								},
+								"create_time": {
+									"type": "string",
+									"format": "date-time"
+								},
+								"last_update_time": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								}
+							},
+							"required": [
+								"id",
+								"chat_id",
+								"author_kind",
+								"author_id",
+								"author_name",
+								"text",
+								"primary_candidate_id",
+								"candidate_count",
+								"is_final",
+								"model_type",
+								"state",
+								"create_time",
+								"last_update_time"
+							]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "create_time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": true,
+						"incremental": false,
+						"relationships": [
+							{
+								"name": "chat",
+								"stream": "chats",
+								"foreign_key": "chat_id",
+								"cardinality": "has_one"
+							}
+						],
+						"parent_streams": ["chats"],
+						"query": {
+							"search": {
+								"lexical_fields": ["text", "author_name"],
+								"semantic_fields": ["text"]
+							},
+							"range_filters": {
+								"create_time": ["gte", "gt", "lte", "lt"],
+								"last_update_time": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["create_time"],
+								"group_by": ["author_kind"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"freshness_strategy": "scheduled_window"
+					}
+				],
+				"reason_display_messages": {
+					"stream_collection_failed": "Character.AI could not be read completely this time. Nothing already saved was lost.",
+					"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
+					"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
+					"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
+					"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",
+					"character_ai_api_429": "Character.AI is limiting requests right now. The sync will try again later.",
+					"character_ai_api_408": "Character.AI took too long to answer. The sync will try again later.",
+					"character_ai_api_5xx": "Character.AI is having trouble right now. The sync will try again later.",
+					"character_ai_timeout": "Character.AI took too long to answer. The sync will try again later.",
+					"character_ai_network_error": "Character.AI could not be reached. Check your connection; the sync will try again later.",
+					"character_ai_invalid_payload": "Character.AI answered in a format this connector does not recognize. A connector update is needed."
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "character_ai",
+						"login_url": "https://character.ai/",
+						"login_message": "Sign in to Character.AI, then return here.",
+						"collect_export": "collectCharacterAi",
+						"probe_export": "probeCharacterAiSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				}
+			}
+		},
+		{
 			"brandIcon": "./connectors/chase/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/chase",
 			"entry": "./connectors/chase/index.ts",
@@ -4243,7 +4630,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.2",
+				"version": "0.3.7",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -4294,10 +4681,11 @@
 				"streams": [
 					{
 						"name": "conversations",
+						"required": true,
 						"description": "ChatGPT conversations.",
 						"display": {
 							"label": "Your conversations",
-							"detail": "Conversation list with titles, create/update times, archived/starred flags, workspace (if enterprise), current-branch tip. Messages are a separate stream."
+							"detail": "Conversation list with titles, create/update times, archived/starred flags, workspace (if enterprise), current-branch tip, and the count of assistant replies per model on the current branch (model names only; tool calls and other intermediate steps are not counted). Messages are a separate stream."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -4332,6 +4720,14 @@
 								},
 								"message_count_on_current_branch": {
 									"type": ["integer", "null"]
+								},
+								"model_counts": {
+									"type": ["object", "null"],
+									"description": "Assistant replies on the current branch per model slug, as {\"<model_slug>\": <count>}. A reply is an assistant message that speaks to the user: an assistant message that calls a tool or does not end its turn is not counted. Model names and counts only, never message text. A reply with no usable slug (absent, longer than 80 characters, or not safe text) adds no entry. The connector reads each conversation's detail for this stream, whether or not messages is requested. Null when that detail has not been read: a run limit or source pressure deferred it, it failed in a way a later run retries, or the conversation was deleted (404 or 410). A deferred or failed read is retried by the next run. An empty object means a read branch with no named assistant model. When messages is also requested, the count follows the messages emitted for the branch, so a requested time range or record selection can narrow it.",
+									"additionalProperties": {
+										"type": "integer",
+										"minimum": 1
+									}
 								},
 								"gizmo_id": {
 									"type": ["string", "null"]
@@ -4793,18 +5189,22 @@
 					{
 						"name": "account_plan",
 						"required": false,
-						"description": "The subscription plan of the signed-in ChatGPT account, with its renewal, expiry and cancellation dates and any scheduled plan change.",
+						"description": "Plans for every usable ChatGPT account. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},
 						"display": {
 							"label": "Your ChatGPT plan",
-							"detail": "Which plan the signed-in account is on (free, Plus, Pro, Team…), whether the subscription is active and set to renew, its billing period, the renewal/expiry/cancellation dates, any scheduled plan change, and when the account was created. Usage limits are not included. Payment details and billing identifiers are not collected. Singleton — one record for the account the session is signed in to."
+							"detail": "Which plan the signed-in account is on (free, Plus, Pro, Team…), whether the subscription is active and set to renew, its billing period, the renewal/expiry/cancellation dates, any scheduled plan change, and when the account was created. Usage limits are not included. Payment details and billing identifiers are not collected. One record per usable account, without changing the account used for conversations."
 						},
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
+								"is_default": {
+									"type": "boolean",
+									"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+								},
 								"id": {
 									"type": "string"
 								},
@@ -4891,6 +5291,843 @@
 								"count": true
 							}
 						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "account_profile",
+						"required": false,
+						"description": "The signed-in ChatGPT account described with no text: user and account creation times and tenure, country and sub-national region codes, billing currency, MFA, subscription facts not in account_plan (complimentary, trial, delinquency, purchase platform), data residency, enabled beta features, whether custom instructions and personality are set, memory count and token use, project, project file and scheduled task counts. Each source is read independently and its outcome is reported.",
+						"compaction_fingerprint": {
+							"exclude_keys": []
+						},
+						"display": {
+							"label": "Your ChatGPT account profile",
+							"detail": "When the account was created and how long you have had it, your country and region code (or the network country, labelled, when the account has none), billing currency, whether MFA is on, subscription facts such as a complimentary or trial plan, data residency, which beta features are switched on, whether custom instructions, memory and a personality are set (not their contents), how many memories, projects, project files and scheduled tasks you have. Your email, name, phone, picture, ids, region name, organisation names and all text are not collected. Plan, renewal and cancellation dates are in the account plan stream. Singleton."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"const": "account_profile"
+								},
+								"user_created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the ChatGPT user signed up (/me created)."
+								},
+								"chatgpt_account_created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the current ChatGPT account (for example the paid account) was created (accounts/check created_time). Same source as account_plan.account_created_at; can be later than user_created_at."
+								},
+								"tenure_months": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Whole months from user_created_at to collection time."
+								},
+								"country": {
+									"type": ["string", "null"],
+									"pattern": "^[A-Z]{2}$",
+									"description": "ISO country code from the account profile; the network country when the profile has none (see geography_source).",
+									"x_pdpp_role": "secondary"
+								},
+								"region_code": {
+									"type": ["string", "null"],
+									"pattern": "^[A-Z0-9]{1,3}$",
+									"description": "SUB-NATIONAL subdivision code from the account profile (for example a state or province code). Raises re-identification risk together with other fields; whether to coarsen or drop it is pending legal review. The region name is not collected."
+								},
+								"geography_source": {
+									"type": ["string", "null"],
+									"enum": ["account_profile", "network", null]
+								},
+								"network_country": {
+									"type": ["string", "null"],
+									"pattern": "^[A-Z]{2}$",
+									"description": "Country of the network the browser used at collection time (Cloudflare trace). Fallback only; not the account's country."
+								},
+								"billing_currency": {
+									"type": ["string", "null"],
+									"pattern": "^[A-Z]{3}$"
+								},
+								"mfa_enabled": {
+									"type": ["boolean", "null"]
+								},
+								"email_domain_type": {
+									"type": ["string", "null"],
+									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$",
+									"description": "Kind of email domain (for example social). The address is not collected."
+								},
+								"org_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"has_non_personal_org": {
+									"type": ["boolean", "null"]
+								},
+								"workspace_type": {
+									"type": ["string", "null"],
+									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+								},
+								"is_deactivated": {
+									"type": ["boolean", "null"]
+								},
+								"data_residency_region": {
+									"type": ["string", "null"],
+									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+								},
+								"compute_residency_region": {
+									"type": ["string", "null"],
+									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+								},
+								"is_gratis": {
+									"type": ["boolean", "null"],
+									"description": "The active subscription is complimentary."
+								},
+								"is_trial": {
+									"type": ["boolean", "null"]
+								},
+								"trial_state": {
+									"type": ["string", "null"],
+									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+								},
+								"has_previously_paid_subscription": {
+									"type": ["boolean", "null"]
+								},
+								"last_expired_subscription_was_gratis": {
+									"type": ["boolean", "null"]
+								},
+								"purchase_origin_platform": {
+									"type": ["string", "null"],
+									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+								},
+								"is_delinquent": {
+									"type": ["boolean", "null"]
+								},
+								"in_grace_period": {
+									"type": ["boolean", "null"]
+								},
+								"account_feature_flag_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"enabled_beta_features": {
+									"type": ["array", "null"],
+									"maxItems": 256,
+									"items": {
+										"type": "string",
+										"pattern": "^[a-z0-9_]{1,64}$"
+									},
+									"description": "Keys of the beta settings that are switched on."
+								},
+								"beta_feature_flag_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"custom_instructions_enabled": {
+									"type": ["boolean", "null"]
+								},
+								"custom_instructions_about_user_set": {
+									"type": ["boolean", "null"]
+								},
+								"custom_instructions_response_style_set": {
+									"type": ["boolean", "null"]
+								},
+								"custom_instructions_name_set": {
+									"type": ["boolean", "null"]
+								},
+								"custom_instructions_role_set": {
+									"type": ["boolean", "null"]
+								},
+								"custom_instructions_traits_set": {
+									"type": ["boolean", "null"]
+								},
+								"custom_instructions_other_set": {
+									"type": ["boolean", "null"]
+								},
+								"personality_set": {
+									"type": ["boolean", "null"]
+								},
+								"traits_enabled": {
+									"type": ["boolean", "null"]
+								},
+								"disabled_tools_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"memory_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"memory_tokens_used": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"memory_tokens_max": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"project_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"project_file_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"scheduled_task_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"scheduled_tasks_by_status": {
+									"type": ["object", "null"],
+									"propertyNames": {
+										"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+									},
+									"additionalProperties": {
+										"type": "integer",
+										"minimum": 0
+									}
+								},
+								"source_status": {
+									"type": "object",
+									"properties": {
+										"me": {
+											"type": "string",
+											"enum": ["ok", "not_available", "failed", "partial"]
+										},
+										"accounts_check": {
+											"type": "string",
+											"enum": ["ok", "not_available", "failed", "partial"]
+										},
+										"beta_features": {
+											"type": "string",
+											"enum": ["ok", "not_available", "failed", "partial"]
+										},
+										"custom_instructions": {
+											"type": "string",
+											"enum": ["ok", "not_available", "failed", "partial"]
+										},
+										"memories": {
+											"type": "string",
+											"enum": ["ok", "not_available", "failed", "partial"]
+										},
+										"projects": {
+											"type": "string",
+											"enum": ["ok", "not_available", "failed", "partial"]
+										},
+										"tasks": {
+											"type": "string",
+											"enum": ["ok", "not_available", "failed", "partial"]
+										},
+										"network": {
+											"type": "string",
+											"enum": ["ok", "not_available", "failed", "partial"]
+										}
+									},
+									"required": [
+										"me",
+										"accounts_check",
+										"beta_features",
+										"custom_instructions",
+										"memories",
+										"projects",
+										"tasks",
+										"network"
+									],
+									"additionalProperties": false,
+									"description": "Per-source outcome. A source that is not ok leaves its fields null; partial means a paged source stopped early."
+								}
+							},
+							"required": [
+								"id",
+								"user_created_at",
+								"chatgpt_account_created_at",
+								"tenure_months",
+								"country",
+								"region_code",
+								"geography_source",
+								"network_country",
+								"billing_currency",
+								"mfa_enabled",
+								"email_domain_type",
+								"org_count",
+								"has_non_personal_org",
+								"workspace_type",
+								"is_deactivated",
+								"data_residency_region",
+								"compute_residency_region",
+								"is_gratis",
+								"is_trial",
+								"trial_state",
+								"has_previously_paid_subscription",
+								"last_expired_subscription_was_gratis",
+								"purchase_origin_platform",
+								"is_delinquent",
+								"in_grace_period",
+								"account_feature_flag_count",
+								"enabled_beta_features",
+								"beta_feature_flag_count",
+								"custom_instructions_enabled",
+								"custom_instructions_about_user_set",
+								"custom_instructions_response_style_set",
+								"custom_instructions_name_set",
+								"custom_instructions_role_set",
+								"custom_instructions_traits_set",
+								"custom_instructions_other_set",
+								"personality_set",
+								"traits_enabled",
+								"disabled_tools_count",
+								"memory_count",
+								"memory_tokens_used",
+								"memory_tokens_max",
+								"project_count",
+								"project_file_count",
+								"scheduled_task_count",
+								"scheduled_tasks_by_status",
+								"source_status"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": false
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"user_created_at": ["gte", "gt", "lte", "lt"],
+								"chatgpt_account_created_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "usage_summary",
+						"required": false,
+						"description": "Aggregate ChatGPT usage with no text. Exact, from every conversation's list entry: totals and flags (archived, pinned, shared, temporary, automation), custom GPT and project share, conversations per month, active days, longest streak, first and last activity, hour-of-day and day-of-week of conversation starts. Sample-based and labelled as such: message counts, model mix and feature use over the most recently updated conversations.",
+						"compaction_fingerprint": {
+							"exclude_keys": []
+						},
+						"display": {
+							"label": "Your ChatGPT usage summary",
+							"detail": "How many conversations you have and how many are archived, pinned, shared, temporary or automated; how much you use custom GPTs and projects; conversations per month, active days and longest streak; when in the day and week you start conversations; and, for your most recent conversations only, how many messages were sent, which models answered and which tools were used. Account and settings facts are in the account profile stream; plan details in the account plan stream. No text, titles or ids are collected. Singleton."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"const": "usage_summary"
+								},
+								"timezone": {
+									"type": "string",
+									"maxLength": 64,
+									"description": "IANA timezone every month/day/hour bucket uses: the page's own, else UTC.",
+									"x_pdpp_role": "secondary"
+								},
+								"timezone_source": {
+									"type": "string",
+									"enum": ["browser", "default_utc"]
+								},
+								"activity_basis": {
+									"type": "string",
+									"const": "conversation_timestamps",
+									"description": "Activity (days, months, streak, first/last) is read from each conversation's start, last update and last answer, not from individual messages."
+								},
+								"coverage": {
+									"type": "object",
+									"properties": {
+										"conversations_listed": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"archived_listing": {
+											"type": "string",
+											"enum": ["read", "not_available"]
+										},
+										"list_pages": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_mode": {
+											"type": "string",
+											"enum": ["sample", "none"]
+										},
+										"listing_complete": {
+											"type": "boolean",
+											"description": "False when the project listing was incomplete (sidebar failed or partial, a project listing failed, or the run-wide budget truncated it). The summary is still built from what was listed but may miss conversations; detail_sample.complete is then false as well. An incomplete main or archived list withholds the summary instead."
+										},
+										"project_listing": {
+											"type": "object",
+											"description": "Project conversations are listed per project (they are missing from the main list). sidebar: outcome of the read that names the projects; failed: projects whose listing stopped early; conversations_added: conversations found only through a project.",
+											"properties": {
+												"sidebar": {
+													"type": "string",
+													"enum": ["ok", "not_available", "failed", "partial"]
+												},
+												"projects": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"pages": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"failed": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"truncated": {
+													"type": "boolean",
+													"description": "True when the run-wide budget (100 projects, 400 project pages) left projects or pages unread."
+												},
+												"conversations_added": {
+													"type": "integer",
+													"minimum": 0
+												}
+											},
+											"required": [
+												"sidebar",
+												"projects",
+												"pages",
+												"failed",
+												"truncated",
+												"conversations_added"
+											],
+											"additionalProperties": false
+										},
+										"detail_fetched": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_unavailable": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_failed": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_not_read": {
+											"type": "integer",
+											"minimum": 0
+										}
+									},
+									"required": [
+										"conversations_listed",
+										"archived_listing",
+										"list_pages",
+										"detail_mode",
+										"listing_complete",
+										"project_listing",
+										"detail_fetched",
+										"detail_unavailable",
+										"detail_failed",
+										"detail_not_read"
+									],
+									"additionalProperties": false
+								},
+								"first_activity_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"last_activity_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"history_span_days": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"active_days": {
+									"type": "integer",
+									"minimum": 0,
+									"description": "Days on which a conversation started, was last updated or last answered. Exact over every conversation; misses days in the middle of a long conversation."
+								},
+								"longest_streak_days": {
+									"type": "integer",
+									"minimum": 0
+								},
+								"totals": {
+									"type": "object",
+									"properties": {
+										"conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"archived": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"pinned": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"shared": {
+											"type": ["integer", "null"],
+											"minimum": 0,
+											"description": "Null when shares could not be read."
+										},
+										"in_workspace": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"custom_gpt_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"project_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"temporary_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"automation_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"do_not_remember_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"custom_gpts_used": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"projects_used": {
+											"type": "integer",
+											"minimum": 0
+										}
+									},
+									"required": [
+										"conversations",
+										"archived",
+										"pinned",
+										"shared",
+										"in_workspace",
+										"custom_gpt_conversations",
+										"project_conversations",
+										"temporary_conversations",
+										"automation_conversations",
+										"do_not_remember_conversations",
+										"custom_gpts_used",
+										"projects_used"
+									],
+									"additionalProperties": false
+								},
+								"custom_gpt_share": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"maximum": 1,
+									"description": "Share of conversations that ran in a custom GPT."
+								},
+								"project_share": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"maximum": 1,
+									"description": "Share of conversations that ran in a project."
+								},
+								"months": {
+									"type": "array",
+									"maxItems": 1200,
+									"items": {
+										"type": "object",
+										"properties": {
+											"month": {
+												"type": "string",
+												"pattern": "^\\d{4}-\\d{2}$"
+											},
+											"conversations_created": {
+												"type": "integer",
+												"minimum": 0
+											},
+											"conversations_last_active": {
+												"type": "integer",
+												"minimum": 0
+											},
+											"active_days": {
+												"type": "integer",
+												"minimum": 0
+											}
+										},
+										"required": [
+											"month",
+											"conversations_created",
+											"conversations_last_active",
+											"active_days"
+										],
+										"additionalProperties": false
+									}
+								},
+								"hour_of_day": {
+									"type": "array",
+									"minItems": 24,
+									"maxItems": 24,
+									"items": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"description": "Conversations started per local hour (0-23)."
+								},
+								"day_of_week": {
+									"type": "array",
+									"minItems": 7,
+									"maxItems": 7,
+									"items": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"description": "Conversations started per local weekday, Monday first."
+								},
+								"detail_sample": {
+									"type": ["object", "null"],
+									"properties": {
+										"basis": {
+											"type": "string",
+											"const": "most_recently_updated"
+										},
+										"n_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"n_read": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"complete": {
+											"type": "boolean"
+										},
+										"window_start": {
+											"type": ["string", "null"],
+											"format": "date-time"
+										},
+										"window_end": {
+											"type": ["string", "null"],
+											"format": "date-time"
+										},
+										"user_messages": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"assistant_messages": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"tool_messages": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"user_attachments": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"user_images": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"user_chars_total": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"regenerated_or_edited_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"messages_per_conversation": {
+											"type": "object",
+											"properties": {
+												"mean": {
+													"type": ["number", "null"],
+													"minimum": 0
+												},
+												"median": {
+													"type": ["integer", "null"],
+													"minimum": 0
+												}
+											},
+											"required": ["mean", "median"],
+											"additionalProperties": false
+										},
+										"user_messages_per_conversation": {
+											"type": "object",
+											"properties": {
+												"mean": {
+													"type": ["number", "null"],
+													"minimum": 0
+												},
+												"median": {
+													"type": ["integer", "null"],
+													"minimum": 0
+												}
+											},
+											"required": ["mean", "median"],
+											"additionalProperties": false
+										},
+										"user_chars_mean_per_message": {
+											"type": ["integer", "null"],
+											"minimum": 0
+										},
+										"models": {
+											"type": "array",
+											"maxItems": 500,
+											"items": {
+												"type": "object",
+												"properties": {
+													"slug": {
+														"type": "string",
+														"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+													},
+													"assistant_messages": {
+														"type": "integer",
+														"minimum": 0
+													}
+												},
+												"required": ["slug", "assistant_messages"],
+												"additionalProperties": false
+											}
+										},
+										"feature_conversations": {
+											"type": "object",
+											"properties": {
+												"web_search": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"code_interpreter": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"image_generation": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"canvas": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"deep_research": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"memory_update": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"file_search": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"reasoning": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"voice": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"other_tool": {
+													"type": "integer",
+													"minimum": 0
+												}
+											},
+											"required": [
+												"web_search",
+												"code_interpreter",
+												"image_generation",
+												"canvas",
+												"deep_research",
+												"memory_update",
+												"file_search",
+												"reasoning",
+												"voice",
+												"other_tool"
+											],
+											"additionalProperties": false
+										}
+									},
+									"required": [
+										"basis",
+										"n_conversations",
+										"n_read",
+										"complete",
+										"window_start",
+										"window_end",
+										"user_messages",
+										"assistant_messages",
+										"tool_messages",
+										"user_attachments",
+										"user_images",
+										"user_chars_total",
+										"regenerated_or_edited_conversations",
+										"messages_per_conversation",
+										"user_messages_per_conversation",
+										"user_chars_mean_per_message",
+										"models",
+										"feature_conversations"
+									],
+									"additionalProperties": false,
+									"description": "SAMPLE-BASED, not account-wide: message counts, model mix and feature use over the n_conversations most recently updated conversations, whose last activity falls between window_start and window_end. Null when no sample was read."
+								},
+								"locale": {
+									"type": "object",
+									"properties": {
+										"browser_language": {
+											"type": ["string", "null"],
+											"maxLength": 35
+										}
+									},
+									"required": ["browser_language"],
+									"additionalProperties": false
+								}
+							},
+							"required": [
+								"id",
+								"timezone",
+								"timezone_source",
+								"activity_basis",
+								"coverage",
+								"first_activity_at",
+								"last_activity_at",
+								"history_span_days",
+								"active_days",
+								"longest_streak_days",
+								"totals",
+								"custom_gpt_share",
+								"project_share",
+								"months",
+								"hour_of_day",
+								"day_of_week",
+								"detail_sample",
+								"locale"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": false
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"first_activity_at": ["gte", "gt", "lte", "lt"],
+								"last_activity_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
 						"coverage_strategy": "singleton_presence",
 						"freshness_strategy": "scheduled_window"
 					}
@@ -4961,6 +6198,21 @@
 								"name": "account_plan"
 							}
 						]
+					},
+					{
+						"id": "usage_metadata",
+						"label": "Usage metadata only, no conversation text",
+						"streams": [
+							{
+								"name": "account_profile"
+							},
+							{
+								"name": "usage_summary"
+							},
+							{
+								"name": "account_plan"
+							}
+						]
 					}
 				],
 				"mobile": {
@@ -5000,7 +6252,7 @@
 				},
 				"connector_key": "claude-code",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-				"version": "0.3.25",
+				"version": "0.3.26",
 				"display_name": "Claude Code",
 				"brand": {
 					"icon": "icon.svg",
@@ -5291,6 +6543,10 @@
 								},
 								"tool_use_id": {
 									"type": ["string", "null"]
+								},
+								"tool_name": {
+									"type": ["string", "null"],
+									"description": "Tool name of a tool_use block extracted from an assistant message."
 								},
 								"content_preview": {
 									"type": ["string", "null"]
@@ -6986,7 +8242,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.12",
+				"version": "0.1.13",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -7665,7 +8921,7 @@
 				},
 				"connector_key": "facebook",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-				"version": "0.1.2",
+				"version": "0.1.4",
 				"display_name": "Facebook",
 				"runtime_requirements": {
 					"bindings": {
@@ -7699,7 +8955,11 @@
 					}
 				},
 				"reason_display_messages": {
-					"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time."
+					"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time.",
+					"shape_check_failed": "Facebook sent an item this connector could not read, so it was not saved.",
+					"scope_not_supported": "Facebook does not date this list, so it cannot be limited to a time range. Choose it without a time range to import it.",
+					"facebook_auth_failed": "Facebook needs you to sign in again before this can continue.",
+					"facebook_interrupted": "The Facebook page stopped answering while signing in. Nothing was read; try again."
 				},
 				"streams": [
 					{
@@ -7815,13 +9075,12 @@
 							"required": ["id", "create_time", "attachments"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "create_time",
 						"consent_time_field": "create_time",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": [
@@ -7841,7 +9100,7 @@
 								"group_by": ["privacy"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -7937,7 +9196,7 @@
 							"label": "Your likes and reactions",
 							"detail": "When you liked or reacted, what Facebook says you reacted to, and the post's link and text."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -7972,13 +9231,12 @@
 							"required": ["id", "kind", "time"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "time",
 						"consent_time_field": "time",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["title", "target_text", "comment_text"],
@@ -7992,7 +9250,7 @@
 								"group_by_time": ["time"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -8003,7 +9261,7 @@
 							"label": "Your comments",
 							"detail": "When you commented, your comment's text, and the post it was on."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -8038,13 +9296,12 @@
 							"required": ["id", "kind", "time"]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "time",
 						"consent_time_field": "time",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["title", "target_text", "comment_text"],
@@ -8058,7 +9315,7 @@
 								"group_by_time": ["time"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					}
 				],
@@ -10107,7 +11364,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.10",
+				"version": "0.3.11",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -13478,7 +14735,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.24",
+				"version": "0.6.25",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -14207,7 +15464,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.37",
+				"version": "0.1.39",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -14663,6 +15920,912 @@
 			}
 		},
 		{
+			"connectorId": "https://registry.pdpp.dev/connectors/instinct",
+			"entry": "./connectors/instinct/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/instinct",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/instinct",
+					"display": {
+						"name": "Instinct"
+					}
+				},
+				"connector_key": "instinct",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
+				"version": "0.1.2",
+				"display_name": "Instinct",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"]
+						},
+						"browser": {
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "automatic",
+						"recommended_interval_seconds": 21600,
+						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 86400,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "low",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": true,
+						"assisted_after_owner_auth": true,
+						"max_recovery_attempts": 3,
+						"rationale": "Instinct signs in with an SMS one-time code behind a Turnstile challenge, so first login is an owner manual action in the isolated Instinct browser profile. The session then persists in that profile and scheduled refresh reuses it; assisted_after_owner_auth:true records that a background run may ask the owner to sign in again when the session lapses. Account-state streams are one small read each, and chat history pages only until the per-chat checkpoint after the first backfill, so refresh is cheap and rate-limit pressure is low."
+					},
+					"public_listing": {
+						"tier": "development",
+						"rationale": "Collection logic is real and was exercised against a live owner account over CDP, including a full chat-history backfill and a checkpointed rerun. Instinct is invite-only private beta and the account used had no connected services, devices, trusted people, or vault entries, and its chat history held only message and tool events, so those four streams and the rarer chat event kinds have not yet been proven against non-empty data."
+					}
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": true,
+						"description": "The Instinct account holder: identity, sign-in phone, roles, enabled feature flags, and the two privacy preferences Instinct exposes.",
+						"display": {
+							"label": "Your Instinct profile",
+							"detail": "Your name, email, sign-in phone number, account roles, onboarding state, which Instinct features are switched on for you, whether you opted out of training-data use, whether Instinct holds location data, and whether other people's Instincts may reach yours."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Instinct user id (stable, e.g. user-01M0...)."
+								},
+								"name": {
+									"type": ["string", "null"],
+									"description": "Display name used across Instinct.",
+									"x_pdpp_role": "primary-title"
+								},
+								"email": {
+									"type": ["string", "null"],
+									"description": "Email address on the Instinct account.",
+									"format": "email"
+								},
+								"phone_number": {
+									"type": ["string", "null"],
+									"description": "Phone number used to sign in to Instinct, in E.164."
+								},
+								"roles": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Account roles granted to this user (e.g. MEMBER)."
+								},
+								"enabled_feature_flags": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Instinct feature flags currently switched on for this account."
+								},
+								"onboarding_step": {
+									"type": ["string", "null"],
+									"description": "Where the account sits in Instinct onboarding ('done' once complete)."
+								},
+								"training_data_opt_out": {
+									"type": ["boolean", "null"],
+									"description": "True when the owner opted this account's data out of model training."
+								},
+								"has_location_data": {
+									"type": ["boolean", "null"],
+									"description": "True when Instinct currently holds location data for this account."
+								},
+								"agent_to_agent_enabled": {
+									"type": ["boolean", "null"],
+									"description": "True when this owner's Instinct is allowed to exchange messages with other people's Instincts."
+								},
+								"linked_sign_in_providers": {
+									"type": "array",
+									"items": {
+										"type": "object"
+									},
+									"description": "Identity providers linked for sign-in, each as {provider, subject}."
+								},
+								"observed_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "email", "onboarding_step"],
+								"semantic_fields": ["name"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "agent_contact",
+						"required": true,
+						"description": "The addresses Instinct assigned to the owner's agent: its SMS number, voice number, WhatsApp number, and agent mailbox.",
+						"display": {
+							"label": "How you reach your Instinct",
+							"detail": "The phone numbers and email address your Instinct agent answers on - SMS, voice, WhatsApp, and its @mail.instinct.com mailbox - plus whether voice calls and agent mail are switched on."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Constant singleton key ('agent_contact')."
+								},
+								"sms_phone_number": {
+									"type": ["string", "null"],
+									"description": "Number the owner texts to reach their agent, in E.164."
+								},
+								"voice_phone_number": {
+									"type": ["string", "null"],
+									"description": "Number the owner calls to reach their agent, in E.164."
+								},
+								"voice_calls_enabled": {
+									"type": ["boolean", "null"],
+									"description": "True when voice calling is enabled for this agent."
+								},
+								"whatsapp_channel_phone_number": {
+									"type": ["string", "null"],
+									"description": "Number the agent answers on WhatsApp, in E.164."
+								},
+								"email": {
+									"type": ["string", "null"],
+									"description": "The agent's own mailbox address.",
+									"format": "email",
+									"x_pdpp_role": "primary-title"
+								},
+								"agent_mail_status": {
+									"type": ["string", "null"],
+									"description": "Provisioning state of the agent mailbox (e.g. READY)."
+								},
+								"agent_phone_number": {
+									"type": ["string", "null"],
+									"description": "Dedicated outbound agent phone number, when one is provisioned."
+								},
+								"agent_phone_status": {
+									"type": ["string", "null"],
+									"description": "Provisioning state of the dedicated agent phone number (e.g. NOT_AVAILABLE)."
+								},
+								"observed_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"email",
+									"agent_mail_status",
+									"agent_phone_status"
+								]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "connections",
+						"required": false,
+						"description": "Third-party accounts the owner connected to Instinct so the agent can act in them, one record per connected account.",
+						"display": {
+							"label": "Services connected to your Instinct",
+							"detail": "Every outside account you linked - Google Workspace, Outlook, Linear, Notion, GitHub, Slack, Granola, Shop wallet, WHOOP, Stripe Link, WhatsApp, iMessage - with the account identity, whether it is the default for its provider, whether access was revoked, and for Google Workspace which individual services (Gmail, Calendar, Drive, ...) are switched on."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Stable key: '<provider>:<provider connection id>'."
+								},
+								"provider": {
+									"type": "string",
+									"description": "Which service this connection is to (e.g. google_workspace, outlook, linear, notion, github, slack, granola, shop_wallet, whoop, stripe_link, whatsapp, imessage)."
+								},
+								"connection_id": {
+									"type": ["string", "null"],
+									"description": "The provider connection id as Instinct reports it."
+								},
+								"account_email": {
+									"type": ["string", "null"],
+									"description": "Email identifying the connected account, when the provider exposes one.",
+									"format": "email"
+								},
+								"account_name": {
+									"type": ["string", "null"],
+									"description": "Human-readable account or user name on the connected service.",
+									"x_pdpp_role": "primary-title"
+								},
+								"workspace_name": {
+									"type": ["string", "null"],
+									"description": "Workspace, organization, or team name on the connected service."
+								},
+								"is_default": {
+									"type": ["boolean", "null"],
+									"description": "True when this is the default account Instinct uses for that provider."
+								},
+								"is_revoked": {
+									"type": ["boolean", "null"],
+									"description": "True when the connection exists but its access was revoked."
+								},
+								"is_connected": {
+									"type": ["boolean", "null"],
+									"description": "True when Instinct reports the connection as currently usable."
+								},
+								"services": {
+									"type": "array",
+									"items": {
+										"type": "object"
+									},
+									"description": "Per-service grants inside this connection, each as {service_id, label, connected, read_only, notification_issue}. Google Workspace only."
+								},
+								"connected_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the connection was made, as Instinct reports it (ISO 8601). Instinct reports it only for the local iMessage relay; null for every other connection."
+								},
+								"observed_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+								}
+							},
+							"required": ["id", "provider"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"provider",
+									"account_email",
+									"account_name",
+									"workspace_name"
+								]
+							},
+							"range_filters": {
+								"connected_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["provider"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "devices",
+						"required": false,
+						"description": "Devices the owner enrolled with Instinct so the agent can drive them.",
+						"display": {
+							"label": "Your enrolled devices",
+							"detail": "Each phone or computer registered with Instinct: its name, hostname, OS version, device type, when it was enrolled, and its last reported connection and battery state."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Instinct device id."
+								},
+								"name": {
+									"type": ["string", "null"],
+									"description": "Device name the owner gave it.",
+									"x_pdpp_role": "primary-title"
+								},
+								"hostname": {
+									"type": ["string", "null"],
+									"description": "Device hostname reported by the Instinct client."
+								},
+								"os_version": {
+									"type": ["string", "null"],
+									"description": "Operating system version reported by the device."
+								},
+								"device_type": {
+									"type": ["string", "null"],
+									"description": "Device class Instinct assigned (e.g. mac, iphone)."
+								},
+								"is_connected": {
+									"type": ["boolean", "null"],
+									"description": "True when the device was online at read time."
+								},
+								"battery_level": {
+									"type": ["integer", "null"],
+									"description": "Last reported battery level, 0-100."
+								},
+								"is_charging": {
+									"type": ["boolean", "null"],
+									"description": "True when the device reported charging at read time."
+								},
+								"created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the device was enrolled with Instinct (ISO 8601).",
+									"x_pdpp_role": "event-time"
+								},
+								"observed_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "created_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"name",
+									"hostname",
+									"os_version",
+									"device_type"
+								]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"],
+								"battery_level": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["device_type"],
+								"group_by_time": ["created_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "trusted_people",
+						"required": false,
+						"description": "The owner's agent-to-agent trust list: people whose Instinct may reach theirs, people they blocked, and pending requests in both directions.",
+						"display": {
+							"label": "People your Instinct trusts",
+							"detail": "Everyone on your agent-to-agent list - trusted, blocked, asking to connect, or asked by you - with their display name, the phone numbers the request came from, when it was created, and when a pending request expires."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Stable key: '<relationship>:<Instinct record id>'."
+								},
+								"relationship": {
+									"type": "string",
+									"description": "Which list this person is on: contact, blocked, incoming_request, or sent_request."
+								},
+								"person_id": {
+									"type": ["string", "null"],
+									"description": "Instinct's id for the person or request record."
+								},
+								"display_name": {
+									"type": ["string", "null"],
+									"description": "Name Instinct shows for this person.",
+									"x_pdpp_role": "primary-title"
+								},
+								"phone_numbers": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Phone numbers associated with this person, in E.164."
+								},
+								"status": {
+									"type": ["string", "null"],
+									"description": "Status of a pending request, when the record is a request."
+								},
+								"generation": {
+									"type": ["integer", "null"],
+									"description": "Instinct's optimistic-concurrency generation for this record."
+								},
+								"created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the trust record or request was created (ISO 8601).",
+									"x_pdpp_role": "event-time"
+								},
+								"expires_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When a pending request expires (ISO 8601)."
+								},
+								"observed_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+								}
+							},
+							"required": ["id", "relationship"]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "created_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["display_name", "relationship", "status"],
+								"semantic_fields": ["display_name"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"],
+								"expires_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["relationship"],
+								"group_by_time": ["created_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "vault_entries",
+						"required": false,
+						"description": "Inventory of what the owner's Instinct vault holds. Metadata only - entry kind, label, and which fields are filled. Never the stored values.",
+						"display": {
+							"label": "What your Instinct vault holds",
+							"detail": "One row per saved vault item - logins, cards, addresses, phone numbers - showing its kind, its label, whether your agent put it there, and which of that kind's fields are filled in. The secret values themselves are never read or exported."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Stable key: '<kind>:<entry name>'."
+								},
+								"kind": {
+									"type": "string",
+									"description": "Vault entry kind (login, card, address, phone, ssn)."
+								},
+								"name": {
+									"type": ["string", "null"],
+									"description": "Label the entry is saved under.",
+									"x_pdpp_role": "primary-title"
+								},
+								"is_agent_entry": {
+									"type": ["boolean", "null"],
+									"description": "True when the agent created the entry rather than the owner."
+								},
+								"field_keys": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Field names this entry kind defines (e.g. username, password, totp). Names only."
+								},
+								"populated_field_keys": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Which of those fields currently hold a value. Names only - no values are read."
+								},
+								"observed_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+								}
+							},
+							"required": ["id", "kind"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["kind", "name"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["kind"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "chats",
+						"required": true,
+						"description": "The owner's chats with their Instinct agent, as listed by the app's /agent page. A time range selects chats by last_event_at, the time of their newest event: a chat with events inside the range but a newer event after its end is not included, although its events in the range are. A chat with no events has no last_event_at, so while any chat has none, a run with an end time does not save its progress for chats and chat events.",
+						"display": {
+							"label": "Your chats with your agent",
+							"detail": "Each chat Instinct keeps with your agent (for example the main chat that gathers every channel, and a WhatsApp channel chat): its title, source, status, and whether a turn is in progress."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Instinct chat id."
+								},
+								"title": {
+									"type": ["string", "null"],
+									"description": "Chat title Instinct shows.",
+									"x_pdpp_role": "primary-title"
+								},
+								"source": {
+									"type": ["string", "null"],
+									"description": "Which channel the chat collects, as Instinct labels it (e.g. main, which gathers every channel, or whatsapp_channel)."
+								},
+								"status": {
+									"type": ["string", "null"],
+									"description": "Chat status Instinct reports."
+								},
+								"pending_turn_started_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the agent's in-progress turn started, or null when no turn is pending (ISO 8601)."
+								},
+								"last_event_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the newest event in this chat happened, as Instinct reports it (ISO 8601, second precision), or null when the chat has no events. A time range selects the chats whose latest activity falls in it.",
+									"x_pdpp_role": "event-time"
+								},
+								"observed_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "Deprecated and no longer set. Versions up to 0.1.1 wrote the time this connector ran here; records now carry only times Instinct reports."
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "last_event_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["title", "source", "status"],
+								"semantic_fields": ["title"]
+							},
+							"range_filters": {
+								"last_event_at": ["gte", "gt", "lte", "lt"],
+								"pending_turn_started_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["source"],
+								"group_by_time": ["last_event_at"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "chat_events",
+						"required": true,
+						"description": "Every event in the owner's chats with their Instinct agent: the owner's messages and the agent's tool calls, tool responses, interactions, thinking, and errors. The agent's replies over WhatsApp and SMS are sent through tool calls, so they appear in tool_arguments rather than as message events. Message text, draft field values, interactions, thinking, and tool arguments and results are copied as the app shows them, so they can hold anything the agent typed or read, including values it took from the vault. A regular run reads only events newer than those already collected, so a change Instinct makes to an older event later, such as read_at or an answer to an interaction, is picked up only by a full refresh or when that part of the history is read again.",
+						"display": {
+							"label": "Your conversations with your agent",
+							"detail": "Each event in your chats: messages you sent and their read time, the tools your agent called with their arguments and responses, approvals it asked for and your answers, and errors. Attachments are listed by name, type, and size; their download links are not kept. Message text, form values, approvals, and tool inputs and outputs are kept as the app shows them, so they can include anything your agent typed or read, such as details it filled in from your vault."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Instinct event id."
+								},
+								"chat_id": {
+									"type": "string",
+									"description": "Id of the chat this event belongs to."
+								},
+								"type": {
+									"type": "string",
+									"description": "Event kind Instinct records (e.g. message, tool_invocation, tool_response, tool_result_block, error); says which of the per-kind fields are populated."
+								},
+								"created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the event happened (ISO 8601, second precision).",
+									"x_pdpp_role": "event-time"
+								},
+								"message_id": {
+									"type": ["string", "null"],
+									"description": "Instinct message id, for message events."
+								},
+								"role": {
+									"type": ["string", "null"],
+									"description": "Who wrote the message (e.g. user, assistant).",
+									"x_pdpp_role": "actor"
+								},
+								"content": {
+									"type": ["string", "null"],
+									"description": "Message text.",
+									"x_pdpp_role": "primary-title"
+								},
+								"read_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the message was read, if Instinct had recorded it when the event was collected (ISO 8601). Instinct sets it later for a message read later, and a collected event is read again only on a full refresh."
+								},
+								"origin_kind": {
+									"type": ["string", "null"],
+									"description": "Where the message came from, as Instinct labels it."
+								},
+								"origin_agent_display_name": {
+									"type": ["string", "null"],
+									"description": "Display name of the agent that originated the message, when another agent sent it."
+								},
+								"attachments": {
+									"type": "array",
+									"description": "Files attached to the message, without their short-lived download links.",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": ["string", "null"],
+												"description": "Instinct attachment id."
+											},
+											"kind": {
+												"type": ["string", "null"],
+												"description": "Attachment kind Instinct assigned."
+											},
+											"mime_type": {
+												"type": ["string", "null"],
+												"description": "Attachment MIME type."
+											},
+											"filename": {
+												"type": ["string", "null"],
+												"description": "Attachment file name."
+											},
+											"byte_size": {
+												"type": ["integer", "null"],
+												"description": "Attachment size in bytes."
+											}
+										}
+									}
+								},
+								"error_message": {
+									"type": ["string", "null"],
+									"description": "Error text, for error events."
+								},
+								"tool_name": {
+									"type": ["string", "null"],
+									"description": "Name of the tool the agent called, for tool invocation and response events."
+								},
+								"tool_call_id": {
+									"type": ["string", "null"],
+									"description": "Id linking a tool invocation to its response."
+								},
+								"tool_arguments": {
+									"type": ["string", "null"],
+									"description": "Arguments the agent passed to the tool, as Instinct recorded them (usually JSON text)."
+								},
+								"tool_response": {
+									"type": ["string", "null"],
+									"description": "What the tool returned, as Instinct recorded it."
+								},
+								"tool_is_error": {
+									"type": ["boolean", "null"],
+									"description": "True when the tool response was an error."
+								},
+								"interaction": {
+									"type": ["object", "null"],
+									"description": "An approval, question, or plan the agent put to the owner, for interaction events."
+								},
+								"interaction_response": {
+									"type": ["object", "null"],
+									"description": "The owner's answer to an interaction."
+								},
+								"thinking": {
+									"type": ["string", "null"],
+									"description": "The agent's recorded reasoning text, for thinking events."
+								},
+								"action": {
+									"type": ["object", "null"],
+									"description": "A device action the agent took (click, type, key, scroll, or command), for action events."
+								},
+								"draft_field": {
+									"type": ["object", "null"],
+									"description": "A form field the agent drafted and any edit the owner made to it."
+								},
+								"has_screenshot": {
+									"type": "boolean",
+									"description": "True when the event carried a screenshot; the image link itself is not kept."
+								}
+							},
+							"required": ["id", "chat_id", "type"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "created_at",
+						"consent_time_field": "created_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"relationships": [
+							{
+								"name": "chat",
+								"stream": "chats",
+								"foreign_key": "chat_id",
+								"cardinality": "has_one"
+							}
+						],
+						"parent_streams": ["chats"],
+						"query": {
+							"search": {
+								"lexical_fields": ["content"],
+								"semantic_fields": ["content"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"],
+								"read_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["type", "role"],
+								"group_by_time": ["created_at"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"freshness_strategy": "scheduled_window"
+					}
+				],
+				"reason_display_messages": {
+					"shape_check_failed": "The data from Instinct did not look like we expected",
+					"instinct_auth_failed": "Instinct needs you to sign in again before this can continue.",
+					"instinct_interrupted": "Instinct did not answer when we checked your sign-in. Nothing was collected; try again.",
+					"instinct_rate_limited": "Instinct asked us to slow down, so collection stopped early. What was collected is saved; try again later.",
+					"instinct_server_error": "Instinct's servers had a problem partway through. What was collected is saved; try again later.",
+					"instinct_request_rejected": "Instinct refused one of the requests, so collection stopped.",
+					"instinct_source_unreadable": "Instinct answered in a form this connector does not recognise. Instinct may have changed its app; please report this.",
+					"instinct_stream_incomplete": "Instinct did not show the end of this list, so it was not saved as complete.",
+					"scope_not_supported": "This part of your Instinct data cannot be collected with the selection you made: account details have no date to limit by, and chat events are collected only together with your chats.",
+					"stream_collection_failed": "Instinct did not show all of this part of your account, so it was not saved as complete. Try again later."
+				},
+				"profiles": [
+					{
+						"id": "account",
+						"label": "Your Instinct account and how to reach your agent",
+						"streams": [
+							{
+								"name": "profile"
+							},
+							{
+								"name": "agent_contact"
+							}
+						]
+					},
+					{
+						"id": "reach",
+						"label": "What your Instinct is connected to",
+						"streams": [
+							{
+								"name": "connections"
+							},
+							{
+								"name": "devices"
+							},
+							{
+								"name": "trusted_people"
+							}
+						]
+					},
+					{
+						"id": "conversations",
+						"label": "Your conversations with your Instinct agent",
+						"streams": [
+							{
+								"name": "chats"
+							},
+							{
+								"name": "chat_events"
+							}
+						]
+					},
+					{
+						"id": "full",
+						"label": "Everything: profile, agent contact, connections, devices, trusted people, vault inventory, chats with your agent",
+						"streams": [
+							{
+								"name": "profile"
+							},
+							{
+								"name": "agent_contact"
+							},
+							{
+								"name": "connections"
+							},
+							{
+								"name": "devices"
+							},
+							{
+								"name": "trusted_people"
+							},
+							{
+								"name": "vault_entries"
+							},
+							{
+								"name": "chats"
+							},
+							{
+								"name": "chat_events"
+							}
+						]
+					}
+				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "instinct",
+						"login_url": "https://app.instinct.com/signin?returnTo=%2Fworkspace",
+						"login_message": "Sign in to Instinct with your phone number and the SMS code, then return here.",
+						"collect_export": "collectInstinctOnPage",
+						"probe_export": "probeInstinctSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				}
+			}
+		},
+		{
 			"brandIcon": "./connectors/jellyfin/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/jellyfin",
 			"entry": "./connectors/jellyfin/index.ts",
@@ -14937,7 +17100,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.34",
+				"version": "0.3.35",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -15567,7 +17730,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.34",
+				"version": "0.4.35",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15918,14 +18081,10 @@
 				},
 				"connector_key": "muse",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-				"version": "0.1.1",
+				"version": "0.1.4",
 				"display_name": "Muse (Meta)",
 				"runtime_requirements": {
 					"bindings": {
-						"network": {
-							"required": true,
-							"features": ["same_origin_page_fetch"]
-						},
 						"browser": {
 							"required": true,
 							"features": [
@@ -15954,7 +18113,7 @@
 				"streams": [
 					{
 						"name": "conversations",
-						"description": "Muse chats: the main chat and side chats, active and archived, as sessions.list reports them.",
+						"description": "Muse chats: the main chat and side chats, active and archived, as sessions.list reports them. A time window selects chats by their last update.",
 						"display": {
 							"label": "Your Muse chats",
 							"detail": "Chat title, snippet of the latest message, create and update times, and whether the chat is the main chat, a thread, archived or pinned."
@@ -16002,7 +18161,7 @@
 						},
 						"primary_key": ["id"],
 						"cursor_field": "updated_at",
-						"consent_time_field": "created_at",
+						"consent_time_field": "updated_at",
 						"selection": {
 							"fields": true,
 							"resources": true
@@ -16028,12 +18187,12 @@
 					},
 					{
 						"name": "messages",
-						"description": "Messages in Muse chats, yours and the agent's, from chat.history, paged back to the start of each chat. Collected only together with conversations (each message's chat record is emitted before it); a request for messages without conversations is answered with scope_not_supported.",
+						"description": "Messages in Muse chats, yours and the agent's, from chat.history, paged back to the start of each chat, or to the start of the requested time window. Collected only together with conversations (each message's chat record is emitted before it, unless the chat record itself is outside the requested window or resources); a request for messages without conversations is answered with scope_not_supported. A message is emitted again under the same id when its chat's transcript changes.",
 						"display": {
 							"label": "Your Muse messages",
 							"detail": "Role, message text, time, the message it replies to, source and visibility."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -16116,7 +18275,7 @@
 							"label": "Your Muse agent activity",
 							"detail": "Activity type, title, status, the task it belonged to and when it happened."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -17263,7 +19422,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.42",
+				"version": "0.1.44",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -17577,6 +19736,272 @@
 						"summary": {
 							"singular": "record",
 							"plural": "records"
+						}
+					}
+				}
+			}
+		},
+		{
+			"connectorId": "https://registry.pdpp.dev/connectors/perplexity",
+			"entry": "./connectors/perplexity/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/perplexity",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/perplexity",
+					"display": {
+						"name": "Perplexity"
+					}
+				},
+				"connector_key": "perplexity",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
+				"version": "0.1.2",
+				"display_name": "Perplexity (Browser Sign-In)",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"],
+							"constraints": {
+								"hosts": ["https://www.perplexity.ai"]
+							}
+						},
+						"browser": {
+							"required": true,
+							"features": ["page_navigation", "page_script_evaluation"],
+							"constraints": {
+								"navigate": ["https://www.perplexity.ai"]
+							}
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"recommended_interval_seconds": 86400,
+						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 604800,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "high",
+						"background_safe": false,
+						"rationale": "Collection reads the JSON that www.perplexity.ai serves the owner's own signed-in session, through the page's own fetch. Perplexity shows a Cloudflare human check on signed-in pages, so the owner may need to complete it before collection continues. A valid session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"streams": [
+					{
+						"name": "conversations",
+						"required": true,
+						"description": "Threads (question-and-answer conversations) in the owner's Perplexity library. One record per thread, keyed by Perplexity's stable thread context uuid.",
+						"display": {
+							"label": "Your Perplexity threads",
+							"detail": "Each thread in your library: title, search mode, model, last activity time, entry count and access level. Questions and answers are the separate messages stream."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The thread's context uuid, stable across renames and new answers."
+								},
+								"title": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title",
+									"description": "The thread title Perplexity shows in the library. Null when the thread has none yet."
+								},
+								"slug": {
+									"type": ["string", "null"],
+									"description": "The URL slug of the thread's latest entry, which addresses the thread page. Null when the list did not carry one."
+								},
+								"mode": {
+									"type": ["string", "null"],
+									"description": "The search mode the thread ran in (web, academic, writing, ...)."
+								},
+								"model": {
+									"type": ["string", "null"],
+									"description": "The display model that answered, as the library shows it."
+								},
+								"create_time": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the thread was created, taken from its first entry's creation time while the thread's entries are being read. Null on a conversations-only run or when the thread has no readable entry, because the list endpoint carries no creation time."
+								},
+								"update_time": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "The thread's last activity (its last query time)."
+								},
+								"entry_count": {
+									"type": ["integer", "null"],
+									"description": "The number of question-and-answer entries Perplexity reports for the thread."
+								},
+								"access": {
+									"type": ["integer", "null"],
+									"description": "The thread's access level code as the library carries it."
+								}
+							},
+							"required": [
+								"id",
+								"title",
+								"slug",
+								"mode",
+								"model",
+								"create_time",
+								"update_time",
+								"entry_count",
+								"access"
+							]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "update_time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["title"],
+								"semantic_fields": ["title"]
+							},
+							"range_filters": {
+								"create_time": ["gte", "gt", "lte", "lt"],
+								"update_time": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["create_time"],
+								"group_by": ["mode"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "messages",
+						"required": false,
+						"description": "The questions and answers inside each Perplexity thread. Every entry becomes two records: the user's question and the assistant's answer, including the citations the answer used. A thread is read again when it changes or when a run asks for messages outside the time range or resources it was collected under. A full refresh limited to a time range re-reads the threads inside it and keeps what earlier runs collected about threads outside it.",
+						"display": {
+							"label": "Your Perplexity messages",
+							"detail": "Each question you asked and each answer Perplexity gave, with the model, the time, and the web citations behind the answer."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The entry's uuid with the role appended: <entry uuid>:user or <entry uuid>:assistant."
+								},
+								"conversation_id": {
+									"type": "string",
+									"description": "The thread's context uuid, matching a conversations record."
+								},
+								"role": {
+									"type": "string",
+									"x_pdpp_role": "actor",
+									"enum": ["user", "assistant"]
+								},
+								"content": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title",
+									"description": "The question text, or the answer's full markdown. Null when the entry carried none."
+								},
+								"create_time": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "For a question, its entry's creation time; for an answer, the entry's last update time, which is when the answer finished."
+								},
+								"model": {
+									"type": ["string", "null"],
+									"description": "The model that produced the answer. Null on a question."
+								},
+								"citations": {
+									"type": "array",
+									"description": "The web results the answer cited: [{ title, url }]. Empty for questions.",
+									"items": {
+										"type": "object",
+										"properties": {
+											"title": {
+												"type": ["string", "null"]
+											},
+											"url": {
+												"type": "string",
+												"format": "uri"
+											}
+										},
+										"required": ["title", "url"]
+									}
+								}
+							},
+							"required": [
+								"id",
+								"conversation_id",
+								"role",
+								"content",
+								"create_time",
+								"model",
+								"citations"
+							]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "create_time",
+						"parent_streams": ["conversations"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"relationships": [
+							{
+								"name": "conversation",
+								"stream": "conversations",
+								"foreign_key": "conversation_id",
+								"cardinality": "has_one"
+							}
+						],
+						"query": {
+							"search": {
+								"lexical_fields": ["content"],
+								"semantic_fields": ["content"]
+							},
+							"range_filters": {
+								"create_time": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["create_time"]
+							}
+						},
+						"coverage_strategy": "parent_detail_accounting",
+						"freshness_strategy": "scheduled_window"
+					}
+				],
+				"reason_display_messages": {
+					"covered_in_full": "All Perplexity threads in the selected time range have already been collected.",
+					"collection_interrupted": "Perplexity stopped answering partway through, so some threads are missing. The next run continues from where this one stopped.",
+					"nothing_in_range": "There are no Perplexity threads in the selected time range.",
+					"records_unreadable": "Some Perplexity threads or answers couldn't be read by this version of the connector and were skipped. Everything else was collected normally.",
+					"sign_in_required": "Perplexity needs you to sign in (and pass its human check) before this can continue.",
+					"source_limit_reached": "This run reached a Perplexity limit. The next run will retry the remaining threads.",
+					"stream_collection_failed": "Perplexity's library could not be read completely in this run, so nothing was checkpointed. A later run, or a newer version of this connector, can finish it.",
+					"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site, so please report this rather than retrying."
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "perplexity",
+						"login_url": "https://www.perplexity.ai/auth/signin?callbackUrl=%2F",
+						"login_message": "Sign in to Perplexity, then return here.",
+						"collect_export": "collectPerplexity",
+						"probe_export": "probePerplexitySession",
+						"summary": {
+							"singular": "item",
+							"plural": "items"
 						}
 					}
 				}
@@ -20553,7 +22978,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.38",
+				"version": "0.1.40",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -21033,6 +23458,7 @@
 				"reason_display_messages": {
 					"stream_collection_failed": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
 					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+					"spotify_library_rows_unsupported": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing.",
 					"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 					"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
 					"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
@@ -21054,7 +23480,7 @@
 				},
 				"connector_key": "steam",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-				"version": "0.1.21",
+				"version": "0.1.22",
 				"display_name": "Steam",
 				"brand": {
 					"icon": "icon.svg",
@@ -21653,7 +24079,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.36",
+				"version": "0.1.37",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -21852,7 +24278,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.1",
+				"version": "0.3.7",
 				"display_name": "TikTok (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -22001,7 +24427,7 @@
 					{
 						"name": "videos",
 						"required": false,
-						"description": "Videos the owner posted, newest first, with their caption, length, who may see them, and their counts when collected. Every run reads the whole list again so the counts stay current. The video files are not collected.",
+						"description": "Videos the owner posted, newest first, with their caption, length, who may see them, and their counts when collected. Every run reads the whole list again so the counts stay current; a run limited to a start date stops once TikTok's newest-first list has passed it, and a run limited to chosen videos stops once all of them were read. The video files are not collected.",
 						"display": {
 							"label": "Your TikTok videos",
 							"detail": "Each video's caption, when you posted it, its length, who can see it, and its views, likes, comments, shares, saves and reposts."
@@ -22019,7 +24445,7 @@
 								"created_at": {
 									"type": "string",
 									"format": "date-time",
-									"description": "When the video was posted, in UTC. This is the stream's cursor and consent time field.",
+									"description": "When the video was posted, in UTC. This is the stream's consent time field.",
 									"x_pdpp_role": "event-time"
 								},
 								"caption": {
@@ -22084,7 +24510,6 @@
 							]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "created_at",
 						"consent_time_field": "created_at",
 						"selection": {
 							"fields": true,
@@ -22113,12 +24538,12 @@
 					{
 						"name": "likes",
 						"required": false,
-						"description": "Videos the owner liked, newest first: who posted each and its caption. TikTok does not say when a video was liked, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected.",
+						"description": "Videos the owner liked, in the order TikTok lists them: who posted each and its caption. TikTok does not say when a video was liked, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal (a run limited to chosen videos stops once all of them were read), so a caption or author name can change between runs; a video unliked since an earlier run is no longer listed and is not reported as removed. The video files are not collected.",
 						"display": {
 							"label": "Videos you liked on TikTok",
 							"detail": "The videos you liked: who posted each, its caption and when it was posted."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -22193,12 +24618,12 @@
 					{
 						"name": "favorites",
 						"required": false,
-						"description": "Videos the owner saved to Favorites, newest first: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal. The video files are not collected.",
+						"description": "Videos the owner saved to Favorites, in the order TikTok lists them: who posted each and its caption. TikTok does not say when a video was saved, so this stream cannot be limited to a date range. Every run reads the whole list again to TikTok's own end signal (a run limited to chosen videos stops once all of them were read), so a caption or author name can change between runs; a video removed from Favorites since an earlier run is no longer listed and is not reported as removed. The video files are not collected.",
 						"display": {
 							"label": "Your TikTok Favorites",
 							"detail": "The videos you saved to Favorites: who posted each, its caption and when it was posted."
 						},
-						"semantics": "append_only",
+						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
@@ -22325,7 +24750,7 @@
 					{
 						"name": "collection_items",
 						"required": false,
-						"description": "Which saved videos sit in which Favorites collection: one record per video in a collection, with who posted it and its caption. Each collection is read to TikTok's own end signal; a collection that could not be read is retried on the next run. The video files are not collected.",
+						"description": "Which saved videos sit in which Favorites collection: one record per video in a collection, with who posted it and its caption. Each collection is read to TikTok's own end signal (a run limited to chosen collections or videos reads only the collections they name); a collection whose list TikTok did not finish is retried on the next run, and one whose answer cannot be read fails the stream. The video files are not collected.",
 						"display": {
 							"label": "Videos in your TikTok Favorites collections",
 							"detail": "For each collection, the videos in it: who posted each, its caption and when it was posted."
@@ -22408,7 +24833,7 @@
 					{
 						"name": "following",
 						"required": false,
-						"description": "Accounts the owner follows: handle, display name and id. Every run reads the whole list again; the stream fails rather than reports complete when TikTok cuts the list short.",
+						"description": "Accounts the owner follows: handle, display name and id. Every run reads the whole list again (a run limited to chosen accounts stops once all of them were read); the stream fails rather than reports complete when TikTok cuts the list short.",
 						"display": {
 							"label": "Accounts you follow on TikTok",
 							"detail": "Each account's handle, display name and id, and whether it is verified or private."
@@ -22478,7 +24903,7 @@
 					{
 						"name": "followers",
 						"required": false,
-						"description": "Accounts that follow the owner: handle, display name and id. Every run reads the whole list again; the stream fails rather than reports complete when TikTok cuts the list short.",
+						"description": "Accounts that follow the owner: handle, display name and id. Every run reads the whole list again (a run limited to chosen accounts stops once all of them were read); the stream fails rather than reports complete when TikTok cuts the list short.",
 						"display": {
 							"label": "Your TikTok followers",
 							"detail": "Each follower's handle, display name and id, and whether it is verified or private."
@@ -22558,6 +24983,7 @@
 					"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
 					"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
 					"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
+					"stream_collection_failed": "TikTok did not let this part be read in full, so it was not saved as complete. What was read is saved.",
 					"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
 				},
 				"mobile": {
@@ -23645,7 +26071,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.22",
+				"version": "0.2.27",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
@@ -23698,10 +26124,12 @@
 						"venmo_post_submit_probe_transport_error",
 						"venmo_origin_navigation_failed",
 						"venmo_password_screen_timeout",
-						"venmo_invisible_scoring_challenge",
+						"venmo_password_field_empty_after_submit",
+						"venmo_password_submit_stalled",
 						"venmo_sms_offer_checkbox_unavailable",
 						"venmo_sms_offer_send_code_unavailable",
-						"venmo_sms_offer_code_input_timeout"
+						"venmo_sms_offer_code_input_timeout",
+						"venmo_login_challenge_during_replay"
 					],
 					"refresh_policy": {
 						"recommended_mode": "manual",
@@ -23912,7 +26340,7 @@
 									"enum": ["pay", "charge"]
 								},
 								"amount_cents": {
-									"type": "integer"
+									"type": ["integer", "null"]
 								},
 								"audience": {
 									"type": ["string", "null"],
@@ -23965,7 +26393,7 @@
 									}
 								},
 								"is_owner_actor": {
-									"type": "boolean"
+									"type": ["boolean", "null"]
 								}
 							},
 							"required": [
@@ -23977,13 +26405,12 @@
 							]
 						},
 						"primary_key": ["id"],
-						"cursor_field": "date_created",
 						"consent_time_field": "date_created",
 						"selection": {
 							"fields": true,
 							"resources": true
 						},
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": [
@@ -24019,8 +26446,9 @@
 					}
 				],
 				"reason_display_messages": {
-					"friends_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo friends, so some friends haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
-					"transactions_deferred_page_budget": "We stopped after reading a set number of pages of your Venmo transactions, so older transactions haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+					"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
+					"transactions_deferred_page_budget": "Some Venmo transaction history is still pending. Saved positions let later runs resume it while refreshing recent activity. A large volume of new activity may delay completion",
+					"transactions_schema_blocked": "A Venmo transaction could not be validated. The unread history after that record will be retried"
 				}
 			}
 		},
@@ -24347,6 +26775,487 @@
 					"media_exceeds_bounded_read_policy": "Some media files in that WhatsApp export were too large to safely import",
 					"no_exports_found": "We couldn't find any exports yet",
 					"unsupported_export": "We could not read that WhatsApp export format yet"
+				}
+			}
+		},
+		{
+			"brandIcon": "./connectors/whatsapp_web/icon.svg",
+			"connectorId": "https://registry.pdpp.dev/connectors/whatsapp-web",
+			"entry": "./connectors/whatsapp_web/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/whatsapp-web",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/whatsapp_web",
+					"display": {
+						"name": "WhatsApp (web)",
+						"description": "WhatsApp chats, messages, contacts and groups, read from the signed-in WhatsApp Web page's own local stores."
+					}
+				},
+				"connector_key": "whatsapp-web",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
+				"version": "0.1.3",
+				"display_name": "WhatsApp (web)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#25D366"
+				},
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"]
+						},
+						"browser": {
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"minimum_interval_seconds": 3600,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": false,
+						"rationale": "Collection reads the page's own local stores inside the owner's signed-in tab. It sends no request of its own except one on-demand history request per chat that says more messages remain on the phone; the owner starts every run and no run happens in the background. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff."
+					},
+					"public_listing": {
+						"tier": "development",
+						"rationale": "First version: chats, messages, contacts and groups read from the WhatsApp Web client's own in-page stores. Never reads or emits media keys, encrypted blobs, or anything from the signal-storage / wawc_db_enc databases."
+					}
+				},
+				"streams": [
+					{
+						"name": "chats",
+						"required": true,
+						"description": "Every chat the signed-in account has, from the page's own chat collection.",
+						"display": {
+							"label": "Your WhatsApp chats",
+							"detail": "Chat kind (user, group or other), title, last activity, archive, pin, mute, unread and read-only state, and whether more messages remain on the phone."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The chat's WhatsApp id (wid), serialized."
+								},
+								"kind": {
+									"type": "string",
+									"enum": ["user", "group", "other"],
+									"description": "What the chat is, from the id's server part."
+								},
+								"title": {
+									"type": ["string", "null"],
+									"description": "The chat's formatted title.",
+									"x_pdpp_role": "primary-title"
+								},
+								"last_activity_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "The time of the chat's last message.",
+									"x_pdpp_role": "event-time"
+								},
+								"archived": {
+									"type": "boolean",
+									"description": "True when the chat is archived."
+								},
+								"pinned": {
+									"type": ["boolean", "null"],
+									"description": "True when the chat is pinned."
+								},
+								"muted": {
+									"type": "boolean",
+									"description": "True when the source holds a mute for the chat: muted with no end, or muted until muted_until. It is not compared with the run's clock; whether a timed mute is still in force is muted_until against the reader's clock."
+								},
+								"muted_until": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "The time the chat's mute ends, as the source holds it (it can be in the past); null when no mute is set or the mute has no end."
+								},
+								"unread_count": {
+									"type": "integer",
+									"description": "How many unread messages the chat has."
+								},
+								"read_only": {
+									"type": "boolean",
+									"description": "True when the chat cannot accept new messages (e.g. a closed group)."
+								},
+								"history_state": {
+									"type": ["string", "null"],
+									"description": "The chat's end-of-history-transfer state, named as the app's own module names it."
+								}
+							},
+							"required": [
+								"id",
+								"kind",
+								"title",
+								"last_activity_at",
+								"archived",
+								"pinned",
+								"muted",
+								"muted_until",
+								"unread_count",
+								"read_only",
+								"history_state"
+							]
+						},
+						"query": {
+							"search": {
+								"lexical_fields": ["title"],
+								"semantic_fields": ["title"]
+							},
+							"range_filters": {
+								"last_activity_at": ["gte", "gt", "lte", "lt"],
+								"muted_until": ["gte", "gt", "lte", "lt"],
+								"unread_count": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["last_activity_at"],
+								"group_by": ["kind", "archived"]
+							}
+						},
+						"primary_key": ["id"],
+						"cursor_field": "last_activity_at",
+						"consent_time_field": "last_activity_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "messages",
+						"required": true,
+						"description": "Every message of every chat, read from the page's local message store with one on-demand history request per chat that says more messages remain on the phone.",
+						"display": {
+							"label": "Your WhatsApp messages",
+							"detail": "Message text or caption, who sent it, when, whether it was forwarded or starred, media metadata, calls, polls and locations."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The message's own key id."
+								},
+								"chat_id": {
+									"type": "string",
+									"description": "The chat the message belongs to."
+								},
+								"from_me": {
+									"type": "boolean",
+									"description": "True when the signed-in account wrote the message."
+								},
+								"author": {
+									"type": ["string", "null"],
+									"description": "The id of who wrote the message: in a group, the participant (the owner's own id for the owner's messages); in a one-to-one chat, the owner's own id when from_me, else the chat peer's id. Null only when the page does not say."
+								},
+								"type": {
+									"type": ["string", "null"],
+									"description": "The message's own type, e.g. chat, image, video, call_log, poll."
+								},
+								"subtype": {
+									"type": ["string", "null"],
+									"description": "The message's own subtype when it has one."
+								},
+								"text": {
+									"type": ["string", "null"],
+									"description": "The message's body for a chat message, or its caption for media."
+								},
+								"sent_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "The message's timestamp.",
+									"x_pdpp_role": "event-time"
+								},
+								"quoted_id": {
+									"type": ["string", "null"],
+									"description": "The id of the message this one quotes, null when it quotes nothing."
+								},
+								"is_forwarded": {
+									"type": "boolean",
+									"description": "True when the message was forwarded."
+								},
+								"starred": {
+									"type": "boolean",
+									"description": "True when the message is starred."
+								},
+								"media_mimetype": {
+									"type": ["string", "null"],
+									"description": "The media's mimetype, null for a non-media message."
+								},
+								"media_size": {
+									"type": ["integer", "null"],
+									"description": "The media's size in bytes."
+								},
+								"media_filename": {
+									"type": ["string", "null"],
+									"description": "The media's filename."
+								},
+								"media_duration": {
+									"type": ["integer", "null"],
+									"description": "For audio, voice-note and video messages, the media's duration in seconds; null for other types, whose duration value has no known unit."
+								},
+								"call_log": {
+									"type": ["string", "null"],
+									"description": "For a call message, the call's outcome."
+								},
+								"call_duration": {
+									"type": ["integer", "null"],
+									"description": "For a call message, how long the call lasted in seconds."
+								},
+								"poll_name": {
+									"type": ["string", "null"],
+									"description": "For a poll message, the poll's name."
+								},
+								"location_lat": {
+									"type": ["number", "null"],
+									"description": "For a location message, the latitude."
+								},
+								"location_lng": {
+									"type": ["number", "null"],
+									"description": "For a location message, the longitude."
+								}
+							},
+							"required": [
+								"id",
+								"chat_id",
+								"from_me",
+								"author",
+								"type",
+								"subtype",
+								"text",
+								"sent_at",
+								"quoted_id",
+								"is_forwarded",
+								"starred",
+								"media_mimetype",
+								"media_size",
+								"media_filename",
+								"media_duration",
+								"call_log",
+								"call_duration",
+								"poll_name",
+								"location_lat",
+								"location_lng"
+							]
+						},
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"text",
+									"author",
+									"poll_name",
+									"media_filename"
+								],
+								"semantic_fields": ["text"]
+							},
+							"range_filters": {
+								"sent_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["sent_at"],
+								"group_by": ["type", "from_me"]
+							}
+						},
+						"primary_key": ["id"],
+						"cursor_field": "sent_at",
+						"consent_time_field": "sent_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "parent_detail_accounting",
+						"parent_streams": ["chats"],
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "contacts",
+						"required": false,
+						"description": "Only contacts that appear in the user's chats or groups.",
+						"display": {
+							"label": "Your WhatsApp contacts",
+							"detail": "Contact name, short name, push name, and business identity when one is known."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The contact's WhatsApp id (wid), serialized."
+								},
+								"name": {
+									"type": ["string", "null"],
+									"description": "The contact's full name, as the address book or the app has it.",
+									"x_pdpp_role": "primary-title"
+								},
+								"short_name": {
+									"type": ["string", "null"],
+									"description": "The contact's short name."
+								},
+								"push_name": {
+									"type": ["string", "null"],
+									"description": "The name the contact set for themselves."
+								},
+								"is_business": {
+									"type": ["boolean", "null"],
+									"description": "True when the contact is a business account."
+								},
+								"verified_name": {
+									"type": ["string", "null"],
+									"description": "The contact's verified business name."
+								}
+							},
+							"required": [
+								"id",
+								"name",
+								"short_name",
+								"push_name",
+								"is_business",
+								"verified_name"
+							]
+						},
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"name",
+									"short_name",
+									"push_name",
+									"verified_name"
+								]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": ["is_business"]
+							}
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "groups",
+						"required": false,
+						"description": "The group metadata of every group chat: subject, when it was created, its owner and the participants with their admin status.",
+						"display": {
+							"label": "Your WhatsApp groups",
+							"detail": "Group subject, creation time, owner, and the participants with their admin and super-admin status."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The group's WhatsApp id (wid), serialized."
+								},
+								"subject": {
+									"type": ["string", "null"],
+									"description": "The group's subject.",
+									"x_pdpp_role": "primary-title"
+								},
+								"created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "The time the group was created.",
+									"x_pdpp_role": "event-time"
+								},
+								"owner": {
+									"type": ["string", "null"],
+									"description": "The group owner's id."
+								},
+								"participants": {
+									"type": "array",
+									"description": "The group's participants, with their admin and super-admin status.",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string",
+												"description": "The participant's WhatsApp id (wid), serialized."
+											},
+											"is_admin": {
+												"type": "boolean",
+												"description": "True when the participant is a group admin."
+											},
+											"is_super_admin": {
+												"type": "boolean",
+												"description": "True when the participant is the group's super admin."
+											}
+										},
+										"required": ["id", "is_admin", "is_super_admin"]
+									}
+								}
+							},
+							"required": [
+								"id",
+								"subject",
+								"created_at",
+								"owner",
+								"participants"
+							]
+						},
+						"query": {
+							"search": {
+								"lexical_fields": ["subject"],
+								"semantic_fields": ["subject"]
+							},
+							"range_filters": {
+								"created_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["created_at"]
+							}
+						},
+						"primary_key": ["id"],
+						"cursor_field": "created_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					}
+				],
+				"reason_display_messages": {
+					"scope_not_supported": "WhatsApp messages can only be imported together with their chats. Select both to import your messages."
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "whatsapp_web",
+						"login_url": "https://web.whatsapp.com/",
+						"login_message": "Sign in to WhatsApp Web, then return here.",
+						"collect_export": "collect",
+						"probe_export": "probeWhatsAppSessionOnPage",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
 				}
 			}
 		},
@@ -25613,7 +28522,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.12",
+				"version": "0.1.13",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -27719,7 +30628,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.40",
+				"version": "0.2.41",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",

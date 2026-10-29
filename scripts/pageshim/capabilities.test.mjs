@@ -15,22 +15,26 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 	assert.deepEqual(pageShimConnectors(fileURLToPath(new URL("../..", import.meta.url))), [
 		"anthropic",
 		"anthropic_live",
+		"character_ai",
 		"chatgpt",
 		"discord_browser",
 		"facebook",
 		"github_browser",
 		"icloud_notes",
+		"instinct",
 		"linkedin",
 		"meta",
 		"muse",
 		"oura_browser",
+		"perplexity",
 		"spotify",
 		"strava_browser",
 		"tiktok",
+		"whatsapp_web",
 		"x_browser",
 		"youtube",
 	]);
-	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok"]) {
+	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "character_ai", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok", "whatsapp_web", "perplexity", "instinct"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -173,6 +177,14 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			network: ["same_origin_page_fetch", "host_http_request"],
 			browser: ["page_script_evaluation", "page_navigation", "host_http_request"],
 		},
+		character_ai: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
+		instinct: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
 		strava_browser: {
 			network: ["same_origin_page_fetch", "host_http_request"],
 			browser: ["page_script_evaluation", "page_navigation", "host_http_request"],
@@ -206,10 +218,17 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
 		muse: {
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
+		whatsapp_web: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
 		spotify: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation"],
+		},
+		perplexity: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation"],
 		},

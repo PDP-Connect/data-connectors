@@ -95,6 +95,13 @@ interface SpotifyProfile {
 
 export interface BrowserData {
 	playlistRevisionUnproven?: boolean;
+	/**
+	 * Library rows the connector cannot map (folders and row types it does not
+	 * know). They are skipped, not failed, and count as uncovered in the
+	 * playlists and playlist_items coverage. `types` maps a bounded GraphQL type
+	 * name to its row count; it never carries a URI or other row content.
+	 */
+	librarySkipped?: { count: number; types: Record<string, number> };
 	completion: Partial<
 		Record<"playlists" | "playlist_items" | "saved_tracks", SpotifyEndEvidence>
 	>;
@@ -1401,6 +1408,8 @@ export const spotifyPageCollector = async (
 			let libraryExpectedCount: number | null = null;
 			let libraryPageCount = 0;
 			let libraryTerminal: SpotifyEndEvidence["terminal"] = null;
+			let librarySkippedCount = 0;
+			const librarySkippedTypes: Record<string, number> = {};
 			while (true) {
 				const requestOffset = libraryOffset;
 				const libData = await gql("libraryV3", {
@@ -1450,9 +1459,6 @@ export const spotifyPageCollector = async (
 					if (typeof typeName !== "string" || typeName.length === 0) {
 						throw new Error("spotify_library_row_invalid");
 					}
-					if (typeName === "Folder") {
-						throw new Error("spotify_library_folder_untraversed");
-					}
 					const supportedLibraryTypes = [
 						"Playlist",
 						"PseudoPlaylist",
@@ -1464,7 +1470,21 @@ export const spotifyPageCollector = async (
 						"YourEpisodes",
 					];
 					if (!supportedLibraryTypes.includes(typeName)) {
-						throw new Error("spotify_library_row_type_unrecognized");
+						// A folder (its playlists are not traversed) or a row type this
+						// connector does not know. It may hide playlists, so it is a
+						// coverage gap, not a failure: skip it and count it. Only a
+						// bounded GraphQL type name is kept, never row content.
+						librarySkippedCount += 1;
+						const knownSkippedTypes = Object.keys(librarySkippedTypes);
+						const typeLabel = !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(typeName)
+							? "unparseable"
+							: Object.hasOwn(librarySkippedTypes, typeName) ||
+									knownSkippedTypes.length < 16
+								? typeName
+								: "other";
+						librarySkippedTypes[typeLabel] =
+							(librarySkippedTypes[typeLabel] ?? 0) + 1;
+						continue;
 					}
 					const uri = data._uri ?? data.uri;
 					if (typeof uri !== "string" || uri.length === 0) {
@@ -1545,6 +1565,12 @@ export const spotifyPageCollector = async (
 				terminal: libraryTerminal,
 			};
 			result.playlistUris = playlistUris;
+			if (librarySkippedCount > 0) {
+				result.librarySkipped = {
+					count: librarySkippedCount,
+					types: librarySkippedTypes,
+				};
+			}
 			if (wanted.has("playlists")) result.completion.playlists = libraryProof;
 			let childRawCount = 0;
 			let childExpectedCount = 0;
@@ -1913,15 +1939,18 @@ export const spotifyPageCollector = async (
 							};
 			}
 			if (wanted.has("playlists")) {
-				libraryProof.discardedCount = playlistRowUnavailableCount;
+				libraryProof.discardedCount =
+					playlistRowUnavailableCount + librarySkippedCount;
 				result.sourceCounts.playlists = {
-					considered: playlistUris.length,
+					considered: playlistUris.length + librarySkippedCount,
 					covered: result.playlists.length,
 				};
 			}
 			if (wanted.has("playlist_items")) {
+				// Each skipped library row is at least one unread unit, so the
+				// stream cannot read complete while any row was skipped.
 				result.sourceCounts.playlist_items = {
-					considered: childTrackCount,
+					considered: childTrackCount + librarySkippedCount,
 					covered: childTrackCoveredCount,
 				};
 			}
@@ -2393,6 +2422,19 @@ export async function spotifyCollect({
 		}
 		return;
 	}
+	const librarySkipped =
+		data.librarySkipped && data.librarySkipped.count > 0
+			? data.librarySkipped
+			: null;
+	if (librarySkipped) {
+		connectorDiagnostic("spotify", "library_rows_skipped", {
+			skipped: librarySkipped.count,
+			types: Object.entries(librarySkipped.types)
+				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+				.map(([type, rows]) => `${type}:${rows}`)
+				.join(","),
+		});
+	}
 	if (requested.has("profile") && data.profile) {
 		if (!validateRecord("profile", data.profile).ok) {
 			data.profile = null;
@@ -2543,6 +2585,22 @@ export async function spotifyCollect({
 			emit,
 			emitRecord,
 		);
+	}
+	if (librarySkipped) {
+		for (const stream of ["playlists", "playlist_items"] as const) {
+			if (!requested.has(stream)) continue;
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "spotify_library_rows_unsupported",
+				message:
+					"Some library entries (folders or entry types this connector does not read yet) were skipped, so playlists inside them may be missing.",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
+			});
+		}
 	}
 	if (requested.has("saved_tracks")) {
 		await emitRecordsWithCoverage(

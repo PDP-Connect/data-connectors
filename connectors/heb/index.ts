@@ -857,25 +857,33 @@ const DETAIL_RETRY_FACTOR = 2;
 async function navigateToOrderDetail(
 	page: Page,
 	url: string,
-): Promise<boolean | null> {
-	let responseSucceeded: boolean | null = null;
+	minTimeoutMs: number,
+): Promise<{ status: number | null; succeeded: boolean | null }> {
+	let succeeded: boolean | null = null;
+	let status: number | null = null;
 	await pRetry(
 		async (): Promise<void> => {
 			const response = await page.goto(url, {
 				waitUntil: "domcontentloaded",
 				timeout: NAV_TIMEOUT_MS,
 			});
-			responseSucceeded = response?.ok() ?? null;
+			succeeded = response?.ok() ?? null;
+			status = response && succeeded === false ? response.status() : null;
+			// `goto` resolves for an error status, so the retry gate below only sees
+			// one if it is thrown. A 5xx means the server failed, not the request.
+			if (status !== null && status >= 500) {
+				throw new Error(`HTTP ${String(status)} from the order page`);
+			}
 		},
 		{
 			retries: DETAIL_RETRY_COUNT,
-			minTimeout: DETAIL_RETRY_MIN_TIMEOUT_MS,
+			minTimeout: minTimeoutMs,
 			factor: DETAIL_RETRY_FACTOR,
 			shouldRetry: ({ error }): boolean =>
 				RETRYABLE_ERROR_RE.test(error.message),
 		},
 	);
-	return responseSucceeded;
+	return { status, succeeded };
 }
 
 export interface HydrationDeps {
@@ -883,6 +891,9 @@ export interface HydrationDeps {
 	detailSurfaceTimeoutMs?: number | undefined;
 	/** Expected provider-declared item count from the order list, when sound. */
 	expectedItemCount?: number | null | undefined;
+	/** Test-only seam for the first delay between navigation retries;
+	 *  production uses 1,500 ms. */
+	navigationRetryMinTimeoutMs?: number | undefined;
 	/** Optional bounded progress sink for browser-surface diagnostics. */
 	onDetailProgress?: ((message: string) => Promise<void>) | undefined;
 	/** Optional deterministic seam for unit tests; production omits it and
@@ -913,10 +924,14 @@ export async function fetchOrderDetail(
 	});
 	const url = `https://www.heb.com/my-account/order-history/${orderId}`;
 	let responseSucceeded: boolean | null = null;
+	let httpStatus: number | null = null;
 	try {
-		responseSucceeded = await navigateToOrderDetail(page, url);
-		if (responseSucceeded === false)
-			return failed("navigation_failed_non_retryable");
+		({ status: httpStatus, succeeded: responseSucceeded } =
+			await navigateToOrderDetail(
+				page,
+				url,
+				deps.navigationRetryMinTimeoutMs ?? DETAIL_RETRY_MIN_TIMEOUT_MS,
+			));
 	} catch (err) {
 		// pRetry's shouldRetry gate (RETRYABLE_ERROR_RE) only lets transient
 		// transport errors consume the retry budget — a non-retryable error
@@ -955,6 +970,14 @@ export async function fetchOrderDetail(
 	}
 	if (isIncapsulaBlocked(initialHtml)) {
 		return failed("session_repair_required");
+	}
+	// An error status is judged only after the page above had its say: a 403
+	// that serves a sign-in or challenge page is a dead session, not a defect.
+	if (responseSucceeded === false) {
+		return failed(
+			"navigation_failed_non_retryable",
+			`http_status=${String(httpStatus)}`,
+		);
 	}
 
 	const surface = await collectDetailSurface(

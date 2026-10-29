@@ -37,9 +37,10 @@
  *   - claude.ai records the model on the conversation, not on a message.
  *     `messages.model` is the conversation's model when the message was
  *     collected (`model_source: "conversation"`); see parsers.ts.
- *   - One organization per run: the first with the `chat` capability, the
- *     export connector's rule. An account that also belongs to a Team
- *     organization has that organization's conversations left out.
+ *   - Conversations and usage come from one organization per run: the first
+ *     with the `chat` capability, the export connector's rule. An account
+ *     that also belongs to a Team organization has that organization's
+ *     conversations left out. account_plan covers every chat organization.
  *   - A conversation deleted on claude.ai is not retracted. Temporary chats
  *     are not listed by claude.ai and are not collected.
  *   - At most MAX_CONVERSATIONS_PER_RUN conversations are read per run; a
@@ -75,6 +76,8 @@ import {
 } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	buildAccountPlanRecord,
+	hasReadablePlanOrganizationInventory,
+	usablePlanOrganizations,
 	buildConversationRecord,
 	buildMessageRecord,
 	buildUsageLimitRecords,
@@ -307,72 +310,112 @@ async function skip(
 }
 
 /**
- * Emit at most one account_plan record. An unreadable subscription_details
- * on a retryable status emits nothing, so a transient failure never
- * overwrites the last real plan dates with nulls. 403/404 there means the
- * organization has no readable subscription (free plan, or a Team member
- * without billing access): the record is emitted with null dates.
+ * Emit one account_plan record per chat organization. The run's organization
+ * keeps the id account_plan; the others use account_plan:<organization id>.
+ * Every subscription_details read must succeed before anything is emitted, so
+ * a transient failure never replaces the last real inventory with a partial
+ * one. 403/404 there means the organization has no readable subscription
+ * (free plan, or a Team member without billing access): its record has null
+ * dates.
  */
 export async function runAccountPlanStream(
 	ctx: Ctx,
 	org: RawOrganization,
-	orgPath: string,
+	organizations: RawOrganization[],
 ): Promise<void> {
-	await ctx.progress("Fetching account plan", { stream: ACCOUNT_PLAN_STREAM });
-	const res = await apiGet(ctx.page, `${orgPath}/subscription_details`);
-	if (res.status === 401) throw new AuthError(res.status);
-	const unavailable = res.status === 403 || res.status === 404;
-	if (res.status !== 200 && !unavailable) {
-		await skip(
-			ctx,
-			ACCOUNT_PLAN_STREAM,
-			"http_error",
-			`subscription_details http ${res.status}`,
-			isRetryableStatus(res.status),
-		);
+	await ctx.progress("Fetching account plans", { stream: ACCOUNT_PLAN_STREAM });
+	if (!hasReadablePlanOrganizationInventory(organizations)) {
+		await skip(ctx, ACCOUNT_PLAN_STREAM, "parse_error", "The organization list contains an unreadable entry.", true);
 		return;
 	}
-	if (res.status === 200 && !isRecord(res.json)) {
+	const usable = usablePlanOrganizations(organizations);
+	// As in the export connector: the run's organization holds the id
+	// account_plan, so an inventory without it is not the full inventory.
+	if (!usable.some((candidate) => candidate.uuid === org.uuid)) {
 		await skip(
 			ctx,
 			ACCOUNT_PLAN_STREAM,
-			"parse_error",
-			"subscription_details http 200 with no readable body",
+			"organization_unavailable",
+			"The selected organization has no readable chat plan.",
 			true,
 		);
 		return;
 	}
-	const record = buildAccountPlanRecord(
-		org,
-		unavailable ? null : (res.json as RawSubscriptionDetails),
-	);
-	if (!(record && validateRecord(ACCOUNT_PLAN_STREAM, record).ok)) {
+	const records: RecordData[] = [];
+	for (const candidate of usable) {
+		const res = await apiGet(
+			ctx.page,
+			`/api/organizations/${encodeURIComponent(String(candidate.uuid))}/subscription_details`,
+		);
+		if (res.status === 401) throw new AuthError(res.status);
+		const unavailable = res.status === 403 || res.status === 404;
+		if (res.status !== 200 && !unavailable) {
+			await skip(
+				ctx,
+				ACCOUNT_PLAN_STREAM,
+				"http_error",
+				`subscription_details http ${res.status}`,
+				isRetryableStatus(res.status),
+			);
+			return;
+		}
+		if (res.status === 200 && !isRecord(res.json)) {
+			await skip(
+				ctx,
+				ACCOUNT_PLAN_STREAM,
+				"parse_error",
+				"subscription_details http 200 with no readable body",
+				true,
+			);
+			return;
+		}
+		const record = buildAccountPlanRecord(
+			candidate,
+			unavailable ? null : (res.json as RawSubscriptionDetails),
+			candidate.uuid === org.uuid,
+		);
+		if (!record || !validateRecord(ACCOUNT_PLAN_STREAM, record).ok) {
+			await skip(
+				ctx,
+				ACCOUNT_PLAN_STREAM,
+				"parse_error",
+				"organization has no readable plan",
+				true,
+			);
+			return;
+		}
+		records.push(record);
+	}
+	if (!records.length) {
 		await skip(
 			ctx,
 			ACCOUNT_PLAN_STREAM,
-			"parse_error",
-			"organization has no readable plan",
-			true,
+			"no_chat_organization",
+			"No usable chat account plan was found.",
+			false,
 		);
 		return;
 	}
-	// Stable synthetic id and no run-clock field: an unchanged plan is not
-	// re-emitted. The last emitted record is kept in STATE (it holds no
+	records.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+	// Stable synthetic ids and no run-clock field: an unchanged inventory is
+	// not re-emitted. The last emitted inventory is kept in STATE (it holds no
 	// secret) because the fingerprint cursor needs node:crypto, which the
-	// PageShim host does not provide.
+	// PageShim host does not provide. Sorting keeps API order from causing churn.
 	const prior = ctx.state[ACCOUNT_PLAN_STREAM] as
 		| { emitted?: unknown }
 		| undefined;
-	const serialized = JSON.stringify(record);
-	if (prior?.emitted !== serialized) {
-		await ctx.emitRecord(ACCOUNT_PLAN_STREAM, record);
-	}
+	const serialized = JSON.stringify(records);
+	if (prior?.emitted !== serialized)
+		for (const record of records)
+			await ctx.emitRecord(ACCOUNT_PLAN_STREAM, record);
 	await ctx.emit({
 		type: "STATE",
 		stream: ACCOUNT_PLAN_STREAM,
 		cursor: { fetched_at: nowIso(), emitted: serialized },
 	});
-	await ctx.emit(buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, 1));
+	await ctx.emit(
+		buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, records.length),
+	);
 }
 
 /** Emit one usage_limits record per limit claude.ai reports. */
@@ -1116,7 +1159,11 @@ export async function collectAnthropicLive(ctx: Ctx): Promise<void> {
 	}
 	const orgPath = `/api/organizations/${String(org.uuid)}`;
 	if (requested.has(ACCOUNT_PLAN_STREAM)) {
-		await runAccountPlanStream(ctx, org, orgPath);
+		await runAccountPlanStream(
+			ctx,
+			org,
+			Array.isArray(orgs.json) ? orgs.json : [org],
+		);
 	}
 	if (requested.has(USAGE_LIMITS_STREAM)) {
 		await runUsageLimitsStream(ctx, orgPath);
