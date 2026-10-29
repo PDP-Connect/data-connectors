@@ -32,8 +32,12 @@ export interface JsonlObject {
 }
 
 export interface ContentPart {
+	content?: unknown;
+	id?: string;
+	input?: unknown;
 	name?: string;
 	text?: string;
+	tool_use_id?: string;
 	type?: string;
 }
 
@@ -90,6 +94,12 @@ export interface ClaudeJsonlGap {
 }
 
 export interface ClaudeChildFileCursorV1 extends LocalJsonlPhysicalCursorV1 {
+	/**
+	 * Byte offset of the first committed line whose attachment body could not
+	 * be captured although capture was enabled. The next run re-derives
+	 * attachments, and only attachments, from here. Absent: nothing is owed.
+	 */
+	attachments_owed_from_bytes?: number;
 	jsonl_gaps?: ClaudeJsonlGap[];
 	current_session_id: string | null;
 }

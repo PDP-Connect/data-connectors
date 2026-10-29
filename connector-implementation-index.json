@@ -5383,7 +5383,7 @@
 				},
 				"connector_key": "claude-code",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-				"version": "0.3.25",
+				"version": "0.3.26",
 				"display_name": "Claude Code",
 				"brand": {
 					"icon": "icon.svg",
@@ -5674,6 +5674,10 @@
 								},
 								"tool_use_id": {
 									"type": ["string", "null"]
+								},
+								"tool_name": {
+									"type": ["string", "null"],
+									"description": "Tool name of a tool_use block extracted from an assistant message."
 								},
 								"content_preview": {
 									"type": ["string", "null"]
@@ -22607,7 +22611,7 @@
 				},
 				"connector_key": "steam",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-				"version": "0.1.21",
+				"version": "0.1.22",
 				"display_name": "Steam",
 				"brand": {
 					"icon": "icon.svg",
