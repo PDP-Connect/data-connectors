@@ -190,8 +190,20 @@ for (const name of pageShimConnectors(
 			assert.equal(r.result, null, "a thin host never gets a one-message result");
 			assert.equal(r.streamResult.completed, true);
 			assert.equal(r.streamResult.scopeCount, c.scopes.length);
-			// fetchedAt is wall-clock time, so it differs between the two runs.
-			const withoutFetchedAt = ({ fetchedAt, ...value }) => value;
+			// fetchedAt is wall-clock time, so it differs between the two runs,
+			// as does any record field the case names as a per-run clock.
+			const volatile = c.volatileRecordFields ?? [];
+			const withoutFetchedAt = ({ fetchedAt, ...value }) =>
+				volatile.length === 0 || !Array.isArray(value.records)
+					? value
+					: {
+							...value,
+							records: value.records.map((record) =>
+								Object.fromEntries(
+									Object.entries(record).filter(([key]) => !volatile.includes(key)),
+								),
+							),
+						};
 			for (const scope of c.scopes)
 				assert.deepEqual(
 					withoutFetchedAt(
@@ -874,6 +886,10 @@ test("chatgpt: a windowed conversations-only run keeps list items that carry onl
 				update_time: now - (index < 2 ? index + 1 : 40 + index) * 86400,
 			}));
 			response.body = JSON.stringify(body);
+		} else if (/^\/backend-api\/conversation\//.test(path)) {
+			// A conversations-only run reads each detail for its model counts, and
+			// the record takes its times from that detail. Keep it inside the window.
+			stampChatGptDetail(response, now - 86400);
 		}
 		return response;
 	};
@@ -894,10 +910,11 @@ test("chatgpt: a windowed conversations-only run keeps list items that carry onl
 	const conversations = JSON.parse(
 		await readFile(r.streamScopeFiles["chatgpt.conversations"], "utf8"),
 	);
-	assert.deepEqual(
-		conversations.records.map((record) => record.id),
-		["conv-1", "conv-2"],
-	);
+	// Record order is not part of the contract: the detail pass reads oldest first.
+	assert.deepEqual(conversations.records.map((record) => record.id).sort(), [
+		"conv-1",
+		"conv-2",
+	]);
 });
 
 test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed pages", {
@@ -1636,6 +1653,7 @@ test("anthropic: export paths on the PageShim host", {
 			);
 			assert.deepEqual(streamed, {
 				"claude.account_profile": 1,
+				"claude.account_plan": 1,
 				"claude.conversations": 1,
 				"claude.messages": 0,
 				"claude.projects": 0,
@@ -1663,8 +1681,14 @@ test("anthropic: export paths on the PageShim host", {
 				resultSpoolDirectory: spool,
 			});
 			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
-			for (const scope of ["claude.conversations", "claude.messages"])
-				assert.equal(r.streamScopeFiles?.[scope], undefined, scope);
+			// A thin host gets the skipped scope as a placeholder that carries its
+			// error; it is never a checkpointed empty scope.
+			assert.ok(r.streamScopeFiles?.["claude.conversations"], "claude.conversations");
+			for (const scope of ["claude.conversations", "claude.messages"]) {
+				const file = r.streamScopeFiles?.[scope];
+				if (file !== undefined) assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { records: [] }, scope);
+				assert.equal(r.states?.[scope], undefined, scope);
+			}
 		} finally {
 			rmSync(spool, { recursive: true, force: true });
 		}
@@ -3392,6 +3416,46 @@ page = new Proxy(locationHost, {
 		}
 	}
 });
+test("icloud_notes: overlap outcomes and recovery survive the built collector host boundary", { timeout: 120_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud-overlap.js") });
+	for (const mode of ["identical", "conflicting", "duplicate-only"]) {
+		for (const resultStreaming of [false, true]) {
+			let noteCalls = 0;
+			const fixtures = { ...c.fixtures, resolve(url, request) {
+				const response = c.fixtures.resolve(url, request);
+				if (!url.includes("/records/query") || JSON.parse(request.postData).query.filterBy[0].fieldValue.value !== "recents") return response;
+				const rows = JSON.parse(response.body).records;
+				const overlap = structuredClone(rows[0]);
+				if (mode === "conflicting") overlap.fields.TitleEncrypted.value = Buffer.from("New revision").toString("base64");
+				noteCalls++;
+				const records = noteCalls === 1 ? [rows[0]] : noteCalls === 2 ? mode === "duplicate-only" ? [overlap] : [overlap, rows[1]] : [rows[2]];
+				return { ...response, body: JSON.stringify({ records, ...(noteCalls < 3 ? { continuationMarker: `page-${noteCalls + 1}` } : {}) }) };
+			} };
+			const run = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes, resultStreaming,
+				gotoDelayMs: 0, loginWaitMs: 1000, resultSpoolDirectory: join(out, `icloud-overlap-${mode}-${resultStreaming}`) });
+			assertCleanRun(run);
+			assert.equal(run.data.error, undefined);
+			assert.equal(noteCalls, mode === "identical" ? 3 : 2);
+			const done = resultStreaming ? run.streamDone : run.result;
+			const notes = resultStreaming ? JSON.parse(readFileSync(run.streamScopeFiles["icloud_notes.notes"], "utf8")) : run.result["icloud_notes.notes"];
+			assert.equal(notes.records.length, mode === "identical" ? 3 : mode === "conflicting" ? 2 : 1);
+			assert.match(run.data.status, mode === "identical" ? /^Complete!/ : /^Partial:/);
+			if (mode === "identical") {
+				assert.deepEqual(done.errors, []);
+				assert.ok(run.states["icloud_notes.notes"]);
+			} else {
+				const error = done.errors.find(error => error.scope === "icloud_notes.notes");
+				assert.equal(error.code, "stream_collection_failed");
+				assert.deepEqual(error.recovery_hint, { action: "retry_by_runtime", retryable: true });
+				assert.equal(run.states["icloud_notes.notes"], undefined);
+			}
+			assert.ok(run.states["icloud_notes.folders"]);
+			assert.ok(run.states["icloud_notes.profile"]);
+		}
+	}
+});
+
 test("icloud_notes: failed continuation preserves readable rows and never checkpoints notes", { timeout: 120_000 }, async () => {
 	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
 	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-partial.js") });
@@ -3414,6 +3478,53 @@ test("icloud_notes: failed continuation preserves readable rows and never checkp
 	assert.equal(r.states["icloud_notes.notes"], undefined);
 	assert.ok(r.states["icloud_notes.profile"]);
 	assert.ok(r.states["icloud_notes.folders"]);
+});
+
+test("icloud_notes: incomplete inventories retain recovery hints without checkpointing", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-recovery.js") });
+	for (const [status, action, retryable] of [
+		[429, "retry_by_runtime", true], [503, "retry_by_runtime", true],
+		[401, "manual_action_required", false], [403, "manual_action_required", false],
+		[200, "not_retriable", false],
+	]) {
+		for (const resultStreaming of [false, true]) {
+			const fixtures = { ...c.fixtures, resolve(url, request) {
+				const response = c.fixtures.resolve(url, request);
+				if (!url.includes("/records/query")) return response;
+				const query = JSON.parse(request.postData);
+				if (query.query.filterBy[0].fieldValue.value !== "parentless") return response;
+				return { ...response, status, body: JSON.stringify(status === 200 ? { records: [{ recordType: "Folder" }] } : { error: "synthetic failure" }) };
+			} };
+			const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes,
+				gotoDelayMs: 0, loginWaitMs: 1000, resultStreaming,
+				resultSpoolDirectory: join(out, `icloud-recovery-${status}-${resultStreaming}`) });
+			assertCleanRun(r);
+			assert.deepEqual(r.ret, { ok: true });
+			// The stacked portable-failure change makes rejected authentication a
+			// run-level failure. It must not turn back into a scoped retry.
+			if (status === 401 || status === 403) {
+				assert.match(r.data.error, /^icloud_auth_failed:/);
+				assert.doesNotMatch(r.data.status, /^(Complete!|Partial:)/);
+				assert.deepEqual(r.states, {});
+				assert.deepEqual(r.stateMessages, []);
+				if (resultStreaming) assert.equal(r.streamDone, null);
+				else {
+					assert.deepEqual(r.result.errors.map(error => [error.errorClass, error.disposition]), [["auth_failed", "fatal"]]);
+					assert.equal(r.result.errors[0].code, "icloud_auth_failed");
+					assert.deepEqual(r.result.errors[0].recovery_hint, { action, retryable });
+				}
+				continue;
+			}
+			const errors = resultStreaming ? r.streamDone.errors : r.result.errors;
+			for (const scope of ["icloud_notes.folders", "icloud_notes.notes"]) {
+				const error = errors.find(error => error.scope === scope);
+				assert.equal(error?.code, "stream_collection_failed", `${status}: ${scope}`);
+				assert.deepEqual(error?.recovery_hint, { action, retryable }, `${status}: ${scope}`);
+				assert.equal(r.states[scope], undefined, `${status}: no checkpoint for ${scope}`);
+			}
+		}
+	}
 });
 
 test("icloud_notes: thin host commits all streams only after accepted completion", { timeout: 120_000 }, async () => {
@@ -3701,6 +3812,8 @@ test("meta: late logout remains a terminal session failure on both hosts", {time
     reason: "meta_session_required: Instagram authentication was rejected or challenged during this run",
     disposition: "fatal",
     phase: "collect",
+    code: "meta_session_required",
+    recovery_hint: { action: "manual_action_required", retryable: false },
    }]);
    assert.equal(r.result["instagram.following"], undefined);
    assert.equal(r.result.exportSummary.count, 0);

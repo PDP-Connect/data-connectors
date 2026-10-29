@@ -473,6 +473,69 @@ test("collectAllStreams: paginates notes via continuationMarker", async () => {
 	assert.deepEqual(new Set(ids), new Set(["note-1", "note-2"]));
 });
 
+for (const reorderKeys of [false, true]) {
+	test(`collectAllStreams: identical overlap with fresh rows follows the continuation (reordered=${reorderKeys})`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const first = noteQueryResponse().records[0];
+		assert.ok(first);
+		const overlap = reorderKeys ? { fields: Object.fromEntries(Object.entries(first.fields).reverse()), recordType: first.recordType, recordName: first.recordName } : structuredClone(first);
+		const fresh = (id: string) => ({ ...structuredClone(first), recordName: id });
+		let requests = 0;
+		await collectAllStreams(makeCtx(makeFakePage([
+			{ stream: "folders", response: folderQueryResponse() },
+			{ stream: "notes", response: { records: [first], continuationMarker: "page-2" } },
+			{ stream: "notes", response: { records: [overlap, fresh("note-2")], continuationMarker: "page-3" } },
+			{ stream: "notes", response: { records: [fresh("note-3")] } },
+		], () => { requests += 1; }), harness, ["notes"]));
+		assert.equal(requests, 4, "continue past the overlapping page");
+		assert.deepEqual(harness.emitted.map(row => row.data.id), ["note-1", "note-2", "note-3"]);
+		assert.equal(harness.protocolMessages.some(message => message.type === "SKIP_RESULT"), false);
+		assert.ok(harness.protocolMessages.some(message => message.type === "STATE" && message.stream === "notes"));
+	});
+}
+
+test("collectAllStreams: conflicting overlap salvages its prefix and asks for a rescan", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const first = noteQueryResponse().records[0];
+		assert.ok(first);
+	const changed = structuredClone(first);
+	changed.fields.TitleEncrypted.value = b64("Changed during scan");
+	let requests = 0;
+	await collectAllStreams(makeCtx(makeFakePage([
+		{ stream: "folders", response: folderQueryResponse() },
+		{ stream: "notes", response: { records: [first], continuationMarker: "page-2" } },
+		{ stream: "notes", response: { records: [changed, { ...structuredClone(first), recordName: "note-2" }], continuationMarker: "page-3" } },
+	], () => { requests += 1; }), harness, ["notes"]));
+	assert.equal(requests, 3);
+	assert.deepEqual(harness.emitted.map(row => row.data.id), ["note-1", "note-2"]);
+	const skip = harness.protocolMessages.find(message => message.type === "SKIP_RESULT" && message.stream === "notes");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.equal(diagnosticField(skip, "source_reason"), "icloud_inventory_changed");
+	assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+	assert.equal(harness.protocolMessages.some(message => message.type === "STATE" && message.stream === "notes"), false);
+});
+
+for (const repeatedMarker of [false, true]) {
+	test(`collectAllStreams: duplicate-only continuation is bounded (repeatedMarker=${repeatedMarker})`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		let requests = 0;
+		const first = noteQueryResponse().records[0];
+		assert.ok(first);
+		await collectAllStreams(makeCtx(makeFakePage([
+			{ stream: "folders", response: folderQueryResponse() },
+			{ stream: "notes", response: { records: [first], continuationMarker: "page-2" } },
+			{ stream: "notes", response: { records: [structuredClone(first)], continuationMarker: repeatedMarker ? "page-2" : "page-3" } },
+		], () => { requests += 1; }), harness, ["notes"]));
+		assert.equal(requests, 3, "stop before a third notes request");
+		const skip = harness.protocolMessages.find(message => message.type === "SKIP_RESULT" && message.stream === "notes");
+		assert.ok(skip && skip.type === "SKIP_RESULT");
+		assert.equal(diagnosticField(skip, "source_reason"), "icloud_no_progress");
+		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.equal(harness.protocolMessages.some(message => message.type === "STATE" && message.stream === "notes"), false);
+	});
+}
+
 test("collectAllStreams: refuses malformed successful envelopes and does not checkpoint them", async () => {
 	for (const stream of ["folders", "notes"] as const) {
 		for (const malformed of [

@@ -76,6 +76,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	// strava.
 	apple_health: { testFile: "connectors/apple_health/index.test.ts" },
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
+	character_ai: { testFile: "connectors/character_ai/parsers.test.ts" },
 	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
 	facebook: { testFile: "connectors/facebook/collect.test.ts" },
@@ -93,6 +94,11 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	google_takeout: { testFile: "connectors/google_takeout/schemas.test.ts" },
 	github_browser: { testFile: "connectors/github_browser/protocol.test.ts" },
 	groupme: { testFile: "connectors/groupme/collection.test.ts" },
+	// Real collector, Development tier: exercised live over CDP against an
+	// owner account, but Instinct is invite-only private beta and that account
+	// had no connections, devices, trusted people, or vault entries, so four of
+	// its eight streams are unproven against non-empty data.
+	instinct: { testFile: "connectors/instinct/integration.test.ts" },
 	meta: { testFile: "connectors/meta/integration.test.ts" },
 	// Tier development. Collects through the signed-in muse.ai app's own
 	// gateway client; the oracle is the collection protocol test.
@@ -103,7 +109,12 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	netflix_export: { testFile: "connectors/netflix_export/integration.test.ts" },
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
+	perplexity: { testFile: "connectors/perplexity/index.test.ts" },
 	strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
+	// Tier development. Reads the signed-in WhatsApp Web page's own in-page
+	// stores (chats, messages, contacts, groups); the oracle is the collection
+	// walk test over a synthetic page.
+	whatsapp_web: { testFile: "connectors/whatsapp_web/collect-fixes.test.ts" },
 	whoop_browser: { testFile: "connectors/whoop_browser/index.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },

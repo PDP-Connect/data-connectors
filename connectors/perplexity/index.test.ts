@@ -1,0 +1,2918 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import type { Page } from "playwright";
+import { z } from "zod";
+import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import {
+	type BrowserCollectContext,
+	type EmittedMessage,
+	makeEmitRecord,
+	type RecordData,
+	type StreamScope,
+	withholdsBoundedProgress,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
+import { isConnectorErrorCodeShaped } from "../../packages/polyfill-connectors/src/terminal-error.ts";
+import {
+	checkPerplexitySession,
+	collectPerplexity,
+	ensurePerplexitySession,
+	hasPerplexitySession,
+	PAGE_SIZE,
+} from "./index.ts";
+import {
+	conversationSchema,
+	messageSchema,
+	validateRecord,
+} from "./schemas.ts";
+
+const HOME = "https://www.perplexity.ai/";
+/** Perplexity's own sign-in page, where a signed-out run is handed over. */
+const SIGN_IN = "https://www.perplexity.ai/auth/signin?callbackUrl=%2F";
+const pad = (n: number) => String(n).padStart(12, "0");
+const threadId = (n: number) => `cccccccc-0000-4000-8000-${pad(n)}`;
+const threadSlug = (n: number) => `bbbbbbbb-0000-4000-8000-${pad(n)}`;
+const entryId = (n: number) => `eeeeeeee-0000-4000-8000-${pad(n)}`;
+const stamp = (n: number) =>
+	new Date(Date.UTC(2026, 9, 1, 9) + n * 3_600_000).toISOString();
+/** The list's real clock: microseconds and no zone at all. */
+const listStamp = (n: number) => `${stamp(n).slice(0, 23)}000`;
+/** Entry timestamps: microseconds plus an explicit UTC offset. */
+const entryStamp = (n: number) => `${stamp(n).slice(0, 23)}000+00:00`;
+/** What the parsers emit for either: a fixed-width UTC instant. */
+const instant = (n: number) => `${stamp(n).slice(0, 23)}000Z`;
+
+/** One synthetic list item, shaped exactly like the recon's list item. */
+function threadItem(n: number, hasNext: boolean): Record<string, unknown> {
+	return {
+		uuid: `aaaaaaaa-0000-4000-8000-${pad(n)}`,
+		context_uuid: threadId(n),
+		slug: threadSlug(n),
+		title: `Synthetic thread ${n}`,
+		query_str: `Synthetic question ${n}?`,
+		mode: "web",
+		display_model: "sonar",
+		search_focus: "internet",
+		sources: [],
+		query_count: 1,
+		last_query_datetime: listStamp(n),
+		thread_access: 1,
+		thread_number: n,
+		// The real site's total_threads is unrelated to the item count (a
+		// 4-thread account reported 99 on every item); the walk ignores it.
+		total_threads: 99,
+		has_next_page: hasNext,
+		status: "COMPLETED",
+		thread_status: "COMPLETED",
+		unread: false,
+		read_write_token: `kkkkkkkk-0000-4000-8000-${pad(n)}`,
+	};
+}
+
+/** One synthetic thread response: a single complete entry. */
+function threadDetail(n: number): string {
+	return JSON.stringify({
+		status: "COMPLETED",
+		entries: [
+			{
+				uuid: entryId(n),
+				status: "COMPLETED",
+				context_uuid: threadId(n),
+				query_str: `Synthetic question ${n}?`,
+				entry_created_datetime: entryStamp(n),
+				entry_updated_datetime: entryStamp(n),
+				display_model: "sonar",
+				blocks: [
+					{
+						intended_usage: "web_results",
+						web_result_block: {
+							web_results: [
+								{
+									name: `Synthetic source ${n}`,
+									url: `https://example.com/synthetic-${n}`,
+								},
+							],
+						},
+					},
+					{
+						intended_usage: "ask_text",
+						markdown_block: { answer: `Synthetic answer ${n}.` },
+					},
+				],
+			},
+		],
+		has_next_page: false,
+	});
+}
+
+interface ServedRequest {
+	readonly url: URL;
+	readonly method: string;
+	readonly headers: Headers;
+	readonly body: string | undefined;
+}
+
+/**
+ * A tiny stand-in for the signed-in perplexity.ai page: the library list is
+ * served by offset, each thread by slug, and every request is recorded.
+ */
+function perplexityLibrary(options: {
+	readonly total: number;
+	readonly listStatus?: number;
+	readonly failingSlugs?: readonly string[];
+	readonly failStatus?: number;
+}) {
+	const requests: ServedRequest[] = [];
+	const serve: typeof fetch = async (input, init) => {
+		const url = new URL(String(input), HOME);
+		const headers = new Headers(init?.headers);
+		const body = typeof init?.body === "string" ? init.body : undefined;
+		requests.push({
+			url,
+			method: init?.method ?? "GET",
+			headers,
+			body,
+		});
+		if (url.pathname === "/api/auth/session") {
+			return Response.json({ user: { id: "synthetic-owner" } });
+		}
+		if (url.pathname === "/rest/thread/list_ask_threads") {
+			if (options.listStatus !== undefined) {
+				return new Response("{}", { status: options.listStatus });
+			}
+			const offset =
+				body === undefined
+					? 0
+					: (JSON.parse(body) as { offset: number }).offset;
+			const slice = Array.from(
+				{ length: Math.min(PAGE_SIZE, options.total - offset) },
+				(_, index) =>
+					threadItem(offset + index + 1, offset + index + 1 < options.total),
+			);
+			return Response.json(slice);
+		}
+		const slug = url.pathname.split("/").pop() ?? "";
+		if (options.failingSlugs?.includes(slug)) {
+			return new Response("{}", { status: options.failStatus ?? 500 });
+		}
+		return new Response(threadDetail(Number(slug.slice(-12))), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	};
+	return { requests, serve };
+}
+
+async function withBrowser<T>(
+	fetcher: typeof fetch,
+	run: () => Promise<T>,
+): Promise<T> {
+	const savedFetch = globalThis.fetch;
+	const savedLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+	Object.defineProperty(globalThis, "location", {
+		configurable: true,
+		value: { origin: new URL(HOME).origin },
+	});
+	globalThis.fetch = fetcher;
+	return run().finally(() => {
+		globalThis.fetch = savedFetch;
+		if (savedLocation)
+			Object.defineProperty(globalThis, "location", savedLocation);
+		else Reflect.deleteProperty(globalThis, "location");
+	});
+}
+
+function page(initial = HOME, visits: string[] = []): Page {
+	let url = initial;
+	return {
+		url: () => url,
+		goto: async (target: string) => {
+			url = target;
+			visits.push(target);
+			return null;
+		},
+		evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => {
+			const previousLocation = Object.getOwnPropertyDescriptor(
+				globalThis,
+				"location",
+			);
+			Object.defineProperty(globalThis, "location", {
+				configurable: true,
+				value: { origin: new URL(url).origin },
+			});
+			try {
+				return await fn(arg);
+			} finally {
+				if (previousLocation)
+					Object.defineProperty(globalThis, "location", previousLocation);
+				else Reflect.deleteProperty(globalThis, "location");
+			}
+		},
+		close: async () => {},
+		context: () => ({ newPage: async () => page() }),
+	} as Page;
+}
+
+/** The manifest's consent fields, as the runtime reads them for time_range. */
+const CONSENT_FIELDS: Record<string, string> = {
+	conversations: "update_time",
+	messages: "create_time",
+};
+
+interface HarnessOptions {
+	/** Per-stream time ranges, overriding the shared one. */
+	readonly ranges?: Record<string, { since?: string; until?: string }>;
+	readonly resources?: Record<string, readonly string[]>;
+	readonly collectionMode?: "full_refresh" | "incremental";
+}
+
+/**
+ * A collect context whose record gates are the runtime's own: records go
+ * through `makeEmitRecord` (time range, resources, shape check), and a STATE
+ * or gap receipt after a record withheld at or after `until` is held back the
+ * way the runtime holds it.
+ */
+function harness(
+	names: string[],
+	browserPage: Page,
+	state: Record<string, unknown> = {},
+	timeRange: { since?: string; until?: string } = {},
+	options: HarnessOptions = {},
+) {
+	const messages: EmittedMessage[] = [];
+	const records: Array<{ stream: string; data: RecordData }> = [];
+	const failures: Array<{ stream: string; retryable: boolean }> = [];
+	const requested = new Map(
+		names.map((name) => {
+			const range = options.ranges?.[name] ?? timeRange;
+			const resources = options.resources?.[name];
+			return [
+				name,
+				{
+					name,
+					...(range.since === undefined && range.until === undefined
+						? {}
+						: { time_range: range }),
+					...(resources === undefined ? {} : { resources }),
+				} as StreamScope,
+			];
+		}),
+	);
+	const emitter = makeEmitRecord({
+		requested,
+		emit: async (message) => {
+			if (message.type === "RECORD") {
+				records.push({ stream: message.stream, data: message.data });
+			}
+			messages.push(message);
+		},
+		emittedAt: "2026-10-26T00:00:00.000Z",
+		validateRecord: (stream, data) => {
+			const parsed = validateRecord(stream, data);
+			assert.equal(parsed.ok, true, JSON.stringify(parsed));
+			return parsed;
+		},
+		isTombstone: undefined,
+		timeRangeFieldFor: (stream) => {
+			const field = CONSENT_FIELDS[stream];
+			return field === undefined ? null : { field, format: "date-time" };
+		},
+	});
+	const ctx = Object.assign(Object.create(null) as BrowserCollectContext, {
+		page: browserPage,
+		state,
+		detailGaps: [],
+		requested,
+		...(options.collectionMode === undefined
+			? {}
+			: { collectionMode: options.collectionMode }),
+		emit: async (message: EmittedMessage) => {
+			if (withholdsBoundedProgress(message, emitter.withheldAtOrAfterUntil)) {
+				messages.push({
+					type: "PROGRESS",
+					stream: message.stream,
+					message: `${message.type} withheld`,
+				} as EmittedMessage);
+				return;
+			}
+			messages.push(message);
+		},
+		emitRecord: emitter.emit,
+		isRecordSelected: emitter.isSelected,
+		reportStreamFailure: async (
+			stream: string,
+			message: string,
+			failure?: {
+				retryable?: boolean;
+				recoveryHint?: { action: string; retryable?: boolean };
+			},
+		) => {
+			failures.push({ stream, retryable: failure?.retryable === true });
+			messages.push({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "stream_collection_failed",
+				message,
+				...(failure?.recoveryHint === undefined
+					? {}
+					: { recovery_hint: failure.recoveryHint }),
+			} as EmittedMessage);
+		},
+		progress: async (message: string, extra?: Record<string, unknown>) => {
+			messages.push({ type: "PROGRESS", message, ...extra } as EmittedMessage);
+		},
+	});
+	return { ctx, messages, records, failures };
+}
+
+function stateCursor(
+	messages: readonly EmittedMessage[],
+	stream: string,
+): Record<string, unknown> {
+	const message = messages.find(
+		(item) => item.type === "STATE" && item.stream === stream,
+	);
+	assert.equal(
+		message?.type,
+		"STATE",
+		`expected a STATE message for ${stream}`,
+	);
+	return (message as { cursor: Record<string, unknown> }).cursor;
+}
+
+function detailCoverage(
+	messages: readonly EmittedMessage[],
+	stream: string,
+): Record<string, unknown> {
+	const message = messages.find(
+		(item) =>
+			(item as { type?: string }).type === "DETAIL_COVERAGE" &&
+			(item as { stream?: string }).stream === stream,
+	);
+	assert.ok(message, `expected a DETAIL_COVERAGE message for ${stream}`);
+	return message as Record<string, unknown>;
+}
+
+const ALL_STREAMS = ["conversations", "messages"];
+
+test("the manifest declares the browser-session profile and its two streams", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as {
+		connector_key: string;
+		runtime_requirements: {
+			bindings: Record<
+				string,
+				{
+					features: string[];
+					constraints?: { hosts?: string[]; navigate?: string[] };
+				}
+			>;
+		};
+		streams: Array<{
+			name: string;
+			required: boolean;
+			coverage_strategy: string;
+			cursor_field?: string;
+			incremental: boolean;
+			semantics: string;
+			parent_streams?: string[];
+		}>;
+	};
+	assert.equal(manifest.connector_key, "perplexity");
+	const network = manifest.runtime_requirements.bindings.network;
+	const browserBinding = manifest.runtime_requirements.bindings.browser;
+	assert.deepEqual(network?.features ?? [], ["same_origin_page_fetch"]);
+	assert.deepEqual(network?.constraints?.hosts ?? [], [
+		"https://www.perplexity.ai",
+	]);
+	assert.deepEqual(browserBinding?.constraints?.navigate ?? [], [
+		"https://www.perplexity.ai",
+	]);
+	assert.deepEqual(
+		manifest.streams.map((stream) => stream.name),
+		["conversations", "messages"],
+	);
+	assert.equal(manifest.streams[0]?.required, true);
+	// Every run lists the whole (granted window of the) library, so the
+	// threads stream keeps no cursor; messages are remembered per thread.
+	assert.equal(manifest.streams[0]?.coverage_strategy, "full_inventory");
+	assert.equal(manifest.streams[0]?.cursor_field, undefined);
+	// Messages are remembered per thread, not behind a time cursor.
+	assert.equal(manifest.streams[1]?.cursor_field, undefined);
+	assert.equal(manifest.streams[0]?.incremental, false);
+	assert.equal(manifest.streams[1]?.semantics, "mutable_state");
+	assert.equal(
+		manifest.streams[1]?.coverage_strategy,
+		"parent_detail_accounting",
+	);
+	assert.deepEqual(manifest.streams[1]?.parent_streams, ["conversations"]);
+});
+
+test("collect walks the list page by page and reads every thread", async () => {
+	const library = perplexityLibrary({ total: PAGE_SIZE + 5 });
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(
+			h.records.filter((r) => r.stream === "conversations").length,
+			25,
+		);
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 50);
+		assert.deepEqual(h.failures, []);
+
+		// The list is POSTed with the app's own headers and paged by offset.
+		// A list longer than one page is walked twice to prove it held still.
+		const listCalls = library.requests.filter(
+			(request) => request.url.pathname === "/rest/thread/list_ask_threads",
+		);
+		assert.equal(listCalls.length, 4);
+		const first = listCalls[0];
+		assert.ok(first, "the list was requested");
+		assert.equal(first.method, "POST");
+		assert.equal(first.headers.get("x-app-apiclient"), "default");
+		assert.equal(first.headers.get("x-app-apiversion"), "2.18");
+		assert.equal(first.headers.get("content-type"), "application/json");
+		const requestBody = JSON.parse(first.body ?? "{}") as Record<
+			string,
+			unknown
+		>;
+		assert.deepEqual(requestBody, {
+			limit: PAGE_SIZE,
+			offset: 0,
+			ascending: false,
+			search_term: "",
+		});
+		const second = listCalls[1];
+		assert.equal(
+			(JSON.parse(second?.body ?? "{}") as { offset: number }).offset,
+			20,
+		);
+
+		// Each thread is read through its slug with the app's query parameters.
+		const threadCalls = library.requests.filter(
+			(request) =>
+				request.method === "GET" &&
+				request.url.pathname.startsWith("/rest/thread/"),
+		);
+		assert.equal(threadCalls.length, 25);
+		for (const call of threadCalls) {
+			assert.match(call.url.pathname, /^\/rest\/thread\/bbbbbbbb-/);
+			assert.equal(call.url.searchParams.get("version"), "2.18");
+			assert.equal(call.url.searchParams.get("source"), "default");
+			assert.equal(call.url.searchParams.get("from_first"), "true");
+			assert.equal(
+				call.url.searchParams.get("with_schematized_response"),
+				"true",
+			);
+			assert.equal(call.url.searchParams.get("limit"), "10");
+		}
+
+		// Records carry the expected shape.
+		const firstConversation = h.records.find(
+			(r) => r.stream === "conversations" && r.data.id === threadId(1),
+		)?.data;
+		assert.equal(firstConversation?.title, "Synthetic thread 1");
+		assert.equal(firstConversation?.create_time, instant(1));
+		assert.equal(firstConversation?.update_time, instant(1));
+		const userMessage = h.records.find(
+			(r) => r.stream === "messages" && r.data.id === `${entryId(1)}:user`,
+		)?.data;
+		assert.equal(userMessage?.content, "Synthetic question 1?");
+		const assistantMessage = h.records.find(
+			(r) => r.stream === "messages" && r.data.id === `${entryId(1)}:assistant`,
+		)?.data;
+		assert.equal(assistantMessage?.content, "Synthetic answer 1.");
+		assert.deepEqual(assistantMessage?.citations, [
+			{ title: "Synthetic source 1", url: "https://example.com/synthetic-1" },
+		]);
+	});
+});
+
+test("both streams prove their boundary and checkpoint their cursors", async () => {
+	const library = perplexityLibrary({ total: 3 });
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+
+		assert.deepEqual(detailCoverage(h.messages, "conversations"), {
+			type: "DETAIL_COVERAGE",
+			reference_only: true,
+			stream: "conversations",
+			state_stream: "conversations",
+			required_keys: [],
+			hydrated_keys: [],
+			considered: 3,
+			covered: 3,
+		});
+		const coverage = detailCoverage(h.messages, "messages");
+		assert.equal(coverage.considered, 3);
+		assert.equal(coverage.covered, 3);
+		assert.equal((coverage.required_keys as string[]).length, 3);
+		assert.equal((coverage.hydrated_keys as string[]).length, 3);
+
+		// The threads stream is a full inventory and keeps no STATE; the
+		// messages STATE is versioned.
+		assert.equal(
+			h.messages.some(
+				(m) => m.type === "STATE" && m.stream === "conversations",
+			),
+			false,
+		);
+		assert.equal(stateCursor(h.messages, "messages").v, 2);
+		const messagesCursor = stateCursor(h.messages, "messages") as {
+			synced: Record<
+				string,
+				{ update_time: string | null; create_time: string | null }
+			>;
+		};
+		assert.equal(Object.keys(messagesCursor.synced).length, 3);
+	});
+});
+
+test("an unchanged thread is not re-read, but its conversation stays whole", async () => {
+	const library = perplexityLibrary({ total: 2 });
+	await withBrowser(library.serve, async () => {
+		const first = harness(ALL_STREAMS, page());
+		await collectPerplexity(first.ctx, { threadDelayMs: 0 });
+		const messagesState = stateCursor(first.messages, "messages");
+		// Second run with the saved state: nothing has changed upstream.
+		const before = library.requests.filter((r) =>
+			r.url.pathname.startsWith("/rest/thread/"),
+		).length;
+		const second = harness(ALL_STREAMS, page(), {
+			messages: messagesState,
+		});
+		await collectPerplexity(second.ctx, { threadDelayMs: 0 });
+		const after = library.requests.filter((r) =>
+			r.url.pathname.startsWith("/rest/thread/"),
+		).length;
+		assert.equal(after - before, 1, "only the list is requested again");
+		assert.equal(
+			second.records.filter((r) => r.stream === "conversations").length,
+			2,
+		);
+		// create_time survives the skip because it was checkpointed.
+		const skipped = second.records.find(
+			(r) => r.stream === "conversations" && r.data.id === threadId(1),
+		)?.data;
+		assert.equal(skipped?.create_time, instant(1));
+		const coverage = detailCoverage(second.messages, "messages");
+		assert.equal(coverage.covered, 2);
+		assert.equal((coverage.optional_skip_keys as string[]).length, 2);
+	});
+});
+
+test("a thread that fails is a reported gap, not a silent hole", async () => {
+	const library = perplexityLibrary({
+		total: 2,
+		failingSlugs: [threadSlug(1)],
+		failStatus: 404,
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const gap = h.messages.find(
+			(item) => (item as { type?: string }).type === "DETAIL_GAP",
+		) as Record<string, unknown> | undefined;
+		assert.ok(gap, "expected a DETAIL_GAP");
+		assert.equal(gap?.stream, "messages");
+		assert.equal(gap?.parent_stream, "conversations");
+		assert.equal(gap?.record_key, threadId(1));
+		assert.equal(gap?.status, "pending");
+		assert.equal(gap?.reason, "temporary_unavailable");
+		const coverage = detailCoverage(h.messages, "messages");
+		assert.equal(coverage.considered, 2);
+		assert.equal(coverage.covered, 1);
+		assert.deepEqual(coverage.gap_keys, [threadId(1)]);
+		// The failed thread's conversation record still lands, from the list.
+		assert.equal(
+			h.records.filter((r) => r.stream === "conversations").length,
+			2,
+		);
+	});
+});
+
+test("a dead session during a run aborts it loudly", async () => {
+	const library = perplexityLibrary({
+		total: 2,
+		failingSlugs: [threadSlug(1)],
+		failStatus: 401,
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_auth_failed/,
+		);
+	});
+});
+
+test("a list body of the wrong shape fails the run, not the stream", async () => {
+	const serve: typeof fetch = async () => Response.json({ models: [] });
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_source_unreadable/,
+		);
+	});
+});
+
+test("a list row that cannot be keyed fails both streams and checkpoints neither, keeping the readable threads", async () => {
+	const rows = [
+		threadItem(1, true),
+		{
+			uuid: "aaaaaaaa-0000-4000-8000-000000000009",
+			title: "a thread with no id of its own",
+			total_threads: 1,
+			has_next_page: false,
+		},
+	];
+	const library = scriptedLibrary({
+		listPage: (offset) => (offset === 0 ? rows : []),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		// `total_threads` must not gate completeness: the walk proved its own
+		// end (the last item said has_next_page: false). The unkeyed row is a
+		// thread neither stream can account for, so both fail without a
+		// coverage claim or a checkpoint; the readable thread is still kept.
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(
+			h.records.filter((r) => r.stream === "conversations").length,
+			1,
+		);
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 2);
+		assert.deepEqual(h.failures, [
+			{ stream: "conversations", retryable: false },
+			{ stream: "messages", retryable: false },
+		]);
+		assert.equal(
+			h.messages.some(
+				(m) =>
+					m.type === "STATE" ||
+					(m as { type: string }).type === "DETAIL_COVERAGE",
+			),
+			false,
+		);
+	});
+	// A messages-only run reports only the stream it was asked for.
+	await withBrowser(library.serve, async () => {
+		const h = harness(["messages"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, [{ stream: "messages", retryable: false }]);
+	});
+});
+
+test("an empty library is proven empty, with zero records and an empty inventory marker", async () => {
+	const serve: typeof fetch = async (input) =>
+		new URL(String(input), HOME).pathname === "/api/auth/session"
+			? Response.json({ user: { id: "synthetic-owner" } })
+			: Response.json([]);
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.records, []);
+		assert.deepEqual(h.failures, []);
+		assert.equal(detailCoverage(h.messages, "conversations").considered, 0);
+		assert.equal(detailCoverage(h.messages, "messages").covered, 0);
+		assert.equal(
+			h.messages.some(
+				(m) => m.type === "STATE" && m.stream === "conversations",
+			),
+			false,
+		);
+		assert.deepEqual(stateCursor(h.messages, "messages"), {
+			v: 2,
+			synced: {},
+		});
+	});
+});
+
+test("a signed-in session is verified through the page's session endpoint", async () => {
+	const requests: string[] = [];
+	const visits: string[] = [];
+	await withBrowser(
+		async (input) => {
+			requests.push(String(input));
+			return Response.json({
+				user: { id: "synthetic-owner" },
+				expires: "2027-01-01T00:00:00Z",
+			});
+		},
+		async () => {
+			assert.equal(await hasPerplexitySession(page(HOME, visits)), true);
+		},
+	);
+	assert.deepEqual(requests, ["/api/auth/session"]);
+	assert.deepEqual(visits, []);
+});
+
+test("an expired session hands off to the owner and resolves when they sign in", async () => {
+	let authenticated = false;
+	const visits: string[] = [];
+	const statuses: string[] = [];
+	await withBrowser(
+		async (input) => {
+			void input;
+			return Response.json(
+				authenticated ? { user: { id: "synthetic-owner" } } : {},
+			);
+		},
+		async () => {
+			await ensurePerplexitySession(
+				Object.assign(Object.create(null) as EnsureSessionArgs, {
+					page: page("about:blank", visits),
+					assist: async () => {
+						authenticated = true;
+						return "assist-1";
+					},
+					completeAssistance: async (_id: string, status: string) => {
+						statuses.push(status);
+					},
+				}),
+			);
+		},
+	);
+	// Home first to read the session, then the sign-in form for the handoff.
+	assert.deepEqual(visits, [HOME, SIGN_IN]);
+	assert.deepEqual(statuses, ["resolved"]);
+});
+
+// ─── review follow-ups ───────────────────────────────────────────────────
+
+/** A server whose list pages and thread bodies a test scripts directly. */
+function scriptedLibrary(options: {
+	readonly listPage: (offset: number, walk: number) => unknown[];
+	readonly thread?: (slug: string, offset: number) => Response;
+	/** The session endpoint's body; signed in unless a test says otherwise. */
+	readonly session?: () => unknown;
+}) {
+	const requests: ServedRequest[] = [];
+	let walk = 0;
+	const serve: typeof fetch = async (input, init) => {
+		const url = new URL(String(input), HOME);
+		const body = typeof init?.body === "string" ? init.body : undefined;
+		requests.push({
+			url,
+			method: init?.method ?? "GET",
+			headers: new Headers(init?.headers),
+			body,
+		});
+		if (url.pathname === "/api/auth/session") {
+			return Response.json(
+				options.session?.() ?? { user: { id: "synthetic-owner" } },
+			);
+		}
+		if (url.pathname === "/rest/thread/list_ask_threads") {
+			const offset =
+				body === undefined
+					? 0
+					: (JSON.parse(body) as { offset: number }).offset;
+			if (offset === 0) walk += 1;
+			return Response.json(options.listPage(offset, walk));
+		}
+		const slug = url.pathname.split("/").pop() ?? "";
+		const offset = Number(url.searchParams.get("offset") ?? "0");
+		if (options.thread) return options.thread(slug, offset);
+		return new Response(threadDetail(Number(slug.slice(-12))), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	};
+	return { requests, serve };
+}
+
+const listItems = (ns: readonly number[], lastHasNext: boolean) =>
+	ns.map((n, index) =>
+		threadItem(n, index === ns.length - 1 ? lastHasNext : true),
+	);
+
+const isUnreadableSkip = (message: EmittedMessage): boolean =>
+	message.type === "SKIP_RESULT" &&
+	(message as { reason?: string }).reason === "records_unreadable";
+
+/** The thread-detail reads among served requests. */
+const threadReads = (requests: readonly ServedRequest[]) =>
+	requests.filter(
+		(request) =>
+			request.method === "GET" &&
+			request.url.pathname.startsWith("/rest/thread/") &&
+			request.url.pathname !== "/rest/thread/list_ask_threads",
+	);
+
+test("a short list page that says there is more is followed, not taken as the end", async () => {
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0
+				? listItems([1, 2], true)
+				: offset === 2
+					? listItems([3], false)
+					: [],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(
+			h.records.filter((r) => r.stream === "conversations").length,
+			3,
+		);
+		assert.equal(detailCoverage(h.messages, "messages").covered, 3);
+	});
+});
+
+test("a list that moves under the walk is re-walked until two walks agree", async () => {
+	const all = Array.from({ length: PAGE_SIZE + 2 }, (_, i) => i + 1);
+	// The first walk misses thread 22 (it moved during the walk); later walks see it.
+	const library = scriptedLibrary({
+		listPage: (offset, walk) => {
+			const ids = walk === 1 ? all.filter((n) => n !== 22) : all;
+			const slice = ids.slice(offset, offset + PAGE_SIZE);
+			return listItems(slice, offset + PAGE_SIZE < ids.length);
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(["conversations"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(h.records.length, PAGE_SIZE + 2);
+	});
+});
+
+test("a list that never holds still keeps its threads, fails both streams retryably and checkpoints nothing", async () => {
+	const library = scriptedLibrary({
+		listPage: (offset, walk) => {
+			const ids = Array.from(
+				{ length: PAGE_SIZE + 2 },
+				(_, i) => i + 1 + walk * 100,
+			);
+			return listItems(
+				ids.slice(offset, offset + PAGE_SIZE),
+				offset + PAGE_SIZE < ids.length,
+			);
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		// The threads seen are kept, but neither stream is proven: both fail
+		// retryably, with no coverage claim and no checkpoint.
+		assert.equal(
+			h.records.filter((r) => r.stream === "conversations").length,
+			PAGE_SIZE + 2,
+		);
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 0);
+		assert.deepEqual(h.failures, [
+			{ stream: "conversations", retryable: true },
+			{ stream: "messages", retryable: true },
+		]);
+		assert.equal(
+			h.messages.some(
+				(m) =>
+					m.type === "STATE" ||
+					(m as { type: string }).type === "DETAIL_COVERAGE",
+			),
+			false,
+		);
+	});
+});
+
+test("a thread that returns fewer entries than the list reports is a gap, not hydrated", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [{ ...threadItem(1, false), query_count: 2 }],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const coverage = detailCoverage(h.messages, "messages");
+		assert.equal(coverage.covered, 0);
+		assert.deepEqual(coverage.gap_keys, [threadId(1)]);
+		const cursor = stateCursor(h.messages, "messages") as {
+			synced: Record<string, unknown>;
+		};
+		assert.deepEqual(cursor.synced, {});
+	});
+});
+
+test("an entries page that claims more but adds nothing is a gap", async () => {
+	const library = scriptedLibrary({
+		listPage: () => listItems([1], false),
+		thread: () =>
+			Response.json({
+				status: "success",
+				entries: [],
+				has_next_page: true,
+				next_cursor: "c",
+			}),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(detailCoverage(h.messages, "messages").gap_keys, [
+			threadId(1),
+		]);
+	});
+});
+
+test("an answer still being written is a gap and is not remembered", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [{ ...threadItem(1, false), status: "IN_PROGRESS" }],
+		thread: () => {
+			const body = JSON.parse(threadDetail(1)) as {
+				entries: Array<Record<string, unknown>>;
+			};
+			const [entry] = body.entries;
+			if (entry) entry.status = "IN_PROGRESS";
+			return Response.json(body);
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const gap = h.messages.find(
+			(m) => (m as { type?: string }).type === "DETAIL_GAP",
+		) as { detail?: { class?: string } } | undefined;
+		assert.equal(gap?.detail?.class, "answer_still_generating");
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 0);
+	});
+});
+
+test("each conversation is emitted before its messages and before its gap", async () => {
+	const library = scriptedLibrary({
+		listPage: () => listItems([1, 2], false),
+		thread: (slug) =>
+			slug === threadSlug(2)
+				? new Response("{}", {
+						status: 404,
+						headers: { "content-type": "application/json" },
+					})
+				: new Response(threadDetail(1), {
+						headers: { "content-type": "application/json" },
+					}),
+	});
+	await withBrowser(library.serve, async () => {
+		const order: string[] = [];
+		const h = harness(ALL_STREAMS, page());
+		const emitRecord = h.ctx.emitRecord;
+		const emit = h.ctx.emit;
+		h.ctx.emitRecord = async (stream, data) => {
+			order.push(`${stream}:${String(data.conversation_id ?? data.id)}`);
+			await emitRecord(stream, data);
+		};
+		h.ctx.emit = async (message) => {
+			if (message.type === "DETAIL_GAP")
+				order.push(`gap:${String(message.record_key)}`);
+			await emit(message);
+		};
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(order, [
+			`conversations:${threadId(1)}`,
+			`messages:${threadId(1)}`,
+			`messages:${threadId(1)}`,
+			`conversations:${threadId(2)}`,
+			`gap:${threadId(2)}`,
+		]);
+	});
+});
+
+test("a rate limit or server error stops the run instead of gapping every thread", async () => {
+	for (const status of [429, 500]) {
+		const library = perplexityLibrary({
+			total: 3,
+			failingSlugs: [threadSlug(1)],
+			failStatus: status,
+		});
+		await withBrowser(library.serve, async () => {
+			const h = harness(ALL_STREAMS, page());
+			await assert.rejects(
+				collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+				new RegExp(`perplexity_internal_api_${String(status)}`),
+			);
+			assert.equal(
+				h.messages.some((m) => m.type === "STATE"),
+				false,
+			);
+		});
+	}
+});
+
+test("a Cloudflare page instead of JSON is a challenge, not a schema failure", async () => {
+	const serve: typeof fetch = async () =>
+		new Response("<html>Just a moment...</html>", {
+			status: 200,
+			headers: { "content-type": "text/html" },
+		});
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_challenge/,
+		);
+	});
+	const forbidden: typeof fetch = async () =>
+		new Response("{}", { status: 403 });
+	await withBrowser(forbidden, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_challenge/,
+		);
+	});
+});
+
+test("an update inside the same second is not mistaken for no change", async () => {
+	const library = perplexityLibrary({ total: 1 });
+	await withBrowser(library.serve, async () => {
+		const first = harness(ALL_STREAMS, page());
+		await collectPerplexity(first.ctx, { threadDelayMs: 0 });
+		const synced = (
+			stateCursor(first.messages, "messages") as {
+				synced: Record<string, { update_time: string }>;
+			}
+		).synced;
+		const remembered = synced[threadId(1)];
+		assert.ok(remembered);
+		// The thread was remembered a fraction of a second earlier than it now reads.
+		remembered.update_time =
+			remembered.update_time
+				.replace(/\.\d{6}Z$/, ".000001Z")
+				.replace(".000001Z", ".000000Z") === remembered.update_time
+				? remembered.update_time.replace(/\.\d{6}Z$/, ".999999Z")
+				: remembered.update_time.replace(/\.\d{6}Z$/, ".000000Z");
+		const before = library.requests.length;
+		const second = harness(ALL_STREAMS, page(), { messages: { synced } });
+		await collectPerplexity(second.ctx, { threadDelayMs: 0 });
+		const threadReads = library.requests
+			.slice(before)
+			.filter((r) => r.method === "GET");
+		assert.equal(threadReads.length, 1, "the thread is read again");
+	});
+});
+
+test("a pending gap is recovered from its locator, and recovery-only stops there", async () => {
+	const library = perplexityLibrary({ total: 1 });
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		const gap = {
+			status: "pending",
+			stream: "messages",
+			record_key: threadId(1),
+			detail_locator: {
+				kind: "perplexity.thread",
+				slug: threadSlug(1),
+				entry_count: 1,
+			},
+		};
+		Object.assign(h.ctx, {
+			recoveryOnly: true,
+			detailGaps: [
+				{ ...gap, gap_id: "gap-1" },
+				{ ...gap, gap_id: "gap-2" },
+			],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		// Two gaps for one thread: its messages once, both gaps resolved.
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 2);
+		const recovered = h.messages
+			.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+			.map((m) => (m as { gap_id?: string }).gap_id);
+		assert.deepEqual(recovered, ["gap-1", "gap-2"]);
+		assert.equal(
+			library.requests.some(
+				(r) => r.url.pathname === "/rest/thread/list_ask_threads",
+			),
+			false,
+			"recovery-only never walks the list",
+		);
+		assert.equal(
+			h.messages.some((m) => m.type === "STATE"),
+			false,
+			"recovery-only checkpoints nothing",
+		);
+	});
+});
+
+test("an ordinary run resolves a pending gap in the forward walk, parent first", async () => {
+	const library = perplexityLibrary({ total: 1 });
+	await withBrowser(library.serve, async () => {
+		const order: string[] = [];
+		const h = harness(ALL_STREAMS, page());
+		Object.assign(h.ctx, {
+			detailGaps: [
+				{
+					gap_id: "gap-1",
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(1),
+					detail_locator: {
+						kind: "perplexity.thread",
+						slug: threadSlug(1),
+						entry_count: 1,
+					},
+				},
+			],
+		});
+		const emitRecord = h.ctx.emitRecord;
+		const emit = h.ctx.emit;
+		h.ctx.emitRecord = async (stream, data) => {
+			order.push(stream);
+			await emitRecord(stream, data);
+		};
+		h.ctx.emit = async (message) => {
+			if (message.type === "DETAIL_GAP_RECOVERED") order.push("recovered");
+			await emit(message);
+		};
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(order, [
+			"conversations",
+			"messages",
+			"messages",
+			"recovered",
+		]);
+	});
+});
+
+test("a pending gap whose thread is still short stays pending and is not remembered", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [{ ...threadItem(1, false), query_count: 2 }],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		Object.assign(h.ctx, {
+			detailGaps: [
+				{
+					gap_id: "gap-1",
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(1),
+					detail_locator: {
+						kind: "perplexity.thread",
+						slug: threadSlug(1),
+						entry_count: 1,
+					},
+				},
+			],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(
+			h.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		const cursor = stateCursor(h.messages, "messages") as {
+			synced: Record<string, unknown>;
+		};
+		assert.deepEqual(cursor.synced, {});
+	});
+});
+
+test("a two-page walk whose second page repeats a shifted thread is re-walked", async () => {
+	const all = Array.from({ length: PAGE_SIZE + 1 }, (_, i) => i + 1);
+	// Walk 1: thread 21 was pushed back by new activity, page 2 repeats thread 20.
+	const library = scriptedLibrary({
+		listPage: (offset, walk) => {
+			if (walk === 1 && offset === PAGE_SIZE)
+				return listItems([PAGE_SIZE], false);
+			const slice = all.slice(offset, offset + PAGE_SIZE);
+			return listItems(slice, offset + PAGE_SIZE < all.length);
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(["conversations"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(h.records.length, PAGE_SIZE + 1);
+	});
+});
+
+test("a thread answered between walks does not make the list unstable", async () => {
+	const all = Array.from({ length: PAGE_SIZE + 2 }, (_, i) => i + 1);
+	const library = scriptedLibrary({
+		listPage: (offset, walk) =>
+			all.slice(offset, offset + PAGE_SIZE).map((n, index, slice) => ({
+				...threadItem(
+					n,
+					index < slice.length - 1 || offset + PAGE_SIZE < all.length,
+				),
+				...(n === 1 ? { last_query_datetime: listStamp(100 + walk) } : {}),
+			})),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(["conversations"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(h.records.length, PAGE_SIZE + 2);
+	});
+});
+
+test("a thread with no entry count is read but never remembered", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [{ ...threadItem(1, false), query_count: null }],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 2);
+		const cursor = stateCursor(h.messages, "messages") as {
+			synced: Record<string, unknown>;
+		};
+		assert.deepEqual(cursor.synced, {});
+	});
+});
+
+test("an over-long title is cut inside the schema bound", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [{ ...threadItem(1, false), title: "t".repeat(600) }],
+	});
+	await withBrowser(library.serve, async () => {
+		// The harness validates every record against the schema.
+		const h = harness(["conversations"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const title = h.records[0]?.data.title;
+		assert.equal(typeof title, "string");
+		assert.ok(String(title).length <= 500);
+	});
+});
+
+test("the manifest's record contracts match the schemas", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as {
+		streams: Array<{
+			name: string;
+			schema: {
+				required: string[];
+				properties: Record<
+					string,
+					{ type?: unknown; items?: { required?: string[] } }
+				>;
+			};
+		}>;
+	};
+	for (const stream of manifest.streams) {
+		assert.deepEqual(
+			[...stream.schema.required].sort(),
+			Object.keys(stream.schema.properties).sort(),
+			`${stream.name}: every field is required, as the zod schema requires it`,
+		);
+	}
+	const messages = manifest.streams.find(
+		(stream) => stream.name === "messages",
+	);
+	assert.equal(messages?.schema.properties.role?.type, "string");
+	assert.deepEqual(messages?.schema.properties.citations?.items?.required, [
+		"title",
+		"url",
+	]);
+});
+
+test("a pending gap whose thread still fails is gapped again in this run, matching gap_keys", async () => {
+	const library = perplexityLibrary({
+		total: 2,
+		failingSlugs: [threadSlug(1)],
+		failStatus: 404,
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		Object.assign(h.ctx, {
+			detailGaps: [
+				{
+					gap_id: "gap-1",
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(1),
+					detail_locator: {
+						kind: "perplexity.thread",
+						slug: threadSlug(1),
+						entry_count: 1,
+					},
+				},
+			],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const gapped = h.messages
+			.filter((m) => m.type === "DETAIL_GAP")
+			.map((m) => (m as { record_key?: string }).record_key);
+		assert.deepEqual(gapped, [threadId(1)]);
+		assert.deepEqual(detailCoverage(h.messages, "messages").gap_keys, gapped);
+		assert.equal(
+			h.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+	});
+});
+
+test("a Cloudflare 503 challenge page is a challenge, not a retryable outage", async () => {
+	const htmlChallenge: typeof fetch = async () =>
+		new Response("<html>Just a moment...</html>", {
+			status: 503,
+			headers: { "content-type": "text/html; charset=UTF-8" },
+		});
+	await withBrowser(htmlChallenge, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_challenge/,
+		);
+	});
+	const marked: typeof fetch = async () =>
+		new Response("{}", {
+			status: 503,
+			headers: {
+				"content-type": "application/json",
+				"cf-mitigated": "challenge",
+			},
+		});
+	await withBrowser(marked, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_challenge/,
+		);
+	});
+	// A plain JSON 503 is still an outage the runtime retries.
+	const outage: typeof fetch = async () =>
+		new Response("{}", {
+			status: 503,
+			headers: { "content-type": "application/json" },
+		});
+	await withBrowser(outage, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_internal_api_503/,
+		);
+	});
+});
+
+interface JsonFieldSchema {
+	type?: string | string[];
+	format?: string;
+	enum?: unknown[];
+	anyOf?: JsonFieldSchema[];
+	items?: JsonFieldSchema;
+	properties?: Record<string, JsonFieldSchema>;
+	required?: string[];
+}
+
+/** The comparable facts of one field: its types (null included), format and enum. */
+function fieldFacts(
+	schema: JsonFieldSchema | undefined,
+): Record<string, unknown> {
+	const parts = schema?.anyOf ?? (schema ? [schema] : []);
+	const valued = parts.find(({ type }) => type !== "null") ?? {};
+	return {
+		types: parts
+			.flatMap(({ type }) => (type === undefined ? [] : [type].flat()))
+			.sort(),
+		format: valued.format ?? null,
+		enum: valued.enum ?? null,
+		items:
+			valued.items?.properties === undefined
+				? null
+				: Object.fromEntries(
+						Object.entries(valued.items.properties).map(([key, value]) => [
+							key,
+							fieldFacts(value),
+						]),
+					),
+		itemsRequired: valued.items?.required
+			? [...valued.items.required].sort()
+			: null,
+	};
+}
+
+test("each manifest field matches its zod schema in type, format, nullability and enum", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { streams: Array<{ name: string; schema: JsonFieldSchema }> };
+	const zodSchemas: Record<string, z.ZodTypeAny> = {
+		conversations: conversationSchema,
+		messages: messageSchema,
+	};
+	for (const stream of manifest.streams) {
+		const zodSchema = zodSchemas[stream.name];
+		assert.ok(zodSchema, `${stream.name} has a zod schema`);
+		const zod = z.toJSONSchema(zodSchema, { io: "input" }) as JsonFieldSchema;
+		const keys = Object.keys(stream.schema.properties ?? {}).sort();
+		assert.deepEqual(
+			Object.keys(zod.properties ?? {}).sort(),
+			keys,
+			`${stream.name}: keys`,
+		);
+		for (const key of keys) {
+			assert.deepEqual(
+				fieldFacts(stream.schema.properties?.[key]),
+				fieldFacts(zod.properties?.[key]),
+				`${stream.name}.${key}`,
+			);
+		}
+		assert.deepEqual(
+			[...(stream.schema.required ?? [])].sort(),
+			[...(zod.required ?? [])].sort(),
+			`${stream.name}: required`,
+		);
+	}
+});
+
+// ─── current runtime: session handoff and completeness proof ─────────────
+
+/** EnsureSession arguments whose assist records each handoff it is asked for. */
+function sessionArgs(
+	browserPage: Page,
+	onAssist: () => void = () => {},
+): {
+	args: EnsureSessionArgs;
+	handoffs: string[];
+	statuses: string[];
+} {
+	const handoffs: string[] = [];
+	const statuses: string[] = [];
+	const args = Object.assign(Object.create(null) as EnsureSessionArgs, {
+		page: browserPage,
+		assist: async (request: { message: string }) => {
+			handoffs.push(request.message);
+			onAssist();
+			return `assist-${String(handoffs.length)}`;
+		},
+		completeAssistance: async (_id: string, status: string) => {
+			statuses.push(status);
+		},
+	});
+	return { args, handoffs, statuses };
+}
+
+const noDelay = async (): Promise<void> => {};
+
+test("a signed-out page elsewhere on the site is moved to the sign-in page, then handed over", async () => {
+	let authenticated = false;
+	const visits: string[] = [];
+	const session = sessionArgs(
+		page(`${HOME}search/synthetic-thread`, visits),
+		() => {
+			authenticated = true;
+		},
+	);
+	await withBrowser(
+		async () =>
+			Response.json(authenticated ? { user: { id: "synthetic-owner" } } : {}),
+		() => ensurePerplexitySession(session.args, noDelay),
+	);
+	assert.deepEqual(visits, [SIGN_IN]);
+	assert.equal(session.handoffs.length, 1);
+	assert.match(session.handoffs[0] ?? "", /^Sign in to Perplexity/);
+	assert.deepEqual(session.statuses, ["resolved"]);
+});
+
+async function signedOutHandoffVisits(start: string): Promise<string[]> {
+	let authenticated = false;
+	const visits: string[] = [];
+	const session = sessionArgs(page(start, visits), () => {
+		authenticated = true;
+	});
+	await withBrowser(
+		async () =>
+			Response.json(authenticated ? { user: { id: "synthetic-owner" } } : {}),
+		() => ensurePerplexitySession(session.args, noDelay),
+	);
+	assert.equal(session.handoffs.length, 1);
+	return visits;
+}
+
+test("a signed-out home page is moved to the sign-in form; one already there is not moved", async () => {
+	assert.deepEqual(await signedOutHandoffVisits(HOME), [SIGN_IN]);
+	assert.deepEqual(await signedOutHandoffVisits(SIGN_IN), []);
+});
+
+test("a human check is handed over in place, never navigated away from", async () => {
+	let cleared = false;
+	const visits: string[] = [];
+	const session = sessionArgs(
+		page(`${HOME}search/synthetic-thread`, visits),
+		() => {
+			cleared = true;
+		},
+	);
+	await withBrowser(
+		async () =>
+			cleared
+				? Response.json({ user: { id: "synthetic-owner" } })
+				: new Response("<html>Just a moment...</html>", {
+						status: 403,
+						headers: {
+							"content-type": "text/html",
+							"cf-mitigated": "challenge",
+						},
+					}),
+		() => ensurePerplexitySession(session.args, noDelay),
+	);
+	assert.deepEqual(visits, []);
+	assert.equal(session.handoffs.length, 1);
+	assert.match(session.handoffs[0] ?? "", /human check/);
+	assert.doesNotMatch(session.handoffs[0] ?? "", /^Sign in/);
+});
+
+test("a Cloudflare challenge document is read as a challenge without a request", async () => {
+	const requests: string[] = [];
+	const saved = Object.getOwnPropertyDescriptor(globalThis, "document");
+	Object.defineProperty(globalThis, "document", {
+		configurable: true,
+		value: { title: "Just a moment..." },
+	});
+	try {
+		await withBrowser(
+			async (input) => {
+				requests.push(String(input));
+				return Response.json({});
+			},
+			async () => {
+				assert.equal(await checkPerplexitySession(page()), "challenge");
+			},
+		);
+	} finally {
+		if (saved) Object.defineProperty(globalThis, "document", saved);
+		else Reflect.deleteProperty(globalThis, "document");
+	}
+	assert.deepEqual(requests, []);
+});
+
+test("a session check with no usable answer is retried in place, then fails with a bare code and no handoff", async () => {
+	let reads = 0;
+	const visits: string[] = [];
+	const session = sessionArgs(page(HOME, visits));
+	let thrown: unknown;
+	await withBrowser(
+		async () => {
+			reads += 1;
+			return new Response("{}", {
+				status: 502,
+				headers: { "content-type": "application/json" },
+			});
+		},
+		async () => {
+			try {
+				await ensurePerplexitySession(session.args, noDelay);
+			} catch (error) {
+				thrown = error;
+			}
+		},
+	);
+	assert.ok(thrown instanceof Error);
+	assert.equal(thrown.message, "perplexity_interrupted");
+	assert.equal(isConnectorErrorCodeShaped(thrown.message), true);
+	assert.equal(reads, 3);
+	assert.deepEqual(session.handoffs, []);
+	assert.deepEqual(visits, []);
+});
+
+test("a sign-in that is never completed fails with the bare perplexity_auth_failed code", async () => {
+	const visits: string[] = [];
+	const browserPage = page(HOME, visits);
+	let thrown: unknown;
+	await withBrowser(
+		async () => Response.json({}),
+		async () => {
+			try {
+				// A host without the streamed handoff: the owner says they are
+				// done, and the session is then read once and is still signed out.
+				await ensurePerplexitySession(
+					Object.assign(Object.create(null) as EnsureSessionArgs, {
+						page: browserPage,
+						sendInteraction: async () => ({
+							type: "INTERACTION_RESPONSE",
+							request_id: "synthetic",
+							status: "success",
+						}),
+					}),
+					noDelay,
+				);
+			} catch (error) {
+				thrown = error;
+			}
+		},
+	);
+	assert.ok(thrown instanceof Error);
+	assert.equal(thrown.message, "perplexity_auth_failed");
+	assert.equal(isConnectorErrorCodeShaped(thrown.message), true);
+});
+
+test("exactly one full page whose last item ends the list is one request and a proven, checkpointed list", async () => {
+	// The owner's live library shape: 20 threads, one page, the last item
+	// saying has_next_page: false.
+	const library = perplexityLibrary({ total: PAGE_SIZE });
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const listCalls = library.requests.filter(
+			(request) => request.url.pathname === "/rest/thread/list_ask_threads",
+		);
+		assert.equal(listCalls.length, 1);
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 40);
+		assert.deepEqual(h.failures, []);
+		assert.equal(detailCoverage(h.messages, "messages").covered, PAGE_SIZE);
+		assert.equal(
+			Object.keys(
+				(stateCursor(h.messages, "messages") as { synced: object }).synced,
+			).length,
+			PAGE_SIZE,
+		);
+	});
+});
+
+test("a full page that still claims more ends on the empty page after it, only once the session is confirmed", async () => {
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0
+				? listItems(
+						Array.from({ length: PAGE_SIZE }, (_, i) => i + 1),
+						true,
+					)
+				: [],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const offsets = library.requests
+			.filter((r) => r.url.pathname === "/rest/thread/list_ask_threads")
+			.map((r) => (JSON.parse(r.body ?? "{}") as { offset: number }).offset);
+		// Two pages per walk, walked twice to prove it held still.
+		assert.deepEqual(offsets, [0, PAGE_SIZE, 0, PAGE_SIZE]);
+		assert.equal(
+			library.requests.filter((r) => r.url.pathname === "/api/auth/session")
+				.length,
+			2,
+		);
+		assert.equal(detailCoverage(h.messages, "messages").covered, PAGE_SIZE);
+		assert.deepEqual(h.failures, []);
+	});
+});
+
+test("an empty list from a session that is no longer signed in fails the run with no checkpoint", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [],
+		session: () => ({}),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_auth_failed/,
+		);
+		assert.equal(
+			h.messages.some(
+				(m) =>
+					m.type === "STATE" ||
+					(m as { type: string }).type === "DETAIL_COVERAGE",
+			),
+			false,
+		);
+	});
+});
+
+test("a stream failure without the runtime's reporter fails the run instead of finishing complete", async () => {
+	const serve: typeof fetch = async () =>
+		Response.json([
+			{
+				uuid: "aaaaaaaa-0000-4000-8000-000000000001",
+				title: "a thread with no id of its own",
+				has_next_page: false,
+			},
+		]);
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		Reflect.deleteProperty(h.ctx, "reportStreamFailure");
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			(error: unknown) =>
+				error instanceof Error &&
+				(error as { code?: string }).code === "perplexity_stream_incomplete",
+		);
+	});
+});
+
+test("the session check is bounded by an abort signal", async () => {
+	let signal: unknown;
+	await withBrowser(
+		async (_input, init) => {
+			signal = init?.signal;
+			return Response.json({ user: { id: "synthetic-owner" } });
+		},
+		async () => {
+			assert.equal(await checkPerplexitySession(page()), "signed_in");
+		},
+	);
+	assert.ok(signal instanceof AbortSignal);
+});
+
+test("a host without the streamed handoff never moves the page to check the finished sign-in", async () => {
+	const visits: string[] = [];
+	const browserPage = page(SIGN_IN, visits);
+	let thrown: unknown;
+	await withBrowser(
+		async () => Response.json({}),
+		async () => {
+			try {
+				await ensurePerplexitySession(
+					Object.assign(Object.create(null) as EnsureSessionArgs, {
+						page: browserPage,
+						sendInteraction: async () => {
+							// The owner is still on the identity provider's page.
+							await browserPage.goto("https://accounts.example.com/sign-in");
+							return {
+								type: "INTERACTION_RESPONSE",
+								request_id: "synthetic",
+								status: "success",
+							};
+						},
+					}),
+					noDelay,
+				);
+			} catch (error) {
+				thrown = error;
+			}
+		},
+	);
+	assert.ok(thrown instanceof Error);
+	assert.equal(thrown.message, "perplexity_auth_failed");
+	assert.deepEqual(visits, ["https://accounts.example.com/sign-in"]);
+});
+
+test("a thread whose entries span two pages is read in full, then remembered", async () => {
+	const entry = (k: number) => ({
+		uuid: entryId(100 + k),
+		status: "COMPLETED",
+		context_uuid: threadId(1),
+		query_str: `Synthetic question 1.${String(k)}?`,
+		entry_created_datetime: entryStamp(k),
+		entry_updated_datetime: entryStamp(k),
+		display_model: "sonar",
+		blocks: [
+			{
+				intended_usage: "ask_text",
+				markdown_block: { answer: `Synthetic answer 1.${String(k)}.` },
+			},
+		],
+	});
+	const all = Array.from({ length: 12 }, (_, k) => entry(k + 1));
+	const offsets: number[] = [];
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0 ? [{ ...threadItem(1, false), query_count: 12 }] : [],
+		thread: (_slug, offset) => {
+			offsets.push(offset);
+			const slice = all.slice(offset, offset + 10);
+			return Response.json({
+				entries: slice,
+				has_next_page: offset + slice.length < all.length,
+			});
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(offsets, [0, 10]);
+		const ids = h.records
+			.filter((r) => r.stream === "messages" && r.data.role === "user")
+			.map((r) => r.data.id);
+		assert.deepEqual(
+			ids,
+			all.map((item) => `${item.uuid}:user`),
+		);
+		assert.deepEqual(h.failures, []);
+		assert.deepEqual(detailCoverage(h.messages, "messages").hydrated_keys, [
+			threadId(1),
+		]);
+		const synced = (
+			stateCursor(h.messages, "messages") as {
+				synced: Record<string, { entry_count: number }>;
+			}
+		).synced;
+		assert.equal(synced[threadId(1)]?.entry_count, 12);
+	});
+});
+
+test("a leased pending gap is recovered with its lease echoed, in recovery-only and forward runs", async () => {
+	const gap = {
+		status: "pending",
+		stream: "messages",
+		record_key: threadId(1),
+		detail_locator: {
+			kind: "perplexity.thread",
+			slug: threadSlug(1),
+			entry_count: 1,
+		},
+	};
+	for (const recoveryOnly of [true, false]) {
+		const library = perplexityLibrary({ total: 1 });
+		await withBrowser(library.serve, async () => {
+			const h = harness(ALL_STREAMS, page());
+			Object.assign(h.ctx, {
+				recoveryOnly,
+				detailGaps: [
+					{ ...gap, gap_id: "gap-leased", lease_id: "lease-1" },
+					{ ...gap, gap_id: "gap-plain" },
+				],
+			});
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			const recovered = h.messages
+				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+				.map((m) => ({
+					gap_id: (m as { gap_id?: string }).gap_id,
+					lease_id: (m as { lease_id?: string }).lease_id,
+				}));
+			assert.deepEqual(
+				recovered,
+				[
+					{ gap_id: "gap-leased", lease_id: "lease-1" },
+					{ gap_id: "gap-plain", lease_id: undefined },
+				],
+				`recoveryOnly=${String(recoveryOnly)}`,
+			);
+		});
+	}
+});
+
+test("a walk that saw an unkeyed row and one that shifted past it do not agree", async () => {
+	const unkeyed = {
+		uuid: "aaaaaaaa-0000-4000-8000-000000000099",
+		title: "a thread with no id of its own",
+		has_next_page: true,
+	};
+	const ids = Array.from({ length: PAGE_SIZE + 2 }, (_, i) => i + 1);
+	// Walk 1 sees the unkeyed row on page 2; walk 2 shifts past it; walk 3
+	// and later see it again. Only walks 3 and 4 may agree, so the run must
+	// end with the unkeyed row reported and no checkpoint.
+	const library = scriptedLibrary({
+		listPage: (offset, walk) => {
+			const rows: unknown[] = listItems(ids, false);
+			if (walk !== 2) rows.splice(PAGE_SIZE, 0, unkeyed);
+			const slice = rows.slice(offset, offset + PAGE_SIZE);
+			return offset + PAGE_SIZE >= rows.length
+				? slice.map((row, index) =>
+						index === slice.length - 1
+							? { ...(row as object), has_next_page: false }
+							: row,
+					)
+				: slice;
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			h.failures.map((f) => f.stream),
+			["conversations", "messages"],
+		);
+		assert.equal(
+			h.messages.some((m) => m.type === "STATE"),
+			false,
+		);
+	});
+});
+
+// ─── round 3 review ──────────────────────────────────────────────────────
+
+/** A thread whose entry pages a test scripts: `count` single-entry entries. */
+function entriesOf(
+	count: number,
+	answer: (k: number) => unknown = (k) => `Synthetic answer ${String(k)}.`,
+) {
+	return Array.from({ length: count }, (_, i) => ({
+		uuid: entryId(200 + i),
+		status: "COMPLETED",
+		context_uuid: threadId(1),
+		query_str: `Synthetic question ${String(i)}?`,
+		entry_created_datetime: entryStamp(i),
+		entry_updated_datetime: entryStamp(i),
+		display_model: "sonar",
+		blocks: [
+			{ intended_usage: "ask_text", markdown_block: { answer: answer(i) } },
+		],
+	}));
+}
+
+test("recovery-only holds a gapped thread to the entry count its locator recorded, and skips a locator without one", async () => {
+	const short = entriesOf(10);
+	const library = scriptedLibrary({
+		listPage: () => [],
+		thread: (_slug, offset) =>
+			Response.json({
+				entries: short.slice(offset, offset + 10),
+				has_next_page: false,
+			}),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		const locator = { kind: "perplexity.thread", slug: threadSlug(1) };
+		Object.assign(h.ctx, {
+			recoveryOnly: true,
+			detailGaps: [
+				{
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(1),
+					gap_id: "gap-short",
+					detail_locator: { ...locator, entry_count: 12 },
+				},
+				{
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(2),
+					gap_id: "gap-uncounted",
+					detail_locator: { ...locator, slug: threadSlug(2) },
+				},
+			],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(
+			h.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		assert.deepEqual(h.records, []);
+		const reads = library.requests
+			.filter((r) => r.method === "GET")
+			.map((r) => r.url.pathname);
+		assert.deepEqual(reads, [`/rest/thread/${threadSlug(1)}`]);
+	});
+});
+
+test("recovery-only closes a gap whose only remaining fault is an unreadable entry, and keeps one still being answered", async () => {
+	const unreadable = [...entriesOf(1), ...entriesOf(2, () => 42).slice(1)];
+	const generating = entriesOf(1).map((entry) => ({
+		...entry,
+		status: "IN_PROGRESS",
+	}));
+	const library = scriptedLibrary({
+		listPage: () => [],
+		thread: (slug) =>
+			Response.json({
+				entries: slug === threadSlug(1) ? unreadable : generating,
+				has_next_page: false,
+			}),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		Object.assign(h.ctx, {
+			recoveryOnly: true,
+			detailGaps: [1, 2].map((n) => ({
+				status: "pending",
+				stream: "messages",
+				record_key: threadId(n),
+				gap_id: `gap-${String(n)}`,
+				detail_locator: {
+					kind: "perplexity.thread",
+					slug: threadSlug(n),
+					entry_count: n === 1 ? 2 : 1,
+				},
+			})),
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			h.messages
+				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+				.map((m) => (m as { gap_id: string }).gap_id),
+			["gap-1"],
+		);
+		assert.equal(h.messages.filter(isUnreadableSkip).length, 1);
+		assert.deepEqual(
+			h.records.map((r) => r.data.id),
+			[`${entryId(200)}:user`, `${entryId(200)}:assistant`],
+		);
+		assert.equal(
+			h.messages.some((m) => m.type === "STATE"),
+			false,
+		);
+	});
+});
+
+test("a forward gap records the list's entry count in its locator", async () => {
+	const library = perplexityLibrary({
+		total: 1,
+		failingSlugs: [threadSlug(1)],
+		failStatus: 404,
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const gap = h.messages.find(
+			(m) => (m as { type: string }).type === "DETAIL_GAP",
+		) as { detail_locator?: Record<string, unknown> } | undefined;
+		assert.deepEqual(gap?.detail_locator, {
+			kind: "perplexity.thread",
+			slug: threadSlug(1),
+			entry_count: 1,
+		});
+	});
+});
+
+test("an answer that cannot be read is reported once for a connector upgrade, not gapped; messages still checkpoint", async () => {
+	// Thread 1 has two entries: one readable, one whose answer is not text.
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0
+				? [{ ...threadItem(1, true), query_count: 2 }, threadItem(2, false)]
+				: [],
+		thread: (slug) =>
+			slug === threadSlug(1)
+				? Response.json({
+						entries: [...entriesOf(1), ...entriesOf(2, () => 42).slice(1)],
+						has_next_page: false,
+					})
+				: new Response(threadDetail(2), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					}),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, []);
+		const coverage = detailCoverage(h.messages, "messages");
+		assert.equal(coverage.gap_keys, undefined);
+		assert.deepEqual(coverage.optional_skip_keys, [threadId(1)]);
+		assert.deepEqual(coverage.hydrated_keys, [threadId(2)]);
+		assert.equal(h.messages.filter((m) => m.type === "DETAIL_GAP").length, 0);
+		const skips = h.messages.filter(isUnreadableSkip) as Array<{
+			stream: string;
+			recovery_hint?: unknown;
+		}>;
+		assert.equal(skips.length, 1);
+		assert.equal(skips[0]?.stream, "messages");
+		assert.deepEqual(skips[0]?.recovery_hint, {
+			action: "retry_on_connector_upgrade",
+			retryable: false,
+		});
+		// The readable entry of the thread is kept.
+		assert.ok(h.records.some((r) => r.data.id === `${entryId(200)}:assistant`));
+		// Remembered with the parser revision, so only an upgrade re-reads it.
+		const messagesState = stateCursor(h.messages, "messages");
+		const synced = (
+			messagesState as { synced: Record<string, Record<string, unknown>> }
+		).synced;
+		assert.deepEqual(Object.keys(synced).sort(), [threadId(1), threadId(2)]);
+		assert.equal(synced[threadId(1)]?.unreadable_entries, 1);
+		assert.equal(synced[threadId(1)]?.parser, 1);
+
+		const before = library.requests.length;
+		const again = harness(ALL_STREAMS, page(), { messages: messagesState });
+		await collectPerplexity(again.ctx, { threadDelayMs: 0 });
+		assert.equal(
+			threadReads(library.requests.slice(before)).length,
+			0,
+			"an unchanged thread is not re-read by the same parser",
+		);
+		assert.equal(again.messages.filter(isUnreadableSkip).length, 0);
+	});
+});
+
+test("a thread the list gives no slug is reported unreadable once and its pending gap stays pending", async () => {
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0 ? [{ ...threadItem(1, false), slug: null }] : [],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		Object.assign(h.ctx, {
+			detailGaps: [
+				{
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(1),
+					gap_id: "gap-1",
+				},
+			],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, []);
+		assert.equal(threadReads(library.requests).length, 0);
+		assert.equal(h.messages.filter(isUnreadableSkip).length, 1);
+		assert.equal(h.messages.filter((m) => m.type === "DETAIL_GAP").length, 0);
+		assert.equal(
+			h.messages.filter((m) => m.type === "DETAIL_GAP_RECOVERED").length,
+			0,
+			"closing the gap would claim messages that were never read",
+		);
+		const coverage = detailCoverage(h.messages, "messages");
+		assert.deepEqual(coverage.optional_skip_keys, [threadId(1)]);
+		assert.equal(coverage.covered, 0);
+	});
+});
+
+test("an empty list page whose session check meets a human check stops as a challenge, not a sign-in failure", async () => {
+	const library = scriptedLibrary({ listPage: () => [] });
+	const serve: typeof fetch = async (input, init) =>
+		new URL(String(input), HOME).pathname === "/api/auth/session"
+			? new Response("<html></html>", {
+					status: 403,
+					headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
+				})
+			: library.serve(input, init);
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0, delay: async () => {} }),
+			/^Error: perplexity_challenge/,
+		);
+	});
+});
+
+test("an empty list page whose session check has no answer is re-read, then stops retryably", async () => {
+	let checks = 0;
+	const library = scriptedLibrary({ listPage: () => [] });
+	const serve: typeof fetch = async (input, init) => {
+		if (new URL(String(input), HOME).pathname === "/api/auth/session") {
+			checks += 1;
+			return new Response("{}", {
+				status: 502,
+				headers: { "content-type": "application/json" },
+			});
+		}
+		return library.serve(input, init);
+	};
+	await withBrowser(serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0, delay: async () => {} }),
+			/perplexity_interrupted/,
+		);
+	});
+	assert.equal(checks, 3);
+});
+
+test("a session check whose body stalls is abandoned by its own timer", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let aborted = false;
+	const pending = withBrowser(
+		async (_input, init) => {
+			const signal = init?.signal ?? undefined;
+			const body = new ReadableStream({
+				start(controller) {
+					signal?.addEventListener("abort", () => {
+						aborted = true;
+						controller.error(new DOMException("aborted", "AbortError"));
+					});
+				},
+			});
+			return new Response(body, {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		},
+		() => checkPerplexitySession(page()),
+	);
+	for (let i = 0; i < 10 && !aborted; i += 1) {
+		await new Promise((resolve) => setImmediate(resolve));
+		t.mock.timers.tick(15_000);
+	}
+	assert.equal(await pending, "unknown");
+	assert.equal(aborted, true);
+});
+
+test("pending gaps beyond START's first page are paged and acknowledged for threads read this run", async () => {
+	const library = perplexityLibrary({ total: 2 });
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		const gap = (n: number, id: string) => ({
+			status: "pending",
+			stream: "messages",
+			record_key: threadId(n),
+			gap_id: id,
+			detail_locator: {
+				kind: "perplexity.thread",
+				slug: threadSlug(n),
+				entry_count: 1,
+			},
+		});
+		const pages = [[gap(1, "gap-1"), gap(2, "gap-2")], [gap(2, "gap-2")]];
+		let requests = 0;
+		Object.assign(h.ctx, {
+			detailGaps: [gap(1, "gap-1")],
+			requestDetailGapPage: async () => pages[requests++] ?? [],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const recovered = h.messages
+			.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+			.map((m) => (m as { gap_id?: string }).gap_id);
+		assert.deepEqual(recovered, ["gap-1", "gap-2"]);
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		let served = false;
+		Object.assign(h.ctx, {
+			recoveryOnly: true,
+			detailGaps: [],
+			requestDetailGapPage: async () => {
+				if (served) return [];
+				served = true;
+				return [
+					{
+						status: "pending",
+						stream: "messages",
+						record_key: threadId(2),
+						gap_id: "gap-late",
+						detail_locator: {
+							kind: "perplexity.thread",
+							slug: threadSlug(2),
+							entry_count: 1,
+						},
+					},
+				];
+			},
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			h.messages
+				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+				.map((m) => (m as { gap_id?: string }).gap_id),
+			["gap-late"],
+		);
+	});
+});
+
+test("a closed page or a destroyed context stops the run instead of gapping every thread", async () => {
+	for (const failure of [
+		"page.evaluate: Target page, context or browser has been closed",
+		"page.evaluate: Execution context was destroyed, most likely because of a navigation",
+	]) {
+		const library = perplexityLibrary({ total: 3 });
+		const base = page();
+		let lists = 0;
+		const closing = Object.assign(Object.create(base) as Page, {
+			evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => {
+				const isThread =
+					typeof arg === "object" &&
+					arg !== null &&
+					(arg as { method?: string }).method === "GET";
+				if (isThread) throw new Error(failure);
+				lists += 1;
+				return base.evaluate(fn as never, arg as never);
+			},
+		});
+		await withBrowser(library.serve, async () => {
+			const h = harness(ALL_STREAMS, closing);
+			await assert.rejects(
+				collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+				(error: unknown) => error instanceof Error && error.message === failure,
+			);
+			assert.equal(
+				h.messages.some((m) => (m as { type: string }).type === "DETAIL_GAP"),
+				false,
+			);
+		});
+		assert.ok(lists > 0);
+	}
+});
+
+// ─── time ranges and resources ───────────────────────────────────────────
+
+/** A library listed newest first, as the real list is: thread `total` first. */
+function newestFirstLibrary(total: number) {
+	return scriptedLibrary({
+		listPage: (offset) => {
+			const ns: number[] = [];
+			for (
+				let n = total - offset;
+				n > Math.max(0, total - offset - PAGE_SIZE);
+				n -= 1
+			) {
+				ns.push(n);
+			}
+			return listItems(ns, total - offset - PAGE_SIZE > 0);
+		},
+	});
+}
+
+const listReads = (requests: readonly ServedRequest[]) =>
+	requests.filter(
+		(request) => request.url.pathname === "/rest/thread/list_ask_threads",
+	);
+
+/** The thread numbers whose detail was read. */
+const readThreadNumbers = (requests: readonly ServedRequest[]) =>
+	threadReads(requests)
+		.map((request) => Number(request.url.pathname.slice(-12)))
+		.sort((a, b) => a - b);
+
+/** The thread numbers whose messages were delivered. */
+const deliveredThreads = (
+	records: ReadonlyArray<{ stream: string; data: RecordData }>,
+) =>
+	[
+		...new Set(
+			records
+				.filter((record) => record.stream === "messages")
+				.map((record) => Number(String(record.data.id).slice(24, 36))),
+		),
+	].sort((a, b) => a - b);
+
+const range = (from: number, to: number) =>
+	Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+type Synced = Record<string, { window?: Record<string, string> }>;
+const syncedOf = (messages: readonly EmittedMessage[]) =>
+	(stateCursor(messages, "messages") as { synced: Synced }).synced;
+
+test("since: the newest-first walk stops two old pages past it, and threads that cannot reach it are not read", async () => {
+	const library = newestFirstLibrary(120);
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page(), {}, { since: stamp(90) });
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, []);
+		// The cutoff is a day before since (thread 66). Pages 120-101,
+		// 100-81 and 80-61 hold threads at or after it; 60-41 is the first
+		// wholly older page and 40-21 the second, where the walk stops. Each
+		// walk reads five pages; two walks agree.
+		assert.equal(listReads(library.requests).length, 10);
+		// A thread whose last query is more than a day before since is listed
+		// but not read: its answers cannot reach since.
+		assert.deepEqual(readThreadNumbers(library.requests), range(66, 120));
+		assert.deepEqual(deliveredThreads(h.records), range(90, 120));
+		assert.equal(
+			h.records.filter((r) => r.stream === "conversations").length,
+			31,
+		);
+		const coverage = detailCoverage(h.messages, "messages");
+		assert.equal((coverage.hydrated_keys as string[]).length, 55);
+		// Listed but not read: threads 21-65.
+		assert.equal((coverage.optional_skip_keys as string[]).length, 45);
+		// A thread whose messages were all before since remembers that window.
+		const synced = syncedOf(h.messages);
+		assert.deepEqual(synced[threadId(70)]?.window, { since: stamp(90) });
+		assert.equal(synced[threadId(95)]?.window, undefined);
+		assert.equal(synced[threadId(50)], undefined);
+	});
+});
+
+test("since on a list that is not newest first walks it to the end", async () => {
+	const library = perplexityLibrary({ total: PAGE_SIZE * 4 });
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page(), {}, { since: stamp(70) });
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, []);
+		assert.equal(listReads(library.requests).length, 8);
+		assert.deepEqual(deliveredThreads(h.records), range(70, 80));
+	});
+});
+
+test("since: a list row without a readable time turns the early stop off for the rest of the walk", async () => {
+	for (const bad of [undefined, "not a time"]) {
+		const total = 120;
+		const library = scriptedLibrary({
+			listPage: (offset) => {
+				const ns: number[] = [];
+				for (
+					let n = total - offset;
+					n > Math.max(0, total - offset - PAGE_SIZE);
+					n -= 1
+				) {
+					ns.push(n);
+				}
+				return listItems(ns, total - offset - PAGE_SIZE > 0).map((item) =>
+					item.context_uuid === threadId(110)
+						? { ...item, last_query_datetime: bad }
+						: item,
+				);
+			},
+		});
+		await withBrowser(library.serve, async () => {
+			const h = harness(ALL_STREAMS, page(), {}, { since: stamp(90) });
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			// Six pages, walked twice: the whole list.
+			assert.equal(listReads(library.requests).length, 12);
+		});
+	}
+});
+
+test("a narrow window, then a wider one: the wider run reads what the narrow one withheld", async () => {
+	const library = newestFirstLibrary(120);
+	await withBrowser(library.serve, async () => {
+		const narrow = harness(ALL_STREAMS, page(), {}, { since: stamp(90) });
+		await collectPerplexity(narrow.ctx, { threadDelayMs: 0 });
+		const before = library.requests.length;
+		const wide = harness(
+			ALL_STREAMS,
+			page(),
+			{ messages: stateCursor(narrow.messages, "messages") },
+			{ since: stamp(70) },
+		);
+		await collectPerplexity(wide.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(wide.failures, []);
+		// Threads read under the narrow window are read again (their messages
+		// before stamp(90) were never delivered); threads never read are read
+		// now; threads delivered whole are skipped.
+		assert.deepEqual(
+			readThreadNumbers(library.requests.slice(before)),
+			range(46, 89),
+		);
+		assert.deepEqual(deliveredThreads(wide.records), range(70, 89));
+		const synced = syncedOf(wide.messages);
+		assert.deepEqual(synced[threadId(60)]?.window, { since: stamp(70) });
+		assert.equal(synced[threadId(80)]?.window, undefined);
+
+		// The same narrow window again reads nothing.
+		const after = library.requests.length;
+		const again = harness(
+			ALL_STREAMS,
+			page(),
+			{ messages: stateCursor(wide.messages, "messages") },
+			{ since: stamp(90) },
+		);
+		await collectPerplexity(again.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(readThreadNumbers(library.requests.slice(after)), []);
+	});
+});
+
+test("a walk stopped at since carries the older threads' remembered state forward", async () => {
+	const library = newestFirstLibrary(120);
+	await withBrowser(library.serve, async () => {
+		const full = harness(ALL_STREAMS, page());
+		await collectPerplexity(full.ctx, { threadDelayMs: 0 });
+		assert.equal(Object.keys(syncedOf(full.messages)).length, 120);
+		const before = library.requests.length;
+		const bounded = harness(
+			ALL_STREAMS,
+			page(),
+			{ messages: stateCursor(full.messages, "messages") },
+			{ since: stamp(90) },
+		);
+		await collectPerplexity(bounded.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(readThreadNumbers(library.requests.slice(before)), []);
+		const synced = syncedOf(bounded.messages);
+		assert.equal(Object.keys(synced).length, 120);
+		assert.deepEqual(synced[threadId(1)], syncedOf(full.messages)[threadId(1)]);
+	});
+});
+
+test("until: a run that withheld records at or after it saves no checkpoint, and the next run delivers them", async () => {
+	const library = perplexityLibrary({ total: 5 });
+	await withBrowser(library.serve, async () => {
+		const bounded = harness(ALL_STREAMS, page(), {}, { until: stamp(3) });
+		await collectPerplexity(bounded.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(bounded.failures, []);
+		assert.deepEqual(deliveredThreads(bounded.records), [1, 2]);
+		assert.equal(
+			bounded.messages.filter((m) => m.type === "STATE").length,
+			0,
+			"the runtime holds every STATE after a record at or after until",
+		);
+		const next = harness(ALL_STREAMS, page());
+		await collectPerplexity(next.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(deliveredThreads(next.records), [1, 2, 3, 4, 5]);
+	});
+});
+
+test("until: a remembered thread first created at or after it is not read in depth", async () => {
+	const library = perplexityLibrary({ total: 5 });
+	await withBrowser(library.serve, async () => {
+		const full = harness(ALL_STREAMS, page());
+		await collectPerplexity(full.ctx, { threadDelayMs: 0 });
+		// Thread 2 was answered again (a microsecond later); threads 3-5
+		// began at or after until.
+		const changed = perplexityLibrary({ total: 5 });
+		const serve: typeof fetch = async (input, init) => {
+			const response = await changed.serve(input, init);
+			if (
+				new URL(String(input), HOME).pathname !==
+				"/rest/thread/list_ask_threads"
+			) {
+				return response;
+			}
+			const items = (await response.json()) as Array<Record<string, unknown>>;
+			return Response.json(
+				items.map((item) =>
+					item.context_uuid === threadId(2)
+						? { ...item, last_query_datetime: listStamp(2).replace(/0$/, "1") }
+						: item,
+				),
+			);
+		};
+		await withBrowser(serve, async () => {
+			const bounded = harness(
+				ALL_STREAMS,
+				page(),
+				{ messages: stateCursor(full.messages, "messages") },
+				{ until: stamp(3) },
+			);
+			await collectPerplexity(bounded.ctx, { threadDelayMs: 0 });
+			assert.deepEqual(readThreadNumbers(changed.requests), [2]);
+			assert.deepEqual(deliveredThreads(bounded.records), [2]);
+			const coverage = detailCoverage(bounded.messages, "messages");
+			assert.deepEqual(
+				(coverage.optional_skip_keys as string[]).sort(),
+				[threadId(1), threadId(3), threadId(4), threadId(5)].sort(),
+			);
+		});
+	});
+});
+
+test("since and until together: a thread is re-read only when the run selects outside the window it was delivered under", async () => {
+	const library = perplexityLibrary({ total: 5 });
+	await withBrowser(library.serve, async () => {
+		const window = { since: stamp(2), until: stamp(10) };
+		const first = harness(ALL_STREAMS, page(), {}, window);
+		await collectPerplexity(first.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(deliveredThreads(first.records), [2, 3, 4, 5]);
+		assert.deepEqual(syncedOf(first.messages)[threadId(1)]?.window, window);
+		assert.equal(syncedOf(first.messages)[threadId(2)]?.window, undefined);
+
+		const runWith = async (timeRange: { since?: string; until?: string }) => {
+			const before = library.requests.length;
+			const h = harness(
+				ALL_STREAMS,
+				page(),
+				{ messages: stateCursor(first.messages, "messages") },
+				timeRange,
+			);
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			return readThreadNumbers(library.requests.slice(before));
+		};
+		assert.deepEqual(await runWith(window), []);
+		assert.deepEqual(await runWith({ since: stamp(3), until: stamp(9) }), []);
+		assert.deepEqual(await runWith({ since: stamp(1), until: stamp(10) }), [1]);
+		assert.deepEqual(await runWith({ since: stamp(2), until: stamp(20) }), [1]);
+		assert.deepEqual(await runWith({}), [1]);
+	});
+});
+
+test("resources: messages are filtered by id, and a thread delivered under a resource list is re-read for another", async () => {
+	const library = perplexityLibrary({ total: 3 });
+	const wanted = [`${entryId(2)}:user`];
+	await withBrowser(library.serve, async () => {
+		const first = harness(
+			ALL_STREAMS,
+			page(),
+			{},
+			{},
+			{
+				resources: { messages: wanted },
+			},
+		);
+		await collectPerplexity(first.ctx, { threadDelayMs: 0 });
+		// The source cannot look entries up by id, so every thread is read
+		// and the runtime keeps only the requested message.
+		assert.deepEqual(readThreadNumbers(library.requests), [1, 2, 3]);
+		assert.deepEqual(
+			first.records
+				.filter((r) => r.stream === "messages")
+				.map((r) => r.data.id),
+			wanted,
+		);
+		const synced = syncedOf(first.messages);
+		const digest = synced[threadId(2)]?.window?.resources;
+		assert.match(String(digest), /^1:[0-9a-f]{16}$/);
+		assert.deepEqual(synced[threadId(1)]?.window, { resources: digest });
+
+		const runWith = async (options: HarnessOptions) => {
+			const before = library.requests.length;
+			const h = harness(
+				ALL_STREAMS,
+				page(),
+				{ messages: stateCursor(first.messages, "messages") },
+				{},
+				options,
+			);
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			return readThreadNumbers(library.requests.slice(before));
+		};
+		assert.deepEqual(await runWith({ resources: { messages: wanted } }), []);
+		assert.deepEqual(
+			await runWith({ resources: { messages: [`${entryId(1)}:user`] } }),
+			[1, 2, 3],
+		);
+		assert.deepEqual(await runWith({}), [1, 2, 3]);
+	});
+});
+
+test("a conversations-only run keeps each thread's creation time from the remembered state, also on a full refresh", async () => {
+	const library = perplexityLibrary({ total: 2 });
+	await withBrowser(library.serve, async () => {
+		const first = harness(ALL_STREAMS, page());
+		await collectPerplexity(first.ctx, { threadDelayMs: 0 });
+		const before = library.requests.length;
+		const second = harness(
+			["conversations"],
+			page(),
+			{ messages: stateCursor(first.messages, "messages") },
+			{},
+			{ collectionMode: "full_refresh" },
+		);
+		await collectPerplexity(second.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(readThreadNumbers(library.requests.slice(before)), []);
+		assert.deepEqual(
+			second.records.map((r) => r.data.create_time),
+			[instant(1), instant(2)],
+		);
+	});
+});
+
+test("a full refresh re-reads remembered threads", async () => {
+	const library = perplexityLibrary({ total: 2 });
+	await withBrowser(library.serve, async () => {
+		const first = harness(ALL_STREAMS, page());
+		await collectPerplexity(first.ctx, { threadDelayMs: 0 });
+		const before = library.requests.length;
+		const second = harness(
+			ALL_STREAMS,
+			page(),
+			{ messages: stateCursor(first.messages, "messages") },
+			{},
+			{ collectionMode: "full_refresh" },
+		);
+		await collectPerplexity(second.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(readThreadNumbers(library.requests.slice(before)), [1, 2]);
+	});
+});
+
+test("a full refresh bounded by since keeps what was remembered about threads it does not read", async () => {
+	const library = newestFirstLibrary(120);
+	await withBrowser(library.serve, async () => {
+		const full = harness(ALL_STREAMS, page());
+		await collectPerplexity(full.ctx, { threadDelayMs: 0 });
+		const refresh = harness(
+			ALL_STREAMS,
+			page(),
+			{ messages: stateCursor(full.messages, "messages") },
+			{ since: stamp(90) },
+			{ collectionMode: "full_refresh" },
+		);
+		await collectPerplexity(refresh.ctx, { threadDelayMs: 0 });
+		const synced = syncedOf(refresh.messages);
+		// Threads 1-20 were never listed (the walk stopped), 21-65 were
+		// listed but not read; both keep their remembered state.
+		assert.equal(Object.keys(synced).length, 120);
+		assert.deepEqual(synced[threadId(1)], syncedOf(full.messages)[threadId(1)]);
+		assert.deepEqual(
+			synced[threadId(50)],
+			syncedOf(full.messages)[threadId(50)],
+		);
+	});
+});
+
+test("a walk stopped at since never carries forward a thread it listed and gapped", async () => {
+	const library = newestFirstLibrary(120);
+	await withBrowser(library.serve, async () => {
+		const full = harness(ALL_STREAMS, page());
+		await collectPerplexity(full.ctx, { threadDelayMs: 0 });
+		const failing = scriptedLibrary({
+			listPage: (offset) => {
+				const ns: number[] = [];
+				for (
+					let n = 121 - offset;
+					n > Math.max(0, 121 - offset - PAGE_SIZE);
+					n -= 1
+				) {
+					ns.push(n);
+				}
+				// Thread 100 was answered again since the full run.
+				return listItems(ns, 121 - offset - PAGE_SIZE > 0)
+					.map((item) =>
+						item.context_uuid === threadId(121)
+							? { ...item, context_uuid: threadId(100), slug: threadSlug(100) }
+							: item,
+					)
+					.filter(
+						(item, i, all) =>
+							all.findIndex(
+								(other) => other.context_uuid === item.context_uuid,
+							) === i,
+					);
+			},
+			thread: (slug) =>
+				slug === threadSlug(100)
+					? new Response("{}", { status: 404 })
+					: new Response(threadDetail(Number(slug.slice(-12))), {
+							status: 200,
+							headers: { "content-type": "application/json" },
+						}),
+		});
+		await withBrowser(failing.serve, async () => {
+			const bounded = harness(
+				ALL_STREAMS,
+				page(),
+				{ messages: stateCursor(full.messages, "messages") },
+				{ since: stamp(90) },
+			);
+			await collectPerplexity(bounded.ctx, { threadDelayMs: 0 });
+			const coverage = detailCoverage(bounded.messages, "messages");
+			assert.deepEqual(coverage.gap_keys, [threadId(100)]);
+			assert.equal(syncedOf(bounded.messages)[threadId(100)], undefined);
+			assert.ok(syncedOf(bounded.messages)[threadId(1)]);
+		});
+	});
+});
+
+test("an until within a millisecond of a thread's first entry is compared to the microsecond", async () => {
+	const library = perplexityLibrary({ total: 1 });
+	await withBrowser(library.serve, async () => {
+		const full = harness(ALL_STREAMS, page());
+		await collectPerplexity(full.ctx, { threadDelayMs: 0 });
+		const state = stateCursor(full.messages, "messages") as {
+			synced: Record<string, Record<string, unknown>>;
+		};
+		const remembered = state.synced[threadId(1)];
+		assert.ok(remembered);
+		// The first entry was created 500 microseconds into its millisecond.
+		const created = `${stamp(1).slice(0, 23)}500Z`;
+		remembered.create_time = created;
+		// The thread changed since, so only the range can spare its read.
+		remembered.entry_count = 0;
+		const before = library.requests.length;
+		const bounded = harness(
+			["messages"],
+			page(),
+			{ messages: state },
+			{ until: `${stamp(1).slice(0, 23)}900Z` },
+		);
+		await collectPerplexity(bounded.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(readThreadNumbers(library.requests.slice(before)), [1]);
+	});
+});
+
+test("a STATE from before windows were recorded is used only for creation times, and its threads are read again once", async () => {
+	const library = perplexityLibrary({ total: 3 });
+	await withBrowser(library.serve, async () => {
+		// 0.1.1 remembered every thread even when the runtime withheld its
+		// messages: here a since-bounded run delivered thread 3 only.
+		const bounded = harness(ALL_STREAMS, page(), {}, { since: stamp(3) });
+		await collectPerplexity(bounded.ctx, { threadDelayMs: 0 });
+		const legacy: Record<string, Record<string, unknown>> = {};
+		for (const [id, entry] of Object.entries(syncedOf(bounded.messages))) {
+			const { window: _window, ...rest } = entry as Record<string, unknown>;
+			legacy[id] = rest;
+		}
+		assert.equal(Object.keys(legacy).length, 3);
+
+		const before = library.requests.length;
+		const unrestricted = harness(ALL_STREAMS, page(), {
+			messages: { synced: legacy },
+		});
+		await collectPerplexity(unrestricted.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			readThreadNumbers(library.requests.slice(before)),
+			[1, 2, 3],
+		);
+		assert.deepEqual(deliveredThreads(unrestricted.records), [1, 2, 3]);
+		assert.equal(stateCursor(unrestricted.messages, "messages").v, 2);
+
+		// A conversations-only run still takes creation times from it.
+		const threadsOnly = harness(["conversations"], page(), {
+			messages: { synced: legacy },
+		});
+		await collectPerplexity(threadsOnly.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(
+			threadsOnly.records.map((r) => r.data.create_time),
+			[instant(1), instant(2), instant(3)],
+		);
+	});
+});
+
+/** A list row and a one-entry thread whose answer finished at `answered`. */
+function trailingThread(
+	n: number,
+	asked: number,
+	answered: number,
+	status = "COMPLETED",
+) {
+	return {
+		item: {
+			...threadItem(n, true),
+			last_query_datetime: listStamp(asked),
+			status,
+		},
+		detail: {
+			entries: [
+				{
+					uuid: entryId(n),
+					status: "COMPLETED",
+					context_uuid: threadId(n),
+					query_str: `Synthetic question ${String(n)}?`,
+					entry_created_datetime: entryStamp(asked),
+					entry_updated_datetime: entryStamp(answered),
+					display_model: "sonar",
+					blocks: [
+						{
+							intended_usage: "ask_text",
+							markdown_block: { answer: `Synthetic answer ${String(n)}.` },
+						},
+					],
+				},
+			],
+			has_next_page: false,
+		},
+	};
+}
+
+test("since: an answer that finished after its thread's last query is delivered within the margin; past it only an unfinished thread is read", async () => {
+	// since = stamp(100). Thread 1 was asked 20 hours before and answered
+	// after since; thread 2 was asked 30 hours before (past the one-day
+	// margin); thread 3 likewise, but the list says it is still running.
+	const threads = [
+		trailingThread(1, 80, 101),
+		trailingThread(2, 70, 101),
+		trailingThread(3, 69, 101, "IN_PROGRESS"),
+	];
+	const library = scriptedLibrary({
+		listPage: (offset) =>
+			offset === 0
+				? threads.map((t, i) => ({
+						...t.item,
+						has_next_page: i < threads.length - 1,
+					}))
+				: [],
+		thread: (slug) =>
+			Response.json(
+				threads.find((t) => (t.item as Record<string, unknown>).slug === slug)
+					?.detail ?? {
+					entries: [],
+					has_next_page: false,
+				},
+			),
+	});
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		await withBrowser(library.serve, async () => {
+			const h = harness(ALL_STREAMS, page(), {}, { since: stamp(100) });
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			assert.deepEqual(readThreadNumbers(library.requests), [1, 3]);
+			assert.deepEqual(
+				h.records
+					.filter((r) => r.stream === "messages")
+					.map((r) => r.data.id)
+					.sort(),
+				[`${entryId(1)}:assistant`, `${entryId(3)}:assistant`],
+			);
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	// Each trailing answer is reported, so the margin is checked against
+	// real libraries.
+	const trailing = lines.filter((line) =>
+		line.includes("answer_trails_last_query"),
+	);
+	assert.equal(trailing.length, 2);
+	assert.ok(trailing.some((line) => line.includes('"beyond_margin":true')));
+});
+
+test("an until finer than a microsecond is rounded up, so an entry just before it is read", async () => {
+	const library = perplexityLibrary({ total: 1 });
+	await withBrowser(library.serve, async () => {
+		const full = harness(ALL_STREAMS, page());
+		await collectPerplexity(full.ctx, { threadDelayMs: 0 });
+		const state = stateCursor(full.messages, "messages") as {
+			synced: Record<string, Record<string, unknown>>;
+		};
+		const remembered = state.synced[threadId(1)];
+		assert.ok(remembered);
+		remembered.entry_count = 0;
+		const base = stamp(1).slice(0, 23);
+		const runWith = async (until: string) => {
+			const before = library.requests.length;
+			const h = harness(["messages"], page(), { messages: state }, { until });
+			await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+			return readThreadNumbers(library.requests.slice(before));
+		};
+		// First entry at .xxx000 µs; until .xxx0000001 is just after it.
+		remembered.create_time = `${base}000Z`;
+		assert.deepEqual(await runWith(`${base}0000001Z`), [1]);
+		// An until of exactly the first entry's time excludes it.
+		assert.deepEqual(await runWith(`${base}0000000Z`), []);
+		// Rounding carries across the second.
+		remembered.create_time = `${stamp(1).slice(0, 19)}.999999Z`;
+		assert.deepEqual(
+			await runWith(`${stamp(1).slice(0, 19)}.9999990001Z`),
+			[1],
+		);
+	});
+});
+
+test("since: unkeyed list rows older than the cutoff neither fail the streams nor unsettle the walk", async () => {
+	const total = 120;
+	const library = scriptedLibrary({
+		listPage: (offset, walk) => {
+			const ns: number[] = [];
+			for (
+				let n = total - offset;
+				n > Math.max(0, total - offset - PAGE_SIZE);
+				n -= 1
+			) {
+				ns.push(n);
+			}
+			// Old rows without an id; the second walk sees one more of them.
+			return listItems(ns, total - offset - PAGE_SIZE > 0).map((item, i) =>
+				ns[i] !== undefined && ns[i] < (walk === 1 ? 30 : 35)
+					? { ...item, context_uuid: undefined, uuid: undefined }
+					: item,
+			);
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page(), {}, { since: stamp(90) });
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.failures, []);
+		assert.equal(listReads(library.requests).length, 10);
+		assert.ok(stateCursor(h.messages, "messages"));
+	});
+});

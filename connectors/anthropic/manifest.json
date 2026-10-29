@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.55",
+	"version": "0.2.59",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {
@@ -106,6 +106,114 @@
 			"incremental": false,
 			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
+		},
+		{
+			"name": "account_plan",
+			"required": false,
+			"description": "Plans for every usable Claude organization. The unchanged conversation/export or session-default account keeps id account_plan and is_default=true; other accounts use account_plan:<account_id> and is_default=false. This export connector fills plan family and organization creation time only. A plan-only run requests no export.",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
+			"display": {
+				"label": "Your Claude plan",
+				"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"is_default": {
+						"type": "boolean",
+						"description": "True for the unchanged conversation/export or session-default account at id account_plan; other usable accounts use account_plan:<account_id>."
+					},
+					"id": {
+						"type": "string"
+					},
+					"account_id": {
+						"type": ["string", "null"]
+					},
+					"account_structure": {
+						"type": ["string", "null"]
+					},
+					"account_created_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"plan_type": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"plan_display_name": {
+						"type": ["string", "null"]
+					},
+					"subscription_plan": {
+						"type": ["string", "null"]
+					},
+					"has_active_subscription": {
+						"type": ["boolean", "null"]
+					},
+					"billing_period": {
+						"type": ["string", "null"]
+					},
+					"will_renew": {
+						"type": ["boolean", "null"]
+					},
+					"renews_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"expires_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"cancels_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"scheduled_plan_change": {
+						"type": ["object", "null"],
+						"properties": {
+							"plan_type": {
+								"type": ["string", "null"],
+								"pattern": "^[a-z][a-z_-]{0,39}$"
+							},
+							"changes_at": {
+								"type": ["string", "null"],
+								"format": "date-time"
+							}
+						},
+						"required": ["plan_type", "changes_at"],
+						"additionalProperties": false
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"plan_type",
+						"plan_display_name",
+						"subscription_plan"
+					]
+				},
+				"range_filters": {
+					"account_created_at": ["gte", "gt", "lte", "lt"],
+					"renews_at": ["gte", "gt", "lte", "lt"],
+					"expires_at": ["gte", "gt", "lte", "lt"],
+					"cancels_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
 		},
 		{
 			"name": "conversations",
@@ -495,7 +603,12 @@
 		"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
 		"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
 		"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
-		"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
+		"parse_error": "Claude sent back a plan we couldn't read. Your existing plan data was not changed. This will retry automatically.",
+		"organization_unavailable": "Your Claude plan could not be read: the organization this data export came from is not in your signed-in account's organization list. This will retry automatically.",
+		"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed.",
+		"export_manifest_incomplete": "Your Claude export is incomplete or inconsistent. Affected data was not marked as fully imported.",
+		"export_conversations_incomplete": "Your Claude export is missing some conversation files. Conversations and messages were not marked as fully imported.",
+		"export_projects_missing": "Your Claude export has no complete projects section. Projects and project documents were not marked as fully imported."
 	},
 	"mobile": {
 		"pageshim": {

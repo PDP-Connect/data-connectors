@@ -24,9 +24,10 @@
  * every other path is refused before the page is touched.
  *
  * Streams and their end signals:
- *   - conversations: sessions.list {} plus {view:"archived"}; each answer is
- *     an independently paged view, not an authoritative all-status snapshot.
- *     Readable chats are imported, but inventory remains incomplete.
+ *   - conversations: sessions.list {} plus {view:"archived"}, each paged to
+ *     its end. Muse has no all-status view, so the inventory is proven by
+ *     bracketing: active, archived, active, archived, complete only when
+ *     both pairs list the same chat ids (see listSessions).
  *   - messages: chat.history per chat, child of conversations with
  *     parent_detail_accounting, paged back like the app does (`before_seq` =
  *     the smallest `seq` on the page) until `has_more: false`. A chat whose
@@ -59,6 +60,10 @@ import {
 	type RecordData,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	isOutsideTimeRange,
+	parseIsoInstant,
+} from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	activityId,
 	buildActivityRecord,
@@ -137,8 +142,18 @@ const GATEWAY_WAIT_ATTEMPTS = 20;
 const GATEWAY_WAIT_MS = 1_500;
 const RPC_TIMEOUT_MS = 60_000;
 const CURSOR_VERSION = 1;
-/** Version 1 held a single update-time watermark; it is not read back. */
-const CHATS_CURSOR_VERSION = 2;
+/**
+ * Version 2 of the activities cursor. Version 1 watermarks are not read back:
+ * a run with a `resources` filter could advance them past activities the
+ * runtime withheld.
+ */
+const ACTIVITY_CURSOR_VERSION = 2;
+/**
+ * Version 1 held a single update-time watermark. Version 2 marks did not
+ * record the time window they were read under, and a bounded run could write
+ * them over messages the runtime withheld. Neither is read back.
+ */
+const CHATS_CURSOR_VERSION = 3;
 const FRACTION_RE = /\.\d+/;
 
 type Page = BrowserCollectContext["page"];
@@ -476,6 +491,7 @@ export type MuseCtx = Pick<
 	| "detailGaps"
 	| "emit"
 	| "emitRecord"
+	| "isRecordSelected"
 	| "progress"
 	| "recoveryOnly"
 	| "reportStreamFailure"
@@ -483,13 +499,77 @@ export type MuseCtx = Pick<
 	| "state"
 >;
 
-/** A stream could not prove its end; it gets no STATE this run. */
+/** A portable recovery hint (Collection Profile 5.5). */
+type RecoveryHint = { action: string; retryable: boolean };
+
+/**
+ * A stream could not prove its end; it gets no STATE this run. A failure no
+ * retry can fix (a page cap, text or a shape this connector cannot store)
+ * says so with `retry_on_connector_upgrade` rather than the runtime's
+ * default `retry_by_runtime`.
+ */
 class StreamFailure extends Error {
 	readonly retryable: boolean;
+	readonly recoveryHint: RecoveryHint;
 	constructor(message: string, retryable = true) {
 		super(message);
 		this.retryable = retryable;
+		this.recoveryHint = retryable
+			? { action: "retry_by_runtime", retryable: true }
+			: { action: "retry_on_connector_upgrade", retryable: false };
 	}
+}
+
+/** The requested time window of one stream; a null bound is open. */
+export interface TimeWindow {
+	since: string | null;
+	until: string | null;
+}
+
+export function requestedWindow(ctx: MuseCtx, stream: string): TimeWindow {
+	const range = ctx.requested.get(stream)?.time_range;
+	return {
+		since: typeof range?.since === "string" ? range.since : null,
+		until: typeof range?.until === "string" ? range.until : null,
+	};
+}
+
+/** Whether the stream's scope names resources (the runtime filters by them). */
+function hasResources(ctx: MuseCtx, stream: string): boolean {
+	const resources = ctx.requested.get(stream)?.resources;
+	return Array.isArray(resources) && resources.length > 0;
+}
+
+function boundMs(bound: string | null): number | null {
+	if (bound === null) return null;
+	const ms = Date.parse(bound);
+	return Number.isFinite(ms) ? ms : Number.NaN;
+}
+
+/**
+ * Whether what was read under `held` covers a read under `wanted`: `held`
+ * starts no later and ends no earlier. An open bound covers everything on its
+ * side; an unparseable one covers nothing.
+ */
+export function windowCovers(held: TimeWindow, wanted: TimeWindow): boolean {
+	// The runtime's own instant comparison, at full fractional precision
+	// (Date.parse drops digits past the millisecond).
+	const valid = (bound: string) => parseIsoInstant(bound) !== null;
+	const sinceOk =
+		held.since === null ||
+		(wanted.since !== null &&
+			valid(held.since) &&
+			valid(wanted.since) &&
+			// held.since <= wanted.since
+			!isOutsideTimeRange({ since: held.since }, wanted.since));
+	const untilOk =
+		held.until === null ||
+		(wanted.until !== null &&
+			valid(held.until) &&
+			valid(wanted.until) &&
+			// wanted.until <= held.until
+			isOutsideTimeRange({ until: wanted.until }, held.until));
+	return sinceOk && untilOk;
 }
 
 function isAuthError(error: unknown): boolean {
@@ -507,14 +587,22 @@ async function failStreams(
 ): Promise<void> {
 	if (isAuthError(error)) throw error;
 	const retryable = error instanceof StreamFailure ? error.retryable : true;
+	const recoveryHint: RecoveryHint =
+		error instanceof StreamFailure
+			? error.recoveryHint
+			: { action: "retry_by_runtime", retryable: true };
 	for (const stream of streams) {
 		connectorDiagnostic("muse", "stream_failed", { stream, retryable });
 		if (!ctx.reportStreamFailure) {
 			throw createConnectorFailure("muse_stream_incomplete", describe(error), {
 				retryable,
+				recoveryHint,
 			});
 		}
-		await ctx.reportStreamFailure?.(stream, describe(error), { retryable });
+		await ctx.reportStreamFailure?.(stream, describe(error), {
+			retryable,
+			recoveryHint,
+		});
 	}
 }
 
@@ -549,17 +637,26 @@ async function call(
 	return await gateway.call(method, params);
 }
 
-/** What a complete read of one chat's messages saw. */
+/**
+ * What a complete read of one chat's messages saw, and the messages time
+ * window it was read under (absent bounds are open: an unbounded read).
+ */
 export interface ChatMark {
 	updated_at_ms: number;
 	transcript_revision: number;
+	since?: string;
+	until?: string;
 }
 
 /**
  * conversations cursor: for each chat whose messages were read completely,
- * its list update time and its transcript revision at that read. Chat ids
- * and two numbers; no credential. A chat is read again when either value
- * changed or is unknown.
+ * its list update time, its transcript revision at that read, and the
+ * messages window of that read. Chat ids, two numbers and the window; no
+ * credential. A chat is read again when either value changed or is unknown,
+ * or when the mark's window does not cover the window asked for now (a
+ * narrow run never hides older messages from a later wider one). A run with
+ * a messages `resources` filter writes no new mark: the runtime withheld the
+ * other messages of every chat it read.
  */
 interface ConversationsCursor {
 	version: typeof CHATS_CURSOR_VERSION;
@@ -581,9 +678,16 @@ function parseConversationsCursor(value: unknown): ConversationsCursor | null {
 			typeof m.transcript_revision === "number" &&
 			Number.isFinite(m.transcript_revision)
 		) {
+			if (
+				(m.since !== undefined && typeof m.since !== "string") ||
+				(m.until !== undefined && typeof m.until !== "string")
+			)
+				continue;
 			chats[id] = {
 				updated_at_ms: m.updated_at_ms,
 				transcript_revision: m.transcript_revision,
+				...(typeof m.since === "string" ? { since: m.since } : {}),
+				...(typeof m.until === "string" ? { until: m.until } : {}),
 			};
 		}
 	}
@@ -596,68 +700,148 @@ interface ListedSession {
 }
 
 /**
- * Observed chats, active then archived, read page by page as the app does:
- * `{ limit }`, then `{ limit, cursor: <next_cursor> }`, until an answer has
- * no next_cursor. A repeated cursor, a page cap, or has_more with no cursor
- * fails the list; nothing is checkpointed from a list that did not end.
+ * sessions.list (active, archived) pair reads before a chat list that keeps
+ * moving fails the chat streams: one bracket (two pairs) plus up to three
+ * retries, each retry one more pair compared with the pair before it.
  */
-async function listSessions(gateway: MuseGateway): Promise<ListedSession[]> {
-	const out: ListedSession[] = [];
+const MAX_INVENTORY_PAIRS = 5;
+
+/**
+ * One view's chats, read page by page as the app does: `{ limit }`, then
+ * `{ limit, cursor: <next_cursor> }`, until an answer has no next_cursor. A
+ * repeated cursor, a page cap, or has_more with no cursor fails the list;
+ * nothing is checkpointed from a list that did not end.
+ */
+async function readChatView(
+	gateway: MuseGateway,
+	archivedView: boolean,
+): Promise<MuseSession[]> {
+	const label = archivedView ? "archived chat list" : "chat list";
+	const out: MuseSession[] = [];
 	const seen = new Set<string>();
-	for (const archivedView of [false, true]) {
-		const label = archivedView ? "archived chat list" : "chat list";
-		const cursors = new Set<string>();
-		let cursor: PageCursor | null = null;
-		for (let pageIndex = 0; ; pageIndex++) {
-			if (pageIndex >= MAX_SESSION_PAGES) {
-				throw new StreamFailure(
-					`Muse's ${label} is longer than ${MAX_SESSION_PAGES} pages; nothing was checkpointed.`,
-					false,
-				);
-			}
-			const params: Record<string, unknown> = {
-				limit: SESSIONS_LIMIT,
-				...(archivedView ? { view: "archived" } : {}),
-				...(cursor === null ? {} : { cursor }),
-			};
-			const page = parseSessionsPage(
-				await call(gateway, "sessions.list", params),
+	const cursors = new Set<string>();
+	let cursor: PageCursor | null = null;
+	for (let pageIndex = 0; ; pageIndex++) {
+		if (pageIndex >= MAX_SESSION_PAGES) {
+			throw new StreamFailure(
+				`Muse's ${label} is longer than ${MAX_SESSION_PAGES} pages; nothing was checkpointed.`,
+				false,
 			);
-			if (page === null) {
-				throw new StreamFailure(
-					`Muse's ${label} came back in a shape the connector cannot read; nothing was checkpointed.`,
-				);
-			}
-			let added = 0;
-			for (const session of page.sessions) {
-				if (seen.has(session.session_id)) continue;
-				seen.add(session.session_id);
-				out.push({ session, archivedView });
-				added += 1;
-			}
-			if (page.moreWithoutCursor) {
-				throw new StreamFailure(
-					`Muse's ${label} says more chats follow but gives no cursor to read them; nothing was checkpointed.`,
-				);
-			}
-			if (page.nextCursor === null) break; // the source's end signal
-			// A page that says more follow must add chats: one that adds none
-			// (a moving list, a stuck page) cannot prove the list complete.
-			if (added === 0) {
-				throw new StreamFailure(
-					`Muse's ${label} returned a page with no new chats while saying more follow; nothing was checkpointed.`,
-				);
-			}
-			if (cursors.has(cursorKey(page.nextCursor))) {
-				throw new StreamFailure(
-					`Muse's ${label} repeated a page cursor; nothing was checkpointed.`,
-				);
-			}
-			cursors.add(cursorKey(page.nextCursor));
-			cursor = page.nextCursor;
+		}
+		const params: Record<string, unknown> = {
+			limit: SESSIONS_LIMIT,
+			...(archivedView ? { view: "archived" } : {}),
+			...(cursor === null ? {} : { cursor }),
+		};
+		const page = parseSessionsPage(
+			await call(gateway, "sessions.list", params),
+		);
+		if (page === null) {
+			throw new StreamFailure(
+				`Muse's ${label} came back in a shape the connector cannot read; nothing was checkpointed.`,
+			);
+		}
+		let added = 0;
+		for (const session of page.sessions) {
+			if (seen.has(session.session_id)) continue;
+			seen.add(session.session_id);
+			out.push(session);
+			added += 1;
+		}
+		if (page.moreWithoutCursor) {
+			throw new StreamFailure(
+				`Muse's ${label} says more chats follow but gives no cursor to read them; nothing was checkpointed.`,
+			);
+		}
+		if (page.nextCursor === null) return out; // the source's end signal
+		// A page that says more follow must add chats: one that adds none
+		// (a moving list, a stuck page) cannot prove the list complete.
+		if (added === 0) {
+			throw new StreamFailure(
+				`Muse's ${label} returned a page with no new chats while saying more follow; nothing was checkpointed.`,
+			);
+		}
+		if (cursors.has(cursorKey(page.nextCursor))) {
+			throw new StreamFailure(
+				`Muse's ${label} repeated a page cursor; nothing was checkpointed.`,
+			);
+		}
+		cursors.add(cursorKey(page.nextCursor));
+		cursor = page.nextCursor;
+	}
+}
+
+function sameChatIds(
+	a: readonly MuseSession[],
+	b: readonly MuseSession[],
+): boolean {
+	if (a.length !== b.length) return false;
+	const ids = new Set(a.map((s) => s.session_id));
+	return b.every((s) => ids.has(s.session_id));
+}
+
+/** The chat list as read, and whether it is proven complete. */
+interface ChatInventory {
+	listed: ListedSession[];
+	/** Two consecutive (active, archived) reads agreed on every chat id. */
+	proven: boolean;
+	pairs: number;
+}
+
+/**
+ * The chat inventory, proven by bracketing. Muse has no all-status view:
+ * the app reads active (`{}`) and archived (`{view:"archived"}`) separately
+ * and nothing records a total, so one pass over both views cannot rule out a
+ * chat that moved from archived to active between the two reads. The
+ * connector reads active, archived, active, archived, each view walked to
+ * its end. When the second pair lists exactly the chat ids of the first in
+ * each view, no chat was created, deleted or moved between the views during
+ * that window, and active plus archived is the whole inventory. Otherwise
+ * it reads one more pair and compares it with the one before, up to
+ * MAX_INVENTORY_PAIRS. A list that never settles is returned unproven: its
+ * chats are still imported, nothing is checkpointed.
+ *
+ * Residual: a chat that flips between the views at least three times, each
+ * flip landing between two specific reads, could be absent from all four
+ * reads of a bracket; nothing short of an all-status snapshot excludes that.
+ *
+ * Records come from the latest pair. A chat in both views is kept once,
+ * as active.
+ */
+async function listSessions(gateway: MuseGateway): Promise<ChatInventory> {
+	let previous: { active: MuseSession[]; archived: MuseSession[] } | null =
+		null;
+	let pairs = 0;
+	let proven = false;
+	let active: MuseSession[] = [];
+	let archived: MuseSession[] = [];
+	while (pairs < MAX_INVENTORY_PAIRS) {
+		active = await readChatView(gateway, false);
+		archived = await readChatView(gateway, true);
+		pairs += 1;
+		if (
+			previous !== null &&
+			sameChatIds(previous.active, active) &&
+			sameChatIds(previous.archived, archived)
+		) {
+			proven = true;
+			break;
+		}
+		previous = { active, archived };
+	}
+	const listed: ListedSession[] = [];
+	const seen = new Set<string>();
+	for (const [sessions, archivedView] of [
+		[active, false],
+		[archived, true],
+	] as const) {
+		for (const session of sessions) {
+			if (seen.has(session.session_id)) continue;
+			seen.add(session.session_id);
+			listed.push({ session, archivedView });
 		}
 	}
-	return out;
+	return { listed, proven, pairs };
 }
 
 /**
@@ -681,6 +865,7 @@ async function hydrateChat(
 	gateway: MuseGateway,
 	tally: TextTally,
 	sessionId: string,
+	sinceMs: number | null = null,
 ): Promise<HistoryOutcome> {
 	const seen = new Set<string>();
 	let cursor: number | null = null;
@@ -752,18 +937,29 @@ async function hydrateChat(
 		);
 		for (const event of fresh) {
 			seen.add(event.message_id);
+			const built = buildMessageRecord(event, sessionId);
+			// A message the scope leaves out (before `since`, not a selected
+			// resource) is neither stored nor a reason to gap the chat.
+			if (ctx.isRecordSelected && !ctx.isRecordSelected(MESSAGES, built.record))
+				continue;
 			if (!isFinalEvent(event)) {
 				notFinal += 1;
 				continue;
 			}
-			const built = buildMessageRecord(event, sessionId);
 			if (built.replaced > 0) {
 				unsafe += 1;
 				continue;
 			}
 			await emitBuilt(ctx, tally, MESSAGES, built);
 		}
-		if (!page.hasMore) {
+		// chat.history runs newest first by seq. Once a whole page is older
+		// than `since`, every page behind it is older too: the window's part
+		// of the chat is read, and the walk stops as at the source's end.
+		const pastSince =
+			sinceMs !== null &&
+			page.events.length > 0 &&
+			page.events.every((e) => e.occurred_at_ms < sinceMs);
+		if (!page.hasMore || pastSince) {
 			// the source's end signal. When a continuation page did not report
 			// the revision, one more first-page read confirms the chat did not
 			// change while it was walked.
@@ -966,6 +1162,13 @@ async function hydrateChats(
 	pending: ReadonlyMap<string, readonly PendingGap[]> = new Map(),
 	beforeChat?: (sessionId: string) => Promise<ParentOutcome>,
 ): Promise<Map<string, number | null>> {
+	// Pushed down: a chat is read back only as far as the messages window.
+	const sinceMs = boundMs(requestedWindow(ctx, MESSAGES).since);
+	// A read cut at `since`, or one whose messages the runtime filters by
+	// `resources`, is complete for this scope but not for the chat: it never
+	// clears a gap an earlier run left. (A message withheld at or after
+	// `until` already makes the runtime hold the recovery receipt.)
+	const partialScope = sinceMs !== null || hasResources(ctx, MESSAGES);
 	const hydrated: string[] = [];
 	const revisions = new Map<string, number | null>();
 	const gaps: string[] = [];
@@ -983,21 +1186,31 @@ async function hydrateChats(
 			blocked.push(parent.reason);
 			continue;
 		}
-		const outcome = await hydrateChat(ctx, gateway, tally, sessionId);
-		if (outcome.kind === "hydrated") {
+		const outcome = await hydrateChat(ctx, gateway, tally, sessionId, sinceMs);
+		const pendingHere = pending.has(sessionId);
+		if (outcome.kind === "hydrated" && !(partialScope && pendingHere)) {
 			hydrated.push(sessionId);
 			revisions.set(sessionId, outcome.revision);
 			// Read completely: resolve the gaps an earlier run left for it.
 			await resolvePendingGaps(ctx, pending, sessionId);
 			continue;
 		}
+		// A pending gap read under a partial scope is still open: re-emitted.
+		const error =
+			outcome.kind === "hydrated"
+				? {
+						class: "muse_history_scope_partial",
+						message:
+							"the chat was read only within the requested window or resources",
+					}
+				: { class: outcome.errorClass, message: outcome.message };
 		await emitDetailGap(ctx, {
 			stream: MESSAGES,
 			parentStream: CONVERSATIONS,
 			recordKey: sessionId,
 			reason: "temporary_unavailable",
 			locator: { kind: "muse.chat_history", chat_id: sessionId },
-			error: { class: outcome.errorClass, message: outcome.message },
+			error,
 		});
 		gaps.push(sessionId);
 	}
@@ -1027,8 +1240,17 @@ async function chatUnchanged(
 	id: string,
 	updatedMs: number | null,
 	mark: ChatMark | undefined,
+	window: TimeWindow,
 ): Promise<boolean> {
 	if (!mark || updatedMs === null || mark.updated_at_ms !== updatedMs)
+		return false;
+	// A mark read under a narrower window says nothing about the rest.
+	if (
+		!windowCovers(
+			{ since: mark.since ?? null, until: mark.until ?? null },
+			window,
+		)
+	)
 		return false;
 	let raw: unknown;
 	try {
@@ -1110,10 +1332,13 @@ export async function runChatStreams(
 		return;
 	}
 
+	if (!wantMessages && (await conversationsByResource(ctx, gateway, tally)))
+		return;
+
 	await ctx.progress("Listing chats", { stream: CONVERSATIONS });
-	let listed: ListedSession[];
+	let inventory: ChatInventory;
 	try {
-		listed = await listSessions(gateway);
+		inventory = await listSessions(gateway);
 	} catch (error) {
 		await failStreams(
 			ctx,
@@ -1122,6 +1347,7 @@ export async function runChatStreams(
 		);
 		return;
 	}
+	const { listed } = inventory;
 
 	if (wantConversations) {
 		for (const { session, archivedView } of listed) {
@@ -1140,25 +1366,34 @@ export async function runChatStreams(
 			: parseConversationsCursor(ctx.state[CONVERSATIONS]);
 	const prior = stored?.chats ?? {};
 	const listedIds = new Set(listed.map(({ session }) => session.session_id));
+	// Chats read again this run, and the transcript revision of each one read
+	// completely (absent for a gapped chat).
+	const changedIds = new Set<string>();
+	let revisions = new Map<string, number | null>();
+	const messagesWindow = requestedWindow(ctx, MESSAGES);
 	if (wantMessages) {
 		const chats = listed
 			.map(({ session }) => ({
 				id: session.session_id,
-				updatedMs:
-					typeof session.updated_at_ms === "number" &&
-					Number.isFinite(session.updated_at_ms)
-						? session.updated_at_ms
-						: null,
+				updatedMs: listedUpdatedMs(session),
 			}))
 			.sort((a, b) => (a.updatedMs ?? 0) - (b.updatedMs ?? 0));
 		const counts = { unsafe: 0 };
 		try {
 			const changed: string[] = [];
 			for (const c of chats) {
-				if (!(await chatUnchanged(gateway, c.id, c.updatedMs, prior[c.id])))
+				if (
+					!(await chatUnchanged(
+						gateway,
+						c.id,
+						c.updatedMs,
+						prior[c.id],
+						messagesWindow,
+					))
+				)
 					changed.push(c.id);
 			}
-			const changedIds = new Set(changed);
+			for (const id of changed) changedIds.add(id);
 			// Retry earlier gaps first, then every chat that changed. A gapped
 			// chat the inventory did not list gets its parent from sessions.get
 			// (it may have moved between the two views during the walk); it is
@@ -1167,10 +1402,16 @@ export async function runChatStreams(
 				...[...pending.keys()].filter((id) => !changedIds.has(id)),
 				...changed,
 			];
-			await hydrateChats(ctx, gateway, tally, required, pending, (id) =>
-				listedIds.has(id)
-					? Promise.resolve<ParentOutcome>({ kind: "emitted" })
-					: parentFromSessionsGet(ctx, gateway, tally, id, counts),
+			revisions = await hydrateChats(
+				ctx,
+				gateway,
+				tally,
+				required,
+				pending,
+				(id) =>
+					listedIds.has(id)
+						? Promise.resolve<ParentOutcome>({ kind: "emitted" })
+						: parentFromSessionsGet(ctx, gateway, tally, id, counts),
 			);
 		} catch (error) {
 			await failStreams(
@@ -1190,19 +1431,126 @@ export async function runChatStreams(
 		);
 		return;
 	}
-	// Exhausting two independent views does not prove an inventory: an
-	// unknown chat can move from archived to active between those reads.
-	// Known-ID recovery and repeated walks cannot close that discovery gap.
-	// Keep records and per-parent detail accounting, but never full coverage
-	// or a chat checkpoint until an authoritative inventory contract exists.
-	await failStreams(
-		ctx,
-		[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
-		new StreamFailure(
-			"Muse chat inventory is incomplete: active and archived lists are independent reads without an authoritative all-status snapshot. Readable chats were imported, but conversations and messages are not checkpointed as complete.",
-			false,
-		),
-	);
+	if (!inventory.proven) {
+		// The views kept changing: an unknown chat may have moved between
+		// them unseen. Keep records and per-parent detail accounting, but no
+		// conversations coverage and no chat checkpoint. Retryable: a list
+		// that settles proves itself on a later run.
+		await failStreams(
+			ctx,
+			[CONVERSATIONS, MESSAGES].filter((s) => ctx.requested.has(s)),
+			new StreamFailure(
+				`Muse chat inventory is incomplete: the active and archived chat lists changed between every pair of reads (${inventory.pairs} reads of each), so no read proves every chat was listed. Readable chats were imported, but conversations and messages are not checkpointed as complete.`,
+				true,
+			),
+		);
+		return;
+	}
+
+	// Proven inventory: full conversations coverage, then the cursor. A chat
+	// read completely this run (changed, or a pending gap) gets a new mark
+	// carrying the messages window it was read under; an unchanged chat keeps
+	// its mark; a gapped chat, or one whose revision or update time is
+	// unknown, gets none and is read again next run. Under a messages
+	// `resources` filter the runtime withheld the other messages of every
+	// chat read, so no chat read this run gets a new mark: it keeps the mark
+	// it had, if any (a mark from an earlier read stays true of that read).
+	// Chats no longer listed drop out.
+	const markable = !hasResources(ctx, MESSAGES);
+	const marks: Record<string, ChatMark> = {};
+	for (const { session } of listed) {
+		const id = session.session_id;
+		if (revisions.has(id) || changedIds.has(id)) {
+			const revision = revisions.get(id);
+			const updatedMs = listedUpdatedMs(session);
+			if (markable && typeof revision === "number" && updatedMs !== null) {
+				marks[id] = {
+					updated_at_ms: updatedMs,
+					transcript_revision: revision,
+					...(messagesWindow.since === null
+						? {}
+						: { since: messagesWindow.since }),
+					...(messagesWindow.until === null
+						? {}
+						: { until: messagesWindow.until }),
+				};
+				continue;
+			}
+			const kept = prior[id];
+			if (!markable && kept) marks[id] = kept;
+			continue;
+		}
+		const mark = prior[id];
+		if (mark) marks[id] = mark;
+	}
+	await ctx.emit(buildFullScanCoverageMessage(CONVERSATIONS, listed.length));
+	await ctx.emit({
+		type: "STATE",
+		stream: CONVERSATIONS,
+		cursor: { version: CHATS_CURSOR_VERSION, chats: marks },
+	});
+}
+
+/** At most this many named chats are fetched one by one instead of listing every chat. */
+const MAX_RESOURCE_GETS = 20;
+
+/**
+ * conversations alone, filtered by `resources`: the filter is pushed down to
+ * the source with one sessions.get per named chat instead of listing every
+ * chat four times. A chat sessions.get does not find is not in the source,
+ * so it yields no record. Returns false, with nothing emitted, when the
+ * push-down does not apply (no or too many resources, or an answer without
+ * the archived flag, which only the list views can supply); the caller then
+ * lists as usual. A filtered read is not a full scan: it emits no full-
+ * inventory coverage and no STATE, so the chat marks stay as they were.
+ */
+async function conversationsByResource(
+	ctx: MuseCtx,
+	gateway: MuseGateway,
+	tally: TextTally,
+): Promise<boolean> {
+	const resources = ctx.requested.get(CONVERSATIONS)?.resources;
+	if (
+		!Array.isArray(resources) ||
+		resources.length === 0 ||
+		resources.length > MAX_RESOURCE_GETS
+	)
+		return false;
+	await ctx.progress("Reading the requested chats", { stream: CONVERSATIONS });
+	const built: Array<{ record: RecordData; replaced: number }> = [];
+	try {
+		for (const id of [...new Set(resources.map(String))]) {
+			let raw: unknown;
+			try {
+				raw = await call(gateway, "sessions.get", { id });
+			} catch (error) {
+				if (error instanceof MuseRpcError && PER_ITEM_RPC_CODES.has(error.code))
+					continue;
+				throw error;
+			}
+			const session = parseSessionGet(raw);
+			if (session === null || session.session_id !== id) {
+				throw new StreamFailure(
+					"Muse's sessions.get came back in a shape the connector cannot read; nothing was checkpointed.",
+				);
+			}
+			if (typeof session.archived !== "boolean") return false;
+			built.push(buildConversationRecord(session, session.archived));
+		}
+		for (const b of built) await emitBuilt(ctx, tally, CONVERSATIONS, b);
+		if (unsafeTextCount(tally, CONVERSATIONS) > 0)
+			throw unsafeTextFailure(tally, CONVERSATIONS);
+	} catch (error) {
+		await failStreams(ctx, [CONVERSATIONS], error);
+	}
+	return true;
+}
+
+function listedUpdatedMs(session: MuseSession): number | null {
+	return typeof session.updated_at_ms === "number" &&
+		Number.isFinite(session.updated_at_ms)
+		? session.updated_at_ms
+		: null;
 }
 
 /** One second after a zoned timestamp, in the same shape (`Z`, whole seconds unless the source had a fraction). */
@@ -1232,9 +1580,16 @@ export function nextActivityCursor(input: {
 	freshCount: number;
 	tiedFullPage: boolean;
 	previous: string | null;
+	/** The pushed-down `until`: no request reaches past it. */
+	ceiling?: string | null;
 }): string | null {
 	if (input.tiedFullPage) return null;
-	const inclusive = oneSecondAfter(input.oldestRaw, input.oldestIso);
+	const after = oneSecondAfter(input.oldestRaw, input.oldestIso);
+	const ceiling = input.ceiling ?? null;
+	const inclusive =
+		ceiling !== null && Date.parse(after) > Date.parse(ceiling)
+			? ceiling
+			: after;
 	if (input.freshCount > 0 && input.previous !== inclusive) return inclusive;
 	// Propose stepping strictly past the oldest time, unless already there.
 	// The caller must establish that this page is not full before accepting
@@ -1243,14 +1598,35 @@ export function nextActivityCursor(input: {
 	return input.oldestRaw;
 }
 
-/** activities cursor: the newest activity time a complete walk has emitted. */
+/**
+ * activities cursor: the newest activity time an unbounded complete walk has
+ * emitted. Only an unbounded run (no time_range, no resources) moves it;
+ * every activity at or before it was emitted by such a walk.
+ */
 function priorActivityWatermark(ctx: MuseCtx): string | null {
 	if (ctx.collectionMode === "full_refresh") return null;
 	const v = ctx.state[ACTIVITIES];
 	if (typeof v !== "object" || v === null) return null;
 	const c = v as Record<string, unknown>;
-	if (c.version !== CURSOR_VERSION) return null;
+	if (c.version !== ACTIVITY_CURSOR_VERSION) return null;
 	return zonedIsoToIso(c.newest_timestamp);
+}
+
+/** A time bound in the shape activity.list takes: UTC `Z`, whole seconds unless the bound had a fraction. */
+function activityBound(bound: string | null): string | null {
+	if (bound === null) return null;
+	const instant = parseIsoInstant(bound);
+	if (instant === null) return null;
+	// `before` is exclusive: a bound finer than a millisecond is rounded up,
+	// never down, so nothing inside the window is cut off (anything the
+	// round-up admits past `until` is the runtime's to withhold).
+	const fraction = instant.fraction.padEnd(3, "0");
+	const ms =
+		instant.second +
+		Number(fraction.slice(0, 3)) +
+		(/[1-9]/.test(fraction.slice(3)) ? 1 : 0);
+	const iso = new Date(ms).toISOString();
+	return iso.endsWith(".000Z") ? iso.replace(".000Z", "Z") : iso;
 }
 
 export async function runActivities(
@@ -1259,13 +1635,27 @@ export async function runActivities(
 	tally: TextTally,
 ): Promise<void> {
 	if (!ctx.requested.has(ACTIVITIES)) return;
-	const ranged = Boolean(ctx.requested.get(ACTIVITIES)?.time_range);
+	// A bounded run (time window or resources) has activities the runtime
+	// withheld, so it never moves the watermark: it writes the prior one back.
+	const window = requestedWindow(ctx, ACTIVITIES);
+	const ranged =
+		Boolean(ctx.requested.get(ACTIVITIES)?.time_range) ||
+		hasResources(ctx, ACTIVITIES);
 	const prior = priorActivityWatermark(ctx);
-	const stopAt = ranged ? null : prior;
+	// Pushed down: the log runs newest first, so the walk starts at `until`
+	// (activity.list's `before` is exclusive, as `until` is) and stops once it
+	// is older than `since` or the watermark, whichever is later: everything
+	// older than the watermark was emitted by an unbounded walk already.
+	const sinceIso = window.since === null ? null : zonedIsoToIso(window.since);
+	const stopAt =
+		sinceIso !== null && (prior === null || sinceIso > prior)
+			? sinceIso
+			: prior;
+	const ceiling = activityBound(window.until);
 	await ctx.progress("Reading activity", { stream: ACTIVITIES });
 	const seen = new Set<string>();
 	let newest = prior;
-	let before: string | null = null;
+	let before: string | null = ceiling;
 	try {
 		for (let pageIndex = 0; ; pageIndex++) {
 			if (pageIndex >= MAX_ACTIVITY_PAGES) {
@@ -1322,6 +1712,7 @@ export async function runActivities(
 				freshCount: fresh.length,
 				tiedFullPage,
 				previous: before,
+				ceiling,
 			});
 			// No fresh identities on a full inclusive page does not prove the
 			// boundary bucket is exhausted: newer fractional timestamps can
@@ -1346,7 +1737,7 @@ export async function runActivities(
 		type: "STATE",
 		stream: ACTIVITIES,
 		cursor: {
-			version: CURSOR_VERSION,
+			version: ACTIVITY_CURSOR_VERSION,
 			newest_timestamp: ranged ? prior : newest,
 		},
 	});
@@ -1489,7 +1880,16 @@ export async function runMemoryFiles(
 				"Muse's workspace listing came back in a shape the connector cannot read; nothing was checkpointed.",
 			);
 		}
-		const present = memoryFileEntries(entries);
+		// Pushed down: a file the scope's resources or time window leaves out
+		// is never read (the runtime's own gate decides, from its name and
+		// modified time, before the body is fetched).
+		const present = memoryFileEntries(entries).filter(
+			(entry) =>
+				ctx.isRecordSelected?.(MEMORY_FILES, {
+					id: entry.name,
+					modified_at: zonedIsoToIso(entry.modifiedAt),
+				}) ?? true,
+		);
 		let failed = 0;
 		for (const entry of present) {
 			let text: string | null = null;
@@ -1671,13 +2071,16 @@ export async function collectMuseWith(
 	// Standalone callers have no runtime reporter. Collect healthy siblings
 	// before throwing, rather than silently treating an incomplete run as success.
 	const failures: string[] = [];
-	let retryable = true;
+	const hints = new Set<string>();
+	let retryable = false;
 	if (!ctx.reportStreamFailure) {
 		ctx = {
 			...ctx,
 			reportStreamFailure: async (stream, message, options) => {
 				failures.push(`${stream}: ${message}`);
-				retryable &&= options?.retryable !== false;
+				// The run can gain from a retry when any failed stream can.
+				retryable ||= options?.retryable !== false;
+				if (options?.recoveryHint) hints.add(options.recoveryHint.action);
 			},
 		};
 	}
@@ -1692,10 +2095,24 @@ export async function collectMuseWith(
 			await runConnectedApps(ctx, gateway, tally);
 		}
 		if (failures.length > 0) {
+			// One hint for the run: a retry helps when any stream can gain from
+			// it; otherwise the streams' own hint when they agree.
+			const [only] = hints;
 			throw createConnectorFailure(
 				"muse_stream_incomplete",
 				failures.join("; "),
-				{ retryable },
+				{
+					retryable,
+					recoveryHint: retryable
+						? { action: "retry_by_runtime", retryable: true }
+						: {
+								action:
+									hints.size === 1 && only
+										? only
+										: "retry_on_connector_upgrade",
+								retryable: false,
+							},
+				},
 			);
 		}
 	} finally {
@@ -1747,7 +2164,10 @@ function challengeFailure(signals: readonly string[]): Error {
 	return createConnectorFailure(
 		"muse_bot_challenge",
 		`muse_bot_challenge: muse.ai served a bot challenge or interstitial instead of the app (signals: ${signals.join(", ")}); complete it in the browser, then run again`,
-		{ retryable: false },
+		{
+			retryable: false,
+			recoveryHint: { action: "manual_action_required", retryable: false },
+		},
 	);
 }
 

@@ -594,3 +594,119 @@ test("a setup failure after the stores open still releases them", async () => {
 		);
 	}
 });
+
+// ─── Tool blocks inside transcript lines ────────────────────────────────
+
+/** Append one tool call and its result to a session transcript. */
+async function appendToolTurn(
+	transcript: string,
+	sessionId: string,
+	uuidSuffix: string,
+): Promise<void> {
+	const line = (extra: Record<string, unknown>) =>
+		JSON.stringify({
+			isSidechain: false,
+			sessionId,
+			timestamp: "2026-09-01T00:01:00.000Z",
+			...extra,
+		});
+	await writeFile(
+		transcript,
+		`${await readFile(transcript, "utf8")}${line({
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: `toolu_${uuidSuffix}`,
+						name: "Bash",
+						input: { command: "ls" },
+					},
+				],
+			},
+			type: "assistant",
+			uuid: `00000000-0000-4000-8000-0000000a${uuidSuffix}`,
+		})}\n${line({
+			message: {
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: `toolu_${uuidSuffix}`,
+						content: "file-a",
+					},
+				],
+			},
+			type: "user",
+			uuid: `00000000-0000-4000-8000-0000000b${uuidSuffix}`,
+		})}\n`,
+	);
+}
+
+function toolBlockRecords(
+	ingested: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	return attachmentRecords(ingested).filter(
+		(record) =>
+			record.event_type === "tool_use" || record.event_type === "tool_result",
+	);
+}
+
+function messageRecords(
+	ingested: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	return ingested.filter((record) => record.stream === "messages");
+}
+
+test("a failed tool-block capture is retried on the next run without replaying messages", async () => {
+	const source = await makeSource();
+	await appendToolTurn(
+		join(source.project, `${SESSION_ID}.jsonl`),
+		SESSION_ID,
+		"0001",
+	);
+	const harness = await makeHarness(source);
+	const staging = join(source.spoolRoot, "tmp");
+	await mkdir(staging, { recursive: true });
+	await chmod(staging, 0o500);
+	try {
+		await harness.run();
+	} finally {
+		await chmod(staging, 0o700);
+	}
+	assert.deepEqual(
+		toolBlockRecords(harness.ingested).map((record) => record.artifact_capture),
+		["failed", "failed"],
+	);
+	assert.ok(messageRecords(harness.ingested).length > 0);
+
+	harness.ingested.length = 0;
+	await harness.run();
+	assert.deepEqual(
+		toolBlockRecords(harness.ingested).map((record) => record.artifact_capture),
+		["captured", "captured"],
+		"the unchanged transcript line is revisited and its bodies captured",
+	);
+	assert.deepEqual(messageRecords(harness.ingested), []);
+
+	harness.ingested.length = 0;
+	await harness.run();
+	assert.deepEqual(toolBlockRecords(harness.ingested), []);
+});
+
+test("with capture off, tool blocks are not revisited on every run", async () => {
+	const source = await makeSource();
+	await appendToolTurn(
+		join(source.project, `${SESSION_ID}.jsonl`),
+		SESSION_ID,
+		"0001",
+	);
+	const harness = await makeHarness(source);
+	await harness.run({ capture: false });
+	assert.deepEqual(
+		toolBlockRecords(harness.ingested).map((record) => record.artifact_capture),
+		["unavailable", "unavailable"],
+	);
+
+	harness.ingested.length = 0;
+	await harness.run({ capture: false });
+	assert.deepEqual(toolBlockRecords(harness.ingested), []);
+});

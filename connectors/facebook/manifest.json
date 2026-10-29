@@ -9,7 +9,7 @@
 	},
 	"connector_key": "facebook",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-	"version": "0.1.3",
+	"version": "0.1.5",
 	"display_name": "Facebook",
 	"runtime_requirements": {
 		"bindings": {
@@ -43,7 +43,11 @@
 		}
 	},
 	"reason_display_messages": {
-		"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time."
+		"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time.",
+		"shape_check_failed": "Facebook sent an item this connector could not read, so it was not saved.",
+		"scope_not_supported": "Facebook does not date this list, so it cannot be limited to a time range. Choose it without a time range to import it.",
+		"facebook_auth_failed": "Facebook needs you to sign in again before this can continue.",
+		"facebook_interrupted": "The Facebook page stopped answering while signing in. Nothing was read; try again."
 	},
 	"streams": [
 		{
@@ -159,13 +163,12 @@
 				"required": ["id", "create_time", "attachments"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "create_time",
 			"consent_time_field": "create_time",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": [
@@ -185,7 +188,7 @@
 					"group_by": ["privacy"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -281,7 +284,7 @@
 				"label": "Your likes and reactions",
 				"detail": "When you liked or reacted, what Facebook says you reacted to, and the post's link and text."
 			},
-			"semantics": "append_only",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
@@ -316,13 +319,12 @@
 				"required": ["id", "kind", "time"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "time",
 			"consent_time_field": "time",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["title", "target_text", "comment_text"],
@@ -336,7 +338,7 @@
 					"group_by_time": ["time"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
@@ -347,7 +349,7 @@
 				"label": "Your comments",
 				"detail": "When you commented, your comment's text, and the post it was on."
 			},
-			"semantics": "append_only",
+			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
@@ -382,13 +384,12 @@
 				"required": ["id", "kind", "time"]
 			},
 			"primary_key": ["id"],
-			"cursor_field": "time",
 			"consent_time_field": "time",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["title", "target_text", "comment_text"],
@@ -402,7 +403,7 @@
 					"group_by_time": ["time"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		}
 	],

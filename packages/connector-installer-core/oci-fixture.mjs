@@ -194,6 +194,10 @@ export class FixtureRegistry {
     // When set, the next /token request answers 302 to this location instead of
     // a token, so a test can drive the per-hop token-realm check.
     this.redirectTokenTo = null;
+    // When set, /token requests without an Authorization header get this
+    // response. GHCR answers an anonymous token request for a repository that
+    // does not exist with 403, and an authenticated one with a clean 404.
+    this.anonymousTokenFault = null;
     this.faults = new Map();
     this.requests = [];
     this.requestHeaders = [];
@@ -242,6 +246,11 @@ export class FixtureRegistry {
       if (url.pathname === "/token") {
         if (pathFault) {
           sendPathFault();
+          return;
+        }
+        if (this.anonymousTokenFault && !req.headers.authorization) {
+          res.writeHead(this.anonymousTokenFault.status, this.anonymousTokenFault.headers ?? {});
+          res.end(this.anonymousTokenFault.body ?? "");
           return;
         }
         // `redirectTokenTo` makes this realm answer a 302 instead of a token,
