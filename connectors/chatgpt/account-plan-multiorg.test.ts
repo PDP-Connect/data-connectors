@@ -49,3 +49,33 @@ test("account_plan enumerates personal plus workspace, deduplicating the session
 	);
 	assert.deepEqual(records, []);
 });
+test("a malformed secondary account skips the stream without claiming coverage", async () => {
+	const records: Record<string, unknown>[] = [],
+		events: Record<string, unknown>[] = [];
+	await runAccountPlanStream({
+		api: {
+			fetch: async () => ({
+				status: 200,
+				json: {
+					accounts: {
+						default: { account: { account_id: "p", plan_type: "plus" } },
+						w: { account: {} },
+					},
+				},
+			}),
+		},
+		emitRecord: async (_s: string, r: Record<string, unknown>) => {
+			records.push(r);
+		},
+		emit: (e: Record<string, unknown>) => events.push(e),
+	} as unknown as Parameters<typeof runAccountPlanStream>[0]);
+	assert.deepEqual(records, []);
+	const skip = events.find((e) => e.type === "SKIP_RESULT") as
+		| { reason?: string; recovery_hint?: { retryable?: boolean } }
+		| undefined;
+	assert.equal(skip?.reason, "parse_error");
+	assert.equal(skip?.recovery_hint?.retryable, true);
+	assert.ok(
+		events.every((e) => e.type !== "DETAIL_COVERAGE" && e.type !== "STATE"),
+	);
+});

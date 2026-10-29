@@ -938,12 +938,20 @@ export function buildAccountPlanRecord(
 	};
 }
 
-/** Enumerate usable account entries without changing the session-default rule. */
+// Keys under `accounts` that alias another entry rather than name an account.
+const ACCOUNT_ALIAS_KEYS = new Set(["default"]);
+
+/**
+ * Every account the session lists, session default first, or null when the
+ * list is not complete: no readable default, or a listed entry that is not a
+ * readable account. The stream claims full inventory coverage, so a dropped
+ * entry would read as an account the user no longer has.
+ */
 export function buildAccountPlanRecords(
 	body: RawAccountsCheckBody | null | undefined,
-): RecordData[] {
+): RecordData[] | null {
 	const primary = buildAccountPlanRecord(body);
-	if (!primary) return [];
+	if (!primary) return null;
 	const records = [primary];
 	const seen = new Set<string>();
 	if (typeof primary.account_id === "string") seen.add(primary.account_id);
@@ -951,17 +959,15 @@ export function buildAccountPlanRecords(
 		a.localeCompare(b),
 	);
 	for (const [key, entry] of entries) {
-		if (key === "default" || !isAccountEntry(entry)) continue;
-		const record = buildAccountPlanRecord({
-			accounts: { [key]: entry },
-			account_ordering: [key],
-		});
-		if (
-			!record ||
-			typeof record.account_id !== "string" ||
-			seen.has(record.account_id)
-		)
-			continue;
+		if (ACCOUNT_ALIAS_KEYS.has(key)) continue;
+		const record = isAccountEntry(entry)
+			? buildAccountPlanRecord({
+					accounts: { [key]: entry },
+					account_ordering: [key],
+				})
+			: null;
+		if (!record || typeof record.account_id !== "string") return null;
+		if (seen.has(record.account_id)) continue;
 		seen.add(record.account_id);
 		records.push({
 			...record,

@@ -17,10 +17,10 @@ test("all usable account plans retain session default and deduplicate aliases", 
 			p: personal,
 			t: team,
 			t_alias: team,
-			broken: null,
 		},
 		account_ordering: ["t", "p"],
 	});
+	assert.ok(records);
 	assert.deepEqual(
 		records.map((r) => [r.id, r.account_id, r.is_default]),
 		[
@@ -35,6 +35,17 @@ test("malformed present default never silently changes account identity", () => 
 		buildAccountPlanRecords({
 			accounts: { default: null, t: { account: { account_id: "t" } } },
 		}),
-		[],
+		null,
 	);
+});
+test("a malformed listed account makes the inventory incomplete instead of dropping it", () => {
+	const personal = { account: { account_id: "p", plan_type: "plus" } };
+	for (const secondary of [{ account: {} }, null]) {
+		assert.equal(
+			buildAccountPlanRecords({
+				accounts: { default: personal, w: secondary },
+			}),
+			null,
+		);
+	}
 });

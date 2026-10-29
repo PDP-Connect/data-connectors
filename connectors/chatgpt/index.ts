@@ -2675,12 +2675,13 @@ export async function runAccountPlanStream(
 		return;
 	}
 	const records = isUnreadableJsonBody(res)
-		? []
+		? null
 		: buildAccountPlanRecords(res.json as RawAccountsCheckBody);
-	// A record the schema would reject (e.g. an over-long id) is dropped by
-	// emitRecord; without this check STATE would still advance past it.
+	// The only place this stream decides between a complete inventory and a
+	// skip. A record the schema would reject (e.g. an over-long id) is dropped
+	// by emitRecord; without this check STATE and coverage would still claim it.
 	if (
-		!records.length ||
+		!records ||
 		records.some((record) => !validateRecord("account_plan", record).ok)
 	) {
 		deps.emit({

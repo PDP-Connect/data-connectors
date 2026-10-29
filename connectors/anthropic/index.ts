@@ -1359,9 +1359,25 @@ export async function collectAnthropic({
 			});
 			return;
 		}
-		for (const org of usable) {
-			const plan = buildAccountPlanRecord(org, org.uuid === organizationId);
-			if (!plan) continue;
+		// The stream claims full inventory coverage, so emit every plan or none.
+		const plans = usable.map((org) =>
+			buildAccountPlanRecord(org, org.uuid === organizationId),
+		);
+		if (
+			plans.some(
+				(plan) => !plan || !validateRecord(ACCOUNT_PLAN_STREAM, plan).ok,
+			)
+		) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACCOUNT_PLAN_STREAM,
+				reason: "parse_error",
+				message: "An organization has no readable plan.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+			return;
+		}
+		for (const plan of plans as Record<string, unknown>[]) {
 			if (plan.plan_type === null || plan.account_created_at === null) {
 				connectorDiagnostic("anthropic", "account_plan_incomplete", {
 					plan_type: plan.plan_type === null ? "absent" : "read",
@@ -1371,9 +1387,7 @@ export async function collectAnthropic({
 			}
 			await emitRecord(ACCOUNT_PLAN_STREAM, plan);
 		}
-		await emit(
-			buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, usable.length),
-		);
+		await emit(buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, plans.length));
 	};
 	// The plan needs no export. A run that asks for nothing else must not request
 	// one: each request emails the account owner.

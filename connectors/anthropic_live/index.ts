@@ -323,8 +323,21 @@ export async function runAccountPlanStream(
 	organizations: RawOrganization[],
 ): Promise<void> {
 	await ctx.progress("Fetching account plans", { stream: ACCOUNT_PLAN_STREAM });
+	const usable = usablePlanOrganizations(organizations);
+	// As in the export connector: the run's organization holds the id
+	// account_plan, so an inventory without it is not the full inventory.
+	if (!usable.some((candidate) => candidate.uuid === org.uuid)) {
+		await skip(
+			ctx,
+			ACCOUNT_PLAN_STREAM,
+			"organization_unavailable",
+			"The selected organization has no readable chat plan.",
+			true,
+		);
+		return;
+	}
 	const records: RecordData[] = [];
-	for (const candidate of usablePlanOrganizations(organizations)) {
+	for (const candidate of usable) {
 		const res = await apiGet(
 			ctx.page,
 			`/api/organizations/${encodeURIComponent(String(candidate.uuid))}/subscription_details`,
