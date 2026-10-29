@@ -88,9 +88,7 @@ export interface IsolatedBrowser {
 	 */
 	harRecordingOutcome?: () => Promise<HarRecordingOutcome>;
 	/**
-	 * Tells the launcher that `page` is the run's page although the launcher
-	 * did not create it: a preserve-page connector reusing a tab that was
-	 * already open (see `selectBrowserPageForRun`). The launcher then treats
+	 * Register a pre-existing page for recording. The launcher treats
 	 * it and its popups as run-owned for recording (their downloads go into
 	 * the HAR) but never closes it, because it predates the run. Present only
 	 * on the remote-CDP path, where the launcher tracks run-owned pages.
