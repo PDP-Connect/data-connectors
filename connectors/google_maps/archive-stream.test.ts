@@ -15,6 +15,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
 	createWriteStream,
 	mkdtempSync,
@@ -238,12 +239,22 @@ test("a huge timelinePath stays bounded under a hard heap limit while unrelated 
 			'{"semanticSegments":[{"duration":{"startTimestamp":"2024-06-05T13:45:22Z"},"timelinePath":[',
 		);
 		const repetitions = Math.ceil((70 * 1024 * 1024) / (point.length + 1));
+		let wroteWhileBackpressured = false;
 		for (let index = 0; index < repetitions; index += 1) {
-			out.write((index === 0 ? "" : ",") + point);
+			wroteWhileBackpressured ||= out.writableNeedDrain;
+			if (!out.write((index === 0 ? "" : ",") + point)) {
+				await once(out, "drain");
+			}
 		}
 		out.write("]}]}");
 		await new Promise<void>((resolve, reject) =>
 			out.end((error?: Error | null) => (error ? reject(error) : resolve())),
+		);
+
+		assert.equal(
+			wroteWhileBackpressured,
+			false,
+			"fixture writer must honor stream backpressure",
 		);
 
 		const childPath = new URL(
@@ -263,10 +274,13 @@ test("a huge timelinePath stays bounded under a hard heap limit while unrelated 
 			],
 			{ encoding: "utf8", timeout: 60_000 },
 		);
+		const spawnError = result.error;
+		const errorCode =
+			spawnError && "code" in spawnError ? String(spawnError.code) : "none";
 		assert.equal(
 			result.status,
 			0,
-			`huge path must stream under the heap limit: ${result.stderr}`,
+			`huge path must stream under the heap limit (status=${result.status}, signal=${result.signal}, error=${errorCode}): ${result.stderr}`,
 		);
 		assert.equal(JSON.parse(result.stdout.trim()).status, "valid");
 	} finally {
