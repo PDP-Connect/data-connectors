@@ -33,8 +33,6 @@ export type UnavailableReason =
 	| "invalid_value"
 	/** The whole source object this field comes from was not returned. */
 	| "source_unavailable"
-	/** A connection's profile could not be resolved this run. */
-	| "enrichment_unresolved"
 	/** The connections walk did not prove the end of the list. */
 	| "walk_unverified"
 	/** A derived field's source row is itself not covered. */

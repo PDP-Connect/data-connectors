@@ -272,22 +272,34 @@ test("a run with no registered credentials keeps its trace for diagnostics", asy
 // they prove the TRACER honours the gate but say nothing about whether the
 // session ever reports it. These close that loop against the real object.
 
-function withCaptureEnv<T>(body: () => T): T {
+// Captures made in the body go to a scratch root that is removed when the
+// body settles. Without PDPP_CAPTURE_ROOT_DIR, createCaptureSession writes
+// into connectors/.
+async function withCaptureEnv<T>(body: () => T | Promise<T>): Promise<T> {
 	const previous = process.env.PDPP_CAPTURE_FIXTURES;
+	const previousRoot = process.env.PDPP_CAPTURE_ROOT_DIR;
+	const scratchRoot = mkdtempSync(join(tmpdir(), "pdpp-capture-trace-"));
 	process.env.PDPP_CAPTURE_FIXTURES = "1";
+	process.env.PDPP_CAPTURE_ROOT_DIR = scratchRoot;
 	try {
-		return body();
+		return await body();
 	} finally {
 		if (previous === undefined) {
 			delete process.env.PDPP_CAPTURE_FIXTURES;
 		} else {
 			process.env.PDPP_CAPTURE_FIXTURES = previous;
 		}
+		if (previousRoot === undefined) {
+			delete process.env.PDPP_CAPTURE_ROOT_DIR;
+		} else {
+			process.env.PDPP_CAPTURE_ROOT_DIR = previousRoot;
+		}
+		rmSync(scratchRoot, { recursive: true, force: true });
 	}
 }
 
-test("registering a credential arms the trace gate on the real session", () => {
-	withCaptureEnv(() => {
+test("registering a credential arms the trace gate on the real session", async () => {
+	await withCaptureEnv(() => {
 		const capture = createCaptureSession(`gate_${process.pid}_${Date.now()}`);
 		assert.ok(capture);
 
@@ -302,12 +314,11 @@ test("registering a credential arms the trace gate on the real session", () => {
 			true,
 			"a registered credential must arm the gate",
 		);
-		rmSync(capture.baseDir, { force: true, recursive: true });
 	});
 });
 
-test("a credential too short to match still arms the trace gate", () => {
-	withCaptureEnv(() => {
+test("a credential too short to match still arms the trace gate", async () => {
+	await withCaptureEnv(() => {
 		const capture = createCaptureSession(
 			`gate_short_${process.pid}_${Date.now()}`,
 		);
@@ -321,12 +332,11 @@ test("a credential too short to match still arms the trace gate", () => {
 			true,
 			"a sub-floor credential is still a credential",
 		);
-		rmSync(capture.baseDir, { force: true, recursive: true });
 	});
 });
 
-test("http capture redacts a credential in a url or response body", () => {
-	withCaptureEnv(() => {
+test("http capture redacts a credential in a url or response body", async () => {
+	await withCaptureEnv(() => {
 		const capture = createCaptureSession(`http_${process.pid}_${Date.now()}`);
 		assert.ok(capture);
 		capture.registerSecrets([SECRET]);
@@ -350,12 +360,11 @@ test("http capture redacts a credential in a url or response body", () => {
 		// Still diagnostically useful: the request and its shape survive.
 		assert.match(written, /"status": 200/);
 		assert.match(written, /"user": "tim"/);
-		rmSync(capture.baseDir, { force: true, recursive: true });
 	});
 });
 
-test("record capture redacts a credential echoed back by an api", () => {
-	withCaptureEnv(() => {
+test("record capture redacts a credential echoed back by an api", async () => {
+	await withCaptureEnv(() => {
 		const capture = createCaptureSession(`rec_${process.pid}_${Date.now()}`);
 		assert.ok(capture);
 		capture.registerSecrets([SECRET]);
@@ -374,7 +383,6 @@ test("record capture redacts a credential echoed back by an api", () => {
 			`credential leaked into records capture:\n${written}`,
 		);
 		assert.match(written, /"id":"u1"/);
-		rmSync(capture.baseDir, { force: true, recursive: true });
 	});
 });
 
@@ -403,7 +411,6 @@ test("no screenshot is written when the page cannot build a credential mask", as
 			false,
 			"an unmaskable page must not produce a screenshot",
 		);
-		rmSync(capture.baseDir, { force: true, recursive: true });
 	});
 });
 
@@ -417,20 +424,21 @@ test("screenshot capture masks a one-time code rendered as readable text", async
 		// `type="password"` argument does not cover.
 		await page.fill("#t", "482913");
 
-		const captured = await withCaptureEnv(async () => {
+		// The helper removes the capture root when the body settles, so the PNG
+		// is read inside it.
+		const png = await withCaptureEnv(async () => {
 			const capture = createCaptureSession(`shot_${process.pid}_${Date.now()}`);
 			assert.ok(capture);
 			capture.registerSecrets([SECRET]);
 			await capture.captureDom(page, "otp-after-submit");
-			return capture.baseDir;
+			return readFileSync(
+				join(capture.baseDir, "screenshots", "otp-after-submit.png"),
+			);
 		});
 
 		// Playwright paints an opaque #FF00FF box over each masked element before
 		// the pixels are read, so proving the overlay exists proves the digits
 		// were never encoded into the file.
-		const png = readFileSync(
-			join(captured, "screenshots", "otp-after-submit.png"),
-		);
 		const magenta = await page.evaluate(
 			async (dataUrl) => {
 				const img = new Image();
@@ -464,7 +472,6 @@ test("screenshot capture masks a one-time code rendered as readable text", async
 			magenta > 0,
 			"expected a mask overlay covering the credential fields in the screenshot",
 		);
-		rmSync(captured, { force: true, recursive: true });
 		await context.close();
 	} finally {
 		await browser.close();

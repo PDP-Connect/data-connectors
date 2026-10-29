@@ -183,6 +183,9 @@ import {
 	scanConversation,
 } from "./oversize-conversation.ts";
 import {
+	buildAccountPlanRecord,
+	hasReadablePlanOrganizationInventory,
+	usablePlanOrganizations,
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	JSON_ENTRY_READ_CHUNK_UNITS,
@@ -199,6 +202,7 @@ import {
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
+	type RawOrganization,
 	resolveExportedProfile,
 	type SourceRecordEnvelope,
 } from "./parsers.ts";
@@ -215,7 +219,7 @@ const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
 export const ANTHROPIC_BROWSER_LOGIN_ASSISTANCE_MESSAGE =
-	"Sign in to Claude in the secure browser. PDPP continues automatically when Claude confirms the session.";
+	"Sign in to Claude in the secure browser. The import continues automatically once Claude confirms you're signed in.";
 
 /**
  * Probe the browser's Claude session. A dead cookie probe also opens Claude's
@@ -343,6 +347,7 @@ const CONVERSATION_SCAN_FIELDS: ReadonlySet<string> = new Set([
 
 const CONVERSATIONS_STREAM = "conversations";
 const ACCOUNT_PROFILE_STREAM = "account_profile";
+const ACCOUNT_PLAN_STREAM = "account_plan";
 const MESSAGES_STREAM = "messages";
 const PROJECTS_STREAM = "projects";
 const PROJECT_DOCUMENTS_STREAM = "project_documents";
@@ -397,6 +402,7 @@ async function* entryRangeChunks(
 
 const ALL_STREAMS = [
 	ACCOUNT_PROFILE_STREAM,
+	ACCOUNT_PLAN_STREAM,
 	CONVERSATIONS_STREAM,
 	MESSAGES_STREAM,
 	PROJECTS_STREAM,
@@ -521,7 +527,7 @@ function readExportReference(
 
 // ─── Claude API calls (in-page, cookie-authenticated) ───────────────────
 
-interface ClaudeOrganization {
+interface ClaudeOrganization extends RawOrganization {
 	uuid: string;
 	capabilities?: string[];
 }
@@ -551,12 +557,7 @@ async function fetchOrganizations(
 	if (!result.ok || !Array.isArray(result.json)) {
 		return [];
 	}
-	return result.json.filter(
-		(org): org is ClaudeOrganization =>
-			typeof org === "object" &&
-			org !== null &&
-			typeof (org as { uuid?: unknown }).uuid === "string",
-	);
+	return result.json as ClaudeOrganization[];
 }
 
 /** Selects the chat-capable org, mirroring the legacy connector's
@@ -1328,6 +1329,84 @@ export async function collectAnthropic({
 	const initialDelayMs = testOverrides?.initialDelayMs ?? 1500;
 	if (initialDelayMs > 0) await politeDelay(initialDelayMs);
 	const browserProfile = await readBrowserProfile(page);
+	// One read of the signed-in account's organizations, shared by the
+	// account_plan stream (plan family, creation time) and the export request
+	// (which organization to export). It runs here, on the claude.ai page and
+	// before any download navigation, and only when the plan stream was asked for.
+	let organizationsRead: Promise<ClaudeOrganization[]> | undefined;
+	const readOrganizations = (): Promise<ClaudeOrganization[]> => {
+		organizationsRead ??= fetchOrganizations(page);
+		return organizationsRead;
+	};
+	const organizations = requested.has(ACCOUNT_PLAN_STREAM)
+		? await readOrganizations()
+		: [];
+	// The legacy key stays bound to the actual export org (or unchanged selector
+	// in a plan-only run). Enumerating plans must never request another export.
+	const emitAccountPlan = async (organizationId: string): Promise<void> => {
+		if (!hasReadablePlanOrganizationInventory(organizations)) {
+			await emit({ type: "SKIP_RESULT", stream: ACCOUNT_PLAN_STREAM, reason: "parse_error", message: "The organization list contains an unreadable entry.", recovery_hint: { action: "retry_by_runtime", retryable: true } });
+			return;
+		}
+		const usable = usablePlanOrganizations(organizations);
+		if (!usable.some((org) => org.uuid === organizationId)) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACCOUNT_PLAN_STREAM,
+				reason: "organization_unavailable",
+				message: "The exported organization has no readable chat plan.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+			return;
+		}
+		// The stream claims full inventory coverage, so emit every plan or none.
+		const plans = usable.map((org) =>
+			buildAccountPlanRecord(org, org.uuid === organizationId),
+		);
+		if (
+			plans.some(
+				(plan) => !plan || !validateRecord(ACCOUNT_PLAN_STREAM, plan).ok,
+			)
+		) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACCOUNT_PLAN_STREAM,
+				reason: "parse_error",
+				message: "An organization has no readable plan.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+			return;
+		}
+		for (const plan of plans as Record<string, unknown>[]) {
+			if (plan.plan_type === null || plan.account_created_at === null) {
+				connectorDiagnostic("anthropic", "account_plan_incomplete", {
+					plan_type: plan.plan_type === null ? "absent" : "read",
+					account_created_at:
+						plan.account_created_at === null ? "absent" : "read",
+				});
+			}
+			await emitRecord(ACCOUNT_PLAN_STREAM, plan);
+		}
+		await emit(buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, plans.length));
+	};
+	// The plan needs no export. A run that asks for nothing else must not request
+	// one: each request emails the account owner.
+	if (![...requested.keys()].some((stream) => stream !== ACCOUNT_PLAN_STREAM)) {
+		const planOrganization = selectChatOrganization(organizations);
+		if (planOrganization) {
+			await emitAccountPlan(planOrganization.uuid);
+		} else {
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACCOUNT_PLAN_STREAM,
+				reason: "no_chat_organization",
+				message:
+					"No chat-capable Claude organization could be resolved from the session.",
+				recovery_hint: { action: "refresh_credentials", retryable: false },
+			});
+		}
+		return;
+	}
 
 	const wantsConversations = requested.has(CONVERSATIONS_STREAM);
 	const wantsMessages = requested.has(MESSAGES_STREAM);
@@ -1796,7 +1875,9 @@ export async function collectAnthropic({
 					retryable: false,
 				},
 				diagnostics: {
-					...(conversationId === null ? {} : { conversation_id: conversationId }),
+					...(conversationId === null
+						? {}
+						: { conversation_id: conversationId }),
 					...(startOffset === undefined ? {} : { source_offset: startOffset }),
 				},
 			});
@@ -1826,6 +1907,13 @@ export async function collectAnthropic({
 		/** The manifest has no recognized conversations source. That is not
 		 * an empty account, so conversations and messages are skipped. */
 		conversationsSourceMissing = false,
+		/** The conversations category has no complete contiguous partition. */
+		conversationsBoundaryMissing = false,
+		/** The manifest has no complete projects partition. That is not proof
+		 * of an empty account, so projects and project_documents are skipped. */
+		projectsBoundaryMissing = false,
+		/** An archive-wide manifest defect makes all export-derived streams uncertain. */
+		manifestArchiveIncomplete = false,
 	): Promise<void> {
 		const selectedConversations: Array<{
 			record: (typeof parsed.conversations)[number];
@@ -1912,6 +2000,10 @@ export async function collectAnthropic({
 				metadata_status: profile.metadataStatus,
 			});
 		}
+		if (requested.has(ACCOUNT_PLAN_STREAM)) {
+			// The exported organization's plan; see emitAccountPlan.
+			await emitAccountPlan(organizationId);
+		}
 		if (wantsConversations) {
 			for (const { record: conversation, source } of selectedConversations) {
 				const blob = await spoolEnvelope(CONVERSATIONS_STREAM, () =>
@@ -1966,18 +2058,68 @@ export async function collectAnthropic({
 			],
 		];
 		const skipped = new Set(conversationSkipped);
-		if (conversationsSourceMissing) {
-			for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
-				if (!requested.has(stream)) {
+		if (manifestArchiveIncomplete) {
+			for (const stream of [
+				ACCOUNT_PROFILE_STREAM,
+				CONVERSATIONS_STREAM,
+				MESSAGES_STREAM,
+				PROJECTS_STREAM,
+				PROJECT_DOCUMENTS_STREAM,
+			]) {
+				if (!requested.has(stream) || skipped.has(stream)) {
 					continue;
 				}
 				skipped.add(stream);
 				await emit({
 					type: "SKIP_RESULT",
 					stream,
-					reason: "export_conversations_missing",
+					reason: "export_manifest_incomplete",
 					message:
-						"The Claude export has no recognized conversations entry, so " +
+						"The Claude export manifest is incomplete or inconsistent, so " +
+						`${stream} was not imported and was not checkpointed.`,
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
+				});
+			}
+		} else if (conversationsSourceMissing || conversationsBoundaryMissing) {
+			for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
+				if (!requested.has(stream) || skipped.has(stream)) {
+					continue;
+				}
+				skipped.add(stream);
+				const missing = conversationsSourceMissing;
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: missing
+						? "export_conversations_missing"
+						: "export_conversations_incomplete",
+					message:
+						(missing
+							? "The Claude export has no recognized conversations entry, so "
+							: "The Claude export has no complete conversations partition, so ") +
+						`${stream} was not imported and was not checkpointed.`,
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
+				});
+			}
+		}
+		if (!manifestArchiveIncomplete && projectsBoundaryMissing) {
+			for (const stream of [PROJECTS_STREAM, PROJECT_DOCUMENTS_STREAM]) {
+				if (!requested.has(stream) || skipped.has(stream)) {
+					continue;
+				}
+				skipped.add(stream);
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "export_projects_missing",
+					message:
+						"The Claude export has no complete projects category, so " +
 						`${stream} was not imported and was not checkpointed.`,
 					recovery_hint: {
 						action: "retry_on_connector_upgrade",
@@ -2323,10 +2465,10 @@ export async function collectAnthropic({
 					validatedEntry: Boolean(entriesValidated),
 					...(entriesValidated
 						? {
-							maxBufferedObjectUnits:
-								testOverrides?.maxBufferedObjectUnits ??
-								OVERSIZE_PARENT_UNITS,
-						}
+								maxBufferedObjectUnits:
+									testOverrides?.maxBufferedObjectUnits ??
+									OVERSIZE_PARENT_UNITS,
+							}
 						: {}),
 					onOversizedObject: async (_prefix, value) => {
 						await processOversizedConversation(value);
@@ -2422,7 +2564,7 @@ export async function collectAnthropic({
 		}
 	}
 
-	const orgs = await fetchOrganizations(page);
+	const orgs = await readOrganizations();
 	const org = selectChatOrganization(orgs);
 	if (!org) {
 		// Every export-derived stream is skipped: a stream with no record and
@@ -2780,12 +2922,16 @@ export async function collectAnthropic({
 			"light_metadata",
 			...knownUnconsumedCategories,
 		];
-		const partitionsContiguous = accountedCategories.every(
+		const archiveWidePartitionCategories = [
+			"light_metadata",
+			...knownUnconsumedCategories,
+		];
+		const partitionsContiguous = archiveWidePartitionCategories.every(
 			(category) =>
 				!dataFiles.some((part) => part.category === category) ||
 				categoryBoundary(category),
 		);
-		archiveComplete = completeMessages =
+		const manifestInventoryComplete =
 			manifest.version === "1.0" &&
 			Number.isSafeInteger(manifest.total_files) &&
 			manifest.total_files === dataFiles.length &&
@@ -2799,11 +2945,11 @@ export async function collectAnthropic({
 			) &&
 			new Set(dataFiles.map((part) => part.export_url)).size ===
 				dataFiles.length &&
-			new Set(dataFiles.map((part) => part.filename)).size ===
-				dataFiles.length &&
+			new Set(dataFiles.map((part) => part.filename)).size === dataFiles.length;
+		const archiveManifestComplete =
+			manifestInventoryComplete &&
 			partitionsContiguous &&
-			// Missing metadata is as incomplete as a partial metadata partition:
-			// conservatively withhold archive-wide proof, but keep record delivery.
+			// Missing metadata is as incomplete as a partial metadata partition.
 			categoryBoundary("light_metadata") &&
 			results.every(
 				(result) =>
@@ -2819,6 +2965,7 @@ export async function collectAnthropic({
 								entry.json !== null,
 						)),
 			);
+		archiveComplete = completeMessages = archiveManifestComplete;
 		completeMessages &&= conversationsManifestBoundary;
 		conversationsExact &&= conversationsManifestBoundary;
 		projectsExact &&= projectsManifestBoundary;
@@ -2842,10 +2989,7 @@ export async function collectAnthropic({
 				const items = Array.isArray(entry.json) ? entry.json : [entry.json];
 				if (result.category === "conversations") {
 					for (const item of items) {
-						if (
-							isPlainObject(item) &&
-							!Array.isArray(item.chat_messages)
-						) {
+						if (isPlainObject(item) && !Array.isArray(item.chat_messages)) {
 							// Report the named omission before shape classification can
 							// divert this conversation to projects or leave it unmatched.
 							await accountRawConversation(item);
@@ -2871,6 +3015,8 @@ export async function collectAnthropic({
 			);
 			unaccountedEntries ||= classified.outOfScopeEntryNames.some(
 				(name) =>
+					result.category !== "conversations" &&
+					result.category !== "projects" &&
 					!knownUnconsumedCategories.has(result.category) &&
 					(result.category !== "light_metadata" ||
 						!knownUnconsumedMetadataFiles.has(name)),
@@ -3008,6 +3154,9 @@ export async function collectAnthropic({
 			exportBookkeeping,
 			unclassifiedEntries,
 			!conversationsSourceFound,
+			!conversationsManifestBoundary,
+			!projectsManifestBoundary,
+			!archiveManifestComplete || unaccountedEntries,
 		);
 	}
 }

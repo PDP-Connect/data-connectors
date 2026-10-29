@@ -9,7 +9,7 @@
 	},
 	"connector_key": "shopify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-	"version": "0.2.32",
+	"version": "0.2.34",
 	"display_name": "Shopify Shop",
 	"brand": {
 		"icon": "icon.svg",
@@ -122,7 +122,7 @@
 		"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
 		"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
 		"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",
-		"inventory_not_proven_complete": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
+		"stream_collection_failed": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
 		"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
 		"shopify_order_rows_unresolved": "Some Shop orders could not be read completely; retry to collect them",
 		"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"

@@ -3,13 +3,30 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { ynabPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import {
 	type EmittedRecord,
 	makeRecordingEmit,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { type BudgetCtx, collectCategoriesAndGroups, ynab } from "./index.ts";
+import {
+	type BudgetCtx,
+	collectCategoriesAndGroups,
+	createYnabRequest,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+// The production governor with pacing opted out, so a test goes through the
+// real request and error path without waiting out the provider's 20 s floor.
+const unpacedYnab = createYnabRequest(
+	createConnectorHttpGovernor({
+		maxAttempts: 1,
+		name: "ynab",
+		pacingInitialIntervalMs: 0,
+		profile: ynabPacingProfile(),
+	}),
+);
 
 // Regression proof for the stream-coverage evidence omission: a succeeded YNAB
 // run emitted `category_groups` records but never staged a checkpoint for the
@@ -85,7 +102,7 @@ function makeCtx(requestedStreams: readonly string[]): {
 		emit: harness.emit as BudgetCtx["emit"],
 		newState: {},
 		progress: (): Promise<void> => Promise.resolve(),
-		request: ynab,
+		request: unpacedYnab,
 		requested: new Map(requestedStreams.map((name) => [name, {}])),
 		state: {},
 		token: "test-token",

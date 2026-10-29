@@ -23,7 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { type Dirent, readdirSync, readFileSync } from "node:fs";
 import { stringifyForJsonl } from "@pdpp/connector-protocol";
 import type {
 	DetailGapStartEntry,
@@ -33,6 +33,84 @@ import type {
 } from "./connector-runtime.ts";
 
 const VM_RSS_STATUS_RE = /VmRSS:\s*(\d+)\s*kB/;
+
+/** Parent pid and start time (in clock ticks since boot) from /proc/<pid>/stat. */
+function readProcStat(
+	pid: number,
+): { parentPid: number; startTime: string } | null {
+	try {
+		const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
+		// Fields after the command name, which may itself contain ") ".
+		const fields = stat
+			.slice(stat.lastIndexOf(")") + 1)
+			.trim()
+			.split(/\s+/u);
+		const parentPid = Number(fields[1]);
+		const startTime = fields[19];
+		if (!Number.isSafeInteger(parentPid) || startTime === undefined)
+			return null;
+		return { parentPid, startTime };
+	} catch {
+		return null; // The process exited while /proc was being read.
+	}
+}
+
+// Best effort: called from timer and stream callbacks, so it must never throw.
+// A pid is signalled only if it still has the start time seen in the scan, so
+// a descendant that exited and whose pid was reused is left alone.
+function killLinuxProcessTree(rootPid: number): void {
+	const kill = (pid: number, startTime?: string): void => {
+		if (startTime !== undefined && readProcStat(pid)?.startTime !== startTime) {
+			return;
+		}
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Already gone (ESRCH) or not ours to signal (EPERM).
+		}
+	};
+
+	for (let pass = 0; pass < 2; pass += 1) {
+		const childrenByParent = new Map<
+			number,
+			{ pid: number; startTime: string }[]
+		>();
+		let entries: Dirent[];
+		try {
+			entries = readdirSync("/proc", { withFileTypes: true });
+		} catch {
+			break;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) continue;
+			const pid = Number(entry.name);
+			const stat = readProcStat(pid);
+			if (!stat) continue;
+			const children = childrenByParent.get(stat.parentPid) ?? [];
+			children.push({ pid, startTime: stat.startTime });
+			childrenByParent.set(stat.parentPid, children);
+		}
+
+		const descendants: { pid: number; startTime: string }[] = [];
+		const pending = [rootPid];
+		const seen = new Set(pending);
+		while (pending.length > 0) {
+			const parentPid = pending.shift();
+			if (parentPid === undefined) continue;
+			for (const child of childrenByParent.get(parentPid) ?? []) {
+				if (seen.has(child.pid)) continue;
+				seen.add(child.pid);
+				descendants.push(child);
+				pending.push(child.pid);
+			}
+		}
+
+		for (const { pid, startTime } of descendants.reverse())
+			kill(pid, startTime);
+	}
+
+	kill(rootPid);
+}
 
 /** A record that passed (or bypassed) shape-check and would flow
  *  downstream as a RECORD in production. */
@@ -112,6 +190,10 @@ export interface ConnectorSubprocessOptions {
 	 *  poll timer is pure overhead for the many tests that don't need a
 	 *  memory proof. */
 	peakRssPollIntervalMs?: number;
+	/** Set false for a run whose stdout is too large to hold twice: `rawStdout`
+	 *  is then "" and `messages` is unchanged. Callers that assert on
+	 *  `rawStdout` must keep the default (true). */
+	retainRawStdout?: boolean;
 	start: {
 		/** Mirrors the real runtime's START `collection_mode` field, so a test can
 		 *  exercise the owner-triggered full-refresh bypass end to end rather than
@@ -195,6 +277,7 @@ export function runConnectorProtocolSubprocess(
 	options: ConnectorSubprocessOptions,
 ): Promise<ConnectorSubprocessResult> {
 	const timeoutMs = options.timeoutMs ?? 15_000;
+	const retainRawStdout = options.retainRawStdout ?? true;
 
 	return new Promise((resolve, reject) => {
 		const child = spawn(
@@ -215,22 +298,28 @@ export function runConnectorProtocolSubprocess(
 		let peakRssBytes: number | null = null;
 		let rssPoller: NodeJS.Timeout | undefined;
 		const { pid } = child;
-		if (options.peakRssPollIntervalMs && pid) {
-			rssPoller = setInterval(() => {
-				try {
-					const status = readFileSync(`/proc/${pid}/status`, "utf8");
-					const match = VM_RSS_STATUS_RE.exec(status);
-					if (match?.[1]) {
-						const bytes = Number.parseInt(match[1], 10) * 1024;
-						peakRssBytes =
-							peakRssBytes === null ? bytes : Math.max(peakRssBytes, bytes);
-					}
-				} catch {
-					// /proc/<pid>/status is unavailable (non-Linux, or the process
-					// already exited between the tick firing and the read) -- leave
-					// peakRssBytes at its last known value.
+		const sampleRss = (): void => {
+			try {
+				const status = readFileSync(`/proc/${pid}/status`, "utf8");
+				const match = VM_RSS_STATUS_RE.exec(status);
+				if (match?.[1]) {
+					const bytes = Number.parseInt(match[1], 10) * 1024;
+					peakRssBytes =
+						peakRssBytes === null ? bytes : Math.max(peakRssBytes, bytes);
 				}
-			}, options.peakRssPollIntervalMs);
+			} catch {
+				// /proc/<pid>/status is unavailable (non-Linux, or the process
+				// already exited between the tick firing and the read) -- leave
+				// peakRssBytes at its last known value.
+			}
+		};
+		const sampleRssOnOutput = Boolean(options.peakRssPollIntervalMs && pid);
+		if (sampleRssOnOutput) {
+			// The interval alone can miss a child that finishes before its first
+			// tick; sampling at start and on each stdout chunk (below) always
+			// yields a value while the child is producing records.
+			sampleRss();
+			rssPoller = setInterval(sampleRss, options.peakRssPollIntervalMs);
 		}
 
 		const messages: EmittedMessage[] = [];
@@ -252,10 +341,18 @@ export function runConnectorProtocolSubprocess(
 			fn();
 		};
 
-		const rejectAndKill = (error: Error): void => {
-			if (!child.killed) {
-				child.kill("SIGKILL");
+		const killChildTree = (): void => {
+			// Once the child has exited its pid may be reused: never signal it.
+			if (child.exitCode !== null || child.signalCode !== null) return;
+			if (process.platform === "linux" && child.pid) {
+				killLinuxProcessTree(child.pid);
+				return;
 			}
+			if (!child.killed) child.kill("SIGKILL");
+		};
+
+		const rejectAndKill = (error: Error): void => {
+			killChildTree();
 			finish(() => reject(error));
 		};
 
@@ -283,9 +380,15 @@ export function runConnectorProtocolSubprocess(
 			);
 		}, timeoutMs);
 
-		child.stdout?.on("data", (chunk: Buffer) => {
-			const text = chunk.toString();
-			rawStdout += text;
+		// Decode as streams, not per chunk: a multi-byte character split across
+		// two pipe chunks would otherwise become U+FFFD in both halves.
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (text: string) => {
+			if (sampleRssOnOutput) sampleRss();
+			if (retainRawStdout) {
+				rawStdout += text;
+			}
 			stdoutBuffer += text;
 			let newlineIndex = stdoutBuffer.indexOf("\n");
 			while (newlineIndex !== -1) {
@@ -296,8 +399,8 @@ export function runConnectorProtocolSubprocess(
 			}
 		});
 
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+		child.stderr?.on("data", (text: string) => {
+			stderr += text;
 		});
 
 		child.on("error", (err) => {
@@ -360,4 +463,90 @@ export function runConnectorProtocolSubprocess(
 
 		child.stdin?.end(stringifyForJsonl(options.start));
 	});
+}
+
+// `politeDelay` is `new Promise((r) => setTimeout(r, ms))`, so under the
+// wrapper below its timer's stack is: the wrapper, the Promise executor,
+// `new Promise (<anonymous>)`, `politeDelay (...)`. The match keys on V8's
+// function name, so it needs code that keeps its names. The suite runs
+// TypeScript unbundled through `node --import tsx` (scripts/test-dispatch.mjs).
+// A bundler or minifier that renames politeDelay turns the skip off without an
+// error. The test "a politeDelay pause fires on the next tick" then fails,
+// since it asserts that the pause is recorded as 0 ms.
+const NEW_PROMISE_FRAME = /^\s+at new Promise \(/;
+const POLITE_DELAY_FRAME = /^\s+at politeDelay \(/;
+
+/**
+ * True when the timer being armed was armed directly by `politeDelay`. The
+ * frames, innermost first and after the "Error" header, are [0] the wrapper,
+ * [1] the Promise executor, [2] `new Promise`, [3] `politeDelay`. A timer armed
+ * by a helper that `politeDelay` calls shifts [2] and [3], so it is not matched.
+ */
+function armedDirectlyByPoliteDelay(stack: string): boolean {
+	const frames = stack.split("\n").slice(1);
+	return (
+		NEW_PROMISE_FRAME.test(frames[2] ?? "") &&
+		POLITE_DELAY_FRAME.test(frames[3] ?? "")
+	);
+}
+
+/** Installations still live. One patch serves all of them. */
+let liveInstallations = 0;
+/** The timer the patch replaced. Calls that pass through the patch land here. */
+let realSetTimeout: typeof setTimeout = globalThis.setTimeout;
+
+const pacedSetTimeout = ((
+	handler: () => void,
+	delay?: number,
+	...args: unknown[]
+) => {
+	const isPause =
+		liveInstallations > 0 &&
+		typeof delay === "number" &&
+		delay > 0 &&
+		armedDirectlyByPoliteDelay(new Error().stack ?? "");
+	return realSetTimeout(handler, isPause ? 0 : delay, ...args);
+}) as unknown as typeof setTimeout;
+
+/**
+ * Make `politeDelay` pauses fire on the next timer tick until the returned
+ * function runs.
+ *
+ * `politeDelay` is the runtime's anti-bot pacing pause. A test that walks
+ * pages through a connector pays it on every page (2.5 s per Whole Foods
+ * navigation, about half a second per heb list page) and does not assert on
+ * it. Only the timer that `politeDelay` arms itself is shortened, found by the
+ * call stack. A watchdog, a polling interval or Playwright's own timeout in the
+ * code under test keeps its real duration, and so does a timer armed by a
+ * helper that `politeDelay` calls.
+ *
+ * It patches `globalThis.setTimeout` for the whole process: install it once
+ * per test file with `after(skipPoliteDelays())`, which also restores it.
+ * Installations may overlap. The first one installs the patch and the last one
+ * restored removes it. Each returned function does nothing after its first
+ * call.
+ *
+ * Limit: a `setTimeout` wrapper installed on top of this one that calls
+ * through adds a frame, so the pause is not matched and keeps its real delay.
+ * That is slower, never a changed result.
+ */
+export function skipPoliteDelays(): () => void {
+	if (liveInstallations === 0) {
+		// A caller that saved the patch and restored it after the last restore
+		// leaves the patch in place. Never let the patch wrap itself.
+		if (globalThis.setTimeout !== pacedSetTimeout) {
+			realSetTimeout = globalThis.setTimeout;
+		}
+		globalThis.setTimeout = pacedSetTimeout;
+	}
+	liveInstallations += 1;
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		liveInstallations -= 1;
+		if (liveInstallations === 0) {
+			globalThis.setTimeout = realSetTimeout;
+		}
+	};
 }

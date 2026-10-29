@@ -99,8 +99,10 @@ export const messagesSchema = z.object({
 	has_pasted_content: z.boolean(),
 });
 
-// attachments.id is one of two shapes:
-//   - a session-event UUID (from buildAttachmentRecord), or
+// attachments.id is one of three shapes:
+//   - a session-event UUID (from buildAttachmentRecord),
+//   - "<messageUuid>:<tool_use|tool_result>:<blockIndex>" (from
+//     buildToolBlockRecords), or
 //   - "tool_result_file:<projectDir>/<sessionId>/<rel>" composite
 //     (from the tool-results blob path).
 // Single string assertion with generous bounds; structural variants
@@ -112,6 +114,9 @@ export const attachmentsSchema = z.object({
 	event_type: stringMaxSchema(64),
 	hook_name: stringMaxSchema(256),
 	tool_use_id: stringMaxSchema(256),
+	// Set on records derived from a message's tool_use block. `.optional()`
+	// so records emitted before this field existed validate.
+	tool_name: stringMaxSchema(256).optional(),
 	// content_preview keeps its bespoke refine for the +1-for-ellipsis bound;
 	// semantically equivalent to pdppSafeText (same safeTextPreview check).
 	content_preview: z

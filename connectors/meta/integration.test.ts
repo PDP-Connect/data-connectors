@@ -27,6 +27,7 @@ import type {
 	BrowserCollectContext,
 	EmittedMessage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	classifyAdsDialogInPage,
@@ -138,6 +139,7 @@ function makeFakePage(options: {
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
 	let pendingPostsPredicate: ((value: unknown) => boolean) | null = null;
 	let adsListWait = 0;
+	let activeAdsSurface: "categories" | "advertisers" | "ad_topics" | null = null;
 	let dialogClassificationSequenceIndex = 0;
 	let dialogScrapeCount = 0;
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
@@ -254,6 +256,7 @@ function makeFakePage(options: {
 				return Promise.reject(new Error("scripted navigation failure"));
 			}
 			frameUrl = url ?? "https://www.instagram.com/testuser/";
+			if (frameUrl.includes("/ads/ad_topics/")) activeAdsSurface = "ad_topics";
 			currentNavigationRequest = {
 				frame: () => mainFrame,
 				isNavigationRequest: () => true,
@@ -324,6 +327,7 @@ function makeFakePage(options: {
 				return readiness(false);
 			}
 			if (source.includes("Categories used to reach you")) {
+				activeAdsSurface = "categories";
 				return readiness(options.categoriesAvailable === true);
 			}
 			if (source.includes("View all")) {
@@ -336,6 +340,9 @@ function makeFakePage(options: {
 				source.includes('[role="dialog"] [role="list"]') &&
 				!source.includes('[role="listitem"]')
 			) {
+				if (activeAdsSurface === "categories") {
+					return readiness(options.categoryDestinationReached !== false);
+				}
 				const index = adsListWait++;
 				if (index < 2) {
 					const reached = dialogReachedQueue[0];
@@ -354,6 +361,9 @@ function makeFakePage(options: {
 				source.includes('[role="dialog"] [role="list"]') &&
 				source.includes('[role="listitem"]')
 			) {
+				if (activeAdsSurface === "categories") {
+					return readiness((options.categoryRows?.length ?? 0) > 0);
+				}
 				const index = adsListWait - 1;
 				const ready =
 					index < 2
@@ -497,7 +507,12 @@ function makeFakePage(options: {
 				return Promise.resolve(options.categoriesAvailable === true);
 			}
 			if (fnSource.includes("Categories used to reach you")) {
+				activeAdsSurface = "categories";
 				return Promise.resolve(options.categoriesAvailable === true);
+			}
+			if (fnSource.includes("Advertisers using your activity")) {
+				activeAdsSurface = "advertisers";
+				return Promise.resolve(true);
 			}
 			if (fnSource.includes("View all")) {
 				return Promise.resolve(undefined);
@@ -1262,7 +1277,7 @@ test("collectAllStreams: an empty nonterminal timeline does not complete posts",
 	);
 });
 
-test("collectAllStreams: a login challenge vetoes completion even with same-owner exact-zero evidence", async () => {
+test("collectAllStreams: a login challenge ends the run as a session failure even with same-owner exact-zero evidence", async () => {
 	const ended = JSON.parse(
 		await readFile(
 			new URL("./fixtures/posts.empty.json", import.meta.url),
@@ -1287,18 +1302,29 @@ test("collectAllStreams: a login challenge vetoes completion even with same-owne
 			requestedStreams: ["posts"],
 		});
 
-		await collectAllStreams(
-			ctx,
-			NO_DELAY,
-			TEST_POSTS_CLOCK,
-			makeVirtualAdsClock(),
-			TEST_PROFILE_CLOCK,
+		// A login challenge ends the run as a session failure.
+		await assert.rejects(
+			collectAllStreams(
+				ctx,
+				NO_DELAY,
+				TEST_POSTS_CLOCK,
+				makeVirtualAdsClock(),
+				TEST_PROFILE_CLOCK,
+			),
+			(error: unknown) => {
+				assert.ok(error instanceof TerminalError);
+				assert.equal(error.code, "meta_session_required");
+				assert.equal(error.retryable, false);
+				assert.deepEqual(error.recoveryHint, { action: "manual_action_required", retryable: false });
+				assert.equal(error.message, "meta_session_required: Instagram authentication was rejected or challenged during this run");
+				return true;
+			},
 		);
 		assert.equal(
 			harness.protocolMessages.some((message) => message.type === "STATE"),
 			complete,
 		);
-		assert.deepEqual(unprovenInventories(harness), complete ? [] : ["posts"]);
+		assert.deepEqual(unprovenInventories(harness), []);
 	}
 });
 
@@ -1628,6 +1654,21 @@ const unprovenIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
 		(m) => m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
 	);
 
+/** Streams whose read failed (navigation, an unsuccessful page, a browser
+ *  error): reported through reportStreamFailure, rows upsert, no STATE. */
+const failedReads = (harness: ReturnType<typeof makeRecordingEmit>): string[] =>
+	harness.protocolMessages
+		.filter(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+		)
+		.map((m) => String((m as { stream: string }).stream))
+		.sort();
+
+const failedReadIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
+	harness.protocolMessages.findIndex(
+		(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+	);
+
 test("collectAllStreams: a posts timeout after a valid page emits that page, then skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
@@ -1661,7 +1702,7 @@ test("collectAllStreams: a posts timeout after a valid page emits that page, the
 	);
 });
 
-test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then skips the stream as unproven", async () => {
+test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then reports the stream as a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1686,15 +1727,15 @@ test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, 
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1", "p2"],
 	);
-	assert.deepEqual(unprovenInventories(harness), ["posts"]);
-	assert.ok(recordIndex(harness, "posts") < unprovenIndex(harness));
+	assert.deepEqual(failedReads(harness), ["posts"]);
+	assert.ok(recordIndex(harness, "posts") < failedReadIndex(harness));
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
 	);
 });
 
-test("collectAllStreams: a browser error while advancing posts keeps the earlier page and is not proven complete", async () => {
+test("collectAllStreams: a browser error while advancing posts keeps the earlier page and reports a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1716,11 +1757,11 @@ test("collectAllStreams: a browser error while advancing posts keeps the earlier
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1"],
 	);
-	assert.deepEqual(unprovenInventories(harness), ["post_likes", "posts"]);
-	assert.ok(recordIndex(harness, "posts") < unprovenIndex(harness));
+	assert.deepEqual(failedReads(harness), ["post_likes", "posts"]);
+	assert.ok(recordIndex(harness, "posts") < failedReadIndex(harness));
 });
 
-test("collectAllStreams: a first-page posts failure emits nothing and skips the stream as unproven", async () => {
+test("collectAllStreams: a first-page posts failure emits nothing and reports the stream as a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1738,10 +1779,10 @@ test("collectAllStreams: a first-page posts failure emits nothing and skips the 
 	);
 
 	assert.equal(harness.emitted.filter((e) => e.stream === "posts").length, 0);
-	assert.deepEqual(unprovenInventories(harness), ["posts"]);
+	assert.deepEqual(failedReads(harness), ["posts"]);
 });
 
-test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then skips the stream as unproven", async () => {
+test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then reports the stream as a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1775,15 +1816,15 @@ test("collectAllStreams: an HTTP 503 on a later following page emits earlier pag
 			.map((e) => e.data.username),
 		["followed1"],
 	);
-	assert.deepEqual(unprovenInventories(harness), ["following"]);
-	assert.ok(recordIndex(harness, "following") < unprovenIndex(harness));
+	assert.deepEqual(failedReads(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < failedReadIndex(harness));
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
 	);
 });
 
-test("collectAllStreams: a browser error on a later following page keeps earlier pages and is not proven complete", async () => {
+test("collectAllStreams: a browser error on a later following page keeps earlier pages and reports a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1818,11 +1859,11 @@ test("collectAllStreams: a browser error on a later following page keeps earlier
 			.map((e) => e.data.username),
 		["followed1"],
 	);
-	assert.deepEqual(unprovenInventories(harness), ["following"]);
-	assert.ok(recordIndex(harness, "following") < unprovenIndex(harness));
+	assert.deepEqual(failedReads(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < failedReadIndex(harness));
 });
 
-test("collectAllStreams: a first-page following failure emits nothing and skips the stream as unproven", async () => {
+test("collectAllStreams: a first-page following failure emits nothing and reports the stream as a failed read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1846,7 +1887,7 @@ test("collectAllStreams: a first-page following failure emits nothing and skips 
 		harness.emitted.filter((e) => e.stream === "following").length,
 		0,
 	);
-	assert.deepEqual(unprovenInventories(harness), ["following"]);
+	assert.deepEqual(failedReads(harness), ["following"]);
 });
 
 // ─── Invariant 5: ads merges three DOM-scraped lists with a kind discriminator ──
@@ -1857,7 +1898,7 @@ test("collectAllStreams: ads completes independently when profile web_info is un
 		categoriesAvailable: true,
 		categoryComplete: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
-		dialogComplete: [true, true],
+		dialogComplete: [true, true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: null,
@@ -1997,6 +2038,7 @@ test("collectAllStreams: nonempty ads without source total emits records but is 
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
+		dialogComplete: [true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -2186,7 +2228,7 @@ test("collectAllStreams: ads missing a surface keeps its rows and skips only the
 	const harness = makeRecordingEmit(validateRecord);
 	const { page, waitRejections } = makeFakePage({
 		categoriesAvailable: false,
-		dialogComplete: [true, true],
+		dialogComplete: [true, true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -2491,11 +2533,14 @@ const advertisersControl = (dialogHtml: string): string => `
 	</script>`;
 
 /** Manage info tab and categories link that run `clickScript` on click. */
-const categoriesControl = (clickScript: string): string => `
+const categoriesControl = (
+	clickScript: string,
+	entry: "button" | "link" = "link",
+): string => `
 	<div role="tab">Manage info</div>
-	<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+	<div role="tabpanel">${entry === "button" ? "<button>Categories used to reach you</button>" : "<div role=\"link\">Categories used to reach you</div>"}</div>
 	<script>
-		document.querySelector('[role="link"]').addEventListener('click', () => {
+		document.querySelector('${entry === "button" ? "[role=tabpanel] button" : "[role=link]"}').addEventListener('click', () => {
 			${clickScript}
 		});
 	</script>`;
@@ -2512,6 +2557,7 @@ const INSTAGRAM_WEB_INFO_HTML = `<html><body><script type="application/json" dat
 async function collectAdsInChromium(pages: {
 	ads: string;
 	adTopics: string;
+	observePath?: (path: string, cookie: string) => void;
 }): Promise<ReturnType<typeof makeRecordingEmit>> {
 	const harness = makeRecordingEmit(validateRecord);
 	const browser = await chromium.launch({ headless: true });
@@ -2528,8 +2574,12 @@ async function collectAdsInChromium(pages: {
 				status: 200,
 			}),
 		);
-		await page.route(ACCOUNTS_CENTER_ROUTE, (route) =>
-			route.fulfill({
+		await page.route(ACCOUNTS_CENTER_ROUTE, (route) => {
+			pages.observePath?.(
+				new URL(route.request().url()).pathname,
+				route.request().headers().cookie ?? "",
+			);
+			return route.fulfill({
 				body: new URL(route.request().url()).pathname.startsWith(
 					"/ads/ad_topics/",
 				)
@@ -2537,8 +2587,8 @@ async function collectAdsInChromium(pages: {
 					: pages.ads,
 				contentType: "text/html",
 				status: 200,
-			}),
-		);
+			});
+		});
 		const ctx: BrowserCollectContext = {
 			assist: async (): Promise<never> => {
 				throw new Error("not implemented");
@@ -2574,6 +2624,43 @@ async function collectAdsInChromium(pages: {
 		await browser.close();
 	}
 }
+
+test("collectAllStreams: opens targeting categories before advertiser and topic pagination", async () => {
+	const requests: Array<{ cookie: string; path: string }> = [];
+	const ads = htmlPage(
+		`<button type="button" aria-label="Advertisers you saw ads from">Advertisers</button>
+		<script>document.querySelector('button').addEventListener('click', () => {
+			document.cookie = 'advertiser=1; path=/';
+			document.body.insertAdjacentHTML('beforeend', '<section role="dialog"><div role="list" aria-setsize="0"></div><p>No advertisers</p></section>');
+		});</script>`,
+		categoriesControl(
+			`document.cookie = 'targeting=1; path=/'; document.body.insertAdjacentHTML('beforeend', '<section role="dialog"><div role="list" aria-setsize="1"><div role="listitem" aria-posinset="1"><span>Sample Category</span><button>Remove</button></div></div></section>');`,
+			"button",
+		),
+	);
+	const harness = await collectAdsInChromium({
+		ads,
+		adTopics: htmlPage(
+			'<section role="dialog"><div role="list"></div><p>No ad topics</p></section>',
+		),
+		observePath: (path, cookie) => requests.push({ path, cookie }),
+	});
+
+	assert.ok(
+		requests.some(
+			({ cookie, path }) => path === "/ads/" && cookie.includes("targeting=1"),
+		) &&
+			requests.some(
+				({ cookie, path }) =>
+					path === "/ads/ad_topics/" && cookie.includes("targeting=1"),
+			),
+		`targeting categories must be clicked before advertiser pagination; visited ${JSON.stringify(requests.map(({ path, cookie }) => ({ path, targetingSeen: cookie.includes("targeting=1") })))}`,
+	);
+	assert.equal(
+		harness.emitted.filter((record) => record.data.kind === "ad_category").length,
+		1,
+	);
+});
 
 function adsCoverage(
 	harness: ReturnType<typeof makeRecordingEmit>,

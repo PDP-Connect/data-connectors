@@ -5,8 +5,10 @@
  * Real-browser fixture for `connector-runtime-remote-ownership.test.ts`. It
  * runs through `runConnector` against a browser attached with
  * `PDPP_REMOTE_OWNERSHIP_FIXTURE_REMOTE_CDP_URL`, and does what a connector
- * does in someone else's browser: load a page, make a request, open a genuine
- * provider popup from its own page, and either finish or fail.
+ * does in someone else's browser: load a page, make a request, open a blank
+ * popup from its own page, then navigate it after the popup event. This gives
+ * attached-CDP HAR a chance to capture the request; see README.md's "Attached
+ * CDP HAR recording" section and issue #523. The connector then finishes or fails.
  *
  * `PDPP_OWNERSHIP_FIXTURE_BASE_URL` points at the test's loopback server.
  * `/open-user-tab` makes the test open a tab in the same browser through its
@@ -53,7 +55,10 @@ async function collectOnPreservedPage(
 		page.waitForEvent("popup"),
 		page.click("#provider"),
 	]);
-	await popup.waitForLoadState();
+	// Navigate after the popup event; see README.md's attached CDP HAR section.
+	await popup.goto(new URL("/provider", baseUrl).toString(), {
+		waitUntil: "load",
+	});
 	if (process.env.PDPP_OWNERSHIP_FIXTURE_DOWNLOAD === "1") {
 		// A download on the reused run page: the launcher must count it as the
 		// run's (it goes into a recording's HAR) although it did not create
@@ -95,7 +100,10 @@ runConnector({
 			page.waitForEvent("popup"),
 			page.click("#provider"),
 		]);
-		await popup.waitForLoadState();
+		// Navigate after the popup event; see README.md's attached CDP HAR section.
+		await popup.goto(new URL("/provider", baseUrl).toString(), {
+			waitUntil: "load",
+		});
 		await emitRecord("items", { id: userTab });
 		if (process.env.PDPP_OWNERSHIP_FIXTURE_FAIL === "1") {
 			throw new Error("ownership fixture: deliberate collect failure");

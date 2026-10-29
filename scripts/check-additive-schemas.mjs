@@ -23,6 +23,10 @@ import { execFileSync } from "node:child_process";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// execFileSync defaults to a 1 MiB output buffer; connector-implementation-index.json
+// alone passed that in October 2026, and git show then fails with ENOBUFS.
+const GIT_SHOW_MAX_BUFFER = 64 * 1024 * 1024;
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 
@@ -78,6 +82,7 @@ function getFileAtRef(ref, relPath) {
     return execFileSync("git", ["show", `${ref}:${relPath}`], {
       cwd: repoRoot,
       encoding: "utf8",
+      maxBuffer: GIT_SHOW_MAX_BUFFER,
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch {

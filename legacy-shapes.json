@@ -1,0 +1,221 @@
+{
+	"schemaVersion": 1,
+	"scopes": [
+		{
+			"id": "amazon.orders",
+			"schemaPath": "connectors/amazon/schemas/amazon.orders.json"
+		},
+		{
+			"id": "amazon.profile",
+			"schemaPath": "connectors/amazon/schemas/amazon.profile.json"
+		},
+		{
+			"id": "chatgpt.conversations",
+			"schemaPath": "connectors/openai/schemas/chatgpt.conversations.json"
+		},
+		{
+			"id": "chatgpt.memories",
+			"schemaPath": "connectors/openai/schemas/chatgpt.memories.json"
+		},
+		{
+			"id": "claude_code.prompts",
+			"schemaPath": "connectors/anthropic/schemas/claude_code.prompts.json"
+		},
+		{
+			"id": "claude_code.sessions",
+			"schemaPath": "connectors/anthropic/schemas/claude_code.sessions.json"
+		},
+		{
+			"id": "claude_code.trajectories",
+			"schemaPath": "connectors/anthropic/schemas/claude_code.trajectories.json"
+		},
+		{
+			"id": "claude_code.usage",
+			"schemaPath": "connectors/anthropic/schemas/claude_code.usage.json"
+		},
+		{
+			"id": "claude.conversations",
+			"schemaPath": "connectors/anthropic/schemas/claude.conversations.json"
+		},
+		{
+			"id": "claude.projects",
+			"schemaPath": "connectors/anthropic/schemas/claude.projects.json"
+		},
+		{
+			"id": "doordash.orders",
+			"schemaPath": "connectors/doordash/schemas/doordash.orders.json"
+		},
+		{
+			"id": "github.contributions",
+			"schemaPath": "connectors/github/schemas/github.contributions.json"
+		},
+		{
+			"id": "github.events",
+			"schemaPath": "connectors/github/schemas/github.events.json"
+		},
+		{
+			"id": "github.history",
+			"schemaPath": "connectors/github/schemas/github.history.json"
+		},
+		{
+			"id": "github.profile",
+			"schemaPath": "connectors/github/schemas/github.profile.json"
+		},
+		{
+			"id": "github.repositories",
+			"schemaPath": "connectors/github/schemas/github.repositories.json"
+		},
+		{
+			"id": "github.starred",
+			"schemaPath": "connectors/github/schemas/github.starred.json"
+		},
+		{
+			"id": "heb.nutrition",
+			"schemaPath": "connectors/heb/schemas/heb.nutrition.json"
+		},
+		{
+			"id": "heb.orders",
+			"schemaPath": "connectors/heb/schemas/heb.orders.json"
+		},
+		{
+			"id": "heb.profile",
+			"schemaPath": "connectors/heb/schemas/heb.profile.json"
+		},
+		{
+			"id": "icloud_notes.folders",
+			"schemaPath": "connectors/apple/schemas/icloud_notes.folders.json"
+		},
+		{
+			"id": "icloud_notes.notes",
+			"schemaPath": "connectors/apple/schemas/icloud_notes.notes.json"
+		},
+		{
+			"id": "instagram.ads",
+			"schemaPath": "connectors/meta/schemas/instagram.ads.json"
+		},
+		{
+			"id": "instagram.following",
+			"schemaPath": "connectors/meta/schemas/instagram.following.json"
+		},
+		{
+			"id": "instagram.posts",
+			"schemaPath": "connectors/meta/schemas/instagram.posts.json"
+		},
+		{
+			"id": "instagram.profile",
+			"schemaPath": "connectors/meta/schemas/instagram.profile.json"
+		},
+		{
+			"id": "linkedin.connections",
+			"schemaPath": "connectors/linkedin/schemas/linkedin.connections.json"
+		},
+		{
+			"id": "linkedin.education",
+			"schemaPath": "connectors/linkedin/schemas/linkedin.education.json"
+		},
+		{
+			"id": "linkedin.experience",
+			"schemaPath": "connectors/linkedin/schemas/linkedin.experience.json"
+		},
+		{
+			"id": "linkedin.languages",
+			"schemaPath": "connectors/linkedin/schemas/linkedin.languages.json"
+		},
+		{
+			"id": "linkedin.profile",
+			"schemaPath": "connectors/linkedin/schemas/linkedin.profile.json"
+		},
+		{
+			"id": "linkedin.skills",
+			"schemaPath": "connectors/linkedin/schemas/linkedin.skills.json"
+		},
+		{
+			"id": "oura.activity",
+			"schemaPath": "connectors/oura/schemas/oura.activity.json"
+		},
+		{
+			"id": "oura.readiness",
+			"schemaPath": "connectors/oura/schemas/oura.readiness.json"
+		},
+		{
+			"id": "oura.sleep",
+			"schemaPath": "connectors/oura/schemas/oura.sleep.json"
+		},
+		{
+			"id": "shop.orders",
+			"schemaPath": "connectors/shopify/schemas/shop.orders.json"
+		},
+		{
+			"id": "spotify.playlists",
+			"schemaPath": "connectors/spotify/schemas/spotify.playlists.json"
+		},
+		{
+			"id": "spotify.profile",
+			"schemaPath": "connectors/spotify/schemas/spotify.profile.json"
+		},
+		{
+			"id": "spotify.savedTracks",
+			"schemaPath": "connectors/spotify/schemas/spotify.savedTracks.json"
+		},
+		{
+			"id": "steam.friends",
+			"schemaPath": "connectors/valve/schemas/steam.friends.json"
+		},
+		{
+			"id": "steam.games",
+			"schemaPath": "connectors/valve/schemas/steam.games.json"
+		},
+		{
+			"id": "steam.profile",
+			"schemaPath": "connectors/valve/schemas/steam.profile.json"
+		},
+		{
+			"id": "uber.receipts",
+			"schemaPath": "connectors/uber/schemas/uber.receipts.json"
+		},
+		{
+			"id": "uber.trips",
+			"schemaPath": "connectors/uber/schemas/uber.trips.json"
+		},
+		{
+			"id": "wholefoods.nutrition",
+			"schemaPath": "connectors/wholefoods/schemas/wholefoods.nutrition.json"
+		},
+		{
+			"id": "wholefoods.orders",
+			"schemaPath": "connectors/wholefoods/schemas/wholefoods.orders.json"
+		},
+		{
+			"id": "wholefoods.profile",
+			"schemaPath": "connectors/wholefoods/schemas/wholefoods.profile.json"
+		},
+		{
+			"id": "youtube.history",
+			"schemaPath": "connectors/google/schemas/youtube.history.json"
+		},
+		{
+			"id": "youtube.likes",
+			"schemaPath": "connectors/google/schemas/youtube.likes.json"
+		},
+		{
+			"id": "youtube.playlistItems",
+			"schemaPath": "connectors/google/schemas/youtube.playlistItems.json"
+		},
+		{
+			"id": "youtube.playlists",
+			"schemaPath": "connectors/google/schemas/youtube.playlists.json"
+		},
+		{
+			"id": "youtube.profile",
+			"schemaPath": "connectors/google/schemas/youtube.profile.json"
+		},
+		{
+			"id": "youtube.subscriptions",
+			"schemaPath": "connectors/google/schemas/youtube.subscriptions.json"
+		},
+		{
+			"id": "youtube.watchLater",
+			"schemaPath": "connectors/google/schemas/youtube.watchLater.json"
+		}
+	]
+}

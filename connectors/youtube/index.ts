@@ -3,13 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /** Browser-first YouTube Collection Profile. The owner signs in in PDPP's browser. */
-import { createHash } from "node:crypto";
-import { performance } from "node:perf_hooks";
 import type { Request, Response } from "playwright";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
+	buildFullScanCoverageMessage,
 	type BrowserCollectContext,
 	type EnsureSessionArgs,
 	runConnector,
@@ -19,6 +18,8 @@ import {
 	CHANNEL_TITLE_SELECTOR,
 	readChannelAbout,
 	readChannelPage,
+	openSwitchAccount,
+	readGoogleAccountEmail,
 	readOwnAccount,
 	readPlaylistHeader,
 	readPlaylistLinks,
@@ -77,19 +78,36 @@ type CoverageFact = {
 	stop_reason?: string;
 	next_checkpoint?: string | null;
 	incomplete?: boolean;
-	skipped_unresolved_date_count?: number;
+	unresolved_date_count?: number;
 };
 
-function id(value: string): string {
-	return createHash("sha256").update(value).digest("hex").slice(0, 24);
+export async function youtubeRecordId(value: string): Promise<string> {
+	const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 24);
 }
 
-function videoIdentity(video: BrowserVideo): string {
+export function videoIdentity(video: BrowserVideo): string {
 	if (video.video_id) return video.video_id;
 	const url = new URL(video.video_url);
 	url.searchParams.delete("list");
 	url.searchParams.delete("index");
 	return url.href;
+}
+
+function historyIdentity(video: BrowserVideo, dateReference: Date): string {
+	const label = video.watched_date_label ?? null;
+	const watchedDate = resolveWatchedDate(
+		label,
+		dateReference,
+	);
+	if (watchedDate) return `${videoIdentity(video)}|${watchedDate}`;
+	const sectionLabel = label
+		?.normalize("NFKC")
+		.trim()
+		.replace(/\s+/g, " ")
+		.toLowerCase();
+	const collectionDate = localDate(dateReference);
+	return `${videoIdentity(video)}|unresolved:${collectionDate}:${sectionLabel ?? "unknown-section"}`;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
@@ -307,14 +325,19 @@ export function parseCount(value: string | null | undefined): number | null {
 }
 
 /** A section label has at most day precision. Never infer a time of day. */
+function localDate(date: Date): string {
+	const year = date.getFullYear();
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const day = String(date.getDate()).padStart(2, "0");
+	return `${year}-${month}-${day}`;
+}
+
 export function resolveWatchedDate(
 	label: string | null,
 	now: Date,
 ): string | null {
 	if (!label) return null;
 	const text = label.trim().toLowerCase();
-	const localDate = (date: Date) =>
-		`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 	if (text === "today") return localDate(now);
 	if (text === "yesterday")
 		return localDate(
@@ -382,7 +405,7 @@ function videoFields(video: BrowserVideo) {
 	};
 }
 
-async function hasYoutubeSession(
+export async function hasYoutubeSession(
 	page: BrowserCollectContext["page"],
 ): Promise<boolean> {
 	if (
@@ -424,7 +447,7 @@ export async function ensureYoutubeSession(
 		completeAssistance: args.completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
 		message:
-			"Sign in to YouTube in the secure browser, then continue. PDPP will verify the session before collecting.",
+			"Sign in to YouTube in the secure browser, then continue. Collection starts once the session is verified.",
 		page: args.page,
 		probe: () => hasYoutubeSession(args.page),
 		readinessProbe: hasYoutubeSession,
@@ -496,6 +519,27 @@ async function waitForContent(
 		return state;
 	} catch {
 		return "unreadable";
+	}
+}
+
+async function readSwitchAccountEmail(
+	page: BrowserCollectContext["page"],
+): Promise<string | null> {
+	try {
+		const opened = await page.evaluate(
+			openSwitchAccount as () => ReturnType<typeof openSwitchAccount>,
+		);
+		if (opened !== true) return null;
+		const handle = await page.waitForFunction(
+			readGoogleAccountEmail as () => ReturnType<typeof readGoogleAccountEmail>,
+			undefined,
+			{ timeout: 4_000 },
+		);
+		const email = (await handle.jsonValue()) as unknown;
+		await handle.dispose();
+		return typeof email === "string" ? email : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -631,6 +675,8 @@ async function emitVerifiedEmptyState(
 			evidence: "youtube_page_data_empty",
 		},
 	});
+	if (stream === "playlist_items")
+		await ctx.emit(buildFullScanCoverageMessage(stream, 0));
 }
 
 type ExhaustionEvidence = {
@@ -969,6 +1015,7 @@ async function readHistoryVideoList(
 	cursor: HistoryCursor | undefined,
 	collectionMode: BrowserCollectContext["collectionMode"],
 	emitRecord: HistoryStreamRecord,
+	identityForVideo: (video: BrowserVideo) => string,
 ): Promise<VideoReadResult> {
 	const startedAt = performance.now();
 	const responseTracker = new HistoryResponseTracker(page);
@@ -1073,7 +1120,7 @@ async function readHistoryVideoList(
 			rowsAtStart = batch.totalRows;
 			headAnchorIds = batch.rows
 				.slice(0, 3)
-				.flatMap((video) => (video ? [videoIdentity(video)] : []));
+				.flatMap((video) => (video ? [identityForVideo(video)] : []));
 		}
 		if (offset >= totalRows) {
 			await responseTracker.flush();
@@ -1203,8 +1250,10 @@ async function readHistoryVideoList(
 				break;
 			}
 			const position = offset;
-			const key = videoIdentity(video);
-			if (resumeAnchor && !resumeAnchorFound && key !== resumeAnchor) {
+			const key = identityForVideo(video);
+			const matchesResumeAnchor =
+				key === resumeAnchor || videoIdentity(video) === resumeAnchor;
+			if (resumeAnchor && !resumeAnchorFound && !matchesResumeAnchor) {
 				if (rowsSeen.has(key)) {
 					dedupedCount += 1;
 				} else {
@@ -1216,7 +1265,7 @@ async function readHistoryVideoList(
 				offset += 1;
 				continue;
 			}
-			const matchingResumeAnchor = key === resumeAnchor;
+			const matchingResumeAnchor = matchesResumeAnchor;
 			if (matchingResumeAnchor) {
 				resumeAnchorFound = true;
 				phase = "backfill";
@@ -1310,7 +1359,7 @@ async function readHistoryVideoList(
 		lastAccounted,
 		checkpointAnchor:
 			stableEnd && responseTracker.trackingComplete && lastAccounted
-				? videoIdentity(lastAccounted)
+				? identityForVideo(lastAccounted)
 				: null,
 		phase: headOnly ? "head_reconciliation" : phase,
 		...(lastAccounted ? { checkpointPosition: Math.max(0, offset - 1) } : {}),
@@ -1424,6 +1473,7 @@ function readWatchHistoryList(
 	historyCursor?: HistoryCursor,
 	collectionMode?: BrowserCollectContext["collectionMode"],
 	emitRecord?: HistoryStreamRecord,
+	identityForVideo?: (video: BrowserVideo) => string,
 ): Promise<VideoReadResult> {
 	return readHistoryVideoList(
 		page,
@@ -1432,6 +1482,7 @@ function readWatchHistoryList(
 		historyCursor,
 		collectionMode,
 		emitRecord ?? (async () => undefined),
+		identityForVideo ?? videoIdentity,
 	);
 }
 
@@ -1443,6 +1494,7 @@ async function readableVideos(
 	stream: string,
 	historyCursor?: HistoryCursor,
 	historyRecord?: HistoryStreamRecord,
+	historyIdentityForVideo?: (video: BrowserVideo) => string,
 ): Promise<VideoReadResult | null> {
 	try {
 		const result =
@@ -1454,6 +1506,7 @@ async function readableVideos(
 						historyCursor,
 						ctx.collectionMode,
 						historyRecord,
+						historyIdentityForVideo,
 					)
 				: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);
 		if (
@@ -1565,9 +1618,15 @@ export async function collectYoutubeBrowser(
 					"youtube_profile_account_header_unreadable",
 				);
 			} else {
-				const own = await page.evaluate(
+				const account = await page.evaluate(
 					readOwnAccount as () => ReturnType<typeof readOwnAccount>,
 				);
+				// The avatar menu itself does not show the email on current YouTube;
+				// the Switch account view does, in the signed-in account's header.
+				const own = {
+					...account,
+					email: account.email ?? (await readSwitchAccountEmail(page)),
+				};
 				if (!own.channel_url) {
 					if (own.email) {
 						await emit("profile", {
@@ -1576,7 +1635,7 @@ export async function collectYoutubeBrowser(
 							channel_url: null,
 							title: null,
 							handle: null,
-							email: own.email,
+							...(own.email ? { email: own.email } : {}),
 							joined_at: null,
 							avatar_url: null,
 							description: null,
@@ -1641,7 +1700,7 @@ export async function collectYoutubeBrowser(
 								channel_url: own.channel_url,
 								title: channel.title,
 								handle: channel.handle,
-								email: own.email,
+								...(own.email ? { email: own.email } : {}),
 								joined_at: about?.joined_at ?? null,
 								avatar_url: channel.avatar_url,
 								description: about?.description ?? null,
@@ -1712,6 +1771,7 @@ export async function collectYoutubeBrowser(
 	let playlistLinks: Array<{ id: string; url: string }> = [];
 	let playlistIndexReadable = true;
 	let playlistIndexVerifiedEmpty = false;
+	let playlistItemsEmptyProven = false;
 	if (requested.has("playlists") || requested.has("playlist_items")) {
 		try {
 			await page.goto(`${HOME}feed/playlists`, {
@@ -1734,6 +1794,7 @@ export async function collectYoutubeBrowser(
 					"youtube-playlist-index-after-scroll",
 				);
 				playlistLinks = result.items;
+				playlistItemsEmptyProven = result.exhausted;
 				for (const stream of ["playlists", "playlist_items"]) {
 					if (!requested.has(stream)) continue;
 					if (
@@ -1808,16 +1869,19 @@ export async function collectYoutubeBrowser(
 						SCROLLS.playlist_items,
 						"playlist_items",
 					);
+					playlistItemsEmptyProven = playlistItemsEmptyProven &&
+						result !== null && result.exhausted && result.items.length === 0;
 					if (result) {
 						for (const video of result.items) {
 							await emit("playlist_items", {
-								id: id(`playlist_item|${playlist.id}|${videoIdentity(video)}`),
+								id: await youtubeRecordId(`playlist_item|${playlist.id}|${videoIdentity(video)}`),
 								playlist_id: playlist.id,
 								...videoFields(video),
 							});
 						}
 					}
 				} catch {
+					playlistItemsEmptyProven = false;
 					await streams.fail(
 						"playlist_items",
 						`YouTube playlist ${playlist.id} items could not be collected.`,
@@ -1831,6 +1895,9 @@ export async function collectYoutubeBrowser(
 			if (requested.has(stream))
 				await emitVerifiedEmptyState(ctx, stream, capturedAt);
 	}
+	if (!playlistIndexVerifiedEmpty && playlistIndexReadable &&
+		playlistItemsEmptyProven && requested.has("playlist_items"))
+		await emitVerifiedEmptyState(ctx, "playlist_items", capturedAt);
 	for (const [stream, list] of [
 		["likes", "LL"],
 		["watch_later", "WL"],
@@ -1846,7 +1913,7 @@ export async function collectYoutubeBrowser(
 		if (!result) continue;
 		for (const video of result.items)
 			await emit(stream, {
-				id: id(`${stream}|${videoIdentity(video)}`),
+				id: await youtubeRecordId(`${stream}|${videoIdentity(video)}`),
 				...videoFields(video),
 			});
 		if (result.verifiedEmpty)
@@ -1868,7 +1935,16 @@ export async function collectYoutubeBrowser(
 			ctx.collectionMode === "full_refresh"
 				? undefined
 				: (ctx.state?.watch_history as HistoryCursor | undefined);
-		let dateReference: Date | null = null;
+		const readBrowserDate = () => {
+			const now = new Date();
+			return [now.getFullYear(), now.getMonth(), now.getDate()];
+		};
+		const browserDate = await page.evaluate(readBrowserDate);
+		const dateReference =
+			Array.isArray(browserDate) && browserDate.length === 3
+				? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
+				: new Date(capturedAt);
+		let unresolvedDateCount = 0;
 		const result = await readableVideos(
 			ctx,
 			streams,
@@ -1877,23 +1953,17 @@ export async function collectYoutubeBrowser(
 			"watch_history",
 			priorCursor,
 			async (video, position) => {
-				if (!dateReference) {
-					const browserDate = await page.evaluate(() => {
-						const now = new Date();
-						return [now.getFullYear(), now.getMonth(), now.getDate()];
-					});
-					dateReference =
-						Array.isArray(browserDate) && browserDate.length === 3
-							? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
-							: new Date(capturedAt);
-				}
+				const watchedDate = resolveWatchedDate(
+					video.watched_date_label ?? null,
+					dateReference,
+				);
+				if (!watchedDate) unresolvedDateCount += 1;
 				await emit("watch_history", {
-					id: id(`history|${videoIdentity(video)}`),
-					position,
-					watched_date: resolveWatchedDate(
-						video.watched_date_label ?? null,
-						dateReference,
+					id: await youtubeRecordId(
+						`history|${historyIdentity(video, dateReference)}`,
 					),
+					position,
+					watched_date: watchedDate,
 					watched_date_label: video.watched_date_label ?? null,
 					video_id: video.video_id,
 					video_url: video.video_url,
@@ -1905,6 +1975,7 @@ export async function collectYoutubeBrowser(
 					description: video.description,
 				});
 			},
+			(video) => historyIdentity(video, dateReference),
 		);
 		if (result) {
 			const fact = coverage.get("watch_history");
@@ -1915,9 +1986,10 @@ export async function collectYoutubeBrowser(
 				if (result.stopReason) fact.stop_reason = result.stopReason;
 				fact.incomplete = !result.exhausted;
 				fact.next_checkpoint = result.checkpointAnchor
-					? id(result.checkpointAnchor)
+					? await youtubeRecordId(result.checkpointAnchor)
 					: null;
-				fact.skipped_unresolved_date_count = 0;
+				fact.unresolved_date_count = unresolvedDateCount;
+				if (unresolvedDateCount > 0) fact.incomplete = true;
 				if (result.historyDiagnostics)
 					reportHistoryTraversal(result.historyDiagnostics);
 			}
@@ -1930,9 +2002,10 @@ export async function collectYoutubeBrowser(
 						(!priorCursor?.complete || result.partialCheckpointAllowed)))
 			) {
 				const complete =
-					result.exhausted ||
-					(priorCursor?.complete === true &&
-						result.stopReason === "head-reconciled");
+					unresolvedDateCount === 0 &&
+					(result.exhausted ||
+						(priorCursor?.complete === true &&
+							result.stopReason === "head-reconciled"));
 				const evidence = result.exhausted
 					? result.evidence.kind
 					: result.partialCheckpointAllowed

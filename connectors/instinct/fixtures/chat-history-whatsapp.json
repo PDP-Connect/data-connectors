@@ -1,0 +1,31 @@
+{
+	"data": {
+		"chatHistory": {
+			"cursor": null,
+			"events": [
+				{
+					"id": "00000000-0000-4000-8000-000000000201",
+					"type": "message",
+					"createdAt": 1789050000,
+					"message": {
+						"id": "msg-0201TEST",
+						"role": "user",
+						"content": "Hi",
+						"readAt": null,
+						"origin": null,
+						"attachments": []
+					},
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				}
+			]
+		}
+	}
+}

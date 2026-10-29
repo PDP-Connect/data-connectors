@@ -987,8 +987,9 @@ export function runAndStream(
 			}
 		};
 
-		child.stdout?.on("data", (chunk: Buffer) => {
-			stdoutBuffer += chunk.toString();
+		child.stdout?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			stdoutBuffer += chunk;
 			let newlineIndex = stdoutBuffer.indexOf("\n");
 			while (newlineIndex !== -1) {
 				const line = stdoutBuffer.slice(0, newlineIndex);

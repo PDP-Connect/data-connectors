@@ -85,6 +85,64 @@ export function readOwnAccount(doc: Document = document): {
 	};
 }
 
+/**
+ * Opens the avatar menu's "Switch account" view, where YouTube shows the
+ * signed-in Google account's email. Resolves true only once the view's own
+ * header is present, not merely after the click: the handler may sit on the
+ * item renderer or on its nested endpoint anchor, so the anchor is clicked
+ * (the event still bubbles to a renderer-level handler).
+ */
+export async function openSwitchAccount(
+	doc: Document = document,
+	timeoutMs = 4_000,
+): Promise<boolean> {
+	const item = Array.from(
+		doc.querySelectorAll<HTMLElement>(
+			"ytd-multi-page-menu-renderer ytd-compact-link-renderer",
+		),
+	).find(
+		(candidate) =>
+			candidate
+				.querySelector("#label")
+				?.textContent?.trim()
+				.replace(/\s+/g, " ")
+				.toLowerCase() === "switch account",
+	);
+	if (!item) return false;
+	(item.querySelector<HTMLElement>("a#endpoint, #endpoint") ?? item).click();
+	// Inline, no helper bindings: this reader is serialized into the page.
+	const headerSelector = "ytd-google-account-header-renderer";
+	if (doc.querySelector(headerSelector)) return true;
+	const view = doc.defaultView;
+	if (!view) return false;
+	return new Promise<boolean>((resolve) => {
+		const observer = new view.MutationObserver(() => {
+			if (!doc.querySelector(headerSelector)) return;
+			observer.disconnect();
+			resolve(true);
+		});
+		observer.observe(doc, { childList: true, subtree: true });
+		view.setTimeout(() => {
+			observer.disconnect();
+			resolve(doc.querySelector(headerSelector) !== null);
+		}, timeoutMs);
+	});
+}
+
+/**
+ * The signed-in account's email from the Switch account view's own header.
+ * Only that header is read: the account list below it names other accounts.
+ */
+export function readGoogleAccountEmail(doc: Document = document): string | null {
+	const text = doc
+		.querySelector("ytd-google-account-header-renderer #email")
+		?.textContent?.trim();
+	// Inline: these readers are serialized into the page without module scope.
+	return text && /^[^\s@<>"']+@[^\s@<>"'.]+\.[^\s@<>"']+$/.test(text)
+		? text
+		: null;
+}
+
 export function readChannelPage(doc: Document = document): {
 	channel_id: string | null;
 	channel_url: string;
@@ -244,8 +302,7 @@ export function readSubscriptions(doc: Document = document): Array<{
 							: null,
 				},
 			];
-		})
-		.slice(0, 20);
+		});
 }
 
 export function readPlaylistLinks(
@@ -296,8 +353,7 @@ export function readPlaylistLinks(
 			if (!id || id === "LL" || id === "WL" || seen.has(id)) return [];
 			seen.add(id);
 			return [{ id, url: url.href }];
-		})
-		.slice(0, 50);
+		});
 }
 
 export function readPlaylistHeader(doc: Document = document): {

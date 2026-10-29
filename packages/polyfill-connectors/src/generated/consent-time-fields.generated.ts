@@ -25,6 +25,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		profile: null,
 	},
 	anthropic: {
+		account_plan: null,
 		account_profile: null,
 		conversations: { field: "create_time", format: "date-time" },
 		messages: { field: "create_time", format: "date-time" },
@@ -62,6 +63,10 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	apple_photos: {
 		photos: { field: "file_modified_at", format: "date-time" },
 	},
+	character_ai: {
+		chats: { field: "create_time", format: "date-time" },
+		messages: { field: "create_time", format: "date-time" },
+	},
 	chase: {
 		accounts: null,
 		balances: { field: "as_of", format: "date-time" },
@@ -71,12 +76,14 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	},
 	chatgpt: {
 		account_plan: null,
+		account_profile: null,
 		conversations: { field: "update_time", format: "date-time" },
 		custom_gpts: { field: "created_at", format: "date-time" },
 		custom_instructions: { field: "updated_at", format: "date-time" },
 		memories: { field: "created_at", format: "date-time" },
 		messages: { field: "create_time", format: "date-time" },
 		shared_conversations: { field: "created_at", format: "date-time" },
+		usage_summary: null,
 	},
 	claude_code: {
 		attachments: { field: "timestamp", format: "date-time" },
@@ -113,6 +120,14 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	doordash: {
 		order_items: null,
 		orders: { field: "order_date", format: "date-time" },
+	},
+	facebook: {
+		comments: { field: "time", format: "date-time" },
+		friends: null,
+		groups: null,
+		posts: { field: "create_time", format: "date-time" },
+		profile: null,
+		reactions: { field: "time", format: "date-time" },
 	},
 	fitbit: {
 		activities: { field: "start_time", format: "date-time" },
@@ -204,6 +219,16 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		messages: { field: "date", format: "date-time" },
 		participants: null,
 	},
+	instinct: {
+		agent_contact: null,
+		chat_events: { field: "created_at", format: "date-time" },
+		chats: { field: "last_event_at", format: "date-time" },
+		connections: null,
+		devices: { field: "created_at", format: "date-time" },
+		profile: null,
+		trusted_people: { field: "created_at", format: "date-time" },
+		vault_entries: null,
+	},
 	jellyfin: {
 		items: { field: "last_played_date", format: "date-time" },
 		libraries: null,
@@ -227,6 +252,16 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		posts: { field: "taken_at", format: "date-time" },
 		profile: null,
 	},
+	muse: {
+		activities: { field: "timestamp", format: "date-time" },
+		connected_apps: null,
+		conversations: { field: "updated_at", format: "date-time" },
+		files: { field: "modified_at", format: "date-time" },
+		goals: { field: "created_at", format: "date-time" },
+		memory_files: { field: "modified_at", format: "date-time" },
+		messages: { field: "occurred_at", format: "date-time" },
+		scheduled_tasks: null,
+	},
 	netflix_export: {
 		viewing_activity: { field: "watched_at", format: "date-time" },
 	},
@@ -243,6 +278,10 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		activity: { field: "day", format: "date" },
 		readiness: { field: "day", format: "date" },
 		sleep: { field: "day", format: "date" },
+	},
+	perplexity: {
+		conversations: { field: "update_time", format: "date-time" },
+		messages: { field: "create_time", format: "date-time" },
 	},
 	pocket: {
 		items: { field: "time_added", format: "date-time" },
@@ -307,6 +346,16 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	strava_browser: {
 		activities: { field: "start_date_local", format: "date" },
 	},
+	tiktok: {
+		collection_items: null,
+		favorite_collections: null,
+		favorites: null,
+		followers: null,
+		following: null,
+		likes: null,
+		profile: null,
+		videos: { field: "created_at", format: "date-time" },
+	},
 	twitter_archive: {
 		direct_messages: { field: "created_at", format: "date-time" },
 		tweets: { field: "created_at", format: "date-time" },
@@ -332,6 +381,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	whatsapp: {
 		attachments: null,
 		chats: { field: "first_message_date", format: "date-time" },
+		messages: { field: "sent_at", format: "date-time" },
+	},
+	whatsapp_web: {
+		chats: { field: "last_activity_at", format: "date-time" },
+		contacts: null,
+		groups: null,
 		messages: { field: "sent_at", format: "date-time" },
 	},
 	wholefoods: {

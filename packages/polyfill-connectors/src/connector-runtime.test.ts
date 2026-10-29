@@ -37,6 +37,7 @@ import {
 	shouldPreserveRemotePagesOnAcquire,
 } from "./connector-runtime.ts";
 import type { CaptureSession } from "./fixture-capture.ts";
+import { TerminalError } from "./terminal-error.ts";
 
 const HEADLESS: BrowserRuntimeVisibility = {
 	envKey: "PDPP_BROWSER_HEADLESS",
@@ -206,7 +207,7 @@ test("a self-resolved browser handoff registers before emission and unregisters 
 		completeAssistance: lifecycle.complete,
 		isProbeSuccessful: (ready: boolean) => ready,
 		message:
-			"Finish sign-in in the secure browser. PDPP continues automatically.",
+			"Finish sign-in in the secure browser. The import continues automatically.",
 		page: ownerPage,
 		probe: (): Promise<boolean> => Promise.resolve(false),
 		readinessProbe: (): Promise<boolean> => Promise.resolve(true),
@@ -1809,6 +1810,71 @@ test("createConnectorFailure defaults retryable to false when omitted", () => {
 		"discovery failed",
 	) as Error & { retryable?: boolean };
 	assert.equal(err.retryable, false);
+});
+
+test("typed recovery survives a normalizer that only returns message and retryability", () => {
+	const recoveryHint = { action: "manual_action_required", retryable: false };
+	const normalized = composeNormalizedTerminalError({
+		message: "Session rejected",
+		code: "meta_session_required",
+		retryable: false,
+		recoveryHint,
+		normalizeTerminalError: ({ message, retryable }) => ({
+			message,
+			retryable,
+		}),
+	});
+	assert.deepEqual(normalized.recovery_hint, recoveryHint);
+	const overridden = composeNormalizedTerminalError({
+		message: "Session rejected",
+		code: "meta_session_required",
+		retryable: false,
+		recoveryHint,
+		normalizeTerminalError: ({ message, retryable }) => ({
+			message,
+			retryable,
+			recovery_hint: "not_retriable",
+		}),
+	});
+	assert.equal(overridden.recovery_hint, "not_retriable");
+});
+
+test("typed recovery fills an omitted retryable bit independently of its action", () => {
+	for (const retryable of [false, true]) {
+		for (const hintRetryable of [undefined, false, true]) {
+			const error = createConnectorFailure(
+				"auth_failed",
+				"Authentication rejected.",
+				{
+					retryable,
+					recoveryHint: {
+						action: "manual_action_required",
+						...(hintRetryable === undefined
+							? {}
+							: { retryable: hintRetryable }),
+					},
+				},
+			);
+			assert.ok(error instanceof TerminalError);
+			assert.deepEqual(error.recoveryHint, {
+				action: "manual_action_required",
+				retryable: hintRetryable ?? retryable,
+			});
+		}
+	}
+});
+
+test("createConnectorFailure rejects recovery actions outside the machine-field contract", () => {
+	assert.throws(
+		() =>
+			createConnectorFailure("auth_failed", "Session rejected", {
+				recoveryHint: {
+					action: "https://example.invalid/private",
+					retryable: false,
+				},
+			}),
+		/connector_failure_invalid_code/,
+	);
 });
 
 test("createConnectorFailure accepts an explicit retryable: true", () => {

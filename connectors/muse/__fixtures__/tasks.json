@@ -1,0 +1,53 @@
+{
+  "schedules": [
+    {
+      "id": "agentic-feature-tour",
+      "title": null,
+      "path": "user1@example.com",
+      "schedule_key": "Synthetic schedule_key 2 lorem",
+      "mode": "task",
+      "enabled": true,
+      "execution_target": "main",
+      "is_heartbeat": false,
+      "next_run_at_utc": 1792689600,
+      "timezone": "Synthetic timezone 3 lorem",
+      "cadence": {
+        "kind": "daily",
+        "time": "Synthetic time 4"
+      }
+    },
+    {
+      "id": "heartbeat",
+      "title": null,
+      "path": "user5@example.com",
+      "schedule_key": "Synthetic schedule_key 6 lorem",
+      "mode": "heartbeat",
+      "enabled": true,
+      "execution_target": "main",
+      "is_heartbeat": true,
+      "next_run_at_utc": 1792614192,
+      "timezone": "UTC",
+      "cadence": {
+        "kind": "interval",
+        "interval_seconds": 1800
+      }
+    },
+    {
+      "id": "stretch-reminder-2026-10-22",
+      "title": "Synthetic title 7 lorem lorem",
+      "path": "user8@example.com",
+      "schedule_key": "Synthetic schedule_key 9 lorem lorem lorem",
+      "mode": "task",
+      "enabled": true,
+      "execution_target": "main",
+      "is_heartbeat": false,
+      "next_run_at_utc": 1792684800,
+      "timezone": "Synthetic timezone 10 lorem",
+      "cadence": {
+        "kind": "runonce",
+        "run_at_utc": 1792684800
+      }
+    }
+  ],
+  "invalid": []
+}

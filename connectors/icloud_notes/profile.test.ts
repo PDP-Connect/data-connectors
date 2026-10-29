@@ -26,6 +26,7 @@ function fixture(
 	const page = {
 		url: () => href,
 		evaluate: async (_fn: unknown, arg: unknown) => {
+			if (arg === "icloud-notes-location") return href;
 			if (arg === undefined) {
 				return { href, readyState: "complete", blocked: false };
 			}
@@ -135,7 +136,12 @@ test("profile: numeric account IDs remain source identities, while malformed ide
 		"x".repeat(201),
 	]) {
 		const run = fixture({ dsid, fullName: "Test User" });
-		await assert.rejects(collectAllStreams(run.ctx), /icloud_auth_failed/);
+		// A signed-in 200 response with a malformed id is an unrecognized
+		// response, not a rejected session.
+		await assert.rejects(
+			collectAllStreams(run.ctx),
+			/icloud_invalid_config_response/,
+		);
 		assert.equal(run.harness.emitted.length, 0);
 		assert.equal(run.harness.protocolMessages.length, 0);
 	}
@@ -208,7 +214,11 @@ test("profile: navigation during record delivery prevents a profile checkpoint",
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "profile" &&
-				message.reason === "icloud_navigation_changed",
+				message.reason === "stream_collection_failed" &&
+				typeof message.recovery_hint === "object" &&
+				message.recovery_hint?.action === "retry_by_runtime" &&
+				message.recovery_hint?.retryable === true &&
+				(message.diagnostics as Record<string, unknown>)?.source_reason === "icloud_navigation_changed",
 		),
 	);
 });

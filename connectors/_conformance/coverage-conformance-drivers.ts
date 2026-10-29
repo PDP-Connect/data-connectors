@@ -1377,6 +1377,9 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"github.events",
 	"github.organizations",
 	"github.pinned_repositories",
+	// Facebook (browser-session-backed, auth-walled; no credential-free
+	// coverage driver yet). profile is its only required stream.
+	"facebook.profile",
 	// GitHub browser profile: auth-walled browser-session collection with no
 	// credential-free coverage driver yet. The PAT/API GitHub connector remains
 	// the supported setup profile; this profile is listed as development.
@@ -1393,6 +1396,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"linkedin.skills",
 	"linkedin.languages",
 	"linkedin.connections",
+	// WhatsApp (web): read from the owner's signed-in WhatsApp Web tab's own
+	// in-page stores; auth-walled (phone-linked session), no credential-free
+	// coverage driver. chats and messages are its required streams.
+	"whatsapp_web.chats",
+	"whatsapp_web.messages",
 	// Meta (browser-session-backed; no credential-free fixture yet).
 	"meta.profile",
 	// Shopify (browser Apollo-cache extraction; no credential-free fixture yet).
@@ -1436,6 +1444,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"oura.sleep",
 	"oura.readiness",
 	"oura.activity",
+	// Character.AI browser profile: auth-walled character.ai session whose API
+	// token lives only in the signed-in page; no credential-free coverage
+	// driver exists for it yet.
+	"character_ai.chats",
+	"character_ai.messages",
 	// Oura browser profile: auth-walled cloud.ouraring.com browser-session
 	// collection with no credential-free coverage driver yet. The PAT/API Oura
 	// connector remains the supported setup profile; this profile is listed as
@@ -1443,6 +1456,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"oura_browser.sleep",
 	"oura_browser.readiness",
 	"oura_browser.activity",
+	// Perplexity: auth-walled www.perplexity.ai browser-session collection
+	// behind a Cloudflare check, with no credential-free coverage driver yet.
+	// Development tier; its tests drive the collector against a synthetic
+	// library instead.
+	"perplexity.conversations",
 	"slack.channels",
 	"slack.channel_memberships",
 	"slack.channel_stats",
@@ -1470,6 +1488,14 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"venmo.profile",
 	"venmo.friends",
 	"venmo.transactions",
+	// Instinct (REAL_UNLISTED_CONNECTORS, development): browser-session
+	// connector behind an SMS-code + Turnstile login; its integration suite
+	// drives collectInstinct against fixtures, but no credential-free coverage
+	// driver exists yet.
+	"instinct.profile",
+	"instinct.agent_contact",
+	"instinct.chats",
+	"instinct.chat_events",
 	// WHOOP (Preview): the owner-visible browser connector has a real
 	// integration suite, but no credential-free coverage driver yet.
 	"whoop.profile",

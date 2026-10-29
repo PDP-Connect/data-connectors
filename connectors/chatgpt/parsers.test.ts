@@ -15,6 +15,7 @@ import {
 	buildMemoryRecord,
 	buildSharedConversationRecord,
 	countBranchMessages,
+	countBranchModels,
 	decodeEscapedText,
 	encodePdppSafeText,
 	encodeToolCallStrings,
@@ -23,18 +24,22 @@ import {
 	extractContentParts,
 	extractMessage,
 	extractMessageWithBlob,
+	extractNonStringParts,
 	extractRawMessageText,
 	extractToolCalls,
 	flattenTreeCurrentBranch,
 	isEscapedUnit,
 	maxUpdateTimeIso,
+	messageRecordId,
 	reconcileEmittedBranchMessages,
 	resolveGizmoIsPublic,
+	toMessageRecord,
 	tsToIso,
 	unwrapGizmo,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
+	ChatGptMessage,
 	ChatGptNode,
 	ConversationListItem,
 	RawAccountsCheckBody,
@@ -127,19 +132,229 @@ test("extractContent: undefined / empty object → null", () => {
 	assert.equal(extractContent({}), null);
 });
 
-test("extractContent: text joins parts with \\n and asset-pointers render as [asset:...]", () => {
-	const out = extractContent({
-		content_type: "text",
-		parts: ["hello", { asset_pointer: "file-1" }, { text: "world" }],
+// The legacy collector (apps/desktop/connectors/openai/chatgpt-playwright.js,
+// walkMessages) builds text and multimodal_text content as
+// `parts.filter(p => typeof p === "string").join("\n")` and omits the message
+// when that is empty. Each case below pins one shape of that join.
+const LEGACY_JOIN_CASES: Array<[string, unknown[], string | null]> = [
+	["single string", ["hello"], "hello"],
+	["strings join with a newline", ["a", "b"], "a\nb"],
+	["edge whitespace is kept", [" a "], " a "],
+	["a trailing empty string adds a newline", [" a ", ""], " a \n"],
+	["a leading empty string adds a newline", ["", " a "], "\n a "],
+	["empty strings between strings", ["a", "", "b"], "a\n\nb"],
+	["two empty strings give a lone newline", ["", ""], "\n"],
+	["one empty string is empty", [""], null],
+	["no parts", [], null],
+	["whitespace-only strings are kept", ["", "   "], "\n   "],
+	["only object parts are empty", [{}, {}], null],
+	[
+		"object parts are dropped before the join",
+		["hello", { asset_pointer: "file-1" }, { text: "world" }, "end"],
+		"hello\nend",
+	],
+	["objects around one string", [{}, " a ", {}], " a "],
+	["an asset-only body is empty", [{ asset_pointer: "img-1" }], null],
+	["non-object, non-string parts are dropped", [1, null, true, "a"], "a"],
+];
+
+for (const contentType of ["text", "multimodal_text"] as const) {
+	for (const [name, parts, expected] of LEGACY_JOIN_CASES) {
+		test(`extractContent: ${contentType} matches the legacy join: ${name}`, () => {
+			assert.equal(
+				extractContent({ content_type: contentType, parts }),
+				expected,
+			);
+			assert.equal(
+				extractContentParts({ content_type: contentType, parts }).raw,
+				expected,
+			);
+		});
+	}
+}
+
+// The `parts` stringifier of 0.2.56, which wrote every object part into
+// `content`. The text it produced for an object part must stay recoverable.
+function capturedBy0_2_56(part: unknown): string {
+	if (typeof part === "string") return part;
+	if (part && typeof part === "object") {
+		const po = part as {
+			asset_pointer?: unknown;
+			content_type?: unknown;
+			text?: unknown;
+		};
+		if (typeof po.text === "string") return po.text;
+		if (typeof po.asset_pointer === "string")
+			return `[asset:${po.asset_pointer}]`;
+		if (typeof po.content_type === "string") return `[${po.content_type}]`;
+	}
+	return "";
+}
+
+const MIXED_PARTS: unknown[] = [
+	"hello",
+	{
+		content_type: "image_asset_pointer",
+		asset_pointer: "file-service://file-1",
+		size_bytes: 120,
+		width: 10,
+		metadata: { dalle: { gen_id: "g1", prompt: "a prompt" } },
+	},
+	{
+		content_type: "audio_transcription",
+		text: "spoken words",
+		direction: "in",
+	},
+	{ content_type: "audio_asset_pointer", asset_pointer: "sediment://audio-1" },
+	{ content_type: "real_time_user_audio_video_asset_pointer" },
+	{},
+	1,
+	null,
+	["nested", { asset_pointer: "p" }],
+	"end",
+];
+
+for (const contentType of ["text", "multimodal_text"] as const) {
+	test(`non_string_parts: ${contentType} keeps every non-string part, and what 0.2.56 wrote into content is recoverable`, () => {
+		const rec = extractMessage(
+			"n1",
+			{
+				parent: null,
+				children: [],
+				message: {
+					author: { role: "user" },
+					content: { content_type: contentType, parts: MIXED_PARTS },
+				},
+			} as ChatGptNode,
+			"c1",
+			true,
+		);
+		assert.equal(rec?.content, "hello\nend", "content is the legacy join");
+		const kept = rec?.non_string_parts as { index: number; part: unknown }[];
+		const expectedIndexes = MIXED_PARTS.flatMap((part, index) =>
+			typeof part === "string" ? [] : [index],
+		);
+		assert.deepEqual(
+			kept.map((entry) => entry.index),
+			expectedIndexes,
+			"one entry per non-string part, in order, with its position in parts",
+		);
+		for (const entry of kept) {
+			assert.deepEqual(
+				entry.part,
+				MIXED_PARTS[entry.index] ?? null,
+				`part ${entry.index} is kept whole`,
+			);
+			assert.equal(
+				capturedBy0_2_56(entry.part),
+				capturedBy0_2_56(MIXED_PARTS[entry.index]),
+				`part ${entry.index}: the 0.2.56 text is reproducible from the kept part`,
+			);
+		}
+		assert.equal(
+			validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+			true,
+		);
 	});
-	assert.equal(out, "hello\n[asset:file-1]\nworld");
+}
+
+test("non_string_parts: empty for string-only bodies and for content types that have no parts", () => {
+	for (const content of [
+		{ content_type: "text", parts: ["a", "b"] },
+		{ content_type: "text", parts: [] },
+		{ content_type: "text" },
+		{ content_type: "code", language: "python", text: "print(1)" },
+		{ content_type: "thoughts", thoughts: [{ summary: "s" }] },
+	]) {
+		assert.deepEqual(
+			extractNonStringParts(content),
+			[],
+			JSON.stringify(content),
+		);
+	}
+	assert.deepEqual(extractNonStringParts(undefined), []);
 });
 
-test("extractContent: empty text parts → null", () => {
+test("non_string_parts: strings at any depth, and keys, are pdpp-safe-escape-v1 encoded and decode back", () => {
+	const part = { text: "a\x00b", nested: { "k\x01": ["c\x7fd"] }, n: 3 };
+	const [entry] = extractNonStringParts({
+		content_type: "multimodal_text",
+		parts: ["x", part],
+	}) as { index: number; part: Record<string, unknown> }[];
+	assert.equal(entry?.index, 1);
+	assert.equal(entry?.part.text, "a\\u0000b");
+	assert.deepEqual(entry?.part.nested, { "k\\u0001": ["c\\u007Fd"] });
+	assert.equal(entry?.part.n, 3);
+	assert.equal(decodeEscapedText(String(entry?.part.text)), part.text);
+});
+
+test("messageRecordId / toMessageRecord: ids, parent and child links name records in the conversation, node_id keeps the source id", () => {
+	assert.equal(messageRecordId("c1", "n1"), "c1:n1");
+	const node: ChatGptNode = {
+		parent: "p1",
+		children: ["k1", "k2"],
+		message: {
+			author: { role: "user" },
+			content: { content_type: "text", parts: ["hi"] },
+		},
+	} as ChatGptNode;
+	const rec = extractMessage("n1", node, "c1", true) ?? {};
+	assert.equal(rec.id, "n1", "extraction names a node by the source's node id");
+	const wire = toMessageRecord(rec, "c1");
+	assert.equal(wire.id, "c1:n1");
+	assert.equal(wire.node_id, "n1");
+	assert.equal(wire.conversation_id, "c1");
+	assert.equal(wire.parent_id, "c1:p1");
+	assert.deepEqual(wire.children_ids, ["c1:k1", "c1:k2"]);
+	assert.equal(
+		toMessageRecord({ ...rec, parent_id: null }, "c1").parent_id,
+		null,
+	);
+	// The same node in another conversation is another record.
+	assert.notEqual(toMessageRecord(rec, "c2").id, wire.id);
+	assert.equal(toMessageRecord(rec, "c2").node_id, wire.node_id);
+});
+
+test("messages manifest: primary key is [id], and every field a wire record carries is declared", () => {
+	const manifest = JSON.parse(
+		readFileSync(join(__dirname, "manifest.json"), "utf8"),
+	) as {
+		streams: Array<{
+			name: string;
+			primary_key: string[];
+			schema: { properties: Record<string, unknown>; required: string[] };
+		}>;
+	};
+	const stream = manifest.streams.find((s) => s.name === "messages");
+	assert.deepEqual(stream?.primary_key, ["id"]);
+	const wire = toMessageRecord(
+		extractMessage("n1", textNode("hello"), "c1", true) ?? {},
+		"c1",
+	);
+	for (const key of Object.keys(wire)) {
+		assert.ok(key in (stream?.schema.properties ?? {}), `${key} is declared`);
+	}
+	for (const key of ["node_id", "non_string_parts"]) {
+		assert.ok(key in (stream?.schema.properties ?? {}), `${key} is declared`);
+		assert.equal(
+			stream?.schema.required.includes(key),
+			false,
+			`${key} is additive`,
+		);
+	}
+});
+
+test("extractContent: a body without a parts array is empty", () => {
+	assert.equal(extractContent({ content_type: "text" }), null);
+	assert.equal(extractContent({ content_type: "multimodal_text" }), null);
+});
+
+test("extractContent: no text parts → null; whitespace-only text is kept as written", () => {
 	assert.equal(extractContent({ content_type: "text", parts: [] }), null);
+	assert.equal(extractContent({ content_type: "text", parts: [""] }), null);
 	assert.equal(
 		extractContent({ content_type: "text", parts: ["", "   "] }),
-		null,
+		"\n   ",
 	);
 });
 
@@ -183,18 +398,6 @@ test("extractContent: reasoning_recap prefers `content` then falls back to `text
 		"B",
 	);
 	assert.equal(extractContent({ content_type: "reasoning_recap" }), null);
-});
-
-test("extractContent: multimodal_text renders {content_type: image_asset_pointer} tag", () => {
-	const out = extractContent({
-		content_type: "multimodal_text",
-		parts: [
-			{ content_type: "image_asset_pointer", asset_pointer: "img-1" },
-			"caption",
-		],
-	});
-	// asset_pointer wins over content_type when both present.
-	assert.equal(out, "[asset:img-1]\ncaption");
 });
 
 test("extractContent: tether_browsing_display joins summary + result with blank line", () => {
@@ -278,10 +481,56 @@ test("extractContentParts: forbidden controls at the edges are escaped, not trim
 		extractContent({ content_type: "text", parts: ["\u000B\u000C"] }),
 		"\\u000B\\u000C",
 	);
+});
+
+test("extractContent: leading and trailing whitespace is preserved exactly, in every text-bearing shape", () => {
+	const edged = (body: string) => `  \t\n${body}\n\t \u00A0`;
+	const cases: Array<[string, Parameters<typeof extractContent>[0]]> = [
+		["text", { content_type: "text", parts: [edged("a")] }],
+		[
+			"multimodal_text",
+			{ content_type: "multimodal_text", parts: [edged("a")] },
+		],
+		[
+			"thoughts",
+			{ content_type: "thoughts", thoughts: [{ summary: edged("a") }] },
+		],
+		[
+			"tether_browsing_display",
+			{ content_type: "tether_browsing_display", result: edged("a") },
+		],
+		["tether_quote", { content_type: "tether_quote", text: edged("a") }],
+		[
+			"model_editable_context",
+			{ content_type: "model_editable_context", model_set_context: edged("a") },
+		],
+		[
+			"user_editable_context",
+			{ content_type: "user_editable_context", user_instructions: edged("a") },
+		],
+	];
+	for (const [name, content] of cases) {
+		const got = extractContent(content);
+		assert.ok(got?.includes(edged("a")), `${name}: ${JSON.stringify(got)}`);
+	}
 	assert.equal(
 		extractContentParts({ content_type: "text", parts: ["  hello \n"] }).raw,
-		"hello",
+		"  hello \n",
 	);
+	assert.equal(
+		extractContent({ content_type: "text", parts: ["\n\t "] }),
+		"\n\t ",
+	);
+});
+
+test("extractMessage: the stored record keeps edge whitespace next to escaped controls", () => {
+	const source = "\n  lead\ttab \x00 mid\x0B \n trail  \t\n";
+	const rec = extractMessage("n1", textNode(source), "c1", true);
+	assert.equal(
+		rec?.content,
+		source.replace("\x00", "\\u0000").replace("\x0B", "\\u000B"),
+	);
+	assert.equal(decodeEscapedText(rec?.content as string), source);
 });
 
 function textNode(text: string): ChatGptNode {
@@ -300,7 +549,10 @@ test("extractMessage: control-rich text is emitted escaped with no loss marker, 
 	assert.equal(rec?.content, "a\\u0000b");
 	assert.equal("content_loss" in (rec ?? {}), false);
 	assert.equal("blob_ref" in (rec ?? {}), false);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 test("decodeEscapedText: NUL and other controls round-trip losslessly", () => {
@@ -313,10 +565,13 @@ test("decodeEscapedText: NUL and other controls round-trip losslessly", () => {
 		"valid pair \u{1F600} next to \x00",
 	]) {
 		const rec = extractMessage("n1", textNode(source), "c1", true);
-		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+		assert.equal(
+			validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+			true,
+		);
 		assert.equal(
 			decodeEscapedText(rec?.content as string),
-			source.trim(),
+			source,
 			JSON.stringify(source),
 		);
 	}
@@ -372,7 +627,10 @@ test("decodeEscapedText: round-trips arbitrary strings over a hostile alphabet",
 		}
 		source += "x";
 		const rec = extractMessage("n1", textNode(source), "c1", true);
-		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+		assert.equal(
+			validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+			true,
+		);
 		assert.equal(
 			decodeEscapedText(rec?.content as string),
 			source,
@@ -467,7 +725,10 @@ test("extractContentParts: only the unknown-shape fallback truncation is source-
 
 test("messages schema: a message with a blob_ref and null content validates", () => {
 	const sha256 = "a".repeat(64);
-	const base = extractMessage("n1", textNode("hello"), "c1", true) ?? {};
+	const base = toMessageRecord(
+		extractMessage("n1", textNode("hello"), "c1", true) ?? {},
+		"c1",
+	);
 	const ok = validateRecord("messages", {
 		...base,
 		content: null,
@@ -817,6 +1078,7 @@ test("buildAccountPlanRecord: normalizes the default account from the fixture", 
 	const rec = buildAccountPlanRecord(raw);
 	assert.deepEqual(rec, {
 		id: "account_plan",
+		is_default: true,
 		account_id: "00000000-0000-4000-8000-000000000001",
 		account_structure: "personal",
 		account_created_at: "2023-01-15T10:00:00.000Z",
@@ -1126,6 +1388,179 @@ test("buildConversationRecord: detail fields overlay list; branchCount uses mapp
 	assert.equal(rec.message_count_on_current_branch, 2);
 });
 
+test("countBranchModels: a conversation that switches models counts assistant replies per model on the current branch only", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	// gpt-4o twice, then o3 twice. Not counted: the tool message that names
+	// gpt-4o, the abandoned-branch reply that names gpt-5, and the last
+	// assistant reply, which reports no model.
+	assert.deepEqual(countBranchModels(mapping, currentNode), {
+		"gpt-4o": 2,
+		o3: 2,
+	});
+	// The same tree read from the abandoned branch sees only its own replies.
+	assert.deepEqual(countBranchModels(mapping, "a3-alt"), {
+		"gpt-4o": 2,
+		"gpt-5": 1,
+	});
+});
+
+test("countBranchModels: null without a mapping or tip, empty when no assistant names a model", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	assert.equal(countBranchModels(null, currentNode), null);
+	assert.equal(countBranchModels(mapping, null), null);
+	assert.deepEqual(countBranchModels(mapping, "u2"), { "gpt-4o": 1 });
+	assert.deepEqual(countBranchModels(mapping, "u1"), {});
+});
+
+test("countBranchModels: drops slugs that are not safe model names", () => {
+	const reply = (
+		id: string,
+		parent: string,
+		slug: unknown,
+	): [string, ChatGptNode] => [
+		id,
+		{
+			parent,
+			children: [],
+			message: {
+				author: { role: "assistant" },
+				metadata: { model_slug: slug as string },
+			},
+		},
+	];
+	const mapping: Record<string, ChatGptNode> = Object.fromEntries([
+		["root", { parent: null, children: ["r1"] }],
+		reply("r1", "root", "x".repeat(80)),
+		reply("r2", "r1", "x".repeat(81)),
+		reply("r3", "r2", ""),
+		reply("r4", "r3", "bad\u0000slug"),
+		reply("r5", "r4", 4),
+		reply("r6", "r5", null),
+		reply("r7", "r6", "__proto__"),
+		reply("r8", "r7", "__proto__"),
+	]);
+	const counts = countBranchModels(mapping, "r8");
+	assert.deepEqual(Object.entries(counts ?? {}), [
+		["x".repeat(80), 1],
+		["__proto__", 2],
+	]);
+	assert.equal(
+		validateRecord("conversations", conversationWith(counts)).ok,
+		true,
+	);
+});
+
+test("countBranchModels: counts only replies, not the tool calls and intermediate steps the messages stream reports as such", () => {
+	const assistant = (
+		id: string,
+		parent: string,
+		message: Partial<ChatGptMessage>,
+	): [string, ChatGptNode] => [
+		id,
+		{
+			parent,
+			children: [],
+			message: {
+				author: { role: "assistant" },
+				metadata: { model_slug: "gpt-4o" },
+				...message,
+			},
+		},
+	];
+	const mapping: Record<string, ChatGptNode> = Object.fromEntries([
+		["root", { parent: null, children: ["a1"] }],
+		// A reply to the user, with and without an explicit "all" recipient.
+		assistant("a1", "root", {}),
+		assistant("a2", "a1", { recipient: "all", end_turn: true }),
+		// Not replies: a call to a tool, a call listed in metadata, a plugin call,
+		// and a step that does not end the turn.
+		assistant("t1", "a2", { recipient: "python" }),
+		assistant("t2", "t1", {
+			metadata: { model_slug: "gpt-4o", tool_calls: [{ name: "search" }] },
+		}),
+		assistant("t3", "t2", {
+			metadata: { model_slug: "gpt-4o", invoked_plugin: { name: "x" } },
+		}),
+		assistant("t4", "t3", { end_turn: false }),
+		assistant("a3", "t4", { metadata: { model_slug: "o3" } }),
+	]);
+
+	assert.deepEqual(countBranchModels(mapping, "a3"), { "gpt-4o": 2, o3: 1 });
+});
+
+function conversationWith(modelCounts: unknown): Record<string, unknown> {
+	return {
+		id: "c1",
+		title: null,
+		create_time: null,
+		update_time: null,
+		is_archived: null,
+		is_starred: null,
+		workspace_id: null,
+		current_node: null,
+		message_count_on_current_branch: null,
+		model_counts: modelCounts,
+		gizmo_id: null,
+	};
+}
+
+test("conversations schema: model_counts accepts null and name-to-count objects, refuses unsafe keys and counts", () => {
+	for (const ok of [null, {}, { "gpt-4o": 3 }]) {
+		assert.equal(
+			validateRecord("conversations", conversationWith(ok)).ok,
+			true,
+		);
+	}
+	for (const bad of [
+		{ ["x".repeat(81)]: 1 },
+		{ "": 1 },
+		{ "a\u0000b": 1 },
+		{ "gpt-4o": 0 },
+		{ "gpt-4o": 1.5 },
+		{ "gpt-4o": "3" },
+		["gpt-4o"],
+		"gpt-4o",
+	]) {
+		assert.equal(
+			validateRecord("conversations", conversationWith(bad)).ok,
+			false,
+			JSON.stringify(bad),
+		);
+	}
+	// A record without the field is not a valid conversation record any more.
+	const { model_counts: _omitted, ...without } = conversationWith(null);
+	assert.equal(validateRecord("conversations", without).ok, false);
+});
+
+test("buildConversationRecord: model_counts follows the detail mapping, like the branch count", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	const list: ConversationListItem = {
+		id: "conv1",
+		update_time: 1_700_000_000,
+	};
+	const withDetail = buildConversationRecord(list, {
+		current_node: currentNode,
+		mapping,
+	});
+	assert.deepEqual(withDetail.model_counts, { "gpt-4o": 2, o3: 2 });
+	assert.equal(validateRecord("conversations", withDetail).ok, true);
+	// A detail with a mapping but no tip: nothing is on the branch.
+	const noTip = buildConversationRecord(list, { current_node: null, mapping });
+	assert.equal(noTip.message_count_on_current_branch, 0);
+	assert.deepEqual(noTip.model_counts, {});
+	// No detail: unknown, not empty.
+	const listOnly = buildConversationRecord(list, null);
+	assert.equal(listOnly.message_count_on_current_branch, null);
+	assert.equal(listOnly.model_counts, null);
+	assert.equal(validateRecord("conversations", listOnly).ok, true);
+	// Nothing but model names and counts reaches the record: no message text.
+	assert.equal(JSON.stringify(withDetail).includes("question"), false);
+	assert.equal(JSON.stringify(withDetail).includes("answer"), false);
+});
+
 test("buildConversationRecord: null detail falls back to list fields", () => {
 	const rec = buildConversationRecord(
 		{ id: "conv1", title: "t", update_time: 1_700_000_000 },
@@ -1242,7 +1677,10 @@ test("pdpp-safe-escape-v1: noncharacters on every plane are valid text and pass 
 		assert.equal(encodePdppSafeText(source), source, "so it is not escaped");
 		const rec = extractMessage("n1", textNode(source), "c1", true);
 		assert.equal(rec?.content, source);
-		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+		assert.equal(
+			validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+			true,
+		);
 	}
 });
 
@@ -1293,9 +1731,10 @@ test("messages schema: blob_ref requires null content; content may be absent but
 		size_bytes: 9,
 		sha256,
 	};
-	const base = {
-		...(extractMessage("n1", textNode("hello"), "c1", true) ?? {}),
-	};
+	const base = toMessageRecord(
+		extractMessage("n1", textNode("hello"), "c1", true) ?? {},
+		"c1",
+	);
 	assert.equal(
 		validateRecord("messages", { ...base, content: null, blob_ref }).ok,
 		true,
@@ -1338,7 +1777,10 @@ test("extractMessage: a tool-recipient body stays inline in tool_calls when cont
 			text: "print(1)",
 		},
 	]);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 test("extractMessage: an oversize tool-recipient body is referenced, not duplicated into tool_calls", () => {
@@ -1391,7 +1833,10 @@ test("messages schema: an arbitrary source tool call with text_ref and text is k
 	assert.deepEqual(rec?.tool_calls, [
 		{ text_ref: "source-id", text: "bo\\u0000dy" },
 	]);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 function decodeToolCallStrings(value: unknown): unknown {
@@ -1455,7 +1900,10 @@ test("tool_calls: every nested string and key from a source call is encoded and 
 		assert.equal(/[\ud800-\udfff]/u.test(str), false, "no lone surrogate");
 	}
 	assert.deepEqual(decodeToolCallStrings(rec?.tool_calls), source);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 test("extractMessage: an inline tool-recipient body with controls is escaped in tool_calls and round-trips", () => {
@@ -1475,7 +1923,10 @@ test("extractMessage: an inline tool-recipient body with controls is escaped in 
 	assert.equal(call.text.includes("\x00"), false);
 	assert.equal(call.text, encodePdppSafeText(text));
 	assert.equal(decodeEscapedText(call.text), text);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 	const manifest = JSON.parse(
 		readFileSync(join(__dirname, "manifest.json"), "utf8"),
 	) as {
@@ -1529,7 +1980,10 @@ test('encodeToolCallStrings: an own "__proto__" key from JSON.parse is kept as d
 	} as ChatGptNode;
 	const rec = extractMessage("n1", node, "c1", true);
 	assert.equal(JSON.stringify(rec?.tool_calls), JSON.stringify(encoded));
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 test("encodeToolCallStrings: nesting far deeper than the call stack is encoded without loss", () => {

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "icloud-notes",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-	"version": "0.1.24",
+	"version": "0.1.39",
 	"display_name": "iCloud Notes",
 	"brand": {
 		"icon": "icon.svg",
@@ -17,12 +17,16 @@
 	},
 	"runtime_requirements": {
 		"bindings": {
-			"network": {
-				"required": true
-			},
 			"browser": {
-				"required": true
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
 			}
+		}
+	},
+	"mobile": {
+		"pageshim": {
+			"entry": "icloud_notes.ts", "scope_prefix": "icloud_notes",
+			"login_url": "https://www.icloud.com/notes"
 		}
 	},
 	"capabilities": {
@@ -201,6 +205,7 @@
 		}
 	],
 	"reason_display_messages": {
+		"stream_collection_failed": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
 		"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
 		"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
 		"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",

@@ -13,10 +13,18 @@ const browserSleepSchema = sleepSchema.extend({
 	daily_sleep_timestamp: z.string().datetime({ offset: true }).nullable(),
 });
 
+const browserReadinessSchema = readinessSchema.extend({
+	timestamp: z.string().datetime({ offset: true }).nullable(),
+});
+
+const browserActivitySchema = activitySchema.extend({
+	timestamp: z.string().datetime({ offset: true }).nullable(),
+});
+
 export const SCHEMAS: Record<string, Zod.ZodTypeAny> = {
 	sleep: browserSleepSchema,
-	readiness: readinessSchema,
-	activity: activitySchema,
+	readiness: browserReadinessSchema,
+	activity: browserActivitySchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);
