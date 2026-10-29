@@ -65,7 +65,8 @@ jobs:
           fi
           [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]*$ && "$RELEASE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
           gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_RUN_ID}/attempts/${RELEASE_RUN_ATTEMPT}/jobs?per_page=100" > "$RUNNER_TEMP/catalog-jobs.json"
-          echo "deploy=$(node scripts/websub-publisher/publication-ran.mjs "$RUNNER_TEMP/catalog-jobs.json")" >> "$GITHUB_OUTPUT"
+          deploy=$(node scripts/websub-publisher/publication-ran.mjs "$RUNNER_TEMP/catalog-jobs.json")
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
 
   build:
     needs: publication-gate

@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
 const pages = parse(readFileSync(new URL("../../../.github/workflows/pages.yml", import.meta.url), "utf8"));
@@ -53,6 +57,38 @@ test("the event gate accepts the trusted workflow path forms and rejects other s
   run.head_branch = "feature";
   assert.equal(evaluate(github), false);
   assert.equal(evaluate({ ...github, event_name: "push", event: {} }), true);
+});
+
+test("the workflow gate fails rather than silently skipping when job evidence is invalid", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pages-publication-gate-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const output = join(dir, "output");
+  const script = pages.jobs["publication-gate"].steps.find((step) => step.id === "gate").run;
+  const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+  const run = (jobs, overrides = {}) => {
+    writeFileSync(output, "");
+    const result = spawnSync("bash", ["-c", `gh() { if [[ "\${MOCK_GH_FAIL:-}" == 1 ]]; then return 23; fi; printf '%s' "$MOCK_JOBS"; }\n${script}`], {
+      cwd: repoRoot, encoding: "utf8", env: {
+        ...process.env, GITHUB_OUTPUT: output, RUNNER_TEMP: dir,
+        GITHUB_REPOSITORY: "PDP-Connect/data-connectors", EVENT_NAME: "workflow_run",
+        RELEASE_RUN_ID: "123", RELEASE_RUN_ATTEMPT: "1", MOCK_JOBS: JSON.stringify(jobs),
+        ...overrides,
+      },
+    });
+    return { result, output: readFileSync(output, "utf8") };
+  };
+  const skipped = [{ jobs: [{ name: "Publish and verify the connector catalog", status: "completed", conclusion: "skipped", steps: [] }] }];
+  assert.equal(run(skipped).output, "deploy=false\n");
+  const invalid = run({ bad: "response" });
+  assert.notEqual(invalid.result.status, 0);
+  assert.equal(invalid.output, "");
+  const apiFailure = run(skipped, { MOCK_GH_FAIL: "1" });
+  assert.notEqual(apiFailure.result.status, 0);
+  assert.equal(apiFailure.output, "");
+  const badRun = run(skipped, { RELEASE_RUN_ID: "bad" });
+  assert.notEqual(badRun.result.status, 0);
+  assert.equal(badRun.output, "");
+  assert.equal(run(skipped, { EVENT_NAME: "push" }).output, "deploy=true\n");
 });
 
 test("a publish hint follows a successful full-site deploy and is disabled until enabled", () => {
