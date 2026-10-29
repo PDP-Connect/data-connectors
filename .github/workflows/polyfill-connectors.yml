@@ -65,7 +65,7 @@ jobs:
         run: node .github/scripts/groupme-mutation-admission.mjs
 
   verify:
-    name: verify + test
+    name: verify
     needs: changes
     if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -91,10 +91,8 @@ jobs:
 
       - name: Install workspace dependencies
         # Root connector files resolve dependencies from the root workspace.
-        # --ignore-scripts skips patchright's
-        # postinstall browser download; the browser the tests DO need is
-        # installed explicitly in the next step, so the skip stays deliberate
-        # rather than accidental.
+        # --ignore-scripts skips patchright's postinstall browser download.
+        # Test shards install the Chromium browser they need explicitly.
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
@@ -107,21 +105,6 @@ jobs:
         # Root helper tests fall outside the package's scripts/**/*.test.mjs glob.
         run: node --test scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs scripts/groupme-mutation/changes.test.mjs scripts/groupme-mutation/evidence.test.mjs scripts/groupme-mutation/admission.test.mjs
 
-      - name: Install Chromium for the capture-redaction proofs
-        # `src/capture-trace-redaction.test.ts` launches a real browser: the
-        # thing under test is what Playwright WRITES to disk (trace zips,
-        # screenshots, DOM snapshots), so a stub cannot prove the redaction.
-        # `--with-deps` because the runner image carries no shared libs for it.
-        # The root workspace install provides `playwright` to the package.
-        #
-        # Ported from PDP-Connect/pdpp's own polyfill-connectors workflow,
-        # which already installs exactly this for exactly this suite. Move A
-        # brought that suite into this repo but not the browser step, so the
-        # install comment above ("verify + test don't launch a browser") became
-        # false and six tests failed on a missing chrome-headless-shell.
-        working-directory: packages/polyfill-connectors
-        run: npx playwright install --with-deps chromium
-
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
         run: npm run verify
@@ -130,38 +113,6 @@ jobs:
         # This scan targets connectors/ at the repository root, outside the
         # package-local verification scope.
         run: npm run connector-stdout-console:check
-
-      - name: Allow unprivileged user namespaces for the isolation tests
-        # Ubuntu 24.04 runners restrict unprivileged user namespaces through
-        # AppArmor, so every test in scripts/test-lanes.mjs's NAMESPACE_TESTS
-        # that needs bwrap or unshare skipped here ("network isolation
-        # unavailable on this host"). Those tests prove the scenario sandbox
-        # that keeps connectors off the network; lifting the restriction on this
-        # throwaway runner lets them run.
-        run: |
-          key=kernel.apparmor_restrict_unprivileged_userns
-          if sysctl -n "$key" >/dev/null 2>&1; then
-            sudo sysctl -w "$key=0"
-          else
-            echo "$key is not present on this runner; nothing to lift"
-          fi
-          # The isolation module also drives bwrap; install it if the image lacks it.
-          command -v bwrap >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q bubblewrap; }
-          if unshare --user --map-root-user --net true; then
-            echo "unprivileged user and network namespaces: available"
-          else
-            # They worked on this runner image when this step was added, so losing
-            # them is an image change to fix, not coverage to drop quietly.
-            echo "::error::unprivileged namespaces are unavailable; the scenario-isolation tests would skip"
-            exit 1
-          fi
-
-      - name: Test
-        working-directory: packages/polyfill-connectors
-        # Excludes the @pdpp/reference-contract-dependent suites; see
-        # scripts/run-tests.mjs and tsconfig.json for the file list and the
-        # reinstatement note (that package isn't part of Move A's scope).
-        run: npm run test
 
       - name: Pack, install, and run (proves a real npm install of the published tarball works)
         # This step's own dependency install above used --ignore-scripts, so
@@ -174,6 +125,70 @@ jobs:
         # any of that consumer's own code ran — see scripts/pack-install-run.mjs.
         working-directory: packages/polyfill-connectors
         run: npm run pack-install-run
+
+  test:
+    name: Test shard ${{ matrix.shard }}
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/polyfill-connectors/test-tools/package-lock.json
+
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Install isolated Vitest test tools
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+
+      - name: Install Chromium for the capture-redaction proofs
+        working-directory: packages/polyfill-connectors
+        run: npx playwright install --with-deps chromium
+
+      - name: Allow unprivileged user namespaces for the isolation tests
+        run: |
+          key=kernel.apparmor_restrict_unprivileged_userns
+          if sysctl -n "$key" >/dev/null 2>&1; then
+            sudo sysctl -w "$key=0"
+          else
+            echo "$key is not present on this runner; nothing to lift"
+          fi
+          command -v bwrap >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q bubblewrap; }
+          if unshare --user --map-root-user --net true; then
+            echo "unprivileged user and network namespaces: available"
+          else
+            echo "::error::unprivileged namespaces are unavailable; the scenario-isolation tests would skip"
+            exit 1
+          fi
+
+      - name: Test assigned file shard
+        working-directory: packages/polyfill-connectors
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/6
+        # Excludes the @pdpp/reference-contract-dependent suites; see
+        # scripts/run-tests.mjs and tsconfig.json for the file list and the
+        # reinstatement note (that package isn't part of Move A's scope).
+        run: npm test
 
   groupme-mutation:
     # INITIAL EVIDENCE, NOT REQUIRED. Visible as its own check and red when the canary or
@@ -231,6 +246,7 @@ jobs:
           path: ${{ runner.temp }}/groupme-mutation-*
           if-no-files-found: warn
           retention-days: 14
+
 
   connector-evidence:
     name: Connector evidence summary
@@ -352,7 +368,7 @@ jobs:
 
   gate:
     name: Polyfill Connectors Gate
-    needs: [changes, verify, groupme-mutation]
+    needs: [changes, verify, test, groupme-mutation]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -365,14 +381,15 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          TEST_RESULT: ${{ needs.test.result }}
           MUTATION_RESULT: ${{ needs.groupme-mutation.result }}
           MUTATION_REQUIRED: ${{ needs.changes.outputs.mutation_required }}
-          # Keep at "optional" until the root promotes the mutation evidence to required.
           MUTATION_ENFORCEMENT: optional
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           echo "changes: $CHANGES_RESULT"
           echo "verify:  $VERIFY_RESULT"
+          echo "tests:   $TEST_RESULT"
           echo "mutation: $MUTATION_RESULT"
 
           if [ "$CHANGES_RESULT" != "success" ]; then
@@ -388,6 +405,14 @@ jobs:
               ;;
           esac
 
+          case "$TEST_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::test shards reported '$TEST_RESULT' — expected all shards to succeed or be skipped"
+              exit 1
+              ;;
+          esac
+
           node .github/scripts/groupme-mutation-admission.mjs --gate
 
-          echo "Polyfill Connectors Gate: verify succeeded or was correctly skipped as irrelevant."
+          echo "Polyfill Connectors Gate: verification and every test shard succeeded or were correctly skipped as irrelevant."

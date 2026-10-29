@@ -449,7 +449,9 @@ function buildBrowserManifest(
 }
 
 function buildTypesTs(displayName: string, stream: string): string {
-	const commentDisplayName = displayName.replace(/[\r\n\u2028\u2029]/g, " ").replace(/\*\//g, "* /");
+	const commentDisplayName = displayName
+		.replace(/[\r\n\u2028\u2029]/g, " ")
+		.replace(/\*\//g, "* /");
 	return `// Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -469,7 +471,9 @@ export interface ${pascalCase(stream)}Item {
 }
 
 function buildBrowserTypesTs(displayName: string, stream: string): string {
-	const commentDisplayName = displayName.replace(/[\r\n\u2028\u2029]/g, " ").replace(/\*\//g, "* /");
+	const commentDisplayName = displayName
+		.replace(/[\r\n\u2028\u2029]/g, " ")
+		.replace(/\*\//g, "* /");
 	return `// Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -680,7 +684,9 @@ function buildBrowserIndexTs(
 ): string {
 	const typeName = `${pascalCase(stream)}Row`;
 	const recordFn = `${camelCase(stream)}Record`;
-	const commentDisplayName = displayName.replace(/[\r\n\u2028\u2029]/g, " ").replace(/\*\//g, "* /");
+	const commentDisplayName = displayName
+		.replace(/[\r\n\u2028\u2029]/g, " ")
+		.replace(/\*\//g, "* /");
 	return `#!/usr/bin/env node
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -812,7 +818,7 @@ async function ensureSession({
   // richer form once this connector is wired into a deployment that has it.
   const ready = await manualBrowserLogin({
     message:
-      ${JSON.stringify(`Sign in to ${displayName} in the secure browser, then continue. PDPP will verify the session before collecting.`)},
+      ${JSON.stringify(`Sign in to ${displayName} in the secure browser, then continue. Collection starts once the session is verified.`)},
     page,
     probe: () => probeLoggedIn(page),
     reason: "login",

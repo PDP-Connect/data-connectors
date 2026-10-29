@@ -11,8 +11,8 @@ const dir = new URL(
 	import.meta.url,
 );
 const fx = (n) => readFileSync(new URL(n, dir), "utf8");
-const profile = fx("profile.html").replace("1,234 contributions", "365 contributions")
-	.replace('<h2 class="f4', '<h2 id="js-contribution-activity-description" class="f4');
+const profile = fx("profile-pinned-listitem-current-github.html")
+	.replace("1,234 contributions", "365 contributions");
 const terminal = '<div class="paginate-container"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
 const repositories = fx("repositories.html") + terminal;
 const starredEmpty = fx("starred-empty-current-github.html") + terminal;

@@ -25,7 +25,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import test, { mock } from "node:test";
+import test, { after, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import { chromium, type Page } from "playwright";
@@ -37,12 +37,14 @@ import type { BrowserCollectContext } from "../../packages/polyfill-connectors/s
 import {
 	type EmittedRecord,
 	makeRecordingEmit,
+	skipPoliteDelays,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	buildOrdersStateCursor,
 	classifyEmptyListPage,
 	classifyHebDetailFailure,
 	collectNutrition,
+	HebEnumerationUnprovenError,
 	collectProfile,
 	type DetailFailureKind,
 	type EmitDeps,
@@ -84,6 +86,9 @@ import type { ListPageDiagnostics, ListPageOrder } from "./types.ts";
 // DOM fixtures contain date-only English labels; pin this test process so
 // absolute fixture dates do not depend on the host's local timezone.
 process.env.TZ = "UTC";
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 const FIXTURES_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -1382,6 +1387,120 @@ test("classifyHebDetailFailure: a non-retryable navigation failure classifies as
 	);
 });
 
+// ─── HTTP status of the detail navigation ─────────────────────────────────
+// `page.goto` resolves with a response for a 403 or a 503; it throws only for
+// transport failures. The status has to be weighed against what the page
+// says: a challenge or sign-in page behind a 403 is a dead session, and a 5xx
+// is transient, so neither is a connector defect.
+
+const ORDER_DETAIL_URL =
+	"https://www.heb.com/my-account/order-history/HEB1000000001";
+
+function readFixture(name: string): string {
+	return readFileSync(join(FIXTURES_DIR, name), "utf8");
+}
+
+/** A detail page whose `goto` answers with the next status in `statuses`
+ *  (the last one repeats) and then serves `content` at `landedUrl`. */
+function makeStatusPageStub(opts: {
+	content: string;
+	landedUrl?: string;
+	statuses: number[];
+}): { gotoCalls: () => number; page: Page } {
+	let gotoCalls = 0;
+	const base = makePageStub({
+		content: opts.content,
+		...(opts.landedUrl ? { url: opts.landedUrl } : {}),
+	});
+	const page = new Proxy(base, {
+		get(target, prop): unknown {
+			if (prop === "goto") {
+				return (): Promise<unknown> => {
+					const status =
+						opts.statuses[Math.min(gotoCalls, opts.statuses.length - 1)] ?? 200;
+					gotoCalls += 1;
+					return Promise.resolve({
+						ok: () => status >= 200 && status < 300,
+						status: () => status,
+					});
+				};
+			}
+			return Reflect.get(target, prop);
+		},
+	});
+	return { gotoCalls: () => gotoCalls, page };
+}
+
+const fetchWithoutWaiting = (page: Page) =>
+	fetchOrderDetail(page, "HEB1000000001", {
+		navigationRetryMinTimeoutMs: 1,
+		waitForHydration: immediateWait,
+	});
+
+for (const [label, content] of [
+	["Incapsula block page", readFixture("incapsula-block.html")],
+	["Imperva incident report", readFixture("incapsula-json-block.html")],
+] as const) {
+	test(`fetchOrderDetail: an HTTP 403 carrying the ${label} asks for session repair`, async () => {
+		const { page } = makeStatusPageStub({
+			content,
+			landedUrl: ORDER_DETAIL_URL,
+			statuses: [403],
+		});
+		const result = await fetchWithoutWaiting(page);
+		assert.equal(result.status, "failed");
+		assert.equal(result.failureKind, "session_repair_required");
+	});
+}
+
+test("fetchOrderDetail: an HTTP 403 that lands on the sign-in page asks for session repair", async () => {
+	const { page } = makeStatusPageStub({
+		content: PASSWORD_FORM_HTML,
+		landedUrl: "https://www.heb.com/login",
+		statuses: [403],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "session_repair_required");
+});
+
+test("fetchOrderDetail: an HTTP 404 on an ordinary page stays a non-retryable failure and is tried once", async () => {
+	const { gotoCalls, page } = makeStatusPageStub({
+		content: NO_DETAIL_HTML,
+		landedUrl: ORDER_DETAIL_URL,
+		statuses: [404],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "navigation_failed_non_retryable");
+	assert.equal(gotoCalls(), 1);
+});
+
+for (const status of [500, 502, 503, 504]) {
+	test(`fetchOrderDetail: an HTTP ${String(status)} is retried and the order is read when the retry succeeds`, async () => {
+		const { gotoCalls, page } = makeStatusPageStub({
+			content: DETAIL_HTML,
+			landedUrl: ORDER_DETAIL_URL,
+			statuses: [status, 200],
+		});
+		const result = await fetchWithoutWaiting(page);
+		assert.equal(result.status, "hydrated");
+		assert.equal(gotoCalls(), 2);
+	});
+}
+
+test("fetchOrderDetail: an HTTP 503 on every attempt is retry-exhausted, a retryable gap, not a connector defect", async () => {
+	const { gotoCalls, page } = makeStatusPageStub({
+		content: NO_DETAIL_HTML,
+		landedUrl: ORDER_DETAIL_URL,
+		statuses: [503],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "navigation_retry_exhausted");
+	assert.equal(gotoCalls(), 3, "one attempt and two retries");
+});
+
 // ─── design.md Decision 4: owner-started manual repair vs unattended latch ─
 
 test("hebAllowsInteractiveAuthRepair: true when PDPP_RUN_TRIGGER_KIND is 'manual'", () => {
@@ -2008,7 +2127,14 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
 
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_navigation_failed/,
+		(error: unknown) => {
+			// A failed navigation is a failed read: `collect` reports it for
+			// every order stream from the error, so the scan emits no SKIP.
+			assert.ok(error instanceof HebEnumerationUnprovenError);
+			assert.match(error.message, /heb_empty_list_page_navigation_failed/);
+			assert.equal(error.readFailed, true);
+			return true;
+		},
 	);
 
 	assert.deepEqual(
@@ -2018,11 +2144,10 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
 		["HEB1000000001"],
 		"stale page cards must not enter the current run",
 	);
-	const skip = protocolMessages.find(
-		(message) => message.type === "SKIP_RESULT",
+	assert.equal(
+		protocolMessages.some((message) => message.type === "SKIP_RESULT"),
+		false,
 	);
-	assert.ok(skip);
-	assert.equal(skip?.reason, "stream_collection_failed");
 	assert.equal(
 		protocolMessages.some(
 			(message) =>
@@ -2056,9 +2181,15 @@ test("runForwardScan: a falsy goto rejection cannot parse stale page content", a
 			`https://www.heb.com/my-account/your-orders?page=${navigations}`,
 	});
 
+	let failure: HebEnumerationUnprovenError | undefined;
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_navigation_failed/,
+		(error: unknown) => {
+			assert.ok(error instanceof HebEnumerationUnprovenError);
+			assert.match(error.message, /heb_empty_list_page_navigation_failed/);
+			failure = error;
+			return true;
+		},
 	);
 	assert.deepEqual(
 		emitted
@@ -2072,8 +2203,7 @@ test("runForwardScan: a falsy goto rejection cannot parse stale page content", a
 		false,
 	);
 	assert.deepEqual(
-		protocolMessages.find((message) => message.type === "SKIP_RESULT")
-			?.diagnostics,
+		failure?.diagnostics,
 		{
 			error_class: "unknown",
 		},
@@ -2353,7 +2483,7 @@ test("runForwardScan: an Imperva block is never laundered into a proven-empty re
 
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_source_auth_or_challenge/,
+		{ message: "heb_session_required" },
 		"bot protection must outrank the empty-state marker",
 	);
 });
@@ -2838,7 +2968,7 @@ test("runForwardScan: H-E-B's real 'No past orders' page aborts when this connec
 			(m as { reason: string }).reason === "stream_collection_failed",
 	) as { message: string; diagnostics: Record<string, unknown> } | undefined;
 	assert.ok(skip, "the abort must surface a SKIP_RESULT the owner can read");
-	assert.match(skip.message, /previously collected orders/);
+	assert.match(skip.message, /orders were previously collected/);
 	assert.match(skip.message, /retained and untouched/);
 	assert.doesNotMatch(
 		skip.message,
@@ -4266,7 +4396,7 @@ test("collectProfile withholds an aggregate without complete owner-bound section
 		protocolMessages.some(
 			(m) =>
 				m.type === "SKIP_RESULT" &&
-				m.reason === "inventory_not_proven_complete",
+				m.reason === "stream_collection_failed",
 		),
 	);
 });
@@ -4479,50 +4609,53 @@ test("collectNutrition covers products past the former 50-lookup limit and recor
 
 	const outcomes = emitted.filter((record) => record.stream === "nutrition");
 	assert.equal(outcomes.length, targets.length - 2);
-	assert.equal(
-		protocolMessages.filter(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "inventory_not_proven_complete",
-		).length,
-		2,
+	// The target without a URL is an unproven lookup; the page that failed to
+	// load is a failed read.
+	assert.deepEqual(
+		protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && message.reason),
+		["inventory_not_proven_complete", "stream_collection_failed"],
 	);
 });
 
-test("collectNutrition retains blocked outcomes with the observed product URL", async () => {
+test("collectNutrition ends the run as a session failure on a blocked product page", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const blockedPage = makePageStub({
 		content:
 			"<html><body><iframe src='/_Incapsula_Resource'></iframe></body></html>",
 	});
 
-	await collectNutrition(
-		blockedPage,
-		[
-			{
-				name: "H-E-B Organic 2% Reduced Fat Milk",
-				productId: "123456789",
-				productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
-			},
-		],
-		{
-			emit: deps.emit,
-			emitRecord: deps.emitRecord,
-			emittedAt: deps.emittedAt,
-			waitForHydration: immediateWait,
-		},
+	await assert.rejects(
+		() =>
+			collectNutrition(
+				blockedPage,
+				[
+					{
+						name: "H-E-B Organic 2% Reduced Fat Milk",
+						productId: "123456789",
+						productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
+					},
+				],
+				{
+					emit: deps.emit,
+					emitRecord: deps.emitRecord,
+					emittedAt: deps.emittedAt,
+					waitForHydration: immediateWait,
+				},
+			),
+		{ message: "heb_session_required" },
 	);
 
 	assert.equal(
 		emitted.filter((record) => record.stream === "nutrition").length,
 		0,
 	);
-	assert.ok(
-		protocolMessages.some(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "inventory_not_proven_complete",
-		),
+	assert.deepEqual(
+		protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && message.reason),
+		["session_repair_required"],
 	);
 });
 
@@ -4604,4 +4737,102 @@ test("nutritionCoverageRecoveryHint retries only the causes a rerun can clear", 
 		nutritionCoverageRecoveryHint("order_scan_suppressed"),
 		retry,
 	);
+});
+
+test("resolveOrderDetail: latched manual repair respects the 99/100 detail boundary", async () => {
+	await Promise.all(
+		[99, 100].map(async (initialAttempts) => {
+			const flags: RunFlags = {
+				detailAttempts: initialAttempts,
+				isManualRun: true,
+				manualRepairAttempted: false,
+				sessionRepairRequired: true,
+			};
+			const base = makeSessionRepairPageStub({
+				htmlSequence: [LIVE_ORDERS_HTML],
+				detailHtmlAfterRepair: DETAIL_HTML,
+			});
+			const navigations: string[] = [];
+			let interactions = 0;
+			const page = new Proxy(base, {
+				get(target, prop): unknown {
+					if (prop === "goto") {
+						return (url: string, options?: Parameters<Page["goto"]>[1]) => {
+							navigations.push(url);
+							return target.goto(url, options);
+						};
+					}
+					return Reflect.get(target, prop);
+				},
+			});
+			const send = fakeSendInteraction();
+			const deps = immediateRepairDeps((request) => {
+				interactions += 1;
+				return send(request);
+			});
+			const result = await resolveOrderDetail(
+				page,
+				flags,
+				"HEB1000000001",
+				deps,
+			);
+			assert.equal(
+				flags.detailAttempts,
+				100,
+				"repair must never fetch detail 101",
+			);
+			if (initialAttempts === 100) {
+				assert.equal(result.status, "deferred");
+				assert.equal(result.failureKind, "deferred_budget");
+				assert.equal(interactions, 0);
+				assert.deepEqual(navigations, []);
+				assert.equal(flags.manualRepairAttempted, false);
+				assert.equal(flags.sessionRepairRequired, true);
+			} else {
+				assert.equal(result.status, "hydrated");
+				assert.equal(interactions, 1);
+				assert.equal(
+					navigations.filter((url) => url.includes("/order-history/")).length,
+					1,
+				);
+				assert.equal(flags.manualRepairAttempted, true);
+				assert.equal(flags.sessionRepairRequired, false);
+			}
+		}),
+	);
+});
+
+test("resolveOrderDetail: failed repair at 99 does not spend a detail or retry repair", async () => {
+	const flags: RunFlags = {
+		detailAttempts: 99,
+		isManualRun: true,
+		manualRepairAttempted: false,
+		sessionRepairRequired: true,
+	};
+	let interactions = 0;
+	const deps = immediateRepairDeps(() => {
+		interactions += 1;
+		return Promise.reject(new Error("synthetic repair declined"));
+	});
+	const first = await resolveOrderDetail(
+		NEVER_CALLED_PAGE,
+		flags,
+		"HEB1000000001",
+		deps,
+	);
+	assert.equal(first.status, "deferred");
+	assert.equal(first.failureKind, "session_repair_required");
+	assert.equal(flags.detailAttempts, 99);
+	assert.equal(flags.manualRepairAttempted, true);
+	assert.equal(flags.sessionRepairRequired, true);
+	const second = await resolveOrderDetail(
+		NEVER_CALLED_PAGE,
+		flags,
+		"HEB1000000002",
+		deps,
+	);
+	assert.equal(second.status, "deferred");
+	assert.equal(second.failureKind, "session_repair_required");
+	assert.equal(flags.detailAttempts, 99);
+	assert.equal(interactions, 1);
 });

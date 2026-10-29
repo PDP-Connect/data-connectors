@@ -109,23 +109,21 @@ interface ChatGptAuthProbeDiagnostic extends ChatGptDomSessionProbe {
 
 const APPROVE_SIGN_IN_TEXT = /approve sign-in/i;
 const CHATGPT_DEVICE_TEXT = /chatgpt app|your devices/i;
-const CONTINUE_WITH_PASSWORD_NAME = /^continue with password$/i;
-const LOG_IN_NAME = /^log in$/i;
 const RESEND_PROMPT_TEXT = /resend prompt/i;
 const SENT_NOTIFICATION_TEXT = /sent a notification/i;
 const TRY_WITH_EMAIL_TEXT = /try with email/i;
 const STORED_CREDENTIAL_REJECTION_TEXT =
 	/incorrect email address or password|incorrect password|invalid password|wrong password|email or password is incorrect/i;
 export const CHATGPT_PUSH_APPROVAL_ASSISTANCE_MESSAGE =
-	"ChatGPT sent an app approval notification. Approve it in the ChatGPT app; PDPP will continue automatically after ChatGPT confirms the session.";
+	"ChatGPT sent an app approval notification. Approve it in the ChatGPT app. The import continues automatically once ChatGPT confirms the session.";
 export const CHATGPT_PUSH_APPROVAL_PROGRESS_MESSAGE =
 	CHATGPT_PUSH_APPROVAL_ASSISTANCE_MESSAGE;
 export const CHATGPT_PUSH_APPROVAL_FALLBACK_MESSAGE =
-	"ChatGPT approval did not complete automatically; open the ChatGPT app to approve it. PDPP resumes when the session continues.";
+	"ChatGPT approval did not complete automatically; open the ChatGPT app to approve it. The import resumes when the session continues.";
 export const CHATGPT_BROWSER_LOGIN_ASSISTANCE_MESSAGE =
-	"ChatGPT could not finish sign-in automatically; open the browser to continue. PDPP resumes when sign-in succeeds.";
+	"ChatGPT could not finish sign-in automatically; open the browser to continue. The import resumes when sign-in succeeds.";
 export const CHATGPT_BROWSER_LOGIN_FALLBACK_MESSAGE =
-	"ChatGPT could not finish sign-in automatically; open the browser to continue. PDPP resumes when sign-in succeeds.";
+	"ChatGPT could not finish sign-in automatically; open the browser to continue. The import resumes when sign-in succeeds.";
 export const CHATGPT_SESSION_REQUIRED_NON_INTERACTIVE_MESSAGE =
 	"chatgpt_session_required: ChatGPT session is not active; start an owner-attended manual refresh to repair authentication.";
 export const CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE =
@@ -446,10 +444,6 @@ async function checkLoggedInViaDOMDetails(
 	};
 }
 
-async function checkLoggedInViaDOM(page: Page): Promise<boolean> {
-	return (await checkLoggedInViaDOMDetails(page)).dom_logged_in;
-}
-
 export function isLikelyChatGptPushApprovalText(text: string): boolean {
 	const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
 	if (!normalized) {
@@ -525,7 +519,7 @@ async function isLikelyChatGptPushApprovalPage(page: Page): Promise<boolean> {
 }
 
 async function isChatGptSessionActiveOnPage(page: Page): Promise<boolean> {
-	return (await checkSession(page)) || (await checkLoggedInViaDOM(page));
+	return await checkSession(page);
 }
 
 async function isChatGptSessionActiveFromContext(page: Page): Promise<boolean> {
@@ -664,8 +658,7 @@ async function openChatGptLogin(page: Page): Promise<void> {
 
 async function clickIntermediateLogin(page: Page): Promise<void> {
 	await clickFirstVisible([
-		page.getByRole("button", { name: LOG_IN_NAME }),
-		page.getByRole("link", { name: LOG_IN_NAME }),
+		page.locator('[data-testid="login-button"], a[href="/auth/login"]'),
 	]);
 	await page.waitForTimeout(3000);
 }
@@ -892,7 +885,7 @@ async function findAndFillEmail({
 
 	await emailWait.match.fill(email);
 	await page
-		.locator('button[type="submit"], :text-is("Continue")')
+		.locator('button[type="submit"]:visible, input[type="submit"]:visible')
 		.first()
 		.click()
 		.catch((): undefined => undefined);
@@ -902,8 +895,9 @@ async function findAndFillEmail({
 
 async function continueWithPasswordIfPresent(page: Page): Promise<void> {
 	const clicked = await clickFirstVisible([
-		page.getByRole("button", { name: CONTINUE_WITH_PASSWORD_NAME }),
-		page.getByRole("link", { name: CONTINUE_WITH_PASSWORD_NAME }),
+		page.locator(
+			'button[name="intent"][value="password"], a[href*="/log-in/password"]',
+		),
 	]);
 	if (clicked) {
 		await page.waitForTimeout(3000);
@@ -1059,7 +1053,7 @@ async function submitPasswordAndHandleSecondFactor({
 
 	await passwordIn.fill(password);
 	await page
-		.locator('button[type="submit"], :text-is("Continue")')
+		.locator('button[type="submit"]:visible, input[type="submit"]:visible')
 		.first()
 		.click()
 		.catch((): undefined => undefined);
@@ -1123,7 +1117,7 @@ async function fallbackForPostSubmitLogin({
 		...(checkpoint ? { checkpoint } : {}),
 		...(completeAssistance ? { completeAssistance } : {}),
 		diagnosticMessage:
-			"ChatGPT login submitted but session still is not active. Use the streaming companion to complete login (Cloudflare challenge, 2FA, etc.). PDPP will continue automatically after ChatGPT confirms the session.",
+			"ChatGPT login submitted but session still is not active. Use the streaming companion to complete login (Cloudflare challenge, 2FA, etc.). The import continues automatically once ChatGPT confirms the session.",
 		message: CHATGPT_BROWSER_LOGIN_FALLBACK_MESSAGE,
 		page,
 		...(progress ? { progress } : {}),

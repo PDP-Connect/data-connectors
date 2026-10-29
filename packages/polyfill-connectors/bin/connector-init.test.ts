@@ -513,75 +513,107 @@ test("connector-init: mutation of an existing tracked input is still rejected", 
 });
 
 test("connector-init: next steps keep synthetic pilots separate from reviewed real captures", () => {
-  withPrivateConnectorTree(() => {
-    const name = `zz_init_instructions_${String(process.pid)}`;
-    const plan = planTargets(name, "items");
-    assert.deepEqual(findCollisions(plan), []);
-    try {
-      const result = spawnSync(process.execPath, ["--import", "tsx", "bin/connector-init.ts", name], {
-        cwd: PACKAGE_ROOT,
-        env: childTestEnv(),
-        encoding: "utf8",
-        timeout: 60_000,
-      });
-      assert.equal(result.status, 0, result.stderr);
-      assert.ok(result.stdout.includes(`connectors/${name}/fixtures/scrubbed/<runId>/`));
-      assert.match(result.stdout, /Keep the synthetic pilot-real-shape rows/);
-      assert.match(result.stdout, /Never put real owner rows under pilot-real-shape/);
-      assert.doesNotMatch(result.stdout, /replace this\s+scaffold's synthetic/);
-    } finally {
-      cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
-    }
-  });
+	withPrivateConnectorTree(() => {
+		const name = `zz_init_instructions_${String(process.pid)}`;
+		const plan = planTargets(name, "items");
+		assert.deepEqual(findCollisions(plan), []);
+		try {
+			const result = spawnSync(
+				process.execPath,
+				["--import", "tsx", "bin/connector-init.ts", name],
+				{
+					cwd: PACKAGE_ROOT,
+					env: childTestEnv(),
+					encoding: "utf8",
+					timeout: 60_000,
+				},
+			);
+			assert.equal(result.status, 0, result.stderr);
+			assert.ok(
+				result.stdout.includes(`connectors/${name}/fixtures/scrubbed/<runId>/`),
+			);
+			assert.match(result.stdout, /Keep the synthetic pilot-real-shape rows/);
+			assert.match(
+				result.stdout,
+				/Never put real owner rows under pilot-real-shape/,
+			);
+			assert.doesNotMatch(result.stdout, /replace this\s+scaffold's synthetic/);
+		} finally {
+			cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+		}
+	});
 });
 
 test("CLI browser scaffold parses unusual display names and orders setup before running", () => {
-  withPrivateConnectorTree(() => {
-    for (const [suffix, display] of [
-      ["quote", 'Acme "Plus"'],
-      ["newline", "Acme\nPlus"],
-    ]) {
-      const name = `zz_init_${suffix}_${process.pid}`;
-      const plan = planTargets(name, "items");
-      assert.deepEqual(findCollisions(plan), []);
-      try {
-        const result = spawnSync(
-          process.execPath,
-          ["--import", "tsx", "bin/connector-init.ts", name, "--browser", "--display-name", display],
-          { cwd: PACKAGE_ROOT, env: childTestEnv(), encoding: "utf8" }
-        );
-        assert.equal(result.status, 0, result.stderr);
-        for (const file of [plan.files.indexTs, plan.files.typesTs]) {
-          const checked = spawnSync(process.execPath, ["--check", file], { encoding: "utf8" });
-          assert.equal(checked.status, 0, checked.stderr);
-        }
-        const setup = result.stdout.indexOf("LOGIN_CHECK_URL");
-        const run = result.stdout.indexOf("bin/connector-dev.ts");
-        assert.ok(setup >= 0 && setup < run, result.stdout);
-      } finally {
-        cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
-      }
-    }
-  });
+	withPrivateConnectorTree(() => {
+		for (const [suffix, display] of [
+			["quote", 'Acme "Plus"'],
+			["newline", "Acme\nPlus"],
+		] as const) {
+			const name = `zz_init_${suffix}_${process.pid}`;
+			const plan = planTargets(name, "items");
+			assert.deepEqual(findCollisions(plan), []);
+			try {
+				const result = spawnSync(
+					process.execPath,
+					[
+						"--import",
+						"tsx",
+						"bin/connector-init.ts",
+						name,
+						"--browser",
+						"--display-name",
+						display,
+					],
+					{ cwd: PACKAGE_ROOT, env: childTestEnv(), encoding: "utf8" },
+				);
+				assert.equal(result.status, 0, result.stderr);
+				for (const file of [plan.files.indexTs, plan.files.typesTs]) {
+					const checked = spawnSync(process.execPath, ["--check", file], {
+						encoding: "utf8",
+					});
+					assert.equal(checked.status, 0, checked.stderr);
+				}
+				const setup = result.stdout.indexOf("LOGIN_CHECK_URL");
+				const run = result.stdout.indexOf("bin/connector-dev.ts");
+				assert.ok(setup >= 0 && setup < run, result.stdout);
+			} finally {
+				cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+			}
+		}
+	});
 });
 
 test("CLI browser scaffold rejects an untouched row selector but accepts configured empty rows", () => {
-  withPrivateConnectorTree(() => {
-    const name = `zz_init_rows_${process.pid}`;
-    const plan = planTargets(name, "items");
-    assert.deepEqual(findCollisions(plan), []);
-    try {
-      const result = spawnSync(process.execPath, ["--import", "tsx", "bin/connector-init.ts", name, "--browser"], {
-        cwd: PACKAGE_ROOT,
-        env: childTestEnv(),
-        encoding: "utf8",
-      });
-      assert.equal(result.status, 0, result.stderr);
-      writeFileSync(
-        plan.files.indexTs,
-        readFileSync(plan.files.indexTs, "utf8").replace('"TODO-rows-container-selector"', '"#rows"')
-      );
-      writeFileSync(plan.files.indexTs, readFileSync(plan.files.indexTs, "utf8").replace(JSON.stringify(`https://example.invalid/TODO-${name}-items`), JSON.stringify("https://example.invalid/items")));
+	withPrivateConnectorTree(() => {
+		const name = `zz_init_rows_${process.pid}`;
+		const plan = planTargets(name, "items");
+		assert.deepEqual(findCollisions(plan), []);
+		try {
+			const result = spawnSync(
+				process.execPath,
+				["--import", "tsx", "bin/connector-init.ts", name, "--browser"],
+				{
+					cwd: PACKAGE_ROOT,
+					env: childTestEnv(),
+					encoding: "utf8",
+				},
+			);
+			assert.equal(result.status, 0, result.stderr);
+			writeFileSync(
+				plan.files.indexTs,
+				readFileSync(plan.files.indexTs, "utf8").replace(
+					'"TODO-rows-container-selector"',
+					'"#rows"',
+				),
+			);
+			writeFileSync(
+				plan.files.indexTs,
+				readFileSync(plan.files.indexTs, "utf8").replace(
+					JSON.stringify(`https://example.invalid/TODO-${name}-items`),
+					JSON.stringify("https://example.invalid/items"),
+				),
+			);
 			const script = `
       import assert from "node:assert/strict";
       import {readFileSync, writeFileSync} from "node:fs";
@@ -600,80 +632,94 @@ test("CLI browser scaffold rejects an untouched row selector but accepts configu
       const configured = await import(url + "?configured");
       await assert.doesNotReject(() => configured.collect(context));
     `;
-      const checked = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
-        cwd: PACKAGE_ROOT,
-        env: childTestEnv(),
-        encoding: "utf8",
-      });
-      assert.equal(checked.status, 0, checked.stderr);
-    } finally {
-      cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
-    }
-  });
+			const checked = spawnSync(
+				process.execPath,
+				["--import", "tsx", "--input-type=module", "-e", script],
+				{
+					cwd: PACKAGE_ROOT,
+					env: childTestEnv(),
+					encoding: "utf8",
+				},
+			);
+			assert.equal(checked.status, 0, checked.stderr);
+		} finally {
+			cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+		}
+	});
 });
 
 test("CLI browser instructions configure login before first invocation", () => {
-  withPrivateConnectorTree(() => {
-    const name = `zz_init_order_${process.pid}`;
-    const plan = planTargets(name, "items");
-    assert.deepEqual(findCollisions(plan), []);
-    try {
-      const result = spawnSync(process.execPath, ["--import", "tsx", "bin/connector-init.ts", name, "--browser"], {
-        cwd: PACKAGE_ROOT,
-        env: childTestEnv(),
-        encoding: "utf8",
-      });
-      assert.equal(result.status, 0, result.stderr);
-      assert.ok(
-        result.stdout.indexOf("LOGIN_CHECK_URL") >= 0 &&
-          result.stdout.indexOf("LOGIN_CHECK_URL") < result.stdout.indexOf("bin/connector-dev.ts"),
-        result.stdout
-      );
-    } finally {
-      cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
-    }
-  });
+	withPrivateConnectorTree(() => {
+		const name = `zz_init_order_${process.pid}`;
+		const plan = planTargets(name, "items");
+		assert.deepEqual(findCollisions(plan), []);
+		try {
+			const result = spawnSync(
+				process.execPath,
+				["--import", "tsx", "bin/connector-init.ts", name, "--browser"],
+				{
+					cwd: PACKAGE_ROOT,
+					env: childTestEnv(),
+					encoding: "utf8",
+				},
+			);
+			assert.equal(result.status, 0, result.stderr);
+			assert.ok(
+				result.stdout.indexOf("LOGIN_CHECK_URL") >= 0 &&
+					result.stdout.indexOf("LOGIN_CHECK_URL") <
+						result.stdout.indexOf("bin/connector-dev.ts"),
+				result.stdout,
+			);
+		} finally {
+			cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+		}
+	});
 });
 
 test("cleanup leaves unrelated changes in a private fixture alone", () => {
-  const root = mkdtempSync(join(tmpdir(), "init-owned-"));
-  const connector = join(root, "connector");
-  const fixture = join(root, "fixture");
-  const manifest = join(root, "manifest.json");
-  const unrelated = join(root, "unrelated.txt");
-  try {
-    writeFileSync(unrelated, "before");
-    writeFileSync(manifest, "owned");
-    writeFileSync(unrelated, "changed during generation");
-    cleanUp(connector, fixture, manifest);
-    assert.equal(readFileSync(unrelated, "utf8"), "changed during generation");
-    assert.equal(existsSync(manifest), false);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+	const root = mkdtempSync(join(tmpdir(), "init-owned-"));
+	const connector = join(root, "connector");
+	const fixture = join(root, "fixture");
+	const manifest = join(root, "manifest.json");
+	const unrelated = join(root, "unrelated.txt");
+	try {
+		writeFileSync(unrelated, "before");
+		writeFileSync(manifest, "owned");
+		writeFileSync(unrelated, "changed during generation");
+		cleanUp(connector, fixture, manifest);
+		assert.equal(readFileSync(unrelated, "utf8"), "changed during generation");
+		assert.equal(existsSync(manifest), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("CLI collision refuses pre-existing targets without changing their bytes", () => {
-  withPrivateConnectorTree(() => {
-    const name = `zz_init_collision_${process.pid}`;
-    const plan = planTargets(name, "items");
-    mkdirSync(plan.connectorDir, { recursive: true });
-    writeFileSync(plan.files.indexTs, "// sentinel source\n");
-    writeFileSync(plan.files.manifestJson, '{"sentinel":true}\n');
-    const files = [plan.files.indexTs, plan.files.manifestJson];
-    const before = files.map((path) => readFileSync(path));
-    const names = readdirSync(plan.connectorDir).sort();
-    const result = spawnSync(process.execPath, ["--import", "tsx", "bin/connector-init.ts", name], {
-      cwd: PACKAGE_ROOT,
-      env: childTestEnv(),
-      encoding: "utf8",
-    });
-    assert.notEqual(result.status, 0);
-    for (const path of [plan.connectorDir, ...files]) assert.ok((result.stderr + result.stdout).includes(path));
-    assert.deepEqual(
-      files.map((path) => readFileSync(path)),
-      before
-    );
-    assert.deepEqual(readdirSync(plan.connectorDir).sort(), names);
-  });
+	withPrivateConnectorTree(() => {
+		const name = `zz_init_collision_${process.pid}`;
+		const plan = planTargets(name, "items");
+		mkdirSync(plan.connectorDir, { recursive: true });
+		writeFileSync(plan.files.indexTs, "// sentinel source\n");
+		writeFileSync(plan.files.manifestJson, '{"sentinel":true}\n');
+		const files = [plan.files.indexTs, plan.files.manifestJson];
+		const before = files.map((path) => readFileSync(path));
+		const names = readdirSync(plan.connectorDir).sort();
+		const result = spawnSync(
+			process.execPath,
+			["--import", "tsx", "bin/connector-init.ts", name],
+			{
+				cwd: PACKAGE_ROOT,
+				env: childTestEnv(),
+				encoding: "utf8",
+			},
+		);
+		assert.notEqual(result.status, 0);
+		for (const path of [plan.connectorDir, ...files])
+			assert.ok((result.stderr + result.stdout).includes(path));
+		assert.deepEqual(
+			files.map((path) => readFileSync(path)),
+			before,
+		);
+		assert.deepEqual(readdirSync(plan.connectorDir).sort(), names);
+	});
 });

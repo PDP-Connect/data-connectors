@@ -1,0 +1,64 @@
+{
+  "extra": {
+    "fatal_item_ids": [],
+    "logid": "Synthetic logid 1 lorem lorem lorem lorem",
+    "now": 1792644430000
+  },
+  "hasMore": false,
+  "isTruncated": false,
+  "log_pb": {
+    "impr_id": "Synthetic impr_id 2 lorem lorem lorem lorem"
+  },
+  "maxCursor": 0,
+  "minCursor": 1783816615,
+  "statusCode": 0,
+  "status_code": 0,
+  "status_msg": "",
+  "total": 1,
+  "userList": [
+    {
+      "stats": {
+        "diggCount": 24800,
+        "followerCount": 74,
+        "followingCount": 2793,
+        "friendCount": 0,
+        "heart": 61,
+        "heartCount": 61,
+        "videoCount": 2
+      },
+      "statsV2": {
+        "diggCount": "100003",
+        "followerCount": "100004",
+        "followingCount": "100005",
+        "friendCount": "100006",
+        "heart": "100007",
+        "heartCount": "100008",
+        "videoCount": "100009"
+      },
+      "user": {
+        "UserStoryStatus": 0,
+        "avatarLarger": "https://example.com/item/10",
+        "avatarMedium": "https://example.com/item/11",
+        "avatarThumb": "https://example.com/item/12",
+        "commentSetting": 0,
+        "downloadSetting": 0,
+        "duetSetting": 0,
+        "ftc": false,
+        "id": "100013",
+        "isADVirtual": false,
+        "nickname": "Synthetic nickname 14",
+        "openFavorite": false,
+        "privateAccount": false,
+        "relation": 1,
+        "secUid": "Synthetic secUid 15 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+        "secret": false,
+        "shortDramaCreator": {},
+        "signature": "Details",
+        "stitchSetting": 0,
+        "ttSeller": false,
+        "uniqueId": "synthetic.follow",
+        "verified": false
+      }
+    }
+  ]
+}

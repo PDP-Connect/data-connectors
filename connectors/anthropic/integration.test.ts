@@ -63,9 +63,12 @@ const { decodeEscapedText } = await import("./safe-escape.ts");
 const { consentTimeFieldResolver, makeEmitRecord } = await import(
 	"../../packages/polyfill-connectors/src/connector-runtime.ts"
 );
-const { makeRecordingEmit } = await import(
+const { makeRecordingEmit, skipPoliteDelays } = await import(
 	"../../packages/polyfill-connectors/src/test-harness.ts"
 );
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 type BrowserCollectContext =
 	import("../../packages/polyfill-connectors/src/connector-runtime.ts").BrowserCollectContext;
 type AnthropicTestOverrides = {
@@ -245,7 +248,13 @@ function makeContext(overrides: {
 }
 
 const ORG_RESPONSE = [
-	{ uuid: "org-1", capabilities: ["chat", "claude_pro"] },
+	{
+		uuid: "org-1",
+		// A personal organization is named after its owner.
+		name: "Fictional Owner's Organization",
+		capabilities: ["chat", "claude_pro"],
+		created_at: "2025-03-01T12:00:00.123456Z",
+	},
 	{ uuid: "org-2", capabilities: ["api"] },
 ];
 
@@ -822,6 +831,243 @@ for (const scenario of [
 		assertUserFacingProgress(protocolMessages);
 	});
 }
+
+const ACCOUNT_PLAN_RECORD = {
+	id: "account_plan",
+	is_default: true,
+	account_id: "org-1",
+	account_structure: null,
+	account_created_at: "2025-03-01T12:00:00.123456Z",
+	plan_type: "pro",
+	plan_display_name: null,
+	subscription_plan: null,
+	has_active_subscription: null,
+	billing_period: null,
+	will_renew: null,
+	renews_at: null,
+	expires_at: null,
+	cancels_at: null,
+	scheduled_plan_change: null,
+};
+
+test("collectAnthropic: account_plan carries the organization's plan family and creation time, and no name", async () => {
+	const organizationReads = { count: 0 };
+	const exportRequests: string[] = [];
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data")) {
+			organizationReads.count += 1;
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		}
+		if (url.includes("/export_data")) exportRequests.push(url);
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages, page } = makeContext({
+		streams: ["account_plan"],
+		fetchStub,
+	});
+	page.menuSpans = ["Export Owner", "Pro plan"];
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted.map((record) => [record.stream, record.data]),
+		[["account_plan", ACCOUNT_PLAN_RECORD]],
+	);
+	// One organization read serves the plan, and no export is requested: each
+	// request emails the account owner.
+	assert.equal(organizationReads.count, 1);
+	assert.deepEqual(exportRequests, []);
+	// No name reaches any message: not the menu's, not users.json's, not the
+	// organization's own name.
+	const everything = JSON.stringify([...protocolMessages, ...diagnostics]);
+	for (const name of ["Export Owner", "Fictional", "Owner's Organization"])
+		assert.equal(everything.includes(name), false, name);
+	// The inventory reports coverage but keeps no checkpoint.
+	assert.equal(
+		protocolMessages.some(
+			(message) =>
+				message.type === "STATE" && message.stream === "account_plan",
+		),
+		false,
+	);
+	assert.equal(
+		diagnostics.some((line) => line.includes("account_plan_incomplete")),
+		false,
+	);
+});
+
+test("collectAnthropic: account_plan reports an organization entry without a plan or a creation time as null, with a diagnostic", async () => {
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(
+				jsonResponse(200, [
+					{ uuid: "org-1", capabilities: ["chat"], billing_type: "stripe" },
+				]),
+			);
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted } = makeContext({
+		streams: ["account_plan"],
+		fetchStub,
+	});
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(emitted[0]?.data, {
+		...ACCOUNT_PLAN_RECORD,
+		account_created_at: null,
+		plan_type: null,
+	});
+	assert.match(
+		diagnostics.find((line) => line.includes("account_plan_incomplete")) ?? "",
+		/"plan_type":"absent".*"account_created_at":"absent"/,
+	);
+});
+
+test("collectAnthropic: a resumed export whose organization is not in the signed-in account skips account_plan instead of emitting an empty plan, when the run reads the export", async () => {
+	const zipBytes = await buildZipBytes();
+	const { download } = makeFakeDownload(zipBytes);
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages, page } = makeContext({
+		streams: ["account_plan", "projects"],
+		state: {
+			conversations: {
+				pending_export: {
+					organization_id: "old-org",
+					nonce: "old-nonce",
+					requested_at: "2025-12-31T00:00:00.000Z",
+				},
+			},
+		},
+		fetchStub,
+	});
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+
+	await collectAnthropic(ctx);
+
+	assert.equal(
+		emitted.some((record) => record.stream === "account_plan"),
+		false,
+	);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(
+		skips.map((skip) => [skip.stream, skip.reason]),
+		[["account_plan", "organization_unavailable"]],
+	);
+	assert.deepEqual(skips[0]?.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+});
+
+test("collectAnthropic: a resumed export finds its own organization's plan in the account's list, when the run reads the export", async () => {
+	const zipBytes = await buildZipBytes();
+	const { download } = makeFakeDownload(zipBytes);
+	const fetchStub: FetchStub = (url) => {
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, page } = makeContext({
+		streams: ["account_plan", "projects"],
+		state: {
+			conversations: {
+				pending_export: {
+					organization_id: "org-1",
+					nonce: "old-nonce",
+					requested_at: "2025-12-31T00:00:00.000Z",
+				},
+			},
+		},
+		fetchStub,
+	});
+	const originalGoto = page.goto.bind(page);
+	page.goto = async (url: string): Promise<null> => {
+		const result = await originalGoto(url);
+		if (url.includes("/export/"))
+			queueMicrotask(() => page.emit("download", download));
+		return result;
+	};
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted.find((record) => record.stream === "account_plan")?.data,
+		ACCOUNT_PLAN_RECORD,
+	);
+});
+
+test("collectAnthropic: a plan-only run reads the plan of the chat organization without touching a pending export", async () => {
+	const requests: string[] = [];
+	const fetchStub: FetchStub = (url) => {
+		requests.push(url);
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages } = makeContext({
+		streams: ["account_plan"],
+		state: {
+			conversations: {
+				pending_export: {
+					organization_id: "old-org",
+					nonce: "old-nonce",
+					requested_at: "2025-12-31T00:00:00.000Z",
+				},
+			},
+		},
+		fetchStub,
+	});
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted.map((record) => [record.stream, record.data]),
+		[["account_plan", ACCOUNT_PLAN_RECORD]],
+	);
+	assert.equal(
+		requests.some((url) => url.includes("/export")),
+		false,
+	);
+	assert.deepEqual(skipsOf(protocolMessages), []);
+});
+
+test("collectAnthropic: a plan-only run with no chat organization skips account_plan and requests no export", async () => {
+	const requests: string[] = [];
+	const fetchStub: FetchStub = (url) => {
+		requests.push(url);
+		if (url.includes("/api/organizations") && !url.includes("export_data"))
+			return Promise.resolve(jsonResponse(200, []));
+		return Promise.reject(new Error(`unexpected fetch: ${url}`));
+	};
+	const { ctx, emitted, protocolMessages } = makeContext({
+		streams: ["account_plan"],
+		fetchStub,
+	});
+
+	await collectAnthropic(ctx);
+
+	assert.equal(emitted.length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(
+		skips.map((skip) => [skip.stream, skip.reason]),
+		[["account_plan", "no_chat_organization"]],
+	);
+	assert.equal(
+		requests.some((url) => url.includes("/export")),
+		false,
+	);
+});
 
 test("collectAnthropic: scope filtering — requesting only 'projects' emits no conversations/messages/project_documents", async () => {
 	const zipBytes = await buildZipBytes();
@@ -1670,13 +1916,14 @@ test("collectAnthropic: multi-part manifest with no recognized category part -> 
 
 function manifestFetchStub(
 	parts: Array<{ category: string; token: string; part?: number }>,
+	totalFiles = parts.length,
 ): FetchStub {
 	// Synthetic default: category-local numbering matches the only scheme
 	// accepted for proof. Observed filenames do not prove raw part semantics.
 	const seen = new Map<string, number>();
 	const manifest = {
 		version: "1.0",
-		total_files: parts.length,
+		total_files: totalFiles,
 		data_files: parts.map((p, i) => {
 			const next = seen.get(p.category) ?? 0;
 			seen.set(p.category, next + 1);
@@ -1752,9 +1999,19 @@ test("collectAnthropic: manifest with an empty conversations part is a verified 
 		streams: ["conversations", "messages"],
 		fetchStub: manifestFetchStub([
 			{ category: "conversations", token: "tok-c" },
+			{ category: "light_metadata", token: "tok-m" },
 		]),
 	});
-	serveDownloads(page, new Map([["tok-c", zip]]));
+	const metadataZip = await buildManifestPartZip([
+		{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+	]);
+	serveDownloads(
+		page,
+		new Map([
+			["tok-c", zip],
+			["tok-m", metadataZip],
+		]),
+	);
 
 	await collectAnthropic(ctx);
 
@@ -1765,6 +2022,62 @@ test("collectAnthropic: manifest with an empty conversations part is a verified 
 	);
 	assert.ok(final?.cursor);
 	assert.ok("synced_at" in (final.cursor as Record<string, unknown>));
+});
+
+test("collectAnthropic: manifest without a projects category skips projects and documents instead of checkpointing them empty", async () => {
+	const zip = await buildManifestPartZip([
+		{
+			name: "conversations.json",
+			content: [
+				{
+					uuid: "conv-1",
+					name: "Manifest conversation",
+					created_at: "2026-01-01T00:00:00.000Z",
+					chat_messages: [],
+				},
+			],
+		},
+	]);
+	const { ctx, emitted, page, protocolMessages } = makeContext({
+		streams: ["conversations", "projects", "project_documents"],
+		fetchStub: manifestFetchStub([
+			{ category: "conversations", token: "tok-c" },
+			{ category: "light_metadata", token: "tok-m" },
+		]),
+	});
+	const metadataZip = await buildManifestPartZip([
+		{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+	]);
+	serveDownloads(
+		page,
+		new Map([
+			["tok-c", zip],
+			["tok-m", metadataZip],
+		]),
+	);
+
+	await collectAnthropic(ctx);
+
+	assert.deepEqual(
+		emitted
+			.filter((record) => record.stream === "conversations")
+			.map((record) => record.data.id),
+		["conv-1"],
+	);
+	const skips = skipsOf(protocolMessages);
+	assert.deepEqual(skips.map((skip) => skip.stream).sort(), [
+		"project_documents",
+		"projects",
+	]);
+	assert.ok(skips.every((skip) => skip.reason === "export_projects_missing"));
+	assertNoSyncedAt(protocolMessages, ["projects", "project_documents"]);
+	assert.ok(
+		statesOf(protocolMessages).some(
+			(message) =>
+				message.stream === "conversations" &&
+				"synced_at" in (message.cursor as Record<string, unknown>),
+		),
+	);
 });
 
 test("collectAnthropic: manifest projects part with unknown content skips projects and project_documents only", async () => {
@@ -1779,13 +2092,18 @@ test("collectAnthropic: manifest projects part with unknown content skips projec
 		fetchStub: manifestFetchStub([
 			{ category: "conversations", token: "tok-c" },
 			{ category: "projects", token: "tok-p" },
+			{ category: "light_metadata", token: "tok-m" },
 		]),
 	});
+	const metadataZip = await buildManifestPartZip([
+		{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+	]);
 	serveDownloads(
 		page,
 		new Map([
 			["tok-c", convZip],
 			["tok-p", projZip],
+			["tok-m", metadataZip],
 		]),
 	);
 
@@ -1879,6 +2197,12 @@ for (const scenario of [
 				category: "projects",
 				entries: [{ name: "projects/p.json", content: PROJECT_JSON }],
 			},
+			{
+				category: "light_metadata",
+				entries: [
+					{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+				],
+			},
 		],
 	},
 	{
@@ -1892,6 +2216,12 @@ for (const scenario of [
 				category: "projects",
 				entries: [{ name: "projects/p.json", content: PROJECT_JSON }],
 			},
+			{
+				category: "light_metadata",
+				entries: [
+					{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+				],
+			},
 		],
 	},
 ]) {
@@ -1899,12 +2229,29 @@ for (const scenario of [
 		const { emitted, protocolMessages } = await runManifest(scenario.parts);
 
 		const skips = skipsOf(protocolMessages);
-		assert.deepEqual(skips.map((s) => s.stream).sort(), [
-			"conversations",
-			"messages",
-		]);
-		assert.ok(skips.every((s) => s.reason === "export_conversations_missing"));
-		assertNoSyncedAt(protocolMessages, ["conversations", "messages"]);
+		assert.deepEqual(
+			skips.map((s) => s.stream).sort(),
+			[
+				...(scenario.label === "conversations under a renamed category"
+					? ARCHIVE_STREAMS
+					: ["conversations", "messages"]),
+			].sort(),
+		);
+		assert.ok(
+			skips.every(
+				(s) =>
+					s.reason ===
+					(scenario.label === "conversations under a renamed category"
+						? "export_manifest_incomplete"
+						: "export_conversations_missing"),
+			),
+		);
+		assertNoSyncedAt(
+			protocolMessages,
+			scenario.label === "conversations under a renamed category"
+				? ARCHIVE_STREAMS
+				: ["conversations", "messages"],
+		);
 		assert.equal(emitted.filter((r) => r.stream === "conversations").length, 0);
 		assert.equal(emitted.filter((r) => r.stream === "projects").length, 1);
 		const conversationsState = statesOf(protocolMessages).findLast(
@@ -1930,15 +2277,36 @@ test("collectAnthropic: manifest conversations entry with an unparseable item sk
 				},
 			],
 		},
+		{
+			category: "light_metadata",
+			entries: [
+				{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+			],
+		},
 	]);
 
 	const skips = skipsOf(protocolMessages);
 	assert.deepEqual(skips.map((s) => s.stream).sort(), [
 		"conversations",
 		"messages",
+		"project_documents",
+		"projects",
 	]);
-	assert.ok(skips.every((s) => s.reason === "export_items_unparseable"));
-	assertNoSyncedAt(protocolMessages, ["conversations", "messages"]);
+	assert.deepEqual(
+		skips.map((skip) => `${skip.stream}:${skip.reason}`).sort(),
+		[
+			"conversations:export_items_unparseable",
+			"messages:export_items_unparseable",
+			"project_documents:export_projects_missing",
+			"projects:export_projects_missing",
+		].sort(),
+	);
+	assertNoSyncedAt(protocolMessages, [
+		"conversations",
+		"messages",
+		"projects",
+		"project_documents",
+	]);
 	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
 	const progressText = protocolMessages
 		.filter((m) => m.type === "PROGRESS")
@@ -1965,19 +2333,35 @@ test("collectAnthropic: manifest conversation without chat_messages imports its 
 				},
 			],
 		},
+		{
+			category: "light_metadata",
+			entries: [
+				{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+			],
+		},
 	]);
 
 	const skips = skipsOf(protocolMessages);
-	assert.equal(skips.length, 1);
-	const skip = skips[0];
+	assert.deepEqual(
+		skips.map((skip) => `${skip.stream}:${skip.reason}`).sort(),
+		[
+			"messages:export_conversation_incomplete",
+			"project_documents:export_projects_missing",
+			"projects:export_projects_missing",
+		].sort(),
+	);
+	const skip = skips.find((entry) => entry.stream === "messages");
 	assert.ok(skip);
-	assert.equal(skip.stream, "messages");
 	assert.equal(skip.reason, "export_conversation_incomplete");
 	assert.equal(
 		(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
 		"conv-2",
 	);
-	assertNoSyncedAt(protocolMessages, ["messages"]);
+	assertNoSyncedAt(protocolMessages, [
+		"messages",
+		"projects",
+		"project_documents",
+	]);
 	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 2);
 });
 
@@ -3131,6 +3515,8 @@ async function runFullCompletion(
 			part: number;
 			entries: Array<{ name: string; content: unknown }>;
 		}>;
+		/** Manifest mode: override the declared file count to test inventory integrity. */
+		manifestTotalFiles?: number;
 		/** Awaited before each RECORD reaches the sink; may defer or reject. */
 		recordGate?: (
 			message: EmittedMessage,
@@ -3207,7 +3593,7 @@ async function runFullCompletion(
 		...(input.testOverrides ? { testOverrides: input.testOverrides } : {}),
 		fetchStub:
 			mode === "manifest"
-				? manifestFetchStub(tokens)
+				? manifestFetchStub(tokens, input.manifestTotalFiles)
 				: oldFormatFetchStub({ exportRequests: 0 }),
 	});
 	context.page.menuSpans = OWNER_MENU;
@@ -3648,95 +4034,158 @@ function assertNoProofs(run: Awaited<ReturnType<typeof runPartitions>>) {
 	);
 }
 
-test("manifest partitions: a lone projects part 1 holding [] does not prove empty projects or documents", async () => {
-	assertNoProofs(
-		await runPartitions([
+function assertStreamsSkipped(
+	run: Awaited<ReturnType<typeof runPartitions>>,
+	streams: string[],
+) {
+	for (const stream of streams) {
+		const skips = skipsOf(run.protocolMessages).filter(
+			(skip) => skip.stream === stream,
+		);
+		assert.equal(skips.length, 1, `${stream} has one SKIP_RESULT`);
+		assert.equal(run.proofFor(stream).length, 0, `${stream} has no coverage`);
+		assertNoSyncedAt(run.protocolMessages, [stream]);
+	}
+}
+
+const ARCHIVE_STREAMS = [
+	"account_profile",
+	"conversations",
+	"messages",
+	"projects",
+	"project_documents",
+];
+
+const COMPLETE_PROJECTS_PART = {
+	category: "projects",
+	part: 0,
+	entries: projectEntry(0),
+};
+const COMPLETE_METADATA_PART = {
+	category: "light_metadata",
+	part: 0,
+	entries: OWNER_USERS,
+};
+
+test("manifest partitions: a conversations gap skips conversations and messages while complete projects still prove", async () => {
+	const run = await runPartitions([
+		conversationsPart(1),
+		COMPLETE_PROJECTS_PART,
+		COMPLETE_METADATA_PART,
+	]);
+	assertStreamsSkipped(run, ["conversations", "messages"]);
+	assertSelfMapped(run, "projects", 1);
+	assertSelfMapped(run, "project_documents", 2);
+});
+
+test("manifest inventory count mismatch skips every content stream instead of only withholding coverage", async () => {
+	const run = await runFullCompletion("manifest", {
+		partitions: [
 			conversationsPart(),
-			{
-				category: "projects",
-				part: 1,
-				entries: [{ name: "projects.json", content: [] }],
-			},
-		]),
-	);
+			COMPLETE_PROJECTS_PART,
+			COMPLETE_METADATA_PART,
+		],
+		manifestTotalFiles: 4,
+		streams: ALL_PLUS_MESSAGES,
+	});
+	assertStreamsSkipped(run, ARCHIVE_STREAMS);
+});
+
+test("manifest partitions: a lone projects part 1 holding [] does not prove empty projects or documents", async () => {
+	const run = await runPartitions([
+		conversationsPart(),
+		{
+			category: "projects",
+			part: 1,
+			entries: [{ name: "projects.json", content: [] }],
+		},
+		COMPLETE_METADATA_PART,
+	]);
+	assertStreamsSkipped(run, ["projects", "project_documents"]);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 1);
 });
 test("manifest partitions: a missing projects part 0 withholds proofs even beside a valid part 1", async () => {
-	assertNoProofs(
-		await runPartitions([
-			conversationsPart(),
-			{ category: "projects", part: 1, entries: projectEntry(0) },
-		]),
-	);
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 1, entries: projectEntry(0) },
+		COMPLETE_METADATA_PART,
+	]);
+	assertStreamsSkipped(run, ["projects", "project_documents"]);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 1);
 });
 test("manifest partitions: two distinct projects files both labelled part 0 withhold proofs", async () => {
-	assertNoProofs(
-		await runPartitions([
-			conversationsPart(),
-			{ category: "projects", part: 0, entries: projectEntry(0) },
-			{
-				category: "projects",
-				part: 0,
-				entries: projectEntry(1, {
-					uuid: "proj-2",
-					name: "Other",
-					docs: [{ uuid: "doc-9", filename: "z.md", content: "z" }],
-				}),
-			},
-		]),
-	);
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 0, entries: projectEntry(0) },
+		{
+			category: "projects",
+			part: 0,
+			entries: projectEntry(1, {
+				uuid: "proj-2",
+				name: "Other",
+				docs: [{ uuid: "doc-9", filename: "z.md", content: "z" }],
+			}),
+		},
+		COMPLETE_METADATA_PART,
+	]);
+	assertStreamsSkipped(run, ["projects", "project_documents"]);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 1);
 });
 test("manifest partitions: a projects gap (0 and 2) withholds proofs", async () => {
-	assertNoProofs(
-		await runPartitions([
-			conversationsPart(),
-			{ category: "projects", part: 0, entries: projectEntry(0) },
-			{
-				category: "projects",
-				part: 2,
-				entries: projectEntry(1, { uuid: "proj-2", docs: [] }),
-			},
-		]),
-	);
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 0, entries: projectEntry(0) },
+		{
+			category: "projects",
+			part: 2,
+			entries: projectEntry(1, { uuid: "proj-2", docs: [] }),
+		},
+		COMPLETE_METADATA_PART,
+	]);
+	assertStreamsSkipped(run, ["projects", "project_documents"]);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 1);
 });
 test("manifest partitions: light_metadata part 1 without part 0 gives no profile or other proof", async () => {
-	assertNoProofs(
-		await runPartitions([
-			conversationsPart(),
-			{ category: "projects", part: 0, entries: projectEntry(0) },
-			{ category: "light_metadata", part: 1, entries: OWNER_USERS },
-		]),
-	);
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 0, entries: projectEntry(0) },
+		{ category: "light_metadata", part: 1, entries: OWNER_USERS },
+	]);
+	assertStreamsSkipped(run, ARCHIVE_STREAMS);
 });
 test("manifest partitions: duplicate light_metadata part 0 withholds proofs", async () => {
-	assertNoProofs(
-		await runPartitions([
-			conversationsPart(),
-			{ category: "projects", part: 0, entries: projectEntry(0) },
-			{ category: "light_metadata", part: 0, entries: OWNER_USERS },
-			{
-				category: "light_metadata",
-				part: 0,
-				entries: [
-					{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
-				],
-			},
-		]),
-	);
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 0, entries: projectEntry(0) },
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+		{
+			category: "light_metadata",
+			part: 0,
+			entries: [
+				{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+			],
+		},
+	]);
+	assertStreamsSkipped(run, ARCHIVE_STREAMS);
 });
 test("manifest partitions: duplicate or missing conversations parts still withhold proofs", async () => {
-	assertNoProofs(
-		await runPartitions([
-			conversationsPart(0),
-			conversationsPart(0),
-			{ category: "projects", part: 0, entries: projectEntry(0) },
-		]),
-	);
-	assertNoProofs(
-		await runPartitions([
-			conversationsPart(1),
-			{ category: "projects", part: 0, entries: projectEntry(0) },
-		]),
-	);
+	for (const conversations of [
+		[conversationsPart(0), conversationsPart(0)],
+		[conversationsPart(1)],
+	]) {
+		const run = await runPartitions([
+			...conversations,
+			COMPLETE_PROJECTS_PART,
+			COMPLETE_METADATA_PART,
+		]);
+		assertStreamsSkipped(run, ["conversations", "messages"]);
+		assertSelfMapped(run, "projects", 1);
+		assertSelfMapped(run, "project_documents", 2);
+	}
 });
 test("manifest partitions: contiguous multi-part projects from 0 keep their proofs", async () => {
 	const run = await runPartitions([
@@ -3788,7 +4237,9 @@ test("manifest category boundary: absent projects with a cross-classified projec
 	assert.equal(run.proofFor("messages").length, 0);
 	assert.equal(run.recordsOf("conversations").length, 1);
 	assert.equal(run.recordsOf("messages").length, 0);
-	const skip = skipsOf(run.protocolMessages).find((s) => s.stream === "messages");
+	const skip = skipsOf(run.protocolMessages).find(
+		(s) => s.stream === "messages",
+	);
 	assert.equal(skip?.reason, "export_conversation_incomplete");
 	assert.equal(
 		(skip?.diagnostics as Record<string, unknown>)?.conversation_id,
@@ -3870,7 +4321,9 @@ test("manifest category boundary: projects found in conversations do not count t
 	assert.equal(run.proofFor("messages").length, 0);
 	assert.equal(run.recordsOf("conversations").length, 1);
 	assert.equal(run.recordsOf("messages").length, 1);
-	const skip = skipsOf(run.protocolMessages).find((s) => s.stream === "messages");
+	const skip = skipsOf(run.protocolMessages).find(
+		(s) => s.stream === "messages",
+	);
 	assert.equal(skip?.reason, "export_conversation_incomplete");
 	assert.equal(
 		(skip?.diagnostics as Record<string, unknown>)?.conversation_id,
@@ -4850,11 +5303,7 @@ function blobsOf(messages: EmittedMessage[]) {
 
 test("collectAnthropic: a streamed oversized parent whose identity follows its messages is kept; its full envelope is streamed into one real blob and its messages are emitted in order", async () => {
 	// Cross the injected 64 Ki unit buffer and verify the complete source blob.
-	const parent = messagesFirstParent(
-		"late-id",
-		"2026-02-01T00:00:00.000Z",
-		3,
-	);
+	const parent = messagesFirstParent("late-id", "2026-02-01T00:00:00.000Z", 3);
 	const reads: number[] = [];
 	const meter = new BufferMeter();
 	const { emitted, events, protocolMessages } = await runOldFormat(
@@ -5413,7 +5862,12 @@ test("collectAnthropic: organization selection prefers chat, then claude_pro, th
 	]);
 });
 
-for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) {
+for (const mode of [
+	"buffered",
+	"streaming",
+	"oversized",
+	"manifest",
+] as const) {
 	for (const unboundedMessages of [false, true]) {
 		test(`scope union ${mode}: June conversations preserve May messages with ${unboundedMessages ? "unbounded" : "January"} messages`, async () => {
 			const conversation = (month: string) => ({
@@ -5491,7 +5945,8 @@ test("oversized omission: malformed envelope names the conversation and skips bo
 		assert.ok(skip, `${stream} must explicitly report a partial outcome`);
 		assert.equal(skip.reason, "export_oversized_conversation_incomplete");
 		assert.equal(
-			(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
+			(skip.diagnostics as Record<string, unknown> | undefined)
+				?.conversation_id,
 			"broken-envelope",
 		);
 		assert.equal(coverageOf(protocolMessages, stream).length, 0);
@@ -5535,15 +5990,13 @@ for (const [label, children] of [
 				testOverrides: { maxBufferedObjectUnits: 64 },
 			},
 		);
-		assert.equal(
-			emitted.filter((r) => r.stream === "conversations").length,
-			1,
-		);
+		assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
 		const skip = skipsOf(protocolMessages).find((s) => s.stream === "messages");
 		assert.ok(skip, "an omitted message must explicitly make messages partial");
 		assert.equal(skip.reason, "export_oversized_conversation_incomplete");
 		assert.equal(
-			(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
+			(skip.diagnostics as Record<string, unknown> | undefined)
+				?.conversation_id,
 			"partial-parent",
 		);
 		assert.equal(coverageOf(protocolMessages, "messages").length, 0);
@@ -5788,7 +6241,12 @@ for (const children of [undefined, null]) {
 	});
 }
 
-for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) {
+for (const mode of [
+	"buffered",
+	"streaming",
+	"oversized",
+	"manifest",
+] as const) {
 	for (const withConversations of [false, true]) {
 		for (const [label, parentTimes, children, outside] of [
 			[
@@ -5834,12 +6292,7 @@ for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) 
 				[null],
 				"before",
 			],
-			[
-				"non-object child with unknown time",
-				{},
-				[null],
-				null,
-			],
+			["non-object child with unknown time", {}, [null], null],
 			[
 				"malformed list in old parent",
 				{ updated_at: "2026-05-15T00:00:00Z" },
@@ -6065,7 +6518,8 @@ for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) 
 								: "export_conversation_incomplete",
 						);
 						assert.equal(
-							(skips[0]?.diagnostics as Record<string, unknown>)?.conversation_id,
+							(skips[0]?.diagnostics as Record<string, unknown>)
+								?.conversation_id,
 							"partial-parent",
 						);
 					}

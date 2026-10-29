@@ -4716,7 +4716,9 @@ test("scenario-record: declared schema bounds wide allOf scheduling and disclose
 	try {
 		const result = runRecordCli(
 			[connectorKey, "--out", join(tmpDir, "wide.scenario.json")],
-			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+			},
 		);
 		assert.equal(result.code, 0, result.stderr);
 		assert.match(result.stdout, /complete: true/);
@@ -4776,7 +4778,9 @@ for (const baseKeyword of ["$id", "id"]) {
 		try {
 			const result = runRecordCli(
 				[connectorKey, "--out", join(tmpDir, "ancestor.scenario.json")],
-				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+				{
+					PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				},
 			);
 			assert.equal(result.code, 0, result.stderr);
 			assert.match(result.stdout, /complete: true/);
@@ -4827,7 +4831,9 @@ test("scenario-record: declared schema bounds pointer length before expansion", 
 			});
 			const result = runRecordCli(
 				[connectorKey, "--out", join(tmpDir, "pointer.scenario.json")],
-				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+				{
+					PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				},
 			);
 			assert.equal(result.code, 0, result.stderr);
 			assert.match(result.stdout, /complete: true/);
@@ -4920,7 +4926,9 @@ for (const { label, ref, named, bounded } of [
 		try {
 			const result = runRecordCli(
 				[connectorKey, "--out", join(tmpDir, "fragment.scenario.json")],
-				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+				{
+					PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				},
 			);
 			assert.equal(result.code, 0, result.stderr);
 			assert.match(result.stdout, /complete: true/);
@@ -4996,7 +5004,9 @@ test("scenario-record: declared schema follows allOf and local $refs across runs
 	try {
 		const result = runRecordCli(
 			[connectorKey, "--out", join(tmpDir, "declared.scenario.json")],
-			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+			},
 		);
 		assert.equal(result.code, 0, result.stderr);
 		assert.match(result.stdout, /complete: true/);
@@ -5176,7 +5186,9 @@ test("scenario-record: declared schema cycles, unresolved refs, and node overflo
 			});
 			const result = runRecordCli(
 				[key, "--runs", runs, "--out", join(tmpDir, `${key}.scenario.json`)],
-				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+				{
+					PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				},
 			);
 			assert.equal(result.code, 0, `${key}: ${result.stderr}`);
 			assert.match(result.stdout, /complete: true/, key);
@@ -5311,7 +5323,9 @@ test("scenario-record: declared schema unsupported keywords keep the metadata bo
 			});
 			const result = runRecordCli(
 				[key, "--out", join(tmpDir, `${key}.scenario.json`)],
-				{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+				{
+					PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				},
 			);
 			const isBounded = result.stdout.includes(
 				"Schema field metadata was bounded",
@@ -5372,7 +5386,9 @@ test("scenario-record: declared schema nested base URI stops names beneath it an
 				"--out",
 				join(tmpDir, "nested.scenario.json"),
 			],
-			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+			},
 		);
 		assert.equal(result.code, 0, result.stderr);
 		assert.match(result.stdout, /complete: true/);
@@ -5641,6 +5657,63 @@ test("scenario-verify: preserves multi-byte STATE cursors across pipe chunks", (
 			`stdout=${result.stdout.slice(0, 2000)} stderr=${result.stderr}`,
 		);
 		assert.match(result.stdout, /run 0: PASS/);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+const GAP_PAGE_FIXTURE_PATH = join(
+	PACKAGE_ROOT,
+	"src",
+	"test-fixtures",
+	"connector-dev-gap-page-fixture.ts",
+);
+
+test("scenario-record and scenario-verify answer DETAIL_GAPS_PAGE_REQUEST with an empty page, so the run reaches DONE", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-gap-page-test-"));
+	const scenarioPath = join(tmpDir, "gap-page.scenario.json");
+	try {
+		// A short inactivity window: an unanswered request would be killed by
+		// it (exit non-zero, no DONE) instead of hanging the test.
+		const recordResult = runRecordCli(
+			[
+				"connector-dev-gap-page-fixture",
+				"--entrypoint",
+				GAP_PAGE_FIXTURE_PATH,
+				"--runs",
+				"1",
+				"--timeout",
+				"15",
+				"--out",
+				scenarioPath,
+			],
+			{},
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`scenario-record failed: stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
+		);
+		assert.match(recordResult.stdout, /complete: true/);
+		const scenario = JSON.parse(
+			readFileSync(scenarioPath, "utf8"),
+		) as ConnectorScenario;
+		assert.deepEqual(scenario.runs[0]?.expected.records.items?.ids, ["item-1"]);
+
+		const verifyResult = runVerifyCli([
+			"connector-dev-gap-page-fixture",
+			"--entrypoint",
+			GAP_PAGE_FIXTURE_PATH,
+			"--timeout",
+			"15",
+			scenarioPath,
+		]);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`scenario-verify failed: stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+		);
+		assert.match(verifyResult.stdout, /run 0: PASS/);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}

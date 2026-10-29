@@ -8,6 +8,7 @@ import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
+	buildFullScanCoverageMessage,
 	type BrowserCollectContext,
 	type EnsureSessionArgs,
 	runConnector,
@@ -77,7 +78,7 @@ type CoverageFact = {
 	stop_reason?: string;
 	next_checkpoint?: string | null;
 	incomplete?: boolean;
-	skipped_unresolved_date_count?: number;
+	unresolved_date_count?: number;
 };
 
 export async function youtubeRecordId(value: string): Promise<string> {
@@ -94,11 +95,19 @@ export function videoIdentity(video: BrowserVideo): string {
 }
 
 function historyIdentity(video: BrowserVideo, dateReference: Date): string {
+	const label = video.watched_date_label ?? null;
 	const watchedDate = resolveWatchedDate(
-		video.watched_date_label ?? null,
+		label,
 		dateReference,
 	);
-	return `${videoIdentity(video)}|${watchedDate ?? "unknown-date"}`;
+	if (watchedDate) return `${videoIdentity(video)}|${watchedDate}`;
+	const sectionLabel = label
+		?.normalize("NFKC")
+		.trim()
+		.replace(/\s+/g, " ")
+		.toLowerCase();
+	const collectionDate = localDate(dateReference);
+	return `${videoIdentity(video)}|unresolved:${collectionDate}:${sectionLabel ?? "unknown-section"}`;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
@@ -316,14 +325,19 @@ export function parseCount(value: string | null | undefined): number | null {
 }
 
 /** A section label has at most day precision. Never infer a time of day. */
+function localDate(date: Date): string {
+	const year = date.getFullYear();
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const day = String(date.getDate()).padStart(2, "0");
+	return `${year}-${month}-${day}`;
+}
+
 export function resolveWatchedDate(
 	label: string | null,
 	now: Date,
 ): string | null {
 	if (!label) return null;
 	const text = label.trim().toLowerCase();
-	const localDate = (date: Date) =>
-		`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 	if (text === "today") return localDate(now);
 	if (text === "yesterday")
 		return localDate(
@@ -433,7 +447,7 @@ export async function ensureYoutubeSession(
 		completeAssistance: args.completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
 		message:
-			"Sign in to YouTube in the secure browser, then continue. PDPP will verify the session before collecting.",
+			"Sign in to YouTube in the secure browser, then continue. Collection starts once the session is verified.",
 		page: args.page,
 		probe: () => hasYoutubeSession(args.page),
 		readinessProbe: hasYoutubeSession,
@@ -661,6 +675,8 @@ async function emitVerifiedEmptyState(
 			evidence: "youtube_page_data_empty",
 		},
 	});
+	if (stream === "playlist_items")
+		await ctx.emit(buildFullScanCoverageMessage(stream, 0));
 }
 
 type ExhaustionEvidence = {
@@ -1755,6 +1771,7 @@ export async function collectYoutubeBrowser(
 	let playlistLinks: Array<{ id: string; url: string }> = [];
 	let playlistIndexReadable = true;
 	let playlistIndexVerifiedEmpty = false;
+	let playlistItemsEmptyProven = false;
 	if (requested.has("playlists") || requested.has("playlist_items")) {
 		try {
 			await page.goto(`${HOME}feed/playlists`, {
@@ -1777,6 +1794,7 @@ export async function collectYoutubeBrowser(
 					"youtube-playlist-index-after-scroll",
 				);
 				playlistLinks = result.items;
+				playlistItemsEmptyProven = result.exhausted;
 				for (const stream of ["playlists", "playlist_items"]) {
 					if (!requested.has(stream)) continue;
 					if (
@@ -1851,6 +1869,8 @@ export async function collectYoutubeBrowser(
 						SCROLLS.playlist_items,
 						"playlist_items",
 					);
+					playlistItemsEmptyProven = playlistItemsEmptyProven &&
+						result !== null && result.exhausted && result.items.length === 0;
 					if (result) {
 						for (const video of result.items) {
 							await emit("playlist_items", {
@@ -1861,6 +1881,7 @@ export async function collectYoutubeBrowser(
 						}
 					}
 				} catch {
+					playlistItemsEmptyProven = false;
 					await streams.fail(
 						"playlist_items",
 						`YouTube playlist ${playlist.id} items could not be collected.`,
@@ -1874,6 +1895,9 @@ export async function collectYoutubeBrowser(
 			if (requested.has(stream))
 				await emitVerifiedEmptyState(ctx, stream, capturedAt);
 	}
+	if (!playlistIndexVerifiedEmpty && playlistIndexReadable &&
+		playlistItemsEmptyProven && requested.has("playlist_items"))
+		await emitVerifiedEmptyState(ctx, "playlist_items", capturedAt);
 	for (const [stream, list] of [
 		["likes", "LL"],
 		["watch_later", "WL"],
@@ -1911,14 +1935,16 @@ export async function collectYoutubeBrowser(
 			ctx.collectionMode === "full_refresh"
 				? undefined
 				: (ctx.state?.watch_history as HistoryCursor | undefined);
-		const browserDate = await page.evaluate(() => {
+		const readBrowserDate = () => {
 			const now = new Date();
 			return [now.getFullYear(), now.getMonth(), now.getDate()];
-		});
+		};
+		const browserDate = await page.evaluate(readBrowserDate);
 		const dateReference =
 			Array.isArray(browserDate) && browserDate.length === 3
 				? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
 				: new Date(capturedAt);
+		let unresolvedDateCount = 0;
 		const result = await readableVideos(
 			ctx,
 			streams,
@@ -1927,13 +1953,17 @@ export async function collectYoutubeBrowser(
 			"watch_history",
 			priorCursor,
 			async (video, position) => {
+				const watchedDate = resolveWatchedDate(
+					video.watched_date_label ?? null,
+					dateReference,
+				);
+				if (!watchedDate) unresolvedDateCount += 1;
 				await emit("watch_history", {
-					id: await youtubeRecordId(`history|${historyIdentity(video, dateReference)}`),
-					position,
-					watched_date: resolveWatchedDate(
-						video.watched_date_label ?? null,
-						dateReference,
+					id: await youtubeRecordId(
+						`history|${historyIdentity(video, dateReference)}`,
 					),
+					position,
+					watched_date: watchedDate,
 					watched_date_label: video.watched_date_label ?? null,
 					video_id: video.video_id,
 					video_url: video.video_url,
@@ -1958,7 +1988,8 @@ export async function collectYoutubeBrowser(
 				fact.next_checkpoint = result.checkpointAnchor
 					? await youtubeRecordId(result.checkpointAnchor)
 					: null;
-				fact.skipped_unresolved_date_count = 0;
+				fact.unresolved_date_count = unresolvedDateCount;
+				if (unresolvedDateCount > 0) fact.incomplete = true;
 				if (result.historyDiagnostics)
 					reportHistoryTraversal(result.historyDiagnostics);
 			}
@@ -1971,9 +2002,10 @@ export async function collectYoutubeBrowser(
 						(!priorCursor?.complete || result.partialCheckpointAllowed)))
 			) {
 				const complete =
-					result.exhausted ||
-					(priorCursor?.complete === true &&
-						result.stopReason === "head-reconciled");
+					unresolvedDateCount === 0 &&
+					(result.exhausted ||
+						(priorCursor?.complete === true &&
+							result.stopReason === "head-reconciled"));
 				const evidence = result.exhausted
 					? result.evidence.kind
 					: result.partialCheckpointAllowed

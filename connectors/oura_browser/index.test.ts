@@ -6,644 +6,262 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Page } from "playwright";
 import type { BrowserCollectContext, EmittedMessage, RecordData, StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
-import { assertUserFacingProgress, setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
-import { collectOuraBrowser, ensureOuraSession, initialStartDate } from "./index.ts";
+import { collectOuraBrowser, initialStartDate } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
-const HOME = "https://cloud.ouraring.com/";
-const UUID = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const next = (value: string) => {
-  const date = new Date(`${value}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + 1);
-  return date.toISOString().slice(0, 10);
+const DAY = "2026-09-23";
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const ACCESS = { accessToken: "synthetic-access", account: "account-a" };
+const replay = JSON.parse(readFileSync(new URL("./fixtures/api-v2-replay.json", import.meta.url), "utf8")) as {
+  sleep: Array<Record<string, unknown>>;
+  daily_sleep: Array<Record<string, unknown>>;
+  daily_readiness: Array<Record<string, unknown>>;
+  daily_activity: Array<Record<string, unknown>>;
 };
 
-function withBrowser<T>(fetcher: typeof fetch, run: () => Promise<T>): Promise<T> {
-  const savedFetch = globalThis.fetch;
-  const savedLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
-  Object.defineProperty(globalThis, "location", { configurable: true, value: { origin: new URL(HOME).origin } });
-  globalThis.fetch = fetcher;
-  return run().finally(() => {
-    globalThis.fetch = savedFetch;
-    if (savedLocation) Object.defineProperty(globalThis, "location", savedLocation);
-    else Reflect.deleteProperty(globalThis, "location");
-  });
-}
-
-function page(initial = "about:blank", visits: string[] = [], sibling?: () => Promise<Page>): Page {
-  let url = initial;
-  return {
-    url: () => url,
-    goto: async (target: string) => { url = target; visits.push(target); return null; },
-    evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => {
-      const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
-      Object.defineProperty(globalThis, "location", {
-        configurable: true,
-        value: { origin: new URL(url).origin },
-      });
-      try {
-        return await fn(arg);
-      } finally {
-        if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
-        else Reflect.deleteProperty(globalThis, "location");
-      }
-    },
-    close: async () => {},
-    context: () => ({ newPage: sibling ?? (async () => page()) }),
-  } as Page;
-}
-
-function harness(names: string[], browserPage: Page, state: Record<string, unknown> = {}, timeRange: { since?: string; until?: string } = {}) {
-  const messages: EmittedMessage[] = [];
+type Answer = { data?: Array<Record<string, unknown>>; next_token?: string | null; status?: number };
+function harness(options: {
+  streams?: string[];
+  since?: string;
+  until?: string;
+  answers?: (endpoint: string, token: string | null, window: { start: string | null; end: string | null }) => Answer;
+  state?: Record<string, unknown>;
+  /** Omit the requested time range, so a stored cursor decides the start. */
+  openRange?: boolean;
+} = {}) {
+  const calls: Array<{ endpoint: string; start: string | null; end: string | null; token: string | null }> = [];
   const records: Array<{ stream: string; data: RecordData }> = [];
-  const failures: Array<{ stream: string; retryable: boolean }> = [];
+  const messages: EmittedMessage[] = [];
+  const page = Object.assign(Object.create(null) as Page, {
+    context: () => ({ request: { get: async (raw: string) => {
+      const url = new URL(raw);
+      const endpoint = url.pathname.split("/").at(-1) ?? "";
+      const token = url.searchParams.get("next_token");
+      calls.push({ endpoint, start: url.searchParams.get("start_date"), end: url.searchParams.get("end_date"), token });
+      const window = { start: url.searchParams.get("start_date"), end: url.searchParams.get("end_date") };
+      const answer = options.answers?.(endpoint, token, window) ?? { data: replay[endpoint as keyof typeof replay] ?? [], next_token: null };
+      const status = answer.status ?? 200;
+      return { ok: () => status >= 200 && status < 300, status: () => status, json: async () => answer, dispose: async () => {} };
+    } } }),
+  });
+  const streams = options.streams ?? ["sleep", "readiness", "activity"];
   const ctx = Object.assign(Object.create(null) as BrowserCollectContext, {
-    page: browserPage, state,
-    requested: new Map(names.map((name) => [name, { name, time_range: timeRange } as StreamScope])),
+    page,
+    requested: new Map(streams.map((stream) => [stream, (options.openRange ? { name: stream } : { name: stream, time_range: {
+      since: options.since ?? `${DAY}T00:00:00Z`, until: options.until ?? "2026-09-24T00:00:00Z",
+    } }) as StreamScope])),
+    state: options.state ?? {},
     emit: async (message: EmittedMessage) => { messages.push(message); },
     emitRecord: async (stream: string, data: RecordData) => {
-      const parsed = validateRecord(stream, data);
-      assert.equal(parsed.ok, true, JSON.stringify(parsed));
+      assert.equal(validateRecord(stream, data).ok, true, JSON.stringify(data));
       records.push({ stream, data });
     },
-    reportStreamFailure: async (stream: string, message: string, options?: { retryable?: boolean }) => {
-      failures.push({ stream, retryable: options?.retryable === true });
-      messages.push({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message });
-    },
-    progress: async (message: string, extra?: Record<string, unknown>) => {
-      messages.push({ type: "PROGRESS", message, ...extra } as EmittedMessage);
-    },
+    progress: async () => {},
   });
-  return { ctx, messages, records, failures };
+  return { ctx, calls, records, messages };
 }
 
-function savedCursor(messages: EmittedMessage[]): { next_day?: string; refresh_from?: string; failed_windows?: Array<{ start: string; end: string }> } {
-  const message = messages.find((item) => item.type === "STATE");
-  assert.equal(message?.type, "STATE");
-  return message.cursor as { next_day?: string; refresh_from?: string; failed_windows?: Array<{ start: string; end: string }> };
+test("API v2 replay preserves every legacy document and mapped field", async () => {
+  const h = harness();
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map((call) => call.endpoint), ["daily_sleep", "sleep", "daily_readiness", "daily_activity"]);
+  assert.ok(h.calls.every((call) => call.start === DAY && call.end === "2026-09-24"));
+  assert.deepEqual(h.records.map((record) => record.data.id), [id(101), id(201), id(301), id(401)]);
+  const session = h.records[0]?.data;
+  assert.equal(session?.awake_time, 1200);
+  assert.equal(session?.average_hrv, 42);
+  assert.equal(session?.restless_periods, 3);
+  const score = h.records[1]?.data;
+  assert.equal(score?.record_type, "daily_score");
+  assert.equal(score?.daily_sleep_timestamp, "2026-09-23T08:15:00+00:00");
+  assert.deepEqual(score?.contributors, { efficiency: 91 });
+  assert.equal(h.records[2]?.data.timestamp, "2026-09-23T08:15:00+00:00");
+  assert.equal(h.records[3]?.data.timestamp, "2026-09-23T08:15:00+00:00");
+  assert.equal(h.records[3]?.data.inactivity_alerts, 2);
+  assert.equal(h.messages.filter((message) => message.type === "STATE").length, 3);
+  assert.equal(h.messages.some((message) => message.type === "SKIP_RESULT"), false);
+});
+
+test("a terminal token is required; a partial page is upserted without STATE", async () => {
+  const h = harness({ streams: ["readiness"], answers: () => ({ data: replay.daily_readiness }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.records.length, 1);
+  assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+  assert.deepEqual(h.messages.filter((message) => message.type === "SKIP_RESULT").map((message) => message.reason), ["inventory_not_proven_complete"]);
+  assert.deepEqual(h.messages.find((message) => message.type === "SKIP_RESULT")?.recovery_hint,
+    { action: "retry_by_runtime", retryable: true });
+});
+
+test("a malformed row does not discard valid rows from the same page", async () => {
+  const h = harness({ streams: ["readiness"], answers: () => ({
+    data: [...replay.daily_readiness, { id: id(999) }], next_token: null,
+  }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.records.length, 1);
+  assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+  assert.equal(h.messages.find((message) => message.type === "SKIP_RESULT")?.reason, "inventory_not_proven_complete");
+});
+
+test("repeated page tokens retain read rows but cannot complete inventory", async () => {
+  const h = harness({ streams: ["activity"], answers: (_endpoint, token) =>
+    token ? { data: [], next_token: "again" } : { data: replay.daily_activity, next_token: "again" } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.records.length, 1);
+  assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+});
+
+for (const status of [401, 403]) {
+  test(`page-two HTTP ${status} retains page-one rows without STATE`, async () => {
+    const h = harness({ streams: ["readiness"], answers: (_endpoint, token) =>
+      token ? { status } : { data: replay.daily_readiness, next_token: "page-two" } });
+    await collectOuraBrowser(h.ctx, ACCESS);
+    assert.deepEqual(h.records.map(({ data }) => data.id), [id(301)]);
+    assert.deepEqual(h.messages.filter((message) => message.type === "SKIP_RESULT").map((message) =>
+      [message.reason, message.recovery_hint]), [["inventory_not_proven_complete",
+        { action: "retry_by_runtime", retryable: true }]]);
+    assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+  });
 }
 
-test("browser profile uses a publishable identity and keeps PAT setup separate", () => {
-  const pat = JSON.parse(readFileSync(new URL("../oura/manifest.json", import.meta.url), "utf8"));
-  const browser = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
-  assert.equal(pat.connector_key, "oura");
-  assert.deepEqual(pat.capabilities.auth.required, ["OURA_PERSONAL_ACCESS_TOKEN"]);
-  assert.equal(browser.connector_key, "oura-browser");
-  assert.ok(browser.connector_id.endsWith(`/${browser.connector_key}`));
-  assert.equal(browser.setup, undefined);
-  assert.deepEqual(browser.streams.map((s: { name: string }) => s.name), pat.streams.map((s: { name: string }) => s.name));
+test("an exclusive until and a lower bound constrain requests and emitted records", async () => {
+  const h = harness({ streams: ["readiness"], since: "2026-09-23T12:00:00Z", until: "2026-09-24T00:00:00Z",
+    answers: () => ({ data: [...replay.daily_readiness, { ...replay.daily_readiness[0], id: id(302), day: "2026-09-25" }], next_token: null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.records.length, 1);
+  assert.equal(h.calls[0]?.start, DAY);
+  assert.equal(h.calls[0]?.end, "2026-09-24");
 });
 
-test("stored session navigates the blank run page before probing", async () => {
-  const visits: string[] = [];
-  const requests: string[] = [];
-  await withBrowser(async (input) => {
-    requests.push(String(input));
-    return Response.json({});
-  }, async () => {
-    await ensureOuraSession(Object.assign(Object.create(null) as EnsureSessionArgs, { page: page("about:blank", visits), assist: async () => { throw new Error("unexpected assistance"); } }));
+function noSkip(h: ReturnType<typeof harness>) {
+  assert.equal(h.messages.some((message) => message.type === "SKIP_RESULT"), false);
+  assert.equal(h.messages.filter((message) => message.type === "STATE").length, 1);
+}
+
+const today = new Date(Date.now()).toISOString().slice(0, 10);
+const cursor = { api_v2: true, next_day: "2999-01-01", refresh_from: "2999-01-01", requested_since: null };
+for (const [label, stored, start] of [
+  ["a cursor from the same account resumes at its overlap", { ...cursor, account: "account-a" },
+    new Date(Date.parse(`${today}T00:00:00Z`) - 2 * 86_400_000).toISOString().slice(0, 10)],
+  ["a cursor from another account is ignored; a fresh snapshot starts", { ...cursor, account: "account-b" },
+    initialStartDate(new Date(`${today}T00:00:00Z`))],
+  ["a cursor without an account is ignored; a fresh snapshot starts", cursor,
+    initialStartDate(new Date(`${today}T00:00:00Z`))],
+] as const) {
+  test(label, async () => {
+    const h = harness({ streams: ["readiness"], openRange: true, state: { readiness: stored },
+      answers: () => ({ data: [], next_token: null }) });
+    await collectOuraBrowser(h.ctx, ACCESS);
+    assert.equal(h.calls[0]?.start, start);
+    noSkip(h);
+    const state = h.messages.find((message) => message.type === "STATE") as { cursor?: { account?: string } } | undefined;
+    assert.equal(state?.cursor?.account, "account-a");
   });
-  assert.deepEqual(visits, [HOME]);
-  assert.deepEqual(requests, ["/api/me"]);
-});
+}
 
-test("streamed handoff probes Oura on the login page without opening a sibling tab", async () => {
-  let authenticated = false;
-  const visits: string[] = [];
-  const statuses: string[] = [];
-  await withBrowser(async () => new Response("{}", { status: authenticated ? 200 : 401 }), async () => {
-    await ensureOuraSession(Object.assign(Object.create(null) as EnsureSessionArgs, {
-      page: page("about:blank", visits, async () => { throw new Error("unexpected sibling page"); }),
-      assist: async () => { authenticated = true; return "assist-1"; },
-      completeAssistance: async (_id: string, status: string) => { statuses.push(status); },
-    }));
+// Oura's end_date is inclusive: a chunk asking for [from, to] also returns the day after `to`.
+function inclusiveWindow(rows: Array<Record<string, unknown>>) {
+  return (_endpoint: string, _token: string | null, window: { start: string | null; end: string | null }): Answer => ({
+    data: rows.filter((row) => String(row.day) >= String(window.start) && String(row.day) <= String(window.end)),
+    next_token: null,
   });
-  assert.deepEqual(visits, [HOME, `${HOME}user/sign-in`]);
-  assert.deepEqual(statuses, ["resolved"]);
+}
+// A 31-day window splits into a 30-day chunk (08-01..08-30) and a 1-day chunk (08-31).
+const WINDOW = { since: "2026-08-01T00:00:00Z", until: "2026-09-01T00:00:00Z" };
+const BOUNDARY = "2026-08-31";
+
+test("a boundary day returned by two chunks is emitted once per id", async () => {
+  const rows = [
+    { ...replay.daily_readiness[0], id: id(501), day: "2026-08-10", timestamp: "2026-08-10T08:15:00+00:00" },
+    { ...replay.daily_readiness[0], id: id(502), day: BOUNDARY, timestamp: `${BOUNDARY}T08:15:00+00:00` },
+  ];
+  const h = harness({ streams: ["readiness"], ...WINDOW, answers: inclusiveWindow(rows) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map((call) => [call.start, call.end]), [["2026-08-01", "2026-08-31"], ["2026-08-31", "2026-09-01"]]);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(501), id(502)]);
+  noSkip(h);
 });
 
-test("all three streams produce schema-valid UUID records and day checkpoints", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const requests: string[] = [];
-  await withBrowser(async (input) => {
-    requests.push(String(input));
-    return Response.json({
-      sleeps: [{ id: UUID(1), day: today, total_sleep_duration: 28000 }],
-      daily_sleeps: [{ id: UUID(2), day: today, score: 88, contributors: { efficiency: 91 } }],
-      daily_readinesses: [{ id: UUID(3), day: today, score: 82 }],
-      daily_activities: [{ id: UUID(4), day: today, steps: 7000 }],
-    });
-  }, async () => {
-    const h = harness(["sleep", "readiness", "activity"], page(HOME), {}, { since: today });
-    await collectOuraBrowser(h.ctx);
-    assert.deepEqual(h.records.map((r) => r.stream), ["sleep", "sleep", "readiness", "activity"]);
-    assert.equal(h.records[0]?.data.sleep_score, 88);
-    assert.equal(h.records.find((record) => record.stream === "activity")?.data.steps, 7000);
-    assert.deepEqual(h.failures, []);
-    assert.deepEqual(h.messages.filter((m) => m.type === "STATE").map((m) => (m.cursor as { next_day: string }).next_day), [next(today), next(today), next(today)]);
-  });
-  assert.equal(requests.length, 3);
-  assert.ok(requests.every((url) => url.includes(`start=${today}`) && url.includes(`end=${today}`)));
+test("a boundary day shared by sleep sessions and daily scores is emitted once per id", async () => {
+  const sessions = [{ ...replay.sleep[0], id: id(601), day: BOUNDARY }];
+  const scores = [{ ...replay.daily_sleep[0], id: id(602), day: BOUNDARY }];
+  const h = harness({ streams: ["sleep"], ...WINDOW, answers: (endpoint, token, window) =>
+    inclusiveWindow(endpoint === "sleep" ? sessions : scores)(endpoint, token, window) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 4);
+  assert.deepEqual(h.records.map(({ data }) => [data.record_type, data.id]),
+    [["sleep_session", id(601)], ["daily_score", id(602)]]);
+  noSkip(h);
 });
 
-test("browser schema accepts offset timestamps and preserves every daily score document", async () => {
-  const fixture = JSON.parse(readFileSync(new URL("./fixtures/sleep-score-parity.json", import.meta.url), "utf8")) as {
-    sleeps: Array<Record<string, unknown>>;
-    daily_sleeps: Array<Record<string, unknown>>;
+test("of two copies of one id, the copy with more filled fields is kept", async () => {
+  const sparse = { ...replay.daily_readiness[0], id: id(502), day: BOUNDARY, timestamp: `${BOUNDARY}T08:15:00+00:00`, score: null };
+  const full = { ...sparse, score: 77 };
+  // The first chunk returns the sparse copy; the second chunk returns the full copy.
+  const h = harness({ streams: ["readiness"], ...WINDOW, answers: (_endpoint, _token, window) =>
+    ({ data: [window.start === "2026-08-01" ? sparse : full], next_token: null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.records.map(({ data }) => [data.id, data.score]), [[id(502), 77]]);
+});
+
+test("a window inside one chunk emits each row once, as before", async () => {
+  const rows = [
+    { ...replay.daily_readiness[0], id: id(501), day: "2026-08-10", timestamp: "2026-08-10T08:15:00+00:00" },
+    { ...replay.daily_readiness[0], id: id(502), day: "2026-08-11", timestamp: "2026-08-11T08:15:00+00:00" },
+  ];
+  const h = harness({ streams: ["readiness"], since: "2026-08-10T00:00:00Z", until: "2026-08-12T00:00:00Z",
+    answers: inclusiveWindow(rows) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(501), id(502)]);
+  noSkip(h);
+});
+
+test("a session takes a daily score only when that score is the only one for its day", async () => {
+  const session = (n: number) => ({ ...replay.sleep[0], id: id(n) });
+  const score = (n: number, value: number) => ({ ...replay.daily_sleep[0], id: id(n), score: value });
+  const links = async (sleep: Array<Record<string, unknown>>, dailySleep: Array<Record<string, unknown>>) => {
+    const h = harness({ streams: ["sleep"], answers: (endpoint) =>
+      ({ data: endpoint === "sleep" ? sleep : dailySleep, next_token: null }) });
+    await collectOuraBrowser(h.ctx, ACCESS);
+    noSkip(h);
+    // Score documents always stand alone, whatever the sessions link to.
+    assert.equal(h.records.filter(({ data }) => data.record_type === "daily_score").length,
+      new Set(dailySleep.map((score) => score.id)).size);
+    return h.records.filter(({ data }) => data.record_type === "sleep_session")
+      .map(({ data }) => [data.id, data.daily_sleep_id, data.sleep_score, data.daily_sleep_timestamp, data.contributors]);
   };
-  await withBrowser(async () => Response.json(fixture), async () => {
-    const h = harness(["sleep"], page(HOME), {}, { since: "2026-09-22", until: "2026-09-24" });
-    await collectOuraBrowser(h.ctx);
-    assert.equal(h.records.length, 4);
-    const session = h.records.find((record) => record.data.id === UUID(101));
-    assert.equal(session?.data.record_type, "sleep_session");
-    assert.equal(session?.data.awake_time, 1200);
-    assert.equal(session?.data.daily_sleep_id, UUID(203));
-    assert.equal(session?.data.daily_sleep_timestamp, "2026-09-23T09:15:00+00:00");
-    const sameDayScores = h.records.filter((record) => record.data.record_type === "daily_score" && record.data.day === "2026-09-23");
-    assert.deepEqual(sameDayScores.map((record) => record.data.id), [UUID(201), UUID(203)]);
-    assert.deepEqual(sameDayScores.map((record) => record.data.daily_sleep_timestamp), [
-      "2026-09-23T08:15:00+00:00",
-      "2026-09-23T09:15:00+00:00",
-    ]);
-    const scoreOnly = h.records.find((record) => record.data.day === "2026-09-22");
-    assert.equal(scoreOnly?.data.id, UUID(202));
-    assert.equal(scoreOnly?.data.record_type, "daily_score");
-    assert.equal(scoreOnly?.data.daily_sleep_id, UUID(202));
-    assert.equal(scoreOnly?.data.sleep_score, 76);
-    assert.equal(scoreOnly?.data.daily_sleep_timestamp, "2026-09-22T07:45:00+00:00");
-  });
+  // One score for the day: every session that day carries it.
+  assert.deepEqual(await links([session(101), session(102)], [score(201, 88)]), [
+    [id(101), id(201), 88, "2026-09-23T08:15:00+00:00", { efficiency: 91 }],
+    [id(102), id(201), 88, "2026-09-23T08:15:00+00:00", { efficiency: 91 }],
+  ]);
+  // Two score documents for one day: no session claims either, in any page order.
+  const unlinked = [[id(101), null, null, null, {}]];
+  assert.deepEqual(await links([session(101)], [score(201, 88), score(202, 61)]), unlinked);
+  assert.deepEqual(await links([session(101)], [score(202, 61), score(201, 88)]), unlinked);
+  // The same document repeated is still one score.
+  assert.deepEqual(await links([session(101)], [score(201, 88), score(201, 88)]),
+    [[id(101), id(201), 88, "2026-09-23T08:15:00+00:00", { efficiency: 91 }]]);
 });
 
-test("partial-day until includes its UTC date in the daily source window", async () => {
-  const requests: string[] = [];
-  await withBrowser(async (input) => {
-    requests.push(String(input));
-    return Response.json({ daily_activities: [] });
-  }, async () => {
-    const h = harness(["activity"], page(HOME), {}, {
-      since: "2020-01-01",
-      until: "2020-01-03T12:00:00Z",
-    });
-    await collectOuraBrowser(h.ctx);
-    assert.equal(savedCursor(h.messages).next_day, "2020-01-04");
+for (const malformed of ["", "not-a-day", "2026-02-30", "2026-9-23", "2026-09-23T00:00:00Z"]) {
+  test(`a terminal page with day ${JSON.stringify(malformed)} keeps valid rows and withholds STATE`, async () => {
+    const h = harness({ streams: ["readiness"], answers: () => ({
+      data: [...replay.daily_readiness, { ...replay.daily_readiness[0], id: id(999), day: malformed }], next_token: null,
+    }) });
+    await collectOuraBrowser(h.ctx, ACCESS);
+    assert.deepEqual(h.records.map(({ data }) => data.id), [id(301)]);
+    assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+    assert.equal(h.messages.find((message) => message.type === "SKIP_RESULT")?.reason, "inventory_not_proven_complete");
   });
-  assert.ok(requests.at(-1)?.includes("start=2020-01-01&end=2020-01-03"));
-});
-
-test("failed required window reports runtime failure and saves retry state", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  let retryState: unknown;
-  const diagnostics: string[] = [];
-  setConnectorDiagnosticSink((line) => diagnostics.push(line));
-  await withBrowser(async () => { throw new Error("network unavailable"); }, async () => {
-    const h = harness(["activity"], page(HOME), {}, { since: today });
-    try {
-      await collectOuraBrowser(h.ctx);
-    } finally {
-      setConnectorDiagnosticSink(undefined);
-    }
-    assert.deepEqual(h.failures, [{ stream: "activity", retryable: true }]);
-    // Owner text is plain; the raw error detail moved to a diagnostic line.
-    const progress = h.messages.filter((m) => m.type === "PROGRESS");
-    assert.deepEqual(progress.map((m) => (m as { message: string }).message), [
-      `Fetching activity: ${today} to ${today}`,
-      `Could not fetch Oura activity data for ${today} to ${today}`,
-    ]);
-    assertUserFacingProgress(h.messages);
-    assert.deepEqual(diagnostics, [
-      `[oura_browser-diagnostic] chunk_failed {"stream":"activity","from":"${today}","to":"${today}","detail":"network unavailable","retryable":true}`,
-    ]);
-    assert.ok(h.messages.some((m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed"));
-    assert.deepEqual(h.messages.find((m) => m.type === "STATE")?.cursor, {
-      next_day: today, refresh_from: today, requested_since: today, failed_windows: [{ start: today, end: today }],
-    });
-    retryState = savedCursor(h.messages);
-  });
-  await withBrowser(async () => Response.json({ daily_activities: [] }), async () => {
-    const retry = harness(["activity"], page(HOME), { activity: retryState }, { since: today });
-    await collectOuraBrowser(retry.ctx);
-    assert.deepEqual(retry.failures, []);
-    assert.equal(savedCursor(retry.messages).next_day, next(today));
-  });
-});
-
-test("empty window advances; explicit older range overrides forward cursor and honors exclusive until", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const requests: string[] = [];
-  await withBrowser(async (input) => {
-    requests.push(String(input));
-    return Response.json({ sleeps: [], daily_sleeps: [], daily_readinesses: [], daily_activities: [] });
-  }, async () => {
-    const first = harness(["activity"], page(HOME), {}, { since: today });
-    await collectOuraBrowser(first.ctx);
-    const cursor = savedCursor(first.messages);
-    assert.equal(cursor?.next_day, next(today));
-    const backfill = harness(["activity"], page(HOME), { activity: cursor }, { since: "2020-01-01", until: "2020-01-03" });
-    await collectOuraBrowser(backfill.ctx);
-    assert.equal(savedCursor(backfill.messages).next_day, "2020-01-03");
-  });
-  assert.ok(requests.at(-1)?.includes("start=2020-01-01&end=2020-01-02"));
-});
-
-test("long requested ranges stop at 90 days and declare deferred coverage", async () => {
-  assert.equal(initialStartDate(new Date("2026-09-23T00:00:00.000Z")), "2026-06-26");
-  await withBrowser(async () => Response.json({ daily_activities: [] }), async () => {
-    const h = harness(["activity"], page(HOME), {}, { since: "2020-01-01", until: "2021-01-01" });
-    await collectOuraBrowser(h.ctx);
-    const skip = h.messages.find(
-      (m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-        m.type === "SKIP_RESULT" && m.reason === "oura_browser_window_deferred",
-    );
-    assert.ok(skip);
-    // Without a retry hint the host reads the deferral as final and drops the stream.
-    assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
-    assert.equal(savedCursor(h.messages).next_day, "2020-03-31");
-  });
-});
-
-test("wrong-origin page cannot make an authenticated data request", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  let requests = 0;
-  await withBrowser(async () => { requests += 1; return Response.json({ daily_activities: [] }); }, async () => {
-    const h = harness(["activity"], page("https://example.com/"), {}, { since: today });
-    await assert.rejects(collectOuraBrowser(h.ctx), /oura_auth_failed/);
-    assert.deepEqual(h.failures, []);
-  });
-  assert.equal(requests, 0);
-});
-
-test("lost authentication fails the run without attempting later windows", async () => {
-  let requests = 0;
-  await withBrowser(async () => {
-    requests += 1;
-    return new Response("{}", { status: 401 });
-  }, async () => {
-    const h = harness(["activity"], page(HOME), {}, { since: "2020-01-01", until: "2020-04-01" });
-    await assert.rejects(collectOuraBrowser(h.ctx), /oura_auth_failed/);
-    assert.deepEqual(h.failures, []);
-  });
-  assert.equal(requests, 1);
-});
-
-test("changed response shape is a non-retryable failed window", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  await withBrowser(async () => Response.json({ unexpected: [] }), async () => {
-    const h = harness(["activity"], page(HOME), {}, { since: today });
-    await collectOuraBrowser(h.ctx);
-    assert.deepEqual(h.failures, [{ stream: "activity", retryable: false }]);
-    assert.equal(savedCursor(h.messages).next_day, today);
-  });
-});
-
-test("seven-day sleep consent requests and emits only its seven source days", async () => {
-  const requests: string[] = [];
-  await withBrowser(async (input) => {
-    requests.push(String(input));
-    const url = new URL(String(input), HOME);
-    const days: string[] = [];
-    for (let day = url.searchParams.get("start")!; day <= url.searchParams.get("end")!; day = next(day)) days.push(day);
-    days.unshift("2020-01-01");
-    days.push("2020-01-09");
-    return Response.json({ daily_sleeps: days.map((day, i) => ({ id: UUID(i + 1), day, score: 80 })) });
-  }, async () => {
-    const h = harness(["sleep"], page(HOME), {}, { since: "2020-01-02", until: "2020-01-09" });
-    await collectOuraBrowser(h.ctx);
-    assert.deepEqual(h.records.map((r) => r.data.day), ["2020-01-02", "2020-01-03", "2020-01-04", "2020-01-05", "2020-01-06", "2020-01-07", "2020-01-08"]);
-    assert.deepEqual(h.failures, []);
-  });
-  assert.equal(requests.length, 1);
-  assert.ok(requests[0]?.includes("start=2020-01-02&end=2020-01-08"));
-});
-
-test("one failed window preserves successful records but reports failure and a safe retry cursor", async () => {
-  let requests = 0;
-  await withBrowser(async (input) => {
-    if (++requests === 2) return new Response("{}", { status: 500 });
-    const day = new URL(String(input), HOME).searchParams.get("start")!;
-    return Response.json({ daily_sleeps: [{ id: UUID(requests), day, score: 80 }] });
-  }, async () => {
-    const h = harness(["sleep"], page(HOME), {}, { since: "2020-01-01", until: "2020-03-31" });
-    await collectOuraBrowser(h.ctx);
-    assert.equal(requests, 3);
-    assert.equal(h.records.length, 2);
-    assert.deepEqual(h.failures, [{ stream: "sleep", retryable: true }]);
-    assert.equal(savedCursor(h.messages).next_day, "2020-01-31");
-  });
-});
-
-test("readiness and activity enforce full-date consent on returned calendar days", async () => {
-  for (const stream of ["readiness", "activity"]) {
-    await withBrowser(async () => Response.json({
-      [stream === "readiness" ? "daily_readinesses" : "daily_activities"]:
-        ["2020-01-01", "2020-01-02", "2020-01-08", "2020-01-09"].map((day, i) => ({ id: UUID(i + 1), day, score: 80 })),
-    }), async () => {
-      const h = harness([stream], page(HOME), {}, { since: "2020-01-02", until: "2020-01-09" });
-      await collectOuraBrowser(h.ctx);
-      assert.deepEqual(h.records.map((r) => r.data.day), ["2020-01-02", "2020-01-08"]);
-      assert.deepEqual(h.failures, []);
-    });
-  }
-});
-
-function shifted(value: string, days: number): string {
-  const date = new Date(`${value}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
 }
 
-test("consecutive runs refresh mutable rows for today and the previous two days in every stream", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const since = shifted(today, -2);
-  const days = [since, shifted(today, -1), today];
-  let version = 1;
-  const requests: string[] = [];
-  await withBrowser(async (input) => {
-    requests.push(String(input));
-    return Response.json({
-      daily_sleeps: days.map((day, i) => ({ id: UUID(i + 1), day, score: 70 + version })),
-      daily_readinesses: days.map((day, i) => ({ id: UUID(i + 11), day, score: 60 + version })),
-      daily_activities: days.map((day, i) => ({ id: UUID(i + 21), day, steps: 1000 * version })),
-    });
-  }, async () => {
-    const streams = ["sleep", "readiness", "activity"];
-    const first = harness(streams, page(HOME), {}, { since });
-    await collectOuraBrowser(first.ctx);
-    const state = Object.fromEntries(first.messages.filter((message) => message.type === "STATE")
-      .map((message) => [message.stream, message.cursor]));
-    version = 2;
-    const second = harness(streams, page(HOME), state, { since });
-    await collectOuraBrowser(second.ctx);
-    for (const stream of streams) {
-      const records = second.records.filter((record) => record.stream === stream);
-      assert.deepEqual(records.map((record) => record.data.day), days);
-      const field = stream === "activity" ? "steps" : stream === "sleep" ? "sleep_score" : "score";
-      const value = stream === "activity" ? 2000 : stream === "sleep" ? 72 : 62;
-      assert.ok(records.every((record) => record.data[field] === value));
-    }
-    for (const message of second.messages) {
-      if (message.type !== "STATE") continue;
-      assert.equal((message.cursor as { next_day: string }).next_day, next(today));
-      assert.equal((message.cursor as { refresh_from: string }).refresh_from, since);
-    }
-  });
-  assert.equal(requests.length, 6);
-  assert.ok(requests.every((url) => url.includes(`start=${since}&end=${today}`)));
-});
-
-test("a row arriving after an empty current-day response is collected on the next run", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  let synced = false;
-  await withBrowser(async () => Response.json({
-    daily_sleeps: synced ? [{ id: UUID(1), day: today, score: 84 }] : [],
-  }), async () => {
-    const first = harness(["sleep"], page(HOME), {}, { since: today });
-    await collectOuraBrowser(first.ctx);
-    assert.equal(first.records.length, 0);
-    const cursor = savedCursor(first.messages);
-    assert.equal(cursor.next_day, next(today));
-    assert.equal(cursor.refresh_from, today);
-    synced = true;
-    const second = harness(["sleep"], page(HOME), { sleep: cursor }, { since: today });
-    await collectOuraBrowser(second.ctx);
-    assert.equal(second.records.length, 1);
-    assert.equal(second.records[0]?.data.sleep_score, 84);
-    assert.equal(savedCursor(second.messages).next_day, next(today));
-  });
-});
-
-test("historical backfill and mutable refresh have separate progress within a 90-day budget", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const refreshFrom = shifted(today, -2);
-  const requests: Array<{ start: string; end: string }> = [];
-  let version = 1;
-  await withBrowser(async (input) => {
-    const params = new URL(String(input), HOME).searchParams;
-    requests.push({ start: params.get("start")!, end: params.get("end")! });
-    return Response.json({ daily_activities: [{ id: UUID(1), day: today, steps: version * 1000 }] });
-  }, async () => {
-    const first = harness(["activity"], page(HOME), {}, { since: "2020-01-01" });
-    await collectOuraBrowser(first.ctx);
-    const cursor = savedCursor(first.messages);
-    assert.equal(cursor.next_day, shifted("2020-01-01", 87));
-    assert.equal(cursor.refresh_from, refreshFrom);
-    assert.equal(first.records.length, 1);
-    assert.equal(first.records[0]?.data.steps, 1000);
-    const firstRequests = requests.splice(0);
-    assert.equal(firstRequests.reduce((days, window) =>
-      days + (Date.parse(window.end) - Date.parse(window.start)) / 86_400_000 + 1, 0), 90);
-    assert.deepEqual(firstRequests.at(-1), { start: refreshFrom, end: today });
-    version = 2;
-    const second = harness(["activity"], page(HOME), { activity: cursor }, { since: "2020-01-01" });
-    await collectOuraBrowser(second.ctx);
-    assert.equal(requests[0]?.start, cursor.next_day);
-    assert.deepEqual(requests.at(-1), { start: refreshFrom, end: today });
-    assert.equal(savedCursor(second.messages).next_day, shifted("2020-01-01", 174));
-    assert.equal(savedCursor(second.messages).refresh_from, refreshFrom);
-    assert.equal(second.records.length, 1);
-    assert.equal(second.records[0]?.data.steps, 2000);
-    assert.ok(second.messages.some((message) =>
-      message.type === "SKIP_RESULT" && message.reason === "oura_browser_window_deferred"));
-  });
-});
-
-test("a failed mutable refresh preserves the prior refresh watermark and safe historical cursor", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const priorRefresh = shifted(today, -3);
-  await withBrowser(async () => new Response("{}", { status: 500 }), async () => {
-    const h = harness(["activity"], page(HOME), {
-      activity: { next_day: next(today), refresh_from: priorRefresh, requested_since: "2020-01-01" },
-    }, { since: "2020-01-01" });
-    await collectOuraBrowser(h.ctx);
-    assert.deepEqual(h.failures, [{ stream: "activity", retryable: true }]);
-    assert.equal(savedCursor(h.messages).next_day, next(today));
-    assert.equal(savedCursor(h.messages).refresh_from, priorRefresh);
-    assert.deepEqual(savedCursor(h.messages).failed_windows,
-      [{ start: priorRefresh, end: today }]);
-  });
-});
-
-test("legacy forward cursors still refresh recent days, and consent clips the overlap", async () => {
-  const today = new Date().toISOString().slice(0, 10);
-  const since = shifted(today, -1);
-  const requests: string[] = [];
-  await withBrowser(async (input) => {
-    requests.push(String(input));
-    return Response.json({ daily_activities: [] });
-  }, async () => {
-    const h = harness(["activity"], page(HOME), {
-      activity: { next_day: next(today), requested_since: since },
-    }, { since, until: today });
-    await collectOuraBrowser(h.ctx);
-    assert.equal(savedCursor(h.messages).refresh_from, since);
-    assert.equal(savedCursor(h.messages).next_day, next(today));
-  });
-  assert.equal(requests.length, 1);
-  assert.ok(requests[0]?.includes(`start=${since}&end=${since}`));
-});
-
-test("covered bounded acknowledgement does not replace uncovered or full-refresh collection", async () => {
-  const range = { since: "2020-01-01", until: "2020-01-08" };
-  const requests: Array<{ start: string; end: string }> = [];
-  await withBrowser(async (input) => {
-    const params = new URL(String(input), HOME).searchParams;
-    requests.push({ start: params.get("start")!, end: params.get("end")! });
-    return Response.json({ daily_sleeps: [] });
-  }, async () => {
-    const covered = { next_day: "2020-01-08", requested_since: range.since, failed_windows: [] };
-    const ack = harness(["sleep"], page(HOME), { sleep: covered }, range);
-    await collectOuraBrowser(ack.ctx);
-    assert.deepEqual(requests.splice(0), []);
-    assert.deepEqual(ack.messages, [{ type: "STATE", stream: "sleep", cursor: covered }]);
-
-    const uncovered = harness(["sleep"], page(HOME), { sleep: { ...covered, next_day: "2020-01-05" } }, range);
-    await collectOuraBrowser(uncovered.ctx);
-    assert.deepEqual(requests.splice(0), [{ start: "2020-01-05", end: "2020-01-07" }]);
-
-    const differentConsent = harness(["sleep"], page(HOME), { sleep: { ...covered, requested_since: "2020-01-02" } }, range);
-    await collectOuraBrowser(differentConsent.ctx);
-    assert.deepEqual(requests.splice(0), [{ start: "2020-01-01", end: "2020-01-07" }]);
-
-    const full = harness(["sleep"], page(HOME), { sleep: covered }, range);
-    full.ctx.collectionMode = "full_refresh";
-    await collectOuraBrowser(full.ctx);
-    assert.deepEqual(requests.splice(0), [{ start: "2020-01-01", end: "2020-01-07" }]);
-
-    const failed = harness(["sleep"], page(HOME), { sleep: { ...covered,
-      failed_windows: [{ start: "2020-01-03", end: "2020-01-04" }] } }, range);
-    await collectOuraBrowser(failed.ctx);
-    assert.deepEqual(requests.splice(0), [{ start: "2020-01-03", end: "2020-01-07" }]);
-
-    const invalid = harness(["sleep"], page(HOME), { sleep: covered }, { since: "2020-01-08", until: "2020-01-01" });
-    await collectOuraBrowser(invalid.ctx);
-    assert.deepEqual(requests, []);
-    assert.deepEqual(invalid.messages, []);
-  });
-});
-
-test("omitted-since coverage requires a valid same-consent checkpoint without gaps", async () => {
-  const now = Date.now;
-  Date.now = () => Date.parse("2026-10-18T12:00:00Z");
-  try {
-    const requests: string[] = [];
-    await withBrowser(async (input) => {
-      requests.push(String(input));
-      return Response.json({ daily_sleeps: [] });
-    }, async () => {
-      const range = { until: "2026-10-15" };
-      const covered = { next_day: "2026-10-15", requested_since: null, failed_windows: [] };
-      for (const cursor of [
-        covered,
-        { next_day: covered.next_day },
-        { ...covered, failed_windows: [{ start: "2026-10-15", end: "2026-10-16" }] },
-      ]) {
-        const h = harness(["sleep"], page(HOME), { sleep: cursor }, range);
-        await collectOuraBrowser(h.ctx);
-        assert.deepEqual(h.messages, [{ type: "STATE", stream: "sleep", cursor }]);
-        assert.deepEqual(requests, []);
-      }
-      for (const state of [
-        {},
-        { sleep: { ...covered, requested_since: "2026-10-01" } },
-        { sleep: { ...covered, next_day: "2026-02-30" } },
-      ]) {
-        const h = harness(["sleep"], page(HOME), state, { until: "2020-01-01" });
-        await collectOuraBrowser(h.ctx);
-        assert.deepEqual(h.messages, []);
-        assert.deepEqual(requests, []);
-      }
-      for (const cursor of [
-        { ...covered, next_day: "2026-10-13" },
-        { ...covered, failed_windows: [{ start: "2026-10-13", end: "2026-10-14" }] },
-      ]) {
-        const h = harness(["sleep"], page(HOME), { sleep: cursor }, range);
-        await collectOuraBrowser(h.ctx);
-        assert.equal(requests.splice(0).length, 1);
-        assert.notDeepEqual(savedCursor(h.messages), cursor);
-      }
-      const full = harness(["sleep"], page(HOME), { sleep: covered }, range);
-      full.ctx.collectionMode = "full_refresh";
-      await collectOuraBrowser(full.ctx);
-      assert.ok(requests.length > 0);
-    });
-  } finally {
-    Date.now = now;
-  }
-});
-
-test("clipped requests retain failed and refresh debt for a wider retry", async () => {
-  const now = Date.now;
-  Date.now = () => Date.parse("2026-10-17T12:00:00Z");
-  try {
-    for (const debt of ["failed", "refresh"] as const) {
-      const requests: Array<{ start: string; end: string }> = [];
-      await withBrowser(async (input) => {
-        const params = new URL(String(input), HOME).searchParams;
-        requests.push({ start: params.get("start")!, end: params.get("end")! });
-        return Response.json({ daily_sleeps: [] });
-      }, async () => {
-        const initial = { next_day: "2026-10-18", requested_since: "2026-01-01",
-          refresh_from: debt === "refresh" ? "2026-01-01" : "2026-10-15",
-          failed_windows: debt === "failed" ? [{ start: "2026-01-01", end: "2026-01-10" }] : [] };
-        const narrow = harness(["sleep"], page(HOME), { sleep: initial },
-          { since: "2026-01-01", until: "2026-01-05" });
-        await collectOuraBrowser(narrow.ctx);
-        const cursor = savedCursor(narrow.messages);
-        assert.deepEqual(requests.splice(0), [{ start: "2026-01-01", end: "2026-01-04" }]);
-        if (debt === "failed") assert.deepEqual(cursor.failed_windows,
-          [{ start: "2026-01-05", end: "2026-01-10" }]);
-        assert.equal(cursor.refresh_from, "2026-01-05");
-        const wide = harness(["sleep"], page(HOME), { sleep: cursor },
-          { since: "2026-01-01", until: "2026-01-11" });
-        await collectOuraBrowser(wide.ctx);
-        assert.deepEqual(requests, [{ start: "2026-01-05", end: "2026-01-10" }]);
-        assert.deepEqual(savedCursor(wide.messages).failed_windows, []);
-        assert.equal(savedCursor(wide.messages).refresh_from, "2026-01-11");
-        assert.deepEqual(wide.failures, []);
-        assert.equal(wide.messages.some((m) => m.type === "SKIP_RESULT"), false);
-      });
-    }
-  } finally { Date.now = now; }
-});
-
-test("debt subtraction preserves both clipped sides and unattempted refresh watermarks", async () => {
-  const now = Date.now;
-  Date.now = () => Date.parse("2026-10-17T12:00:00Z");
-  try {
-    await withBrowser(async () => Response.json({ daily_sleeps: [] }), async () => {
-      const debt = [{ start: "2026-01-01", end: "2026-01-10" },
-        { start: "2026-02-01", end: "2026-02-03" }];
-      const split = harness(["sleep"], page(HOME), { sleep: {
-        next_day: "2026-10-18", requested_since: "2026-01-03",
-        refresh_from: "2026-10-15", failed_windows: debt,
-      } }, { since: "2026-01-03", until: "2026-01-05" });
-      await collectOuraBrowser(split.ctx);
-      assert.deepEqual(savedCursor(split.messages).failed_windows, [
-        { start: "2026-01-01", end: "2026-01-02" },
-        { start: "2026-01-05", end: "2026-01-10" }, debt[1],
-      ]);
-      assert.deepEqual(split.failures, []);
-      const historical = harness(["sleep"], page(HOME), { sleep: {
-        next_day: "2026-01-01", requested_since: "2026-01-01",
-        refresh_from: "2026-01-08", failed_windows: [debt[1]],
-      } }, { since: "2026-01-01", until: "2026-01-05" });
-      await collectOuraBrowser(historical.ctx);
-      assert.equal(savedCursor(historical.messages).refresh_from, "2026-01-08");
-      assert.deepEqual(savedCursor(historical.messages).failed_windows, [debt[1]]);
-    });
-    await withBrowser(async () => new Response("{}", { status: 500 }), async () => {
-      const h = harness(["sleep"], page(HOME), { sleep: {
-        next_day: "2026-10-18", requested_since: "2026-01-01", refresh_from: "2026-01-01",
-        failed_windows: [{ start: "2026-01-01", end: "2026-01-10" }],
-      } }, { since: "2026-01-01", until: "2026-01-05" });
-      await collectOuraBrowser(h.ctx);
-      assert.equal(savedCursor(h.messages).refresh_from, "2026-01-01");
-      assert.deepEqual(savedCursor(h.messages).failed_windows, [
-        { start: "2026-01-05", end: "2026-01-10" },
-        { start: "2026-01-01", end: "2026-01-04" },
-      ]);
-      assert.deepEqual(h.failures, [{ stream: "sleep", retryable: true }]);
-    });
-  } finally { Date.now = now; }
+test("a terminal page with an empty id withholds STATE", async () => {
+  const h = harness({ streams: ["readiness"], answers: () => ({
+    data: [...replay.daily_readiness, { ...replay.daily_readiness[0], id: "" }], next_token: null,
+  }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(301)]);
+  assert.equal(h.messages.some((message) => message.type === "STATE"), false);
 });

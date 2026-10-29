@@ -5,12 +5,13 @@ import { validateRecord } from "../../../connectors/icloud_notes/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage, initialState: Record<string, unknown>, supportsState: boolean,
 ) => runOnPageShim(page, {
 	platform: "icloud_notes",
-	scopes: ["icloud_notes.profile", "icloud_notes.notes", "icloud_notes.folders"],
+	scopes: PAGESHIM_CONNECTOR_STREAMS.map((stream) => `icloud_notes.${stream}`),
 	version: PAGESHIM_CONNECTOR_VERSION,
 	loginUrl: "https://www.icloud.com/notes",
 	loginMessage: "Sign in to iCloud Notes, then return here.",

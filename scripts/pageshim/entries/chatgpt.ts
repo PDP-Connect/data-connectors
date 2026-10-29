@@ -7,9 +7,10 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import { applyRequestedTimeRanges } from "../requested-time-range.ts";
 
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const STREAMS = ["conversations", "messages", "memories", "account_plan"];
+const STREAMS = PAGESHIM_CONNECTOR_STREAMS;
 const env = (globalThis as { __pageshimEnv?: Record<string, string> })
 	.__pageshimEnv ?? {};
 
@@ -24,6 +25,7 @@ if (env.PDPP_CHATGPT_MAX_TAIL_DEFERRAL_GAPS_PER_RUN !== undefined) {
 for (const name of [
 	"PDPP_CHATGPT_PACING_INITIAL_INTERVAL_MS",
 	"PDPP_CHATGPT_PACING_MIN_INTERVAL_MS",
+	"PDPP_CHATGPT_BATCH_MAX_PARALLELISM",
 ]) {
 	if (env[name] !== undefined) process.env[name] = env[name];
 }
@@ -79,7 +81,7 @@ const count = (scope: unknown): number => {
 		},
 		toScope: (_stream, records) => ({ records }),
 		streamScopeRecords: {
-			order: ["messages", "conversations", "memories", "account_plan"],
+			order: ["messages", "conversations"],
 			summarizeCounts: (counts) => {
 				const details = Object.fromEntries(
 					STREAMS.map((stream) => [stream, counts[stream] ?? 0]),
@@ -92,8 +94,6 @@ const count = (scope: unknown): number => {
 				};
 			},
 		},
-		partialStreamsFromDetailGaps: (streams) =>
-			streams.filter((s) => STREAMS.includes(s)),
 		summarize: (scopes) => {
 			const details = Object.fromEntries(
 				STREAMS.map((s) => [s, count(scopes[`chatgpt.${s}`])]),

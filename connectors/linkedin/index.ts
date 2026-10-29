@@ -74,6 +74,7 @@ import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/brows
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
+	createConnectorFailure,
 	type EmittedMessage,
 	type EnsureSessionArgs,
 	type ProbeSessionArgs,
@@ -99,6 +100,7 @@ import {
 	buildProfileRows,
 	buildSkillRows,
 	collectionAt,
+	connectionEnrichmentHasMalformedFields,
 	connectionEnrichmentIsReadable,
 	type DashProfileSource,
 } from "./parsers.ts";
@@ -133,7 +135,31 @@ const PROFILE_DECORATION_IDS = [
 	"com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-109",
 ];
 
-type VoyagerJsonResult<T> = { _error: string } | (T & { _error?: undefined });
+/** Why a Voyager read failed, as a closed set. A thrown message or a response
+ *  body can quote private text, so only these classes leave the page. */
+type VoyagerReadCause = `http_${number}` | "malformed_json_body" | "transport_failed";
+
+type PageVoyagerResult =
+	| { _error: VoyagerReadCause }
+	| { _body: unknown; _status: number };
+
+// JSON can contain any string key, including _error and recognized cause names.
+// Only envelopes created here carry this process-local, non-JSON brand.
+const VOYAGER_FAILURE = Symbol("voyager_failure");
+type VoyagerFailure = { [VOYAGER_FAILURE]: true; _error: VoyagerReadCause };
+type VoyagerJsonResult<T> = VoyagerFailure | (T & { [VOYAGER_FAILURE]?: never });
+
+function isVoyagerReadCause(value: unknown): value is VoyagerReadCause {
+	return value === "malformed_json_body" || value === "transport_failed" ||
+		(typeof value === "string" && /^http_[0-9]{1,3}$/u.test(value));
+}
+
+function voyagerFailure(cause: unknown): VoyagerFailure {
+	return {
+		[VOYAGER_FAILURE]: true,
+		_error: isVoyagerReadCause(cause) ? cause : "transport_failed",
+	};
+}
 
 /** Fetch a Voyager endpoint from inside the logged-in page context. Voyager
  *  has no public CORS allowance, so this must run via `page.evaluate` on a
@@ -152,7 +178,7 @@ async function voyagerFetch<T>(
 	label?: string,
 ): Promise<VoyagerJsonResult<T>> {
 	const result = await page.evaluate(
-		async ({ path }) => {
+		async ({ path }): Promise<PageVoyagerResult> => {
 			try {
 				const csrfMatch = document.cookie.match(/JSESSIONID="?([^";]+)/);
 				const csrfToken = csrfMatch ? csrfMatch[1] : "";
@@ -165,13 +191,17 @@ async function voyagerFetch<T>(
 				}
 				return { _body: await resp.json(), _status: resp.status };
 			} catch (err) {
-				return { _error: err instanceof Error ? err.message : String(err) };
+				// Classes only: a parse or transport error's message can quote the
+				// response body or the host.
+				return {
+					_error: err instanceof SyntaxError ? "malformed_json_body" : "transport_failed",
+				};
 			}
 		},
 		{ path: endpoint },
 	);
 	if ("_error" in result) {
-		return result as VoyagerJsonResult<T>;
+		return voyagerFailure(result._error);
 	}
 	capture?.captureHttp(label ?? endpoint, result._body, {
 		endpoint,
@@ -182,25 +212,26 @@ async function voyagerFetch<T>(
 		result._body === null ||
 		Array.isArray(result._body)
 	) {
-		return { _error: "malformed_json_body" };
+		return voyagerFailure("malformed_json_body");
 	}
-	return result._body as VoyagerJsonResult<T>;
+	return result._body as T & { [VOYAGER_FAILURE]?: never };
 }
 
 function isFetchError<T>(
 	result: VoyagerJsonResult<T>,
-): result is { _error: string } {
+): result is VoyagerFailure {
 	return (
 		typeof result === "object" &&
 		result !== null &&
-		"_error" in result &&
-		typeof result._error === "string"
+		result[VOYAGER_FAILURE] === true &&
+		isVoyagerReadCause(result._error)
 	);
 }
 
 interface DashProfileResult {
 	profile: VoyagerProfileElement | null;
 	source: DashProfileSource;
+	failure?: VoyagerReadCause;
 }
 
 function hasRecognizedProfileField(profile: Record<string, unknown>): boolean {
@@ -238,14 +269,15 @@ async function checkApiAuth(
 }
 
 /** Fetch the full dash profile, trying each known decoration id in turn.
- *  Returns the first successful element, or null if every attempt failed
- *  (the caller still has the basic `/me` fields to fall back to). */
+ *  A successful full decoration recovers earlier failures. A weaker basic
+ *  fallback retains the failed decoration cause for unavailable sections. */
 async function fetchDashProfile(
 	page: Page,
 	publicIdentifier: string,
 	capture?: CaptureSession | null,
 ): Promise<DashProfileResult> {
 	const publicIdStr = encodeURIComponent(publicIdentifier);
+	let decorationFailure: VoyagerReadCause | undefined;
 	for (const decorationId of PROFILE_DECORATION_IDS) {
 		const result = await voyagerFetch<VoyagerDashProfilesResponse>(
 			page,
@@ -253,6 +285,10 @@ async function fetchDashProfile(
 			capture,
 			`dash-profile-${decorationId.split("-").pop()}`,
 		);
+		if (isFetchError(result) && isRejectedSession(result._error)) {
+			return { profile: null, source: "unavailable", failure: result._error };
+		}
+		if (isFetchError(result)) decorationFailure = result._error;
 		if (!isFetchError(result) && Array.isArray(result.elements)) {
 			for (const candidate of result.elements) {
 				if (isRecord(candidate) && hasRecognizedProfileField(candidate)) {
@@ -274,10 +310,18 @@ async function fetchDashProfile(
 	if (!isFetchError(basic) && Array.isArray(basic.elements)) {
 		const profile = basic.elements.find(isRecord);
 		if (profile) {
-			return { profile: profile as VoyagerProfileElement, source: "basic" };
+			return { profile: profile as VoyagerProfileElement, source: "basic",
+				...(decorationFailure ? { failure: decorationFailure } : {}),
+			};
 		}
 	}
-	return { profile: null, source: "unavailable" };
+	return { profile: null, source: "unavailable",
+		...(isFetchError(basic) ? { failure: basic._error } : decorationFailure ? { failure: decorationFailure } : {}),
+	};
+}
+
+function isRejectedSession(error: string): boolean {
+	return /^http_40[13]$/u.test(error);
 }
 
 interface ConnectionsResult {
@@ -439,8 +483,8 @@ async function fetchConnections(
 /** Batch-resolve connection member URNs to profile summaries (name,
  *  headline, public identifier) via the same dash/profiles endpoint used
  *  for the owner's own profile. Failed batches receive singleton retries
- *  after the first two consecutive batch failures; after five failures, the
- *  remaining enrichment is left unresolved and reported. */
+ *  after the first two consecutive batch failures; only an explicit per-member
+ *  404 is treated as permanent. Other unresolved enrichment withholds rows. */
 async function resolveConnectionProfiles(
 	page: Page,
 	memberUrns: string[],
@@ -449,6 +493,7 @@ async function resolveConnectionProfiles(
 ): Promise<ConnectionProfileResolution> {
 	const resolved = new Map<string, ResolvedConnectionProfile>();
 	const malformedUrns = new Set<string>();
+	const permanentlyMissingUrns = new Set<string>();
 	let consecutiveFailures = 0;
 	let batchIndex = 0;
 	let singletonIndex = 0;
@@ -464,15 +509,17 @@ async function resolveConnectionProfiles(
 		const presentFields = profileFields.filter((field) =>
 			Object.hasOwn(value, field),
 		);
-		const malformed = !connectionEnrichmentIsReadable(value);
+		const malformed = connectionEnrichmentHasMalformedFields(value);
 		if (malformed) malformedUrns.add(urn);
 		if (presentFields.length === 0) return;
 		const profile = value as VoyagerResolvedProfile;
+		const complete = connectionEnrichmentIsReadable(value);
 		const prior = resolved.get(urn);
-		if (!prior || (!prior.complete && !malformed)) {
+		permanentlyMissingUrns.delete(urn);
+		if (!prior || (!prior.complete && complete)) {
 			resolved.set(urn, {
 				profile,
-				complete: !malformed,
+				complete,
 			});
 		}
 	};
@@ -483,6 +530,20 @@ async function resolveConnectionProfiles(
 		if (isRecord(value.results)) {
 			for (const [urn, profile] of Object.entries(value.results)) {
 				accept(urn, profile, requested);
+			}
+		}
+		if (isRecord(value.errors)) {
+			for (const [urn, error] of Object.entries(value.errors)) {
+				if (
+					requested.has(urn) &&
+					isRecord(error) &&
+					error.status === 404 &&
+					!resolved.get(urn)?.complete
+				) {
+					resolved.delete(urn);
+					permanentlyMissingUrns.add(urn);
+					malformedUrns.delete(urn);
+				}
 			}
 		}
 		for (const profile of Array.isArray(value.elements) ? value.elements : []) {
@@ -509,7 +570,7 @@ async function resolveConnectionProfiles(
 
 		if (
 			isFetchError(result) ||
-			!(isRecord(result.results) || Array.isArray(result.elements))
+			!(isRecord(result.results) || Array.isArray(result.elements) || isRecord(result.errors))
 		) {
 			consecutiveFailures += 1;
 			if (consecutiveFailures <= 2) {
@@ -524,7 +585,7 @@ async function resolveConnectionProfiles(
 					);
 					if (
 						!isFetchError(singleton) &&
-						(isRecord(singleton.results) || Array.isArray(singleton.elements))
+						(isRecord(singleton.results) || Array.isArray(singleton.elements) || isRecord(singleton.errors))
 					) {
 						acceptBatch(singleton, new Set([urn]));
 					}
@@ -537,7 +598,7 @@ async function resolveConnectionProfiles(
 		consecutiveFailures = 0;
 		acceptBatch(result, requested);
 		for (const urn of batch) {
-			if (resolved.get(urn)?.complete) continue;
+			if (resolved.get(urn)?.complete || permanentlyMissingUrns.has(urn)) continue;
 			const singleton = await voyagerFetch<VoyagerProfilesByIdResponse>(
 				page,
 				`/voyager/api/identity/dash/profiles?ids=List(${encodeURIComponent(urn)})`,
@@ -547,7 +608,7 @@ async function resolveConnectionProfiles(
 			singletonIndex += 1;
 			if (
 				!isFetchError(singleton) &&
-				(isRecord(singleton.results) || Array.isArray(singleton.elements))
+				(isRecord(singleton.results) || Array.isArray(singleton.elements) || isRecord(singleton.errors))
 			) {
 				acceptBatch(singleton, new Set([urn]));
 			}
@@ -562,7 +623,7 @@ async function resolveConnectionProfiles(
 		await politeDelay(PAGE_DELAY_MS);
 	}
 
-	return { profiles: resolved, malformedCount: malformedUrns.size };
+	return { profiles: resolved, permanentlyMissingUrns, malformedCount: malformedUrns.size };
 }
 
 interface ResolvedConnectionProfile {
@@ -571,6 +632,7 @@ interface ResolvedConnectionProfile {
 }
 
 interface ConnectionProfileResolution {
+	permanentlyMissingUrns: Set<string>;
 	profiles: Map<string, ResolvedConnectionProfile>;
 	malformedCount: number;
 }
@@ -644,7 +706,7 @@ export async function ensureLinkedInSession(
 		completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
 		message:
-			"Sign in to LinkedIn in the secure browser. PDPP will verify the session and continue automatically.",
+			"Sign in to LinkedIn in the secure browser. The session is verified, then collection continues automatically.",
 		page,
 		probe: () => checkApiAuth(page, capture),
 		readinessProbe: (readinessPage) => checkApiAuth(readinessPage, capture),
@@ -693,8 +755,9 @@ export async function collectLinkedIn(
 
 	const isAuthenticated = await checkApiAuth(page, capture);
 	if (!isAuthenticated) {
-		throw new Error(
+		throw createConnectorFailure("linkedin_session_dead",
 			"linkedin_session_dead: no live Voyager session (li_at/JSESSIONID cookie missing or expired); manual login required in the connector's browser profile",
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
 		);
 	}
 
@@ -739,6 +802,10 @@ export async function collectLinkedIn(
 		);
 	}
 	const dashProfile = dashProfileResult.profile;
+	if (dashProfileResult.failure && isRejectedSession(dashProfileResult.failure)) {
+		throw createConnectorFailure("linkedin_session_dead", "linkedin_session_dead: LinkedIn rejected the profile read; manual login required in the connector's browser profile",
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } });
+	}
 
 	// The profile count is the owner-bound source summary, independent of
 	// connection enumeration or enrichment proof. Reuse the summary reads
@@ -771,7 +838,13 @@ export async function collectLinkedIn(
 	}
 	const ownerEvidence = profileEvidence(meResult, dashProfile);
 
-	const sink: StreamSink = { emit, emitRecord, progress, isRecordSelected: ctx.isRecordSelected };
+	const sink: StreamSink = {
+		emit,
+		emitRecord,
+		progress,
+		isRecordSelected: ctx.isRecordSelected,
+		reportStreamFailure: ctx.reportStreamFailure,
+	};
 
 	if (wantsProfileFields) {
 		await emitRows(
@@ -791,6 +864,7 @@ export async function collectLinkedIn(
 					dashProfileResult.source === "unavailable"
 						? "dashProfileUnavailable"
 						: "profileFieldsUnavailable",
+				...(dashProfileResult.failure ? { readFailure: "read_failed" as const } : {}),
 			},
 		);
 	}
@@ -803,7 +877,7 @@ export async function collectLinkedIn(
 				? collectionAt(dashProfile, section.key)
 				: unavailable("source_unavailable");
 		if (items.kind !== "read") {
-			await emitUnavailableSection(section.stream, emit);
+			await emitUnavailableSection(section.stream, sink, dashProfileResult.failure);
 			continue;
 		}
 		await emitRows(sink, section.stream, section.build(items.value), {
@@ -827,7 +901,7 @@ export async function collectLinkedIn(
 		);
 		const resolvedProfiles = resolution.profiles;
 		const unresolved = memberUrns.filter(
-			(urn) => !resolvedProfiles.get(urn)?.complete,
+			(urn) => !resolvedProfiles.get(urn)?.complete && !resolution.permanentlyMissingUrns.has(urn),
 		).length;
 		const omittedWithoutUrn = connectionsResult.missingUrnCount;
 		if (omittedWithoutUrn > 0) {
@@ -852,7 +926,7 @@ export async function collectLinkedIn(
 		}
 		if (resolution.malformedCount > 0) {
 			await progress(
-				`LinkedIn connections omitted malformed enrichment: malformed_enrichment=${resolution.malformedCount}`,
+				`LinkedIn connection enrichment malformed: malformed_enrichment=${resolution.malformedCount}`,
 				{
 					stream: "connections",
 					count: resolution.malformedCount,
@@ -860,8 +934,13 @@ export async function collectLinkedIn(
 				},
 			);
 		}
-		const rows = buildConnectionRows(elements, (urn) => resolvedProfiles.get(urn)?.profile);
-		const emittedUrns = new Set(rows.records.filter((row) => ctx.isRecordSelected?.("connections", row) ?? true).map((row) => row.id));
+		const rows = buildConnectionRows(
+			elements,
+			(urn) => resolvedProfiles.get(urn)?.profile,
+			(urn) => resolution.permanentlyMissingUrns.has(urn),
+		);
+		// Provider inventory proof includes readable rows the owner excluded.
+		const emittedUrns = new Set(rows.records.map((row) => row.id));
 		const withheldCount = elements.length - emittedUrns.size;
 		const evidenceReason = withheldCount > 0 ? "linkedin_connection_enrichment_incomplete" :
 			connectionEvidence({
@@ -870,16 +949,22 @@ export async function collectLinkedIn(
 				pageTotal: connectionsResult.total, confirmation,
 			});
 		const connectionsComplete = !evidenceReason;
+		// A failed connections page is a failed read: HTTP 401/403 means
+		// LinkedIn rejected the session, anything else (429, 5xx, a thrown
+		// fetch) means the read did not complete.
+		const readFailure = connectionsComplete || terminationReason !== "page_error"
+			? undefined
+			: isRejectedSession(connectionsResult.error ?? "")
+				? "session_rejected" as const
+				: "read_failed" as const;
 		await emitRows(
 			sink,
 			"connections",
 			rows,
 			{
 				enumerated: connectionsComplete,
-				gapReason:
-					unresolved > 0
-						? "connectionEnrichmentIncomplete"
-						: "connectionFieldsUnreadable",
+				...(readFailure === undefined ? {} : { readFailure }),
+				gapReason: "connectionFieldsUnreadable",
 				diagnostics: {
 					evidence_reason: evidenceReason,
 					withheld_count: withheldCount,
@@ -931,20 +1016,19 @@ interface StreamSink {
 	emit: BrowserCollectContext["emit"];
 	emitRecord: BrowserCollectContext["emitRecord"];
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
+	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 }
 
 type RowGapReason =
 	| "dashProfileUnavailable"
 	| "profileFieldsUnavailable"
 	| "profileSectionFieldsUnreadable"
-	| "connectionEnrichmentIncomplete"
 	| "connectionFieldsUnreadable";
 
 const ROW_GAP_REASON: Record<RowGapReason, string> = {
 	dashProfileUnavailable: "linkedin_dash_profile_unavailable",
 	profileFieldsUnavailable: "linkedin_profile_fields_unavailable",
 	profileSectionFieldsUnreadable: "linkedin_fields_unreadable",
-	connectionEnrichmentIncomplete: "linkedin_connection_enrichment_incomplete",
 	connectionFieldsUnreadable: "linkedin_fields_unreadable",
 };
 
@@ -958,6 +1042,10 @@ async function emitRows(
 		diagnostics?: Record<string, unknown>;
 		enumerated: boolean;
 		gapReason: RowGapReason;
+		/** The walk stopped because a request failed, not because the end was
+		 *  unproven: a rejected session ends the run, any other failure is a
+		 *  failed read of this stream. */
+		readFailure?: "read_failed" | "session_rejected";
 	},
 ): Promise<void> {
 	const { gapReason } = options;
@@ -965,8 +1053,16 @@ async function emitRows(
 	for (const record of rows.records) {
 		await sink.emitRecord(stream, record);
 	}
+	if (options.readFailure === "session_rejected") {
+		throw createConnectorFailure("linkedin_session_dead",
+			`linkedin_session_dead: LinkedIn rejected the session while reading ${stream}; manual login required in the connector's browser profile`,
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
+		);
+	}
 	const selectedCount = rows.records.filter((record) => sink.isRecordSelected?.(stream, record) ?? true).length;
-	if (options.enumerated && rows.covered === rows.considered && selectedCount === rows.records.length) {
+	if (options.enumerated && rows.covered === rows.considered) {
+		// The requested subset is complete, but cannot certify a global cursor.
+		if (selectedCount !== rows.records.length) return;
 		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
 		await sink.emit({ type: "STATE", stream, cursor: { full_scan_at: new Date().toISOString() } });
 		return;
@@ -975,23 +1071,34 @@ async function emitRows(
 		(stream !== "connections" || options.diagnostics?.missing_urn_count === 0)) {
 		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
 	}
+	const diagnostics = {
+		...(rows.covered < rows.considered
+			? { source_reason: ROW_GAP_REASON[gapReason] }
+			: {}),
+		selected_count: selectedCount,
+		considered: rows.considered,
+		covered: rows.covered,
+		omitted_rows: rows.omittedRows,
+		unavailable_fields: rows.unavailableFields,
+		...options.diagnostics,
+	};
+	const recoveryHint = { action: "retry_by_runtime", retryable: true };
+	if (options.readFailure === "read_failed") {
+		const message = `LinkedIn stopped returning ${stream} pages before the list ended; covered entries are upserted only`;
+		if (sink.reportStreamFailure)
+			await sink.reportStreamFailure(stream, message, { recoveryHint, diagnostics });
+		else
+			await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed",
+				recovery_hint: { action: "retry_by_runtime", retryable: true }, message, diagnostics });
+		return;
+	}
 	await sink.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason: "linkedin_enumeration_unproven",
-		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		recovery_hint: recoveryHint,
 		message: `LinkedIn ${stream} enumeration is unproven; covered entries are upserted only`,
-		diagnostics: {
-			...(rows.covered < rows.considered
-				? { source_reason: ROW_GAP_REASON[gapReason] }
-				: {}),
-			selected_count: selectedCount,
-			considered: rows.considered,
-			covered: rows.covered,
-			omitted_rows: rows.omittedRows,
-			unavailable_fields: rows.unavailableFields,
-			...options.diagnostics,
-		},
+		diagnostics,
 	});
 }
 
@@ -1012,15 +1119,24 @@ function coverageMessage(
 
 async function emitUnavailableSection(
 	stream: string,
-	emit: (message: EmittedMessage) => Promise<void>,
+	sink: StreamSink,
+	failure?: VoyagerReadCause,
 ): Promise<void> {
-	await emit({
+	const diagnostics = { source_reason: "linkedin_profile_section_unavailable" };
+	if (failure) {
+		const message = `LinkedIn ${stream} read failed: ${failure}`;
+		const recoveryHint = { action: "retry_by_runtime", retryable: true };
+		if (sink.reportStreamFailure) await sink.reportStreamFailure(stream, message, { recoveryHint, retryable: true, diagnostics });
+		else await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message, recovery_hint: { action: "retry_by_runtime", retryable: true }, diagnostics });
+		return;
+	}
+	await sink.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason: "linkedin_enumeration_unproven",
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		message: "LinkedIn enumeration is unproven; the profile section was unreadable",
-		diagnostics: { source_reason: "linkedin_profile_section_unavailable" },
+		diagnostics,
 	});
 }
 

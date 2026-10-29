@@ -721,7 +721,7 @@ test("buildConnectionRows: resolved profile gives full enrichment", () => {
 	assert.equal(validateRecord("connections", rows.records[0]).ok, true);
 });
 
-test("buildConnectionRows: either malformed name part withholds the whole row", () => {
+test("buildConnectionRows: malformed enrichment withholds the whole edge", () => {
 	for (const resolved of [
 		{
 			firstName: 17,
@@ -775,14 +775,26 @@ test("buildEducationRows: a malformed bare end withholds the whole row", () => {
 
 test("buildConnectionRows: source-backed blank names stay blank", () => {
 	const rows = buildConnectionRows(
-		[{ connectedMember: "urn:li:fsd_profile:blank-name" }],
-		() => ({ firstName: " ", lastName: "" }),
+		[
+			{
+				connectedMember: "urn:li:fsd_profile:blank-name",
+				createdAt: 1_700_000_000_000,
+			},
+		],
+		() => ({
+			firstName: " ",
+			lastName: "",
+			headline: null,
+			publicIdentifier: null,
+		}),
 	);
 	assert.equal(rows.records[0]?.full_name, "");
+	assert.equal(rows.records[0]?.headline, null);
+	assert.equal(rows.records[0]?.profile_url, null);
 	assert.equal(rows.covered, 1);
 });
 
-test("buildConnectionRows: an unresolved member is withheld whole, never emitted without its enrichment", () => {
+test("buildConnectionRows: an unresolved member withholds its edge", () => {
 	const rows = buildConnectionRows(
 		[{ connectedMember: "urn:li:fsd_profile:xyz789" }],
 		() => undefined,
@@ -791,10 +803,41 @@ test("buildConnectionRows: an unresolved member is withheld whole, never emitted
 	assert.equal(rows.considered, 1);
 	assert.equal(rows.covered, 0);
 	assert.deepEqual(rows.unavailableFields, {
-		full_name: { enrichment_unresolved: 1 },
-		headline: { enrichment_unresolved: 1 },
-		profile_url: { enrichment_unresolved: 1 },
+		connected_at: { absent: 1 },
+		full_name: { source_unavailable: 1 },
+		headline: { source_unavailable: 1 },
+		profile_url: { source_unavailable: 1 },
 	});
+});
+
+test("buildConnectionRows: only a per-member 404 emits an unenriched edge", () => {
+	const rows = buildConnectionRows(
+		[{ connectedMember: "urn:li:fsd_profile:gone" }],
+		() => undefined,
+		() => true,
+	);
+	assert.deepEqual(rows.records, [{ id: "urn:li:fsd_profile:gone" }]);
+	assert.equal(rows.covered, 1);
+});
+
+test("buildConnectionRows: malformed source timestamps withhold the whole edge", () => {
+	const rows = buildConnectionRows(
+		[
+			{
+				connectedMember: "urn:li:fsd_profile:malformed-date",
+				createdAt: "bad",
+			},
+		],
+		() => ({
+			firstName: "Jamie",
+			lastName: "Lee",
+			headline: "PM",
+			publicIdentifier: "jlee",
+		}),
+	);
+	assert.deepEqual(rows.records, []);
+	assert.equal(rows.covered, 0);
+	assert.equal(rows.unavailableFields.connected_at?.malformed, 1);
 });
 
 test("buildConnectionRows: a row without a member URN cannot be keyed and is omitted", () => {

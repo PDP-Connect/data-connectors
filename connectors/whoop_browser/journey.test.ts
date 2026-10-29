@@ -42,7 +42,7 @@ const fixture = (name: string): string => read(`./fixtures/${name}`);
 const BOOTSTRAP = fixture("bootstrap.json");
 const CYCLES = fixture("cycles-details.json");
 const MESSAGE =
-	"Sign in to WHOOP in the secure browser. PDPP continues on its own once you are signed in.";
+	"Sign in to WHOOP in the secure browser. The import continues on its own once you are signed in.";
 
 // ── Layer 3.2: the real handoff against probeOnPage ────────────────────────
 

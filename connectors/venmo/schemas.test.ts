@@ -109,6 +109,14 @@ test("transactions schema accepts a representative pay record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("transactions schema accepts an unknown amount as null", () => {
+	const result = transactionsSchema.safeParse({
+		...TRANSACTION_RECORD,
+		amount_cents: null,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
 test("transactions schema accepts a charge with null counterparty (deleted/unavailable user)", () => {
 	const result = transactionsSchema.safeParse({
 		...TRANSACTION_RECORD,

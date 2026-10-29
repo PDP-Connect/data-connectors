@@ -15,3 +15,5 @@ Run these commands from the repository root after `npm ci`. `--json` writes to t
 Follow the [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md), then run package verification and focused tests. For artifact build and publication flow, see the repository README and `scripts/build-connector-oci-artifact.mjs` / `scripts/verify-connector-oci-artifact.mjs`.
 
 The historical Playwright scope catalog is frozen. A new Collection Profile stream does not automatically replace a Desktop scope or authorize writing raw records under a legacy scope ID. Such a replacement needs a separately reviewed projection and consumer activation.
+
+Implementation or manifest-contract changes require a connector version bump. Publication is selected by `scripts/select-publish-connectors.mjs` and signed from the protected main workflow.

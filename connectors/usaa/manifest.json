@@ -9,7 +9,7 @@
 	},
 	"connector_key": "usaa",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-	"version": "0.2.15",
+	"version": "0.2.20",
 	"display_name": "USAA",
 	"runtime_requirements": {
 		"bindings": {
@@ -627,9 +627,11 @@
 		"credit_card_export_unverified": "We couldn't confirm the credit card export",
 		"csv_no_data_rows": "The transactions file had no rows to import",
 		"csv_no_usable_transactions": "We couldn't find any usable transactions in that file",
+		"csv_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 		"export_affordance_missing": "We couldn't find the export controls on this page — the site may have changed",
 		"export_error": "The export couldn't be downloaded",
 		"export_no_download": "The export didn't produce a downloadable file",
+		"export_window_incomplete": "The export did not cover all of the requested transaction history",
 		"hydrate_crashed": "Something went wrong while loading the page",
 		"inbox_rows_unresolved": "We found inbox messages but couldn't read them — the site may have changed",
 		"pdf_download_click_failed": "We couldn't click the download option for a statement PDF",

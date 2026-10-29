@@ -464,3 +464,89 @@ export function runConnectorProtocolSubprocess(
 		child.stdin?.end(stringifyForJsonl(options.start));
 	});
 }
+
+// `politeDelay` is `new Promise((r) => setTimeout(r, ms))`, so under the
+// wrapper below its timer's stack is: the wrapper, the Promise executor,
+// `new Promise (<anonymous>)`, `politeDelay (...)`. The match keys on V8's
+// function name, so it needs code that keeps its names. The suite runs
+// TypeScript unbundled through `node --import tsx` (scripts/test-dispatch.mjs).
+// A bundler or minifier that renames politeDelay turns the skip off without an
+// error. The test "a politeDelay pause fires on the next tick" then fails,
+// since it asserts that the pause is recorded as 0 ms.
+const NEW_PROMISE_FRAME = /^\s+at new Promise \(/;
+const POLITE_DELAY_FRAME = /^\s+at politeDelay \(/;
+
+/**
+ * True when the timer being armed was armed directly by `politeDelay`. The
+ * frames, innermost first and after the "Error" header, are [0] the wrapper,
+ * [1] the Promise executor, [2] `new Promise`, [3] `politeDelay`. A timer armed
+ * by a helper that `politeDelay` calls shifts [2] and [3], so it is not matched.
+ */
+function armedDirectlyByPoliteDelay(stack: string): boolean {
+	const frames = stack.split("\n").slice(1);
+	return (
+		NEW_PROMISE_FRAME.test(frames[2] ?? "") &&
+		POLITE_DELAY_FRAME.test(frames[3] ?? "")
+	);
+}
+
+/** Installations still live. One patch serves all of them. */
+let liveInstallations = 0;
+/** The timer the patch replaced. Calls that pass through the patch land here. */
+let realSetTimeout: typeof setTimeout = globalThis.setTimeout;
+
+const pacedSetTimeout = ((
+	handler: () => void,
+	delay?: number,
+	...args: unknown[]
+) => {
+	const isPause =
+		liveInstallations > 0 &&
+		typeof delay === "number" &&
+		delay > 0 &&
+		armedDirectlyByPoliteDelay(new Error().stack ?? "");
+	return realSetTimeout(handler, isPause ? 0 : delay, ...args);
+}) as unknown as typeof setTimeout;
+
+/**
+ * Make `politeDelay` pauses fire on the next timer tick until the returned
+ * function runs.
+ *
+ * `politeDelay` is the runtime's anti-bot pacing pause. A test that walks
+ * pages through a connector pays it on every page (2.5 s per Whole Foods
+ * navigation, about half a second per heb list page) and does not assert on
+ * it. Only the timer that `politeDelay` arms itself is shortened, found by the
+ * call stack. A watchdog, a polling interval or Playwright's own timeout in the
+ * code under test keeps its real duration, and so does a timer armed by a
+ * helper that `politeDelay` calls.
+ *
+ * It patches `globalThis.setTimeout` for the whole process: install it once
+ * per test file with `after(skipPoliteDelays())`, which also restores it.
+ * Installations may overlap. The first one installs the patch and the last one
+ * restored removes it. Each returned function does nothing after its first
+ * call.
+ *
+ * Limit: a `setTimeout` wrapper installed on top of this one that calls
+ * through adds a frame, so the pause is not matched and keeps its real delay.
+ * That is slower, never a changed result.
+ */
+export function skipPoliteDelays(): () => void {
+	if (liveInstallations === 0) {
+		// A caller that saved the patch and restored it after the last restore
+		// leaves the patch in place. Never let the patch wrap itself.
+		if (globalThis.setTimeout !== pacedSetTimeout) {
+			realSetTimeout = globalThis.setTimeout;
+		}
+		globalThis.setTimeout = pacedSetTimeout;
+	}
+	liveInstallations += 1;
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		liveInstallations -= 1;
+		if (liveInstallations === 0) {
+			globalThis.setTimeout = realSetTimeout;
+		}
+	};
+}
