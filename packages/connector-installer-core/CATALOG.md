@@ -31,7 +31,9 @@ const { catalog, digest } = await fetchCatalog({
 
 `registry` defaults to `ghcr.io`. `identity` defaults to `https://github.com/PDP-Connect/data-connectors/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main`. An explicit identity is caller-owned trust policy; never take it from the downloaded catalog.
 
-The helper resolves `latest` once, fetches the manifest by digest, and verifies its Cosign signature through `oci-verify.mjs` before parsing the JSON layer. It verifies layer bytes and size, validates the catalog schema, and refuses a `generated_at` older than `lastAcceptedGeneratedAt`. Equal timestamps permit retries. Callers must persist the last accepted timestamp to retain rollback protection across process restarts.
+By default, the helper resolves `latest` once, fetches the manifest by digest, and verifies its Cosign signature through `oci-verify.mjs` before parsing the JSON layer. It verifies layer bytes and size, validates the catalog schema, and refuses a `generated_at` older than `lastAcceptedGeneratedAt`. Equal timestamps permit retries. Callers must persist the last accepted timestamp to retain rollback protection across process restarts.
+
+To use a catalog digest obtained earlier, pass `catalogDigest` to `fetchCatalog`. The helper fetches that exact manifest instead of resolving `latest`, and applies the same signature, schema, and rollback checks. An invalid or unavailable digest fails; it does not fall back to `latest`. A digest identifies bytes, not freshness: callers still need to enforce their own last accepted timestamp.
 
 Catalog acceptance does not install a connector or verify the separate signatures of every listed connector. Installation must fetch each chosen connector by its catalog digest and verify that artifact's signature. This helper is not connected to installation or update selection yet.
 
