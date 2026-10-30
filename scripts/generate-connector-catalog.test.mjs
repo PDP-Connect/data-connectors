@@ -443,6 +443,26 @@ test("a metadata refresh reads the signed release's registry metadata again", as
   }
 });
 
+test("a successful policy refresh records its source even when entries are unchanged", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const previous = await generate(root, registry.registry);
+    const refreshed = await generate(root, registry.registry, {
+      previousCatalog: previous, refreshMetadata: true, sourceCommit: "b".repeat(40),
+    });
+    assert.deepEqual(refreshed.connectors, previous.connectors);
+    assert.equal(refreshed.source_commit, "b".repeat(40));
+    assert.ok(Date.parse(refreshed.generated_at) > Date.parse(previous.generated_at));
+    const retry = await generate(root, registry.registry, { previousCatalog: refreshed, sourceCommit: "c".repeat(40) });
+    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(refreshed));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a previous catalog with an invalid schema fails closed", async () => {
   const root = fixtureDirectory();
   const registry = await startRegistry({ publishedVersions: ["1.0.0"] });

@@ -120,7 +120,6 @@ jobs:
     outputs:
       matrix: ${{ steps.main-selection.outputs.matrix || steps.allowlist.outputs.matrix }}
       has-publishable-changes: ${{ steps.main-selection.outputs.has-publishable-changes || steps.allowlist.outputs.has-publishable-changes }}
-      policy-changed: ${{ steps.policy.outputs.policy-changed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -157,38 +156,6 @@ jobs:
           LOOKUP_USERNAME: ${{ github.actor }}
           LOOKUP_PASSWORD: ${{ github.token }}
         run: node scripts/select-publish-connectors.mjs
-
-      - name: Detect policy changes that refresh the connector catalog
-        # A policy-only push selects no connector, so the catalog job needs this
-        # output to refresh the signed catalog. Only the paths below refresh it.
-        id: policy
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if ! [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            echo "::error::no before commit '${BEFORE_SHA}' in this checkout; refusing to guess which policy files changed"
-            exit 1
-          fi
-          if ! [[ "$AFTER_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${AFTER_SHA}^{commit}" 2>/dev/null; then
-            echo "::error::no after commit '${AFTER_SHA}' in this checkout"
-            exit 1
-          fi
-          CHANGED="$(git diff --no-renames --name-only "$BEFORE_SHA" "$AFTER_SHA" -- \
-            scripts/assert-publishable-readiness.mjs \
-            scripts/connector-publish-allowlist.mjs \
-            packages/polyfill-connectors/src/connector-conformance-roster.ts \
-            scripts/generate-connector-catalog.mjs \
-            scripts/verify-catalog-additions.mjs \
-            .github/workflows/publish-polyfill-connectors.yml)"
-          if [ -n "$CHANGED" ]; then
-            printf 'publish policy changed; the connector catalog will be refreshed:\n%s\n' "$CHANGED"
-            echo "policy-changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "policy-changed=false" >> "$GITHUB_OUTPUT"
-          fi
 
   publish:
     name: Publish ${{ matrix.connector }} to GHCR
@@ -676,7 +643,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_ACTOR: ${{ github.actor }}
-          POLICY_CHANGED: ${{ needs.prepare.outputs.policy-changed }}
           # The generator sends this only to the token endpoint. With it, GHCR answers a
           # repository that was never created with NAME_UNKNOWN, which omits it; without
           # it, GHCR answers 403, which is denial and must fail closed.
@@ -690,9 +656,9 @@ jobs:
           CREATED="$(git show -s --format=%cI "$GITHUB_SHA")"
           PREVIOUS_ARGS=()
           METADATA_ARGS=()
-          # Policy changes and manual recovery rebuild metadata from the
-          # published profiles; normal no-op pushes can reuse the signed row.
-          if [ "${POLICY_CHANGED:-}" != false ]; then
+          node scripts/assert-publishable-readiness.mjs
+          # A manual recovery re-reads the published profile metadata.
+          if [ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch ]; then
             METADATA_ARGS=(--refresh-metadata true)
           fi
           # Same credential the connector lookup uses: anonymously, GHCR answers a
@@ -716,6 +682,18 @@ jobs:
               if ! git merge-base --is-ancestor "$PREVIOUS_SOURCE" "$GITHUB_SHA"; then
                 echo "::error::previous catalog source is not an ancestor of this run; refusing to replace it"
                 exit 1
+              fi
+              # Compare against the last published catalog, not the preceding
+              # push: a failed policy-only run must remain recoverable.
+              CHANGED="$(git diff --no-renames --name-only "$PREVIOUS_SOURCE" "$GITHUB_SHA" -- \
+                scripts/assert-publishable-readiness.mjs \
+                scripts/connector-publish-allowlist.mjs \
+                packages/polyfill-connectors/src/connector-conformance-roster.ts \
+                scripts/generate-connector-catalog.mjs \
+                scripts/verify-catalog-additions.mjs \
+                .github/workflows/publish-polyfill-connectors.yml)"
+              if [ -n "$CHANGED" ]; then
+                METADATA_ARGS=(--refresh-metadata true)
               fi
               PREVIOUS_ARGS=(--previous-catalog "$CATALOG_DIR/previous/catalog.json")
               ;;

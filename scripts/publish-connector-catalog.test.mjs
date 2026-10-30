@@ -131,6 +131,10 @@ if [ "\${1:-}" = "merge-base" ]; then
   if [ "\${FAIL_COMMAND:-}" = "stale-source" ]; then exit 1; fi
   exit 0
 fi
+if [ "\${1:-}" = "diff" ]; then
+  printf '%s' "\${POLICY_DIFF:-}"
+  exit 0
+fi
 printf '%s\n' '2026-09-15T12:34:56-05:00'
 `,
   );
@@ -374,9 +378,27 @@ test("unchanged reconciliation does not push, sign, or move the catalog tag", ()
   try {
     assert.equal(run.result.status, 0, run.result.stderr);
     assert.ok(run.commands.some(line => line.startsWith("node\tscripts/verify-catalog-additions.mjs ")));
+    assert.doesNotMatch(run.commands.find(line => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), /--refresh-metadata/);
     assert.equal(run.commands.some(line => line.startsWith("oras\tpush ")), false);
     assert.equal(run.commands.some(line => line.startsWith("oras\ttag ")), false);
     assert.equal(run.tagDigest(), previousCatalogDigest);
+  } finally { run.cleanup(); }
+});
+
+test("a policy change since the last catalog forces metadata refresh", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", POLICY_DIFF: "scripts/generate-connector-catalog.mjs" });
+  try {
+    assert.equal(run.result.status, 0, run.result.stderr);
+    assert.match(run.commands.find(line => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), /--refresh-metadata true/);
+    assert.equal(run.tagDigest(), catalogDigest);
+  } finally { run.cleanup(); }
+});
+
+test("manual reconciliation re-reads published metadata", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", GITHUB_EVENT_NAME: "workflow_dispatch" });
+  try {
+    assert.equal(run.result.status, 0, run.result.stderr);
+    assert.match(run.commands.find(line => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), /--refresh-metadata true/);
   } finally { run.cleanup(); }
 });
 
@@ -559,7 +581,6 @@ test("the publish matrix consumes the prepared selection and catalog has no matr
   );
 });
 
-const POLICY_STEP = "Detect policy changes that refresh the connector catalog";
 const PREPARE_GUARD_STEP = "Validate publish inventory identities and exclusions";
 
 function catalogJobCondition() {
@@ -575,7 +596,6 @@ function catalogScheduled({
   dryRun = false,
   publish = "skipped",
   hasPublishableChanges = "false",
-  policyChanged = "false",
   prepare = "success",
   cancelled = false,
 } = {}) {
@@ -586,7 +606,7 @@ function catalogScheduled({
     needs: {
       prepare: {
         result: prepare,
-        outputs: { "has-publishable-changes": hasPublishableChanges, "policy-changed": policyChanged },
+        outputs: { "has-publishable-changes": hasPublishableChanges },
       },
       publish: { result: publish },
     },
@@ -594,7 +614,7 @@ function catalogScheduled({
 }
 
 test("a policy-only main push schedules reconciliation without publishing a connector", () => {
-  assert.equal(catalogScheduled({ policyChanged: "true" }), true);
+  assert.equal(catalogScheduled(), true);
 });
 
 test("a failed publish can be reconciled, but a cancelled workflow cannot", () => {
@@ -608,18 +628,17 @@ test("an otherwise unchanged main push still checks for missed catalog releases"
 
 test("an artifact publish still schedules the catalog, and only main ever does", () => {
   assert.equal(catalogScheduled({ publish: "success", hasPublishableChanges: "true" }), true);
-  assert.equal(catalogScheduled({ policyChanged: "true", ref: "refs/tags/connector-ynab-v0.3.0" }), false);
+  assert.equal(catalogScheduled({ ref: "refs/tags/connector-ynab-v0.3.0" }), false);
   assert.equal(catalogScheduled({ publish: "success", hasPublishableChanges: "true", ref: "refs/heads/feature" }), false);
-  assert.equal(catalogScheduled({ policyChanged: "true", dryRun: true }), false);
+  assert.equal(catalogScheduled({ dryRun: true }), false);
 });
 
-test("the policy step reads the pushed range and fails closed without a real before commit", () => {
-  const step = extractStep(POLICY_STEP);
-  assert.match(step.condition, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
-  assert.match(step.text, /^          BEFORE_SHA: \$\{\{ github\.event\.before \}\}$/m);
-  assert.match(step.text, /^          AFTER_SHA: \$\{\{ github\.sha \}\}$/m);
+test("policy changes are detected since the last published catalog, including after an unrelated push", () => {
+  const step = extractStep("Reconcile the connector catalog");
+  const policyDiff = step.shell.match(/CHANGED="\$\(git diff[\s\S]*?\)"/)?.[0];
+  assert.ok(policyDiff, "expected the workflow's policy diff");
 
-  const repo = mkdtempSync(join(tmpdir(), "policy-changed-"));
+  const repo = mkdtempSync(join(tmpdir(), "catalog-policy-"));
   try {
     const git = (...args) => {
       const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
@@ -642,39 +661,34 @@ test("the policy step reads the pushed range and fails closed without a real bef
     writeFileSync(join(repo, "scripts", "connector-publish-allowlist.mjs"), "export const v = 2;\n");
     git("commit", "-q", "-am", "policy edit");
     const policyEdit = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "README.md"), "three\n");
+    git("commit", "-q", "-am", "unrelated follow-up");
+    const followUp = git("rev-parse", "HEAD");
 
-    const run = (before, after) => {
-      const output = join(repo, `output-${before.slice(0, 8)}-${after.slice(0, 8)}`);
-      writeFileSync(output, "");
-      const result = spawnSync("bash", ["-c", step.shell], {
+    const run = (previous, current) => {
+      const result = spawnSync("bash", ["-c", `set -euo pipefail\n${policyDiff}\nprintf '%s' "$CHANGED"`], {
         cwd: repo,
         encoding: "utf8",
-        env: { PATH: process.env.PATH, BEFORE_SHA: before, AFTER_SHA: after, GITHUB_OUTPUT: output },
+        env: { PATH: process.env.PATH, PREVIOUS_SOURCE: previous, GITHUB_SHA: current },
       });
-      return { status: result.status, stdout: result.stdout, output: readFileSync(output, "utf8") };
+      return result;
     };
 
     const unchanged = run(base, docsOnly);
     assert.equal(unchanged.status, 0, unchanged.stderr);
-    assert.equal(unchanged.output, "policy-changed=false\n");
+    assert.equal(unchanged.stdout, "");
 
-    const changed = run(docsOnly, policyEdit);
+    const changed = run(base, followUp);
     assert.equal(changed.status, 0, changed.stderr);
-    assert.equal(changed.output, "policy-changed=true\n");
-
-    for (const before of ["0".repeat(40), "f".repeat(40)]) {
-      const refused = run(before, policyEdit);
-      assert.notEqual(refused.status, 0, `before ${before} must not yield a decision`);
-      assert.equal(refused.output, "", "no policy decision may be written without a real before commit");
-      // ::error:: annotations are read from stdout by the Actions runner.
-      assert.match(refused.stdout, /::error::no before commit/);
-    }
+    assert.equal(changed.stdout, "scripts/connector-publish-allowlist.mjs");
+    assert.equal(run(policyEdit, followUp).stdout, "", "the last-push range alone would miss the policy edit");
+    assert.notEqual(run("f".repeat(40), followUp).status, 0);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("the prepare job pins Node 24 and runs the inventory guard before any matrix or policy step", () => {
+test("the prepare job pins Node 24 and runs the inventory guard before selection", () => {
   const prepare = workflow.match(/\n  prepare:\n([\s\S]*?)\n  publish:\n/)?.[1];
   assert.ok(prepare, "expected the prepare job");
   const position = (text) => {
@@ -688,8 +702,6 @@ test("the prepare job pins Node 24 and runs the inventory guard before any matri
   assert.ok(guard > nodeSetup, "Node 24 must be set up before the guard runs");
   assert.ok(guard < position("- name: Derive the publish matrix from the reviewed allowlist"));
   assert.ok(guard < position("- name: Select connector versions missing from GHCR"));
-  assert.ok(guard < position(`- name: ${POLICY_STEP}`));
-  assert.match(prepare, /^      policy-changed: \$\{\{ steps\.policy\.outputs\.policy-changed \}\}$/m);
 });
 
 // A copy of the publish scripts for tests that must exercise the real guard

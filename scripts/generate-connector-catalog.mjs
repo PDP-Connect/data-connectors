@@ -523,7 +523,8 @@ export async function generateConnectorCatalog({
   };
   if (previousCatalog !== null) {
     const comparable = (value) => JSON.stringify(sortObjectKeys(value.connectors));
-    if (comparable(catalog) === comparable(previousCatalog)) {
+    if (comparable(catalog) === comparable(previousCatalog) &&
+        (!refreshMetadata || sourceCommit === previousCatalog.source_commit)) {
       catalog.generated_at = previousCatalog.generated_at;
       catalog.source_commit = previousCatalog.source_commit;
     } else {
