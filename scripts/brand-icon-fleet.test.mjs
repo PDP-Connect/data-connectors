@@ -37,47 +37,26 @@ function assertSafeRecognisableSvg(source, filename) {
   }
 }
 
-// Connectors with no legitimate brand mark available in any vendored, offline,
-// build-time-only source checked (verified, not assumed): simple-icons v16.31.0
-// (slack/openai/pocket removed after brand-owner takedown/product-retirement;
-// whoop/ynab/oura never added; heb/usaa/wholefoods/google_takeout have no
-// vendor-published entry), home-assistant/brands (PNG-only, incompatible with
-// this repo's SVG-only pipeline; also has zero coverage of heb/pocket/usaa/
-// wholefoods/ynab/google_takeout even as PNG), and @iconify/json's `logos`
-// collection (CC0-1.0, ~2,174 marks) — this last source covers codex and
-// slack, but not heb/oura/pocket/usaa/wholefoods/whoop/ynab. codex.svg and
-// slack.svg were vendored from that collection's `codex` and `slack-icon`
-// keys respectively (256x256 source viewBox), rescaled to this fleet's
-// 0 0 24 24 grid via a uniform linear transform (svgpath(...).scale(24/256)),
-// with slack-icon's 4 separate colored <path> elements merged into one path
-// under a single root fill="#FFFFFF" to match every other icon here. These
-// manifests declare no `brand` object at all, so the console falls back to
-// the deterministic monogram rather than shipping an invented or hand-drawn
-// logo. See /home/tnunamak/code/pdpp/local/ICON-SOURCES-0918.md for full
-// source research and coverage numbers, and ICON-ART-0918.md for the
-// original per-connector removal verdict.
-const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
-  "heb.json",
-  "muse.json", // no vendored real mark; the console shows the monogram
-  "facebook.json", // no vendored real mark; the factory agent's drawn icon was removed
-  "tiktok.json", // no vendored real mark; the factory agent's drawn icon was removed
-  "fitbit.json", // a mark exists; omitted by choice (trademark)
-  "character_ai.json", // no vendored real mark; the factory-drawn placeholder icon was removed
-  "garmin_browser.json",
-  "google_takeout.json",
-  // Instinct: invite-only product launched 2026; no mark in the vendored
-  // offline sources yet, so it takes the monogram fallback like the rest.
-  "instinct.json",
-  "oura.json",
-  "oura_browser.json",
-  "perplexity.json", // no vendored real mark; the console uses the monogram
-  "pocket.json",
-  "usaa.json",
-  "wholefoods.json",
-  "whoop.json",
-  "whoop_browser.json",
-  "ynab.json",
-]);
+// Icon provenance. Most marks are simple-icons paths used verbatim (16.36.0;
+// pocket from 15.22.0, the last release that carried it before Pocket shut
+// down). codex.svg and slack.svg come from @iconify/json's CC0 `logos`
+// collection, rescaled from 256 to 24 and merged into one path. Brands that
+// simple-icons does not carry use the owner's own published vector, keeping
+// only the mark's white shape (no ® glyph), scaled uniformly to fit 24x24, and
+// rewritten from even-odd to nonzero filling where needed:
+//   character_ai  https://character.ai/icon.svg
+//   heb           https://www.heb.com/ header logo
+//   instinct      https://instinct.com/redesign/wordmark.svg, the "I" glyph
+//                 that app.instinct.com/favicon.ico shows
+//   oura*         https://static.ouraring.com/pdfs/Oura_BrandGuidelines_v1.pdf
+//   usaa          https://www.usaa.com/favicon.svg
+//   wholefoods    https://www.wholefoodsmarket.com/ header logo, the leaf O
+//                 that the site favicon shows
+//   whoop*        https://developer.whoop.com/docs/developing/design-guidelines
+//   ynab          https://www.ynab.com/press, Tree Logo
+// A connector with no legitimately available mark is listed here and declares
+// no `brand`, so consumers fall back to the monogram instead of an invented logo.
+const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([]);
 
 function assertRealBrandMarkShape(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);

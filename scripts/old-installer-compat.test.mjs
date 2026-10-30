@@ -284,12 +284,18 @@ test("pre-5fa1e7bb installer accepts the current builder's layer-free OCI connec
     assert.deepEqual(
       result.expectedPaths.sort(),
       [
+        "collection-profiles/oura/assets/icon.svg",
         "collection-profiles/oura/dist/collection-profile.mjs",
         "collection-profiles/oura/licenses/LICENSE",
         "collection-profiles/oura/licenses/NOTICE",
         "collection-profiles/oura/profile/collection-profile.json",
         "collection-profiles/oura/provenance.json",
       ].sort()
+    );
+    assert.deepEqual(
+      readFileSync(join(installRoot, "collection-profiles/oura/assets/icon.svg")),
+      readFileSync(resolve("connectors/oura/icon.svg")),
+      "the old installer writes the brand icon byte for byte"
     );
     assert.equal(result.pinned[0].digest, artifact.digest);
     assert.equal(sourceDeclarationReferrer.manifest.subject.digest, artifact.digest);

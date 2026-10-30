@@ -9,8 +9,12 @@
 	},
 	"connector_key": "ynab",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-	"version": "0.3.23",
+	"version": "0.3.24",
 	"display_name": "YNAB",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#3B5EDA"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

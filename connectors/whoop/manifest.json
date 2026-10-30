@@ -9,8 +9,12 @@
 	},
 	"connector_key": "whoop",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "WHOOP",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#000000"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": { "required": true },

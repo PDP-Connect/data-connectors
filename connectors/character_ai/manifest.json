@@ -9,8 +9,12 @@
 	},
 	"connector_key": "character-ai",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Character.AI",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#000000"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
