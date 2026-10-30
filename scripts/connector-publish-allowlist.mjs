@@ -31,11 +31,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["facebook", "facebook"],
     ["fitbit", "fitbit"],
     ["garmin_browser", "garmin-browser"],
-    [
-      "github",
-      "github",
-      "Shares public source github with github-browser, but four shared stream names have different record contracts; held until they are reconciled so the source keeps one declaration.",
-    ],
+    ["github", "github"],
     ["github_browser", "github-browser"],
     ["gmail", "gmail"],
     ["google_calendar", "google-calendar"],

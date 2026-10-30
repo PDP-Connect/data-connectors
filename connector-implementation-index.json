@@ -10223,14 +10223,14 @@
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/github",
 				"source": {
-					"id": "https://registry.pdpp.dev/sources/github",
+					"id": "https://registry.pdpp.dev/sources/github_api",
 					"display": {
-						"name": "GitHub"
+						"name": "GitHub (API)"
 					}
 				},
 				"connector_key": "github",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-				"version": "0.7.7",
+				"version": "0.7.8",
 				"display_name": "GitHub",
 				"brand": {
 					"icon": "icon.svg",
