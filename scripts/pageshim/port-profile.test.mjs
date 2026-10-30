@@ -440,6 +440,26 @@ test("public builder rejects a transitive selected input linked ancestor", (t) =
 	assert.match(result.stderr, /symbolic link|outside trusted repository/);
 });
 
+test("public builder checks static require descendants at esbuild resolution", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	fixture.put(fixture.inject, 'globalThis.portChild = require("./child.cjs");');
+	const child = join(fixture.repo, "scripts/pageshim/inject/child.cjs");
+	fixture.put("scripts/pageshim/inject/child.cjs", 'module.exports = "regular";');
+	const regular = fixture.run();
+	assert.equal(regular.status, 0, regular.stderr);
+	const outside = join(fixture.root, "outside-child.cjs");
+	writeFileSync(outside, 'module.exports = "outside";');
+	rmSync(child);
+	symlinkSync(outside, child);
+	const result = fixture.run();
+	assert.notEqual(
+		result.status,
+		0,
+		`Unsafe static require descendant was accepted: ${result.stdout}`,
+	);
+	assert.match(result.stderr, /symbolic link|escapes repository/);
+});
+
 test("public builder rejects directory and FIFO inputs without blocking", (t) => {
 	const fixture = physicalBuilderFixture(t);
 	const target = join(fixture.repo, fixture.inject);

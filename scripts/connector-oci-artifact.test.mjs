@@ -988,6 +988,37 @@ it("PageShim port isolation hashes same-line selected inject imports that change
 		"a selected injected dependency must participate in the artifact input hash",
 	);
 });
+it("PageShim port isolation hashes static require descendants that change bundle bytes", async (t) => {
+	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
+	const { buildSync } = await import(esbuildLib);
+	const f = portIsolationFixture(t);
+	const inject = "scripts/pageshim/shims/buffer.js";
+	const child = "scripts/pageshim/shims/buffer-child.cjs";
+	f.put(inject, 'globalThis.injected = require("./buffer-child.cjs");');
+	f.put(child, 'module.exports = "before";');
+	const hash = (commit) =>
+		artifactInputHash({ commit, manifest: "anthropic", cwd: f.cwd });
+	const compile = () =>
+		buildSync({
+			entryPoints: [join(f.cwd, inject)],
+			bundle: true,
+			write: false,
+			format: "esm",
+		}).outputFiles[0].text;
+	const base = f.commit();
+	const beforeHash = await hash(base);
+	const beforeBundle = compile();
+	f.put(child, 'module.exports = "after";');
+	const next = f.commit();
+	const afterHash = await hash(next);
+	const afterBundle = compile();
+	assert.notEqual(beforeBundle, afterBundle);
+	assert.notEqual(
+		afterHash,
+		beforeHash,
+		"a selected static require descendant must participate in the artifact input hash",
+	);
+});
 it("PageShim port isolation rejects missing malformed and mixed layouts", async (t) => {
 	const { artifactInputHash } = await import("./connector-artifact-inputs.mjs");
 	for (const kind of ["missing", "malformed", "noresolver"]) {

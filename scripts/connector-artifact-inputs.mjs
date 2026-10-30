@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
-import { transformSync } from "esbuild";
+import { build as buildEsbuild, transformSync } from "esbuild";
 import {
   CONSENT_AGGREGATE,
   CONSENT_RESOLUTION_MODULE,
@@ -244,6 +244,55 @@ function addLocalImportClosure(commit, entryPath, files, options, excluded = new
       pending.push(remap(resolveLocalImport(commit, path, specifier, options, readFile)));
     }
   }
+}
+
+async function addEsbuildImportClosure(commit, entryPath, files, options, excluded = new Set(), remap = (path) => path) {
+  const root = remap(entryPath);
+  const repositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd: options.cwd,
+    encoding: "utf8",
+  }).trim();
+  const loaderFor = (path) => {
+    const extension = posix.extname(path);
+    if ([".ts", ".mts", ".cts"].includes(extension)) return "ts";
+    if (extension === ".tsx") return "tsx";
+    if (extension === ".jsx") return "jsx";
+    if (extension === ".json") return "json";
+    return "js";
+  };
+  const plugin = {
+    name: "commit-artifact-input-closure",
+    setup(build) {
+      build.onResolve({ filter: /.*/ }, (args) => {
+        if (args.kind === "entry-point")
+          return { path: root, namespace: "commit-artifact-input" };
+        if (args.namespace !== "commit-artifact-input") return undefined;
+        if (!args.path.startsWith("./") && !args.path.startsWith("../"))
+          return { path: args.path, external: true };
+        const from = args.importer || root;
+        const resolved = remap(resolveLocalImport(commit, from, args.path, options, readPageShimFileAtCommit));
+        if (excluded.has(resolved)) return { path: args.path, external: true };
+        return { path: resolved, namespace: "commit-artifact-input" };
+      });
+      build.onLoad({ filter: /.*/, namespace: "commit-artifact-input" }, (args) => {
+        const content = readPageShimFileAtCommit(commit, args.path, options);
+        if (content === null)
+          return { errors: [{ text: `cannot read local artifact input ${args.path} at ${commit}` }] };
+        files.set(args.path, content);
+        return { contents: content, loader: loaderFor(args.path) };
+      });
+    },
+  };
+  await buildEsbuild({
+    absWorkingDir: repositoryRoot,
+    entryPoints: [root],
+    bundle: true,
+    write: false,
+    platform: "browser",
+    format: "esm",
+    logLevel: "silent",
+    plugins: [plugin],
+  });
 }
 
 async function publishInventoryAtCommit(commit, options) {
@@ -525,14 +574,13 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
           physical.selected.shim,
           ...physical.selected.inject,
         ]) {
-          addLocalImportClosure(
+          await addEsbuildImportClosure(
             commit,
             path,
             portFiles,
             options,
             new Set(["scripts/pageshim/capabilities.mjs", CONSENT_RENDERER]),
             consentRemap ?? undefined,
-            readPageShimFileAtCommit,
           );
         }
       }
