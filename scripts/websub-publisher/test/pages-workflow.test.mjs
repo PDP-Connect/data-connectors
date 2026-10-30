@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +10,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
+import { publicationRan } from "../publication-ran.mjs";
 
 const pages = parse(readFileSync(new URL("../../../.github/workflows/pages.yml", import.meta.url), "utf8"));
 const release = parse(readFileSync(new URL("../../../.github/workflows/publish-polyfill-connectors.yml", import.meta.url), "utf8"));
@@ -98,4 +100,97 @@ test("a publish hint follows a successful full-site deploy and is disabled until
   const steps = pages.jobs.notify.steps;
   assert.equal(steps.find((step) => step.uses?.startsWith("actions/checkout@")).with.ref, "${{ needs.build.outputs.source_sha }}");
   assert.match(steps.find((step) => step.name === "Verify the public feed and notify the hub").run, /static-notify\.mjs --sha256/);
+});
+
+const feed = "<feed>signed catalog hint</feed>";
+const feedHash = createHash("sha256").update(feed).digest("hex");
+const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+
+function compareFeed(t, { event = "workflow_run", live = feed, fail = false, metadata = "200 application/atom+xml" } = {}) {
+  const compare = pages.jobs.build.steps.find((step) => step.id === "compare");
+  assert.ok(compare, "the build must compare the live topic with its feed");
+  assert.equal(compare.env.FEED_SHA256, "${{ steps.feed.outputs.sha256 }}");
+  assert.equal(compare.env.EVENT_NAME, "${{ github.event_name }}");
+  assert.equal(pages.jobs.build.outputs.deploy, "${{ steps.compare.outputs.deploy }}");
+  const upload = pages.jobs.build.steps.find((step) => step.uses?.startsWith("actions/upload-pages-artifact@"));
+  assert.match(upload.if, /steps\.compare\.outputs\.deploy == 'true'/);
+  const dir = mkdtempSync(join(tmpdir(), "pages-feed-compare-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const output = join(dir, "output");
+  writeFileSync(output, "");
+  const stub = `curl() {
+    if [[ "$MOCK_FAIL" == 1 ]]; then return 7; fi
+    local output=""
+    while (( $# )); do
+      if [[ "$1" == --output ]]; then output="$2"; shift 2; else shift; fi
+    done
+    printf '%s' "$MOCK_FEED" > "$output"
+    printf '%s' "$MOCK_METADATA"
+  }\n`;
+  const result = spawnSync("bash", ["-c", stub + compare.run], {
+    cwd: repoRoot, encoding: "utf8", env: {
+      ...process.env, GITHUB_OUTPUT: output, RUNNER_TEMP: dir,
+      FEED_SHA256: feedHash, EVENT_NAME: event, MOCK_FEED: live,
+      MOCK_FAIL: fail ? "1" : "0", MOCK_METADATA: metadata,
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const decision = readFileSync(output, "utf8").match(/^deploy=(true|false)$/m)?.[1];
+  assert.ok(decision, "comparison must write its deployment decision");
+  return { decision, stdout: result.stdout };
+}
+
+function downstream(decision) {
+  assert.equal(pages.jobs.deploy.needs, "build");
+  assert.deepEqual(pages.jobs.notify.needs, ["build", "deploy"]);
+  const condition = pages.jobs.deploy.if?.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+  assert.ok(condition, "deployment must use the comparison result");
+  const deploy = Function("needs", `return (${condition});`)({ build: { outputs: { deploy: decision } } });
+  const notify = deploy && /CATALOG_WEBSUB_NOTIFY_ENABLED == 'true'/.test(pages.jobs.notify.if);
+  return { deploy, notify };
+}
+
+test("a release with empty step metadata and changed feed deploys and notifies", (t) => {
+  assert.equal(publicationRan([{ jobs: [{ name: "Publish and verify the connector catalog", status: "completed", conclusion: "success", steps: [] }] }]), true);
+  assert.deepEqual(downstream(compareFeed(t, { live: "<feed>old</feed>" }).decision), { deploy: true, notify: true });
+});
+
+test("a release with an identical feed skips deploy and notification", (t) => {
+  const result = compareFeed(t);
+  assert.match(result.stdout, new RegExp(`feed already at ${feedHash}`));
+  assert.deepEqual(downstream(result.decision), { deploy: false, notify: false });
+  assert.deepEqual(downstream(compareFeed(t, { metadata: "200 Application/Atom+XML; charset=utf-8" }).decision), { deploy: false, notify: false });
+});
+
+test("an unavailable, non-200 or non-Atom feed triggers deploy and notification", (t) => {
+  for (const options of [{ fail: true }, { metadata: "503 text/html" }, { metadata: "302 text/html" },
+    { metadata: "200 text/plain" }, { metadata: "200 application/atom+xml-invalid" }]) {
+    assert.deepEqual(downstream(compareFeed(t, options).decision), { deploy: true, notify: true });
+  }
+});
+
+test("manual recovery and site pushes still deploy and notify when the feed is unchanged", (t) => {
+  for (const event of ["workflow_dispatch", "push"]) {
+    assert.deepEqual(downstream(compareFeed(t, { event }).decision), { deploy: true, notify: true });
+    assert.deepEqual(downstream(compareFeed(t, { event, fail: true }).decision), { deploy: true, notify: true });
+  }
+});
+
+test("a rejected hub hint fails the notification command", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pages-notify-failure-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const preload = join(dir, "mock-fetch.mjs");
+  writeFileSync(preload, `globalThis.fetch = async (url) => String(url).includes('registry.pdpp.dev')
+    ? new Response(${JSON.stringify(feed)}, { headers: { 'content-type': 'application/atom+xml' } })
+    : new Response(null, { status: 503 });\n`);
+  const notify = pages.jobs.notify.steps.find((step) => step.name === "Verify the public feed and notify the hub");
+  assert.notEqual(notify["continue-on-error"], true);
+  assert.notEqual(pages.jobs.notify["continue-on-error"], true);
+  const result = spawnSync("bash", ["-c", notify.run], {
+    cwd: repoRoot, encoding: "utf8", env: {
+      ...process.env, FEED_SHA256: feedHash, NODE_OPTIONS: `--import=${preload}`,
+    },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /hub rejected the publish hint \(HTTP 503\)/);
 });

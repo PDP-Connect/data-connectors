@@ -16,12 +16,9 @@ export function publicationRan(pages) {
   const jobs = pages.flatMap((page) => page.jobs).filter((job) => job?.name === name);
   if (jobs.length !== 1 || jobs[0].status !== "completed" || !terminal.has(jobs[0].conclusion))
     throw new Error("catalog job is missing, ambiguous or unfinished");
-  if (jobs[0].conclusion === "skipped") return false;
-  if (!Array.isArray(jobs[0].steps)) throw new Error("catalog job has no steps");
-  const steps = jobs[0].steps.filter((step) => step?.name === name);
-  if (steps.length !== 1 || steps[0].status !== "completed" || !terminal.has(steps[0].conclusion))
-    throw new Error("catalog publication step is missing, ambiguous or unfinished");
-  return steps[0].conclusion !== "skipped";
+  // The Jobs API may omit step metadata. Reconcile every attempted catalog job;
+  // the Pages build checks whether its verified feed differs before deploying.
+  return jobs[0].conclusion !== "skipped";
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
