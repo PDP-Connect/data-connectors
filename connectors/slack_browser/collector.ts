@@ -1064,7 +1064,9 @@ async function collectMessages(
 	// DETAIL_GAP either: no retry can close it, and files has no parent
 	// stream to hang a gap off.
 	const idlessFiles = teamMessages.filter((id) => run.fileGaps.has(id)).length;
-	run.filesIncomplete = outcome.gaps.length > 0;
+	// Accumulated across teams: a later team that reads clean must not clear
+	// an earlier team's conversations left to retry.
+	run.filesIncomplete ||= outcome.gaps.length > 0;
 	if (wants(run, "files") && (outcome.gaps.length > 0 || idlessFiles > 0)) {
 		await run.ctx.progress(
 			`Files: ${outcome.gaps.length} conversations to retry${run.filesIncomplete ? " (not checkpointed this run)" : ""}; ${idlessFiles} messages named a file Slack served with no id`,

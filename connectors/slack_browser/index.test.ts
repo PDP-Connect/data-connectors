@@ -799,6 +799,75 @@ test("a conversation Slack stopped answering is a gap; its cursor stays put", as
 	assert.equal(cursor.C0123456789, "1790450000.000200");
 });
 
+test("a gap in one workspace keeps files unchecked even when a later workspace reads clean", async () => {
+	const h = harness(["messages", "files"]);
+	const fixtures = fakeApi();
+	const second = { ...TEAM, id: "T0999999999", domain: "acme-two" };
+	const api = {
+		calls: fixtures.calls,
+		call: (teamId: string, method: string, params: Record<string, string>) =>
+			teamId === TEAM.id &&
+			method === "conversations.history" &&
+			params.channel === "C0987654321"
+				? Promise.reject(
+						new SlackApiError("conversations.history", "http_503", true, 503),
+					)
+				: fixtures.call(teamId, method, params),
+	};
+	await collectSlackBrowser(
+		h.ctx,
+		{ api, concurrency: 1, now: () => FIXTURE_NOW },
+		[TEAM, second],
+		DEFAULT_OPTIONS,
+	);
+	assert.deepEqual(h.skips(), []);
+	assert.equal(h.gaps().length, 1);
+	assert.ok(h.state("messages"), "messages still checkpoints its cursors");
+	assert.equal(
+		h.state("files"),
+		undefined,
+		"the first workspace's conversation left to retry withholds the files STATE",
+	);
+});
+
+test("a clean read recovers the conversation's pending gaps; one that fails again stays pending", async () => {
+	const h = harness(["messages"], {
+		detailGaps: [
+			{
+				gap_id: "g-clean",
+				lease_id: "l-1",
+				stream: "messages",
+				record_key: "C0123456789",
+			},
+			{ gap_id: "g-again", stream: "messages", record_key: "C0987654321" },
+		],
+	});
+	await run(
+		h,
+		fakeApi((call) =>
+			call.method === "conversations.history" &&
+			call.params.channel === "C0987654321"
+				? new SlackApiError("conversations.history", "http_503", true, 503)
+				: undefined,
+		),
+	);
+	const recovered = h.messages.filter((m) => m.type === "DETAIL_GAP_RECOVERED");
+	assert.deepEqual(recovered, [
+		{
+			type: "DETAIL_GAP_RECOVERED",
+			reference_only: true,
+			gap_id: "g-clean",
+			lease_id: "l-1",
+			record_key: "C0123456789",
+			stream: "messages",
+		},
+	]);
+	assert.deepEqual(
+		h.gaps().map((g) => g.record_key),
+		["C0987654321"],
+	);
+});
+
 test("a replies answer this connector cannot parse fails the run closed", async () => {
 	const h = harness(ALL_STREAMS);
 	const api = await run(
