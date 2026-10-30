@@ -42,6 +42,7 @@ test("the publish selector's dependencies are installed before every main-push s
   const install = steps[installIndex];
   assert.equal(install.if, steps[selectorIndex].if, "install must run for the same events as selection");
   assert.equal(install["working-directory"], undefined, "install must use the root lockfile");
+  assert.match(install.run, /(?:^|\s)--include=dev(?:\s|$)/, "selector build dependencies must be present even with production npm settings");
   assert.notEqual(install["continue-on-error"], true, "a failed install must stop selection");
 });
 
@@ -644,18 +645,13 @@ test("a changed version already present in GHCR is skipped", async () => {
   assert.match(notices.join("\n"), /already present in GHCR/);
 });
 
-test("an unknown GHCR lookup is skipped with a notice and never selected", async () => {
-  const notices = [];
+test("an unknown GHCR lookup fails selection instead of reporting a successful no-op", async () => {
   const candidate = { connector: "oura", manifest: "oura", version: "0.2.0" };
-  const selected = await filterAbsentVersions([candidate], {
+  await assert.rejects(filterAbsentVersions([candidate], {
     owner: "pdp-connect",
     lookup: async () => ({ outcome: "unknown", reason: "registry timed out" }),
-    notice: (message) => notices.push(message),
-  });
-
-  assert.deepEqual(selected, []);
-  assert.match(notices.join("\n"), /GHCR lookup is unknown/);
-  assert.match(notices.join("\n"), /will not be published blindly/);
+    notice: () => {},
+  }), /GHCR lookup is unknown.*registry timed out/);
 });
 
 test("only a definite absent lookup reaches the publish matrix", async () => {

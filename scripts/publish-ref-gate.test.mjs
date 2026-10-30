@@ -388,10 +388,8 @@ test("signing is restricted to refs/heads/main, and the advertised identity says
   // branch can edit that gate on their branch; they cannot change what OIDC
   // claims about the ref their run is on.
   const steps = parsePublishSteps();
-  const signing = steps.filter((step) =>
-    ["Push and sign", "Verify the published signature"].includes(step.keys.name || ""),
-  );
-  assert.equal(signing.length, 2, "expected the push/sign and verify steps");
+  const signing = steps.filter((step) => step.keys.name === "Push and sign");
+  assert.equal(signing.length, 1, "expected the push/sign step");
 
   for (const step of signing) {
     const condition = step.keys.if || "";
@@ -463,12 +461,13 @@ test("a main push uses the filtered matrix and a no-op skips publish jobs", () =
   );
 });
 
-test("the catalog fan-in excludes failed and cancelled publish results", () => {
+test("the catalog fan-in reconciles main failures but excludes cancelled workflows", () => {
   const workflow = readFileSync(workflowPath, "utf8");
   const catalogIf = /^  catalog:[\s\S]*?^    if: \$\{\{ (.*) \}\}$/m.exec(workflow);
   assert.ok(catalogIf, "the catalog job must have an if condition");
-  assert.match(catalogIf[1], /needs\.publish\.result == 'success'/);
-  assert.doesNotMatch(catalogIf[1], /needs\.publish\.result == '(?:failure|cancelled)'/);
+  assert.match(catalogIf[1], /always\(\)/);
+  assert.match(catalogIf[1], /!cancelled\(\)/);
+  assert.match(catalogIf[1], /github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /CONNECTOR_CATALOG_PASSWORD: \$\{\{ github\.token \}\}/, "the generator must receive the registry credential");
 });
 
@@ -498,15 +497,14 @@ test("the signed digest comes from the push, and the tag is never re-resolved", 
     "the push must request structured output so its digest can be captured",
   );
 
-  // The verify step must consume the push step's output rather than deriving a
-  // digest of its own.
+  // Verification must consume the captured push digest rather than deriving a
+  // digest of its own, and finish before the mutable version tag is written.
   const steps = parsePublishSteps();
-  const verify = steps.find((step) => (step.keys.name || "") === "Verify the published signature");
-  assert.ok(verify, "expected a verify step");
-  assert.ok(
-    verify.lines.some((line) => /steps\.publish\.outputs\.digest/.test(line)),
-    "the verify step must verify the digest the push reported",
-  );
+  const publish = steps.find((step) => (step.keys.name || "") === "Push and sign");
+  assert.ok(publish, "expected a push/sign step");
+  const verify = publish.lines.findIndex((line) => /cosign verify/.test(line));
+  const tag = publish.lines.findIndex((line) => /^\s*oras tag\b/.test(line));
+  assert.ok(verify >= 0 && verify < tag, "verify the captured digest before exposing the version tag");
 });
 
 test("the republication guard is reached before the mutable version tag moves", () => {

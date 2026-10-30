@@ -145,7 +145,7 @@ jobs:
 
       - name: Install selector dependencies
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        run: npm ci --ignore-scripts
+        run: npm ci --include=dev --ignore-scripts
 
       - name: Select connector versions missing from GHCR
         id: main-selection
@@ -181,6 +181,7 @@ jobs:
             scripts/connector-publish-allowlist.mjs \
             packages/polyfill-connectors/src/connector-conformance-roster.ts \
             scripts/generate-connector-catalog.mjs \
+            scripts/verify-catalog-additions.mjs \
             .github/workflows/publish-polyfill-connectors.yml)"
           if [ -n "$CHANGED" ]; then
             printf 'publish policy changed; the connector catalog will be refreshed:\n%s\n' "$CHANGED"
@@ -570,9 +571,18 @@ jobs:
           # data-connect release verifies bundles.
           cosign sign --yes --new-bundle-format=false --use-signing-config=false "${REPOSITORY}@${DIGEST}"
 
-          # Step 3: the version identifier moves, to the digest the guard
-          # cleared and the signature now covers. Tagging BY DIGEST — never by
-          # re-resolving a name — keeps this the same single captured value.
+          # Verify both connector and declaration signatures before exposing a
+          # version tag. A successful sign command alone is not verification.
+          for signed_digest in "$SOURCE_DECLARATION_DIGEST" "$DIGEST"; do
+            for bundle_format in true false; do
+              cosign verify "${REPOSITORY}@${signed_digest}" \
+                --new-bundle-format="${bundle_format}" \
+                --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            done
+          done
+
+          # Step 3: expose the exact digest only after verification succeeds.
           oras tag "${REPOSITORY}@${DIGEST}" "${VERSION}"
 
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
@@ -599,61 +609,13 @@ jobs:
             echo "file running on any other branch or tag does not satisfy it."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify the published signature
-        # Verifying from the same job that signed does not prove much about
-        # Sigstore, but it does prove the identity the certificate carries is
-        # the one a consumer will be told to expect — which is the part that is
-        # easy to get wrong and invisible until someone tries to verify.
-        #
-        # Verifies THE digest the push reported, taken from the publish step's
-        # output. It does not re-resolve the tag: re-resolving is how the
-        # previous revision came to verify content it had never pushed.
-        #
-        # `--certificate-identity` (exact), not `--certificate-identity-regexp`
-        # with a trailing `@`. The old expression stopped constraining at the
-        # `@`, so it accepted this workflow file running on an unreviewed branch
-        # or an arbitrary tag — an actor who could push a branch could edit the
-        # in-checkout guard there and still satisfy the advertised policy. An
-        # instruction that accepts any ref is part of the defect, so this string
-        # and the consumer instruction above are the same string.
-        if: ${{ steps.target.outputs.selected == 'true' && github.ref == 'refs/heads/main' && !inputs.dry-run }}
-        env:
-          REPOSITORY: ${{ steps.target.outputs.repository }}
-          DIGEST: ${{ steps.publish.outputs.digest }}
-          SOURCE_DECLARATION_DIGEST: ${{ steps.publish.outputs.source_declaration_digest }}
-        run: |
-          set -euo pipefail
-          source scripts/registry-command.sh
-
-          # The digest must have come from the push. An empty value here would
-          # otherwise make `cosign verify` run against a malformed reference and
-          # the failure would look like a signing problem rather than a broken
-          # hand-off between steps.
-          if [ -z "${DIGEST:-}" ]; then
-            echo "::error::no digest was carried from the push step — refusing to verify"
-            exit 1
-          fi
-          if [ -z "${SOURCE_DECLARATION_DIGEST:-}" ]; then
-            echo "::error::no source declaration digest was carried from the publish step — refusing to verify"
-            exit 1
-          fi
-
-          # Verify both formats while the legacy bridge in the publish step exists.
-          for signed_digest in "$SOURCE_DECLARATION_DIGEST" "$DIGEST"; do
-            for bundle_format in true false; do
-              cosign verify "${REPOSITORY}@${signed_digest}" \
-                --new-bundle-format="${bundle_format}" \
-                --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
-                --certificate-oidc-issuer https://token.actions.githubusercontent.com
-            done
-          done
-
   catalog:
     name: Publish and verify the connector catalog
     needs: [prepare, publish]
-    # A failed or cancelled publish never refreshes the catalog. A policy-only
-    # main push refreshes it even when no connector artifact changed.
-    if: ${{ always() && needs.prepare.result == 'success' && (inputs.catalog-only || (github.ref == 'refs/heads/main' && !inputs.dry-run && ((needs.publish.result == 'success' && needs.prepare.outputs.has-publishable-changes == 'true') || ((needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.prepare.outputs.policy-changed == 'true')))) }}
+    # Reconcile after every main release event, including a partial matrix
+    # failure. The reconciliation independently verifies every new artifact.
+    # A cancelled workflow must not start a new publication.
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' && !inputs.dry-run }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -709,11 +671,12 @@ jobs:
         with:
           cosign-release: "v3.1.3"
 
-      - name: Publish and verify the connector catalog
-        if: ${{ github.ref == 'refs/heads/main' && !inputs.dry-run }}
+      - name: Reconcile the connector catalog
+        id: reconcile
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_ACTOR: ${{ github.actor }}
+          POLICY_CHANGED: ${{ needs.prepare.outputs.policy-changed }}
           # The generator sends this only to the token endpoint. With it, GHCR answers a
           # repository that was never created with NAME_UNKNOWN, which omits it; without
           # it, GHCR answers 403, which is denial and must fail closed.
@@ -726,6 +689,12 @@ jobs:
           mkdir -p "$CATALOG_DIR"
           CREATED="$(git show -s --format=%cI "$GITHUB_SHA")"
           PREVIOUS_ARGS=()
+          METADATA_ARGS=()
+          # Policy changes and manual recovery rebuild metadata from the
+          # published profiles; normal no-op pushes can reuse the signed row.
+          if [ "${POLICY_CHANGED:-}" != false ]; then
+            METADATA_ARGS=(--refresh-metadata true)
+          fi
           # Same credential the connector lookup uses: anonymously, GHCR answers a
           # repository that does not exist yet with a token-endpoint 403, which the
           # lookup rightly classifies as unknown — so the first catalog publish
@@ -755,7 +724,25 @@ jobs:
           esac
           node scripts/generate-connector-catalog.mjs \
             --out "$CATALOG_DIR/catalog.json" \
-            --source-commit "$GITHUB_SHA" --generated-at "$CREATED" "${PREVIOUS_ARGS[@]}"
+            --source-commit "$GITHUB_SHA" --generated-at "$CREATED" "${METADATA_ARGS[@]}" "${PREVIOUS_ARGS[@]}"
+          node scripts/verify-catalog-additions.mjs \
+            --catalog "$CATALOG_DIR/catalog.json" "${PREVIOUS_ARGS[@]}"
+          if [ "$OUTCOME" = present ] && cmp -s "$CATALOG_DIR/previous/catalog.json" "$CATALOG_DIR/catalog.json"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish and verify the connector catalog
+        if: ${{ steps.reconcile.outputs.changed == 'true' && github.ref == 'refs/heads/main' && !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          source scripts/registry-command.sh
+          CATALOG_DIR="${RUNNER_TEMP}/connector-catalog"
+          CREATED="$(git show -s --format=%cI "$GITHUB_SHA")"
 
           printf '%s' "$GH_TOKEN" | oras login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           cd "$CATALOG_DIR"
@@ -775,4 +762,19 @@ jobs:
               --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com
           done
+          # Every authorized writer uses this workflow's concurrency group.
+          # Refuse a changed latest even if an external writer bypassed it.
+          LOOKUP_USERNAME="${GITHUB_ACTOR:-github-actions}" \
+          LOOKUP_PASSWORD="${GH_TOKEN:-}" \
+          node "$GITHUB_WORKSPACE/scripts/lookup-manifest.mjs" \
+            --reference ghcr.io/pdp-connect/connector-catalog:latest > "$CATALOG_DIR/current-lookup.json"
+          node -e '
+            const fs = require("fs");
+            const before = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const now = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+            if (before.outcome !== now.outcome || !["present", "absent"].includes(now.outcome) ||
+                (now.outcome === "present" && before.digest !== now.digest)) {
+              throw new Error("catalog latest changed or became unknown during reconciliation");
+            }
+          ' "$CATALOG_DIR/lookup.json" "$CATALOG_DIR/current-lookup.json"
           oras tag "ghcr.io/pdp-connect/connector-catalog@${DIGEST}" latest

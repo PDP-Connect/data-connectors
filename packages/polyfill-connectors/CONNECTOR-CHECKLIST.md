@@ -78,8 +78,8 @@ failure to fix later.
 - **Treating `UNKNOWN` as a bug to silence.** For most connectors in
   categories with no HTTP surface, `UNKNOWN` on reachability and
   mock-mutation is the permanently correct answer. Read
-  `docs/inbox/report-connector-coverage.md`'s (a)/(b)/(c) classification
-  before assuming a connector's `UNKNOWN` is fixable.
+  `docs/inbox/report-connector-coverage.md`'s classification table before
+  assuming a connector's `UNKNOWN` is fixable.
 - **Promoting `public_listing.tier` because every mechanical check went
   green.** It doesn't mean the connector works. It means nothing
   *mechanical* is wrong. Promotion needs a real run.
