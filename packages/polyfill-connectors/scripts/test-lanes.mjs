@@ -25,4 +25,19 @@ export const EXCLUDED_TESTS = new Set(["connectors/github/index.test.ts"]);
 // Files that run under Vitest instead of node:test. Use repo-relative
 // `connectors/...` paths for connectors and package-relative paths otherwise.
 // A file may also be in NAMESPACE_TESTS. Connector owners append paths here.
-export const VITEST_TESTS = new Set([]);
+export const VITEST_TESTS = new Set([
+	"connectors/groupme/index.test.ts",
+	"connectors/groupme/schemas.test.ts",
+	"connectors/groupme/completeness-anchor.test.ts",
+	"connectors/groupme/attachments-stream.test.ts",
+	"connectors/groupme/auth-probe.test.ts",
+	"connectors/groupme/collection.test.ts",
+	"connectors/groupme/production-dedup.test.ts",
+	"connectors/groupme/attachment-detail-coverage.test.ts",
+	"connectors/groupme/blob-security.test.ts",
+	"connectors/groupme/carry-forward-projection.test.ts",
+	"connectors/groupme/skip-result-boundary-claim-contract.test.ts",
+	"connectors/groupme/incremental-frontier.test.ts",
+	"connectors/groupme/setup-contract.test.ts",
+	"connectors/groupme/stream-coverage.test.ts",
+]);

@@ -4,12 +4,14 @@ This document captures the standards, heuristics, and earned lessons for writing
 
 The guide is written for connector *authors*. It does not describe the Collection Profile wire protocol (that's in `spec-collection-profile.md`) or the Polyfill Runtime (that's in `spec-polyfill-runtime.md`). It describes how to write the code between those two layers.
 
+Unless stated otherwise, `bin/...` CLI examples run from `packages/polyfill-connectors/`; connector source and fixture paths are repository-root relative. The root authoring loop below uses explicit full CLI paths.
+
 ## The entry point: `runConnector()`
 
 Every connector is one call to `runConnector()`. The runtime owns the Collection Profile protocol handshake (START / RECORD / STATE / SKIP_RESULT / PROGRESS / DONE), browser lifecycle, tracing, fixture capture, retryable-error detection, and terminal exit. Connectors own business logic — how records are collected, shaped, and cursored.
 
 ```js
-import { runConnector } from '../../src/connector-runtime.js';
+import { runConnector } from '../../packages/polyfill-connectors/src/connector-runtime.ts';
 import { validateRecord } from './schemas.js';
 
 runConnector({
@@ -94,12 +96,12 @@ Multi-account note: the runtime today defaults `profileName` to the connector na
 
 - The manifest declares `runtime_requirements.bindings.browser` + `.network` and `capabilities.human_interaction: ["manual_action"]` — no `auth` block, since a browser-session connector authenticates via the owner's signed-in profile, not an env credential.
 - `index.ts` wires the canonical `runConnector({ browser: { profileName }, ensureSession, probeSession, probeSessionIsAuthoritative: true, collect })` shape: a session probe against two declared constants (`LOGIN_CHECK_URL`, `LOGIN_CHECK_SELECTOR`), the fleet's `manualBrowserLogin` handoff (`src/browser-handoff.ts`) when the probe fails, and one TODO (`extractRows`) where the author navigates to the real listing page and extracts rows.
-- Both the login-check constants and the extraction's `LISTING_URL`/`ROWS_CONTAINER_SELECTOR`/`ROW_SELECTOR` start as literal `"TODO: ..."` strings or recognizable placeholders. `requireConfigured()` throws a clear, named error the first time a still-placeholder login-check value is actually read — the same posture as dlt's "Please set me up!" — instead of silently probing a URL that was never real. The extraction placeholders instead rely on the diagnostic wiring below: a selector that matches nothing fails the run visibly rather than returning an empty-looking success.
+- Both the login-check constants and the extraction's `LISTING_URL`/`ROWS_CONTAINER_SELECTOR`/`ROW_SELECTOR` start as literal `"TODO: ..."` strings or recognizable placeholders. `requireConfigured()` throws a clear, named error the first time a still-placeholder login-check value is actually read — the same posture as dlt's "Please set me up!" — instead of silently probing a URL that was never real. `ROW_SELECTOR` also fails clearly while untouched. Configure every placeholder before running; the container diagnostic detects a missing or hidden container, but a configured row selector that matches nothing can represent an empty list.
 - The manifest declares `protocol_version: "0.2.0"`, `protocol_capabilities: ["OBSERVATION"]`, and `diagnostic_descriptors` (steps `sign_in`/`list_rows`, expectations `session_check`/`rows_container`), and `index.ts` passes `protocolCapabilities: ["OBSERVATION"]` to `runConnector()` and routes `probeLoggedIn`'s session check and `extractRows`'s rows-container check through `waitForElementExpectation` (`src/auto-login/locator-helpers.ts`). This is what turns a selector miss into a `diagnose`-able `expectation_mismatch` fact instead of `unknown` (§5.10-5.11 below), and what makes a hidden/removed rows container FAIL the run instead of succeeding with 0 records — a genuinely empty list (container present, no rows) still succeeds with 0 records.
   **CAUTION**: `data-connect`, the production runtime, does not support Collection Profile 0.2.0 yet and currently rejects a manifest that declares a capability it does not recognize. `connector-dev.ts` (this authoring loop) does understand 0.2.0 today, but do not point `data-connect` at a connector scaffolded this way until it ships 0.2.0 support. The scaffold's `public_listing.tier: "development"` does not by itself keep a connector out of publishing — the actual gate is `scripts/connector-publish-allowlist.mjs`'s `CONNECTOR_PUBLISH_INVENTORY`, an opt-in allowlist a new connector is never added to automatically. Confirm a connector has no entry there (and data-connect has 0.2.0 support) before it ships.
 - Session-only cookies (no `Expires`/`Max-Age`) do not survive Chromium's clean exit, even inside the persistent profile `acquireIsolatedBrowser` keeps per connector — see §5's "Cookie longevity varies" below for how to recognize this and what to do about it (not a daemon: that mechanism was retired).
 
-Next: `node --import tsx bin/connector-doctor.ts` (checks Node/deps/Chromium/display/`.env.local`/`~/.pdpp/profiles` before you drive a real browser), then `node --import tsx bin/connector-dev.ts <name>` to watch the session check and manual-login handoff run live. `connector-init --browser`'s own printed next-steps give the exact commands and the TODO's file location.
+Next: configure all login and extraction placeholders, run `node --import tsx bin/connector-doctor.ts` (checks Node/deps/Chromium/display/`.env.local`/`~/.pdpp/profiles` before you drive a real browser), then `node --import tsx bin/connector-dev.ts <name>` to watch the session check and manual-login handoff run live. `connector-init --browser`'s own printed next-steps give the exact commands and the TODO's file location.
 
 ---
 
@@ -515,7 +517,7 @@ Captured DOM is enough for parser tests and structural-selector drift checks, bu
 3. Replace a working structural selector only when the semantic candidate is unique, visible/enabled when needed, and at least as stable in captured evidence.
 4. Keep the structural fallback when the upstream component exposes weak or duplicate accessibility names.
 
-Raw locator and ARIA captures may contain owner data. They follow the same rule as raw DOM: use them locally for debugging, then scrub/review before promoting anything to `fixtures/<connector>/scrubbed/`.
+Raw locator and ARIA captures may contain owner data. They follow the same rule as raw DOM: use them locally for debugging, then scrub/review before promoting anything to `connectors/<connector>/fixtures/scrubbed/`.
 
 **Scrubbing before commit**
 
@@ -525,7 +527,7 @@ Raw fixtures contain your real PII — emails, addresses, order IDs, account num
 node --import tsx bin/scrub-fixtures.ts <connector>
 ```
 
-This applies the shared defaults in `src/scrub-defaults.ts` (emails, SSNs, credit-card-shaped digit runs, US phone numbers, labeled account numbers, deterministic street-address patterns, and labeled names) plus any connector-specific rules in `connectors/<connector>/scrub-rules.ts`. Output lands in `fixtures/<connector>/scrubbed/<runId>/`, which **is** committable after review.
+This applies the shared defaults in `src/scrub-defaults.ts` (emails, SSNs, credit-card-shaped digit runs, US phone numbers, labeled account numbers, deterministic street-address patterns, and labeled names) plus any connector-specific rules in `connectors/<connector>/scrub-rules.ts`. Output lands in `connectors/<connector>/fixtures/scrubbed/<runId>/`, which **is** committable after review.
 
 For free-form text that deterministic rules cannot classify safely, use an LLM or human reviewer to produce a structured redaction plan, then pass it to the scrubber:
 
@@ -573,15 +575,15 @@ Review the scrubbed tree by eye. The default rules are conservative but not exha
 
 Confirm the scrubbed fixture preserves parser-relevant structure before commit: selectors, object keys, stream names, timestamps that are safe to retain, and representative non-sensitive values should remain stable. Redact or replace all owner identifiers, free-form notes, account numbers, addresses, emails, phones, and platform IDs that can identify the owner. If review finds sensitive content the deterministic scrubber cannot safely classify, do not commit the fixture until a connector-specific rule or reviewed manual redaction covers it.
 
-When committing a pilot fixture, commit only `fixtures/<connector>/scrubbed/<runId>/...` and tests that consume it. Do not commit `fixtures/<connector>/raw/...` or local redaction-plan directories; keep those local unless a plan itself is synthetic and intentionally useful as test data.
+When committing a pilot fixture, commit only `connectors/<connector>/fixtures/scrubbed/<runId>/...` and tests that consume it. Do not commit `connectors/<connector>/fixtures/raw/...` or local redaction-plan directories; keep those local unless a plan itself is synthetic and intentionally useful as test data.
 
 **The `pilot-real-shape` fixture (schema-drift lock)**
 
-Each schema-bearing connector ships one canonical fixture under `fixtures/<connector>/scrubbed/pilot-real-shape/`. Its job is to lock the connector's emitted-record shape against schema drift: any later change to `schemas.ts` that would reject a row surfaces as a test failure instead of reaching production silently. Wire it in one line with the shared helper:
+Each schema-bearing connector ships one canonical fixture under `connectors/<connector>/fixtures/scrubbed/pilot-real-shape/`. Its job is to lock the connector's emitted-record shape against schema drift: any later change to `schemas.ts` that would reject a row surfaces as a test failure instead of reaching production silently. Wire it in one line with the shared helper:
 
 ```ts
 // connectors/<name>/pilot-fixture.test.ts
-import { registerPilotFixtureTests } from "../../src/pilot-fixture-test-helper.ts";
+import { registerPilotFixtureTests } from "../../packages/polyfill-connectors/src/pilot-fixture-test-helper.ts";
 import { validateRecord } from "./schemas.ts";
 
 registerPilotFixtureTests({ connector: "<name>", validateRecord });
@@ -589,39 +591,49 @@ registerPilotFixtureTests({ connector: "<name>", validateRecord });
 
 The helper registers one `node:test` case per `records/<stream>.jsonl`, parses every non-blank line, and asserts `validateRecord(stream, row).ok === true`. A missing fixture directory or an empty stream file fails the test — a `schemas.ts`-bearing connector is expected to ship this fixture (opt out only with `expectMissing: true`, and only with justification).
 
-A `pilot-real-shape` fixture is a hand-authored **synthetic-but-shape-real** record set: real field shapes and representative non-identifying values, with `[REDACTED_*]` placeholders wherever a real capture would carry owner identity. A reviewed real owner capture can calibrate the synthetic rows, but real owner rows must not be committed under `pilot-real-shape/`. If retaining a scrubbed real run as separate evidence, keep it under a run-specific `fixtures/<connector>/scrubbed/<runId>/` path and use the LLM-assisted redaction review above.
+A `pilot-real-shape` fixture is a hand-authored **synthetic-but-shape-real** record set: real field shapes and representative non-identifying values, with `[REDACTED_*]` placeholders wherever a real capture would carry owner identity. A reviewed real owner capture can calibrate the synthetic rows, but real owner rows must not be committed under `pilot-real-shape/`. If retaining a scrubbed real run as separate evidence, keep it under a run-specific `connectors/<connector>/fixtures/scrubbed/<runId>/` path and use the LLM-assisted redaction review above.
 
 The three committed pilots double as the per-shape reference for new connectors:
 
-- **Amazon — DOM shape.** `fixtures/amazon/scrubbed/pilot-real-shape/dom/` holds scrubbed `page.content()` HTML for a browser-scraped connector.
-- **GitHub — API-JSON shape.** `fixtures/github/scrubbed/pilot-real-shape/api/` holds scrubbed HTTP response bodies, and `records/*.jsonl` holds the emitted records derived from them.
-- **Reddit — records-stream shape.** `fixtures/reddit/scrubbed/pilot-real-shape/records/{submitted,comments,saved,upvoted,downvoted,hidden}.jsonl` holds the records the connector emits directly from `old.reddit.com/*.json`, with no intermediate DOM or stored HTTP-JSON layer. This is the reference for any connector whose only durable output is a JSONL record stream.
+- **Amazon — DOM shape.** `connectors/amazon/fixtures/scrubbed/pilot-real-shape/dom/` holds scrubbed `page.content()` HTML for a browser-scraped connector.
+- **GitHub — API-JSON shape.** `connectors/github/fixtures/scrubbed/pilot-real-shape/api/` holds scrubbed HTTP response bodies, and `records/*.jsonl` holds the emitted records derived from them.
+- **Reddit — records-stream shape.** `connectors/reddit/fixtures/scrubbed/pilot-real-shape/records/{submitted,comments,saved,upvoted,downvoted,hidden}.jsonl` holds the records the connector emits directly from `old.reddit.com/*.json`, with no intermediate DOM or stored HTTP-JSON layer. This is the reference for any connector whose only durable output is a JSONL record stream.
 
 **Smoke-test the capture pipeline**
 
-`node --import tsx bin/test-fixture-capture.ts` runs a self-contained end-to-end check (no network, no browser) that capture + scrub produce sanitized output from PII-bearing input. Local development writes raw captures under `fixtures/<connector>/raw/` by default; deployed reference stacks can set `PDPP_CAPTURE_ROOT_DIR` so live diagnostics live in persistent runtime storage instead of the checkout. Run the smoke after changing anything in `fixture-capture.ts`, `scrub-defaults.ts`, or `scrub-fixtures.ts`.
+`node --import tsx bin/test-fixture-capture.ts` runs a self-contained end-to-end check (no network, no browser) that capture + scrub produce sanitized output from PII-bearing input. Local development writes raw captures under `connectors/<connector>/fixtures/raw/` by default; deployed reference stacks can set `PDPP_CAPTURE_ROOT_DIR` so live diagnostics live in persistent runtime storage instead of the checkout. Run the smoke after changing anything in `fixture-capture.ts`, `scrub-defaults.ts`, or `scrub-fixtures.ts`.
 
 ### 9.2 Scenario replay evidence (`claim.json`)
 
-`bin/scenario-record.ts` and `bin/scenario-verify.ts` are this package's second evidence track, separate from the fixture-capture/scrub pipeline above: a scenario captures a connector run's real network traffic (`recorded-http`) or browser session (`recorded-browser`) and lets anyone replay it offline, without a provider account, to prove the connector's data mapping still matches. See each file's module doc comment for the full mechanics; this section is only about the ONE artifact a connector author commits.
+For browser replay, capture with `scenario-record --record-har` and confirm that usable HAR and storage-state files were produced. Keep both private; they can contain credentials or account data.
 
-**Commit the claim, never the scenario itself.** A scenario's HAR/storageState/interactions carry real request and response content — they are `capture.privacy_class: local-only`, never committed, same as a raw fixture. What a PR DOES carry is the one-line verdict `scenario-verify --json` writes:
+The [authoring loop](../../../AUTHORING.md#local-authoring-loop) gives the current scaffold → run/watch → capture → replay sequence. Run its commands from the repository root after `npm ci`. Recording is live collection using configured credentials; replay is offline against captured interactions and checks the current connector's output against that scenario. Replay does not test provider freshness or stability under provider churn.
+
+To write the machine-readable claim, add `--json connectors/<key>/evidence/claim.json` to the `scenario-verify` command:
 
 ```bash
-pnpm exec tsx bin/scenario-verify.ts <connector> <path-to-local-scenario.json> --json connectors/<connector>/evidence/claim.json
+mkdir -p connectors/<key>/evidence
+node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <path-to-local-scenario.json> --json connectors/<key>/evidence/claim.json
 ```
 
-This writes `pdpp.connector-claim/1` — a small, deliberately SAFE-TO-COMMIT JSON record: the claim (`recorded_replay` or `diagnostic_replay`), its limitations, stream coverage, run/driver counts, the digests the claim was captured and verified against, and a bare scenario filename. It never carries an absolute host path, a username, or any record/URL content — `writeClaimRecord` (bin/scenario-verify.ts) redacts a filesystem-input connector's real import-directory path down to `$<ITS_ENV_VAR>` before the file is ever written, and reduces the scenario path to its filename. If you ever see an absolute path or `$HOME` in a generated `claim.json`, that is a bug in `writeClaimRecord`, not something to hand-edit around.
+The scaffold does not create `connectors/<key>/evidence/`, and the verifier does not create it either, so the `mkdir -p` is required. If the write fails, the verifier prints a warning and keeps its replay exit code. Remove the old claim before verification, or check the current verification timestamp and expected digests in the resulting claim. Mere file existence and the replay exit code do not prove that the new write succeeded. Review its content.
+
+`--json` uses the path relative to the process working directory. From the repository root, this writes to `connectors/<key>/evidence/claim.json`, alongside the connector. To run from `packages/polyfill-connectors/` instead, run `mkdir -p ../../connectors/<key>/evidence` and pass `--json ../../connectors/<key>/evidence/claim.json` to `bin/scenario-verify.ts`.
+
+The file uses schema `pdpp.connector-claim/1`. It holds the claim and its limitations, capture and verification timestamps, the coverage labels earned (for example `empty_state_run` or `state_seeded_second_run_with_changed_requests`), the run count, the names of the drivers used (not a driver count), captured and verified source and declaration digests, and only the scenario filename. It does not hold per-stream coverage. The `streams exercised` summary prints only to the local verifier's stdout. Review generated content before committing. Commit this claim file only; scenario JSON, HAR, storage state, and diagnostic dumps are local-only and can contain account data or credentials.
 
 **Path and freshness convention**
 
-- Commit to exactly `connectors/<connector>/evidence/claim.json` — one file, the LATEST claim only. Overwrite it (don't append a timestamped file) each time you re-verify.
-- Re-generate it whenever `connectors/<connector>/` or `connectors/<connector>/manifest.json` changes materially — the committed claim's `captured_with` digests are what this repo's CI job (see below) compares against the PR's own code to decide whether the claim is still BOUND or has gone STALE.
-- A connector with no `evidence/claim.json` simply has no established claim yet — that is a valid, honest state (CI reports it as `evidence: none`), not an error.
+- Keep exactly one committed claim at `connectors/<key>/evidence/claim.json`: the latest claim. Overwrite it when you re-verify; do not add timestamped claim files.
+- Re-generate it when connector source or its manifest changes materially. CI compares the claim's `captured_with` source and declaration digests with the PR's connector source and manifest. Matching digests are reported as BOUND; differing digests are STALE.
+- Re-verifying an existing scenario refreshes `verified_at` and `verified_subject`, but keeps `captured_with` from the original capture. If connector source or manifest changed after that capture, the claim stays STALE. Capture again with `scenario-record` and verify the new scenario to bind the claim to the changed code.
+- No claim file means no established replay claim. That is an honest state: CI reports `evidence: none` and does not fail because evidence is missing.
 
 **What CI does with it**
 
-A PR touching `connectors/<name>/` gets an informational job summary (never a required/blocking check) per changed connector: whether a committed claim is present, whether its `captured_with` digests still match the PR's own `connectors/<name>/` source and manifest (BOUND) or not (STALE), who produced it (always "author-run" — CI does not re-execute a real provider session), and what is NOT established (e.g. "no maintainer live run"). It also applies a `evidence: author-replay` / `evidence: stale` / `evidence: none` label. See the workflow for the exact table/label logic.
+For a PR that touches a connector, the workflow prints an informational summary for each changed connector and applies an `evidence: author-replay`, `evidence: stale`, or `evidence: none` label on same-repository PRs. The summary reports whether a claim exists, whether its captured digests match the PR source and manifest, and that CI did not re-run a provider session. This is informational, not a required or blocking check. See `.github/workflows/polyfill-connectors.yml` and `scripts/connector-evidence-summary.ts` for the current table and label logic.
+
+`recorded_replay` has explicit eligibility requirements. The current verifier hardcodes `isolationEvidenceBoundaryProven: false`, so it withholds `recorded_replay` for every driver pending independent review; a passing replay currently produces `diagnostic_replay`. Recorded-browser replay is also capped at diagnostic evidence. A driver this verifier does not support fails replay rather than earning either claim. Coverage names are deliberately narrow: `empty_state_run` requires run 0 to start with null state, perform an interaction, and expect at least one record. `state_seeded_second_run_with_changed_requests` requires a later run seeded from an earlier run with non-trivial final state and requests that differ from run 1. A capture with two runs does not automatically meet either condition or prove full-refresh/incremental semantics. Generated claims remain candidates for review; they do not guarantee the generated connector's behavior. Claim digest binding describes code at capture/verification and is not a live-provider check.
 
 ### Pre-ship checklist
 
@@ -631,7 +643,7 @@ Before a new connector is considered usable by another user:
 - [ ] Declares all streams in manifest, even nullable ones.
 - [ ] Has a SKIP_RESULT path for selector drift (list page returning zero records is a drift signal, not a "no data" signal).
 - [ ] Documents locale / account-type assumptions in the connector's header comment.
-- [ ] Has been run at least twice (so incremental/STATE behavior is exercised).
+- [ ] Has been run at least twice; review the captured state and request differences before making claims about incremental behavior.
 
 ---
 

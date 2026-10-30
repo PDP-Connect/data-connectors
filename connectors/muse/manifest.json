@@ -9,7 +9,7 @@
 	},
 	"connector_key": "muse",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-	"version": "0.1.4",
+	"version": "0.1.6",
 	"display_name": "Muse (Meta)",
 	"runtime_requirements": {
 		"bindings": {

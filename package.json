@@ -38,7 +38,7 @@
   "scripts": {
     "test:fast": "npm --prefix packages/polyfill-connectors run test:fast --",
     "test:tooling": "scripts/test-sandbox/test-sandbox -- node --test scripts/test-sandbox/vendored-copy.test.mjs scripts/test-lanes-coverage.test.mjs",
-    "scripts:test": "scripts/test-sandbox/test-sandbox -- node --test ./scripts/publish-tag-guard.test.mjs ./scripts/lookup-manifest.test.mjs ./scripts/registry-rate-limit.test.mjs ./scripts/check-additive-schemas.test.mjs ./scripts/brand-icon-fleet.test.mjs ./scripts/no-legacy-connectors.test.mjs",
+    "scripts:test": "scripts/test-sandbox/test-sandbox -- node --test ./scripts/publish-tag-guard.test.mjs ./scripts/lookup-manifest.test.mjs ./scripts/registry-rate-limit.test.mjs ./scripts/check-additive-schemas.test.mjs ./scripts/brand-icon-fleet.test.mjs ./scripts/no-legacy-connectors.test.mjs ./scripts/websub-publisher/test/static-feed.test.mjs ./scripts/websub-publisher/test/static-notify.test.mjs ./scripts/websub-publisher/test/materialize-catalog.test.mjs ./scripts/websub-publisher/test/pages-workflow.test.mjs ./scripts/websub-publisher/test/publication-ran.test.mjs",
     "test:pageshim": "scripts/test-sandbox/test-sandbox -- node --test scripts/pageshim/capabilities.test.mjs scripts/pageshim/harness-timing.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs",
     "test": "npm run connector-implementation-index:check && npm run legacy-shapes:check && npm run legacy-shapes:test && npm run installer:test && npm run manifest-schema:test && npm run cross-repo-integrity:test && npm run test:tooling && npm run scripts:test && npm --prefix packages/polyfill-connectors test && npm run test:pageshim",
     "connector-implementation-index:generate": "node ./scripts/generate-connector-implementation-index.mjs",
@@ -55,6 +55,7 @@
     "polyfill-library-metadata:generate": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs",
     "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check",
     "connector-stdout-console:check": "node --import tsx ./packages/polyfill-connectors/scripts/check-connector-stdout-console.ts",
+    "groupme-mutation": "node --import tsx --test scripts/groupme-mutation/run.test.ts && node --import tsx scripts/groupme-mutation/run.ts",
     "legacy-shapes:check": "node ./scripts/check-frozen-legacy-contracts.mjs",
     "legacy-shapes:test": "scripts/test-sandbox/test-sandbox -- node --test ./scripts/frozen-legacy-contracts.test.mjs ./scripts/generate-legacy-scopes.test.mjs",
     "legacy-shapes:generate": "node ./scripts/generate-legacy-scopes.mjs"

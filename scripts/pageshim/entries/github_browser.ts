@@ -10,6 +10,7 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 
 // Defined by build.mjs from connectors/github_browser/manifest.json.
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
 const length = (scope: unknown, key: string): number => {
 	const value = (scope as Record<string, unknown> | undefined)?.[key];
@@ -23,14 +24,7 @@ const length = (scope: unknown, key: string): number => {
 ) =>
 	runOnPageShim(page, {
 		platform: "github",
-		scopes: [
-			"profile",
-			"repositories",
-			"starred",
-			"events",
-			"contributions",
-			"history",
-		].map((s) => `github.${s}`),
+		scopes: PAGESHIM_CONNECTOR_STREAMS.map((s) => `github.${s}`),
 		version: PAGESHIM_CONNECTOR_VERSION,
 		loginUrl: "https://github.com/login",
 		loginMessage: "Sign in to GitHub, then return here.",

@@ -368,7 +368,7 @@ export interface PageshimConnector {
 	emptyScopeFromCheckpoint?: boolean;
 	/** Optional incremental form for connectors whose scope value is one record array. */
 	streamScopeRecords?: {
-		/** Large streams first; later streams remain buffered until the active scope closes. */
+		/** Large streams first; the connector's other streams follow in scope order. Later streams remain buffered until the active scope closes. */
 		order: string[];
 		/** The scope value's array key, matching `toScope`. Defaults to "records". */
 		arrayKey?: string;
@@ -484,6 +484,14 @@ export async function runOnPageShim(
 		connector.streamScopeRecords && streamingHost
 			? connector.streamScopeRecords
 			: null;
+	const streamOrder = streamConfig
+		? [
+				...streamConfig.order,
+				...[...scopeByStream.keys()].filter(
+					(stream) => !streamConfig.order.includes(stream),
+				),
+			]
+		: [];
 	const pendingRecords: Record<string, Rec[]> = {};
 	const streamCounts = outcome.counts;
 	let streamProtocolUsed = false;
@@ -727,8 +735,8 @@ export async function runOnPageShim(
 				const stream = String(msg.stream);
 				outcome.record(stream);
 				if (streamConfig) {
-					const target = streamConfig.order[0];
-					if (!streamConfig.order.includes(stream))
+					const target = streamOrder[0];
+					if (!streamOrder.includes(stream))
 						throw new Error(`PageShim stream serializer missing ${stream}`);
 					if (stream === target) {
 						if (activeStream === null) await beginStreamScope(stream);
@@ -942,7 +950,7 @@ export async function runOnPageShim(
 		if (streamFailure) throw streamFailure;
 		if (streamConfig) {
 			await finishStreamScope();
-			for (const stream of streamConfig.order) {
+			for (const stream of streamOrder) {
 				const buffered = pendingRecords[stream] ?? [];
 				// A confirmed-empty stream still sends its scope, empty, so the
 				// host can tell "collected, none" from "not collected". A

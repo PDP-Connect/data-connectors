@@ -130,6 +130,10 @@ import {
 	evaluateClaimEligibility,
 } from "../src/scenario/claims.ts";
 import {
+	emptyDetailGapsPage,
+	isDetailGapsPageRequestLine,
+} from "../src/scenario/detail-gaps-page.ts";
+import {
 	type ResolvedFilesystemInput,
 	readDeclaredFilesystemInput,
 	resolveFilesystemInput,
@@ -1493,6 +1497,12 @@ function runReplaySubprocess(args: {
 			if (isRawInteractionLine(parsed)) {
 				answerScriptedInteraction(parsed);
 				return;
+			}
+			if (isDetailGapsPageRequestLine(parsed)) {
+				// Replay keeps no detail-gap ledger either: an empty page, as at record time.
+				childStdin.write(
+					`${JSON.stringify(emptyDetailGapsPage(parsed.request_id))}\n`,
+				);
 			}
 			if (isDoneLine(parsed)) {
 				// See bin/connector-dev.ts's matching comment: stdin stays open (not

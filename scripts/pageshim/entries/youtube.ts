@@ -6,7 +6,8 @@ import { validateRecord } from "../../../connectors/youtube/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import { applyRequestedScopeEntries } from "../requested-scope-entries.ts";
 declare const PAGESHIM_CONNECTOR_VERSION: string;
-const streams = ["profile", "subscriptions", "playlists", "playlist_items", "likes", "watch_later", "watch_history"];
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
+const streams = PAGESHIM_CONNECTOR_STREAMS;
 function scopeEntries(page: ShimPage): unknown {
 	let read: (() => unknown) | undefined;
 	try { read = (page as ShimPage & { requestedScopeEntries?: () => unknown }).requestedScopeEntries; } catch { return undefined; }

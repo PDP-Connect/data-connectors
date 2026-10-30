@@ -114,6 +114,10 @@ exec "$REAL_NODE" "$@"
 set -u
 printf 'git\t%s\n' "$*" >> "$COMMAND_LOG"
 if [ "\${FAIL_COMMAND:-}" = "git" ]; then exit 43; fi
+if [ "\${1:-}" = "merge-base" ]; then
+  if [ "\${FAIL_COMMAND:-}" = "stale-source" ]; then exit 1; fi
+  exit 0
+fi
 printf '%s\n' '2026-09-15T12:34:56-05:00'
 `,
   );
@@ -142,7 +146,11 @@ if [ "\${1:-}" = "pull" ]; then
   while [ "$#" -gt 0 ]; do
     if [ "$1" = "--output" ]; then
       mkdir -p "$2"
-      printf '{"connectors":[]}' > "$2/catalog.json"
+      if [ "\${MALFORMED_PREVIOUS:-}" = "1" ]; then
+        printf '{"source_commit":"bad","connectors":[]}' > "$2/catalog.json"
+      else
+        printf '{"source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","connectors":[]}' > "$2/catalog.json"
+      fi
       exit 0
     fi
     shift
@@ -289,6 +297,7 @@ test("a verified prior catalog is pulled by digest and passed to the generator",
     const generate = run.commands.findIndex((line) =>
       line.startsWith("node\tscripts/generate-connector-catalog.mjs "),
     );
+    const ancestry = run.commands.findIndex((line) => line.startsWith("git\tmerge-base --is-ancestor "));
     const push = run.commands.findIndex((line) => line.startsWith("oras\tpush "));
 
     assert.notEqual(priorVerify, -1, "the previous catalog digest must be verified");
@@ -311,9 +320,34 @@ test("a verified prior catalog is pulled by digest and passed to the generator",
     );
     assert.notEqual(push, -1, "the updated catalog must be pushed");
     assert.ok(
-      priorVerify < pull && pull < generate && generate < push,
-      "the prior catalog must be verified and pulled before generation and publication",
+      priorVerify < pull && pull < ancestry && ancestry < generate && generate < push,
+      "the prior catalog must be verified, pulled and checked before publication",
     );
+  } finally {
+    run.cleanup();
+  }
+});
+
+test("a queued older source cannot replace the latest catalog", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", FAIL_COMMAND: "stale-source" });
+  try {
+    assert.notEqual(run.result.status, 0);
+    assert.match(run.result.stdout + run.result.stderr, /previous catalog source is not an ancestor/);
+    assert.equal(run.commands.some((line) => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), false);
+    assert.equal(run.commands.some((line) => line.startsWith("oras\ttag ")), false);
+    assert.equal(run.tagDigest(), previousCatalogDigest);
+  } finally {
+    run.cleanup();
+  }
+});
+
+test("a previous catalog without a valid source commit cannot move latest", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", MALFORMED_PREVIOUS: "1" });
+  try {
+    assert.notEqual(run.result.status, 0);
+    assert.equal(run.commands.some((line) => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), false);
+    assert.equal(run.commands.some((line) => line.startsWith("oras\ttag ")), false);
+    assert.equal(run.tagDigest(), previousCatalogDigest);
   } finally {
     run.cleanup();
   }
