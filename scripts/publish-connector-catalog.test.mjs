@@ -5,11 +5,13 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,35 +25,40 @@ const workflow = readFileSync(workflowPath, "utf8");
 const catalogDigest = `sha256:${"a".repeat(64)}`;
 const previousCatalogDigest = `sha256:${"b".repeat(64)}`;
 
-function extractCatalogPublishStep() {
+// A named step of the publish workflow: its `if`, its run script (block or
+// single line) and its raw text, so tests can execute the real shell.
+function extractStep(name) {
   const lines = workflow.split("\n");
-  const stepIndex = lines.findIndex((line) =>
-    /^\s*-\s*name:\s*Publish and verify the connector catalog\s*$/.test(line),
-  );
-  assert.notEqual(stepIndex, -1, "expected the connector catalog publish step");
+  const start = lines.findIndex((line) => line === `      - name: ${name}`);
+  assert.notEqual(start, -1, `expected workflow step '${name}'`);
+  let end = start + 1;
+  while (end < lines.length && !/^ {6}- |^ {2}\S/.test(lines[end])) end += 1;
+  const section = lines.slice(start, end);
 
-  const ifLine = lines.slice(stepIndex).find((line) => /^\s*if:\s*/.test(line));
-  const runIndex = lines.findIndex((line, index) =>
-    index > stepIndex && /^\s*run:\s*\|\s*$/.test(line),
-  );
-  assert.notEqual(runIndex, -1, "expected the catalog step to carry a block `run:` script");
-
-  const indent = lines[runIndex].match(/^\s*/)[0].length + 2;
-  const body = [];
-  for (let index = runIndex + 1; index < lines.length; index++) {
-    const line = lines[index];
-    if (line.trim() === "") {
-      body.push("");
-      continue;
+  const ifLine = section.find((line) => /^        if: /.test(line));
+  const runIndex = section.findIndex((line) => /^        run: /.test(line));
+  assert.notEqual(runIndex, -1, `workflow step '${name}' has no run`);
+  let shell;
+  if (section[runIndex] === "        run: |") {
+    const body = [];
+    for (const line of section.slice(runIndex + 1)) {
+      if (line.trim() === "") body.push("");
+      else if (/^ {10}/.test(line)) body.push(line.slice(10));
+      else break;
     }
-    if (line.match(/^\s*/)[0].length < indent) break;
-    body.push(line.slice(indent));
+    shell = body.join("\n");
+  } else {
+    shell = section[runIndex].replace(/^        run: /, "");
   }
-
   return {
-    condition: ifLine?.replace(/^\s*if:\s*/, "") ?? "",
-    shell: body.join("\n"),
+    condition: ifLine?.replace(/^ *if: /, "") ?? "",
+    shell,
+    text: section.join("\n"),
   };
+}
+
+function extractCatalogPublishStep() {
+  return extractStep("Publish and verify the connector catalog");
 }
 
 function writeCommand(path, source) {
@@ -59,7 +66,9 @@ function writeCommand(path, source) {
   chmodSync(path, 0o755);
 }
 
-function runCatalogPublish(overrides = {}) {
+// REAL_GENERATOR=1 runs scripts/generate-connector-catalog.mjs from `cwd`
+// instead of the stub, so a test can observe the generator's own refusal.
+function runCatalogPublish(overrides = {}, { cwd = repoRoot, shell = extractCatalogPublishStep().shell } = {}) {
   const root = mkdtempSync(join(tmpdir(), "connector-catalog-publish-"));
   const bin = join(root, "bin");
   const runnerTemp = join(root, "runner-temp");
@@ -83,7 +92,7 @@ if [ "\${1:-}" = "scripts/lookup-manifest.mjs" ]; then
   esac
   exit 0
 fi
-if [ "\${1:-}" = "scripts/generate-connector-catalog.mjs" ]; then
+if [ "\${1:-}" = "scripts/generate-connector-catalog.mjs" ] && [ "\${REAL_GENERATOR:-}" != "1" ]; then
   if [ "\${FAIL_COMMAND:-}" = "generate" ]; then exit 41; fi
   shift
   while [ "$#" -gt 0 ]; do
@@ -169,8 +178,8 @@ case "\${1:-}" in sign|verify) exit 0 ;; *) exit 48 ;; esac
 `,
   );
 
-  const result = spawnSync("bash", ["-c", extractCatalogPublishStep().shell], {
-    cwd: repoRoot,
+  const result = spawnSync("bash", ["-c", shell], {
+    cwd,
     encoding: "utf8",
     env: {
       ...process.env,
@@ -447,14 +456,17 @@ test("all publishes remain serialized by one workflow-wide concurrency group", (
   assert.match(workflow, /^  cancel-in-progress:\s*false\s*$/m);
 });
 
-function evaluateCondition(expression, { catalogOnly, dryRun = false, selected = false, ref = "refs/heads/main" }) {
+function evaluateCondition(expression, { catalogOnly, dryRun = false, selected = false, ref = "refs/heads/main", needs = {} }) {
   const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "")
     .replaceAll("inputs.catalog-only", "inputs['catalog-only']")
-    .replaceAll("inputs.dry-run", "inputs['dry-run']");
-  return Function("inputs", "steps", "github", `return (${source});`)(
+    .replaceAll("inputs.dry-run", "inputs['dry-run']")
+    .replace(/needs\.(\w+)\.outputs\.([a-z-]+)/g, "needs.$1.outputs['$2']");
+  return Function("inputs", "steps", "github", "needs", "always", `return (${source});`)(
     { "catalog-only": catalogOnly, "dry-run": dryRun },
     { target: { outputs: { selected: selected ? "true" : "false" } } },
     { ref },
+    needs,
+    () => true,
   );
 }
 
@@ -506,4 +518,222 @@ test("the publish matrix consumes the prepared selection and catalog has no matr
     /^      matrix:/m,
     "the catalog fan-in must run once, not as a connector matrix",
   );
+});
+
+const POLICY_STEP = "Detect policy changes that refresh the connector catalog";
+const PREPARE_GUARD_STEP = "Validate publish inventory identities and exclusions";
+
+function catalogJobCondition() {
+  const catalog = workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1];
+  assert.ok(catalog, "expected the catalog fan-in job");
+  const condition = catalog.match(/^    if: (.+)$/m)?.[1];
+  assert.ok(condition, "expected the catalog job to carry an if condition");
+  return condition;
+}
+
+function catalogScheduled({
+  ref = "refs/heads/main",
+  dryRun = false,
+  publish = "skipped",
+  hasPublishableChanges = "false",
+  policyChanged = "false",
+  prepare = "success",
+} = {}) {
+  return evaluateCondition(catalogJobCondition(), {
+    dryRun,
+    ref,
+    needs: {
+      prepare: {
+        result: prepare,
+        outputs: { "has-publishable-changes": hasPublishableChanges, "policy-changed": policyChanged },
+      },
+      publish: { result: publish },
+    },
+  });
+}
+
+test("a policy-only main push refreshes the catalog without publishing a connector", () => {
+  assert.equal(catalogScheduled({ policyChanged: "true" }), true);
+});
+
+test("a failed or cancelled publish never refreshes the catalog from a policy change", () => {
+  for (const publish of ["failure", "cancelled"]) {
+    assert.equal(catalogScheduled({ publish, hasPublishableChanges: "true", policyChanged: "true" }), false, publish);
+  }
+});
+
+test("a main push with neither an artifact nor a policy change leaves the catalog untouched", () => {
+  assert.equal(catalogScheduled({}), false);
+});
+
+test("an artifact publish still schedules the catalog, and only main ever does", () => {
+  assert.equal(catalogScheduled({ publish: "success", hasPublishableChanges: "true" }), true);
+  assert.equal(catalogScheduled({ policyChanged: "true", ref: "refs/tags/connector-ynab-v0.3.0" }), false);
+  assert.equal(catalogScheduled({ publish: "success", hasPublishableChanges: "true", ref: "refs/heads/feature" }), false);
+  assert.equal(catalogScheduled({ policyChanged: "true", dryRun: true }), false);
+});
+
+test("the policy step reads the pushed range and fails closed without a real before commit", () => {
+  const step = extractStep(POLICY_STEP);
+  assert.match(step.condition, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
+  assert.match(step.text, /^          BEFORE_SHA: \$\{\{ github\.event\.before \}\}$/m);
+  assert.match(step.text, /^          AFTER_SHA: \$\{\{ github\.sha \}\}$/m);
+
+  const repo = mkdtempSync(join(tmpdir(), "policy-changed-"));
+  try {
+    const git = (...args) => {
+      const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+      return result.stdout.trim();
+    };
+    git("init", "-q");
+    git("config", "user.name", "fixture");
+    git("config", "user.email", "fixture@example.invalid");
+    git("config", "commit.gpgsign", "false");
+    mkdirSync(join(repo, "scripts"));
+    writeFileSync(join(repo, "scripts", "connector-publish-allowlist.mjs"), "export const v = 1;\n");
+    writeFileSync(join(repo, "README.md"), "one\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    const base = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "README.md"), "two\n");
+    git("commit", "-q", "-am", "docs only");
+    const docsOnly = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "scripts", "connector-publish-allowlist.mjs"), "export const v = 2;\n");
+    git("commit", "-q", "-am", "policy edit");
+    const policyEdit = git("rev-parse", "HEAD");
+
+    const run = (before, after) => {
+      const output = join(repo, `output-${before.slice(0, 8)}-${after.slice(0, 8)}`);
+      writeFileSync(output, "");
+      const result = spawnSync("bash", ["-c", step.shell], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { PATH: process.env.PATH, BEFORE_SHA: before, AFTER_SHA: after, GITHUB_OUTPUT: output },
+      });
+      return { status: result.status, stdout: result.stdout, output: readFileSync(output, "utf8") };
+    };
+
+    const unchanged = run(base, docsOnly);
+    assert.equal(unchanged.status, 0, unchanged.stderr);
+    assert.equal(unchanged.output, "policy-changed=false\n");
+
+    const changed = run(docsOnly, policyEdit);
+    assert.equal(changed.status, 0, changed.stderr);
+    assert.equal(changed.output, "policy-changed=true\n");
+
+    for (const before of ["0".repeat(40), "f".repeat(40)]) {
+      const refused = run(before, policyEdit);
+      assert.notEqual(refused.status, 0, `before ${before} must not yield a decision`);
+      assert.equal(refused.output, "", "no policy decision may be written without a real before commit");
+      // ::error:: annotations are read from stdout by the Actions runner.
+      assert.match(refused.stdout, /::error::no before commit/);
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("the prepare job pins Node 24 and runs the inventory guard before any matrix or policy step", () => {
+  const prepare = workflow.match(/\n  prepare:\n([\s\S]*?)\n  publish:\n/)?.[1];
+  assert.ok(prepare, "expected the prepare job");
+  const position = (text) => {
+    const index = prepare.indexOf(text);
+    assert.notEqual(index, -1, `prepare job must contain ${text}`);
+    return index;
+  };
+  const nodeSetup = position("uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0");
+  const guard = position(`- name: ${PREPARE_GUARD_STEP}`);
+  assert.match(prepare.slice(nodeSetup, guard), /node-version: "24"/);
+  assert.ok(guard > nodeSetup, "Node 24 must be set up before the guard runs");
+  assert.ok(guard < position("- name: Derive the publish matrix from the reviewed allowlist"));
+  assert.ok(guard < position("- name: Select connector versions missing from GHCR"));
+  assert.ok(guard < position(`- name: ${POLICY_STEP}`));
+  assert.match(prepare, /^      policy-changed: \$\{\{ steps\.policy\.outputs\.policy-changed \}\}$/m);
+});
+
+// A copy of the publish scripts for tests that must exercise the real guard
+// and generator. Republishing Loom reproduces the pre-fix inventory. The copied
+// generator's registry is a closed loopback port, so a generator that failed to
+// refuse would fail at connect time and never reach GHCR.
+function replaceOnce(path, from, to) {
+  const source = readFileSync(path, "utf8");
+  assert.equal(source.split(from).length, 2, `expected one occurrence of ${from} in ${path}`);
+  writeFileSync(path, source.replace(from, to));
+}
+
+function copyPublishScripts() {
+  const root = mkdtempSync(join(tmpdir(), "catalog-guard-"));
+  cpSync(join(repoRoot, "scripts"), join(root, "scripts"), { recursive: true });
+  cpSync(join(repoRoot, "packages", "connector-installer-core"), join(root, "packages", "connector-installer-core"), {
+    recursive: true,
+  });
+  mkdirSync(join(root, "packages", "polyfill-connectors", "src"), { recursive: true });
+  for (const file of [
+    "package.json",
+    join("packages", "polyfill-connectors", "package.json"),
+    join("packages", "polyfill-connectors", "src", "connector-conformance-roster.ts"),
+  ]) {
+    cpSync(join(repoRoot, file), join(root, file));
+  }
+  symlinkSync(join(repoRoot, "node_modules"), join(root, "node_modules"), "dir");
+  replaceOnce(
+    join(root, "scripts", "generate-connector-catalog.mjs"),
+    `const DEFAULT_REGISTRY = "ghcr.io";`,
+    `const DEFAULT_REGISTRY = "127.0.0.1:1";`,
+  );
+  return root;
+}
+
+test("the publish inventory guard passes on the reviewed inventory", () => {
+  const step = extractStep(PREPARE_GUARD_STEP);
+  assert.match(step.shell, /node scripts\/assert-publishable-readiness\.mjs/);
+  const result = spawnSync("bash", ["-c", step.shell], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { PATH: process.env.PATH },
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("the publish inventory guard admits canonical Development entries", () => {
+  const root = copyPublishScripts();
+  try {
+    const result = spawnSync("bash", ["-c", extractStep(PREPARE_GUARD_STEP).shell], {
+      cwd: root,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /connectors pass identity and exclusion checks/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a manual dispatch of an excluded connector is refused before anything publishes", () => {
+  const root = mkdtempSync(join(tmpdir(), "excluded-dispatch-"));
+  try {
+    const output = join(root, "github-output");
+    writeFileSync(output, "");
+    const result = spawnSync("bash", ["-c", extractStep("Select the connector and version this run publishes").shell], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH,
+        EVENT_NAME: "workflow_dispatch",
+        GIT_REF_NAME: "main",
+        GIT_REF_TYPE: "branch",
+        INPUT_CONNECTOR: "slack",
+        MATRIX_CONNECTOR: "ynab",
+        MATRIX_VERSION: "",
+        GITHUB_OUTPUT: output,
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /not in the publish allowlist/);
+    assert.doesNotMatch(readFileSync(output, "utf8"), /selected=true/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

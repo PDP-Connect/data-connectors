@@ -72,6 +72,7 @@ async function startRegistry({
   tokenFault = null,
   publishedRepository = "acme/connector/public-name",
   publishedVersions = ["1.1.0", "1.1.0-beta.1", "1.0.0"],
+  tier = "supported",
   runtimeBindings = undefined,
 } = {}) {
   const registry = new FixtureRegistry({ challenge: true });
@@ -80,6 +81,7 @@ async function startRegistry({
     const artifact = publishArtifact(registry, {
       version,
       connectorKey: publishedRepository.split("/").at(-1),
+      tier,
       ...(runtimeBindings === undefined ? {} : { runtimeBindings }),
     });
     registry.digests.set(version, artifact.digest);
@@ -337,6 +339,7 @@ test("two full CLI runs write byte-identical catalogs from the same registry and
   const root = fixtureDirectory();
   const registry = await startRegistry({
     publishedRepository: "acme/connector/apple-photos",
+    tier: "development",
   });
   const firstPath = join(root, "first.json");
   const secondPath = join(root, "second.json");
@@ -402,6 +405,7 @@ test("the CLI exits nonzero without writing output when any manifest lookup is u
   const registry = await startRegistry({
     manifestFault: "1.1.0-beta.1",
     publishedRepository: "acme/connector/apple-photos",
+    tier: "development",
   });
   const output = join(root, "catalog.json");
   try {
@@ -417,7 +421,7 @@ test("the CLI exits nonzero without writing output when any manifest lookup is u
 
 test("the CLI exits nonzero without writing output when published metadata is unavailable", async () => {
   const root = fixtureDirectory();
-  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos" });
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos", tier: "development" });
   const latestDigest = registry.digests.get("1.1.0");
   const latestManifest = JSON.parse(registry.manifests.get(latestDigest).toString("utf8"));
   registry.blobs.delete(latestManifest.config.digest);
@@ -673,5 +677,176 @@ test("the installer-side catalog schema accepts the real github_browser and stra
       ],
     };
     assert.equal(assertCatalog(catalog), catalog, `${connectorKey}: expected the catalog schema to accept it`);
+  }
+});
+
+test("catalog metadata keeps Loom and Whole Foods at Development", async () => {
+  const registry = new FixtureRegistry({ challenge: true });
+  const rows = [
+    { manifest: "loom", connectorKey: "loom" },
+    { manifest: "wholefoods", connectorKey: "wholefoods" },
+  ];
+  for (const { connectorKey } of rows) {
+    const version = connectorKey === "loom" ? "0.1.0" : "0.1.1";
+    publishArtifact(registry, {
+      connectorKey,
+      displayName: connectorKey === "loom" ? "Loom" : "Whole Foods",
+      version,
+      tier: "development",
+    });
+    registry.tagLists.set(`acme/connector/${connectorKey}`, { tags: [version] });
+  }
+  try {
+    await registry.start();
+    const catalog = await generate(null, registry.registry, { connectors: rows });
+    assert.equal(assertCatalog(catalog), catalog);
+    assert.deepEqual(
+      catalog.connectors.map(({ connector_key, tier }) => ({ connector_key, tier })),
+      [
+        { connector_key: "loom", tier: "development" },
+        { connector_key: "wholefoods", tier: "development" },
+      ],
+    );
+  } finally {
+    await registry.stop();
+  }
+});
+
+test("catalog refuses a Development connector whose published artifact claims Supported", async () => {
+  const registry = new FixtureRegistry({ challenge: true });
+  publishArtifact(registry, {
+    connectorKey: "loom",
+    displayName: "Loom",
+    version: "0.1.0",
+    tier: "supported",
+  });
+  registry.tagLists.set("acme/connector/loom", { tags: ["0.1.0"] });
+  try {
+    await registry.start();
+    await assert.rejects(
+      generate(null, registry.registry, { connectors: [{ manifest: "loom", connectorKey: "loom" }] }),
+      /refusing to list Development connector 'loom'/,
+    );
+  } finally {
+    await registry.stop();
+  }
+});
+
+test("identity mismatches and exclusions are refused before any registry request", async () => {
+  for (const connector of [
+    { manifest: "amazon", connectorKey: "loom" },
+    { manifest: "loom", connectorKey: "amazon" },
+    { manifest: "youtube_takeout", connectorKey: "youtube-takeout" },
+  ]) {
+    let requests = 0;
+    const refuseRegistry = async () => {
+      requests += 1;
+      throw new Error("registry contacted");
+    };
+    await assert.rejects(
+      generateConnectorCatalog({
+        registry: "registry.invalid",
+        namespace: "acme",
+        sourceCommit: SOURCE_COMMIT,
+        generatedAt: GENERATED_AT,
+        connectors: [connector],
+        requestImpl: refuseRegistry,
+        lookupImpl: refuseRegistry,
+        fetchImpl: refuseRegistry,
+      }),
+      /refusing to publish/,
+      JSON.stringify(connector),
+    );
+    assert.equal(requests, 0, `${JSON.stringify(connector)} reached the registry`);
+  }
+});
+
+test("ordinary and unknown synthetic identities pass the publish guard", async () => {
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos", tier: "development" });
+  try {
+    const catalog = await generateConnectorCatalog({
+      registry: registry.registry,
+      namespace: "acme",
+      sourceCommit: SOURCE_COMMIT,
+      generatedAt: GENERATED_AT,
+      connectors: [
+        { manifest: "apple_photos", connectorKey: "apple-photos", exclusionReason: null },
+        { manifest: "source_name", connectorKey: "public-name" },
+      ],
+      scheme: "http",
+      allowInsecureLoopback: true,
+    });
+    assert.deepEqual(catalog.connectors.map((connector) => connector.connector_key), ["apple-photos"]);
+  } finally {
+    await registry.stop();
+  }
+});
+
+test("a refresh drops a previously published scaffold entry and the next run is stable", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const current = await generate(root, registry.registry);
+    const [synthetic] = current.connectors;
+    const previous = {
+      ...structuredClone(current),
+      connectors: [
+        structuredClone(synthetic),
+        {
+          ...structuredClone(synthetic),
+          connector_key: "loom",
+          connector_id: "https://registry.pdpp.dev/connectors/loom",
+          display_name: "Loom",
+        },
+      ],
+    };
+
+    const refreshed = await generate(root, registry.registry, { previousCatalog: previous });
+    assert.deepEqual(refreshed.connectors.map((connector) => connector.connector_key), ["public-name"]);
+    assert.deepEqual(refreshed.connectors[0].latest, synthetic.latest);
+    assert.equal(refreshed.generated_at, "2026-09-15T16:34:18.001Z");
+
+    const retry = await generate(root, registry.registry, { previousCatalog: refreshed });
+    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(refreshed));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the CLI refresh drops excluded entries from the previous catalog and repeats byte for byte", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos", tier: "development" });
+  const seedPath = join(root, "seed.json");
+  const previousPath = join(root, "previous.json");
+  const firstPath = join(root, "first.json");
+  const secondPath = join(root, "second.json");
+  try {
+    const seed = await runCli(registry.registry, seedPath);
+    assert.equal(seed.status, 0, seed.stderr);
+    const seeded = JSON.parse(readFileSync(seedPath, "utf8"));
+    const [photos] = seeded.connectors;
+    writeFileSync(previousPath, JSON.stringify({
+      ...seeded,
+      source_commit: "b".repeat(40),
+      connectors: [
+        photos,
+        { ...photos, connector_key: "loom", connector_id: "https://registry.pdpp.dev/connectors/loom", display_name: "Loom" },
+        { ...photos, connector_key: "wholefoods", connector_id: "https://registry.pdpp.dev/connectors/wholefoods", display_name: "Whole Foods" },
+      ],
+    }));
+
+    const first = await runCli(registry.registry, firstPath, previousPath);
+    const second = await runCli(registry.registry, secondPath, firstPath);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(second.status, 0, second.stderr);
+    const refreshed = JSON.parse(readFileSync(firstPath, "utf8"));
+    assert.deepEqual(refreshed.connectors.map((connector) => connector.connector_key), ["apple-photos"]);
+    assert.equal(refreshed.generated_at, "2026-09-15T16:34:18.001Z");
+    assert.deepEqual(readFileSync(firstPath), readFileSync(secondPath));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
   }
 });

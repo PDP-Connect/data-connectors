@@ -60,10 +60,12 @@ name: Publish Polyfill Connectors
 # before any push or sign step, and that the signing ref condition and the consumer
 # identity expression agree with each other.
 #
-# SCOPE. scripts/connector-publish-allowlist.mjs classifies all 53 manifests. Its
+# SCOPE. scripts/connector-publish-allowlist.mjs classifies every manifest. Its
 # publish list supplies this workflow's matrix and the pull-request build gate;
-# its exclusions record why the three external-tool connectors cannot yet be
-# self-contained OCI artifacts.
+# its exclusions record connectors whose runtime cannot yet be published.
+# prepare validates identities and exclusions before it derives a matrix. The
+# catalog generator checks known scaffolds against the tier in the published
+# artifact metadata, so a scaffold can appear only at Development.
 
 on:
   # A release tag still triggers a BUILD AND VERIFY — useful, and it keeps the tag as the
@@ -118,11 +120,21 @@ jobs:
     outputs:
       matrix: ${{ steps.main-selection.outputs.matrix || steps.allowlist.outputs.matrix }}
       has-publishable-changes: ${{ steps.main-selection.outputs.has-publishable-changes || steps.allowlist.outputs.has-publishable-changes }}
+      policy-changed: ${{ steps.policy.outputs.policy-changed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - name: Validate publish inventory identities and exclusions
+        # Runs before any matrix is derived, so both selections below only ever
+        # see canonical, non-excluded rows.
+        run: node scripts/assert-publishable-readiness.mjs
 
       - name: Derive the publish matrix from the reviewed allowlist
         id: allowlist
@@ -141,6 +153,37 @@ jobs:
           LOOKUP_USERNAME: ${{ github.actor }}
           LOOKUP_PASSWORD: ${{ github.token }}
         run: node scripts/select-publish-connectors.mjs
+
+      - name: Detect policy changes that refresh the connector catalog
+        # A policy-only push selects no connector, so the catalog job needs this
+        # output to refresh the signed catalog. Only the paths below refresh it.
+        id: policy
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::no before commit '${BEFORE_SHA}' in this checkout; refusing to guess which policy files changed"
+            exit 1
+          fi
+          if ! [[ "$AFTER_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${AFTER_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::no after commit '${AFTER_SHA}' in this checkout"
+            exit 1
+          fi
+          CHANGED="$(git diff --no-renames --name-only "$BEFORE_SHA" "$AFTER_SHA" -- \
+            scripts/assert-publishable-readiness.mjs \
+            scripts/connector-publish-allowlist.mjs \
+            packages/polyfill-connectors/src/connector-conformance-roster.ts \
+            scripts/generate-connector-catalog.mjs \
+            .github/workflows/publish-polyfill-connectors.yml)"
+          if [ -n "$CHANGED" ]; then
+            printf 'publish policy changed; the connector catalog will be refreshed:\n%s\n' "$CHANGED"
+            echo "policy-changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "policy-changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
   publish:
     name: Publish ${{ matrix.connector }} to GHCR
@@ -604,11 +647,9 @@ jobs:
   catalog:
     name: Publish and verify the connector catalog
     needs: [prepare, publish]
-    # A failed publish leg must not freeze the catalog. The generator lists what is
-    # actually in GHCR, so a connector whose newest version failed keeps its last
-    # published version. The run still fails, because publish failed. A cancelled
-    # publish is not retried here: its outcome is unknown.
-    if: ${{ always() && needs.prepare.result == 'success' && (inputs.catalog-only || (github.ref == 'refs/heads/main' && !inputs.dry-run && (needs.publish.result == 'success' || needs.publish.result == 'failure') && needs.prepare.outputs.has-publishable-changes == 'true')) }}
+    # A failed or cancelled publish never refreshes the catalog. A policy-only
+    # main push refreshes it even when no connector artifact changed.
+    if: ${{ always() && needs.prepare.result == 'success' && (inputs.catalog-only || (github.ref == 'refs/heads/main' && !inputs.dry-run && ((needs.publish.result == 'success' && needs.prepare.outputs.has-publishable-changes == 'true') || ((needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.prepare.outputs.policy-changed == 'true')))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

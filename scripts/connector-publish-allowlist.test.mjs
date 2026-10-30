@@ -7,6 +7,41 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
+
+test("Loom and Whole Foods remain in the catalog inventory as Development entries", () => {
+  for (const manifest of ["loom", "wholefoods"]) {
+    const row = PUBLISHABLE_CONNECTORS.find((entry) => entry.manifest === manifest);
+    assert.ok(row, manifest);
+    assert.equal(row.exclusionReason, null, manifest);
+    const profile = JSON.parse(readFileSync(join(manifests, manifest, "manifest.json"), "utf8"));
+    assert.equal(profile.capabilities.public_listing.tier, "development", manifest);
+  }
+  assert.deepEqual(KNOWN_SCAFFOLD_CONNECTORS, ["loom"]);
+  assert.equal(PUBLISHABLE_CONNECTORS.some((row) => row.manifest === "slack"), false);
+  assert.ok(PUBLISH_EXCLUSIONS.find((row) => row.manifest === "slack")?.exclusionReason);
+});
+
+test("actual CLI matrices include Development catalog entries and keep excluded runtimes out", () => {
+  const expected = PUBLISHABLE_CONNECTORS.map(({ manifest, connectorKey }) => ({ manifest, connectorKey }));
+  for (const args of [["--matrix"], ["--shard-matrix", "6"]]) {
+    const result = spawnSync(process.execPath, ["scripts/connector-publish-allowlist.mjs", ...args], {
+      cwd: repoRoot, encoding: "utf8", env: { PATH: process.env.PATH },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const include = JSON.parse(result.stdout).include;
+    const rows = args[0] === "--matrix"
+      ? include.map(({ manifest, connector }) => ({ manifest, connectorKey: connector }))
+      : include.flatMap(({ connectors }) => connectors.map(({ manifest, connectorKey }) => ({ manifest, connectorKey })));
+    assert.deepEqual([...rows].sort((a, b) => a.manifest.localeCompare(b.manifest)),
+      [...expected].sort((a, b) => a.manifest.localeCompare(b.manifest)));
+    assert.deepEqual(
+      rows.filter(({ manifest }) => ["loom", "wholefoods"].includes(manifest)).map(({ manifest }) => manifest).sort(),
+      ["loom", "wholefoods"],
+    );
+    assert.equal(rows.some(({ manifest }) => manifest === "slack"), false);
+  }
+});
 import {
   CONNECTOR_PUBLISH_INVENTORY, PUBLISHABLE_CONNECTORS, PUBLISH_EXCLUSIONS,
 } from "./connector-publish-allowlist.mjs";
