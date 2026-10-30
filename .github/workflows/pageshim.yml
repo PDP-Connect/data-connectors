@@ -70,7 +70,8 @@ jobs:
     needs: harness-shards
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    # Allow time for runner cleanup after the shard check.
+    timeout-minutes: 5
     steps:
       - name: Require all shards to pass
         env:

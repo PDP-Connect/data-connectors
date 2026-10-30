@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.30)
+ * PDPP LinkedIn Connector
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -16,6 +16,8 @@
  * `page.evaluate(fetch)`, exactly as the legacy connector did — Voyager
  * requires the session cookie + CSRF token pair that only exists in that
  * context, and has no public CORS allowance.
+ * An unauthenticated reachability probe cannot exercise this collection path:
+ * Voyager requires an owner-authenticated browser session.
  *
  * Streams (D7 — capability-map.json `linkedin`):
  *   profile      /voyager/api/me + dash/profiles (FullProfileWithEntities)

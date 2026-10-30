@@ -377,7 +377,93 @@ test("changed registry content advances a tied source timestamp and the next ret
   }
 });
 
-test("a legacy feature in the previous catalog does not block a valid catalog", async () => {
+test("an unrelated source commit does not change an identical catalog", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const first = await generate(root, registry.registry);
+    const retry = await generate(root, registry.registry, { previousCatalog: first, sourceCommit: "b".repeat(40) });
+    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(first));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a missing old tag retains its signed catalog mapping", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const first = await generate(root, registry.registry);
+    registry.setPublishedVersions([]);
+    const retry = await generate(root, registry.registry, { previousCatalog: first });
+    assert.deepEqual(retry.connectors[0].versions, first.connectors[0].versions);
+    assert.deepEqual(retry.connectors[0].latest, first.connectors[0].latest);
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("known versions retain their signed catalog digests without re-resolving mutable tags", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const first = await generate(root, registry.registry);
+    const retry = await generate(root, registry.registry, {
+      previousCatalog: first,
+      lookupImpl: async () => { throw new Error("known version was re-resolved"); },
+    });
+    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(first));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a metadata refresh reads the signed release's registry metadata again", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const first = await generate(root, registry.registry);
+    let reads = 0;
+    const retry = await generate(root, registry.registry, {
+      previousCatalog: first, refreshMetadata: true,
+      fetchImpl: (...args) => { reads += 1; return fetch(...args); },
+    });
+    assert.ok(reads > 0, "an explicit refresh must fetch the published metadata");
+    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(first));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a successful policy refresh records its source even when entries are unchanged", async () => {
+  const root = fixtureDirectory();
+  const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
+  try {
+    fixtureManifest(root);
+    const previous = await generate(root, registry.registry);
+    const refreshed = await generate(root, registry.registry, {
+      previousCatalog: previous, refreshMetadata: true, sourceCommit: "b".repeat(40),
+    });
+    assert.deepEqual(refreshed.connectors, previous.connectors);
+    assert.equal(refreshed.source_commit, "b".repeat(40));
+    assert.ok(Date.parse(refreshed.generated_at) > Date.parse(previous.generated_at));
+    const retry = await generate(root, registry.registry, { previousCatalog: refreshed, sourceCommit: "c".repeat(40) });
+    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(refreshed));
+  } finally {
+    await registry.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a previous catalog with an invalid schema fails closed", async () => {
   const root = fixtureDirectory();
   const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
   try {
@@ -392,8 +478,7 @@ test("a legacy feature in the previous catalog does not block a valid catalog", 
     assertCatalog(current);
     assert.throws(() => assertCatalog(previousCatalog), /does not match its schema/);
 
-    const next = await generate(root, registry.registry, { previousCatalog });
-    assertCatalog(next);
+    await assert.rejects(generate(root, registry.registry, { previousCatalog }), /does not match its schema/);
   } finally {
     await registry.stop();
     rmSync(root, { recursive: true, force: true });
@@ -832,8 +917,8 @@ test("the CLI refresh drops excluded entries from the previous catalog and repea
       source_commit: "b".repeat(40),
       connectors: [
         photos,
-        { ...photos, connector_key: "loom", connector_id: "https://registry.pdpp.dev/connectors/loom", display_name: "Loom" },
-        { ...photos, connector_key: "wholefoods", connector_id: "https://registry.pdpp.dev/connectors/wholefoods", display_name: "Whole Foods" },
+        { ...photos, connector_key: "github", connector_id: "https://registry.pdpp.dev/connectors/github", display_name: "GitHub" },
+        { ...photos, connector_key: "signal", connector_id: "https://registry.pdpp.dev/connectors/signal", display_name: "Signal" },
       ],
     }));
 

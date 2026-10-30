@@ -494,6 +494,10 @@ process.exit(1);
 const COSIGN_STUB = `#!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 appendFileSync(process.env.ARGV_LOG, JSON.stringify(["cosign", ...process.argv.slice(2)]) + "\\n");
+if (process.argv[2] === "verify" && process.env.COSIGN_FAIL_VERIFY === "1") {
+  console.error("signature verification failed");
+  process.exit(1);
+}
 const counter = process.env.ARGV_LOG + ".cosign-calls";
 const calls = (existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0) + 1;
 writeFileSync(counter, String(calls));
@@ -518,7 +522,7 @@ process.exit(0);
  * Returns the exit status, the recorded argv, and — separately — what the
  * registry holds afterwards.
  */
-function runPublish({ registry, dir, name, code, lookupFault = "", cosignRateLimitedCalls = 0 }) {
+function runPublish({ registry, dir, name, code, lookupFault = "", cosignRateLimitedCalls = 0, cosignVerifyFails = false }) {
   const scratch = mkdtempSync(join(dir, "run-"));
   const artifact = join(scratch, "artifact");
   mkdirSync(artifact, { recursive: true });
@@ -583,6 +587,7 @@ function runPublish({ registry, dir, name, code, lookupFault = "", cosignRateLim
     // without changing how many tries are made.
     REGISTRY_RETRY_DELAY_SCALE: "0.0001",
     COSIGN_RATE_LIMITED_CALLS: String(cosignRateLimitedCalls),
+    COSIGN_FAIL_VERIFY: cosignVerifyFails ? "1" : "0",
     VERSION: "0.3.0",
     CONNECTOR: "ynab",
     GITHUB_REPOSITORY: "PDP-Connect/data-connectors",
@@ -732,7 +737,7 @@ test("a first publish of a new version tags and signs the digest it pushed", () 
     // legacy `.sig` for the SourceDeclaration referrer, then both formats for
     // the connector manifest. When the legacy bridge is removed, this becomes
     // two calls.
-    const signed = result.calls.filter((call) => call[0] === "cosign");
+    const signed = result.calls.filter((call) => call[0] === "cosign" && call[1] === "sign");
     assert.equal(signed.length, 4, "a publish signs both manifests once per signature format");
     assert.equal(
       signed.filter((call) => call.includes("--new-bundle-format=false")).length,
@@ -1033,6 +1038,17 @@ test("the push that precedes the guard writes no tag", () => {
 // workflow's shell to show that a retry repeats the same command on the same
 // digest and changes nothing about the guard.
 
+test("a failed signature verification leaves the version tag absent", () => {
+  withRegistry(({ registry, dir }) => {
+    const name = "connector/ynab";
+    const result = runPublish({ registry, dir, name, code: "CODE-NEW", cosignVerifyFails: true });
+    assert.notEqual(result.status, 0);
+    assert.match(result.output, /signature verification failed/);
+    assert.equal(registry.resolveTag(name, "0.3.0"), null);
+    assert.ok(result.calls.some((call) => call[0] === "cosign" && call[1] === "verify"));
+  });
+});
+
 test("a rate-limited signature is retried on the pushed digest, and the tag lands on it", () => {
   withRegistry(({ registry, dir }) => {
     const name = "connector/ynab";
@@ -1040,7 +1056,7 @@ test("a rate-limited signature is retried on the pushed digest, and the tag land
 
     assert.equal(result.status, 0, `a rate-limited sign must be retried, not fail the publish\n${result.output}`);
 
-    const signed = result.calls.filter((call) => call[0] === "cosign");
+    const signed = result.calls.filter((call) => call[0] === "cosign" && call[1] === "sign");
     assert.equal(signed.length, 5, "four signatures plus one retry");
     assert.deepEqual(signed[1], signed[0], "the retry repeats the same command, by the same digest");
 

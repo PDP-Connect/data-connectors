@@ -17135,7 +17135,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.38",
+				"version": "0.3.39",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -17178,7 +17178,7 @@
 						"rationale": "LinkedIn aggressively blocks automated access; profile refresh is manual-only."
 					},
 					"public_listing": {
-						"tier": "development"
+						"tier": "preview"
 					}
 				},
 				"streams": [

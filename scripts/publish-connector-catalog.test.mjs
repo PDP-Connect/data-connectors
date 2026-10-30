@@ -68,7 +68,9 @@ function writeCommand(path, source) {
 
 // REAL_GENERATOR=1 runs scripts/generate-connector-catalog.mjs from `cwd`
 // instead of the stub, so a test can observe the generator's own refusal.
-function runCatalogPublish(overrides = {}, { cwd = repoRoot, shell = extractCatalogPublishStep().shell } = {}) {
+function runCatalogPublish(overrides = {}, { cwd = repoRoot, shell } = {}) {
+  shell ??= `${extractStep("Reconcile the connector catalog").shell}\n` +
+    `if grep -qx 'changed=true' "$GITHUB_OUTPUT"; then\n${extractCatalogPublishStep().shell}\nfi`;
   const root = mkdtempSync(join(tmpdir(), "connector-catalog-publish-"));
   const bin = join(root, "bin");
   const runnerTemp = join(root, "runner-temp");
@@ -83,8 +85,11 @@ function runCatalogPublish(overrides = {}, { cwd = repoRoot, shell = extractCata
     `#!/bin/bash
 set -u
 printf 'node\t%s\n' "$*" >> "$COMMAND_LOG"
-if [ "\${1:-}" = "scripts/lookup-manifest.mjs" ]; then
-  case "\${LOOKUP_OUTCOME:-absent}" in
+if [ "\${1:-}" = "scripts/lookup-manifest.mjs" ] || [ "\${1:-}" = "$GITHUB_WORKSPACE/scripts/lookup-manifest.mjs" ]; then
+  outcome="\${LOOKUP_OUTCOME:-absent}"
+  if [ -e "$LOOKUP_CALLED" ]; then outcome="\${LOOKUP_SECOND_OUTCOME:-$outcome}"; fi
+  touch "$LOOKUP_CALLED"
+  case "$outcome" in
     absent) printf '%s\n' '{"outcome":"absent"}' ;;
     present) printf '%s\n' '{"outcome":"present","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' ;;
     unknown) printf '%s\n' '{"outcome":"unknown"}' ;;
@@ -98,12 +103,20 @@ if [ "\${1:-}" = "scripts/generate-connector-catalog.mjs" ] && [ "\${REAL_GENERA
   while [ "$#" -gt 0 ]; do
     if [ "$1" = "--out" ]; then
       mkdir -p "$(dirname "$2")"
-      printf '{"connectors":[]}' > "$2"
+      if [ "\${SAME_CONTENT:-}" = "1" ]; then
+        cp "$RUNNER_TEMP/connector-catalog/previous/catalog.json" "$2"
+      else
+        printf '{"connectors":[]}' > "$2"
+      fi
       exit 0
     fi
     shift
   done
   exit 42
+fi
+if [ "\${1:-}" = "scripts/verify-catalog-additions.mjs" ]; then
+  if [ "\${FAIL_COMMAND:-}" = "additions-verify" ]; then exit 52; fi
+  exit 0
 fi
 exec "$REAL_NODE" "$@"
 `,
@@ -116,6 +129,10 @@ printf 'git\t%s\n' "$*" >> "$COMMAND_LOG"
 if [ "\${FAIL_COMMAND:-}" = "git" ]; then exit 43; fi
 if [ "\${1:-}" = "merge-base" ]; then
   if [ "\${FAIL_COMMAND:-}" = "stale-source" ]; then exit 1; fi
+  exit 0
+fi
+if [ "\${1:-}" = "diff" ]; then
+  printf '%s' "\${POLICY_DIFF:-}"
   exit 0
 fi
 printf '%s\n' '2026-09-15T12:34:56-05:00'
@@ -188,6 +205,9 @@ case "\${1:-}" in sign|verify) exit 0 ;; *) exit 48 ;; esac
       COMMAND_LOG: commandLog,
       TAG_POINTER: tagPointer,
       RUNNER_TEMP: runnerTemp,
+      GITHUB_WORKSPACE: cwd,
+      GITHUB_OUTPUT: join(root, "github-output"),
+      LOOKUP_CALLED: join(root, "lookup-called"),
       GH_TOKEN: "fixture-token",
       GITHUB_ACTOR: "fixture-actor",
       GITHUB_REPOSITORY: "PDP-Connect/data-connectors",
@@ -353,6 +373,55 @@ test("a previous catalog without a valid source commit cannot move latest", () =
   }
 });
 
+test("unchanged reconciliation does not push, sign, or move the catalog tag", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", SAME_CONTENT: "1" });
+  try {
+    assert.equal(run.result.status, 0, run.result.stderr);
+    assert.ok(run.commands.some(line => line.startsWith("node\tscripts/verify-catalog-additions.mjs ")));
+    assert.doesNotMatch(run.commands.find(line => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), /--refresh-metadata/);
+    assert.equal(run.commands.some(line => line.startsWith("oras\tpush ")), false);
+    assert.equal(run.commands.some(line => line.startsWith("oras\ttag ")), false);
+    assert.equal(run.tagDigest(), previousCatalogDigest);
+  } finally { run.cleanup(); }
+});
+
+test("a policy change since the last catalog forces metadata refresh", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", POLICY_DIFF: "scripts/generate-connector-catalog.mjs" });
+  try {
+    assert.equal(run.result.status, 0, run.result.stderr);
+    assert.match(run.commands.find(line => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), /--refresh-metadata true/);
+    assert.equal(run.tagDigest(), catalogDigest);
+  } finally { run.cleanup(); }
+});
+
+test("manual reconciliation re-reads published metadata", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", GITHUB_EVENT_NAME: "workflow_dispatch" });
+  try {
+    assert.equal(run.result.status, 0, run.result.stderr);
+    assert.match(run.commands.find(line => line.startsWith("node\tscripts/generate-connector-catalog.mjs ")), /--refresh-metadata true/);
+  } finally { run.cleanup(); }
+});
+
+test("failed addition verification keeps the previous catalog tag", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", FAIL_COMMAND: "additions-verify" });
+  try {
+    assert.notEqual(run.result.status, 0);
+    assert.equal(run.commands.some(line => line.startsWith("oras\tpush ")), false);
+    assert.equal(run.commands.some(line => line.startsWith("oras\ttag ")), false);
+    assert.equal(run.tagDigest(), previousCatalogDigest);
+  } finally { run.cleanup(); }
+});
+
+test("a changed or unknown latest at publication cannot move the catalog tag", () => {
+  const run = runCatalogPublish({ LOOKUP_OUTCOME: "present", LOOKUP_SECOND_OUTCOME: "unknown" });
+  try {
+    assert.notEqual(run.result.status, 0);
+    assert.match(run.result.stderr, /catalog latest changed or became unknown/);
+    assert.equal(run.commands.some(line => line.startsWith("oras\ttag ")), false);
+    assert.equal(run.tagDigest(), previousCatalogDigest);
+  } finally { run.cleanup(); }
+});
+
 test("an unknown prior-catalog lookup aborts before generation or publication", () => {
   const run = runCatalogPublish({ LOOKUP_OUTCOME: "unknown" });
   try {
@@ -421,24 +490,17 @@ for (const failure of [
   });
 }
 
-test("the catalog publish runs once after successful publish legs or a catalog-only dispatch", () => {
+test("catalog reconciliation follows main release events and publication only runs for changes", () => {
   const { condition } = extractCatalogPublishStep();
   assert.match(condition, /!inputs\.dry-run/);
+  assert.match(condition, /steps\.reconcile\.outputs\.changed\s*==\s*'true'/);
 
   const catalog = workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1];
   assert.ok(catalog, "expected the catalog fan-in job");
   assert.match(catalog, /^    needs: \[prepare, publish\]$/m);
   assert.match(catalog, /^    if: .*always\(\)/m);
-  assert.match(catalog, /needs\.prepare\.result\s*==\s*'success'/);
+  assert.match(catalog, /!cancelled\(\)/);
   assert.match(catalog, /github\.ref\s*==\s*'refs\/heads\/main'/);
-  assert.match(catalog, /inputs\.catalog-only/);
-  assert.match(catalog, /needs\.publish\.result\s*==\s*'success'/);
-  assert.match(catalog, /needs\.prepare\.outputs\.has-publishable-changes\s*==\s*'true'/);
-  assert.match(
-    catalog,
-    /github\.ref\s*==\s*'refs\/heads\/main'.*needs\.publish\.result/s,
-    "a release-tag push must skip the catalog fan-in job",
-  );
   assert.equal(
     workflow.match(/^      - name: Publish and verify the connector catalog$/gm)?.length,
     1,
@@ -456,17 +518,18 @@ test("all publishes remain serialized by one workflow-wide concurrency group", (
   assert.match(workflow, /^  cancel-in-progress:\s*false\s*$/m);
 });
 
-function evaluateCondition(expression, { catalogOnly, dryRun = false, selected = false, ref = "refs/heads/main", needs = {} }) {
+function evaluateCondition(expression, { catalogOnly, dryRun = false, selected = false, changed = true, cancelled = false, ref = "refs/heads/main", needs = {} }) {
   const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "")
     .replaceAll("inputs.catalog-only", "inputs['catalog-only']")
     .replaceAll("inputs.dry-run", "inputs['dry-run']")
     .replace(/needs\.(\w+)\.outputs\.([a-z-]+)/g, "needs.$1.outputs['$2']");
-  return Function("inputs", "steps", "github", "needs", "always", `return (${source});`)(
+  return Function("inputs", "steps", "github", "needs", "always", "cancelled", `return (${source});`)(
     { "catalog-only": catalogOnly, "dry-run": dryRun },
-    { target: { outputs: { selected: selected ? "true" : "false" } } },
+    { target: { outputs: { selected: selected ? "true" : "false" } }, reconcile: { outputs: { changed: changed ? "true" : "false" } } },
     { ref },
     needs,
     () => true,
+    () => cancelled,
   );
 }
 
@@ -483,7 +546,6 @@ test("catalog-only dispatch skips connector selection and publication but runs c
     "Build the artifact layers",
     "Prove the built bundle imports before publishing it",
     "Push and sign",
-    "Verify the published signature",
   ]) {
     assert.equal(evaluateCondition(stepCondition(name), catalogOnly), false, name);
   }
@@ -502,7 +564,6 @@ test("catalog-only dispatch skips connector selection and publication but runs c
     false,
   );
   const catalog = workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1] ?? "";
-  assert.match(catalog, /inputs\.catalog-only/);
   assert.match(catalog, /github\.ref\s*==\s*'refs\/heads\/main'/);
 });
 
@@ -520,7 +581,6 @@ test("the publish matrix consumes the prepared selection and catalog has no matr
   );
 });
 
-const POLICY_STEP = "Detect policy changes that refresh the connector catalog";
 const PREPARE_GUARD_STEP = "Validate publish inventory identities and exclusions";
 
 function catalogJobCondition() {
@@ -536,50 +596,49 @@ function catalogScheduled({
   dryRun = false,
   publish = "skipped",
   hasPublishableChanges = "false",
-  policyChanged = "false",
   prepare = "success",
+  cancelled = false,
 } = {}) {
   return evaluateCondition(catalogJobCondition(), {
     dryRun,
+    cancelled,
     ref,
     needs: {
       prepare: {
         result: prepare,
-        outputs: { "has-publishable-changes": hasPublishableChanges, "policy-changed": policyChanged },
+        outputs: { "has-publishable-changes": hasPublishableChanges },
       },
       publish: { result: publish },
     },
   });
 }
 
-test("a policy-only main push refreshes the catalog without publishing a connector", () => {
-  assert.equal(catalogScheduled({ policyChanged: "true" }), true);
+test("a policy-only main push schedules reconciliation without publishing a connector", () => {
+  assert.equal(catalogScheduled(), true);
 });
 
-test("a failed or cancelled publish never refreshes the catalog from a policy change", () => {
-  for (const publish of ["failure", "cancelled"]) {
-    assert.equal(catalogScheduled({ publish, hasPublishableChanges: "true", policyChanged: "true" }), false, publish);
-  }
+test("a failed publish can be reconciled, but a cancelled workflow cannot", () => {
+  assert.equal(catalogScheduled({ publish: "failure", hasPublishableChanges: "true" }), true);
+  assert.equal(catalogScheduled({ publish: "failure", cancelled: true }), false);
 });
 
-test("a main push with neither an artifact nor a policy change leaves the catalog untouched", () => {
-  assert.equal(catalogScheduled({}), false);
+test("an otherwise unchanged main push still checks for missed catalog releases", () => {
+  assert.equal(catalogScheduled({}), true);
 });
 
 test("an artifact publish still schedules the catalog, and only main ever does", () => {
   assert.equal(catalogScheduled({ publish: "success", hasPublishableChanges: "true" }), true);
-  assert.equal(catalogScheduled({ policyChanged: "true", ref: "refs/tags/connector-ynab-v0.3.0" }), false);
+  assert.equal(catalogScheduled({ ref: "refs/tags/connector-ynab-v0.3.0" }), false);
   assert.equal(catalogScheduled({ publish: "success", hasPublishableChanges: "true", ref: "refs/heads/feature" }), false);
-  assert.equal(catalogScheduled({ policyChanged: "true", dryRun: true }), false);
+  assert.equal(catalogScheduled({ dryRun: true }), false);
 });
 
-test("the policy step reads the pushed range and fails closed without a real before commit", () => {
-  const step = extractStep(POLICY_STEP);
-  assert.match(step.condition, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
-  assert.match(step.text, /^          BEFORE_SHA: \$\{\{ github\.event\.before \}\}$/m);
-  assert.match(step.text, /^          AFTER_SHA: \$\{\{ github\.sha \}\}$/m);
+test("policy changes are detected since the last published catalog, including after an unrelated push", () => {
+  const step = extractStep("Reconcile the connector catalog");
+  const policyDiff = step.shell.match(/CHANGED="\$\(git diff[\s\S]*?\)"/)?.[0];
+  assert.ok(policyDiff, "expected the workflow's policy diff");
 
-  const repo = mkdtempSync(join(tmpdir(), "policy-changed-"));
+  const repo = mkdtempSync(join(tmpdir(), "catalog-policy-"));
   try {
     const git = (...args) => {
       const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
@@ -602,39 +661,34 @@ test("the policy step reads the pushed range and fails closed without a real bef
     writeFileSync(join(repo, "scripts", "connector-publish-allowlist.mjs"), "export const v = 2;\n");
     git("commit", "-q", "-am", "policy edit");
     const policyEdit = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "README.md"), "three\n");
+    git("commit", "-q", "-am", "unrelated follow-up");
+    const followUp = git("rev-parse", "HEAD");
 
-    const run = (before, after) => {
-      const output = join(repo, `output-${before.slice(0, 8)}-${after.slice(0, 8)}`);
-      writeFileSync(output, "");
-      const result = spawnSync("bash", ["-c", step.shell], {
+    const run = (previous, current) => {
+      const result = spawnSync("bash", ["-c", `set -euo pipefail\n${policyDiff}\nprintf '%s' "$CHANGED"`], {
         cwd: repo,
         encoding: "utf8",
-        env: { PATH: process.env.PATH, BEFORE_SHA: before, AFTER_SHA: after, GITHUB_OUTPUT: output },
+        env: { PATH: process.env.PATH, PREVIOUS_SOURCE: previous, GITHUB_SHA: current },
       });
-      return { status: result.status, stdout: result.stdout, output: readFileSync(output, "utf8") };
+      return result;
     };
 
     const unchanged = run(base, docsOnly);
     assert.equal(unchanged.status, 0, unchanged.stderr);
-    assert.equal(unchanged.output, "policy-changed=false\n");
+    assert.equal(unchanged.stdout, "");
 
-    const changed = run(docsOnly, policyEdit);
+    const changed = run(base, followUp);
     assert.equal(changed.status, 0, changed.stderr);
-    assert.equal(changed.output, "policy-changed=true\n");
-
-    for (const before of ["0".repeat(40), "f".repeat(40)]) {
-      const refused = run(before, policyEdit);
-      assert.notEqual(refused.status, 0, `before ${before} must not yield a decision`);
-      assert.equal(refused.output, "", "no policy decision may be written without a real before commit");
-      // ::error:: annotations are read from stdout by the Actions runner.
-      assert.match(refused.stdout, /::error::no before commit/);
-    }
+    assert.equal(changed.stdout, "scripts/connector-publish-allowlist.mjs");
+    assert.equal(run(policyEdit, followUp).stdout, "", "the last-push range alone would miss the policy edit");
+    assert.notEqual(run("f".repeat(40), followUp).status, 0);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("the prepare job pins Node 24 and runs the inventory guard before any matrix or policy step", () => {
+test("the prepare job pins Node 24 and runs the inventory guard before selection", () => {
   const prepare = workflow.match(/\n  prepare:\n([\s\S]*?)\n  publish:\n/)?.[1];
   assert.ok(prepare, "expected the prepare job");
   const position = (text) => {
@@ -648,8 +702,6 @@ test("the prepare job pins Node 24 and runs the inventory guard before any matri
   assert.ok(guard > nodeSetup, "Node 24 must be set up before the guard runs");
   assert.ok(guard < position("- name: Derive the publish matrix from the reviewed allowlist"));
   assert.ok(guard < position("- name: Select connector versions missing from GHCR"));
-  assert.ok(guard < position(`- name: ${POLICY_STEP}`));
-  assert.match(prepare, /^      policy-changed: \$\{\{ steps\.policy\.outputs\.policy-changed \}\}$/m);
 });
 
 // A copy of the publish scripts for tests that must exercise the real guard
