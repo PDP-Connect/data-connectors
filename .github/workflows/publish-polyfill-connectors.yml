@@ -143,6 +143,10 @@ jobs:
           node scripts/connector-publish-allowlist.mjs --matrix
           echo "has-publishable-changes=true" >> "$GITHUB_OUTPUT"
 
+      - name: Install selector dependencies
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: npm ci --ignore-scripts
+
       - name: Select connector versions missing from GHCR
         id: main-selection
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
