@@ -1,0 +1,114 @@
+{
+  "facebook": {
+    "bytes": 542,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#0866FF",
+    "via": "simple-icons@16.36.0 facebook"
+  },
+  "fitbit": {
+    "bytes": 1777,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#00B0B9",
+    "via": "simple-icons@16.36.0 fitbit"
+  },
+  "garmin": {
+    "bytes": 3242,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#000000",
+    "via": "simple-icons@16.36.0 garmin"
+  },
+  "google": {
+    "bytes": 459,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#4285F4",
+    "via": "simple-icons@16.36.0 google"
+  },
+  "meta": {
+    "bytes": 1328,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#0467DF",
+    "via": "simple-icons@16.36.0 meta"
+  },
+  "perplexity": {
+    "bytes": 616,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#1FB8CD",
+    "via": "simple-icons@16.36.0 perplexity"
+  },
+  "tiktok": {
+    "bytes": 709,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#000000",
+    "via": "simple-icons@16.36.0 tiktok"
+  },
+  "pocket": {
+    "bytes": 831,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#EF3F56",
+    "via": "simple-icons@15.22.0 pocket"
+  },
+  "character_ai": {
+    "bytes": 1307,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#000000",
+    "via": "https://character.ai/icon.svg"
+  },
+  "heb": {
+    "bytes": 1250,
+    "diffPixels": 3,
+    "ofPixels": 57600,
+    "bg": "#E1251B",
+    "via": "https://www.heb.com/ header logo"
+  },
+  "instinct": {
+    "bytes": 283,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#1F2322",
+    "via": "https://instinct.com/redesign/wordmark.svg (I glyph, as app.instinct.com/favicon.ico)"
+  },
+  "oura": {
+    "bytes": 1324,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#2F4A73",
+    "via": "https://static.ouraring.com/pdfs/Oura_BrandGuidelines_v1.pdf p.5 white logo"
+  },
+  "usaa": {
+    "bytes": 2341,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#12395B",
+    "via": "https://www.usaa.com/favicon.svg"
+  },
+  "wholefoods": {
+    "bytes": 937,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#046F46",
+    "via": "https://www.wholefoodsmarket.com/ header logo (leaf O, as the site favicon)"
+  },
+  "whoop": {
+    "bytes": 411,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#000000",
+    "via": "https://developer.whoop.com/docs/developing/design-guidelines Logos zip, Circle White"
+  },
+  "ynab": {
+    "bytes": 2521,
+    "diffPixels": 0,
+    "ofPixels": 57600,
+    "bg": "#3B5EDA",
+    "via": "https://www.ynab.com/press Tree Logo"
+  }
+}
