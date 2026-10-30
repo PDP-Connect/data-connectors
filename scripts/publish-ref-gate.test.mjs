@@ -463,15 +463,12 @@ test("a main push uses the filtered matrix and a no-op skips publish jobs", () =
   );
 });
 
-test("the catalog still refreshes after a partial publish failure, and not after a cancelled one", () => {
-  // A connector that can never publish fails its leg on every main push. If the
-  // catalog job required publish success, that one leg would freeze the catalog
-  // for every other connector. Partial failure must refresh it; cancellation must not.
+test("the catalog fan-in excludes failed and cancelled publish results", () => {
   const workflow = readFileSync(workflowPath, "utf8");
   const catalogIf = /^  catalog:[\s\S]*?^    if: \$\{\{ (.*) \}\}$/m.exec(workflow);
   assert.ok(catalogIf, "the catalog job must have an if condition");
-  assert.match(catalogIf[1], /needs\.publish\.result == 'success' \|\| needs\.publish\.result == 'failure'/);
-  assert.doesNotMatch(catalogIf[1], /cancelled/);
+  assert.match(catalogIf[1], /needs\.publish\.result == 'success'/);
+  assert.doesNotMatch(catalogIf[1], /needs\.publish\.result == '(?:failure|cancelled)'/);
   assert.match(workflow, /CONNECTOR_CATALOG_PASSWORD: \$\{\{ github\.token \}\}/, "the generator must receive the registry credential");
 });
 

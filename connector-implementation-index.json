@@ -21379,7 +21379,7 @@
 				},
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "0.7.1",
+				"version": "0.7.2",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -21484,7 +21484,7 @@
 						"rationale": "Slack credentials are durable. Slackdump v4.4.2 (AGPL-3.0, https://github.com/rusq/slackdump/tree/v4.4.2) is bundled in core-browser Docker image; refresh moderately."
 					},
 					"public_listing": {
-						"tier": "supported"
+						"tier": "development"
 					}
 				},
 				"streams": [

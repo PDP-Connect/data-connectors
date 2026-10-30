@@ -17,7 +17,7 @@
  *      or Preview (a visible connector missing from the roster fails CI);
  *   2. every roster entry's `testFile` exists on disk;
  *   3. its connector set is disjoint from `KNOWN_SCAFFOLD_CONNECTORS`
- *      (loom, wholefoods) — all
+ *      (loom) — all
  *      of which MUST remain Development until they collect.
  *
  * `testFile` names each connector's own named collection/integration test —
@@ -45,7 +45,6 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		notion: { testFile: "connectors/notion/schemas.test.ts" },
 		reddit: { testFile: "connectors/reddit/integration.test.ts" },
 		signal: { testFile: "connectors/signal/integration.test.ts" },
-		slack: { testFile: "connectors/slack/integration.test.ts" },
 		steam: { testFile: "connectors/steam/index.test.ts" },
 		strava: { testFile: "connectors/strava/index.test.ts" },
 		uber: { testFile: "connectors/uber/integration.test.ts" },
@@ -60,7 +59,7 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
  * collection) and MUST stay outside `PRODUCTION_READY_CONNECTORS` and outside
  * the owner-selectable listing until they actually collect.
  */
-export const KNOWN_SCAFFOLD_CONNECTORS = ["loom", "wholefoods"] as const;
+export const KNOWN_SCAFFOLD_CONNECTORS = ["loom"] as const;
 
 /**
  * Connectors with a REAL collector (verified: no unconditional `SKIP_RESULT`
@@ -110,11 +109,16 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
 	perplexity: { testFile: "connectors/perplexity/index.test.ts" },
+	// Real collector, Development tier: the artifact still depends on a host
+	// helper and installability is not yet proven.
+	slack: { testFile: "connectors/slack/integration.test.ts" },
 	strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
 	// Tier development. Reads the signed-in WhatsApp Web page's own in-page
 	// stores (chats, messages, contacts, groups); the oracle is the collection
 	// walk test over a synthetic page.
 	whatsapp_web: { testFile: "connectors/whatsapp_web/collect-fixes.test.ts" },
+	// Real collection and fixture evidence; live installability remains unproven.
+	wholefoods: { testFile: "connectors/wholefoods/integration.test.ts" },
 	whoop_browser: { testFile: "connectors/whoop_browser/index.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },

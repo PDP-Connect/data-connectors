@@ -8,6 +8,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  assertPublishableRow,
+  assertDevelopmentTier,
+} from "./assert-publishable-readiness.mjs";
+import {
   PUBLISHABLE_CONNECTORS,
 } from "./connector-publish-allowlist.mjs";
 import {
@@ -426,6 +430,9 @@ export async function generateConnectorCatalog({
   lookupImpl = lookupManifest,
   fetchImpl = fetch,
 }) {
+  // Check identities and exclusions before any request. Development-tier
+  // readiness is checked against published metadata after it is read.
+  for (const connector of connectors) assertPublishableRow(connector);
   if (!/^[0-9a-f]{40}$/.test(sourceCommit ?? "")) {
     throw new Error("source commit must be a 40-character lowercase hexadecimal Git object ID");
   }
@@ -482,6 +489,7 @@ export async function generateConnectorCatalog({
       timeoutMs,
       fetchImpl,
     });
+    assertDevelopmentTier(connector, metadata);
     catalogConnectors.push({
       ...metadata,
       latest: { version: metadata.version, digest: latest.digest },
