@@ -3743,6 +3743,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/character_ai/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/character-ai",
 			"entry": "./connectors/character_ai/index.ts",
 			"manifest": {
@@ -3756,8 +3757,12 @@
 				},
 				"connector_key": "character-ai",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-				"version": "0.1.4",
+				"version": "0.1.5",
 				"display_name": "Character.AI",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#000000"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -14742,6 +14747,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/heb/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/heb",
 			"entry": "./connectors/heb/index.ts",
 			"manifest": {
@@ -14755,8 +14761,12 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.27",
+				"version": "0.6.28",
 				"display_name": "H-E-B",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#E1251B"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -15940,6 +15950,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/instinct/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/instinct",
 			"entry": "./connectors/instinct/index.ts",
 			"manifest": {
@@ -15953,8 +15964,12 @@
 				},
 				"connector_key": "instinct",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "Instinct",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#1F2322"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -19099,6 +19114,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/oura/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/oura",
 			"entry": "./connectors/oura/index.ts",
 			"manifest": {
@@ -19112,8 +19128,12 @@
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Oura",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#2F4A73"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -19434,6 +19454,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/oura_browser/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/oura-browser",
 			"entry": "./connectors/oura_browser/index.ts",
 			"manifest": {
@@ -19447,8 +19468,12 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.47",
+				"version": "0.1.48",
 				"display_name": "Oura (Browser Sign-In)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#2F4A73"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -25440,6 +25465,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/usaa/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/usaa",
 			"entry": "./connectors/usaa/index.ts",
 			"manifest": {
@@ -25453,8 +25479,12 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.20",
+				"version": "0.2.21",
 				"display_name": "USAA",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#12395B"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -27300,6 +27330,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/wholefoods/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/wholefoods",
 			"entry": "./connectors/wholefoods/index.ts",
 			"manifest": {
@@ -27313,8 +27344,12 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.44",
+				"version": "0.3.45",
 				"display_name": "Whole Foods",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#046F46"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -27644,6 +27679,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/whoop/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/whoop",
 			"entry": "./connectors/whoop/index.ts",
 			"manifest": {
@@ -27657,8 +27693,12 @@
 				},
 				"connector_key": "whoop",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "WHOOP",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#000000"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -28133,6 +28173,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/whoop_browser/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/whoop-browser",
 			"entry": "./connectors/whoop_browser/index.ts",
 			"manifest": {
@@ -28146,8 +28187,12 @@
 				},
 				"connector_key": "whoop-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop-browser",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "WHOOP (Browser Sign-In)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#000000"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -29247,6 +29292,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/ynab/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/ynab",
 			"entry": "./connectors/ynab/index.ts",
 			"manifest": {
@@ -29260,8 +29306,12 @@
 				},
 				"connector_key": "ynab",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-				"version": "0.3.23",
+				"version": "0.3.24",
 				"display_name": "YNAB",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#3B5EDA"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {

@@ -9,8 +9,12 @@
 	},
 	"connector_key": "instinct",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"display_name": "Instinct",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#1F2322"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

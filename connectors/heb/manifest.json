@@ -9,8 +9,12 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.6.27",
+	"version": "0.6.28",
 	"display_name": "H-E-B",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#E1251B"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

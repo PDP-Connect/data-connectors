@@ -9,8 +9,12 @@
 	},
 	"connector_key": "oura",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "Oura",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#2F4A73"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {

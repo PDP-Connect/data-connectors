@@ -9,8 +9,12 @@
 	},
 	"connector_key": "usaa",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-	"version": "0.2.20",
+	"version": "0.2.21",
 	"display_name": "USAA",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#12395B"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
