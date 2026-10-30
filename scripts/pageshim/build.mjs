@@ -13,7 +13,7 @@
 //     package resolves to a stub whose exports throw when called. `path` and
 //     `url` resolve to small pure-JS versions, because connector modules call
 //     them at load time;
-//   - per-connector ports (CONNECTOR_PORTS): for one connector file, some
+//   - per-connector physical port profiles: for one connector file, some
 //     imports resolve to a shim that maps them onto host methods instead of
 //     the throwing stub (anthropic: the export download and ZIP read).
 //
@@ -24,7 +24,7 @@
 
 import { mkdirSync, readFileSync } from "node:fs";
 import { builtinModules, createRequire } from "node:module";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { gzipSync } from "node:zlib";
@@ -32,34 +32,11 @@ import * as esbuild from "esbuild";
 import { consentSlicePlugin } from "../consent-slice-resolution.mjs";
 import { renderSlice } from "../../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 import { isPageShimCapable } from "./capabilities.mjs";
+import { createPageShimPortFileReader, resolvePageShimPortProfile } from "./port-profile.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const require = createRequire(import.meta.url);
-
-/**
- * Per-connector ports. `modules`: for imports made by `importer` only, these
- * specifiers resolve to a shim that maps them onto the host (instead of the
- * throwing stub or the real module). `inject`: extra globals. Unlike
- * `modules`, esbuild applies them to every free reference in the whole
- * connector bundle, not only to code under `importer`.
- */
-const CONNECTOR_PORTS = {
-	anthropic: {
-		importer: join(REPO, "connectors", "anthropic", "index.ts"),
-		shim: join(HERE, "shims", "anthropic-export.ts"),
-		modules: [
-			"fs",
-			"fs/promises",
-			"os",
-			"crypto",
-			"../../packages/polyfill-connectors/src/bounded-zip-archive.ts",
-			"../../packages/polyfill-connectors/src/download-queue.ts",
-			"../../packages/polyfill-connectors/src/playwright-download.ts",
-		],
-		inject: [join(HERE, "shims", "buffer.js")],
-	},
-};
 
 const BROWSER_PACKAGES = [
 	"playwright",
@@ -81,6 +58,35 @@ const HASH_IMPORTERS = new Set([
 	"scripts/pageshim/test-fixtures/crypto-runtime.ts",
 ].map(path => join(REPO, path)));
 const BUILTINS = new Set(builtinModules);
+async function validateSelectedPortClosure(roots, readFile) {
+	await esbuild.build({
+		absWorkingDir: REPO,
+		entryPoints: roots,
+		bundle: true,
+		outdir: resolve(REPO, ".pageshim-validation"),
+		write: false,
+		preserveSymlinks: true,
+		packages: "external",
+		external: ["node:*", ...BUILTINS, ...BROWSER_PACKAGES],
+		platform: "browser",
+		format: "esm",
+		logLevel: "silent",
+		plugins: [
+			{
+				name: "pageshim-port-input-guard",
+				setup(build) {
+					build.onLoad({ filter: /.*/, namespace: "file" }, (args) => {
+						const path = relative(REPO, args.path)
+							.split(sep)
+							.join("/");
+						readFile(path);
+						return undefined;
+					});
+				},
+			},
+		],
+	});
+}
 
 function stubSource(spec) {
 	let keys = [];
@@ -106,16 +112,40 @@ ${keys.map((k) => `export const ${k} = mk(${JSON.stringify(`${spec}.${k}`)});`).
 `;
 }
 
-const stubPlugin = (stubbed, port, cryptoHashShim) => ({
+export const stubPlugin = (stubbed, port, cryptoHashShim) => ({
 	name: "pageshim-stubs",
 	setup(build) {
 		if (port) {
-			build.onResolve({ filter: /.*/ }, (args) =>
-				args.importer === port.importer &&
-				port.modules.includes(args.path.replace(/^node:/, ""))
-					? { path: port.shim }
-					: undefined,
-			);
+			const consumed = new Set();
+			build.onStart(() => {
+				consumed.clear();
+			});
+			build.onResolve({ filter: /.*/ }, (args) => {
+				const specifier = args.path.replace(/^node:/, "");
+				if (
+					args.importer !== port.importer ||
+					!port.modules.includes(specifier)
+				)
+					return undefined;
+				consumed.add(specifier);
+				return { path: port.shim };
+			});
+			build.onEnd((result) => {
+				if (result.errors.length) return;
+				const missing = port.modules.filter((name) => !consumed.has(name));
+				if (missing.length)
+					return {
+						errors: [
+							{
+								text:
+									"stale module mapping in " +
+									port.path +
+									": " +
+									missing.join(", "),
+							},
+						],
+					};
+			});
 		}
 		build.onResolve({ filter: /^(node:)?(path|path\/posix|url)$/ }, (args) => ({
 			path: join(
@@ -126,13 +156,25 @@ const stubPlugin = (stubbed, port, cryptoHashShim) => ({
 		// Only node:crypto imports opt into the audited hash implementation.
 		// Other crypto exports and bare crypto imports remain throwing stubs.
 		if (cryptoHashShim) {
-			build.onResolve({ filter: /^node:crypto$/ }, (args) => HASH_IMPORTERS.has(args.importer) ? ({
-				path: "crypto", namespace: "pageshim-crypto",
-			}) : undefined);
+			build.onResolve({ filter: /^node:crypto$/ }, (args) =>
+				HASH_IMPORTERS.has(args.importer)
+					? {
+							path: "crypto",
+							namespace: "pageshim-crypto",
+						}
+					: undefined,
+			);
 			build.onLoad({ filter: /.*/, namespace: "pageshim-crypto" }, () => ({
-				contents: stubSource("crypto").split("\n").filter(line => !line.startsWith("export const createHash = ")).join("\n") +
-					"\nexport { createHash } from " + JSON.stringify(join(HERE, "shims/crypto.js")) + ";\n",
-				loader: "js", resolveDir: HERE,
+				contents:
+					stubSource("crypto")
+						.split("\n")
+						.filter((line) => !line.startsWith("export const createHash = "))
+						.join("\n") +
+					"\nexport { createHash } from " +
+					JSON.stringify(join(HERE, "shims/crypto.js")) +
+					";\n",
+				loader: "js",
+				resolveDir: HERE,
 			}));
 		}
 		build.onResolve({ filter: /.*/ }, (args) => {
@@ -162,7 +204,22 @@ export async function buildPageshim({
 	cryptoHashShim = true,
 }) {
 	const stubbed = new Set();
-	const port = CONNECTOR_PORTS[connector];
+	const readPortFile = createPageShimPortFileReader(REPO);
+	const selected = resolvePageShimPortProfile(
+		connector,
+		readPortFile,
+	);
+	if (!selected.empty) {
+		await validateSelectedPortClosure([selected.shim, ...selected.inject], readPortFile);
+	}
+	const port = selected.empty
+		? undefined
+		: {
+				...selected,
+				importer: join(REPO, selected.importer),
+				shim: join(REPO, selected.shim),
+				inject: selected.inject.map((path) => join(REPO, path)),
+			};
 	const manifest = JSON.parse(
 		readFileSync(join(REPO, "connectors", connector, "manifest.json"), "utf8"),
 	);

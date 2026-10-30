@@ -24,6 +24,9 @@ jobs:
       - name: Check packed library manifest projection
         run: npm run polyfill-library-metadata:check
 
+      - name: Test PageShim port profiles
+        run: node --test scripts/pageshim/port-profile.test.mjs
+
       - name: Check stream schemas for run-clock fields
         run: node scripts/check-run-clock-schema-fields.mjs
 

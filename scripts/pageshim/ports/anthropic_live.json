@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"connector": "anthropic_live",
+	"importer": null,
+	"shim": null,
+	"modules": [],
+	"inject": []
+}

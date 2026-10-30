@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"connector": "x_browser",
+	"importer": null,
+	"shim": null,
+	"modules": [],
+	"inject": []
+}

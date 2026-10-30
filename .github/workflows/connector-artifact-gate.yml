@@ -144,6 +144,11 @@ jobs:
         with:
           node-version-file: packages/polyfill-connectors/package.json
 
+      # The artifact-input resolver uses esbuild's own module graph. Install
+      # the existing root-lockfile tooling dependencies before evaluating it.
+      - name: Install artifact-check tooling dependencies
+        run: npm ci --ignore-scripts
+
       - name: Run the publish-selection refusal rule against this PR
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

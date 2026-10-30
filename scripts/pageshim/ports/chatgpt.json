@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"connector": "chatgpt",
+	"importer": null,
+	"shim": null,
+	"modules": [],
+	"inject": []
+}

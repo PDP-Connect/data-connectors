@@ -10,7 +10,7 @@
 	},
 	"connector_key": "whatsapp-web",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"display_name": "WhatsApp (web)",
 	"brand": {
 		"icon": "icon.svg",

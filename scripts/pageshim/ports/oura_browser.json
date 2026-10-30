@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"connector": "oura_browser",
+	"importer": null,
+	"shim": null,
+	"modules": [],
+	"inject": []
+}
