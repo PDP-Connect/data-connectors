@@ -72,6 +72,7 @@ async function startRegistry({
   tokenFault = null,
   publishedRepository = "acme/connector/public-name",
   publishedVersions = ["1.1.0", "1.1.0-beta.1", "1.0.0"],
+  tier = "supported",
   runtimeBindings = undefined,
 } = {}) {
   const registry = new FixtureRegistry({ challenge: true });
@@ -80,6 +81,7 @@ async function startRegistry({
     const artifact = publishArtifact(registry, {
       version,
       connectorKey: publishedRepository.split("/").at(-1),
+      tier,
       ...(runtimeBindings === undefined ? {} : { runtimeBindings }),
     });
     registry.digests.set(version, artifact.digest);
@@ -337,6 +339,7 @@ test("two full CLI runs write byte-identical catalogs from the same registry and
   const root = fixtureDirectory();
   const registry = await startRegistry({
     publishedRepository: "acme/connector/apple-photos",
+    tier: "development",
   });
   const firstPath = join(root, "first.json");
   const secondPath = join(root, "second.json");
@@ -402,6 +405,7 @@ test("the CLI exits nonzero without writing output when any manifest lookup is u
   const registry = await startRegistry({
     manifestFault: "1.1.0-beta.1",
     publishedRepository: "acme/connector/apple-photos",
+    tier: "development",
   });
   const output = join(root, "catalog.json");
   try {
@@ -417,7 +421,7 @@ test("the CLI exits nonzero without writing output when any manifest lookup is u
 
 test("the CLI exits nonzero without writing output when published metadata is unavailable", async () => {
   const root = fixtureDirectory();
-  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos" });
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos", tier: "development" });
   const latestDigest = registry.digests.get("1.1.0");
   const latestManifest = JSON.parse(registry.manifests.get(latestDigest).toString("utf8"));
   registry.blobs.delete(latestManifest.config.digest);
@@ -708,7 +712,7 @@ test("catalog metadata keeps Loom and Whole Foods at Development", async () => {
   }
 });
 
-test("catalog refuses a known scaffold whose published artifact claims Supported", async () => {
+test("catalog refuses a Development connector whose published artifact claims Supported", async () => {
   const registry = new FixtureRegistry({ challenge: true });
   publishArtifact(registry, {
     connectorKey: "loom",
@@ -721,7 +725,7 @@ test("catalog refuses a known scaffold whose published artifact claims Supported
     await registry.start();
     await assert.rejects(
       generate(null, registry.registry, { connectors: [{ manifest: "loom", connectorKey: "loom" }] }),
-      /known scaffold connector 'loom': published tier must remain at Development/,
+      /refusing to list Development connector 'loom'/,
     );
   } finally {
     await registry.stop();
@@ -758,7 +762,7 @@ test("identity mismatches and exclusions are refused before any registry request
 });
 
 test("ordinary and unknown synthetic identities pass the publish guard", async () => {
-  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos" });
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos", tier: "development" });
   try {
     const catalog = await generateConnectorCatalog({
       registry: registry.registry,
@@ -813,7 +817,7 @@ test("a refresh drops a previously published scaffold entry and the next run is 
 
 test("the CLI refresh drops excluded entries from the previous catalog and repeats byte for byte", async () => {
   const root = fixtureDirectory();
-  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos" });
+  const registry = await startRegistry({ publishedRepository: "acme/connector/apple-photos", tier: "development" });
   const seedPath = join(root, "seed.json");
   const previousPath = join(root, "previous.json");
   const firstPath = join(root, "first.json");

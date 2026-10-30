@@ -4,7 +4,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { fileURLToPath } from "node:url";
-import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
+import {
+  KNOWN_SCAFFOLD_CONNECTORS,
+  REAL_UNLISTED_CONNECTORS,
+} from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
 import {
   CONNECTOR_PUBLISH_INVENTORY,
   PUBLISHABLE_CONNECTORS,
@@ -22,6 +25,10 @@ import {
 const DIRECTORY = /^[a-z0-9][a-z0-9_]*$/;
 const PUBLIC_KEY = /^[a-z0-9][a-z0-9-]*$/;
 const SCAFFOLD_DIRECTORIES = new Set(KNOWN_SCAFFOLD_CONNECTORS);
+const DEVELOPMENT_DIRECTORIES = new Set([
+  ...KNOWN_SCAFFOLD_CONNECTORS,
+  ...Object.keys(REAL_UNLISTED_CONNECTORS),
+]);
 const SCAFFOLD_KEYS = new Set(
   CONNECTOR_PUBLISH_INVENTORY
     .filter(({ manifest }) => SCAFFOLD_DIRECTORIES.has(manifest))
@@ -51,18 +58,18 @@ export function assertPublishableRow(row) {
   }
 }
 
-export function assertScaffoldTier(row, metadata) {
+export function assertDevelopmentTier(row, metadata) {
   const { manifest, connectorKey } = row ?? {};
   if (
-    !SCAFFOLD_DIRECTORIES.has(manifest) &&
-    !SCAFFOLD_DIRECTORIES.has(connectorKey) &&
+    !DEVELOPMENT_DIRECTORIES.has(manifest) &&
+    !DEVELOPMENT_DIRECTORIES.has(connectorKey) &&
     !SCAFFOLD_KEYS.has(connectorKey)
   ) {
     return;
   }
   if (metadata?.tier !== "development") {
     throw new Error(
-      `refusing to list known scaffold connector '${connectorKey}': published tier must remain at Development (got '${metadata?.tier ?? "unknown"}')`,
+      `refusing to list Development connector '${connectorKey}' with published tier '${metadata?.tier ?? "unknown"}'`,
     );
   }
 }

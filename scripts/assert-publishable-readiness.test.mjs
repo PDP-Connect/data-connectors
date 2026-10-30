@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
 import {
   assertPublishableRow,
-  assertScaffoldTier,
+  assertDevelopmentTier,
 } from "./assert-publishable-readiness.mjs";
 import { PUBLISH_EXCLUSIONS, PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
 
@@ -44,18 +44,22 @@ test("a known scaffold is publishable only under its canonical identity", () => 
   }
 });
 
-test("a known scaffold's published metadata cannot claim Preview or Supported", () => {
-  assert.doesNotThrow(() => assertScaffoldTier(
+test("Development roster entries cannot claim Preview or Supported in published metadata", () => {
+  assert.doesNotThrow(() => assertDevelopmentTier(
     { manifest: "loom", connectorKey: "loom" },
     { tier: "development" },
   ));
   for (const tier of ["preview", "supported"]) {
     assert.throws(
-      () => assertScaffoldTier({ manifest: "loom", connectorKey: "loom" }, { tier }),
-      /known scaffold connector 'loom': published tier must remain at Development/,
+      () => assertDevelopmentTier({ manifest: "loom", connectorKey: "loom" }, { tier }),
+      /refusing to list Development connector 'loom'/,
       tier,
     );
   }
+  assert.throws(
+    () => assertDevelopmentTier({ manifest: "wholefoods", connectorKey: "wholefoods" }, { tier: "supported" }),
+    /refusing to list Development connector 'wholefoods'/,
+  );
 });
 
 test("WholeFoods is a canonical publish inventory entry, because it is a Development collector", () => {
