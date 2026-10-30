@@ -9,8 +9,12 @@
 	},
 	"connector_key": "muse",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-	"version": "0.1.7",
+	"version": "0.1.8",
 	"display_name": "Muse (Meta)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#0467DF"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"browser": {

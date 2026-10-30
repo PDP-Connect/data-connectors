@@ -8908,6 +8908,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/facebook/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/facebook",
 			"entry": "./connectors/facebook/index.ts",
 			"manifest": {
@@ -8921,8 +8922,12 @@
 				},
 				"connector_key": "facebook",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-				"version": "0.1.7",
+				"version": "0.1.8",
 				"display_name": "Facebook",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#0866FF"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -9335,6 +9340,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/fitbit/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/fitbit",
 			"entry": "./connectors/fitbit/index.ts",
 			"manifest": {
@@ -9348,8 +9354,12 @@
 				},
 				"connector_key": "fitbit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
-				"version": "0.1.6",
+				"version": "0.1.7",
 				"display_name": "Fitbit",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#00B0B9"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -9694,6 +9704,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/garmin_browser/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/garmin-browser",
 			"entry": "./connectors/garmin_browser/index.ts",
 			"manifest": {
@@ -9707,8 +9718,12 @@
 				},
 				"connector_key": "garmin-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/garmin-browser",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "Garmin (Browser Sign-In)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#000000"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -13933,6 +13948,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/google_takeout/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/google-takeout",
 			"entry": "./connectors/google_takeout/index.ts",
 			"manifest": {
@@ -13946,8 +13962,12 @@
 				},
 				"connector_key": "google-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-				"version": "0.1.24",
+				"version": "0.1.25",
 				"display_name": "Google Takeout",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#4285F4"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -18068,6 +18088,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/muse/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/muse",
 			"entry": "./connectors/muse/index.ts",
 			"manifest": {
@@ -18081,8 +18102,12 @@
 				},
 				"connector_key": "muse",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-				"version": "0.1.7",
+				"version": "0.1.8",
 				"display_name": "Muse (Meta)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#0467DF"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"browser": {
@@ -19742,6 +19767,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/perplexity/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/perplexity",
 			"entry": "./connectors/perplexity/index.ts",
 			"manifest": {
@@ -19755,8 +19781,12 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "Perplexity (Browser Sign-In)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#1FB8CD"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -20008,6 +20038,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/pocket/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/pocket",
 			"entry": "./connectors/pocket/index.ts",
 			"manifest": {
@@ -20021,8 +20052,12 @@
 				},
 				"connector_key": "pocket",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Pocket",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#EF3F56"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -24265,6 +24300,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/tiktok/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/tiktok",
 			"entry": "./connectors/tiktok/index.ts",
 			"manifest": {
@@ -24278,8 +24314,12 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.10",
+				"version": "0.3.11",
 				"display_name": "TikTok (Browser Sign-In)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#000000"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {

@@ -9,8 +9,12 @@
 	},
 	"connector_key": "perplexity",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"display_name": "Perplexity (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#1FB8CD"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
