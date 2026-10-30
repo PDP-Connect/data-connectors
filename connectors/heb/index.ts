@@ -2072,16 +2072,52 @@ async function emitOrderAndItems(
 				card_units: listOrder.itemCount,
 				product_rows: detail.items.length,
 				fulfilled_units: fulfilledUnits ?? "unknown",
+				...(fulfilledUnits === null ? quantityShapeCounts(detail.items) : {}),
 				reason: "unit_and_row_counts_differ",
 			});
-			await deps.progress("An order's item count did not match its details");
 		}
-		deps.itemCountTallies?.push({
-			orderId: listOrder.orderId,
-			declaredItemCount: listOrder.itemCount,
-			collectedItemCount: fulfilledUnits ?? detail.items.length,
-		});
+		// Units are known only when every row has a whole quantity. Without them
+		// the card's count has nothing to be compared with: a 2x line is one row
+		// and a weighed line is a fraction, so a row count cannot show that items
+		// are missing. Only a known shortfall reaches the owner or the run tally.
+		if (fulfilledUnits !== null) {
+			if (
+				listOrder.itemCount !== null &&
+				fulfilledUnits < listOrder.itemCount
+			) {
+				await deps.progress("An order's item count did not match its details");
+			}
+			deps.itemCountTallies?.push({
+				orderId: listOrder.orderId,
+				declaredItemCount: listOrder.itemCount,
+				collectedItemCount: fulfilledUnits,
+			});
+		}
 	}
+}
+
+/** How each row's quantity parsed, as counts only, so an order whose
+ *  fulfilled units are unknown says why in its diagnostic line. */
+function quantityShapeCounts(items: readonly { quantity: number | null }[]): {
+	fractional_qty_rows: number;
+	unparsed_qty_rows: number;
+	whole_qty_rows: number;
+} {
+	const counts = {
+		fractional_qty_rows: 0,
+		unparsed_qty_rows: 0,
+		whole_qty_rows: 0,
+	};
+	for (const { quantity } of items) {
+		if (quantity === null) {
+			counts.unparsed_qty_rows += 1;
+		} else if (Number.isSafeInteger(quantity)) {
+			counts.whole_qty_rows += 1;
+		} else {
+			counts.fractional_qty_rows += 1;
+		}
+	}
+	return counts;
 }
 
 /** Process one list-page order: fetch detail (if in scope), account for
@@ -3103,6 +3139,7 @@ export const hebConnector: BrowserConnectorConfig = {
 	},
 	async collect(ctx: BrowserCollectContext): Promise<void> {
 		const {
+			collectionMode,
 			scope,
 			state,
 			emitRecord,
@@ -3141,7 +3178,12 @@ export const hebConnector: BrowserConnectorConfig = {
 		const collectNutritionTargets = wantsNutrition;
 
 		const ordersState = (state.orders ?? {}) as OrdersStateShape;
-		const boundary = resumeBoundary(ordersState.checkpoint);
+		// An explicit full refresh ignores the resume checkpoint and walks the
+		// whole order history.
+		const boundary =
+			collectionMode === "full_refresh"
+				? null
+				: resumeBoundary(ordersState.checkpoint);
 		// A committed `orders` checkpoint is this connection's own record that
 		// H-E-B has listed orders for this account before. It is what makes a
 		// later "no order history" page a contradiction to escalate rather than
