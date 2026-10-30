@@ -10,6 +10,7 @@ Install from the repository root so TypeScript and runtime imports resolve the d
 
 ```bash
 npm ci
+npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
 npm run verify --workspace @pdpp/polyfill-connectors
 npm test --workspace @pdpp/polyfill-connectors
 npm run connector-implementation-index:check

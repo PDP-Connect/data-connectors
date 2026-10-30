@@ -4,7 +4,14 @@ Create and maintain PDPP Collection Profile implementations in this repository u
 
 ## Local authoring loop
 
-Run these commands from the repository root after `npm ci`. `--json` writes to the path as given, relative to the current working directory; using the root keeps the claim at `connectors/<key>/evidence/claim.json`.
+Run these commands from the repository root after installing dependencies:
+
+```bash
+npm ci
+npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+```
+
+The second install provides the isolated Vitest dependencies used by package verification and tests. `--json` writes to the path as given, relative to the current working directory; using the root keeps the claim at `connectors/<key>/evidence/claim.json`.
 
 1. **Scaffold:** `node --import tsx packages/polyfill-connectors/bin/connector-init.ts <key> [--display-name <name>] [--stream <stream>] [--browser]`. The key and stream use lowercase snake_case. The default creates an API connector; `--browser` creates a browser connector. The command refuses to overwrite existing paths. The scaffold leaves `TODO` stubs for stream descriptions, the upstream request, and (for `--browser`) navigation and extraction. Fill them in, and configure credentials or a browser session, before step 2.
 2. **Run and watch:** `node --import tsx packages/polyfill-connectors/bin/connector-dev.ts <key> [--streams <name,name,...>] [--summary-out <path>]`. This runs the connector against its live upstream using configured credentials and prints records and progress locally. It is a development run, not an ingest proof. Keep output and summaries private.
