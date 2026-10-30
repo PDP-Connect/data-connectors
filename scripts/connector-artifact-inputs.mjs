@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
+import { transformSync } from "esbuild";
 import {
   CONSENT_AGGREGATE,
   CONSENT_RESOLUTION_MODULE,
@@ -183,8 +184,18 @@ function artifactInputContent(path, content) {
   return Buffer.from(JSON.stringify(packageMetadata));
 }
 
-function localImportSpecifiers(source) {
-  const text = source.toString();
+function localImportSpecifiers(source, path) {
+  const extension = posix.extname(path);
+  const loader = [".ts", ".mts", ".cts"].includes(extension)
+    ? "ts"
+    : extension === ".tsx"
+      ? "tsx"
+      : extension === ".jsx"
+        ? "jsx"
+        : "js";
+  // Parse and print ModuleItems before scanning specifiers. This catches valid
+  // same-line imports while keeping the hash closure aligned with esbuild.
+  const text = transformSync(source.toString(), { loader, format: "esm" }).code;
   return [
     ...text.matchAll(STATIC_LOCAL_IMPORT),
     ...text.matchAll(SIDE_EFFECT_LOCAL_IMPORT),
@@ -229,7 +240,7 @@ function addLocalImportClosure(commit, entryPath, files, options, excluded = new
       }
       files.set(path, source);
     }
-    for (const specifier of localImportSpecifiers(source)) {
+    for (const specifier of localImportSpecifiers(source, path)) {
       pending.push(remap(resolveLocalImport(commit, path, specifier, options, readFile)));
     }
   }

@@ -409,6 +409,37 @@ test("public builder rejects a selected input's linked ancestor", (t) => {
 	assert.match(result.stderr, /symbolic link/);
 });
 
+test("public builder rejects a transitive selected input link escape", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	fixture.put(fixture.inject, 'import "./child.js"; globalThis.portChild = true;');
+	const outside = join(fixture.root, "outside-child.js");
+	writeFileSync(outside, "globalThis.portChild = false;");
+	symlinkSync(outside, join(fixture.repo, "scripts/pageshim/inject/child.js"));
+	const result = fixture.run();
+	assert.notEqual(
+		result.status,
+		0,
+		`Unsafe transitive selected input link was accepted: ${result.stdout}`,
+	);
+	assert.match(result.stderr, /symbolic link|outside trusted repository/);
+});
+
+test("public builder rejects a transitive selected input linked ancestor", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	fixture.put(fixture.inject, 'import "./nested/child.js";');
+	const outside = join(fixture.root, "outside-nested");
+	mkdirSync(outside);
+	writeFileSync(join(outside, "child.js"), "globalThis.portChild = true;");
+	symlinkSync(outside, join(fixture.repo, "scripts/pageshim/inject/nested"), "dir");
+	const result = fixture.run();
+	assert.notEqual(
+		result.status,
+		0,
+		`Unsafe transitive selected input ancestor was accepted: ${result.stdout}`,
+	);
+	assert.match(result.stderr, /symbolic link|outside trusted repository/);
+});
+
 test("public builder rejects directory and FIFO inputs without blocking", (t) => {
 	const fixture = physicalBuilderFixture(t);
 	const target = join(fixture.repo, fixture.inject);

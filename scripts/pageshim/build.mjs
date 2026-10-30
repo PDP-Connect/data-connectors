@@ -24,7 +24,7 @@
 
 import { mkdirSync, readFileSync } from "node:fs";
 import { builtinModules, createRequire } from "node:module";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, posix, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { gzipSync } from "node:zlib";
@@ -58,6 +58,67 @@ const HASH_IMPORTERS = new Set([
 	"scripts/pageshim/test-fixtures/crypto-runtime.ts",
 ].map(path => join(REPO, path)));
 const BUILTINS = new Set(builtinModules);
+const PORT_IMPORT = /^\s*(?:import|export)\s+(?!type\b)(?:[^\n]*\n)*?[^\n]*?\sfrom\s*(["'])(\.{1,2}\/[^"']*?)\1/gm;
+const PORT_SIDE_EFFECT_IMPORT = /^\s*import\s*(["'])(\.{1,2}\/[^"']*?)\1/gm;
+const PORT_DYNAMIC_IMPORT = /\bimport\s*\(\s*(["'])(\.{1,2}\/[^"']*?)\1/g;
+const PORT_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
+
+function localImports(source, path) {
+	const extension = posix.extname(path);
+	const loader = extension === ".tsx"
+		? "tsx"
+		: extension === ".jsx"
+			? "jsx"
+			: extension === ".json"
+				? "json"
+				: [".ts", ".mts", ".cts"].includes(extension)
+					? "ts"
+					: "js";
+	const text = esbuild.transformSync(source, { loader, format: "esm" }).code;
+	return [
+		...text.matchAll(PORT_IMPORT),
+		...text.matchAll(PORT_SIDE_EFFECT_IMPORT),
+		...text.matchAll(PORT_DYNAMIC_IMPORT),
+	].map((match) => match[2]);
+}
+
+function portCandidates(from, specifier) {
+	const resolved = posix.normalize(posix.join(posix.dirname(from), specifier));
+	const extension = posix.extname(resolved);
+	if (!extension)
+		return [
+			...PORT_EXTENSIONS.map((suffix) => `${resolved}${suffix}`),
+			...PORT_EXTENSIONS.map((suffix) => `${resolved}/index${suffix}`),
+		];
+	return [resolved, ...(extension === ".js" ? [`${resolved.slice(0, -3)}.ts`] : [])];
+}
+
+function validateSelectedPortClosure(roots, readFile) {
+	const pending = [...roots];
+	const visited = new Set();
+	while (pending.length) {
+		const path = pending.pop();
+		if (visited.has(path)) continue;
+		visited.add(path);
+		const source = readFile(path);
+		if (source === null)
+			throw new Error(`missing selected PageShim port input ${path}`);
+		for (const specifier of localImports(source.toString(), path)) {
+			let resolved;
+			for (const candidate of portCandidates(path, specifier)) {
+				if (readFile(candidate) !== null) {
+					resolved = candidate;
+					break;
+				}
+			}
+			if (!resolved)
+				throw new Error(
+					`cannot resolve selected PageShim port import ${specifier} from ${path}`,
+				);
+			pending.push(resolved);
+		}
+	}
+}
 
 function stubSource(spec) {
 	let keys = [];
@@ -179,6 +240,12 @@ export async function buildPageshim({
 		connector,
 		createPageShimPortFileReader(REPO),
 	);
+	if (!selected.empty) {
+		validateSelectedPortClosure(
+			[selected.shim, ...selected.inject],
+			createPageShimPortFileReader(REPO),
+		);
+	}
 	const port = selected.empty
 		? undefined
 		: {
