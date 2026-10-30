@@ -61,7 +61,7 @@ test("a message with reactions, a link preview and a file yields the whole famil
 		latest_reply: null,
 		subtype: null,
 		is_tombstone: false,
-		text: "Reminder: the relayer ran out of VANA again, see <#C0987654321|eng-alerts>",
+		text: "Reminder: the staging database is down for maintenance tonight, see <#C0987654321|eng-alerts>",
 		edited_ts: null,
 		edited_by: null,
 		has_files: true,
@@ -93,7 +93,7 @@ test("a message with reactions, a link preview and a file yields the whole famil
 	);
 	assert.equal(
 		family.attachments[0]?.title_link,
-		"https://docs.vana.org/personal-server",
+		"https://docs.example.com/getting-started",
 	);
 	assert.equal(family.files.length, 1);
 	valid("files", family.files[0] ?? {});

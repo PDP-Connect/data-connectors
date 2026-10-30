@@ -4,7 +4,7 @@
 		{
 			"type": "message",
 			"user": "U0123456789",
-			"text": "Reminder: the relayer ran out of VANA again, see <#C0987654321|eng-alerts>",
+			"text": "Reminder: the staging database is down for maintenance tonight, see <#C0987654321|eng-alerts>",
 			"ts": "1790450000.000200",
 			"team": "T0123456789",
 			"client_msg_id": "6b1a9d6e-0000-4000-8000-000000000001",
@@ -30,13 +30,13 @@
 			"attachments": [
 				{
 					"id": 1,
-					"fallback": "Vana docs: Personal Server",
-					"title": "Personal Server",
-					"title_link": "https://docs.vana.org/personal-server",
-					"text": "Run your own server.",
-					"from_url": "https://docs.vana.org/personal-server",
-					"service_name": "docs.vana.org",
-					"service_icon": "https://docs.vana.org/favicon.ico"
+					"fallback": "Example docs: Getting started",
+					"title": "Getting started",
+					"title_link": "https://docs.example.com/getting-started",
+					"text": "Set up your first project.",
+					"from_url": "https://docs.example.com/getting-started",
+					"service_name": "docs.example.com",
+					"service_icon": "https://docs.example.com/favicon.ico"
 				}
 			],
 			"files": [
