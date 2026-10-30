@@ -16,6 +16,9 @@ on:
     branches: [main]
     paths:
       - "packages/polyfill-connectors/**"
+      - "package.json"
+      - "scripts/groupme-mutation/**"
+      - ".github/scripts/groupme-mutation-admission.mjs"
       - "connectors/**"
       - "scripts/test-sandbox/**"
       - ".github/workflows/polyfill-connectors.yml"
@@ -40,6 +43,12 @@ jobs:
       contents: read
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
+      harness: ${{ steps.filter.outputs.harness }}
+      groupme: ${{ steps.filter.outputs.groupme }}
+      mutation_required: ${{ steps.filter.outputs.mutation_required }}
+      base_sha: ${{ steps.filter.outputs.base_sha }}
+      head_sha: ${{ steps.filter.outputs.head_sha }}
+      merge_base_sha: ${{ steps.filter.outputs.merge_base_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,23 +58,11 @@ jobs:
       - name: Determine whether relevant paths changed
         id: filter
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [ -n "$BASE_SHA" ]; then
-            MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-            CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")"
-          else
-            CHANGED="$(git diff --name-only HEAD~1 HEAD)"
-          fi
-
-          echo "$CHANGED"
-
-          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|scripts/test-sandbox/|\.github/workflows/polyfill-connectors\.yml$)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-          fi
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node .github/scripts/groupme-mutation-admission.mjs
 
   verify:
     name: verify
@@ -100,6 +97,13 @@ jobs:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: npm ci --ignore-scripts
+
+      - name: Install isolated Vitest test tools
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+
+      - name: Test GroupMe mutation helpers
+        # Root helper tests fall outside the package's scripts/**/*.test.mjs glob.
+        run: node --test scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs scripts/groupme-mutation/changes.test.mjs scripts/groupme-mutation/evidence.test.mjs scripts/groupme-mutation/admission.test.mjs
 
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
@@ -185,6 +189,64 @@ jobs:
         # scripts/run-tests.mjs and tsconfig.json for the file list and the
         # reinstatement note (that package isn't part of Move A's scope).
         run: npm test
+
+  groupme-mutation:
+    # INITIAL EVIDENCE, NOT REQUIRED. Visible as its own check and red when the canary or
+    # the reconciled population fails; the gate below records it as optional. Promotion to
+    # required is a root decision after hosted CI reproduces the local evidence.
+    name: GroupMe mutation evidence
+    needs: [changes, verify]
+    if: always() && needs.changes.outputs.mutation_required == 'true' && (needs.verify.result == 'success' || needs.verify.result == 'skipped') && (github.event_name == 'pull_request' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Mutated ranges name checked-out lines, so HEAD must be the PR head commit,
+          # not the default merge commit.
+          ref: ${{ needs.changes.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          set -o pipefail
+          npm ci --ignore-scripts 2>&1 | tee "$RUNNER_TEMP/groupme-mutation-install.log"
+
+      - name: Install isolated test tools
+        # The runner refuses to start without the pinned Stryker and Vitest tree.
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+
+      - name: Run the official GroupMe mutation invocation
+        # One Stryker run: changed production ranges plus the canary, native Vitest only.
+        # The report directory must not exist; the artifact glob below includes it and its log.
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.changes.outputs.head_sha }}
+          MERGE_BASE: ${{ needs.changes.outputs.merge_base_sha }}
+          REPORT: ${{ runner.temp }}/groupme-mutation-evidence
+        run: |
+          set -o pipefail
+          npm run groupme-mutation -- --mode diff --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT" 2>&1 | tee "$REPORT.log"
+
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: groupme-mutation-${{ github.run_id }}
+          path: ${{ runner.temp }}/groupme-mutation-*
+          if-no-files-found: warn
+          retention-days: 14
+
 
   connector-evidence:
     name: Connector evidence summary
@@ -306,19 +368,29 @@ jobs:
 
   gate:
     name: Polyfill Connectors Gate
-    needs: [changes, verify, test]
+    needs: [changes, verify, test, groupme-mutation]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
       - name: Evaluate all job results
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          MUTATION_RESULT: ${{ needs.groupme-mutation.result }}
+          MUTATION_REQUIRED: ${{ needs.changes.outputs.mutation_required }}
+          MUTATION_ENFORCEMENT: optional
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           echo "changes: $CHANGES_RESULT"
           echo "verify:  $VERIFY_RESULT"
           echo "tests:   $TEST_RESULT"
+          echo "mutation: $MUTATION_RESULT"
 
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "::error::changes job did not succeed (result: $CHANGES_RESULT) — cannot trust downstream skip/run decisions"
@@ -340,5 +412,7 @@ jobs:
               exit 1
               ;;
           esac
+
+          node .github/scripts/groupme-mutation-admission.mjs --gate
 
           echo "Polyfill Connectors Gate: verification and every test shard succeeded or were correctly skipped as irrelevant."

@@ -4,10 +4,13 @@ This repository is the source home for PDPP Collection Profile connectors. Each 
 
 ## Build and verify
 
+Start with the [connector authoring loop](AUTHORING.md) for the scaffold, local run, capture, replay, and safe evidence workflow.
+
 Install from the repository root so TypeScript and runtime imports resolve the declared workspace dependencies:
 
 ```bash
 npm ci
+npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
 npm run verify --workspace @pdpp/polyfill-connectors
 npm test --workspace @pdpp/polyfill-connectors
 npm run connector-implementation-index:check

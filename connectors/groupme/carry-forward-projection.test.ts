@@ -30,7 +30,7 @@
  */
 
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import type {
 	CollectContext,
 	EmittedMessage,
@@ -55,10 +55,10 @@ const TOKEN = "test-access-token";
 // GroupMe's real production pacing interval that is minutes of wall-clock
 // for zero behavioral value (the assertions are about STATE/fingerprint
 // projection, not timing). Disable pacing for this file only.
-before(() => {
+beforeAll(() => {
 	__setZeroDelayHttpGovernorForTests();
 });
-after(() => {
+afterAll(() => {
 	__resetHttpGovernorForTests();
 });
 

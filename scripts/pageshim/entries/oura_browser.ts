@@ -9,8 +9,9 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import type { Page } from "playwright";
 
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
-const streams = ["sleep", "readiness", "activity"];
+const streams = PAGESHIM_CONNECTOR_STREAMS;
 
 function requestedScopeEntries(page: ShimPage): unknown {
 	try {
