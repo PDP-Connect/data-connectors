@@ -226,6 +226,10 @@ export async function buildPageshim({
 			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
 				manifest.version,
 			),
+			// An entry serves every stream the manifest declares.
+			PAGESHIM_CONNECTOR_STREAMS: JSON.stringify(
+				manifest.streams.map((stream) => stream.name),
+			),
 			// The runtime reads each stream's consent_time_field by this name.
 			PAGESHIM_CONNECTOR_MANIFEST: JSON.stringify(connector),
 		},

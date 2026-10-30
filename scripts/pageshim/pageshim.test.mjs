@@ -45,13 +45,21 @@ const NODE_ONLY = new Set([
 	"patchright",
 	"readline",
 ]);
-const manifestVersion = (name) =>
+const manifestOf = (name) =>
 	JSON.parse(
 		readFileSync(
 			new URL(`../../connectors/${name}/manifest.json`, import.meta.url),
 			"utf8",
 		),
-	).version;
+	);
+const manifestVersion = (name) => manifestOf(name).version;
+/** Every manifest stream, as the scopes a PageShim bundle must accept. */
+const manifestScopes = (name) => {
+	const manifest = manifestOf(name);
+	return manifest.streams.map(
+		(stream) => `${manifest.mobile.pageshim.scope_prefix}.${stream.name}`,
+	);
+};
 
 function assertCleanRun(run) {
 	assert.deepEqual(
@@ -240,15 +248,23 @@ for (const name of pageShimConnectors(
 			assert.equal(r.calls.goHeadless, 1);
 		});
 
+		await t.test("accepts and runs every manifest stream", async () => {
+			const r = await run({ scopes: manifestScopes(name) });
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.deepEqual(
+				r.result?.errors.filter((error) => error.phase === "init") ?? [],
+				[],
+				"the bundle refused a manifest stream",
+			);
+		});
+
 		await t.test("empty requestedScopes: protocol_violation", async () => {
 			const r = await run({ scopes: [] });
 			assertFatal(r, c, name, {
 				errorClass: "protocol_violation",
 				phase: "init",
-				requestedScopes:
-					name === "chatgpt"
-						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.allScopes ?? c.scopes,
+				requestedScopes: manifestScopes(name),
 			});
 		});
 
@@ -257,10 +273,7 @@ for (const name of pageShimConnectors(
 			assertFatal(r, c, name, {
 				errorClass: "protocol_violation",
 				phase: "init",
-				requestedScopes:
-					name === "chatgpt"
-						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.allScopes ?? c.scopes,
+				requestedScopes: manifestScopes(name),
 			});
 		});
 
@@ -327,7 +340,7 @@ test("chatgpt: complete bounded walk is not marked partial just because STATE wa
 		assert.deepEqual(r.result.exportSummary, {
 			count: 1,
 			label: "conversation",
-			details: { conversations: 1, messages: 1, memories: 0, account_plan: 0 },
+			details: fx.chatgptDetails({ conversations: 1, messages: 1 }),
 		});
 	} finally {
 		fx.useConversationCount(2);
@@ -370,12 +383,7 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 		);
 		assert.equal(legacy.result["chatgpt.conversations"].records.length, 2);
 		assert.equal(legacy.result["chatgpt.messages"].records.length, 2);
-		assert.deepEqual(legacy.result.exportSummary.details, {
-			conversations: 2,
-			messages: 2,
-			memories: 1,
-			account_plan: 0,
-		});
+		assert.deepEqual(legacy.result.exportSummary.details, fx.chatgptDetails({ conversations: 2, messages: 2, memories: 1 }));
 
 		const streamed = await runHarness({
 			bundle: built.outfile,
@@ -399,12 +407,7 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 			readFileSync(streamed.streamScopeFiles["chatgpt.memories"], "utf8"),
 		).records;
 		assert.deepEqual(memoryRecords, legacy.result["chatgpt.memories"].records);
-		assert.deepEqual(streamed.streamDone.exportSummary.details, {
-			conversations: 2,
-			messages: 2,
-			memories: 1,
-			account_plan: 0,
-		});
+		assert.deepEqual(streamed.streamDone.exportSummary.details, fx.chatgptDetails({ conversations: 2, messages: 2, memories: 1 }));
 
 		const unsupported = await runHarness({
 			bundle: built.outfile,
@@ -436,12 +439,7 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 		assert.equal(memoriesOnly.result["chatgpt.conversations"], undefined);
 		assert.equal(memoriesOnly.result["chatgpt.messages"], undefined);
 		assert.equal(memoriesOnly.result["chatgpt.memories"].records.length, 1);
-		assert.deepEqual(memoriesOnly.result.exportSummary.details, {
-			conversations: 0,
-			messages: 0,
-			memories: 1,
-			account_plan: 0,
-		});
+		assert.deepEqual(memoriesOnly.result.exportSummary.details, fx.chatgptDetails({ memories: 1 }));
 	} finally {
 		rmSync(spool, { recursive: true, force: true });
 	}
@@ -486,12 +484,7 @@ test("chatgpt: account_plan is served as its own timeless scope", {
 		assert.deepEqual(planFields(plans[0]), expectedPlan);
 		assert.equal(legacy.result["chatgpt.conversations"].records.length, 2);
 		assert.equal(legacy.result["chatgpt.memories"], undefined);
-		assert.deepEqual(legacy.result.exportSummary.details, {
-			conversations: 2,
-			messages: 2,
-			memories: 0,
-			account_plan: 1,
-		});
+		assert.deepEqual(legacy.result.exportSummary.details, fx.chatgptDetails({ conversations: 2, messages: 2, account_plan: 1 }));
 
 		const streamed = await runHarness({
 			bundle: built.outfile,
@@ -593,6 +586,53 @@ test("chatgpt: account_plan is served as its own timeless scope", {
 		);
 	} finally {
 		fx.setAccountsCheckStatus(200);
+		rmSync(spool, { recursive: true, force: true });
+	}
+});
+
+test("chatgpt: every manifest stream yields schema-valid records on both hosts", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const { validateRecord } = await import("../../connectors/chatgpt/schemas.ts");
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-every-stream.js"),
+	});
+	const scopes = manifestScopes("chatgpt");
+	const spool = mkdtempSync(join(out, "chatgpt-every-stream-"));
+	try {
+		const legacy = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes,
+		});
+		assert.deepEqual(legacy.ret, { ok: true }, legacy.log.slice(-20).join("\n"));
+		assertCleanRun(legacy);
+		assert.deepEqual(legacy.result.errors, []);
+		assert.match(legacy.data.status, /^Complete!/);
+		for (const scope of scopes) {
+			const records = legacy.result[scope]?.records ?? [];
+			assert.ok(records.length > 0, `${scope} has no records`);
+			const stream = scope.slice("chatgpt.".length);
+			for (const record of records) {
+				const checked = validateRecord(stream, record);
+				assert.equal(checked.ok, true, `${scope} record fails its schema`);
+				assert.equal(checked.anomalies, undefined, `${scope} record has shape anomalies`);
+			}
+		}
+		const streamed = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes,
+			resultStreaming: true,
+			resultSpoolDirectory: spool,
+		});
+		assert.deepEqual(streamed.ret, { ok: true }, streamed.log.slice(-20).join("\n"));
+		assert.equal(streamed.streamResult?.completed, true);
+		assert.equal(streamed.streamResult.scopeCount, scopes.length);
+		assert.deepEqual(streamed.streamDone.errors, []);
+	} finally {
 		rmSync(spool, { recursive: true, force: true });
 	}
 });
@@ -1362,7 +1402,7 @@ test("chatgpt: capped PageShim walk reports partial with omitted detail evidence
 	assert.deepEqual(r.result.exportSummary, {
 		count: 1,
 		label: "conversation",
-		details: { conversations: 1, messages: 1, memories: 0, account_plan: 0 },
+		details: fx.chatgptDetails({ conversations: 1, messages: 1 }),
 	});
 	assert.deepEqual(r.result.errors, [
 		{

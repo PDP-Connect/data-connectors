@@ -1,0 +1,158 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+import { execFileSync } from "node:child_process";
+import { appendFileSync } from "node:fs";
+
+const repo = process.env.GITHUB_WORKSPACE ?? process.cwd();
+const event = process.env.EVENT_NAME;
+// Admit all production paths so the selector can visibly reject unsupported ones.
+// Keep this predicate aligned with scripts/groupme-mutation/select.mjs.
+function production(path) {
+	return (
+		path.startsWith("connectors/groupme/") &&
+		path.endsWith(".ts") &&
+		!path.endsWith(".test.ts") &&
+		!path.endsWith(".d.ts") &&
+		!/(?:^|\/)(?:__fixtures__|fixtures|tests|docs)(?:\/|$)/.test(path)
+	);
+}
+const zeroSha = /^0+$/;
+
+function git(args) {
+	return execFileSync("git", args, {
+		cwd: repo,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+}
+
+function commitSha(value, label) {
+	if (!value || !/^[0-9a-f]{40,64}$/i.test(value) || zeroSha.test(value))
+		throw new Error(`${label} must be a nonzero full commit SHA`);
+	git(["cat-file", "-e", `${value}^{commit}`]);
+	return value;
+}
+
+// "optional" is visible but never blocks the gate; "required" is the promotion switch.
+export function mutationGate({ enforcement, required, mutationResult }) {
+	if (enforcement === "optional") return true;
+	return required
+		? mutationResult === "success"
+		: mutationResult === "success" || mutationResult === "skipped";
+}
+
+function pathFlags(changed) {
+	const allPaths = changed.flatMap(({ paths }) => paths);
+	const harness = allPaths.some(
+		(file) =>
+			file.startsWith("scripts/groupme-mutation/") ||
+			file.startsWith("packages/polyfill-connectors/test-tools/") ||
+			file === "packages/polyfill-connectors/scripts/test-lanes.mjs" ||
+			file === "packages/polyfill-connectors/vitest.config.mjs" ||
+			file === ".github/scripts/groupme-mutation-admission.mjs" ||
+			file === "package.json" ||
+			file === ".github/workflows/polyfill-connectors.yml",
+	);
+	// Harness changes must also admit ordinary verification, or they skip it.
+	const relevant =
+		harness ||
+		allPaths.some(
+			(file) =>
+				file.startsWith("connectors/") ||
+				file.startsWith("packages/polyfill-connectors/") ||
+				file.startsWith("scripts/test-sandbox/") ||
+				file === ".github/workflows/polyfill-connectors.yml",
+		);
+	const groupme = allPaths.some(production);
+	return { relevant, harness, groupme, mutationRequired: harness || groupme };
+}
+
+try {
+	let result;
+	if (process.argv[2] === "--gate") {
+		const enforcement = process.env.MUTATION_ENFORCEMENT ?? "optional";
+		if (enforcement !== "optional" && enforcement !== "required")
+			throw new Error(`unknown MUTATION_ENFORCEMENT '${enforcement}'`);
+		const required = process.env.MUTATION_REQUIRED === "true";
+		const mutationResult = process.env.MUTATION_RESULT;
+		const accepted = mutationGate({ enforcement, required, mutationResult });
+		result = { enforcement, required, mutationResult, accepted };
+		process.stdout.write(`${JSON.stringify(result)}\n`);
+		if (!accepted)
+			throw new Error(
+				`mutation gate rejected result '${mutationResult}' (required=${required})`,
+			);
+		if (mutationResult !== "success" && mutationResult !== "skipped")
+			process.stdout.write(
+				`::warning::GroupMe mutation evidence is '${mutationResult}' and is not a required check yet\n`,
+			);
+	} else if (event !== "push" && event !== "pull_request") {
+		result = {
+			event,
+			before: null,
+			base: null,
+			head: null,
+			mergeBase: null,
+			changed: [],
+			...pathFlags([]),
+		};
+	} else {
+		const head = commitSha(process.env.HEAD_SHA, "head SHA");
+		const before =
+			event === "push"
+				? commitSha(process.env.BEFORE_SHA, "push before SHA")
+				: undefined;
+		const base =
+			event === "pull_request"
+				? commitSha(process.env.BASE_SHA, "pull request base SHA")
+				: before;
+		const mergeBase = git(["merge-base", base, head]).trim();
+		commitSha(mergeBase, "merge-base SHA");
+		const raw = git([
+			"diff",
+			"--name-status",
+			"-z",
+			"--find-renames",
+			mergeBase,
+			head,
+		]);
+		const fields = raw ? raw.split("\0") : [];
+		if (fields.length && fields.at(-1) !== "")
+			throw new Error("malformed NUL name-status terminator");
+		if (fields.length) fields.pop();
+		const changed = [];
+		for (let i = 0; i < fields.length; ) {
+			const status = fields[i++];
+			if (!status || !/^(?:A|M|T|D|R\d{1,3}|C\d{1,3})$/.test(status))
+				throw new Error("malformed NUL name-status diff");
+			const count = status.startsWith("R") || status.startsWith("C") ? 2 : 1;
+			const paths = fields.slice(i, i + count);
+			if (paths.length !== count || paths.some((entry) => !entry))
+				throw new Error("malformed NUL name-status path list");
+			i += count;
+			changed.push({ status, paths });
+		}
+		result = {
+			event,
+			before: before ?? null,
+			base,
+			head,
+			mergeBase,
+			changed,
+			...pathFlags(changed),
+		};
+	}
+	process.stdout.write(`${JSON.stringify(result)}\n`);
+	if (process.env.GITHUB_OUTPUT) {
+		appendFileSync(
+			process.env.GITHUB_OUTPUT,
+			`relevant=${result.relevant}\nharness=${result.harness}\ngroupme=${result.groupme}\nmutation_required=${result.mutationRequired}\nbase_sha=${result.base ?? ""}\nhead_sha=${result.head ?? ""}\nmerge_base_sha=${result.mergeBase ?? ""}\n`,
+		);
+	}
+} catch (error) {
+	process.stderr.write(
+		`${error instanceof Error ? error.message : String(error)}\n`,
+	);
+	process.exitCode = 1;
+}

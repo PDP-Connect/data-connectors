@@ -340,6 +340,7 @@ function physicalBuilderFixture(t) {
 		"connectors/anthropic/manifest.json",
 		JSON.stringify({
 			version: "1.0.0",
+			streams: [{ name: "records" }],
 			mobile: { pageshim: { entry: "../../../connectors/anthropic/index.ts" } },
 		}),
 	);

@@ -25,6 +25,7 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 
 // Defined by build.mjs from connectors/strava_browser/manifest.json.
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
 type ScopeEntriesPage = ShimPage & {
 	requestedScopeEntries?: () => unknown;
@@ -42,7 +43,7 @@ const activitiesConsentField =
 		page,
 		{
 			platform: "strava",
-			scopes: ["strava.activities"],
+			scopes: PAGESHIM_CONNECTOR_STREAMS.map((stream) => `strava.${stream}`),
 			version: PAGESHIM_CONNECTOR_VERSION,
 			loginUrl: LOGIN_URL,
 			loginMessage: "Sign in to Strava, then return here.",

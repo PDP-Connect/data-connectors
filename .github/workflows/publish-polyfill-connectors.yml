@@ -103,6 +103,7 @@ concurrency:
   # that publish once per release.
   group: publish-polyfill-connectors
   cancel-in-progress: false
+  queue: max
 
 jobs:
   prepare:
@@ -696,6 +697,12 @@ jobs:
                 --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-polyfill-connectors.yml@refs/heads/main" \
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com
               oras pull "ghcr.io/pdp-connect/connector-catalog@${PREVIOUS_DIGEST}" --output "$CATALOG_DIR/previous"
+              # A queued older run must not replace a catalog from a newer commit.
+              PREVIOUS_SOURCE="$(node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).source_commit; if (typeof s !== "string" || !/^[0-9a-f]{40}$/.test(s)) process.exit(1); console.log(s)' "$CATALOG_DIR/previous/catalog.json")"
+              if ! git merge-base --is-ancestor "$PREVIOUS_SOURCE" "$GITHUB_SHA"; then
+                echo "::error::previous catalog source is not an ancestor of this run; refusing to replace it"
+                exit 1
+              fi
               PREVIOUS_ARGS=(--previous-catalog "$CATALOG_DIR/previous/catalog.json")
               ;;
             absent) ;;

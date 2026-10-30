@@ -67,6 +67,51 @@ test("catalog accepts a fresh signed catalog through the registry token flow", a
   assert.ok(registry.requests.some((path) => path.startsWith("/token?")));
 });
 
+test("catalog fetches the requested signed digest even after latest moves", async (t) => {
+  const { registry, signer, options } = await fixture(t);
+  const first = publishCatalog(registry, signer);
+  publishCatalog(registry, signer, {
+    catalog: { ...freshCatalog(), generated_at: "2026-09-16T12:00:00.000Z" },
+  });
+
+  const result = await fetchCatalog({ ...options, catalogDigest: first.digest });
+  assert.deepEqual(result, { catalog: first.catalog, digest: first.digest });
+  assert.ok(!registry.requests.includes(`/v2/${CATALOG_REPOSITORY}/manifests/latest`));
+});
+
+test("catalog refuses an unavailable requested digest without falling back to latest", async (t) => {
+  const { registry, signer, options } = await fixture(t);
+  publishCatalog(registry, signer);
+  await assert.rejects(fetchCatalog({ ...options, catalogDigest: `sha256:${"f".repeat(64)}` }), { reason: "absent" });
+  assert.ok(!registry.requests.includes(`/v2/${CATALOG_REPOSITORY}/manifests/latest`));
+});
+
+test("catalog validates a requested digest before network access", async () => {
+  for (const catalogDigest of [null, "", "latest", "sha256:abc", 42]) {
+    await assert.rejects(fetchCatalog({
+      catalogDigest,
+      fetchImpl() { assert.fail("unexpected network request"); },
+      retryOptions: { jitter: false, sleep: async () => {}, onRetry: () => {} },
+    }), { reason: "invalid-reference" });
+  }
+});
+
+test("catalog verifies the signer of a requested digest", async (t) => {
+  const { registry, signer, options } = await fixture(t, "https://github.com/foreign/repo/workflow@refs/heads/main");
+  const { digest } = publishCatalog(registry, signer);
+  await assert.rejects(fetchCatalog({ ...options, catalogDigest: digest }), { reason: "misidentified" });
+});
+
+test("catalog enforces rollback protection for a requested digest", async (t) => {
+  const { registry, signer, options } = await fixture(t);
+  const { digest } = publishCatalog(registry, signer);
+  await assert.rejects(fetchCatalog({
+    ...options,
+    catalogDigest: digest,
+    lastAcceptedGeneratedAt: "2026-09-16T00:00:00Z",
+  }), { reason: "stale-catalog" });
+});
+
 for (const identity of ["https://github.com/foreign/repo/workflow@refs/heads/main", `${PINNED_IDENTITY}line`]) {
   test(`catalog refuses foreign signer ${identity}`, async (t) => {
     const { registry, signer, options } = await fixture(t, identity);

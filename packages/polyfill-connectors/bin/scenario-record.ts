@@ -252,6 +252,10 @@ import {
 	readManifest,
 } from "../src/orchestrator.ts";
 import {
+	emptyDetailGapsPage,
+	isDetailGapsPageRequestLine,
+} from "../src/scenario/detail-gaps-page.ts";
+import {
 	FilesystemInputError,
 	readDeclaredFilesystemInput,
 	resolveFilesystemInput,
@@ -266,6 +270,13 @@ import type {
 	ScenarioUserInteraction,
 } from "../src/scenario/format.ts";
 import { SCENARIO_FORMAT } from "../src/scenario/format.ts";
+import {
+	analyzeRawObservations,
+	appendObservationPath,
+	type RawObservationRun,
+	type RawObservationStreamMetadata,
+	type RawObservationSummary,
+} from "../src/scenario/raw-observation-analysis.ts";
 import {
 	type ExcludedFieldsByStream,
 	projectRecordForComparison,
@@ -724,6 +735,286 @@ export function createInactivityWatchdog(
 interface ManifestStream {
 	name: string;
 	[extra: string]: unknown;
+}
+
+function manifestObject(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+/** Collection bounds for declared schema paths. Manifest schemas are
+ *  author-controlled and unbounded, so collection is iterative and capped;
+ *  fields past a bound fall into the advisory's generic bucket. */
+const MAX_SCHEMA_PATH_DEPTH = 32;
+const MAX_SCHEMA_PATHS = 2000;
+/** Total schema frames scheduled, including the root. Bound enqueueing, not
+ *  just popping: a wide `allOf` must not allocate an unbounded pending stack. */
+const MAX_SCHEMA_NODES = 4096;
+/** Bound pointer parsing/decoding and ref bookkeeping before copying strings. */
+const MAX_SCHEMA_REF_LENGTH = 65_536;
+
+/** Keywords that can contribute instance fields this collector cannot name
+ *  without a general JSON Schema engine. Their presence makes the metadata
+ *  honestly bounded instead of silently incomplete. The dynamic refs are
+ *  listed because they resolve to targets this collector does not follow. */
+const UNSUPPORTED_SCHEMA_KEYWORDS = [
+	"oneOf",
+	"anyOf",
+	"not",
+	"if",
+	"then",
+	"else",
+	"patternProperties",
+	"dependentSchemas",
+	"dependencies",
+	"$dynamicRef",
+	"$recursiveRef",
+] as const;
+
+/** Whether a schema node can add instance fields this collector cannot name
+ *  exactly. Object-valued `additionalProperties` and `unevaluatedProperties`
+ *  can; their boolean forms add no named fields. */
+function hasUnsupportedSchemaShape(node: Record<string, unknown>): boolean {
+	const hasListedKeyword = UNSUPPORTED_SCHEMA_KEYWORDS.some((keyword) =>
+		Object.hasOwn(node, keyword),
+	);
+	return (
+		hasListedKeyword ||
+		manifestObject(node.additionalProperties) !== undefined ||
+		manifestObject(node.unevaluatedProperties) !== undefined
+	);
+}
+
+/** A subschema that declares its own base URI (`$id`, or a draft-04 `id`
+ *  string) resolves its `$ref`s against that base, which this collector does
+ *  not model. The root document is exempt; see `declaredSchemaPaths`. */
+function declaresNestedBaseUri(node: Record<string, unknown>): boolean {
+	return Object.hasOwn(node, "$id") || typeof node.id === "string";
+}
+
+/** Resolve a same-document JSON Pointer fragment against the ORIGINAL schema
+ *  root using own properties only. External refs and malformed pointers
+ *  return undefined; nothing is fetched or inferred. */
+function resolveLocalSchemaRef(
+	root: unknown,
+	ref: string,
+): unknown | undefined {
+	if (ref === "#") {
+		return root;
+	}
+	if (!ref.startsWith("#") || ref.length > MAX_SCHEMA_REF_LENGTH) {
+		return undefined;
+	}
+	// URI decoding precedes pointer splitting: encoded slashes are separators,
+	// while ~1 denotes a slash within a token. Never percent-decode tokens again.
+	let pointer: string;
+	try {
+		pointer = decodeURIComponent(ref.slice(1));
+	} catch {
+		return undefined;
+	}
+	if (!pointer.startsWith("/")) {
+		return undefined;
+	}
+	let current = root;
+	for (const token of pointer.slice(1).split("/")) {
+		const key = token.replaceAll("~1", "/").replaceAll("~0", "~");
+		if (typeof current !== "object" || current === null) {
+			return undefined;
+		}
+		const ancestor = manifestObject(current);
+		if (
+			current !== root &&
+			ancestor !== undefined &&
+			declaresNestedBaseUri(ancestor)
+		) {
+			// A pointer can skip straight into a descendant without visiting
+			// its resource root as a schema frame. Do not cross that boundary.
+			return undefined;
+		}
+		if (!Object.hasOwn(current, key)) {
+			return undefined;
+		}
+		current = (current as Record<string, unknown>)[key];
+	}
+	return current;
+}
+
+/** Whether a schema the traversal will not enter can hide declared fields.
+ *  It applies the traversal's own shape tests before the depth return, so a
+ *  node at the bound is never passed over for a keyword the traversal flags.
+ *  Any `properties`, `allOf`, or `$ref` counts, because this check does not
+ *  resolve refs. */
+function hidesDeclaredFields(value: unknown): boolean {
+	const node = manifestObject(value);
+	return (
+		node !== undefined &&
+		(declaresNestedBaseUri(node) ||
+			hasUnsupportedSchemaShape(node) ||
+			Object.hasOwn(node, "properties") ||
+			Object.hasOwn(node, "allOf") ||
+			Object.hasOwn(node, "$ref"))
+	);
+}
+
+/** Schema properties use the same RFC 6901 paths as raw observation traversal.
+ *  `allOf` subschemas and same-document `$ref`s apply to the same instance,
+ *  so they are followed at the same prefix; unsafe or unsupported schema
+ *  shapes set `bounded` instead of guessing field names. A subschema with its
+ *  own base URI is not entered, so nothing beneath it is named. */
+function declaredSchemaPaths(schema: unknown): {
+	bounded: boolean;
+	paths: string[];
+} {
+	const paths: string[] = [];
+	const seen = new Set<string>();
+	let bounded = false;
+	let scheduled = 1;
+	const activeRefs = new Set<string>();
+	const completedRefs = new Set<string>();
+	type SchemaFrame = { depth: number; prefix: string; schema: unknown };
+	type Frame = SchemaFrame | { exitedRef: string };
+	const pending: Frame[] = [{ depth: 0, prefix: "", schema }];
+	const schedule = (frame: SchemaFrame): boolean => {
+		if (scheduled >= MAX_SCHEMA_NODES) {
+			bounded = true;
+			return false;
+		}
+		scheduled += 1;
+		pending.push(frame);
+		return true;
+	};
+	while (pending.length > 0) {
+		const frame = pending.pop();
+		if (frame === undefined) {
+			break;
+		}
+		if ("exitedRef" in frame) {
+			activeRefs.delete(frame.exitedRef);
+			completedRefs.add(frame.exitedRef);
+			continue;
+		}
+		const node = manifestObject(frame.schema);
+		if (node === undefined) {
+			continue;
+		}
+		if (node !== schema && declaresNestedBaseUri(node)) {
+			// Refs under this subschema would resolve against its own base URI,
+			// which is not modeled, so name nothing beneath it.
+			bounded = true;
+			continue;
+		}
+		if (hasUnsupportedSchemaShape(node)) {
+			bounded = true;
+		}
+
+		if (Object.hasOwn(node, "$ref")) {
+			const ref = node.$ref;
+			if (typeof ref !== "string" || ref.length > MAX_SCHEMA_REF_LENGTH) {
+				bounded = true;
+			} else {
+				const visitKey = `${frame.prefix}\u0000${ref}`;
+				if (activeRefs.has(visitKey)) {
+					// A ref cycle at the same instance prefix.
+					bounded = true;
+				} else if (!completedRefs.has(visitKey)) {
+					const resolved = resolveLocalSchemaRef(schema, ref);
+					if (resolved === undefined) {
+						bounded = true;
+					} else {
+						// Reserve a schema slot before adding its exit marker. There
+						// can be at most one exit marker per admitted schema frame.
+						if (scheduled >= MAX_SCHEMA_NODES) {
+							bounded = true;
+						} else {
+							activeRefs.add(visitKey);
+							pending.push({ exitedRef: visitKey });
+							schedule({
+								depth: frame.depth,
+								prefix: frame.prefix,
+								schema: resolved,
+							});
+						}
+					}
+				}
+			}
+			// Direct siblings still apply; they are collected below.
+		}
+
+		if (Object.hasOwn(node, "allOf")) {
+			if (Array.isArray(node.allOf)) {
+				for (const subSchema of node.allOf) {
+					if (
+						!schedule({
+							depth: frame.depth,
+							prefix: frame.prefix,
+							schema: subSchema,
+						})
+					) {
+						break;
+					}
+				}
+			} else {
+				bounded = true;
+			}
+		}
+
+		const properties = manifestObject(node.properties);
+		if (properties === undefined) {
+			if (Object.hasOwn(node, "properties")) {
+				bounded = true;
+			}
+			continue;
+		}
+		for (const name in properties) {
+			if (!Object.hasOwn(properties, name)) {
+				continue;
+			}
+			if (paths.length >= MAX_SCHEMA_PATHS) {
+				return { bounded: true, paths };
+			}
+			const path = appendObservationPath(frame.prefix, name);
+			if (!seen.has(path)) {
+				seen.add(path);
+				paths.push(path);
+			}
+			if (frame.depth + 1 < MAX_SCHEMA_PATH_DEPTH) {
+				schedule({
+					depth: frame.depth + 1,
+					prefix: path,
+					schema: properties[name],
+				});
+			} else if (hidesDeclaredFields(properties[name])) {
+				bounded = true;
+			}
+		}
+	}
+	return { bounded, paths };
+}
+
+function rawObservationMetadata(
+	streams: readonly ManifestStream[],
+	excludedFields: ExcludedFieldsByStream,
+): RawObservationStreamMetadata[] {
+	return streams.map((stream) => {
+		const primaryKey = stream.primary_key;
+		const excluded = excludedFields.get(stream.name);
+		const { bounded, paths } = declaredSchemaPaths(stream.schema);
+		return {
+			name: stream.name,
+			safeFieldPaths: paths,
+			...(bounded ? { schemaPathsBounded: true } : {}),
+			...(Array.isArray(primaryKey)
+				? {
+						primaryKey: primaryKey.filter(
+							(field): field is string => typeof field === "string",
+						),
+					}
+				: {}),
+			...(excluded === undefined ? {} : { excludedFields: excluded }),
+		};
+	});
 }
 
 export interface CliArgs {
@@ -1199,6 +1490,9 @@ interface RecordRunResult {
 		message: string;
 		requestId: string;
 	}>;
+	/** Private equality key for the selections this run answered — see
+	 *  `selectionContextKey`. Never printed or persisted. */
+	selectionContext: string | undefined;
 	userInteractions: ScenarioUserInteraction[];
 }
 
@@ -1367,6 +1661,146 @@ function toScenarioUserInteraction(
 	};
 }
 
+/** Marks a run whose selection context cannot be established. */
+const UNKNOWN_SELECTION_CONTEXT = Symbol("unknown-selection-context");
+
+/** Canonicalization bounds for a prompt schema. They keep a hostile or
+ *  malformed schema from making the advisory walk an unbounded or cyclic
+ *  value. A schema past them makes the run's selection context unknown. */
+const MAX_SELECTION_SCHEMA_DEPTH = 64;
+const MAX_SELECTION_SCHEMA_NODES = 4096;
+
+/**
+ * Canonical, selection-relevant projection of a prompt schema. Object key
+ * order is not selection-relevant (the same schema is often serialized in a
+ * different order), but array order and JSON types are. The projection is
+ * private: it only feeds `selectionContextKey`, which is compared in memory
+ * and never printed or persisted.
+ *
+ * Returns `undefined` when the value cannot be represented safely inside the
+ * bounds (cycles, non-JSON values, or a hostile depth/node fan-out). A schema
+ * that exists but cannot be compared makes the whole run's selection context
+ * unknown rather than guessed.
+ */
+function canonicalSelectionSchema(value: unknown): unknown | undefined {
+	let nodes = 0;
+	const active = new Set<object>();
+	const encode = (item: unknown, depth: number): unknown | undefined => {
+		if (depth > MAX_SELECTION_SCHEMA_DEPTH) {
+			return undefined;
+		}
+		nodes += 1;
+		if (nodes > MAX_SELECTION_SCHEMA_NODES) {
+			return undefined;
+		}
+		if (item === null) {
+			return null;
+		}
+		if (typeof item !== "object") {
+			if (typeof item === "string" || typeof item === "boolean") {
+				return item;
+			}
+			return typeof item === "number" && Number.isFinite(item)
+				? item
+				: undefined;
+		}
+		if (active.has(item)) {
+			return undefined;
+		}
+		active.add(item);
+		try {
+			if (Array.isArray(item)) {
+				const encoded: unknown[] = [];
+				for (const entry of item) {
+					const next = encode(entry, depth + 1);
+					if (next === undefined) {
+						return undefined;
+					}
+					encoded.push(next);
+				}
+				return encoded;
+			}
+			// A null prototype keeps an own `__proto__` key (from JSON.parse) as
+			// data. A plain object would treat the assignment as a prototype change.
+			const encoded: Record<string, unknown> = Object.create(null);
+			for (const key of Object.keys(item).sort()) {
+				const next = encode((item as Record<string, unknown>)[key], depth + 1);
+				if (next === undefined) {
+					return undefined;
+				}
+				encoded[key] = next;
+			}
+			return encoded;
+		} finally {
+			active.delete(item);
+		}
+	};
+	return encode(value, 0);
+}
+
+/**
+ * Private, in-memory equality input for "did these runs answer the same
+ * selections?". The persisted `user_interactions` redact credentials and OTP
+ * values, so they cannot say whether two runs picked the same account or
+ * resource; the advisory needs the raw answers, and must never print or
+ * persist them (or a hash of them). The prompt schema is part of the
+ * selection: the same answer index means a different account when the
+ * schema's options differ between runs. It is canonicalized (sorted object
+ * keys, arrays and types preserved) and counted in the same serialized
+ * budget as the answers. An OTP exchange makes the whole run's context
+ * unknown: nothing in the wire protocol binds a successful OTP to the same
+ * account across runs, so the advisory does not infer it.
+ */
+function selectionContextEntry(
+	prompt: RawInteractionLine,
+	response: InteractionResponse,
+): unknown {
+	if (isOtpPrompt(prompt)) {
+		return UNKNOWN_SELECTION_CONTEXT;
+	}
+	const entry: Record<string, unknown> = {
+		kind: prompt.kind,
+		message: prompt.message,
+		response: {
+			status: response.status,
+			value: response.value,
+			data: response.data,
+			error: response.error,
+		},
+	};
+	// A legacy prompt with no schema keeps the previous entry shape exactly.
+	if (prompt.schema !== undefined) {
+		const schema = canonicalSelectionSchema(prompt.schema);
+		if (schema === undefined) {
+			return UNKNOWN_SELECTION_CONTEXT;
+		}
+		entry.schema = schema;
+	}
+	return entry;
+}
+
+/** Largest serialized context (JavaScript string length, measured after
+ *  `JSON.stringify`) kept for comparison; the answers are fully materialized
+ *  before this check, so it limits what is retained, not memory or CPU. */
+export const MAX_SELECTION_CONTEXT_LENGTH = 65_536;
+
+/** `undefined` (unknown context; never equal to anything) when any entry is
+ *  unknown, or the answers cannot be serialized or serialize past
+ *  `MAX_SELECTION_CONTEXT_LENGTH`. */
+export function selectionContextKey(
+	entries: readonly unknown[],
+): string | undefined {
+	if (entries.includes(UNKNOWN_SELECTION_CONTEXT)) {
+		return undefined;
+	}
+	try {
+		const key = JSON.stringify(entries);
+		return key.length <= MAX_SELECTION_CONTEXT_LENGTH ? key : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 let transcriptRunNumber = 0;
 
 /**
@@ -1494,6 +1928,7 @@ function runRecordSubprocess(args: {
 
 		const messages: ProtocolMessage[] = [];
 		const userInteractions: ScenarioUserInteraction[] = [];
+		const selectionEntries: unknown[] = [];
 		const unansweredInteractions: RecordRunResult["unansweredInteractions"] =
 			[];
 		let stdoutBuffer = "";
@@ -1544,6 +1979,7 @@ function runRecordSubprocess(args: {
 			);
 			const record = (response: InteractionResponse): void => {
 				userInteractionSeq += 1;
+				selectionEntries.push(selectionContextEntry(raw, response));
 				userInteractions.push(
 					toScenarioUserInteraction(
 						userInteractionSeq,
@@ -1642,6 +2078,14 @@ function runRecordSubprocess(args: {
 				watchdog.suspend();
 				answerInteraction(parsed);
 				return;
+			}
+			if (isDetailGapsPageRequestLine(parsed)) {
+				// This host keeps no detail-gap ledger, so every page is empty. Left
+				// unanswered, a connector that pages pending gaps waits on stdin
+				// until the inactivity watchdog kills it, with no DONE.
+				child.stdin.write(
+					`${JSON.stringify(emptyDetailGapsPage(parsed.request_id))}\n`,
+				);
 			}
 			if (isDoneLine(parsed)) {
 				doneCount += 1;
@@ -1757,6 +2201,7 @@ function runRecordSubprocess(args: {
 					capture.incomplete === true ||
 					(capture.truncatedCount ?? 0) > 0 ||
 					(capture.pendingAtExit ?? 0) > 0,
+				selectionContext: selectionContextKey(selectionEntries),
 				userInteractions,
 				unansweredInteractions,
 				...(protocolViolation ? { protocolViolation } : {}),
@@ -1861,8 +2306,10 @@ async function recordOneRun(
 		id: string;
 		op: "upsert" | "delete";
 		stream: string;
+		wireKey: string | string[];
 	}>;
 	reason?: string;
+	selectionContext: string | undefined;
 	userInteractions: ScenarioUserInteraction[];
 }> {
 	const result = await runRecordSubprocess({
@@ -1877,6 +2324,9 @@ async function recordOneRun(
 		...(harRecordPaths ? { harRecordPaths } : {}),
 	});
 	const done = result.messages.find((m) => m.type === "DONE");
+	// `msg.data` is the parsed, validated wire RECORD payload. Retain this
+	// reference for the advisory before `expectedForRecords` applies the
+	// replay-comparison exclusions; no post-normalizer data is called raw.
 	const { records, stateMessages } = messagesToRecordsAndState(result.messages);
 	const finalState: Record<string, unknown> = { ...startState };
 	for (const s of stateMessages) {
@@ -1907,6 +2357,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -1933,6 +2384,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -1949,6 +2401,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -1965,6 +2418,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -1978,6 +2432,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -1989,6 +2444,7 @@ async function recordOneRun(
 		records,
 		finalState,
 		protocolTrace,
+		selectionContext: result.selectionContext,
 		userInteractions: result.userInteractions,
 	};
 }
@@ -2048,6 +2504,7 @@ interface CaptureRunsResult {
 	browserCaptures: Array<BrowserCaptureArtifact | undefined>;
 	complete: boolean;
 	normalizerNames: Set<string>;
+	rawObservationSummary: RawObservationSummary;
 	runs: ScenarioRun[];
 }
 
@@ -2253,6 +2710,14 @@ async function captureRuns(
 	// Read once per capture: both runs must hash under the SAME projection, and
 	// `scenario-verify` reads the same declaration when it recomputes.
 	const excludedComparisonFields = readExcludedComparisonFields(args.connector);
+	const streamNames = JSON.stringify(streams.map((stream) => stream.name));
+	// Comparable only when the runs also answered the same selections. An
+	// unknown selection context is unique per run, so it never compares equal.
+	const observationScopeKey = (
+		run: number,
+		selectionContext: string | undefined,
+	): string =>
+		`${streamNames}|${selectionContext ?? `unknown-selection-run-${String(run)}`}`;
 	process.stdout.write(
 		`RECORDING ${args.connector} — run 1 (full refresh, state=null)\n`,
 	);
@@ -2270,6 +2735,15 @@ async function captureRuns(
 
 	const runs: ScenarioRun[] = [];
 	const browserCaptures: Array<BrowserCaptureArtifact | undefined> = [];
+	const observationRuns: RawObservationRun[] = run1.ok
+		? [
+				{
+					records: run1.records,
+					run: 1,
+					scopeKey: observationScopeKey(1, run1.selectionContext),
+				},
+			]
+		: [];
 	let complete = run1.ok;
 	const normalizerNames = new Set(run1.normalizerNames);
 
@@ -2324,6 +2798,13 @@ async function captureRuns(
 				args.recordHar,
 				2,
 			);
+		if (run2.ok) {
+			observationRuns.push({
+				records: run2.records,
+				run: 2,
+				scopeKey: observationScopeKey(2, run2.selectionContext),
+			});
+		}
 		for (const name of run2.normalizerNames) {
 			normalizerNames.add(name);
 		}
@@ -2356,7 +2837,39 @@ async function captureRuns(
 		}
 	}
 
-	return { runs, complete, normalizerNames, browserCaptures };
+	let rawObservationSummary: RawObservationSummary;
+	try {
+		// Metadata collection runs inside the advisory boundary: a hostile or
+		// malformed manifest schema must never abort an otherwise good capture.
+		const observationMetadata = args.entrypoint
+			? []
+			: rawObservationMetadata(streams, excludedComparisonFields);
+		rawObservationSummary = analyzeRawObservations(
+			observationRuns,
+			observationMetadata,
+		);
+	} catch {
+		// Advisory analysis is deliberately outside capture success semantics.
+		// Do not include an exception message, which could contain record data.
+		rawObservationSummary = {
+			identityLimit: 250,
+			missingIdentityRecords: 0,
+			oversizedIdentityRecords: 0,
+			unknownStreamSampleLimit: 50,
+			streams: [],
+			truncated: false,
+			limitations: [
+				"Raw observation analysis failed; no stability verdict was produced.",
+			],
+		};
+	}
+	return {
+		runs,
+		complete,
+		normalizerNames,
+		browserCaptures,
+		rawObservationSummary,
+	};
 }
 
 /**
@@ -2623,6 +3136,46 @@ function printCaptureSummary(outPath: string, built: BuiltScenario): void {
 	);
 }
 
+function printRawObservationSummary(summary: RawObservationSummary): void {
+	process.stdout.write(
+		"\nauthor advisory: raw RECORD differences across capture runs\n",
+	);
+	for (const stream of summary.streams) {
+		process.stdout.write(
+			`  ${stream.stream}: ${stream.status} (${String(stream.comparedIdentities)} repeated identities; sample limit ${String(stream.sampleLimit)}, retained ${String(stream.sampledIdentities)}, truncated ${String(stream.truncated)})\n`,
+		);
+		if (stream.rawChangedFields.length > 0) {
+			process.stdout.write(
+				`    raw changed fields: ${stream.rawChangedFields.map(({ field, identities }) => `${field} (${String(identities)})`).join(", ")}\n`,
+			);
+		}
+		if (stream.rawUnnamedFieldIdentities > 0) {
+			process.stdout.write(
+				`    raw changes in unnamed or undeclared fields: ${String(stream.rawUnnamedFieldIdentities)} identity/identities\n`,
+			);
+		}
+		if (stream.projectedChangedFields.length > 0) {
+			process.stdout.write(
+				`    changed after declared comparison exclusions: ${stream.projectedChangedFields.map(({ field, identities }) => `${field} (${String(identities)})`).join(", ")}\n`,
+			);
+		}
+		if (stream.projectedUnnamedFieldIdentities > 0) {
+			process.stdout.write(
+				`    projected changes in unnamed or undeclared fields: ${String(stream.projectedUnnamedFieldIdentities)} identity/identities\n`,
+			);
+		}
+	}
+	process.stdout.write(
+		`  total identity limit: ${String(summary.identityLimit)}; generic unknown-stream bucket limit: ${String(summary.unknownStreamSampleLimit)}; truncation: ${String(summary.truncated)}\n`,
+	);
+	process.stdout.write(
+		"  comparison exclusions apply only to declared top-level keys; nested-path exclusions are not supported.\n",
+	);
+	for (const limitation of summary.limitations) {
+		process.stdout.write(`  limitation: ${limitation}\n`);
+	}
+}
+
 /**
  * Prints where each run's HAR/storageState landed (or, honestly, that
  * `--record-har` produced nothing usable for that run) and exactly what
@@ -2820,6 +3373,7 @@ async function main(): Promise<void> {
 		);
 
 		printCaptureSummary(outPath, built);
+		printRawObservationSummary(captureResult.rawObservationSummary);
 		printBrowserCaptureSummary(outPath, built.scenario.runs);
 
 		if (captureResult.complete) {

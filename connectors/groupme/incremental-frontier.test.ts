@@ -39,7 +39,7 @@
  */
 
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import {
 	assertUserFacingProgress,
 	setConnectorDiagnosticSink,
@@ -73,10 +73,10 @@ const PAGE_SIZE = 100;
 // this file take minutes and fail on wall-clock rather than behavior. Swap in
 // a zero-delay governor for the duration of this file only; production
 // `collect()` never calls this override.
-before(() => {
+beforeAll(() => {
 	__setZeroDelayHttpGovernorForTests();
 });
-after(() => {
+afterAll(() => {
 	__resetHttpGovernorForTests();
 });
 
@@ -333,6 +333,93 @@ test("ordinary resume: a persisted cursor resumes forward via after_id and stops
 			walk.restore();
 		}
 	})();
+});
+
+test("ordinary resume: equal timestamps with advancing IDs collect and advance across pages", async () => {
+	const page1 = Array.from({ length: PAGE_SIZE }, (_, i) =>
+		groupMessage({ id: `m-tie-${String(i)}`, created_at: 1_700_000_200 }),
+	);
+	const page2 = [
+		groupMessage({ id: "m-tie-100", created_at: 1_700_000_200 }),
+		groupMessage({ id: "m-tie-101", created_at: 1_700_000_200 }),
+	];
+	const walk = stubGroupWalk({
+		messagePages: [
+			{ body: { response: { count: 102, messages: page1 } } },
+			{ body: { response: { count: 102, messages: page2 } } },
+		],
+	});
+	const afterIds: unknown[] = [];
+	try {
+		const { emitRecord, emitted } = makeHarness();
+		const outcome = await collectGroupMessages(
+			TOKEN,
+			openFingerprintCursor(new Map()),
+			undefined,
+			undefined,
+			async (_message, extra) => {
+				if (extra?.phase === "fetch" && extra.after_id !== undefined) {
+					afterIds.push(extra.after_id);
+				}
+			},
+			emitRecord,
+			null,
+			{ "group-1": "m-old-cursor" },
+		);
+
+		assert.equal(
+			outcome.failed,
+			false,
+			"equal timestamps with advancing IDs must not fail the forward walk",
+		);
+		assert.equal(walk.fetchCount(), 2, "the short second page ends the walk");
+		assert.deepEqual(afterIds, ["m-old-cursor", "m-tie-99"]);
+		assert.equal(outcome.considered, 102);
+		assert.deepEqual(
+			emitted
+				.filter((record) => record.stream === "group_messages")
+				.map((record) => record.data.id),
+			[...page1, ...page2].map((message) => message.id),
+			"every tied message emits in provider order",
+		);
+		assert.equal(outcome.nextCursors["group-1"], "m-tie-101");
+	} finally {
+		walk.restore();
+	}
+});
+
+test("ordinary resume: forward-fetch progress remains nonblank without pinning copy", async () => {
+	const walk = stubGroupWalk({
+		messagePages: [{ body: { response: { count: 0, messages: [] } } }],
+	});
+	const fetchProgress: string[] = [];
+	try {
+		const { emitRecord } = makeHarness();
+		const outcome = await collectGroupMessages(
+			TOKEN,
+			openFingerprintCursor(new Map()),
+			undefined,
+			undefined,
+			async (message, extra) => {
+				if (extra?.phase === "fetch" && extra.after_id !== undefined) {
+					fetchProgress.push(message);
+				}
+			},
+			emitRecord,
+			null,
+			{ "group-1": "m-old-cursor" },
+		);
+
+		assert.equal(outcome.failed, false);
+		assert.equal(fetchProgress.length, 1, "the forward-fetch callback ran");
+		assert.ok(
+			fetchProgress[0]?.trim(),
+			"forward-fetch progress must contain a user-facing message",
+		);
+		assertUserFacingProgress(fetchProgress.map((message) => ({ message })));
+	} finally {
+		walk.restore();
+	}
 });
 
 test("ordinary resume: no new messages (empty forward page) leaves the cursor unchanged and considered at 0", () => {
@@ -1318,6 +1405,37 @@ test("explicit full_refresh bypass via collect(): CollectContext.collectionMode 
 			150,
 			"the full history emits, not just what's newer than the pre-existing cursor",
 		);
+	} finally {
+		walk.restore();
+	}
+});
+
+test("forward malformed null preserves valid-prefix emission before failed outcome", async () => {
+	// Pins EXISTING partial-emission behavior; this is not an endorsement.
+	const walk = stubGroupWalk({
+		groupsListBody: [group({ id: "group-1" })],
+		messagePages: [{
+			body: { response: { count: 2, messages: [
+				groupMessage({ id: "m1", created_at: 1_700_000_001, attachments: [] }),
+				null,
+			] } },
+		}],
+	});
+	try {
+		const { emitRecord, emitted } = makeHarness();
+		const outcome = await collectGroupMessages(
+			TOKEN, openFingerprintCursor(new Map()), undefined, undefined,
+			noopProgress, emitRecord, null, { "group-1": "m0" }, "incremental",
+		);
+		assert.deepEqual(
+			emitted.filter((r) => r.stream === "group_messages")
+				.map((r) => (r.data as { id: string }).id),
+			["m1"],
+			"existing partial-emission behavior preserves exactly the valid prefix",
+		);
+		assert.equal(outcome.failed, true);
+		assert.deepEqual(outcome.nextCursors, {});
+		assert.equal(walk.fetchCount(), 1);
 	} finally {
 		walk.restore();
 	}
