@@ -449,15 +449,18 @@ function buildBrowserManifest(
 }
 
 function buildTypesTs(displayName: string, stream: string): string {
+	const commentDisplayName = displayName
+		.replace(/[\r\n\u2028\u2029]/g, " ")
+		.replace(/\*\//g, "* /");
 	return `// Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Shared types for the ${displayName} connector. Kept out of index.ts so the
+// Shared types for the ${commentDisplayName} connector. Kept out of index.ts so the
 // pure record builders in parsers.ts can import them without pulling in the
 // runtime entry point (see connectors/github/types.ts for the pattern this
 // scaffold follows).
 
-// TODO: replace with the real upstream ${displayName} API response shape
+// TODO: replace with the real upstream ${commentDisplayName} API response shape
 // for the "${stream}" stream.
 export interface ${pascalCase(stream)}Item {
   created_at: string;
@@ -468,16 +471,19 @@ export interface ${pascalCase(stream)}Item {
 }
 
 function buildBrowserTypesTs(displayName: string, stream: string): string {
+	const commentDisplayName = displayName
+		.replace(/[\r\n\u2028\u2029]/g, " ")
+		.replace(/\*\//g, "* /");
 	return `// Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Shared types for the ${displayName} browser connector. Kept out of
+// Shared types for the ${commentDisplayName} browser connector. Kept out of
 // index.ts so the pure record builder in parsers.ts can import them
 // without pulling in the Playwright-facing runtime entry point (see
 // connectors/github_browser/types.ts for the pattern this scaffold
 // follows).
 
-// TODO: replace with the real shape extracted from the ${displayName}
+// TODO: replace with the real shape extracted from the ${commentDisplayName}
 // page's DOM for the "${stream}" stream, once index.ts's extractRows()
 // TODO is filled in.
 export interface ${pascalCase(stream)}Row {
@@ -502,7 +508,7 @@ import type { RecordData } from "../../packages/polyfill-connectors/src/connecto
 import type { ${typeName} } from "./types.ts";
 
 // TODO: fill in the record builder once the real upstream shape is known.
-// Must emit exactly the fields declared in manifests/${name}.json's
+// Must emit exactly the fields declared in connectors/${name}/manifest.json's
 // "${stream}" stream schema (id, created_at, title).
 export function ${camelCase(stream)}Record(item: ${typeName}): RecordData {
   return {
@@ -528,7 +534,7 @@ function buildBrowserParsersTs(name: string, stream: string): string {
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { ${typeName} } from "./types.ts";
 
-// Must emit exactly the fields declared in manifests/${name}.json's
+// Must emit exactly the fields declared in connectors/${name}/manifest.json's
 // "${stream}" stream schema (id, created_at, title). Already matches the
 // row shape index.ts's extractRows() TODO returns — widen both together as
 // the real DOM shape lands.
@@ -678,6 +684,9 @@ function buildBrowserIndexTs(
 ): string {
 	const typeName = `${pascalCase(stream)}Row`;
 	const recordFn = `${camelCase(stream)}Record`;
+	const commentDisplayName = displayName
+		.replace(/[\r\n\u2028\u2029]/g, " ")
+		.replace(/\*\//g, "* /");
 	return `#!/usr/bin/env node
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -685,7 +694,7 @@ function buildBrowserIndexTs(
 /**
  * PDPP ${name} Connector (v0.1.0) — scaffolded by bin/connector-init.ts --browser.
  *
- * Browser-session connector: ${displayName} is collected from the owner's
+ * Browser-session connector: ${commentDisplayName} is collected from the owner's
  * own signed-in browser session, not an API token. The runtime launches an
  * isolated, persistent Patchright Chromium profile at
  * ~/.pdpp/profiles/${name}/ (PDPP_BROWSER_PROFILE_ROOT overrides the root;
@@ -702,7 +711,7 @@ function buildBrowserIndexTs(
  * (docs/connector-authoring-guide.md §0). See the CAUTION comment above
  * protocolCapabilities below before this connector leaves connector-dev.
  *
- * TODO: document the real ${displayName} login URL and the page(s) this
+ * TODO: document the real ${commentDisplayName} login URL and the page(s) this
  * connector navigates, once known.
  */
 
@@ -737,11 +746,11 @@ const ELEMENT_WAIT_TIMEOUT_MS = 8_000;
 // never real. Same posture as dlt's "Please set me up!": a config value
 // that cannot be skimmed past.
 const LOGIN_CHECK_URL =
-  "TODO: set the URL only a signed-in ${displayName} session can load (e.g. https://app.example.com/account)";
+  ${JSON.stringify(`TODO: set the URL only a signed-in ${displayName} session can load (e.g. https://app.example.com/account)`)};
 const LOGIN_CHECK_SELECTOR =
   "TODO: set a CSS selector only present once signed in (e.g. [data-testid='account-menu'])";
 
-const PLACEHOLDER_RE = /^TODO:/;
+const PLACEHOLDER_RE = /^TODO(?::|-)/;
 
 function requireConfigured(value: string, fieldName: string): string {
   if (PLACEHOLDER_RE.test(value)) {
@@ -780,7 +789,7 @@ async function probeLoggedIn(
 // exit, even inside the persistent profile acquireIsolatedBrowser keeps at
 // ~/.pdpp/profiles/${name}/ — only cookies with an expiry do. If this
 // connector reports "signed out" on EVERY run despite a real prior sign-in
-// (never just the first cold run), check the ${displayName} auth cookie's
+// (never just the first cold run), check the ${commentDisplayName} auth cookie's
 // Expires/Max-Age in devtools; a session-only cookie is the likely cause,
 // not a selector or credential problem. There is no shared long-lived
 // browser daemon to opt into — it was retired 2026-04-25 because no
@@ -809,7 +818,7 @@ async function ensureSession({
   // richer form once this connector is wired into a deployment that has it.
   const ready = await manualBrowserLogin({
     message:
-      "Sign in to ${displayName} in the secure browser, then continue. Collection starts once the session is verified.",
+      ${JSON.stringify(`Sign in to ${displayName} in the secure browser, then continue. Collection starts once the session is verified.`)},
     page,
     probe: () => probeLoggedIn(page),
     reason: "login",
@@ -822,7 +831,7 @@ async function ensureSession({
 }
 
 // TODO: replace LISTING_URL/ROWS_CONTAINER_SELECTOR/ROW_SELECTOR and the
-// extraction below with the real ${displayName} listing page and row shape
+// extraction below with the real ${commentDisplayName} listing page and row shape
 // for "${stream}" — this is the one thing a new browser connector has to
 // write. Prefer structure over text (docs/connector-authoring-guide.md §2):
 // read attributes/ARIA, not regexed innerText. See
@@ -831,8 +840,8 @@ async function ensureSession({
 const LISTING_URL = "https://example.invalid/TODO-${name}-${stream}";
 // The element that wraps every row, present even when the list is
 // genuinely empty (an ancestor of ROW_SELECTOR, never the rows themselves).
-// Waiting on THIS, not on individual rows, is what makes "0 rows" and
-// "broken selector" distinguishable — see the comment on extractRows below.
+// Waiting on the container distinguishes a missing container from an empty list.
+// A configured row selector that matches nothing can still mean either.
 const ROWS_CONTAINER_SELECTOR = "TODO-rows-container-selector";
 const ROW_SELECTOR = "TODO-row-selector";
 
@@ -844,10 +853,12 @@ const ROW_SELECTOR = "TODO-row-selector";
 // genuinely empty list. Waiting on the CONTAINER first keeps both outcomes
 // honest: container absent/hidden -> the run fails with an
 // expectation_mismatch fact citing "rows_container"; container present
-// with zero matching rows -> 0 records, success, exactly as it should.
+// with zero matching rows -> 0 records, success. An untouched row selector
+// is rejected before navigation.
 async function extractRows(
   page: BrowserCollectContext["page"],
 ): Promise<${typeName}[]> {
+  const rowSelector = requireConfigured(ROW_SELECTOR, "ROW_SELECTOR");
   await page.goto(LISTING_URL, { waitUntil: "domcontentloaded" });
   const containerWait = await waitForElementExpectation({
     expectation: ROWS_CONTAINER_EXPECTATION,
@@ -864,7 +875,7 @@ async function extractRows(
     );
   }
   return await containerWait.match
-    .locator(ROW_SELECTOR)
+    .locator(rowSelector)
     .evaluateAll((elements) =>
       elements.map((element) => ({
         id: element.getAttribute("data-id") ?? "",
@@ -927,13 +938,13 @@ function buildSchemasTs(name: string, stream: string): string {
 
 /**
  * Zod schemas for ${name} stream records. Shape-check-before-emit per
- * docs/connector-authoring-guide.md §3. Mirrors manifests/${name}.json's
+ * docs/connector-authoring-guide.md §3. Mirrors connectors/${name}/manifest.json's
  * "${stream}" stream schema exactly — see src/manifest-reconcile.ts (run
  * via bin/reconcile-manifests.test.ts) for the drift check across
  * manifest / SCHEMAS registry / emitted-stream literals.
  *
  * TODO: as the real upstream shape lands in parsers.ts's record builder,
- * widen these fields (and manifests/${name}.json's schema in lockstep) to
+ * widen these fields (and connectors/${name}/manifest.json's schema in lockstep) to
  * match the real payload instead of this placeholder id/created_at/title
  * shape.
  */
@@ -1064,25 +1075,26 @@ function printNextSteps(name: string, stream: string): void {
 	console.log(`
 Scaffolded connector "${name}" (stream: "${stream}").
 
-Next steps:
-  1. Read docs/connector-authoring-guide.md — the authoring conventions
+Next steps (run commands from the repository root):
+  1. Read packages/polyfill-connectors/docs/connector-authoring-guide.md — the authoring conventions
      (source-of-truth ranking, fail-loud schema discipline, naming, cursor
      discipline) every connector in this fleet follows.
   2. Edit connectors/${name}/index.ts: replace the TODO endpoint (API_URL,
      auth header shape, response envelope) with the real upstream call.
   3. Widen connectors/${name}/types.ts, parsers.ts, and schemas.ts (in
-     lockstep with manifests/${name}.json's stream schema) to match the
+     lockstep with connectors/${name}/manifest.json's stream schema) to match the
      real payload shape as you discover it.
   4. Run the connector against the real API and watch it live:
-       node --import tsx bin/connector-dev.ts ${name}
+       node --import tsx packages/polyfill-connectors/bin/connector-dev.ts ${name}
   5. Capture a real run, then replay it strictly offline to prove the
      connector against fixed evidence:
-       node --import tsx bin/scenario-record.ts ${name}
-       node --import tsx bin/scenario-verify.ts ${name}
-     Scrub the capture (see bin/scrub-fixtures.ts) before committing
-     anything under fixtures/${name}/scrubbed/, and replace this
-     scaffold's synthetic pilot-real-shape fixture with a scrubbed real
-     one once you have it.
+       node --import tsx packages/polyfill-connectors/bin/scenario-record.ts ${name}
+       node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts ${name} <scenario-path>
+     Keep the synthetic pilot-real-shape rows; calibrate them from a
+     privately reviewed capture. Never put real owner rows under pilot-real-shape.
+     Keep any approved scrubbed real evidence separate under
+     connectors/${name}/fixtures/scrubbed/<runId>/.
+     See packages/polyfill-connectors/docs/connector-authoring-guide.md for review.
   6. Run the test suite for this connector:
        node --test --import tsx "connectors/${name}/**/*.test.ts"
   7. connector-dev, scenario-record, register-all, and orchestrate all
@@ -1099,36 +1111,28 @@ Next steps:
 /**
  * Browser-mode next steps: deliberately just the three commands/pointers
  * the task of getting a browser connector running actually needs — doctor
- * first (so a missing Chromium revision or an unwritable profile dir is a
- * clear message, not a confusing mid-run failure), then connector-dev (which
- * drives the session check and manual-login handoff this scaffold already
- * wires up), then where the one real TODO lives.
+ * first, configure the placeholders, then run connector-dev to drive the
+ * session check and manual-login handoff.
  */
 function printBrowserNextSteps(name: string, stream: string): void {
 	console.log(`
 Scaffolded browser connector "${name}" (stream: "${stream}").
 
-Next commands:
-  1. node --import tsx bin/connector-doctor.ts
+Next commands (run from the repository root):
+  1. node --import tsx packages/polyfill-connectors/bin/connector-doctor.ts
        Checks Node, dependencies, the Patchright Chromium revision, display
        availability, .env.local location, and ~/.pdpp/profiles — before you
        drive a real browser.
-  2. node --import tsx bin/connector-dev.ts ${name}
-       Launches the browser, runs the session check, and hands you the
-       manual-login window if the ${name} profile isn't signed in yet.
-       "${name}" is already resolvable — connector-dev/orchestrate discover
-       it from connectors/${name}/manifest.json, no registration step needed.
-  3. The one TODO is extractRows() in connectors/${name}/index.ts — replace
-     LISTING_URL/ROWS_CONTAINER_SELECTOR/ROW_SELECTOR and the extraction
-     with real navigation for the "${stream}" stream. LOGIN_CHECK_URL/
-     LOGIN_CHECK_SELECTOR just above it need a real value too (all four
-     fail loudly if left as-is — a missing/hidden rows container now fails
-     the run with an "expectation_mismatch" diagnosis instead of silently
-     succeeding with 0 records).
+  2. Configure LOGIN_CHECK_URL, LOGIN_CHECK_SELECTOR, LISTING_URL,
+     ROWS_CONTAINER_SELECTOR, and ROW_SELECTOR in connectors/${name}/index.ts.
+     Replace the extraction with real navigation for the "${stream}" stream.
+  3. node --import tsx packages/polyfill-connectors/bin/connector-dev.ts ${name}
+       Launches the browser and runs the configured session check and manual login.
+       The connector is discovered from connectors/${name}/manifest.json.
 
 Widen connectors/${name}/types.ts, parsers.ts, and schemas.ts (in lockstep
-with manifests/${name}.json's stream schema) to match the real row shape as
-you discover it. See docs/connector-authoring-guide.md §0 ("Browser
+with connectors/${name}/manifest.json's stream schema) to match the real row shape as
+you discover it. See packages/polyfill-connectors/docs/connector-authoring-guide.md §0 ("Browser
 architecture") and connectors/github_browser/ for the fuller reference this
 scaffold follows.
 

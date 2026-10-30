@@ -28,7 +28,7 @@
  */
 
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import {
 	assertUserFacingProgress,
 	setConnectorDiagnosticSink,
@@ -58,10 +58,10 @@ import { validateRecord } from "./schemas.ts";
 const TOKEN = "test-access-token";
 const PAGE_SIZE = 100;
 
-before(() => {
+beforeAll(() => {
 	__setZeroDelayHttpGovernorForTests();
 });
-after(() => {
+afterAll(() => {
 	__resetHttpGovernorForTests();
 });
 

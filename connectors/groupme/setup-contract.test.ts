@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 
 const MANIFEST_PATH = manifestPath("groupme");
@@ -83,9 +83,8 @@ describe("GroupMe setup contract", () => {
 	});
 
 	it("live: accepts valid GROUPME_ACCESS_TOKEN via X-Access-Token header", {
-		skip: process.env.GROUPME_ACCESS_TOKEN
-			? false
-			: "GROUPME_ACCESS_TOKEN unset",
+		// GROUPME_ACCESS_TOKEN unset: live account probe remains skipped.
+		skip: !process.env.GROUPME_ACCESS_TOKEN,
 	}, async () => {
 		const token = process.env.GROUPME_ACCESS_TOKEN;
 		assert.ok(

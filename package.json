@@ -55,6 +55,7 @@
     "polyfill-library-metadata:generate": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs",
     "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check",
     "connector-stdout-console:check": "node --import tsx ./packages/polyfill-connectors/scripts/check-connector-stdout-console.ts",
+    "groupme-mutation": "node --import tsx --test scripts/groupme-mutation/run.test.ts && node --import tsx scripts/groupme-mutation/run.ts",
     "legacy-shapes:check": "node ./scripts/check-frozen-legacy-contracts.mjs",
     "legacy-shapes:test": "scripts/test-sandbox/test-sandbox -- node --test ./scripts/frozen-legacy-contracts.test.mjs ./scripts/generate-legacy-scopes.test.mjs",
     "legacy-shapes:generate": "node ./scripts/generate-legacy-scopes.mjs"
