@@ -521,7 +521,7 @@ test("the publish matrix consumes the prepared selection and catalog has no matr
 });
 
 const POLICY_STEP = "Detect policy changes that refresh the connector catalog";
-const PREPARE_GUARD_STEP = "Refuse scaffold or excluded connectors in the publish inventory";
+const PREPARE_GUARD_STEP = "Validate publish inventory identities and exclusions";
 
 function catalogJobCondition() {
   const catalog = workflow.match(/\n  catalog:\n([\s\S]*)$/)?.[1];
@@ -662,7 +662,7 @@ function replaceOnce(path, from, to) {
   writeFileSync(path, source.replace(from, to));
 }
 
-function copyPublishScripts({ republishLoom = false } = {}) {
+function copyPublishScripts() {
   const root = mkdtempSync(join(tmpdir(), "catalog-guard-"));
   cpSync(join(repoRoot, "scripts"), join(root, "scripts"), { recursive: true });
   cpSync(join(repoRoot, "packages", "connector-installer-core"), join(root, "packages", "connector-installer-core"), {
@@ -682,13 +682,6 @@ function copyPublishScripts({ republishLoom = false } = {}) {
     `const DEFAULT_REGISTRY = "ghcr.io";`,
     `const DEFAULT_REGISTRY = "127.0.0.1:1";`,
   );
-  if (republishLoom) {
-    replaceOnce(
-      join(root, "scripts", "connector-publish-allowlist.mjs"),
-      `["loom", "loom", "Scaffold: collection unconditionally skips while Loom extraction is not implemented."],`,
-      `["loom", "loom"],`,
-    );
-  }
   return root;
 }
 
@@ -703,33 +696,17 @@ test("the publish inventory guard passes on the reviewed inventory", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("the publish inventory guard refuses an inventory that publishes Loom", () => {
-  const root = copyPublishScripts({ republishLoom: true });
+test("the publish inventory guard admits canonical Development entries", () => {
+  const root = copyPublishScripts();
   try {
     const result = spawnSync("bash", ["-c", extractStep(PREPARE_GUARD_STEP).shell], {
       cwd: root,
       encoding: "utf8",
       env: { PATH: process.env.PATH },
     });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /refusing to publish known scaffold connector 'loom'/);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /connectors pass identity and exclusion checks/);
   } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a catalog run whose generator refuses the inventory pushes, signs, and tags nothing", () => {
-  const root = copyPublishScripts({ republishLoom: true });
-  const run = runCatalogPublish({ REAL_GENERATOR: "1" }, { cwd: root });
-  try {
-    assert.notEqual(run.result.status, 0);
-    assert.match(run.result.stderr, /refusing to publish known scaffold connector 'loom'/);
-    assert.equal(run.commands.some((line) => /^oras\tpush\b/.test(line)), false, "no catalog push");
-    assert.equal(run.commands.some((line) => /^cosign\tsign\b/.test(line)), false, "no signature");
-    assert.equal(run.commands.some((line) => /^oras\ttag\b/.test(line)), false, "no latest tag");
-    assert.equal(run.tagDigest(), previousCatalogDigest, "the prior latest catalog stays");
-  } finally {
-    run.cleanup();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -747,7 +724,7 @@ test("a manual dispatch of an excluded connector is refused before anything publ
         EVENT_NAME: "workflow_dispatch",
         GIT_REF_NAME: "main",
         GIT_REF_TYPE: "branch",
-        INPUT_CONNECTOR: "wholefoods",
+        INPUT_CONNECTOR: "slack",
         MATRIX_CONNECTOR: "ynab",
         MATRIX_VERSION: "",
         GITHUB_OUTPUT: output,

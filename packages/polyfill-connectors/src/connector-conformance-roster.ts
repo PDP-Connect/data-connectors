@@ -45,7 +45,6 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		notion: { testFile: "connectors/notion/schemas.test.ts" },
 		reddit: { testFile: "connectors/reddit/integration.test.ts" },
 		signal: { testFile: "connectors/signal/integration.test.ts" },
-		slack: { testFile: "connectors/slack/integration.test.ts" },
 		steam: { testFile: "connectors/steam/index.test.ts" },
 		strava: { testFile: "connectors/strava/index.test.ts" },
 		uber: { testFile: "connectors/uber/integration.test.ts" },
@@ -110,6 +109,9 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
 	perplexity: { testFile: "connectors/perplexity/index.test.ts" },
+	// Real collector, Development tier: the artifact still depends on a host
+	// helper and installability is not yet proven.
+	slack: { testFile: "connectors/slack/integration.test.ts" },
 	strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
 	// Tier development. Reads the signed-in WhatsApp Web page's own in-page
 	// stores (chats, messages, contacts, groups); the oracle is the collection

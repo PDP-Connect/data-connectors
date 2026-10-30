@@ -14,11 +14,10 @@ import {
 // generator checks every row it is given, including an override, and the
 // publish workflow checks the full publishable set before it derives a matrix.
 //
-// A row is judged against the canonical inventory, never against what the row
-// says about itself. A known scaffold is refused by directory or by public key.
-// A known identity must match its inventory entry on both names. An excluded
-// entry is refused whatever the row claims. Unknown identities pass, so
-// synthetic fixtures still work.
+// Rows are judged against the canonical inventory, never against what a row
+// says about itself. A known identity must match on both names. An excluded
+// entry is refused whatever the row claims. Known scaffolds are checked later,
+// against the tier in their published artifact metadata.
 
 const DIRECTORY = /^[a-z0-9][a-z0-9_]*$/;
 const PUBLIC_KEY = /^[a-z0-9][a-z0-9-]*$/;
@@ -38,14 +37,6 @@ export function assertPublishableRow(row) {
   ) {
     throw new Error(`refusing to publish malformed connector row ${JSON.stringify(row ?? null)}`);
   }
-  if (
-    SCAFFOLD_DIRECTORIES.has(manifest) ||
-    SCAFFOLD_DIRECTORIES.has(connectorKey) ||
-    SCAFFOLD_KEYS.has(connectorKey)
-  ) {
-    throw new Error(`refusing to publish known scaffold connector '${connectorKey}'`);
-  }
-
   const byDirectory = CONNECTOR_PUBLISH_INVENTORY.find((entry) => entry.manifest === manifest);
   const byKey = CONNECTOR_PUBLISH_INVENTORY.find((entry) => entry.connectorKey === connectorKey);
   if (byDirectory !== byKey && (byDirectory || byKey)) {
@@ -60,11 +51,27 @@ export function assertPublishableRow(row) {
   }
 }
 
+export function assertScaffoldTier(row, metadata) {
+  const { manifest, connectorKey } = row ?? {};
+  if (
+    !SCAFFOLD_DIRECTORIES.has(manifest) &&
+    !SCAFFOLD_DIRECTORIES.has(connectorKey) &&
+    !SCAFFOLD_KEYS.has(connectorKey)
+  ) {
+    return;
+  }
+  if (metadata?.tier !== "development") {
+    throw new Error(
+      `refusing to list known scaffold connector '${connectorKey}': published tier must remain at Development (got '${metadata?.tier ?? "unknown"}')`,
+    );
+  }
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     for (const row of PUBLISHABLE_CONNECTORS) assertPublishableRow(row);
     console.log(
-      `publish inventory: ${PUBLISHABLE_CONNECTORS.length} connectors pass the scaffold and exclusion guard`,
+      `publish inventory: ${PUBLISHABLE_CONNECTORS.length} connectors pass identity and exclusion checks`,
     );
   } catch (error) {
     console.error(`::error::${error.message}`);

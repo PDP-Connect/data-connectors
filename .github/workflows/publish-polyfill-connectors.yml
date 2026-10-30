@@ -62,10 +62,10 @@ name: Publish Polyfill Connectors
 #
 # SCOPE. scripts/connector-publish-allowlist.mjs classifies every manifest. Its
 # publish list supplies this workflow's matrix and the pull-request build gate;
-# its exclusions record why a connector is not published, including scaffolds
-# and connectors whose installability is unproven. prepare refuses an inventory
-# that publishes one (scripts/assert-publishable-readiness.mjs) before it derives
-# any matrix, and the catalog generator applies the same check.
+# its exclusions record connectors whose runtime cannot yet be published.
+# prepare validates identities and exclusions before it derives a matrix. The
+# catalog generator checks known scaffolds against the tier in the published
+# artifact metadata, so a scaffold can appear only at Development.
 
 on:
   # A release tag still triggers a BUILD AND VERIFY — useful, and it keeps the tag as the
@@ -131,9 +131,9 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Refuse scaffold or excluded connectors in the publish inventory
+      - name: Validate publish inventory identities and exclusions
         # Runs before any matrix is derived, so both selections below only ever
-        # see an inventory this guard has admitted.
+        # see canonical, non-excluded rows.
         run: node scripts/assert-publishable-readiness.mjs
 
       - name: Derive the publish matrix from the reviewed allowlist

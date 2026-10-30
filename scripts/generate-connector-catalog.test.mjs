@@ -676,10 +676,60 @@ test("the installer-side catalog schema accepts the real github_browser and stra
   }
 });
 
-test("a scaffold or excluded connector is refused before any registry request", async () => {
-  for (const connector of [
+test("catalog metadata keeps Loom and Whole Foods at Development", async () => {
+  const registry = new FixtureRegistry({ challenge: true });
+  const rows = [
     { manifest: "loom", connectorKey: "loom" },
     { manifest: "wholefoods", connectorKey: "wholefoods" },
+  ];
+  for (const { connectorKey } of rows) {
+    const version = connectorKey === "loom" ? "0.1.0" : "0.1.1";
+    publishArtifact(registry, {
+      connectorKey,
+      displayName: connectorKey === "loom" ? "Loom" : "Whole Foods",
+      version,
+      tier: "development",
+    });
+    registry.tagLists.set(`acme/connector/${connectorKey}`, { tags: [version] });
+  }
+  try {
+    await registry.start();
+    const catalog = await generate(null, registry.registry, { connectors: rows });
+    assert.equal(assertCatalog(catalog), catalog);
+    assert.deepEqual(
+      catalog.connectors.map(({ connector_key, tier }) => ({ connector_key, tier })),
+      [
+        { connector_key: "loom", tier: "development" },
+        { connector_key: "wholefoods", tier: "development" },
+      ],
+    );
+  } finally {
+    await registry.stop();
+  }
+});
+
+test("catalog refuses a known scaffold whose published artifact claims Supported", async () => {
+  const registry = new FixtureRegistry({ challenge: true });
+  publishArtifact(registry, {
+    connectorKey: "loom",
+    displayName: "Loom",
+    version: "0.1.0",
+    tier: "supported",
+  });
+  registry.tagLists.set("acme/connector/loom", { tags: ["0.1.0"] });
+  try {
+    await registry.start();
+    await assert.rejects(
+      generate(null, registry.registry, { connectors: [{ manifest: "loom", connectorKey: "loom" }] }),
+      /known scaffold connector 'loom': published tier must remain at Development/,
+    );
+  } finally {
+    await registry.stop();
+  }
+});
+
+test("identity mismatches and exclusions are refused before any registry request", async () => {
+  for (const connector of [
     { manifest: "amazon", connectorKey: "loom" },
     { manifest: "loom", connectorKey: "amazon" },
     { manifest: "youtube_takeout", connectorKey: "youtube-takeout" },

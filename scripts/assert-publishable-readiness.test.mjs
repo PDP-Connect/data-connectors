@@ -7,7 +7,10 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
-import { assertPublishableRow } from "./assert-publishable-readiness.mjs";
+import {
+  assertPublishableRow,
+  assertScaffoldTier,
+} from "./assert-publishable-readiness.mjs";
 import { PUBLISH_EXCLUSIONS, PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -24,27 +27,42 @@ test("every publishable connector passes, and the CLI reports the same set", () 
   assert.match(result.stdout, new RegExp(`${PUBLISHABLE_CONNECTORS.length} connectors pass`));
 });
 
-test("a known scaffold is refused by directory or by public key, whatever the other name claims", () => {
+test("a known scaffold is publishable only under its canonical identity", () => {
+  assert.doesNotThrow(() =>
+    assertPublishableRow({ manifest: "loom", connectorKey: "loom", exclusionReason: null }),
+  );
   for (const row of [
-    { manifest: "loom", connectorKey: "loom", exclusionReason: null },
     { manifest: "loom", connectorKey: "amazon" },
     { manifest: "amazon", connectorKey: "loom" },
     { manifest: "loom", connectorKey: "loom-copy" },
   ]) {
     assert.throws(
       () => assertPublishableRow(row),
-      /refusing to publish known scaffold connector/,
+      /identity does not match the publish inventory/,
       JSON.stringify(row),
     );
   }
 });
 
-test("WholeFoods is refused on exclusion policy alone, because it is no longer a scaffold", () => {
+test("a known scaffold's published metadata cannot claim Preview or Supported", () => {
+  assert.doesNotThrow(() => assertScaffoldTier(
+    { manifest: "loom", connectorKey: "loom" },
+    { tier: "development" },
+  ));
+  for (const tier of ["preview", "supported"]) {
+    assert.throws(
+      () => assertScaffoldTier({ manifest: "loom", connectorKey: "loom" }, { tier }),
+      /known scaffold connector 'loom': published tier must remain at Development/,
+      tier,
+    );
+  }
+});
+
+test("WholeFoods is a canonical publish inventory entry, because it is a Development collector", () => {
   assert.equal(KNOWN_SCAFFOLD_CONNECTORS.includes("wholefoods"), false);
-  assert.throws(
-    () => assertPublishableRow({ manifest: "wholefoods", connectorKey: "wholefoods", exclusionReason: null }),
-    /refusing to publish excluded connector 'wholefoods'/,
-  );
+  assert.doesNotThrow(() => assertPublishableRow({
+    manifest: "wholefoods", connectorKey: "wholefoods", exclusionReason: null,
+  }));
 });
 
 test("every excluded inventory entry is refused even when the row claims it is publishable", () => {
