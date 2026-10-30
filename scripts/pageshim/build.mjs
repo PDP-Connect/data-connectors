@@ -59,26 +59,33 @@ const HASH_IMPORTERS = new Set([
 ].map(path => join(REPO, path)));
 const BUILTINS = new Set(builtinModules);
 async function validateSelectedPortClosure(roots, readFile) {
-	const result = await esbuild.build({
+	await esbuild.build({
 		absWorkingDir: REPO,
 		entryPoints: roots,
 		bundle: true,
 		outdir: resolve(REPO, ".pageshim-validation"),
 		write: false,
-		metafile: true,
 		preserveSymlinks: true,
 		packages: "external",
 		external: ["node:*", ...BUILTINS, ...BROWSER_PACKAGES],
 		platform: "browser",
 		format: "esm",
 		logLevel: "silent",
+		plugins: [
+			{
+				name: "pageshim-port-input-guard",
+				setup(build) {
+					build.onLoad({ filter: /.*/, namespace: "file" }, (args) => {
+						const path = relative(REPO, args.path)
+							.split(sep)
+							.join("/");
+						readFile(path);
+						return undefined;
+					});
+				},
+			},
+		],
 	});
-	for (const input of Object.keys(result.metafile.inputs)) {
-		const path = relative(REPO, resolve(REPO, input)).split(sep).join("/");
-		if (path === ".." || path.startsWith("../"))
-			throw new Error(`selected PageShim port input escapes repository: ${input}`);
-		readFile(path);
-	}
 }
 
 function stubSource(spec) {

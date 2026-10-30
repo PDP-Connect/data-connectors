@@ -460,6 +460,25 @@ test("public builder checks static require descendants at esbuild resolution", (
 	assert.match(result.stderr, /symbolic link|escapes repository/);
 });
 
+test("public builder rejects a transitive FIFO before esbuild reads it", (t) => {
+	const fixture = physicalBuilderFixture(t);
+	fixture.put(fixture.inject, 'globalThis.portChild = require("./child.cjs");');
+	const target = join(fixture.repo, "scripts/pageshim/inject/child.cjs");
+	const fifo = spawnSync("mkfifo", [target], {
+		encoding: "utf8",
+		timeout: 1000,
+	});
+	assert.equal(fifo.status, 0, fifo.stderr);
+	const result = fixture.run();
+	assert.equal(
+		result.error,
+		undefined,
+		"transitive FIFO must be refused before a native read can block",
+	);
+	assert.notEqual(result.status, 0);
+	assert.match(result.stderr, /not a regular file/);
+});
+
 test("public builder rejects directory and FIFO inputs without blocking", (t) => {
 	const fixture = physicalBuilderFixture(t);
 	const target = join(fixture.repo, fixture.inject);
