@@ -3286,6 +3286,98 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: exhausted detail budget
 	);
 });
 
+// A hydrated H-E-B order stays a pending gap (its detail page carries no
+// completeness signal), so a backlog of gaps that can never clear builds up.
+
+function makeBacklog(
+	count: number,
+): BrowserCollectContext["detailGaps"][number][] {
+	return Array.from({ length: count }, (_, index) =>
+		makeGap(`HEB${String(4_000_000_000 + index)}`),
+	);
+}
+
+async function recoverBacklog(
+	count: number,
+	options: { emittedAt?: string; recoveryOnly?: boolean } = {},
+) {
+	const { deps, protocolMessages } = makeRecordingDeps();
+	const flags = makeRunFlags();
+	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+		makePageStub({ content: DETAIL_HTML }),
+		{
+			detailGaps: makeBacklog(count),
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: options.emittedAt ?? deps.emittedAt,
+			sendInteraction: deps.sendInteraction,
+			waitForHydration: deps.waitForHydration,
+		},
+		flags,
+		{
+			recoveryOnly: options.recoveryOnly ?? false,
+			wantsItems: true,
+			wantsNutrition: false,
+		},
+	);
+	const attempted = findDetailGaps(protocolMessages).map((gap) =>
+		String(gap.record_key),
+	);
+	return { attempted, flags, protocolMessages, result };
+}
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a backlog of unprovable gaps leaves half the detail budget to the forward scan", async () => {
+	const { attempted, flags, protocolMessages, result } =
+		await recoverBacklog(100);
+
+	assert.equal(flags.detailAttempts, 50);
+	assert.equal(attempted.length, 50, "only the gaps it retried are re-emitted");
+	assert.equal(
+		result.suppressForward,
+		false,
+		"the scan for new orders still runs",
+	);
+	assert.equal(result.stoppedWithPending, true);
+	assert.equal(result.recovered, 0);
+	assert.equal(findDetailGapRecovered(protocolMessages).length, 0);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a backlog within the recovery share is retried in full, in order", async () => {
+	const { attempted, flags, result } = await recoverBacklog(50);
+
+	assert.deepEqual(
+		attempted,
+		makeBacklog(50).map((gap) => String(gap.record_key)),
+	);
+	assert.equal(flags.detailAttempts, 50);
+	assert.equal(result.suppressForward, false);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a recovery-only run may spend the whole detail budget", async () => {
+	const { flags, result } = await recoverBacklog(100, { recoveryOnly: true });
+
+	assert.equal(flags.detailAttempts, 100);
+	assert.equal(
+		result.suppressForward,
+		true,
+		"recovery-only still skips the forward scan",
+	);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: an over-share backlog retries the first gaps the host served", async () => {
+	// The host serves gaps fewest-attempts first and takes back a lease the
+	// run did not settle without counting an attempt, so the leftovers lead
+	// the next run. The pass must keep the order it was given.
+	const { attempted } = await recoverBacklog(100);
+
+	assert.deepEqual(
+		attempted,
+		makeBacklog(100)
+			.slice(0, 50)
+			.map((gap) => String(gap.record_key)),
+	);
+});
+
 test("recoverPendingOrderItemDetailGapsBeforeForwardRun: order_items out of scope skips recovery entirely", async () => {
 	const { deps } = makeRecordingDeps();
 	const flags = makeRunFlags();
