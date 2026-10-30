@@ -33,11 +33,11 @@ function makeTree() {
   const dir = mkdtempSync(join(tmpdir(), "select-publish-"));
   const manifests = join(dir, "connectors");
   mkdirSync(join(manifests, "oura"), { recursive: true });
-  mkdirSync(join(manifests, "slack"), { recursive: true });
+  mkdirSync(join(manifests, "signal"), { recursive: true });
   mkdirSync(join(manifests, "apple_health"), { recursive: true });
   mkdirSync(join(dir, "packages", "polyfill-connectors", "manifests"), { recursive: true });
   writeFileSync(join(manifests, "oura", "manifest.json"), JSON.stringify({ version: "0.1.0" }));
-  writeFileSync(join(manifests, "slack", "manifest.json"), JSON.stringify({ version: "2.0.0" }));
+  writeFileSync(join(manifests, "signal", "manifest.json"), JSON.stringify({ version: "2.0.0" }));
   writeFileSync(join(dir, "packages", "polyfill-connectors", "manifests", "oura.json"), JSON.stringify({ version: "0.1.0" }));
   return { dir, marker: join(dir, "MARKER") };
 }
@@ -239,13 +239,13 @@ test("an allowlisted name with no manifest refuses rather than selecting a blank
 
 
 test("an excluded target refuses even when the matrix leg names it", () => {
-  for (const matrix of ["oura", "slack"]) {
+  for (const matrix of ["oura", "signal"]) {
     const tree = makeTree();
     try {
       // A malformed manifest makes an accidental read observable.
-      writeFileSync(join(tree.dir, "connectors/slack/manifest.json"), "not JSON");
+      writeFileSync(join(tree.dir, "connectors/signal/manifest.json"), "not JSON");
       const result = run(tree, { ...BASE, MATRIX_CONNECTOR: matrix,
-        EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "slack" });
+        EVENT_NAME: "workflow_dispatch", INPUT_CONNECTOR: "signal" });
       assert.equal(result.status, 1);
       assert.match(result.stderr, /not in the publish allowlist/);
       assert.doesNotMatch(result.stderr, /cannot read manifest/);

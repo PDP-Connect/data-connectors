@@ -196,7 +196,7 @@ jobs:
         run: node --test packages/connector-installer-core/source-declaration.test.mjs scripts/anthropic-claude-source-declaration.test.mjs
 
       - name: Artifact contract tests, including the negative controls
-        run: node --test scripts/connector-oci-artifact.test.mjs
+        run: node --test scripts/connector-oci-artifact.test.mjs scripts/connector-oci-tool-guard.test.mjs
 
       - name: Publish-ref gate tests
         run: node --test scripts/publish-ref-gate.test.mjs

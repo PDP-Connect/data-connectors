@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.2.19",
+				"version": "0.2.20",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -1541,7 +1541,7 @@
 				},
 				"connector_key": "apple-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "Apple Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -1951,7 +1951,7 @@
 				},
 				"connector_key": "apple-health",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
-				"version": "0.2.6",
+				"version": "0.2.7",
 				"display_name": "Apple Health",
 				"brand": {
 					"icon": "icon.svg",
@@ -3596,7 +3596,7 @@
 				},
 				"connector_key": "apple-photos",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-				"version": "0.1.24",
+				"version": "0.1.25",
 				"display_name": "Apple Photos",
 				"brand": {
 					"icon": "icon.svg",
@@ -4026,7 +4026,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.2.20",
+				"version": "0.2.21",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -6252,7 +6252,7 @@
 				},
 				"connector_key": "claude-code",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-				"version": "0.3.27",
+				"version": "0.3.28",
 				"display_name": "Claude Code",
 				"brand": {
 					"icon": "icon.svg",
@@ -7358,7 +7358,7 @@
 				},
 				"connector_key": "codex",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-				"version": "0.3.15",
+				"version": "0.3.16",
 				"display_name": "OpenAI Codex CLI",
 				"brand": {
 					"icon": "icon.svg",
@@ -8702,7 +8702,7 @@
 				},
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.2.26",
+				"version": "0.2.27",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icon.svg",
@@ -9348,7 +9348,7 @@
 				},
 				"connector_key": "fitbit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
-				"version": "0.1.6",
+				"version": "0.1.7",
 				"display_name": "Fitbit",
 				"runtime_requirements": {
 					"bindings": {
@@ -9707,7 +9707,7 @@
 				},
 				"connector_key": "garmin-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/garmin-browser",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "Garmin (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -12063,7 +12063,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.28",
+				"version": "0.2.29",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",
@@ -12740,7 +12740,7 @@
 				},
 				"connector_key": "google-calendar",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-calendar",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Google Calendar",
 				"brand": {
 					"icon": "icon.svg",
@@ -13016,7 +13016,7 @@
 				},
 				"connector_key": "google-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-contacts",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Google Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -13258,7 +13258,7 @@
 				},
 				"connector_key": "google-maps",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Google Maps Timeline Import",
 				"brand": {
 					"icon": "icon.svg",
@@ -13539,7 +13539,7 @@
 				},
 				"connector_key": "google-maps-data-portability",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Google Maps Data Portability",
 				"brand": {
 					"icon": "icon.svg",
@@ -13946,7 +13946,7 @@
 				},
 				"connector_key": "google-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-				"version": "0.1.24",
+				"version": "0.1.25",
 				"display_name": "Google Takeout",
 				"runtime_requirements": {
 					"bindings": {
@@ -14275,7 +14275,7 @@
 				},
 				"connector_key": "groupme",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "GroupMe",
 				"brand": {
 					"icon": "icon.svg",
@@ -14735,7 +14735,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.25",
+				"version": "0.6.26",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -15331,7 +15331,7 @@
 				},
 				"connector_key": "ical",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Calendar (iCal)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15688,7 +15688,7 @@
 				},
 				"connector_key": "imessage",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "iMessage (macOS)",
 				"brand": {
 					"icon": "icon.svg",
@@ -16840,7 +16840,7 @@
 				},
 				"connector_key": "jellyfin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-				"version": "0.2.17",
+				"version": "0.2.18",
 				"display_name": "Jellyfin",
 				"brand": {
 					"icon": "icon.svg",
@@ -17564,7 +17564,7 @@
 				},
 				"connector_key": "loom",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "Loom",
 				"brand": {
 					"icon": "icon.svg",
@@ -18694,7 +18694,7 @@
 				},
 				"connector_key": "netflix-export",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Netflix Export",
 				"brand": {
 					"icon": "icon.svg",
@@ -18869,7 +18869,7 @@
 				},
 				"connector_key": "notion",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Notion",
 				"brand": {
 					"icon": "icon.svg",
@@ -19087,7 +19087,7 @@
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Oura",
 				"runtime_requirements": {
 					"bindings": {
@@ -20021,7 +20021,7 @@
 				},
 				"connector_key": "pocket",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "Pocket",
 				"runtime_requirements": {
 					"bindings": {
@@ -20146,7 +20146,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.3",
+				"version": "0.4.4",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -20931,7 +20931,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.35",
+				"version": "0.2.36",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -21379,7 +21379,7 @@
 				},
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "0.7.1",
+				"version": "0.7.2",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -22955,7 +22955,7 @@
 						},
 						"RECLAIM_UPLOADS": {
 							"type": "boolean",
-							"description": "When true, attempt to reclaim previously-failed file uploads on retry (does not change which channels/messages are collected).",
+							"description": "When true, delete the downloaded file attachments from the local archive after each run's messages are saved. PDPP keeps no other copy and the export tool does not download them again, so deleted files cannot be recovered. Does not change which channels or messages are collected.",
 							"default": false,
 							"declared_option_kind": "transport"
 						}
@@ -23480,7 +23480,7 @@
 				},
 				"connector_key": "steam",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "Steam",
 				"brand": {
 					"icon": "icon.svg",
@@ -23872,7 +23872,7 @@
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.29",
+				"version": "1.0.30",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
@@ -25016,7 +25016,7 @@
 				},
 				"connector_key": "twitter-archive",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/twitter-archive",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "Twitter/X Archive",
 				"brand": {
 					"icon": "icon.svg",
@@ -25197,7 +25197,7 @@
 				},
 				"connector_key": "uber",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-				"version": "1.0.25",
+				"version": "1.0.26",
 				"display_name": "Uber",
 				"brand": {
 					"icon": "icon.svg",
@@ -25413,7 +25413,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.20",
+				"version": "0.2.21",
 				"display_name": "USAA",
 				"runtime_requirements": {
 					"bindings": {
@@ -26071,7 +26071,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.28",
+				"version": "0.2.29",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
@@ -26467,7 +26467,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.23",
+				"version": "0.2.24",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
@@ -27273,7 +27273,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.44",
+				"version": "0.3.45",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -27617,7 +27617,7 @@
 				},
 				"connector_key": "whoop",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "WHOOP",
 				"runtime_requirements": {
 					"bindings": {
@@ -28106,7 +28106,7 @@
 				},
 				"connector_key": "whoop-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop-browser",
-				"version": "0.1.5",
+				"version": "0.1.6",
 				"display_name": "WHOOP (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -29220,7 +29220,7 @@
 				},
 				"connector_key": "ynab",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-				"version": "0.3.23",
+				"version": "0.3.24",
 				"display_name": "YNAB",
 				"runtime_requirements": {
 					"bindings": {
