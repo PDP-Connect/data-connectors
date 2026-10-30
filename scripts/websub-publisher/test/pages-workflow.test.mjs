@@ -106,7 +106,7 @@ const feed = "<feed>signed catalog hint</feed>";
 const feedHash = createHash("sha256").update(feed).digest("hex");
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
-function compareFeed(t, { event = "workflow_run", live = feed, fail = false, metadata = "200 application/atom+xml" } = {}) {
+function compareFeed(t, { event = "workflow_run", attempt = "1", live = feed, fail = false, metadata = "200 application/atom+xml" } = {}) {
   const compare = pages.jobs.build.steps.find((step) => step.id === "compare");
   assert.ok(compare, "the build must compare the live topic with its feed");
   assert.equal(compare.env.FEED_SHA256, "${{ steps.feed.outputs.sha256 }}");
@@ -130,7 +130,7 @@ function compareFeed(t, { event = "workflow_run", live = feed, fail = false, met
   const result = spawnSync("bash", ["-c", stub + compare.run], {
     cwd: repoRoot, encoding: "utf8", env: {
       ...process.env, GITHUB_OUTPUT: output, RUNNER_TEMP: dir,
-      FEED_SHA256: feedHash, EVENT_NAME: event, MOCK_FEED: live,
+      FEED_SHA256: feedHash, EVENT_NAME: event, GITHUB_RUN_ATTEMPT: attempt, MOCK_FEED: live,
       MOCK_FAIL: fail ? "1" : "0", MOCK_METADATA: metadata,
     },
   });
@@ -176,21 +176,27 @@ test("manual recovery and site pushes still deploy and notify when the feed is u
   }
 });
 
-test("a rejected hub hint fails the notification command", (t) => {
+test("a rejected hub hint fails the job and a full rerun retries the unchanged feed", (t) => {
+  assert.deepEqual(downstream(compareFeed(t, { live: "<feed>old</feed>" }).decision), { deploy: true, notify: true });
   const dir = mkdtempSync(join(tmpdir(), "pages-notify-failure-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const preload = join(dir, "mock-fetch.mjs");
-  writeFileSync(preload, `globalThis.fetch = async (url) => String(url).includes('registry.pdpp.dev')
-    ? new Response(${JSON.stringify(feed)}, { headers: { 'content-type': 'application/atom+xml' } })
-    : new Response(null, { status: 503 });\n`);
   const notify = pages.jobs.notify.steps.find((step) => step.name === "Verify the public feed and notify the hub");
   assert.notEqual(notify["continue-on-error"], true);
   assert.notEqual(pages.jobs.notify["continue-on-error"], true);
-  const result = spawnSync("bash", ["-c", notify.run], {
-    cwd: repoRoot, encoding: "utf8", env: {
-      ...process.env, FEED_SHA256: feedHash, NODE_OPTIONS: `--import=${preload}`,
-    },
-  });
+  const runNotify = (status) => {
+    writeFileSync(preload, `globalThis.fetch = async (url) => String(url).includes('registry.pdpp.dev')
+      ? new Response(${JSON.stringify(feed)}, { headers: { 'content-type': 'application/atom+xml' } })
+      : new Response(null, { status: ${status} });\n`);
+    return spawnSync("bash", ["-c", notify.run], {
+      cwd: repoRoot, encoding: "utf8", env: {
+        ...process.env, FEED_SHA256: feedHash, NODE_OPTIONS: `--import=${preload}`,
+      },
+    });
+  };
+  const result = runNotify(503);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /hub rejected the publish hint \(HTTP 503\)/);
+  assert.deepEqual(downstream(compareFeed(t, { attempt: "2" }).decision), { deploy: true, notify: true });
+  assert.equal(runNotify(202).status, 0);
 });

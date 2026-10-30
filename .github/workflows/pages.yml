@@ -119,7 +119,8 @@ jobs:
           set -euo pipefail
           [[ "$FEED_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
           deploy=true
-          if [[ "$EVENT_NAME" == workflow_run ]]; then
+          # A full re-run must retry notification even if its earlier deploy succeeded.
+          if [[ "$EVENT_NAME" == workflow_run && "$GITHUB_RUN_ATTEMPT" == 1 ]]; then
             topic=$(node --input-type=module -e 'import { TOPIC_URL } from "./scripts/websub-publisher/config.mjs"; process.stdout.write(TOPIC_URL)')
             if metadata=$(curl --silent --show-error --max-time 10 --max-filesize 65536 --proto '=https' --output "$RUNNER_TEMP/live-catalog-feed.atom" --write-out '%{http_code} %{content_type}' "$topic"); then
               http_status=${metadata%% *}
