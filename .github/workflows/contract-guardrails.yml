@@ -24,6 +24,12 @@ jobs:
       - name: Check packed library manifest projection
         run: npm run polyfill-library-metadata:check
 
+      - name: Check stream schemas for run-clock fields
+        run: node scripts/check-run-clock-schema-fields.mjs
+
+      - name: Test run-clock schema guard
+        run: node --test scripts/check-run-clock-schema-fields.test.mjs
+
       - name: Check permanent frozen scope IDs, schemas and generated docs
         run: npm run legacy-shapes:check && npm run legacy-shapes:test
 
