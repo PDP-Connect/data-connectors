@@ -18,7 +18,7 @@ collected a record.
 | workspace | `auth.test` + `team.info`, one record per signed-in workspace |
 | channels | `users.conversations`: every conversation the owner belongs to |
 | users | `users.list` |
-| messages | `conversations.history` per conversation back to the lookback floor, plus `conversations.replies` for every thread active inside the window |
+| messages | `conversations.history` per conversation (the lookback window on a first read, then from its cursor), plus `conversations.replies` for every thread that got a reply since the last run |
 | message_attachments, reactions, files | derived from each message read |
 | user_groups | `usergroups.list` |
 | reminders | `reminders.list` |
@@ -32,7 +32,8 @@ not already say.
 
 | variable | default | meaning |
 | --- | --- | --- |
-| `SLACK_LOOKBACK_DAYS` | 7 | how far back each conversation is read; 0 for everything |
+| `SLACK_LOOKBACK_DAYS` | 7 | how far back a conversation's first read goes; 0 for everything |
+| `SLACK_MAX_BACKFILL_DAYS` | 90 | how far back a later read may catch up from its cursor after a long pause; 0 for no limit |
 | `SLACK_CHANNEL_TYPES` | public,private,im,mpim | which conversation kinds to read |
 | `SLACK_CHANNEL_ALLOWLIST` | (all) | channel ids or names to read |
 | `SLACK_WORKSPACE` | (all signed in) | one workspace by subdomain, id, name or URL |
@@ -40,12 +41,26 @@ not already say.
 ## Cursors
 
 Directory streams are full scans gated by a per-record fingerprint, so a
-steady-state run emits nothing for them. `messages` keeps the newest ts read
-per conversation and the floor it was read down to. A later run reads from a
-week before each cursor (late replies and reactions), a first read of a
-conversation goes to the floor and then looks a further month below it for
-threads still active inside the window, and a run that asks for more history
-than the stored floor walks every conversation down again.
+steady-state run emits nothing for them. With several signed-in workspaces,
+each stream reports one coverage for the run, its counts summed.
+
+`messages` keeps the newest ts read per conversation, the floor it was read
+down to, and when the run started. A first read of a conversation goes to the
+floor. A later read starts a week before its cursor (late replies and
+reactions), however long ago that was, up to `SLACK_MAX_BACKFILL_DAYS`; a run
+that asks for more history than the stored floor walks every conversation
+down again.
+
+Replies to threads whose parent is older than where a read starts come from
+`search.messages`, from a week before the last run. When search is refused,
+fails, or runs past its page cap, each conversation scans the month below
+its starting line for threads with new replies instead; if it has older
+history than that, the conversation is reported as a detail gap carrying the
+replies still owed, and a later run with search back looks that far again.
+
+A pending gap for a conversation the run no longer reads (left, refused, or
+filtered out by the allowlist or channel kinds) is resolved rather than left
+open, for the workspace being read only.
 
 ## Running locally
 

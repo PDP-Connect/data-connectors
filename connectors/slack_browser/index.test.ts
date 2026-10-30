@@ -238,6 +238,7 @@ test("a first run reads the window, active threads, and the directory, then chec
 		},
 		floor_ts: FLOOR_7D,
 		format: 1,
+		replies_checked_ts: FIXTURE_NOW_SECONDS,
 	});
 	for (const stream of [
 		"workspace",
@@ -416,8 +417,11 @@ test("without search, a first read scans below the floor for active threads", as
 			[String(FLOOR_7D), undefined],
 			[String(FLOOR_7D), undefined],
 			[String(FLOOR_7D - 30 * DAY), String(FLOOR_7D)],
+			// One message below the scan, to learn whether older parents exist.
+			[undefined, String(FLOOR_7D - 30 * DAY)],
 		],
 	);
+	assert.deepEqual(h.gaps(), [], "nothing is older than the scan reached");
 	assert.ok(
 		h.of("messages").some((m) => m.id === "C0123456789:1790000000.000700"),
 	);
@@ -437,6 +441,7 @@ test("without search, a first read scans below the floor for active threads", as
 		[
 			[String(FLOOR_7D), undefined],
 			[String(FLOOR_7D - 30 * DAY), String(FLOOR_7D)],
+			[undefined, String(FLOOR_7D - 30 * DAY)],
 		],
 	);
 });
@@ -544,7 +549,7 @@ test("asking for more history than the cursor covers walks every conversation do
 	assert.equal(second.state("messages")?.floor_ts, FLOOR_30D);
 });
 
-test("asking for less history than the cursor covers keeps the wider floor", async () => {
+test("asking for less history than the cursor covers keeps the wider floor, and a read with a cursor starts from it", async () => {
 	const first = harness(["messages"]);
 	await run(first, fakeApi(), { lookbackDays: 30 });
 	const second = harness(["messages"], {
@@ -552,7 +557,9 @@ test("asking for less history than the cursor covers keeps the wider floor", asy
 	});
 	const api = await run(second);
 	const [head] = historyCalls(api, "C0123456789");
-	assert.equal(head?.params.oldest, String(FLOOR_7D));
+	// The cursor's own week, not the shorter lookback floor: the lookback
+	// bounds a first read only.
+	assert.equal(head?.params.oldest, String(1_790_450_000 - 7 * DAY));
 	assert.equal(historyCalls(api, "C0123456789").length, 2, "no threads pass");
 	assert.equal(second.state("messages")?.floor_ts, FLOOR_30D);
 });
@@ -788,6 +795,7 @@ test("a conversation Slack stopped answering is a gap; its cursor stays put", as
 		kind: "slack_conversation",
 		channel_id: "C0987654321",
 		team_id: "T0123456789",
+		thread_replies_since: FLOOR_7D,
 	});
 	const coverage = h
 		.coverage()
@@ -1303,14 +1311,18 @@ test("options come from SLACK_* variables with the archive profile's defaults", 
 		process.env.SLACK_CHANNEL_TYPES = "public,IM,bogus";
 		process.env.SLACK_CHANNEL_ALLOWLIST = "general, eng-alerts";
 		process.env.SLACK_WORKSPACE = " acme ";
+		process.env.SLACK_MAX_BACKFILL_DAYS = "0";
 		assert.deepEqual(readSlackBrowserOptions(), {
 			channelAllowlist: ["general", "eng-alerts"],
 			channelTypes: ["public", "im"],
 			lookbackDays: 30,
+			maxBackfillDays: 0,
 			workspace: "acme",
 		});
 		process.env.SLACK_LOOKBACK_DAYS = "-3";
+		process.env.SLACK_MAX_BACKFILL_DAYS = "-1";
 		assert.equal(readSlackBrowserOptions().lookbackDays, 7);
+		assert.equal(readSlackBrowserOptions().maxBackfillDays, 90);
 	} finally {
 		for (const key of Object.keys(process.env)) {
 			if (key.startsWith("SLACK_")) {
@@ -1497,4 +1509,353 @@ test("with no pending gap in START, no gap page is requested (a host that does n
 	await run(h);
 	assert.equal(asked, 0);
 	assert.ok(h.state("messages"));
+});
+
+// ─── Thread replies below the starting line ─────────────────────────────
+
+const GENERAL_CURSOR = "1790450000.000200";
+const GENERAL_HEAD = 1_790_450_000 - 7 * DAY;
+const OLD_THREAD = "1788000000.000600";
+
+/** A stored messages cursor for #general alone, written by a run a day ago. */
+const generalCursorState = (floorTs = FLOOR_7D) => ({
+	messages: {
+		channel_last_ts: { C0123456789: GENERAL_CURSOR },
+		floor_ts: floorTs,
+		format: 1,
+		replies_checked_ts: FIXTURE_NOW_SECONDS - DAY,
+	},
+});
+
+const repliesCalls = (api: ReturnType<typeof fakeApi>) =>
+	api.calls
+		.filter((c) => c.method === "conversations.replies")
+		.map((c) => `${c.params.channel}:${c.params.ts}`);
+
+const searchDayOf = (seconds: number) =>
+	new Date(seconds * 1000).toISOString().slice(0, 10);
+
+test("with the whole history asked for, a later run still asks search for replies to old threads", async () => {
+	const h = harness(["messages"], { state: generalCursorState(0) });
+	const api = await run(h, fakeApi(), { lookbackDays: 0 });
+	// Replies are owed from a week before the last run started.
+	assert.equal(
+		api.calls.find((c) => c.method === "search.messages")?.params.query,
+		`after:${searchDayOf(FIXTURE_NOW_SECONDS - 8 * DAY - DAY)}`,
+	);
+	assert.ok(repliesCalls(api).includes(`C0123456789:${OLD_THREAD}`));
+	assert.ok(
+		h.of("messages").some((m) => m.id === "C0123456789:1790000000.000700"),
+		"the late reply to the old thread is read",
+	);
+});
+
+for (const [label, searchAnswer] of [
+	["search is refused", (): unknown => ({ ok: false, error: "missing_scope" })],
+	[
+		"search runs past its page cap",
+		(page: number): unknown => ({
+			ok: true,
+			messages: { matches: [], paging: { page, pages: 1000 } },
+		}),
+	],
+] as const) {
+	test(`when ${label}, a later run scans below its starting line for threads with new replies`, async () => {
+		const h = harness(["messages"], { state: generalCursorState() });
+		const api = await run(
+			h,
+			fakeApi((call) =>
+				call.method === "search.messages"
+					? searchAnswer(Number(call.params.page))
+					: undefined,
+			),
+		);
+		const general = historyCalls(api, "C0123456789");
+		assert.deepEqual(
+			general.map((c) => [c.params.oldest, c.params.latest, c.params.limit]),
+			[
+				[String(GENERAL_HEAD), undefined, "999"],
+				[String(GENERAL_HEAD), undefined, "999"],
+				[String(GENERAL_HEAD - 30 * DAY), String(GENERAL_HEAD), "999"],
+				[undefined, String(GENERAL_HEAD - 30 * DAY), "1"],
+			],
+		);
+		assert.ok(repliesCalls(api).includes(`C0123456789:${OLD_THREAD}`));
+		assert.ok(
+			h.of("messages").some((m) => m.id === "C0123456789:1790000000.000700"),
+		);
+		assert.deepEqual(h.gaps(), []);
+	});
+}
+
+test("a thread scan that stops with older history left files a gap carrying the replies still owed", async () => {
+	const h = harness(["messages"], { state: generalCursorState() });
+	await run(
+		h,
+		fakeApi((call) => {
+			if (call.method === "search.messages") {
+				return { ok: false, error: "missing_scope" };
+			}
+			if (
+				call.method === "conversations.history" &&
+				call.params.limit === "1" &&
+				call.params.channel === "C0123456789"
+			) {
+				return {
+					ok: true,
+					messages: [{ type: "message", ts: "1780000000.000100", text: "x" }],
+					has_more: true,
+				};
+			}
+			return undefined;
+		}),
+	);
+	const gaps = h.gaps();
+	assert.deepEqual(
+		gaps.map((g) => [g.record_key, g.reason, g.last_error?.message]),
+		[["C0123456789", "temporary_unavailable", "thread_scan_bound_reached"]],
+	);
+	assert.deepEqual(gaps[0]?.detail_locator, {
+		kind: "slack_conversation",
+		channel_id: "C0123456789",
+		team_id: TEAM.id,
+		thread_replies_since: FIXTURE_NOW_SECONDS - 8 * DAY,
+	});
+	const coverage = h.coverage().find((c) => c.stream === "messages");
+	assert.deepEqual(coverage?.gap_keys, ["C0123456789"]);
+	assert.ok(
+		!coverage?.hydrated_keys.includes("C0123456789"),
+		"a conversation with replies left unchecked is not counted as read",
+	);
+	// The window itself was read in full, so the cursor still checkpoints.
+	const cursors = h.state("messages")?.channel_last_ts as
+		| Record<string, string>
+		| undefined;
+	assert.equal(cursors?.C0123456789, GENERAL_CURSOR);
+});
+
+test("a pending gap's owed replies pull the search back, and a complete search recovers it", async () => {
+	const owedSince = FIXTURE_NOW_SECONDS - 40 * DAY;
+	const h = harness(["messages"], {
+		state: generalCursorState(),
+		detailGaps: [
+			{
+				gap_id: "g-owed",
+				stream: "messages",
+				record_key: "C0123456789",
+				detail_locator: {
+					kind: "slack_conversation",
+					channel_id: "C0123456789",
+					team_id: TEAM.id,
+					thread_replies_since: owedSince,
+				},
+			},
+		],
+	});
+	const api = await run(h);
+	assert.equal(
+		api.calls.find((c) => c.method === "search.messages")?.params.query,
+		`after:${searchDayOf(owedSince - DAY)}`,
+	);
+	assert.deepEqual(
+		h.messages
+			.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+			.map((m) => m.gap_id),
+		["g-owed"],
+	);
+});
+
+// ─── Catching up after a pause ──────────────────────────────────────────
+
+test("after a long pause a later run reads from its cursor, not from the lookback floor", async () => {
+	const cursorSec = FIXTURE_NOW_SECONDS - 20 * DAY;
+	const h = harness(["messages"], {
+		state: {
+			messages: {
+				channel_last_ts: { C0123456789: `${cursorSec}.000100` },
+				floor_ts: FLOOR_7D - 20 * DAY,
+				format: 1,
+				replies_checked_ts: cursorSec,
+			},
+		},
+	});
+	const api = await run(h);
+	assert.equal(
+		historyCalls(api, "C0123456789")[0]?.params.oldest,
+		String(cursorSec - 7 * DAY),
+		"days 27 to 7 ago are read, not dropped",
+	);
+	// A conversation with no cursor still starts at the lookback floor.
+	assert.equal(
+		historyCalls(api, "C0987654321")[0]?.params.oldest,
+		String(FLOOR_7D),
+	);
+	assert.equal(
+		api.calls.find((c) => c.method === "search.messages")?.params.query,
+		`after:${searchDayOf(cursorSec - 7 * DAY - DAY)}`,
+	);
+});
+
+test("the catch-up is clamped only by the max backfill and the requested start", async () => {
+	const cursorSec = FIXTURE_NOW_SECONDS - 200 * DAY;
+	const state = {
+		messages: {
+			channel_last_ts: { C0123456789: `${cursorSec}.000100` },
+			floor_ts: cursorSec,
+			format: 1,
+			replies_checked_ts: cursorSec,
+		},
+	};
+	const clamped = harness(["messages"], { state });
+	const api = await run(clamped);
+	assert.equal(
+		historyCalls(api, "C0123456789")[0]?.params.oldest,
+		String(FIXTURE_NOW_SECONDS - 90 * DAY),
+	);
+	assert.ok(
+		clamped.progress.some((p) => p.message.includes("SLACK_MAX_BACKFILL_DAYS")),
+		"the clamp is reported",
+	);
+
+	const unlimited = harness(["messages"], { state });
+	const unlimitedApi = await run(unlimited, fakeApi(), { maxBackfillDays: 0 });
+	assert.equal(
+		historyCalls(unlimitedApi, "C0123456789")[0]?.params.oldest,
+		String(cursorSec - 7 * DAY),
+	);
+
+	const since = harness(["messages"], {
+		state,
+		timeRange: { since: "2026-09-18T00:00:00Z" },
+	});
+	const sinceApi = await run(since, fakeApi(), { maxBackfillDays: 0 });
+	assert.equal(
+		historyCalls(sinceApi, "C0123456789")[0]?.params.oldest,
+		String(Date.parse("2026-09-18T00:00:00Z") / 1000),
+	);
+});
+
+// ─── Gaps for conversations that left the run ───────────────────────────
+
+test("pending gaps of conversations no longer listed or refused are resolved, for the workspace being read only", async () => {
+	const locator = (channel: string, team?: string) => ({
+		kind: "slack_conversation",
+		channel_id: channel,
+		...(team === undefined ? {} : { team_id: team }),
+	});
+	const h = harness(["messages"], {
+		detailGaps: [
+			{
+				gap_id: "g-left",
+				stream: "messages",
+				record_key: "C0DEADBEEF0",
+				detail_locator: locator("C0DEADBEEF0", TEAM.id),
+			},
+			{
+				gap_id: "g-refused",
+				stream: "messages",
+				record_key: "C0555555555",
+				detail_locator: locator("C0555555555", TEAM.id),
+			},
+			{
+				gap_id: "g-filtered",
+				stream: "messages",
+				record_key: "C0987654321",
+				detail_locator: locator("C0987654321", TEAM.id),
+			},
+			{
+				gap_id: "g-other-workspace",
+				stream: "messages",
+				record_key: "C0ABCDEF012",
+				detail_locator: locator("C0ABCDEF012", "T0999999999"),
+			},
+			{
+				gap_id: "g-no-workspace",
+				stream: "messages",
+				record_key: "C0FEEDFACE0",
+				detail_locator: locator("C0FEEDFACE0"),
+			},
+		],
+	});
+	await run(h, fakeApi(), {
+		channelAllowlist: [
+			"C0123456789",
+			"D0123456789",
+			"C0555555555",
+			"C0777777777",
+		],
+	});
+	assert.deepEqual(
+		h.messages
+			.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+			.map((m) => m.gap_id)
+			.sort(),
+		["g-filtered", "g-left", "g-refused"],
+	);
+});
+
+// ─── Several workspaces ─────────────────────────────────────────────────
+
+test("with two workspaces, each stream reports one coverage with the counts summed", async () => {
+	const h = harness(ALL_STREAMS);
+	const second = { ...TEAM, id: "T0999999999", domain: "acme-two" };
+	await collectSlackBrowser(
+		h.ctx,
+		{ api: fakeApi(), concurrency: 1, now: () => FIXTURE_NOW },
+		[TEAM, second],
+		DEFAULT_OPTIONS,
+	);
+	const coverage = h.coverage();
+	for (const stream of [
+		"workspace",
+		"channels",
+		"users",
+		"messages",
+		"message_attachments",
+		"reactions",
+		"user_groups",
+		"reminders",
+		"stars",
+	]) {
+		assert.equal(
+			coverage.filter((c) => c.stream === stream).length,
+			1,
+			`${stream} reports once`,
+		);
+	}
+	const considered = (stream: string) =>
+		coverage.find((c) => c.stream === stream)?.considered;
+	assert.equal(considered("workspace"), 2);
+	assert.equal(considered("users"), 6);
+	assert.equal(considered("channels"), 10);
+	assert.equal(considered("stars"), 4);
+	const messages = coverage.find((c) => c.stream === "messages");
+	assert.equal(
+		new Set(messages?.required_keys).size,
+		messages?.required_keys.length,
+		"no key twice",
+	);
+	// Every coverage precedes the STATE it vouches for.
+	const lastCoverage = h.messages.findLastIndex(
+		(m) => m.type === "DETAIL_COVERAGE",
+	);
+	const firstState = h.messages.findIndex((m) => m.type === "STATE");
+	assert.ok(lastCoverage < firstState);
+});
+
+test("later gap pages are asked for the messages stream only", async () => {
+	const h = harness(["messages", "files"], {
+		detailGaps: [
+			{ gap_id: "g-1", stream: "messages", record_key: "C0123456789" },
+		],
+		gapPages: [[]],
+	});
+	const asked: unknown[] = [];
+	const page = h.ctx.requestDetailGapPage;
+	h.ctx.requestDetailGapPage = async (req) => {
+		asked.push(req);
+		return page ? page(req) : [];
+	};
+	await run(h);
+	assert.deepEqual(asked, [{ streams: ["messages"] }]);
 });

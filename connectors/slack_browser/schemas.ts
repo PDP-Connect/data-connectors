@@ -208,4 +208,6 @@ export const messagesCursorSchema = z.object({
 	channel_last_ts: z.record(z.string(), z.string()),
 	floor_ts: z.number(),
 	format: z.literal(1),
+	/** When the run that wrote this cursor started, in Unix seconds: thread replies before it were looked for. */
+	replies_checked_ts: z.number().optional(),
 });

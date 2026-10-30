@@ -39,8 +39,13 @@ export interface SlackBrowserOptions {
 	channelAllowlist: string[];
 	/** Which conversation kinds to collect. */
 	channelTypes: ConversationKind[];
-	/** How far back a conversation's history is read; 0 means everything. */
+	/** How far back a conversation's first read goes; 0 means everything. */
 	lookbackDays: number;
+	/**
+	 * How far back a later read may reach to catch up from its cursor after a
+	 * long pause; 0 means no limit.
+	 */
+	maxBackfillDays: number;
 	/** Subdomain, team id or name of one workspace; empty means every signed-in workspace. */
 	workspace: string;
 }

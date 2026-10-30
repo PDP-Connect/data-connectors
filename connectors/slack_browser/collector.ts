@@ -7,31 +7,43 @@
  *
  * Directory streams (workspace, channels, users, user_groups, reminders,
  * stars) are full scans gated by a per-record fingerprint, so a steady-state
- * run emits nothing for them.
+ * run emits nothing for them. With several signed-in workspaces, each stream
+ * reports one coverage for the whole run, its counts summed across them.
  *
-
- * `messages` keeps one cursor per conversation: the newest ts read. Before
- * walking, the run asks `search.messages` for everything written since the
- * lookback floor; its results name the threads that got a reply inside the
- * window whatever the age of their parent, so those threads are read
- * directly instead of scanning a month of history below the floor. Every
- * conversation is then walked from its own starting line: a conversation the
- * run never read starts at the floor, and one with a stored cursor starts a
- * week before that cursor. The web client's own `client.counts` cannot stand
- * in for any of this: its `latest` moves only when a new message lands, so it
- * says nothing about a reaction or an edit landing on the newest message it
- * already reports — a conversation skipped on counts would stay skipped for
- * exactly the changes only a re-read can see. When search is unavailable a
- * first read also scans below the floor for active threads. A later run reads
- * from a week before each conversation's cursor, so a reply or reaction that
- * arrived on a recent message is seen again.
+ * `messages` keeps one cursor per conversation (the newest ts read) and the
+ * time the run that wrote it started (`replies_checked_ts`). A conversation
+ * the run never read starts at the lookback floor. One with a stored cursor
+ * starts a week before that cursor, so a late reply or reaction on a recent
+ * message is seen again, however long ago the last run was: after a long
+ * pause the read catches up from the cursor, reaching back no further than
+ * the owner's SLACK_MAX_BACKFILL_DAYS. The web client's own `client.counts`
+ * cannot stand in for any of this: its `latest` moves only when a new message
+ * lands, so it says nothing about a reaction or an edit landing on the newest
+ * message it already reports.
+ *
+ * Replies to a thread whose parent is older than where a read starts are
+ * found two ways. First, `search.messages` for everything written since the
+ * oldest reply any conversation still owes a look for (the last run's start,
+ * less the same week, or the floor on a first read): its results name the
+ * threads that got a reply, whatever the age of their parent, and those are
+ * read directly. When search is unavailable, fails, or runs past its page cap,
+ * each conversation instead scans the month below its starting line for
+ * thread parents with a reply since then. That scan is bounded; when the
+ * conversation has history older than the scan reached, the conversation is
+ * reported as a DETAIL_GAP carrying the oldest reply time still owed, so a
+ * later run with search back looks that far again instead of the miss going
+ * unrecorded.
  *
  * Conversations are read a few at a time. A conversation Slack will not
  * serve this session (`not_in_channel` and the like) is skipped; one Slack
  * stopped answering is reported as a DETAIL_GAP and its cursor stays put, so
- * the next run reads it again. A session rejection, the browser leaving
- * app.slack.com, or the page being closed ends the run with a SKIP_RESULT on
- * every requested stream and no cursor moves.
+ * the next run reads it again. A pending gap for a conversation that has left
+ * what the run reads (the owner left it, Slack refuses it, or the allowlist or
+ * channel kinds now leave it out) is resolved, so it does not stay open for
+ * good; only gaps of the workspace being read are resolved this way. A
+ * session rejection, the browser leaving app.slack.com, or the page being
+ * closed ends the run with a SKIP_RESULT on every requested stream and no
+ * cursor moves.
  */
 
 import type { ZodType } from "zod";
@@ -90,10 +102,16 @@ import {
 	SlackSessionLostError,
 } from "./web-api.ts";
 
-/** How far below a conversation's cursor a later run reads again, for late replies and reactions. */
+/**
+ * How far below a conversation's cursor a later run reads again, for late
+ * replies and reactions; also how far before the last run's start replies are
+ * looked for again.
+ */
 export const LATE_REPLY_LOOKBACK_SECONDS = 7 * 24 * 3600;
-/** How far below the lookback floor a first read looks for active threads when search is unavailable. */
+/** How far below a read's starting line it scans for active threads when search did not name them. */
 export const THREAD_LOOKBACK_SECONDS = 30 * 24 * 3600;
+/** The thread scan below a read's starting line stopped with older history left unscanned. */
+export const THREAD_SCAN_BOUND_REASON = "thread_scan_bound_reached";
 export const MAX_PAGES_PER_CONVERSATION = 2000;
 /** Search pages (100 matches each) a run reads before it stops trusting search for thread discovery. */
 export const MAX_SEARCH_PAGES = 100;
@@ -177,6 +195,15 @@ interface Run {
 	cursors: Map<FingerprintedStream, FingerprintCursor>;
 	/** Optional streams that ended in a SKIP_RESULT this run. */
 	failed: Set<string>;
+	/**
+	 * Each full-scan stream's enumerated size, summed across the workspaces
+	 * read: one coverage per stream goes out when the run finishes.
+	 */
+	fullScanConsidered: Map<FingerprintedStream, number>;
+	/** The messages boundary across every workspace read, reported once when the run finishes. */
+	messagesCoverage: MessagesCoverage;
+	/** Pending messages gaps by conversation, read once per run; null until the first workspace asks. */
+	pendingGaps: Map<string, PendingGap[]> | null;
 	fullRefresh: boolean;
 	/** Message ids read this run, in read order, deduplicated: the parent boundary the derived detail streams account for. */
 	messagesRead: string[];
@@ -199,9 +226,47 @@ interface Run {
 }
 
 interface MessagesPlan {
+	/** The oldest the owner's max backfill lets a read from a cursor start; 0 for no limit. */
+	backfillFloorSec: number;
 	channelLastTs: Record<string, string>;
+	/** Where a conversation's first read starts; 0 for its whole history. */
 	floorSec: number;
 	nextFloorSec: number;
+	/** When the cursor's run started, if it said: replies before it were looked for then. */
+	repliesCheckedSec: number | null;
+	/**
+	 * The oldest a read from a stored cursor may start: the requested start
+	 * and the owner's max backfill. 0 when neither limits it.
+	 */
+	resumeClampSec: number;
+	/** This run's start, stored as the next cursor's replies_checked_ts. */
+	runSec: number;
+}
+
+/** Where one conversation's read starts this run, and which replies it owes a look for. */
+interface ConversationWindow {
+	/** The cursor's own starting line was older than the owner's max backfill allows. */
+	clamped: boolean;
+	/** The oldest ts the head walk reads; 0 for the whole history. */
+	headOldest: number;
+	/** Replies at or after this are looked for in threads below headOldest. */
+	repliesSince: number;
+}
+
+interface PendingGap {
+	gapId: string;
+	leaseId?: string;
+	/** The oldest reply time the gap still owes a look for, when it said. */
+	repliesSince?: number;
+	/** The workspace the gap was filed for, when it said. */
+	teamId?: string;
+}
+
+interface MessagesCoverage {
+	gaps: Set<string>;
+	hydrated: Set<string>;
+	refused: Set<string>;
+	required: Set<string>;
 }
 
 interface HistoryWindow {
@@ -271,18 +336,22 @@ async function emitFingerprinted(
 }
 
 /**
- * A full scan's boundary proof, emitted only after the enumeration succeeded:
- * every item the source listed this run was considered, and each was either
- * emitted or suppressed as unchanged. A scan that found nothing declares zero,
- * which is how an empty stream proves coverage instead of merely lacking
- * evidence of it.
+ * Count one workspace's full scan toward the stream's boundary proof, only
+ * after its enumeration succeeded: every item the source listed was
+ * considered, and each was either emitted or suppressed as unchanged. The
+ * proof goes out once per stream when the run finishes, summed across the
+ * workspaces read; a scan that found nothing adds zero, which is how an
+ * empty stream proves coverage instead of merely lacking evidence of it.
  */
-async function emitFullScanCoverage(
+function countFullScan(
 	run: Run,
 	stream: FingerprintedStream,
 	considered: number,
-): Promise<void> {
-	await run.ctx.emit(buildFullScanCoverageMessage(stream, considered));
+): void {
+	run.fullScanConsidered.set(
+		stream,
+		(run.fullScanConsidered.get(stream) ?? 0) + considered,
+	);
 }
 
 /** Every page of a cursor-paginated list method. */
@@ -381,7 +450,7 @@ async function collectWorkspace(run: Run, team: SignedInTeam): Promise<void> {
 	const record = buildWorkspace(auth, info);
 	if (record !== null) {
 		await emitFingerprinted(run, "workspace", record);
-		await emitFullScanCoverage(run, "workspace", 1);
+		countFullScan(run, "workspace", 1);
 	}
 }
 
@@ -403,7 +472,7 @@ async function collectUsers(run: Run, team: SignedInTeam): Promise<void> {
 			await emitFingerprinted(run, "users", buildUser(member));
 		}
 	}
-	await emitFullScanCoverage(run, "users", members);
+	countFullScan(run, "users", members);
 }
 
 async function listConversations(
@@ -443,7 +512,7 @@ async function collectChannels(
 	for (const conversation of conversations) {
 		await emitFingerprinted(run, "channels", buildChannel(conversation));
 	}
-	await emitFullScanCoverage(run, "channels", conversations.length);
+	countFullScan(run, "channels", conversations.length);
 }
 
 // ─── Messages: plan and discovery ───────────────────────────────────────
@@ -466,58 +535,108 @@ function planMessages(run: Run): MessagesPlan {
 			? nowSec - run.options.lookbackDays * 86_400
 			: 0;
 	const since = run.ctx.requested.get("messages")?.time_range?.since;
-	const sinceSec =
+	const parsedSince =
 		since === undefined ? Number.NaN : Math.floor(Date.parse(since) / 1000);
-	const floorSec = Number.isFinite(sinceSec)
-		? Math.max(lookbackFloor, sinceSec)
-		: lookbackFloor;
+	const sinceSec = Number.isFinite(parsedSince) ? parsedSince : 0;
+	const floorSec = Math.max(lookbackFloor, sinceSec);
+	const backfillFloor =
+		run.options.maxBackfillDays > 0
+			? nowSec - run.options.maxBackfillDays * 86_400
+			: 0;
 	const stored = run.fullRefresh
 		? null
 		: readMessagesCursor(run.ctx.state.messages);
 	const covers = stored !== null && stored.floor_ts <= floorSec;
 	return {
+		backfillFloorSec: backfillFloor,
 		channelLastTs: covers ? { ...stored.channel_last_ts } : {},
 		floorSec,
 		nextFloorSec: covers ? Math.min(stored.floor_ts, floorSec) : floorSec,
+		repliesCheckedSec: covers ? (stored.replies_checked_ts ?? null) : null,
+		resumeClampSec: Math.max(sinceSec, backfillFloor),
+		runSec: nowSec,
 	};
 }
 
 /**
- * Which threads got a reply inside the window, per conversation, from Slack
+ * One conversation's starting line and the replies it owes a look for. A
+ * first read starts at the floor. A later read starts a week before its
+ * cursor however far back that is (a long pause catches up instead of
+ * skipping to the floor), clamped only by the requested start and the
+ * owner's max backfill. Replies are owed from a week before the last run
+ * started, or from the starting line when the cursor does not say when that
+ * was, and from further back still when a pending gap says so.
+ */
+function conversationWindow(
+	plan: MessagesPlan,
+	conversationId: string,
+	pendingRepliesSince: number | undefined,
+): ConversationWindow {
+	const last = plan.channelLastTs[conversationId];
+	if (last === undefined) {
+		return {
+			clamped: false,
+			headOldest: plan.floorSec,
+			repliesSince: plan.floorSec,
+		};
+	}
+	const fromCursor = Math.max(
+		0,
+		Math.floor(slackTsSeconds(last)) - LATE_REPLY_LOOKBACK_SECONDS,
+	);
+	const headOldest = Math.max(plan.resumeClampSec, fromCursor);
+	// A cursor is the newest message read, never later than the run that read
+	// it, so a week before that run is never older than a week before the
+	// cursor: a quiet conversation's old cursor does not drag the reply search
+	// back with it.
+	const checked =
+		plan.repliesCheckedSec === null
+			? headOldest
+			: plan.repliesCheckedSec - LATE_REPLY_LOOKBACK_SECONDS;
+	const owed =
+		pendingRepliesSince === undefined
+			? checked
+			: Math.min(checked, pendingRepliesSince);
+	return {
+		// A requested start that cuts the catch-up short is the grant's own
+		// boundary, not history lost: only the max backfill is reported.
+		clamped: fromCursor < plan.backfillFloorSec,
+		headOldest,
+		repliesSince: Math.max(plan.resumeClampSec, owed),
+	};
+}
+
+/**
+ * Which threads got a reply since `sinceSec`, per conversation, from Slack
  * search: parents whose replies are active whatever the age of the parent
- * itself. Null when search did not cover the window, so the walk falls back
- * to scanning below the floor on a first read.
+ * itself. Null when search did not cover the window (unavailable, failed, or
+ * past its page cap), so each conversation scans below its starting line
+ * instead.
  */
 async function discoverThreads(
 	run: Run,
 	team: SignedInTeam,
-	plan: MessagesPlan,
+	sinceSec: number,
 ): Promise<Map<string, Set<string>> | null> {
-	if (plan.floorSec <= 0) {
-		// The whole history was asked for; every conversation is read to its
-		// floor anyway, so no thread list is needed.
-		return null;
-	}
-	await run.ctx.progress("Asking Slack what changed since the floor", {
+	await run.ctx.progress("Asking Slack which threads got replies", {
 		stream: "messages",
 	});
-	const found = await searchSinceFloor(run, team, plan.floorSec);
+	const found = await searchSinceFloor(run, team, sinceSec);
 	return found?.complete ? found.threadsByChannel : null;
 }
 
 interface SearchFindings {
-	channelIds: Set<string>;
 	/** Whether every page was read, so the thread list is complete. */
 	complete: boolean;
 	threadsByChannel: Map<string, Set<string>>;
 }
 
 /**
- * Everything written since the floor, from Slack search: which conversations
- * it landed in, and which thread parents got a reply (search links a reply
- * to its parent through the permalink's `thread_ts`). Search is paged 100
- * at a time and rate limited more tightly than history, so a run reads at
- * most MAX_SEARCH_PAGES pages and reports the list incomplete beyond that.
+ * Everything written since the floor, from Slack search: which thread
+ * parents got a reply (search links a reply to its parent through the
+ * permalink's `thread_ts`). Search is paged 100 at a time and rate limited
+ * more tightly than history, so a run reads at most MAX_SEARCH_PAGES pages
+ * and reports the list incomplete beyond that.
  */
 async function searchSinceFloor(
 	run: Run,
@@ -525,7 +644,6 @@ async function searchSinceFloor(
 	floorSec: number,
 ): Promise<SearchFindings | null> {
 	const findings: SearchFindings = {
-		channelIds: new Set(),
 		complete: false,
 		threadsByChannel: new Map(),
 	};
@@ -555,7 +673,6 @@ async function searchSinceFloor(
 			if (channelId === undefined) {
 				continue;
 			}
-			findings.channelIds.add(channelId);
 			const parent = THREAD_TS_IN_PERMALINK.exec(match.permalink ?? "")?.[1];
 			if (parent !== undefined) {
 				let threads = findings.threadsByChannel.get(channelId);
@@ -784,21 +901,43 @@ async function walkHistory(
 	throw new SlackApiError("conversations.history", PAGE_CAP_REASON, true, null);
 }
 
+/**
+ * Whether the conversation has any message older than `beforeSec`: one
+ * single-message page below the line a thread scan stopped at.
+ */
+async function hasHistoryBefore(
+	run: Run,
+	team: SignedInTeam,
+	conversationId: string,
+	beforeSec: number,
+): Promise<boolean> {
+	const answer = parseAnswer(
+		historySchema,
+		"conversations.history",
+		await run.api.call(team.id, "conversations.history", {
+			channel: conversationId,
+			latest: String(beforeSec),
+			limit: "1",
+		}),
+	);
+	return (answer.messages ?? []).length > 0;
+}
+
+/**
+ * Read one conversation's window and the threads below it that owe a look.
+ * Returns whether the thread scan below the window stopped at its bound with
+ * older history left, so replies there may have been missed.
+ */
 async function walkConversation(
 	run: Run,
 	team: SignedInTeam,
 	conversation: SlackConversationObject,
 	plan: MessagesPlan,
+	window: ConversationWindow,
 	threadsByChannel: Map<string, Set<string>> | null,
-): Promise<void> {
+): Promise<{ boundHit: boolean }> {
 	const last = plan.channelLastTs[conversation.id];
-	const headOldest =
-		last === undefined
-			? plan.floorSec
-			: Math.max(
-					plan.floorSec,
-					Math.floor(slackTsSeconds(last)) - LATE_REPLY_LOOKBACK_SECONDS,
-				);
+	const { headOldest, repliesSince } = window;
 	const fetchedThreads = new Set<string>();
 	const newest = await walkHistory(
 		run,
@@ -812,6 +951,7 @@ async function walkConversation(
 		},
 		fetchedThreads,
 	);
+	let boundHit = false;
 	if (threadsByChannel !== null) {
 		// Threads search saw a reply in: their parents may be far below the floor.
 		for (const parentTs of threadsByChannel.get(conversation.id) ?? []) {
@@ -821,19 +961,28 @@ async function walkConversation(
 			fetchedThreads.add(parentTs);
 			await emitThread(run, team, conversation.id, parentTs, true);
 		}
-	} else if (last === undefined && plan.floorSec > 0) {
+	} else if (headOldest > 0) {
+		// Search did not name the threads: scan the month below the starting
+		// line for parents with a reply the conversation still owes a look at.
+		const scanOldest = Math.max(0, headOldest - THREAD_LOOKBACK_SECONDS);
 		await walkHistory(
 			run,
 			team,
 			conversation,
 			{
-				activeSince: plan.floorSec,
-				latest: plan.floorSec,
-				oldest: plan.floorSec - THREAD_LOOKBACK_SECONDS,
+				activeSince: repliesSince,
+				latest: headOldest,
+				oldest: scanOldest,
 				threadsOnly: true,
 			},
 			fetchedThreads,
 		);
+		// Older parents than the scan reached may have replies too; whether
+		// any exist is one small read, and a conversation with older history
+		// is reported instead of being taken as fully read.
+		boundHit =
+			scanOldest > 0 &&
+			(await hasHistoryBefore(run, team, conversation.id, scanOldest));
 	}
 	if (
 		newest !== null &&
@@ -841,6 +990,40 @@ async function walkConversation(
 	) {
 		plan.channelLastTs[conversation.id] = newest;
 	}
+	return { boundHit };
+}
+
+/** File a conversation left to retry: a DETAIL_GAP that also carries the replies it still owes a look for. */
+async function emitConversationGap(
+	run: Run,
+	team: SignedInTeam,
+	conversation: SlackConversationObject,
+	window: ConversationWindow,
+	outcome: MessagesOutcome,
+	gap: {
+		error: { class: string; httpStatus: number | null; message: string };
+		reason: "rate_limited" | "retry_exhausted" | "temporary_unavailable";
+	},
+): Promise<void> {
+	outcome.gaps.push(conversation.id);
+	await emitDetailGap(run.ctx, {
+		error: {
+			class: gap.error.class,
+			...(gap.error.httpStatus === null
+				? {}
+				: { httpStatus: gap.error.httpStatus }),
+			message: gap.error.message,
+		},
+		locator: {
+			kind: "slack_conversation",
+			channel_id: conversation.id,
+			team_id: team.id,
+			thread_replies_since: window.repliesSince,
+		},
+		reason: gap.reason,
+		recordKey: conversation.id,
+		stream: "messages",
+	});
 }
 
 /** Read one conversation, filing the outcome; only faults that end the run escape. */
@@ -849,6 +1032,7 @@ async function readConversation(
 	team: SignedInTeam,
 	conversation: SlackConversationObject,
 	plan: MessagesPlan,
+	window: ConversationWindow,
 	threadsByChannel: Map<string, Set<string>> | null,
 	outcome: MessagesOutcome,
 ): Promise<void> {
@@ -857,8 +1041,29 @@ async function readConversation(
 		stream: "messages",
 	});
 	try {
-		await walkConversation(run, team, conversation, plan, threadsByChannel);
-		outcome.hydrated.push(conversation.id);
+		const { boundHit } = await walkConversation(
+			run,
+			team,
+			conversation,
+			plan,
+			window,
+			threadsByChannel,
+		);
+		if (!boundHit) {
+			outcome.hydrated.push(conversation.id);
+			return;
+		}
+		// The window itself was read, so its cursor moved; the threads below
+		// the scan were not all looked at. The gap carries the oldest reply
+		// still owed, so a later run with search back looks that far again.
+		await emitConversationGap(run, team, conversation, window, outcome, {
+			error: {
+				class: "collection_bound",
+				httpStatus: null,
+				message: THREAD_SCAN_BOUND_REASON,
+			},
+			reason: "temporary_unavailable",
+		});
 	} catch (error) {
 		if (!(error instanceof SlackApiError) || isHostFault(error)) {
 			throw error;
@@ -877,17 +1082,11 @@ async function readConversation(
 			// eternally retryable temporary_unavailable gap.
 			throw error;
 		}
-		outcome.gaps.push(conversation.id);
-		await emitDetailGap(run.ctx, {
+		await emitConversationGap(run, team, conversation, window, outcome, {
 			error: {
 				class: "upstream_pressure",
-				...(error.httpStatus === null ? {} : { httpStatus: error.httpStatus }),
+				httpStatus: error.httpStatus,
 				message: error.reason,
-			},
-			locator: {
-				kind: "slack_conversation",
-				channel_id: conversation.id,
-				team_id: team.id,
 			},
 			reason:
 				error.reason === "ratelimited"
@@ -895,8 +1094,6 @@ async function readConversation(
 					: error.reason === PAGE_CAP_REASON
 						? "temporary_unavailable"
 						: "retry_exhausted",
-			recordKey: conversation.id,
-			stream: "messages",
 		});
 	}
 }
@@ -905,23 +1102,27 @@ async function readConversation(
  * The pending `messages` gaps the runtime served for prior runs, keyed by the
  * conversation the gap hangs off. The run's first page is `detailGaps`; the
  * rest, if any, come from `requestDetailGapPage` until a page answers with
- * nothing this run has not already seen. Absent when the host offered no gap
- * service, so there is nothing to recover.
+ * nothing this run has not already seen. Empty when the host offered no gap
+ * service, so there is nothing to recover. Read once per run: every
+ * workspace settles its own conversations' gaps from the same map.
  */
-async function pendingDetailGaps(ctx: SlackBrowserCollectContext): Promise<{
-	messages: Map<string, Array<{ gapId: string; leaseId?: string }>>;
-}> {
-	const messages = new Map<
-		string,
-		Array<{ gapId: string; leaseId?: string }>
-	>();
+async function pendingDetailGaps(
+	ctx: SlackBrowserCollectContext,
+): Promise<Map<string, PendingGap[]>> {
+	const messages = new Map<string, PendingGap[]>();
 	const seen = new Set<string>();
-	const entry = (
-		gap: DetailGapStartEntry,
-	): { gapId: string; leaseId?: string } => ({
-		gapId: gap.gap_id,
-		...(gap.lease_id === undefined ? {} : { leaseId: gap.lease_id }),
-	});
+	const entry = (gap: DetailGapStartEntry): PendingGap => {
+		const teamId = gap.detail_locator?.team_id;
+		const repliesSince = gap.detail_locator?.thread_replies_since;
+		return {
+			gapId: gap.gap_id,
+			...(gap.lease_id === undefined ? {} : { leaseId: gap.lease_id }),
+			...(typeof teamId === "string" && teamId !== "" ? { teamId } : {}),
+			...(typeof repliesSince === "number" && Number.isFinite(repliesSince)
+				? { repliesSince }
+				: {}),
+		};
+	};
 	const add = (gap: DetailGapStartEntry): void => {
 		// The runtime answers with the gaps still pending, so recovered ones
 		// drop out and one re-emitted this run comes back, already seen.
@@ -951,20 +1152,88 @@ async function pendingDetailGaps(ctx: SlackBrowserCollectContext): Promise<{
 	// is nothing to page, and a host that does not page gaps would leave the
 	// request unanswered and the run waiting forever.
 	if (first.length === 0 || typeof ctx.requestDetailGapPage !== "function") {
-		return { messages };
+		return messages;
 	}
 	for (;;) {
-		const page = await ctx.requestDetailGapPage({
-			streams: ["messages", "files"],
-		});
+		const page = await ctx.requestDetailGapPage({ streams: ["messages"] });
 		const unseen = page.filter((gap) => !seen.has(gap.gap_id));
 		if (unseen.length === 0) {
-			return { messages };
+			return messages;
 		}
 		for (const gap of unseen) {
 			add(gap);
 		}
 	}
+}
+
+/** A pending gap filed for this workspace, or one that does not say which. */
+const gapIsFor = (gap: PendingGap, team: SignedInTeam): boolean =>
+	gap.teamId === undefined || gap.teamId === team.id;
+
+/**
+ * Close the pending gaps of conversations this workspace settled: read to
+ * their end, refused to this session, or gone from the workspace's complete
+ * conversation list (the owner left, or the allowlist or channel kinds now
+ * leave them out). A gone conversation will never be read again, so its gap
+ * would otherwise stay open for good. Only gaps filed for this workspace are
+ * closed as gone: in a run over several workspaces, another workspace's
+ * conversations are absent from this list without having gone anywhere.
+ */
+async function settlePendingGaps(
+	run: Run,
+	team: SignedInTeam,
+	listed: ReadonlySet<string>,
+	outcome: MessagesOutcome,
+): Promise<void> {
+	const pending = run.pendingGaps;
+	if (pending === null) {
+		return;
+	}
+	const settled = new Set([...outcome.hydrated, ...outcome.refused]);
+	for (const [id, gaps] of [...pending]) {
+		const closing = gaps.filter((gap) =>
+			settled.has(id)
+				? gapIsFor(gap, team)
+				: !listed.has(id) && gap.teamId === team.id,
+		);
+		if (closing.length === 0) {
+			continue;
+		}
+		for (const gap of closing) {
+			await run.ctx.emit({
+				type: "DETAIL_GAP_RECOVERED",
+				reference_only: true,
+				gap_id: gap.gapId,
+				...(gap.leaseId === undefined ? {} : { lease_id: gap.leaseId }),
+				record_key: id,
+				stream: "messages",
+			});
+		}
+		const left = gaps.filter((gap) => !closing.includes(gap));
+		if (left.length === 0) {
+			pending.delete(id);
+		} else {
+			pending.set(id, left);
+		}
+	}
+}
+
+/** The oldest reply time a conversation's pending gaps for this workspace still owe. */
+function pendingRepliesSince(
+	run: Run,
+	team: SignedInTeam,
+	conversationId: string,
+): number | undefined {
+	let oldest: number | undefined;
+	for (const gap of run.pendingGaps?.get(conversationId) ?? []) {
+		if (gapIsFor(gap, team) && gap.repliesSince !== undefined) {
+			oldest =
+				oldest === undefined
+					? gap.repliesSince
+					: Math.min(oldest, gap.repliesSince);
+		}
+	}
+	return oldest;
 }
 
 async function collectMessages(
@@ -973,11 +1242,38 @@ async function collectMessages(
 	conversations: readonly SlackConversationObject[],
 	plan: MessagesPlan,
 ): Promise<void> {
-	// Coverage for this team's detail streams accounts for this team's reads
-	// only: another team's messages, already in the run's list, stay out.
+	// This workspace's messages, for its files report: another workspace's
+	// messages, already in the run's list, stay out.
 	const readFrom = run.messagesRead.length;
-	const threadsByChannel = await discoverThreads(run, team, plan);
-	const pending = await pendingDetailGaps(run.ctx);
+	run.pendingGaps ??= await pendingDetailGaps(run.ctx);
+	const windows = new Map<string, ConversationWindow>();
+	for (const conversation of conversations) {
+		windows.set(
+			conversation.id,
+			conversationWindow(
+				plan,
+				conversation.id,
+				pendingRepliesSince(run, team, conversation.id),
+			),
+		);
+	}
+	// Search reaches back to the oldest reply any conversation still owes a
+	// look for. A conversation read from its very beginning finds every thread
+	// on the way and owes none.
+	const owed = [...windows.values()]
+		.filter((window) => window.headOldest > 0)
+		.map((window) => window.repliesSince);
+	const threadsByChannel =
+		owed.length === 0
+			? null
+			: await discoverThreads(run, team, Math.min(...owed));
+	const clamped = [...windows.values()].filter((w) => w.clamped).length;
+	if (clamped > 0) {
+		await run.ctx.progress(
+			`${clamped} conversations were last read longer ago than SLACK_MAX_BACKFILL_DAYS allows; they are read from ${run.options.maxBackfillDays} days back`,
+			{ stream: "messages" },
+		);
+	}
 	const outcome: MessagesOutcome = {
 		gaps: [],
 		hydrated: [],
@@ -994,25 +1290,31 @@ async function collectMessages(
 		`Reading ${toRead.length} of ${conversations.length} conversations`,
 		{ stream: "messages" },
 	);
-	await runPool(toRead, run.concurrency, (conversation) =>
-		readConversation(run, team, conversation, plan, threadsByChannel, outcome),
-	);
-	// A conversation read to its end closes the gaps prior runs filed for it:
-	// each pending gap resolves with its own id, so the runtime's ledger
-	// commits instead of holding the checkpoint back for a conversation that
-	// now reads clean.
-	for (const id of outcome.hydrated) {
-		for (const gap of pending.messages.get(id) ?? []) {
-			await run.ctx.emit({
-				type: "DETAIL_GAP_RECOVERED",
-				reference_only: true,
-				gap_id: gap.gapId,
-				...(gap.leaseId === undefined ? {} : { lease_id: gap.leaseId }),
-				record_key: id,
-				stream: "messages",
-			});
+	await runPool(toRead, run.concurrency, (conversation) => {
+		const window = windows.get(conversation.id);
+		if (window === undefined) {
+			return Promise.resolve();
 		}
-	}
+		return readConversation(
+			run,
+			team,
+			conversation,
+			plan,
+			window,
+			threadsByChannel,
+			outcome,
+		);
+	});
+	// A conversation read to its end closes the gaps prior runs filed for it,
+	// and so does one that is refused or no longer listed: each pending gap
+	// resolves with its own id, so the runtime's ledger does not keep owing a
+	// conversation that now reads clean or that the run will never read again.
+	await settlePendingGaps(
+		run,
+		team,
+		new Set(conversations.map((conversation) => conversation.id)),
+		outcome,
+	);
 	await run.ctx.progress(
 		`Messages: ${run.messagesEmitted} read from ${outcome.hydrated.length} conversations; ${outcome.refused.length} not readable, ${outcome.gaps.length} to retry next run`,
 		{ count: run.messagesEmitted, stream: "messages" },
@@ -1025,36 +1327,23 @@ async function collectMessages(
 	// them — never becomes an optional skip either: it is a fault on data the
 	// owner owns, and a permanent one (Slack answers the same shape every
 	// run), so it ends the run closed with source_unreadable instead of
-	// filing an eternally retried gap.
+	// filing an eternally retried gap. The boundary is reported once for the
+	// whole run when it finishes, every workspace's keys together.
 	const refused = new Set(outcome.refused);
-	await emitDetailCoverage(run.ctx, {
-		considered: conversations.length - refused.size,
-		covered: outcome.hydrated.length,
-		gapKeys: outcome.gaps,
-		hydratedKeys: outcome.hydrated,
-		optionalSkipKeys: [...refused],
-		requiredKeys: toRead
-			.map((conversation) => conversation.id)
-			.filter((id) => !refused.has(id)),
-		stateStream: "messages",
-		stream: "messages",
-	});
-	// message_attachments and reactions hang off each message read: their
-	// parent boundary is the messages this run read, and their details ride
-	// on the message object, so no message can be read without them.
-	const teamMessages = run.messagesRead.slice(readFrom);
-	for (const stream of ["message_attachments", "reactions"] as const) {
-		if (!wants(run, stream)) {
-			continue;
+	const coverage = run.messagesCoverage;
+	for (const conversation of toRead) {
+		if (!refused.has(conversation.id)) {
+			coverage.required.add(conversation.id);
 		}
-		await emitDetailCoverage(run.ctx, {
-			considered: teamMessages.length,
-			covered: teamMessages.length,
-			hydratedKeys: teamMessages,
-			requiredKeys: teamMessages,
-			stateStream: "messages",
-			stream,
-		});
+	}
+	for (const id of refused) {
+		coverage.refused.add(id);
+	}
+	for (const id of outcome.gaps) {
+		coverage.gaps.add(id);
+	}
+	for (const id of outcome.hydrated) {
+		coverage.hydrated.add(id);
 	}
 	// files is its own checkpoint parent: a conversation left to retry means
 	// the window's files are not all read, so the files STATE is withheld this
@@ -1063,6 +1352,7 @@ async function collectMessages(
 	// it is reported here and does not hold the checkpoint back. It is not a
 	// DETAIL_GAP either: no retry can close it, and files has no parent
 	// stream to hang a gap off.
+	const teamMessages = run.messagesRead.slice(readFrom);
 	const idlessFiles = teamMessages.filter((id) => run.fileGaps.has(id)).length;
 	// Accumulated across teams: a later team that reads clean must not clear
 	// an earlier team's conversations left to retry.
@@ -1072,6 +1362,58 @@ async function collectMessages(
 			`Files: ${outcome.gaps.length} conversations to retry${run.filesIncomplete ? " (not checkpointed this run)" : ""}; ${idlessFiles} messages named a file Slack served with no id`,
 			{ stream: "files" },
 		);
+	}
+}
+
+/**
+ * The run's coverage, once per stream, after every workspace was read: each
+ * full scan's size summed across workspaces, and the messages boundary with
+ * the derived streams that hang off the messages read.
+ */
+async function emitRunCoverage(
+	run: Run,
+	plan: MessagesPlan | null,
+): Promise<void> {
+	for (const stream of FINGERPRINTED) {
+		const considered = run.fullScanConsidered.get(stream);
+		if (considered === undefined || run.failed.has(stream)) {
+			continue;
+		}
+		await run.ctx.emit(buildFullScanCoverageMessage(stream, considered));
+	}
+	if (plan === null) {
+		return;
+	}
+	// A conversation shared between two workspaces (Slack Connect) is one key:
+	// left to retry if either read left it, hydrated only if none did, and an
+	// optional skip only if no workspace could read it.
+	const { gaps, hydrated, refused, required } = run.messagesCoverage;
+	const hydratedKeys = [...hydrated].filter((id) => !gaps.has(id));
+	await emitDetailCoverage(run.ctx, {
+		considered: required.size,
+		covered: hydratedKeys.length,
+		gapKeys: [...gaps],
+		hydratedKeys,
+		optionalSkipKeys: [...refused].filter((id) => !required.has(id)),
+		requiredKeys: [...required],
+		stateStream: "messages",
+		stream: "messages",
+	});
+	// message_attachments and reactions hang off each message read: their
+	// parent boundary is the messages this run read, and their details ride
+	// on the message object, so no message can be read without them.
+	for (const stream of ["message_attachments", "reactions"] as const) {
+		if (!wants(run, stream)) {
+			continue;
+		}
+		await emitDetailCoverage(run.ctx, {
+			considered: run.messagesRead.length,
+			covered: run.messagesRead.length,
+			hydratedKeys: run.messagesRead,
+			requiredKeys: run.messagesRead,
+			stateStream: "messages",
+			stream,
+		});
 	}
 }
 
@@ -1157,7 +1499,7 @@ async function collectOptional(
 	for (const record of records) {
 		await emitFingerprinted(run, stream, record);
 	}
-	await emitFullScanCoverage(run, stream, records.length);
+	countFullScan(run, stream, records.length);
 }
 
 // ─── Run ────────────────────────────────────────────────────────────────
@@ -1274,6 +1616,7 @@ async function finish(
 		}
 		return;
 	}
+	await emitRunCoverage(run, plan);
 	for (const stream of FINGERPRINTED) {
 		const cursor = run.cursors.get(stream);
 		if (cursor === undefined || run.failed.has(stream)) {
@@ -1304,6 +1647,7 @@ async function finish(
 				channel_last_ts: plan.channelLastTs,
 				floor_ts: plan.nextFloorSec,
 				format: 1,
+				replies_checked_ts: plan.runSec,
 			},
 		});
 		if (wants(run, "files") && !run.filesIncomplete) {
@@ -1331,6 +1675,14 @@ export async function collectSlackBrowser(
 		ctx,
 		cursors: new Map(),
 		failed: new Set(),
+		fullScanConsidered: new Map(),
+		messagesCoverage: {
+			gaps: new Set(),
+			hydrated: new Set(),
+			refused: new Set(),
+			required: new Set(),
+		},
+		pendingGaps: null,
 		fullRefresh: ctx.collectionMode === "full_refresh",
 		messagesRead: [],
 		messagesSeen: new Set<string>(),

@@ -37,6 +37,7 @@ export const DEFAULT_OPTIONS: SlackBrowserOptions = {
 	channelAllowlist: [],
 	channelTypes: ["public", "private", "im", "mpim"],
 	lookbackDays: 7,
+	maxBackfillDays: 90,
 	workspace: "",
 };
 
@@ -80,6 +81,16 @@ export function fixtureAnswer(
 	switch (method) {
 		case "conversations.history": {
 			const channel = params.channel ?? "";
+			if (params.limit === "1") {
+				// The one-message look below where a thread scan stopped.
+				return (
+					fixtureIfPresent(`conversations.history-${channel}-older`) ?? {
+						ok: true,
+						messages: [],
+						has_more: false,
+					}
+				);
+			}
 			if (params.latest !== undefined) {
 				return (
 					fixtureIfPresent(`conversations.history-${channel}-threads`) ?? {
@@ -163,20 +174,23 @@ export /**
  * A pending gap the way the runtime serves it: the wire `DETAIL_GAP` shape the
  * type declares, carrying the served `gap_id`/`lease_id`.
  */
-const servedGap = (entry: {
-	gap_id: string;
-	lease_id?: string;
-	stream: string;
-	record_key: string;
-}): DetailGapStartEntry => ({
+const servedGap = (entry: ServedGap): DetailGapStartEntry => ({
 	reference_only: true,
 	status: "pending",
 	stream: entry.stream,
 	record_key: entry.record_key,
-	detail_locator: { kind: "slack_test_gap" },
+	detail_locator: entry.detail_locator ?? { kind: "slack_test_gap" },
 	gap_id: entry.gap_id,
 	...(entry.lease_id === undefined ? {} : { lease_id: entry.lease_id }),
 });
+
+export interface ServedGap {
+	detail_locator?: DetailGapStartEntry["detail_locator"];
+	gap_id: string;
+	lease_id?: string;
+	record_key: string;
+	stream: string;
+}
 
 export function harness(
 	streams: readonly string[],
@@ -185,21 +199,9 @@ export function harness(
 		state?: Record<string, unknown>;
 		timeRange?: { since?: string; until?: string };
 		/** Detail gaps the runtime had pending when the run started. */
-		detailGaps?: Array<{
-			gap_id: string;
-			lease_id?: string;
-			stream: string;
-			record_key: string;
-		}>;
+		detailGaps?: ServedGap[];
 		/** Later pages of pending detail gaps, served in order. */
-		gapPages?: Array<
-			Array<{
-				gap_id: string;
-				lease_id?: string;
-				stream: string;
-				record_key: string;
-			}>
-		>;
+		gapPages?: ServedGap[][];
 	} = {},
 ): Harness {
 	const messages: EmittedMessage[] = [];
