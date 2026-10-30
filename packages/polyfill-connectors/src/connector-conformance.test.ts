@@ -225,17 +225,17 @@ test("Development catalog entries stay unlisted, and Loom remains scaffolded", (
 	assert.deepEqual(REAL_UNLISTED_CONNECTORS.wholefoods, {
 		testFile: "connectors/wholefoods/integration.test.ts",
 	});
-  assert.deepEqual(REAL_UNLISTED_CONNECTORS.slack, {
-    testFile: "connectors/slack/integration.test.ts",
-  });
+	assert.deepEqual(REAL_UNLISTED_CONNECTORS.slack, {
+		testFile: "connectors/slack/integration.test.ts",
+	});
 	assert.equal("wholefoods" in PRODUCTION_READY_CONNECTORS, false);
-  assert.equal("slack" in PRODUCTION_READY_CONNECTORS, false);
+	assert.equal("slack" in PRODUCTION_READY_CONNECTORS, false);
 	assert.equal(
 		new Set<string>(KNOWN_SCAFFOLD_CONNECTORS).has("wholefoods"),
 		false,
 	);
 	assert.equal(new Set<string>(KNOWN_SCAFFOLD_CONNECTORS).has("loom"), true);
 	assert.equal(publicTier("wholefoods"), "development");
-  assert.equal(publicTier("slack"), "development");
+	assert.equal(publicTier("slack"), "development");
 	assert.equal(publicTier("loom"), "development");
 });
