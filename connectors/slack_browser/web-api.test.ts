@@ -252,6 +252,45 @@ test("every call after the first pauses", async () => {
 	assert.deepEqual(sleeps, [350]);
 });
 
+test("call starts are paced across lanes: concurrent calls queue on one pause, not one each", async () => {
+	let evaluated = 0;
+	const page = {
+		evaluate: async () => {
+			evaluated += 1;
+			return {
+				kind: "http",
+				status: 200,
+				retryAfterSeconds: null,
+				body: JSON.stringify({ ok: true }),
+			};
+		},
+	} as unknown as Parameters<typeof createSlackApiClient>[0];
+	const sleeps: number[] = [];
+	const wakes: Array<() => void> = [];
+	const api = createSlackApiClient(page, {
+		pauseMs: 1000,
+		sleep: (ms) =>
+			new Promise<void>((resolve) => {
+				sleeps.push(ms);
+				wakes.push(resolve);
+			}),
+	});
+	const flush = () => new Promise((resolve) => setImmediate(resolve));
+	const calls = [1, 2, 3].map(() => api.call("T0123456789", "auth.test", {}));
+	await flush();
+	// Three lanes asked at once: the first starts, the second waits one
+	// pause, and the third waits behind the second instead of pausing beside it.
+	assert.equal(evaluated, 1);
+	assert.deepEqual(sleeps, [1000]);
+	wakes.shift()?.();
+	await flush();
+	assert.equal(evaluated, 2);
+	assert.deepEqual(sleeps, [1000, 1000]);
+	wakes.shift()?.();
+	await Promise.all(calls);
+	assert.equal(evaluated, 3);
+});
+
 test("the in-page call reports an evaluate failure as a network error", async () => {
 	const page = {
 		evaluate: async () => {

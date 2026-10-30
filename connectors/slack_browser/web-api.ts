@@ -31,8 +31,14 @@ export const WRONG_ORIGIN_PREFIX = "wrong_origin:";
 export const PAGE_GONE_REASON = "page_gone";
 const PAGE_GONE_RE =
 	/has been closed|Target closed|Execution context was destroyed|Session closed|browser has disconnected/i;
-/** Slack's own guidance for Tier 3 methods is about one call per second; this stays under it with headroom for retries. */
-export const REQUEST_PAUSE_MS = 350;
+/**
+ * The spacing between the starts of two calls on one client, shared by every
+ * lane that reads through it: however many conversations are read at once,
+ * the client starts at most one call a second, Slack's own guidance for the
+ * Tier 3 methods (history, replies) this connector spends most of its calls on.
+ * A rate-limit answer is still honoured on top of this with its Retry-After.
+ */
+export const REQUEST_PAUSE_MS = 1000;
 const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_ATTEMPTS = 6;
 const RETRY_BASE_MS = 1500;
@@ -344,10 +350,12 @@ export interface SlackApiClientDeps {
 }
 
 /**
- * The paced, retrying client over one page. Every call after the first waits
- * `pauseMs`; a rate-limited, 5xx, malformed or unreachable answer is retried
- * with a growing delay, at most `maxAttempts` times; a session rejection or
- * a method error is thrown at once.
+ * The paced, retrying client over one page. Calls start one at a time, at
+ * least `pauseMs` apart, whichever lane asks: the pacing is one queue for the
+ * whole client, so reading several conversations at once overlaps their
+ * round trips without multiplying the call rate. A rate-limited, 5xx,
+ * malformed or unreachable answer is retried with a growing delay, at most
+ * `maxAttempts` times; a session rejection or a method error is thrown at once.
  */
 export function createSlackApiClient(
 	page: SlackApiPage,
@@ -356,13 +364,18 @@ export function createSlackApiClient(
 	const maxAttempts = deps.maxAttempts ?? MAX_ATTEMPTS;
 	const pauseMs = deps.pauseMs ?? REQUEST_PAUSE_MS;
 	const retryBaseMs = deps.retryBaseMs ?? RETRY_BASE_MS;
-	let calls = 0;
+	// The turn the next call waits for: the previous call's start plus the
+	// pause. Chaining every call's turn onto the one before keeps call starts
+	// spaced across lanes, not only within one.
+	let lastTurn: Promise<void> | null = null;
 	return {
 		async call(teamId, method, params) {
-			if (calls > 0) {
-				await deps.sleep(pauseMs);
-			}
-			calls += 1;
+			const turn: Promise<void> =
+				lastTurn === null
+					? Promise.resolve()
+					: lastTurn.then(() => deps.sleep(pauseMs));
+			lastTurn = turn;
+			await turn;
 			let lastFailure = "unknown";
 			for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
 				const verdict = classify(
