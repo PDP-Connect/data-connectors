@@ -1196,6 +1196,57 @@ export const spotifyPageCollector = async (
 						if (complete(found)) return found;
 					} catch {}
 				}
+				// Some operations (userTopContent) live only in lazily loaded route
+				// chunks that the home page never loads. Desktop browsers have them
+				// in the workbox precache above, but a WebView without service
+				// workers (iOS WKWebView outside app-bound domains) has no precache
+				// at all. The service worker script itself is a plain same-origin
+				// file that lists every precached chunk, so read the chunk URLs
+				// from it and scan the ones whose names match a missing operation
+				// first.
+				let precacheUrls: string[] = [];
+				try {
+					const response = await fetch("/service-worker.js");
+					if (response.ok) {
+						const source = await response.text();
+						const urlPattern =
+							/["']?url["']?\s*:\s*["'](https:\/\/[\w.-]*spotifycdn\.com\/[^"'\s]+\.js)["']/g;
+						precacheUrls = Array.from(
+							source.matchAll(urlPattern),
+							(match) => match[1] ?? "",
+						).filter(
+							(url, index, all) =>
+								url !== "" &&
+								!scripts.includes(url) &&
+								all.indexOf(url) === index,
+						);
+					}
+				} catch {}
+				const chunkHints: Record<string, string[]> = {
+					userTopContent: ["profile"],
+					profileAttributes: ["profile"],
+					libraryV3: ["library"],
+					fetchPlaylist: ["playlist"],
+					fetchLibraryTracks: ["collection-songs", "library"],
+				};
+				const hints = [...needed]
+					.filter((name) => typeof found[name] !== "string")
+					.flatMap((name) => chunkHints[name] ?? []);
+				const hinted = (url: string) => {
+					const file = url.slice(url.lastIndexOf("/") + 1);
+					return hints.some((hint) => file.includes(hint));
+				};
+				precacheUrls.sort(
+					(a, b) => Number(hinted(b)) - Number(hinted(a)),
+				);
+				for (const url of precacheUrls) {
+					if (bundlesRead >= maxBundles || bytesRead >= maxBundleBytes) break;
+					try {
+						const response = await fetch(url);
+						if (response.ok) await read(response);
+						if (complete(found)) return found;
+					} catch {}
+				}
 				return found;
 			}
 			let found: Record<string, string> = {};
