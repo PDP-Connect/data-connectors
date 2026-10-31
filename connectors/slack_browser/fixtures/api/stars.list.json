@@ -1,0 +1,31 @@
+{
+	"ok": true,
+	"items": [
+		{
+			"type": "message",
+			"channel": "C0123456789",
+			"message": {
+				"type": "message",
+				"user": "U0555555555",
+				"text": "Design review at 3pm <@U0123456789>?",
+				"ts": "1790400000.000100",
+				"permalink": "https://acme.slack.com/archives/C0123456789/p1790400000000100"
+			},
+			"date_create": 1790420000
+		},
+		{
+			"type": "channel",
+			"channel": "C0987654321",
+			"date_create": 1790000000
+		}
+	],
+	"response_metadata": {
+		"next_cursor": ""
+	},
+	"paging": {
+		"count": 100,
+		"total": 2,
+		"page": 1,
+		"pages": 1
+	}
+}

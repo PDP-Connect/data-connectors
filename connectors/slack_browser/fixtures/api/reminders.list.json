@@ -1,0 +1,10 @@
+{
+	"ok": true,
+	"reminders": [],
+	"warning": "superfluous_charset",
+	"response_metadata": {
+		"warnings": [
+			"superfluous_charset"
+		]
+	}
+}

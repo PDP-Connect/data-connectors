@@ -114,6 +114,10 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	// helper and installability is not yet proven.
 	slack: { testFile: "connectors/slack/integration.test.ts" },
 	strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
+	// Tier development. Reads the Slack Web API from the owner's signed-in
+	// app.slack.com page, the way the web client calls it; the oracle is the
+	// collection protocol test over a synthetic page + API fixture.
+	slack_browser: { testFile: "connectors/slack_browser/index.test.ts" },
 	// Tier development. Reads the signed-in WhatsApp Web page's own in-page
 	// stores (chats, messages, contacts, groups); the oracle is the collection
 	// walk test over a synthetic page.
