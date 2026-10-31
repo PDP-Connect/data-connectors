@@ -71,6 +71,10 @@ async function collectSavedTracks(
 	options: {
 		bundle?: (requestIndex: number) => string;
 		cachedBundles?: Array<{ url: string; size: number; body: string }>;
+		/** Body served at /service-worker.js; absent means a 404. */
+		serviceWorker?: string;
+		/** Bodies for precached chunk URLs the service worker lists. */
+		chunks?: Record<string, string>;
 		pathname?: string;
 		requested?: string[];
 		profileEnrichment?: unknown;
@@ -96,6 +100,7 @@ async function collectSavedTracks(
 	}> = [];
 	const messages: EmittedMessage[] = [];
 	let bundleRequests = 0;
+	const chunkRequests: string[] = [];
 	(globalThis as unknown as { window: unknown }).window = {
 		location: {
 			href: `https://open.spotify.com${options.pathname ?? "/"}`,
@@ -158,6 +163,15 @@ async function collectSavedTracks(
 				status: 200,
 			});
 		}
+		if (url === "/service-worker.js") {
+			return options.serviceWorker === undefined
+				? new Response("", { status: 404 })
+				: new Response(options.serviceWorker, { status: 200 });
+		}
+		if (options.chunks && Object.hasOwn(options.chunks, url)) {
+			chunkRequests.push(url);
+			return new Response(options.chunks[url], { status: 200 });
+		}
 		if (url.startsWith("https://spclient.wg.spotify.com/user-profile-view/")) {
 			return new Response(JSON.stringify(options.profileEnrichment ?? {}), {
 				status: options.profileEnrichmentStatus ?? 200,
@@ -213,7 +227,14 @@ async function collectSavedTracks(
 			options.onFailure?.({ emittedRecords, messages });
 			throw error;
 		}
-		return { bundleRequests, emittedRecords, messages, operations, requests };
+		return {
+			bundleRequests,
+			chunkRequests,
+			emittedRecords,
+			messages,
+			operations,
+			requests,
+		};
 	} finally {
 		globalThis.fetch = originalFetch;
 		(globalThis as unknown as { window: unknown }).window = originalWindow;
@@ -307,6 +328,36 @@ test("hash discovery scans every bounded precache entry when the requested opera
 		cachedBundles,
 	});
 	assert.equal(result.bundleRequests, 0);
+	assert.deepEqual(result.requests, [0]);
+});
+
+test("hash discovery reads lazy chunks from the service worker manifest when there is no precache", async () => {
+	// A WebView without service workers (iOS WKWebView) has no workbox cache,
+	// and the home page never loads the route chunk that defines the operation.
+	const cdn = "https://open.spotifycdn.com/cdn/build/web-player";
+	const serviceWorker = `self.__WB_DISABLE_DEV_LOGS=!0,e=[${[
+		"1186.d1c1615d.js",
+		"xpui-routes-artist.2459ba1a.js",
+		"xpui-routes-collection-songs.933cac3b.js",
+		"xpui-routes-profile.72480c98.css",
+	]
+		.map((file) => `{'revision':null,'url':'${cdn}/${file}'}`)
+		.join(",")}]||[]`;
+	const result = await collectSavedTracks(() => savedResponse([], 0), {
+		bundle: () => bundleFor(["profileAttributes"]),
+		serviceWorker,
+		chunks: {
+			[`${cdn}/1186.d1c1615d.js`]: "unrelated",
+			[`${cdn}/xpui-routes-artist.2459ba1a.js`]: "unrelated",
+			[`${cdn}/xpui-routes-collection-songs.933cac3b.js`]: bundleFor([
+				"fetchLibraryTracks",
+			]),
+		},
+	});
+	assert.equal(result.bundleRequests, 1);
+	assert.deepEqual(result.chunkRequests, [
+		`${cdn}/xpui-routes-collection-songs.933cac3b.js`,
+	]);
 	assert.deepEqual(result.requests, [0]);
 });
 
