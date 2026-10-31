@@ -1,0 +1,47 @@
+{
+	"ok": true,
+	"messages": [
+		{
+			"type": "message",
+			"subtype": "bot_message",
+			"text": "",
+			"ts": "1790460000.001100",
+			"bot_id": "B0123456789",
+			"username": "deploybot",
+			"bot_profile": {
+				"id": "B0123456789",
+				"name": "Deploy Bot",
+				"team_id": "T0123456789"
+			},
+			"attachments": [
+				{
+					"id": 1,
+					"color": "36a64f",
+					"fallback": "Deploy succeeded: api v1.2.3",
+					"title": "Deploy succeeded",
+					"text": "api v1.2.3 is live in production",
+					"footer": "deploybot"
+				}
+			],
+			"metadata": {
+				"event_type": "deploy_finished",
+				"event_payload": {
+					"service": "api"
+				}
+			}
+		},
+		{
+			"type": "message",
+			"subtype": "channel_join",
+			"user": "U0555555555",
+			"text": "<@U0555555555> has joined the channel",
+			"ts": "1790000000.001200",
+			"team": "T0123456789"
+		}
+	],
+	"has_more": false,
+	"pin_count": 0,
+	"response_metadata": {
+		"next_cursor": ""
+	}
+}

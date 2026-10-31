@@ -1,0 +1,9 @@
+{
+	"ok": true,
+	"url": "https://acme.slack.com/",
+	"team": "Acme",
+	"user": "owner",
+	"team_id": "T0123456789",
+	"user_id": "U0123456789",
+	"is_enterprise_install": false
+}

@@ -324,6 +324,18 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		users: null,
 		workspace: null,
 	},
+	slack_browser: {
+		channels: null,
+		files: null,
+		message_attachments: null,
+		messages: { field: "sent_at", format: "date-time" },
+		reactions: null,
+		reminders: null,
+		stars: null,
+		user_groups: null,
+		users: null,
+		workspace: null,
+	},
 	spotify: {
 		playlist_items: { field: "added_at", format: "date-time" },
 		playlists: null,

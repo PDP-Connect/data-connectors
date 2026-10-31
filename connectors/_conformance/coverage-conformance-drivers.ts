@@ -1469,6 +1469,12 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"slack.messages",
 	"slack.files",
 	"slack.canvases",
+	// Slack browser profile: auth-walled app.slack.com session whose Web API
+	// token lives only in the signed-in page; no credential-free coverage
+	// driver exists for it yet.
+	"slack_browser.channels",
+	"slack_browser.users",
+	"slack_browser.workspace",
 	"spotify.playlists",
 	"spotify.saved_tracks",
 	// Twitter archive (REAL_UNLISTED_CONNECTORS): zip-import snapshot receipts,

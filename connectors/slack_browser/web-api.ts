@@ -1,0 +1,452 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * The Slack Web API, called from inside the owner's signed-in
+ * app.slack.com page.
+ *
+ * Slack's web client authenticates its API calls with a session token it
+ * keeps in the page's local storage (`localConfig_v2.teams[<team>].token`)
+ * plus the browser's own cookies. Both are only usable from the app.slack.com
+ * origin: the workspace's own domain and slack.com refuse cross-origin calls.
+ * So every call is a same-origin `fetch('/api/<method>')` run by
+ * `page.evaluate` on an app.slack.com page. The token is read inside the
+ * page and never returned to the connector process, and nothing here writes
+ * it anywhere.
+ *
+ * The in-page function reports what happened rather than throwing, so the
+ * connector can tell a lost session from a rate limit from a network fault.
+ * Retries, pacing and the auth-versus-transient classification live on the
+ * Node side, where they can be unit-tested.
+ */
+
+import type { Page } from "playwright";
+import { z } from "zod";
+import { envelopeSchema, signedInTeamsSchema } from "./schemas.ts";
+import type { SignedInTeam } from "./types.ts";
+
+export const APP_ORIGIN = "https://app.slack.com";
+export const WRONG_ORIGIN_PREFIX = "wrong_origin:";
+/** The page the calls run in was closed or its context torn down; no retry can bring it back. */
+export const PAGE_GONE_REASON = "page_gone";
+const PAGE_GONE_RE =
+	/has been closed|Target closed|Execution context was destroyed|Session closed|browser has disconnected/i;
+/**
+ * The spacing between the starts of two calls on one client, shared by every
+ * lane that reads through it: however many conversations are read at once,
+ * the client starts at most one call a second, Slack's own guidance for the
+ * Tier 3 methods (history, replies) this connector spends most of its calls on.
+ * A rate-limit answer is still honoured on top of this with its Retry-After.
+ */
+export const REQUEST_PAUSE_MS = 1000;
+const REQUEST_TIMEOUT_MS = 60_000;
+const MAX_ATTEMPTS = 6;
+const RETRY_BASE_MS = 1500;
+const RATE_LIMIT_FALLBACK_S = 5;
+
+/** Slack's answers that mean the session itself is no good; retrying cannot help. */
+const SESSION_ERRORS = new Set([
+	"invalid_auth",
+	"not_authed",
+	"token_revoked",
+	"token_expired",
+	"account_inactive",
+	"team_access_not_granted",
+]);
+
+/**
+ * An edge challenge (Cloudflare and the like) answered where Slack's JSON was
+ * expected. Neither the session (401) nor an outage (5xx): sleeping retries
+ * nothing, the session is fine, and the owner passes the check in the page.
+ */
+export const CHALLENGE_REASON = "source_auth_or_challenge";
+/**
+ * An HTML document in place of the JSON answer — an edge's interstitial. It is
+ * anchored to the body's start: a JSON answer can carry the substring
+ * "<html>" inside message text (someone pasted HTML into a channel), and only
+ * a body that begins with the doctype or the tag is a document in place of
+ * the answer.
+ */
+const HTML_DOCUMENT_RE = /^[\s\uFEFF]*<(?:!doctype\s+html\b|html[\s>])/i;
+
+/** What the in-page call returns. It never throws: a throw in the page becomes network_error. */
+export const callOutcomeSchema = z.discriminatedUnion("kind", [
+	z.object({ kind: z.literal("wrong_origin"), origin: z.string() }),
+	z.object({ kind: z.literal("no_session") }),
+	z.object({ kind: z.literal("network_error"), message: z.string() }),
+	z.object({
+		kind: z.literal("http"),
+		status: z.number(),
+		retryAfterSeconds: z.number().nullable(),
+		body: z.string(),
+		/** The edge served this answer under a `cf-mitigated: challenge` header. */
+		cfMitigated: z.boolean().optional(),
+	}),
+]);
+
+export type SlackCallOutcome = z.infer<typeof callOutcomeSchema>;
+
+export type SlackApiPage = Pick<Page, "evaluate">;
+
+/** A durable rejection of the browser session; the owner has to sign in again. */
+export class SlackSessionLostError extends Error {
+	readonly code = "slack_session_lost";
+	readonly slackError: string | null;
+	constructor(slackError: string | null) {
+		super(
+			slackError === null
+				? "slack_session_lost"
+				: `slack_session_lost: ${slackError}`,
+		);
+		this.name = "SlackSessionLostError";
+		this.slackError = slackError;
+	}
+}
+
+/** A method that did not answer usefully, after retries where they applied. */
+export class SlackApiError extends Error {
+	readonly httpStatus: number | null;
+	readonly method: string;
+	readonly reason: string;
+	readonly retryable: boolean;
+	/** Slack itself answered `ok: false` with this reason (e.g. `not_in_channel`), as opposed to a fault on the way. */
+	readonly refusedBySlack: boolean;
+	constructor(
+		method: string,
+		reason: string,
+		retryable: boolean,
+		httpStatus: number | null,
+		refusedBySlack = false,
+	) {
+		super(`slack_api_${method}: ${reason}`);
+		this.name = "SlackApiError";
+		this.method = method;
+		this.reason = reason;
+		this.retryable = retryable;
+		this.httpStatus = httpStatus;
+		this.refusedBySlack = refusedBySlack;
+	}
+}
+
+/** A fault of the browser page itself, not of Slack: the run cannot continue on this page. */
+export function isHostFault(error: SlackApiError): boolean {
+	return (
+		error.reason === PAGE_GONE_REASON ||
+		error.reason.startsWith(WRONG_ORIGIN_PREFIX)
+	);
+}
+
+export interface SlackApiClient {
+	/** One Web API call for `teamId`; resolves to the parsed JSON answer, `ok: true`. */
+	call(
+		teamId: string,
+		method: string,
+		params: Record<string, string>,
+	): Promise<unknown>;
+}
+
+interface InPageCallInput {
+	method: string;
+	origin: string;
+	params: Record<string, string>;
+	teamId: string;
+	timeoutMs: number;
+}
+
+/**
+ * Runs in the page. Self-contained: Playwright serialises the function, so it
+ * can only use its argument and browser globals.
+ */
+async function callFromPage(input: InPageCallInput): Promise<SlackCallOutcome> {
+	if (location.origin !== input.origin) {
+		return { kind: "wrong_origin", origin: location.origin };
+	}
+	let token = "";
+	try {
+		const config: unknown = JSON.parse(
+			localStorage.getItem("localConfig_v2") ?? "{}",
+		);
+		const teams = (
+			config as {
+				teams?: Record<string, { token?: unknown } | undefined>;
+			} | null
+		)?.teams;
+		const candidate = teams?.[input.teamId]?.token;
+		if (typeof candidate === "string") {
+			token = candidate;
+		}
+	} catch {
+		token = "";
+	}
+	if (token === "") {
+		return { kind: "no_session" };
+	}
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+	try {
+		const response = await fetch(`/api/${input.method}`, {
+			body: new URLSearchParams({ ...input.params, token }),
+			credentials: "include",
+			method: "POST",
+			signal: controller.signal,
+		});
+		const retryAfter = response.headers.get("retry-after");
+		const seconds =
+			retryAfter === null ? Number.NaN : Number.parseInt(retryAfter, 10);
+		return {
+			kind: "http",
+			status: response.status,
+			retryAfterSeconds: Number.isFinite(seconds) ? seconds : null,
+			body: await response.text(),
+			cfMitigated: response.headers.get("cf-mitigated") === "challenge",
+		};
+	} catch (error) {
+		return {
+			kind: "network_error",
+			message: error instanceof Error ? error.message : String(error),
+		};
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+export async function callSlackInPage(
+	page: SlackApiPage,
+	teamId: string,
+	method: string,
+	params: Record<string, string>,
+): Promise<SlackCallOutcome> {
+	let raw: unknown;
+	try {
+		raw = await page.evaluate(callFromPage, {
+			method,
+			origin: APP_ORIGIN,
+			params,
+			teamId,
+			timeoutMs: REQUEST_TIMEOUT_MS,
+		});
+	} catch (error) {
+		return {
+			kind: "network_error",
+			message: `evaluate failed: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	const parsed = callOutcomeSchema.safeParse(raw);
+	return parsed.success
+		? parsed.data
+		: {
+				kind: "network_error",
+				message: "the page returned an unrecognised result",
+			};
+}
+
+type Verdict =
+	| { kind: "answer"; json: unknown }
+	| { kind: "retry"; reason: string; waitMs?: number }
+	| { kind: "fatal"; error: Error };
+
+function classifyBody(method: string, status: number, body: string): Verdict {
+	let json: unknown;
+	try {
+		json = JSON.parse(body);
+	} catch {
+		return { kind: "retry", reason: "bad_json" };
+	}
+	const envelope = envelopeSchema.safeParse(json);
+	if (!envelope.success) {
+		return {
+			kind: "fatal",
+			error: new SlackApiError(method, "unrecognised_answer", false, status),
+		};
+	}
+	if (envelope.data.ok) {
+		return { kind: "answer", json };
+	}
+	const reason = envelope.data.error ?? "unknown";
+	if (SESSION_ERRORS.has(reason)) {
+		return { kind: "fatal", error: new SlackSessionLostError(reason) };
+	}
+	if (reason === "ratelimited") {
+		return { kind: "retry", reason, waitMs: RATE_LIMIT_FALLBACK_S * 1000 };
+	}
+	return {
+		kind: "fatal",
+		error: new SlackApiError(method, reason, false, status, true),
+	};
+}
+
+function classify(method: string, outcome: SlackCallOutcome): Verdict {
+	switch (outcome.kind) {
+		case "wrong_origin":
+			return {
+				kind: "fatal",
+				error: new SlackApiError(
+					method,
+					`${WRONG_ORIGIN_PREFIX}${outcome.origin}`,
+					false,
+					null,
+				),
+			};
+		case "no_session":
+			return { kind: "fatal", error: new SlackSessionLostError(null) };
+		case "network_error":
+			if (PAGE_GONE_RE.test(outcome.message)) {
+				return {
+					kind: "fatal",
+					error: new SlackApiError(method, PAGE_GONE_REASON, false, null),
+				};
+			}
+			return { kind: "retry", reason: `network_error:${outcome.message}` };
+		default:
+			break;
+	}
+	const { status } = outcome;
+	if (status === 429) {
+		const seconds = outcome.retryAfterSeconds ?? RATE_LIMIT_FALLBACK_S;
+		return {
+			kind: "retry",
+			reason: "ratelimited",
+			waitMs: (seconds + 1) * 1000,
+		};
+	}
+	if (status === 401) {
+		return { kind: "fatal", error: new SlackSessionLostError(null) };
+	}
+	// An edge challenge answers where JSON was expected: `cf-mitigated` names
+	// it outright, and an HTML document in place of the body (with 200, or
+	// with the 403 an interstitial is served under) is the same fault. It is
+	// checked before the session and outage branches: it is neither of those,
+	// and sleeping through it retries nothing.
+	const inAnswerRange = (status >= 200 && status < 300) || status === 403;
+	const challenged =
+		outcome.cfMitigated === true ||
+		(inAnswerRange && HTML_DOCUMENT_RE.test(outcome.body));
+	if (challenged) {
+		return {
+			kind: "fatal",
+			error: new SlackApiError(method, CHALLENGE_REASON, false, status),
+		};
+	}
+	if (status === 403) {
+		return { kind: "fatal", error: new SlackSessionLostError(null) };
+	}
+	if (status >= 500) {
+		return { kind: "retry", reason: `http_${status}` };
+	}
+	if (status < 200 || status >= 300) {
+		return {
+			kind: "fatal",
+			error: new SlackApiError(method, `http_${status}`, false, status),
+		};
+	}
+	return classifyBody(method, status, outcome.body);
+}
+
+export interface SlackApiClientDeps {
+	maxAttempts?: number;
+	pauseMs?: number;
+	retryBaseMs?: number;
+	sleep: (ms: number) => Promise<void>;
+}
+
+/**
+ * The paced, retrying client over one page. Calls start one at a time, at
+ * least `pauseMs` apart, whichever lane asks: the pacing is one queue for the
+ * whole client, so reading several conversations at once overlaps their
+ * round trips without multiplying the call rate. A rate-limited, 5xx,
+ * malformed or unreachable answer is retried with a growing delay, at most
+ * `maxAttempts` times; a session rejection or a method error is thrown at once.
+ */
+export function createSlackApiClient(
+	page: SlackApiPage,
+	deps: SlackApiClientDeps,
+): SlackApiClient {
+	const maxAttempts = deps.maxAttempts ?? MAX_ATTEMPTS;
+	const pauseMs = deps.pauseMs ?? REQUEST_PAUSE_MS;
+	const retryBaseMs = deps.retryBaseMs ?? RETRY_BASE_MS;
+	// The turn the next call waits for: the previous call's start plus the
+	// pause. Chaining every call's turn onto the one before keeps call starts
+	// spaced across lanes, not only within one.
+	let lastTurn: Promise<void> | null = null;
+	return {
+		async call(teamId, method, params) {
+			const turn: Promise<void> =
+				lastTurn === null
+					? Promise.resolve()
+					: lastTurn.then(() => deps.sleep(pauseMs));
+			lastTurn = turn;
+			await turn;
+			let lastFailure = "unknown";
+			for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+				const verdict = classify(
+					method,
+					await callSlackInPage(page, teamId, method, params),
+				);
+				if (verdict.kind === "answer") {
+					return verdict.json;
+				}
+				if (verdict.kind === "fatal") {
+					throw verdict.error;
+				}
+				lastFailure = verdict.reason;
+				if (attempt < maxAttempts) {
+					await deps.sleep(verdict.waitMs ?? retryBaseMs * attempt);
+				}
+			}
+			throw new SlackApiError(method, lastFailure, true, null);
+		},
+	};
+}
+
+/**
+ * Runs in the page: the workspaces the web client is signed in to, without
+ * their tokens. Empty off app.slack.com or before the client has loaded.
+ */
+function readTeamsFromPage(origin: string): unknown {
+	if (location.origin !== origin) {
+		return [];
+	}
+	try {
+		const config: unknown = JSON.parse(
+			localStorage.getItem("localConfig_v2") ?? "{}",
+		);
+		const teams = (config as { teams?: Record<string, unknown> } | null)?.teams;
+		if (!teams || typeof teams !== "object") {
+			return [];
+		}
+		return Object.entries(teams).flatMap(([id, value]) => {
+			const team = value as {
+				domain?: unknown;
+				name?: unknown;
+				token?: unknown;
+				url?: unknown;
+			} | null;
+			if (typeof team?.token !== "string" || typeof team.url !== "string") {
+				return [];
+			}
+			return [
+				{
+					id,
+					name: typeof team.name === "string" ? team.name : "",
+					domain: typeof team.domain === "string" ? team.domain : "",
+					url: team.url.endsWith("/") ? team.url : `${team.url}/`,
+				},
+			];
+		});
+	} catch {
+		return [];
+	}
+}
+
+export async function readSignedInTeams(
+	page: SlackApiPage,
+): Promise<SignedInTeam[]> {
+	let raw: unknown;
+	try {
+		raw = await page.evaluate(readTeamsFromPage, APP_ORIGIN);
+	} catch {
+		return [];
+	}
+	const parsed = signedInTeamsSchema.safeParse(raw);
+	return parsed.success ? parsed.data : [];
+}

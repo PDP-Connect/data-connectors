@@ -1,0 +1,15 @@
+{
+	"ok": true,
+	"team": {
+		"id": "T0123456789",
+		"name": "Acme",
+		"domain": "acme",
+		"email_domain": "acme.example",
+		"icon": {
+			"image_102": "https://avatars.slack-edge.com/acme_102.png",
+			"image_230": "https://avatars.slack-edge.com/acme_230.png"
+		},
+		"avatar_base_url": "https://ca.slack-edge.com/",
+		"is_verified": false
+	}
+}
