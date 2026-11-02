@@ -4326,14 +4326,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/spotify/mobile.ts",
-			line: 149,
+			line: 171,
+			column: 11,
+			category: "bounded_retry_polling",
+			note: "collectSpotifyMobileData(): collects again on the settled page only after the previous attempt lost its document, at most three attempts",
+		},
+		{
+			path: "connectors/spotify/mobile.ts",
+			line: 189,
 			column: 18,
 			category: "bounded_retry_polling",
 			note: "spotifyMobileCollect(): pumps the in-page collector job one bounded bridge call at a time until it reports done",
 		},
 		{
 			path: "connectors/spotify/mobile.ts",
-			line: 158,
+			line: 198,
 			column: 19,
 			category: "dependent_file_cursor",
 			note: "spotifyMobileCollect(): reads the finished result in 16 KiB chunks in offset order under the bridge's transfer cap",
