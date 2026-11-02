@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-	"version": "0.1.40",
+	"version": "0.1.41",
 	"display_name": "Strava (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -41,7 +41,7 @@
 			"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. The first run inventories all activity summaries. Later runs discover new summaries and read at most 100 activity details from a resumable queue. Pages and details are fetched one at a time with pauses."
 		},
 		"public_listing": {
-			"tier": "development"
+			"tier": "preview"
 		}
 	},
 	"streams": [

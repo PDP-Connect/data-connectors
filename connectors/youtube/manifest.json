@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-	"version": "0.2.44",
+	"version": "0.2.45",
 	"mobile": { "pageshim": { "entry": "youtube.ts", "scope_prefix": "youtube", "login_url": "https://www.youtube.com/" } },
 	"display_name": "YouTube",
 	"brand": {
@@ -39,8 +39,8 @@
 			"rationale": "Collection uses the owner's authenticated YouTube browser session. Login and session repair require the owner; lists are bounded browser snapshots."
 		},
 		"public_listing": {
-			"tier": "development",
-			"rationale": "Browser replacement for seven legacy YouTube scopes; live authenticated proof is required before promotion."
+			"tier": "preview",
+			"rationale": "Browser replacement for seven legacy YouTube scopes."
 		}
 	},
 	"streams": [

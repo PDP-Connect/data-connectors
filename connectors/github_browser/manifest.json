@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.3.14",
+	"version": "0.3.15",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -40,7 +40,7 @@
 			"manual_action"
 		],
 		"public_listing": {
-			"tier": "development",
+			"tier": "preview",
 			"rationale": "Separate browser-session profile for existing GitHub users. The PAT connector remains the recommended profile for new connections."
 		},
 		"refresh_policy": {

@@ -9,7 +9,7 @@
   },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "display_name": "Oura (Browser Sign-In)",
   "brand": {
     "icon": "icon.svg",
@@ -41,7 +41,7 @@
       "rationale": "Collection uses an owner-created Oura Developer Portal app and scoped API v2 OAuth token. A cached refresh token supports unattended reads; first authorization or a revoked grant requires browser sign-in."
     },
     "public_listing": {
-      "tier": "development"
+      "tier": "preview"
     }
   },
   "streams": [

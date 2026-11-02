@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.61",
+	"version": "0.2.62",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {
@@ -51,7 +51,7 @@
 			"rationale": "Claude.ai conversations are browser-scraped behind a login wall; background polling risks lockouts."
 		},
 		"public_listing": {
-			"tier": "development"
+			"tier": "preview"
 		}
 	},
 	"streams": [
