@@ -2587,7 +2587,7 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 	);
 });
 
-test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
+test("strava_browser: every PageShim run delivers the whole activity list, even with a saved cursor", {
 	timeout: 180_000,
 }, async () => {
 	const { pageshimCase: c, resolveFixture } = await import(
@@ -2651,9 +2651,11 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 			stateAckDelayMs: 5,
 			...overrides,
 		});
-	let initialState = {};
-
-	const first = await run(initialState);
+	// The mobile host stores each { activities } payload as the newest whole
+	// version and does not merge it with the last one. A run that resumed the
+	// saved cursor emitted only a detail batch or new activities, which then
+	// replaced the stored list, or emitted nothing and failed as no data.
+	const first = await run({});
 	assert.deepEqual(first.ret, { ok: true }, first.log.slice(-20).join("\n"));
 	assertCleanRun(first);
 	assert.deepEqual(first.result.errors, []);
@@ -2664,10 +2666,6 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		"initial inventory must not backfill details",
 	);
 	assert.equal(first.states?.["strava.activities"]?.list_complete, true);
-	assert.equal(
-		first.states?.["strava.activities"]?.pending_detail_ids.length,
-		205,
-	);
 	assert.deepEqual(first.stateMessages, [
 		{
 			type: "STATE",
@@ -2683,53 +2681,31 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		!first.log.some((line) => line.includes("91000000000")),
 		"cursor contents must not appear in logs",
 	);
-	initialState = first.states;
+
+	for (const label of ["second", "third"]) {
+		detailRequests.length = 0;
+		const next = await run(first.states);
+		assert.deepEqual(next.ret, { ok: true }, next.log.slice(-20).join("\n"));
+		assertCleanRun(next);
+		assert.deepEqual(next.result.errors, []);
+		const ids = next.result["strava.activities"].activities.map((a) => a.id);
+		assert.equal(ids.length, 205, `the ${label} run must deliver every activity`);
+		assert.equal(new Set(ids).size, 205, `the ${label} run must not repeat an id`);
+		assert.deepEqual(
+			detailRequests,
+			[],
+			`the ${label} run must not resume a detail batch from the saved cursor`,
+		);
+	}
 
 	detailRequests.length = 0;
-	const second = await run(initialState);
-	assert.deepEqual(second.ret, { ok: true }, second.log.slice(-20).join("\n"));
-	assertCleanRun(second);
-	assert.equal(
-		detailRequests.length,
-		100,
-		"run two must fetch the first detail batch",
-	);
-	const secondBatch = new Set(detailRequests);
-	assert.equal(second.result["strava.activities"].activities.length, 100);
-	assert.equal(
-		second.states?.["strava.activities"]?.pending_detail_ids.length,
-		105,
-	);
-	assert.notDeepEqual(second.states, initialState);
-	initialState = second.states;
-
-	detailRequests.length = 0;
-	const third = await run(initialState);
-	assert.deepEqual(third.ret, { ok: true }, third.log.slice(-20).join("\n"));
-	assertCleanRun(third);
-	assert.equal(
-		detailRequests.length,
-		100,
-		"run three must fetch the next detail batch",
-	);
-	assert.ok(
-		detailRequests.every((id) => !secondBatch.has(id)),
-		"run three must continue with activities left by run two",
-	);
-	assert.equal(third.result["strava.activities"].activities.length, 100);
-	assert.equal(
-		third.states?.["strava.activities"]?.pending_detail_ids.length,
-		5,
-	);
-
-	detailRequests.length = 0;
-	const failed = await run(third.states, { failResultWrite: true });
+	const failed = await run(first.states, { failResultWrite: true });
 	assert.deepEqual(failed.ret, { ok: true }, failed.log.slice(-20).join("\n"));
 	assert.equal(failed.data.error, "synthetic result write failed");
 	assert.deepEqual(failed.stateMessages, []);
 	assert.deepEqual(
 		failed.states,
-		third.states,
+		first.states,
 		"a failed result write must not send a checkpoint",
 	);
 });

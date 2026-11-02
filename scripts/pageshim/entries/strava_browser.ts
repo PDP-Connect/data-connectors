@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // strava_browser on PageShim. Each scope is `{ activities }`, matching Vana's
-// stored Strava payload. The host persists STATE between runs; each run walks
-// from the newest activity up to the connector's page bound. The mobile host
-// stores each `{ activities }` payload as the newest whole version, so a list
-// walk that stops early (a 503 or a 429 after the retries) fails the run: an
-// emitted prefix would replace the stored list.
+// stored Strava payload. The mobile host stores each `{ activities }` payload
+// as the newest whole version: it merges only keyed `{ records }` scopes, so
+// this one is delivered as is. Every run is therefore a full inventory of
+// activity summaries. The saved cursor is not given to the collector: with
+// it, a later run emits only new activities or a detail batch, and that
+// subset would replace the stored list (or, with nothing new, store nothing
+// and fail the run as no data). A list walk that stops early (a 503 or a 429
+// after the retries) fails the run for the same reason: an emitted prefix
+// would replace the stored list.
 //
 // A host range for strava.activities applies to start_date_local, a
 // calendar day: full-date bounds are compared as days. A bound of another
@@ -68,9 +72,11 @@ const activitiesConsentField =
 					activitiesConsentField,
 				);
 				if (unsupported !== null) return;
-				await collectStravaBrowser(ctx as unknown as StravaCollectContext, {
-					failRunOnIncompleteList: true,
-				});
+				// No saved cursor: see the note at the top of this file.
+				await collectStravaBrowser(
+					{ ...(ctx as unknown as StravaCollectContext), state: {} },
+					{ failRunOnIncompleteList: true },
+				);
 			},
 			toScope: (_stream, records) => ({ activities: records }),
 			streamScopeRecords: {
