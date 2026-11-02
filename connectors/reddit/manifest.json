@@ -9,7 +9,7 @@
 	},
 	"connector_key": "reddit",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-	"version": "0.4.3",
+	"version": "0.4.4",
 	"display_name": "Reddit",
 	"brand": {
 		"icon": "icon.svg",
@@ -18,10 +18,12 @@
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
-				"required": true
+				"required": true,
+				"features": ["same_origin_page_fetch"]
 			},
 			"browser": {
-				"required": true
+				"required": true,
+				"features": ["page_script_evaluation", "page_navigation"]
 			}
 		}
 	},
@@ -52,6 +54,16 @@
 					"env": ["REDDIT_PASSWORD"]
 				}
 			]
+		}
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "reddit",
+			"login_url": "https://www.reddit.com/login/",
+			"login_message": "Sign in to Reddit, then return here.",
+			"collect_export": "collectRedditPageShim",
+			"probe_export": "probeRedditSession",
+			"summary": { "singular": "record", "plural": "records" }
 		}
 	},
 	"capabilities": {

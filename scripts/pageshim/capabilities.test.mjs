@@ -27,6 +27,7 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"muse",
 		"oura_browser",
 		"perplexity",
+		"reddit",
 		"slack_browser",
 		"spotify",
 		"strava_browser",
@@ -35,7 +36,7 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"x_browser",
 		"youtube",
 	]);
-	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "character_ai", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok", "whatsapp_web", "perplexity", "instinct", "slack_browser"]) {
+	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "character_ai", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok", "whatsapp_web", "perplexity", "instinct", "slack_browser", "reddit"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -183,6 +184,10 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			browser: ["page_script_evaluation", "page_navigation"],
 		},
 		instinct: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
+		reddit: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_script_evaluation", "page_navigation"],
 		},
