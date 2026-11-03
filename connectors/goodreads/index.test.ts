@@ -300,7 +300,21 @@ function harness(
 				...extra,
 			} as EmittedMessage);
 		},
-		reportStreamFailure: async (stream, message) => {
+		reportStreamFailure: async (stream, message, options) => {
+			// Every stop in every test: the SKIP_RESULT just before names who
+			// acts next, and agrees with the failure on whether to retry.
+			const skip = state.messages.at(-1) as {
+				recovery_hint?: { action?: string; retryable?: boolean };
+				stream?: string;
+				type: string;
+			};
+			assert.equal(skip.type, "SKIP_RESULT");
+			assert.equal(skip.stream, stream);
+			assert.ok(
+				RECOVERY_ACTIONS.has(skip.recovery_hint?.action ?? ""),
+				`${stream} stop has a portable recovery action`,
+			);
+			assert.equal(skip.recovery_hint?.retryable, options?.retryable);
 			state.failures.push({ message, stream });
 		},
 		requested: new Map(
@@ -325,6 +339,17 @@ const skips = (h: Harness) =>
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT",
 	);
+/** The spec's portable recovery actions (collection profile, SKIP_RESULT). */
+const RECOVERY_ACTIONS: ReadonlySet<string> = new Set([
+	"manual_action_required",
+	"not_retriable",
+	"refresh_credentials",
+	"retry_by_runtime",
+	"retry_on_connector_upgrade",
+	"unknown",
+	"update_selector",
+	"upstream_unblock",
+]);
 /** Each DETAIL_COVERAGE the run emitted, as stream -> [considered, covered]. */
 const coverageOf = (h: Harness) =>
 	Object.fromEntries(

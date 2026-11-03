@@ -114,23 +114,49 @@ interface Stop {
 	reason: StopReason;
 }
 
-/** Stops that a second run would meet again: Goodreads' pages, not the moment. */
-const PERMANENT: ReadonlySet<StopReason> = new Set([
-	"shelf_list_incomplete",
-	"source_unreadable",
-]);
+/**
+ * Who acts after each kind of stop, as the SKIP_RESULT's portable recovery
+ * hint. `retryable` says whether a later run can succeed without a connector
+ * change; it is also the stream failure's retryable flag, so the two agree.
+ * A stop caused by Goodreads' pages (a site change) meets the same pages
+ * next time, so only a connector update helps. Each branch returns a literal
+ * so the repo's static hint check can read every action.
+ */
+function recoveryFor(reason: StopReason): {
+	action:
+		| "manual_action_required"
+		| "retry_by_runtime"
+		| "retry_on_connector_upgrade";
+	retryable: boolean;
+} {
+	switch (reason) {
+		case "bot_challenge":
+			return { action: "manual_action_required", retryable: true };
+		case "shelf_list_incomplete":
+		case "source_unreadable":
+			return { action: "retry_on_connector_upgrade", retryable: false };
+		// An interruption, a list read in part, or a session that ended mid-run:
+		// the next run reads again and signs in again, with the saved details or
+		// by asking the owner.
+		default:
+			return { action: "retry_by_runtime", retryable: true };
+	}
+}
 
 /**
- * Report that a stream could not be finished: a specific reason, and a failed
- * run. Without the failure hook the run would end as succeeded with the
- * stream missing, so a host that lacks it is an error.
+ * Report that a stream could not be finished: a specific reason, a recovery
+ * hint, and a failed run. Without the failure hook the run would end as
+ * succeeded with the stream missing, so a host that lacks it is an error.
+ * `cause` is the stop that led to this one, when another stream's failure
+ * did; the recovery is the cause's.
  */
 async function stopStream(
 	ctx: GoodreadsCollectContext,
 	stream: string,
 	stop: Stop,
-	retryable = !PERMANENT.has(stop.reason),
+	cause?: StopReason,
 ): Promise<void> {
+	const recoveryReason = cause ?? stop.reason;
 	if (!ctx.reportStreamFailure) {
 		throw new Error(
 			`goodreads_stream_failure_unreported: ${stream}: ${stop.message}`,
@@ -141,8 +167,11 @@ async function stopStream(
 		stream,
 		reason: SKIP_REASON[stop.reason],
 		message: stop.message,
+		recovery_hint: recoveryFor(recoveryReason),
 	});
-	await ctx.reportStreamFailure(stream, stop.message, { retryable });
+	await ctx.reportStreamFailure(stream, stop.message, {
+		retryable: recoveryFor(recoveryReason).retryable,
+	});
 }
 
 /**
@@ -795,7 +824,7 @@ async function finishSummary(
 					`Your Goodreads reading summary was not saved because the library list was not read in full (${listing.books.length} books read). ${cause?.message ?? ""}`.trim(),
 				reason: "listing_incomplete",
 			},
-			cause ? !PERMANENT.has(cause.reason) : true,
+			cause?.reason,
 		);
 		return;
 	}
