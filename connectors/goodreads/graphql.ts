@@ -552,6 +552,15 @@ export async function openGraphql(
 						);
 					}
 					totalCount ??= connection.totalCount;
+					// A total that moves between pages means the library changed
+					// mid-read, so the pages may have shifted past or repeated a book.
+					if (connection.totalCount !== totalCount) {
+						return {
+							ok: false,
+							reason: "collection_interrupted",
+							message: `Your ${label} changed on Goodreads while this run was reading them (${totalCount} became ${connection.totalCount}). Run collection again.`,
+						};
+					}
 					for (const edge of connection.edges) {
 						const item = parse(isObject(edge) ? edge.node : null);
 						if (item === null) {

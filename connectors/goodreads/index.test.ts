@@ -1411,6 +1411,32 @@ test("the API's pages are followed by their tokens; a repeated token stops the r
 	assert.equal(skips(stuck)[0]?.reason, "source_unreadable");
 });
 
+test("a library that changes between API pages is read again, not trusted", async () => {
+	// Page 2 reports one more book than page 1: the owner shelved a book
+	// mid-read, so the pages may have shifted. The counts still add up to the
+	// first total, which is why the check has to be on the total itself.
+	const shifting: Api = (op, variables) => {
+		if (op !== "GoodreadsShelvings") return fixtureApi()(op, variables, 0);
+		const body = apiFixture("shelvings.json");
+		const connection = connectionOf(body);
+		const second = variables.pagination.after === "cGFnZTI=";
+		connection.edges = second
+			? connection.edges.slice(3)
+			: connection.edges.slice(0, 3);
+		if (second) connection.totalCount += 1;
+		connection.pageInfo = second
+			? { hasNextPage: false, nextPageToken: null }
+			: { hasNextPage: true, nextPageToken: "cGFnZTI=" };
+		return { body: JSON.stringify(body) };
+	};
+	const h = harness(signedInSite(), { books: {} }, { api: shifting });
+	await collect(h.ctx);
+	assert.equal(recordsOf(h, "books").length, 0);
+	assert.deepEqual(coverageOf(h), {});
+	assert.equal(skips(h)[0]?.reason, "collection_interrupted");
+	assert.match(skips(h)[0]?.message ?? "", /5 became 6/);
+});
+
 test("a refused token is read again once from a fresh page; refused twice stops the run", async () => {
 	const refusedOnce: Api = (op, variables, call) =>
 		op === "GoodreadsShelvings" && call === 0
