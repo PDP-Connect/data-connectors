@@ -13116,23 +13116,10 @@
 									"average_rating",
 									"updated_at"
 								]
-							},
-							"expand": [
-								{
-									"name": "shelf"
-								}
-							]
+							}
 						},
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "scheduled_window",
-						"relationships": [
-							{
-								"name": "shelf",
-								"stream": "shelves",
-								"foreign_key": "exclusive_shelf",
-								"cardinality": "has_one"
-							}
-						],
 						"views": [
 							{
 								"id": "reading_log",

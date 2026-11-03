@@ -17,7 +17,14 @@ interface JsonSchema {
 interface ManifestStream {
 	cursor_field?: string;
 	name?: string;
+	relationships?: {
+		cardinality?: string;
+		foreign_key?: string;
+		name?: string;
+		stream?: string;
+	}[];
 	query?: {
+		expand?: { name?: string }[];
 		search?: {
 			lexical_fields?: string[];
 			semantic_fields?: string[];
@@ -396,6 +403,52 @@ test("range_filters and group_by declarations target schema-supported fields", (
 				if (!isScalarSchema(schema)) {
 					violations.push(
 						`${connectorKey}.${streamName}.${field}: group_by requires a scalar field`,
+					);
+				}
+			}
+		}
+	}
+
+	assert.deepEqual(violations, []);
+});
+
+// Mirrors validateExpandCapability in data-connect
+// reference-implementation/server/connector-manifest-validation.ts. The
+// reference server refuses to register a manifest that breaks it, and a join
+// from a record to its parent (a "belongs to") cannot be declared: the foreign
+// key always lives on the related stream and matches this stream's id.
+test("query.expand entries name a relationship whose foreign key the related stream has", () => {
+	const violations: string[] = [];
+
+	for (const file of manifestFiles()) {
+		const manifest = readManifest(file);
+		const connectorKey = manifest.connector_key ?? file.replace(/\.json$/, "");
+		const streams = new Map(
+			(manifest.streams ?? []).map((stream) => [stream.name, stream]),
+		);
+
+		for (const stream of manifest.streams ?? []) {
+			for (const { name } of stream.query?.expand ?? []) {
+				const where = `${connectorKey}.${stream.name ?? "<unnamed>"}.expand.${name}`;
+				const relationship = stream.relationships?.find(
+					(candidate) => candidate.name === name,
+				);
+				if (!relationship) {
+					violations.push(`${where}: no same-stream relationship`);
+					continue;
+				}
+				if (!["has_one", "has_many"].includes(relationship.cardinality ?? "")) {
+					violations.push(`${where}: cardinality must be has_one or has_many`);
+				}
+				const related = streams.get(relationship.stream);
+				if (!related) {
+					violations.push(`${where}: unknown stream ${relationship.stream}`);
+					continue;
+				}
+				const foreignKey = relationship.foreign_key ?? "";
+				if (!Object.hasOwn(related.schema?.properties ?? {}, foreignKey)) {
+					violations.push(
+						`${where}: ${relationship.stream} has no top-level ${foreignKey}`,
 					);
 				}
 			}
