@@ -1586,6 +1586,7 @@ async function acquireIsolatedBrowserWithClock({
 	};
 	const baseLaunchOptions: PatchrightLaunchOptions = {
 		headless: effectiveHeadless,
+		chromiumSandbox: process.platform === "darwin",
 		viewport: null,
 		args: baseArgs,
 		// OFF by default (`harRecording` is opt-in and normally omitted), so an
@@ -1602,10 +1603,11 @@ async function acquireIsolatedBrowserWithClock({
 			: {}),
 	};
 
-	const explicitChannel = configuredBrowserChannel();
-	// Default to Patchright's pinned bundled Chromium so local and n.eko runs
-	// share the same browser-family posture. Operators can still opt into a
-	// branded channel explicitly with PDPP_BROWSER_CHANNEL=chrome.
+	// macOS uses the system browser so normal Chrome updates also protect
+	// connector browsing. Other hosts retain their deployment-pinned browser.
+	const explicitChannel =
+		configuredBrowserChannel() ??
+		(process.platform === "darwin" ? "chrome" : undefined);
 	// Cleanup-then-launch is gated by an in-process mutex keyed on the
 	// user-data-dir. The mutex is the load-bearing primitive: it guarantees
 	// PDPP never has two of its own processes launching against the same
