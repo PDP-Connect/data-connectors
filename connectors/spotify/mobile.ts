@@ -154,14 +154,29 @@ const LOST_DOCUMENT_ERRORS = new Set([
 	"spotify_page_not_player",
 ]);
 
+// A bridge call that runs while the WebView commits the new document is
+// answered with nothing, which the page facade (scripts/pageshim/runtime.ts)
+// reports as an invalid transfer marker, or as a failed transfer when it was
+// reading a large result back. The call never reached the settled document.
+const BRIDGE_LOST_DOCUMENT =
+	/^PageShim evaluation (?:returned an invalid transfer marker|transfer failed)/;
+
 function isLostDocument(error: unknown): boolean {
-	return error instanceof Error && LOST_DOCUMENT_ERRORS.has(error.message);
+	return error instanceof Error &&
+		(LOST_DOCUMENT_ERRORS.has(error.message) || BRIDGE_LOST_DOCUMENT.test(error.message));
 }
 
 async function settleSpotifyPlayer(page: Page): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, DOCUMENT_SETTLE_MS));
-	const atPlayer = await page.evaluate(() =>
-		location.href === "https://open.spotify.com/" && document.readyState !== "loading");
+	let atPlayer: unknown = false;
+	try {
+		atPlayer = await page.evaluate(() =>
+			location.href === "https://open.spotify.com/" && document.readyState !== "loading");
+	} catch (error) {
+		// A probe the committing document swallowed says nothing about where the
+		// page is, so the page is not taken to be settled.
+		if (!isLostDocument(error)) throw error;
+	}
 	if (atPlayer !== true) await page.goto(SPOTIFY_PLAYER_URL, { waitUntil: "domcontentloaded" });
 }
 
@@ -203,11 +218,16 @@ async function collectSpotifyMobileDocument(page: Page, streams: string[]): Prom
 			return JSON.parse(chunks.join("")) as BrowserData;
 		}
 	} finally {
-		await page.evaluate((name) => {
-			const jobs = globalThis as any;
-			jobs[name]?.dispose();
-			delete jobs[name];
-		}, key);
+		// Best effort: a dispose that runs while the document commits fails the
+		// way the lost call did, and must not replace the attempt's own error
+		// (which decides whether the run is collected again) or its result.
+		try {
+			await page.evaluate((name) => {
+				const jobs = globalThis as any;
+				jobs[name]?.dispose();
+				delete jobs[name];
+			}, key);
+		} catch {}
 	}
 }
 
