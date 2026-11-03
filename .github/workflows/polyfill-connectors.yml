@@ -190,6 +190,34 @@ jobs:
         # reinstatement note (that package isn't part of Move A's scope).
         run: npm test
 
+  macos-browser:
+    name: macOS browser safety
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+      - name: Install current stable Chrome
+        run: node node_modules/patchright/cli.js install --force chrome
+      - name: Exercise sandboxed Chrome and missing-browser admission
+        run: |
+          node -e 'require("node:assert/strict").equal(process.platform, "darwin")'
+          scripts/test-sandbox/test-sandbox --net host -- node --import tsx --test --test-name-pattern='macOS local connector browser|macOS missing Chrome|local launch diagnostic|checkChromiumRevision|macOS dependency installation' packages/polyfill-connectors/src/browser-launch.test.ts packages/polyfill-connectors/bin/connector-doctor.test.ts packages/polyfill-connectors/scripts/install-patchright-browser.test.mjs
+
   groupme-mutation:
     # INITIAL EVIDENCE, NOT REQUIRED. Visible as its own check and red when the canary or
     # the reconciled population fails; the gate below records it as optional. Promotion to
@@ -368,7 +396,7 @@ jobs:
 
   gate:
     name: Polyfill Connectors Gate
-    needs: [changes, verify, test, groupme-mutation]
+    needs: [changes, verify, test, macos-browser, groupme-mutation]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -382,6 +410,7 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          MACOS_BROWSER_RESULT: ${{ needs.macos-browser.result }}
           MUTATION_RESULT: ${{ needs.groupme-mutation.result }}
           MUTATION_REQUIRED: ${{ needs.changes.outputs.mutation_required }}
           MUTATION_ENFORCEMENT: optional
@@ -409,6 +438,14 @@ jobs:
             success|skipped) ;;
             *)
               echo "::error::test shards reported '$TEST_RESULT' — expected all shards to succeed or be skipped"
+              exit 1
+              ;;
+          esac
+
+          case "$MACOS_BROWSER_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::macOS browser safety reported '$MACOS_BROWSER_RESULT'"
               exit 1
               ;;
           esac

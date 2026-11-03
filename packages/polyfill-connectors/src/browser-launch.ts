@@ -33,6 +33,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Browser, BrowserContext, chromium, Page } from "playwright";
 import {
+	MACOS_CHROME_GUIDANCE,
+	macosBrowserExecutable,
+	selectedLocalBrowserChannel,
+} from "./local-browser.ts";
+import {
 	removeChromiumSingletonResidue,
 	withProfileLockMutex,
 } from "./profile-lock.ts";
@@ -68,6 +73,8 @@ export const HAR_RECORD_PATH_ENV = "PDPP_SCENARIO_HAR_RECORD_PATH";
  */
 export const STORAGE_STATE_RECORD_PATH_ENV =
 	"PDPP_SCENARIO_STORAGE_STATE_RECORD_PATH";
+const SANDBOX_INITIALIZATION_FAILED_RE =
+	/sandbox initialization failed: Operation not permitted/;
 // The two halves of the transient remote-CDP-attach race signature. See
 // `isCdpAttachSessionRaceError` for the full root-cause explanation.
 const CDP_ATTACH_RACE_METHOD_RE = /Network\.setCacheDisabled/;
@@ -1501,6 +1508,21 @@ async function acquireIsolatedBrowserWithClock({
 			...(storageStateRecording ? { storageStateRecording } : {}),
 		});
 	}
+	const explicitChannel = selectedLocalBrowserChannel(
+		process.env,
+		process.platform,
+	);
+	if (process.platform === "darwin" && explicitChannel) {
+		const executable = macosBrowserExecutable(explicitChannel);
+		if (executable && !existsSync(executable)) {
+			throw new Error(
+				`Selected browser '${explicitChannel}' is missing at ${executable}. ` +
+					(explicitChannel === "chrome"
+						? MACOS_CHROME_GUIDANCE
+						: "Install or update the selected browser in /Applications, then retry."),
+			);
+		}
+	}
 	const effectiveHeadless = resolveDeploymentBrowserHeadless(headless);
 	const profileRoot =
 		process.env.PDPP_BROWSER_PROFILE_ROOT?.trim() ||
@@ -1603,11 +1625,6 @@ async function acquireIsolatedBrowserWithClock({
 			: {}),
 	};
 
-	// macOS uses the system browser so normal Chrome updates also protect
-	// connector browsing. Other hosts retain their deployment-pinned browser.
-	const explicitChannel =
-		configuredBrowserChannel() ??
-		(process.platform === "darwin" ? "chrome" : undefined);
 	// Cleanup-then-launch is gated by an in-process mutex keyed on the
 	// user-data-dir. The mutex is the load-bearing primitive: it guarantees
 	// PDPP never has two of its own processes launching against the same
@@ -1619,16 +1636,24 @@ async function acquireIsolatedBrowserWithClock({
 		isolatedDir,
 		async () => {
 			await removeChromiumSingletonResidue(isolatedDir);
-			if (explicitChannel) {
-				return localChromium.launchPersistentContext(isolatedDir, {
+			try {
+				return await localChromium.launchPersistentContext(isolatedDir, {
 					...baseLaunchOptions,
-					channel: explicitChannel,
+					...(explicitChannel ? { channel: explicitChannel } : {}),
 				});
+			} catch (error) {
+				if (
+					process.platform === "darwin" &&
+					error instanceof Error &&
+					SANDBOX_INITIALIZATION_FAILED_RE.test(error.message)
+				) {
+					throw new Error(
+						"The browser sandbox initialization failed. If this command is running inside an agent sandbox, use its approved execution outside that sandbox and retry. Keep browser sandboxing enabled.",
+						{ cause: error },
+					);
+				}
+				throw error;
 			}
-			return localChromium.launchPersistentContext(
-				isolatedDir,
-				baseLaunchOptions,
-			);
 		},
 	);
 
