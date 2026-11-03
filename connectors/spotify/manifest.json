@@ -9,7 +9,7 @@
 	},
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.44",
+	"version": "0.1.45",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",
@@ -30,7 +30,7 @@
 	"capabilities": {
 		"human_interaction": ["manual_action"],
 		"public_listing": {
-			"tier": "development",
+			"tier": "preview",
 			"rationale": "Browser-session replacement for the legacy Spotify connector. Collects profile, playlists, playlist items, saved tracks, recent playback contexts, and bounded top artist and track rankings through the authenticated web player."
 		},
 		"refresh_policy": {

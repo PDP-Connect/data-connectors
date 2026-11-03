@@ -9,7 +9,7 @@
 	},
 	"connector_key": "icloud-notes",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-	"version": "0.1.42",
+	"version": "0.1.43",
 	"display_name": "iCloud Notes",
 	"brand": {
 		"icon": "icon.svg",
@@ -44,7 +44,7 @@
 			"rationale": "Apple does not publish a rate limit for the CloudKit web service or the icloud.com sign-in surface. This connector is session-reuse-only: it never automates Apple ID sign-in or any two-factor challenge, so a scheduled run either reuses the seeded profile's live session or hands off to the owner via manual_action. First login from a new browser profile commonly serves a two-factor prompt and sometimes a 'Trust this browser?' step, but the session persists in the profile afterward, so most scheduled refreshes reuse it without any prompt. A conservative 12-hour cadence avoids repeatedly exercising Apple's undocumented sign-in friction; assisted_after_owner_auth:true lets a background run ask the owner for bounded help when the session has gone stale."
 		},
 		"public_listing": {
-			"tier": "development"
+			"tier": "preview"
 		}
 	},
 	"streams": [
