@@ -25,7 +25,7 @@ import {
 	type FetchOutcome,
 	type FetchPage,
 	navigate,
-	RETRY_BASE_DELAY_MS,
+	retryWait,
 	WAF_SETTLE_MS,
 } from "./fetcher.ts";
 import { ORIGIN } from "./parsers.ts";
@@ -38,7 +38,6 @@ export const FALLBACK_TOKEN_PAGE = `${ORIGIN}/book/show/1`;
 export const TOKEN_MARGIN_MS = 60_000;
 /** The API's page-size ceiling is between 100 and 200. */
 export const GRAPHQL_PAGE_SIZE = 100;
-const MAX_ATTEMPTS = 3;
 
 type Failure = Extract<FetchOutcome, { ok: false }>;
 export type GraphqlOutcome<T> = { ok: true; value: T } | Failure;
@@ -292,7 +291,12 @@ async function readNextDataText(page: FetchPage): Promise<NextDataText> {
 
 type RawGraphqlResponse =
 	| { kind: "network_error"; message: string }
-	| { kind: "response"; status: number; body: string };
+	| {
+			kind: "response";
+			status: number;
+			retryAfter: string | null;
+			body: string;
+	  };
 
 async function rawPost(
 	page: FetchPage,
@@ -316,6 +320,8 @@ async function rawPost(
 				return {
 					kind: "response",
 					status: response.status,
+					// Readable only if the API's CORS policy exposes it; null otherwise.
+					retryAfter: response.headers.get("retry-after"),
 					body: await response.text(),
 				};
 			} catch (error) {
@@ -442,7 +448,15 @@ export async function openGraphql(
 				raw.status >= 500
 			) {
 				failures += 1;
-				if (failures >= MAX_ATTEMPTS) {
+				const wait = retryWait(failures, raw);
+				if (wait === "rate_limited") {
+					return {
+						ok: false,
+						reason: "rate_limited",
+						message: `Goodreads' book API asked this run to slow down (HTTP 429) while reading ${label}, and did not lift the limit in time.`,
+					};
+				}
+				if (wait === "give_up") {
 					return {
 						ok: false,
 						reason: "collection_interrupted",
@@ -452,7 +466,7 @@ export async function openGraphql(
 								: `Goodreads' book API kept answering with an error (${raw.status}) while reading ${label}.`,
 					};
 				}
-				await politeDelay(RETRY_BASE_DELAY_MS * 2 ** (failures - 1));
+				await politeDelay(wait);
 				continue;
 			}
 			let parsed: unknown = null;

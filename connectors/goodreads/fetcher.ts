@@ -5,7 +5,10 @@
  * Same-origin page fetches for goodreads.com, from inside the owner's
  * signed-in browser page, with the three failure modes the site shows:
  *
- *   - a navigation or network failure, or HTTP 429/5xx: retried with backoff;
+ *   - a navigation or network failure, or HTTP 429/5xx: retried with backoff,
+ *     waiting at least as long as a Retry-After header asks; a 429 that does
+ *     not lift, or asks for a longer wait than a run should sleep, stops the
+ *     run as rate limited;
  *   - an AWS WAF challenge (HTTP 202, an `x-amzn-waf-action` header, or an
  *     empty body): the page is loaded once at that URL so the challenge
  *     script can run, then the fetch is retried once; still challenged means
@@ -16,6 +19,7 @@
  * PageShim host serialises it with `Function.prototype.toString`.
  */
 
+import { parseRetryAfterMs } from "@pdpp/connector-protocol/http-retry";
 import type { Page } from "playwright";
 import { politeDelay } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { ORIGIN } from "./parsers.ts";
@@ -27,6 +31,8 @@ export const ANCHOR_URL = `${ORIGIN}/robots.txt`;
 export const NAVIGATION_TIMEOUT_MS = 45_000;
 export const RETRY_BASE_DELAY_MS = 3000;
 export const WAF_SETTLE_MS = 5000;
+/** The longest Retry-After a run sleeps through; a longer ask stops the run. */
+export const MAX_RETRY_AFTER_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
 const MAX_ORIGIN_RECOVERIES = 2;
 
@@ -41,6 +47,7 @@ type RawResponse =
 			status: number;
 			url: string;
 			waf: string;
+			retryAfter: string | null;
 			body: string;
 	  };
 
@@ -51,6 +58,7 @@ export type FetchOutcome =
 			reason:
 				| "bot_challenge"
 				| "collection_interrupted"
+				| "rate_limited"
 				| "sign_in_required"
 				| "source_unreadable";
 			message: string;
@@ -73,6 +81,7 @@ async function rawFetch(page: FetchPage, path: string): Promise<RawResponse> {
 					status: response.status,
 					url: response.url,
 					waf: response.headers.get("x-amzn-waf-action") ?? "",
+					retryAfter: response.headers.get("retry-after"),
 					body: await response.text(),
 				};
 			} catch (error) {
@@ -138,6 +147,27 @@ function isSignInUrl(url: string): boolean {
 	}
 }
 
+/**
+ * What to do after the `failures`-th retryable answer: wait this many ms, give
+ * up as interrupted, or give up as rate limited. A Retry-After header sets the
+ * least wait; one longer than MAX_RETRY_AFTER_MS ends the run at once rather
+ * than sleeping through it. Shared with the book API's retry loop.
+ */
+export function retryWait(
+	failures: number,
+	raw:
+		| { kind: "network_error" }
+		| { kind: "response"; status: number; retryAfter: string | null },
+): number | "give_up" | "rate_limited" {
+	const limited = raw.kind === "response" && raw.status === 429;
+	const asked =
+		raw.kind === "response" ? parseRetryAfterMs(raw.retryAfter) : null;
+	if (failures >= MAX_ATTEMPTS || (asked ?? 0) > MAX_RETRY_AFTER_MS) {
+		return limited ? "rate_limited" : "give_up";
+	}
+	return Math.max(asked ?? 0, RETRY_BASE_DELAY_MS * 2 ** (failures - 1));
+}
+
 /** GET a goodreads.com path from the owner's page and classify the answer. */
 export async function fetchHtml(
 	page: FetchPage,
@@ -169,7 +199,15 @@ export async function fetchHtml(
 			raw.status >= 500
 		) {
 			failures += 1;
-			if (failures >= MAX_ATTEMPTS) {
+			const wait = retryWait(failures, raw);
+			if (wait === "rate_limited") {
+				return {
+					ok: false,
+					reason: "rate_limited",
+					message: `Goodreads asked this run to slow down (HTTP 429) while reading ${label}, and did not lift the limit in time.`,
+				};
+			}
+			if (wait === "give_up") {
 				return {
 					ok: false,
 					reason: "collection_interrupted",
@@ -179,7 +217,7 @@ export async function fetchHtml(
 							: `Goodreads kept answering with an error (${raw.status}) while reading ${label}.`,
 				};
 			}
-			await politeDelay(RETRY_BASE_DELAY_MS * 2 ** (failures - 1));
+			await politeDelay(wait);
 			continue;
 		}
 		if (isWafChallenge(raw)) {

@@ -243,7 +243,7 @@
 						"items": {
 							"type": "string"
 						},
-						"description": "Slugs of every shelf and tag the book is on, exclusive shelf first. Empty when the row printed none."
+						"description": "Slugs of every shelf and tag the book is on, exclusive shelf first. Empty when the row printed none. The query API cannot filter on an array field, so this is the only place that records which books carry a tag."
 					},
 					"review_text": {
 						"type": [
@@ -715,7 +715,7 @@
 		{
 			"name": "shelves",
 			"required": false,
-			"description": "The owner's Goodreads shelves: the exclusive shelves (to-read, currently-reading, read and any custom exclusive shelf) and the tag-style shelves, with the number of books on each. Read from the book API Goodreads' own pages use, and saved only when the lists are as long as Goodreads reports and name every shelf a book is on. Incremental: unchanged shelves are not emitted again, and a deleted shelf is emitted as a deletion.",
+			"description": "The owner's Goodreads shelves: the exclusive shelves (to-read, currently-reading, read and any custom exclusive shelf) and the tag-style shelves, with the number of books on each. Expanding exclusive_shelf_books returns the books whose exclusive shelf this is, so it is empty for a tag. Read from the book API Goodreads' own pages use, and saved only when the lists are as long as Goodreads reports and name every shelf a book is on. Incremental: unchanged shelves are not emitted again, and a deleted shelf is emitted as a deletion.",
 			"display": {
 				"label": "Your Goodreads shelves",
 				"detail": "The names of your shelves, whether each is an exclusive shelf or a tag, and how many books are on each."
@@ -735,7 +735,7 @@
 					},
 					"exclusive": {
 						"type": "boolean",
-						"description": "True for an exclusive shelf (a book sits on at most one of them: to-read, currently-reading, read and the owner's custom exclusive shelves). False for a tag-style shelf, which a book can share with others."
+						"description": "True for an exclusive shelf (a book sits on at most one of them: to-read, currently-reading, read and the owner's custom exclusive shelves). False for a tag-style shelf, which a book can share with others. Only an exclusive shelf has books to expand through exclusive_shelf_books; for a tag, read books.shelves."
 					},
 					"book_count": {
 						"type": "integer",
@@ -795,7 +795,7 @@
 				},
 				"expand": [
 					{
-						"name": "books",
+						"name": "exclusive_shelf_books",
 						"default_limit": 25,
 						"max_limit": 200
 					}
@@ -805,7 +805,7 @@
 			"freshness_strategy": "scheduled_window",
 			"relationships": [
 				{
-					"name": "books",
+					"name": "exclusive_shelf_books",
 					"stream": "books",
 					"foreign_key": "exclusive_shelf",
 					"cardinality": "has_many"
@@ -1236,6 +1236,7 @@
 		"collection_interrupted": "Goodreads stopped answering partway through, so some of your library is missing. Run collection again.",
 		"goodreads_session_missing": "This run ended before Goodreads had a signed-in session in the connector's browser. Sign in to Goodreads there (any method, with Keep me signed in ticked), then run collection again.",
 		"listing_incomplete": "Your reading summary was not saved because the library list could not be read to its end, and a summary of part of a library would be wrong.",
+		"rate_limited": "Goodreads asked this run to slow down and did not lift the limit in time, so part of your library was not read. Run collection again later.",
 		"shelf_list_incomplete": "Your shelves were not saved because Goodreads showed only part of your shelf list, and saving part of it would drop the rest. Please report this; running again will not help.",
 		"sign_in_required": "Goodreads needs you to sign in again before this can continue.",
 		"source_unreadable": "Goodreads answered with a page this connector doesn't recognise, so nothing more was read. Goodreads may have changed its site - please report this rather than retrying."

@@ -104,6 +104,7 @@ const SKIP_REASON: Record<StopReason, string> = {
 	bot_challenge: "bot_challenge",
 	collection_interrupted: "collection_interrupted",
 	listing_incomplete: "listing_incomplete",
+	rate_limited: "rate_limited",
 	shelf_list_incomplete: "shelf_list_incomplete",
 	sign_in_required: "sign_in_required",
 	source_unreadable: "source_unreadable",

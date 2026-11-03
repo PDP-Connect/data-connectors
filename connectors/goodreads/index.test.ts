@@ -15,6 +15,11 @@ import { skipPoliteDelays } from "../../packages/polyfill-connectors/src/test-ha
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
 import { type GoodreadsCollectContext, joinLibrary } from "./collector.ts";
 import {
+	MAX_RETRY_AFTER_MS,
+	RETRY_BASE_DELAY_MS,
+	retryWait,
+} from "./fetcher.ts";
+import {
 	FALLBACK_TOKEN_PAGE,
 	GRAPHQL_URL,
 	type GraphqlShelving,
@@ -467,6 +472,47 @@ test("shelves come from the API with display names and counts from the library",
 	);
 });
 
+test("expanding a shelf finds its books the way the server filters them", async () => {
+	// The server expands a relationship as filter[<foreign_key>]=<parent id>,
+	// and only a field of one scalar type is filterable (no arrays).
+	const declared = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as {
+		streams: {
+			name: string;
+			relationships?: { foreign_key: string; stream: string }[];
+			schema: { properties: Record<string, { type: string | string[] }> };
+		}[];
+	};
+	const shelves = declared.streams.find((s) => s.name === "shelves");
+	const books = declared.streams.find((s) => s.name === "books");
+	assert.deepEqual(
+		shelves?.relationships?.map((r) => [r.stream, r.foreign_key]),
+		[["books", "exclusive_shelf"]],
+	);
+	const fkType = [books?.schema.properties.exclusive_shelf?.type]
+		.flat()
+		.filter((t) => t !== "null");
+	assert.deepEqual(fkType, ["string"]);
+
+	const h = harness(signedInSite(), { books: {}, shelves: {} });
+	await collect(h.ctx);
+	const bookRecords = recordsOf(h, "books");
+	for (const shelf of recordsOf(h, "shelves")) {
+		const expanded = bookRecords.filter((b) => b.exclusive_shelf === shelf.id);
+		const carrying = bookRecords.filter((b) =>
+			(b.shelves as string[]).includes(shelf.id as string),
+		);
+		assert.equal(carrying.length, shelf.book_count, `${shelf.id} count`);
+		// An exclusive shelf expands to every book on it; a tag expands to none.
+		assert.equal(
+			expanded.length,
+			shelf.exclusive ? shelf.book_count : 0,
+			`${shelf.id} expand`,
+		);
+	}
+});
+
 test("what the account does not say about itself never reaches a record", async () => {
 	const h = harness(signedInSite(), ALL_STREAMS);
 	await collect(h.ctx);
@@ -687,7 +733,7 @@ test("a 503 is retried and then succeeds; the run does not fail", async () => {
 	assert.equal(h.paths.filter((p) => p.startsWith("/user/show")).length, 2);
 });
 
-test("a rate limit that does not lift stops the listing as interrupted and saves no books", async () => {
+test("a rate limit that does not lift stops the listing as rate limited and saves no books", async () => {
 	const h = harness(
 		signedInSite({
 			print: (path) =>
@@ -704,9 +750,70 @@ test("a rate limit that does not lift stops the listing as interrupted and saves
 	assert.deepEqual(h.graphql, []);
 	assert.equal(recordsOf(h, "usage_summary").length, 0);
 	const byStream = new Map(skips(h).map((skip) => [skip.stream, skip.reason]));
-	assert.equal(byStream.get("books"), "collection_interrupted");
+	assert.equal(byStream.get("books"), "rate_limited");
 	assert.equal(byStream.get("usage_summary"), "listing_incomplete");
 	assert.equal(h.paths.filter((p) => p.includes("&page=2&")).length, 3);
+});
+
+test("a Retry-After sets the least wait, and one longer than a run sleeps stops it", () => {
+	const limited = (retryAfter: string | null) =>
+		({ kind: "response", retryAfter, status: 429 }) as const;
+	const unavailable = (retryAfter: string | null) =>
+		({ kind: "response", retryAfter, status: 503 }) as const;
+	// The server's wait wins over a shorter backoff, and the backoff over a shorter ask.
+	assert.equal(retryWait(1, limited("20")), 20_000);
+	assert.equal(retryWait(2, unavailable("1")), RETRY_BASE_DELAY_MS * 2);
+	assert.equal(retryWait(1, limited(null)), RETRY_BASE_DELAY_MS);
+	assert.equal(retryWait(1, limited("not a number")), RETRY_BASE_DELAY_MS);
+	// A wait past the ceiling, or a third failure, ends the retries.
+	const tooLong = String(MAX_RETRY_AFTER_MS / 1000 + 1);
+	assert.equal(retryWait(1, limited(tooLong)), "rate_limited");
+	assert.equal(retryWait(1, unavailable(tooLong)), "give_up");
+	assert.equal(retryWait(3, limited(null)), "rate_limited");
+	assert.equal(retryWait(3, { kind: "network_error" }), "give_up");
+});
+
+test("a rate limit asking for an hour stops the listing at once", async () => {
+	const h = harness(
+		signedInSite({
+			print: (path) =>
+				path.includes("&page=2&")
+					? {
+							body: "slow down",
+							headers: { "retry-after": "3600" },
+							status: 429,
+						}
+					: { body: PRINT_PAGES["1"] ?? "" },
+		}),
+		{ books: {} },
+	);
+	await collect(h.ctx);
+	assert.equal(
+		skips(h).find((s) => s.stream === "books")?.reason,
+		"rate_limited",
+	);
+	assert.equal(h.paths.filter((p) => p.includes("&page=2&")).length, 1);
+});
+
+test("the book API's rate limit stops books as rate limited", async () => {
+	const fixtures = fixtureApi();
+	const h = harness(
+		signedInSite(),
+		{ books: {} },
+		{
+			api: (op, variables, call) =>
+				op === "GoodreadsShelvings"
+					? { body: "{}", status: 429 }
+					: fixtures(op, variables, call),
+		},
+	);
+	await collect(h.ctx);
+	assert.equal(recordsOf(h, "books").length, 0);
+	assert.equal(
+		skips(h).find((s) => s.stream === "books")?.reason,
+		"rate_limited",
+	);
+	assert.equal(h.graphql.filter((op) => op === "GoodreadsShelvings").length, 3);
 });
 
 test("a listing that ends short of the count is not complete and the summary is withheld", async () => {
@@ -1176,6 +1283,7 @@ test("every SKIP_RESULT reason the run can emit has display copy in the manifest
 			}),
 		],
 		[signedInSite({ print: () => ({ body: "x", status: 429 }) })],
+		[signedInSite({ print: () => ({ body: "x", status: 503 }) })],
 		[signedInSite(), shortTags],
 	] as [Site, Api?][]) {
 		const h = harness(site, ALL_STREAMS, api ? { api } : {});
@@ -1186,6 +1294,7 @@ test("every SKIP_RESULT reason the run can emit has display copy in the manifest
 		"bot_challenge",
 		"collection_interrupted",
 		"listing_incomplete",
+		"rate_limited",
 		"shelf_list_incomplete",
 		"sign_in_required",
 		"source_unreadable",
