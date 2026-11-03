@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -44,6 +45,51 @@ const ENV_VARS = [
 	"PDPP_FORCE_CONTAINER",
 	"PDPP_ALLOW_HEADED_CONTAINER_BROWSER",
 ] as const;
+
+test("macOS local connector browser uses system Chrome with its sandbox enabled", {
+	skip: process.platform !== "darwin",
+}, async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-browser-security-"));
+	const previousRoot = process.env.PDPP_BROWSER_PROFILE_ROOT;
+	const previousChannel = process.env.PDPP_BROWSER_CHANNEL;
+	let handle: Awaited<ReturnType<typeof acquireIsolatedBrowser>> | undefined;
+	process.env.PDPP_BROWSER_PROFILE_ROOT = dir;
+	delete process.env.PDPP_BROWSER_CHANNEL;
+	t.after(async () => {
+		await handle?.release();
+		if (previousRoot === undefined)
+			delete process.env.PDPP_BROWSER_PROFILE_ROOT;
+		else process.env.PDPP_BROWSER_PROFILE_ROOT = previousRoot;
+		if (previousChannel === undefined) delete process.env.PDPP_BROWSER_CHANNEL;
+		else process.env.PDPP_BROWSER_CHANNEL = previousChannel;
+		await rm(dir, { recursive: true, force: true });
+	});
+	handle = await acquireIsolatedBrowser({
+		profileName: "security-check",
+		headless: true,
+	});
+	const browser = handle.context.browser();
+	assert.ok(browser);
+	const cdp = await browser.newBrowserCDPSession();
+	const { processInfo } = await cdp.send("SystemInfo.getProcessInfo");
+	const main = processInfo.find((entry) => entry.type === "browser");
+	assert.ok(main);
+	const command = execFileSync(
+		"ps",
+		["-p", String(main.id), "-o", "command="],
+		{ encoding: "utf8" },
+	);
+	assert.ok(
+		command.includes(
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		),
+		"connector must use the system browser that receives security updates",
+	);
+	assert.ok(
+		!command.includes("--no-sandbox"),
+		"connector must retain Chromium sandboxing on macOS",
+	);
+});
 
 function withEnv(values: Partial<Record<(typeof ENV_VARS)[number], string>>) {
 	const previous = new Map<string, string | undefined>();
