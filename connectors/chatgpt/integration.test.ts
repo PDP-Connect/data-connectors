@@ -2922,7 +2922,7 @@ test("processConversationDetail: a schema-rejected branch node emits a DETAIL_GA
 		},
 		makeEmitConversation(deps),
 	);
-	assert.equal(emitted.filter((r) => r.stream === "messages").length, 2);
+	assert.deepEqual(emitted, []);
 	const gaps = detailGaps(messages);
 	assert.equal(gaps.length, 1);
 	assert.equal(gaps[0]?.record_key, "convo-abc");
@@ -13022,46 +13022,35 @@ test("processConversationDetail: a repeat detail never changes an already-emitte
 	const { deps, emitted, messages } = makeHarness();
 	deps.emittedMessageIdsThisRun = new Set<string>();
 	deps.emittedMessageParentsThisRun = new Map<string, string | null>();
-	const detail = (a1Role: string): ChatGptFetchResult => ({
+	const detail = (a2Parent: string): ChatGptFetchResult => ({
 		status: 200,
 		json: {
 			current_node: "a2",
 			mapping: {
 				a0: userNode(null, ["a1"], "first"),
-				// a role over the 40-char cap is rejected, so a2 relinks to a0
-				a1: userNode("a0", ["a2"], "middle", a1Role),
-				a2: userNode("a1", [], "last", "assistant"),
+				a1: userNode("a0", ["a2"], "middle"),
+				a2: userNode(a2Parent, [], "last", "assistant"),
 			},
 		},
 	});
 	await processConversationDetail(
 		deps,
 		makeConvo({ current_node: "a2" }),
-		detail("r".repeat(41)),
+		detail("a1"),
 		makeEmitConversation(deps),
 	);
 	const second = await processConversationDetail(
 		deps,
 		makeConvo({ current_node: "a2" }),
-		detail("user"),
+		detail("a0"),
 		makeEmitConversation(deps),
 	);
 	const a2Emits = emitted.filter(
 		(r) => r.stream === "messages" && r.data.node_id === "a2",
 	);
 	assert.equal(a2Emits.length, 1, "a2 is emitted once");
-	assert.equal(a2Emits[0]?.data.parent_id, `${makeConvo().id}:a0`);
-	const conversations = emitted.filter((r) => r.stream === "conversations");
-	const a2InMapping = (
-		conversations[1]?.data as
-			| { mapping?: Record<string, { parent?: string }> }
-			| undefined
-	)?.mapping?.a2;
-	assert.equal(
-		a2InMapping?.parent ?? "a0",
-		"a0",
-		"the conversation record keeps the emitted parent",
-	);
+	assert.equal(a2Emits[0]?.data.parent_id, `${makeConvo().id}:a1`);
+	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 1);
 	assert.equal(
 		second.complete,
 		false,

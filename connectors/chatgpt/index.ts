@@ -3097,50 +3097,6 @@ export async function processConversationDetail(
 		current_node: emittedCurrentNode,
 	};
 	reportProcessingTime();
-	// Keep the established parent-first record order. The metadata now comes
-	// from the same selected, schema-valid records that will be emitted below.
-	await emitConversation(c, conversationDetail);
-	if (filteredBranchCount > 0) {
-		chatGptDiagnostic(
-			`branch_message_filtered: current_node and branch count reflect emitted messages ` +
-				`(filtered=${filteredBranchCount}, selection=${filteredBySelection}, ` +
-				`shape=${filteredByShape}, duplicate=${filteredAsDuplicate}, ` +
-				`non_message=${filteredAsNonMessage}, ` +
-				`current_node_filtered=${currentNodeFilteredReason ?? "no"})`,
-		);
-	}
-	for (const candidate of emitMessages ? candidates : []) {
-		const { msg } = candidate;
-		if (candidate.alreadyEmitted) continue;
-		const messageId =
-			typeof msg.id === "string" ? messageRecordId(c.id, msg.id) : null;
-		if (messageId) {
-			alreadyEmittedIds.add(messageId);
-			emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
-		}
-		const { blob } = candidate;
-		const sourceNode = mapping[candidate.nodeId];
-		// The blob is spooled only after the runtime's selection and validation
-		// gates pass (beforeEmit), so a suppressed record leaves no orphan file,
-		// and the text is re-derived here rather than held per candidate.
-		await deps.emitRecord(
-			"messages",
-			toMessageRecord(msg, c.id),
-			blob && messageId && sourceNode
-				? {
-						beforeEmit: () =>
-							deps.emit(
-								spoolMessageBlob(
-									blob.spoolDir,
-									messageId,
-									extractRawMessageText(sourceNode) ?? "",
-									blob.ref,
-								),
-							),
-					}
-				: undefined,
-		);
-	}
 	const branchStructurallyIncomplete = await emitBranchReconciliation(
 		mapping,
 		currentNode,
@@ -3157,6 +3113,52 @@ export async function processConversationDetail(
 				: null;
 	if (incompleteReason && emitMessages) {
 		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
+	}
+	if (!incompleteReason) {
+		// Keep the established parent-first record order. The metadata now comes
+		// from the same selected, schema-valid records that will be emitted below.
+		await emitConversation(c, conversationDetail);
+		if (filteredBranchCount > 0) {
+			chatGptDiagnostic(
+				`branch_message_filtered: current_node and branch count reflect emitted messages ` +
+					`(filtered=${filteredBranchCount}, selection=${filteredBySelection}, ` +
+					`shape=${filteredByShape}, duplicate=${filteredAsDuplicate}, ` +
+					`non_message=${filteredAsNonMessage}, ` +
+					`current_node_filtered=${currentNodeFilteredReason ?? "no"})`,
+			);
+		}
+		for (const candidate of emitMessages ? candidates : []) {
+			const { msg } = candidate;
+			if (candidate.alreadyEmitted) continue;
+			const messageId =
+				typeof msg.id === "string" ? messageRecordId(c.id, msg.id) : null;
+			if (messageId) {
+				alreadyEmittedIds.add(messageId);
+				emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
+			}
+			const { blob } = candidate;
+			const sourceNode = mapping[candidate.nodeId];
+			// The blob is spooled only after the runtime's selection and validation
+			// gates pass (beforeEmit), so a suppressed record leaves no orphan file,
+			// and the text is re-derived here rather than held per candidate.
+			await deps.emitRecord(
+				"messages",
+				toMessageRecord(msg, c.id),
+				blob && messageId && sourceNode
+					? {
+							beforeEmit: () =>
+								deps.emit(
+									spoolMessageBlob(
+										blob.spoolDir,
+										messageId,
+										extractRawMessageText(sourceNode) ?? "",
+										blob.ref,
+									),
+								),
+						}
+					: undefined,
+			);
+		}
 	}
 	if (candidates.length === 0) {
 		// Completeness guard. A 200-with-mapping detail whose graph contains NO
