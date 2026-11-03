@@ -81,6 +81,7 @@ import {
 	NO_DETAIL_WAITS,
 	withEmptyConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
+import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
 	applyChatGptColdStatePreflight,
 	buildChatGptCollectionRateProgress,
@@ -110,7 +111,7 @@ import {
 	resolveChatGptProviderBudget,
 	resolveChatGptRateLimitDensityStop,
 	runAccountPlanStream,
-	runConversationsAndMessagesStreams,
+	runConversationsAndMessagesStreams as runUnionStreams,
 	runCustomGptsStream,
 	runCustomInstructionsStream,
 	runMemoriesStream,
@@ -130,6 +131,18 @@ import type {
 	ChatGptNode,
 	ConversationListItem,
 } from "./types.ts";
+
+/** These scenarios isolate search/detail behavior against a healthy empty primary source. */
+const runConversationsAndMessagesStreams: typeof runUnionStreams = (
+	deps,
+	state,
+	options,
+) =>
+	runUnionStreams(
+		{ ...deps, api: withEmptyPrimaryList(deps.api) },
+		state,
+		options,
+	);
 
 interface RecordingHarness {
 	deps: StreamDeps;
@@ -6106,11 +6119,15 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 		deps,
 		{
 			conversations: {
+				enumeration_version: 1,
 				last_update_time: "2026-06-15T00:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,
 			},
-			messages: { last_update_time: "2026-06-15T00:00:00.000Z" },
+			messages: {
+				enumeration_version: 1,
+				last_update_time: "2026-06-15T00:00:00.000Z",
+			},
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -6153,10 +6170,14 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 	assert.deepEqual(
 		states.map((state) => [state.stream, state.cursor]),
 		[
-			["messages", { last_update_time: "2026-06-15T00:00:00.000Z" }],
+			[
+				"messages",
+				{ enumeration_version: 1, last_update_time: "2026-06-15T00:00:00.000Z" },
+			],
 			[
 				"conversations",
 				{
+					enumeration_version: 1,
 					last_update_time: "2026-06-15T00:00:00.000Z",
 					detail_version: 2,
 					detail_frontier: null,
@@ -6215,6 +6236,7 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 		states.map((state) => state.cursor),
 		[
 			{
+				enumeration_version: 1,
 				last_update_time: "2026-06-15T00:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,

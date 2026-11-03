@@ -3711,6 +3711,133 @@ function readConversationBackfill(value: unknown): ConversationBackfill | null {
 
 const CONVERSATION_PAGE_SIZE = 30;
 
+const PRIMARY_CONVERSATION_PAGE_SIZE = 100;
+const CONVERSATION_ENUMERATION_VERSION = 1;
+
+/** Independent offset walk. `total` can be offset + count + 1: a lower bound,
+ * never a snapshot size. Only a repeated empty page ends this walk. */
+async function listPrimaryConversations(
+	deps: StreamDeps,
+	resume: ConversationBackfill | null,
+): Promise<ConversationListResult> {
+	const rows = new Map<string, ConversationListItem>();
+	let offset = resume
+		? Math.max(0, resume.position_hint - PRIMARY_CONVERSATION_PAGE_SIZE)
+		: 0;
+	let boundarySeen = resume === null || resume.boundary_ids.length === 0;
+	const recovery = conversationSearchRecovery(
+		deps,
+		(position) => `/conversations?offset=${position}&limit=100&order=updated`,
+	);
+	const incomplete = (): ConversationListResult => ({
+		items: [...rows.values()],
+		truncated: true,
+		backfill:
+			resume && rows.size > 0 && !boundarySeen
+				? { position_hint: 0, oldest_update_time: null, boundary_ids: [] }
+				: rows.size > 0
+					? conversationBackfillAt(rows.values(), offset)
+					: (resume ?? {
+							position_hint: 0,
+							oldest_update_time: null,
+							boundary_ids: [],
+						}),
+	});
+	let emptyReads = 0;
+	let pages = 0;
+	while (pages * PRIMARY_CONVERSATION_PAGE_SIZE < PAGINATION_SAFETY_LIMIT) {
+		let response: ChatGptFetchResult;
+		try {
+			response = await recovery.fetch(offset);
+		} catch (error) {
+			if (!isConversationSearchDeferred(error)) {
+				throw error;
+			}
+			await emitConversationSearchDeferred(deps, error, offset);
+			return incomplete();
+		}
+		const classified = classifyChatGptListPage<unknown>(response, {
+			stream: "conversations",
+			endpointLabel: "conversations primary list",
+			page: pages,
+			listKeys: ["items"],
+		});
+		if (!classified.ok) {
+			for (const stream of ["conversations", "messages"]) {
+				if (deps.requested.has(stream)) {
+					deps.emit({ ...classified.skip, stream });
+				}
+			}
+			return incomplete();
+		}
+		const pageRows: ConversationListItem[] = [];
+		for (const raw of classified.items) {
+			const id = isChatGptJsonObject(raw)
+				? (raw.id ?? raw.conversation_id)
+				: null;
+			if (
+				!isChatGptJsonObject(raw) ||
+				typeof id !== "string" ||
+				id.length === 0
+			) {
+				emitConversationListUnstable(
+					deps,
+					"ChatGPT primary list returned an item without a usable id",
+					{ offset },
+				);
+				return incomplete();
+			}
+			pageRows.push({ ...raw, id } as ConversationListItem);
+		}
+		if (pageRows.length > PRIMARY_CONVERSATION_PAGE_SIZE) {
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT primary list exceeded its page size",
+				{ offset },
+			);
+			return incomplete();
+		}
+		if (pageRows.length === 0) {
+			emptyReads += 1;
+			if (emptyReads < 2) {
+				// API admission applies provider pacing to the confirmation read too.
+				continue;
+			}
+			if (!boundarySeen) {
+				emitConversationListUnstable(
+					deps,
+					"ChatGPT primary list did not re-observe its backfill boundary",
+					{ offset },
+				);
+				return {
+					...incomplete(),
+					backfill: {
+						position_hint: 0,
+						oldest_update_time: null,
+						boundary_ids: [],
+					},
+				};
+			}
+			return { items: [...rows.values()], truncated: false, backfill: null };
+		}
+		emptyReads = 0;
+		for (const item of pageRows) {
+			rows.set(item.id, item);
+		}
+		if (resume && conversationBackfillBoundarySeen(rows.values(), resume)) {
+			boundarySeen = true;
+		}
+		offset += pageRows.length;
+		pages += 1;
+	}
+	emitConversationListUnstable(
+		deps,
+		"ChatGPT primary list reached the per-run pagination cap",
+		{ offset },
+	);
+	return incomplete();
+}
+
 function logConversationListPageShape(
 	items: readonly unknown[],
 	page: number,
@@ -4393,7 +4520,10 @@ async function emitConversationSearchDeferred(
 
 /** Only the consumer waits/probes. Speculative reads retain their errors and
  * drain before recovery; they never start independent cooldown loops. */
-function conversationSearchRecovery(deps: StreamDeps) {
+function conversationSearchRecovery(
+	deps: StreamDeps,
+	pathForCursor: (cursor: number) => string = conversationSearchPath,
+) {
 	const runBudget = deps.runBudget ?? new ChatGptRunBudget();
 	let consecutiveWaits = 0;
 	let pressured = false;
@@ -4412,7 +4542,7 @@ function conversationSearchRecovery(deps: StreamDeps) {
 				capReason,
 			);
 		}
-		const response = await deps.api.fetch(conversationSearchPath(cursor));
+		const response = await deps.api.fetch(pathForCursor(cursor));
 		if (response.status === 200) {
 			consecutiveWaits = 0;
 			// Listing owns this response's success observation; detail pacing keeps
@@ -7388,7 +7518,7 @@ export async function runConversationsAndMessagesStreams(
 }
 
 async function walkConversationsAndMessages(
-	deps: StreamDeps,
+	inputDeps: StreamDeps,
 	state: CollectContext["state"],
 	options: {
 		detailPacing?: ConversationDetailPacingOptions;
@@ -7396,6 +7526,62 @@ async function walkConversationsAndMessages(
 		detailBackfillLimit?: number;
 	} = {},
 ): Promise<void> {
+	let primaryList: ConversationListResult | null = null;
+	const deps: StreamDeps = {
+		...inputDeps,
+		emit: (message) => {
+			if (
+				message.type !== "STATE" ||
+				(message.stream !== "conversations" && message.stream !== "messages") ||
+				!isChatGptJsonObject(message.cursor)
+			) {
+				return inputDeps.emit(message);
+			}
+			const previous = state[message.stream];
+			if (primaryList === null) {
+				// Recovery-only/budget exits did not run enumeration. Keep its
+				// independent continuation when persisting learned detail pacing.
+				const stored = isChatGptJsonObject(previous) ? previous : {};
+				const savedPrimary = readConversationBackfill(stored.primary_backfill);
+				return inputDeps.emit({
+					...message,
+					cursor: {
+						...message.cursor,
+						...(stored.enumeration_version === CONVERSATION_ENUMERATION_VERSION
+							? { enumeration_version: CONVERSATION_ENUMERATION_VERSION }
+							: {}),
+						...(savedPrimary === null
+							? {}
+							: { primary_backfill: savedPrimary }),
+					},
+				});
+			}
+			const previousWatermark = isChatGptJsonObject(previous)
+				? previous.last_update_time
+				: null;
+			const migrationStarted =
+				!primaryList.truncated ||
+				primaryList.items.length > 0 ||
+				(isChatGptJsonObject(previous) &&
+					previous.enumeration_version === CONVERSATION_ENUMERATION_VERSION);
+			return inputDeps.emit({
+				...message,
+				cursor: {
+					...message.cursor,
+					...(migrationStarted
+						? { enumeration_version: CONVERSATION_ENUMERATION_VERSION }
+						: {}),
+					...(primaryList.backfill === null
+						? {}
+						: { primary_backfill: primaryList.backfill }),
+					// A failed primary walk cannot authorize a newer stream watermark.
+					...(primaryList.truncated
+						? { last_update_time: previousWatermark ?? null }
+						: {}),
+				},
+			});
+		},
+	};
 	const listingRecovery =
 		deps.searchRecovery ?? conversationSearchRecovery(deps);
 	const runDeps: StreamDeps = {
@@ -7409,19 +7595,23 @@ async function walkConversationsAndMessages(
 		| {
 				last_update_time?: string | null;
 				backfill?: unknown;
+				primary_backfill?: unknown;
+				enumeration_version?: unknown;
 		  }
 		| undefined;
 	const messagesCursor = state.messages as
 		| {
 				last_update_time?: string | null;
 				backfill?: unknown;
+				primary_backfill?: unknown;
+				enumeration_version?: unknown;
 		  }
 		| undefined;
 	const wantsConversations = deps.requested.has("conversations");
 	const wantsMessages = deps.requested.has("messages");
 	// What the cursor says has had its detail read (model counts). A cursor in
 	// the published shape keeps its watermark and says no history is read.
-	const priorDetailProgress = readDetailProgress(conversationsCursor);
+	let priorDetailProgress = readDetailProgress(conversationsCursor);
 	const requestedSince = Date.parse(
 		deps.requested.get("conversations")?.time_range?.since ??
 			deps.requested.get("messages")?.time_range?.since ??
@@ -7431,11 +7621,28 @@ async function walkConversationsAndMessages(
 	const floorMs = Number.isNaN(requestedSince) ? null : requestedSince - 1;
 	// The list is walked strictly after this cursor, one millisecond below the
 	// watermark, so conversations that tie the watermark are listed again.
-	const priorConversationsCursor = detailListCursor(
-		priorDetailProgress,
-		floorMs,
-	);
+	let priorConversationsCursor = detailListCursor(priorDetailProgress, floorMs);
 	const priorMessagesCursor = messagesCursor?.last_update_time || null;
+	const migrateConversations =
+		wantsConversations &&
+		conversationsCursor?.enumeration_version !==
+			CONVERSATION_ENUMERATION_VERSION;
+	const migrateMessages =
+		wantsMessages &&
+		messagesCursor?.enumeration_version !== CONVERSATION_ENUMERATION_VERSION;
+	const primaryBackfills = [
+		wantsConversations
+			? readConversationBackfill(conversationsCursor?.primary_backfill)
+			: null,
+		wantsMessages
+			? readConversationBackfill(messagesCursor?.primary_backfill)
+			: null,
+	].filter((value): value is ConversationBackfill => value !== null);
+	const primaryBackfill =
+		primaryBackfills.sort((a, b) => a.position_hint - b.position_hint)[0] ??
+		null;
+	const primaryCatchup =
+		migrateConversations || migrateMessages || primaryBackfill !== null;
 	const savedBackfills = [
 		wantsConversations
 			? readConversationBackfill(conversationsCursor?.backfill)
@@ -7461,7 +7668,9 @@ async function walkConversationsAndMessages(
 				undefined,
 				listingRecovery,
 			);
-			if (savedBackfill === null) return forward;
+			if (savedBackfill === null) {
+				return forward;
+			}
 			// Collect the incremental frontier first, then resume the incomplete
 			// full-list walk. The update-time watermark and paging continuation are
 			// independent: one finds arrivals; the other drains older unseen pages.
@@ -7473,8 +7682,12 @@ async function walkConversationsAndMessages(
 				listingRecovery,
 			);
 			const merged = new Map<string, ConversationListItem>();
-			for (const item of backfill.items) merged.set(item.id, item);
-			for (const item of forward.items) merged.set(item.id, item);
+			for (const item of backfill.items) {
+				merged.set(item.id, item);
+			}
+			for (const item of forward.items) {
+				merged.set(item.id, item);
+			}
 			const nextBackfill = forward.truncated
 				? savedBackfill
 				: backfill.backfill;
@@ -7484,7 +7697,34 @@ async function walkConversationsAndMessages(
 				backfill: nextBackfill,
 				backfillItems: backfill.backfillItems ?? backfill.items,
 			};
-		})();
+		})().then((search): ConversationListResult => {
+			if (primaryList === null) {
+				return search;
+			}
+			const since =
+				deps.requested.get("conversations")?.time_range?.since ??
+				deps.requested.get("messages")?.time_range?.since;
+			const primaryItems = primaryList.items.filter((item) => {
+				const time = item.update_time ? tsToIso(item.update_time) : null;
+				if (since && (time === null || isOutsideTimeRange({ since }, time))) {
+					return false;
+				}
+				return primaryCatchup || conversationIsAfterCursor(item, cursor);
+			});
+			const merged = new Map(primaryItems.map((item) => [item.id, item]));
+			for (const item of search.items) {
+				merged.set(item.id, item);
+			}
+			return {
+				...search,
+				items: [...merged.values()],
+				truncated: search.truncated || primaryList.truncated,
+				backfillItems: [
+					...(search.backfillItems ?? []),
+					...(primaryCatchup ? primaryItems : []),
+				],
+			};
+		});
 		listedByCursor.set(key, listed);
 		return listed;
 	};
@@ -7511,6 +7751,24 @@ async function walkConversationsAndMessages(
 		persistChatGptPacingStateOnly(deps, priorMessagesCursor, savedBackfill);
 		return;
 	}
+	// Finish the other source's saved suffix before starting another primary
+	// pass. Otherwise a primary list that consumes the request budget can
+	// repeatedly starve search. This carries enumeration progress, not a provider
+	// snapshot guarantee; the next ordinary run reads primary from the top again.
+	primaryList =
+		savedBackfill !== null && !primaryCatchup
+			? { items: [], truncated: false, backfill: null }
+			: await listPrimaryConversations(deps, primaryBackfill);
+	// Existing search-only completed ranges do not establish primary history.
+	// Reopen that range once, then persist ordinary exact-key/detail progress on
+	// every checkpoint. Budgeted runs continue from independent source anchors.
+	if (migrateConversations && primaryList.items.length > 0) {
+		priorDetailProgress = {
+			...priorDetailProgress,
+			frontier: priorDetailProgress.watermark,
+		};
+		priorConversationsCursor = detailListCursor(priorDetailProgress, floorMs);
+	}
 
 	const {
 		conversationsToSync,
@@ -7523,7 +7781,10 @@ async function walkConversationsAndMessages(
 		wantsConversations,
 		wantsMessages,
 		priorConversationsCursor,
-		priorMessagesCursor,
+		priorMessagesCursor:
+			migrateMessages && primaryList.items.length > 0
+				? null
+				: priorMessagesCursor,
 		listForCursor,
 	});
 	if (wantsConversations) {
