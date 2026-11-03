@@ -25231,7 +25231,7 @@
 								"start_date": {
 									"type": "string",
 									"format": "date",
-									"description": "The YYYY-MM-DD date as written in start_time: at its stated offset, else in UTC or the zoneless value's own clock. Window aggregates are safe on any record. A same-day join or local-day claim is safe only when start_date_local is non-null or start_time_basis is 'local'; otherwise this date can be the wrong local day."
+									"description": "The YYYY-MM-DD date as written in start_time: at its stated offset, else in UTC or the zoneless value's own clock. Window aggregates are safe on any record. A same-day join or local-day claim is safe only when start_date_local is non-null; otherwise this date can be the wrong local day."
 								},
 								"start_date_local": {
 									"type": ["string", "null"],
@@ -25246,7 +25246,7 @@
 								"start_time_basis": {
 									"type": "string",
 									"enum": ["utc", "local", "unknown"],
-									"description": "The clock used for start_time: 'local', 'utc' or 'unknown', recording what the collected source establishes rather than assuming a timezone. UTC or unknown-basis time does not establish the athlete's local time of day."
+									"description": "The clock used for start_time: 'local' (the athlete's local clock, with its offset), 'utc' (an exact instant: UTC, or a numeric offset stated in the account export) or 'unknown' (a zoneless value). It records what the collected source establishes rather than assuming a timezone. Only a non-null start_date_local establishes the athlete's local day."
 								},
 								"distance_m": {
 									"type": ["number", "null"],
@@ -25414,7 +25414,7 @@
 								"start_date": {
 									"type": "string",
 									"format": "date",
-									"description": "The YYYY-MM-DD date as written in start_time: at its stated offset, else in UTC or the zoneless value's own clock. Window aggregates are safe on any record. A same-day join or local-day claim is safe only when start_date_local is non-null or start_time_basis is 'local'; otherwise this date can be the wrong local day."
+									"description": "The YYYY-MM-DD date as written in start_time: at its stated offset, else in UTC or the zoneless value's own clock. Window aggregates are safe on any record. A same-day join or local-day claim is safe only when start_date_local is non-null; otherwise this date can be the wrong local day."
 								},
 								"start_date_local": {
 									"type": ["string", "null"],
@@ -25429,7 +25429,7 @@
 								"start_time_basis": {
 									"type": "string",
 									"enum": ["utc", "local", "unknown"],
-									"description": "The clock used for start_time: 'local', 'utc' or 'unknown', recording what the collected source establishes rather than assuming a timezone. UTC or unknown-basis time does not establish the athlete's local time of day."
+									"description": "The clock used for start_time: 'local' (the athlete's local clock, with its offset), 'utc' (an exact instant: UTC, or a numeric offset stated in the account export) or 'unknown' (a zoneless value). It records what the collected source establishes rather than assuming a timezone. Only a non-null start_date_local establishes the athlete's local day."
 								},
 								"distance_m": {
 									"type": ["number", "null"],
