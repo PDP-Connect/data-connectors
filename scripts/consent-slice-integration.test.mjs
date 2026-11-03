@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -42,7 +43,8 @@ const GENERATOR = "packages/polyfill-connectors/scripts/generate-consent-time-fi
 function makeFixture(t) {
   const base = process.env.RUNNER_TEMP || process.env.TMPDIR || join(homedir(), ".tmp");
   mkdirSync(base, { recursive: true });
-  const root = mkdtempSync(join(base, "consent-slice-integration-"));
+  // Node resolves the entry module's path before its CLI guard compares argv.
+  const root = realpathSync(mkdtempSync(join(base, "consent-slice-integration-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   cpSync(repoRoot, root, {
     recursive: true,
@@ -64,6 +66,9 @@ function makeFixture(t) {
   writeFileSync(join(root, ".git/info/exclude"), "node_modules\n.out\n");
   git("config", "user.email", "test@example.invalid");
   git("config", "user.name", "Consent Slice Integration Test");
+  // Detached Git housekeeping must not outlive this fixture's cleanup.
+  git("config", "maintenance.auto", "false");
+  git("config", "gc.auto", "0");
   const read = (path) => readFileSync(join(root, path), "utf8");
   const write = (path, content) => writeFileSync(join(root, path), content);
   const fixture = {
