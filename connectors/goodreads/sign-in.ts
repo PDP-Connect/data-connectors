@@ -44,6 +44,8 @@ export const GOODREADS_LOGIN_FIELDS: LoginCredentialFields = {
 const SIGN_IN_FORM_TIMEOUT_MS = 20_000;
 const OUTCOME_TIMEOUT_MS = 45_000;
 const POLL_INTERVAL_MS = 500;
+/** One signed-in check may not hold the outcome wait past its own bound. */
+const PROBE_TIMEOUT_MS = 10_000;
 
 const EMAIL_SIGN_IN_LINK =
 	'a:has-text("Sign in with email"), button:has-text("Sign in with email")';
@@ -51,8 +53,12 @@ const EMAIL_FIELD = "input#ap_email, input#ap_email_login";
 const PASSWORD_FIELD = "input#ap_password";
 const REMEMBER_ME = "input#auth-remember-me";
 const SUBMIT_BUTTON = "input#signInSubmit";
-/** Amazon's own sign-in error box: wrong password, unknown email, locked account. */
-const ERROR_BOX = "#auth-error-message-box, #auth-warning-message-box";
+/**
+ * Amazon's sign-in error box: wrong password, unknown email, locked account.
+ * Its warning box (`#auth-warning-message-box`) also carries notices such as
+ * "enable cookies", so it is not read as a rejection.
+ */
+const ERROR_BOX = "#auth-error-message-box";
 const CAPTCHA_ELEMENT =
 	'#auth-captcha-guess, #captchacharacters, #auth-captcha-image, form[action*="validateCaptcha"], iframe[src*="captcha" i], #captcha-container';
 const CODE_FIELD =
@@ -107,16 +113,18 @@ export function classifySignInSurface(
 		observed.path.startsWith("/ap/") ||
 		SIGN_IN_PATH_RE.test(observed.path) ||
 		observed.passwordField;
+	// Elements count only there too: a signed-in page may carry a reCAPTCHA
+	// badge or a field named "code".
 	if (
-		observed.captchaElement ||
-		(onSignInTree && CAPTCHA_TEXT_RE.test(observed.bodyText))
+		onSignInTree &&
+		(observed.captchaElement || CAPTCHA_TEXT_RE.test(observed.bodyText))
 	) {
 		return "captcha";
 	}
 	if (
-		observed.codeField ||
 		VERIFICATION_PATH_RE.test(observed.path) ||
-		(onSignInTree && VERIFICATION_TEXT_RE.test(observed.bodyText))
+		(onSignInTree &&
+			(observed.codeField || VERIFICATION_TEXT_RE.test(observed.bodyText)))
 	) {
 		return "verification";
 	}
@@ -295,6 +303,8 @@ export interface AutomaticSignInArgs {
 	readonly password: string;
 	/** The connector's own signed-in check. Success is this and nothing else. */
 	readonly probe: () => Promise<boolean>;
+	/** Bound on one `probe` call. Defaults to 10 s; tests shorten it. */
+	readonly probeTimeoutMs?: number | undefined;
 	readonly username: string;
 }
 
@@ -305,11 +315,13 @@ function defaultClock(page: SignInPage): SignInClock {
 	};
 }
 
+/** `false` when nothing could be sent; the caller has not submitted. */
 async function submitForm(
 	page: SignInPage,
 	clock: SignInClock,
 	username: string,
 	password: string,
+	onCredentialSubmit: (() => void) | undefined,
 ): Promise<boolean> {
 	const email = await waitForVisible(page, EMAIL_FIELD, clock, 5000);
 	const pass = await waitForVisible(page, PASSWORD_FIELD, clock, 5000);
@@ -317,8 +329,12 @@ async function submitForm(
 	if (!(email && pass && submit)) {
 		return false;
 	}
-	await email.fill(username);
-	await pass.fill(password);
+	try {
+		await email.fill(username);
+		await pass.fill(password);
+	} catch {
+		return false;
+	}
 	// Keep me signed in: without it the session ends with the browser and the
 	// next run signs in again.
 	const remember = page.locator(REMEMBER_ME).first();
@@ -328,14 +344,36 @@ async function submitForm(
 	) {
 		await remember.check().catch((): undefined => undefined);
 	}
-	await submit.click();
+	// Before the click, not after it: a click that throws may still have sent
+	// the form, and a fresh process must not send it again (see
+	// EnsureSessionArgs.onCredentialSubmit). The outcome wait below reads what
+	// the page shows either way.
+	onCredentialSubmit?.();
+	await submit.click().catch((): undefined => undefined);
 	return true;
+}
+
+/** The signed-in check, bounded: a hung check reads as not signed in. */
+async function probeWithin(
+	probe: () => Promise<boolean>,
+	ms: number,
+): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expired = new Promise<boolean>((resolve) => {
+		timer = setTimeout(() => resolve(false), ms);
+	});
+	try {
+		return await Promise.race([probe().catch((): boolean => false), expired]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 /**
  * One automatic sign-in attempt. Returns `signed_in` only when `probe` says
  * the session is live; every other end is a named fallback for the caller to
- * hand to the owner. The sole thrown failure is a page or browser error.
+ * hand to the owner. A page or browser error can still throw; the caller
+ * hands off then too.
  */
 export async function attemptAutomaticSignIn({
 	checkpoint,
@@ -345,6 +383,7 @@ export async function attemptAutomaticSignIn({
 	page,
 	password,
 	probe,
+	probeTimeoutMs = PROBE_TIMEOUT_MS,
 	username,
 }: AutomaticSignInArgs): Promise<AutomaticSignInOutcome> {
 	const clock = injectedClock ?? defaultClock(page);
@@ -352,20 +391,29 @@ export async function attemptAutomaticSignIn({
 	if (!(await openEmailForm(page, clock, loginUrl))) {
 		return { kind: "fallback", reason: "form_missing" };
 	}
+	// The form must be Goodreads' own before a credential is typed into it.
+	if (!GOODREADS_HOSTS.has(hostAndPath(page.url()).host)) {
+		return { kind: "fallback", reason: "unrecognized_page" };
+	}
 	await checkpoint?.("goodreads-signin-form-loaded");
-	if (!(await submitForm(page, clock, username, password))) {
+	// An error box already on the form is not Goodreads' answer to this submit.
+	const urlBefore = page.url();
+	const boxBefore = await anyVisible(page, ERROR_BOX);
+	if (
+		!(await submitForm(page, clock, username, password, onCredentialSubmit))
+	) {
 		return { kind: "fallback", reason: "form_missing" };
 	}
-	// Called at the click that sent the password: a later fault must not let a
-	// fresh process resubmit it (see EnsureSessionArgs.onCredentialSubmit).
-	onCredentialSubmit?.();
 	await checkpoint?.("goodreads-signin-submitted");
 
 	const startedAt = clock.now();
 	while (clock.now() - startedAt <= OUTCOME_TIMEOUT_MS) {
 		await clock.wait(POLL_INTERVAL_MS);
 		const surface = classifySignInSurface(await observe(page));
-		if (surface === "goodreads_page" && (await probe())) {
+		if (
+			surface === "goodreads_page" &&
+			(await probeWithin(probe, probeTimeoutMs))
+		) {
 			await checkpoint?.("goodreads-signin-live");
 			return { kind: "signed_in" };
 		}
@@ -375,13 +423,18 @@ export async function attemptAutomaticSignIn({
 		if (surface === "verification") {
 			return { kind: "fallback", reason: "verification" };
 		}
-		if (surface === "rejected") {
+		if (surface === "rejected" && (!boxBefore || page.url() !== urlBefore)) {
 			return { kind: "fallback", reason: "rejected_credentials" };
 		}
 	}
 	await checkpoint?.("goodreads-signin-timeout");
 	const last = classifySignInSurface(await observe(page));
-	if (last === "goodreads_page" || last === "form" || last === "pending") {
+	if (
+		last === "goodreads_page" ||
+		last === "form" ||
+		last === "pending" ||
+		last === "rejected"
+	) {
 		return { kind: "fallback", reason: "not_signed_in" };
 	}
 	return { kind: "fallback", reason: "unrecognized_page" };

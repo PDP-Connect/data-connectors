@@ -320,6 +320,16 @@ const skips = (h: Harness) =>
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT",
 	);
+/** Each DETAIL_COVERAGE the run emitted, as stream -> [considered, covered]. */
+const coverageOf = (h: Harness) =>
+	Object.fromEntries(
+		h.messages
+			.filter(
+				(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+					m.type === "DETAIL_COVERAGE",
+			)
+			.map((m) => [m.stream, [m.considered, m.covered]]),
+	);
 const recordsOf = (h: Harness, stream: string) =>
 	h.records.filter((r) => r.stream === stream).map((r) => r.data);
 
@@ -867,6 +877,7 @@ test("shelves are saved only when the API's lists are shown to be whole", async 
 		);
 		// The books are unaffected.
 		assert.equal(recordsOf(h, "books").length, 5, label);
+		assert.deepEqual(coverageOf(h), { books: [5, 5] }, label);
 	}
 });
 
@@ -1175,6 +1186,8 @@ test("the print list and the API disagreeing on a book saves no books, and says 
 		assert.match(books?.message ?? "", message, label);
 		// The summary needs only the print list.
 		assert.equal(recordsOf(h, "usage_summary").length, 1, label);
+		assert.equal(coverageOf(h).books, undefined, label);
+		assert.deepEqual(coverageOf(h).usage_summary, [1, 1], label);
 	}
 });
 
@@ -1201,6 +1214,7 @@ test("an API listing shorter than its own total stops books and shelves as inter
 		],
 	);
 	assert.match(skips(h)[0]?.message ?? "", /5 different books of the 6/);
+	assert.deepEqual(coverageOf(h), {});
 });
 
 test("the API's pages are followed by their tokens; a repeated token stops the run", async () => {
@@ -1580,15 +1594,6 @@ function probePage(answer: FetchAnswer | "network_error", origin = ORIGIN) {
 }
 
 test("coverage: an un-narrowed run proves every stream it saved; a narrowed or failed one claims none", async () => {
-	const coverageOf = (h: Harness) =>
-		Object.fromEntries(
-			h.messages
-				.filter(
-					(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
-						m.type === "DETAIL_COVERAGE",
-				)
-				.map((m) => [m.stream, [m.considered, m.covered]]),
-		);
 	const whole = {
 		account_profile: [1, 1],
 		books: [5, 5],

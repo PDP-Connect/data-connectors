@@ -51,6 +51,7 @@ import { collectGoodreads, type GoodreadsCollectContext } from "./collector.ts";
 import { ORIGIN } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import {
+	type AutomaticSignInOutcome,
 	attemptAutomaticSignIn,
 	fallbackExplanation,
 	fallbackHandoffReason,
@@ -180,8 +181,10 @@ export async function probeGoodreadsSession(
 /**
  * Session order: a live saved session first; then, only when the owner saved
  * an email and password, one automatic sign-in; then the owner's browser
- * handoff. A fallback from the automatic step carries its reason into the
- * handoff message, and the handoff reason ("captcha", "2fa") when it has one.
+ * handoff. A fallback from the automatic step, or an error it throws, still
+ * reaches the handoff, and its explanation leads the handoff message. The
+ * handoff reason ("captcha", "2fa") reaches a host that takes a manual action;
+ * a host with an assistance surface shows only the message.
  */
 export async function ensureGoodreadsSession(
 	args: EnsureSessionArgs,
@@ -207,6 +210,8 @@ export async function ensureGoodreadsSession(
 		"goodreads",
 	);
 	if (saved.kind === "resolved") {
+		// A page error must not cost the owner the handoff they would get
+		// without saved credentials.
 		const outcome = await attemptAutomaticSignIn({
 			checkpoint,
 			loginUrl: LOGIN_URL,
@@ -215,7 +220,12 @@ export async function ensureGoodreadsSession(
 			password: saved.password,
 			probe: () => probeGoodreadsSession(page),
 			username: saved.username,
-		});
+		}).catch(
+			(): AutomaticSignInOutcome => ({
+				kind: "fallback",
+				reason: "unrecognized_page",
+			}),
+		);
 		if (outcome.kind === "signed_in") return;
 		message = `${fallbackExplanation(outcome.reason)} ${SIGN_IN_MESSAGE}`;
 		reason = fallbackHandoffReason(outcome.reason);

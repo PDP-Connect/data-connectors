@@ -68,6 +68,14 @@ const SCREENS = {
 		visible: ["email", "password", "submit", "error"],
 	},
 	unrecognized: { url: "https://www.example.test/elsewhere" },
+	rejectedAgain: {
+		url: `${ORIGIN}/ap/signin/136-0000000-0000000`,
+		visible: ["email", "password", "submit", "error"],
+	},
+	foreignForm: {
+		url: "https://www.example.test/ap/signin",
+		visible: ["email", "password", "submit", "remember"],
+	},
 } satisfies Record<string, Screen>;
 
 type ScreenName = keyof typeof SCREENS;
@@ -87,6 +95,10 @@ interface Script {
 	readonly afterEmailLink?: ScreenName;
 	/** Where the submit leads. */
 	readonly afterSubmit: ScreenName;
+	/** The submit click moves the page, then throws (a navigation race). */
+	readonly clickThrows?: boolean;
+	/** Typing into the form throws (an overlay, a detached node). */
+	readonly fillThrows?: boolean;
 }
 
 function keysOf(selector: string): Key[] {
@@ -136,10 +148,12 @@ function makeSignIn(script: Script, start: ScreenName = "landing") {
 				} else if (key === "submit") {
 					world.screen = script.afterSubmit;
 					world.signedIn = script.afterSubmit === "home";
+					if (script.clickThrows) throw new Error("Target closed");
 				}
 			},
 			count: async () => (selector === "body" || visible(keys) ? 1 : 0),
 			fill: async (value: string) => {
+				if (script.fillThrows) throw new Error("Element is not attached");
 				world.filled[keys[0] as string] = value;
 			},
 			first: () => self,
@@ -380,10 +394,121 @@ test("a page without the email form hands off with nothing typed", async () => {
 	);
 });
 
+test("a sign-in form on another site gets nothing typed into it", async () => {
+	const run = await runEnsure(
+		{ afterEmailLink: "foreignForm", afterSubmit: "home" },
+		CREDENTIALS,
+	);
+	assert.equal(run.error, undefined);
+	assert.deepEqual(run.world.filled, {});
+	assert.equal(run.spy.submitted, 0);
+	assert.equal(run.handoff.requests.length, 1);
+	assert.match(run.handoff.requests[0]?.message ?? "", /does not recognize/);
+});
+
+test("a submit click that throws still counts as sent: one submit, and the outcome is read", async () => {
+	const run = await runEnsure(
+		{ afterSubmit: "home", clickThrows: true },
+		CREDENTIALS,
+	);
+	assert.equal(run.error, undefined);
+	assert.equal(run.spy.submitted, 1);
+	assert.equal(submits(run.world), 1);
+	assert.equal(run.handoff.requests.length, 0);
+});
+
+test("typing that throws hands off with nothing sent", async () => {
+	const run = await runEnsure(
+		{ afterSubmit: "home", fillThrows: true },
+		CREDENTIALS,
+	);
+	assert.equal(run.error, undefined);
+	assert.equal(run.spy.submitted, 0);
+	assert.equal(submits(run.world), 0);
+	assert.equal(run.handoff.requests.length, 1);
+});
+
+test("an error the attempt throws still reaches the handoff", async () => {
+	const run = await runEnsure({ afterSubmit: "home" }, CREDENTIALS);
+	const fake = makeSignIn({ afterSubmit: "home" });
+	const handoff = makeHandoff(fake.world, { ownerSignsIn: true });
+	const page = {
+		...fake.page,
+		locator: () => {
+			throw new Error("Target crashed");
+		},
+	};
+	const clock = mock.method(Date, "now", () => fake.world.now);
+	try {
+		await ensureGoodreadsSession({
+			credentials: CREDENTIALS,
+			page,
+			sendInteraction: handoff.sendInteraction,
+		} as never);
+	} finally {
+		clock.mock.restore();
+	}
+	assert.equal(run.error, undefined);
+	assert.equal(handoff.requests.length, 1);
+	assert.match(handoff.requests[0]?.message ?? "", /does not recognize/);
+});
+
+test("with an assistance surface, the fallback's explanation reaches the owner", async () => {
+	const fake = makeSignIn({ afterSubmit: "captcha" });
+	const asked: string[] = [];
+	const clock = mock.method(Date, "now", () => fake.world.now);
+	try {
+		await ensureGoodreadsSession({
+			assist: async (request: { message: string }) => {
+				asked.push(request.message);
+				fake.world.signedIn = true;
+				fake.world.screen = "home";
+				return "assist-1";
+			},
+			completeAssistance: async () => undefined,
+			credentials: CREDENTIALS,
+			page: fake.page,
+		} as never);
+	} finally {
+		clock.mock.restore();
+	}
+	assert.equal(asked.length, 1);
+	assert.match(asked[0] ?? "", /CAPTCHA/);
+	assertNoSecrets(asked);
+});
+
+test("an error box already on the form is not the answer; a new page with one is", async () => {
+	const stale = attempt({ afterSubmit: "rejected" }, "rejected");
+	assert.deepEqual(await stale.outcome, {
+		kind: "fallback",
+		reason: "not_signed_in",
+	});
+	const fresh = attempt({ afterSubmit: "rejectedAgain" }, "rejected");
+	assert.deepEqual(await fresh.outcome, {
+		kind: "fallback",
+		reason: "rejected_credentials",
+	});
+	assert.equal(submits(fresh.world), 1);
+});
+
+test("a signed-in check that never answers does not hold the run", async () => {
+	const fake = makeSignIn({ afterSubmit: "home" });
+	const outcome = await attemptAutomaticSignIn({
+		clock: fake.clock,
+		loginUrl: LOGIN_URL,
+		page: fake.page as never,
+		password: PASSWORD,
+		probe: () => new Promise<boolean>(() => undefined),
+		probeTimeoutMs: 1,
+		username: EMAIL,
+	});
+	assert.deepEqual(outcome, { kind: "fallback", reason: "not_signed_in" });
+});
+
 // ─── The attempt itself ──────────────────────────────────────────────────
 
-function attempt(script: Script) {
-	const fake = makeSignIn(script);
+function attempt(script: Script, start: ScreenName = "landing") {
+	const fake = makeSignIn(script, start);
 	const spy = makeSpy();
 	const outcome = attemptAutomaticSignIn({
 		...spy.args,
@@ -499,6 +624,11 @@ test("page copy on a signed-in goodreads page never reads as a CAPTCHA or a code
 		path: "/review/list/90000001-synthetic-reader",
 	};
 	assert.equal(classifySignInSurface(page), "goodreads_page");
+	// Nor does a reCAPTCHA badge or a field named "code" on such a page.
+	assert.equal(
+		classifySignInSurface({ ...page, captchaElement: true, codeField: true }),
+		"goodreads_page",
+	);
 });
 
 test("every fallback has owner copy that names no credential, and a handoff reason", () => {
