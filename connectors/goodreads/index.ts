@@ -5,10 +5,12 @@
 /**
  * PDPP Goodreads browser connector (v0.1.0).
  *
- * Collection runs in the owner's own signed-in goodreads.com session. There
- * is no credential in this code and no credential form: the owner signs in
- * in the browser (any method Goodreads offers), and collection reads what
- * the owner can already see: the library list (print view, 100 a page), the
+ * Collection runs in the owner's own signed-in goodreads.com session. The
+ * owner signs in in the browser (any method Goodreads offers). An owner whose
+ * account uses an email and password may also save them for this connection;
+ * the connector then signs in once by itself when the session is missing, and
+ * falls back to the browser handoff when Goodreads asks for more (see
+ * sign-in.ts). Collection reads what the owner can already see: the library list (print view, 100 a page), the
  * profile and the account settings pages, and the shelves and book details
  * that Goodreads' own book pages read from its GraphQL API, with the
  * short-lived token those pages carry. Goodreads offers no public API, key
@@ -35,7 +37,11 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { resolveLoginCredentials } from "../../packages/polyfill-connectors/src/auto-login/login-credentials.ts";
+import {
+	type ManualActionReason,
+	manualBrowserLogin,
+} from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
@@ -44,6 +50,12 @@ import { runConnector } from "../../packages/polyfill-connectors/src/connector-r
 import { collectGoodreads, type GoodreadsCollectContext } from "./collector.ts";
 import { ORIGIN } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
+import {
+	attemptAutomaticSignIn,
+	fallbackExplanation,
+	fallbackHandoffReason,
+	GOODREADS_LOGIN_FIELDS,
+} from "./sign-in.ts";
 
 export const LOGIN_URL = `${ORIGIN}/user/sign_in`;
 const LIST_URL = `${ORIGIN}/review/list`;
@@ -165,22 +177,69 @@ export async function probeGoodreadsSession(
 	return probeGoodreadsPage(page);
 }
 
+/**
+ * Session order: a live saved session first; then, only when the owner saved
+ * an email and password, one automatic sign-in; then the owner's browser
+ * handoff. A fallback from the automatic step carries its reason into the
+ * handoff message, and the handoff reason ("captcha", "2fa") when it has one.
+ */
 export async function ensureGoodreadsSession(
 	args: EnsureSessionArgs,
 ): Promise<void> {
-	const { assist, capture, completeAssistance, page, sendInteraction } = args;
+	const {
+		assist,
+		capture,
+		checkpoint,
+		completeAssistance,
+		credentials,
+		onCredentialSubmit,
+		page,
+		sendInteraction,
+	} = args;
 	if (await probeGoodreadsSession(page)) return;
-	await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
+
+	let message = SIGN_IN_MESSAGE;
+	let reason: ManualActionReason = "login";
+	let onSignInPage = false;
+	const saved = resolveLoginCredentials(
+		credentials,
+		GOODREADS_LOGIN_FIELDS,
+		"goodreads",
+	);
+	if (saved.kind === "resolved") {
+		const outcome = await attemptAutomaticSignIn({
+			checkpoint,
+			loginUrl: LOGIN_URL,
+			onCredentialSubmit,
+			page,
+			password: saved.password,
+			probe: () => probeGoodreadsSession(page),
+			username: saved.username,
+		});
+		if (outcome.kind === "signed_in") return;
+		message = `${fallbackExplanation(outcome.reason)} ${SIGN_IN_MESSAGE}`;
+		reason = fallbackHandoffReason(outcome.reason);
+		// A CAPTCHA, code or rejected-password page is where the owner finishes;
+		// leave it in place. Any other fallback restarts from the sign-in page.
+		onSignInPage =
+			outcome.reason === "captcha" ||
+			outcome.reason === "verification" ||
+			outcome.reason === "rejected_credentials";
+	}
+	if (!onSignInPage) {
+		await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
+	}
 	const ready = await manualBrowserLogin({
 		assist,
 		capture,
 		completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
-		message: SIGN_IN_MESSAGE,
+		message,
 		page,
 		probe: () => probeGoodreadsSession(page),
 		readinessProbe: probeGoodreadsSession,
 		readinessProbeOnHandoffPage: true,
+		reason,
 		sendInteraction,
 		timeoutSeconds: 30 * 60,
 	});
@@ -202,6 +261,13 @@ export function collect(ctx: GoodreadsCollectContext): Promise<void> {
 export const CONNECTOR_CONFIG = {
 	name: "goodreads",
 	validateRecord,
+	// The saved sign-in is optional: with none, the owner signs in through the
+	// browser handoff and the run never asks for a credential.
+	auth: {
+		kind: "env" as const,
+		required: ["GOODREADS_USERNAME", "GOODREADS_PASSWORD"],
+	},
+	authOptional: true,
 	browser: { profileName: "goodreads" },
 	ensureSession: ensureGoodreadsSession,
 	probeSession: ({ page }: { page: Pick<Page, "context" | "evaluate"> }) =>

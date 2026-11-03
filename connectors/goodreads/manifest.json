@@ -32,6 +32,40 @@
 			}
 		}
 	},
+	"setup": {
+		"modality": "static_secret",
+		"credential_capture": {
+			"required": false,
+			"kind": "username_password",
+			"label": "Optional Goodreads sign-in details",
+			"description": "If you sign in to Goodreads with an email and password, you can save both so the connector signs in for you. Leave both blank to sign in in the secure browser instead. If you sign in with Google, Apple, Amazon or Facebook, leave both blank: those sign-ins need the secure browser. A CAPTCHA or verification code always needs the secure browser too. Credentials are stored only for this connection.",
+			"submit_label": "Save optional details and start collection",
+			"fields": [
+				{
+					"name": "username",
+					"label": "Goodreads email",
+					"type": "text",
+					"required": false,
+					"secret": true,
+					"autocomplete": "username",
+					"env": [
+						"GOODREADS_USERNAME"
+					]
+				},
+				{
+					"name": "password",
+					"label": "Goodreads password",
+					"type": "password",
+					"required": false,
+					"secret": true,
+					"autocomplete": "current-password",
+					"env": [
+						"GOODREADS_PASSWORD"
+					]
+				}
+			]
+		}
+	},
 	"capabilities": {
 		"human_interaction": [
 			"manual_action"
@@ -45,7 +79,7 @@
 			"rate_limit_sensitivity": "medium",
 			"bot_detection_sensitivity": "high",
 			"background_safe": false,
-			"rationale": "Collection reads the owner's own library list, profile and account settings pages in a signed-in goodreads.com session, one request at a time with a pause between requests. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff (any method, with Keep me signed in ticked). Goodreads sits behind AWS WAF, which may answer a request with a challenge; the run then loads the page once to let the challenge pass and fails with a clear reason if it persists. A library changes slowly, so a daily run at most is enough."
+			"rationale": "Collection reads the owner's own library list, profile and account settings pages in a signed-in goodreads.com session, one request at a time with a pause between requests. A live session refreshes without a prompt. The first run and an expired session need a sign-in: when the owner saved an email and password, the run signs in once by itself; otherwise, or when Goodreads shows a CAPTCHA, a verification code or rejects the password, the owner signs in through the browser handoff (any method, with Keep me signed in ticked). Goodreads sits behind AWS WAF, which may answer a request with a challenge; the run then loads the page once to let the challenge pass and fails with a clear reason if it persists. A library changes slowly, so a daily run at most is enough."
 		},
 		"public_listing": {
 			"tier": "preview"
