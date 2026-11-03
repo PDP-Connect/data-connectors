@@ -2673,6 +2673,19 @@ test("strava_browser: every PageShim run delivers the whole activity list, even 
 			cursor: first.states["strava.activities"],
 		},
 	]);
+	// No PageShim run reads the collector's id lists, and with about 9k
+	// activities they would exceed the host bridge's 256Ki message cap. The
+	// checkpoint keeps only the scalar fields, so its size does not grow with
+	// the activity list.
+	assert.deepEqual(
+		Object.keys(first.states["strava.activities"]).sort(),
+		["list_complete", "requested_since"],
+		"the PageShim checkpoint must not carry known_ids or pending_detail_ids",
+	);
+	assert.ok(
+		JSON.stringify(first.states["strava.activities"]).length < 256,
+		"the PageShim checkpoint must not grow with the activity list",
+	);
 	assert.ok(
 		first.resultWriteOrder < first.stateAckOrder,
 		"the runtime must publish buffered records before writing their checkpoint",
@@ -2682,9 +2695,24 @@ test("strava_browser: every PageShim run delivers the whole activity list, even 
 		"cursor contents must not appear in logs",
 	);
 
-	for (const label of ["second", "third"]) {
+	// A device that ran 0.1.40 or earlier stored the collector's full cursor
+	// with every id listed; a current device stores the compact one. Neither
+	// may change what a run delivers.
+	const allIds = activities.map((a) => a.id_str);
+	const legacyStates = {
+		"strava.activities": {
+			known_ids: allIds,
+			pending_detail_ids: allIds,
+			list_complete: true,
+			requested_since: null,
+		},
+	};
+	for (const [label, states] of [
+		["second", legacyStates],
+		["third", first.states],
+	]) {
 		detailRequests.length = 0;
-		const next = await run(first.states);
+		const next = await run(states);
 		assert.deepEqual(next.ret, { ok: true }, next.log.slice(-20).join("\n"));
 		assertCleanRun(next);
 		assert.deepEqual(next.result.errors, []);
@@ -2695,6 +2723,11 @@ test("strava_browser: every PageShim run delivers the whole activity list, even 
 			detailRequests,
 			[],
 			`the ${label} run must not resume a detail batch from the saved cursor`,
+		);
+		assert.deepEqual(
+			next.states,
+			first.states,
+			`the ${label} run must write the compact checkpoint, whatever it was given`,
 		);
 	}
 
@@ -2806,10 +2839,12 @@ test("strava_browser: a large activity list streams only when the host offers pa
 	);
 	assert.ok(scope.length > 125 * 1024, `${scope.length}`);
 	assert.equal(JSON.parse(scope).activities.length, 2000);
-	assert.equal(
-		large.states["strava.activities"].pending_detail_ids.length,
-		2000,
-	);
+	// The checkpoint stays small however long the list is: the id lists the
+	// collector keeps for desktop detail work are not sent to the host.
+	assert.deepEqual(large.states["strava.activities"], {
+		list_complete: true,
+		requested_since: null,
+	});
 	assert.match(large.data.status, /^Complete! 2000 activities/);
 
 	const largeLegacy = await run("strava-large-older-shell", 2000, false);

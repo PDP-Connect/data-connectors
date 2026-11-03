@@ -12,6 +12,12 @@
 // after the retries) fails the run for the same reason: an emitted prefix
 // would replace the stored list.
 //
+// The STATE checkpoint is still sent, since the runtime uses it to tell an
+// account with no activities (a confirmed empty list) from a run that
+// collected nothing. Its id lists (`known_ids`, `pending_detail_ids`) are
+// dropped first: no PageShim run reads them, and at about 9k activities they
+// would exceed the host bridge's 256Ki message cap and fail the checkpoint.
+//
 // A host range for strava.activities applies to start_date_local, a
 // calendar day: full-date bounds are compared as days. A bound of another
 // type collects nothing, and the runtime reports scope_not_supported.
@@ -37,6 +43,22 @@ type ScopeEntriesPage = ShimPage & {
 
 const activitiesConsentField =
 	consentTimeFieldResolver("strava-browser")("activities");
+
+/**
+ * The collector's activities cursor without its id lists. Everything else
+ * (`list_complete`, `requested_since`) is a few bytes and keeps the stored
+ * STATE a recognisable subset of the desktop shape.
+ */
+function compactCursor(cursor: unknown): unknown {
+	if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor))
+		return cursor;
+	const {
+		known_ids: _knownIds,
+		pending_detail_ids: _pendingIds,
+		...rest
+	} = cursor as Record<string, unknown>;
+	return rest;
+}
 
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
@@ -72,9 +94,20 @@ const activitiesConsentField =
 					activitiesConsentField,
 				);
 				if (unsupported !== null) return;
-				// No saved cursor: see the note at the top of this file.
+				// No saved cursor, and a checkpoint without the id lists: see the
+				// note at the top of this file.
+				const stravaCtx = ctx as unknown as StravaCollectContext;
 				await collectStravaBrowser(
-					{ ...(ctx as unknown as StravaCollectContext), state: {} },
+					{
+						...stravaCtx,
+						state: {},
+						emit: (msg) =>
+							stravaCtx.emit(
+								msg.type === "STATE"
+									? { ...msg, cursor: compactCursor(msg.cursor) }
+									: msg,
+							),
+					},
 					{ failRunOnIncompleteList: true },
 				);
 			},
