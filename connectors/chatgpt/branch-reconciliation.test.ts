@@ -638,3 +638,36 @@ test("structurally incomplete conversations publish no records while complete co
 	assert.ok(skips().some((s) => s.reason === "branch_truncated"));
 	assert.ok(emitted.length > 0);
 });
+
+test("conversations-only shape failure reports why the conversation was withheld", async () => {
+	const { deps, emitted, messages } = makeHarness(["conversations"]);
+	deps.conversationDetailOnly = true;
+	const mapping = wholeBranch();
+	mapping.a1 = {
+		...assistantNode("u1"),
+		message: {
+			author: { role: "r".repeat(41) },
+			content: { content_type: "text", parts: ["invalid role"] },
+		},
+	};
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo("a1"),
+		{ status: 200, json: { mapping, current_node: "a1" } },
+		emitConversation(deps),
+	);
+	assert.deepEqual(outcome, {
+		complete: false,
+		reason: "message_shape_rejected",
+	});
+	assert.deepEqual(emitted, []);
+	assert.equal(
+		messages.some((message) => message.type === "DETAIL_GAP"),
+		false,
+	);
+	assert.ok(
+		diagnostics.some((line) =>
+			line.startsWith("conversation_detail_incomplete: message_shape_rejected"),
+		),
+	);
+});
