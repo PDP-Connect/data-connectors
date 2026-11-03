@@ -6,7 +6,7 @@
  * listing. Pure; it holds no titles, authors or text, only counts and dates.
  */
 
-import type { BookRecord } from "./types.ts";
+import type { PrintBookRecord } from "./types.ts";
 
 export type Tally = Record<string, number>;
 
@@ -72,7 +72,7 @@ function extremes(values: string[]): [string | null, string | null] {
 }
 
 export function summarizeLibrary(
-	books: readonly BookRecord[],
+	books: readonly PrintBookRecord[],
 	listing: { listPages: number; listingComplete: boolean },
 ): UsageSummary {
 	const byShelf = emptyTally();

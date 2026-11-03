@@ -32,6 +32,13 @@ const authorSchema = z.object({
 	name: pdppSafeText.max(500),
 });
 
+const instant = z.string().datetime().nullable().optional();
+
+const seriesSchema = z.object({
+	placement: pdppSafeText.max(100).nullable(),
+	title: pdppSafeText.max(2000),
+});
+
 const readingSessionSchema = z.object({
 	finished_on: z.string().regex(PARTIAL_DATE_RE).nullable(),
 	session_id: z.string().max(64).nullable(),
@@ -40,6 +47,7 @@ const readingSessionSchema = z.object({
 
 /** books: one record per shelving in the owner's library. */
 export const booksSchema = z.object({
+	added_at: instant,
 	added_on: z.string().regex(FULL_DATE_RE).nullable().optional(),
 	asin: text(40),
 	author: text(500),
@@ -54,25 +62,33 @@ export const booksSchema = z.object({
 	finished_date: z.string().regex(FULL_DATE_RE).nullable().optional(),
 	finished_on: partialDate,
 	format: text(200),
+	genres: z.array(pdppSafeText.max(200)).max(100).optional(),
 	has_review: z.boolean().optional(),
 	id: z.string().min(1).max(40),
 	isbn: text(40),
 	isbn13: text(40),
+	language: text(200),
 	likes_count: count,
 	num_pages: z.number().int().min(1).nullable().optional(),
 	original_publication_date: partialDate,
 	owned: flag,
 	position: count,
 	private_notes: text(1_048_576),
+	publisher: text(2000),
 	rating: z.number().int().min(1).max(5).nullable().optional(),
 	ratings_count: count,
 	read_count: count,
 	reading_sessions: z.array(readingSessionSchema).max(500).optional(),
+	review_created_at: instant,
+	review_has_spoilers: flag,
 	review_text: text(1_048_576),
+	review_updated_at: instant,
+	series: z.array(seriesSchema).max(100).optional(),
 	shelves: z.array(pdppSafeText.max(200)).max(500).optional(),
 	started_date: z.string().regex(FULL_DATE_RE).nullable().optional(),
 	started_on: partialDate,
 	title: text(2000),
+	updated_at: instant,
 });
 
 /** shelves: one record per shelf or tag. */
@@ -81,7 +97,7 @@ export const shelvesSchema = z.object({
 	exclusive: z.boolean(),
 	id: pdppSafeText.min(1).max(200),
 	name: pdppSafeText.min(1).max(200),
-	url: pdppSafeText.max(2000).optional(),
+	url: text(2000),
 });
 
 const sourceOutcome = z.enum(["read", "failed"]);

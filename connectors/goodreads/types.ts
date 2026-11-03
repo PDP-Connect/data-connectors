@@ -17,8 +17,32 @@ export interface ReadingSession {
 	started_on: string | null;
 }
 
-/** One library row, in the shape of the `books` stream. */
-export interface BookRecord {
+export interface BookSeries {
+	placement: string | null;
+	title: string;
+}
+
+/**
+ * The fields of a `books` record that come from Goodreads' book API rather
+ * than the print list. The two are joined on `book_id`.
+ */
+export interface BookApiFields {
+	/** When the book was put on the shelves, an instant (ISO 8601, UTC). */
+	added_at: string | null;
+	genres: string[];
+	language: string | null;
+	publisher: string | null;
+	review_created_at: string | null;
+	review_has_spoilers: boolean | null;
+	review_updated_at: string | null;
+	series: BookSeries[];
+	/** When the shelving last changed: shelf, tags, rating or dates. */
+	updated_at: string | null;
+}
+
+/** One library row of the print list, before the book API fields are joined in. */
+export interface PrintBookRecord {
+	/** The day the book was added, as the print list shows it (the owner's time zone). */
 	added_on: string | null;
 	asin: string | null;
 	author: string | null;
@@ -56,12 +80,15 @@ export interface BookRecord {
 	title: string | null;
 }
 
+/** One record of the `books` stream. */
+export type BookRecord = PrintBookRecord & BookApiFields;
+
 export interface ShelfRecord {
 	book_count: number | null;
 	exclusive: boolean;
 	id: string;
 	name: string;
-	url: string;
+	url: string | null;
 }
 
 /** What one page of the print library list says. */
@@ -74,19 +101,11 @@ export interface ListingPage {
 	noMatchingItems: boolean;
 	/** The page has the library table at all. False means a page this parser does not know. */
 	recognised: boolean;
-	rows: BookRecord[];
+	rows: PrintBookRecord[];
 	/** "N of TOTAL loaded": TOTAL, when the page carries the status line. */
 	total: number | null;
 	/** Rows that could not be turned into a record (no review id or book id). */
 	unreadableRows: number;
-}
-
-export interface SidebarInfo {
-	/** The sidebar's "All (N)" count. */
-	allCount: number | null;
-	/** The sidebar shows a next-page or "more" link: the shelves are only part of the list. */
-	continues: boolean;
-	shelves: ShelfRecord[];
 }
 
 export interface ProfileFacts {

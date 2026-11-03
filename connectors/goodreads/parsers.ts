@@ -16,13 +16,11 @@
 import { parseHTML } from "linkedom";
 import type {
 	BookAuthor,
-	BookRecord,
 	ListingPage,
+	PrintBookRecord,
 	ProfileFacts,
 	ReadingSession,
 	SettingsFacts,
-	ShelfRecord,
-	SidebarInfo,
 	VisibilityChoice,
 } from "./types.ts";
 
@@ -44,10 +42,7 @@ const BOOK_PATH_RE = /\/book\/show\/(\d+)/;
 const AUTHOR_PATH_RE = /\/author\/show\/(\d+)/;
 const LOADED_RE = /([\d,]+)\s+of\s+([\d,]+)\s+loaded/i;
 const ALL_COUNT_RE = /^\s*All\s*\(([\d,]+)\)\s*$/i;
-const SHELF_COUNT_RE = /^(.*?)\s*\(([\d,]+)\)\s*$/;
 const FULL_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-const SHELF_PAGE_HREF_RE = /[?&]page=\d/;
-const SHELF_MORE_TEXT_RE = /^(?:more|next)\b/i;
 const DATE_CLASS_RE = /^date_(?:started|read)_(.+)$/;
 const SESSION_PREFIX_RE = /^amzn1grreading_sessionv1/;
 const HEX32_RE = /^[0-9a-f]{32}$/i;
@@ -441,7 +436,7 @@ function linkCount(row: El, name: string): number | null {
 }
 
 /** One `tr.review` row -> a record, or null when it lacks a review id or a book id. */
-export function parseBookRow(row: El): BookRecord | null {
+export function parseBookRow(row: El): PrintBookRecord | null {
 	const id = REVIEW_ID_RE.exec(row.getAttribute("id") ?? "")?.[1];
 	if (!id) return null;
 	const titleLink =
@@ -521,7 +516,7 @@ export function parseBookRow(row: El): BookRecord | null {
 export function parseListingPage(html: string): ListingPage {
 	const doc = parse(html);
 	const body = doc.querySelector("tbody#booksBody");
-	const rows: BookRecord[] = [];
+	const rows: PrintBookRecord[] = [];
 	let unreadableRows = 0;
 	if (body) {
 		for (const row of all(body, "tr.review")) {
@@ -563,58 +558,17 @@ export function userIdFromHtml(html: string): string | null {
 	return null;
 }
 
-/** The shelf list and total count from the non-print library page. */
-export function parseSidebar(html: string, userId: string): SidebarInfo {
+/** The "All (N)" book count from the non-print library page's sidebar. */
+export function parseAllCount(html: string): number | null {
 	const doc = parse(html);
-	let allCount: number | null = null;
 	for (const link of [
 		doc.querySelector("a.selectedShelf"),
 		...all(doc, 'a[href*="shelf=%23ALL%23"]'),
 	]) {
 		const match = ALL_COUNT_RE.exec(textOf(link));
-		if (match) {
-			allCount = toInt(match[1]);
-			break;
-		}
+		if (match) return toInt(match[1]);
 	}
-	const shelves: ShelfRecord[] = [];
-	for (const link of all(doc, "#paginatedShelfList .userShelf a")) {
-		const href = link.getAttribute("href") ?? "";
-		const shelf = queryParam(href, "shelf");
-		const tag = queryParam(href, "tag");
-		const slug = shelf ?? tag;
-		if (!slug) continue;
-		const label = SHELF_COUNT_RE.exec(textOf(link));
-		const name = squash(label ? label[1] : textOf(link));
-		shelves.push({
-			book_count: label ? toInt(label[2]) : null,
-			exclusive: shelf !== null,
-			id: slug,
-			name: name === "" ? slug : name,
-			url: `${ORIGIN}/review/list/${userId}?${shelf !== null ? "shelf" : "tag"}=${encodeURIComponent(slug)}`,
-		});
-	}
-	return { allCount, continues: shelfListContinues(doc), shelves };
-}
-
-/**
- * Whether the sidebar says its shelf list goes on past what it shows: a
- * next-page or "more" link in the shelves section, outside the shelf links.
- */
-function shelfListContinues(doc: Doc): boolean {
-	for (const link of all(doc, "#shelvesSection a")) {
-		if (link.closest(".userShelf") || link.closest(".sectionHeader")) continue;
-		if (link.classList.contains("selectedShelf")) continue;
-		const href = link.getAttribute("href") ?? "";
-		if (
-			SHELF_PAGE_HREF_RE.test(href) ||
-			/\bnext_page\b/.test(link.getAttribute("class") ?? "") ||
-			SHELF_MORE_TEXT_RE.test(textOf(link))
-		) {
-			return true;
-		}
-	}
-	return false;
+	return null;
 }
 
 // ─── Profile ────────────────────────────────────────────────────────────

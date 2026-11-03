@@ -7,17 +7,22 @@
  *
  * Collection runs in the owner's own signed-in goodreads.com session. There
  * is no credential in this code and no credential form: the owner signs in
- * in the browser (any method Goodreads offers), and collection reads the
- * pages the owner can already see: the library list (print view, 100 a
- * page), its shelf sidebar, the profile and the account settings. Goodreads
- * has no API and no feeds for this any more.
+ * in the browser (any method Goodreads offers), and collection reads what
+ * the owner can already see: the library list (print view, 100 a page), the
+ * profile and the account settings pages, and the shelves and book details
+ * that Goodreads' own book pages read from its GraphQL API, with the
+ * short-lived token those pages carry. Goodreads offers no public API, key
+ * or feed for any of this.
  *
  * Streams: books, shelves, account_profile, usage_summary. The summary is
  * computed from the full library listing even when `books` is not asked for,
- * and is withheld unless that listing is proven complete. Identity text
- * (name, username, email, gender, location, about-me, friends) is never read
- * into a record. See collector.ts for the request order and the completeness
- * rules, and fetcher.ts for retries and AWS WAF handling.
+ * and is withheld unless that listing is proven complete. Books and shelves
+ * are incremental on the desktop runtime: unchanged records are not emitted
+ * again, and a book or shelf gone from Goodreads is emitted as a deletion.
+ * Identity text (name, username, email, gender, location, about-me,
+ * friends) is never read into a record. See collector.ts for the request
+ * order and the completeness rules, graphql.ts for the API, and fetcher.ts
+ * for retries and AWS WAF handling.
  *
  * Robots: goodreads.com disallows /review/list for crawlers. This reads the
  * owner's own list in the owner's own session, one request at a time with a
@@ -202,6 +207,9 @@ export const CONNECTOR_CONFIG = {
 	probeSession: ({ page }: { page: Pick<Page, "context" | "evaluate"> }) =>
 		probeGoodreadsSession(page),
 	probeSessionIsAuthoritative: true,
+	// The collector marks a book or shelf that Goodreads no longer lists.
+	isTombstone: (_stream: string, data: Record<string, unknown>) =>
+		data.deleted === true,
 	collect: (ctx: BrowserCollectContext) => collect(ctx),
 };
 

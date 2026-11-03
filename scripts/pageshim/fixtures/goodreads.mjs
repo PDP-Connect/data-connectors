@@ -1,7 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Serves connectors/goodreads/fixtures/html for www.goodreads.com, so the
+// Serves connectors/goodreads/fixtures/html for www.goodreads.com and
+// connectors/goodreads/fixtures/api for Goodreads' GraphQL host, so the
 // pageshim harness runs goodreads with no network. Everything here is
 // invented.
 //
@@ -14,7 +15,16 @@
 import { readFileSync } from "node:fs";
 
 const dir = new URL("../../../connectors/goodreads/fixtures/html/", import.meta.url);
+const apiDir = new URL("../../../connectors/goodreads/fixtures/api/", import.meta.url);
 const fx = (n) => readFileSync(new URL(n, dir), "utf8");
+const api = (n) => readFileSync(new URL(n, apiDir), "utf8");
+const GRAPHQL_URL = "https://kxbwmqov6jgg3daaamb744ycu4.appsync-api.us-east-1.amazonaws.com/graphql";
+const bookPage = api("book-page.html");
+const answers = {
+	GoodreadsShelvings: api("shelvings.json"),
+	GoodreadsShelves: api("shelves.json"),
+	GoodreadsTags: api("tags.json"),
+};
 const pages = { 1: fx("library-page-1.html"), 2: fx("library-page-2.html") };
 const sidebar = fx("library-sidebar.html");
 const noRows = fx("library-no-rows.html");
@@ -33,7 +43,15 @@ export const setLoggedIn = (v) => {
 	loggedIn = v;
 };
 
-export function resolveFixture(raw) {
+export function resolveFixture(raw, request = {}) {
+	if (raw === GRAPHQL_URL) {
+		if (request.method === "OPTIONS") return { status: 204, contentType: "text/plain", body: "" };
+		const op = /^query (\w+)/.exec(JSON.parse(request.postData ?? "{}").query ?? "")?.[1];
+		const body = answers[op];
+		return body
+			? { status: 200, contentType: "application/json", body }
+			: { status: 400, contentType: "application/json", body: "{}" };
+	}
 	const url = new URL(raw);
 	const p = url.pathname;
 	if (p === "/user/sign_in" || !loggedIn) return html(signin);
@@ -43,12 +61,13 @@ export function resolveFixture(raw) {
 	}
 	if (p === "/user/show/90000001") return html(profile);
 	if (p === "/user/edit") return html(settings);
+	if (p.startsWith("/book/show/")) return html(bookPage);
 	if (p === "/robots.txt") return { status: 200, contentType: "text/plain", body: "User-agent: *\n" };
 	return { status: 404, contentType: "text/html", body: "<html></html>" };
 }
 
 export const goodreadsFixtures = {
-	hosts: /^https:\/\/www\.goodreads\.com\//,
+	hosts: /^https:\/\/(?:www\.goodreads\.com|kxbwmqov6jgg3daaamb744ycu4\.appsync-api\.us-east-1\.amazonaws\.com)\//,
 	resolve: resolveFixture,
 	setLoggedIn,
 	loginUrl: "https://www.goodreads.com/user/sign_in",

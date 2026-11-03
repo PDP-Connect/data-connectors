@@ -55,10 +55,10 @@
 		{
 			"name": "books",
 			"required": false,
-			"description": "Every book on the owner's Goodreads shelves, one record per shelving: title, authors, edition identifiers, the owner's rating, shelves, review and private notes, reading sessions with start and finish dates, date added, format and ownership. Read from the owner's own library list in a signed-in session.",
+			"description": "Every book on the owner's Goodreads shelves, one record per shelving: title, authors, edition identifiers, publisher, language, genres and series, the owner's rating, shelves, review and private notes, reading sessions with start and finish dates, when the book was added and last changed, format and ownership. Read from the owner's own library list and from the book API Goodreads' own pages use, in a signed-in session, and saved only when the two agree. Incremental: unchanged books are not emitted again, and a book removed from the shelves is emitted as a deletion.",
 			"display": {
 				"label": "Your Goodreads books",
-				"detail": "Every book on your shelves with its title, authors, edition details, your star rating, shelves, reading start and finish dates, date added, format and whether you own it. Your review text and private notes are included unless you drop them at consent. Other members' reviews and your friends are not collected."
+				"detail": "Every book on your shelves with its title, authors, edition details, publisher, language, genres and series, your star rating, shelves, reading start and finish dates, when you added it and last changed it, format and whether you own it. Your review text and private notes are included unless you drop them at consent. Other members' reviews and your friends are not collected."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -322,7 +322,7 @@
 							"null"
 						],
 						"format": "date",
-						"description": "The calendar day the owner added the book to a shelf, YYYY-MM-DD, as Goodreads prints it for the owner. This is the stream's consent_time_field. Null when the list printed no readable date."
+						"description": "The calendar day the owner added the book to a shelf, YYYY-MM-DD, as Goodreads prints it for the owner in the owner's time zone. Null when the list printed no readable date. added_at is the same moment as an instant."
 					},
 					"owned": {
 						"type": [
@@ -344,6 +344,91 @@
 							"null"
 						],
 						"description": "The owner's manual sort position on the shelf, when they set one. Null otherwise."
+					},
+					"added_at": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date-time",
+						"description": "The instant the owner put the book on a shelf, ISO 8601 in UTC, from Goodreads' book API. This is the stream's consent_time_field. added_on is the same moment as the calendar day the list prints in the owner's time zone, so the two can differ by a day."
+					},
+					"updated_at": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date-time",
+						"description": "The instant the owner last changed this shelving (its shelf, tags, rating or dates), ISO 8601 in UTC, from Goodreads' book API. Null when the API gave none."
+					},
+					"review_created_at": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date-time",
+						"description": "When the owner first rated or reviewed the book, ISO 8601 in UTC, from Goodreads' book API. Null when the owner has neither rated nor reviewed it."
+					},
+					"review_updated_at": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date-time",
+						"description": "When the owner last changed their rating or review, ISO 8601 in UTC. Null when the owner has neither rated nor reviewed it."
+					},
+					"review_has_spoilers": {
+						"type": [
+							"boolean",
+							"null"
+						],
+						"description": "True when the owner marked their review as containing spoilers. Null when there is no rating or review."
+					},
+					"publisher": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The publisher of the edition on the shelf, as Goodreads' catalogue records it. Null when the catalogue has none."
+					},
+					"language": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The language of the edition, as a name (for example English). Null when the catalogue has none."
+					},
+					"genres": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "The genres Goodreads' catalogue gives the book, in the order it lists them (at most about ten). Empty when it gives none."
+					},
+					"series": {
+						"type": "array",
+						"description": "The series the book belongs to, with its place in each. Empty when it is in none.",
+						"items": {
+							"type": "object",
+							"additionalProperties": false,
+							"properties": {
+								"title": {
+									"type": "string",
+									"description": "The series title."
+								},
+								"placement": {
+									"type": [
+										"string",
+										"null"
+									],
+									"description": "The book's place in the series as Goodreads writes it (for example 2 or 1.5). Null when the catalogue gives none."
+								}
+							},
+							"required": [
+								"title",
+								"placement"
+							]
+						}
 					}
 				},
 				"required": [
@@ -354,17 +439,18 @@
 			"primary_key": [
 				"id"
 			],
-			"consent_time_field": "added_on",
+			"consent_time_field": "added_at",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": false,
+			"incremental": true,
 			"query": {
 				"search": {
 					"lexical_fields": [
 						"title",
-						"author"
+						"author",
+						"publisher"
 					],
 					"semantic_fields": [
 						"title"
@@ -418,14 +504,40 @@
 						"gt",
 						"lte",
 						"lt"
+					],
+					"added_at": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"updated_at": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"review_created_at": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"review_updated_at": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
 					]
 				},
 				"aggregations": {
 					"count": true,
 					"group_by_time": [
+						"added_at",
 						"added_on",
 						"finished_date",
-						"started_date"
+						"started_date",
+						"updated_at"
 					],
 					"group_by": [
 						"exclusive_shelf",
@@ -433,7 +545,9 @@
 						"format",
 						"author",
 						"owned",
-						"has_review"
+						"has_review",
+						"language",
+						"publisher"
 					],
 					"count_distinct": [
 						"author",
@@ -443,20 +557,24 @@
 						"num_pages"
 					],
 					"min": [
+						"added_at",
 						"added_on",
 						"finished_date",
 						"started_date",
 						"num_pages",
 						"rating",
-						"average_rating"
+						"average_rating",
+						"updated_at"
 					],
 					"max": [
+						"added_at",
 						"added_on",
 						"finished_date",
 						"started_date",
 						"num_pages",
 						"rating",
-						"average_rating"
+						"average_rating",
+						"updated_at"
 					]
 				},
 				"expand": [
@@ -493,7 +611,10 @@
 						"started_date",
 						"finished_on",
 						"finished_date",
-						"added_on"
+						"added_on",
+						"added_at",
+						"updated_at",
+						"review_created_at"
 					]
 				},
 				{
@@ -515,7 +636,11 @@
 						"average_rating",
 						"ratings_count",
 						"book_url",
-						"cover_url"
+						"cover_url",
+						"publisher",
+						"language",
+						"genres",
+						"series"
 					]
 				},
 				{
@@ -552,7 +677,16 @@
 						"added_on",
 						"owned",
 						"format",
-						"position"
+						"position",
+						"added_at",
+						"updated_at",
+						"review_created_at",
+						"review_updated_at",
+						"review_has_spoilers",
+						"publisher",
+						"language",
+						"genres",
+						"series"
 					]
 				}
 			]
@@ -560,7 +694,7 @@
 		{
 			"name": "shelves",
 			"required": false,
-			"description": "The owner's Goodreads shelves: the exclusive shelves (to-read, currently-reading, read and any custom exclusive shelf) and tag-style shelves, with the number of books on each.",
+			"description": "The owner's Goodreads shelves: the exclusive shelves (to-read, currently-reading, read and any custom exclusive shelf) and the tag-style shelves, with the number of books on each. Read from the book API Goodreads' own pages use, and saved only when the lists are as long as Goodreads reports and name every shelf a book is on. Incremental: unchanged shelves are not emitted again, and a deleted shelf is emitted as a deletion.",
 			"display": {
 				"label": "Your Goodreads shelves",
 				"detail": "The names of your shelves, whether each is an exclusive shelf or a tag, and how many books are on each."
@@ -571,11 +705,11 @@
 				"properties": {
 					"id": {
 						"type": "string",
-						"description": "The shelf's slug as it appears in the shelf= or tag= query of its list URL. Stable unless the owner renames the shelf."
+						"description": "The shelf's or tag's name as Goodreads stores it (the slug in its list URL, for example to-read). Stable unless the owner renames it. A book's exclusive_shelf and shelves name shelves by this id."
 					},
 					"name": {
 						"type": "string",
-						"description": "The shelf's display name as the sidebar prints it.",
+						"description": "The shelf's display name (for example Want to Read for to-read). For a tag, its name, the same as id.",
 						"x_pdpp_role": "primary-title"
 					},
 					"exclusive": {
@@ -583,16 +717,16 @@
 						"description": "True for an exclusive shelf (a book sits on at most one of them: to-read, currently-reading, read and the owner's custom exclusive shelves). False for a tag-style shelf, which a book can share with others."
 					},
 					"book_count": {
-						"type": [
-							"integer",
-							"null"
-						],
-						"description": "How many books the sidebar says are on the shelf. Null when the sidebar printed no count."
+						"type": "integer",
+						"description": "How many books in the owner's library are on the shelf or carry the tag, counted from the complete library the run read."
 					},
 					"url": {
-						"type": "string",
+						"type": [
+							"string",
+							"null"
+						],
 						"format": "uri",
-						"description": "Absolute URL of the shelf's book list, https://www.goodreads.com/review/list/<user id>?shelf=<slug> or ?tag=<slug>."
+						"description": "Absolute URL of the shelf's or tag's book list on goodreads.com, as Goodreads' API gives it. Null when it gives none."
 					}
 				},
 				"required": [
@@ -608,7 +742,7 @@
 				"fields": true,
 				"resources": true
 			},
-			"incremental": false,
+			"incremental": true,
 			"query": {
 				"search": {
 					"lexical_fields": [

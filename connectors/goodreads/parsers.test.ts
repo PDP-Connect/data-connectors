@@ -6,16 +6,16 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
 	normalizePartialDate,
+	parseAllCount,
 	parseListingPage,
 	parseProfile,
 	parseSettings,
-	parseSidebar,
 	tenureMonths,
 	userIdFromHtml,
 	userIdFromUrl,
 } from "./parsers.ts";
 import { summarizeLibrary } from "./summary.ts";
-import type { BookRecord } from "./types.ts";
+import type { PrintBookRecord } from "./types.ts";
 
 // Every page under fixtures/html is synthetic: the markup shape of the real
 // pages with invented books, people and ids. See fixtures/README.md.
@@ -24,9 +24,9 @@ const fixture = (name: string): string =>
 
 const page1 = parseListingPage(fixture("library-page-1.html"));
 const page2 = parseListingPage(fixture("library-page-2.html"));
-const books: BookRecord[] = [...page1.rows, ...page2.rows];
+const books: PrintBookRecord[] = [...page1.rows, ...page2.rows];
 
-function book(id: string): BookRecord {
+function book(id: string): PrintBookRecord {
 	const found = books.find((candidate) => candidate.id === id);
 	assert.ok(found, `fixture book ${id} is present`);
 	return found;
@@ -245,54 +245,9 @@ test("a row with no review id or no book id is counted unreadable, not guessed",
 	assert.equal(parsed.unreadableRows, 2);
 });
 
-test("the sidebar gives the total, exclusive shelves and tags with counts", () => {
-	const sidebar = parseSidebar(fixture("library-sidebar.html"), "90000001");
-	assert.equal(sidebar.allCount, 5);
-	assert.deepEqual(
-		sidebar.shelves.map((shelf) => [
-			shelf.id,
-			shelf.name,
-			shelf.exclusive,
-			shelf.book_count,
-		]),
-		[
-			["to-read", "Want to Read", true, 1],
-			["currently-reading", "Currently Reading", true, 1],
-			["read", "Read", true, 2],
-			["abandoned", "Abandoned", true, 1],
-			["winter-list", "winter-list", false, 2],
-			["favorites-synthetic", "favorites-synthetic", false, 1],
-		],
-	);
-	assert.equal(
-		sidebar.shelves[0]?.url,
-		"https://www.goodreads.com/review/list/90000001?shelf=to-read",
-	);
-	assert.equal(
-		sidebar.shelves[4]?.url,
-		"https://www.goodreads.com/review/list/90000001?tag=winter-list",
-	);
-	// The shelf counts in the sidebar add up to the "All" count.
-	const exclusiveTotal = sidebar.shelves
-		.filter((shelf) => shelf.exclusive)
-		.reduce((sum, shelf) => sum + (shelf.book_count ?? 0), 0);
-	assert.equal(exclusiveTotal, sidebar.allCount);
-});
-
-test("the sidebar says when its shelf list goes on past what it shows", () => {
-	const html = fixture("library-sidebar.html");
-	assert.equal(parseSidebar(html, "90000001").continues, false);
-	for (const more of [
-		'<a href="/review/list/90000001?shelves_page=2&amp;page=2">next</a>',
-		'<a class="next_page" href="#">Next</a>',
-		'<a href="#" onclick="return false">more shelves...</a>',
-	]) {
-		const paged = html.replace(
-			'<div class="horizontalGreyDivider"></div>',
-			`<div class="horizontalGreyDivider"></div>${more}`,
-		);
-		assert.equal(parseSidebar(paged, "90000001").continues, true, more);
-	}
+test("the sidebar gives the All count", () => {
+	assert.equal(parseAllCount(fixture("library-sidebar.html")), 5);
+	assert.equal(parseAllCount("<html><body>redesigned</body></html>"), null);
 });
 
 test("the All count is found when the selected shelf is not All", () => {
@@ -300,16 +255,11 @@ test("the All count is found when the selected shelf is not All", () => {
 		'<a class="selectedShelf" href="/review/list/90000001?shelf=%23ALL%23">All (5)</a>',
 		'<a class="selectedShelf" href="/review/list/90000001?shelf=read">Read (2)</a><a href="/review/list/90000001?shelf=%23ALL%23">All (5)</a>',
 	);
-	assert.equal(parseSidebar(html, "90000001").allCount, 5);
+	assert.equal(parseAllCount(html), 5);
 });
 
 test("an empty library's sidebar says All (0)", () => {
-	const sidebar = parseSidebar(
-		fixture("library-sidebar-empty.html"),
-		"90000001",
-	);
-	assert.equal(sidebar.allCount, 0);
-	assert.equal(sidebar.shelves.length, 3);
+	assert.equal(parseAllCount(fixture("library-sidebar-empty.html")), 0);
 });
 
 test("the owner id comes from the redirect URL, else from the signed-in header", () => {
@@ -462,8 +412,8 @@ test("the usage summary of an empty library is all zeros and nulls", () => {
 });
 
 test("a shelf or format named like an Object property counts like any other", () => {
-	const named = (shelf: string, format: string): BookRecord => ({
-		...(books[0] as BookRecord),
+	const named = (shelf: string, format: string): PrintBookRecord => ({
+		...(books[0] as PrintBookRecord),
 		exclusive_shelf: shelf,
 		format,
 	});
