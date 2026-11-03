@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-	"version": "0.1.42",
+	"version": "0.1.43",
 	"display_name": "Strava (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -38,7 +38,7 @@
 			"rate_limit_sensitivity": "medium",
 			"bot_detection_sensitivity": "medium",
 			"background_safe": false,
-			"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. The first run inventories all activity summaries. Later runs discover new summaries and read at most 100 activity details from a resumable queue. Pages and details are fetched one at a time with pauses."
+			"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Every run reads activity summaries from that list. On desktop, the first run inventories all summaries and later runs discover new ones and read at most 100 activity details from a resumable queue. On mobile, every run is a full inventory of summaries and no activity details are read. Pages and details are fetched one at a time with pauses."
 		},
 		"public_listing": {
 			"tier": "preview"
@@ -48,10 +48,10 @@
 		{
 			"name": "activities",
 			"required": false,
-			"description": "Activities read from the owner's signed-in strava.com activity list. The initial inventory emits summaries; later runs can enrich them from activity detail pages, heartrate streams and gear lists. Emitted records exclude routes, GPS coordinates, activity titles and notes.",
+			"description": "Activities read from the owner's signed-in strava.com activity list. Every run emits summaries; on desktop, later runs can enrich them from activity detail pages, heart-rate streams and gear lists. Mobile runs collect summaries only, so heart rate, calories and gear stay null there. Emitted records exclude routes, GPS coordinates, activity titles and notes.",
 			"display": {
 				"label": "Your Strava activities",
-				"detail": "Sport, start time, distance, moving and elapsed time, elevation gain, average and maximum heart rate, calories and gear. No route, no GPS coordinates, no activity titles or notes."
+				"detail": "Sport, start time, distance, moving and elapsed time, elevation gain, plus average and maximum heart rate, calories and gear where available (desktop detail collection only; mobile collects summaries without them). No route, no GPS coordinates, no activity titles or notes."
 			},
 			"semantics": "mutable_state",
 			"schema": {
