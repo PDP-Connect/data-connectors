@@ -1,13 +1,13 @@
 {
   "schema": "pdpp.connector-claim/1",
   "connector": "goodreads",
-  "captured_at": "2026-11-03T20:34:35.065Z",
-  "verified_at": "2026-11-03T20:35:33.150Z",
+  "captured_at": "2026-11-03T21:30:34.001Z",
+  "verified_at": "2026-11-03T21:32:01.759Z",
   "claim": "diagnostic_replay",
   "limitations": [
     "non-recorded-http driver - canonical replay is defined only for recorded-http",
     "network isolation: launcher trust or recursive read-only filesystem closure not proven for this run",
-    "recorded-browser: verified against capture of 2026-11-03T20:34:35.065Z; asserts nothing about the live provider"
+    "recorded-browser: verified against capture of 2026-11-03T21:30:34.001Z; asserts nothing about the live provider"
   ],
   "coverage": [],
   "runs": 2,
@@ -15,13 +15,13 @@
     "recorded-browser"
   ],
   "captured_with": {
-    "source_digest": "06cd00a9fe8e1977f5b4fd300d62d4bcb82866fce0a905e1cef3e21723521b85",
+    "source_digest": "e8188cf054abc02e67868c930ec9efec21d4acc29ed73ded5201eb9f90d448cd",
     "declaration_digest": "4bb58bb598fa2ed9c12ebedbedfff3b38b3de5dd0c35e177aae394095fca635a"
   },
   "verified_subject": {
-    "source_digest": "06cd00a9fe8e1977f5b4fd300d62d4bcb82866fce0a905e1cef3e21723521b85",
+    "source_digest": "e8188cf054abc02e67868c930ec9efec21d4acc29ed73ded5201eb9f90d448cd",
     "declaration_digest": "4bb58bb598fa2ed9c12ebedbedfff3b38b3de5dd0c35e177aae394095fca635a"
   },
-  "scenario_path": "2026-11-03T20-34-35.065Z-scenario.json",
+  "scenario_path": "2026-11-03T21-30-34.001Z-scenario.json",
   "scenario_status": "candidate oracle"
 }
