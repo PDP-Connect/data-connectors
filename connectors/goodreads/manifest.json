@@ -127,7 +127,8 @@
 							"string",
 							"null"
 						],
-						"description": "The first-listed author, as printed in the list (Last, First). Null when the row names no author. The full list, with ids, is in authors."
+						"description": "The first-listed author, as printed in the list (Last, First). Null when the row names no author. The full list, with ids, is in authors.",
+						"x_pdpp_role": "secondary"
 					},
 					"authors": {
 						"type": "array",
@@ -385,7 +386,8 @@
 							"null"
 						],
 						"format": "date-time",
-						"description": "The instant the owner put the book on a shelf, ISO 8601 in UTC, from Goodreads' book API. This is the stream's consent_time_field. added_on is the same moment as the calendar day the list prints in the owner's time zone, so the two can differ by a day."
+						"description": "The instant the owner put the book on a shelf, ISO 8601 in UTC, from Goodreads' book API. This is the stream's consent_time_field and its cursor_field, so records list in the order the owner shelved them. added_on is the same moment as the calendar day the list prints in the owner's time zone, so the two can differ by a day.",
+						"x_pdpp_role": "event-time"
 					},
 					"updated_at": {
 						"type": [
@@ -473,6 +475,7 @@
 			"primary_key": [
 				"id"
 			],
+			"cursor_field": "added_at",
 			"consent_time_field": "added_at",
 			"selection": {
 				"fields": true,
