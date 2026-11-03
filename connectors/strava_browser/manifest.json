@@ -63,18 +63,18 @@
 					},
 					"activity_type": {
 						"type": ["string", "null"],
-						"description": "Strava's activity type, such as Ride, Run, Swim or Hike, or null when absent. The account export copies its Activity Type column. The browser collector uses the activity list's type, else its sport_type, and maps a few fine types to coarse ones (GravelRide and MountainBikeRide to Ride, TrailRun to Run, EMountainBikeRide to EBikeRide); other values pass through unchanged.",
+						"description": "Strava's activity type, such as Ride, Run, Swim or Hike, or null when absent. The account export copies its Activity Type column. The browser collector uses the activity list's type; when that is absent, it uses sport_type and maps GravelRide and MountainBikeRide to Ride, TrailRun to Run and EMountainBikeRide to EBikeRide. Other values pass through unchanged.",
 						"x_pdpp_role": "primary-title"
 					},
 					"start_date": {
 						"type": "string",
 						"format": "date",
-						"description": "The YYYY-MM-DD date portion of start_time, on the same clock as start_time_basis. Window aggregates are safe on any basis. A same-day join or local-day claim is safe only when start_time_basis is 'local' or start_date_local is non-null; a UTC or unknown-basis date can be the wrong local day."
+						"description": "The YYYY-MM-DD date as written in start_time: at its stated offset, else in UTC or the zoneless value's own clock. Window aggregates are safe on any record. A same-day join or local-day claim is safe only when start_date_local is non-null or start_time_basis is 'local'; otherwise this date can be the wrong local day."
 					},
 					"start_date_local": {
 						"type": ["string", "null"],
 						"format": "date",
-						"description": "The athlete's local calendar day, YYYY-MM-DD, or null. Set only when the source states the local clock: a numeric UTC offset in the account export (+00:00 counts; -00:00 means unknown), or an exact local offset in the Strava activity list. A 'Z', -00:00 or zoneless value gives no local day, so null is common. This is the consent_time_field: a time_range compares calendar days, and a bounded run excludes activities whose value is null."
+						"description": "The athlete's local calendar day, YYYY-MM-DD, or null. Set only when the source states the local clock: a numeric UTC offset in the account export (+00:00 counts; -00:00 means unknown), or an exact local offset in the Strava activity list. A 'Z', -00:00 or zoneless value gives no local day. This is the consent_time_field: a time_range compares calendar days, and a bounded run excludes activities whose value is null."
 					},
 					"start_time": {
 						"type": "string",
@@ -104,11 +104,11 @@
 					},
 					"average_heartrate": {
 						"type": ["number", "null"],
-						"description": "Average heart rate in beats per minute, or null when no heart-rate data is available: no monitor was worn, or, in browser records, detail collection has not run for this activity. Never zero. Browser values are the mean of the heart-rate stream samples."
+						"description": "Average heart rate in beats per minute, or null when not recorded or not yet collected. A missing reading is null, not 0. Browser values are the mean of the heart-rate stream samples."
 					},
 					"max_heartrate": {
 						"type": ["number", "null"],
-						"description": "Maximum heart rate in beats per minute, or null when no heart-rate data is available: no monitor was worn, or, in browser records, detail collection has not run for this activity. Never zero. Browser values are the maximum of the heart-rate stream samples."
+						"description": "Maximum heart rate in beats per minute, or null when not recorded or not yet collected. A missing reading is null, not 0. Browser values are the maximum of the heart-rate stream samples."
 					},
 					"calories_kcal": {
 						"type": ["number", "null"],
