@@ -1,0 +1,1106 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/goodreads",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/goodreads",
+		"display": {
+			"name": "Goodreads"
+		}
+	},
+	"connector_key": "goodreads",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/goodreads",
+	"version": "0.1.0",
+	"display_name": "Goodreads (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#372213"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": [
+					"same_origin_page_fetch"
+				]
+			},
+			"browser": {
+				"required": true,
+				"features": [
+					"page_navigation",
+					"page_script_evaluation"
+				]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": [
+			"manual_action"
+		],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 86400,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 2592000,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "high",
+			"background_safe": false,
+			"rationale": "Collection reads the owner's own library list, profile and account settings pages in a signed-in goodreads.com session, one request at a time with a pause between requests. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff (any method, with Keep me signed in ticked). Goodreads sits behind AWS WAF, which may answer a request with a challenge; the run then loads the page once to let the challenge pass and fails with a clear reason if it persists. A library changes slowly, so a daily run at most is enough."
+		},
+		"public_listing": {
+			"tier": "preview"
+		}
+	},
+	"streams": [
+		{
+			"name": "books",
+			"required": false,
+			"description": "Every book on the owner's Goodreads shelves, one record per shelving: title, authors, edition identifiers, the owner's rating, shelves, review and private notes, reading sessions with start and finish dates, date added, format and ownership. Read from the owner's own library list in a signed-in session.",
+			"display": {
+				"label": "Your Goodreads books",
+				"detail": "Every book on your shelves with its title, authors, edition details, your star rating, shelves, reading start and finish dates, date added, format and whether you own it. Your review text and private notes are included unless you drop them at consent. Other members' reviews and your friends are not collected."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "Goodreads' own id for the shelving of this book in the owner's library (the review id in review_<id> row markup). Stable for as long as the book stays on any shelf; it is not the book id."
+					},
+					"book_id": {
+						"type": "string",
+						"description": "Goodreads' numeric id for the edition the owner shelved (the number in /book/show/<id>-<slug>). Distinct from id: two owners shelving the same edition share a book_id."
+					},
+					"book_url": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "uri",
+						"description": "Absolute URL of the book page, https://www.goodreads.com/book/show/<id>-<slug>. Null when the row carried no title link."
+					},
+					"title": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The book title exactly as the library list prints it, including any subtitle or series suffix.",
+						"x_pdpp_role": "primary-title"
+					},
+					"author": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The first-listed author, as printed in the list (Last, First). Null when the row names no author. The full list, with ids, is in authors."
+					},
+					"authors": {
+						"type": "array",
+						"description": "Every author the list prints for the book, in print order. Empty when none is printed.",
+						"items": {
+							"type": "object",
+							"additionalProperties": false,
+							"properties": {
+								"name": {
+									"type": "string",
+									"description": "Author name as printed in the list (Last, First)."
+								},
+								"author_id": {
+									"type": [
+										"string",
+										"null"
+									],
+									"description": "Goodreads' author id, the number before the dot in /author/show/<id>.<slug>. Null when the link carried none."
+								},
+								"is_goodreads_author": {
+									"type": "boolean",
+									"description": "True when the list marks the author with the Goodreads Author asterisk, meaning the author has claimed a Goodreads author profile."
+								}
+							},
+							"required": [
+								"name",
+								"author_id",
+								"is_goodreads_author"
+							]
+						}
+					},
+					"isbn": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "ISBN-10 of the shelved edition as printed, possibly ending in X. Null when the edition has none."
+					},
+					"isbn13": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "ISBN-13 of the shelved edition as printed. Null when the edition has none."
+					},
+					"asin": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Amazon ASIN of the shelved edition (a Kindle edition usually has one and no ISBN). Null when absent."
+					},
+					"num_pages": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "Page count of the shelved edition. Null when Goodreads has none; never zero."
+					},
+					"average_rating": {
+						"type": [
+							"number",
+							"null"
+						],
+						"description": "Goodreads' community average rating for the book, 0 to 5, as printed (two decimals). This is everyone's average, not the owner's rating."
+					},
+					"ratings_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many Goodreads members have rated the book, at the time of collection."
+					},
+					"original_publication_date": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "When the work was first published, as the most precise partial ISO date the list prints: YYYY, YYYY-MM or YYYY-MM-DD. Null when the list says unknown."
+					},
+					"edition_publication_date": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "When the shelved edition was published, as partial ISO date: YYYY, YYYY-MM or YYYY-MM-DD. Null when the list says unknown."
+					},
+					"cover_url": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Absolute URL of the cover thumbnail the list shows. Null when the book has no cover."
+					},
+					"rating": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"minimum": 1,
+						"maximum": 5,
+						"description": "The owner's star rating, 1 to 5. Null means the owner has not rated the book; Goodreads prints that as zero stars and this connector never emits 0."
+					},
+					"exclusive_shelf": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The one exclusive shelf the book sits on (to-read, currently-reading, read, or a custom exclusive shelf), as its slug. Null when the row printed no exclusive shelf."
+					},
+					"shelves": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"description": "Slugs of every shelf and tag the book is on, exclusive shelf first. Empty when the row printed none."
+					},
+					"review_text": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The owner's own review, whole, with line breaks kept as newlines and markup removed. Null when the owner wrote none. Free text: a reader can drop this field at consent."
+					},
+					"has_review": {
+						"type": "boolean",
+						"description": "True when the owner wrote a review. Carried apart from review_text so a consent that drops the text still tells whether one exists."
+					},
+					"private_notes": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The owner's private notes on the book, whole. Null when there are none. Free text visible only to the owner; a reader can drop this field at consent."
+					},
+					"comments_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many comments the review has."
+					},
+					"likes_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many likes (votes) the review has."
+					},
+					"read_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many times the owner marked the book read, as the list's times-read column."
+					},
+					"reading_sessions": {
+						"type": "array",
+						"description": "The owner's reading sessions for the book, oldest first as printed. A session with neither a start nor a finish date is omitted.",
+						"items": {
+							"type": "object",
+							"additionalProperties": false,
+							"properties": {
+								"session_id": {
+									"type": [
+										"string",
+										"null"
+									],
+									"description": "Goodreads' reading session id as a bare lowercase UUID. Null for a session Goodreads has not saved yet."
+								},
+								"started_on": {
+									"type": [
+										"string",
+										"null"
+									],
+									"description": "When the owner started, as partial ISO date YYYY, YYYY-MM or YYYY-MM-DD. Null when not set."
+								},
+								"finished_on": {
+									"type": [
+										"string",
+										"null"
+									],
+									"description": "When the owner finished, as partial ISO date YYYY, YYYY-MM or YYYY-MM-DD. Null when not set."
+								}
+							},
+							"required": [
+								"session_id",
+								"started_on",
+								"finished_on"
+							]
+						}
+					},
+					"started_on": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Start date of the latest session that has one, as partial ISO date YYYY, YYYY-MM or YYYY-MM-DD. Null when no session has a start date."
+					},
+					"started_date": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date",
+						"description": "started_on when Goodreads gives a whole day (YYYY-MM-DD). Null when the start date is only a month or a year, or absent. Use this field to filter or group by start day."
+					},
+					"finished_on": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Finish date of the latest session that has one, as partial ISO date YYYY, YYYY-MM or YYYY-MM-DD. Null when no session has a finish date."
+					},
+					"finished_date": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date",
+						"description": "finished_on when Goodreads gives a whole day (YYYY-MM-DD). Null when the finish date is only a month or a year, or absent. Use this field to filter or group by finish day."
+					},
+					"added_on": {
+						"type": [
+							"string",
+							"null"
+						],
+						"format": "date",
+						"description": "The calendar day the owner added the book to a shelf, YYYY-MM-DD, as Goodreads prints it for the owner. This is the stream's consent_time_field. Null when the list printed no readable date."
+					},
+					"owned": {
+						"type": [
+							"boolean",
+							"null"
+						],
+						"description": "True when the owner marked a copy of the book as owned. Null when the list column is absent."
+					},
+					"format": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The format the owner recorded for their copy (for example a Kindle edition or a paperback). Null when none is recorded."
+					},
+					"position": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "The owner's manual sort position on the shelf, when they set one. Null otherwise."
+					}
+				},
+				"required": [
+					"id",
+					"book_id"
+				]
+			},
+			"primary_key": [
+				"id"
+			],
+			"consent_time_field": "added_on",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"title",
+						"author"
+					],
+					"semantic_fields": [
+						"title"
+					]
+				},
+				"range_filters": {
+					"added_on": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"rating": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"num_pages": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"average_rating": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"finished_date": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"started_date": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"ratings_count": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					],
+					"read_count": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": [
+						"added_on",
+						"finished_date",
+						"started_date"
+					],
+					"group_by": [
+						"exclusive_shelf",
+						"rating",
+						"format",
+						"author",
+						"owned",
+						"has_review"
+					],
+					"count_distinct": [
+						"author",
+						"book_id"
+					],
+					"sum": [
+						"num_pages"
+					],
+					"min": [
+						"added_on",
+						"finished_date",
+						"started_date",
+						"num_pages",
+						"rating",
+						"average_rating"
+					],
+					"max": [
+						"added_on",
+						"finished_date",
+						"started_date",
+						"num_pages",
+						"rating",
+						"average_rating"
+					]
+				},
+				"expand": [
+					{
+						"name": "shelf"
+					}
+				]
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window",
+			"relationships": [
+				{
+					"name": "shelf",
+					"stream": "shelves",
+					"foreign_key": "exclusive_shelf",
+					"cardinality": "has_one"
+				}
+			],
+			"views": [
+				{
+					"id": "reading_log",
+					"label": "What you read, when, and how you rated it",
+					"fields": [
+						"id",
+						"book_id",
+						"title",
+						"author",
+						"exclusive_shelf",
+						"shelves",
+						"rating",
+						"read_count",
+						"reading_sessions",
+						"started_on",
+						"started_date",
+						"finished_on",
+						"finished_date",
+						"added_on"
+					]
+				},
+				{
+					"id": "catalogue",
+					"label": "Which books are in your library, without your ratings or dates",
+					"fields": [
+						"id",
+						"book_id",
+						"title",
+						"author",
+						"authors",
+						"isbn",
+						"isbn13",
+						"asin",
+						"num_pages",
+						"format",
+						"original_publication_date",
+						"edition_publication_date",
+						"average_rating",
+						"ratings_count",
+						"book_url",
+						"cover_url"
+					]
+				},
+				{
+					"id": "without_private_text",
+					"label": "Everything except your review text and private notes",
+					"fields": [
+						"id",
+						"book_id",
+						"book_url",
+						"title",
+						"author",
+						"authors",
+						"isbn",
+						"isbn13",
+						"asin",
+						"num_pages",
+						"average_rating",
+						"ratings_count",
+						"original_publication_date",
+						"edition_publication_date",
+						"cover_url",
+						"rating",
+						"exclusive_shelf",
+						"shelves",
+						"has_review",
+						"comments_count",
+						"likes_count",
+						"read_count",
+						"reading_sessions",
+						"started_on",
+						"started_date",
+						"finished_on",
+						"finished_date",
+						"added_on",
+						"owned",
+						"format",
+						"position"
+					]
+				}
+			]
+		},
+		{
+			"name": "shelves",
+			"required": false,
+			"description": "The owner's Goodreads shelves: the exclusive shelves (to-read, currently-reading, read and any custom exclusive shelf) and tag-style shelves, with the number of books on each.",
+			"display": {
+				"label": "Your Goodreads shelves",
+				"detail": "The names of your shelves, whether each is an exclusive shelf or a tag, and how many books are on each."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The shelf's slug as it appears in the shelf= or tag= query of its list URL. Stable unless the owner renames the shelf."
+					},
+					"name": {
+						"type": "string",
+						"description": "The shelf's display name as the sidebar prints it.",
+						"x_pdpp_role": "primary-title"
+					},
+					"exclusive": {
+						"type": "boolean",
+						"description": "True for an exclusive shelf (a book sits on at most one of them: to-read, currently-reading, read and the owner's custom exclusive shelves). False for a tag-style shelf, which a book can share with others."
+					},
+					"book_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many books the sidebar says are on the shelf. Null when the sidebar printed no count."
+					},
+					"url": {
+						"type": "string",
+						"format": "uri",
+						"description": "Absolute URL of the shelf's book list, https://www.goodreads.com/review/list/<user id>?shelf=<slug> or ?tag=<slug>."
+					}
+				},
+				"required": [
+					"id",
+					"name",
+					"exclusive"
+				]
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"search": {
+					"lexical_fields": [
+						"name"
+					]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": [
+						"exclusive"
+					],
+					"sum": [
+						"book_count"
+					],
+					"min": [
+						"book_count"
+					],
+					"max": [
+						"book_count"
+					]
+				},
+				"range_filters": {
+					"book_count": [
+						"gte",
+						"gt",
+						"lte",
+						"lt"
+					]
+				},
+				"expand": [
+					{
+						"name": "books",
+						"default_limit": 25,
+						"max_limit": 200
+					}
+				]
+			},
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window",
+			"relationships": [
+				{
+					"name": "books",
+					"stream": "books",
+					"foreign_key": "exclusive_shelf",
+					"cardinality": "has_many"
+				}
+			]
+		},
+		{
+			"name": "account_profile",
+			"required": false,
+			"description": "The signed-in Goodreads account described with no identity: when it was created and its tenure, the profile's rating, review, friend, book and shelf counts, country and language settings, profile visibility, privacy toggles, which outside sign-in accounts are linked, and favourite genres. Each page is read independently and its outcome is reported in sources.",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
+			"display": {
+				"label": "Your Goodreads account profile",
+				"detail": "When you joined and how long you have had the account, how many ratings, reviews, friends, books and shelves your profile shows, your country and language, who can see your profile, a few privacy settings, which outside accounts you can sign in with, and your favourite genres. Your name, username, email, gender, location text, about-me text, website, photo and friends' identities are not collected. Singleton."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"const": "account_profile",
+						"description": "Fixed id of this singleton record."
+					},
+					"joined_on": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Month the account was created, YYYY-MM, from the profile's Joined in line. Null when the profile could not be read."
+					},
+					"tenure_months": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "Whole months from joined_on to the collection month. Null when joined_on is null."
+					},
+					"last_active": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Goodreads' own coarse label for when the owner was last active (for example this month). A label, not a date. Null when not printed."
+					},
+					"ratings_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many ratings the profile counts."
+					},
+					"average_rating": {
+						"type": [
+							"number",
+							"null"
+						],
+						"description": "The owner's average star rating as the profile prints it."
+					},
+					"reviews_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many reviews the profile counts."
+					},
+					"friends_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many friends the profile counts. A count only: no friend is named or identified."
+					},
+					"books_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "Books on the owner's exclusive shelves, summed from the profile's shelf counts."
+					},
+					"shelves_count": {
+						"type": [
+							"integer",
+							"null"
+						],
+						"description": "How many shelves and tags the profile lists."
+					},
+					"country": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The country selected in account settings, as ISO 3166-1 alpha-2. Null when none is selected or settings could not be read.",
+						"x_pdpp_role": "secondary"
+					},
+					"locale": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "The interface language selected in account settings, as the language code Goodreads uses. Null when settings could not be read."
+					},
+					"profile_visibility": {
+						"type": [
+							"string",
+							"null"
+						],
+						"enum": [
+							"everyone",
+							"members",
+							"friends",
+							null
+						],
+						"description": "Who may view the profile: everyone (including search engines), Goodreads members, or friends only. Null when settings could not be read."
+					},
+					"allow_followers": {
+						"type": [
+							"boolean",
+							"null"
+						],
+						"description": "Whether non-friends may follow the owner's reviews. Null when the setting is disabled by the visibility choice or settings could not be read."
+					},
+					"allow_nonfriend_review_comments": {
+						"type": [
+							"boolean",
+							"null"
+						],
+						"description": "Whether non-friends may comment on the owner's reviews and notes. Null when settings could not be read."
+					},
+					"searchable_by_email": {
+						"type": [
+							"boolean",
+							"null"
+						],
+						"description": "Whether Goodreads members may find the owner by email address. Null when settings could not be read."
+					},
+					"linked_sign_in": {
+						"type": [
+							"object",
+							"null"
+						],
+						"additionalProperties": false,
+						"description": "Which outside accounts are linked as sign-in methods. Null when settings could not be read.",
+						"properties": {
+							"amazon": {
+								"type": [
+									"boolean",
+									"null"
+								],
+								"description": "True when an Amazon account is linked. Null when the page did not say."
+							},
+							"google": {
+								"type": [
+									"boolean",
+									"null"
+								],
+								"description": "True when a Google account is linked. Null when the page did not say."
+							},
+							"apple": {
+								"type": [
+									"boolean",
+									"null"
+								],
+								"description": "True when an Apple account is linked. Null when the page did not say."
+							}
+						}
+					},
+					"favorite_genres": {
+						"type": [
+							"array",
+							"null"
+						],
+						"items": {
+							"type": "string"
+						},
+						"description": "The genres ticked as favourites in account settings. Null when settings could not be read; empty when none is ticked."
+					},
+					"sources": {
+						"type": "object",
+						"additionalProperties": false,
+						"description": "Whether each page this record is built from was read. A failed source leaves its fields null; it never means the owner has no such data.",
+						"properties": {
+							"profile": {
+								"type": "string",
+								"enum": [
+									"read",
+									"failed"
+								],
+								"description": "Outcome of reading the public profile page."
+							},
+							"settings": {
+								"type": "string",
+								"enum": [
+									"read",
+									"failed"
+								],
+								"description": "Outcome of reading the account settings page."
+							}
+						},
+						"required": [
+							"profile",
+							"settings"
+						]
+					}
+				},
+				"required": [
+					"id",
+					"sources"
+				]
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": false
+			},
+			"incremental": false,
+			"query": {
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "usage_summary",
+			"required": false,
+			"description": "Exact aggregates over the owner's whole Goodreads library, with no titles and no text: totals per exclusive shelf, rating counts and histogram, books and pages finished and books added per year, first and last dates, rereads, formats and owned count. Computed only from a complete listing; withheld when the listing could not be proven complete.",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
+			"display": {
+				"label": "Your Goodreads reading summary",
+				"detail": "How many books you have in total and on each shelf, how you rate them, how many you finished and how many pages that was in each year, when you added your first and latest book, how many you reread, which formats you read in and how many you own. No titles, authors or text are collected. Singleton."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"const": "usage_summary",
+						"description": "Fixed id of this singleton record."
+					},
+					"books_total": {
+						"type": "integer",
+						"description": "Books on the owner's shelves, counted from the whole library listing."
+					},
+					"by_exclusive_shelf": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "integer"
+						},
+						"description": "Books per exclusive shelf, keyed by shelf slug. A book with no exclusive shelf is counted under none."
+					},
+					"rated_count": {
+						"type": "integer",
+						"description": "Books the owner rated 1 to 5 stars."
+					},
+					"reviewed_count": {
+						"type": "integer",
+						"description": "Books the owner wrote a review for."
+					},
+					"average_rating_given": {
+						"type": [
+							"number",
+							"null"
+						],
+						"description": "Mean of the owner's star ratings over the rated books, rounded to two decimals. Null when nothing is rated."
+					},
+					"rating_histogram": {
+						"type": "object",
+						"additionalProperties": false,
+						"description": "How many books got each star rating.",
+						"properties": {
+							"1": {
+								"type": "integer",
+								"description": "Books rated 1 star."
+							},
+							"2": {
+								"type": "integer",
+								"description": "Books rated 2 stars."
+							},
+							"3": {
+								"type": "integer",
+								"description": "Books rated 3 stars."
+							},
+							"4": {
+								"type": "integer",
+								"description": "Books rated 4 stars."
+							},
+							"5": {
+								"type": "integer",
+								"description": "Books rated 5 stars."
+							}
+						},
+						"required": [
+							"1",
+							"2",
+							"3",
+							"4",
+							"5"
+						]
+					},
+					"books_finished_by_year": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "integer"
+						},
+						"description": "Books finished per year, keyed by year, by each book's latest finish date. Books without a finish date are not counted here."
+					},
+					"pages_finished_by_year": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "integer"
+						},
+						"description": "Pages of the books finished per year, keyed by year. A book with no page count adds nothing."
+					},
+					"books_added_by_year": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "integer"
+						},
+						"description": "Books added to a shelf per year, keyed by year of the added date."
+					},
+					"first_added_on": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Earliest added date, YYYY-MM-DD. Null for an empty library."
+					},
+					"last_added_on": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Latest added date, YYYY-MM-DD. Null for an empty library.",
+						"x_pdpp_role": "event-time"
+					},
+					"first_finished_on": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Earliest finish date across all books, as partial ISO date. Null when no book has one."
+					},
+					"last_finished_on": {
+						"type": [
+							"string",
+							"null"
+						],
+						"description": "Latest finish date across all books, as partial ISO date. Null when no book has one."
+					},
+					"reread_books": {
+						"type": "integer",
+						"description": "Books the owner marked read more than once."
+					},
+					"formats": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "integer"
+						},
+						"description": "Books per recorded format, keyed by the format text. Books with no format are not counted here."
+					},
+					"owned_count": {
+						"type": "integer",
+						"description": "Books the owner marked as owned."
+					},
+					"coverage": {
+						"type": "object",
+						"additionalProperties": false,
+						"description": "How much of the library this summary was computed from. A summary is only emitted when the listing is complete.",
+						"properties": {
+							"books_listed": {
+								"type": "integer",
+								"description": "Library rows read."
+							},
+							"list_pages": {
+								"type": "integer",
+								"description": "Listing pages read, including the final empty proof."
+							},
+							"listing_complete": {
+								"type": "boolean",
+								"description": "True when the listing ended on its last page and the row count matched the count Goodreads reports."
+							},
+							"books_with_finish_date": {
+								"type": "integer",
+								"description": "Books that have at least one finish date."
+							}
+						},
+						"required": [
+							"books_listed",
+							"list_pages",
+							"listing_complete",
+							"books_with_finish_date"
+						]
+					}
+				},
+				"required": [
+					"id",
+					"coverage"
+				]
+			},
+			"primary_key": [
+				"id"
+			],
+			"selection": {
+				"fields": true,
+				"resources": false
+			},
+			"incremental": false,
+			"query": {
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "scheduled_window"
+		}
+	],
+	"reason_display_messages": {
+		"bot_challenge": "Goodreads is asking the browser to pass a verification check and did not let this run read the page. Open Goodreads in the connector's browser, pass the check, then run collection again.",
+		"collection_interrupted": "Goodreads stopped answering partway through, so some of your library is missing. Run collection again.",
+		"goodreads_session_missing": "This run ended before Goodreads had a signed-in session in the connector's browser. Sign in to Goodreads there (any method, with Keep me signed in ticked), then run collection again.",
+		"listing_incomplete": "Your reading summary was not saved because the library list could not be read to its end, and a summary of part of a library would be wrong.",
+		"shelf_list_incomplete": "Your shelves were not saved because Goodreads showed only part of your shelf list, and saving part of it would drop the rest. Please report this; running again will not help.",
+		"sign_in_required": "Goodreads needs you to sign in again before this can continue.",
+		"source_unreadable": "Goodreads answered with a page this connector doesn't recognise, so nothing more was read. Goodreads may have changed its site - please report this rather than retrying."
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "goodreads",
+			"login_url": "https://www.goodreads.com/user/sign_in",
+			"login_message": "Sign in to Goodreads (any method), tick Keep me signed in, then return here.",
+			"collect_export": "collect",
+			"probe_export": "probeGoodreadsPage",
+			"summary": {
+				"stream": "books",
+				"singular": "book",
+				"plural": "books",
+				"details": [
+					"books",
+					"shelves"
+				]
+			}
+		}
+	}
+}

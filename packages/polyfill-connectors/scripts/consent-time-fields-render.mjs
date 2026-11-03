@@ -30,6 +30,7 @@
 export const DATE_BOUND_STREAMS = new Set([
 	"fitbit.daily_summaries",
 	"fitbit.sleep",
+	"goodreads.books",
 	"garmin_browser.daily_summaries",
 	"garmin_browser.hrv",
 	"garmin_browser.training_status",

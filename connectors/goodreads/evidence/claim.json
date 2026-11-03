@@ -1,0 +1,27 @@
+{
+  "schema": "pdpp.connector-claim/1",
+  "connector": "goodreads",
+  "captured_at": "2026-11-03T15:18:19.900Z",
+  "verified_at": "2026-11-03T15:18:43.552Z",
+  "claim": "diagnostic_replay",
+  "limitations": [
+    "non-recorded-http driver - canonical replay is defined only for recorded-http",
+    "network isolation: launcher trust or recursive read-only filesystem closure not proven for this run",
+    "recorded-browser: verified against capture of 2026-11-03T15:18:19.900Z; asserts nothing about the live provider"
+  ],
+  "coverage": [],
+  "runs": 2,
+  "drivers": [
+    "recorded-browser"
+  ],
+  "captured_with": {
+    "source_digest": "50cb91b0fa8383c76259477d7540385127365d6a4e863369d7a485e9055b5a22",
+    "declaration_digest": "be9007b2d04703aed0019a2e8f8cbe35657c952cb5b1b7a5c0b3eec6f4cbf8dc"
+  },
+  "verified_subject": {
+    "source_digest": "50cb91b0fa8383c76259477d7540385127365d6a4e863369d7a485e9055b5a22",
+    "declaration_digest": "be9007b2d04703aed0019a2e8f8cbe35657c952cb5b1b7a5c0b3eec6f4cbf8dc"
+  },
+  "scenario_path": "2026-11-03T15-18-19.900Z-scenario.json",
+  "scenario_status": "candidate oracle"
+}

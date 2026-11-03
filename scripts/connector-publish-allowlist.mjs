@@ -38,6 +38,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ],
     ["github_browser", "github-browser"],
     ["gmail", "gmail"],
+    ["goodreads", "goodreads"],
     ["google_calendar", "google-calendar"],
     ["google_contacts", "google-contacts"],
     ["google_maps", "google-maps"],
