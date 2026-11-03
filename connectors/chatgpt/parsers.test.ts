@@ -55,6 +55,12 @@ for (const contentType of ["text", "multimodal_text"]) {
 		["empty array", [], null],
 		["object only", [{}], null],
 		["mixed empty and object", ["", {}], null],
+		["mixed separated empty strings and object", ["", {}, ""], null],
+		["object before multiple empty strings", [{}, "", ""], null],
+		["mixed empty strings and multiple objects", ["", {}, "", {}], null],
+		["all-string newline", ["", ""], "\n"],
+		["mixed actual text and object", ["text", {}, ""], "text\n"],
+		["mixed whitespace text and object", [" ", {}, ""], " \n"],
 	] as const) {
 		test(`empty text fidelity: ${contentType} ${name} through wire schema`, () => {
 			const content: ChatGptContent = {
