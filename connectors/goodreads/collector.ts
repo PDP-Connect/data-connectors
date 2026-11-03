@@ -30,7 +30,10 @@
 
 import { resourceSet } from "@pdpp/connector-protocol";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { politeDelay } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	buildFullScanCoverageMessage,
+	politeDelay,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { type FetchOutcome, type FetchPage, fetchHtml } from "./fetcher.ts";
 import {
@@ -557,6 +560,11 @@ function priorIds(state: unknown): string[] {
  * refresh), emits a deletion for each record saved before that Goodreads no
  * longer lists, and saves the fingerprints. A narrowed run, or a PageShim
  * run, emits every record it selects and saves no state.
+ *
+ * An un-narrowed run also proves the stream's coverage: `records` is the whole
+ * list Goodreads gave, and each one was emitted or suppressed as unchanged, so
+ * considered equals covered. A narrowed run claims no coverage, because the
+ * runtime drops the records outside the consent after this count is taken.
  */
 async function emitStream<T extends { id: string }>(
 	ctx: GoodreadsCollectContext,
@@ -569,12 +577,11 @@ async function emitStream<T extends { id: string }>(
 			string,
 			unknown
 		>;
-	const tracked =
-		ctx.collectionMode !== undefined &&
-		!scope?.time_range &&
-		resourceSet(scope) === null;
-	if (!tracked) {
+	const narrowed = Boolean(scope?.time_range) || resourceSet(scope) !== null;
+	const coverage = buildFullScanCoverageMessage(stream, records.length);
+	if (narrowed || ctx.collectionMode === undefined) {
 		for (const record of records) await ctx.emitRecord(stream, project(record));
+		if (!narrowed) await ctx.emit(coverage);
 		return records.length;
 	}
 	const prior = ctx.state?.[stream];
@@ -593,6 +600,7 @@ async function emitStream<T extends { id: string }>(
 		if (!current.has(id)) await ctx.emitRecord(stream, { id, deleted: true });
 	}
 	cursor.dropUnseenIds();
+	await ctx.emit(coverage);
 	await ctx.emit({
 		type: "STATE",
 		stream,
@@ -720,6 +728,7 @@ async function finishSummary(
 			ctx.requested.get(SUMMARY)?.fields,
 		) as unknown as Record<string, unknown>,
 	);
+	await ctx.emit(buildFullScanCoverageMessage(SUMMARY, 1));
 }
 
 async function collectProfile(
@@ -790,6 +799,7 @@ async function collectProfile(
 			ctx.requested.get(PROFILE)?.fields,
 		) as unknown as Record<string, unknown>,
 	);
+	await ctx.emit(buildFullScanCoverageMessage(PROFILE, 1));
 	if (!(profile && settings)) {
 		await ctx.progress?.(
 			`Read your Goodreads account, but the ${profile ? "settings" : "profile"} page could not be read`,

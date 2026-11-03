@@ -1579,6 +1579,55 @@ function probePage(answer: FetchAnswer | "network_error", origin = ORIGIN) {
 	};
 }
 
+test("coverage: an un-narrowed run proves every stream it saved; a narrowed or failed one claims none", async () => {
+	const coverageOf = (h: Harness) =>
+		Object.fromEntries(
+			h.messages
+				.filter(
+					(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+						m.type === "DETAIL_COVERAGE",
+				)
+				.map((m) => [m.stream, [m.considered, m.covered]]),
+		);
+	const whole = {
+		account_profile: [1, 1],
+		books: [5, 5],
+		shelves: [6, 6],
+		usage_summary: [1, 1],
+	};
+	const shim = harness(signedInSite(), ALL_STREAMS);
+	await collect(shim.ctx);
+	assert.deepEqual(coverageOf(shim), whole);
+
+	// A quiet incremental run emits no records, yet still covers the stream.
+	const first = desktop(harness(signedInSite(), ALL_STREAMS), "incremental");
+	await collect(first.ctx);
+	assert.deepEqual(coverageOf(first), whole);
+	const quiet = desktop(
+		harness(signedInSite(), ALL_STREAMS),
+		"incremental",
+		stateOf(first),
+	);
+	await collect(quiet.ctx);
+	assert.deepEqual(recordsOf(quiet, "books"), []);
+	assert.deepEqual(coverageOf(quiet), whole);
+
+	// The runtime drops records outside the consent after the count is taken.
+	const narrowed = desktop(
+		harness(signedInSite(), {
+			books: { time_range: { since: "2026-01-01T00:00:00Z" } },
+			shelves: { resources: ["read"] },
+		}),
+		"incremental",
+	);
+	await collect(narrowed.ctx);
+	assert.deepEqual(coverageOf(narrowed), {});
+
+	const signedOut = harness(signedOutSite, ALL_STREAMS);
+	await collect(signedOut.ctx);
+	assert.deepEqual(coverageOf(signedOut), {});
+});
+
 test("the page probe: signed in is true; every other answer is false", async () => {
 	assert.equal(await probeGoodreadsPage(probePage({})), true);
 	// A header link and sign-out link prove sign-in when the redirect URL is not shown.
