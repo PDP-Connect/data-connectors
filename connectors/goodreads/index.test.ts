@@ -13,8 +13,12 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { skipPoliteDelays } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
-import type { GoodreadsCollectContext } from "./collector.ts";
-import { FALLBACK_TOKEN_PAGE, GRAPHQL_URL } from "./graphql.ts";
+import { type GoodreadsCollectContext, joinLibrary } from "./collector.ts";
+import {
+	FALLBACK_TOKEN_PAGE,
+	GRAPHQL_URL,
+	type GraphqlShelving,
+} from "./graphql.ts";
 import {
 	CONNECTOR_CONFIG,
 	collect,
@@ -22,6 +26,7 @@ import {
 	probeGoodreadsSession,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+import type { PrintBookRecord } from "./types.ts";
 
 after(skipPoliteDelays());
 
@@ -1481,6 +1486,102 @@ test("incremental: a second run emits only what changed, and deletions for what 
 	assert.deepEqual(recordsOf(changed, "shelves"), []);
 	assert.deepEqual(deletions(changed, "books"), []);
 	assert.deepEqual(deletions(changed, "shelves"), []);
+});
+
+test("incremental: a book its schema rejects is retried, not covered or saved", async () => {
+	const tooLong = "x".repeat(2001);
+	const rejecting = fixtureApi({
+		GoodreadsShelvings: editShelvings((node) =>
+			node.book.legacyId === 80000001
+				? {
+						...node,
+						book: {
+							...node.book,
+							details: { ...node.book.details, publisher: tooLong },
+						},
+					}
+				: node,
+		),
+	});
+	const first = desktop(
+		harness(signedInSite(), { books: {} }, { api: rejecting }),
+		"incremental",
+	);
+	await collect(first.ctx);
+	const kept = recordsOf(first, "books").map((book) => book.book_id);
+	assert.equal(kept.length, 4);
+	assert.ok(!kept.includes("80000001"));
+	assert.ok(
+		skips(first).some((skip) => skip.stream === "books"),
+		"the runtime says why it skipped the book",
+	);
+	assert.deepEqual(coverageOf(first).books, [5, 4]);
+	const saved = stateOf(first);
+	const ids = (state: Record<string, unknown>) =>
+		Object.keys(
+			(state.books as { fingerprints: Record<string, string> }).fingerprints,
+		).length;
+	assert.equal(ids(saved), 4);
+
+	// Fixed at the source: the next run sends the book it could not save.
+	const fixed = desktop(
+		harness(signedInSite(), { books: {} }),
+		"incremental",
+		saved,
+	);
+	await collect(fixed.ctx);
+	assert.deepEqual(
+		recordsOf(fixed, "books").map((book) => book.book_id),
+		["80000001"],
+	);
+	assert.deepEqual(coverageOf(fixed).books, [5, 5]);
+	const whole = stateOf(fixed);
+	assert.equal(ids(whole), 5);
+
+	// Broken again after it was saved: no deletion, and the saved fingerprint
+	// stays so a later removal from Goodreads still deletes the saved copy.
+	const broken = desktop(
+		harness(signedInSite(), { books: {} }, { api: rejecting }),
+		"incremental",
+		whole,
+	);
+	await collect(broken.ctx);
+	assert.deepEqual(deletions(broken, "books"), []);
+	assert.deepEqual(coverageOf(broken).books, [5, 4]);
+	assert.deepEqual(stateOf(broken), whole);
+});
+
+test("join: two list rows for one book cannot hide a book only the API lists", () => {
+	const row = (book_id: string, id: string) =>
+		({
+			book_id,
+			exclusive_shelf: "read",
+			id,
+			rating: null,
+			shelves: ["read"],
+		}) as unknown as PrintBookRecord;
+	const shelving = (bookId: string): GraphqlShelving => ({
+		addedAtMs: 0,
+		bookId,
+		genres: [],
+		language: null,
+		publisher: null,
+		review: null,
+		series: [],
+		shelf: "read",
+		tags: [],
+		updatedAtMs: null,
+	});
+	const joined = joinLibrary(
+		[row("A", "R1"), row("A", "R3")],
+		[shelving("A"), shelving("B")],
+	);
+	assert.equal(joined.ok, false);
+	assert.match(
+		joined.ok ? "" : joined.message,
+		/1 books in the API are not in the list; 1 books are in the list twice/,
+	);
+	assert.equal(joinLibrary([row("A", "R1")], [shelving("A")]).ok, true);
 });
 
 test("incremental: a book or shelf gone from Goodreads is emitted as a deletion", async () => {

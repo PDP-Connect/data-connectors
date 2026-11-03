@@ -31,7 +31,7 @@
 import { resourceSet } from "@pdpp/connector-protocol";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
-	buildFullScanCoverageMessage,
+	buildDetailCoverageMessage,
 	politeDelay,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
@@ -58,6 +58,7 @@ import {
 	userIdFromHtml,
 	userIdFromUrl,
 } from "./parsers.ts";
+import { validateRecord } from "./schemas.ts";
 import { summarizeLibrary } from "./summary.ts";
 import type { BookRecord, PrintBookRecord, ShelfRecord } from "./types.ts";
 
@@ -349,8 +350,10 @@ export function joinLibrary(
 	api: readonly GraphqlShelving[],
 ): { ok: true; books: BookRecord[] } | { ok: false; message: string } {
 	const byBook = new Map(api.map((shelving) => [shelving.bookId, shelving]));
+	const matched = new Set<string>();
 	let missing = 0;
 	let differ = 0;
+	let repeated = 0;
 	const books: BookRecord[] = [];
 	for (const row of print) {
 		const shelving = byBook.get(row.book_id);
@@ -358,6 +361,11 @@ export function joinLibrary(
 			missing += 1;
 			continue;
 		}
+		if (matched.has(row.book_id)) {
+			repeated += 1;
+			continue;
+		}
+		matched.add(row.book_id);
 		const printTags = row.shelves.filter(
 			(shelf) => shelf !== row.exclusive_shelf,
 		);
@@ -382,11 +390,14 @@ export function joinLibrary(
 			updated_at: isoOrNull(shelving.updatedAtMs),
 		});
 	}
-	const extra = api.length - (print.length - missing);
-	if (missing > 0 || differ > 0 || extra > 0) {
+	// Counted from the books the list matched, not from row counts: two list
+	// rows for one book would otherwise hide a book only the API lists.
+	const extra = api.length - matched.size;
+	if (missing > 0 || differ > 0 || extra > 0 || repeated > 0) {
 		const parts = [
 			missing > 0 ? `${missing} books in the list are not in the API` : null,
 			extra > 0 ? `${extra} books in the API are not in the list` : null,
+			repeated > 0 ? `${repeated} books are in the list twice` : null,
 			differ > 0
 				? `${differ} books have a different shelf, tags or rating`
 				: null,
@@ -537,17 +548,24 @@ export function shelfListProblem(
 	return null;
 }
 
-/** The ids a stream's saved state says were emitted before, tolerant of any shape. */
-function priorIds(state: unknown): string[] {
+/** A stream's saved fingerprints by record id, tolerant of any shape. */
+function priorFingerprints(state: unknown): Record<string, string> {
 	const fingerprints =
 		typeof state === "object" && state !== null
 			? (state as { fingerprints?: unknown }).fingerprints
 			: undefined;
-	return typeof fingerprints === "object" &&
-		fingerprints !== null &&
-		!Array.isArray(fingerprints)
-		? Object.keys(fingerprints)
-		: [];
+	if (
+		typeof fingerprints !== "object" ||
+		fingerprints === null ||
+		Array.isArray(fingerprints)
+	) {
+		return {};
+	}
+	return Object.fromEntries(
+		Object.entries(fingerprints).filter(
+			(entry): entry is [string, string] => typeof entry[1] === "string",
+		),
+	);
 }
 
 /**
@@ -562,9 +580,16 @@ function priorIds(state: unknown): string[] {
  * run, emits every record it selects and saves no state.
  *
  * An un-narrowed run also proves the stream's coverage: `records` is the whole
- * list Goodreads gave, and each one was emitted or suppressed as unchanged, so
- * considered equals covered. A narrowed run claims no coverage, because the
- * runtime drops the records outside the consent after this count is taken.
+ * list Goodreads gave, and each one was emitted or suppressed as unchanged.
+ * A narrowed run claims no coverage, because the runtime drops the records
+ * outside the consent after this count is taken.
+ *
+ * The runtime skips a record its schema rejects and carries on, so each record
+ * is checked here first with the same validator. A rejected record is still
+ * sent, so the runtime reports why, but it is not counted as covered and its
+ * fingerprint is not saved: the next run sends it again instead of treating it
+ * as already saved. Its previous fingerprint, if any, is kept, so a later
+ * deletion still reaches the copy saved before.
  */
 async function emitStream<T extends { id: string }>(
 	ctx: GoodreadsCollectContext,
@@ -578,35 +603,86 @@ async function emitStream<T extends { id: string }>(
 			unknown
 		>;
 	const narrowed = Boolean(scope?.time_range) || resourceSet(scope) !== null;
-	const coverage = buildFullScanCoverageMessage(stream, records.length);
+	const projected = records.map((record) => ({
+		data: project(record),
+		id: record.id,
+	}));
+	const rejected = new Set(
+		projected
+			.filter(({ data }) => !validateRecord(stream, data).ok)
+			.map(({ id }) => id),
+	);
+	const coverage = buildDetailCoverageMessage({
+		considered: records.length,
+		covered: records.length - rejected.size,
+		hydratedKeys: [],
+		requiredKeys: [],
+		stateStream: stream,
+		stream,
+	});
 	if (narrowed || ctx.collectionMode === undefined) {
-		for (const record of records) await ctx.emitRecord(stream, project(record));
+		for (const { data } of projected) await ctx.emitRecord(stream, data);
 		if (!narrowed) await ctx.emit(coverage);
-		return records.length;
+		return records.length - rejected.size;
 	}
-	const prior = ctx.state?.[stream];
+	const prior = priorFingerprints(ctx.state?.[stream]);
 	const cursor = openFingerprintCursor(
-		ctx.collectionMode === "full_refresh" ? undefined : prior,
+		ctx.collectionMode === "full_refresh" ? undefined : ctx.state?.[stream],
 	);
 	let emitted = 0;
-	for (const record of records) {
-		const data = project(record);
+	for (const { data, id } of projected) {
+		if (rejected.has(id)) {
+			await ctx.emitRecord(stream, data);
+			continue;
+		}
 		if (!cursor.shouldEmit(data)) continue;
 		emitted += 1;
 		await ctx.emitRecord(stream, data);
 	}
 	const current = new Set(records.map((record) => record.id));
-	for (const id of priorIds(prior)) {
+	for (const id of Object.keys(prior)) {
 		if (!current.has(id)) await ctx.emitRecord(stream, { id, deleted: true });
 	}
 	cursor.dropUnseenIds();
+	const kept = Object.fromEntries(
+		[...rejected].flatMap((id) =>
+			prior[id] === undefined ? [] : [[id, prior[id]]],
+		),
+	);
 	await ctx.emit(coverage);
 	await ctx.emit({
 		type: "STATE",
 		stream,
-		cursor: { fingerprints: cursor.toState() },
+		cursor: { fingerprints: { ...cursor.toState(), ...kept } },
 	});
 	return emitted;
+}
+
+/**
+ * Emit a stream's one record and its coverage. The record counts as covered
+ * only when its schema accepts it, for the reason given on `emitStream`.
+ */
+async function emitSingleton(
+	ctx: GoodreadsCollectContext,
+	stream: string,
+	record: { id: string },
+): Promise<void> {
+	const data = projectFields(
+		stream,
+		record,
+		ctx.requested.get(stream)?.fields,
+	) as unknown as Record<string, unknown>;
+	await ctx.emitRecord(stream, data);
+	await ctx.emit(
+		buildDetailCoverageMessage({
+			considered: 1,
+			covered: validateRecord(stream, data).ok ? 1 : 0,
+			hydratedKeys: [],
+			requiredKeys: [],
+			stateStream: stream,
+			stream,
+		}),
+	);
 }
 
 async function readListing(
@@ -720,15 +796,7 @@ async function finishSummary(
 		listPages: listing.pages,
 		listingComplete: true,
 	});
-	await ctx.emitRecord(
-		SUMMARY,
-		projectFields(
-			SUMMARY,
-			summary,
-			ctx.requested.get(SUMMARY)?.fields,
-		) as unknown as Record<string, unknown>,
-	);
-	await ctx.emit(buildFullScanCoverageMessage(SUMMARY, 1));
+	await emitSingleton(ctx, SUMMARY, summary);
 }
 
 async function collectProfile(
@@ -791,15 +859,7 @@ async function collectProfile(
 		},
 		tenure_months: tenureMonths(profile?.joined_on ?? null, new Date()),
 	};
-	await ctx.emitRecord(
-		PROFILE,
-		projectFields(
-			PROFILE,
-			record,
-			ctx.requested.get(PROFILE)?.fields,
-		) as unknown as Record<string, unknown>,
-	);
-	await ctx.emit(buildFullScanCoverageMessage(PROFILE, 1));
+	await emitSingleton(ctx, PROFILE, record);
 	if (!(profile && settings)) {
 		await ctx.progress?.(
 			`Read your Goodreads account, but the ${profile ? "settings" : "profile"} page could not be read`,
