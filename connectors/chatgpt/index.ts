@@ -7751,13 +7751,13 @@ async function walkConversationsAndMessages(
 		persistChatGptPacingStateOnly(deps, priorMessagesCursor, savedBackfill);
 		return;
 	}
-	// Finish the other source's saved suffix before starting another primary
-	// pass. Otherwise a primary list that consumes the request budget can
-	// repeatedly starve search. This carries enumeration progress, not a provider
-	// snapshot guarantee; the next ordinary run reads primary from the top again.
+	// Finish search's saved suffix before restarting primary, so primary
+	// cannot consume the request budget and repeatedly starve search.
+	// A skipped primary pass leaves its interval unread: hold the existing
+	// watermark until a real primary pass covers it.
 	primaryList =
 		savedBackfill !== null && !primaryCatchup
-			? { items: [], truncated: false, backfill: null }
+			? { items: [], truncated: true, backfill: null }
 			: await listPrimaryConversations(deps, primaryBackfill);
 	// Existing search-only completed ranges do not establish primary history.
 	// Reopen that range once, then persist ordinary exact-key/detail progress on

@@ -400,3 +400,147 @@ test("conversation-only migration keeps bounded detail progress across runs", as
 	assert.equal(reads.size, rows.length);
 	assert.ok([...reads.values()].every((count) => count === 1));
 });
+
+for (const names of [
+	["conversations"],
+	["messages"],
+	["conversations", "messages"],
+]) {
+	for (const partialPrimary of [false, true]) {
+		test(`skipped primary holds the discovery watermark across search arrivals: ${names.join("+")} partialPrimary=${partialPrimary}`, async () => {
+			const anchor = row(900);
+			const primaryOnly = row(1100);
+			const searchOnly = row(1200);
+			const primary: ConversationListItem[] = [];
+			const search = [anchor];
+			let interruptPrimary = partialPrimary;
+			const fake = fixture(primary, search, (offset) => {
+				if (interruptPrimary && offset === 100) {
+					throw new ChatGptPlannedProviderBudgetDeferredError(
+						"synthetic primary interruption",
+						"max_detail_fetches",
+					);
+				}
+			});
+			let arrived = false;
+			const api: ChatGptApi = {
+				...fake.api,
+				fetch: (path, options) => {
+					if (!arrived && path.startsWith("/conversations/search?")) {
+						// Arrivals after T0: T1 exists only in the source skipped this
+						// run, while the draining search walk observes the later T2.
+						arrived = true;
+						if (partialPrimary) {
+							primary.push(
+								...Array.from({ length: 100 }, (_, i) => ({
+									...row(1200 - i),
+									id: `synthetic-primary-control-${i}`,
+								})),
+							);
+						}
+						primary.push(primaryOnly);
+						search.unshift(searchOnly);
+					}
+					return fake.api.fetch(path, options);
+				},
+			};
+			const cursor = {
+				...completed,
+				enumeration_version: 1,
+				backfill: {
+					position_hint: 30,
+					oldest_update_time: iso(900),
+					boundary_ids: [anchor.id],
+				},
+			};
+			const first = await collect(
+				api,
+				Object.fromEntries(names.map((name) => [name, cursor])),
+				names,
+			);
+			assert.equal(
+				fake.offsets.length,
+				0,
+				"search drains before primary restarts",
+			);
+			assert.equal(fake.details.has(primaryOnly.id), false);
+			for (const name of names) {
+				assert.equal(
+					(first.state[name] as typeof cursor).last_update_time,
+					completed.last_update_time,
+					"unread primary interval cannot advance from T0 to T2",
+				);
+				assert.ok(
+					!first.protocolMessages.some(
+						(message) =>
+							message.type === "DETAIL_COVERAGE" && message.stream === name,
+					),
+				);
+				assert.equal(
+					(first.state[name] as { backfill?: unknown }).backfill,
+					undefined,
+					"the saved search continuation was drained",
+				);
+			}
+			const second = await collect(api, first.state, names);
+			assert.ok(fake.offsets.length > 0, "the next run really reads primary");
+			let finalRun = second;
+			if (partialPrimary) {
+				assert.equal(
+					fake.details.has(primaryOnly.id),
+					false,
+					"T1 is beyond the interrupted primary prefix",
+				);
+				for (const name of names) {
+					assert.equal(
+						(second.state[name] as typeof cursor).last_update_time,
+						completed.last_update_time,
+					);
+					assert.ok(
+						!second.protocolMessages.some(
+							(message) =>
+								message.type === "DETAIL_COVERAGE" && message.stream === name,
+						),
+					);
+					assert.ok(
+						(second.state[name] as { primary_backfill?: unknown })
+							.primary_backfill,
+					);
+				}
+				interruptPrimary = false;
+				finalRun = await collect(api, second.state, names);
+			}
+			assert.equal(
+				fake.details.get(primaryOnly.id),
+				1,
+				"T1 is hydrated exactly once",
+			);
+			for (const name of names) {
+				assert.equal(
+					[
+						...first.emitted,
+						...second.emitted,
+						...(partialPrimary ? finalRun.emitted : []),
+					].filter(
+						(record) =>
+							record.stream === name &&
+							(name === "conversations"
+								? record.data.id === primaryOnly.id
+								: record.data.conversation_id === primaryOnly.id),
+					).length,
+					1,
+				);
+				assert.equal(
+					(finalRun.state[name] as typeof cursor).last_update_time,
+					iso(1200),
+				);
+				assert.ok(
+					finalRun.protocolMessages.some(
+						(message) =>
+							message.type === "DETAIL_COVERAGE" && message.stream === name,
+					),
+				);
+			}
+		});
+	}
+}
