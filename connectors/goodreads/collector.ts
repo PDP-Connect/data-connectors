@@ -315,6 +315,12 @@ async function readApiLibrary(
 		SHELVINGS_QUERY,
 		"getUserShelvings",
 		parseShelvingNode,
+		(read, total) =>
+			ctx.progress?.(`Read details for ${read} of ${total} Goodreads books`, {
+				count: read,
+				stream: BOOKS,
+				total,
+			}) ?? Promise.resolve(),
 	);
 	if (!read.ok) return { ok: false, stop: read };
 	const { items, totalCount } = read.value;
@@ -426,7 +432,7 @@ async function finishBooks(
 	const emitted = await emitStream(ctx, BOOKS, joined.books);
 	await ctx.progress?.(
 		`Finished reading ${joined.books.length} Goodreads books (${emitted} new or changed)`,
-		{ count: joined.books.length, stream: BOOKS },
+		{ count: joined.books.length, stream: BOOKS, total: joined.books.length },
 	);
 }
 
@@ -486,6 +492,7 @@ async function finishShelves(
 	await ctx.progress?.(`Read ${records.length} Goodreads shelves`, {
 		count: records.length,
 		stream: SHELVES,
+		total: records.length,
 	});
 }
 

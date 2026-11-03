@@ -344,12 +344,17 @@ const unreadable = (message: string): Failure => ({
 });
 
 export interface GoodreadsGraphql {
-	/** Every node of a paginated list, and the total the API reports for it. */
+	/**
+	 * Every node of a paginated list, and the total the API reports for it.
+	 * `onPage`, when given, hears how many nodes have been read after each
+	 * page, out of the total the first page reported.
+	 */
 	list<T>(
 		label: string,
 		query: string,
 		field: string,
 		parse: (node: unknown) => T | null,
+		onPage?: (read: number, total: number) => Promise<void>,
 	): Promise<GraphqlOutcome<{ items: T[]; totalCount: number }>>;
 	session(): TokenSession;
 }
@@ -495,7 +500,7 @@ export async function openGraphql(
 		ok: true,
 		value: {
 			session: () => session,
-			async list(label, query, field, parse) {
+			async list(label, query, field, parse, onPage) {
 				const items: ReturnType<typeof parse>[] = [];
 				const tokens = new Set<string>();
 				let after: string | undefined;
@@ -542,6 +547,7 @@ export async function openGraphql(
 						}
 						items.push(item);
 					}
+					await onPage?.(items.length, totalCount);
 					if (!pageInfo.hasNextPage) break;
 					const next = textOrNull(pageInfo.nextPageToken);
 					if (!next || tokens.has(next)) {

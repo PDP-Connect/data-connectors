@@ -963,6 +963,27 @@ test("a row this connector cannot read stops the listing as unreadable, not as a
 	assert.match(byStream.get("usage_summary")?.message ?? "", /1 rows/);
 });
 
+test("every count a run reports for books and shelves comes with its total", async () => {
+	const h = harness(signedInSite(), { books: {}, shelves: {} });
+	await collect(h.ctx);
+	const counted = h.messages
+		.filter((m) => m.type === "PROGRESS")
+		.map((m) => m as { count?: number; stream?: string; total?: number })
+		.filter((m) => m.count !== undefined);
+	assert.deepEqual(
+		counted.map((m) => [m.stream, m.count, m.total]),
+		[
+			// The print list's two pages, the API's one page, then the join.
+			["books", 3, 5],
+			["books", 5, 5],
+			["books", 5, 5],
+			["books", 5, 5],
+			["shelves", 6, 6],
+		],
+	);
+	assert.ok(h.progress.includes("Read details for 5 of 5 Goodreads books"));
+});
+
 test("a usage_summary-only run reports its progress under usage_summary", async () => {
 	const h = harness(signedInSite(), { usage_summary: {} });
 	await collect(h.ctx);
