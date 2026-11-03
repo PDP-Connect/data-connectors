@@ -70,6 +70,7 @@ const PAGE_BRIDGE_MAX_UNITS = 256 * 1024;
 // JSON text is escaped again when the platform bridge serializes its envelope.
 // Leave room for that second encoding and the message fields.
 const RESULT_CHUNK_MAX_UNITS = 125 * 1024;
+const MAX_TIMING_BRIDGE_CALLS = 32;
 const EVALUATE_INLINE_MAX_UNITS = 64 * 1024;
 // A slice is JSON text that the bridge escapes again, so it uses the request
 // bound mobile-host-v1 amendment A4 sets for escape-heavy chunks: twice this
@@ -503,7 +504,7 @@ export async function runOnPageShim(
 	// Record text waiting for a full chunk. One bridge message per record made
 	// a large ChatGPT run cost two host round trips per message record.
 	let pendingStreamText = "";
-	const pendingChunkConversationIds = new Set<string>();
+	let pendingChunkSpans: { id: string; start: number; end: number }[] = [];
 	let streamedScopeCount = 0;
 	let streamFailure: Error | null = null;
 	let streamSendFailed = false;
@@ -514,6 +515,9 @@ export async function runOnPageShim(
 			jsProcessMs: number;
 			bridgeMs: number;
 			bridgeCalls: string[];
+			bridgeCallsOmitted: number;
+			processed: boolean;
+			completed: boolean;
 			bridgeBytes: number;
 			roundTrips: number;
 			ackMs: number;
@@ -534,6 +538,9 @@ export async function runOnPageShim(
 				jsProcessMs: 0,
 				bridgeMs: 0,
 				bridgeCalls: [],
+				bridgeCallsOmitted: 0,
+				processed: false,
+				completed: false,
 				bridgeBytes: 0,
 				roundTrips: 0,
 				ackMs: 0,
@@ -546,11 +553,22 @@ export async function runOnPageShim(
 		processingMs: number,
 	) => {
 		const timing = conversationTimings.get(conversationId);
-		if (timing) timing.jsProcessMs += processingMs;
+		if (timing) {
+			timing.jsProcessMs += processingMs;
+			timing.processed = true;
+		}
 	};
 	(globalThis as Record<string, unknown>).__pdppPageshimSetTimingConversation =
 		(conversationIds: string[] | null) => {
+			if (
+				conversationIds === null &&
+				activeTimingConversationIds.length === 1
+			) {
+				const timing = conversationTimings.get(activeTimingConversationIds[0]);
+				if (timing?.processed) timing.completed = true;
+			}
 			activeTimingConversationIds = conversationIds ?? [];
+			if (conversationIds === null) finishCompletedTimings();
 			for (const id of activeTimingConversationIds) {
 				if (!conversationTimings.has(id)) {
 					conversationTimings.set(id, {
@@ -558,6 +576,9 @@ export async function runOnPageShim(
 						jsProcessMs: 0,
 						bridgeMs: 0,
 						bridgeCalls: [],
+						bridgeCallsOmitted: 0,
+						processed: false,
+						completed: false,
 						bridgeBytes: 0,
 						roundTrips: 0,
 						ackMs: 0,
@@ -594,9 +615,11 @@ export async function runOnPageShim(
 			timing.roundTrips++;
 			timing.bridgeMs += elapsedMs;
 			timing.ackMs += elapsedMs;
-			timing.bridgeCalls.push(
-				`${label}:${elapsedMs.toFixed(1)}ms/${requestBytes}+${responseBytes}B`,
-			);
+			if (timing.bridgeCalls.length < MAX_TIMING_BRIDGE_CALLS) {
+				timing.bridgeCalls.push(
+					`${label}:${elapsedMs.toFixed(1)}ms/${requestBytes}+${responseBytes}B`,
+				);
+			} else timing.bridgeCallsOmitted++;
 			timing.bridgeBytes += requestBytes + responseBytes;
 		}
 	};
@@ -616,11 +639,20 @@ export async function runOnPageShim(
 			throw streamFailure;
 		}
 	};
-	const sendStreamText = async (scope: string, text: string): Promise<void> => {
+	const sendStreamText = async (
+		scope: string,
+		text: string,
+		spans: typeof pendingChunkSpans = [],
+	): Promise<void> => {
 		for (let offset = 0; offset < text.length; ) {
 			let end = Math.min(offset + RESULT_CHUNK_MAX_UNITS, text.length);
 			if (end < text.length && isHighSurrogate(text.charCodeAt(end - 1))) end--;
 			const piece = text.slice(offset, end);
+			activeChunkConversationIds = new Set(
+				spans
+					.filter((span) => span.start < end && span.end > offset)
+					.map((span) => span.id),
+			);
 			await sendStreamMessage("result:chunk", {
 				scope,
 				sequence: activeSequence,
@@ -653,12 +685,19 @@ export async function runOnPageShim(
 			end--;
 		const text = pendingStreamText.slice(0, end);
 		pendingStreamText = pendingStreamText.slice(end);
-		activeChunkConversationIds = new Set(pendingChunkConversationIds);
-		if (pendingStreamText.length === 0) pendingChunkConversationIds.clear();
+		const spans = pendingChunkSpans;
+		pendingChunkSpans = spans
+			.filter((span) => span.end > end)
+			.map((span) => ({
+				...span,
+				start: Math.max(0, span.start - end),
+				end: span.end - end,
+			}));
 		try {
-			await sendStreamText(scope, text);
+			await sendStreamText(scope, text, spans);
 		} finally {
 			activeChunkConversationIds.clear();
+			finishCompletedTimings();
 		}
 	};
 	const beginStreamScope = async (stream: string): Promise<void> => {
@@ -671,7 +710,7 @@ export async function runOnPageShim(
 		activeRecordCount = 0;
 		activeChunkConversationIds = new Set();
 		pendingStreamText = `{${JSON.stringify(streamConfig?.arrayKey ?? "records")}:[`;
-		pendingChunkConversationIds.clear();
+		pendingChunkSpans = [];
 	};
 	const appendStreamRecord = async (
 		stream: string,
@@ -692,7 +731,14 @@ export async function runOnPageShim(
 					const timing = conversationTimings.get(conversationId);
 					if (timing)
 						timing.bytes += new TextEncoder().encode(serialized).length;
-					pendingChunkConversationIds.add(conversationId);
+					pendingChunkSpans.push({
+						id: conversationId,
+						start: pendingStreamText.length,
+						end:
+							pendingStreamText.length +
+							serialized.length +
+							(activeRecordCount > 0 ? 1 : 0),
+					});
 				}
 			}
 			pendingStreamText +=
@@ -705,6 +751,25 @@ export async function runOnPageShim(
 			throw streamFailure;
 		}
 	};
+	let timingOrdinal = 0;
+	const finishCompletedTimings = (all = false): void => {
+		const pending = new Set(pendingChunkSpans.map((span) => span.id));
+		for (const [id, timing] of conversationTimings) {
+			if (
+				!all &&
+				(!timing.completed ||
+					pending.has(id) ||
+					activeChunkConversationIds.has(id) ||
+					activeTimingConversationIds.includes(id))
+			)
+				continue;
+			timingOrdinal++;
+			console.info(
+				`[chatgpt-timing] conversation=${timingOrdinal} providerFetchMs=${Math.round(timing.providerFetchMs)} jsProcessMs=${Math.round(timing.jsProcessMs)} bridgeCalls=${timing.bridgeCalls.join("|")} bridgeBytes=${timing.bridgeBytes} bridgeMs=${Math.round(timing.bridgeMs)} bridgeRoundTrips=${timing.roundTrips} shellAckMs=${Math.round(timing.ackMs)} bytes=${timing.bytes} bridgeCallsOmitted=${timing.bridgeCallsOmitted}`,
+			);
+			conversationTimings.delete(id);
+		}
+	};
 	const finishStreamScope = async (): Promise<void> => {
 		if (activeStream === null) return;
 		const scope = `${prefix}${activeStream}`;
@@ -714,15 +779,7 @@ export async function runOnPageShim(
 			scope,
 			chunkCount: activeSequence,
 		});
-		if (activeStream === "messages") {
-			let ordinal = 0;
-			for (const timing of conversationTimings.values()) {
-				ordinal++;
-				console.info(
-					`[chatgpt-timing] conversation=${ordinal} providerFetchMs=${Math.round(timing.providerFetchMs)} jsProcessMs=${Math.round(timing.jsProcessMs)} bridgeCalls=${timing.bridgeCalls.join("|")} bridgeBytes=${timing.bridgeBytes} bridgeMs=${Math.round(timing.bridgeMs)} bridgeRoundTrips=${timing.roundTrips} shellAckMs=${Math.round(timing.ackMs)} bytes=${timing.bytes}`,
-				);
-			}
-		}
+		if (activeStream === "messages") finishCompletedTimings(true);
 		streamedScopeCount++;
 		activeStream = null;
 	};
