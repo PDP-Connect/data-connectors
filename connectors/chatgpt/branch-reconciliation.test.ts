@@ -361,7 +361,7 @@ test("an all-filtered current branch has no current node and reports zero messag
 	);
 });
 
-test("a roleless current tip is reported as a filtered non-message node", async () => {
+test("a roleless current tip emits a gap instead of a partial branch", async () => {
 	const mapping: Record<string, ChatGptNode> = {
 		root: { parent: null, children: ["m1"] },
 		m1: {
@@ -374,17 +374,13 @@ test("a roleless current tip is reported as a filtered non-message node", async 
 		},
 		leaf: { parent: "m1", children: [], message: {} },
 	};
-	const { emitted } = await runWithFilteredRecords(mapping, "leaf", new Set());
-	const conversation = emitted.find(
-		(record) => record.stream === "conversations",
+	const { emitted, protocolMessages } = await runWithFilteredRecords(
+		mapping,
+		"leaf",
+		new Set(),
 	);
-	assert.equal(conversation?.data.current_node, "m1");
-	assert.equal(conversation?.data.message_count_on_current_branch, 1);
-	assert.ok(
-		diagnostics.some((line) =>
-			line.includes("current_node_filtered=non_message"),
-		),
-	);
+	assert.deepEqual(emitted, []);
+	assert.ok(protocolMessages.some((message) => message.type === "DETAIL_GAP"));
 });
 
 test("chatgpt branch: a whole conversation reconciles clean and reports no gap", async () => {
@@ -668,6 +664,30 @@ test("conversations-only shape failure reports why the conversation was withheld
 	assert.ok(
 		diagnostics.some((line) =>
 			line.startsWith("conversation_detail_incomplete: message_shape_rejected"),
+		),
+	);
+});
+
+test("conversations-only truncated detail reports a withheld conversation", async () => {
+	const { deps, emitted, messages } = makeHarness(["conversations"]);
+	deps.conversationDetailOnly = true;
+	const result = await processConversationDetail(
+		deps,
+		makeConvo("a1"),
+		{ status: 200, json: { mapping: truncatedBranch(), current_node: "a1" } },
+		emitConversation(deps),
+	);
+	assert.deepEqual(result, {
+		complete: false,
+		reason: "branch_structurally_incomplete",
+	});
+	assert.deepEqual(emitted, []);
+	assert.ok(!messages.some((m) => m.type === "DETAIL_GAP"));
+	assert.ok(
+		diagnostics.some((line) =>
+			line.startsWith(
+				"conversation_detail_incomplete: branch_structurally_incomplete",
+			),
 		),
 	);
 });

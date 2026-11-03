@@ -13779,3 +13779,380 @@ test("collectChatGpt: a tool-recipient message keeps its body out of tool_calls 
 		rmSync(dir, { force: true, recursive: true });
 	}
 });
+
+test("mixed run keeps withheld conversation owed for a conversations-only recovery", async () => {
+	const rows = [
+		makeConvo({ id: "bad", update_time: 1_700_000_200 }),
+		makeConvo({ id: "good", update_time: 1_700_000_100 }),
+	];
+	let repaired = false;
+	const fetched: string[] = [];
+	const api: ChatGptApi = {
+		auth: () => Promise.reject(new Error("unused")),
+		fetch: (path) => {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				return Promise.resolve({
+					status: 200,
+					json: {
+						items: cursor === 0 ? rows : [],
+						has_missing_conversations: false,
+						total: rows.length,
+					},
+				});
+			}
+			fetched.push(path);
+			if (path === "/conversation/bad" && !repaired) {
+				return Promise.resolve({
+					status: 200,
+					json: {
+						current_node: "a1",
+						mapping: { a1: userNode("missing", [], "bad") },
+					},
+				});
+			}
+			return Promise.resolve(
+				makeDetailOkForConversation(path.split("/").pop() ?? ""),
+			);
+		},
+	};
+	const first = makeRecordingEmit(validateRecord);
+	await runConversationsAndMessagesStreams(
+		{
+			api,
+			emit: first.emit,
+			emitRecord: first.emitRecord,
+			progress: async () => {},
+			requested: new Map(
+				["conversations", "messages"].map((name) => [name, { name }]),
+			),
+		},
+		{},
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+	const coverage = first.protocolMessages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "conversations",
+	);
+	assert.equal(coverage?.type, "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, 2);
+	assert.equal(coverage.covered, 1);
+	assert.ok(
+		first.protocolMessages.some(
+			(m) => m.type === "DETAIL_GAP" && m.record_key === "bad",
+		),
+	);
+	assert.ok(
+		!first.emitted.some(
+			(r) => r.stream === "conversations" && r.data.id === "bad",
+		),
+	);
+	const state: Record<string, unknown> = {};
+	for (const m of first.protocolMessages)
+		if (m.type === "STATE") state[m.stream] = m.cursor;
+	repaired = true;
+	fetched.length = 0;
+	const second = makeRecordingEmit(validateRecord);
+	await runConversationsAndMessagesStreams(
+		{
+			api,
+			emit: second.emit,
+			emitRecord: second.emitRecord,
+			progress: async () => {},
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		},
+		state as CollectContext["state"],
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+	assert.ok(fetched.includes("/conversation/bad"));
+	assert.ok(
+		second.emitted.some(
+			(r) => r.stream === "conversations" && r.data.id === "bad",
+		),
+	);
+});
+
+test("conversations-only wrapper reports withheld shape failures through diagnostics", async () => {
+	const row = makeConvo({ id: "bad", current_node: "a1" });
+	const harness = makeRecordingEmit(validateRecord);
+	const api: ChatGptApi = {
+		auth: () => Promise.reject(new Error("unused")),
+		fetch: (path) => {
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				return Promise.resolve({
+					status: 200,
+					json: {
+						items: cursor === 0 ? [row] : [],
+						total: 1,
+						has_missing_conversations: false,
+					},
+				});
+			}
+			return Promise.resolve({
+				status: 200,
+				json: {
+					current_node: "a1",
+					mapping: { a1: userNode(null, [], "bad", "r".repeat(41)) },
+				},
+			});
+		},
+	};
+	await runConversationsAndMessagesStreams(
+		{
+			api,
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: async () => {},
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		},
+		{},
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+	assert.ok(
+		diagnostics.some((line) =>
+			line.startsWith("conversation_detail_incomplete: message_shape_rejected"),
+		),
+	);
+	assert.ok(!harness.protocolMessages.some((m) => m.type === "DETAIL_GAP"));
+	const coverage = harness.protocolMessages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "conversations",
+	);
+	assert.equal(coverage?.type, "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, 1);
+	assert.equal(coverage.covered, 0);
+});
+
+test("mixed detail rejection stays owed to a later conversations-only run", async () => {
+	const a = makeConvo({ id: "convo-A", update_time: 1_700_000_200 });
+	const b = makeConvo({ id: "convo-B", update_time: 1_700_000_100 });
+	const rows = [a, b];
+	const options = {
+		detailPacing: { random: () => 0, sleep: () => undefined },
+	};
+	const makeRun = (
+		requested: readonly string[],
+		fixed: boolean,
+		pending: CollectContext["detailGaps"] = [],
+	) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const detailReads: string[] = [];
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				await Promise.resolve();
+				const url = new URL(path, "https://chatgpt.com");
+				if (url.pathname === "/conversations") {
+					const offset = Number(url.searchParams.get("offset") ?? 0);
+					return {
+						status: 200,
+						json: { items: offset === 0 ? rows : [], total: rows.length },
+					};
+				}
+				if (url.pathname === "/conversations/search") {
+					const cursor = Number(url.searchParams.get("cursor") ?? 0);
+					return {
+						status: 200,
+						json: {
+							items: cursor === 0 ? rows : [],
+							next_cursor: cursor === 0 ? rows.length : null,
+						},
+					};
+				}
+				if (url.pathname.startsWith("/conversation/")) {
+					const id = decodeURIComponent(
+						url.pathname.slice("/conversation/".length),
+					);
+					assert.ok(id === a.id || id === b.id, "only the two fixture details");
+					detailReads.push(id);
+					if (id === a.id && !fixed) {
+						return {
+							status: 200,
+							json: {
+								id,
+								current_node: "a1",
+								mapping: {
+									a1: userNode("missing-u1", [], "truncated", "assistant"),
+								},
+							},
+						};
+					}
+					return makeDetailOkForConversation(id);
+				}
+				throw new Error("unexpected fetch " + path);
+			},
+		};
+		const deps: StreamDeps = {
+			api,
+			sleep: () => Promise.resolve(),
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: () => Promise.resolve(),
+			requested: new Map(requested.map((name) => [name, { name }])),
+			detailGaps: pending,
+			requestDetailGapPage: () => Promise.resolve([]),
+		};
+		return { harness, deps, detailReads };
+	};
+	const countRows = (
+		run: ReturnType<typeof makeRun>,
+		stream: string,
+		id: string,
+	) =>
+		run.harness.emitted.filter((r) => r.stream === stream && r.data.id === id)
+			.length;
+
+	// Run 1: A's structural verdict suppresses its parent record; B succeeds.
+	const first = makeRun(["conversations", "messages"], false);
+	await runConversationsAndMessagesStreams(first.deps, {}, options);
+	assert.deepEqual(first.detailReads.slice().sort(), [a.id, b.id].sort());
+	assert.equal(countRows(first, "conversations", a.id), 0);
+	assert.equal(countRows(first, "conversations", b.id), 1);
+	const gaps = detailGaps(first.harness.protocolMessages);
+	assert.equal(gaps.length, 1);
+	const gap = gaps[0]!;
+	assert.equal(gap.stream, "messages");
+	assert.equal(gap.record_key, a.id);
+	assert.equal(
+		(gap.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		"branch_structurally_incomplete",
+	);
+	const coverage = first.harness.protocolMessages.filter(
+		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			m.type === "DETAIL_COVERAGE" && m.stream === "conversations",
+	);
+	assert.ok(
+		coverage.length > 0,
+		"a complete list must report conversation coverage",
+	);
+	// Persist the complete cursors, not just their watermark: exact done keys,
+	// retry state, history frontier and enumeration state are part of the bug.
+	const saved = {
+		conversations: structuredClone(
+			lastStateCursor(first.harness.protocolMessages, "conversations"),
+		),
+		messages: structuredClone(
+			lastStateCursor(first.harness.protocolMessages, "messages"),
+		),
+	} as CollectContext["state"];
+	const pending = [
+		{
+			...makeDetailGapFromConvo("gap-A", a),
+			detail_locator: gap.detail_locator,
+		},
+	] as CollectContext["detailGaps"];
+
+	// Run 2: provider body repaired, SAME list timestamps and ids.
+	// Supply the still-pending messages gap, but do not request messages.
+	const second = makeRun(["conversations"], true, pending);
+	await runConversationsAndMessagesStreams(second.deps, saved, options);
+	assert.equal(
+		second.harness.emitted.filter((r) => r.stream === "messages").length,
+		0,
+	);
+	assert.equal(
+		second.harness.protocolMessages.filter(
+			(m) => m.type === "DETAIL_GAP_RECOVERED",
+		).length,
+		0,
+		"conversation repair must not falsely discharge the messages gap",
+	);
+	// Delay these assertions until BOTH runs have executed, so a red run shows
+	// false coverage and missed retry together rather than stopping at coverage.
+	assert.deepEqual(
+		{
+			run1Coverage: coverage.map((m) => ({
+				considered: m.considered,
+				covered: m.covered,
+			})),
+			run2DetailReads: second.detailReads,
+			run2ARows: countRows(second, "conversations", a.id),
+			run2BRows: countRows(second, "conversations", b.id),
+		},
+		{
+			run1Coverage: [{ considered: 2, covered: 1 }],
+			run2DetailReads: [a.id],
+			run2ARows: 1,
+			run2BRows: 0,
+		},
+	);
+	const repaired = second.harness.emitted.find(
+		(r) => r.stream === "conversations" && r.data.id === a.id,
+	);
+	assert.equal(repaired?.data.message_count_on_current_branch, 2);
+});
+
+test("incomplete detail locator reasons have connector display messages", async () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { reason_display_messages: Record<string, string> };
+	const fixtures = [
+		{
+			expected: "branch_structurally_incomplete",
+			mapping: { a1: userNode("missing", [], "bad") },
+		},
+		{
+			expected: "message_shape_rejected",
+			mapping: { a1: userNode(null, [], "bad", "r".repeat(41)) },
+		},
+	];
+	await Promise.all(
+		fixtures.map(async (fixture) => {
+			const { deps, messages } = makeHarness();
+			const result = await processConversationDetail(
+				deps,
+				makeConvo({ current_node: "a1" }),
+				{ status: 200, json: { current_node: "a1", mapping: fixture.mapping } },
+				makeEmitConversation(deps),
+			);
+			assert.deepEqual(result, { complete: false, reason: fixture.expected });
+			const gap = detailGaps(messages)[0];
+			const reason = (
+				gap?.detail_locator as { incomplete_reason?: string } | undefined
+			)?.incomplete_reason;
+			assert.equal(reason, fixture.expected);
+			assert.ok(
+				reason && manifest.reason_display_messages[reason]?.trim(),
+				`missing display message for ${reason}`,
+			);
+		}),
+	);
+});
+
+test("detail fallback locator reasons have connector display messages", async () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { reason_display_messages: Record<string, string> };
+	const fixtures = [
+		{ expected: "detail_http_error", detail: { status: 503, json: null } },
+		{
+			expected: "detail_mapping_missing",
+			detail: { status: 200, json: { title: "missing mapping" } },
+		},
+	];
+	await Promise.all(
+		fixtures.map(async ({ expected, detail }) => {
+			const { deps, messages } = makeHarness();
+			const outcome = await processConversationDetail(
+				deps,
+				makeConvo(),
+				detail,
+				makeEmitConversation(deps),
+			);
+			assert.deepEqual(outcome, { complete: false, reason: expected });
+			const reason = (
+				detailGaps(messages)[0]?.detail_locator as
+					| { incomplete_reason?: string }
+					| undefined
+			)?.incomplete_reason;
+			assert.equal(reason, expected);
+			assert.ok(
+				reason && manifest.reason_display_messages[reason]?.trim(),
+				`missing display message for ${reason}`,
+			);
+		}),
+	);
+});
