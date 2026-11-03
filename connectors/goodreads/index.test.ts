@@ -11,6 +11,7 @@ import {
 	makeEmitRecord,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { RUNTIME_GENERIC_REASON_CODES } from "../../packages/polyfill-connectors/src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
 import { skipPoliteDelays } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
 import { type GoodreadsCollectContext, joinLibrary } from "./collector.ts";
@@ -1266,7 +1267,7 @@ test("a run that asks for none of this connector's streams does nothing", async 
 	assert.deepEqual(h.messages, []);
 });
 
-test("every SKIP_RESULT reason the run can emit has display copy in the manifest", async () => {
+test("every SKIP_RESULT reason the run can emit has display copy, in the manifest or the runtime", async () => {
 	const reasons = new Set<string>();
 	const shortTags = fixtureApi({
 		GoodreadsTags: (body) => {
@@ -1300,7 +1301,13 @@ test("every SKIP_RESULT reason the run can emit has display copy in the manifest
 		"source_unreadable",
 	]);
 	for (const reason of reasons) {
-		assert.ok(manifest.reason_display_messages[reason], reason);
+		// The runtime owns copy for its generic codes; a manifest must not redeclare them.
+		const generic = RUNTIME_GENERIC_REASON_CODES.has(reason);
+		assert.equal(
+			Boolean(manifest.reason_display_messages[reason]),
+			!generic,
+			reason,
+		);
 	}
 });
 
