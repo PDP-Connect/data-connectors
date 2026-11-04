@@ -2158,6 +2158,25 @@ test("a request made from a non-player navigation cannot prove an empty saved-tr
 	});
 });
 
+test("the locale-prefixed player root Spotify redirects to collects like the bare root", async () => {
+	for (const pathname of ["/intl-id/", "/intl-pt/", "/intl-pt-BR/", "/intl-de"]) {
+		const result = await collectSavedTracks(() => savedResponse([], 0), {
+			bundle: () => bundleFor(["fetchLibraryTracks"]),
+			pathname,
+		});
+		assert.deepEqual(result.requests, [0], pathname);
+	}
+});
+
+test("a locale prefix on any page other than the player root is still not the player", async () => {
+	for (const pathname of ["/intl-id/search", "/intl-id/login", "/intl-/", "/intlx-id/"]) {
+		await assertRejectedWithoutAuthority(() => savedResponse([], 0), {
+			bundle: () => bundleFor(["fetchLibraryTracks"]),
+			pathname,
+		});
+	}
+});
+
 test("Spotify end proof requires the exact player navigation, owner, request, and terminal counts", () => {
 	const evidence = {
 		stream: "saved_tracks",
