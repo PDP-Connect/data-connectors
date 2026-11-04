@@ -49,3 +49,22 @@ test("maps only valid ids to displayed owner gear names", () => {
 	assert.equal(parseGearNames('{"bikes":[]}'), null);
 	assert.equal(parseGearNames("not json"), null);
 });
+
+test("heart-rate statistics use only valid samples, including recorded zero", () => {
+	const samples = [0, 90, { value: 150 }, null, -1, "180", {}, { value: -2 }];
+	for (const heartrate of [samples, { data: samples }]) {
+		assert.deepEqual(parseHeartRateStream(JSON.stringify({ heartrate })), {
+			average: 80,
+			maximum: 150,
+		});
+	}
+});
+
+test("empty or wholly invalid heart-rate streams have null statistics", () => {
+	for (const heartrate of [[], [null, -1, "120", {}, { value: null }]]) {
+		assert.deepEqual(parseHeartRateStream(JSON.stringify({ heartrate })), {
+			average: null,
+			maximum: null,
+		});
+	}
+});

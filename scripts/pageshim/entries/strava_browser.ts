@@ -2,11 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // strava_browser on PageShim. Each scope is `{ activities }`, matching Vana's
-// stored Strava payload. The host persists STATE between runs; each run walks
-// from the newest activity up to the connector's page bound. The mobile host
-// stores each `{ activities }` payload as the newest whole version, so a list
-// walk that stops early (a 503 or a 429 after the retries) fails the run: an
-// emitted prefix would replace the stored list.
+// stored Strava payload. The mobile host stores each `{ activities }` payload
+// as the newest whole version: it merges only keyed `{ records }` scopes, so
+// this one is delivered as is. Every run is therefore a full inventory of
+// activity summaries. The saved cursor is not given to the collector: with
+// it, a later run emits only new activities or a detail batch, and that
+// subset would replace the stored list (or, with nothing new, store nothing
+// and fail the run as no data). A list walk that stops early (a 503 or a 429
+// after the retries) fails the run for the same reason: an emitted prefix
+// would replace the stored list.
+//
+// The STATE checkpoint is still sent, since the runtime uses it to tell an
+// account with no activities (a confirmed empty list) from a run that
+// collected nothing. Its id lists (`known_ids`, `pending_detail_ids`) are
+// dropped first: no PageShim run reads them, and at about 9k activities they
+// would exceed the host bridge's 256Ki message cap and fail the checkpoint.
 //
 // A host range for strava.activities applies to start_date_local, a
 // calendar day: full-date bounds are compared as days. A bound of another
@@ -33,6 +43,22 @@ type ScopeEntriesPage = ShimPage & {
 
 const activitiesConsentField =
 	consentTimeFieldResolver("strava-browser")("activities");
+
+/**
+ * The collector's activities cursor without its id lists. Everything else
+ * (`list_complete`, `requested_since`) is a few bytes and keeps the stored
+ * STATE a recognisable subset of the desktop shape.
+ */
+function compactCursor(cursor: unknown): unknown {
+	if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor))
+		return cursor;
+	const {
+		known_ids: _knownIds,
+		pending_detail_ids: _pendingIds,
+		...rest
+	} = cursor as Record<string, unknown>;
+	return rest;
+}
 
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
@@ -68,9 +94,22 @@ const activitiesConsentField =
 					activitiesConsentField,
 				);
 				if (unsupported !== null) return;
-				await collectStravaBrowser(ctx as unknown as StravaCollectContext, {
-					failRunOnIncompleteList: true,
-				});
+				// No saved cursor, and a checkpoint without the id lists: see the
+				// note at the top of this file.
+				const stravaCtx = ctx as unknown as StravaCollectContext;
+				await collectStravaBrowser(
+					{
+						...stravaCtx,
+						state: {},
+						emit: (msg) =>
+							stravaCtx.emit(
+								msg.type === "STATE"
+									? { ...msg, cursor: compactCursor(msg.cursor) }
+									: msg,
+							),
+					},
+					{ failRunOnIncompleteList: true },
+				);
 			},
 			toScope: (_stream, records) => ({ activities: records }),
 			streamScopeRecords: {

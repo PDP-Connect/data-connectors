@@ -42,6 +42,7 @@ import {
 	NO_DETAIL_WAITS,
 	withEmptyConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
+import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
 	ChatGptRecoverableRetryExhaustedError,
 	ChatGptRunBudget,
@@ -201,7 +202,7 @@ function makeDeps(
 } {
 	const harness = makeRecordingEmit(validateRecord);
 	const deps: StreamDeps = {
-		api,
+		api: withEmptyPrimaryList(api),
 		sleep: (): Promise<void> => Promise.resolve(),
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
@@ -607,6 +608,7 @@ test("runConversationsAndMessagesStreams: a conversation only the conversations 
 		deps,
 		{
 			conversations: {
+				enumeration_version: 1,
 				last_update_time: "2026-04-22T09:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,
@@ -780,6 +782,7 @@ test("runConversationsAndMessagesStreams: a conversation only the conversations 
 		deps,
 		{
 			conversations: {
+				enumeration_version: 1,
 				last_update_time: "2026-04-22T09:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,
@@ -848,6 +851,7 @@ const THREE = [
 ];
 /** The cursor of a run that read THREE to the bottom: only the newest key is kept. */
 const ALL_READ_CURSOR = {
+	enumeration_version: 1,
 	last_update_time: "2026-04-22T11:00:00.000Z",
 	detail_version: 2,
 	detail_frontier: null,
@@ -882,6 +886,7 @@ test("runConversationsAndMessagesStreams: conversations alone reads the newest c
 	// The watermark and the history frontier both stand at the one row read, and
 	// the exact key says which row it was.
 	assert.deepEqual(first.cursor, {
+		enumeration_version: 1,
 		last_update_time: "2026-04-22T11:00:00.000Z",
 		detail_version: 2,
 		detail_frontier: "2026-04-22T11:00:00.000Z",
@@ -1117,6 +1122,7 @@ test("runConversationsAndMessagesStreams: a conversations cursor from before mod
 	);
 	assert.deepEqual(capped.detailReads, ["conv-C", "conv-B"]);
 	assert.deepEqual(capped.cursor, {
+		enumeration_version: 1,
 		last_update_time: "2026-04-22T11:00:00.000Z",
 		detail_version: 2,
 		detail_frontier: "2026-04-22T10:00:00.000Z",
@@ -1206,6 +1212,7 @@ test("runConversationsAndMessagesStreams: conversations alone reads fresh conver
 	assert.equal(new Set(allReads).size, allReads.length, "no detail read twice");
 	assert.equal(allReads.length, withArrivals.length);
 	assert.deepEqual(cursor, {
+		enumeration_version: 1,
 		last_update_time: "2026-04-22T13:00:00.000Z",
 		detail_version: 2,
 		detail_frontier: null,
@@ -1237,6 +1244,7 @@ test("runConversationsAndMessagesStreams: conversations alone reaches every conv
 	assert.deepEqual(reads, ["conv-A", "conv-B"]);
 	assert.deepEqual(state, {
 		conversations: {
+			enumeration_version: 1,
 			last_update_time: "2026-04-22T10:00:00.000Z",
 			detail_version: 2,
 			detail_frontier: null,
@@ -1275,6 +1283,7 @@ test("runConversationsAndMessagesStreams: conversations alone checkpoints the cu
 	// frontier reaches down to conv-05, the oldest of them, just above conv-04.
 	const checkpoint = lastConversationsCursor(protocolMessages);
 	assert.deepEqual(checkpoint, {
+		enumeration_version: 1,
 		last_update_time: "2026-04-22T00:29:00.000Z",
 		detail_version: 2,
 		detail_frontier: "2026-04-22T00:05:00.000Z",
@@ -1330,6 +1339,7 @@ test("runConversationsAndMessagesStreams: both streams do not start a second det
 		deps,
 		{
 			conversations: {
+				enumeration_version: 1,
 				last_update_time: "2026-04-22T09:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,
@@ -1351,6 +1361,7 @@ test("runConversationsAndMessagesStreams: both streams do not start a second det
 	// conv-mid is the only row still owed, so the watermark stays below it. The
 	// two rows the messages pass took are kept as exact keys above it.
 	assert.deepEqual(lastConversationsCursor(protocolMessages), {
+		enumeration_version: 1,
 		last_update_time: "2026-04-22T09:00:00.000Z",
 		detail_version: 2,
 		detail_frontier: null,
@@ -1410,6 +1421,7 @@ test("runConversationsAndMessagesStreams: messages backfill is independent from 
 	);
 	assert.ok(messagesState && messagesState.type === "STATE");
 	assert.deepEqual(messagesState.cursor, {
+		enumeration_version: 1,
 		last_update_time: "2026-04-22T10:00:00.000Z",
 	});
 });
@@ -1441,6 +1453,7 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 
 	await runConversationsAndMessagesStreams(deps, {
 		conversations: {
+			enumeration_version: 1,
 			last_update_time: "2026-04-22T10:00:00.000Z",
 			detail_version: 2,
 			detail_frontier: null,
@@ -1475,6 +1488,7 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	);
 	assert.ok(conversationsState && conversationsState.type === "STATE");
 	assert.deepEqual(conversationsState.cursor, {
+		enumeration_version: 1,
 		last_update_time: "2026-04-22T11:00:00.000Z",
 		detail_version: 2,
 		detail_frontier: null,
@@ -1486,6 +1500,7 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 	);
 	assert.ok(messagesState && messagesState.type === "STATE");
 	assert.deepEqual(messagesState.cursor, {
+		enumeration_version: 1,
 		last_update_time: "2026-04-22T11:00:00.000Z",
 	});
 });

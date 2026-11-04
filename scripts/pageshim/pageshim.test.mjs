@@ -2587,7 +2587,7 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 	);
 });
 
-test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
+test("strava_browser: every PageShim run delivers the whole activity list, even with a saved cursor", {
 	timeout: 180_000,
 }, async () => {
 	const { pageshimCase: c, resolveFixture } = await import(
@@ -2651,9 +2651,11 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 			stateAckDelayMs: 5,
 			...overrides,
 		});
-	let initialState = {};
-
-	const first = await run(initialState);
+	// The mobile host stores each { activities } payload as the newest whole
+	// version and does not merge it with the last one. A run that resumed the
+	// saved cursor emitted only a detail batch or new activities, which then
+	// replaced the stored list, or emitted nothing and failed as no data.
+	const first = await run({});
 	assert.deepEqual(first.ret, { ok: true }, first.log.slice(-20).join("\n"));
 	assertCleanRun(first);
 	assert.deepEqual(first.result.errors, []);
@@ -2664,10 +2666,6 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		"initial inventory must not backfill details",
 	);
 	assert.equal(first.states?.["strava.activities"]?.list_complete, true);
-	assert.equal(
-		first.states?.["strava.activities"]?.pending_detail_ids.length,
-		205,
-	);
 	assert.deepEqual(first.stateMessages, [
 		{
 			type: "STATE",
@@ -2675,6 +2673,19 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 			cursor: first.states["strava.activities"],
 		},
 	]);
+	// No PageShim run reads the collector's id lists, and with about 9k
+	// activities they would exceed the host bridge's 256Ki message cap. The
+	// checkpoint keeps only the scalar fields, so its size does not grow with
+	// the activity list.
+	assert.deepEqual(
+		Object.keys(first.states["strava.activities"]).sort(),
+		["list_complete", "requested_since"],
+		"the PageShim checkpoint must not carry known_ids or pending_detail_ids",
+	);
+	assert.ok(
+		JSON.stringify(first.states["strava.activities"]).length < 256,
+		"the PageShim checkpoint must not grow with the activity list",
+	);
 	assert.ok(
 		first.resultWriteOrder < first.stateAckOrder,
 		"the runtime must publish buffered records before writing their checkpoint",
@@ -2683,53 +2694,51 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		!first.log.some((line) => line.includes("91000000000")),
 		"cursor contents must not appear in logs",
 	);
-	initialState = first.states;
+
+	// A device that ran 0.1.40 or earlier stored the collector's full cursor
+	// with every id listed; a current device stores the compact one. Neither
+	// may change what a run delivers.
+	const allIds = activities.map((a) => a.id_str);
+	const legacyStates = {
+		"strava.activities": {
+			known_ids: allIds,
+			pending_detail_ids: allIds,
+			list_complete: true,
+			requested_since: null,
+		},
+	};
+	for (const [label, states] of [
+		["second", legacyStates],
+		["third", first.states],
+	]) {
+		detailRequests.length = 0;
+		const next = await run(states);
+		assert.deepEqual(next.ret, { ok: true }, next.log.slice(-20).join("\n"));
+		assertCleanRun(next);
+		assert.deepEqual(next.result.errors, []);
+		const ids = next.result["strava.activities"].activities.map((a) => a.id);
+		assert.equal(ids.length, 205, `the ${label} run must deliver every activity`);
+		assert.equal(new Set(ids).size, 205, `the ${label} run must not repeat an id`);
+		assert.deepEqual(
+			detailRequests,
+			[],
+			`the ${label} run must not resume a detail batch from the saved cursor`,
+		);
+		assert.deepEqual(
+			next.states,
+			first.states,
+			`the ${label} run must write the compact checkpoint, whatever it was given`,
+		);
+	}
 
 	detailRequests.length = 0;
-	const second = await run(initialState);
-	assert.deepEqual(second.ret, { ok: true }, second.log.slice(-20).join("\n"));
-	assertCleanRun(second);
-	assert.equal(
-		detailRequests.length,
-		100,
-		"run two must fetch the first detail batch",
-	);
-	const secondBatch = new Set(detailRequests);
-	assert.equal(second.result["strava.activities"].activities.length, 100);
-	assert.equal(
-		second.states?.["strava.activities"]?.pending_detail_ids.length,
-		105,
-	);
-	assert.notDeepEqual(second.states, initialState);
-	initialState = second.states;
-
-	detailRequests.length = 0;
-	const third = await run(initialState);
-	assert.deepEqual(third.ret, { ok: true }, third.log.slice(-20).join("\n"));
-	assertCleanRun(third);
-	assert.equal(
-		detailRequests.length,
-		100,
-		"run three must fetch the next detail batch",
-	);
-	assert.ok(
-		detailRequests.every((id) => !secondBatch.has(id)),
-		"run three must continue with activities left by run two",
-	);
-	assert.equal(third.result["strava.activities"].activities.length, 100);
-	assert.equal(
-		third.states?.["strava.activities"]?.pending_detail_ids.length,
-		5,
-	);
-
-	detailRequests.length = 0;
-	const failed = await run(third.states, { failResultWrite: true });
+	const failed = await run(first.states, { failResultWrite: true });
 	assert.deepEqual(failed.ret, { ok: true }, failed.log.slice(-20).join("\n"));
 	assert.equal(failed.data.error, "synthetic result write failed");
 	assert.deepEqual(failed.stateMessages, []);
 	assert.deepEqual(
 		failed.states,
-		third.states,
+		first.states,
 		"a failed result write must not send a checkpoint",
 	);
 });
@@ -2830,10 +2839,12 @@ test("strava_browser: a large activity list streams only when the host offers pa
 	);
 	assert.ok(scope.length > 125 * 1024, `${scope.length}`);
 	assert.equal(JSON.parse(scope).activities.length, 2000);
-	assert.equal(
-		large.states["strava.activities"].pending_detail_ids.length,
-		2000,
-	);
+	// The checkpoint stays small however long the list is: the id lists the
+	// collector keeps for desktop detail work are not sent to the host.
+	assert.deepEqual(large.states["strava.activities"], {
+		list_complete: true,
+		requested_since: null,
+	});
 	assert.match(large.data.status, /^Complete! 2000 activities/);
 
 	const largeLegacy = await run("strava-large-older-shell", 2000, false);

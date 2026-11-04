@@ -136,7 +136,62 @@ function install(
 	return true;
 }
 
+// The mobile host's goto returns after a fixed delay, not when the new
+// document commits. A slow load leaves the previous document live, so the job
+// can be installed there and vanish when the new document replaces it: the
+// next pump finds no job, or the bridge call comes back empty. An install
+// that runs before the player root settles fails the same way. Nothing from a
+// lost document has been returned, so the run is collected again on the
+// settled page, a bounded number of times. Errors raised by the collector
+// itself are never retried.
+const DOCUMENT_ATTEMPTS = 3;
+const DOCUMENT_SETTLE_MS = 1_500;
+const SPOTIFY_PLAYER_URL = "https://open.spotify.com/";
+const LOST_DOCUMENT_ERRORS = new Set([
+	"spotify_mobile_install_failed",
+	"spotify_mobile_job_lost",
+	"spotify_mobile_result_lost",
+	"spotify_page_not_player",
+]);
+
+// A bridge call that runs while the WebView commits the new document is
+// answered with nothing, which the page facade (scripts/pageshim/runtime.ts)
+// reports as an invalid transfer marker, or as a failed transfer when it was
+// reading a large result back. The call never reached the settled document.
+const BRIDGE_LOST_DOCUMENT =
+	/^PageShim evaluation (?:returned an invalid transfer marker|transfer failed)/;
+
+function isLostDocument(error: unknown): boolean {
+	return error instanceof Error &&
+		(LOST_DOCUMENT_ERRORS.has(error.message) || BRIDGE_LOST_DOCUMENT.test(error.message));
+}
+
+async function settleSpotifyPlayer(page: Page): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, DOCUMENT_SETTLE_MS));
+	let atPlayer: unknown = false;
+	try {
+		atPlayer = await page.evaluate(() =>
+			location.href === "https://open.spotify.com/" && document.readyState !== "loading");
+	} catch (error) {
+		// A probe the committing document swallowed says nothing about where the
+		// page is, so the page is not taken to be settled.
+		if (!isLostDocument(error)) throw error;
+	}
+	if (atPlayer !== true) await page.goto(SPOTIFY_PLAYER_URL, { waitUntil: "domcontentloaded" });
+}
+
 export async function collectSpotifyMobileData(page: Page, streams: string[]): Promise<BrowserData> {
+	for (let attempt = 1; ; attempt += 1) {
+		try {
+			return await collectSpotifyMobileDocument(page, streams);
+		} catch (error) {
+			if (!isLostDocument(error) || attempt >= DOCUMENT_ATTEMPTS) throw error;
+		}
+		await settleSpotifyPlayer(page);
+	}
+}
+
+async function collectSpotifyMobileDocument(page: Page, streams: string[]): Promise<BrowserData> {
 	const key = "__pdppSpotify_" + Date.now() + "_" + Math.random().toString(36).slice(2);
 	// Lexically bind esbuild's named-function helper without modifying globals.
 	const source = "(() => { const __name = (target) => target; return (" +
@@ -163,11 +218,16 @@ export async function collectSpotifyMobileData(page: Page, streams: string[]): P
 			return JSON.parse(chunks.join("")) as BrowserData;
 		}
 	} finally {
-		await page.evaluate((name) => {
-			const jobs = globalThis as any;
-			jobs[name]?.dispose();
-			delete jobs[name];
-		}, key);
+		// Best effort: a dispose that runs while the document commits fails the
+		// way the lost call did, and must not replace the attempt's own error
+		// (which decides whether the run is collected again) or its result.
+		try {
+			await page.evaluate((name) => {
+				const jobs = globalThis as any;
+				jobs[name]?.dispose();
+				delete jobs[name];
+			}, key);
+		} catch {}
 	}
 }
 

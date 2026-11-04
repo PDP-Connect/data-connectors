@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.64",
+				"version": "0.2.65",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -1090,7 +1090,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.15",
+				"version": "0.3.16",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -3757,7 +3757,7 @@
 				},
 				"connector_key": "character-ai",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-				"version": "0.1.7",
+				"version": "0.1.8",
 				"display_name": "Character.AI",
 				"brand": {
 					"icon": "icon.svg",
@@ -4635,7 +4635,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.12",
+				"version": "0.3.14",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -8247,7 +8247,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.18",
+				"version": "0.1.19",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -8927,7 +8927,7 @@
 				},
 				"connector_key": "facebook",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Facebook",
 				"brand": {
 					"icon": "icon.svg",
@@ -11384,7 +11384,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.17",
+				"version": "0.3.18",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15494,7 +15494,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.45",
+				"version": "0.1.46",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -15964,7 +15964,7 @@
 				},
 				"connector_key": "instinct",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "Instinct",
 				"brand": {
 					"icon": "icon.svg",
@@ -17135,7 +17135,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.41",
+				"version": "0.3.42",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -17765,7 +17765,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.41",
+				"version": "0.4.42",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -18117,7 +18117,7 @@
 				},
 				"connector_key": "muse",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Muse (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19468,7 +19468,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.51",
+				"version": "0.1.52",
 				"display_name": "Oura (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19806,7 +19806,7 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "Perplexity (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -20206,7 +20206,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.6",
+				"version": "0.4.7",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -23053,7 +23053,7 @@
 				},
 				"connector_key": "slack-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "Slack (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -24249,7 +24249,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.47",
+				"version": "0.1.49",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -25143,7 +25143,7 @@
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.31",
+				"version": "1.0.32",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
@@ -25221,74 +25221,74 @@
 							"properties": {
 								"id": {
 									"type": "string",
-									"description": "Strava's own numeric activity id, stable across exports."
+									"description": "Strava's numeric activity ID, used as the record's primary key."
 								},
 								"activity_type": {
 									"type": ["string", "null"],
-									"description": "The export's Activity Type (Ride, Run, Swim, Hike). This is Strava's coarse type, not the API's finer sport_type; the export does not carry the latter.",
+									"description": "Strava's activity type, such as Ride, Run, Swim or Hike, or null when absent. The account export copies its Activity Type column. The browser collector uses the activity list's type; when that is absent, it uses sport_type and maps GravelRide and MountainBikeRide to Ride, TrailRun to Run and EMountainBikeRide to EBikeRide. Other values pass through unchanged.",
 									"x_pdpp_role": "primary-title"
 								},
 								"start_date": {
 									"type": "string",
 									"format": "date",
-									"description": "The calendar day of the activity, YYYY-MM-DD. Carried separately because start_time deliberately does not claim to be an instant: filtering and grouping need a field a server can treat as a date without inventing a timezone to do it. Derived from the same value as start_time, so it INHERITS start_time_basis — under basis 'utc' this is the UTC day, which is the wrong calendar day for any activity between local midnight and the owner's offset. Aggregates over a window (longest, furthest, how many) are safe on any basis; anything anchored to a particular day, including a same-day join against another source, is only safe under basis 'local'."
+									"description": "The YYYY-MM-DD date as written in start_time: at its stated offset, else in UTC or the zoneless value's own clock. Window aggregates are safe on any record. A same-day join or local-day claim is safe only when start_date_local is non-null; otherwise this date can be the wrong local day."
 								},
 								"start_date_local": {
 									"type": ["string", "null"],
 									"format": "date",
-									"description": "The activity's calendar day on the athlete's local clock, YYYY-MM-DD, or null when the source does not give that clock. This is the stream's consent_time_field: a time_range is a pair of full-dates compared with it as calendar days, and a bounded run never emits an activity whose value is null. strava-browser derives it from the local start time in Strava's activity list. The export fills it only when Activity Date states a numeric offset other than -00:00; a Z value gives the UTC day, which is not the local day for an activity between midnight and the offset."
+									"description": "The athlete's local calendar day, YYYY-MM-DD, or null. Set only when the source states the local clock: a numeric UTC offset in the account export (+00:00 counts; -00:00 means unknown), or an exact local offset in the Strava activity list. A 'Z', -00:00 or zoneless value gives no local day. This is the consent_time_field: a time_range compares calendar days, and a bounded run excludes activities whose value is null."
 								},
 								"start_time": {
 									"type": "string",
-									"description": "Activity start, ISO-8601. Carries a UTC offset only when the archive stated one; Strava's own rendering does not, so a zoneless value is normal. Read start_time_basis before treating this as an instant or making any claim about time of day.",
+									"description": "Activity start in ISO-8601 form. The browser collector always includes an offset or Z; the account export may be zoneless. Read start_time_basis before treating it as an instant or making local time-of-day claims.",
 									"x_pdpp_role": "event-time"
 								},
 								"start_time_basis": {
 									"type": "string",
 									"enum": ["utc", "local", "unknown"],
-									"description": "Which clock start_time is on. The export carries a single date column and does not state its basis, so this records what was determined rather than what was assumed. On 'unknown' or 'utc', a reader must not make time-of-day claims: an evening ride in one timezone is an afternoon one in another."
+									"description": "The clock used for start_time: 'local' (the athlete's local clock, with its offset), 'utc' (an exact instant: UTC, or a numeric offset stated in the account export) or 'unknown' (a zoneless value). It records what the collected source establishes rather than assuming a timezone. Only a non-null start_date_local establishes the athlete's local day."
 								},
 								"distance_m": {
 									"type": ["number", "null"],
-									"description": "Metres. Taken from the second Distance column, which is canonical; the first is in the athlete's own display units and may be miles."
+									"description": "Distance in metres, or null when unavailable from the collected source."
 								},
 								"moving_time_s": {
 									"type": ["number", "null"],
-									"description": "Seconds."
+									"description": "Moving time in seconds, or null when unavailable from the collected source."
 								},
 								"elapsed_time_s": {
 									"type": ["number", "null"],
-									"description": "Seconds. Taken from the second Elapsed Time column, which is canonical."
+									"description": "Elapsed time in seconds, or null when unavailable from the collected source."
 								},
 								"total_elevation_gain_m": {
 									"type": ["number", "null"],
-									"description": "Metres."
+									"description": "Elevation gain in metres, or null when unavailable from the collected source."
 								},
 								"average_heartrate": {
 									"type": ["number", "null"],
-									"description": "Beats per minute. Null when no monitor was worn, which is the common case — never zero."
+									"description": "Average heart rate in beats per minute, or null when not recorded or not yet collected. A missing reading is null, not 0. Browser values are the mean of the heart-rate stream samples."
 								},
 								"max_heartrate": {
 									"type": ["number", "null"],
-									"description": "Beats per minute. Null when no monitor was worn."
+									"description": "Maximum heart rate in beats per minute, or null when not recorded or not yet collected. A missing reading is null, not 0. Browser values are the maximum of the heart-rate stream samples."
 								},
 								"calories_kcal": {
 									"type": ["number", "null"],
-									"description": "Kilocalories as Strava recorded them. Null is common, particularly for manually entered activities."
+									"description": "Calories in kilocalories as recorded by Strava, or null when unavailable from the collected source. Browser summary records carry null; detail records may also have null."
 								},
 								"gear": {
 									"type": ["string", "null"],
-									"description": "The owner's own name for the bike or shoes used, from Activity Gear. Null when no gear was assigned."
+									"description": "The name of the bike or shoes used, or null when unassigned or unavailable from the collected source. Browser summary records carry null; detail collection may resolve the name from the owner's gear lists."
 								},
 								"freshness": {
 									"type": "string",
 									"enum": ["live", "snapshot"],
-									"description": "How this reading was collected. Always 'snapshot' for an export: the data is as old as the archive. Present in the payload because a reader holds records, not the manifest, and a source collected two ways must be distinguishable per reading."
+									"description": "How this reading was collected: 'snapshot' for account-export records and 'live' for records read from the signed-in website. This identifies the collection method, not a promise of continuous refresh."
 								},
 								"exported_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When Strava generated the archive these records came from. Always present as a key; null only when the archive carried no determinable generation date. Required alongside freshness 'snapshot' so age can be stated rather than inferred."
+									"description": "When Strava generated the account-export archive, or null when its generation date cannot be determined. Always null for browser-collected records, which do not come from an account-export archive. The key is present for both collection methods."
 								}
 							},
 							"required": [
@@ -25350,7 +25350,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.43",
+				"version": "0.1.45",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25383,7 +25383,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. The first run inventories all activity summaries. Later runs discover new summaries and read at most 100 activity details from a resumable queue. Pages and details are fetched one at a time with pauses."
+						"rationale": "Collection reads the activity list that strava.com loads for the owner's own signed-in session. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Every run reads activity summaries from that list. On desktop, the first run inventories all summaries and later runs discover new ones and read at most 100 activity details from a resumable queue. On mobile, every run is a full inventory of summaries and no activity details are read. Pages and details are fetched one at a time with pauses."
 					},
 					"public_listing": {
 						"tier": "preview"
@@ -25393,10 +25393,10 @@
 					{
 						"name": "activities",
 						"required": false,
-						"description": "Workouts recorded on Strava, read from the owner's account export. Location data and free text are excluded at the schema.",
+						"description": "Activities read from the owner's signed-in strava.com activity list. Every run emits summaries; on desktop, later runs can enrich them from activity detail pages, heart-rate streams and gear lists. Mobile runs collect summaries only, so heart rate, calories and gear stay null there. Emitted records exclude routes, GPS coordinates, activity titles and notes.",
 						"display": {
 							"label": "Your Strava activities",
-							"detail": "Sport, start time, distance, moving and elapsed time, elevation gain, average and maximum heart rate, calories and gear. No route, no GPS coordinates, no activity titles or notes."
+							"detail": "Sport, start time, distance, moving and elapsed time, elevation gain, plus average and maximum heart rate, calories and gear where available (desktop detail collection only; mobile collects summaries without them). No route, no GPS coordinates, no activity titles or notes."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -25404,74 +25404,74 @@
 							"properties": {
 								"id": {
 									"type": "string",
-									"description": "Strava's own numeric activity id, stable across exports."
+									"description": "Strava's numeric activity ID, used as the record's primary key."
 								},
 								"activity_type": {
 									"type": ["string", "null"],
-									"description": "The export's Activity Type (Ride, Run, Swim, Hike). This is Strava's coarse type, not the API's finer sport_type; the export does not carry the latter.",
+									"description": "Strava's activity type, such as Ride, Run, Swim or Hike, or null when absent. The account export copies its Activity Type column. The browser collector uses the activity list's type; when that is absent, it uses sport_type and maps GravelRide and MountainBikeRide to Ride, TrailRun to Run and EMountainBikeRide to EBikeRide. Other values pass through unchanged.",
 									"x_pdpp_role": "primary-title"
 								},
 								"start_date": {
 									"type": "string",
 									"format": "date",
-									"description": "The calendar day of the activity, YYYY-MM-DD. Carried separately because start_time deliberately does not claim to be an instant: filtering and grouping need a field a server can treat as a date without inventing a timezone to do it. Derived from the same value as start_time, so it INHERITS start_time_basis — under basis 'utc' this is the UTC day, which is the wrong calendar day for any activity between local midnight and the owner's offset. Aggregates over a window (longest, furthest, how many) are safe on any basis; anything anchored to a particular day, including a same-day join against another source, is only safe under basis 'local'."
+									"description": "The YYYY-MM-DD date as written in start_time: at its stated offset, else in UTC or the zoneless value's own clock. Window aggregates are safe on any record. A same-day join or local-day claim is safe only when start_date_local is non-null; otherwise this date can be the wrong local day."
 								},
 								"start_date_local": {
 									"type": ["string", "null"],
 									"format": "date",
-									"description": "The activity's calendar day on the athlete's local clock, YYYY-MM-DD, or null when the source does not give that clock. This is the stream's consent_time_field: a time_range is a pair of full-dates compared with it as calendar days, and a bounded run never emits an activity whose value is null. strava-browser derives it from the local start time in Strava's activity list. The export fills it only when Activity Date states a numeric offset other than -00:00; a Z value gives the UTC day, which is not the local day for an activity between midnight and the offset."
+									"description": "The athlete's local calendar day, YYYY-MM-DD, or null. Set only when the source states the local clock: a numeric UTC offset in the account export (+00:00 counts; -00:00 means unknown), or an exact local offset in the Strava activity list. A 'Z', -00:00 or zoneless value gives no local day. This is the consent_time_field: a time_range compares calendar days, and a bounded run excludes activities whose value is null."
 								},
 								"start_time": {
 									"type": "string",
-									"description": "Activity start, ISO-8601. Carries a UTC offset only when the archive stated one; Strava's own rendering does not, so a zoneless value is normal. Read start_time_basis before treating this as an instant or making any claim about time of day.",
+									"description": "Activity start in ISO-8601 form. The browser collector always includes an offset or Z; the account export may be zoneless. Read start_time_basis before treating it as an instant or making local time-of-day claims.",
 									"x_pdpp_role": "event-time"
 								},
 								"start_time_basis": {
 									"type": "string",
 									"enum": ["utc", "local", "unknown"],
-									"description": "Which clock start_time is on. The export carries a single date column and does not state its basis, so this records what was determined rather than what was assumed. On 'unknown' or 'utc', a reader must not make time-of-day claims: an evening ride in one timezone is an afternoon one in another."
+									"description": "The clock used for start_time: 'local' (the athlete's local clock, with its offset), 'utc' (an exact instant: UTC, or a numeric offset stated in the account export) or 'unknown' (a zoneless value). It records what the collected source establishes rather than assuming a timezone. Only a non-null start_date_local establishes the athlete's local day."
 								},
 								"distance_m": {
 									"type": ["number", "null"],
-									"description": "Metres. Taken from the second Distance column, which is canonical; the first is in the athlete's own display units and may be miles."
+									"description": "Distance in metres, or null when unavailable from the collected source."
 								},
 								"moving_time_s": {
 									"type": ["number", "null"],
-									"description": "Seconds."
+									"description": "Moving time in seconds, or null when unavailable from the collected source."
 								},
 								"elapsed_time_s": {
 									"type": ["number", "null"],
-									"description": "Seconds. Taken from the second Elapsed Time column, which is canonical."
+									"description": "Elapsed time in seconds, or null when unavailable from the collected source."
 								},
 								"total_elevation_gain_m": {
 									"type": ["number", "null"],
-									"description": "Metres."
+									"description": "Elevation gain in metres, or null when unavailable from the collected source."
 								},
 								"average_heartrate": {
 									"type": ["number", "null"],
-									"description": "Beats per minute. Null when no monitor was worn, which is the common case — never zero."
+									"description": "Average heart rate in beats per minute, or null when not recorded or not yet collected. A missing reading is null, not 0. Browser values are the mean of the heart-rate stream samples."
 								},
 								"max_heartrate": {
 									"type": ["number", "null"],
-									"description": "Beats per minute. Null when no monitor was worn."
+									"description": "Maximum heart rate in beats per minute, or null when not recorded or not yet collected. A missing reading is null, not 0. Browser values are the maximum of the heart-rate stream samples."
 								},
 								"calories_kcal": {
 									"type": ["number", "null"],
-									"description": "Kilocalories as Strava recorded them. Null is common, particularly for manually entered activities."
+									"description": "Calories in kilocalories as recorded by Strava, or null when unavailable from the collected source. Browser summary records carry null; detail records may also have null."
 								},
 								"gear": {
 									"type": ["string", "null"],
-									"description": "The owner's own name for the bike or shoes used, from Activity Gear. Null when no gear was assigned."
+									"description": "The name of the bike or shoes used, or null when unassigned or unavailable from the collected source. Browser summary records carry null; detail collection may resolve the name from the owner's gear lists."
 								},
 								"freshness": {
 									"type": "string",
 									"enum": ["live", "snapshot"],
-									"description": "How this reading was collected. Always 'snapshot' for an export: the data is as old as the archive. Present in the payload because a reader holds records, not the manifest, and a source collected two ways must be distinguishable per reading."
+									"description": "How this reading was collected: 'snapshot' for account-export records and 'live' for records read from the signed-in website. This identifies the collection method, not a promise of continuous refresh."
 								},
 								"exported_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "When Strava generated the archive these records came from. Always present as a key; null only when the archive carried no determinable generation date. Required alongside freshness 'snapshot' so age can be stated rather than inferred."
+									"description": "When Strava generated the account-export archive, or null when its generation date cannot be determined. Always null for browser-collected records, which do not come from an account-export archive. The key is present for both collection methods."
 								}
 							},
 							"required": [
@@ -25550,7 +25550,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.13",
+				"version": "0.3.14",
 				"display_name": "TikTok (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -28075,7 +28075,7 @@
 				},
 				"connector_key": "whatsapp-web",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "WhatsApp (web)",
 				"brand": {
 					"icon": "icon.svg",
@@ -29818,7 +29818,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.18",
+				"version": "0.1.19",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -31929,7 +31929,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.47",
+				"version": "0.2.48",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",
