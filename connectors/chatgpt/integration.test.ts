@@ -79,7 +79,6 @@ import {
 	emptyConversationDetail,
 	readConversationDetail,
 	NO_DETAIL_WAITS,
-	withEmptyConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
 import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
