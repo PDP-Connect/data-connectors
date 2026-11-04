@@ -1,0 +1,29 @@
+{
+	"annotated_books_collection": [
+		{
+			"asin": "B0SYNTH0001",
+			"imageUrl": "https://example.invalid/covers/80000001.jpg",
+			"title": "The Lighthouse Keeper's Atlas",
+			"authorName": "Mara Quill",
+			"sharedCount": 1,
+			"highlightCount": null,
+			"noteCount": null,
+			"readingNotesUrl": "https://www.goodreads.com/notes/80000001-the-lighthouse-keepers-atlas/90000001-synthetic-reader?ref=abp",
+			"knhCta": "See your notes and highlights (1 visible)",
+			"noSharedAnnotations": false
+		},
+		{
+			"asin": "B0SYNTH0099",
+			"imageUrl": "https://example.invalid/covers/80000099.jpg",
+			"title": "Tidewater Almanac (Kindle Edition)",
+			"authorName": "Ines Harrow",
+			"sharedCount": 0,
+			"highlightCount": null,
+			"noteCount": null,
+			"readingNotesUrl": "/notes/80000099-tidewater-almanac/90000001-synthetic-reader?ref=abp",
+			"knhCta": "See your notes and highlights (none visible)",
+			"noSharedAnnotations": true
+		}
+	],
+	"next_token": null
+}

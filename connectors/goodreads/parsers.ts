@@ -15,10 +15,14 @@
 
 import { parseHTML } from "linkedom";
 import type {
+	AnnotatedBook,
+	AnnotatedBooksPage,
 	BookAuthor,
 	ListingPage,
 	PrintBookRecord,
 	ProfileFacts,
+	ReadingNote,
+	ReadingNotesPage,
 	ReadingSession,
 	SettingsFacts,
 	VisibilityChoice,
@@ -65,6 +69,11 @@ const TRAILING_SPACE_RE = /[ \t]+\n/g;
 const NONE_NOTE_RE = /^(?:none|notes are private!?)$/i;
 const NOT_OWNED_RE = /^(?:0|no|false|not owned)$/i;
 const EDIT_BRACKET_RE = /\s*\[edit\]\s*/gi;
+const NOTES_PATH_RE =
+	/^(?:https:\/\/www\.goodreads\.com)?(\/notes\/\d+[^/?#]*\/\d+[^/?#]*)/;
+/** An annotation pair id, decoded: `<highlight id>|-0-|<note id>`, either side may be empty. */
+const PAIR_SEPARATOR_RE = /\|-\d+-\|/;
+const PERCENT_RE = /^(\d{1,3})%$/;
 
 const MONTHS: Record<string, number> = {
 	jan: 1,
@@ -697,5 +706,143 @@ export function parseSettings(html: string): SettingsFacts | null {
 			? (VISIBILITY[checked.getAttribute("value") ?? ""] ?? null)
 			: null,
 		searchable_by_email: checkbox(doc, "user[searchable_by_email]"),
+	};
+}
+
+// ─── Kindle notes and highlights ─────────────────────────────────────────
+
+const stringOrNull = (value: unknown): string | null =>
+	typeof value === "string" && squash(value) !== "" ? squash(value) : null;
+
+/**
+ * One page of the owner's Kindle notes list, the JSON `/notes/<id>/load_more`
+ * answers. Null for any other shape, and for a book without a notes page
+ * link, so a changed answer is never read as a short list.
+ */
+export function parseAnnotatedBooksPage(
+	body: string,
+): AnnotatedBooksPage | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return null;
+	}
+	if (typeof parsed !== "object" || parsed === null) return null;
+	const { annotated_books_collection: items, next_token: nextToken } =
+		parsed as Record<string, unknown>;
+	if (!Array.isArray(items)) return null;
+	if (!(nextToken === null || typeof nextToken === "string")) return null;
+	const books: AnnotatedBook[] = [];
+	for (const item of items) {
+		if (typeof item !== "object" || item === null) return null;
+		const fields = item as Record<string, unknown>;
+		const url = fields.readingNotesUrl;
+		const path =
+			typeof url === "string" ? NOTES_PATH_RE.exec(url)?.[1] : undefined;
+		if (!path) return null;
+		books.push({
+			asin: stringOrNull(fields.asin),
+			author: stringOrNull(fields.authorName),
+			notesPath: path,
+			title: stringOrNull(fields.title),
+		});
+	}
+	return { books, nextToken: nextToken === "" ? null : nextToken };
+}
+
+const flagAttr = (element: El, name: string): boolean | null => {
+	const value = element.getAttribute(name);
+	if (value === "true") return true;
+	if (value === "false") return false;
+	return null;
+};
+
+const multilineOrNull = (element: El | null): string | null =>
+	element ? orNull(tidyMultiline(textWithBreaks(element))) : null;
+
+/**
+ * One item of a notes page, or null when it cannot be read as one. A
+ * highlight may come with no text: Goodreads shows an empty card for a
+ * highlight whose text Amazon does not share (live 2026-11-04). It is kept,
+ * with null text, when the card has its usual layout.
+ */
+function parseReadingNote(item: El, bookId: string): ReadingNote | null {
+	if (item.getAttribute("data-book-id") !== bookId) return null;
+	if (!item.querySelector(".noteHighlightTextContainer")) return null;
+	let pair: string;
+	try {
+		pair = decodeURIComponent(
+			item.getAttribute("data-annotation-pair-id") ?? "",
+		);
+	} catch {
+		return null;
+	}
+	const halves = pair.split(PAIR_SEPARATOR_RE);
+	if (halves.length !== 2) return null;
+	const highlightId = orNull(halves[0] ?? "");
+	const noteId = orNull(halves[1] ?? "");
+	const highlightText = multilineOrNull(
+		item.querySelector(".noteHighlightTextContainer__highlightText"),
+	);
+	const noteText = multilineOrNull(item.querySelector(".js-noteText"));
+	const hasNote = flagAttr(item, "data-has-note");
+	if (
+		!(highlightId || noteId) ||
+		!(highlightText || noteText || highlightId) ||
+		(hasNote === true) !== (noteText !== null)
+	) {
+		return null;
+	}
+	const location = orNull(
+		textOf(item.querySelector(".noteHighlightContainer__location")),
+	);
+	const percent = PERCENT_RE.exec(location ?? "")?.[1];
+	return {
+		highlight_id: highlightId,
+		highlight_text: highlightText,
+		location,
+		location_percent: percent === undefined ? null : Number(percent),
+		note_id: noteId,
+		note_text: noteText,
+		shared: flagAttr(item, "data-visible"),
+		spoiler: flagAttr(item, "data-is-spoiler"),
+	};
+}
+
+/**
+ * One book's notes page (`/notes/<book id>/<owner id>`): every highlight
+ * and note of the book, in the page's order, with the banner's count of
+ * them. `recognised` is false for a page without the notes column or the
+ * banner, so a changed page is never read as a book without notes.
+ */
+export function parseReadingNotesPage(html: string): ReadingNotesPage {
+	const doc = parse(html);
+	const banner = doc.querySelector("#readingNotesBanner");
+	const column = doc.querySelector("#allHighlightsAndNotes");
+	const bookId = orNull(squash(banner?.getAttribute("data-book-id")));
+	const details = doc.querySelector(".readingNotesBookDetailsContainer");
+	const notes: ReadingNote[] = [];
+	let unreadable = 0;
+	if (column && bookId) {
+		for (const item of all(column, ".js-readingNote")) {
+			const note = parseReadingNote(item, bookId);
+			if (note) notes.push(note);
+			else unreadable += 1;
+		}
+	}
+	const total = banner?.getAttribute("data-total-count");
+	return {
+		author: details
+			? orNull(textOf(details.querySelector('a[href*="/author/show/"]')))
+			: null,
+		bookId,
+		bookTitle: details
+			? orNull(textOf(details.querySelector('a[href*="/book/show/"]')))
+			: null,
+		notes,
+		recognised: Boolean(banner && column && bookId),
+		total: total === null || total === undefined ? null : toInt(total),
+		unreadable,
 	};
 }

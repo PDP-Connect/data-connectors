@@ -31,6 +31,8 @@ const noRows = fx("library-no-rows.html");
 const profile = fx("profile.html");
 const settings = fx("settings.html");
 const signin = fx("signin.html");
+const notesList = api("notes-list.json");
+const notesPages = { 80000001: fx("notes-book-1.html"), 80000099: fx("notes-book-2.html") };
 
 const html = (body) => ({
 	status: 200,
@@ -61,6 +63,11 @@ export function resolveFixture(raw, request = {}) {
 	}
 	if (p === "/user/show/90000001") return html(profile);
 	if (p === "/user/edit") return html(settings);
+	if (p === "/notes/90000001/load_more") {
+		return { status: 200, contentType: "application/json", body: notesList };
+	}
+	const notesBook = /^\/notes\/(\d+)[^/]*\/90000001\b/.exec(p)?.[1];
+	if (notesBook && notesPages[notesBook]) return html(notesPages[notesBook]);
 	if (p.startsWith("/book/show/")) return html(bookPage);
 	if (p === "/robots.txt") return { status: 200, contentType: "text/plain", body: "User-agent: *\n" };
 	return { status: 404, contentType: "text/html", body: "<html></html>" };
@@ -77,7 +84,7 @@ export const goodreadsFixtures = {
 /** What pageshim.test.mjs needs to gate goodreads. */
 export const pageshimCase = {
 	fixtures: goodreadsFixtures,
-	scopes: ["books", "shelves", "account_profile", "usage_summary"].map((s) => `goodreads.${s}`),
+	scopes: ["books", "shelves", "highlights", "account_profile", "usage_summary"].map((s) => `goodreads.${s}`),
 	// tenure_months counts from the day the run happens.
 	volatileRecordFields: ["tenure_months"],
 	exportSummary: { count: 5, label: "books", details: { books: 5, shelves: 6 } },

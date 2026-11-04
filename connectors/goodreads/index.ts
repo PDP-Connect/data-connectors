@@ -16,11 +16,14 @@
  * short-lived token those pages carry. Goodreads offers no public API, key
  * or feed for any of this.
  *
- * Streams: books, shelves, account_profile, usage_summary. The summary is
- * computed from the full library listing even when `books` is not asked for,
- * and is withheld unless that listing is proven complete. Books and shelves
- * are incremental on the desktop runtime: unchanged records are not emitted
- * again, and a book or shelf gone from Goodreads is emitted as a deletion.
+ * Streams: books, shelves, highlights, account_profile, usage_summary. The
+ * summary is computed from the full library listing even when `books` is not
+ * asked for, and is withheld unless that listing is proven complete.
+ * Highlights are the owner's Kindle highlights and notes from Goodreads'
+ * notes pages, saved only when every page shows as many items as it counts.
+ * Books, shelves and highlights are incremental on the desktop runtime:
+ * unchanged records are not emitted again, and a record gone from Goodreads
+ * is emitted as a deletion.
  * Identity text (name, username, email, gender, location, about-me,
  * friends) is never read into a record. See collector.ts for the request
  * order and the completeness rules, graphql.ts for the API, and fetcher.ts
@@ -62,6 +65,10 @@ export const LOGIN_URL = `${ORIGIN}/user/sign_in`;
 const LIST_URL = `${ORIGIN}/review/list`;
 export const SIGN_IN_MESSAGE =
 	"Sign in to Goodreads (any method), tick Keep me signed in, then return here.";
+
+export const CODE_MESSAGE =
+	"Goodreads is asking for a verification code to finish signing in. Enter the code from your authenticator app, text message or email.";
+const CODE_RE = /^\d{4,10}$/;
 
 const OWN_LIST_PATH_RE = /^\/review\/list\/\d+/;
 const SIGN_IN_PATH_RE = /^\/(?:user\/sign_in|ap\/signin|sign_in)/;
@@ -179,9 +186,33 @@ export async function probeGoodreadsSession(
 }
 
 /**
+ * Ask the owner for Goodreads' verification code through the runtime, which
+ * shows the question on the run page. Null when the owner cancels, the
+ * question times out, or the answer is not a code.
+ */
+export async function requestVerificationCode(
+	sendInteraction: EnsureSessionArgs["sendInteraction"],
+): Promise<string | null> {
+	const answer = await sendInteraction({
+		kind: "otp",
+		message: CODE_MESSAGE,
+		schema: {
+			properties: { code: { pattern: CODE_RE.source, type: "string" } },
+			required: ["code"],
+			type: "object",
+		},
+		// Codes are short-lived; past this, the browser handoff takes over.
+		timeout_seconds: 600,
+	});
+	const code = answer.status === "success" ? answer.data?.code?.trim() : "";
+	return code && CODE_RE.test(code) ? code : null;
+}
+
+/**
  * Session order: a live saved session first; then, only when the owner saved
- * an email and password, one automatic sign-in; then the owner's browser
- * handoff. A fallback from the automatic step, or an error it throws, still
+ * an email and password, one automatic sign-in, which asks the owner for a
+ * verification code on the run page if Goodreads wants one; then the owner's
+ * browser handoff. A fallback from the automatic step, or an error it throws, still
  * reaches the handoff, and its explanation leads the handoff message. The
  * handoff reason ("captcha", "2fa") reaches a host that takes a manual action;
  * a host with an assistance surface shows only the message.
@@ -219,6 +250,7 @@ export async function ensureGoodreadsSession(
 			page,
 			password: saved.password,
 			probe: () => probeGoodreadsSession(page),
+			requestCode: () => requestVerificationCode(sendInteraction),
 			username: saved.username,
 		}).catch(
 			(): AutomaticSignInOutcome => ({
@@ -234,6 +266,7 @@ export async function ensureGoodreadsSession(
 		onSignInPage =
 			outcome.reason === "captcha" ||
 			outcome.reason === "verification" ||
+			outcome.reason === "code_rejected" ||
 			outcome.reason === "rejected_credentials";
 	}
 	if (!onSignInPage) {

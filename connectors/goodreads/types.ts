@@ -135,3 +135,65 @@ export interface SettingsFacts {
 	profile_visibility: VisibilityChoice | null;
 	searchable_by_email: boolean | null;
 }
+
+/** One book in the owner's Kindle notes list (`/notes/<id>/load_more`). */
+export interface AnnotatedBook {
+	asin: string | null;
+	author: string | null;
+	/** Path of the book's notes page, `/notes/<book id>-<slug>/<owner id>-<slug>`. */
+	notesPath: string;
+	title: string | null;
+}
+
+/** One page of the Kindle notes list. */
+export interface AnnotatedBooksPage {
+	books: AnnotatedBook[];
+	/** The token for the next page; null on the last one. */
+	nextToken: string | null;
+}
+
+/** One highlight, note, or highlight with a note, as a book's notes page shows it. */
+export interface ReadingNote {
+	highlight_id: string | null;
+	highlight_text: string | null;
+	/** Where the item sits in the book, as the page prints it ("37%"). */
+	location: string | null;
+	location_percent: number | null;
+	note_id: string | null;
+	note_text: string | null;
+	shared: boolean | null;
+	spoiler: boolean | null;
+}
+
+/** What one book's notes page says. */
+export interface ReadingNotesPage {
+	author: string | null;
+	bookId: string | null;
+	bookTitle: string | null;
+	notes: ReadingNote[];
+	/** The page has the notes column and its count banner. False means a page this parser does not know. */
+	recognised: boolean;
+	/** The banner's count of every highlight and note of the book. */
+	total: number | null;
+	/** Items that could not be read: no id, another book's id, or neither highlight nor note text. */
+	unreadable: number;
+}
+
+/** One record of the `highlights` stream. */
+export interface HighlightRecord {
+	asin: string | null;
+	author: string | null;
+	book_id: string;
+	book_title: string | null;
+	highlight_id: string | null;
+	highlight_text: string | null;
+	id: string;
+	location: string | null;
+	location_percent: number | null;
+	note_id: string | null;
+	note_text: string | null;
+	notes_url: string;
+	position: number;
+	shared: boolean | null;
+	spoiler: boolean | null;
+}

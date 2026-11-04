@@ -15,6 +15,8 @@
  *   5. a book page             the session's API token   (books, shelves)
  *   6. getUserShelvings        every shelving, 100 a page (books, shelves)
  *   7. getUserShelves, getUserTags                       (shelves)
+ *   8. /notes/<id>/load_more   the books with Kindle notes, by token (highlights)
+ *   9. /notes/<book>/<id>      one book's highlights and notes      (highlights)
  *
  * A book record joins the print list (notes, ownership, reading sessions,
  * position) with the API (instants, genres, series, publisher, language) on
@@ -26,6 +28,9 @@
  * empty past-the-end page) AND the rows read equal the count Goodreads
  * shows. A first page with no rows while the count is above zero is drift,
  * never an empty library.
+ *
+ * Highlights are saved only when the notes list ended without a next token
+ * and every book's page held as many items as its banner counts.
  */
 
 import { resourceSet } from "@pdpp/connector-protocol";
@@ -51,8 +56,10 @@ import {
 import {
 	ORIGIN,
 	parseAllCount,
+	parseAnnotatedBooksPage,
 	parseListingPage,
 	parseProfile,
+	parseReadingNotesPage,
 	parseSettings,
 	tenureMonths,
 	userIdFromHtml,
@@ -60,18 +67,27 @@ import {
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import { summarizeLibrary } from "./summary.ts";
-import type { BookRecord, PrintBookRecord, ShelfRecord } from "./types.ts";
+import type {
+	AnnotatedBook,
+	BookRecord,
+	HighlightRecord,
+	PrintBookRecord,
+	ShelfRecord,
+} from "./types.ts";
 
 export const PAGE_DELAY_MIN_MS = 1500;
 export const PAGE_DELAY_JITTER_MS = 1000;
 export const PER_PAGE = 100;
 /** A library of 20,000 books is far past any real one; the cap only stops a loop. */
 export const MAX_LISTING_PAGES = 200;
+/** 20,000 annotated books is far past any real reader; the cap only stops a loop. */
+export const MAX_NOTES_LIST_PAGES = 1000;
 
 const BOOKS = "books";
 const SHELVES = "shelves";
 const PROFILE = "account_profile";
 const SUMMARY = "usage_summary";
+const HIGHLIGHTS = "highlights";
 
 /**
  * The part of the collect context this connector uses. Structural, so the
@@ -182,6 +198,7 @@ async function stopStream(
  */
 const KEPT_KEYS: Record<string, readonly string[]> = {
 	[BOOKS]: ["id", "book_id", "added_at"],
+	[HIGHLIGHTS]: ["id", "book_id"],
 	[PROFILE]: ["id", "sources"],
 	[SHELVES]: ["id", "name", "exclusive"],
 	[SUMMARY]: ["id", "coverage"],
@@ -229,8 +246,8 @@ export async function collectGoodreads(
 	const wants = (stream: string): boolean => ctx.requested.has(stream);
 	const wantsPrint = wants(BOOKS) || wants(SUMMARY);
 	const wantsApi = wants(BOOKS) || wants(SHELVES);
-	if (!(wantsPrint || wantsApi || wants(PROFILE))) return;
-	const streams = [BOOKS, SHELVES, PROFILE, SUMMARY].filter(wants);
+	if (!(wantsPrint || wantsApi || wants(PROFILE) || wants(HIGHLIGHTS))) return;
+	const streams = [BOOKS, SHELVES, PROFILE, SUMMARY, HIGHLIGHTS].filter(wants);
 	const stopAll = async (stop: Stop, only: string[] = streams) => {
 		for (const stream of only) await stopStream(ctx, stream, stop);
 	};
@@ -277,15 +294,34 @@ export async function collectGoodreads(
 		await collectProfile(ctx, userId, get);
 	}
 
-	// 3. The whole print listing, for books and for the summary.
+	// 3 to 7. The library: books, shelves and the summary.
+	if (wantsPrint || wantsApi) {
+		await collectLibrary(ctx, userId, allCount, get, paced);
+	}
+
+	// 8 and 9. The Kindle highlights and notes.
+	if (wants(HIGHLIGHTS)) await collectHighlights(ctx, userId, get);
+}
+
+/**
+ * The print listing (for books and the summary), then the API's listing of
+ * the same library (for books and shelves).
+ */
+async function collectLibrary(
+	ctx: GoodreadsCollectContext,
+	userId: string,
+	allCount: number | null,
+	get: (path: string, label: string) => Promise<FetchOutcome>,
+	paced: () => Promise<void>,
+): Promise<void> {
+	const wants = (stream: string): boolean => ctx.requested.has(stream);
 	let listing: Listing | null = null;
-	if (wantsPrint && allCount !== null) {
+	if ((wants(BOOKS) || wants(SUMMARY)) && allCount !== null) {
 		listing = await readListing(ctx, userId, allCount, get);
 		if (wants(SUMMARY)) await finishSummary(ctx, listing);
 	}
 
-	// 4. The API's listing of the same library, for books and shelves.
-	if (!wantsApi) return;
+	if (!(wants(BOOKS) || wants(SHELVES))) return;
 	if (wants(BOOKS) && listing?.stop) {
 		await stopStream(ctx, BOOKS, listing.stop);
 		if (!wants(SHELVES)) return;
@@ -294,12 +330,11 @@ export async function collectGoodreads(
 	if (!(booksReady || wants(SHELVES))) return;
 	const api = await readApiLibrary(ctx, userId, listing, paced);
 	if (!api.ok) {
-		await stopAll(
-			api.stop,
-			[booksReady ? BOOKS : null, SHELVES].filter(
-				(stream): stream is string => stream !== null && wants(stream),
-			),
-		);
+		for (const stream of [booksReady ? BOOKS : null, SHELVES]) {
+			if (stream !== null && wants(stream)) {
+				await stopStream(ctx, stream, api.stop);
+			}
+		}
 		return;
 	}
 	if (booksReady && listing) {
@@ -308,6 +343,180 @@ export async function collectGoodreads(
 	if (wants(SHELVES)) {
 		await finishShelves(ctx, api.graphql, api.shelvings);
 	}
+}
+
+/**
+ * Every book in the owner's Kindle notes list, by its next token until the
+ * list says it has no more. A page this connector cannot read, or a list
+ * that names one book twice, stops the stream.
+ */
+async function readAnnotatedBooks(
+	userId: string,
+	get: (path: string, label: string) => Promise<FetchOutcome>,
+): Promise<{ ok: true; books: AnnotatedBook[] } | { ok: false; stop: Stop }> {
+	const books = new Map<string, AnnotatedBook>();
+	let token: string | null = null;
+	for (let page = 1; page <= MAX_NOTES_LIST_PAGES; page += 1) {
+		const query = token ? `?start_token=${encodeURIComponent(token)}` : "";
+		const response = await get(
+			`/notes/${userId}/load_more${query}`,
+			`page ${page} of your Kindle notes list`,
+		);
+		if (!response.ok) return { ok: false, stop: response };
+		const parsed = parseAnnotatedBooksPage(response.body);
+		if (!parsed) {
+			return {
+				ok: false,
+				stop: {
+					message: `Goodreads answered page ${page} of your Kindle notes list with something this connector does not recognise. Goodreads may have changed its site.`,
+					reason: "source_unreadable",
+				},
+			};
+		}
+		for (const book of parsed.books) {
+			if (books.has(book.notesPath)) {
+				return {
+					ok: false,
+					stop: {
+						message:
+							"Goodreads listed one book twice in your Kindle notes list. The list may have changed while reading; run collection again.",
+						reason: "collection_interrupted",
+					},
+				};
+			}
+			books.set(book.notesPath, book);
+		}
+		if (parsed.nextToken === null)
+			return { ok: true, books: [...books.values()] };
+		if (parsed.nextToken === token || parsed.books.length === 0) {
+			return {
+				ok: false,
+				stop: {
+					message: `Goodreads' Kindle notes list did not move past page ${page}. Goodreads may have changed its site.`,
+					reason: "source_unreadable",
+				},
+			};
+		}
+		token = parsed.nextToken;
+	}
+	return {
+		ok: false,
+		stop: {
+			message: `Your Kindle notes list has more than ${MAX_NOTES_LIST_PAGES} pages; reading stopped at the page limit.`,
+			reason: "source_unreadable",
+		},
+	};
+}
+
+/**
+ * Read every highlight and note of every book in the Kindle notes list, and
+ * save them only when every book's page held as many items as it counts: a
+ * stream read in part would emit deletions for the rest.
+ */
+async function collectHighlights(
+	ctx: GoodreadsCollectContext,
+	userId: string,
+	get: (path: string, label: string) => Promise<FetchOutcome>,
+): Promise<void> {
+	await ctx.progress?.("Reading your Kindle highlights and notes");
+	const list = await readAnnotatedBooks(userId, get);
+	if (!list.ok) {
+		await stopStream(ctx, HIGHLIGHTS, list.stop);
+		return;
+	}
+	const records: HighlightRecord[] = [];
+	const ids = new Set<string>();
+	for (const [index, book] of list.books.entries()) {
+		const label = `the notes page of book ${index + 1} of ${list.books.length} in your Kindle notes list`;
+		const response = await get(book.notesPath, label);
+		if (!response.ok) {
+			await stopStream(ctx, HIGHLIGHTS, response);
+			return;
+		}
+		const page = parseReadingNotesPage(response.body);
+		const problem = notesPageProblem(page, book, label);
+		if (problem) {
+			await stopStream(ctx, HIGHLIGHTS, problem);
+			return;
+		}
+		const bookId = page.bookId as string;
+		for (const [position, note] of page.notes.entries()) {
+			const id = `${bookId}:${note.highlight_id ?? note.note_id}`;
+			if (ids.has(id)) {
+				await stopStream(ctx, HIGHLIGHTS, {
+					message: `Goodreads showed one highlight twice on ${label}. Goodreads may have changed its site.`,
+					reason: "source_unreadable",
+				});
+				return;
+			}
+			ids.add(id);
+			records.push({
+				...note,
+				asin: book.asin,
+				author: page.author ?? book.author,
+				book_id: bookId,
+				book_title: page.bookTitle ?? book.title,
+				id,
+				notes_url: `${ORIGIN}${book.notesPath}`,
+				position: position + 1,
+			});
+		}
+		await ctx.progress?.(
+			`Read Kindle notes for ${index + 1} of ${list.books.length} books`,
+			{ count: index + 1, stream: HIGHLIGHTS, total: list.books.length },
+		);
+	}
+	// A highlight without text is real, but not every one: then Goodreads
+	// moved the text and this would save empty cards.
+	if (
+		records.some((record) => record.highlight_id !== null) &&
+		!records.some((record) => record.highlight_text !== null)
+	) {
+		await stopStream(ctx, HIGHLIGHTS, {
+			message:
+				"Goodreads showed none of your Kindle highlights' text. Goodreads may have changed its site.",
+			reason: "source_unreadable",
+		});
+		return;
+	}
+	const emitted = await emitStream(ctx, HIGHLIGHTS, records);
+	await ctx.progress?.(
+		`Finished reading ${records.length} Kindle highlights and notes (${emitted} new or changed)`,
+		{ count: records.length, stream: HIGHLIGHTS, total: records.length },
+	);
+}
+
+/** Why a book's notes page cannot be saved as all of its notes, or null. */
+export function notesPageProblem(
+	page: ReturnType<typeof parseReadingNotesPage>,
+	book: AnnotatedBook,
+	label: string,
+): Stop | null {
+	if (!page.recognised || page.total === null) {
+		return {
+			message: `Goodreads answered ${label} with a page this connector does not recognise. Goodreads may have changed its site.`,
+			reason: "source_unreadable",
+		};
+	}
+	if (/^\/notes\/(\d+)/.exec(book.notesPath)?.[1] !== page.bookId) {
+		return {
+			message: `Goodreads answered ${label} with the notes of a different book. Goodreads may have changed its site.`,
+			reason: "source_unreadable",
+		};
+	}
+	if (page.unreadable > 0) {
+		return {
+			message: `Goodreads showed ${page.unreadable} items on ${label} that this connector could not read. Goodreads may have changed its site.`,
+			reason: "source_unreadable",
+		};
+	}
+	if (page.notes.length !== page.total) {
+		return {
+			message: `Goodreads counts ${page.total} highlights and notes on ${label} but showed ${page.notes.length}. Goodreads may have changed its site.`,
+			reason: "source_unreadable",
+		};
+	}
+	return null;
 }
 
 /**

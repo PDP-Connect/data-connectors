@@ -172,6 +172,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	goodreads: {
 		account_profile: null,
 		books: { field: "added_at", format: "date-time" },
+		highlights: null,
 		shelves: null,
 		usage_summary: null,
 	},

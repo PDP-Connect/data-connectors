@@ -37,11 +37,13 @@ const CREDENTIALS = {
 type Key =
 	| "captcha"
 	| "code"
+	| "codeSubmit"
 	| "email"
 	| "emailLink"
 	| "error"
 	| "password"
 	| "remember"
+	| "rememberDevice"
 	| "submit";
 
 interface Screen {
@@ -62,7 +64,18 @@ const SCREENS = {
 	},
 	home: { body: "Your home feed", url: `${ORIGIN}/` },
 	landing: { url: `${ORIGIN}/user/sign_in`, visible: ["emailLink"] },
-	otp: { url: `${ORIGIN}/ap/mfa`, visible: ["code"] },
+	approve: {
+		body: "Approve the notification sent to your device",
+		url: `${ORIGIN}/ap/cvf/transactionapproval`,
+	},
+	otp: {
+		url: `${ORIGIN}/ap/mfa`,
+		visible: ["code", "codeSubmit", "rememberDevice"],
+	},
+	otpRejected: {
+		url: `${ORIGIN}/ap/mfa`,
+		visible: ["code", "codeSubmit", "rememberDevice", "error"],
+	},
 	rejected: {
 		url: `${ORIGIN}/ap/signin`,
 		visible: ["email", "password", "submit", "error"],
@@ -82,6 +95,7 @@ type ScreenName = keyof typeof SCREENS;
 
 interface World {
 	checked: boolean;
+	deviceRemembered: boolean;
 	readonly clicks: Key[];
 	readonly filled: Record<string, string>;
 	readonly gotos: string[];
@@ -93,6 +107,8 @@ interface World {
 interface Script {
 	/** Where the email link leads; `landing` models a page without the form. */
 	readonly afterEmailLink?: ScreenName;
+	/** Where sending the verification code leads; `home` by default. */
+	readonly afterCode?: ScreenName;
 	/** Where the submit leads. */
 	readonly afterSubmit: ScreenName;
 	/** The submit click moves the page, then throws (a navigation race). */
@@ -109,6 +125,8 @@ function keysOf(selector: string): Key[] {
 		["ap_password", "password"],
 		["signInSubmit", "submit"],
 		["auth-remember-me", "remember"],
+		["auth-mfa-remember-device", "rememberDevice"],
+		["auth-signin-button", "codeSubmit"],
 		["auth-error-message-box", "error"],
 		["captcha", "captcha"],
 		["otpCode", "code"],
@@ -122,6 +140,7 @@ function keysOf(selector: string): Key[] {
 function makeSignIn(script: Script, start: ScreenName = "landing") {
 	const world: World = {
 		checked: false,
+		deviceRemembered: false,
 		clicks: [],
 		filled: {},
 		gotos: [],
@@ -138,7 +157,8 @@ function makeSignIn(script: Script, start: ScreenName = "landing") {
 		const keys = keysOf(selector);
 		const self = {
 			check: async () => {
-				world.checked = true;
+				if (keys[0] === "rememberDevice") world.deviceRemembered = true;
+				else world.checked = true;
 			},
 			click: async () => {
 				const key = keys[0] as Key;
@@ -149,6 +169,9 @@ function makeSignIn(script: Script, start: ScreenName = "landing") {
 					world.screen = script.afterSubmit;
 					world.signedIn = script.afterSubmit === "home";
 					if (script.clickThrows) throw new Error("Target closed");
+				} else if (key === "codeSubmit") {
+					world.screen = script.afterCode ?? "home";
+					world.signedIn = world.screen === "home";
 				}
 			},
 			count: async () => (selector === "body" || visible(keys) ? 1 : 0),
@@ -158,7 +181,8 @@ function makeSignIn(script: Script, start: ScreenName = "landing") {
 			},
 			first: () => self,
 			innerText: async () => screen().body ?? "",
-			isChecked: async () => world.checked,
+			isChecked: async () =>
+				keys[0] === "rememberDevice" ? world.deviceRemembered : world.checked,
 			isVisible: async () => selector === "body" || visible(keys),
 			nth: () => self,
 		};
@@ -201,7 +225,7 @@ function makeSignIn(script: Script, start: ScreenName = "landing") {
 
 function makeHandoff(
 	world: World,
-	{ ownerSignsIn }: { ownerSignsIn: boolean },
+	{ code, ownerSignsIn }: { code: string | null; ownerSignsIn: boolean },
 ) {
 	const requests: InteractionRequest[] = [];
 	return {
@@ -210,6 +234,21 @@ function makeHandoff(
 			request: InteractionRequest,
 		): Promise<InteractionResponse> => {
 			requests.push(request);
+			// A code question is answered on the run page; the browser is untouched.
+			if (request.kind === "otp") {
+				return code === null
+					? {
+							request_id: request.request_id ?? "test",
+							status: "cancelled",
+							type: "INTERACTION_RESPONSE",
+						}
+					: {
+							data: { code },
+							request_id: request.request_id ?? "test",
+							status: "success",
+							type: "INTERACTION_RESPONSE",
+						};
+			}
 			if (ownerSignsIn) {
 				world.signedIn = true;
 				world.screen = "home";
@@ -251,10 +290,14 @@ function makeSpy(): Spy {
 async function runEnsure(
 	script: Script,
 	credentials: Record<string, string>,
-	{ ownerSignsIn = true, start = "landing" as ScreenName } = {},
+	{
+		code = null as string | null,
+		ownerSignsIn = true,
+		start = "landing" as ScreenName,
+	} = {},
 ) {
 	const fake = makeSignIn(script, start);
-	const handoff = makeHandoff(fake.world, { ownerSignsIn });
+	const handoff = makeHandoff(fake.world, { code, ownerSignsIn });
 	const spy = makeSpy();
 	let error: unknown;
 	// The session hook times its waits with Date.now; drive that from the
@@ -346,13 +389,79 @@ test("a CAPTCHA after submit falls back to the handoff with a captcha reason, no
 	assertNoSecrets([message, run.spy.checkpoints]);
 });
 
-test("a verification-code page falls back to the handoff, no second submit", async () => {
-	const run = await runEnsure({ afterSubmit: "otp" }, CREDENTIALS);
+const CODE = "424242";
+const kinds = (run: { handoff: { requests: InteractionRequest[] } }) =>
+	run.handoff.requests.map((request) => request.kind);
+const codeSubmits = (world: World): number =>
+	world.clicks.filter((key) => key === "codeSubmit").length;
+
+test("a verification-code page asks for the code on the run page and sends it once", async () => {
+	const run = await runEnsure({ afterSubmit: "otp" }, CREDENTIALS, {
+		code: CODE,
+	});
 	assert.equal(run.error, undefined);
-	assert.equal(submits(run.world), 1);
-	assert.equal(run.handoff.requests.length, 1);
+	// No browser handoff: the run page asked, the connector typed.
+	assert.deepEqual(kinds(run), ["otp"]);
 	assert.match(run.handoff.requests[0]?.message ?? "", /verification code/);
+	assert.equal(run.world.filled.code, CODE);
+	assert.equal(run.world.deviceRemembered, true, "this browser is remembered");
+	assert.equal(submits(run.world), 1);
+	assert.equal(codeSubmits(run.world), 1);
+	assert.ok(run.spy.checkpoints.includes("goodreads-signin-code-submitted"));
+	assert.equal(JSON.stringify(run.spy.checkpoints).includes(CODE), false);
 	assertNoSecrets(run.handoff.requests);
+});
+
+test("no code, or an answer that is not a code: nothing is typed and the code page is handed off", async () => {
+	for (const code of [null, "12ab", " "]) {
+		const run = await runEnsure({ afterSubmit: "otp" }, CREDENTIALS, {
+			code,
+		});
+		assert.equal(run.error, undefined);
+		assert.deepEqual(kinds(run), ["otp", "manual_action"], String(code));
+		assert.equal(run.world.filled.code, undefined);
+		assert.equal(codeSubmits(run.world), 0);
+		assert.match(run.handoff.requests[1]?.message ?? "", /verification code/);
+		assert.equal(run.world.gotos.length, 1, "the code page is left in place");
+	}
+});
+
+test("a rejected code is named and handed off; the code is sent once only", async () => {
+	const run = await runEnsure(
+		{ afterCode: "otpRejected", afterSubmit: "otp" },
+		CREDENTIALS,
+		{ code: CODE },
+	);
+	assert.equal(run.error, undefined);
+	assert.deepEqual(kinds(run), ["otp", "manual_action"]);
+	assert.equal(codeSubmits(run.world), 1);
+	const message = run.handoff.requests[1]?.message ?? "";
+	assert.match(message, /did not accept the verification code/);
+	assert.equal(message.includes(CODE), false);
+	assert.equal(run.world.gotos.length, 1, "the code page is left in place");
+});
+
+test("an approval page without a code field goes straight to the handoff", async () => {
+	const run = await runEnsure({ afterSubmit: "approve" }, CREDENTIALS, {
+		code: CODE,
+	});
+	assert.equal(run.error, undefined);
+	assert.deepEqual(kinds(run), ["manual_action"]);
+	assert.equal(submits(run.world), 1);
+	assert.match(
+		run.handoff.requests[0]?.message ?? "",
+		/verification code or an approval/,
+	);
+	assertNoSecrets(run.handoff.requests);
+});
+
+test("without a way to ask, a code page falls back as before", async () => {
+	const run = attempt({ afterSubmit: "otp" });
+	assert.deepEqual(await run.outcome, {
+		kind: "fallback",
+		reason: "verification",
+	});
+	assert.equal(codeSubmits(run.world), 0);
 });
 
 test("a rejected password falls back to the handoff and is named, with one submit only", async () => {
@@ -634,6 +743,7 @@ test("page copy on a signed-in goodreads page never reads as a CAPTCHA or a code
 test("every fallback has owner copy that names no credential, and a handoff reason", () => {
 	const reasons = [
 		"captcha",
+		"code_rejected",
 		"form_missing",
 		"not_signed_in",
 		"rejected_credentials",
@@ -648,6 +758,7 @@ test("every fallback has owner copy that names no credential, and a handoff reas
 	}
 	assert.equal(fallbackHandoffReason("captcha"), "captcha");
 	assert.equal(fallbackHandoffReason("verification"), "2fa");
+	assert.equal(fallbackHandoffReason("code_rejected"), "2fa");
 	assert.equal(fallbackHandoffReason("rejected_credentials"), "login");
 });
 

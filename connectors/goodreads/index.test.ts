@@ -131,7 +131,19 @@ function nextData(edit: (pageProps: ApiBody) => void): string {
 	return JSON.stringify(data);
 }
 
-/** The default signed-in site: sidebar, two print pages, profile and settings. */
+const NOTES_PAGES: Record<string, string> = {
+	"80000001": fixture("notes-book-1.html"),
+	"80000099": fixture("notes-book-2.html"),
+};
+
+/** The book id of a notes page path, `/notes/<book>-<slug>/<owner>-<slug>`. */
+const notesBookOf = (path: string): string | undefined =>
+	/^\/notes\/(\d+)[^/]*\/\d+/.exec(new URL(path, ORIGIN).pathname)?.[1];
+
+/**
+ * The default signed-in site: sidebar, two print pages, profile, settings,
+ * the Kindle notes list and one notes page per book in it.
+ */
 function signedInSite(overrides: Partial<Record<string, Site>> = {}): Site {
 	return (path, call) => {
 		const url = new URL(path, ORIGIN);
@@ -144,7 +156,11 @@ function signedInSite(overrides: Partial<Record<string, Site>> = {}): Site {
 						? "profile"
 						: url.pathname === "/user/edit"
 							? "settings"
-							: "other";
+							: url.pathname === `/notes/${UID}/load_more`
+								? "notesList"
+								: notesBookOf(path)
+									? "notes"
+									: "other";
 		const override = overrides[key];
 		if (override) return override(path, call);
 		switch (key) {
@@ -163,6 +179,12 @@ function signedInSite(overrides: Partial<Record<string, Site>> = {}): Site {
 				return { body: fixture("profile.html") };
 			case "settings":
 				return { body: fixture("settings.html") };
+			case "notesList":
+				return { body: JSON.stringify(apiFixture("notes-list.json")) };
+			case "notes": {
+				const page = NOTES_PAGES[notesBookOf(path) ?? ""];
+				return page ? { body: page } : { body: "not found", status: 404 };
+			}
 			default:
 				return { body: "not found", status: 404 };
 		}
@@ -336,6 +358,7 @@ function harness(
 const ALL_STREAMS = {
 	account_profile: {},
 	books: {},
+	highlights: {},
 	shelves: {},
 	usage_summary: {},
 };
@@ -377,6 +400,7 @@ test("a full run reads every stream across two pages and proves the listing comp
 	assert.deepEqual(skips(h), []);
 	assert.equal(recordsOf(h, "books").length, 5);
 	assert.equal(recordsOf(h, "shelves").length, 6);
+	assert.equal(recordsOf(h, "highlights").length, 5);
 	const profile = recordsOf(h, "account_profile");
 	assert.equal(profile.length, 1);
 	assert.deepEqual(profile[0]?.sources, { profile: "read", settings: "read" });
@@ -401,6 +425,9 @@ test("a full run reads every stream across two pages and proves the listing comp
 			"/user/edit",
 			`/review/list/${UID}?shelf=%23ALL%23`,
 			`/review/list/${UID}?shelf=%23ALL%23`,
+			`/notes/${UID}/load_more`,
+			`/notes/80000001-the-lighthouse-keepers-atlas/${UID}-synthetic-reader`,
+			`/notes/80000099-tidewater-almanac/${UID}-synthetic-reader`,
 		],
 	);
 	assert.match(h.paths[3] ?? "", /per_page=100&page=1&print=true/);
@@ -546,11 +573,12 @@ test("signed out: every requested stream stops with sign_in_required and nothing
 		[
 			["account_profile", "sign_in_required"],
 			["books", "sign_in_required"],
+			["highlights", "sign_in_required"],
 			["shelves", "sign_in_required"],
 			["usage_summary", "sign_in_required"],
 		],
 	);
-	assert.equal(h.failures.length, 4);
+	assert.equal(h.failures.length, 5);
 });
 
 test("an empty library is a legitimate empty run: shelves and a zero summary, no failure", async () => {
@@ -1886,6 +1914,7 @@ test("coverage: an un-narrowed run proves every stream it saved; a narrowed or f
 	const whole = {
 		account_profile: [1, 1],
 		books: [5, 5],
+		highlights: [5, 5],
 		shelves: [6, 6],
 		usage_summary: [1, 1],
 	};
@@ -2048,5 +2077,264 @@ test("the session probe asks the page when the cookie-jar request is challenged"
 			sessionPage("throws", "network_error") as never,
 		),
 		false,
+	);
+});
+
+// ─── Kindle highlights and notes ────────────────────────────────────────
+
+/** The fixture notes list with `edit` applied to its parsed body. */
+const notesList =
+	(edit: (body: ApiBody, token: string | null) => ApiBody): Site =>
+	(path) => ({
+		body: JSON.stringify(
+			edit(
+				apiFixture("notes-list.json"),
+				new URL(path, ORIGIN).searchParams.get("start_token"),
+			),
+		),
+	});
+
+test("highlights: every item of every annotated book, keyed so a later note keeps the id", async () => {
+	const h = harness(signedInSite(), { highlights: {} });
+	await collect(h.ctx);
+
+	assert.deepEqual(h.failures, []);
+	// A highlights-only run reads the notes, not the library.
+	assert.deepEqual(h.paths, [
+		"/review/list",
+		`/notes/${UID}/load_more`,
+		`/notes/80000001-the-lighthouse-keepers-atlas/${UID}-synthetic-reader`,
+		`/notes/80000099-tidewater-almanac/${UID}-synthetic-reader`,
+	]);
+	const records = recordsOf(h, "highlights");
+	assert.deepEqual(
+		records.map((r) => [r.id, r.position, r.location_percent]),
+		[
+			["80000001:QVNZTlRISEwwMDAx", 1, 4],
+			["80000001:QVNZTlRISEwwMDAy", 2, 37],
+			// A note with no highlight is keyed by the note.
+			["80000001:QVNZTlRITk8wMDAz", 3, 52],
+			// A location that is not a percentage is kept as text only.
+			["80000099:QVNZTlRISEwwMDk5", 1, null],
+			// A highlight Goodreads shows as an empty card is kept, without text.
+			["80000099:QVNZTlRISEwwMDk4", 2, null],
+		],
+	);
+	assert.deepEqual(records[1], {
+		asin: "B0SYNTH0001",
+		author: "Mara Quill",
+		book_id: "80000001",
+		book_title: "The Lighthouse Keeper's Atlas",
+		highlight_id: "QVNZTlRISEwwMDAy",
+		highlight_text: "The keeper lit the lamp for a ship that had already sunk.",
+		id: "80000001:QVNZTlRISEwwMDAy",
+		location: "37%",
+		location_percent: 37,
+		note_id: "QVNZTlRITk8wMDAy",
+		note_text: "The ending, foreshadowed.\nCheck chapter 9 again.",
+		notes_url: `${ORIGIN}/notes/80000001-the-lighthouse-keepers-atlas/${UID}-synthetic-reader`,
+		position: 2,
+		shared: true,
+		spoiler: true,
+	});
+	assert.equal(
+		records[0]?.highlight_text,
+		"Every coast keeps a second map,\ndrawn by the people who were wrecked on it.",
+	);
+	assert.equal(records[2]?.highlight_text, null);
+	assert.deepEqual(
+		[records[4]?.highlight_id, records[4]?.highlight_text, records[4]?.note_id],
+		["QVNZTlRISEwwMDk4", null, null],
+	);
+	assert.deepEqual(coverageOf(h), { highlights: [5, 5] });
+	assert.ok(h.progress.some((line) => /2 of 2 books/.test(line)));
+	assertUserFacingProgress(h.messages);
+});
+
+test("highlights: the notes list is followed page by page with its start token", async () => {
+	const site = signedInSite({
+		notesList: notesList((body, token) => {
+			const [first, second] = body.annotated_books_collection;
+			return token === null
+				? { annotated_books_collection: [first], next_token: "token two" }
+				: { annotated_books_collection: [second], next_token: null };
+		}),
+	});
+	const h = harness(site, { highlights: {} });
+	await collect(h.ctx);
+
+	assert.deepEqual(h.failures, []);
+	assert.deepEqual(h.paths.slice(1, 3), [
+		`/notes/${UID}/load_more`,
+		`/notes/${UID}/load_more?start_token=token%20two`,
+	]);
+	assert.equal(recordsOf(h, "highlights").length, 5);
+});
+
+test("highlights: a notes list that does not finish or repeats itself saves nothing", async () => {
+	const cases: [string, Site, string][] = [
+		["an unknown answer", notesList(() => ({})), "source_unreadable"],
+		[
+			"a book without a notes link",
+			notesList((body) => {
+				body.annotated_books_collection[0].readingNotesUrl = "/book/show/1";
+				return body;
+			}),
+			"source_unreadable",
+		],
+		[
+			"a token that does not move",
+			notesList((body) => ({ ...body, next_token: "same" })),
+			// The second page repeats the first page's books.
+			"collection_interrupted",
+		],
+		[
+			"an empty page that claims more",
+			notesList(() => ({ annotated_books_collection: [], next_token: "more" })),
+			"source_unreadable",
+		],
+	];
+	for (const [label, notesListSite, reason] of cases) {
+		const h = harness(signedInSite({ notesList: notesListSite }), {
+			books: {},
+			highlights: {},
+		});
+		await collect(h.ctx);
+		assert.deepEqual(recordsOf(h, "highlights"), [], label);
+		assert.deepEqual(
+			skips(h).map((skip) => [skip.stream, skip.reason]),
+			[["highlights", reason]],
+			label,
+		);
+		// The other streams are not held back by it.
+		assert.equal(recordsOf(h, "books").length, 5, label);
+	}
+});
+
+test("highlights: a notes page that shows fewer items than it counts, or another book, saves nothing", async () => {
+	const book1 = fixture("notes-book-1.html");
+	const cases: [string, string][] = [
+		[
+			"a short page",
+			book1.replace('data-total-count="3"', 'data-total-count="4"'),
+		],
+		[
+			"another book's page",
+			fixture("notes-book-2.html").replaceAll("80000099", "80000555"),
+		],
+		[
+			"an item it cannot read",
+			book1.replace(
+				'data-has-note="true" data-is-spoiler="true"',
+				'data-has-note="false" data-is-spoiler="true"',
+			),
+		],
+		["a redesigned page", "<html><body>redesigned</body></html>"],
+		[
+			"an item without the usual card",
+			book1.replace(
+				'<div class="noteHighlightTextContainer">',
+				'<div class="annotationCard">',
+			),
+		],
+	];
+	for (const [label, page] of cases) {
+		const h = harness(
+			signedInSite({
+				notes: (path, call) =>
+					notesBookOf(path) === "80000001"
+						? { body: page }
+						: signedInSite()(path, call),
+			}),
+			{ highlights: {} },
+		);
+		await collect(h.ctx);
+		assert.deepEqual(h.records, [], label);
+		assert.deepEqual(
+			skips(h).map((skip) => [skip.stream, skip.reason]),
+			[["highlights", "source_unreadable"]],
+			label,
+		);
+		// No book title reaches the message: books are named by their place.
+		assert.match(h.failures[0]?.message ?? "", /book 1 of 2/, label);
+		assert.doesNotMatch(h.failures[0]?.message ?? "", /Lighthouse/, label);
+	}
+});
+
+test("highlights incremental: a note added keeps the record's id; a book gone is deleted", async () => {
+	const first = desktop(
+		harness(signedInSite(), { highlights: {} }),
+		"incremental",
+	);
+	await collect(first.ctx);
+	assert.equal(recordsOf(first, "highlights").length, 5);
+	const saved = stateOf(first);
+
+	const noted = fixture("notes-book-1.html")
+		.replace(
+			'QVNZTlRISEwwMDAx%7C-0-%7C" data-book-id="80000001" data-has-note="false"',
+			'QVNZTlRISEwwMDAx%7C-0-%7CQVNZTlRITk8wMDAx" data-book-id="80000001" data-has-note="true"',
+		)
+		.replace(
+			'contenteditable="" tabindex="0"></div>',
+			'contenteditable="" tabindex="0">Later thought.</div>',
+		);
+	assert.notEqual(noted, fixture("notes-book-1.html"));
+	const second = desktop(
+		harness(
+			signedInSite({
+				notes: (path, call) =>
+					notesBookOf(path) === "80000001"
+						? { body: noted }
+						: signedInSite()(path, call),
+				notesList: notesList((body) => ({
+					...body,
+					annotated_books_collection: body.annotated_books_collection.slice(
+						0,
+						1,
+					),
+				})),
+			}),
+			{ highlights: {} },
+		),
+		"incremental",
+		saved,
+	);
+	await collect(second.ctx);
+	assert.deepEqual(second.failures, []);
+	assert.deepEqual(
+		recordsOf(second, "highlights").map((r) => [r.id, r.note_id, r.note_text]),
+		[["80000001:QVNZTlRISEwwMDAx", "QVNZTlRITk8wMDAx", "Later thought."]],
+	);
+	assert.deepEqual(deletions(second, "highlights"), [
+		"80000099:QVNZTlRISEwwMDk5",
+		"80000099:QVNZTlRISEwwMDk4",
+	]);
+});
+
+test("highlights: when no highlight has text, Goodreads moved it and nothing is saved", async () => {
+	const textless = (name: string) =>
+		fixture(name).replace(
+			/<div class="noteHighlightTextContainer__highlightContainer">[\s\S]*?<\/span>\s*<\/div>\s*<\/div>/g,
+			"",
+		);
+	assert.doesNotMatch(textless("notes-book-1.html"), /highlightText/);
+	const h = harness(
+		signedInSite({
+			notes: (path) => ({
+				body: textless(
+					notesBookOf(path) === "80000001"
+						? "notes-book-1.html"
+						: "notes-book-2.html",
+				),
+			}),
+		}),
+		{ highlights: {} },
+	);
+	await collect(h.ctx);
+	assert.deepEqual(h.records, []);
+	assert.deepEqual(
+		skips(h).map((skip) => [skip.stream, skip.reason]),
+		[["highlights", "source_unreadable"]],
 	);
 });

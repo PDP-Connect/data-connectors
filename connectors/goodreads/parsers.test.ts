@@ -7,8 +7,10 @@ import test from "node:test";
 import {
 	normalizePartialDate,
 	parseAllCount,
+	parseAnnotatedBooksPage,
 	parseListingPage,
 	parseProfile,
+	parseReadingNotesPage,
 	parseSettings,
 	tenureMonths,
 	userIdFromHtml,
@@ -448,4 +450,58 @@ test("finished_date and started_date hold a whole day only, so they can be filte
 	// The fixtures hold both kinds, so both branches ran.
 	assert.ok(partial > 0);
 	assert.ok(books.some((book) => book.started_date !== null));
+});
+
+test("the Kindle notes list: an empty next token ends it; any other shape is unreadable", () => {
+	const item = { readingNotesUrl: "/notes/1-a/2-b?ref=abp", title: " T " };
+	assert.deepEqual(
+		parseAnnotatedBooksPage(
+			JSON.stringify({ annotated_books_collection: [item], next_token: "" }),
+		),
+		{
+			books: [
+				{ asin: null, author: null, notesPath: "/notes/1-a/2-b", title: "T" },
+			],
+			nextToken: null,
+		},
+	);
+	for (const body of [
+		"not json",
+		"null",
+		JSON.stringify({ annotated_books_collection: [item] }),
+		JSON.stringify({ annotated_books_collection: [item], next_token: 7 }),
+		JSON.stringify({ annotated_books_collection: {}, next_token: null }),
+		JSON.stringify({ annotated_books_collection: [null], next_token: null }),
+		JSON.stringify({
+			annotated_books_collection: [
+				{ readingNotesUrl: "https://example.com/notes/1/2" },
+			],
+			next_token: null,
+		}),
+	]) {
+		assert.equal(parseAnnotatedBooksPage(body), null, body);
+	}
+});
+
+test("a notes item whose ids or note flag do not add up is counted unreadable, not guessed", () => {
+	const page = fixture("notes-book-1.html");
+	const broken = [
+		// A pair id that does not decode.
+		page.replace("QVNZTlRISEwwMDAx%7C-0-%7C", "%E0%A4%A"),
+		// A pair id without the separator.
+		page.replace("QVNZTlRISEwwMDAx%7C-0-%7C", "QVNZTlRISEwwMDAx"),
+		// An item filed under another book.
+		page.replace(
+			'%7C-0-%7C" data-book-id="80000001"',
+			'%7C-0-%7C" data-book-id="80000002"',
+		),
+	];
+	for (const html of broken) {
+		const parsed = parseReadingNotesPage(html);
+		assert.equal(parsed.unreadable, 1);
+		assert.equal(parsed.notes.length, 2);
+	}
+	const unrecognised = parseReadingNotesPage("<html><body></body></html>");
+	assert.equal(unrecognised.recognised, false);
+	assert.equal(unrecognised.total, null);
 });

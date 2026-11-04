@@ -177,11 +177,31 @@ export const usageSummarySchema = z.object({
 /**
  * Stream → schema registry. Single source of truth for emitted streams.
  */
+/** highlights: one record per Kindle highlight or note on the owner's Goodreads notes pages. */
+export const highlightsSchema = z.object({
+	asin: text(40),
+	author: text(500),
+	book_id: z.string().min(1).max(40),
+	book_title: text(2000),
+	highlight_id: text(200),
+	highlight_text: text(1_048_576),
+	id: z.string().min(1).max(250),
+	location: text(100),
+	location_percent: z.number().int().min(0).max(100).nullable().optional(),
+	note_id: text(200),
+	note_text: text(1_048_576),
+	notes_url: text(2000),
+	position: z.number().int().min(1).optional(),
+	shared: flag,
+	spoiler: flag,
+});
+
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	books: booksSchema,
 	shelves: shelvesSchema,
 	account_profile: accountProfileSchema,
 	usage_summary: usageSummarySchema,
+	highlights: highlightsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

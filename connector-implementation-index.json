@@ -12784,7 +12784,7 @@
 						"required": false,
 						"kind": "username_password",
 						"label": "Optional Goodreads sign-in details",
-						"description": "If you sign in to Goodreads with an email and password, you can save both so the connector signs in for you. Leave both blank to sign in in the secure browser instead. If you sign in with Google, Apple, Amazon or Facebook, leave both blank: those sign-ins need the secure browser. A CAPTCHA or verification code always needs the secure browser too. Credentials are stored only for this connection.",
+						"description": "If you sign in to Goodreads with an email and password, you can save both so the connector signs in for you. Leave both blank to sign in in the secure browser instead. If you sign in with Google, Apple, Amazon or Facebook, leave both blank: those sign-ins need the secure browser. If Goodreads then asks for a verification code, the run asks you for it and enters it for you. A CAPTCHA or an approval on another device needs the secure browser. Credentials are stored only for this connection.",
 						"submit_label": "Save optional details and start collection",
 						"fields": [
 							{
@@ -12809,7 +12809,7 @@
 					}
 				},
 				"capabilities": {
-					"human_interaction": ["manual_action"],
+					"human_interaction": ["manual_action", "otp"],
 					"refresh_policy": {
 						"recommended_mode": "manual",
 						"recommended_interval_seconds": 86400,
@@ -12819,7 +12819,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "high",
 						"background_safe": false,
-						"rationale": "Collection reads the owner's own library list, profile and account settings pages in a signed-in goodreads.com session, one request at a time with a pause between requests. A live session refreshes without a prompt. The first run and an expired session need a sign-in: when the owner saved an email and password, the run signs in once by itself; otherwise, or when Goodreads shows a CAPTCHA, a verification code or rejects the password, the owner signs in through the browser handoff (any method, with Keep me signed in ticked). Goodreads sits behind AWS WAF, which may answer a request with a challenge; the run then loads the page once to let the challenge pass and fails with a clear reason if it persists. A library changes slowly, so a daily run at most is enough."
+						"rationale": "Collection reads the owner's own library list, profile, account settings and Kindle notes pages in a signed-in goodreads.com session, one request at a time with a pause between requests. A live session refreshes without a prompt. The first run and an expired session need a sign-in: when the owner saved an email and password, the run signs in once by itself and, if Goodreads asks for a verification code, asks the owner for it once; otherwise, or when Goodreads shows a CAPTCHA or an approval step, or rejects the password or the code, the owner signs in through the browser handoff (any method, with Keep me signed in ticked). Goodreads sits behind AWS WAF, which may answer a request with a challenge; the run then loads the page once to let the challenge pass and fails with a clear reason if it persists. A library changes slowly, so a daily run at most is enough."
 					},
 					"public_listing": {
 						"tier": "preview"
@@ -12858,7 +12858,8 @@
 								},
 								"author": {
 									"type": ["string", "null"],
-									"description": "The first-listed author, as printed in the list (Last, First). Null when the row names no author. The full list, with ids, is in authors."
+									"description": "The first-listed author, as printed in the list (Last, First). Null when the row names no author. The full list, with ids, is in authors.",
+									"x_pdpp_role": "secondary"
 								},
 								"authors": {
 									"type": "array",
@@ -12934,7 +12935,7 @@
 									"items": {
 										"type": "string"
 									},
-									"description": "Slugs of every shelf and tag the book is on, exclusive shelf first. Empty when the row printed none."
+									"description": "Slugs of every shelf and tag the book is on, exclusive shelf first. Empty when the row printed none. The query API cannot filter on an array field, so this is the only place that records which books carry a tag."
 								},
 								"review_text": {
 									"type": ["string", "null"],
@@ -13021,7 +13022,8 @@
 								"added_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "The instant the owner put the book on a shelf, ISO 8601 in UTC, from Goodreads' book API. This is the stream's consent_time_field. added_on is the same moment as the calendar day the list prints in the owner's time zone, so the two can differ by a day."
+									"description": "The instant the owner put the book on a shelf, ISO 8601 in UTC, from Goodreads' book API. This is the stream's consent_time_field and its cursor_field, so records list in the order the owner shelved them. added_on is the same moment as the calendar day the list prints in the owner's time zone, so the two can differ by a day.",
+									"x_pdpp_role": "event-time"
 								},
 								"updated_at": {
 									"type": ["string", "null"],
@@ -13080,6 +13082,7 @@
 							"required": ["id", "book_id"]
 						},
 						"primary_key": ["id"],
+						"cursor_field": "added_at",
 						"consent_time_field": "added_at",
 						"selection": {
 							"fields": true,
@@ -13251,7 +13254,7 @@
 					{
 						"name": "shelves",
 						"required": false,
-						"description": "The owner's Goodreads shelves: the exclusive shelves (to-read, currently-reading, read and any custom exclusive shelf) and the tag-style shelves, with the number of books on each. Read from the book API Goodreads' own pages use, and saved only when the lists are as long as Goodreads reports and name every shelf a book is on. Incremental: unchanged shelves are not emitted again, and a deleted shelf is emitted as a deletion.",
+						"description": "The owner's Goodreads shelves: the exclusive shelves (to-read, currently-reading, read and any custom exclusive shelf) and the tag-style shelves, with the number of books on each. Expanding exclusive_shelf_books returns the books whose exclusive shelf this is, so it is empty for a tag. Read from the book API Goodreads' own pages use, and saved only when the lists are as long as Goodreads reports and name every shelf a book is on. Incremental: unchanged shelves are not emitted again, and a deleted shelf is emitted as a deletion.",
 						"display": {
 							"label": "Your Goodreads shelves",
 							"detail": "The names of your shelves, whether each is an exclusive shelf or a tag, and how many books are on each."
@@ -13271,7 +13274,7 @@
 								},
 								"exclusive": {
 									"type": "boolean",
-									"description": "True for an exclusive shelf (a book sits on at most one of them: to-read, currently-reading, read and the owner's custom exclusive shelves). False for a tag-style shelf, which a book can share with others."
+									"description": "True for an exclusive shelf (a book sits on at most one of them: to-read, currently-reading, read and the owner's custom exclusive shelves). False for a tag-style shelf, which a book can share with others. Only an exclusive shelf has books to expand through exclusive_shelf_books; for a tag, read books.shelves."
 								},
 								"book_count": {
 									"type": "integer",
@@ -13307,7 +13310,7 @@
 							},
 							"expand": [
 								{
-									"name": "books",
+									"name": "exclusive_shelf_books",
 									"default_limit": 25,
 									"max_limit": 200
 								}
@@ -13317,10 +13320,147 @@
 						"freshness_strategy": "scheduled_window",
 						"relationships": [
 							{
-								"name": "books",
+								"name": "exclusive_shelf_books",
 								"stream": "books",
 								"foreign_key": "exclusive_shelf",
 								"cardinality": "has_many"
+							}
+						]
+					},
+					{
+						"name": "highlights",
+						"required": false,
+						"description": "The owner's Kindle highlights and notes as Goodreads shows them on its notes pages (goodreads.com/notes), one record per highlight, per highlight with a note, and per note on its own: the highlighted text, the owner's note, where in the book it sits, whether it is marked as a spoiler and whether it is shared on Goodreads. Goodreads holds these only for an owner who linked an Amazon account and synced Kindle notes. Read from the owner's notes list and each book's notes page in a signed-in session, and saved only when every book's page shows as many items as its count says. Incremental: unchanged highlights are not emitted again, and a deleted highlight is emitted as a deletion.",
+						"display": {
+							"label": "Your Kindle highlights and notes on Goodreads",
+							"detail": "Each passage you highlighted on a Kindle and each note you wrote, with the book it is from, where in the book it sits, and whether you marked it as a spoiler or shared it on Goodreads. Other readers' notes are not collected."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The book's Goodreads id and the item's own id, joined by a colon: <book_id>:<highlight_id>, or <book_id>:<note_id> for a note on its own. Stable: adding a note to a highlight keeps the highlight's id."
+								},
+								"book_id": {
+									"type": "string",
+									"description": "Goodreads' id of the book the item belongs to, the number in its goodreads.com/book/show/<id> URL. This is the edition the Kindle notes were synced against, which can differ from the edition on the owner's shelves, so it may match no books.book_id."
+								},
+								"book_title": {
+									"type": ["string", "null"],
+									"description": "The book's title as its notes page prints it. Null when the page prints none.",
+									"x_pdpp_role": "secondary"
+								},
+								"author": {
+									"type": ["string", "null"],
+									"description": "The book's author as its notes page prints it. Null when the page prints none."
+								},
+								"asin": {
+									"type": ["string", "null"],
+									"description": "The Amazon id of the Kindle edition, as Goodreads' notes list gives it. Null when it gives none."
+								},
+								"highlight_id": {
+									"type": ["string", "null"],
+									"description": "Amazon's id of the highlight. Null for a note on its own."
+								},
+								"highlight_text": {
+									"type": ["string", "null"],
+									"description": "The highlighted passage, with its line breaks. Null for a note on its own, and for a highlight whose text Goodreads does not show (it shows an empty card, for example when Amazon withholds the text).",
+									"x_pdpp_role": "primary-title"
+								},
+								"note_id": {
+									"type": ["string", "null"],
+									"description": "Amazon's id of the owner's note. Null for a highlight without a note."
+								},
+								"note_text": {
+									"type": ["string", "null"],
+									"description": "The note the owner wrote, with its line breaks. Null for a highlight without a note."
+								},
+								"location": {
+									"type": ["string", "null"],
+									"description": "Where the item sits in the book, as the notes page prints it (for example 37%). Null when the page prints nothing."
+								},
+								"location_percent": {
+									"type": ["integer", "null"],
+									"description": "location as a whole percentage through the book, 0 to 100. Null when location is not a percentage."
+								},
+								"position": {
+									"type": "integer",
+									"description": "The item's place on the book's notes page, from 1. The page lists items in reading order."
+								},
+								"spoiler": {
+									"type": ["boolean", "null"],
+									"description": "True when the owner marked the item as a spoiler. Null when the page does not say."
+								},
+								"shared": {
+									"type": ["boolean", "null"],
+									"description": "True when the item is visible to other Goodreads members, false when only the owner sees it. Null when the page does not say."
+								},
+								"notes_url": {
+									"type": "string",
+									"format": "uri",
+									"description": "Absolute URL of the book's notes page on goodreads.com."
+								}
+							},
+							"required": ["id", "book_id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": [
+									"highlight_text",
+									"note_text",
+									"book_title",
+									"author",
+									"location"
+								],
+								"semantic_fields": ["highlight_text", "note_text"]
+							},
+							"range_filters": {
+								"location_percent": ["gte", "gt", "lte", "lt"],
+								"position": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by": [
+									"book_id",
+									"book_title",
+									"author",
+									"spoiler",
+									"shared"
+								],
+								"count_distinct": ["book_id"],
+								"min": ["location_percent"],
+								"max": ["location_percent"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window",
+						"views": [
+							{
+								"id": "highlights_only",
+								"label": "The passages you highlighted, without your own notes",
+								"fields": [
+									"id",
+									"book_id",
+									"book_title",
+									"author",
+									"asin",
+									"highlight_id",
+									"highlight_text",
+									"location",
+									"location_percent",
+									"position",
+									"spoiler",
+									"shared",
+									"notes_url"
+								]
 							}
 						]
 					},

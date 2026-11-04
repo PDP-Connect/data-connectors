@@ -7,10 +7,13 @@
  * The owner may save a Goodreads email and password for this connection (the
  * manifest's optional `credential_capture`). When the browser profile holds no
  * live session and a saved pair exists, this module signs in once through
- * Goodreads' "Sign in with email" form. Every other case stays with the
- * owner's browser handoff in index.ts: no saved pair, a CAPTCHA, a
- * verification code or approval step, a rejected password, or a page this
- * module does not recognize. It never retries; one call is one attempt.
+ * Goodreads' "Sign in with email" form. When Goodreads then asks for a
+ * verification code and the caller passed `requestCode`, the owner is asked
+ * for the code once (the runtime shows the question on the run page) and the
+ * code is submitted. Every other case stays with the owner's browser handoff
+ * in index.ts: no saved pair, a CAPTCHA, an approval step without a code
+ * field, no code given, a rejected password or code, or a page this module
+ * does not recognize. It never retries; one call is one attempt.
  *
  * Why this is not `auto-login/amazon.ts`. Goodreads' email sign-in runs on
  * Amazon's sign-in system (`/ap/signin`) and shares its field ids, but
@@ -22,8 +25,8 @@
  * credential resolution (`resolveLoginCredentials`) and the handoff.
  *
  * Success is the connector's own signed-in check, injected as `probe`, never
- * a guess from the URL. Credential values appear only as the argument to
- * `fill`; nothing here logs, throws, or checkpoints them.
+ * a guess from the URL. Credential values and the code appear only as the
+ * argument to `fill`; nothing here logs, throws, or checkpoints them.
  */
 
 import type { Page } from "playwright";
@@ -63,6 +66,10 @@ const CAPTCHA_ELEMENT =
 	'#auth-captcha-guess, #captchacharacters, #auth-captcha-image, form[action*="validateCaptcha"], iframe[src*="captcha" i], #captcha-container';
 const CODE_FIELD =
 	'input#auth-mfa-otpcode, input[name="otpCode"], input[name="code"], input[autocomplete="one-time-code"]';
+/** Amazon's "Don't require a code on this browser" box on the code page. */
+const REMEMBER_DEVICE = "input#auth-mfa-remember-device";
+const CODE_SUBMIT_BUTTON =
+	'input#auth-signin-button, button[type="submit"], input[type="submit"]';
 
 const CAPTCHA_TEXT_RE =
 	/\b(enter the characters you see|type the characters|solve this puzzle|captcha)\b/i;
@@ -149,6 +156,7 @@ export function classifySignInSurface(
 
 export type FallbackReason =
 	| "captcha"
+	| "code_rejected"
 	| "form_missing"
 	| "not_signed_in"
 	| "rejected_credentials"
@@ -166,6 +174,8 @@ export function fallbackExplanation(reason: FallbackReason): string {
 			return "Goodreads is showing a CAPTCHA, so the saved sign-in could not finish.";
 		case "verification":
 			return "Goodreads is asking for a verification code or an approval, so the saved sign-in could not finish.";
+		case "code_rejected":
+			return "Goodreads did not accept the verification code.";
 		case "rejected_credentials":
 			return "Goodreads did not accept the saved email and password. Update the saved sign-in afterwards if it is out of date.";
 		case "form_missing":
@@ -184,7 +194,7 @@ export function fallbackHandoffReason(
 	if (reason === "captcha") {
 		return "captcha";
 	}
-	if (reason === "verification") {
+	if (reason === "verification" || reason === "code_rejected") {
 		return "2fa";
 	}
 	return "login";
@@ -305,6 +315,11 @@ export interface AutomaticSignInArgs {
 	readonly probe: () => Promise<boolean>;
 	/** Bound on one `probe` call. Defaults to 10 s; tests shorten it. */
 	readonly probeTimeoutMs?: number | undefined;
+	/**
+	 * Ask the owner for the verification code Goodreads wants; null when none
+	 * came back. Without it, a code page falls back to the browser handoff.
+	 */
+	readonly requestCode?: (() => Promise<string | null>) | undefined;
 	readonly username: string;
 }
 
@@ -353,6 +368,37 @@ async function submitForm(
 	return true;
 }
 
+/**
+ * Type the code into the code page and send it. `false` when the page lost
+ * its field or button first; the caller then hands off.
+ */
+async function submitCode(
+	page: SignInPage,
+	clock: SignInClock,
+	code: string,
+): Promise<boolean> {
+	const field = await waitForVisible(page, CODE_FIELD, clock, 5000);
+	const submit = await waitForVisible(page, CODE_SUBMIT_BUTTON, clock, 5000);
+	if (!(field && submit)) {
+		return false;
+	}
+	try {
+		await field.fill(code);
+	} catch {
+		return false;
+	}
+	// Without it, every sign-in from this browser asks for a code again.
+	const remember = page.locator(REMEMBER_DEVICE).first();
+	if (
+		(await remember.isVisible().catch((): boolean => false)) &&
+		!(await remember.isChecked().catch((): boolean => true))
+	) {
+		await remember.check().catch((): undefined => undefined);
+	}
+	await submit.click().catch((): undefined => undefined);
+	return true;
+}
+
 /** The signed-in check, bounded: a hung check reads as not signed in. */
 async function probeWithin(
 	probe: () => Promise<boolean>,
@@ -384,6 +430,7 @@ export async function attemptAutomaticSignIn({
 	password,
 	probe,
 	probeTimeoutMs = PROBE_TIMEOUT_MS,
+	requestCode,
 	username,
 }: AutomaticSignInArgs): Promise<AutomaticSignInOutcome> {
 	const clock = injectedClock ?? defaultClock(page);
@@ -406,10 +453,15 @@ export async function attemptAutomaticSignIn({
 	}
 	await checkpoint?.("goodreads-signin-submitted");
 
-	const startedAt = clock.now();
+	let startedAt = clock.now();
+	// Set once a code is sent: what the code page showed just before, so an
+	// error box already there is not read as Goodreads' answer to the code.
+	let codeSent: { readonly boxBefore: boolean; readonly url: string } | null =
+		null;
 	while (clock.now() - startedAt <= OUTCOME_TIMEOUT_MS) {
 		await clock.wait(POLL_INTERVAL_MS);
-		const surface = classifySignInSurface(await observe(page));
+		const observed = await observe(page);
+		const surface = classifySignInSurface(observed);
 		if (
 			surface === "goodreads_page" &&
 			(await probeWithin(probe, probeTimeoutMs))
@@ -420,8 +472,33 @@ export async function attemptAutomaticSignIn({
 		if (surface === "captcha") {
 			return { kind: "fallback", reason: "captcha" };
 		}
+		if (surface === "verification" && codeSent) {
+			// The code page stays up while Goodreads checks the code; only an
+			// error it shows after the code was sent is a rejection.
+			if (
+				observed.errorBox &&
+				(!codeSent.boxBefore || page.url() !== codeSent.url)
+			) {
+				return { kind: "fallback", reason: "code_rejected" };
+			}
+			continue;
+		}
 		if (surface === "verification") {
-			return { kind: "fallback", reason: "verification" };
+			if (!(requestCode && observed.codeField)) {
+				return { kind: "fallback", reason: "verification" };
+			}
+			await checkpoint?.("goodreads-signin-code-requested");
+			const code = await requestCode().catch((): null => null);
+			const boxBeforeCode = await anyVisible(page, ERROR_BOX);
+			const urlBeforeCode = page.url();
+			if (!(code && (await submitCode(page, clock, code)))) {
+				return { kind: "fallback", reason: "verification" };
+			}
+			await checkpoint?.("goodreads-signin-code-submitted");
+			codeSent = { boxBefore: boxBeforeCode, url: urlBeforeCode };
+			// The owner's time to answer does not count against the outcome wait.
+			startedAt = clock.now();
+			continue;
 		}
 		if (surface === "rejected" && (!boxBefore || page.url() !== urlBefore)) {
 			return { kind: "fallback", reason: "rejected_credentials" };
@@ -429,6 +506,10 @@ export async function attemptAutomaticSignIn({
 	}
 	await checkpoint?.("goodreads-signin-timeout");
 	const last = classifySignInSurface(await observe(page));
+	if (last === "verification") {
+		// Still on the code page: the owner finishes there.
+		return { kind: "fallback", reason: "verification" };
+	}
 	if (
 		last === "goodreads_page" ||
 		last === "form" ||
