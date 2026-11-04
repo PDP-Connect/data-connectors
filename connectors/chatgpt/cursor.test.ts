@@ -40,7 +40,7 @@ import type {
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	NO_DETAIL_WAITS,
-	withEmptyConversationDetails,
+	withUnavailableConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
 import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
@@ -64,10 +64,14 @@ const runConversationsAndMessagesStreams: typeof runStreams = (
 	state,
 	options,
 ) =>
-	runStreams({ ...deps, api: withEmptyConversationDetails(deps.api) }, state, {
-		...options,
-		detailPacing: { ...NO_DETAIL_WAITS, ...options?.detailPacing },
-	});
+	runStreams(
+		{ ...deps, api: withUnavailableConversationDetails(deps.api) },
+		state,
+		{
+			...options,
+			detailPacing: { ...NO_DETAIL_WAITS, ...options?.detailPacing },
+		},
+	);
 
 // ─── Synthetic fixtures ────────────────────────────────────────────────────
 

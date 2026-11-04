@@ -32,7 +32,7 @@ import {
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	NO_DETAIL_WAITS,
-	withEmptyConversationDetails,
+	withUnavailableConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
 import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
@@ -53,7 +53,10 @@ const runConversationsAndMessagesStreams: typeof runStreams = (
 	options,
 ) =>
 	runStreams(
-		{ ...deps, api: withEmptyPrimaryList(withEmptyConversationDetails(deps.api)) },
+		{
+			...deps,
+			api: withEmptyPrimaryList(withUnavailableConversationDetails(deps.api)),
+		},
 		state,
 		{
 			...options,
