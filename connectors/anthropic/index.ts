@@ -1110,7 +1110,7 @@ interface ManifestPartDownloadResult {
 	filename: string;
 	outcome: "downloaded" | "download_failed";
 	entries: ManifestPartFile[];
-	completeJsonBoundary?: boolean;
+	allEntriesHaveJsonNames?: boolean;
 }
 
 /**
@@ -1143,7 +1143,7 @@ async function downloadManifestPart(
 			filename: dataFile.filename,
 			outcome: "downloaded",
 			entries,
-			completeJsonBoundary: archiveEntriesMatch(attempt.zipPath, (name) =>
+			allEntriesHaveJsonNames: archiveEntriesMatch(attempt.zipPath, (name) =>
 				name.endsWith(".json"),
 			),
 		};
@@ -1345,7 +1345,13 @@ export async function collectAnthropic({
 	// in a plan-only run). Enumerating plans must never request another export.
 	const emitAccountPlan = async (organizationId: string): Promise<void> => {
 		if (!hasReadablePlanOrganizationInventory(organizations)) {
-			await emit({ type: "SKIP_RESULT", stream: ACCOUNT_PLAN_STREAM, reason: "parse_error", message: "The organization list contains an unreadable entry.", recovery_hint: { action: "retry_by_runtime", retryable: true } });
+			await emit({
+				type: "SKIP_RESULT",
+				stream: ACCOUNT_PLAN_STREAM,
+				reason: "parse_error",
+				message: "The organization list contains an unreadable entry.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
 			return;
 		}
 		const usable = usablePlanOrganizations(organizations);
@@ -1616,7 +1622,7 @@ export async function collectAnthropic({
 	};
 	const accountRawConversation = async (raw: unknown) => {
 		accountRawConversationSource(raw);
-		if (!(wantsMessages && isPlainObject(raw))) {
+		if (!((wantsMessages || wantsConversations) && isPlainObject(raw))) {
 			if (wantsMessages) completeMessages = false;
 			return;
 		}
@@ -1629,10 +1635,10 @@ export async function collectAnthropic({
 		if (!parent) return;
 		let omittedMessages =
 			!Array.isArray(chat_messages) && messageOmissionAffectsScope(null, raw);
-		if (messagesAccounted && Array.isArray(chat_messages)) {
+		if (Array.isArray(chat_messages)) {
 			for (const child of chat_messages) {
 				const message = parseMessage(child, parent.id);
-				accountMessageChild(message);
+				if (messagesAccounted) accountMessageChild(message);
 				if (
 					!message &&
 					messageOmissionAffectsScope(messageOmissionTimestamp(child), raw)
@@ -1641,7 +1647,10 @@ export async function collectAnthropic({
 			}
 		}
 		if (omittedMessages)
-			await reportConversationOmission(parent.id, [MESSAGES_STREAM]);
+			await reportConversationOmission(parent.id, [
+				CONVERSATIONS_STREAM,
+				MESSAGES_STREAM,
+			]);
 	};
 	const markDelivered = (
 		delivered: Set<string>,
@@ -2400,7 +2409,7 @@ export async function collectAnthropic({
 			// The scan already saw every child. Account omissions before the
 			// coarse parent gate, without rereading out-of-window messages.
 			if (
-				wantsMessages &&
+				(wantsMessages || wantsConversations) &&
 				((!chatMessagesIsArray && messageOmissionAffectsScope(null, header)) ||
 					scan.omittedMessageTimes.some((time) =>
 						messageOmissionAffectsScope(time, header),
@@ -2408,7 +2417,7 @@ export async function collectAnthropic({
 			)
 				await reportConversationOmission(
 					conversation?.id ?? null,
-					[MESSAGES_STREAM],
+					[CONVERSATIONS_STREAM, MESSAGES_STREAM],
 					value.startOffset,
 				);
 			if (!isWithinTimeWindow(header.updated_at)) return;
@@ -2416,7 +2425,8 @@ export async function collectAnthropic({
 				droppedConversations += 1;
 				return;
 			}
-			if (wantsMessages) {
+			let parsedMessageCount = 0;
+			if (wantsMessages || wantsConversations) {
 				const ordered = [...scan.messageKeys].sort(
 					(a, b) => a.sortTime - b.sortTime || a.index - b.index,
 				);
@@ -2435,9 +2445,13 @@ export async function collectAnthropic({
 						conversation.id,
 					);
 					if (messagesAccounted) accountMessageChild(message);
-					if (message) await emitMessage(message);
+					if (message) {
+						parsedMessageCount += 1;
+						if (wantsMessages) await emitMessage(message);
+					}
 				}
 			}
+			conversation.message_count = parsedMessageCount;
 			if (
 				wantsConversations &&
 				isRecordSelected?.(CONVERSATIONS_STREAM, conversation)
@@ -2953,7 +2967,8 @@ export async function collectAnthropic({
 			categoryBoundary("light_metadata") &&
 			results.every(
 				(result) =>
-					result.completeJsonBoundary === true &&
+					result.allEntriesHaveJsonNames === true &&
+					result.entries.every((entry) => entry.json !== null) &&
 					accountedCategories.includes(result.category) &&
 					// safeJsonParse returns null when an extra entry is unreadable.
 					(!knownUnconsumedCategories.has(result.category) ||

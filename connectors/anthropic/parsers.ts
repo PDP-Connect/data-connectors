@@ -352,7 +352,7 @@ export function parseConversation(raw: unknown): {
 		return null;
 	}
 	const rawMessages = Array.isArray(raw.chat_messages) ? raw.chat_messages : [];
-	const conversation = parseConversationHeader(raw, rawMessages.length);
+	const conversation = parseConversationHeader(raw, 0);
 	if (!conversation) return null;
 	// Export messages carry no ordering index; sort by created_at, stable on
 	// ties (matches legacy normalizeConversation exactly).
@@ -367,6 +367,7 @@ export function parseConversation(raw: unknown): {
 	const messages = sorted
 		.map((m) => parseMessage(m, conversation.id))
 		.filter((m): m is MessageRecord => m !== null);
+	conversation.message_count = messages.length;
 	return { conversation, messages };
 }
 
@@ -1441,9 +1442,14 @@ export function usablePlanOrganizations(
 /** A full inventory is safe only when every raw entry can be classified. */
 export function hasReadablePlanOrganizationInventory(orgs: unknown[]): boolean {
 	return orgs.every((value) => {
-		if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+		if (!value || typeof value !== "object" || Array.isArray(value))
+			return false;
 		const org = value as RawOrganization;
-		return typeof org.uuid === "string" && org.uuid.length > 0 &&
-			Array.isArray(org.capabilities) && org.capabilities.every((c) => typeof c === "string");
+		return (
+			typeof org.uuid === "string" &&
+			org.uuid.length > 0 &&
+			Array.isArray(org.capabilities) &&
+			org.capabilities.every((c) => typeof c === "string")
+		);
 	});
 }
