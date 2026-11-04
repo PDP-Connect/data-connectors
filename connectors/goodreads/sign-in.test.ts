@@ -540,7 +540,7 @@ test("typing that throws hands off with nothing sent", async () => {
 test("an error the attempt throws still reaches the handoff", async () => {
 	const run = await runEnsure({ afterSubmit: "home" }, CREDENTIALS);
 	const fake = makeSignIn({ afterSubmit: "home" });
-	const handoff = makeHandoff(fake.world, { ownerSignsIn: true });
+	const handoff = makeHandoff(fake.world, { code: null, ownerSignsIn: true });
 	const page = {
 		...fake.page,
 		locator: () => {
