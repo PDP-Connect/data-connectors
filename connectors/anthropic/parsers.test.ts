@@ -312,6 +312,19 @@ test("parseMessage: a control character in content is represented, not dropped",
 
 // ─── parseConversation ───────────────────────────────────────────────────
 
+test("parseConversation: message_count excludes messages that cannot be parsed", () => {
+	const parsed = parseConversation({
+		uuid: "c1",
+		chat_messages: [{ uuid: "m1" }, null, { text: "missing identity" }],
+	});
+	assert.ok(parsed);
+	assert.deepEqual(
+		parsed.messages.map((message) => message.id),
+		["m1"],
+	);
+	assert.equal(parsed.conversation.message_count, 1);
+});
+
 test("parseConversation: messages sorted by created_at, stable on out-of-order input", () => {
 	const parsed = parseConversation({
 		uuid: "c1",
@@ -529,7 +542,7 @@ test("source envelopes retain every legacy conversation message and full project
 		future_provider_field: { nested: [1, "verbatim"] },
 	};
 	const parsed = parseExport([rawConversation], [rawProject]);
-	assert.equal(parsed.conversations[0]?.message_count, 2);
+	assert.equal(parsed.conversations[0]?.message_count, 1);
 	assert.equal(
 		parsed.messages.length,
 		1,

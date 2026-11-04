@@ -2345,6 +2345,7 @@ test("collectAnthropic: manifest conversation without chat_messages imports its 
 	assert.deepEqual(
 		skips.map((skip) => `${skip.stream}:${skip.reason}`).sort(),
 		[
+			"conversations:export_conversation_incomplete",
 			"messages:export_conversation_incomplete",
 			"project_documents:export_projects_missing",
 			"projects:export_projects_missing",
@@ -2358,6 +2359,7 @@ test("collectAnthropic: manifest conversation without chat_messages imports its 
 		"conv-2",
 	);
 	assertNoSyncedAt(protocolMessages, [
+		"conversations",
 		"messages",
 		"projects",
 		"project_documents",
@@ -6039,8 +6041,11 @@ for (const mode of ["buffered", "streaming", "manifest"] as const) {
 				["valid-message"],
 			);
 			const skips = skipsOf(run.protocolMessages);
-			assert.equal(skips.length, 1);
-			const skip = skips[0];
+			assert.deepEqual(skips.map((skip) => skip.stream).sort(), [
+				"conversations",
+				"messages",
+			]);
+			const skip = skips.find((entry) => entry.stream === "messages");
 			assert.ok(skip);
 			assert.equal(skip.stream, "messages");
 			assert.equal(skip.reason, "export_conversation_incomplete");
@@ -6119,8 +6124,10 @@ for (const [label, children] of [
 				.some((record) => record.data.id === "valid-parent"),
 		);
 		const skips = skipsOf(run.protocolMessages);
-		assert.equal(skips.length, 1);
-		assert.equal(skips[0]?.stream, "messages");
+		assert.deepEqual(skips.map((skip) => skip.stream).sort(), [
+			"conversations",
+			"messages",
+		]);
 		assert.equal(skips[0]?.reason, "export_conversation_incomplete");
 		assert.equal(
 			(skips[0]?.diagnostics as Record<string, unknown>)?.conversation_id,
@@ -6195,7 +6202,10 @@ for (const partial of [{ uuid: "partial-parent" }, {}]) {
 			skips.some(
 				(skip) =>
 					skip.stream === ("uuid" in partial ? "conversations" : "messages") &&
-					skip.reason === "export_items_unparseable",
+					skip.reason ===
+						("uuid" in partial
+							? "export_conversation_incomplete"
+							: "export_items_unparseable"),
 			),
 		);
 		assert.equal(coverageOf(run.protocolMessages, "messages").length, 0);
@@ -6549,4 +6559,186 @@ test("conversation omission reasons have vetted display messages", () => {
 		assert.equal(typeof manifest.reason_display_messages[reason], "string");
 		assert.ok(manifest.reason_display_messages[reason]?.trim());
 	}
+});
+
+for (const [label, children] of [
+	["missing", undefined],
+	["non-array", null],
+] as const) {
+	test(`count parity: ${label} children mark both streams incomplete`, async () => {
+		const run = await runFullCompletion("streaming", {
+			streams: ["conversations", "messages"],
+			conversations: [{ uuid: "partial", chat_messages: children }],
+			projects: [],
+		});
+		assert.deepEqual(
+			skipsOf(run.protocolMessages)
+				.map((s) => s.stream)
+				.sort(),
+			["conversations", "messages"],
+		);
+		assertNoSyncedAt(run.protocolMessages, ["conversations", "messages"]);
+	});
+}
+
+test("count parity: oversized parent counts emitted messages and skips both streams", async () => {
+	const run = await runOldFormat(
+		[
+			{
+				name: "conversations.json",
+				content: [
+					{
+						uuid: "parent",
+						padding: "x".repeat(1024),
+						chat_messages: [{ uuid: "valid" }, null, { text: "no id" }],
+					},
+				],
+			},
+		],
+		{
+			streams: ["conversations", "messages"],
+			streaming: true,
+			testOverrides: { maxBufferedObjectUnits: 64 },
+		},
+	);
+	const conversations = run.emitted.filter((r) => r.stream === "conversations");
+	const messages = run.emitted.filter((r) => r.stream === "messages");
+	assert.equal(messages.length, 1);
+	assert.equal(conversations[0]?.data.message_count, messages.length);
+	assert.deepEqual(
+		skipsOf(run.protocolMessages)
+			.map((s) => s.stream)
+			.sort(),
+		["conversations", "messages"],
+	);
+});
+
+test("count parity: streaming validates truncated input before emitting unless already validated", async () => {
+	const raw = new RawJson(
+		'[{"uuid":"first","chat_messages":[{"uuid":"message"}]},{"uuid":',
+	);
+	for (const validated of [false, true]) {
+		const run = await runOldFormat(
+			[{ name: "conversations.json", content: raw }],
+			{
+				streams: ["conversations", "messages"],
+				streaming: true,
+				entriesValidated: validated,
+			},
+		);
+		assert.equal(
+			run.emitted.filter((r) => r.stream === "conversations").length,
+			validated ? 1 : 0,
+		);
+		assert.equal(
+			run.emitted.filter((r) => r.stream === "messages").length,
+			validated ? 1 : 0,
+		);
+		assertNoSyncedAt(run.protocolMessages, ["conversations", "messages"]);
+	}
+});
+
+test("count parity: truncated JSON in a valid manifest ZIP is an incomplete archive", async () => {
+	const run = await runManifest(
+		[
+			{
+				category: "conversations",
+				entries: [
+					{
+						name: "valid.json",
+						content: [{ uuid: "kept", chat_messages: [] }],
+					},
+					{ name: "conversations.json", content: new RawJson('[{"uuid":') },
+				],
+			},
+			{
+				category: "light_metadata",
+				entries: [{ name: "users.json", content: [] }],
+			},
+		],
+		["conversations", "messages"],
+	);
+	assert.deepEqual(
+		run.emitted
+			.filter((r) => r.stream === "conversations")
+			.map((r) => r.data.id),
+		["kept"],
+	);
+	assert.deepEqual(
+		run.emitted.filter((r) => r.stream === "messages"),
+		[],
+	);
+	assert.deepEqual(
+		skipsOf(run.protocolMessages)
+			.map((s) => s.stream)
+			.sort(),
+		["conversations", "messages"],
+	);
+	assert.ok(
+		skipsOf(run.protocolMessages).every(
+			(s) => s.reason === "export_manifest_incomplete",
+		),
+	);
+	assertNoSyncedAt(run.protocolMessages, ["conversations", "messages"]);
+	assert.equal(
+		run.protocolMessages.filter((m) => m.type === "DETAIL_COVERAGE").length,
+		0,
+	);
+});
+
+test("count parity: live rejects unreadable details and unstable lists without checkpoints", async () => {
+	const { collectAnthropicLive } = await import("../anthropic_live/index.ts");
+	const { at, conv, harness, O, stampMessage, uuid } = await import(
+		"../anthropic_live/test-support.ts"
+	);
+	for (const child of [
+		{ text: "missing id", created_at: at(9) },
+		{ uuid: uuid(999), text: "missing time" },
+	]) {
+		const conversation = conv(1, 10);
+		conversation.chat_messages.push(child);
+		const run = harness([conversation], {
+			streams: ["conversations", "messages"],
+		});
+		await collectAnthropicLive(run.ctx);
+		assert.deepEqual(run.ids("conversations"), []);
+		assert.deepEqual(run.ids("messages"), []);
+		assert.deepEqual(run.states("conversations"), []);
+		assert.deepEqual(run.states("messages"), []);
+	}
+	const unreadable = harness([conv(1, 10)], {
+		streams: ["conversations", "messages"],
+		route: (url) =>
+			url.pathname === `${O}/chat_conversations`
+				? { status: 200, body: [{ uuid: uuid(2), updated_at: "invalid" }] }
+				: undefined,
+	});
+	await collectAnthropicLive(unreadable.ctx);
+	assert.deepEqual(unreadable.detailReads(), []);
+	assert.deepEqual(unreadable.states("conversations"), []);
+	assert.deepEqual(unreadable.states("messages"), []);
+	const conversations = Array.from({ length: 150 }, (_, i) => {
+		const c = conv(i + 1, 0);
+		c.updated_at = new Date(Date.UTC(2026, 0, 15, 9, 0, i)).toISOString();
+		stampMessage(c, 1, c.updated_at);
+		return c;
+	});
+	const changing = harness(conversations, {
+		streams: ["conversations", "messages"],
+		runtime: true,
+		route: (url) => {
+			if (
+				url.pathname === `${O}/chat_conversations` &&
+				Number(url.searchParams.get("offset")) > 0
+			)
+				conversations.splice(10, 1);
+			return undefined;
+		},
+	});
+	await collectAnthropicLive(changing.ctx);
+	assert.deepEqual(changing.ids("conversations"), []);
+	assert.deepEqual(changing.ids("messages"), []);
+	assert.deepEqual(changing.states("conversations"), []);
+	assert.deepEqual(changing.states("messages"), []);
+	assert.equal(changing.failures.length, 2);
 });
