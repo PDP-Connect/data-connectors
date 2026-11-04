@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.3.18",
+	"version": "0.3.19",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -871,7 +871,8 @@
 	],
 	"reason_display_messages": {
 		"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
-		"stream_collection_failed": "GitHub did not show that this list was read in full, so the last complete copy was kept."
+		"stream_collection_failed": "GitHub did not show that this list was read in full, so the last complete copy was kept.",
+		"github_browser_session_missing": "GitHub did not show you as signed in. Sign in to GitHub, then try again."
 	},
 	"mobile": {
 		"pageshim": {

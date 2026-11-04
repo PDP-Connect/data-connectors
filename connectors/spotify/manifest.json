@@ -492,6 +492,10 @@
 		"spotify_library_rows_unsupported": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing.",
 		"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 		"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
-		"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
+		"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld.",
+		"spotify_library_pagination_no_progress": "Spotify stopped returning new items partway through your library, so reading stopped. Nothing new was saved.",
+		"spotify_playlist_pagination_no_progress": "Spotify stopped returning new items partway through one of your playlists, so reading stopped. Nothing new was saved.",
+		"spotify_saved_tracks_pagination_no_progress": "Spotify stopped returning new songs partway through your Liked Songs, so reading stopped. Nothing new was saved.",
+		"spotify_session_dead": "Spotify did not show you as signed in. Sign in to Spotify, then try again."
 	}
 }
