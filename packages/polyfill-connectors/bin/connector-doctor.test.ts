@@ -200,6 +200,53 @@ function withPatchrightCore(state: FakeFsState, revision: string): void {
 	);
 }
 
+test("checkChromiumRevision: macOS requires Chrome even when bundled Chromium is cached", () => {
+	const { ctx, state } = baseContext({ platform: "darwin" });
+	withPatchrightCore(state, "1243");
+	state.existing.add("/home/tester/Library/Caches/ms-playwright/chromium-1243");
+	const result = checkChromiumRevision(ctx);
+	assert.equal(result.status, "fail");
+	// copy-assertion-ok: doctor must direct macOS owners to system Chrome in Applications.
+	assert.match(result.fix ?? "", /Chrome.*Applications/);
+	// copy-assertion-ok: doctor must not suggest the prohibited automatic bundled-browser fallback on macOS.
+	assert.doesNotMatch(result.fix ?? "", /patchright install chromium/);
+});
+
+test("checkChromiumRevision: macOS Chrome does not require a bundled revision", () => {
+	const { ctx, state } = baseContext({ platform: "darwin" });
+	state.existing.add(
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+	);
+	const result = checkChromiumRevision(ctx);
+	assert.equal(result.status, "pass");
+	// copy-assertion-ok: successful macOS doctor output must identify the system browser being checked.
+	assert.match(result.message, /Chrome/);
+});
+
+test("checkChromiumRevision: macOS respects an explicitly selected installed channel", () => {
+	const { ctx, state } = baseContext({
+		platform: "darwin",
+		env: { PDPP_BROWSER_CHANNEL: "chrome-beta" },
+	});
+	state.existing.add(
+		"/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+	);
+	assert.equal(checkChromiumRevision(ctx).status, "pass");
+});
+
+test("checkChromiumRevision: macOS explicit Chromium uses its configured cache", () => {
+	const { ctx, state } = baseContext({
+		platform: "darwin",
+		env: {
+			PDPP_BROWSER_CHANNEL: "chromium",
+			PLAYWRIGHT_BROWSERS_PATH: "/managed",
+		},
+	});
+	withPatchrightCore(state, "1243");
+	state.existing.add("/managed/chromium-1243");
+	assert.equal(checkChromiumRevision(ctx).status, "pass");
+});
+
 test("checkChromiumRevision: pass when the required revision is present in the cache dir", () => {
 	const { ctx, state } = baseContext();
 	withPatchrightCore(state, "1243");
