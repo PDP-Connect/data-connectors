@@ -2451,12 +2451,12 @@ export interface StreamDeps {
 	conversationDetailOnly?: boolean;
 	/**
 	 * Reports observed detail outcomes for conversation accounting. Settled means
-	 * read, source-unrepresentable, or a definite 404/410; retry means an
-	 * incomplete detail. Deferred or unreached conversations report neither.
+	 * read, source-unrepresentable, or a definite 404/410; retry means a fetch
+	 * failure, while withheld means structurally incomplete or rejected detail.
 	 */
 	reportConversationDetail?: (
 		c: ConversationListItem,
-		outcome: "settled" | "retry",
+		outcome: "settled" | "retry" | "withheld",
 	) => Promise<void>;
 }
 
@@ -7100,7 +7100,11 @@ export async function runMessagesAndConversationsWithDetail(
 						isSourceUnrepresentable(detailOutcome) ||
 						isDeletedConversationStatus(detail.status)
 						? "settled"
-						: "retry",
+						: "reason" in detailOutcome &&
+								(detailOutcome.reason === "branch_structurally_incomplete" ||
+									detailOutcome.reason === "message_shape_rejected")
+							? "withheld"
+							: "retry",
 				);
 				if (detailOutcome.complete) {
 					hydratedKeys.add(c.id);
@@ -7827,6 +7831,7 @@ async function walkConversationsAndMessages(
 	let messageDetailDeferred = false;
 	const messageSettled = new Set<string>();
 	const messageFailed = new Set<string>();
+	const messageWithheld = new Set<string>();
 	if (wantsMessages) {
 		const foundMessageDetailProgressMsg = {
 			type: "PROGRESS",
@@ -7840,7 +7845,12 @@ async function walkConversationsAndMessages(
 			{
 				...runDeps,
 				reportConversationDetail: async (c, outcome) => {
-					(outcome === "settled" ? messageSettled : messageFailed).add(c.id);
+					(outcome === "settled"
+						? messageSettled
+						: outcome === "withheld"
+							? messageWithheld
+							: messageFailed
+					).add(c.id);
 					await runDeps.reportConversationDetail?.(c, outcome);
 				},
 			},
@@ -7895,11 +7905,12 @@ async function walkConversationsAndMessages(
 				// A messages pass that deferred shared an account under pressure or a
 				// spent run budget; do not send a second pass into it.
 				fetchDetail: !messageDetailDeferred,
-				checkpoint: (read, failed) =>
+				checkpoint: (read, failed, withheld) =>
 					emitConversationsState(deps, {
 						...stateInput,
 						settled: new Set([...messageSettled, ...read]),
 						failed: new Set([...messageFailed, ...failed]),
+						withheld: new Set([...messageWithheld, ...withheld]),
 					}),
 			},
 		);
@@ -7907,6 +7918,7 @@ async function walkConversationsAndMessages(
 			...stateInput,
 			settled: new Set([...messageSettled, ...outcome.settled]),
 			failed: new Set([...messageFailed, ...outcome.failed]),
+			withheld: new Set([...messageWithheld, ...outcome.withheld]),
 		});
 		// A truncated list proved it did not see everything newer than
 		// priorConversationsCursor, so `conversationsToSync.length` is a prefix,
@@ -8016,11 +8028,17 @@ async function emitConversationsWithDetail(
 		checkpoint: (
 			settled: ReadonlySet<string>,
 			failed: ReadonlySet<string>,
+			withheld: ReadonlySet<string>,
 		) => void;
 	},
-): Promise<{ settled: Set<string>; failed: Set<string> }> {
+): Promise<{
+	settled: Set<string>;
+	failed: Set<string>;
+	withheld: Set<string>;
+}> {
 	const settled = new Set<string>();
 	const failed = new Set<string>();
+	const withheld = new Set<string>();
 	const listOnly = new Set(plan.listOnly.map((c) => c.id));
 	const emitted = new Set<string>();
 	// A row with no detail is emitted only if it is new to the stream.
@@ -8036,6 +8054,10 @@ async function emitConversationsWithDetail(
 		let settledAtCheckpoint = 0;
 		await runMessagesAndConversationsWithDetail(
 			conversationDetailOnlyDeps(deps, (c, outcome) => {
+				if (outcome === "withheld") {
+					withheld.add(c.id);
+					return Promise.resolve();
+				}
 				if (outcome === "retry") {
 					failed.add(c.id);
 					return Promise.resolve();
@@ -8046,7 +8068,7 @@ async function emitConversationsWithDetail(
 					CONVERSATION_CHECKPOINT_EVERY
 				) {
 					settledAtCheckpoint = settled.size;
-					checkpoint(settled, failed);
+					checkpoint(settled, failed, withheld);
 				}
 				return Promise.resolve();
 			}),
@@ -8056,11 +8078,11 @@ async function emitConversationsWithDetail(
 		);
 	}
 	for (const c of plan.listOnly) {
-		if (!emitted.has(c.id)) {
+		if (!emitted.has(c.id) && !withheld.has(c.id)) {
 			await emitOnce(c, null);
 		}
 	}
-	return { settled, failed };
+	return { settled, failed, withheld };
 }
 
 /**
@@ -8144,6 +8166,7 @@ function emitConversationsState(
 		rows,
 		settled,
 		failed,
+		withheld,
 		prior,
 		backfill,
 		conversationsListTruncated,
@@ -8152,6 +8175,7 @@ function emitConversationsState(
 		rows: ConversationListItem[];
 		settled: ReadonlySet<string>;
 		failed: ReadonlySet<string>;
+		withheld: ReadonlySet<string>;
 		prior: DetailProgress;
 		backfill: ConversationBackfill | null;
 		conversationsListTruncated: boolean;
@@ -8163,6 +8187,7 @@ function emitConversationsState(
 		rows,
 		settled,
 		failed,
+		withheld,
 		// A list that is truncated, or still has older pages to drain, proved
 		// nothing about the rows between the ones it saw.
 		listComplete: !conversationsListTruncated && backfill === null,
