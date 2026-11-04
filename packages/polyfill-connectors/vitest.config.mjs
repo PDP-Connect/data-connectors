@@ -9,6 +9,16 @@ const include = process.env.PDPP_VITEST_EXACT_FILES
 	: ["**/*.{test,fixture}.ts"];
 
 export default {
+	resolve: {
+		alias: {
+			"fast-check": fileURLToPath(
+				new URL(
+					"./test-tools/node_modules/fast-check/lib/fast-check.js",
+					import.meta.url,
+				),
+			),
+		},
+	},
 	root: fileURLToPath(new URL("../..", import.meta.url)),
 	test: {
 		include,
