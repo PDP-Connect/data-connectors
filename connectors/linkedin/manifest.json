@@ -9,7 +9,7 @@
 	},
 	"connector_key": "linkedin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-	"version": "0.3.42",
+	"version": "0.3.43",
 	"display_name": "LinkedIn",
 	"brand": {
 		"icon": "icon.svg",
@@ -441,6 +441,7 @@
 		"experience_nested_collection_urn_missing": "LinkedIn inventory could not be verified: experience nested collection urn missing",
 		"experience_nested_collection_urn_duplicate": "LinkedIn inventory could not be verified: experience nested collection urn duplicate",
 		"experience_nested_collection_total_mismatch": "LinkedIn inventory could not be verified: experience nested collection total mismatch",
-		"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised"
+		"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised",
+		"linkedin_login_page_unreachable": "LinkedIn's sign-in page did not load. Check your internet connection, then try again."
 	}
 }

@@ -102,19 +102,98 @@
  *          proves every reachable value is RI-generic (see this file's
  *          sibling test for how DETAIL_GAP's closed reason union is
  *          special-cased at the completeness-check layer, not chased here).
+ *
+ * Thrown terminal codes (`terminalCodes`). A run can also end on a code the
+ * connector throws instead of emitting, and the owner sees copy for that
+ * code too. The scan counts two shapes, in the same file scope as above:
+ *
+ *   - `createConnectorFailure(code, ...)`: `code` becomes `DONE.error.code`
+ *     wherever it is thrown. The first argument resolves with the same
+ *     one-hop rules as a `reason:` value, plus a non-computed lookup into a
+ *     module-level object of literals (`ERROR_CODE.AUTH_FAILED`). An argument
+ *     that does not resolve is reported in `unresolvedTerminalCodes`
+ *     (fail-closed), never skipped.
+ *   - A bare `new Error(message)` / `Error(message)`, or `super(message)` in a
+ *     class that directly `extends Error`, whose message is a literal (or an
+ *     all-literal ternary, or an identifier that resolves one hop to
+ *     literals) and is code-shaped per `isConnectorErrorCodeShaped`. Thrown or
+ *     returned does not matter: a helper that returns the Error for its caller
+ *     to throw (heb's `hebSessionRequired()`) is the same code. Other messages
+ *     (spaces, colons, template literals with substitutions) are ignored.
+ *
+ * Which bare Errors really surface as a code: only one path in this package
+ * turns a bare Error into `DONE.error.code`. `establishSession`
+ * (session-establish.ts) catches whatever a connector's `ensureSession`
+ * throws and, when the whole message is code-shaped, copies it to the
+ * TerminalError's `code`. A bare Error thrown from `collect` reaches
+ * `run().catch` in connector-runtime.ts and goes out with no code: only the
+ * redacted message carries the token. The scan still counts every
+ * code-shaped bare Error, for three reasons. Telling an `ensureSession` throw
+ * from a `collect` throw needs a call graph, which this one-hop scanner does
+ * not have, and one code can come from both (github_browser throws
+ * `github_browser_session_missing` from `ensureSession` and again from
+ * `collect`). A code that is message-only
+ * today becomes a real code as soon as the connector moves the check into
+ * `ensureSession` or wraps it in `createConnectorFailure`. And the gate must
+ * fail closed: a code counted that never reaches `DONE.error.code` costs one
+ * allowlist line, a code missed is copy the owner never gets. The known gap
+ * in the other direction: a template-literal message
+ * (`` `spotify_retryable_status_${status}` ``) can be code-shaped at run time
+ * but is not a finite literal set, so it is not counted.
+ *
+ * Shared modules (`SHARED_TERMINAL_CODE_MODULES`). Some codes are thrown by
+ * a shared helper, not by connector code: the Amazon sign-in flow
+ * (auto-login/amazon.ts) and the browser sign-in helpers
+ * (browser-handoff.ts). Each listed module's terminal codes are attributed to
+ * every connector with a production file that imports it at run time
+ * (a type-only import cannot throw), and to every connector that imports a
+ * module named in its `reachedThrough` list (amazon.ts calls
+ * `manualBrowserLogin`, so wholefoods reaches browser-handoff.ts's codes
+ * through it). This is an explicit list, not an import-graph walk: a shared
+ * module that is not listed (the other auto-login helpers, the runtime's own
+ * session code) contributes nothing.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { extname, join } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { parse } from "@babel/parser";
 import type { DetailGapMessage } from "@pdpp/connector-protocol";
+import { packageRoot } from "./connector-paths.ts";
+import { isConnectorErrorCodeShaped } from "./terminal-error.ts";
+
+interface ScanLocation {
+	file: string;
+	line: number;
+	snippet: string;
+}
 
 export interface ReasonEmissionScanResult {
 	/** Reason codes resolved (directly or via one hop) to a finite literal set. */
 	literalReasons: string[];
+	/** Terminal failure codes the connector can throw (see the module comment). */
+	terminalCodes: string[];
 	/** In-scope `reason:` values that could not be resolved within one hop. */
-	unresolved: { file: string; line: number; snippet: string }[];
+	unresolved: ScanLocation[];
+	/** `createConnectorFailure` first arguments that could not be resolved within one hop. */
+	unresolvedTerminalCodes: ScanLocation[];
 }
+
+/** A shared module whose thrown terminal codes belong to the connectors that import it. */
+export interface SharedTerminalCodeModule {
+	/** Absolute path of the shared module. */
+	path: string;
+	/** Absolute paths of other shared modules that call into this one; importing one of them also reaches this module's codes. */
+	reachedThrough: readonly string[];
+}
+
+const AMAZON_LOGIN_MODULE = join(packageRoot, "src", "auto-login", "amazon.ts");
+const BROWSER_HANDOFF_MODULE = join(packageRoot, "src", "browser-handoff.ts");
+
+export const SHARED_TERMINAL_CODE_MODULES: readonly SharedTerminalCodeModule[] =
+	[
+		{ path: AMAZON_LOGIN_MODULE, reachedThrough: [] },
+		{ path: BROWSER_HANDOFF_MODULE, reachedThrough: [AMAZON_LOGIN_MODULE] },
+	];
 
 const TEST_FILE_SUFFIXES = [".test.ts", ".test.tsx"];
 const EMISSION_TYPES = new Set([
@@ -1018,13 +1097,28 @@ const FUNCTION_NODE_TYPES = new Set([
 	"ArrowFunctionExpression",
 ]);
 
-/** Scans one file's source for every reason code emitted on a SKIP_RESULT/connector_error/DETAIL_GAP object literal. */
+/** Scans one file's source for every reason code emitted on a SKIP_RESULT/connector_error/DETAIL_GAP object literal, and every terminal code it throws. */
 export function scanFileForReasonEmissions(
 	absPath: string,
 ): ReasonEmissionScanResult {
+	return scanSourceFile(absPath).result;
+}
+
+/** One file's scan result plus the absolute paths of the relative modules it imports at run time. */
+function scanSourceFile(absPath: string): {
+	importedPaths: string[];
+	result: ReasonEmissionScanResult;
+} {
 	const raw = readFileSync(absPath, "utf8");
-	const literalReasons: string[] = [];
-	const unresolved: { file: string; line: number; snippet: string }[] = [];
+	const ctx: ScanContext = {
+		absPath,
+		literalReasons: [],
+		program: { type: "Program" },
+		raw,
+		terminalCodes: [],
+		unresolved: [],
+		unresolvedTerminalCodes: [],
+	};
 
 	let ast: Node;
 	try {
@@ -1041,22 +1135,24 @@ export function scanFileForReasonEmissions(
 		// fail-soft-on-parse-error posture of the RI zero-connector-knowledge
 		// data-load scanner (a parse failure here is a build error elsewhere,
 		// not something this scan should crash on).
-		return { literalReasons, unresolved };
+		return { importedPaths: [], result: scanResultOf(ctx) };
 	}
 
-	const program = (ast as { program?: Node }).program ?? ast;
-	const ctx: ScanContext = {
-		absPath,
-		literalReasons,
-		program,
-		raw,
-		unresolved,
-	};
-	walkWithFunctionScope(program, null, ctx);
+	ctx.program = (ast as { program?: Node }).program ?? ast;
+	walkWithFunctionScope(ctx.program, null, ctx);
 
 	return {
-		literalReasons: [...new Set(literalReasons)],
-		unresolved,
+		importedPaths: runtimeImportedPaths(ctx.program, absPath),
+		result: scanResultOf(ctx),
+	};
+}
+
+function scanResultOf(ctx: ScanContext): ReasonEmissionScanResult {
+	return {
+		literalReasons: [...new Set(ctx.literalReasons)],
+		terminalCodes: [...new Set(ctx.terminalCodes)],
+		unresolved: ctx.unresolved,
+		unresolvedTerminalCodes: ctx.unresolvedTerminalCodes,
 	};
 }
 
@@ -1066,7 +1162,262 @@ interface ScanContext {
 	literalReasons: string[];
 	program: Node;
 	raw: string;
-	unresolved: { file: string; line: number; snippet: string }[];
+	terminalCodes: string[];
+	unresolved: ScanLocation[];
+	unresolvedTerminalCodes: ScanLocation[];
+}
+
+function scanLocation(node: Node, ctx: ScanContext): ScanLocation {
+	return {
+		file: ctx.absPath,
+		line: nodeLine(node),
+		snippet: ctx.raw.split("\n")[nodeLine(node) - 1]?.trim() ?? "",
+	};
+}
+
+// --- Thrown terminal codes (see the module comment) ---
+
+/** Strips TypeScript-only wrappers (`x as const`, `x satisfies T`, `x!`) that do not change the runtime value. */
+function unwrapTsExpression(node: Node): Node {
+	let current = node;
+	while (
+		current.type === "TSAsExpression" ||
+		current.type === "TSSatisfiesExpression" ||
+		current.type === "TSNonNullExpression"
+	) {
+		const { expression } = current as { expression?: Node };
+		if (!expression) {
+			break;
+		}
+		current = expression;
+	}
+	return current;
+}
+
+/** The value of a template literal with no substitutions (`` `a_b` ``); `undefined` for anything else. */
+function plainTemplateLiteralValue(node: Node): string | undefined {
+	if (node.type !== "TemplateLiteral") {
+		return;
+	}
+	const { expressions = [], quasis = [] } = node as {
+		expressions?: Node[];
+		quasis?: { value?: { cooked?: string } }[];
+	};
+	if (expressions.length > 0 || quasis.length !== 1) {
+		return;
+	}
+	return quasis[0]?.value?.cooked;
+}
+
+/** `OBJ.KEY` where `OBJ` is a module-level object literal (optionally `as const`) whose `KEY` property is a literal (the apple_contacts `APPLE_CONTACTS_ERROR_CODE.AUTH_FAILED` pattern). `null` for any other shape. */
+function resolveConstObjectMember(node: Node, program: Node): string[] | null {
+	if (node.type !== "MemberExpression") {
+		return null;
+	}
+	const { object, property, computed } = node as {
+		object?: Node;
+		property?: Node;
+		computed?: boolean;
+	};
+	if (computed || !(object && isIdentifier(object))) {
+		return null;
+	}
+	if (!(property && isIdentifier(property))) {
+		return null;
+	}
+	for (const init of findLocalInitializers(program, object.name)) {
+		const literal = unwrapTsExpression(init);
+		if (!isObjectExpression(literal)) {
+			continue;
+		}
+		const prop = literal.properties.find(
+			(p) => objectPropertyKeyName(p) === property.name,
+		);
+		if (prop && isObjectProperty(prop)) {
+			return resolveDirectLiterals(prop.value);
+		}
+	}
+	return null;
+}
+
+/** Resolves `createConnectorFailure`'s first argument with the `reason:` one-hop rules, plus a const-object member lookup. `null` if unresolved. */
+function resolveFailureCodeArgument(
+	arg: Node,
+	program: Node,
+	enclosingFunction: Node | null,
+): string[] | null {
+	const node = unwrapTsExpression(arg);
+	const template = plainTemplateLiteralValue(node);
+	if (template !== undefined) {
+		return SNAKE_CASE_RE.test(template) ? [template] : null;
+	}
+	return (
+		resolveConstObjectMember(node, program) ??
+		resolveReasonValue(node, program, enclosingFunction)
+	);
+}
+
+/** The code-shaped literal values an Error message argument can take: a literal, the code-shaped leaves of a ternary, or an identifier that resolves one hop to literals. Anything else (template literal with substitutions, a call, a concatenation) yields nothing. */
+function codeShapedErrorMessages(
+	arg: Node,
+	program: Node,
+	enclosingFunction: Node | null,
+): string[] {
+	const node = unwrapTsExpression(arg);
+	const template = plainTemplateLiteralValue(node);
+	if (template !== undefined) {
+		return isConnectorErrorCodeShaped(template) ? [template] : [];
+	}
+	if (isStringLiteral(node)) {
+		return isConnectorErrorCodeShaped(node.value) ? [node.value] : [];
+	}
+	if (isConditionalExpression(node)) {
+		return [
+			...codeShapedErrorMessages(node.consequent, program, enclosingFunction),
+			...codeShapedErrorMessages(node.alternate, program, enclosingFunction),
+		];
+	}
+	if (isIdentifier(node)) {
+		const resolved = resolveReasonIdentifier(
+			node.name,
+			program,
+			enclosingFunction,
+		);
+		return (resolved ?? []).filter(isConnectorErrorCodeShaped);
+	}
+	return [];
+}
+
+/** True if `callee` names `name` directly (`name(...)`) or as a member (`x.name(...)`). */
+function calleeNamed(callee: Node, name: string): boolean {
+	if (isIdentifier(callee)) {
+		return callee.name === name;
+	}
+	if (callee.type === "MemberExpression") {
+		const { property, computed } = callee as {
+			property?: Node;
+			computed?: boolean;
+		};
+		return !computed && property !== undefined && isIdentifier(property)
+			? property.name === name
+			: false;
+	}
+	return false;
+}
+
+function firstArgument(node: Node): Node | undefined {
+	const args = (node as { arguments?: Node[] }).arguments ?? [];
+	const first = args[0];
+	return first && first.type !== "SpreadElement" ? first : undefined;
+}
+
+/** True for a class declaration/expression that directly `extends Error`. */
+function isErrorSubclass(node: Node): boolean {
+	if (node.type !== "ClassDeclaration" && node.type !== "ClassExpression") {
+		return false;
+	}
+	const { superClass } = node as { superClass?: Node | null };
+	return Boolean(
+		superClass && isIdentifier(superClass) && superClass.name === "Error",
+	);
+}
+
+/** Records the code-shaped `super(message)` literals of a class that directly extends Error (the browser-handoff `BrowserSignInCancelledError` pattern). */
+function recordErrorSubclassCodes(
+	classNode: Node,
+	enclosingFunction: Node | null,
+	ctx: ScanContext,
+): void {
+	walk((classNode as { body?: Node }).body, (node) => {
+		if (!isCallExpression(node) || node.callee.type !== "Super") {
+			return;
+		}
+		const arg = firstArgument(node);
+		if (arg) {
+			ctx.terminalCodes.push(
+				...codeShapedErrorMessages(arg, ctx.program, enclosingFunction),
+			);
+		}
+	});
+}
+
+/** Records the terminal code(s) of one `createConnectorFailure(...)` call or bare `Error(...)` construction; any other node is ignored. */
+function recordTerminalCodeSite(
+	node: Node,
+	enclosingFunction: Node | null,
+	ctx: ScanContext,
+): void {
+	if (isErrorSubclass(node)) {
+		recordErrorSubclassCodes(node, enclosingFunction, ctx);
+		return;
+	}
+	if (node.type !== "CallExpression" && node.type !== "NewExpression") {
+		return;
+	}
+	const { callee } = node as { callee?: Node };
+	const arg = firstArgument(node);
+	if (!callee) {
+		return;
+	}
+	if (
+		node.type === "CallExpression" &&
+		calleeNamed(callee, "createConnectorFailure")
+	) {
+		const resolved = arg
+			? resolveFailureCodeArgument(arg, ctx.program, enclosingFunction)
+			: null;
+		if (resolved) {
+			ctx.terminalCodes.push(...resolved);
+		} else {
+			ctx.unresolvedTerminalCodes.push(scanLocation(arg ?? node, ctx));
+		}
+		return;
+	}
+	if (isIdentifier(callee) && callee.name === "Error" && arg) {
+		ctx.terminalCodes.push(
+			...codeShapedErrorMessages(arg, ctx.program, enclosingFunction),
+		);
+	}
+}
+
+/** Strips a JS/TS source extension so `./x.ts`, `./x.js` and `./x` compare equal. */
+function withoutSourceExtension(path: string): string {
+	return path.replace(/\.(?:[cm]?[jt]s|tsx|jsx)$/, "");
+}
+
+/** Absolute paths (extension stripped) of the relative modules `program` imports at run time. A type-only import cannot throw, so it is skipped. No connector reaches a shared module through a re-export or a dynamic `import()`, so those are not followed. */
+function runtimeImportedPaths(program: Node, absPath: string): string[] {
+	const paths: string[] = [];
+	for (const statement of (program as { body?: Node[] }).body ?? []) {
+		const { importKind, source } = statement as {
+			importKind?: string;
+			source?: Node;
+		};
+		if (
+			statement.type === "ImportDeclaration" &&
+			importKind !== "type" &&
+			source &&
+			isStringLiteral(source) &&
+			source.value.startsWith(".")
+		) {
+			paths.push(
+				withoutSourceExtension(resolve(dirname(absPath), source.value)),
+			);
+		}
+	}
+	return paths;
+}
+
+/** The shared modules whose terminal codes belong to a connector that imports `importedPaths` (directly, or through a module in `reachedThrough`). */
+function attributedSharedModules(
+	importedPaths: ReadonlySet<string>,
+	sharedModules: readonly SharedTerminalCodeModule[],
+): SharedTerminalCodeModule[] {
+	const imports = (path: string): boolean =>
+		importedPaths.has(withoutSourceExtension(path));
+	return sharedModules.filter(
+		(shared) => imports(shared.path) || shared.reachedThrough.some(imports),
+	);
 }
 
 /**
@@ -1112,11 +1463,7 @@ function recordEmissionObjectReasons(
 	for (const prop of n.properties) {
 		if (isSpreadElement(prop)) {
 			if (!hasOwnReasonProperty) {
-				ctx.unresolved.push({
-					file: ctx.absPath,
-					line: nodeLine(prop),
-					snippet: ctx.raw.split("\n")[nodeLine(prop) - 1]?.trim() ?? "",
-				});
+				ctx.unresolved.push(scanLocation(prop, ctx));
 			}
 			continue;
 		}
@@ -1131,11 +1478,7 @@ function recordEmissionObjectReasons(
 		if (resolved) {
 			ctx.literalReasons.push(...resolved);
 		} else {
-			ctx.unresolved.push({
-				file: ctx.absPath,
-				line: nodeLine(prop.value),
-				snippet: ctx.raw.split("\n")[nodeLine(prop.value) - 1]?.trim() ?? "",
-			});
+			ctx.unresolved.push(scanLocation(prop.value, ctx));
 		}
 	}
 }
@@ -1181,22 +1524,53 @@ function walkWithFunctionScope(
 	if (isObjectExpression(n) && isEmissionObjectLiteral(n)) {
 		recordEmissionObjectReasons(n, nextEnclosing, ctx);
 	}
+	if (typeof n.type === "string") {
+		recordTerminalCodeSite(n, nextEnclosing, ctx);
+	}
 
 	walkChildrenWithFunctionScope(n, nextEnclosing, ctx);
 }
 
-/** Scans every production file in a connector's directory. */
+/**
+ * Scans every production file in a connector's directory, plus the terminal
+ * codes of each shared module it imports (`sharedModules`, defaulting to
+ * `SHARED_TERMINAL_CODE_MODULES`). A shared module contributes only terminal
+ * codes: its `reason:` emissions, if any, are not this connector's.
+ */
 export function scanConnectorForReasonEmissions(
 	connectorDir: string,
+	sharedModules: readonly SharedTerminalCodeModule[] = SHARED_TERMINAL_CODE_MODULES,
 ): ReasonEmissionScanResult {
 	const literalReasons = new Set<string>();
-	const unresolved: { file: string; line: number; snippet: string }[] = [];
+	const terminalCodes = new Set<string>();
+	const unresolved: ScanLocation[] = [];
+	const unresolvedTerminalCodes: ScanLocation[] = [];
+	const importedPaths = new Set<string>();
 	for (const file of connectorProductionFiles(connectorDir)) {
-		const result = scanFileForReasonEmissions(file);
-		for (const code of result.literalReasons) {
+		const scanned = scanSourceFile(file);
+		for (const code of scanned.result.literalReasons) {
 			literalReasons.add(code);
 		}
-		unresolved.push(...result.unresolved);
+		for (const code of scanned.result.terminalCodes) {
+			terminalCodes.add(code);
+		}
+		unresolved.push(...scanned.result.unresolved);
+		unresolvedTerminalCodes.push(...scanned.result.unresolvedTerminalCodes);
+		for (const path of scanned.importedPaths) {
+			importedPaths.add(path);
+		}
 	}
-	return { literalReasons: [...literalReasons], unresolved };
+	for (const shared of attributedSharedModules(importedPaths, sharedModules)) {
+		const result = scanFileForReasonEmissions(shared.path);
+		for (const code of result.terminalCodes) {
+			terminalCodes.add(code);
+		}
+		unresolvedTerminalCodes.push(...result.unresolvedTerminalCodes);
+	}
+	return {
+		literalReasons: [...literalReasons],
+		terminalCodes: [...terminalCodes],
+		unresolved,
+		unresolvedTerminalCodes,
+	};
 }

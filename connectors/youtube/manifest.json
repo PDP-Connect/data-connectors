@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-	"version": "0.2.48",
+	"version": "0.2.49",
 	"mobile": { "pageshim": { "entry": "youtube.ts", "scope_prefix": "youtube", "login_url": "https://www.youtube.com/" } },
 	"display_name": "YouTube",
 	"brand": {
@@ -501,6 +501,7 @@
 		"youtube_profile_account_header_unreadable": "The signed-in YouTube account menu did not finish loading.",
 		"youtube_profile_channel_link_unavailable": "The YouTube account menu did not expose the owner's channel link.",
 		"youtube_profile_channel_page_unreadable": "The owner's YouTube channel page did not expose a readable identity.",
-		"youtube_profile_about_page_unreadable": "The owner's YouTube About page did not finish loading."
+		"youtube_profile_about_page_unreadable": "The owner's YouTube About page did not finish loading.",
+		"youtube_session_dead": "YouTube did not show you as signed in. Sign in to YouTube, then try again."
 	}
 }

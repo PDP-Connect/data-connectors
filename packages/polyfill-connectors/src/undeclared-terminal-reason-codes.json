@@ -1,0 +1,311 @@
+{
+	"amazon": [
+		"amazon_2fa_not_provided",
+		"amazon_empty_list_page_renderer_diagnostics_failed",
+		"amazon_list_page_navigation_failed",
+		"amazon_list_page_readiness_timeout",
+		"amazon_login_incomplete_after_submit",
+		"amazon_login_manual_incomplete",
+		"amazon_login_unexpected_ui",
+		"amazon_session_required",
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled"
+	],
+	"anthropic": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled"
+	],
+	"anthropic-live": [
+		"anthropic_live_session_required",
+		"anthropic_live_unparsed_instant",
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled"
+	],
+	"apple-contacts": [
+		"auth_failed",
+		"carddav_request_failed",
+		"discovery_failed",
+		"fake_carddav_server_no_port",
+		"unsafe_redirect_refused"
+	],
+	"character-ai": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"character_ai_stream_incomplete"
+	],
+	"discord-browser": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"discord_session_dead"
+	],
+	"facebook": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"facebook_navigation_failed"
+	],
+	"fitbit": ["time_range_semantics_changed"],
+	"garmin-browser": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"garmin_browser_session_dead"
+	],
+	"github": [
+		"github_auth_failed",
+		"github_malformed_response",
+		"github_pagination_gap",
+		"github_pagination_invalid_max_pages"
+	],
+	"github-browser": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"github_browser_navigation_failed"
+	],
+	"gmail": [
+		"gmail_all_mail_exists_negative",
+		"gmail_all_mail_exists_not_finite",
+		"gmail_all_mail_exists_not_integer",
+		"gmail_all_mail_exists_not_number",
+		"gmail_progress_invalid_instant",
+		"gmail_progress_invalid_mailbox",
+		"gmail_progress_invalid_page_end",
+		"gmail_progress_invalid_time_range",
+		"gmail_progress_invalid_uid",
+		"gmail_progress_invalid_window",
+		"gmail_progress_page_already_consumed",
+		"gmail_progress_plan_after_outcomes",
+		"gmail_progress_unexpected_stream",
+		"gmail_progress_unexpected_uid"
+	],
+	"google-calendar": [
+		"google_calendar_access_token_missing",
+		"google_calendar_auth_failed",
+		"google_calendar_sync_token_expired"
+	],
+	"google-contacts": [
+		"google_contacts_auth_failed",
+		"google_people_access_token_missing",
+		"google_people_sync_token_expired"
+	],
+	"google-maps-data-portability": [
+		"google_data_portability_access_token_missing",
+		"google_data_portability_archive_job_id_missing",
+		"google_data_portability_archive_state_missing",
+		"google_data_portability_resources_missing",
+		"google_dataportability_access_token_missing",
+		"google_dataportability_no_authorized_resource_groups"
+	],
+	"groupme": [
+		"groupme_auth_failed",
+		"groupme_direct_chat_missing_identity",
+		"groupme_messages_empty_page_304"
+	],
+	"heb": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled"
+	],
+	"icloud-notes": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled"
+	],
+	"instinct": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled"
+	],
+	"jellyfin": [
+		"jellyfin_base_url_has_userinfo",
+		"jellyfin_base_url_requires_https_non_loopback",
+		"jellyfin_base_url_unsafe_scheme",
+		"jellyfin_media_browser_device_id_empty",
+		"jellyfin_session_failed",
+		"jellyfin_ssrf_rejected_cross_origin",
+		"jellyfin_total_record_count_negative",
+		"jellyfin_total_record_count_not_finite",
+		"jellyfin_total_record_count_not_integer",
+		"jellyfin_total_record_count_not_number"
+	],
+	"linkedin": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"linkedin_session_dead"
+	],
+	"meta": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"meta_following_owner_conflict",
+		"meta_posts_owner_conflict",
+		"meta_session_required"
+	],
+	"muse": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"muse_bot_challenge",
+		"muse_stream_incomplete"
+	],
+	"notion": ["notion_auth_failed", "notion_pagination_contradiction"],
+	"oura-browser": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"oura_api_token_missing",
+		"oura_authorization_incomplete",
+		"oura_daily_scope_missing",
+		"oura_oauth_code_missing",
+		"oura_oauth_state_invalid",
+		"oura_portal_app_credentials_missing",
+		"oura_portal_email_invalid",
+		"oura_portal_invalid_applications",
+		"oura_portal_origin",
+		"oura_portal_session_unconfirmed",
+		"oura_token_invalid_payload"
+	],
+	"perplexity": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"perplexity_auth_failed",
+		"perplexity_interrupted",
+		"perplexity_stream_incomplete"
+	],
+	"pocket": ["pocket_auth_failed"],
+	"shopify": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_sign_in_cancelled",
+		"shopify_order_id_unresolvable"
+	],
+	"slack": [
+		"slack_auth_failed",
+		"slack_cookie_invalid",
+		"slack_credentials_missing",
+		"slack_token_invalid",
+		"slack_workspace_invalid",
+		"slackdump_max_runtime",
+		"slackdump_timeout"
+	],
+	"slack-browser": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"slack_session_lost"
+	],
+	"spotify": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"spotify_library_count_mismatch",
+		"spotify_library_identity_invalid",
+		"spotify_library_identity_missing",
+		"spotify_library_identity_repeated",
+		"spotify_library_playlist_identity_missing",
+		"spotify_library_response_invalid",
+		"spotify_library_row_invalid",
+		"spotify_library_terminal_unverified",
+		"spotify_library_total_changed",
+		"spotify_library_total_invalid",
+		"spotify_mobile_disposed",
+		"spotify_mobile_evaluate_source_too_large",
+		"spotify_mobile_install_failed",
+		"spotify_mobile_job_lost",
+		"spotify_mobile_result_lost",
+		"spotify_page_not_player",
+		"spotify_pagination_invalid_next",
+		"spotify_pagination_no_progress",
+		"spotify_playlist_count_mismatch",
+		"spotify_playlist_identity_mismatch",
+		"spotify_playlist_items_completion_unproven",
+		"spotify_playlist_response_invalid",
+		"spotify_playlist_row_invalid",
+		"spotify_playlist_row_type_unrecognized",
+		"spotify_playlist_terminal_unverified",
+		"spotify_playlist_total_changed",
+		"spotify_playlist_total_invalid",
+		"spotify_playlists_completion_unproven",
+		"spotify_profile_enrichment_http_status",
+		"spotify_recently_played_malformed",
+		"spotify_recently_played_owner_unavailable",
+		"spotify_recently_played_pagination_no_progress",
+		"spotify_recently_played_repeated_identity",
+		"spotify_retryable_status_unknown",
+		"spotify_saved_tracks_completion_unproven",
+		"spotify_saved_tracks_count_mismatch",
+		"spotify_saved_tracks_identity_repeated",
+		"spotify_saved_tracks_response_invalid",
+		"spotify_saved_tracks_row_invalid",
+		"spotify_saved_tracks_terminal_unverified",
+		"spotify_saved_tracks_total_changed",
+		"spotify_saved_tracks_total_invalid"
+	],
+	"steam": ["steam_auth_failed"],
+	"strava-browser": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"strava_session_dead"
+	],
+	"tiktok": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled"
+	],
+	"usaa": ["session_dead_redirect_to_logon"],
+	"whatsapp-web": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"whatsapp_web_auth_failed",
+		"whatsapp_web_chat_list_never_settled",
+		"whatsapp_web_empty_chat_list",
+		"whatsapp_web_invalid_record",
+		"whatsapp_web_local_store_unavailable",
+		"whatsapp_web_refused_call",
+		"whatsapp_web_stores_not_ready",
+		"whatsapp_web_stream_incomplete",
+		"whatsapp_web_unexpected_shape"
+	],
+	"wholefoods": [
+		"amazon_2fa_not_provided",
+		"amazon_login_incomplete_after_submit",
+		"amazon_login_unexpected_ui",
+		"browser_handoff_readiness_probe_failed"
+	],
+	"whoop": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled"
+	],
+	"whoop-browser": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"whoop_browser_session_dead"
+	],
+	"x-browser": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"x_session_dead"
+	],
+	"ynab": ["ynab_auth_failed"],
+	"youtube": [
+		"browser_handoff_readiness_probe_failed",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+		"youtube_click_target_missing",
+		"youtube_history_page_unreadable",
+		"youtube_playlist_page_unreadable",
+		"youtube_video_parse_mismatch"
+	]
+}
