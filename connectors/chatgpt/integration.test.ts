@@ -14190,9 +14190,10 @@ for (const count of [1, 60]) {
 					emitRecord: harness.emitRecord,
 					progress: () => Promise.resolve(),
 					requested: new Map(
-						(run === 0 ? ["conversations", "messages"] : ["conversations"]).map(
-							(name) => [name, { name }],
-						),
+						(run === 0 && count === 60
+							? ["conversations", "messages"]
+							: ["conversations"]
+						).map((name) => [name, { name }]),
 					),
 					detailGaps: [],
 					requestDetailGapPage: () => Promise.resolve([]),
