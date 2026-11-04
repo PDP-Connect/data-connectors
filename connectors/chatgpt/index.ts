@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP ChatGPT Connector (v0.2.0)
+ * PDPP ChatGPT Connector
  * Change note: conversation detail hydration prefers ChatGPT's capped batch
  * endpoint and falls back to the existing per-id detail fetch for omissions or
  * endpoint unavailability.
@@ -2450,10 +2450,9 @@ export interface StreamDeps {
 	 */
 	conversationDetailOnly?: boolean;
 	/**
-	 * Set with `conversationDetailOnly`: told, per conversation, whether its
-	 * detail is settled (read, or a definite 404/410) or must be retried by a
-	 * later run (any other failure to read it). A conversation the pass never
-	 * reached (a deferral) is reported as neither.
+	 * Reports observed detail outcomes for conversation accounting. Settled means
+	 * read, source-unrepresentable, or a definite 404/410; retry means an
+	 * incomplete detail. Deferred or unreached conversations report neither.
 	 */
 	reportConversationDetail?: (
 		c: ConversationListItem,
@@ -2940,6 +2939,7 @@ export async function processConversationDetail(
 	let filteredByShape = 0;
 	let filteredAsDuplicate = 0;
 	let filteredAsNonMessage = 0;
+	const defectiveBranchNodes = new Set<string>();
 	let rejectedByShapeAnywhere = 0;
 	const omitted =
 		deps.omittedMessageContent ?? createOmittedMessageContentTally();
@@ -2967,6 +2967,7 @@ export async function processConversationDetail(
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredAsNonMessage += 1;
+				defectiveBranchNodes.add(nodeId);
 				if (nodeId === currentNode) currentNodeFilteredReason = "non_message";
 			}
 			continue;
@@ -2981,6 +2982,7 @@ export async function processConversationDetail(
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredAsDuplicate += 1;
+				defectiveBranchNodes.add(nodeId);
 				if (nodeId === currentNode) currentNodeFilteredReason = "duplicate";
 			}
 			continue;
@@ -3050,6 +3052,22 @@ export async function processConversationDetail(
 			(a, b) =>
 				(branchOrder.get(a.nodeId) ?? -1) - (branchOrder.get(b.nodeId) ?? -1),
 		);
+	// Ignore the synthetic root and intentional record selection. An unmodelled
+	// node between retained turns, or at a non-root tip, loses branch content.
+	const retainedPositions = retainedBranch.map(
+		(candidate) => branchOrder.get(candidate.nodeId) ?? -1,
+	);
+	const firstRetained = retainedPositions[0];
+	const lastRetained = retainedPositions.at(-1);
+	const filteredBranchDefect = currentBranch.some(
+		({ nodeId, node }, index) =>
+			defectiveBranchNodes.has(nodeId) &&
+			((nodeId === currentNode && node.parent != null) ||
+				(firstRetained !== undefined &&
+					lastRetained !== undefined &&
+					index > firstRetained &&
+					index < lastRetained)),
+	);
 	const reconciledBranch = reconcileEmittedBranchMessages(
 		retainedBranch.map((candidate) => candidate.msg),
 	);
@@ -3108,9 +3126,16 @@ export async function processConversationDetail(
 	const incompleteReason: ConversationDetailIncompleteReason | null =
 		rejectedByShapeAnywhere > 0
 			? "message_shape_rejected"
-			: branchStructurallyIncomplete || emittedParentConflict
+			: branchStructurallyIncomplete ||
+					emittedParentConflict ||
+					filteredBranchDefect
 				? "branch_structurally_incomplete"
 				: null;
+	if (incompleteReason && !emitMessages) {
+		chatGptDiagnostic(
+			`conversation_detail_incomplete: ${incompleteReason}; conversation was withheld`,
+		);
+	}
 	if (incompleteReason && emitMessages) {
 		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
 	}
@@ -7069,16 +7094,14 @@ export async function runMessagesAndConversationsWithDetail(
 				// Reset the progress-based give-up counter: any successful fetch proves the
 				// account is alive, so N consecutive no-progress waits restarts from 0.
 				consecutiveWaitOutsWithoutSuccess = 0;
-				if (deps.conversationDetailOnly) {
-					await deps.reportConversationDetail?.(
-						c,
-						detailOutcome.complete ||
-							isSourceUnrepresentable(detailOutcome) ||
-							isDeletedConversationStatus(detail.status)
-							? "settled"
-							: "retry",
-					);
-				}
+				await deps.reportConversationDetail?.(
+					c,
+					detailOutcome.complete ||
+						isSourceUnrepresentable(detailOutcome) ||
+						isDeletedConversationStatus(detail.status)
+						? "settled"
+						: "retry",
+				);
 				if (detailOutcome.complete) {
 					hydratedKeys.add(c.id);
 					coverage.hydratedKeys.push(c.id);
@@ -7086,7 +7109,8 @@ export async function runMessagesAndConversationsWithDetail(
 					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 					coverage.sourceUnrepresentableKeys.push(c.id);
 				} else {
-					// processConversationDetail already emitted the DETAIL_GAP.
+					// The messages pass emitted a DETAIL_GAP; conversations-only
+					// reports the incomplete detail through the diagnostic sink.
 					gapKeys.add(c.id);
 					coverage.gapKeys.push(c.id);
 				}
@@ -7801,6 +7825,8 @@ async function walkConversationsAndMessages(
 	}
 
 	let messageDetailDeferred = false;
+	const messageSettled = new Set<string>();
+	const messageFailed = new Set<string>();
 	if (wantsMessages) {
 		const foundMessageDetailProgressMsg = {
 			type: "PROGRESS",
@@ -7811,7 +7837,13 @@ async function walkConversationsAndMessages(
 		} as const;
 		deps.emit(foundMessageDetailProgressMsg);
 		const coverage = await runMessagesAndConversationsWithDetail(
-			runDeps,
+			{
+				...runDeps,
+				reportConversationDetail: async (c, outcome) => {
+					(outcome === "settled" ? messageSettled : messageFailed).add(c.id);
+					await runDeps.reportConversationDetail?.(c, outcome);
+				},
+			},
 			messageDetailConversations,
 			emitConversation,
 			options.detailPacing,
@@ -7827,8 +7859,8 @@ async function walkConversationsAndMessages(
 	}
 
 	if (wantsConversations) {
-		// Rows the message-detail pass already took are done: it read their detail,
-		// or left a durable `messages` DETAIL_GAP that recovery fills in.
+		// Do not fetch the same planned row twice in one run. Only actual
+		// outcomes settle conversations; gaps remain owed by this stream.
 		const takenByMessages = new Set(
 			messageDetailConversations.map((c) => c.id),
 		);
@@ -7866,15 +7898,15 @@ async function walkConversationsAndMessages(
 				checkpoint: (read, failed) =>
 					emitConversationsState(deps, {
 						...stateInput,
-						settled: new Set([...takenByMessages, ...read]),
-						failed,
+						settled: new Set([...messageSettled, ...read]),
+						failed: new Set([...messageFailed, ...failed]),
 					}),
 			},
 		);
 		const { progress, settled } = emitConversationsState(deps, {
 			...stateInput,
-			settled: new Set([...takenByMessages, ...outcome.settled]),
-			failed: outcome.failed,
+			settled: new Set([...messageSettled, ...outcome.settled]),
+			failed: new Set([...messageFailed, ...outcome.failed]),
 		});
 		// A truncated list proved it did not see everything newer than
 		// priorConversationsCursor, so `conversationsToSync.length` is a prefix,

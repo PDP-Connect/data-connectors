@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import assert from "node:assert/strict";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
@@ -13,9 +14,15 @@ import {
 } from "./parsers.ts";
 import {
 	processConversationDetail,
+	type StreamDeps,
 	setChatGptDiagnosticSink,
 } from "./index.ts";
 import type { ChatGptNode } from "./types.ts";
+
+function required<T>(value: T | null | undefined): T {
+	assert.ok(value != null);
+	return value;
+}
 
 // ─── Generator ────────────────────────────────────────────────────────────
 // Builds a mapping plus the generator-known main chain, so the expected
@@ -42,35 +49,38 @@ const nodeIdArb = fc
 	.string({ minLength: 1, maxLength: 12 })
 	.filter((s) => /^\S+$/.test(s));
 
-function messageFor(kind: NodeKind, role: string): ChatGptNode["message"] {
+function messageFor(
+	kind: NodeKind,
+	role: string,
+): NonNullable<ChatGptNode["message"]> | null {
 	switch (kind) {
 		case "messageNull":
-			return null as unknown as ChatGptNode["message"];
+			return null;
 		case "roleLess":
 			return {
 				author: {},
 				content: { content_type: "text", parts: ["x"] },
-			} as ChatGptNode["message"];
+			};
 		case "emptyText":
 			return {
 				author: { role },
 				content: { content_type: "text", parts: [""] },
-			} as ChatGptNode["message"];
+			};
 		case "emptyParts":
 			return {
 				author: { role },
 				content: { content_type: "text", parts: [] },
-			} as ChatGptNode["message"];
+			};
 		case "mixedEmptyAsset":
 			return {
 				author: { role },
 				content: { content_type: "text", parts: ["", { pointer: "asset:1" }] },
-			} as ChatGptNode["message"];
+			};
 		default:
 			return {
 				author: { role },
 				content: { content_type: "text", parts: [`msg-${kind}`] },
-			} as ChatGptNode["message"];
+			};
 	}
 }
 
@@ -86,10 +96,10 @@ const treeArb: fc.Arbitrary<GenTree> = fc
 		fc.integer({ min: 1, max: 12 }), // main-chain length (excluding root)
 		fc.array(
 			fc.oneof(
-				fc.constant("user" as const),
-				fc.constant("assistant" as const),
-				fc.constant("system" as const),
-				fc.constant("emptyText" as const),
+				fc.constant<NodeKind>("user"),
+				fc.constant<NodeKind>("assistant"),
+				fc.constant<NodeKind>("system"),
+				fc.constant<NodeKind>("emptyText"),
 			),
 			{ minLength: 1, maxLength: 12 },
 		),
@@ -108,34 +118,34 @@ const treeArb: fc.Arbitrary<GenTree> = fc
 				const mapping: Record<string, ChatGptNode> = Object.create(null);
 				const chain: string[] = [];
 				// Synthetic root: message null, no parent.
-				const root = ids[0]!;
+				const root = required(ids[0]);
 				mapping[root] = { parent: null, children: [], message: null };
 				chain.push(root);
 				let prev = root;
 				for (let i = 0; i < chainLen; i++) {
-					const id = ids[1 + i]!;
-					const kind = kinds[i % kinds.length]!;
+					const id = required(ids[1 + i]);
+					const kind = required(kinds[i % kinds.length]);
 					mapping[id] = {
 						parent: prev,
 						children: [],
 						message: messageFor(kind, kindRole(kind)),
 					};
-					mapping[prev]!.children!.push(id);
+					required(required(mapping[prev]).children).push(id);
 					chain.push(id);
 					prev = id;
 				}
 				// Side branches off random chain nodes; never on the main chain.
 				for (let s = 0; s < sideCount; s++) {
-					const off = chain[s % chain.length]!;
-					const id = ids[1 + chainLen + s]!;
+					const off = required(chain[s % chain.length]);
+					const id = required(ids[1 + chainLen + s]);
 					mapping[id] = {
 						parent: off,
 						children: [],
 						message: messageFor("assistant", "assistant"),
 					};
-					mapping[off]!.children!.push(id);
+					required(required(mapping[off]).children).push(id);
 				}
-				return { mapping, chain, currentNode: chain[tipIdx]! };
+				return { mapping, chain, currentNode: required(chain[tipIdx]) };
 			}),
 	);
 
@@ -147,7 +157,7 @@ const deepChainArb = (depth: number): fc.Arbitrary<GenTree> =>
 			const chain: string[] = [];
 			ids.forEach((id, i) => {
 				mapping[id] = {
-					parent: i === 0 ? null : ids[i - 1]!,
+					parent: i === 0 ? null : required(ids[i - 1]),
 					children: [],
 					message:
 						i === 0
@@ -159,7 +169,7 @@ const deepChainArb = (depth: number): fc.Arbitrary<GenTree> =>
 				};
 				chain.push(id);
 			});
-			return { mapping, chain, currentNode: ids[ids.length - 1]! };
+			return { mapping, chain, currentNode: required(ids[ids.length - 1]) };
 		});
 
 // ─── Parsers block ────────────────────────────────────────────────────────
@@ -176,7 +186,7 @@ describe("flattenTreeCurrentBranch", () => {
 				expect(got).toEqual(expected);
 				// Order follows parent links exactly: each step's parent is previous.
 				for (let i = 1; i < got.length; i++) {
-					expect(mapping[got[i]!]!.parent).toBe(got[i - 1]);
+					expect(required(mapping[required(got[i])]).parent).toBe(got[i - 1]);
 				}
 			}),
 		);
@@ -186,7 +196,7 @@ describe("flattenTreeCurrentBranch", () => {
 		fc.assert(
 			fc.property(treeArb, ({ mapping, chain, currentNode }) => {
 				const got = flattenTreeCurrentBranch(mapping, currentNode);
-				expect(got[got.length - 1]!.nodeId).toBe(currentNode);
+				expect(required(got[got.length - 1]).nodeId).toBe(currentNode);
 				// No side-branch node ever appears.
 				const chainSet = new Set(chain);
 				for (const { nodeId } of got) expect(chainSet.has(nodeId)).toBe(true);
@@ -209,10 +219,10 @@ describe("flattenTreeCurrentBranch", () => {
 			fc.property(treeArb, ({ mapping, chain, currentNode }) => {
 				const tipIdx = chain.indexOf(currentNode);
 				if (tipIdx < 2) return; // need a mid-chain cut point
-				const cut = chain[1]!;
+				const cut = required(chain[1]);
 				const broken = {
 					...mapping,
-					[cut]: { ...mapping[cut]!, parent: "missing-parent" },
+					[cut]: { ...required(mapping[cut]), parent: "missing-parent" },
 				};
 				const got = flattenTreeCurrentBranch(broken, currentNode).map(
 					(x) => x.nodeId,
@@ -231,7 +241,10 @@ describe("flattenTreeCurrentBranch", () => {
 				// Point the root's parent at the tip: a cycle on the chain.
 				const cyclic = {
 					...mapping,
-					[chain[0]!]: { ...mapping[chain[0]!]!, parent: currentNode },
+					[required(chain[0])]: {
+						...required(mapping[required(chain[0])]),
+						parent: currentNode,
+					},
 				};
 				const got = flattenTreeCurrentBranch(cyclic, currentNode).map(
 					(x) => x.nodeId,
@@ -266,7 +279,7 @@ describe("flattenTreeCurrentBranch", () => {
 				const tipIdx = chain.indexOf(currentNode);
 				const expected = chain
 					.slice(0, tipIdx + 1)
-					.filter((id) => mapping[id]!.message?.author?.role).length;
+					.filter((id) => required(mapping[id]).message?.author?.role).length;
 				expect(countBranchMessages(mapping, currentNode)).toBe(expected);
 			}),
 		);
@@ -280,30 +293,38 @@ describe("message extraction (P5, P6, P7)", () => {
 			children: [],
 			message: messageFor("emptyText", "user"),
 		};
-		const rec = extractMessageWithBlob("n1", node, "c1", true).record!;
+		const rec = required(extractMessageWithBlob("n1", node, "c1", true).record);
 		expect(rec.role).toBe("user");
 		expect(rec.content).toBe(""); // pins encodePdppSafeText("") === ""; see report P5
 		expect(rec.on_current_branch).toBe(true);
 	});
 
 	it("T9: empty-parts vs mixed-empty-asset vs message-null (P5, P7)", () => {
-		const emptyParts = extractMessageWithBlob(
-			"n1",
-			{ parent: null, children: [], message: messageFor("emptyParts", "user") },
-			"c1",
-			true,
-		).record!;
+		const emptyParts = required(
+			extractMessageWithBlob(
+				"n1",
+				{
+					parent: null,
+					children: [],
+					message: messageFor("emptyParts", "user"),
+				},
+				"c1",
+				true,
+			).record,
+		);
 		expect(emptyParts.content).toBeNull();
-		const mixed = extractMessageWithBlob(
-			"n2",
-			{
-				parent: null,
-				children: [],
-				message: messageFor("mixedEmptyAsset", "user"),
-			},
-			"c1",
-			true,
-		).record!;
+		const mixed = required(
+			extractMessageWithBlob(
+				"n2",
+				{
+					parent: null,
+					children: [],
+					message: messageFor("mixedEmptyAsset", "user"),
+				},
+				"c1",
+				true,
+			).record,
+		);
 		expect(mixed.content).toBeNull();
 		// Tombstoned (D3): no message at all → no record; the index-level filter
 		// (non_message) is pinned by the seam test, not here.
@@ -320,12 +341,14 @@ describe("message extraction (P5, P6, P7)", () => {
 			).record,
 		).toBeNull();
 		// Role-less message: record exists with role null; index.ts drops it.
-		const roleLess = extractMessageWithBlob(
-			"n4",
-			{ parent: null, children: [], message: messageFor("roleLess", "user") },
-			"c1",
-			true,
-		).record!;
+		const roleLess = required(
+			extractMessageWithBlob(
+				"n4",
+				{ parent: null, children: [], message: messageFor("roleLess", "user") },
+				"c1",
+				true,
+			).record,
+		);
 		expect(roleLess.role).toBeNull();
 	});
 
@@ -336,8 +359,8 @@ describe("message extraction (P5, P6, P7)", () => {
 			message: messageFor("system", "system"),
 			hidden: true, // unmodeled marker (D3): must not change extraction
 			deleted: true,
-		} as ChatGptNode;
-		const rec = extractMessageWithBlob("n1", node, "c1", true).record!;
+		};
+		const rec = required(extractMessageWithBlob("n1", node, "c1", true).record);
 		expect(rec.role).toBe("system");
 		expect(rec.content).not.toBeNull();
 	});
@@ -348,10 +371,10 @@ describe("message extraction (P5, P6, P7)", () => {
 			{ id: "c", parent_id: "b", on_current_branch: true }, // b filtered out
 			{ id: "off", parent_id: "a", on_current_branch: false },
 		];
-		const out = reconcileEmittedBranchMessages(msgs as never[]);
+		const out = reconcileEmittedBranchMessages(msgs);
 		expect(out.messages.map((m) => m.id)).toEqual(["a", "c"]);
-		expect(out.messages[0]!.parent_id).toBe("synthetic-root");
-		expect(out.messages[1]!.parent_id).toBe("a");
+		expect(required(out.messages[0]).parent_id).toBe("synthetic-root");
+		expect(required(out.messages[1]).parent_id).toBe("a");
 		expect(out.currentNode).toBe("c");
 		expect(out.count).toBe(2);
 	});
@@ -373,14 +396,25 @@ describe("processConversationDetail seam", () => {
 			diagnostics.push(line);
 		});
 		try {
-			const deps = {
+			const deps: StreamDeps = {
+				api: {
+					auth: async () => {
+						throw new Error("unused");
+					},
+					fetch: async () => ({ status: 200, json: null }),
+				},
+				requested: new Map([
+					["conversations", { name: "conversations" }],
+					["messages", { name: "messages" }],
+				]),
+				progress: async () => {},
 				emit: async (msg: unknown) => {
 					emitted.push({ stream: "diagnostic-or-gap", data: msg });
 				},
 				emitRecord: async (stream: string, data: unknown) => {
 					records.push({ stream, data });
 				},
-				isRecordSelected: selected,
+				...(selected ? { isRecordSelected: selected } : {}),
 				emittedMessageIdsThisRun: new Set<string>(),
 				emittedMessageParentsThisRun: new Map<string, string | null>(),
 			};
@@ -394,9 +428,9 @@ describe("processConversationDetail seam", () => {
 			};
 			const conversations: unknown[] = [];
 			const outcome = await processConversationDetail(
-				deps as never,
-				conv as never,
-				detail as never,
+				deps,
+				conv,
+				detail,
 				async (_c: unknown, d: unknown) => {
 					conversations.push(d);
 				},
@@ -453,7 +487,7 @@ describe("processConversationDetail seam", () => {
 				metadata: { is_visually_hidden_from_conversation: true },
 			},
 		};
-		mapping.u1 = { ...mapping.u1!, parent: "sys" };
+		mapping.u1 = { ...required(mapping.u1), parent: "sys" };
 		const r = await runDetail(mapping, tip);
 		expect(r.outcome).toEqual({ complete: true });
 		expect(r.records.filter((x) => x.stream === "messages")).toHaveLength(3);
@@ -474,7 +508,7 @@ describe("processConversationDetail seam", () => {
 
 	it("a roleless non-root tip is incomplete", async () => {
 		const { mapping } = simpleChain();
-		mapping.a1 = { ...mapping.a1!, message: null };
+		mapping.a1 = { ...required(mapping.a1), message: null };
 		const r = await runDetail(mapping, "a1");
 		expect(r.outcome).toEqual({
 			complete: false,
@@ -486,7 +520,7 @@ describe("processConversationDetail seam", () => {
 
 	it("S2: dangling parent gaps and emits nothing (P4a, P8)", async () => {
 		const { mapping, tip } = simpleChain();
-		mapping["u1"] = { ...mapping["u1"]!, parent: "missing" };
+		mapping["u1"] = { ...required(mapping["u1"]), parent: "missing" };
 		const r = await runDetail(mapping, tip);
 		expect(r.outcome).toEqual({
 			complete: false,
@@ -498,7 +532,7 @@ describe("processConversationDetail seam", () => {
 
 	it("S3: cycle gaps and emits nothing (P4a, P9)", async () => {
 		const { mapping, tip } = simpleChain();
-		mapping["root"] = { ...mapping["root"]!, parent: tip };
+		mapping["root"] = { ...required(mapping["root"]), parent: tip };
 		const r = await runDetail(mapping, tip);
 		expect(r.outcome).toEqual({
 			complete: false,
@@ -509,9 +543,9 @@ describe("processConversationDetail seam", () => {
 
 	it("S4: a missing mid-branch message gaps and emits nothing", async () => {
 		const { mapping, tip } = simpleChain();
-		mapping["u1"] = { ...mapping["u1"]!, children: ["d"] };
+		mapping["u1"] = { ...required(mapping["u1"]), children: ["d"] };
 		mapping["d"] = { parent: "u1", children: ["a1"], message: null };
-		mapping["a1"] = { ...mapping["a1"]!, parent: "d" };
+		mapping["a1"] = { ...required(mapping["a1"]), parent: "d" };
 		const r = await runDetail(mapping, tip);
 		expect(r.outcome).toEqual({
 			complete: false,
