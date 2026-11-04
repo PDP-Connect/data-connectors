@@ -9,7 +9,7 @@
 	},
 	"connector_key": "gmail",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-	"version": "0.2.30",
+	"version": "0.2.31",
 	"display_name": "Gmail",
 	"brand": {
 		"icon": "icon.svg",
@@ -661,7 +661,7 @@
 	],
 	"reason_display_messages": {
 		"historical_backfill_pending": "This bounded sync page completed; more historical Gmail data remains and will be collected automatically",
-		"historical_message_unaccounted": "A historical message could not be represented; its UID was recorded as a permanent coverage gap",
+		"historical_message_unaccounted": "An older Gmail message could not be read, so it was skipped. It will not be retried.",
 		"schema_validation_failed": "Some data didn't match the expected format and was skipped"
 	}
 }

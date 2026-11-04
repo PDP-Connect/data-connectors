@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.3.14",
+	"version": "0.3.15",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {
@@ -1599,6 +1599,6 @@
 		"not_available": "This data isn't available through the current connection",
 		"pagination_cap_truncated": "There were more ChatGPT results than we could safely page through in one run, so we stopped early",
 		"parse_error": "ChatGPT sent back a response we couldn't read",
-		"shape_check_failed": "The data didn't look like we expected"
+		"shape_check_failed": "Some ChatGPT records were not in the expected format, so they were skipped. The rest were saved."
 	}
 }

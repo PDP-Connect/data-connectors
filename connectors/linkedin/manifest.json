@@ -9,7 +9,7 @@
 	},
 	"connector_key": "linkedin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-	"version": "0.3.42",
+	"version": "0.3.43",
 	"display_name": "LinkedIn",
 	"brand": {
 		"icon": "icon.svg",
@@ -411,7 +411,7 @@
 		"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 		"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
 		"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
-		"stream_collection_failed": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
+		"stream_collection_failed": "LinkedIn stopped before the end of this list, so it may be incomplete. Entries already read were saved, and the next run tries again.",
 		"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
 		"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
 		"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",

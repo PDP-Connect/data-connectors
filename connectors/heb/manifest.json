@@ -9,7 +9,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.6.30",
+	"version": "0.6.31",
 	"display_name": "H-E-B",
 	"brand": {
 		"icon": "icon.svg",
@@ -573,7 +573,7 @@
 		"list_page_shape_check_failed": "The page didn't look like we expected",
 		"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 		"nutrition_source_coverage_incomplete": "We did not mark H-E-B nutrition complete because the order history or order-item detail coverage is incomplete",
-		"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Valid records were retained; the unread tail remains unproven",
+		"older_pages_deferred_page_budget": "We stopped after the most recent pages of your order history, so older orders were not collected this time. Orders already read were saved.",
 		"pagination_exhausted": "We reached the end of the available pages",
 		"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
 		"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
