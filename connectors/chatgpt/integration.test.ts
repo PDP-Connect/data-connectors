@@ -1646,9 +1646,14 @@ function makeConversationListingHarness(
 			});
 		},
 	};
-	// A listing harness serves only list pages; the detail read for the
-	// `conversations` stream gets an empty detail.
-	const api = withEmptyConversationDetails(listApi);
+	// Listing tests need a complete detail when a listed row has a current tip.
+	const api: ChatGptApi = {
+		...listApi,
+		fetch: (path, options) =>
+			path.startsWith("/conversation/")
+				? Promise.resolve(readConversationDetail(path))
+				: listApi.fetch(path, options),
+	};
 	return {
 		deps: {
 			api,
@@ -2306,7 +2311,9 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 		"the replayed overlap was read in run 1, so run 2 does not emit it again",
 	);
 	const finalRun = await completePrimaryAfterSearch(
-		secondDeps, second, firstCursor.last_update_time,
+		secondDeps,
+		second,
+		firstCursor.last_update_time,
 	);
 	// The detail pass checkpoints every 25 settled rows; the last STATE is final.
 	const finalState = finalRun.protocolMessages
@@ -6219,7 +6226,10 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 		[
 			[
 				"messages",
-				{ enumeration_version: 1, last_update_time: "2026-06-15T00:00:00.000Z" },
+				{
+					enumeration_version: 1,
+					last_update_time: "2026-06-15T00:00:00.000Z",
+				},
 			],
 			[
 				"conversations",
@@ -6394,7 +6404,9 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		"a conversation reordered by update is collected",
 	);
 	const finalRun = await completePrimaryAfterSearch(
-		second.deps, second.harness, firstCursor.last_update_time,
+		second.deps,
+		second.harness,
+		firstCursor.last_update_time,
 	);
 	const secondState = finalRun.protocolMessages.find(
 		(message) => message.type === "STATE" && message.stream === "conversations",
@@ -6622,7 +6634,9 @@ test("runConversationsAndMessagesStreams: equal-time rows moved before the resum
 		"the unseen equal-time row is collected after moving before the saved boundary ID",
 	);
 	const finalRun = await completePrimaryAfterSearch(
-		second.deps, second.harness, firstCursor.last_update_time,
+		second.deps,
+		second.harness,
+		firstCursor.last_update_time,
 	);
 	assert.ok(
 		finalRun.protocolMessages.some(
@@ -6818,7 +6832,11 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		);
 	}
 
-	const finalRun = await completePrimaryAfterSearch(run2Deps, run2, priorCursorIso);
+	const finalRun = await completePrimaryAfterSearch(
+		run2Deps,
+		run2,
+		priorCursorIso,
+	);
 	const finalListCoverage = finalRun.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 			m.type === "DETAIL_COVERAGE" && m.stream === "conversations",
@@ -6853,7 +6871,8 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		"older backfill items do not move the newest-seen watermark backwards",
 	);
 	assert.equal(
-		(finalStates.at(-1)?.cursor as { backfill?: unknown } | undefined)?.backfill,
+		(finalStates.at(-1)?.cursor as { backfill?: unknown } | undefined)
+			?.backfill,
 		undefined,
 		"the completed backfill clears its continuation",
 	);
@@ -7013,7 +7032,7 @@ test("runConversationsAndMessagesStreams: an http_error on the SECOND /conversat
 				return { status: 500, json: null };
 			}
 			if (path.startsWith("/conversation/")) {
-				return emptyConversationDetail(path);
+				return { status: 200, json: {} };
 			}
 			throw new Error(`unexpected fetch ${path}`);
 		},
@@ -7172,7 +7191,7 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 				return { status: 200, json: { items } };
 			}
 			if (path.startsWith("/conversation/")) {
-				return emptyConversationDetail(path);
+				return readConversationDetail(path);
 			}
 			throw new Error(`unexpected fetch ${path}`);
 		},
@@ -13918,6 +13937,23 @@ test("conversations-only wrapper reports withheld shape failures through diagnos
 		),
 	);
 	assert.ok(!harness.protocolMessages.some((m) => m.type === "DETAIL_GAP"));
+	const stored = new Map<string, unknown>([
+		["bad", { id: "bad", title: "previous good metadata" }],
+	]);
+	for (const record of harness.emitted) {
+		if (record.stream === "conversations")
+			stored.set(String(record.data.id), record.data);
+	}
+	assert.equal(
+		harness.emitted.filter(
+			(r) => r.stream === "conversations" && r.data.id === "bad",
+		).length,
+		0,
+	);
+	assert.deepEqual(stored.get("bad"), {
+		id: "bad",
+		title: "previous good metadata",
+	});
 	const coverage = harness.protocolMessages.find(
 		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "conversations",
 	);
@@ -14084,6 +14120,133 @@ test("mixed detail rejection stays owed to a later conversations-only run", asyn
 	);
 	assert.equal(repaired?.data.message_count_on_current_branch, 2);
 });
+
+for (const count of [1, 60]) {
+	test(`withheld detail remains owed for ${count} rows`, async () => {
+		const rows = Array.from({ length: count }, (_, i) =>
+			makeConvo({ id: `withheld-${i}`, update_time: 1_700_000_000 + i }),
+		);
+		const good = makeConvo({ id: "good", update_time: 1_700_000_500 });
+		const listed = [good, ...rows.toReversed()];
+		let state: CollectContext["state"] = {};
+		const iterations = count === 1 ? 5 : 1;
+		for (let run = 0; run <= iterations; run++) {
+			const repaired = run === iterations;
+			const harness = makeRecordingEmit(validateRecord);
+			const reads: string[] = [];
+			const api: ChatGptApi = {
+				auth: () => Promise.reject(new Error("unused")),
+				fetch: async (path) => {
+					await Promise.resolve();
+					const url = new URL(path, "https://chatgpt.com");
+					if (url.pathname === "/conversations")
+						return {
+							status: 200,
+							json: {
+								items:
+									Number(url.searchParams.get("offset") ?? 0) === 0
+										? listed
+										: [],
+								total: listed.length,
+							},
+						};
+					if (url.pathname === "/conversations/search")
+						return {
+							status: 200,
+							json: {
+								items: listed.slice(
+									Number(url.searchParams.get("cursor") ?? 0),
+									Number(url.searchParams.get("cursor") ?? 0) + 30,
+								),
+								next_cursor:
+									Number(url.searchParams.get("cursor") ?? 0) + 30 <
+									listed.length
+										? Number(url.searchParams.get("cursor") ?? 0) + 30
+										: null,
+							},
+						};
+					const id = decodeURIComponent(
+						url.pathname.slice("/conversation/".length),
+					);
+					reads.push(id);
+					if (id !== good.id && !repaired)
+						return {
+							status: 200,
+							json: {
+								id,
+								current_node: "a1",
+								mapping: {
+									a1: userNode("missing", [], "truncated", "assistant"),
+								},
+							},
+						};
+					return makeDetailOkForConversation(id);
+				},
+			};
+			await runConversationsAndMessagesStreams(
+				{
+					api,
+					sleep: () => Promise.resolve(),
+					emit: harness.emit,
+					emitRecord: harness.emitRecord,
+					progress: () => Promise.resolve(),
+					requested: new Map(
+						(run === 0 ? ["conversations", "messages"] : ["conversations"]).map(
+							(name) => [name, { name }],
+						),
+					),
+					detailGaps: [],
+					requestDetailGapPage: () => Promise.resolve([]),
+				},
+				state,
+				{ detailPacing: { random: () => 0, sleep: () => undefined } },
+			);
+			state = {
+				conversations: structuredClone(
+					lastStateCursor(harness.protocolMessages, "conversations"),
+				),
+				messages: structuredClone(
+					lastStateCursor(harness.protocolMessages, "messages") ??
+						state?.messages,
+				),
+			} as CollectContext["state"];
+			if (!repaired) {
+				assert.equal(reads.filter((id) => id !== good.id).length, count);
+				assert.equal(
+					harness.emitted.filter(
+						(r) => r.stream === "conversations" && r.data.id !== good.id,
+					).length,
+					0,
+				);
+				const coverage = harness.protocolMessages.find(
+					(m) => m.type === "DETAIL_COVERAGE" && m.stream === "conversations",
+				);
+				assert.equal(coverage?.type, "DETAIL_COVERAGE");
+				assert.equal(coverage.considered, count + 1);
+				assert.equal(coverage.covered, 1);
+			}
+			if (repaired) {
+				assert.deepEqual(
+					reads.filter((id) => id !== good.id).sort(),
+					rows.map((r) => r.id).sort(),
+					`all ${count} repaired rows must be read`,
+				);
+				assert.equal(
+					harness.emitted.filter(
+						(r) => r.stream === "conversations" && r.data.id !== good.id,
+					).length,
+					count,
+				);
+				assert.equal(
+					harness.emitted.filter(
+						(r) => r.stream === "conversations" && r.data.id === good.id,
+					).length,
+					0,
+				);
+			}
+		}
+	});
+}
 
 test("incomplete detail locator reasons have connector display messages", async () => {
 	const manifest = JSON.parse(
