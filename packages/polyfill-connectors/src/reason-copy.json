@@ -547,6 +547,7 @@
 				"message": "Muse showed a check to confirm you are a person. Complete it in the browser, then run again."
 			},
 			"muse_stream_incomplete": "incomplete_retry",
+			"muse_stream_needs_update": "unexpected_data",
 			"scope_not_supported": "fix_settings"
 		},
 		"netflix-export": {

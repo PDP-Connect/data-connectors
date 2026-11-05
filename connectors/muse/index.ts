@@ -580,6 +580,15 @@ function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Reason code for a failed run that has no runtime reporter. A failure a retry
+ * can fix keeps `muse_stream_incomplete`; one no retry can fix (a page cap, text
+ * or a shape this connector cannot store) needs a connector update.
+ */
+function streamFailureCode(retryable: boolean): string {
+	return retryable ? "muse_stream_incomplete" : "muse_stream_needs_update";
+}
+
 async function failStreams(
 	ctx: MuseCtx,
 	streams: readonly string[],
@@ -594,10 +603,14 @@ async function failStreams(
 	for (const stream of streams) {
 		connectorDiagnostic("muse", "stream_failed", { stream, retryable });
 		if (!ctx.reportStreamFailure) {
-			throw createConnectorFailure("muse_stream_incomplete", describe(error), {
-				retryable,
-				recoveryHint,
-			});
+			throw createConnectorFailure(
+				streamFailureCode(retryable),
+				describe(error),
+				{
+					retryable,
+					recoveryHint,
+				},
+			);
 		}
 		await ctx.reportStreamFailure?.(stream, describe(error), {
 			retryable,
@@ -2099,7 +2112,7 @@ export async function collectMuseWith(
 			// it; otherwise the streams' own hint when they agree.
 			const [only] = hints;
 			throw createConnectorFailure(
-				"muse_stream_incomplete",
+				streamFailureCode(retryable),
 				failures.join("; "),
 				{
 					retryable,
