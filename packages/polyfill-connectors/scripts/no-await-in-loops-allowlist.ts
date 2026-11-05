@@ -4704,21 +4704,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 752,
+			line: 751,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "One SKIP_RESULT per requested stream with missing trip detail, in stream order, after the stream's STATE.",
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 535,
+			line: 534,
 			column: 3,
 			category: "dependent_pagination",
 			note: "Saved Activities positions are continued one at a time, newest segment first, each within the pages the run has left.",
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 594,
+			line: 593,
 			column: 15,
 			category: "provider_pacing_backpressure",
 			note: "fetchGetTrip()/fetchFareBreakdown() per trip id, and emitRecord('trips'|'receipts', ...) after each — one detail-fetch loop shared by both streams, politely paced between trips (D5 revised: trips hydrates from GetTrip, receipts from GetReceipt).",
@@ -5439,7 +5439,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/x_browser/index.test.ts",
-			line: 2904,
+			line: 2905,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "Each pending-head variant gets its own capped and resumed run, asserted before the next variant.",

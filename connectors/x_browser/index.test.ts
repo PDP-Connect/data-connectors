@@ -2865,7 +2865,8 @@ test("an anchor at the production scroll ceiling advances on the next run", asyn
 		third.messages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.recovery_hint?.retryable === false,
+				typeof message.recovery_hint === "object" &&
+				message.recovery_hint.retryable === false,
 		),
 	);
 });
@@ -2909,7 +2910,8 @@ test("a pending-head seek at the scroll ceiling cannot save a retryable checkpoi
 			resumed.messages.some(
 				(message) =>
 					message.type === "SKIP_RESULT" &&
-					message.recovery_hint?.retryable === false,
+					typeof message.recovery_hint === "object" &&
+					message.recovery_hint.retryable === false,
 			),
 		);
 	}
@@ -2967,7 +2969,7 @@ test("object resource key order preserves the backfill scope", async () => {
 			{
 				name: "likes",
 				resources: [{ kind: "list", selection: { owner: "me", id: "saved" } }],
-			} as StreamScope,
+			} as unknown as StreamScope,
 		],
 	]);
 	await collectXBrowser(first.ctx, { ...FAST, viewPostCaps: { likes: 2 } });
@@ -2980,7 +2982,7 @@ test("object resource key order preserves the backfill scope", async () => {
 			{
 				name: "likes",
 				resources: [{ selection: { id: "saved", owner: "me" }, kind: "list" }],
-			} as StreamScope,
+			} as unknown as StreamScope,
 		],
 	]);
 	await collectXBrowser(resumed.ctx, { ...FAST, viewPostCaps: { likes: 2 } });

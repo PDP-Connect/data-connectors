@@ -1119,7 +1119,10 @@ for (const stream of ["trips", "receipts"] as const) {
 					? { action: "retry_by_runtime", retryable: true }
 					: { action: "retry_on_connector_upgrade", retryable: false },
 			);
-			assert.equal(gap.diagnostics?.missing, 1);
+			assert.deepEqual(gap.diagnostics, {
+				missing: 1,
+				retrying: attempt < 3 ? 1 : 0,
+			});
 			if (attempt >= 3) {
 				assert.equal(cursor.backfill, undefined);
 				assert.deepEqual(cursor.retired_trip_ids, { [stream]: ["gone-trip"] });
