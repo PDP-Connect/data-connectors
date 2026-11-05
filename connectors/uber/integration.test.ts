@@ -426,6 +426,7 @@ function backfillCursor(messages: ReturnType<typeof makeCtx>["messages"]) {
 			pending_trip_ids: string[];
 			detail_failure_counts?: Record<string, number>;
 		};
+		retired_trip_ids?: { trips?: string[]; receipts?: string[] };
 	};
 }
 
@@ -1072,29 +1073,92 @@ for (const streams of [["receipts"], ["trips", "receipts"]] as const) {
 	});
 }
 
-test("collectAllStreams: a retired receipt reports a gap that a rerun cannot fill", async () => {
-	let cursor: ReturnType<typeof backfillCursor> | undefined;
-	for (let attempt = 1; attempt <= 3; attempt += 1) {
-		const run = makeCtx(["receipts"]);
-		if (cursor) run.ctx.state = { trips: cursor };
-		const script = makeScriptedFetch({
-			activitiesPages: [{ body: activitiesBody([{ uuid: "gone-trip" }]) }],
-			getReceipt: { "gone-trip": { status: 404, body: "not found" } },
-		});
-		await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
-		cursor = backfillCursor(run.messages);
-		const gap = run.messages.find(
+for (const stream of ["trips", "receipts"] as const) {
+	test(`collectAllStreams: a retired ${stream} detail reports a gap on every later run until a reset`, async () => {
+		const failing =
+			stream === "trips"
+				? { getTrip: { "gone-trip": { status: 404, body: "not found" } } }
+				: { getReceipt: { "gone-trip": { status: 404, body: "not found" } } };
+		let cursor: ReturnType<typeof backfillCursor> | undefined;
+		for (let attempt = 1; attempt <= 6; attempt += 1) {
+			const run = makeCtx([stream]);
+			if (cursor) run.ctx.state = { trips: cursor };
+			// Run 6 resets with full_refresh after the source recovered.
+			if (attempt === 6) run.ctx.collectionMode = "full_refresh";
+			const script = makeScriptedFetch({
+				activitiesPages: [{ body: activitiesBody([{ uuid: "gone-trip" }]) }],
+				...(attempt === 6
+					? {
+							getTrip: tripResponses(["gone-trip"]),
+							getReceipt: {
+								"gone-trip": { body: getReceiptBody(RECEIPT_HTML("$10.00")) },
+							},
+						}
+					: failing),
+			});
+			await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+			cursor = backfillCursor(run.messages);
+			const gaps = run.messages.filter(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "trip_details_unavailable",
+			);
+			if (attempt === 6) {
+				assert.equal(gaps.length, 0);
+				assert.equal(run.emitted.length, 1);
+				assert.equal(cursor.retired_trip_ids, undefined);
+				continue;
+			}
+			assert.equal(gaps.length, 1, `run ${String(attempt)} reports the gap`);
+			const [gap] = gaps;
+			assert.ok(gap && gap.type === "SKIP_RESULT");
+			assert.equal(gap.stream, stream);
+			assert.deepEqual(
+				gap.recovery_hint,
+				attempt < 3
+					? { action: "retry_by_runtime", retryable: true }
+					: { action: "retry_on_connector_upgrade", retryable: false },
+			);
+			assert.equal(gap.diagnostics?.missing, 1);
+			if (attempt >= 3) {
+				assert.equal(cursor.backfill, undefined);
+				assert.deepEqual(cursor.retired_trip_ids, { [stream]: ["gone-trip"] });
+			}
+			if (attempt > 3) {
+				// A retired ID is not fetched again.
+				assert.deepEqual(script.calls, ["Activities"]);
+			}
+		}
+	});
+}
+
+test("collectAllStreams: a scope change clears retired detail IDs", async () => {
+	const run = makeCtx(["receipts"]);
+	run.ctx.state = {
+		trips: {
+			version: 1,
+			scope: "[]",
+			head_trip_id: "gone-trip",
+			hydrated_trip_ids: [],
+			hydrated_receipt_ids: [],
+			retired_trip_ids: { receipts: ["gone-trip"] },
+		},
+	};
+	const script = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "gone-trip" }]) }],
+		getReceipt: {
+			"gone-trip": { body: getReceiptBody(RECEIPT_HTML("$10.00")) },
+		},
+	});
+	await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+	assert.equal(
+		run.messages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.reason === "trip_details_unavailable",
-		);
-		assert.ok(gap && gap.type === "SKIP_RESULT");
-		assert.deepEqual(
-			gap.recovery_hint,
-			attempt < 3
-				? { action: "retry_by_runtime", retryable: true }
-				: { action: "retry_on_connector_upgrade", retryable: false },
-		);
-	}
-	assert.equal(cursor?.backfill, undefined);
+		),
+		false,
+	);
+	assert.equal(backfillCursor(run.messages).retired_trip_ids, undefined);
+	assert.ok(script.calls.includes("GetReceipt:gone-trip"));
 });

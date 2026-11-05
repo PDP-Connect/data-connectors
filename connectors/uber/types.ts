@@ -146,4 +146,9 @@ export interface UberCursor extends Record<string, unknown> {
 		/** Permanent failures per ID; transient faults do not consume retries. */
 		detail_failure_counts?: Record<string, number>;
 	};
+	/**
+	 * IDs whose detail failed three runs, per stream that still lacks it.
+	 * Kept outside `backfill` so later runs keep reporting the gap.
+	 */
+	retired_trip_ids?: { trips?: string[]; receipts?: string[] };
 }

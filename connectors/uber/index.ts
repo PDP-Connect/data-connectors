@@ -16,7 +16,9 @@
  *     successfully hydrated IDs while backfill is open. The source's
  *     nextPageToken resumes history after each per-run budget; only actual
  *     budget deferral emits a budget skip. Failed details retire after
- *     three permanent failures without being marked hydrated.
+ *     three permanent failures without being marked hydrated; STATE keeps
+ *     up to 100 retired IDs per stream, and every later run reports them as
+ *     a non-retryable gap until full_refresh or a scope change.
  *     The head boundary assumes Activities is newest-first. The prior
  *     connector flagged live confirmation of that ordering as outstanding.
  *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
@@ -110,6 +112,8 @@ const ACTIVITIES_PAGE_SIZE = 5;
 /** Safety ceiling, not an observed Uber limit — mirrors venmo's page-cap precedent. */
 const MAX_ACTIVITY_PAGES = 200;
 const MAX_DETAIL_FETCHES = 200;
+/** Retired IDs kept per stream so later runs keep reporting the gap. */
+const MAX_RETIRED_IDS = 100;
 const PAGE_DELAY_MS = 500;
 const DETAIL_DELAY_MS = 500;
 
@@ -503,6 +507,10 @@ export async function collectAllStreams(
 	const detailFailureCounts = new Map(
 		Object.entries(previous?.backfill?.detail_failure_counts ?? {}),
 	);
+	const retired = {
+		trips: new Set(previous?.retired_trip_ids?.trips ?? []),
+		receipts: new Set(previous?.retired_trip_ids?.receipts ?? []),
+	};
 	const head = await fetchAllActivities(fetchPath, delay, {
 		stopAtTripId: previous?.head_trip_id,
 	});
@@ -544,9 +552,11 @@ export async function collectAllStreams(
 	const discoveredIds = activities
 		.map((activity) => activityTripId(activity))
 		.filter((id): id is string => Boolean(id));
-	const needsDetail = (id: string) =>
-		(wantTrips && !hydratedTrips.has(id)) ||
-		(wantReceipts && !hydratedReceipts.has(id));
+	const needsTrip = (id: string) =>
+		wantTrips && !hydratedTrips.has(id) && !retired.trips.has(id);
+	const needsReceipt = (id: string) =>
+		wantReceipts && !hydratedReceipts.has(id) && !retired.receipts.has(id);
+	const needsDetail = (id: string) => needsTrip(id) || needsReceipt(id);
 	const candidates = [
 		...new Set([
 			...headIds,
@@ -576,7 +586,7 @@ export async function collectAllStreams(
 			}
 		};
 
-		if (wantTrips && !hydratedTrips.has(tripId)) {
+		if (needsTrip(tripId)) {
 			tripsRequired.push(tripId);
 			let getTrip: UberGetTripResult | undefined;
 			let fetched = false;
@@ -598,7 +608,7 @@ export async function collectAllStreams(
 			}
 		}
 
-		if (!rateLimit && wantReceipts && !hydratedReceipts.has(tripId)) {
+		if (!rateLimit && needsReceipt(tripId)) {
 			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
 			let fetched = false;
 			try {
@@ -633,6 +643,24 @@ export async function collectAllStreams(
 		}
 	}
 
+	// Retire IDs that used their third permanent failure. Each stream keeps
+	// the IDs it still lacks, so later runs report the gap without fetching.
+	for (const id of attemptedTripIds) {
+		if ((detailFailureCounts.get(id) ?? 0) < 3) continue;
+		const lacking = [
+			...(needsTrip(id) ? [retired.trips] : []),
+			...(needsReceipt(id) ? [retired.receipts] : []),
+		];
+		if (lacking.every((ids) => ids.size < MAX_RETIRED_IDS)) {
+			for (const ids of lacking) ids.add(id);
+			detailFailureCounts.delete(id);
+		}
+	}
+	const retiredTripIds = {
+		...(retired.trips.size > 0 ? { trips: [...retired.trips] } : {}),
+		...(retired.receipts.size > 0 ? { receipts: [...retired.receipts] } : {}),
+	};
+
 	// Unattempted IDs, including work stopped by a rate limit, remain pending.
 	// Only permanent failures consume the three-run retirement allowance.
 	const pendingTripIds = [
@@ -665,6 +693,9 @@ export async function collectAllStreams(
 						detail_failure_counts: Object.fromEntries(detailFailureCounts),
 					},
 				}
+			: {}),
+		...(Object.keys(retiredTripIds).length > 0
+			? { retired_trip_ids: retiredTripIds }
 			: {}),
 	};
 	await emit({ type: "STATE", stream: "trips", cursor });
@@ -700,13 +731,20 @@ export async function collectAllStreams(
 			});
 		}
 		// A failed detail is not a budget stop. Report each stream whose
-		// attempted trips still lack detail, so the run does not look complete.
+		// attempted or retired trips still lack detail, so no run looks complete.
 		if (!rateLimit) {
-			const gaps: Array<["trips" | "receipts", Set<string>]> = [];
-			if (wantTrips) gaps.push(["trips", hydratedTrips]);
-			if (wantReceipts) gaps.push(["receipts", hydratedReceipts]);
-			for (const [stream, hydrated] of gaps) {
-				const missing = [...attemptedTripIds].filter((id) => !hydrated.has(id));
+			const gaps: Array<["trips" | "receipts", Set<string>, Set<string>]> = [];
+			if (wantTrips) gaps.push(["trips", hydratedTrips, retired.trips]);
+			if (wantReceipts) {
+				gaps.push(["receipts", hydratedReceipts, retired.receipts]);
+			}
+			for (const [stream, hydrated, retiredIds] of gaps) {
+				const missing = [
+					...new Set([
+						...[...attemptedTripIds].filter((id) => !hydrated.has(id)),
+						...retiredIds,
+					]),
+				];
 				if (missing.length === 0) continue;
 				const retrying = missing.filter((id) =>
 					pendingTripIds.includes(id),
@@ -719,7 +757,7 @@ export async function collectAllStreams(
 						retrying > 0
 							? { action: "retry_by_runtime", retryable: true }
 							: { action: "retry_on_connector_upgrade", retryable: false },
-					message: `Uber did not return ${stream} detail for ${String(missing.length)} trip(s) in this run`,
+					message: `Uber did not return ${stream} detail for ${String(missing.length)} trip(s)`,
 					diagnostics: { missing: missing.length, retrying },
 				});
 			}
