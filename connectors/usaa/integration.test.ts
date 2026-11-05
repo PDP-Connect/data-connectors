@@ -1954,6 +1954,31 @@ test("emitExportFailure: credit-card account uses credit_card_export_unverified 
 	);
 });
 
+test("emitExportFailure: a credit-card structural failure is export_affordance_missing, not the unverified-flow reason", async () => {
+	const { deps, messages } = makeHarness();
+	const cc = makeAccount({ account_type: "credit-card", last_four: "0001" });
+	const fatal: DiagnosticInfo = {
+		diag: null,
+		error: "end field detached before fill",
+		phase: "export_dialog_fill_failed",
+	};
+	await emitExportFailure(deps, cc, fatal);
+	const transient: DiagnosticInfo = {
+		artifact: { cdpError: null, cdpReady: true, candidates: [] },
+		diag: null,
+		error: "download_empty",
+		phase: "export_artifact_wait_failed",
+	};
+	await emitExportFailure(deps, cc, transient);
+	const reasons = messages
+		.filter((m) => m.type === "SKIP_RESULT")
+		.map((m) => (m as { reason?: string }).reason);
+	assert.deepEqual(reasons, [
+		"export_affordance_missing",
+		"credit_card_export_unverified",
+	]);
+});
+
 test("isNoDataExportMessage: distinguishes source-empty export dialogs from generic failures", () => {
 	assert.equal(
 		isNoDataExportMessage(
