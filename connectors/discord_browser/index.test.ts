@@ -45,6 +45,11 @@ const SERVER_A = "797751587635200003";
 const SERVER_B = "970693646745600004";
 const SERVER_C = "1175889484185600005";
 const ALL = ["profile", "servers", "connections", "messages"];
+const DEFAULT_SCOPE = JSON.stringify({
+	since: null,
+	until: null,
+	resources: null,
+});
 /** Discord's fixed results per search page. */
 const SEARCH_PAGE = 25;
 
@@ -115,7 +120,10 @@ function discordApi(
 			assert.equal(url.searchParams.get("author_id"), OWNER);
 			assert.equal(url.searchParams.get("sort_by"), "timestamp");
 			assert.equal(url.searchParams.get("sort_order"), "desc");
-			const all = servers[match[1]] ?? [];
+			const maxId = url.searchParams.get("max_id");
+			const all = (servers[match[1]] ?? []).filter(
+				(message) => maxId === null || BigInt(message.id) < BigInt(maxId),
+			);
 			const offset = Number(url.searchParams.get("offset"));
 			return ok({
 				total_results: all.length,
@@ -331,6 +339,7 @@ function harness(
 	extra: {
 		collectionMode?: "full_refresh" | "incremental";
 		timeRange?: { since?: string; until?: string };
+		resources?: string[];
 	} = {},
 ) {
 	const messages: EmittedMessage[] = [];
@@ -344,6 +353,9 @@ function harness(
 				name,
 				{
 					name,
+					...(extra.resources && name === "messages"
+						? { resources: extra.resources }
+						: {}),
 					...(extra.timeRange && name === "messages"
 						? { time_range: extra.timeRange }
 						: {}),
@@ -531,11 +543,15 @@ test("a run reads the four streams with the client's own headers", async () => {
 				newest_id: h.of("messages")[0]?.id,
 				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
 				until_ms: null,
+				scope: DEFAULT_SCOPE,
+				backfill: null,
 			},
 			[SERVER_B]: {
 				newest_id: null,
 				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
 				until_ms: null,
+				scope: DEFAULT_SCOPE,
+				backfill: null,
 			},
 		},
 	});
@@ -833,8 +849,7 @@ test("one short 429 is waited out once; a second ends the run", async () => {
 		h.skips().map((skip) => [skip.stream, skip.reason]),
 		[["messages", "discord_rate_limited"]],
 	);
-	// The first page is kept, but an interrupted walk writes no coverage: the
-	// next run starts over from the newest message. The server that stopped
+	// The first page is kept with an open backfill. The server that stopped
 	// part way moves behind the one that never ran.
 	assert.equal(h.of("messages").length, 25);
 	const state = h.cursor("messages") as {
@@ -842,7 +857,7 @@ test("one short 429 is waited out once; a second ends the run", async () => {
 		servers: Record<string, unknown>;
 	};
 	assert.deepEqual(state.queue, [SERVER_B, SERVER_A]);
-	assert.equal(state.servers[SERVER_A], undefined);
+	assert.ok(state.servers[SERVER_A]);
 	assert.equal(state.servers[SERVER_B], undefined);
 });
 
@@ -1391,10 +1406,8 @@ test("an interrupted disjoint expansion cannot omit the uncovered interval", asy
 	assert.equal(collected.size, 90);
 });
 
-test("the accepted search result-offset ceiling still marks the server complete", async () => {
-	// 10,025 messages means the site's own 9,975 offset ceiling is reached
-	// before the listing ends; the product owner accepts that as the range's
-	// end, so the walk records full coverage.
+test("the search offset ceiling rebases by ID and reaches the true end", async () => {
+	// More than 10,000 results must not turn the offset ceiling into false EOF.
 	const all = messagesBy(OWNER, 10_025);
 	const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: all }) });
 	const h = harness(fake, ["messages"]);
@@ -1402,8 +1415,9 @@ test("the accepted search result-offset ceiling still marks the server complete"
 		h.ctx,
 		fast([], { maxMessages: 20_000, maxRequests: 450 }),
 	);
-	// 400 pages of 25 up to and including offset 9,975.
-	assert.equal(h.of("messages").length, 10_000);
+	// The last page uses max_id at offset zero after the 400-page window.
+	assert.equal(h.of("messages").length, 10_025);
+	assert.ok(searches(fake).some((call) => call.path.includes("&max_id=")));
 	assert.deepEqual(h.skips(), []);
 	const state = h.cursor("messages") as {
 		servers: Record<
@@ -1482,65 +1496,40 @@ test("an unchanged request still stops at the known head", async () => {
 	assert.equal(searches(two).length, 1);
 });
 
-test("an interrupted walk writes no coverage and the next run starts over", async () => {
+interface ResumeState {
+	queue: string[];
+	servers: Record<
+		string,
+		{
+			newest_id: string | null;
+			scope: string;
+			backfill: {
+				scope: string;
+				ranges: Array<{ before_id: string | null; stop_id: string | null }>;
+			} | null;
+		}
+	>;
+}
+
+const resumeState = (h: ReturnType<typeof harness>): ResumeState =>
+	h.cursor("messages") as ResumeState;
+
+test("a budget stop saves scoped backfill and reports partial coverage", async () => {
 	const listing = messagesBy(OWNER, 70);
-	const servers = { [SERVER_A]: listing };
-
-	// Two runs hit the message limit before reaching the end. Neither writes
-	// coverage, so the next starts from the newest message again.
-	const one = fakeDiscord({ respond: discordApi(servers) });
-	const first = harness(one, ["messages"]);
-	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
-	assert.equal(first.of("messages").length, 40);
-	assert.equal(
-		(first.cursor("messages") as { servers: Record<string, unknown> }).servers[
-			SERVER_A
-		],
-		undefined,
+	const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
+	const h = harness(fake, ["messages"]);
+	const lines = await captureDiagnostics(() =>
+		collectDiscordBrowser(h.ctx, fast([], { maxMessages: 40 })),
 	);
-
-	const two = fakeDiscord({ respond: discordApi(servers) });
-	const second = harness(two, ["messages"], {
-		messages: first.cursor("messages"),
-	});
-	await collectDiscordBrowser(second.ctx, fast([], { maxMessages: 30 }));
-	// Re-emitting already stored messages is acceptable; missing one is not.
+	const cursor = resumeState(h).servers[SERVER_A];
+	assert.ok(cursor);
+	assert.equal(cursor.newest_id, listing[0]?.id);
+	assert.equal(cursor.backfill?.scope, DEFAULT_SCOPE);
+	assert.deepEqual(cursor.backfill?.ranges, [
+		{ before_id: listing[39]?.id, stop_id: null },
+	]);
 	assert.deepEqual(
-		second.of("messages").map((record) => record.id),
-		listing.slice(0, 30).map((message) => message.id),
-	);
-
-	// A healthy run reaches the end and records the whole range.
-	const three = fakeDiscord({ respond: discordApi(servers) });
-	const third = harness(three, ["messages"], {
-		messages: second.cursor("messages"),
-	});
-	await collectDiscordBrowser(third.ctx, fast());
-	assert.equal(third.of("messages").length, 70);
-	const afterThird = third.cursor("messages") as {
-		servers: Record<string, { floor_ms: number; until_ms: number | null }>;
-	};
-	assert.equal(
-		afterThird.servers[SERVER_A]?.floor_ms,
-		NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
-	);
-	assert.equal(afterThird.servers[SERVER_A]?.until_ms, null);
-});
-
-test("the message limit writes no coverage; a later run re-reads and completes", async () => {
-	const listing = messagesBy(OWNER, 70);
-	const servers = {
-		[SERVER_A]: listing,
-		[SERVER_B]: messagesBy(OWNER, 3, NOW - 3 * DAY_MS),
-	};
-
-	// The first run hits the message limit inside server A and writes nothing.
-	const one = fakeDiscord({ respond: discordApi(servers) });
-	const first = harness(one, ["messages"]);
-	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
-	assert.equal(first.of("messages").length, 40);
-	assert.deepEqual(
-		first.skips().map((skip) => [skip.reason, skip.recovery_hint]),
+		h.skips().map((skip) => [skip.reason, skip.recovery_hint]),
 		[
 			[
 				"discord_run_limit_reached",
@@ -1548,58 +1537,208 @@ test("the message limit writes no coverage; a later run re-reads and completes",
 			],
 		],
 	);
-	assert.deepEqual(first.cursor("messages"), {
-		queue: [SERVER_B, SERVER_A],
-		servers: {},
-	});
+	assert.ok(lines.some((line) => line.includes('"st":"partial"')));
+	assert.ok(!lines.some((line) => line.includes('"st":"complete"')));
+});
 
-	// A later healthy run starts over, reaches the end of both servers, and
-	// records full coverage.
-	const two = fakeDiscord({ respond: discordApi(servers) });
-	const second = harness(two, ["messages"], {
+test("the second run reads a new head and older backfill without duplicate records", async () => {
+	const listing = messagesBy(OWNER, 100);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+	const added = messagesBy(OWNER, 3, NOW - 60_000);
+	const fake = fakeDiscord({
+		respond: discordApi({ [SERVER_A]: [...added, ...listing] }),
+	});
+	const second = harness(fake, ["messages"], {
 		messages: first.cursor("messages"),
 	});
-	await collectDiscordBrowser(second.ctx, fast());
-	assert.equal(second.of("messages").length, 73);
-	const afterSecond = second.cursor("messages");
-	assert.deepEqual(afterSecond, {
-		queue: [SERVER_B, SERVER_A],
-		servers: {
-			[SERVER_A]: {
-				newest_id: servers[SERVER_A]?.[0]?.id,
-				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
-				until_ms: null,
-			},
-			[SERVER_B]: {
-				newest_id: servers[SERVER_B]?.[0]?.id,
-				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
-				until_ms: null,
+	await collectDiscordBrowser(second.ctx, fast([], { maxMessages: 40 }));
+	assert.deepEqual(
+		second.of("messages").map((record) => record.id),
+		[...added, ...listing.slice(40, 77)].map((message) => message.id),
+	);
+	const ids = [...first.of("messages"), ...second.of("messages")].map(
+		(record) => record.id,
+	);
+	assert.equal(new Set(ids).size, ids.length);
+	assert.ok(
+		searches(fake).some((call) =>
+			call.path.endsWith(`max_id=${listing[39]?.id}`),
+		),
+	);
+	assert.equal(
+		resumeState(second).servers[SERVER_A]?.backfill?.ranges[0]?.before_id,
+		listing[76]?.id,
+	);
+});
+
+test("changed since, until, resources and full refresh ignore saved backfill", async () => {
+	const listing = messagesBy(OWNER, 70, NOW - DAY_MS, DAY_MS);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+	const variants: Parameters<typeof harness>[3][] = [
+		{ timeRange: { since: new Date(NOW - 10 * DAY_MS).toISOString() } },
+		{ timeRange: { until: new Date(NOW - 2 * DAY_MS).toISOString() } },
+		{ resources: [SERVER_A] },
+		{ collectionMode: "full_refresh" },
+	];
+	for (const extra of variants) {
+		const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
+		const h = harness(
+			fake,
+			["messages"],
+			{ messages: first.cursor("messages") },
+			extra,
+		);
+		await collectDiscordBrowser(h.ctx, fast([], { maxMessages: 5 }));
+		assert.equal(h.of("messages").length, 5);
+		assert.ok(searches(fake).every((call) => !call.path.includes("&max_id=")));
+		assert.ok(resumeState(h).servers[SERVER_A]?.backfill);
+		assert.notEqual(
+			resumeState(h).servers[SERVER_A]?.backfill?.ranges[0]?.before_id,
+			listing[39]?.id,
+		);
+		assert.equal(
+			resumeState(h).servers[SERVER_A]?.backfill?.scope,
+			resumeState(h).servers[SERVER_A]?.scope,
+		);
+	}
+});
+
+test("reaching the end clears backfill and completes the stream", async () => {
+	const listing = messagesBy(OWNER, 70);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+	const second = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+		{ messages: first.cursor("messages") },
+	);
+	const lines = await captureDiagnostics(() =>
+		collectDiscordBrowser(second.ctx, fast()),
+	);
+	assert.equal(second.of("messages").length, 30);
+	assert.equal(resumeState(second).servers[SERVER_A]?.backfill, null);
+	assert.deepEqual(second.skips(), []);
+	assert.ok(lines.some((line) => line.includes('"st":"complete"')));
+});
+
+test("base-format STATE keeps its head and starts the missing backfill", async () => {
+	const listing = messagesBy(OWNER, 5);
+	const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
+	const h = harness(fake, ["messages"], {
+		messages: {
+			queue: [SERVER_A],
+			servers: {
+				[SERVER_A]: {
+					newest_id: listing[1]?.id,
+					floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+					until_ms: null,
+				},
 			},
 		},
 	});
-	assert.deepEqual(second.skips(), []);
-
-	// Nothing new: one request per server, each stopping at its first hit.
-	const three = fakeDiscord({ respond: discordApi(servers) });
-	const third = harness(three, ["messages"], { messages: afterSecond });
-	await collectDiscordBrowser(third.ctx, fast());
-	assert.deepEqual(third.of("messages"), []);
-	assert.equal(searches(three).length, 2);
-	assert.deepEqual(third.skips(), []);
-
-	// A full refresh ignores the cursor.
-	const four = fakeDiscord({ respond: discordApi(servers) });
-	const fourth = harness(
-		four,
-		["messages"],
-		{ messages: afterSecond },
-		{ collectionMode: "full_refresh" },
+	await collectDiscordBrowser(h.ctx, fast());
+	assert.deepEqual(
+		h.of("messages").map((record) => record.id),
+		[listing[0], ...listing.slice(2)].map((message) => message?.id),
 	);
-	await collectDiscordBrowser(fourth.ctx, fast());
-	assert.equal(fourth.of("messages").length, 73);
+	assert.equal(resumeState(h).servers[SERVER_A]?.backfill, null);
 });
 
-test("an interrupted walk re-reads after deletions shift the listing", async () => {
+test("a head larger than the budget retains every unfinished interval", async () => {
+	const listing = messagesBy(OWNER, 12);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 5 }));
+	const added = messagesBy(OWNER, 8, NOW - 60_000);
+	let state = first.cursor("messages");
+	const records = [...first.of("messages")];
+	for (let run = 0; run < 3; run += 1) {
+		const h = harness(
+			fakeDiscord({
+				respond: discordApi({ [SERVER_A]: [...added, ...listing] }),
+			}),
+			["messages"],
+			{ messages: state },
+		);
+		await collectDiscordBrowser(h.ctx, fast([], { maxMessages: 5 }));
+		records.push(...h.of("messages"));
+		state = h.cursor("messages");
+	}
+	assert.equal(records.length, 20);
+	assert.equal(new Set(records.map((record) => record.id)).size, 20);
+	assert.equal((state as ResumeState).servers[SERVER_A]?.backfill, null);
+});
+
+test("an ignored ID continuation stops without advancing saved backfill", async () => {
+	const listing = messagesBy(OWNER, 70);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+	const fake = fakeDiscord({
+		respond: discordApi({ [SERVER_A]: listing }, (path) =>
+			path.includes("&max_id=")
+				? ok({
+						total_results: listing.length,
+						messages: listing.slice(0, 25).map((message) => [message]),
+					})
+				: undefined,
+		),
+	});
+	const second = harness(fake, ["messages"], {
+		messages: first.cursor("messages"),
+	});
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.deepEqual(second.of("messages"), []);
+	assert.ok(
+		second.skips().some((skip) => skip.reason === "discord_source_unreadable"),
+	);
+	assert.deepEqual(
+		resumeState(second).servers[SERVER_A],
+		resumeState(first).servers[SERVER_A],
+	);
+});
+
+test("the request budget saves a position that the next run continues", async () => {
+	const listing = messagesBy(OWNER, 100);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxRequests: 5 }));
+	assert.equal(first.of("messages").length, 75);
+	assert.equal(
+		resumeState(first).servers[SERVER_A]?.backfill?.ranges[0]?.before_id,
+		listing[74]?.id,
+	);
+	const second = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+		{ messages: first.cursor("messages") },
+	);
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.deepEqual(
+		second.of("messages").map((record) => record.id),
+		listing.slice(75).map((message) => message.id),
+	);
+	assert.equal(resumeState(second).servers[SERVER_A]?.backfill, null);
+});
+
+test("backfill resumes by ID after deletions shift the listing", async () => {
 	const listing = messagesBy(OWNER, 70);
 	const one = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
 	const first = harness(one, ["messages"]);
@@ -1611,10 +1750,10 @@ test("an interrupted walk re-reads after deletions shift the listing", async () 
 		messages: first.cursor("messages"),
 	});
 	await collectDiscordBrowser(second.ctx, fast());
-	// No coverage was claimed, so the walk reads the shifted listing whole.
+	// The saved ID is stable even though earlier offsets changed.
 	assert.deepEqual(
 		second.of("messages").map((record) => String(record.id)),
-		shifted.map((message) => message.id),
+		listing.slice(40).map((message) => message.id),
 	);
 });
 
@@ -1664,7 +1803,7 @@ test("a server over budget moves to the back so every other is read first", asyn
 		[SERVER_C]: smallC,
 	};
 
-	// Run 1: A exhausts the message budget and leaves no coverage. Its walk
+	// Run 1: A exhausts the message budget and saves backfill. Its walk
 	// did not finish, so it moves behind the servers that never ran.
 	const one = fakeDiscord({ respond: discordApi(servers) });
 	const first = harness(one, ["messages"]);
@@ -1707,12 +1846,12 @@ test("a server over budget moves to the back so every other is read first", asyn
 		servers: Record<string, unknown>;
 	};
 	assert.deepEqual(afterSecond.queue, [SERVER_B, SERVER_C, SERVER_A]);
-	assert.equal(afterSecond.servers[SERVER_A], undefined);
+	assert.ok((afterSecond.servers[SERVER_A] as { backfill: unknown }).backfill);
 	assert.equal(afterSecond.servers[SERVER_B] !== undefined, true);
 	assert.equal(afterSecond.servers[SERVER_C] !== undefined, true);
 
-	// Run 3: A is retried after the small servers again and still makes no
-	// progress past the budget; the small servers stop at their known heads.
+	// Run 3: A continues older history after the small servers, which stop
+	// at their known heads.
 	const three = fakeDiscord({ respond: discordApi(servers) });
 	const third = harness(three, ["messages"], { messages: afterSecond });
 	await collectDiscordBrowser(third.ctx, fast());
@@ -1720,11 +1859,10 @@ test("a server over budget moves to the back so every other is read first", asyn
 	assert.deepEqual(thirdOrder.slice(0, 2), [SERVER_B, SERVER_C]);
 	assert.ok(thirdOrder.indexOf(SERVER_A) > thirdOrder.indexOf(SERVER_C));
 	assert.equal(third.of("messages").length, MAX_MESSAGES_PER_RUN);
+	assert.ok(resumeState(third).servers[SERVER_A]?.backfill);
 	assert.equal(
-		(third.cursor("messages") as { servers: Record<string, unknown> }).servers[
-			SERVER_A
-		],
-		undefined,
+		resumeState(third).servers[SERVER_A]?.backfill?.ranges[0]?.before_id,
+		big[2993]?.id,
 	);
 });
 
