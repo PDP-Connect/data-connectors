@@ -2749,3 +2749,83 @@ test("a profile image absent from one source is read from the other, absent from
 	});
 	assert.deepEqual(malformed.emittedRecords, []);
 });
+
+// Carried forward from #545 (1b1db834): saved shows, audiobooks and pre-saved
+// releases are ordinary library rows. They cannot hide a playlist, so they are
+// read past without a coverage gap, unlike a folder or an unknown type.
+function knownLibraryRow(
+	typeName: string,
+	uri: string,
+	wrapper?: string,
+): Record<string, unknown> {
+	return {
+		item: wrapper
+			? { __typename: wrapper, _uri: uri, data: { __typename: typeName } }
+			: { data: { __typename: typeName, uri } },
+	};
+}
+
+function libraryOnly(rows: Record<string, unknown>[]) {
+	return (
+		offset: number,
+		_index: number,
+		operationName?: string,
+		variables?: Record<string, unknown>,
+	) =>
+		operationName === "libraryV3"
+			? {
+					data: {
+						me: {
+							libraryV3: { offset: 0, totalCount: rows.length, items: rows },
+						},
+					},
+				}
+			: playlistDetailResponse(String(variables?.uri), offset, [
+					completePlaylistTrackItem(),
+				]);
+}
+
+test("saved shows, audiobooks and pre-saved releases in the library are read past without a gap", async () => {
+	const result = await collectSavedTracks(
+		libraryOnly([
+			knownLibraryRow("Playlist", "spotify:playlist:pl1"),
+			knownLibraryRow("Podcast", "spotify:show:sh1"),
+			knownLibraryRow("Audiobook", "spotify:show:ab1"),
+			knownLibraryRow("Audiobook", "spotify:audiobook:ab2"),
+			knownLibraryRow("PreRelease", "spotify:prerelease:pr1"),
+			knownLibraryRow("Podcast", "spotify:show:sh2", "PodcastResponseWrapper"),
+		]),
+		{ requested: ["playlists", "playlist_items"] },
+	);
+	assert.deepEqual(
+		result.emittedRecords
+			.filter((record) => record.stream === "playlists")
+			.map((record) => record.data.id),
+		["pl1"],
+	);
+	assert.deepEqual(playlistCoverage(result.messages, "playlists"), {
+		considered: 1,
+		covered: 1,
+	});
+	assert.equal(
+		result.messages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("a known non-playlist library row still has to carry its own resource identity", async () => {
+	for (const row of [
+		knownLibraryRow("Podcast", "spotify:album:a1"),
+		{ item: { data: { __typename: "Audiobook" } } },
+		knownLibraryRow("PreRelease", "spotify:playlist:p1"),
+	]) {
+		await assertRejectedWithoutAuthority(
+			() => ({
+				data: {
+					me: { libraryV3: { offset: 0, totalCount: 1, items: [row] } },
+				},
+			}),
+			{ requested: ["playlists"] },
+		);
+	}
+});

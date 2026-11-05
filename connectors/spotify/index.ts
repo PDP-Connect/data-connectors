@@ -1522,6 +1522,11 @@ export const spotifyPageCollector = async (
 						"Track",
 						"LikedSongs",
 						"YourEpisodes",
+						// Saved shows, audiobooks and pre-saved releases are ordinary
+						// library items that cannot hide a playlist: read past, no gap.
+						"Podcast",
+						"Audiobook",
+						"PreRelease",
 					];
 					if (!supportedLibraryTypes.includes(typeName)) {
 						// A folder (its playlists are not traversed) or a row type this
@@ -1540,7 +1545,9 @@ export const spotifyPageCollector = async (
 							(librarySkippedTypes[typeLabel] ?? 0) + 1;
 						continue;
 					}
-					const uri = data._uri ?? data.uri;
+					// The web player puts the URI on the response wrapper for some types.
+					const uri =
+						data._uri ?? data.uri ?? (isRecord(libraryItem) ? libraryItem._uri : undefined);
 					if (typeof uri !== "string" || uri.length === 0) {
 						throw new Error("spotify_library_identity_missing");
 					}
@@ -1553,6 +1560,9 @@ export const spotifyPageCollector = async (
 						Track: ["track"],
 						LikedSongs: ["collection"],
 						YourEpisodes: ["collection"],
+						Podcast: ["show"],
+						Audiobook: ["show", "audiobook"],
+						PreRelease: ["prerelease", "album"],
 					};
 					const uriParts = uri.split(":");
 					if (

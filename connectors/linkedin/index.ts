@@ -105,6 +105,7 @@ import {
 	connectionEnrichmentHasMalformedFields,
 	connectionEnrichmentIsReadable,
 	type DashProfileSource,
+	pageElementsAt,
 } from "./parsers.ts";
 import { connectionEvidence, profileEvidence, sectionEvidence, summaryEvidence } from "./evidence.ts";
 import { validateRecord } from "./schemas.ts";
@@ -320,6 +321,71 @@ async function fetchDashProfile(
 	return { profile: null, source: "unavailable",
 		...(isFetchError(basic) ? { failure: basic._error } : decorationFailure ? { failure: decorationFailure } : {}),
 	};
+}
+
+const SKILLS_PAGE_SIZE = 20;
+const SKILLS_MAX_PAGES = 10;
+
+interface SkillsWalk {
+	/** Every skill, when the walk proved the whole list; otherwise absent. */
+	elements?: unknown[];
+	/** How the walk ended, as a closed set (never response text). */
+	outcome: string;
+}
+
+/** Walk the owner's skills collection from offset 0 to its stated total.
+ *  The decoration embeds only the first page of a long list (seen live: 20 of
+ *  32). The walk is proof only if every page reports the same total, every
+ *  skill URN is unique and bound to the owner's profile id, and the union is
+ *  exactly that total; anything else leaves the first page as the result. */
+async function walkProfileSkills(
+	page: Page,
+	profile: unknown,
+	firstPage: readonly unknown[],
+	capture?: CaptureSession | null,
+): Promise<SkillsWalk> {
+	if (!isRecord(profile) || typeof profile.entityUrn !== "string") return { outcome: "owner_urn_missing" };
+	const profileId = /^urn:li:fsd_profile:([^:(),]+)$/u.exec(profile.entityUrn)?.[1];
+	if (!profileId) return { outcome: "owner_urn_missing" };
+	const ownedPrefix = `urn:li:fsd_skill:(${profileId},`;
+	const owned = (value: string): boolean => value.startsWith(ownedPrefix) && value.endsWith(")") && value.length > ownedPrefix.length + 1;
+	const urn = encodeURIComponent(profile.entityUrn);
+	const seen = new Map<string, unknown>();
+	let total: number | null = null;
+	// Each page starts where the last one's rows ended: a server may return
+	// fewer than asked for.
+	let start = 0;
+	for (let index = 0; index < SKILLS_MAX_PAGES; index += 1) {
+		const result = await voyagerFetch<Record<string, unknown>>(page,
+			`/voyager/api/identity/dash/profileSkills?q=viewee&profileUrn=${urn}&start=${start}&count=${SKILLS_PAGE_SIZE}`,
+			capture, `skills-page-${String(start).padStart(4, "0")}`);
+		if (isFetchError(result)) return { outcome: `page_${result._error}` };
+		const paging = isRecord(result.paging) ? result.paging : null;
+		if (!Array.isArray(result.elements) || !paging || paging.start !== start) return { outcome: "page_malformed" };
+		if (typeof paging.total !== "number" || !Number.isSafeInteger(paging.total) || paging.total < 0) return { outcome: "page_total_invalid" };
+		if (total !== null && paging.total !== total) return { outcome: "total_changed" };
+		total = paging.total;
+		for (const element of result.elements) {
+			if (!isRecord(element) || typeof element.entityUrn !== "string" || !owned(element.entityUrn)) return { outcome: "skill_not_owned" };
+			// A walked skill must carry its own name: a projection without one
+			// would withhold rows the first page already reads.
+			if (typeof element.name !== "string" || element.name.trim() === "") return { outcome: "skill_name_missing" };
+			if (seen.has(element.entityUrn)) return { outcome: "skill_duplicate" };
+			seen.set(element.entityUrn, element);
+		}
+		start += result.elements.length;
+		if (seen.size >= total || result.elements.length === 0) break;
+		await politeDelay(PAGE_DELAY_MS);
+	}
+	if (total === null || seen.size !== total) return { outcome: "union_total_mismatch" };
+	// The decoration's own entries win for the skills it already carried.
+	for (const element of firstPage) {
+		if (!isRecord(element) || typeof element.entityUrn !== "string" || !seen.has(element.entityUrn)) {
+			return { outcome: "first_page_not_in_walk" };
+		}
+		seen.set(element.entityUrn, element);
+	}
+	return { elements: [...seen.values()], outcome: "proven" };
 }
 
 function isRejectedSession(error: string): boolean {
@@ -874,17 +940,36 @@ export async function collectLinkedIn(
 	for (const section of wantedSections) {
 		// Only a full decoration carries the profile sections; an empty list
 		// from the basic fallback is not evidence of an empty section.
-		const items =
+		let items =
 			dashProfileResult.source === "decoration"
 				? collectionAt(dashProfile, section.key)
 				: unavailable("source_unavailable");
+		// The profile decoration carries only the first page of a long or
+		// categorized skills list. Its rows are readable: they are upserted and
+		// the stream reports the unproven enumeration, rather than dropping
+		// every skill (0.3.4x returned none for such accounts).
+		let walked: SkillsWalk | null = null;
+		if (section.stream === "skills" && items.kind === "unavailable" && items.reason === "walk_unverified") {
+			items = pageElementsAt(dashProfile, section.key);
+			// The rest of the list, from LinkedIn's own skills collection. Proven
+			// only when every page is owner-bound and the union matches its total.
+			if (items.kind === "read" && !ownerEvidence) {
+				walked = await walkProfileSkills(page, dashProfile, items.value, capture);
+				if (walked.elements) items = read(walked.elements);
+			}
+		}
 		if (items.kind !== "read") {
-			await emitUnavailableSection(section.stream, sink, dashProfileResult.failure);
+			await emitUnavailableSection(section.stream, sink, dashProfileResult.failure,
+				items.kind === "unavailable" ? items.reason : undefined);
 			continue;
 		}
+		const evidence = walked?.elements ? undefined : sectionEvidence(dashProfile, section.key);
 		await emitRows(sink, section.stream, section.build(items.value), {
-			enumerated: !ownerEvidence && !sectionEvidence(dashProfile, section.key),
-			diagnostics: { evidence_reason: ownerEvidence ?? sectionEvidence(dashProfile, section.key) },
+			enumerated: !ownerEvidence && !evidence,
+			diagnostics: {
+				evidence_reason: ownerEvidence ?? evidence,
+				...(walked ? { skills_walk: walked.outcome } : {}),
+			},
 			gapReason: "profileSectionFieldsUnreadable",
 		});
 	}
@@ -1123,8 +1208,13 @@ async function emitUnavailableSection(
 	stream: string,
 	sink: StreamSink,
 	failure?: VoyagerReadCause,
+	/** Why the section could not be read (a closed set, never response text). */
+	sectionRead?: string,
 ): Promise<void> {
-	const diagnostics = { source_reason: "linkedin_profile_section_unavailable" };
+	const diagnostics = {
+		source_reason: "linkedin_profile_section_unavailable",
+		...(sectionRead ? { section_read: sectionRead } : {}),
+	};
 	if (failure) {
 		const message = `LinkedIn ${stream} read failed: ${failure}`;
 		const recoveryHint = { action: "retry_by_runtime", retryable: true };
