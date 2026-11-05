@@ -171,7 +171,10 @@ async function settleSpotifyPlayer(page: Page): Promise<void> {
 	let atPlayer: unknown = false;
 	try {
 		atPlayer = await page.evaluate(() =>
-			location.href === "https://open.spotify.com/" && document.readyState !== "loading");
+			location.origin === "https://open.spotify.com" &&
+			/^\/(?:intl-[a-z]{2}(?:-[a-z0-9]{2,8})?\/?)?$/i.test(location.pathname) &&
+			location.search === "" && location.hash === "" &&
+			document.readyState !== "loading");
 	} catch (error) {
 		// A probe the committing document swallowed says nothing about where the
 		// page is, so the page is not taken to be settled.

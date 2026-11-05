@@ -391,7 +391,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.66",
+				"version": "0.2.67",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -1977,7 +1977,7 @@
 				},
 				"connector_key": "apple-health",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
-				"version": "0.2.9",
+				"version": "0.2.10",
 				"display_name": "Apple Health",
 				"brand": {
 					"icon": "icon.svg",
@@ -9401,7 +9401,7 @@
 				},
 				"connector_key": "fitbit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Fitbit",
 				"brand": {
 					"icon": "icon.svg",
@@ -18861,7 +18861,7 @@
 				},
 				"connector_key": "netflix-export",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "Netflix Export",
 				"brand": {
 					"icon": "icon.svg",
@@ -24421,7 +24421,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.51",
+				"version": "0.1.53",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -25365,7 +25365,7 @@
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.33",
+				"version": "1.0.34",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
@@ -25572,7 +25572,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.46",
+				"version": "0.1.47",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -27978,7 +27978,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.26",
+				"version": "0.2.27",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
