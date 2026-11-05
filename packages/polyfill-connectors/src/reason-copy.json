@@ -410,6 +410,7 @@
 			"icloud_omitted_rows": "skipped_items",
 			"icloud_rate_limited": "provider_busy",
 			"icloud_readiness_exhausted": "incomplete_retry",
+			"icloud_request_rejected": "unexpected_data",
 			"stream_collection_failed": "incomplete_retry"
 		},
 		"imessage": {

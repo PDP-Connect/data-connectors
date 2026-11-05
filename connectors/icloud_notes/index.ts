@@ -246,7 +246,8 @@ interface QueryFailure {
 		| "icloud_omitted_rows"
 		| "icloud_page_unresponsive"
 		| "icloud_rate_limited"
-		| "icloud_readiness_exhausted";
+		| "icloud_readiness_exhausted"
+		| "icloud_request_rejected";
 	message: string;
 	cause: FailureCause;
 	pageCount: number;
@@ -266,6 +267,7 @@ const QUERY_FAILURE_REASON_CODES: Record<
 > = {
 	icloud_auth_failed: "icloud_auth_failed",
 	icloud_http_error: "icloud_http_error",
+	icloud_request_rejected: "icloud_request_rejected",
 	icloud_invalid_config_response: "icloud_invalid_config_response",
 	icloud_invalid_query_response: "icloud_invalid_query_response",
 	icloud_inventory_changed: "icloud_inventory_changed",
@@ -606,7 +608,7 @@ function statusFailure(
 		return { reason: "icloud_http_error", cause: { kind: "transient" } };
 	}
 	return {
-		reason: status === 200 ? invalidReason : "icloud_http_error",
+		reason: status === 200 ? invalidReason : "icloud_request_rejected",
 		cause: { kind: "unrecognized_response" },
 	};
 }
