@@ -592,10 +592,15 @@ test("scope changes and full_refresh discard the saved forward frontier", async 
 		{ stream: { name: "activity", time_range: { since: "2026-01-01", until: "2026-07-01" } }, expected: "2026-01-01" },
 		{ stream: { name: "activity", time_range: { since: "2026-01-01", until: "2026-08-07" }, resources: [] }, expected: "2026-01-01" },
 		{ stream: historyStream, collectionMode: "full_refresh" as const, expected: "2026-01-01" },
+		{
+			stream: { ...historyStream, resources: ["b"] },
+			savedScope: { ...historyScope, resources: ["a"] },
+			expected: "2026-01-01",
+		},
 	];
 	for (const scenario of cases) {
 		const { ctx, messages } = makeContext({
-			state: { activity: saved },
+			state: { activity: { ...saved, scope: scenario.savedScope ?? historyScope } },
 			streams: [scenario.stream],
 			...(scenario.collectionMode ? { collectionMode: scenario.collectionMode } : {}),
 		});
