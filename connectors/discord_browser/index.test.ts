@@ -46,11 +46,11 @@ const SERVER_A = "797751587635200003";
 const SERVER_B = "970693646745600004";
 const SERVER_C = "1175889484185600005";
 const ALL = ["profile", "servers", "connections", "messages"];
-const DEFAULT_SCOPE = JSON.stringify({
+const DEFAULT_SCOPE = {
 	since: null,
 	until: null,
 	resources: null,
-});
+};
 /** Discord's fixed results per search page. */
 const SEARCH_PAGE = 25;
 
@@ -1598,9 +1598,9 @@ interface ResumeState {
 		string,
 		{
 			newest_id: string | null;
-			scope: string;
+			scope: unknown;
 			backfill: {
-				scope: string;
+				scope: unknown;
 				ranges: Array<{ before_id: string | null; stop_id: string | null }>;
 			} | null;
 		}
@@ -1620,7 +1620,7 @@ test("a budget stop saves scoped backfill and reports partial coverage", async (
 	const cursor = resumeState(h).servers[SERVER_A];
 	assert.ok(cursor);
 	assert.equal(cursor.newest_id, listing[0]?.id);
-	assert.equal(cursor.backfill?.scope, DEFAULT_SCOPE);
+	assert.deepEqual(cursor.backfill?.scope, DEFAULT_SCOPE);
 	assert.deepEqual(cursor.backfill?.ranges, [
 		{ before_id: listing[39]?.id, stop_id: null },
 	]);
@@ -1671,6 +1671,43 @@ test("the second run reads a new head and older backfill without duplicate recor
 	);
 });
 
+test("STATE saves the scope as an object and still resumes from the older string form", async () => {
+	const listing = messagesBy(OWNER, 100);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+	const saved = resumeState(first);
+	const server = saved.servers[SERVER_A];
+	assert.ok(server?.backfill);
+	assert.deepEqual(server.scope, DEFAULT_SCOPE);
+	// STATE holds IDs, instants and keys, with no escaped JSON inside it.
+	assert.match(JSON.stringify(saved), /^[[\]{}",:0-9a-z_]+$/);
+	// Earlier builds of this cursor kept the scope as a JSON string.
+	const legacyScope = JSON.stringify(DEFAULT_SCOPE);
+	const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
+	const second = harness(fake, ["messages"], {
+		messages: {
+			...saved,
+			servers: {
+				...saved.servers,
+				[SERVER_A]: {
+					...server,
+					scope: legacyScope,
+					backfill: { ...server.backfill, scope: legacyScope },
+				},
+			},
+		},
+	});
+	await collectDiscordBrowser(second.ctx, fast([], { maxMessages: 40 }));
+	assert.deepEqual(
+		second.of("messages").map((record) => record.id),
+		listing.slice(40, 80).map((message) => message.id),
+	);
+	assert.deepEqual(resumeState(second).servers[SERVER_A]?.scope, DEFAULT_SCOPE);
+});
+
 test("changed since, until, resources and full refresh ignore saved backfill", async () => {
 	const listing = messagesBy(OWNER, 70, NOW - DAY_MS, DAY_MS);
 	const first = harness(
@@ -1709,7 +1746,7 @@ test("changed since, until, resources and full refresh ignore saved backfill", a
 			resumeState(h).servers[SERVER_A]?.backfill?.ranges[0]?.before_id,
 			listing[39]?.id,
 		);
-		assert.equal(
+		assert.deepEqual(
 			resumeState(h).servers[SERVER_A]?.backfill?.scope,
 			resumeState(h).servers[SERVER_A]?.scope,
 		);
@@ -1801,14 +1838,11 @@ test("equivalent resource orders and duplicates retain saved backfill", async ()
 		await collectDiscordBrowser(h.ctx, fast([], { maxMessages: 30 }));
 		records.push(...h.of("messages"));
 		state = h.cursor("messages");
-		assert.equal(
-			resumeState(h).servers[SERVER_A]?.scope,
-			JSON.stringify({
-				since: null,
-				until: null,
-				resources: [SERVER_A, SERVER_B],
-			}),
-		);
+		assert.deepEqual(resumeState(h).servers[SERVER_A]?.scope, {
+			since: null,
+			until: null,
+			resources: [SERVER_A, SERVER_B],
+		});
 	}
 	assert.equal(records.length, 90);
 	assert.equal(new Set(records.map((record) => record.id)).size, 90);

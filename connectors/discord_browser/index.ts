@@ -201,11 +201,82 @@ interface ServerCursor {
 	backfill?: { scope: string; ranges: SearchRange[] } | null;
 }
 
+/** The requested time range and resources, as STATE saves them. */
+interface MessagesScope {
+	since: string | null;
+	until: string | null;
+	resources: readonly string[] | null;
+}
+
+/** The comparison key of a requested scope: resources sorted, no repeats. */
+function scopeKey({ since, until, resources }: MessagesScope): string {
+	const canonical: MessagesScope = {
+		since,
+		until,
+		resources: resources === null ? null : [...new Set(resources)].sort(),
+	};
+	return JSON.stringify(canonical);
+}
+
+/**
+ * The comparison key of a saved scope, or null when it is unreadable. STATE
+ * saves the scope as a plain object, so the cursor holds IDs, instants and
+ * keys only; older STATE saved the key itself as a JSON string, and both
+ * forms give the same key.
+ */
+function savedScopeKey(value: unknown): string | null {
+	let scope = value;
+	if (typeof scope === "string") {
+		try {
+			scope = JSON.parse(scope);
+		} catch {
+			return null;
+		}
+	}
+	if (!scope || typeof scope !== "object" || Array.isArray(scope)) return null;
+	const {
+		since = null,
+		until = null,
+		resources = null,
+	} = scope as Record<string, unknown>;
+	if (
+		(since !== null && typeof since !== "string") ||
+		(until !== null && typeof until !== "string") ||
+		(resources !== null &&
+			!(
+				Array.isArray(resources) &&
+				resources.every((id) => typeof id === "string")
+			))
+	)
+		return null;
+	return scopeKey({ since, until, resources: resources as string[] | null });
+}
+
+/** The STATE form of a server cursor: its scope keys become plain objects. */
+function savedServerCursor(cursor: ServerCursor): Record<string, unknown> {
+	const { scope, backfill, ...rest } = cursor;
+	if (scope === undefined) return rest;
+	const saved = JSON.parse(scope) as MessagesScope;
+	return {
+		...rest,
+		scope: saved,
+		...(backfill === undefined
+			? {}
+			: { backfill: backfill === null ? null : { ...backfill, scope: saved } }),
+	};
+}
+
 /** The `messages` cursor. Ids, instants and offsets only. */
 interface MessagesState {
 	/** Server ids in the order later runs search them. */
 	queue?: string[];
-	servers?: Record<string, ServerCursor>;
+	servers?: Record<
+		string,
+		Omit<ServerCursor, "scope" | "backfill"> & {
+			scope?: unknown;
+			backfill?: { scope?: unknown; ranges: SearchRange[] } | null;
+		}
+	>;
 }
 
 /** Why a run stops making requests. */
@@ -843,7 +914,10 @@ function validInstant(value: unknown): number | null {
 		: null;
 }
 
-function readMessagesState(value: unknown): Required<MessagesState> {
+function readMessagesState(value: unknown): {
+	queue: string[];
+	servers: Record<string, ServerCursor>;
+} {
 	const state = (value ?? {}) as MessagesState;
 	const queue = Array.isArray(state.queue)
 		? state.queue.filter((id): id is string => snowflake(id) !== null)
@@ -866,14 +940,15 @@ function readMessagesState(value: unknown): Required<MessagesState> {
 					cursor.until_ms === null ? null : validInstant(cursor.until_ms),
 			};
 			if ("backfill" in cursor) {
-				if (typeof cursor.scope !== "string") continue;
-				parsed.scope = cursor.scope;
+				const scope = savedScopeKey(cursor.scope);
+				if (scope === null) continue;
+				parsed.scope = scope;
 				if (cursor.backfill === null) parsed.backfill = null;
 				else {
 					const backfill = cursor.backfill;
 					if (
 						!backfill ||
-						backfill.scope !== cursor.scope ||
+						savedScopeKey(backfill.scope) !== scope ||
 						!Array.isArray(backfill.ranges) ||
 						backfill.ranges.length === 0 ||
 						!backfill.ranges.every(
@@ -890,7 +965,7 @@ function readMessagesState(value: unknown): Required<MessagesState> {
 					)
 						continue;
 					parsed.backfill = {
-						scope: cursor.scope,
+						scope,
 						ranges: mergeSearchRanges(backfill.ranges),
 					};
 				}
@@ -1181,12 +1256,10 @@ export async function collectDiscordBrowser(
 
 	const requestedScope = ctx.requested.get(MESSAGES);
 	const timeRange = requestedScope?.time_range;
-	const scope = JSON.stringify({
+	const scope = scopeKey({
 		since: timeRange?.since ?? null,
 		until: timeRange?.until ?? null,
-		resources: requestedScope?.resources
-			? [...new Set(requestedScope.resources)].sort()
-			: null,
+		resources: requestedScope?.resources ?? null,
 	});
 	const sinceMs = timeRange?.since ? Date.parse(timeRange.since) : Number.NaN;
 	const untilParsed = timeRange?.until
@@ -1320,7 +1393,15 @@ export async function collectDiscordBrowser(
 	await ctx.emit({
 		type: "STATE",
 		stream: MESSAGES,
-		cursor: { queue: nextQueue, servers: cursors },
+		cursor: {
+			queue: nextQueue,
+			servers: Object.fromEntries(
+				Object.entries(cursors).map(([id, cursor]) => [
+					id,
+					savedServerCursor(cursor),
+				]),
+			),
+		},
 	});
 }
 

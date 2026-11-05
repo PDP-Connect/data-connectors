@@ -607,7 +607,8 @@ const backfillSchema = z.object({
 	head_ids: z.array(z.string()).optional(),
 });
 const cursorSchema = z.object({
-	backfill_scope: z.string().optional(),
+	// A plain {since, until, resources} object; older STATE kept a JSON string.
+	backfill_scope: z.unknown().optional(),
 	backfill: z
 		.object({
 			originals: backfillSchema.optional(),
@@ -1943,6 +1944,32 @@ function canonicalScope(value: unknown): unknown {
 }
 
 /**
+ * The comparison key of a saved backfill scope, or null when it is unreadable.
+ * STATE saves the scope as a plain object, so the cursor holds IDs, instants
+ * and keys only; older STATE saved the key itself as a JSON string, and both
+ * forms give the same key.
+ */
+function backfillScopeKey(value: unknown): string | null {
+	let scope = value;
+	if (typeof scope === "string") {
+		try {
+			scope = JSON.parse(scope);
+		} catch {
+			return null;
+		}
+	}
+	if (scope === null || typeof scope !== "object" || Array.isArray(scope)) {
+		return null;
+	}
+	const {
+		since = null,
+		until = null,
+		resources = null,
+	} = scope as Record<string, unknown>;
+	return JSON.stringify({ since, until, resources: canonicalScope(resources) });
+}
+
+/**
  * How one stream is read in this run, or null when it is not read: it was not
  * requested, or it was requested with a time range it cannot apply. posts
  * applies a range to `created_at`; likes and bookmarks have no time field to
@@ -1985,8 +2012,9 @@ function planStream(
 			(request as StreamScopeWithResources).resources ?? null,
 		),
 	});
+	const savedScope = backfillScopeKey(cursor.backfill_scope);
 	const scopeChanged =
-		cursor.backfill_scope !== undefined && cursor.backfill_scope !== scope;
+		cursor.backfill_scope !== undefined && savedScope !== scope;
 	const reset = ctx.collectionMode === "full_refresh" || scopeChanged;
 	if (reset) {
 		for (const view of storedByView.keys()) storedByView.set(view, []);
@@ -2002,9 +2030,7 @@ function planStream(
 	const backfill = new Map<ViewName, ViewBackfill>();
 	for (const view of storedByView.keys()) {
 		const saved =
-			!fullWalk && cursor.backfill_scope === scope
-				? cursor.backfill?.[view]
-				: undefined;
+			!fullWalk && savedScope === scope ? cursor.backfill?.[view] : undefined;
 		const position = storedIds([saved?.position])[0] ?? null;
 		const headPosition = storedIds([saved?.head_position])[0] ?? null;
 		backfill.set(view, {
@@ -2086,7 +2112,7 @@ function nextCursor(stream: PostStream, plan: StreamPlan): StreamCursor {
 		head_ids: heads(stream === POSTS_STREAM ? "originals" : stream),
 		...(stream === POSTS_STREAM ? { reply_head_ids: heads("replies") } : {}),
 		requested_since: plan.since,
-		backfill_scope: plan.scope,
+		backfill_scope: JSON.parse(plan.scope),
 		backfill,
 	};
 }

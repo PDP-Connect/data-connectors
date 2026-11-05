@@ -945,11 +945,7 @@ test("a first run reads the profile, posts, bookmarks and likes the app loads", 
 			],
 			reply_head_ids: ["1990000000000000204", "1990000000000000202"],
 			requested_since: null,
-			backfill_scope: JSON.stringify({
-				since: null,
-				until: null,
-				resources: null,
-			}),
+			backfill_scope: { since: null, until: null, resources: null },
 			backfill: {
 				originals: { position: null, complete: true },
 				replies: { position: null, complete: true },
@@ -958,21 +954,13 @@ test("a first run reads the profile, posts, bookmarks and likes the app loads", 
 		bookmarks: {
 			head_ids: BOOKMARK_IDS,
 			requested_since: null,
-			backfill_scope: JSON.stringify({
-				since: null,
-				until: null,
-				resources: null,
-			}),
+			backfill_scope: { since: null, until: null, resources: null },
 			backfill: { bookmarks: { position: null, complete: true } },
 		},
 		likes: {
 			head_ids: LIKE_IDS,
 			requested_since: null,
-			backfill_scope: JSON.stringify({
-				since: null,
-				until: null,
-				resources: null,
-			}),
+			backfill_scope: { since: null, until: null, resources: null },
 			backfill: { likes: { position: null, complete: true } },
 		},
 	});
@@ -2124,11 +2112,7 @@ test("a view cap saves a backfill position and reports retryable partial coverag
 		likes: {
 			head_ids: LIKE_IDS.slice(0, 3),
 			requested_since: null,
-			backfill_scope: JSON.stringify({
-				since: null,
-				until: null,
-				resources: null,
-			}),
+			backfill_scope: { since: null, until: null, resources: null },
 			backfill: { likes: { position: LIKE_IDS[2], complete: false } },
 		},
 	});
@@ -2470,7 +2454,7 @@ function backfillLikesPages(pagesOfIds: readonly (readonly string[])[]): Pages {
 
 type BackfillTestCursor = {
 	head_ids: string[];
-	backfill_scope: string;
+	backfill_scope: unknown;
 	backfill: Record<
 		string,
 		{
@@ -2548,6 +2532,36 @@ test("a second run reads new head and older backfill without duplicate records",
 	}
 });
 
+test("STATE saves the backfill scope as an object and still resumes from the older string form", async () => {
+	const pages = backfillLikesPages([
+		["301", "302"],
+		["303", "304"],
+	]);
+	const first = harness(new FakeWebApp({ pages }), ["likes"]);
+	await collectXBrowser(first.ctx, { ...FAST, viewPostCaps: { likes: 2 } });
+	const saved = first.states()["likes"] as BackfillTestCursor;
+	assert.deepEqual(saved.backfill_scope, {
+		since: null,
+		until: null,
+		resources: null,
+	});
+	// Earlier builds of this cursor kept the scope as a JSON string.
+	const resumed = harness(new FakeWebApp({ pages }), ["likes"], {
+		state: {
+			likes: {
+				...saved,
+				backfill_scope: JSON.stringify(saved.backfill_scope),
+			},
+		},
+	});
+	await collectXBrowser(resumed.ctx, { ...FAST, viewPostCaps: { likes: 2 } });
+	assert.deepEqual(resumed.ids("likes"), ["303", "304"]);
+	assert.deepEqual(
+		(resumed.states()["likes"] as BackfillTestCursor).backfill_scope,
+		saved.backfill_scope,
+	);
+});
+
 test("changed resources and full refresh ignore saved backfill positions", async () => {
 	const pages = backfillLikesPages([
 		["301", "302"],
@@ -2577,7 +2591,7 @@ test("changed resources and full refresh ignore saved backfill positions", async
 		assert.equal(cursor.backfill["likes"]?.position, "302");
 		assert.equal(cursor.backfill["likes"]?.complete, false);
 		if (!fullRefresh) {
-			assert.notEqual(
+			assert.notDeepEqual(
 				cursor.backfill_scope,
 				(first.states()["likes"] as BackfillTestCursor).backfill_scope,
 			);
@@ -2600,7 +2614,7 @@ test("changed since or until restarts backfill from the current head", async () 
 		});
 		await collectXBrowser(h.ctx, { ...FAST, viewPostCaps: { originals: 1 } });
 		assert.deepEqual(h.ids("posts"), first.ids("posts"));
-		assert.notEqual(
+		assert.notDeepEqual(
 			(h.states()["posts"] as BackfillTestCursor).backfill_scope,
 			(first.states()["posts"] as BackfillTestCursor).backfill_scope,
 		);
@@ -2824,7 +2838,7 @@ test("resource permutations and repeats preserve the backfill scope", async () =
 		]);
 		await collectXBrowser(h.ctx, { ...FAST, viewPostCaps: { likes: 2 } });
 		const cursor = h.states()["likes"] as BackfillTestCursor;
-		assert.equal(cursor.backfill_scope, original.backfill_scope);
+		assert.deepEqual(cursor.backfill_scope, original.backfill_scope);
 		assert.deepEqual(h.ids("likes"), ["303", "304"]);
 		assert.equal(cursor.backfill["likes"]?.position, "304");
 	}
@@ -2986,7 +3000,7 @@ test("object resource key order preserves the backfill scope", async () => {
 		],
 	]);
 	await collectXBrowser(resumed.ctx, { ...FAST, viewPostCaps: { likes: 2 } });
-	assert.equal(
+	assert.deepEqual(
 		(resumed.states()["likes"] as BackfillTestCursor).backfill_scope,
 		(first.states()["likes"] as BackfillTestCursor).backfill_scope,
 	);
