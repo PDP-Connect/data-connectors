@@ -524,7 +524,7 @@
 		"spotify_playlists_completion_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
 		"spotify_profile_enrichment_http_status": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
 		"spotify_ranked_list_capped": "Only part of this could be collected because of a size or count limit. The rest is not available.",
-		"spotify_recent_context_boundary_unverified": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"spotify_recent_context_boundary_unverified": "Recently played contexts were read, but Spotify does not show where that history ends, so this part is not marked complete. No action is needed.",
 		"spotify_recently_played_malformed": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 		"spotify_recently_played_owner_unavailable": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 		"spotify_recently_played_pagination_no_progress": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",

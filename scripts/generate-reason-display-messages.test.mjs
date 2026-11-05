@@ -208,6 +208,29 @@ test("--check fails when a manifest drifts from the copy file", (t) => {
 	assert.match(result.stderr, /connectors\/example\/manifest\.json/);
 });
 
+test("--check fails on a duplicate reason_display_messages member", (t) => {
+	const root = fixture(t, {
+		copy: { shared: SHARED, connectors: { example: { a_code: "busy" } } },
+		manifests: { example: base },
+	});
+	assert.equal(run(root).status, 0);
+	const stamped = readManifest(root, "example");
+	// A stale second member wins in JSON.parse, so --check must not pass.
+	const duplicated = stamped.replace(
+		/\n\}\n$/,
+		',\n\t"reason_display_messages": { "a_code": "stale" }\n}\n',
+	);
+	assert.notEqual(duplicated, stamped);
+	writeFileSync(join(root, "connectors/example/manifest.json"), duplicated);
+	const result = run(root, "--check");
+	assert.equal(result.status, 1);
+	assert.match(
+		result.stderr,
+		/duplicate top-level member "reason_display_messages"/,
+	);
+	assert.match(result.stderr, /connectors\/example\/manifest\.json/);
+});
+
 const invalid = [
 	[
 		"an unknown shared key",

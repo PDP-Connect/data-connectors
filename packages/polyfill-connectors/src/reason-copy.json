@@ -36,7 +36,9 @@
       "list_page_readiness_timeout": "incomplete_retry",
       "list_page_shape_check_failed": "skipped_items",
       "no_orders_text": "nothing_to_import",
-      "older_pages_deferred_page_budget": "continues_later",
+      "older_pages_deferred_page_budget": {
+        "message": "Amazon has more order pages for one year than a single run reads, so older orders from that year are missing. Later runs read the same pages again, so they may stay missing."
+      },
       "pagination_exhausted": "nothing_to_import",
       "profile_page_read_failed": "incomplete_retry",
       "renderer_diagnostics_failed": "incomplete_retry",
@@ -265,10 +267,10 @@
       "gmail_all_mail_exists_not_finite": "unexpected_data",
       "gmail_all_mail_exists_not_integer": "unexpected_data",
       "gmail_all_mail_exists_not_number": "unexpected_data",
-      "gmail_progress_invalid_instant": "unexpected_data",
+      "gmail_progress_invalid_instant": "fix_settings",
       "gmail_progress_invalid_mailbox": "unexpected_data",
       "gmail_progress_invalid_page_end": "unexpected_data",
-      "gmail_progress_invalid_time_range": "unexpected_data",
+      "gmail_progress_invalid_time_range": "fix_settings",
       "gmail_progress_invalid_uid": "unexpected_data",
       "gmail_progress_invalid_window": "unexpected_data",
       "gmail_progress_page_already_consumed": "unexpected_data",
@@ -349,7 +351,9 @@
       "list_page_shape_check_failed": "skipped_items",
       "nutrition_navigation_failed": "incomplete_retry",
       "nutrition_source_coverage_incomplete": "incomplete_retry",
-      "older_pages_deferred_page_budget": "continues_later",
+      "older_pages_deferred_page_budget": {
+        "message": "Only the most recent pages of your order history were read, so older orders are missing. Orders already read are kept."
+      },
       "pagination_exhausted": "nothing_to_import",
       "pagination_metadata_absent": "incomplete_retry",
       "pagination_metadata_contradictory": "incomplete_retry",
@@ -661,7 +665,9 @@
       "spotify_playlists_completion_unproven": "incomplete_retry",
       "spotify_profile_enrichment_http_status": "incomplete_retry",
       "spotify_ranked_list_capped": "capped_by_limit",
-      "spotify_recent_context_boundary_unverified": "incomplete_retry",
+      "spotify_recent_context_boundary_unverified": {
+        "message": "Recently played contexts were read, but Spotify does not show where that history ends, so this part is not marked complete. No action is needed."
+      },
       "spotify_recently_played_malformed": "unexpected_data",
       "spotify_recently_played_owner_unavailable": "unexpected_data",
       "spotify_recently_played_pagination_no_progress": "incomplete_retry",

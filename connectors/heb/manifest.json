@@ -577,7 +577,7 @@
 		"list_page_shape_check_failed": "Some items could not be read and were skipped.",
 		"nutrition_navigation_failed": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
 		"nutrition_source_coverage_incomplete": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"older_pages_deferred_page_budget": "Only the most recent pages of your order history were read, so older orders are missing. Orders already read are kept.",
 		"pagination_exhausted": "There was nothing to import for this request. No action is needed.",
 		"pagination_metadata_absent": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
 		"pagination_metadata_contradictory": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",

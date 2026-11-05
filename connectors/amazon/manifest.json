@@ -360,7 +360,7 @@
 		"list_page_readiness_timeout": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
 		"list_page_shape_check_failed": "Some items could not be read and were skipped.",
 		"no_orders_text": "There was nothing to import for this request. No action is needed.",
-		"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"older_pages_deferred_page_budget": "Amazon has more order pages for one year than a single run reads, so older orders from that year are missing. Later runs read the same pages again, so they may stay missing.",
 		"pagination_exhausted": "There was nothing to import for this request. No action is needed.",
 		"profile_page_read_failed": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
 		"renderer_diagnostics_failed": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",

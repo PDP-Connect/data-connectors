@@ -240,6 +240,10 @@ function topLevelMembers(text) {
 		i = keyEnd;
 		while (/[\s:]/.test(text[i])) i += 1;
 		i = endOfValue(text, i);
+		// JSON.parse keeps the last duplicate, but the splice would edit the first.
+		if (members.some((m) => m.key === key)) {
+			throw new Error(`duplicate top-level member "${key}"`);
+		}
 		members.push({ key, start, end: i });
 	}
 }
@@ -323,7 +327,14 @@ async function main() {
 			await formatMember(messages, manifest.file),
 			indentUnit(manifest.text),
 		);
-		const next = spliceMember(manifest.text, member);
+		let next;
+		try {
+			next = spliceMember(manifest.text, member);
+		} catch (error) {
+			throw new Error(
+				`${path.relative(repoRoot, manifest.file)}: ${error.message}`,
+			);
+		}
 		if (next === manifest.text) continue;
 		stale.push(path.relative(repoRoot, manifest.file));
 		if (!checkOnly) await writeFile(manifest.file, next);
