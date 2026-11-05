@@ -175,6 +175,7 @@ function safeAll<T>(db: DatabaseSync, sql: string): T[] | null {
 
 const SOURCE_PARTITION_MISSING_REASON = "source_partition_missing";
 const OPTIONAL_STREAM_FAILED_REASON = "optional_stream_failed";
+const SLACK_AUTH_FAILED_REASON = "slack_auth_failed";
 const MAX_MISSING_CHANNEL_IDS_IN_DIAGNOSTIC = 100;
 const SLACK_TS_PATTERN = /^(\d+)\.(\d{6})$/;
 const ISO_FRACTION_PATTERN = /\.(\d{1,6})/;
@@ -3749,7 +3750,11 @@ export async function runOptionalStream(
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
-			reason: OPTIONAL_STREAM_FAILED_REASON,
+			// A durable auth rejection is a sign-in problem, not a stream that
+			// "failed and may recover": it names the sign-in remedy.
+			reason: isAuthFailure
+				? SLACK_AUTH_FAILED_REASON
+				: OPTIONAL_STREAM_FAILED_REASON,
 			message: `Slack: ${stream} failed and was skipped (optional stream): ${message}`,
 			recovery_hint: isAuthFailure
 				? { action: "refresh_credentials", retryable: false }
