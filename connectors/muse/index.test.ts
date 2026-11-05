@@ -3246,3 +3246,33 @@ test("standalone: one retryable failure keeps the run retryable beside a non-ret
 		return true;
 	});
 });
+
+test("standalone: the reason code follows the cause, not one catch-all", async () => {
+	const cases: Array<[string, Record<string, () => unknown>, string]> = [
+		[
+			"page cap needs a connector update",
+			{
+				"goals.list": () => {
+					const g = fixture("goals-tracking");
+					g.pagination = { has_next_page: true };
+					return g;
+				},
+			},
+			"muse_stream_needs_update",
+		],
+		[
+			"unreadable reply is retryable",
+			{ "activity.list": () => ({ unexpected: true }) },
+			"muse_stream_incomplete",
+		],
+	];
+	for (const [name, overrides, code] of cases) {
+		const { gateway } = fakeGateway(overrides);
+		const h = harness({ streams: ["activities", "goals"] });
+		delete h.ctx.reportStreamFailure;
+		await assert.rejects(collectMuseWith(h.ctx, gateway), (error: Error) => {
+			assert.equal((error as { code?: unknown }).code, code, name);
+			return true;
+		});
+	}
+});

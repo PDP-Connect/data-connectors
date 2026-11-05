@@ -9,7 +9,7 @@
 	},
 	"connector_key": "apple-photos",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-	"version": "0.1.26",
+	"version": "0.1.27",
 	"display_name": "Apple Photos",
 	"brand": {
 		"icon": "icon.svg",
@@ -146,6 +146,6 @@
 			}
 		],
 	"reason_display_messages": {
-		"export_not_found": "We couldn't find an export to import"
+		"export_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 	}
 }

@@ -868,10 +868,24 @@ async function failStreams(
 		}
 		connectorDiagnostic("instinct", "stream_failed", { retryable, stream });
 		if (!args.reportStreamFailure) {
-			throw createConnectorFailure(INSTINCT_STREAM_INCOMPLETE, message, {
+			// An answer this connector cannot read needs a connector update;
+			// anything else keeps the catch-all.
+			const options = {
 				retryable,
 				...(recoveryHint === undefined ? {} : { recoveryHint }),
-			});
+			};
+			if (hint === "retry_on_connector_upgrade") {
+				throw createConnectorFailure(
+					INSTINCT_SOURCE_UNREADABLE,
+					message,
+					options,
+				);
+			}
+			throw createConnectorFailure(
+				INSTINCT_STREAM_INCOMPLETE,
+				message,
+				options,
+			);
 		}
 		await args.reportStreamFailure(stream, message, {
 			retryable,

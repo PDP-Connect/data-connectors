@@ -2770,7 +2770,7 @@ for (const { name, response, reason, hint } of [
 	{
 		name: "HTTP 404",
 		response: { status: 404, json: null },
-		reason: "icloud_http_error",
+		reason: "icloud_request_rejected",
 		hint: { action: "retry_on_connector_upgrade", retryable: false },
 	},
 	{

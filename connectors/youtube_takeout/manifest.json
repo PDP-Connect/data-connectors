@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube-takeout",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube-takeout",
-	"version": "0.1.3",
+	"version": "0.1.4",
 	"display_name": "YouTube Takeout",
 	"brand": {
 		"icon": "icon.svg",
@@ -340,8 +340,8 @@
 		}
 	],
 	"reason_display_messages": {
-		"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally.",
-		"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents.",
-		"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Google's Takeout export contents can vary; check the expected path and report a mismatch if you expected data here."
+		"file_not_found_in_export": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"records_unreadable": "Some items could not be read and were skipped.",
+		"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents."
 	}
 }

@@ -3019,10 +3019,17 @@ test("x_browser: STATE, the stop conditions and the narrow layout on the PageShi
 			"x.likes",
 			"x.posts",
 		]);
+		// The scope and the completed backfill let a later run stop at the
+		// saved head instead of walking the whole list again.
 		assert.deepEqual(r.states["x.bookmarks"], {
 			head_ids: ["1990000000000000401", "1950000000000000402"],
 			requested_since: null,
+			backfill_scope: { since: null, until: null, resources: null },
+			backfill: { bookmarks: { position: null, complete: true } },
 		});
+		// STATE holds ids and keys only.
+		for (const cursor of Object.values(r.states))
+			assert.match(JSON.stringify(cursor), /^[\[\]{}",:0-9a-z_]+$/);
 		// Scrolling made the app ask for the later pages of likes.
 		assert.ok(requests.includes("Likes@synthetic-likes-bottom-1"));
 		assert.ok(requests.includes("Likes@synthetic-likes-bottom-2"));
@@ -3034,6 +3041,7 @@ test("x_browser: STATE, the stop conditions and the narrow layout on the PageShi
 	});
 
 	await t.test("a later run stops at the first collected post and does not scroll", async () => {
+		assert.ok(states, "the first run saved no STATE to resume from");
 		const { fixtures, requests } = observed();
 		const r = await runHarness({
 			bundle: built.outfile,
@@ -3057,6 +3065,7 @@ test("x_browser: STATE, the stop conditions and the narrow layout on the PageShi
 	});
 
 	await t.test("a later run on the thin host sends each unchanged list as an empty scope", async () => {
+		assert.ok(states, "the first run saved no STATE to resume from");
 		const { fixtures } = observed();
 		const r = await runHarness({
 			bundle: built.outfile,

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "ynab",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-	"version": "0.3.26",
+	"version": "0.3.27",
 	"display_name": "YNAB",
 	"brand": {
 		"icon": "icon.svg",
@@ -1390,5 +1390,8 @@
 				}
 			]
 		}
-	]
+	],
+	"reason_display_messages": {
+		"ynab_auth_failed": "YNAB needs you to sign in again or update your access key. Then run again."
+	}
 }

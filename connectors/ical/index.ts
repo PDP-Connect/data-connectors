@@ -25,6 +25,7 @@ import {
 import {
 	advanceCursor,
 	buildEventRecord,
+	classifyIcsFetchFailure,
 	ICS_EXT_RE,
 	isBeforeCursor,
 	parseIcs,
@@ -34,6 +35,15 @@ import { validateRecord } from "./schemas.ts";
 import type { IcalState, IcsSource } from "./types.ts";
 
 async function fetchIcs(url: string): Promise<string> {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		throw new Error(`ics_url_invalid: ${url}`);
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+		throw new Error(`ics_url_invalid: ${url}`);
+	}
 	const res = await fetch(url);
 	if (!res.ok) {
 		throw new Error(`ics_fetch_${res.status}: ${url}`);
@@ -82,10 +92,18 @@ async function loadSubscriptionSources(
 			sources.push({ name: new URL(url).hostname, text });
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
+			const cause = classifyIcsFetchFailure(msg);
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "events",
-				reason: "ics_fetch_failed",
+				reason:
+					cause === "auth"
+						? "auth_failure"
+						: cause === "address"
+							? "ics_subscription_address_invalid"
+							: cause === "rate_limited"
+								? "rate_limited"
+								: "ics_fetch_failed",
 				message: msg,
 			});
 		}

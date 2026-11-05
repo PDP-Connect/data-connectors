@@ -9,7 +9,7 @@
 	},
 	"connector_key": "imessage",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "iMessage (macOS)",
 	"brand": {
 		"icon": "icon.svg",
@@ -225,8 +225,8 @@
 		}
 	],
 	"reason_display_messages": {
-		"attachment_tables_missing": "Your Messages database is missing attachment data we need",
-		"chat_handle_join_table_missing": "Your Messages database is missing chat-participant data we need",
-		"message_date_unusable": "We skipped a message with a date we couldn't read"
+		"attachment_tables_missing": "This part stopped because of an internal problem reading iMessage. It is not something you can fix.",
+		"chat_handle_join_table_missing": "This part stopped because of an internal problem reading iMessage. It is not something you can fix.",
+		"message_date_unusable": "Some items could not be read and were skipped."
 	}
 }

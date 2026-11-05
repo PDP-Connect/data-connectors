@@ -9,7 +9,7 @@
 	},
 	"connector_key": "tiktok",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-	"version": "0.3.14",
+	"version": "0.3.15",
 	"display_name": "TikTok (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -699,19 +699,22 @@
 		}
 	],
 	"reason_display_messages": {
-		"tiktok_auth_failed": "TikTok needs you to sign in again before this can continue.",
-		"tiktok_bot_check": "TikTok showed a check or refused a request, so collection stopped without retrying. Open TikTok yourself and make sure your account works normally before running this again.",
-		"tiktok_request_unsigned": "TikTok's page did not sign a request the way it signs its own, so nothing more could be read safely. TikTok may have changed its site; please report this if it keeps happening.",
-		"tiktok_rate_limited": "TikTok asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait a while before running this again.",
-		"tiktok_server_error": "TikTok's servers had a problem partway through. What was collected is saved; try again later.",
-		"tiktok_interrupted": "The TikTok page stopped answering partway through. What was collected is saved; try again.",
-		"tiktok_run_limit_reached": "This run reached its safety limit on requests. What was collected is saved; the next run continues.",
-		"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
-		"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
-		"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
-		"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
-		"stream_collection_failed": "TikTok did not let this part be read in full, so it was not saved as complete. What was read is saved.",
-		"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
+		"browser_handoff_readiness_probe_failed": "TikTok stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"browser_handoff_readiness_timed_out": "TikTok needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "TikTok needs you to sign in again or update your access key. Then run again.",
+		"stream_collection_failed": "TikTok stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"tiktok_api_error": "TikTok stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"tiktok_app_value_not_seen": "This part stopped because of an internal problem reading TikTok. It is not something you can fix.",
+		"tiktok_auth_failed": "TikTok needs you to sign in again or update your access key. Then run again.",
+		"tiktok_bot_check": "TikTok needs you to sign in again or update your access key. Then run again.",
+		"tiktok_interrupted": "TikTok stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"tiktok_list_incomplete": "This part stopped because of an internal problem reading TikTok. It is not something you can fix.",
+		"tiktok_parent_stream_required": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"tiktok_rate_limited": "TikTok is limiting requests or having trouble right now. Wait a while, then run again.",
+		"tiktok_request_unsigned": "This part stopped because of an internal problem reading TikTok. It is not something you can fix.",
+		"tiktok_run_limit_reached": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
+		"tiktok_server_error": "TikTok is limiting requests or having trouble right now. Wait a while, then run again.",
+		"tiktok_source_unreadable": "This part stopped because of an internal problem reading TikTok. It is not something you can fix."
 	},
 	"mobile": {
 		"pageshim": {

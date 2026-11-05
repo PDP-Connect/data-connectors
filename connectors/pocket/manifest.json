@@ -9,7 +9,7 @@
 	},
 	"connector_key": "pocket",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "Pocket",
 	"brand": {
 		"icon": "icon.svg",
@@ -120,5 +120,8 @@
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"
 		}
-	]
+	],
+	"reason_display_messages": {
+		"pocket_auth_failed": "Pocket needs you to sign in again or update your access key. Then run again."
+	}
 }
