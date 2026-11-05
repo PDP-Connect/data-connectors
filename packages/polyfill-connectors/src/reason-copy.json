@@ -389,7 +389,10 @@
 		},
 		"ical": {
 			"ics_fetch_failed": {
-				"message": "A calendar subscription could not be read. Check its address and access, then run again."
+				"message": "A calendar subscription could not be reached or did not answer. Run again later."
+			},
+			"ics_subscription_address_invalid": {
+				"message": "A calendar subscription address is not valid or the calendar is no longer there. Check the address in this connection's settings, then run again."
 			},
 			"no_calendar_sources": "fix_settings"
 		},

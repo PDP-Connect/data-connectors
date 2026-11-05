@@ -24,6 +24,30 @@ export const ICAL_ESC_NEWLINE_RE = /\\n/g;
 export const ICAL_ESC_COMMA_RE = /\\,/g;
 export const ICS_EXT_RE = /\.ics$/i;
 export const RETRYABLE_FETCH_RE = /ECONN|fetch failed/i;
+const ICS_FETCH_STATUS_RE = /^ics_fetch_(\d{3}):/;
+
+/**
+ * Pick the reason code for a failed subscription fetch, one code per owner
+ * remedy: rejected access (runtime `auth_failure`), an address the server
+ * refuses or cannot use (`ics_subscription_address_invalid`), a throttled
+ * server (runtime `rate_limited`), or a transient fault (`ics_fetch_failed`).
+ */
+export function classifyIcsFetchFailure(message: string): string {
+	if (message.startsWith("ics_url_invalid:")) {
+		return "ics_subscription_address_invalid";
+	}
+	const status = Number(ICS_FETCH_STATUS_RE.exec(message)?.[1]);
+	if (status === 401 || status === 403) {
+		return "auth_failure";
+	}
+	if (status === 429) {
+		return "rate_limited";
+	}
+	if (status >= 400 && status < 500 && status !== 408) {
+		return "ics_subscription_address_invalid";
+	}
+	return "ics_fetch_failed";
+}
 export const ICAL_LINE_SPLIT_RE = /\r?\n/;
 
 // ─── Low-level helpers ─────────────────────────────────────────────────
