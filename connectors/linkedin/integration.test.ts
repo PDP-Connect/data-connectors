@@ -2592,6 +2592,7 @@ async function collectProof(options: {
 	profile?: Record<string, any>;
 	before?: unknown; after?: unknown; confirmation?: unknown;
 	connections?: unknown; resolution?: unknown; me?: unknown;
+	skillsPage?: (start: number) => unknown;
 } = {}) {
 	const recording = makeRecordingEmit(validateRecord);
 	const paths: string[] = [];
@@ -2616,6 +2617,9 @@ async function collectProof(options: {
 			const result = start === 0 ? options.connections ?? { elements: CONNECTIONS_PAGE_1.elements } : { elements: [] };
 			if (Array.isArray((result as { elements?: unknown[] }).elements) && (result as { elements: unknown[] }).elements.length === 0) walkEnded = true;
 			return result;
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profileSkills?") && options.skillsPage) {
+			return options.skillsPage(Number(new URL(path, "https://www.linkedin.com").searchParams.get("start")));
 		}
 		return httpFailure(404);
 	});
@@ -2851,3 +2855,48 @@ for (const scenario of [
 			skip.reason === "linkedin_enumeration_unproven"), !scenario.complete);
 	});
 }
+
+// Seen live (2026-11-05): the decoration embedded 20 of 32 skills.
+function skillsFirstPageProfile() {
+	const profile = proofProfile();
+	profile.profileSkills = {
+		elements: [{ entityUrn: "urn:li:fsd_skill:(12,1)", name: "One" }, { entityUrn: "urn:li:fsd_skill:(12,2)", name: "Two" }],
+		paging: { start: 0, count: 2, total: 3 },
+	};
+	return profile;
+}
+const ALL_SKILLS = [
+	{ entityUrn: "urn:li:fsd_skill:(12,1)", name: "One" },
+	{ entityUrn: "urn:li:fsd_skill:(12,2)", name: "Two" },
+	{ entityUrn: "urn:li:fsd_skill:(12,3)", name: "Three" },
+];
+const skillsWalk = (skills: readonly unknown[], total = skills.length, size = 20) => (start: number) =>
+	({ elements: skills.slice(start, start + size), paging: { start, count: size, total } });
+const skillIds = (recording: ReturnType<typeof makeRecordingEmit>) =>
+	recording.emitted.filter((row) => row.stream === "skills").map((row) => row.data.id);
+
+test("skills walk: a first page is completed from the owner's skills collection", async () => {
+	const { recording, paths } = await collectProof({ profile: skillsFirstPageProfile(), skillsPage: skillsWalk(ALL_SKILLS, 3, 2) });
+	assert.deepEqual(skillIds(recording), ["urn:li:fsd_skill:(12,1)", "urn:li:fsd_skill:(12,2)", "urn:li:fsd_skill:(12,3)"]);
+	assert.equal(claimsFullCoverage(recording, "skills"), true);
+	assert.equal(skipResults(recording).some((skip) => skip.stream === "skills"), false);
+	assert.equal(paths.filter((path) => path.includes("/dash/profileSkills?")).length, 2);
+});
+
+test("skills walk: anything unproven keeps the first page and the gap", async (t) => {
+	const cases: Record<string, (start: number) => unknown> = {
+		"endpoint missing": () => httpFailure(404),
+		"another owner's skill": skillsWalk([...ALL_SKILLS.slice(0, 2), { entityUrn: "urn:li:fsd_skill:(99,3)", name: "X" }]),
+		"short of its total": skillsWalk(ALL_SKILLS.slice(0, 2), 3),
+		"no name": skillsWalk([...ALL_SKILLS.slice(0, 2), { entityUrn: "urn:li:fsd_skill:(12,3)" }]),
+		"total changes": (start) => ({ ...skillsWalk(ALL_SKILLS, 3, 2)(start), paging: { start, count: 2, total: 3 + start } }),
+	};
+	for (const [name, skillsPage] of Object.entries(cases)) {
+		await t.test(name, async () => {
+			const { recording } = await collectProof({ profile: skillsFirstPageProfile(), skillsPage });
+			assert.deepEqual(skillIds(recording), ["urn:li:fsd_skill:(12,1)", "urn:li:fsd_skill:(12,2)"]);
+			assert.equal(claimsFullCoverage(recording, "skills"), false);
+			assert.ok(skipResults(recording).some((skip) => skip.stream === "skills" && skip.reason === "linkedin_enumeration_unproven"));
+		});
+	}
+});
