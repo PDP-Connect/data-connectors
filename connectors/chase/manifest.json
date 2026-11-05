@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chase",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-	"version": "0.2.22",
+	"version": "0.2.23",
 	"display_name": "Chase",
 	"brand": {
 		"icon": "icon.svg",
@@ -18,10 +18,17 @@
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
-				"required": true
+				"required": true,
+				"features": ["same_origin_page_fetch"]
 			},
 			"browser": {
-				"required": true
+				"required": true,
+				"features": [
+					"page_navigation",
+					"page_script_evaluation",
+					"page_content_read",
+					"page_condition_wait"
+				]
 			}
 		},
 		"environment_variables": ["CHASE_2FA_METHOD"]
@@ -587,6 +594,20 @@
 		"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 		"row_exception": "Something went wrong reading one of the rows",
 		"selectors_pending": "Support for this part of the connector isn't complete yet",
+		"statement_pdfs_partial_on_mobile": "The Mobile app saves the statement list without the PDF files",
 		"statements_scrape_failed": "We couldn't read your statements page"
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "chase",
+			"login_url": "https://secure.chase.com/web/auth/dashboard#/dashboard/overview",
+			"login_message": "Sign in to Chase, then return here.",
+			"collect_export": "collectChasePageShim",
+			"probe_export": "probeChasePageShimSession",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
 	}
 }

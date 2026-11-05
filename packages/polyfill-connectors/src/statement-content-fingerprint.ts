@@ -25,6 +25,17 @@
 
 import { createHash } from "node:crypto";
 
+/**
+ * Hex sha256 of a UTF-8 string or of bytes. The chase and usaa parsers hash
+ * through this function instead of importing `node:crypto` themselves: this
+ * module is an audited hashing consumer that the Mobile (PageShim) build gives
+ * a browser `createHash` (scripts/pageshim/build.mjs, `HASH_IMPORTERS`), and
+ * only those two connectors import it.
+ */
+export function sha256Hex(data: string | Uint8Array): string {
+	return createHash("sha256").update(data).digest("hex");
+}
+
 /** The two positive content-fingerprint fields a statement record carries. */
 export const STATEMENT_CONTENT_FIELDS = [
 	"pdf_text_sha256",

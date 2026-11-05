@@ -44,6 +44,7 @@ const NODE_ONLY = new Set([
 	"os",
 	"patchright",
 	"readline",
+	"stream/promises",
 ]);
 const manifestOf = (name) =>
 	JSON.parse(

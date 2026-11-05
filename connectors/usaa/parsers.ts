@@ -5,8 +5,8 @@
 // (except sha256 + pathToFileURL which are purely computational) so they
 // can be unit-tested in isolation. See parsers.test.ts for coverage.
 
-import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { sha256Hex as sha256HexOf } from "../../packages/polyfill-connectors/src/statement-content-fingerprint.ts";
 import { isStatementSummaryDescription } from "./statement-reconciliation.ts";
 import type {
 	AccountRecord,
@@ -112,11 +112,11 @@ export const INCREMENTAL_OVERLAP_MS = 5 * MS_PER_DAY;
 // ─── Hash + URL helpers ──────────────────────────────────────────────────
 
 export function hashId(s: string): string {
-	return createHash("sha256").update(s).digest("hex").slice(0, HASH_LENGTH);
+	return sha256HexOf(s).slice(0, HASH_LENGTH);
 }
 
 export function sha256Hex(buf: Buffer | Uint8Array): string {
-	return createHash("sha256").update(buf).digest("hex");
+	return sha256HexOf(buf);
 }
 
 export function fileUrlForPath(p: string): string {
@@ -131,7 +131,7 @@ export function safeAccountSlug(
 		return rawAccountId;
 	}
 	if (rawAccountId) {
-		return createHash("sha256").update(rawAccountId).digest("hex").slice(0, 16);
+		return sha256HexOf(rawAccountId).slice(0, 16);
 	}
 	if (fallback && SLUG_SAFE_RE.test(fallback)) {
 		return fallback;
