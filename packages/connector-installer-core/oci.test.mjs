@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -1584,6 +1585,275 @@ test("an OCI config entrypoint preserves the exact nested member path", async ()
       null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)
     );
     assert.equal(artifact.entrypointBuffer.toString("utf8"), "export const nested = true;\n");
+  });
+});
+
+const MULTI_FILE_CODE = {
+  "collection-profile.mjs": "import { util } from \"./lib/util.mjs\";\nexport const collect = () => util;\n",
+  "lib/util.mjs": "import { LIMIT } from \"./deep/constants.mjs\";\nexport const util = LIMIT;\n",
+  "lib/deep/constants.mjs": "export const LIMIT = 3;\n",
+  "a-first.mjs": "export const first = true;\n",
+};
+
+test("an OCI artifact returns every verified code-layer member, sorted, as isolated copies", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer, codeFiles: MULTI_FILE_CODE });
+    const artifact = await fetchResolvedArtifact(
+      null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)
+    );
+
+    assert.equal(artifact.codeEntrypointPath, "code/collection-profile.mjs");
+    assert.deepEqual(
+      artifact.codeFiles.map((file) => file.path),
+      [
+        "code/a-first.mjs",
+        "code/collection-profile.mjs",
+        "code/lib/deep/constants.mjs",
+        "code/lib/util.mjs",
+      ]
+    );
+    for (const file of artifact.codeFiles) {
+      const source = MULTI_FILE_CODE[file.path.slice("code/".length)];
+      assert.equal(file.buffer.toString("utf8"), source);
+      assert.deepEqual(Object.keys(file).sort(), ["buffer", "path"]);
+    }
+    // The returned entrypoint bytes are the ones the signed checksum covers.
+    const entrypointFile = artifact.codeFiles.find((file) => file.path === artifact.codeEntrypointPath);
+    assert.equal(sha256(entrypointFile.buffer), artifact.checksums.entrypoint);
+    assert.equal(sha256(artifact.entrypointBuffer), artifact.checksums.entrypoint);
+
+    // Mutating a returned member must not reach the verified entrypoint bytes
+    // or another caller's view of the same member.
+    entrypointFile.buffer.fill(0);
+    assert.equal(sha256(artifact.entrypointBuffer), artifact.checksums.entrypoint);
+    const again = await fetchResolvedArtifact(
+      null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)
+    );
+    assert.equal(
+      again.codeFiles.find((file) => file.path === again.codeEntrypointPath).buffer.toString("utf8"),
+      MULTI_FILE_CODE["collection-profile.mjs"]
+    );
+  });
+});
+
+test("installing a multi-module OCI profile writes every code member beside the entrypoint", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer, codeFiles: MULTI_FILE_CODE });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-multifile-"));
+    try {
+      const lock = { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] };
+      const options = { lock, source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer) };
+      const result = await installFromLock(options);
+      const root = join(installRoot, "collection-profiles", "ynab-pdpp");
+
+      // The entrypoint stays at the lock's entrypointPath; the modules it
+      // imports keep their position relative to it, so the imports resolve.
+      for (const [member, content] of Object.entries(MULTI_FILE_CODE)) {
+        assert.equal(readFileSync(join(root, "dist", member), "utf8"), content, member);
+      }
+      assert.ok(result.expectedPaths.includes("collection-profiles/ynab-pdpp/dist/lib/deep/constants.mjs"));
+      const clean = await verifyInstalled(options);
+      assert.equal(clean.ok, true);
+      assert.equal(clean.expectedCount, result.filesWritten);
+
+      // A helper is verified like any other expected file.
+      const helperRelative = "collection-profiles/ynab-pdpp/dist/lib/util.mjs";
+      const helperPath = join(installRoot, helperRelative);
+      writeFileSync(helperPath, "export const util = 999;\n");
+      const tampered = await verifyInstalled(options);
+      assert.equal(tampered.ok, false);
+      assert.deepEqual(tampered.mismatched, [helperRelative]);
+      rmSync(helperPath);
+      const deleted = await verifyInstalled(options);
+      assert.equal(deleted.ok, false);
+      assert.deepEqual(deleted.missing, [helperRelative]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("an installed multi-module profile loads as a module graph, including a helper that imports the entrypoint", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      codeFiles: {
+        "collection-profile.mjs": "import { kind } from \"./lib/helper.mjs\";\nexport const collect = () => kind();\n",
+        "lib/helper.mjs": "import * as entry from \"../collection-profile.mjs\";\nexport const kind = () => typeof entry.collect;\n",
+      },
+    });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-import-graph-"));
+    try {
+      await installFromLock({
+        lock: { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] },
+        source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer),
+      });
+      const installed = join(installRoot, "collection-profiles", "ynab-pdpp", "dist", "collection-profile.mjs");
+      const loaded = await import(pathToFileURL(installed).href);
+      assert.equal(loaded.collect(), "function");
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a multi-member code layer whose entrypoint the lock renames is refused before any write", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    // `helper.mjs` imports `./main.mjs`. Installed under the lock's name
+    // (`collection-profile.mjs`) there would be no `main.mjs` for it to find,
+    // while every planned write would exist and verify.
+    const { digest } = publishArtifact(registry, {
+      signer,
+      codeFiles: {
+        "main.mjs": "import \"./helper.mjs\";\nexport const collect = () => {};\n",
+        "helper.mjs": "import * as main from \"./main.mjs\";\nexport const helper = main;\n",
+      },
+      configOverrides: { entrypoint: "code/main.mjs" },
+    });
+    const root = mkdtempSync(join(tmpdir(), "oci-renamed-entrypoint-"));
+    writeFileSync(join(root, "keep.txt"), "unchanged");
+    try {
+      for (const run of [installFromLock, verifyInstalled]) {
+        await assert.rejects(
+          () => run({
+            lock: { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] },
+            source: null, installRoot: root, layout: "snapshot", ...fixtureOptions(registry, signer),
+          }),
+          /entrypoint must keep its file name/
+        );
+        assert.deepEqual(readdirSync(root), ["keep.txt"]);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a single-member code layer may still be installed under a different entrypoint name", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      codeFiles: { "main.mjs": "export const collect = () => {};\n" },
+      configOverrides: { entrypoint: "code/main.mjs" },
+    });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-single-rename-"));
+    try {
+      await installFromLock({
+        lock: { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] },
+        source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer),
+      });
+      assert.equal(
+        readFileSync(join(installRoot, "collection-profiles", "ynab-pdpp", "dist", "collection-profile.mjs"), "utf8"),
+        "export const collect = () => {};\n"
+      );
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a code member that collides with a manifest, provenance, declaration, licence or asset output is refused before any write", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    // The entrypoint sits at the install root, so the layer's other members
+    // land beside the manifest, provenance, declaration, licence and asset files.
+    for (const member of [
+      "provenance.json",
+      "PROVENANCE.JSON",
+      "source-declaration.json",
+      "profile/collection-profile.json",
+      "licenses/LICENSE",
+      "assets/icons/ynab.svg",
+    ]) {
+      const { digest } = publishArtifact(registry, {
+        signer,
+        withAssets: true,
+        codeFiles: {
+          "collection-profile.mjs": "export const collect = () => {};\n",
+          [member]: "not the reserved file\n",
+        },
+      });
+      const root = mkdtempSync(join(tmpdir(), "oci-code-collision-"));
+      writeFileSync(join(root, "keep.txt"), "unchanged");
+      try {
+        for (const run of [installFromLock, verifyInstalled]) {
+          await assert.rejects(
+            () => run({
+              lock: {
+                lockVersion: "2.0",
+                connectors: [ociLockEntry(registry, digest, { entrypointPath: "collection-profile.mjs" })],
+              },
+              source: null, installRoot: root, layout: "snapshot", prune: true,
+              ...fixtureOptions(registry, signer),
+            }),
+            /collision|conflict|duplicate/i,
+            member
+          );
+          assert.deepEqual(readdirSync(root), ["keep.txt"], member);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+test("a nested config entrypoint installs its sibling modules at the same relative position", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const codeFiles = {
+      "nested/collection-profile.mjs": "import \"../shared.mjs\";\n",
+      "shared.mjs": "export const shared = true;\n",
+    };
+    const { digest } = publishArtifact(registry, {
+      signer, codeFiles, configOverrides: { entrypoint: "code/nested/collection-profile.mjs" },
+    });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-nested-"));
+    try {
+      await installFromLock({
+        lock: { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] },
+        source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer),
+      });
+      const root = join(installRoot, "collection-profiles", "ynab-pdpp");
+      assert.equal(readFileSync(join(root, "dist", "collection-profile.mjs"), "utf8"), codeFiles["nested/collection-profile.mjs"]);
+      // `dist/../shared.mjs`, exactly where the entrypoint's `../shared.mjs` points.
+      assert.equal(readFileSync(join(root, "shared.mjs"), "utf8"), codeFiles["shared.mjs"]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a code member that would install outside the artifact root is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      codeFiles: { "nested/collection-profile.mjs": "import \"../shared.mjs\";\n", "shared.mjs": "export {};\n" },
+      configOverrides: { entrypoint: "code/nested/collection-profile.mjs" },
+    });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-escape-"));
+    try {
+      await assert.rejects(
+        () => installFromLock({
+          lock: {
+            lockVersion: "2.0",
+            // One directory deep in the layer, none in the install tree: `../shared.mjs` has nowhere to go.
+            connectors: [ociLockEntry(registry, digest, { entrypointPath: "collection-profile.mjs" })],
+          },
+          source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer),
+        }),
+        /outside the artifact root/
+      );
+      assert.equal(existsSync(join(installRoot, "collection-profiles")), false);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
   });
 });
 
