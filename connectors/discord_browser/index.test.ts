@@ -1142,6 +1142,17 @@ test("a wider later range reads below the stored floor", async () => {
 		second.of("messages").map((record) => record.id),
 		listing.slice(7).map((message) => message.id),
 	);
+	assert.equal(
+		resumeState(second).servers[SERVER_A]?.newest_id,
+		listing[0]?.id,
+	);
+	const third = harness(
+		fakeDiscord({ respond: discordApi(servers) }),
+		["messages"],
+		{ messages: second.cursor("messages") },
+	);
+	await collectDiscordBrowser(third.ctx, fast());
+	assert.deepEqual(third.of("messages"), []);
 });
 
 test("an interrupted expansion does not claim a floor it never reached", async () => {
@@ -1255,61 +1266,73 @@ test("disjoint ranges do not merge into one covered interval", async () => {
 	assert.equal(collected.size, 90);
 });
 
-test("an unreadable group withholds coverage so the next run recovers it", async () => {
-	const all = messagesBy(OWNER, 50);
-	const groupsAt = (offset: number) =>
-		all
-			.slice(offset, offset + SEARCH_PAGE)
-			.map((message, index) =>
-				offset + index === 3
-					? [{ author: { id: OWNER }, hit: true }]
-					: [message],
-			);
-	const broken = fakeDiscord({
-		respond: discordApi({ [SERVER_A]: all }, (path) => {
-			const url = new URL(path, ORIGIN);
-			if (!url.pathname.endsWith("/messages/search")) return undefined;
-			const offset = Number(url.searchParams.get("offset"));
-			return {
-				status: 200,
-				body: { total_results: all.length, messages: groupsAt(offset) },
-			};
-		}),
+test("a malformed group at EOF completes readable records without runtime retries", async () => {
+	const all = messagesBy(OWNER, 80);
+	const respond = discordApi({ [SERVER_A]: all }, (path) => {
+		const url = new URL(path, ORIGIN);
+		if (!url.pathname.endsWith("/messages/search")) return undefined;
+		const maxId = url.searchParams.get("max_id");
+		const matching = all.filter(
+			(message) => maxId === null || BigInt(message.id) < BigInt(maxId),
+		);
+		const offset = Number(url.searchParams.get("offset"));
+		return ok({
+			total_results: matching.length,
+			messages: matching
+				.slice(offset, offset + SEARCH_PAGE)
+				.map((message) =>
+					message.id === all[3]?.id
+						? [{ author: { id: OWNER }, hit: true }]
+						: [message],
+				),
+		});
 	});
+	const broken = fakeDiscord({ respond });
 	const first = harness(broken, ["messages"]);
 	const lines = await captureDiagnostics(() =>
 		collectDiscordBrowser(first.ctx, fast()),
 	);
-	// Pagination still advances, so the second page is read, but the 49 records
-	// do not prove a complete walk.
-	assert.equal(first.of("messages").length, 49);
+	assert.equal(first.of("messages").length, 79);
 	assert.deepEqual(
-		searches(broken).map((call) => call.path.split("offset=")[1]),
-		["0", "25"],
+		searches(broken).map((call) =>
+			new URL(call.path, ORIGIN).searchParams.get("offset"),
+		),
+		["0", "25", "50", "75"],
 	);
-	const unreadable = lines.find((line) =>
-		line.includes("search_hits_unreadable"),
+	assert.ok(lines.some((line) => line.includes("search_hits_unreadable")));
+	assert.equal(resumeState(first).servers[SERVER_A]?.backfill, null);
+	assert.deepEqual(
+		first.skips().map((skip) => [skip.reason, skip.recovery_hint]),
+		[
+			[
+				"discord_records_unreadable",
+				{ action: "retry_on_connector_upgrade", retryable: false },
+			],
+		],
 	);
-	assert.ok(unreadable);
-	// A walk with an unreadable group writes no trusted coverage.
-	const afterFirst = first.cursor("messages") as {
-		servers: Record<string, unknown>;
-	};
-	assert.equal(afterFirst.servers[SERVER_A], undefined);
 
-	// A healthy second run re-reads the range and recovers the missing message.
-	const healthy = fakeDiscord({ respond: discordApi({ [SERVER_A]: all }) });
-	const second = harness(healthy, ["messages"], { messages: afterFirst });
+	const again = fakeDiscord({ respond });
+	const second = harness(again, ["messages"], {
+		messages: first.cursor("messages"),
+	});
 	await collectDiscordBrowser(second.ctx, fast());
-	assert.equal(second.of("messages").length, 50);
-	assert.ok(
-		second.of("messages").some((record) => String(record.id) === all[3]?.id),
+	assert.deepEqual(second.of("messages"), []);
+	assert.deepEqual(second.skips(), []);
+	assert.equal(resumeState(second).servers[SERVER_A]?.backfill, null);
+	// Only the head is refreshed, never the already-consumed older range.
+	assert.equal(searches(again).length, 1);
+	assert.equal(
+		new URL(searches(again)[0]?.path ?? "", ORIGIN).searchParams.get("offset"),
+		"0",
+	);
+	assert.equal(
+		new URL(searches(again)[0]?.path ?? "", ORIGIN).searchParams.get("max_id"),
+		null,
 	);
 });
 
-test("a hit whose author id is unusable withholds the walk for its server", async () => {
-	// Each malformed author makes its group unreadable: the walk cannot prove
-	// the message is someone else's, so it must not claim coverage.
+test("an unusable author completes readable records and is recoverable by full refresh", async () => {
+	// Malformed authors are reported without scheduling a permanent retry.
 	const variants: Array<[string, unknown]> = [
 		["author missing", undefined],
 		["author null", null],
@@ -1342,17 +1365,21 @@ test("a hit whose author id is unusable withholds the walk for its server", asyn
 		const first = harness(broken, ["messages"]);
 		await collectDiscordBrowser(first.ctx, fast());
 		assert.equal(first.of("messages").length, 49, name);
-		// The unreadable author withholds coverage: no cursor for the server.
-		const state = first.cursor("messages") as {
-			servers: Record<string, unknown>;
-		};
-		assert.equal(state.servers[SERVER_A], undefined, name);
+		assert.equal(resumeState(first).servers[SERVER_A]?.backfill, null, name);
+		assert.deepEqual(
+			first.skips().map((skip) => skip.reason),
+			["discord_records_unreadable"],
+			name,
+		);
 
-		// A healthy run over the same state recovers the missing message.
+		// An explicit full refresh after repair can recover the skipped message.
 		const healthy = fakeDiscord({ respond: discordApi({ [SERVER_A]: all }) });
-		const second = harness(healthy, ["messages"], {
-			messages: first.cursor("messages"),
-		});
+		const second = harness(
+			healthy,
+			["messages"],
+			{ messages: first.cursor("messages") },
+			{ collectionMode: "full_refresh" },
+		);
 		await collectDiscordBrowser(second.ctx, fast());
 		assert.equal(second.of("messages").length, 50, name);
 		assert.ok(
@@ -1890,6 +1917,140 @@ test("an ignored ID continuation stops without advancing saved backfill", async 
 		messages: first.cursor("messages"),
 	});
 	await collectDiscordBrowser(second.ctx, fast());
+	assert.deepEqual(second.of("messages"), []);
+	assert.ok(
+		second.skips().some((skip) => skip.reason === "discord_source_unreadable"),
+	);
+	assert.deepEqual(
+		resumeState(second).servers[SERVER_A],
+		resumeState(first).servers[SERVER_A],
+	);
+});
+
+test("narrowing after a cap resets the head before a later until widening", async () => {
+	// T0..T79: A saves T79..T70, B completes T39..T0, C must collect T59..T40.
+	const listing = messagesBy(OWNER, 80);
+	const t40 = listing[39];
+	const t60 = listing[19];
+	assert.ok(t40);
+	assert.ok(t60);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 10 }));
+	assert.deepEqual(
+		first.of("messages").map((record) => record.id),
+		listing.slice(0, 10).map((message) => message.id),
+	);
+	const second = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+		{ messages: first.cursor("messages") },
+		{ timeRange: { until: t40.timestamp } },
+	);
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.deepEqual(
+		second.of("messages").map((record) => record.id),
+		listing.slice(40).map((message) => message.id),
+	);
+	assert.equal(
+		resumeState(second).servers[SERVER_A]?.newest_id,
+		listing[40]?.id,
+	);
+	assert.equal(resumeState(second).servers[SERVER_A]?.backfill, null);
+
+	const third = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+		{ messages: second.cursor("messages") },
+		{ timeRange: { until: t60.timestamp } },
+	);
+	await collectDiscordBrowser(third.ctx, fast());
+	assert.deepEqual(
+		third.of("messages").map((record) => record.id),
+		listing.slice(20, 40).map((message) => message.id),
+	);
+	assert.equal(resumeState(third).servers[SERVER_A]?.backfill, null);
+	assert.deepEqual(third.skips(), []);
+});
+
+test("loaded duplicate and overlapping ranges cannot re-emit across capped runs", async () => {
+	for (const overlapping of [false, true]) {
+		const listing = messagesBy(OWNER, 90);
+		const first = harness(
+			fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+			["messages"],
+		);
+		await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+		const state = resumeState(first);
+		const cursor = state.servers[SERVER_A];
+		assert.ok(cursor?.backfill);
+		const pending = cursor.backfill.ranges[0];
+		const overlapStart = listing[44];
+		const overlapStop = listing[69];
+		assert.ok(pending);
+		assert.ok(overlapStart);
+		assert.ok(overlapStop);
+		cursor.backfill.ranges.push(
+			overlapping
+				? { before_id: overlapStart.id, stop_id: overlapStop.id }
+				: { ...pending },
+		);
+		const second = harness(
+			fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+			["messages"],
+			{ messages: state },
+		);
+		await collectDiscordBrowser(second.ctx, fast([], { maxMessages: 10 }));
+		assert.deepEqual(resumeState(second).servers[SERVER_A]?.backfill?.ranges, [
+			{ before_id: listing[49]?.id, stop_id: null },
+		]);
+		const third = harness(
+			fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+			["messages"],
+			{ messages: second.cursor("messages") },
+		);
+		await collectDiscordBrowser(third.ctx, fast());
+		const ids = [
+			...first.of("messages"),
+			...second.of("messages"),
+			...third.of("messages"),
+		].map((record) => record.id);
+		assert.deepEqual(
+			ids,
+			listing.map((message) => message.id),
+		);
+		assert.equal(new Set(ids).size, ids.length);
+		assert.equal(resumeState(third).servers[SERVER_A]?.backfill, null);
+		assert.deepEqual(third.skips(), []);
+	}
+});
+
+test("an exact max_id hit with older hits rejects an ignored continuation", async () => {
+	const listing = messagesBy(OWNER, 70);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+	const bound = listing[39];
+	assert.ok(bound);
+	const fake = fakeDiscord({
+		respond: discordApi({ [SERVER_A]: listing }, (path) => {
+			const url = new URL(path, ORIGIN);
+			if (url.searchParams.get("max_id") !== bound.id) return undefined;
+			return ok({
+				total_results: listing.length - 39,
+				messages: listing.slice(39, 64).map((message) => [message]),
+			});
+		}),
+	});
+	const second = harness(fake, ["messages"], {
+		messages: first.cursor("messages"),
+	});
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.equal(searches(fake).length, 2);
 	assert.deepEqual(second.of("messages"), []);
 	assert.ok(
 		second.skips().some((skip) => skip.reason === "discord_source_unreadable"),

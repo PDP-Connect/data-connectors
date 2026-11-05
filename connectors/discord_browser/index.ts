@@ -46,8 +46,9 @@
  * Budget (the constants below): one request at a time with a 3-5 s pause;
  * the newest 90 days of messages; about 1,000 messages and 25 servers per
  * run. A queue in STATE carries the remaining servers to later runs, which
- * then stop each server at the first message already collected. Only a fully
- * readable walk that reached the range's end writes coverage. Readable partial
+ * then stop each server at the first message already collected. A walk that
+ * reached the range's end writes coverage for readable records; malformed
+ * records are reported for a connector upgrade. Readable partial
  * walks save message-ID bounds, so later runs refresh the head and continue
  * older history without relying on search offsets across runs.
  * Every server attempted in a run, finished or not, moves to the back of that
@@ -577,6 +578,39 @@ function snowflakeAt(ms: number): string {
 	);
 }
 
+/** Union strictly overlapping pending intervals before either can advance. */
+function mergeSearchRanges(ranges: SearchRange[]): SearchRange[] {
+	const sorted = ranges
+		.map((range) => ({ ...range }))
+		.sort((a, b) => {
+			if (a.before_id === b.before_id) return 0;
+			if (a.before_id === null) return -1;
+			if (b.before_id === null) return 1;
+			return compareSnowflakes(b.before_id, a.before_id);
+		});
+	const merged: SearchRange[] = [];
+	for (const range of sorted) {
+		const previous = merged[merged.length - 1];
+		if (
+			previous &&
+			(previous.stop_id === null ||
+				range.before_id === null ||
+				compareSnowflakes(range.before_id, previous.stop_id) > 0)
+		) {
+			if (
+				range.stop_id === null ||
+				(previous.stop_id !== null &&
+					compareSnowflakes(range.stop_id, previous.stop_id) < 0)
+			) {
+				previous.stop_id = range.stop_id;
+			}
+		} else {
+			merged.push(range);
+		}
+	}
+	return merged;
+}
+
 /** Refresh the head, then consume saved descending intervals. */
 async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 	const { api, budget, floorMs, ownerId, prior, scope, server, untilMs } = walk;
@@ -584,8 +618,13 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 	const headBound = untilMs === null ? null : snowflakeAt(untilMs);
 	const sameScope = prior?.scope === scope;
 	const legacy = prior !== null && prior.backfill === undefined;
-	let newest = priorNewest;
-	let sawUnreadable = false;
+	// A head only describes its own scope, and must stay below an until bound.
+	let newest =
+		sameScope &&
+		priorNewest !== null &&
+		(headBound === null || compareSnowflakes(priorNewest, headBound) < 0)
+			? priorNewest
+			: null;
 	const emitted = new Set<string>();
 	const ranges: SearchRange[] = sameScope
 		? (prior?.backfill?.ranges ?? []).map((range) => ({ ...range }))
@@ -707,11 +746,21 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 					(range.stop_id !== null &&
 						compareSnowflakes(firstHit.id, range.stop_id) <= 0))
 			) {
+				// A changed scope may reuse coverage only after seeing its head
+				// inside the new bounds, rather than carrying the old head blindly.
+				if (
+					!sameScope &&
+					firstHit.timestampMs >= floorMs &&
+					(untilMs === null || firstHit.timestampMs < untilMs) &&
+					isOwnMessage(firstHit, ownerId) &&
+					(newest === null || compareSnowflakes(firstHit.id, newest) > 0)
+				) {
+					newest = firstHit.id;
+				}
 				done = true;
 				break;
 			}
 			if (page.unreadable > 0) {
-				sawUnreadable = true;
 				reportUnreadable(page.unreadable, page.unreadablePositions, offset);
 				await walk.emitUnreadable(page.unreadable);
 			}
@@ -732,6 +781,14 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 					priorNewest !== null &&
 					compareSnowflakes(hit.id, priorNewest) <= 0 &&
 					cursorCollected(prior, hit.timestampMs);
+				if (
+					collected &&
+					isOwnMessage(hit, ownerId) &&
+					(untilMs === null || hit.timestampMs < untilMs) &&
+					(newest === null || compareSnowflakes(hit.id, newest) > 0)
+				) {
+					newest = hit.id;
+				}
 				if (
 					!collected &&
 					!emitted.has(hit.id) &&
@@ -758,9 +815,9 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 		}
 		ranges.shift();
 	}
-	return sawUnreadable
-		? { kind: "skipped", refused: false }
-		: { kind: "complete", cursor: snapshot() };
+	// Unreadable groups already carry an upgrade-only skip. Reaching EOF
+	// completes the readable records rather than scheduling the same retry.
+	return { kind: "complete", cursor: snapshot() };
 }
 
 /** Only the owner's own messages are kept. */
@@ -823,10 +880,7 @@ function readMessagesState(value: unknown): Required<MessagesState> {
 						continue;
 					parsed.backfill = {
 						scope: cursor.scope,
-						ranges: backfill.ranges.map((range) => ({
-							before_id: range.before_id,
-							stop_id: range.stop_id,
-						})),
+						ranges: mergeSearchRanges(backfill.ranges),
 					};
 				}
 			}
