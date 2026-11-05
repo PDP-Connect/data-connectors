@@ -24,6 +24,7 @@ import {
 	HOME_URL,
 	LOGIN_URL,
 	MAX_POSTS_PER_RUN,
+	MAX_SCROLL_STEPS_PER_VIEW,
 	probeXSession,
 	redactPathShape,
 	VIEW_POST_CAPS,
@@ -2761,4 +2762,165 @@ test("resource permutations and repeats preserve the backfill scope", async () =
 		assert.deepEqual(h.ids("likes"), ["303", "304"]);
 		assert.equal(cursor.backfill["likes"]?.position, "304");
 	}
+});
+
+test("an anchor at the production scroll ceiling advances on the next run", async () => {
+	const ids = Array.from({ length: 62 }, (_, index) => String(301 + index));
+	const pages = backfillLikesPages(ids.map((id) => [id]));
+	const firstApp = new FakeWebApp({ pages });
+	const first = harness(firstApp, ["likes"]);
+	await collectXBrowser(first.ctx, FAST);
+	assert.equal(firstApp.scrolls, MAX_SCROLL_STEPS_PER_VIEW);
+	assert.deepEqual(first.ids("likes"), ids.slice(0, 61));
+	const before = first.states()["likes"] as BackfillTestCursor;
+	assert.equal(before.backfill["likes"]?.position, ids[60]);
+
+	const secondApp = new FakeWebApp({ pages });
+	const second = harness(secondApp, ["likes"], { state: first.states() });
+	await collectXBrowser(second.ctx, FAST);
+	assert.deepEqual(second.ids("likes"), ids.slice(61));
+	assert.equal(secondApp.scrolls, MAX_SCROLL_STEPS_PER_VIEW + 1);
+	const after = second.states()["likes"] as BackfillTestCursor;
+	assert.equal(after.backfill["likes"]?.position, ids[61]);
+	assert.notEqual(
+		after.backfill["likes"]?.position,
+		before.backfill["likes"]?.position,
+	);
+
+	// The next anchor is beyond the ceiling: do not retry unchanged forever.
+	const third = harness(new FakeWebApp({ pages }), ["likes"], {
+		state: second.states(),
+	});
+	await collectXBrowser(third.ctx, FAST);
+	assert.deepEqual(third.ids("likes"), []);
+	assert.equal(third.skips()["likes"], "list_end_unconfirmed");
+	assert.deepEqual(third.states(), {});
+	assert.ok(
+		third.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.recovery_hint?.retryable === false,
+		),
+	);
+});
+
+test("a pending-head seek at the scroll ceiling cannot save a retryable checkpoint", async () => {
+	const completed = harness(
+		new FakeWebApp({ pages: backfillLikesPages([["100"]]) }),
+		["likes"],
+	);
+	await collectXBrowser(completed.ctx, FAST);
+	const ids = Array.from({ length: 160 }, (_, index) => String(1000 + index));
+	const pagesOfIds = Array.from({ length: 8 }, (_, index) =>
+		ids.slice(index * 20, (index + 1) * 20),
+	);
+	const capped = harness(
+		new FakeWebApp({ pages: backfillLikesPages([...pagesOfIds, ["100"]]) }),
+		["likes"],
+		{ state: completed.states() },
+	);
+	await collectXBrowser(capped.ctx, FAST);
+	assert.equal(
+		(capped.states()["likes"] as BackfillTestCursor).backfill["likes"]
+			?.head_position,
+		ids[99],
+	);
+
+	for (const prefix of [
+		ids,
+		// No pending-head ID has appeared yet: headResumePassed is still false.
+		Array.from({ length: 62 }, (_, index) => String(2000 + index)),
+	]) {
+		const app = new FakeWebApp({
+			pages: backfillLikesPages([...prefix.map((id) => [id]), ["100"]]),
+		});
+		const resumed = harness(app, ["likes"], { state: capped.states() });
+		await collectXBrowser(resumed.ctx, FAST);
+		assert.equal(app.scrolls, MAX_SCROLL_STEPS_PER_VIEW);
+		assert.equal(resumed.skips()["likes"], "list_end_unconfirmed");
+		assert.deepEqual(resumed.states(), {});
+		assert.ok(
+			resumed.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.recovery_hint?.retryable === false,
+			),
+		);
+	}
+});
+
+test("finishing a 160-like pending head preserves the newest IDs for the next run", async () => {
+	const completed = harness(
+		new FakeWebApp({ pages: backfillLikesPages([["100"]]) }),
+		["likes"],
+	);
+	await collectXBrowser(completed.ctx, FAST);
+	// Ascending IDs deliberately disagree with the order of liking.
+	const ids = Array.from({ length: 160 }, (_, index) => String(1000 + index));
+	const pages = backfillLikesPages([
+		...Array.from({ length: 8 }, (_, index) =>
+			ids.slice(index * 20, (index + 1) * 20),
+		),
+		["100"],
+	]);
+	const runA = harness(new FakeWebApp({ pages }), ["likes"], {
+		state: completed.states(),
+	});
+	await collectXBrowser(runA.ctx, FAST);
+	assert.deepEqual(runA.ids("likes"), ids.slice(0, 100));
+	assert.equal(runA.skips()["likes"], "run_budget_reached");
+
+	const runB = harness(new FakeWebApp({ pages }), ["likes"], {
+		state: runA.states(),
+	});
+	await collectXBrowser(runB.ctx, FAST);
+	assert.deepEqual(runB.ids("likes"), ids.slice(100));
+	assert.deepEqual(runB.skips(), {});
+	assert.deepEqual(
+		(runB.states()["likes"] as BackfillTestCursor).head_ids,
+		ids.slice(0, 50),
+	);
+
+	const runC = harness(new FakeWebApp({ pages }), ["likes"], {
+		state: runB.states(),
+	});
+	await collectXBrowser(runC.ctx, FAST);
+	assert.deepEqual(runC.ids("likes"), []);
+	assert.deepEqual(runC.skips(), {});
+});
+
+test("object resource key order preserves the backfill scope", async () => {
+	const pages = backfillLikesPages([
+		["301", "302"],
+		["303", "304"],
+	]);
+	const first = harness(new FakeWebApp({ pages }), ["likes"]);
+	first.ctx.requested = new Map([
+		[
+			"likes",
+			{
+				name: "likes",
+				resources: [{ kind: "list", selection: { owner: "me", id: "saved" } }],
+			} as StreamScope,
+		],
+	]);
+	await collectXBrowser(first.ctx, { ...FAST, viewPostCaps: { likes: 2 } });
+	const resumed = harness(new FakeWebApp({ pages }), ["likes"], {
+		state: first.states(),
+	});
+	resumed.ctx.requested = new Map([
+		[
+			"likes",
+			{
+				name: "likes",
+				resources: [{ selection: { id: "saved", owner: "me" }, kind: "list" }],
+			} as StreamScope,
+		],
+	]);
+	await collectXBrowser(resumed.ctx, { ...FAST, viewPostCaps: { likes: 2 } });
+	assert.equal(
+		(resumed.states()["likes"] as BackfillTestCursor).backfill_scope,
+		(first.states()["likes"] as BackfillTestCursor).backfill_scope,
+	);
+	assert.deepEqual(resumed.ids("likes"), ["303", "304"]);
 });

@@ -810,7 +810,7 @@ interface StreamPlan {
 	/** Read to the cap whatever is already collected. */
 	readonly fullWalk: boolean;
 	readonly known: ReadonlySet<string>;
-	/** Ids saved in this run, by view, newest first in each view's order. */
+	/** Head ids in traversal order, including a saved pending head when crossed. */
 	readonly newIds: Map<ViewName, string[]>;
 	/** The stored head ids by view, so one view cannot evict another's. */
 	readonly stored: ReadonlyMap<ViewName, readonly string[]>;
@@ -1188,6 +1188,11 @@ async function takeItem(
 	const known = !plan.fullWalk && plan.known.has(post.id);
 	if (!pinned && backfill.phase === "head") {
 		if (!backfill.headResumePassed && backfill.pendingHead.includes(post.id)) {
+			if (!backfill.headSeeking) {
+				// New arrivals precede the saved head; items after its resume
+				// position must follow it, even when likes are not in id order.
+				viewIds(plan, view.name).push(...backfill.pendingHead);
+			}
 			backfill.headSeeking = true;
 		}
 		if (backfill.headSeeking) {
@@ -1790,6 +1795,8 @@ async function readView(
 	const seen = new Set<string>();
 	let waited = 0;
 	let idleAtBottom = 0;
+	const resumePosition = plan?.backfill.get(view.name)?.position ?? null;
+	let resumeScrollUsed = false;
 	for (let step = 0; ; step += 1) {
 		const drained = await drain(run);
 		const pagesBefore = outcome.pages;
@@ -1839,21 +1846,36 @@ async function readView(
 			run.scrollSteps >= run.maxScrollSteps * VIEWS.length
 		) {
 			const backfill = plan?.backfill.get(view.name);
+			const resumeNeedsProgress =
+				backfill?.phase === "backfill" &&
+				resumePosition !== null &&
+				backfill.position === resumePosition;
 			if (
-				backfill?.phase === "seek" ||
-				backfill?.headSeeking ||
-				backfill?.headResumePassed === false
+				resumeNeedsProgress &&
+				!resumeScrollUsed &&
+				step === run.maxScrollSteps &&
+				run.scrollSteps < run.maxScrollSteps * VIEWS.length
 			) {
-				// The saved position cannot be reached within the allowed walk.
-				// Retrying this unchanged seek cannot advance it.
-				outcome.failure = {
-					reason: "list_end_unconfirmed",
-					message: `X stopped loading more ${view.label} before the list ended, so older ${view.label} may be missing.`,
-				};
+				// Finding the anchor does not save anything. Allow one more
+				// scroll to advance, while retaining the whole-run ceiling.
+				resumeScrollUsed = true;
 			} else {
-				outcome.end = "cap_reached";
+				if (
+					backfill?.phase === "seek" ||
+					backfill?.headSeeking ||
+					backfill?.headResumePassed === false ||
+					resumeNeedsProgress
+				) {
+					// An unchanged seek cannot advance by retrying.
+					outcome.failure = {
+						reason: "list_end_unconfirmed",
+						message: `X stopped loading more ${view.label} before the list ended, so older ${view.label} may be missing.`,
+					};
+				} else {
+					outcome.end = "cap_reached";
+				}
+				break;
 			}
-			break;
 		}
 		if (idleAtBottom > MAX_IDLE_STEPS_AT_BOTTOM) {
 			outcome.failure = {
