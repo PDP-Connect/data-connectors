@@ -4193,8 +4193,14 @@ test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", {
    return body;
   }, 1],
   ["source-404 connection enrichment", "connections", (url, body) => url.searchParams.has("ids") ? { fixtureStatus: 404 } : body, 0],
+  // A skills first page short of its total keeps its rows (0.3.43); the rest
+  // of the list cannot be walked here, so nothing proves it complete.
   ["section total mismatch", "skills", (url, body) => {
    if (url.searchParams.has("memberIdentity")) body.elements[0].profileSkills.paging.total = 2;
+   return body;
+  }, 1],
+  ["section total mismatch", "languages", (url, body) => {
+   if (url.searchParams.has("memberIdentity")) body.elements[0].profileLanguages.paging.total = 2;
    return body;
   }, 0],
   ["profile owner mismatch", "skills", (url, body) => {
@@ -4215,6 +4221,24 @@ test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", {
    assert.ok(r.result.errors.some((e) => e.scope === scope && e.errorClass === "partial"));
   });
  }
+ await t.test("a skills first page is completed by walking the owner's skills collection", async () => {
+  // Seen live (2026-11-05): the decoration embedded 20 of 32 skills.
+  const skills = [1, 2, 3].map((n) => ({ entityUrn: `urn:li:fsd_skill:(12,${n})`, name: `Skill ${n}` }));
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("memberIdentity")) body.elements[0].profileSkills = { elements: skills.slice(0, 2), paging: { start: 0, count: 2, total: 3 } };
+   if (url.pathname === "/voyager/api/identity/dash/profileSkills") {
+    const start = Number(url.searchParams.get("start"));
+    return { elements: skills.slice(start, start + 2), paging: { start, count: 2, total: 3 } };
+   }
+   return body;
+  });
+  const r = await run(fixtures, { scopes: ["linkedin.skills"] });
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.result["linkedin.skills"].records.map((record) => record.id), skills.map((skill) => skill.entityUrn));
+  assert.ok(r.states["linkedin.skills"].full_scan_at);
+  assert.equal(fixtures.requests.filter((request) => request.path === "/voyager/api/identity/dash/profileSkills").length, 2);
+ });
  await t.test("successful JSON without owner identity cannot pass the probe", async () => {
   const fixtures = createLinkedInFixtures((url, body) => url.pathname === "/voyager/api/me" ? {} : body);
   const r = await run(fixtures, { loginWaitMs: 50 });

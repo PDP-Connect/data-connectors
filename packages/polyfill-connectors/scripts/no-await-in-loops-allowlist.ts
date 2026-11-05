@@ -3248,13 +3248,6 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/linkedin/index.ts",
-			line: 359,
-			column: 18,
-			category: "dependent_pagination",
-			note: "walkProfileSkills(): the next skills page's `start` offset depends on the prior page's element count.",
-		},
-		{
-			path: "connectors/linkedin/index.ts",
 			line: 439,
 			column: 18,
 			category: "dependent_pagination",
@@ -3286,7 +3279,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			line: 957,
 			column: 14,
 			category: "ordered_protocol_emission",
-			note: "collectLinkedIn(): each profile section stream emits its records, coverage and gap before the next stream starts.",
+			note: "collectLinkedIn(): each profile section stream (including its skills walk) emits its records, coverage and gap before the next stream starts.",
 		},
 		{
 			path: "connectors/linkedin/index.ts",
@@ -3294,6 +3287,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitRows(): covered rows must reach the sink in source order before the stream's coverage result.",
+		},
+		{
+			path: "connectors/linkedin/index.ts",
+			line: 359,
+			column: 18,
+			category: "dependent_pagination",
+			note: "walkProfileSkills(): each skills page starts where the prior page's rows ended, and the walk stops on the provider total.",
 		},
 		{
 			path: "connectors/linkedin/field-contract.test.ts",
@@ -3370,7 +3370,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			line: 2895,
 			column: 3,
 			category: "test_assertion_sequencing",
-			note: "The skills-walk rejection cases share buildCtx's global fetch shim, so their runs must not overlap.",
+			note: "The unproven skills-walk cases share collectProof's global fetch shim, so their runs must not overlap.",
 		},
 		{
 			path: "connectors/meta/clock-parity.test.ts",
@@ -4592,28 +4592,28 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/spotify/index.ts",
-			line: 2477,
+			line: 2495,
 			column: 32,
 			category: "ordered_protocol_emission",
 			note: "emitRecordsWithCoverage(): emits source records in order before the stream coverage boundary",
 		},
 		{
 			path: "connectors/spotify/index.ts",
-			line: 2506,
+			line: 2524,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "spotifyCollect(): emits a retryable skip for each requested stream before returning without completion authority",
 		},
 		{
 			path: "connectors/spotify/index.ts",
-			line: 2684,
+			line: 2702,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "spotifyCollect(): emits the skipped-library-rows SKIP_RESULT for each requested playlist stream after its coverage",
 		},
 		{
 			path: "connectors/spotify/index.ts",
-			line: 2731,
+			line: 2749,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "spotifyCollect(): records and typed coverage gaps are emitted in requested stream order",

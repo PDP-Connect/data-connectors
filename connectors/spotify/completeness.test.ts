@@ -2829,3 +2829,53 @@ test("a known non-playlist library row still has to carry its own resource ident
 		);
 	}
 });
+
+async function withoutHashWaits<T>(run: () => Promise<T>): Promise<T> {
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+		callback();
+		return 0 as unknown as NodeJS.Timeout;
+	}) as typeof globalThis.setTimeout;
+	try {
+		return await run();
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+	}
+}
+
+test("a player that yields no query hashes is loaded again and read once more", async () => {
+	// RSS run e898e5d4: all five hashes missing after the in-page retries.
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		const result = await withoutHashWaits(() =>
+			collectSavedTracks(() => savedResponse([], 0), {
+				bundle: (attempt) =>
+					attempt <= 3 ? "" : bundleFor(["fetchLibraryTracks"]),
+			}),
+		);
+		assert.equal(result.bundleRequests, 4);
+		assert.deepEqual(result.requests, [0]);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const reload = diagnostics.find((line) => line.includes("query_hashes_reload"));
+	assert.ok(reload);
+	assert.match(reload, /"missing":"fetchLibraryTracks"/);
+});
+
+test("a player that yields no query hashes after the reload still fails the export", async () => {
+	let bundleRequests = 0;
+	await withoutHashWaits(() =>
+		assert.rejects(
+			collectSavedTracks(() => savedResponse([], 0), {
+				bundle: () => {
+					bundleRequests += 1;
+					return "";
+				},
+			}),
+			/spotify_missing_hashes_fetchLibraryTracks/,
+		),
+	);
+	assert.equal(bundleRequests, 6);
+});
