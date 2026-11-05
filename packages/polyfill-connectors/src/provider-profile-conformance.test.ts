@@ -236,13 +236,16 @@ test("the hand-maintained GOVERNOR_USING_CONNECTORS roster matches the filesyste
 test("WI-1b complete: every governor-using connector declares a per-provider pacing profile factory", () => {
 	for (const name of GOVERNOR_USING_CONNECTORS) {
 		const source = readFileSync(join(CONNECTORS_DIR, name, "index.ts"), "utf8");
-		// Each connector imports a named `<name>PacingProfile` factory from the
-		// profile module (the audited per-connector declaration). This pins that the
-		// profile is sourced from the ONE declared home, not hand-rolled inline.
+		// Each connector uses a named, doc-commented `<name>PacingProfile` factory
+		// (the audited per-connector declaration), not a profile literal hand-rolled
+		// at the governor call. Most factories live in provider-profile.ts; goodreads
+		// declares its own in connectors/goodreads/index.ts so that a goodreads change
+		// does not alter the shipped artifacts of every connector that imports the
+		// shared module.
 		assert.match(
 			source,
 			new RegExp(`${name}PacingProfile`),
-			`${name} must import and use its audited ${name}PacingProfile from provider-profile.ts (WI-1b — §3, §9-C5)`,
+			`${name} must use its audited ${name}PacingProfile factory, from provider-profile.ts or declared in its own index.ts (WI-1b — §3, §9-C5)`,
 		);
 	}
 });

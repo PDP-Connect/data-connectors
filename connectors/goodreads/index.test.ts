@@ -11,7 +11,6 @@ import {
 	makeEmitRecord,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { goodreadsPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import { RUNTIME_GENERIC_REASON_CODES } from "../../packages/polyfill-connectors/src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
 import { skipPoliteDelays } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
@@ -27,6 +26,7 @@ import {
 	collect,
 	createGoodreadsHttp,
 	GOODREADS_PACING_INITIAL_INTERVAL_MS,
+	goodreadsPacingProfile,
 	probeGoodreadsPage,
 	probeGoodreadsSession,
 } from "./index.ts";

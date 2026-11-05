@@ -2,7 +2,7 @@
   "schema": "pdpp.connector-claim/1",
   "connector": "goodreads",
   "captured_at": "2026-11-05T21:25:51.674Z",
-  "verified_at": "2026-11-05T21:30:58.156Z",
+  "verified_at": "2026-11-05T21:57:29.637Z",
   "claim": "diagnostic_replay",
   "limitations": [
     "non-recorded-http driver - canonical replay is defined only for recorded-http",
@@ -20,7 +20,7 @@
     "declaration_digest": "26bce530032eb3906f39d11294d3ff13c80d40191d624c530bfdc84bc570c2a6"
   },
   "verified_subject": {
-    "source_digest": "18d85aa115720f84e96fdb48d68fbc26c9b7688e15b11bc26599b4954e3d0a58",
+    "source_digest": "9da608c247ea4187d876c6a0748d609311dec3d87c6e3fe84eae0296106d1da0",
     "declaration_digest": "26bce530032eb3906f39d11294d3ff13c80d40191d624c530bfdc84bc570c2a6"
   },
   "scenario_path": "2026-11-05T21-25-51.674Z-scenario.json",

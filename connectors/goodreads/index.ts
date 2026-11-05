@@ -51,7 +51,7 @@ import type {
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { goodreadsPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
+import type { ProviderPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import { collectGoodreads, type GoodreadsCollectContext } from "./collector.ts";
 import {
 	type GoodreadsHttp,
@@ -310,6 +310,20 @@ export async function ensureGoodreadsSession(
  * make each run's final state depend on real time.
  */
 export const GOODREADS_PACING_INITIAL_INTERVAL_MS = 2000;
+
+/**
+ * Goodreads — 1000ms (60 req/min). Goodreads publishes no rate limit and has
+ * no public API; the connector reads the owner's own pages and the GraphQL API
+ * those pages call, in the owner's signed-in browser, behind AWS WAF. The
+ * ceiling matches GroupMe's for an undocumented provider. The connector starts
+ * each cold run at 2000ms (its earlier fixed pause of 1.5 to 2.5 s), so the
+ * governor only speeds up from there while Goodreads keeps answering, and backs
+ * off on 429/5xx and Retry-After.
+ * Doc: none published (checked 2026-11-05).
+ */
+export function goodreadsPacingProfile(): ProviderPacingProfile {
+	return { pacingMinIntervalMs: 1000 };
+}
 
 export interface GoodreadsHttpOptions {
 	now?: () => number;
