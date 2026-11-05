@@ -11,17 +11,12 @@
  *     requested_at, completed_at, pickup/dropoff addresses, product_type,
  *     driver, distance, duration, fare_total). The Activities list feed
  *     carries only a trip UUID — see parsers.ts's module doc. `trips` does
- *     its own hydration, so it is self-mapped, and it emits its own
- *     DETAIL_COVERAGE. It declares `incremental: false` /
- *     `coverage_strategy: "full_inventory"` in manifests/uber.json: the
- *     Activities list has no date/status field to filter or stop on (only a
- *     trip UUID; see parsers.ts), so `fetchAllActivities` walks the full
- *     feed every run with no STATE-consulted cursor. A stop-at-seen boundary
- *     keyed on trip id is plausible (the audit's cut-semantics-pass report
- *     item #1) but assumes the Activities feed is fetched newest-first,
- *     which no code or fixture in this connector confirms — that requires a
- *     live-account run to verify before implementing; tracked as a
- *     follow-up, not implemented here.
+ *     its own hydration and emits its own DETAIL_COVERAGE. STATE keeps a
+ *     head marker, scoped page continuations, pending detail IDs, and the
+ *     successfully hydrated IDs. The source's nextPageToken resumes history
+ *     after each per-run budget; an open backfill emits a retryable skip.
+ *     The head boundary assumes Activities is newest-first. The prior
+ *     connector flagged live confirmation of that ordering as outstanding.
  *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
  *     totals), fetched from `GetReceipt` only. Declared `state_stream:
  *     "trips"` in the manifest — it rides trips' checkpoint rather than
@@ -98,6 +93,8 @@ import { validateRecord } from "./schemas.ts";
 import type {
 	UberActivitiesResponse,
 	UberActivity,
+	UberActivityPosition,
+	UberCursor,
 	UberGetReceiptResponse,
 	UberGetTripResponse,
 	UberGetTripResult,
@@ -328,12 +325,28 @@ function assertUberOk(
 export async function fetchAllActivities(
 	fetchPath: UberPageFetch,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<{ activities: UberActivity[]; truncated: boolean }> {
+	options: {
+		nextPageToken?: string | undefined;
+		stopAtTripId?: string | undefined;
+		maxPages?: number;
+	} = {},
+): Promise<{
+	activities: UberActivity[];
+	truncated: boolean;
+	nextPageToken?: string | undefined;
+	pages: number;
+	reachedEnd: boolean;
+}> {
 	const all: UberActivity[] = [];
 	const seenIds = new Set<string>();
-	let nextPageToken: string | undefined;
+	const seenTokens = new Set<string>();
+	let nextPageToken = options.nextPageToken;
+	let pages = 0;
+	let reachedEnd = false;
+	if (nextPageToken) seenTokens.add(nextPageToken);
+	const maxPages = options.maxPages ?? MAX_ACTIVITY_PAGES;
 	const walk = await walkPagesWithCeiling({
-		maxPages: MAX_ACTIVITY_PAGES,
+		maxPages,
 		fetchPage: async (pageNumber) => {
 			const { status, body } = await fetchPath("Activities", ACTIVITIES_QUERY, {
 				includePast: true,
@@ -345,28 +358,48 @@ export async function fetchAllActivities(
 			});
 			assertUberOk(status, body, "Activities");
 			const parsed = JSON.parse(body) as UberActivitiesResponse;
-			const page = parsed.data?.activities?.past?.activities ?? [];
-			let newOnPage = 0;
-			for (const activity of page) {
+			const past = parsed.data?.activities?.past;
+			if (!past || !Array.isArray(past.activities)) {
+				throw new Error("uber_activity_resume_failed: missing Activities page");
+			}
+			pages += 1;
+			for (const activity of past.activities) {
 				const id = activityTripId(activity);
+				if (id && id === options.stopAtTripId) {
+					nextPageToken = undefined;
+					return false;
+				}
 				if (id && !seenIds.has(id)) {
 					seenIds.add(id);
 					all.push(activity);
-					newOnPage += 1;
 				}
 			}
-			const token = parsed.data?.activities?.past?.nextPageToken;
-			if (!token || newOnPage === 0) {
+			const token = past.nextPageToken;
+			if (!token) {
+				nextPageToken = undefined;
+				reachedEnd = true;
 				return false;
 			}
+			if (seenTokens.has(token)) {
+				throw new Error(
+					"uber_activity_resume_failed: repeated Activities cursor",
+				);
+			}
+			seenTokens.add(token);
 			nextPageToken = token;
-			if (pageNumber < MAX_ACTIVITY_PAGES) {
+			if (pageNumber < maxPages) {
 				await delay(PAGE_DELAY_MS);
 			}
 			return true;
 		},
 	});
-	return { activities: all, truncated: walk.truncated };
+	return {
+		activities: all,
+		truncated: walk.truncated,
+		nextPageToken,
+		pages,
+		reachedEnd,
+	};
 }
 
 /** One trip's raw GetTrip result, kept as-is so the caller decides how to turn it into a trips RECORD. */
@@ -417,22 +450,90 @@ export async function collectAllStreams(
 		return;
 	}
 
-	const { activities, truncated } = await fetchAllActivities(fetchPath, delay);
-	const tripIds = activities
-		.map((a) => activityTripId(a))
-		.filter((id): id is string => Boolean(id))
-		.slice(0, MAX_DETAIL_FETCHES);
-	const detailTruncated = activities.length > MAX_DETAIL_FETCHES;
+	const scope = JSON.stringify(
+		[...requested.values()]
+			.filter((stream) => stream.name === "trips" || stream.name === "receipts")
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map((stream) => ({
+				name: stream.name,
+				since: stream.time_range?.since ?? null,
+				until: stream.time_range?.until ?? null,
+				resources: [...(stream.resources ?? [])].sort(),
+			})),
+	);
+	const saved = ctx.state.trips as UberCursor | undefined;
+	const previous =
+		ctx.collectionMode !== "full_refresh" &&
+		saved?.version === 1 &&
+		saved.scope === scope &&
+		(!saved.backfill || saved.backfill.scope === scope)
+			? saved
+			: undefined;
+	const hydratedTrips = new Set(previous?.hydrated_trip_ids ?? []);
+	const hydratedReceipts = new Set(previous?.hydrated_receipt_ids ?? []);
+	const head = await fetchAllActivities(fetchPath, delay, {
+		stopAtTripId: previous?.head_trip_id,
+	});
+	const activities = [...head.activities];
+	let pagesRemaining = MAX_ACTIVITY_PAGES - head.pages;
+	const positions: UberActivityPosition[] = head.reachedEnd
+		? []
+		: (previous?.backfill?.pages ?? []).map((position) => ({ ...position }));
+	if (head.truncated && head.nextPageToken) {
+		positions.unshift({
+			next_page_token: head.nextPageToken,
+			...(previous?.head_trip_id
+				? { stop_at_trip_id: previous.head_trip_id }
+				: {}),
+		});
+	}
+	// A head burst can itself exceed the page limit. Keep that unfinished
+	// segment ahead of the older backfill rather than losing either position.
+	while (positions.length > 0 && pagesRemaining > 0) {
+		const position = positions[0];
+		if (!position) break;
+		await delay(PAGE_DELAY_MS);
+		const page = await fetchAllActivities(fetchPath, delay, {
+			nextPageToken: position.next_page_token,
+			stopAtTripId: position.stop_at_trip_id,
+			maxPages: pagesRemaining,
+		});
+		activities.push(...page.activities);
+		pagesRemaining -= page.pages;
+		if (page.truncated && page.nextPageToken) {
+			position.next_page_token = page.nextPageToken;
+		} else {
+			positions.shift();
+		}
+	}
+	const headIds = head.activities
+		.map((activity) => activityTripId(activity))
+		.filter((id): id is string => Boolean(id));
+	const discoveredIds = activities
+		.map((activity) => activityTripId(activity))
+		.filter((id): id is string => Boolean(id));
+	const needsDetail = (id: string) =>
+		(wantTrips && !hydratedTrips.has(id)) ||
+		(wantReceipts && !hydratedReceipts.has(id));
+	const candidates = [
+		...new Set([
+			...headIds,
+			...(previous?.backfill?.pending_trip_ids ?? []),
+			...discoveredIds,
+		]),
+	].filter(needsDetail);
+	const tripIds = candidates.slice(0, MAX_DETAIL_FETCHES);
+	const truncated = positions.length > 0;
 
 	const tripsRequired: string[] = [];
 	const tripsHydrated: string[] = [];
 	for (const [index, tripId] of tripIds.entries()) {
-		if (wantTrips) {
+		if (wantTrips && !hydratedTrips.has(tripId)) {
 			tripsRequired.push(tripId);
 		}
 
 		let getTrip: UberGetTripResult | undefined;
-		if (wantTrips) {
+		if (wantTrips && !hydratedTrips.has(tripId)) {
 			try {
 				getTrip = await fetchGetTrip(fetchPath, tripId);
 			} catch {
@@ -444,10 +545,11 @@ export async function collectAllStreams(
 			if (record) {
 				await emitRecord("trips", record);
 				tripsHydrated.push(tripId);
+				hydratedTrips.add(tripId);
 			}
 		}
 
-		if (wantReceipts) {
+		if (wantReceipts && !hydratedReceipts.has(tripId)) {
 			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
 			try {
 				fareBreakdown = await fetchFareBreakdown(fetchPath, tripId);
@@ -457,6 +559,7 @@ export async function collectAllStreams(
 			const receipt = receiptRecord(tripId, fareBreakdown);
 			if (receipt) {
 				await emitRecord("receipts", receipt);
+				hydratedReceipts.add(tripId);
 			}
 		}
 
@@ -466,15 +569,41 @@ export async function collectAllStreams(
 		}
 	}
 
-	if (wantTrips) {
+	// Rotate failed detail attempts behind unattempted IDs so one bad trip
+	// cannot keep all older trips behind the same per-run detail budget.
+	const pendingTripIds = [
+		...candidates.slice(MAX_DETAIL_FETCHES),
+		...tripIds.filter(needsDetail),
+	];
+	const detailTruncated = pendingTripIds.length > 0;
+	const headTripId = headIds[0] ?? previous?.head_trip_id;
+	const cursor: UberCursor = {
+		version: 1,
+		scope,
+		...(headTripId ? { head_trip_id: headTripId } : {}),
+		hydrated_trip_ids: [...hydratedTrips],
+		hydrated_receipt_ids: [...hydratedReceipts],
+		...(truncated || detailTruncated
+			? {
+					backfill: {
+						scope,
+						pages: positions,
+						pending_trip_ids: pendingTripIds,
+					},
+				}
+			: {}),
+	};
+	await emit({ type: "STATE", stream: "trips", cursor });
+
+	if (wantTrips || wantReceipts) {
 		if (truncated) {
 			await emit({
 				type: "SKIP_RESULT",
-				stream: "trips",
+				stream: wantTrips ? "trips" : "receipts",
 				reason: "trips_deferred_page_budget",
 				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
+					action: "retry_by_runtime",
+					retryable: true,
 				},
 				message: `Uber activity feed stopped at the ${MAX_ACTIVITY_PAGES}-page limit with more trip history possibly available`,
 				diagnostics: { page_limit: MAX_ACTIVITY_PAGES },
@@ -483,29 +612,23 @@ export async function collectAllStreams(
 		if (detailTruncated) {
 			await emit({
 				type: "SKIP_RESULT",
-				stream: "trips",
+				stream: wantTrips ? "trips" : "receipts",
 				reason: "trips_deferred_detail_budget",
 				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
+					action: "retry_by_runtime",
+					retryable: true,
 				},
 				message: `Uber trip detail stopped at the ${MAX_DETAIL_FETCHES}-trip detail-fetch limit for this run`,
 				diagnostics: {
 					detail_fetch_limit: MAX_DETAIL_FETCHES,
-					total_trips: activities.length,
+					total_trips: candidates.length,
 				},
 			});
 		}
-		// `trips` is full_inventory / incremental: false (no source-side date
-		// or stop-at-seen filter is proven — see the manifest and this
-		// connector's header comment): it emits no STATE, matching the
-		// fleet's full_inventory convention (e.g. meta's `following`), rather
-		// than a `cursor: {}` that claimed a bookkeeping cursor with nothing
-		// in it. `trips` does its own hydration (GetTrip per id), so it is
-		// self-mapped and emits its own DETAIL_COVERAGE. `receipts` is
-		// declared `state_stream: "trips"` in the manifest and must NEVER
-		// construct one — see the fleet-wide
-		// detail-coverage-state-stream-manifest-honesty guard.
+	}
+	if (wantTrips) {
+		// Receipts keeps using trips' checkpoint and has no independent
+		// DETAIL_COVERAGE. Emit only this run's attempted trip hydration.
 		await emit(
 			buildDetailCoverageMessage({
 				stream: "trips",

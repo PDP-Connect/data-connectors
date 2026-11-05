@@ -52,12 +52,18 @@ function makeScriptedFetch(script: {
 	activitiesPages?: Array<{ status?: number; body: string }>;
 	getReceipt?: Record<string, { status?: number; body: string }>;
 	getTrip?: Record<string, { status?: number; body: string }>;
-}): { calls: string[]; fetchPath: UberPageFetch } {
+}): {
+	calls: string[];
+	activityTokens: Array<string | undefined>;
+	fetchPath: UberPageFetch;
+} {
 	const calls: string[] = [];
+	const activityTokens: Array<string | undefined> = [];
 	let activitiesPageIndex = 0;
 	const fetchPath: UberPageFetch = (operationName, _query, variables) => {
 		if (operationName === "Activities") {
 			calls.push("Activities");
+			activityTokens.push(variables.nextPageToken as string | undefined);
 			const pages = script.activitiesPages ?? [{ body: activitiesBody([]) }];
 			const r = pages[Math.min(activitiesPageIndex, pages.length - 1)];
 			activitiesPageIndex += 1;
@@ -86,7 +92,7 @@ function makeScriptedFetch(script: {
 		}
 		throw new Error(`no scripted response for operation ${operationName}`);
 	};
-	return { calls, fetchPath };
+	return { calls, activityTokens, fetchPath };
 }
 
 function makeCtx(requestedStreams: string[]): {
@@ -364,7 +370,7 @@ test("collectAllStreams: records emit before DETAIL_COVERAGE for trips", async (
 	);
 });
 
-test("collectAllStreams: trips (full_inventory) emits no STATE", async () => {
+test("collectAllStreams: trips emits resumable STATE", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
 		getTrip: { "trip-1": { body: getTripBody({ status: "COMPLETED" }) } },
@@ -373,8 +379,8 @@ test("collectAllStreams: trips (full_inventory) emits no STATE", async () => {
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.equal(
 		messages.some((m) => m.type === "STATE"),
-		false,
-		"trips is incremental: false / full_inventory — it must not claim a cursor via STATE",
+		true,
+		"trips must persist its head and backfill checkpoint",
 	);
 });
 
@@ -401,4 +407,265 @@ test("collectAllStreams: never calls globalThis.fetch — every read goes throug
 	} finally {
 		globalThis.fetch = original;
 	}
+});
+
+function backfillCursor(messages: ReturnType<typeof makeCtx>["messages"]) {
+	const state = [...messages]
+		.reverse()
+		.find((message) => message.type === "STATE" && message.stream === "trips");
+	assert.ok(state && state.type === "STATE");
+	return state.cursor as {
+		version: 1;
+		scope: string;
+		head_trip_id?: string;
+		hydrated_trip_ids: string[];
+		hydrated_receipt_ids: string[];
+		backfill?: {
+			scope: string;
+			pages: Array<{ next_page_token: string; stop_at_trip_id?: string }>;
+			pending_trip_ids: string[];
+		};
+	};
+}
+
+function tripResponses(ids: string[]) {
+	return Object.fromEntries(
+		ids.map((id) => [
+			id,
+			{ body: getTripBody({ status: "COMPLETED", fare: "$10.00" }) },
+		]),
+	);
+}
+
+async function detailBudgetRun() {
+	const ids = Array.from({ length: 205 }, (_, i) => `trip-${i}`);
+	const script = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody(ids.map((uuid) => ({ uuid }))) }],
+		getTrip: tripResponses(ids),
+	});
+	const run = makeCtx(["trips"]);
+	await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+	return { ...run, ...script, ids, cursor: backfillCursor(run.messages) };
+}
+
+test("collectAllStreams: detail budget saves scoped backfill and remains incomplete", async () => {
+	const run = await detailBudgetRun();
+	assert.equal(run.emitted.length, 200);
+	assert.equal(run.cursor.head_trip_id, "trip-0");
+	assert.deepEqual(run.cursor.backfill?.pending_trip_ids, run.ids.slice(200));
+	assert.equal(run.cursor.backfill?.scope, run.cursor.scope);
+	assert.equal(run.cursor.hydrated_trip_ids.length, 200);
+	const skip = run.messages.find(
+		(message) =>
+			message.type === "SKIP_RESULT" &&
+			message.reason === "trips_deferred_detail_budget",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.deepEqual(skip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+});
+
+test("collectAllStreams: next run hydrates older pending trips and new head without duplicates", async () => {
+	const first = await detailBudgetRun();
+	const script = makeScriptedFetch({
+		activitiesPages: [
+			{
+				body: activitiesBody(
+					[{ uuid: "new-trip" }, { uuid: "trip-0" }],
+					"unused-overlap",
+				),
+			},
+		],
+		getTrip: tripResponses(["new-trip", ...first.ids]),
+	});
+	const second = makeCtx(["trips"]);
+	second.ctx.state = { trips: first.cursor };
+	await collectAllStreams(second.ctx, script.fetchPath, NO_DELAY);
+	assert.deepEqual(
+		script.calls.filter((call) => call.startsWith("GetTrip:")),
+		["new-trip", ...first.ids.slice(200)].map((id) => `GetTrip:${id}`),
+	);
+	assert.equal(first.emitted.length + second.emitted.length, 206);
+	assert.equal(
+		new Set(
+			[...first.emitted, ...second.emitted].map((record) =>
+				JSON.stringify(record.data),
+			),
+		).size,
+		206,
+	);
+	assert.equal(backfillCursor(second.messages).head_trip_id, "new-trip");
+});
+
+test("collectAllStreams: end of history clears backfill and completes the stream", async () => {
+	const first = await detailBudgetRun();
+	const second = makeCtx(["trips"]);
+	second.ctx.state = { trips: first.cursor };
+	const script = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-0" }]) }],
+		getTrip: tripResponses(first.ids.slice(200)),
+	});
+	await collectAllStreams(second.ctx, script.fetchPath, NO_DELAY);
+	assert.equal(backfillCursor(second.messages).backfill, undefined);
+	assert.equal(
+		second.messages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+	assert.equal(second.emitted.length, 5);
+});
+
+test("collectAllStreams: changed since, until, or resources ignores saved backfill", async () => {
+	const first = await detailBudgetRun();
+	for (const changed of [
+		{ time_range: { since: "2026-01-01T00:00:00Z" } },
+		{ time_range: { until: "2026-11-01T00:00:00Z" } },
+		{ resources: ["personal"] },
+	]) {
+		const run = makeCtx(["trips"]);
+		run.ctx.state = {
+			trips: {
+				...first.cursor,
+				backfill: {
+					...first.cursor.backfill,
+					scope: first.cursor.scope,
+					pages: [{ next_page_token: "must-not-resume" }],
+					pending_trip_ids: ["must-not-hydrate"],
+				},
+			},
+		};
+		run.ctx.requested.set("trips", { name: "trips", ...changed });
+		const script = makeScriptedFetch({
+			activitiesPages: [{ body: activitiesBody([{ uuid: "trip-0" }]) }],
+			getTrip: tripResponses(["trip-0"]),
+		});
+		await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+		assert.deepEqual(script.activityTokens, [undefined]);
+		assert.equal(run.emitted.length, 1);
+		assert.notEqual(backfillCursor(run.messages).scope, first.cursor.scope);
+		assert.equal(backfillCursor(run.messages).backfill, undefined);
+	}
+});
+
+test("collectAllStreams: full_refresh ignores and replaces the saved position", async () => {
+	const first = await detailBudgetRun();
+	const run = makeCtx(["trips"]);
+	run.ctx.collectionMode = "full_refresh";
+	run.ctx.state = {
+		trips: {
+			...first.cursor,
+			backfill: {
+				scope: first.cursor.scope,
+				pages: [{ next_page_token: "must-not-resume" }],
+				pending_trip_ids: ["must-not-hydrate"],
+			},
+		},
+	};
+	const script = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-0" }]) }],
+		getTrip: tripResponses(["trip-0"]),
+	});
+	await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+	assert.deepEqual(script.activityTokens, [undefined]);
+	assert.equal(run.emitted.length, 1);
+	assert.equal(backfillCursor(run.messages).backfill, undefined);
+	assert.deepEqual(backfillCursor(run.messages).hydrated_trip_ids, ["trip-0"]);
+});
+
+test("collectAllStreams: page budget resumes the source cursor after collecting a new head", async () => {
+	const ids = Array.from({ length: 200 }, (_, i) => `page-trip-${i}`);
+	const first = makeCtx(["trips"]);
+	const initial = makeScriptedFetch({
+		activitiesPages: ids.map((uuid, i) => ({
+			body: activitiesBody([{ uuid }], `page-${i + 1}`),
+		})),
+		getTrip: tripResponses(ids),
+	});
+	await collectAllStreams(first.ctx, initial.fetchPath, NO_DELAY);
+	const cursor = backfillCursor(first.messages);
+	assert.deepEqual(cursor.backfill?.pages, [{ next_page_token: "page-200" }]);
+	assert.equal(initial.activityTokens.length, 200);
+	const skip = first.messages.find(
+		(message) =>
+			message.type === "SKIP_RESULT" &&
+			message.reason === "trips_deferred_page_budget",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.deepEqual(skip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+	const second = makeCtx(["trips"]);
+	second.ctx.state = { trips: cursor };
+	const resumed = makeScriptedFetch({
+		activitiesPages: [
+			{
+				body: activitiesBody(
+					[{ uuid: "new-page-trip" }, { uuid: ids[0] }],
+					"head-overlap",
+				),
+			},
+			{ body: activitiesBody([{ uuid: "old-page-trip" }]) },
+		],
+		getTrip: tripResponses(["new-page-trip", "old-page-trip"]),
+	});
+	await collectAllStreams(second.ctx, resumed.fetchPath, NO_DELAY);
+	assert.deepEqual(resumed.activityTokens, [undefined, "page-200"]);
+	assert.deepEqual(
+		resumed.calls.filter((call) => call.startsWith("GetTrip:")),
+		["GetTrip:new-page-trip", "GetTrip:old-page-trip"],
+	);
+	assert.equal(backfillCursor(second.messages).backfill, undefined);
+	assert.equal(
+		second.messages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("collectAllStreams: base-format empty STATE starts and completes a backfill", async () => {
+	for (const state of [{}, { trips: { head_trip_id: "trip-0" } }]) {
+		const run = makeCtx(["trips"]);
+		run.ctx.state = state;
+		const script = makeScriptedFetch({
+			activitiesPages: [
+				{ body: activitiesBody([{ uuid: "trip-0" }, { uuid: "older" }]) },
+			],
+			getTrip: tripResponses(["trip-0", "older"]),
+		});
+		await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+		assert.equal(run.emitted.length, 2);
+		assert.equal(backfillCursor(run.messages).version, 1);
+		assert.equal(backfillCursor(run.messages).backfill, undefined);
+	}
+});
+
+test("collectAllStreams: rejected saved page cursor fails without restarting history", async () => {
+	const first = await detailBudgetRun();
+	const run = makeCtx(["trips"]);
+	run.ctx.state = {
+		trips: {
+			...first.cursor,
+			backfill: {
+				scope: first.cursor.scope,
+				pages: [{ next_page_token: "expired-page" }],
+				pending_trip_ids: [],
+			},
+		},
+	};
+	const script = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-0" }], "overlap") },
+			{ body: JSON.stringify({ errors: [{ message: "invalid page token" }] }) },
+		],
+	});
+	await assert.rejects(
+		collectAllStreams(run.ctx, script.fetchPath, NO_DELAY),
+		/uber_activity_resume_failed/,
+	);
+	assert.deepEqual(script.activityTokens, [undefined, "expired-page"]);
+	assert.equal(
+		run.messages.some((message) => message.type === "STATE"),
+		false,
+	);
 });

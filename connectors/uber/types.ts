@@ -125,3 +125,23 @@ export interface UberFareBreakdownLine {
 	label: string;
 	slug: string;
 }
+
+/** A source continuation, optionally bounded by a previously collected head. */
+export interface UberActivityPosition {
+	next_page_token: string;
+	stop_at_trip_id?: string;
+}
+
+/** Versioned head-plus-backfill checkpoint; absent legacy state starts a walk. */
+export interface UberCursor extends Record<string, unknown> {
+	version: 1;
+	scope: string;
+	head_trip_id?: string;
+	hydrated_trip_ids: string[];
+	hydrated_receipt_ids: string[];
+	backfill?: {
+		scope: string;
+		pages: UberActivityPosition[];
+		pending_trip_ids: string[];
+	};
+}
