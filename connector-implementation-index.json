@@ -1104,7 +1104,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.17",
+				"version": "0.3.18",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -1142,6 +1142,7 @@
 				},
 				"reason_display_messages": {
 					"anthropic_live_backlog_deferred": "This run reached its limit. Later runs collect the rest. No action is needed.",
+					"anthropic_live_request_rejected": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
 					"anthropic_live_session_required": "Claude needs you to sign in again or update your access key. Then run again.",
 					"anthropic_live_unparsed_instant": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
 					"browser_handoff_readiness_probe_failed": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
@@ -1560,7 +1561,7 @@
 				},
 				"connector_key": "apple-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Apple Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -1953,6 +1954,7 @@
 				"reason_display_messages": {
 					"auth_failed": "Apple Contacts needs you to sign in again or update your access key. Then run again.",
 					"carddav_request_failed": "Apple Contacts stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+					"carddav_response_unusable": "This part stopped because of an internal problem reading Apple Contacts. It is not something you can fix.",
 					"discovery_failed": "This connection's settings or selection cannot be used as set. Check them, then run again.",
 					"fake_carddav_server_no_port": "This part stopped because of an internal problem reading Apple Contacts. It is not something you can fix.",
 					"group_inventory_short": "Some items could not be read and were skipped.",
@@ -3781,7 +3783,7 @@
 				},
 				"connector_key": "character-ai",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Character.AI",
 				"brand": {
 					"icon": "icon.svg",
@@ -13885,7 +13887,7 @@
 				},
 				"connector_key": "google-messages",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-messages",
-				"version": "0.1.3",
+				"version": "0.1.4",
 				"display_name": "Google Messages (via gmcli)",
 				"brand": {
 					"icon": "icon.svg",
@@ -14002,7 +14004,7 @@
 					"gmcli_not_installed": "The Google Messages helper tool is not installed on this device. Install it, then run again.",
 					"gmcli_not_paired": "This device is not paired with the Google Messages helper tool. Pair it, then run again.",
 					"gmcli_per_chat_limit_reached": "Older messages in some conversations were not read because of the per-chat limit setting. Raise GMCLI_MESSAGES_PER_CHAT_LIMIT, then run again.",
-					"gmcli_query_failed": "The Google Messages helper tool could not read messages. Check that it is installed and paired, then run again.",
+					"gmcli_query_failed": "The Google Messages helper tool failed while reading messages. Run again later. If it keeps happening, check the tool's own output.",
 					"gmcli_schema_drift": "This part stopped because of an internal problem reading Google Messages. It is not something you can fix."
 				},
 				"options_schema": {
@@ -15450,7 +15452,7 @@
 				},
 				"connector_key": "ical",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Calendar (iCal)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15563,7 +15565,8 @@
 					}
 				],
 				"reason_display_messages": {
-					"ics_fetch_failed": "A calendar subscription could not be read. Check its address and access, then run again.",
+					"ics_fetch_failed": "A calendar subscription could not be reached or did not answer. Run again later.",
+					"ics_subscription_address_invalid": "A calendar subscription address is not valid or the calendar is no longer there. Check the address in this connection's settings, then run again.",
 					"no_calendar_sources": "This connection's settings or selection cannot be used as set. Check them, then run again."
 				}
 			}
@@ -15583,7 +15586,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.48",
+				"version": "0.1.49",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -15791,6 +15794,7 @@
 					"icloud_omitted_rows": "Some items could not be read and were skipped.",
 					"icloud_rate_limited": "iCloud Notes is limiting requests or having trouble right now. Wait a while, then run again.",
 					"icloud_readiness_exhausted": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+					"icloud_request_rejected": "This part stopped because of an internal problem reading iCloud Notes. It is not something you can fix.",
 					"stream_collection_failed": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 				}
 			}
@@ -16056,7 +16060,7 @@
 				},
 				"connector_key": "instinct",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Instinct",
 				"brand": {
 					"icon": "icon.svg",
@@ -16970,7 +16974,7 @@
 				},
 				"connector_key": "jellyfin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-				"version": "0.2.21",
+				"version": "0.2.22",
 				"display_name": "Jellyfin",
 				"brand": {
 					"icon": "icon.svg",
@@ -17212,11 +17216,12 @@
 					"jellyfin_base_url_has_userinfo": "This connection's settings or selection cannot be used as set. Check them, then run again.",
 					"jellyfin_base_url_requires_https_non_loopback": "This connection's settings or selection cannot be used as set. Check them, then run again.",
 					"jellyfin_base_url_unsafe_scheme": "This connection's settings or selection cannot be used as set. Check them, then run again.",
-					"jellyfin_error": "Jellyfin could not be read. If your sign-in or server address changed, update the connection. Otherwise run again later.",
+					"jellyfin_error": "Jellyfin could not be reached or stopped responding. Check that the server is running, then run again.",
 					"jellyfin_http_error": "Jellyfin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 					"jellyfin_media_browser_device_id_empty": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
 					"jellyfin_missing_credentials": "This connection's settings or selection cannot be used as set. Check them, then run again.",
-					"jellyfin_session_failed": "Jellyfin needs you to sign in again or update your access key. Then run again.",
+					"jellyfin_response_unreadable": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+					"jellyfin_settings_rejected": "This connection's settings or selection cannot be used as set. Check them, then run again.",
 					"jellyfin_ssrf_rejected_cross_origin": "This connection's settings or selection cannot be used as set. Check them, then run again.",
 					"jellyfin_total_record_count_negative": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
 					"jellyfin_total_record_count_not_finite": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
@@ -18233,7 +18238,7 @@
 				},
 				"connector_key": "muse",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-				"version": "0.1.12",
+				"version": "0.1.13",
 				"display_name": "Muse (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -18836,6 +18841,7 @@
 					"browser_sign_in_cancelled": "Muse needs you to sign in again or update your access key. Then run again.",
 					"muse_bot_challenge": "Muse showed a check to confirm you are a person. Complete it in the browser, then run again.",
 					"muse_stream_incomplete": "Muse stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+					"muse_stream_needs_update": "This part stopped because of an internal problem reading Muse. It is not something you can fix.",
 					"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again."
 				}
 			}
@@ -19946,7 +19952,7 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Perplexity (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -20187,6 +20193,7 @@
 					"perplexity_auth_failed": "Perplexity needs you to sign in again or update your access key. Then run again.",
 					"perplexity_interrupted": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 					"perplexity_stream_incomplete": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+					"perplexity_stream_needs_update": "This part stopped because of an internal problem reading Perplexity. It is not something you can fix.",
 					"records_unreadable": "Some items could not be read and were skipped.",
 					"sign_in_required": "Perplexity needs you to sign in again or update your access key. Then run again.",
 					"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
@@ -21608,7 +21615,7 @@
 				},
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "0.7.3",
+				"version": "0.7.4",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -26912,7 +26919,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.24",
+				"version": "0.2.25",
 				"display_name": "USAA",
 				"brand": {
 					"icon": "icon.svg",
@@ -28298,7 +28305,7 @@
 				},
 				"connector_key": "whatsapp-web",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "WhatsApp (web)",
 				"brand": {
 					"icon": "icon.svg",
@@ -28758,6 +28765,7 @@
 					"whatsapp_web_refused_call": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix.",
 					"whatsapp_web_stores_not_ready": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 					"whatsapp_web_stream_incomplete": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+					"whatsapp_web_stream_needs_update": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix.",
 					"whatsapp_web_unexpected_shape": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix."
 				},
 				"mobile": {

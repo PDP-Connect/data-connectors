@@ -47,6 +47,7 @@
 	},
 	"reason_display_messages": {
 		"anthropic_live_backlog_deferred": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"anthropic_live_request_rejected": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
 		"anthropic_live_session_required": "Claude needs you to sign in again or update your access key. Then run again.",
 		"anthropic_live_unparsed_instant": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
 		"browser_handoff_readiness_probe_failed": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",

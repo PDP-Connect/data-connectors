@@ -122,7 +122,8 @@
 		}
 	],
 	"reason_display_messages": {
-		"ics_fetch_failed": "A calendar subscription could not be read. Check its address and access, then run again.",
+		"ics_fetch_failed": "A calendar subscription could not be reached or did not answer. Run again later.",
+		"ics_subscription_address_invalid": "A calendar subscription address is not valid or the calendar is no longer there. Check the address in this connection's settings, then run again.",
 		"no_calendar_sources": "This connection's settings or selection cannot be used as set. Check them, then run again."
 	}
 }
