@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import baseConfig from "../../packages/polyfill-connectors/vitest.config.mjs";
 import { VITEST_TESTS } from "../../packages/polyfill-connectors/scripts/test-lanes.mjs";
 
-// One Vitest/Stryker installation, shared with the ordinary Vitest lane. Stryker runs this
+// One pinned test-tools installation, shared with the ordinary Vitest lane. Stryker runs this
 // config from its sandbox, which ignores node_modules; run.ts passes the real tool root
 // through the environment so the pins are still checked, not copied.
 export const toolsRoot =
@@ -19,6 +19,7 @@ const requireTool = createRequire(join(toolsRoot, "package.json"));
 export const pins = {
 	"@stryker-mutator/core": "10.0.0",
 	"@stryker-mutator/vitest-runner": "10.0.0",
+	"fast-check": "4.10.2",
 	vitest: "4.1.12",
 };
 const installCommand =

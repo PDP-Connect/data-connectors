@@ -81,7 +81,7 @@ export interface ChatGptMessage {
 
 export interface ChatGptNode {
 	children?: string[];
-	message?: ChatGptMessage;
+	message?: ChatGptMessage | null;
 	parent?: string | null;
 	[field: string]: unknown;
 }

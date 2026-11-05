@@ -40,7 +40,7 @@ import type {
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	NO_DETAIL_WAITS,
-	withEmptyConversationDetails,
+	withUnavailableConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
 import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
@@ -64,10 +64,14 @@ const runConversationsAndMessagesStreams: typeof runStreams = (
 	state,
 	options,
 ) =>
-	runStreams({ ...deps, api: withEmptyConversationDetails(deps.api) }, state, {
-		...options,
-		detailPacing: { ...NO_DETAIL_WAITS, ...options?.detailPacing },
-	});
+	runStreams(
+		{ ...deps, api: withUnavailableConversationDetails(deps.api) },
+		state,
+		{
+			...options,
+			detailPacing: { ...NO_DETAIL_WAITS, ...options?.detailPacing },
+		},
+	);
 
 // ─── Synthetic fixtures ────────────────────────────────────────────────────
 
@@ -1358,15 +1362,14 @@ test("runConversationsAndMessagesStreams: both streams do not start a second det
 		(r) => r.stream === "conversations" && r.data.id === "conv-mid",
 	);
 	assert.equal(mid?.data.model_counts, null, "listed, counts unknown");
-	// conv-mid is the only row still owed, so the watermark stays below it. The
-	// two rows the messages pass took are kept as exact keys above it.
+	// The deferred row and conv-mid are still owed. Only the successful
+	// message detail is kept as an exact key above the watermark.
 	assert.deepEqual(lastConversationsCursor(protocolMessages), {
 		enumeration_version: 1,
 		last_update_time: "2026-04-22T09:00:00.000Z",
 		detail_version: 2,
 		detail_frontier: null,
 		detail_ids: {
-			"2026-04-22T11:00:00.000Z": ["conv-n2"],
 			"2026-04-22T12:00:00.000Z": ["conv-n1"],
 		},
 	});

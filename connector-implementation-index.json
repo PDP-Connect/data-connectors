@@ -4769,10 +4769,10 @@
 					{
 						"name": "messages",
 						"required": true,
-						"description": "Messages within conversations, flattened from ChatGPT's tree structure to the current-branch path. When filtering removes intermediate nodes, parent_id links to the nearest retained ancestor. The filtered message count is reported through PROGRESS.",
+						"description": "Messages from all branches of conversations, flattened from ChatGPT's tree structure, with on_current_branch identifying the current branch. When filtering removes intermediate nodes, parent_id links to the nearest retained ancestor. The filtered message count is reported through PROGRESS.",
 						"display": {
 							"label": "Your messages",
-							"detail": "Each message on the current branch of every conversation: role, content, model, create time, tool calls, citations, attachment IDs. Alt branches are not exported. When filtering removes intermediate nodes, parent_id links to the nearest retained ancestor; the filtered count is reported through PROGRESS."
+							"detail": "Messages from all branches of every conversation: role, content, model, create time, tool calls, citations, attachment IDs. When filtering removes intermediate nodes, parent_id links to the nearest retained ancestor; the filtered count is reported through PROGRESS."
 						},
 						"semantics": "append_only",
 						"schema": {
@@ -4795,7 +4795,7 @@
 								},
 								"children_ids": {
 									"type": "array",
-									"description": "Record ids of the source node's children, including children on other branches that are not emitted."
+									"description": "Record ids of the source node's children, including children on other branches."
 								},
 								"role": {
 									"type": ["string", "null"],
@@ -6229,11 +6229,15 @@
 					}
 				},
 				"reason_display_messages": {
+					"branch_structurally_incomplete": "A conversation is missing parts of its message history, so it could not be imported",
 					"branch_tip_missing": "A conversation points at a message we couldn't find, so part of it is missing",
 					"branch_truncated": "A conversation is missing earlier messages from its current thread",
 					"conversation_list_unstable": "ChatGPT's conversation list changed between checks, so try again",
+					"detail_http_error": "We could not open a conversation because ChatGPT returned an error",
+					"detail_mapping_missing": "We opened a conversation but could not read its messages",
 					"empty_detail": "We opened this conversation but found no messages to import",
 					"http_error": "We hit a network problem talking to the service",
+					"message_shape_rejected": "A conversation contains a message we could not read, so it could not be imported",
 					"missing_mapping": "We opened this conversation but it had no message data to read",
 					"not_available": "This data isn't available through the current connection",
 					"pagination_cap_truncated": "There were more ChatGPT results than we could safely page through in one run, so we stopped early",

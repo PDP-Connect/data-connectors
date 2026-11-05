@@ -1066,7 +1066,7 @@ function isModelSlug(slug: unknown): slug is string {
  * is an intermediate step, not a reply. `messages` has no further notion of
  * visibility, so none is invented here.
  */
-function isAssistantReply(message: ChatGptMessage | undefined): boolean {
+function isAssistantReply(message: ChatGptMessage | null | undefined): boolean {
 	return (
 		message?.author?.role === "assistant" &&
 		message.end_turn !== false &&
