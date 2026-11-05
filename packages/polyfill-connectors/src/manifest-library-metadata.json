@@ -843,7 +843,8 @@
 			"connector_key": "uber",
 			"reason_display_messages": {
 				"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
-				"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit"
+				"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit",
+				"trip_details_unavailable": "Uber did not return the details of some trips in this run."
 			}
 		}
 	},
