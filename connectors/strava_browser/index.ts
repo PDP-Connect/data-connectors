@@ -32,7 +32,10 @@ import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	createConnectorFailure,
+	runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	activityGearId,
@@ -742,8 +745,14 @@ export async function collectStravaBrowser(
 		pageNumber += 1;
 	}
 
-	if (failure && options.failRunOnIncompleteList && listed.length > 0) {
-		throw new Error(failure.message);
+	// Also when nothing was listed: a streaming host would otherwise store an
+	// empty `{ activities }` for a list it could not read (sign-in, HTML, a new
+	// shape), and the run would look like an account with no activities. The
+	// code tells the host which failure it was.
+	if (failure && options.failRunOnIncompleteList) {
+		throw createConnectorFailure(failure.reason, failure.message, {
+			retryable: failure.reason === "collection_interrupted",
+		});
 	}
 
 	const summaryRecords = fullRefresh ? listed : newlyListed;
