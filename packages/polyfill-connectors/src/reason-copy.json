@@ -336,7 +336,7 @@
 				"message": "Older messages in some conversations were not read because of the per-chat limit setting. Raise GMCLI_MESSAGES_PER_CHAT_LIMIT, then run again."
 			},
 			"gmcli_query_failed": {
-				"message": "The Google Messages helper tool could not read messages. Check that it is installed and paired, then run again."
+				"message": "The Google Messages helper tool failed while reading messages. Run again later. If it keeps happening, check the tool's own output."
 			},
 			"gmcli_schema_drift": "unexpected_data"
 		},

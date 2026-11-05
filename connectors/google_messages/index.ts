@@ -695,11 +695,9 @@ export async function fetchAndParseGmcliMessages(
 		try {
 			outcome = await fetchChatMessages(invoke, chat, perChatLimit);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			return {
-				reason: "gmcli_query_failed",
-				message,
-			};
+			// Same classification as the chat-list call: a helper that went missing
+			// or lost its pairing mid-run is not a generic query failure.
+			return classifyGmcliFetchError(err);
 		}
 		parsed.push(...outcome.messages);
 		if (outcome.possiblyTruncated) {
