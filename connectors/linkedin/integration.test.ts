@@ -1356,7 +1356,7 @@ test("collectLinkedIn: an empty decoration does not block a later usable decorat
 	assert.equal(decorationAttempts, 2);
 });
 
-test("collectLinkedIn: a truncated decorated section does not claim complete coverage", async () => {
+test("collectLinkedIn: a truncated skills first page is upserted without claiming complete coverage", async () => {
 	for (const elements of [
 		[],
 		[
@@ -1390,15 +1390,68 @@ test("collectLinkedIn: a truncated decorated section does not claim complete cov
 
 		await collectLinkedIn(buildCtx(["skills"], recording, route));
 
+		// The first page's rows are upserted; the list is never claimed complete.
 		assert.equal(claimsFullCoverage(recording, "skills"), false);
-		assert.equal(recording.emitted.some((row) => row.stream === "skills"), false);
+		assert.deepEqual(
+			recording.emitted.filter((row) => row.stream === "skills").map((row) => row.data.id),
+			elements.map((skill) => skill.entityUrn),
+		);
 		assert.ok(
 			skipResults(recording).some(
-				(skip) => skip.stream === "skills" &&
-					diagnosticsOf(skip).source_reason === "linkedin_profile_section_unavailable",
+				(skip) => skip.stream === "skills" && skip.reason === "linkedin_enumeration_unproven",
 			),
 		);
 	}
+});
+
+test("collectLinkedIn: categorized skills without top-level paging are upserted (run 9ed80d2c)", async () => {
+	// Categories hold their skills as a list or as a collection of their own,
+	// and the outer list carries no paging: 0.3.42 read this as an unreadable
+	// section and returned no skills at all.
+	const recording = makeRecordingEmit(validateRecord);
+	const profile = {
+		...DASH_PROFILE_RESPONSE.elements[0],
+		profileSkills: {
+			elements: [
+				{ entityUrn: "urn:li:skillCategory:1", name: "Industry Knowledge",
+					skills: { elements: [{ entityUrn: "urn:li:skill:a", name: "A" }, { entityUrn: "urn:li:skill:b", name: "B" }],
+						paging: { start: 0, count: 2, total: 5 } } },
+				{ entityUrn: "urn:li:skillCategory:2", name: "Tools",
+					skills: [{ entityUrn: "urn:li:skill:c", name: "C" }] },
+			],
+		},
+	};
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) return { ...DASH_PROFILE_RESPONSE, elements: [profile] };
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: [], paging: { total: 0 } };
+		}
+		return httpFailure(404);
+	};
+	await collectLinkedIn(buildCtx(["skills"], recording, route));
+	assert.deepEqual(
+		recording.emitted.filter((row) => row.stream === "skills").map((row) => row.data.id),
+		["urn:li:skill:a", "urn:li:skill:b", "urn:li:skill:c"],
+	);
+	assert.equal(claimsFullCoverage(recording, "skills"), false);
+	assert.ok(skipResults(recording).some((skip) => skip.stream === "skills" && skip.reason === "linkedin_enumeration_unproven"));
+});
+
+test("collectLinkedIn: an unreadable section names why on its gap", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) {
+			return { ...DASH_PROFILE_RESPONSE, elements: [{ ...DASH_PROFILE_RESPONSE.elements[0], profileLanguages: { elements: [], paging: { start: 0, count: 10, total: 1 } } }] };
+		}
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) return { elements: [], paging: { total: 0 } };
+		return httpFailure(404);
+	};
+	await collectLinkedIn(buildCtx(["languages"], recording, route));
+	const gap = skipResults(recording).find((skip) => skip.stream === "languages");
+	assert.ok(gap);
+	assert.equal(diagnosticsOf(gap).section_read, "walk_unverified");
 });
 
 test("collectLinkedIn: incomplete nested position paging withholds the experience row", async () => {
@@ -2454,7 +2507,8 @@ test("collectLinkedIn: every stream remains UPSERT-ONLY across enumeration count
 					profile[key] = { ...section, paging: { start: 0, count: 1, total: 2 } };
 				}
 				connections = { ...CONNECTIONS_PAGE_1, paging: { start: 0, count: 40, total: 2 } };
-				expectedCounts = { connections: 1 };
+				// A skills first page is upserted; other truncated sections are withheld.
+				expectedCounts = { connections: 1, skills: 1 };
 			} else if (fixture.startsWith("nested-")) {
 				const one = fixture === "nested-one";
 				profile.profileSkills = {

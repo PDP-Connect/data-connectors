@@ -105,6 +105,7 @@ import {
 	connectionEnrichmentHasMalformedFields,
 	connectionEnrichmentIsReadable,
 	type DashProfileSource,
+	pageElementsAt,
 } from "./parsers.ts";
 import { connectionEvidence, profileEvidence, sectionEvidence, summaryEvidence } from "./evidence.ts";
 import { validateRecord } from "./schemas.ts";
@@ -874,12 +875,20 @@ export async function collectLinkedIn(
 	for (const section of wantedSections) {
 		// Only a full decoration carries the profile sections; an empty list
 		// from the basic fallback is not evidence of an empty section.
-		const items =
+		let items =
 			dashProfileResult.source === "decoration"
 				? collectionAt(dashProfile, section.key)
 				: unavailable("source_unavailable");
+		// The profile decoration carries only the first page of a long or
+		// categorized skills list. Its rows are readable: they are upserted and
+		// the stream reports the unproven enumeration, rather than dropping
+		// every skill (0.3.4x returned none for such accounts).
+		if (section.stream === "skills" && items.kind === "unavailable" && items.reason === "walk_unverified") {
+			items = pageElementsAt(dashProfile, section.key);
+		}
 		if (items.kind !== "read") {
-			await emitUnavailableSection(section.stream, sink, dashProfileResult.failure);
+			await emitUnavailableSection(section.stream, sink, dashProfileResult.failure,
+				items.kind === "unavailable" ? items.reason : undefined);
 			continue;
 		}
 		await emitRows(sink, section.stream, section.build(items.value), {
@@ -1123,8 +1132,13 @@ async function emitUnavailableSection(
 	stream: string,
 	sink: StreamSink,
 	failure?: VoyagerReadCause,
+	/** Why the section could not be read (a closed set, never response text). */
+	sectionRead?: string,
 ): Promise<void> {
-	const diagnostics = { source_reason: "linkedin_profile_section_unavailable" };
+	const diagnostics = {
+		source_reason: "linkedin_profile_section_unavailable",
+		...(sectionRead ? { section_read: sectionRead } : {}),
+	};
 	if (failure) {
 		const message = `LinkedIn ${stream} read failed: ${failure}`;
 		const recoveryHint = { action: "retry_by_runtime", retryable: true };
