@@ -2423,9 +2423,27 @@ async function collectSpotifyWebData(
 	evaluateData?: (page: BrowserCollectContext["page"], streams: string[]) => Promise<BrowserData>,
 ): Promise<BrowserCollectResult> {
 	await openSpotify(page);
-	const evaluated = evaluateData ? await evaluateData(page, requestedStreams) : (await page.evaluate(
-		spotifyPageEvaluateSource(requestedStreams),
-	)) as BrowserData;
+	const evaluate = async (): Promise<BrowserData> =>
+		evaluateData
+			? await evaluateData(page, requestedStreams)
+			: ((await page.evaluate(spotifyPageEvaluateSource(requestedStreams))) as BrowserData);
+	let evaluated: BrowserData;
+	try {
+		evaluated = await evaluate();
+	} catch (error) {
+		// The query hashes are read from the web player's own bundles. A player
+		// that yielded none of them (RSS run e898e5d4: all five missing on a
+		// remote browser, while the same account read them ten minutes earlier)
+		// is loaded once more, to completion, and read again before the export
+		// is given up.
+		const message = error instanceof Error ? error.message : String(error);
+		if (!message.includes("spotify_missing_hashes_")) throw error;
+		connectorDiagnostic("spotify", "query_hashes_reload", {
+			missing: message.slice(message.indexOf("spotify_missing_hashes_") + 23).split(/\s/)[0] ?? "",
+		});
+		await page.goto(SPOTIFY_WEB_HOME, { waitUntil: "load" });
+		evaluated = await evaluate();
+	}
 	if (requestedStreams.includes("recently_played_contexts")) {
 		const recent = parseRecentContextRows(evaluated.recent_context_pages ?? []);
 		evaluated.recently_played_contexts = recent.rows;
