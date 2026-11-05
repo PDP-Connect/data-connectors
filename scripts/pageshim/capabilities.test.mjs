@@ -57,6 +57,7 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 		"page_input",
 		"cookie_read",
 		"page_response_observation",
+		"page_init_script",
 		"host_cookie_jar_request",
 	];
 	const catalogSchema = JSON.parse(
@@ -150,6 +151,33 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 		},
 	};
 	assert.equal(isPageShimCapable(capabilityConnector), true);
+});
+
+test("page_init_script is optional on PageShim: usable, never required", () => {
+	const withBrowser = (browser) => ({
+		runtime_requirements: {
+			bindings: {
+				browser,
+				network: { required: true, features: ["same_origin_page_fetch"] },
+			},
+		},
+	});
+	assert.deepEqual(
+		pageShimIncompatibilities(withBrowser({ required: true, features: ["page_navigation", "page_init_script"] })),
+		["browser feature page_init_script is optional on PageShim and cannot be required"],
+	);
+	assert.deepEqual(
+		pageShimIncompatibilities({
+			runtime_requirements: {
+				bindings: {
+					network: { required: true, features: ["same_origin_page_fetch"] },
+					browser: { required: false, features: ["page_init_script"] },
+				},
+			},
+		}),
+		["browser binding is not required"],
+	);
+	assert.equal(isPageShimCapable(withBrowser({ required: true, features: ["page_navigation"] })), true);
 });
 
 test("every declared mobile connector remains PageShim eligible", () => {

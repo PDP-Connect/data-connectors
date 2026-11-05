@@ -22,6 +22,8 @@ const FRIENDS_COLLECTION = "YXBwX2NvbGxlY3Rpb246MTAwNDc2OjI=";
 const GROUPS_DOC_ID = "2222222222222";
 const GROUPS_QUERY = "GroupsCometAllJoinedGroupsSectionPaginationQuery";
 const NOW = 1792600000;
+/** A friends query id only the page's own request shows (see pageRequestFixtures). */
+const NEWER_FRIENDS_DOC_ID = "3333333333333";
 
 const html = (body = "", status = 200) => ({
 	status,
@@ -184,7 +186,7 @@ const MODULES = {
 	[`${GROUPS_QUERY}_facebookRelayOperation`]: GROUPS_DOC_ID,
 };
 
-function signedInPage(data) {
+function signedInPage(data, { modules = MODULES, script = "" } = {}) {
 	const payload = {
 		require: [
 			[
@@ -195,9 +197,9 @@ function signedInPage(data) {
 					{
 						__bbox: {
 							define: [
-								["CurrentUserInitialData", [], MODULES.CurrentUserInitialData, 270],
-								["DTSGInitialData", [], MODULES.DTSGInitialData, 258],
-								["LSD", [], MODULES.LSD, 323],
+								["CurrentUserInitialData", [], modules.CurrentUserInitialData, 270],
+								["DTSGInitialData", [], modules.DTSGInitialData, 258],
+								["LSD", [], modules.LSD, 323],
 							],
 							require: [
 								["RelayPrefetchedStreamCache", "next", [], ["adp_synthetic", { __bbox: { complete: true, result: { data, extensions: { is_final: true } }, sequence_number: 0 } }]],
@@ -208,9 +210,10 @@ function signedInPage(data) {
 			],
 		],
 	};
-	const requireScript = `window.require = (function (modules) { return function (name) { if (!Object.prototype.hasOwnProperty.call(modules, name)) throw new Error("Requiring unknown module \\"" + name + "\\""); return modules[name]; }; })(${JSON.stringify(MODULES)});`;
+	const requireScript = `window.require = (function (modules) { return function (name) { if (!Object.prototype.hasOwnProperty.call(modules, name)) throw new Error("Requiring unknown module \\"" + name + "\\""); return modules[name]; }; })(${JSON.stringify(modules)});`;
 	return html(
-		`<div id="mount_0_0">Facebook</div><script>${requireScript}</script><script type="application/json" data-sjs>${JSON.stringify(payload)}</script>`,
+		`<div id="mount_0_0" style="height:6000px">Facebook</div><script>${requireScript}</script><script type="application/json" data-sjs>${JSON.stringify(payload)}</script>` +
+			(script ? `<script>${script}</script>` : ""),
 	);
 }
 
@@ -235,7 +238,7 @@ function answerGraphql(request) {
 	} catch {
 		variables = {};
 	}
-	if (form.get("doc_id") === FRIENDS_DOC_ID && name === FRIENDS_QUERY && variables.cursor === "friends-c1" && variables.id === FRIENDS_COLLECTION)
+	if ([FRIENDS_DOC_ID, NEWER_FRIENDS_DOC_ID].includes(form.get("doc_id")) && name === FRIENDS_QUERY && variables.cursor === "friends-c1" && variables.id === FRIENDS_COLLECTION)
 		return graphql(FRIENDS_PAGE_2);
 	if (form.get("doc_id") === GROUPS_DOC_ID && name === GROUPS_QUERY && variables.cursor === "groups-c1")
 		return graphql(GROUPS_PAGE_2);
@@ -281,3 +284,45 @@ export const pageshimCase = {
 		details: { profile: 0, posts: 0, friends: 0, groups: 0, reactions: 0, comments: 0 },
 	},
 };
+
+/**
+ * The friends page as a newer web app ships it: the loaded modules no longer
+ * name the friends query, and the page asks for the next page itself, with a
+ * newer query id, when the list is scrolled. Only a host that sees the
+ * page's own request can read the friends list past its first page.
+ * `pageRequests` lists the query ids of the requests the page itself sent,
+ * `connectorRequests` those the connector sent, with their x-asbd-id.
+ */
+export function pageRequestFixtures() {
+	const pageRequests = [];
+	const connectorRequests = [];
+	const modules = Object.fromEntries(Object.entries(MODULES).filter(([key]) => !key.startsWith(FRIENDS_QUERY)));
+	const script = `window.addEventListener("scroll", () => {
+ if (window.__askedNext) return;
+ window.__askedNext = true;
+ const body = new URLSearchParams({
+  av: ${JSON.stringify(VIEWER)}, fb_dtsg: ${JSON.stringify(DTSG)}, fb_api_caller_class: "RelayModern",
+  fb_api_req_friendly_name: ${JSON.stringify(FRIENDS_QUERY)}, doc_id: ${JSON.stringify(NEWER_FRIENDS_DOC_ID)},
+  variables: JSON.stringify({ count: 8, cursor: "friends-c1", id: ${JSON.stringify(FRIENDS_COLLECTION)}, scale: 2 }),
+ });
+ fetch("/api/graphql/", { method: "POST", body, headers: { "x-fb-friendly-name": ${JSON.stringify(FRIENDS_QUERY)}, "x-asbd-id": "129477", "x-synthetic-page": "1" } })
+  .then((response) => response.text());
+});`;
+	return {
+		...facebookFixtures,
+		pageRequests,
+		connectorRequests,
+		resolve(raw, request) {
+			const url = new URL(raw);
+			if (url.pathname === "/api/graphql/") {
+				const form = new URLSearchParams(request?.postData ?? "");
+				if (request?.headers?.["x-synthetic-page"]) pageRequests.push(form.get("doc_id"));
+				else connectorRequests.push(`${form.get("fb_api_req_friendly_name")} ${form.get("doc_id")} ${request?.headers?.["x-asbd-id"] ?? "-"}`);
+				return answerGraphql(request);
+			}
+			if (!loggedIn) return resolveFixture(raw, request);
+			const data = PRELOADED[`${url.pathname}${url.search}`] ?? PRELOADED[url.pathname] ?? {};
+			return signedInPage(data, url.pathname === "/me/friends_all" ? { modules, script } : { modules });
+		},
+	};
+}

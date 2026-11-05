@@ -3739,14 +3739,12 @@ for (const kind of ["login-wall", "consent-wall", "evidence-mid-read", "session-
 			assert.ok(/^Partial:/.test(run.data.status ?? "") || Boolean(run.data.error), "loss must not report completion");
 			if (kind.endsWith("mid-read")) {
 				// First proof is real and positive; the row read then invalidates it.
-				// Removing the final refresh/veto in pageshim.ts would emit STATE
+				// Removing the history walk's final end re-read would emit STATE
 				// from this stale proof and fail the state/status assertions above.
 				assert.equal(proofs[0]?.verifiedEmpty, true);
 				assert.equal(proofs[0]?.pageBlocked, false);
-				assert.equal(batches.length, 1);
-				assert.equal(batches[0].totalRows, 0);
-				assert.equal(proofs.length, 2);
-				assert.equal(proofs[1].verifiedEmpty, false);
+				assert.ok(batches.length >= 1 && batches.every((batch) => batch.totalRows === 0));
+				assert.equal(proofs.at(-1)?.verifiedEmpty, false);
 			}
 		}
 	});
@@ -3813,28 +3811,54 @@ for (const handlerOn of ["renderer", "anchor"]) test(`youtube: profile email com
 	}
 });
 
-test("youtube: capped history upserts the prefix without claiming completion or checkpoint", { timeout: 180_000 }, async () => {
+test("youtube: Mobile watch history follows continuations through the in-page capture and proves the end only from them", { timeout: 900_000 }, async () => {
 	const fx = await import("./fixtures/youtube.mjs");
-	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-prefix.js") });
-	const fixtures = { ...fx.youtubeFixtures, resolve: (raw) =>
-		new URL(raw).pathname === "/feed/history" ? fx.historyPrefixFixture(60) : fx.resolveFixture(raw) };
-	for (const resultStreaming of [false, true]) {
-	const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.watch_history"], resultStreaming,
-		resultSpoolDirectory: join(out, `youtube-prefix-${resultStreaming}`),
-		initialState: { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } } });
-	assert.deepEqual(run.ret, { ok: true });
-	assertCleanRun(run);
-	const result = resultStreaming ? run.streamDone : run.result;
-	const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.watch_history"], "utf8")) : run.result["youtube.watch_history"];
-	assert.equal(scope.records.length, 50);
-	assert.deepEqual(scope.records.map((row) => row.video_id), Array.from({ length: 50 }, (_, index) => `synthetic-history-${index}`));
-	assert.equal(scope.records[0].id, createHash("sha256").update("history|synthetic-history-0").digest("hex").slice(0, 24));
-	assert.match(result.errors[0].reason, /inventory_not_proven_complete/);
-	assert.deepEqual(run.states, { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } });
-	assert.deepEqual(run.stateMessages, []);
-	assert.equal(result.errors.length, 1);
-	assert.equal(result.errors[0].errorClass, "partial");
-	assert.match(run.data.status, /^Partial:/);
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-history-capture.js") });
+	// Continuation 1 arrives over XHR, continuation 2 (the last) over fetch.
+	const cases = [
+		{ name: "to the end", options: {}, rows: 11, complete: [true, true] },
+		{ name: "error status", options: { status: { "synthetic-token-2": 500 } }, rows: 8, complete: [false, false] },
+		{ name: "replaced document", options: { reloadOn: 2 }, rows: 8, complete: [false, false] },
+		// Sent while the document loads: only a capture installed at document
+		// start sees it; without it, later tokens never correlate.
+		{ name: "continuation during load", options: { eager: true }, rows: 11, complete: [false, true] },
+	];
+	for (const pageInitScript of [false, true]) for (const c of cases) {
+		const label = `${c.name} (${pageInitScript ? "init script" : "evaluate"})`;
+		const complete = c.complete[pageInitScript ? 1 : 0];
+		const resultStreaming = c.name === "to the end" && pageInitScript;
+		const app = fx.historyAppFixture(c.options);
+		const run = await runHarness({ bundle: built.outfile, fixtures: { ...fx.youtubeFixtures, resolve: app.resolve },
+			scopes: ["youtube.watch_history"], pageInitScript, resultStreaming,
+			resultSpoolDirectory: join(out, `youtube-history-capture-${resultStreaming}`) });
+		assert.deepEqual(run.ret, { ok: true }, label);
+		assertCleanRun(run);
+		assert.equal(run.initScripts.length, pageInitScript ? 1 : 0, label);
+		// After a reload the new document starts again from token 1.
+		if (c.options.reloadOn) assert.ok(!app.browseRequests.includes("synthetic-token-2"), label);
+		else assert.deepEqual(app.browseRequests, ["synthetic-token-1", "synthetic-token-2"], label);
+		const result = resultStreaming ? run.streamDone : run.result;
+		const scope = resultStreaming
+			? JSON.parse(await readFile(run.streamScopeFiles["youtube.watch_history"], "utf8"))
+			: run.result["youtube.watch_history"];
+		assert.deepEqual(scope.records.map((row) => row.video_id), app.ids.slice(0, c.rows), label);
+		const capture = run.log.find((line) => line.includes("history_capture"));
+		assert.match(capture, new RegExp(`"mode":"${pageInitScript ? "init_script" : "evaluate"}"`), label);
+		if (complete) {
+			assert.deepEqual(result.errors, [], label);
+			const cursor = run.states["youtube.watch_history"];
+			assert.equal(cursor.complete, true, label);
+			assert.equal(cursor.evidence, "latest-history-response", label);
+			// Record ids are Desktop's: history|<video>|<watched date>.
+			const date = cursor.backfill_anchor_id.split("|")[1];
+			assert.equal(scope.records[0].id, createHash("sha256").update(`history|${app.ids[0]}|${date}`).digest("hex").slice(0, 24), label);
+		} else {
+			assert.equal(result.errors.length, 1, label);
+			assert.equal(result.errors[0].errorClass, "partial", label);
+			assert.match(result.errors[0].reason, /did not show the end of this list/, label);
+			assert.deepEqual(run.states, {}, label);
+			assert.match(run.data.status, /^Partial:/, label);
+		}
 	}
 });
 
@@ -3856,14 +3880,14 @@ test("youtube: incomplete subscriptions preserve observed rows and fail closed",
 	assert.deepEqual(run.states, {});
 });
 
-test("meta: independent streams preserve posts gaps, WebCrypto ids and accepted STATE on both hosts", {timeout: 180_000}, async () => {
+test("meta: independent streams preserve gaps, WebCrypto ids and accepted STATE on both hosts", {timeout: 180_000}, async () => {
  const {createMetaFixtures} = await import("./fixtures/meta.mjs");
  const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-all.js")});
  for (const resultStreaming of [false, true]) {
   const codes = [];
   const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(),
    scopes: ["profile", "posts", "post_likes", "following", "ads"].map(s => "instagram." + s),
-   initialState: {"instagram.posts": {old: true}}, resultStreaming,
+   initialState: {"instagram.post_likes": {old: true}}, resultStreaming,
    resultSpoolDirectory: join(out, "meta-all-" + resultStreaming),
    observeBridge: (method, args) => { if (method === "evaluate") codes.push(args[0].length); },
   });
@@ -3872,27 +3896,110 @@ test("meta: independent streams preserve posts gaps, WebCrypto ids and accepted 
   assert.equal(r.data.error, undefined);
   assert.match(r.data.status, /^Partial:/);
   const result = resultStreaming ? r.streamDone : r.result;
-  assert.deepEqual(result.errors.map(e => e.scope), ["instagram.posts", "instagram.post_likes", "instagram.ads"]);
+  // post_likes is a facepile sample (post 2 has more likes than likers).
+  assert.deepEqual(result.errors.map(e => e.scope), ["instagram.post_likes", "instagram.ads"]);
   assert.ok(result.errors.every(e => /not proven complete/.test(e.reason)));
-  for (const error of result.errors.slice(0, 2)) {
-   assert.match(error.reason, /passive GraphQL.*page-minted/);
-  }
-  assert.deepEqual(r.stateMessages.map(m => m.stream), ["instagram.following"]);
+  assert.deepEqual(r.stateMessages.map(m => m.stream), ["instagram.posts", "instagram.following"]);
   assert.deepEqual(r.states["instagram.following"], {});
+  assert.deepEqual(r.states["instagram.posts"], {});
+  assert.deepEqual(r.states["instagram.post_likes"], {old: true});
   const scope = async name => resultStreaming
    ? JSON.parse(await readFile(r.streamScopeFiles["instagram." + name], "utf8"))
    : r.result["instagram." + name];
   assert.equal((await scope("profile")).records.length, 1);
   assert.equal((await scope("following")).records.length, 1);
+  assert.equal((await scope("posts")).records.length, 3);
+  assert.equal((await scope("post_likes")).records.length, 4);
   const ads = (await scope("ads")).records;
   assert.equal(ads.length, 3);
   for (const row of ads) assert.equal(row.id, createHash("sha256").update(row.kind + "|" + row.name).digest("hex").slice(0, 32));
   assert.ok(codes.length > 0 && Math.max(...codes) <= 65_536);
-  if (resultStreaming) {
-   assert.equal(r.streamResult.completed, true);
-   assert.equal(r.streamScopeFiles["instagram.posts"], undefined);
-  } else assert.equal(r.result["instagram.posts"], undefined);
+  if (resultStreaming) assert.equal(r.streamResult.completed, true);
  }
+});
+
+test("meta: posts and post_likes on PageShim read the app's own posts query through the in-page capture", {timeout: 600_000}, async () => {
+ const {createMetaFixtures, POSTS_PAGES, syntheticPost, timelinePage} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-posts.js")});
+ const scopes = ["instagram.posts", "instagram.post_likes"];
+ const firstPage = POSTS_PAGES[""];
+ const cases = [
+  // Page 1 over XHR after a client-side navigation, page 2 over fetch after a scroll.
+  {name: "two pages", options: {}, posts: 3, likes: 4, postsComplete: true, likesComplete: false,
+   cursors: ["", "synthetic-cursor-1"]},
+  {name: "every liker sampled", options: {postsPages: {"": timelinePage([syntheticPost(1, 2)], null)}, mediaCount: 1},
+   posts: 1, likes: 2, postsComplete: true, likesComplete: true, cursors: [""]},
+  // The app never asks for page 2: the walk stops without an end signal.
+  {name: "no next page", options: {scroll: false}, posts: 2, likes: 3, postsComplete: false, likesComplete: false,
+   cursors: [""]},
+  // The app asks for page 1 again after the end and gets fewer posts: a
+  // contradiction, so posts are never complete, though every post is kept.
+  {name: "contradictory repeat", options: {refetchFirstPage: true, postsPages: {...POSTS_PAGES,
+   "": [firstPage, timelinePage([syntheticPost(1, 2)], "synthetic-cursor-1")]}},
+   posts: 3, likes: 4, postsComplete: false, likesComplete: false, cursors: ["", "synthetic-cursor-1", ""]},
+  // No client routing: the click loads a new document and the capture is gone.
+  {name: "full page load", options: {routing: "reload"}, failed: true, cursors: [""]},
+ ];
+ // With page_init_script the walk loads the profile directly, so a site
+ // without client routing reads like one with it.
+ const initCases = cases.map(c => c.name === "full page load"
+  ? {...c, failed: false, posts: 3, likes: 4, postsComplete: true, likesComplete: false, cursors: ["", "synthetic-cursor-1"]}
+  : c);
+ for (const [pageInitScript, c] of [...cases.map(c => [false, c]), ...initCases.map(c => [true, c])]) {
+  const label = `${c.name} (${pageInitScript ? "init script" : "evaluate"})`;
+  const fixtures = createMetaFixtures(c.options);
+  const r = await runHarness({bundle: built.outfile, fixtures, scopes, pageInitScript,
+   initialState: {"instagram.posts": {old: true}, "instagram.post_likes": {old: true}}});
+  assertCleanRun(r);
+  assert.equal(r.initScripts.length, pageInitScript ? 1 : 0, label);
+  assert.deepEqual(r.ret, {ok: true}, label);
+  assert.equal(r.data.error, undefined, label);
+  assert.deepEqual(fixtures.postsRequests.map(p => p.cursor), c.cursors, label);
+  assert.ok(fixtures.postsRequests.every(p => p.pageMinted), label);
+  const errors = Object.fromEntries(r.result.errors.map(e => [e.scope, e.reason]));
+  if (c.failed) {
+   assert.equal(r.result["instagram.posts"]?.records.length ?? 0, 0, label);
+   for (const scope of scopes) assert.match(errors[scope], /read failed before the source's end/, label);
+   assert.deepEqual(r.stateMessages, [], label);
+   continue;
+  }
+  const posts = r.result["instagram.posts"].records;
+  assert.equal(posts.length, c.posts, label);
+  assert.equal(r.result["instagram.post_likes"].records.length, c.likes, label);
+  assert.deepEqual(posts.map(p => p.id), firstPage.data.xdt_api__v1__feed__user_timeline_graphql_connection.edges
+   .map(e => e.node.id).concat(c.posts > 2 ? ["3401000000000000003"] : []).slice(0, c.posts), label);
+  assert.equal(errors["instagram.posts"] === undefined, c.postsComplete, label);
+  assert.equal(errors["instagram.post_likes"] === undefined, c.likesComplete, label);
+  for (const reason of Object.values(errors)) assert.match(reason, /not proven complete/, label);
+  assert.deepEqual(r.stateMessages.map(m => m.stream),
+   [...(c.postsComplete ? ["instagram.posts"] : []), ...(c.likesComplete ? ["instagram.post_likes"] : [])], label);
+  assert.deepEqual(r.states["instagram.posts"], c.postsComplete ? {} : {old: true}, label);
+ }
+});
+
+test("facebook: Mobile takes a list's query from the page's own request through the in-page capture", { timeout: 300_000 }, async () => {
+	const { pageRequestFixtures } = await import("./fixtures/facebook.mjs");
+	const built = await buildPageshim({ connector: "facebook", outfile: join(out, "facebook-page-request.js") });
+	for (const pageInitScript of [false, true]) {
+		const label = pageInitScript ? "init script" : "evaluate";
+		// The loaded modules no longer name the friends query; only the request
+		// the page sends on scroll shows its (newer) query id.
+		const fixtures = pageRequestFixtures();
+		const run = await runHarness({ bundle: built.outfile, fixtures, pageInitScript,
+			scopes: ["facebook.friends", "facebook.groups"] });
+		assertCleanRun(run);
+		assert.deepEqual(run.ret, { ok: true }, label);
+		assert.equal(run.initScripts.length, pageInitScript ? 1 : 0, label);
+		assert.deepEqual(run.result.errors, [], label);
+		assert.equal(run.result["facebook.friends"].records.length, 3, label);
+		assert.equal(run.result["facebook.groups"].records.length, 2, label);
+		assert.deepEqual(fixtures.pageRequests, ["3333333333333"], label);
+		// Friends pages with the captured id and x-asbd-id; groups with the module's id.
+		assert.deepEqual(fixtures.connectorRequests, [
+			"ProfileCometAppCollectionSelfFriendsListRendererPaginationQuery 3333333333333 129477",
+			"GroupsCometAllJoinedGroupsSectionPaginationQuery 2222222222222 -",
+		], label);
+	}
 });
 
 test("meta: following empty, contradictory, owner and partial-page evidence never fabricate completion", {timeout: 180_000}, async () => {

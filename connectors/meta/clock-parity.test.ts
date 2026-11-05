@@ -45,14 +45,18 @@ function decision(body: unknown): "data" | "empty" | "not-proven" {
 	return edges.length === 0 ? "empty" : "data";
 }
 
+// The legacy runner's posts loop: it polled the host's last captured posts
+// response once a second (last response wins). `latestPostsResponse` stands
+// in for that host call, which no host offers any more; only the clock
+// matters here.
 async function runLegacyLoop(
 	responses: TimedResponse[],
 ): Promise<"data" | "empty" | "not-proven"> {
 	let now = 0;
 	const pending = [...responses].sort((a, b) => a.atMs - b.atMs);
-	const captured = new Map<string, { data: unknown }>();
+	let latest: { data: unknown } | null = null;
 	const page = {
-		getCapturedResponse: async (key: string) => captured.get(key) ?? null,
+		latestPostsResponse: async () => latest,
 		sleep: async (ms: number) => {
 			now += ms;
 			while (
@@ -61,7 +65,7 @@ async function runLegacyLoop(
 			) {
 				const response = pending.shift();
 				if (response?.body) {
-					captured.set("postsResponse", { data: response.body });
+					latest = { data: response.body };
 				}
 			}
 		},
@@ -75,7 +79,7 @@ async function runLegacyLoop(
 			while (attempts < maxAttempts && !postsData) {
 				await page.sleep(1000);
 				attempts++;
-				postsData = await page.getCapturedResponse("postsResponse");
+				postsData = await page.latestPostsResponse();
 			}
 			return postsData?.data ?? null;
 		})()

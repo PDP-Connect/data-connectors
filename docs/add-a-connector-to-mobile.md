@@ -18,12 +18,38 @@
 | `page_input` | Interact with the active page: click and type. |
 | `cookie_read` | Read the active page's cookie jar. |
 | `page_response_observation` | Observe page network responses, including response body content. |
+| `page_init_script` | Run script in the main frame at the start of every later document, before the page's own scripts. |
 | `host_cookie_jar_request` | Make an HTTP request from the host runtime using the active page's cookie jar. |
 
-PageShim does not implement the last four features yet (Collection Profile
-Section 3.3.8); they are part of the shared vocabulary so a connector can
-declare them, and a host that does not support them is simply ineligible for
-that connector, the same as any other unsupported feature.
+PageShim does not implement `page_input`, `cookie_read`,
+`page_response_observation` or `host_cookie_jar_request` yet (Collection
+Profile Section 3.3.8); they are part of the shared vocabulary so a connector
+can declare them, and a host that does not support them is simply ineligible
+for that connector, the same as any other unsupported feature.
+
+`page_init_script` is optional on PageShim: some Mobile hosts offer it and
+others do not. A connector must not require it. It may use it when the page
+offers `addInitScript` (see `createPageExchangeCapture` in
+`packages/polyfill-connectors/src/page-exchange-capture.ts`) and must still
+work without it. `scripts/pageshim/capabilities.mjs` rejects a manifest that
+requires it.
+
+The Mobile host always has `page.addInitScript`. It lists `page_init_script`
+only in its `capabilities()` reply, which a bundle cannot read, and on a
+device whose WebView cannot run scripts at document start the call rejects.
+Treat a rejection as "not offered". An accepted script runs in the main frame
+only, and only on the row's `cookieDomain` host and its subdomains. The host
+wraps it in a block, so a top-level `let`, `const` or `class` stays local:
+write it as one self-contained function call that sets shared state on
+`window` explicitly. The host refuses, never truncates, a script over 64 KiB,
+a run's 17th script, a run past 256 KiB, or a script whose brackets, strings
+or comments do not balance. `scripts/pageshim/init-script-host.mjs` applies
+the same rules in the harness.
+
+No manifest declares `page_init_script` yet. An installer validates the whole
+catalog against the schema it shipped with, and an installer older than this
+feature name rejects a catalog that contains it. Declare it only after
+installers that know the name are deployed.
 
 The enum is defined in `schemas/connector-manifest.schema.json`; the catalog and implementation-index schemas reference that shared definition. A host declares support with a set of feature names for each binding. PageShim's binding-to-feature support map is in `scripts/pageshim/capabilities.mjs`; another host publishes its own map. Eligibility requires every required binding and declared feature to be supported.
 
