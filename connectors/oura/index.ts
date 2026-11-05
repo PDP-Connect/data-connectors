@@ -315,7 +315,29 @@ interface RunStreamArgs<T extends OuraRow> {
 interface OuraScope {
 	since: string | null;
 	until: string | null;
-	resources: unknown;
+	resources: string[] | null;
+}
+
+function normalizeScope(scope: {
+	since?: string | null;
+	until?: string | null;
+	resources?: unknown;
+} | undefined): OuraScope {
+	return {
+		since: scope?.since ?? null,
+		until: scope?.until ?? null,
+		resources: Array.isArray(scope?.resources)
+			? [...new Set(scope.resources.filter((value): value is string => typeof value === "string"))].sort()
+			: null,
+	};
+}
+
+function sameScope(left: OuraScope, right: OuraScope): boolean {
+	return left.since === right.since && left.until === right.until
+		&& (left.resources === null || right.resources === null
+			? left.resources === right.resources
+			: left.resources.length === right.resources.length
+				&& left.resources.every((resource, index) => resource === right.resources?.[index]));
 }
 
 interface OuraCursor {
@@ -325,6 +347,8 @@ interface OuraCursor {
 	frontier?: {
 		start_date: string;
 		newest_day: string | null;
+		/** Shrinks incomplete windows; absent in older STATE. Never a page token. */
+		window_days?: number;
 	} | null;
 }
 
@@ -360,31 +384,38 @@ async function runWindows(
 		time_range?: { since?: string; until?: string };
 		resources?: unknown;
 	} | undefined;
-	const scope: OuraScope = {
+	const scope = normalizeScope({
 		since: request?.time_range?.since ?? null,
 		until: request?.time_range?.until ?? null,
 		resources: request?.resources ?? null,
-	};
+	});
 	const saved = state[streamName] as OuraCursor | undefined;
 	const legacy = !saved?.scope && !saved?.frontier;
 	const useSaved = !fullRefresh
-		&& (legacy || JSON.stringify(saved?.scope) === JSON.stringify(scope));
+		&& (legacy || sameScope(normalizeScope(saved?.scope), scope));
 	let startDate = (useSaved
 		? day(saved?.frontier?.start_date) ?? day(saved?.last_day)
 		: null) ?? day(scope.since) ?? FIRST_OURA_DAY;
 	let newestDay = useSaved
 		? (saved?.frontier ? day(saved.frontier.newest_day) : day(saved?.last_day))
 		: null;
+	const savedWindowDays = useSaved ? saved?.frontier?.window_days : undefined;
+	let windowDays = typeof savedWindowDays === "number"
+		&& Number.isInteger(savedWindowDays) && savedWindowDays > 0
+		? Math.min(savedWindowDays, WINDOW_DAYS) : WINDOW_DAYS;
 	const tomorrow = addDays(today, 1);
 	const until = day(scope.until);
 	const endDate = until && until < tomorrow ? until : tomorrow;
 	const remaining = endpoints.map(() => maxPages);
 	const emitted = new Set<string>();
 	let totalSeen = 0;
-	let complete = startDate >= endDate;
+	let complete = startDate > endDate;
+	let singleDayOverflow = false;
 
-	while (startDate < endDate && remaining.every((pages) => pages > 0)) {
-		const boundary = addDays(startDate, WINDOW_DAYS);
+	while (!complete && remaining.every((pages) => pages > 0)) {
+		// Oura date bounds are inclusive. Keep the established overlap between
+		// larger windows, but a one-day fallback must request exactly one day.
+		const boundary = windowDays === 1 ? startDate : addDays(startDate, windowDays);
 		const windowEnd = boundary < endDate ? boundary : endDate;
 		const results = await Promise.all(endpoints.map((endpoint, index) =>
 			fetchAll<OuraRow>(
@@ -410,12 +441,18 @@ async function runWindows(
 			}
 		}
 		if (truncated) {
+			// Tokens have no established cross-run lifetime. Split the date
+			// window instead of replaying an unfinishable prefix forever.
+			singleDayOverflow = startDate === windowEnd
+				&& results.some((result) => result.truncated && result.pages === maxPages);
+			windowDays = startDate === windowEnd ? 1 : Math.max(1, Math.floor(windowDays / 2));
 			break;
 		}
 		// An unordered page gives no safe date frontier. Only an exhausted
-		// window does. Keep its end inclusive for adjacent windows and retries.
-		startDate = windowEnd;
-		complete = startDate >= endDate;
+		// window does. Retain overlap, except after an exhausted single day.
+		complete = windowEnd >= endDate;
+		startDate = windowEnd === startDate ? addDays(windowEnd, 1) : windowEnd;
+		windowDays = WINDOW_DAYS;
 	}
 
 	if (!complete) {
@@ -423,8 +460,12 @@ async function runWindows(
 			type: "SKIP_RESULT",
 			stream: streamName,
 			reason: "older_pages_deferred_page_budget",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+			recovery_hint: singleDayOverflow
+				? { action: "retry_on_connector_upgrade", retryable: false }
+				: { action: "retry_by_runtime", retryable: true },
+			message: singleDayOverflow
+				? `Oura ${streamName} exceeded the ${String(maxPages)}-page limit within one day; no safe cross-run page token is available`
+				: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
 			diagnostics: {
 				page_limit: maxPages,
 				total_seen: totalSeen,
@@ -441,6 +482,7 @@ async function runWindows(
 			frontier: complete ? null : {
 				start_date: startDate,
 				newest_day: newestDay,
+				window_days: windowDays,
 			},
 		},
 	});
