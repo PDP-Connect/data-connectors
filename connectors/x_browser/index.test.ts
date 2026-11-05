@@ -1111,7 +1111,8 @@ test("an old pinned post stays known when the saved head holds only newer ids", 
 	// Pinned post id 1, then 60 newer posts: more than the 50 head ids kept.
 	const pages = fixturePages();
 	const originals = JSON.parse(pages["UserOriginalsTimeline"]?.[""] ?? "");
-	const instructions = originals.data.user.result.timeline.timeline.instructions;
+	const instructions =
+		originals.data.user.result.timeline.timeline.instructions;
 	const pin = instructions[1].entry;
 	pin.entryId = "tweet-1";
 	pin.content.itemContent.tweet_results.result.rest_id = "1";
@@ -1122,7 +1123,9 @@ test("an old pinned post stays known when the saved head holds only newer ids", 
 	];
 	const entries = instructions[2].entries as Array<{ entryId: string }>;
 	const template = entries[0];
-	const cursors = entries.filter((entry) => entry.entryId.startsWith("cursor-"));
+	const cursors = entries.filter((entry) =>
+		entry.entryId.startsWith("cursor-"),
+	);
 	const postIds = Array.from({ length: 60 }, (_, index) =>
 		String(1990000000000000300n - BigInt(index)),
 	);
@@ -1156,7 +1159,10 @@ test("an old pinned post stays known when the saved head holds only newer ids", 
 	const first = harness(new FakeWebApp({ pages }), ["posts"]);
 	await collectXBrowser(first.ctx, FAST);
 	assert.ok(first.ids("posts").includes("1"));
-	assert.equal(first.ids("posts").filter((id) => postIds.includes(String(id))).length, 60);
+	assert.equal(
+		first.ids("posts").filter((id) => postIds.includes(String(id))).length,
+		60,
+	);
 
 	const app = new FakeWebApp({ pages });
 	const second = harness(app, ["posts"], { state: first.states() });

@@ -1083,12 +1083,14 @@ test("the unreadable-position report fits the line budget at a full page", async
 				status: 200,
 				body: {
 					total_results: matching.length,
-					messages: matching.slice(offset, offset + SEARCH_PAGE).map((message) => {
-						const at = index.get(message.id) ?? 0;
-						return at < lastOffset || (at - lastOffset) % 2 === 0
-							? [{ author: { id: OWNER }, hit: true }]
-							: [message];
-					}),
+					messages: matching
+						.slice(offset, offset + SEARCH_PAGE)
+						.map((message) => {
+							const at = index.get(message.id) ?? 0;
+							return at < lastOffset || (at - lastOffset) % 2 === 0
+								? [{ author: { id: OWNER }, hit: true }]
+								: [message];
+						}),
 				},
 			};
 		}),
@@ -1384,7 +1386,13 @@ test("an unusable author completes readable records and is recoverable by full r
 							.map((message) => {
 								if (message.id !== all[3]?.id) return [message];
 								return author === undefined
-									? [{ hit: true, id: message.id, timestamp: message.timestamp }]
+									? [
+											{
+												hit: true,
+												id: message.id,
+												timestamp: message.timestamp,
+											},
+										]
 									: [{ ...message, author }];
 							}),
 					},
