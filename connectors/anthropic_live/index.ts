@@ -262,6 +262,18 @@ function isRetryableStatus(status: number): boolean {
 	return status === 0 || status === 429 || status >= 500;
 }
 
+/**
+ * Reason for a non-OK status that is not an auth failure (401 throws
+ * AuthError before this) or an unavailable resource (403/404). A status a
+ * retry can clear stays `http_error`; any other 4xx means claude.ai rejected
+ * the request itself, which only a connector update fixes.
+ */
+function httpFailureReason(status: number): string {
+	return isRetryableStatus(status)
+		? "http_error"
+		: "anthropic_live_request_rejected";
+}
+
 /** The export connector's rule: `chat`, then `claude_max`, then the first. */
 export function selectChatOrganization(orgs: unknown): RawOrganization | null {
 	if (!Array.isArray(orgs)) return null;
@@ -325,7 +337,13 @@ export async function runAccountPlanStream(
 ): Promise<void> {
 	await ctx.progress("Fetching account plans", { stream: ACCOUNT_PLAN_STREAM });
 	if (!hasReadablePlanOrganizationInventory(organizations)) {
-		await skip(ctx, ACCOUNT_PLAN_STREAM, "parse_error", "The organization list contains an unreadable entry.", true);
+		await skip(
+			ctx,
+			ACCOUNT_PLAN_STREAM,
+			"parse_error",
+			"The organization list contains an unreadable entry.",
+			true,
+		);
 		return;
 	}
 	const usable = usablePlanOrganizations(organizations);
@@ -353,7 +371,7 @@ export async function runAccountPlanStream(
 			await skip(
 				ctx,
 				ACCOUNT_PLAN_STREAM,
-				"http_error",
+				httpFailureReason(res.status),
 				`subscription_details http ${res.status}`,
 				isRetryableStatus(res.status),
 			);
@@ -440,7 +458,7 @@ export async function runUsageLimitsStream(
 		await skip(
 			ctx,
 			USAGE_LIMITS_STREAM,
-			"http_error",
+			httpFailureReason(res.status),
 			`usage http ${res.status}`,
 			isRetryableStatus(res.status),
 		);

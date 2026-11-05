@@ -74,6 +74,7 @@
 		},
 		"anthropic-live": {
 			"anthropic_live_backlog_deferred": "continues_later",
+			"anthropic_live_request_rejected": "unexpected_data",
 			"anthropic_live_session_required": "sign_in_again",
 			"anthropic_live_unparsed_instant": "unexpected_data",
 			"browser_handoff_readiness_probe_failed": "incomplete_retry",
