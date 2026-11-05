@@ -143,7 +143,7 @@ export interface UberCursor extends Record<string, unknown> {
 		scope: string;
 		pages: UberActivityPosition[];
 		pending_trip_ids: string[];
-		/** Failed runs per ID; counts of three prevent retries during overlap. */
+		/** Permanent failures per ID; transient faults do not consume retries. */
 		detail_failure_counts?: Record<string, number>;
 	};
 }

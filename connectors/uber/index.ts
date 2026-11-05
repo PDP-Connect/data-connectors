@@ -15,8 +15,8 @@
  *     head marker, scoped page continuations, pending detail IDs, and the
  *     successfully hydrated IDs while backfill is open. The source's
  *     nextPageToken resumes history after each per-run budget; only actual
- *     budget deferral emits a retryable skip. Failed details retire after
- *     three failed runs without being marked hydrated.
+ *     budget deferral emits a budget skip. Failed details retire after
+ *     three permanent failures without being marked hydrated.
  *     The head boundary assumes Activities is newest-first. The prior
  *     connector flagged live confirmation of that ordering as outstanding.
  *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
@@ -299,19 +299,46 @@ function makePageFetch(page: Page): UberPageFetch {
 	};
 }
 
+class UberHttpError extends Error {
+	constructor(
+		readonly status: number,
+		message: string,
+	) {
+		super(message);
+	}
+}
+
+function isPermanentDetailFailure(error: unknown): boolean {
+	return (
+		error instanceof SyntaxError ||
+		(error instanceof UberHttpError &&
+			error.status >= 400 &&
+			error.status < 500 &&
+			error.status !== 408 &&
+			error.status !== 429)
+	);
+}
+
 function assertUberOk(
 	status: number,
 	body: string,
 	operationName: string,
 ): void {
 	if (status === 401 || status === 403) {
-		throw new Error(`uber_session_expired [endpoint ${operationName}]`);
+		throw new UberHttpError(
+			status,
+			`uber_session_expired [endpoint ${operationName}]`,
+		);
 	}
 	if (status === 429) {
-		throw new Error(`uber_rate_limited [endpoint ${operationName}]`);
+		throw new UberHttpError(
+			status,
+			`uber_rate_limited [endpoint ${operationName}]`,
+		);
 	}
 	if (status < 200 || status >= 300) {
-		throw new Error(
+		throw new UberHttpError(
+			status,
 			`uber_http_${String(status)} [endpoint ${operationName}]: ${redactTransportDetail(body).slice(0, 200)}`,
 		);
 	}
@@ -417,7 +444,7 @@ async function fetchGetTrip(
 	return parsed.data?.getTrip;
 }
 
-/** One trip's fare-breakdown lines from GetReceipt. Never throws; an empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
+/** One trip's fare-breakdown lines; transport and JSON failures remain distinguishable from absent receipt evidence. */
 async function fetchFareBreakdown(
 	fetchPath: UberPageFetch,
 	tripId: string,
@@ -532,17 +559,32 @@ export async function collectAllStreams(
 
 	const tripsRequired: string[] = [];
 	const tripsHydrated: string[] = [];
+	const attemptedTripIds = new Set<string>();
+	let rateLimit: UberHttpError | undefined;
 	for (const [index, tripId] of tripIds.entries()) {
+		attemptedTripIds.add(tripId);
+		let permanentFailure = false;
+		let transientFailure = false;
+		const recordFailure = (error: unknown) => {
+			if (isPermanentDetailFailure(error)) {
+				permanentFailure = true;
+			} else {
+				transientFailure = true;
+			}
+			if (error instanceof UberHttpError && error.status === 429) {
+				rateLimit = error;
+			}
+		};
+
 		if (wantTrips && !hydratedTrips.has(tripId)) {
 			tripsRequired.push(tripId);
-		}
-
-		let getTrip: UberGetTripResult | undefined;
-		if (wantTrips && !hydratedTrips.has(tripId)) {
+			let getTrip: UberGetTripResult | undefined;
+			let fetched = false;
 			try {
 				getTrip = await fetchGetTrip(fetchPath, tripId);
-			} catch {
-				getTrip = undefined;
+				fetched = true;
+			} catch (error) {
+				recordFailure(error);
 			}
 			const record = getTrip
 				? tripRecord(tripId, getTrip.trip, getTrip.receipt)
@@ -551,49 +593,60 @@ export async function collectAllStreams(
 				await emitRecord("trips", record);
 				tripsHydrated.push(tripId);
 				hydratedTrips.add(tripId);
+			} else if (fetched) {
+				permanentFailure = true;
 			}
 		}
 
-		if (wantReceipts && !hydratedReceipts.has(tripId)) {
+		if (!rateLimit && wantReceipts && !hydratedReceipts.has(tripId)) {
 			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
+			let fetched = false;
 			try {
 				fareBreakdown = await fetchFareBreakdown(fetchPath, tripId);
-			} catch {
-				fareBreakdown = [];
+				fetched = true;
+			} catch (error) {
+				recordFailure(error);
 			}
 			const receipt = receiptRecord(tripId, fareBreakdown);
 			if (receipt) {
 				await emitRecord("receipts", receipt);
 				hydratedReceipts.add(tripId);
+			} else if (fetched) {
+				permanentFailure = true;
 			}
 		}
 
-		// Count one failed run per trip, even when both detail calls fail.
-		if (needsDetail(tripId)) {
+		// A transient failure in either requested stream must not retire the ID.
+		if (!needsDetail(tripId)) {
+			detailFailureCounts.delete(tripId);
+		} else if (permanentFailure && !transientFailure) {
 			detailFailureCounts.set(
 				tripId,
 				(detailFailureCounts.get(tripId) ?? 0) + 1,
 			);
-		} else {
-			detailFailureCounts.delete(tripId);
 		}
+		if (rateLimit) break;
 
 		const isLast = index === tripIds.length - 1;
-		if (!isLast && (wantTrips || wantReceipts)) {
+		if (!isLast) {
 			await delay(DETAIL_DELAY_MS);
 		}
 	}
 
-	// Rotate failed details behind unattempted IDs, but retire them after
-	// three failed runs without claiming they hydrated. Keep exhausted counts
-	// until backfill closes so overlapping pages cannot restart their retries.
+	// Unattempted IDs, including work stopped by a rate limit, remain pending.
+	// Only permanent failures consume the three-run retirement allowance.
 	const pendingTripIds = [
-		...candidates.slice(MAX_DETAIL_FETCHES),
+		...candidates.filter((id) => !attemptedTripIds.has(id)),
 		...tripIds.filter(
-			(id) => needsDetail(id) && (detailFailureCounts.get(id) ?? 0) < 3,
+			(id) =>
+				attemptedTripIds.has(id) &&
+				needsDetail(id) &&
+				(detailFailureCounts.get(id) ?? 0) < 3,
 		),
 	];
-	const detailTruncated = candidates.length > MAX_DETAIL_FETCHES;
+	const detailTruncated =
+		attemptedTripIds.size === MAX_DETAIL_FETCHES &&
+		candidates.length > MAX_DETAIL_FETCHES;
 	const backfillIncomplete = truncated || pendingTripIds.length > 0;
 	const headTripId = headIds[0] ?? previous?.head_trip_id;
 	const cursor: UberCursor = {
@@ -646,6 +699,31 @@ export async function collectAllStreams(
 				},
 			});
 		}
+		// A failed detail is not a budget stop. Report each stream whose
+		// attempted trips still lack detail, so the run does not look complete.
+		if (!rateLimit) {
+			const gaps: Array<["trips" | "receipts", Set<string>]> = [];
+			if (wantTrips) gaps.push(["trips", hydratedTrips]);
+			if (wantReceipts) gaps.push(["receipts", hydratedReceipts]);
+			for (const [stream, hydrated] of gaps) {
+				const missing = [...attemptedTripIds].filter((id) => !hydrated.has(id));
+				if (missing.length === 0) continue;
+				const retrying = missing.filter((id) =>
+					pendingTripIds.includes(id),
+				).length;
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "trip_details_unavailable",
+					recovery_hint:
+						retrying > 0
+							? { action: "retry_by_runtime", retryable: true }
+							: { action: "retry_on_connector_upgrade", retryable: false },
+					message: `Uber did not return ${stream} detail for ${String(missing.length)} trip(s) in this run`,
+					diagnostics: { missing: missing.length, retrying },
+				});
+			}
+		}
 	}
 	if (wantTrips) {
 		// Receipts keeps using trips' checkpoint and has no independent
@@ -661,6 +739,8 @@ export async function collectAllStreams(
 			}),
 		);
 	}
+	// Save retryable work and emit coverage before propagating the named fault.
+	if (rateLimit) throw rateLimit;
 }
 
 if (isMainModule(import.meta.url)) {

@@ -696,13 +696,19 @@ for (const failedOperation of ["GetTrip", "GetReceipt", "both"]) {
 						),
 					},
 				],
-				getTrip: tripResponses(tripIds),
-				getReceipt: Object.fromEntries(
-					receiptIds.map((id) => [
-						id,
-						{ body: getReceiptBody(RECEIPT_HTML("$10.00")) },
-					]),
-				),
+				getTrip: {
+					bad: { status: 404, body: "not found" },
+					...tripResponses(tripIds),
+				},
+				getReceipt: {
+					bad: { status: 404, body: "not found" },
+					...Object.fromEntries(
+						receiptIds.map((id) => [
+							id,
+							{ body: getReceiptBody(RECEIPT_HTML("$10.00")) },
+						]),
+					),
+				},
 			});
 			await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
 			cursor = backfillCursor(run.messages);
@@ -899,4 +905,196 @@ test("collectAllStreams: reordered resources preserve the saved page position", 
 		["GetTrip:resource-tail"],
 	);
 	assert.equal(backfillCursor(second.messages).backfill, undefined);
+});
+
+for (const operation of ["GetTrip", "GetReceipt"]) {
+	for (const failure of ["429", "408", "503", "network"]) {
+		test(`collectAllStreams: three ${operation} ${failure} failures stay pending and recover`, async () => {
+			let cursor: ReturnType<typeof backfillCursor> | undefined;
+			for (let attempt = 1; attempt <= 4; attempt += 1) {
+				const run = makeCtx(["trips", "receipts"]);
+				if (cursor) run.ctx.state = { trips: cursor };
+				const script = makeScriptedFetch({
+					activitiesPages: [{ body: activitiesBody([{ uuid: "retry-trip" }]) }],
+					getTrip: tripResponses(["retry-trip"]),
+					getReceipt: {
+						"retry-trip": { body: getReceiptBody(RECEIPT_HTML("$10.00")) },
+					},
+				});
+				const fetchPath: UberPageFetch = (name, query, variables) => {
+					if (attempt < 4 && name === operation) {
+						if (failure === "network") {
+							return Promise.reject(new Error("network disconnected"));
+						}
+						return Promise.resolve({
+							status: Number(failure),
+							body: "unavailable",
+						});
+					}
+					return script.fetchPath(name, query, variables);
+				};
+				if (attempt < 4 && failure === "429") {
+					await assert.rejects(
+						collectAllStreams(run.ctx, fetchPath, NO_DELAY),
+						/uber_rate_limited/,
+					);
+				} else {
+					await collectAllStreams(run.ctx, fetchPath, NO_DELAY);
+				}
+				cursor = backfillCursor(run.messages);
+				if (attempt < 4) {
+					assert.deepEqual(cursor.backfill?.pending_trip_ids, ["retry-trip"]);
+					assert.equal(
+						cursor.backfill?.detail_failure_counts?.["retry-trip"] ?? 0,
+						0,
+					);
+				} else {
+					assert.equal(cursor.backfill, undefined);
+					assert.equal(
+						run.emitted.filter(
+							(record) =>
+								record.stream ===
+								(operation === "GetTrip" ? "trips" : "receipts"),
+						).length,
+						1,
+					);
+				}
+			}
+		});
+	}
+
+	test(`collectAllStreams: ${operation} rate limit stops detail fetching and checkpoints remaining IDs`, async () => {
+		const run = makeCtx(["trips", "receipts"]);
+		const script = makeScriptedFetch({
+			activitiesPages: [
+				{ body: activitiesBody([{ uuid: "a" }, { uuid: "b" }]) },
+			],
+			getTrip: {
+				...tripResponses(["a", "b"]),
+				...(operation === "GetTrip" ? { a: { status: 429, body: "" } } : {}),
+			},
+			getReceipt: {
+				a: {
+					status: operation === "GetReceipt" ? 429 : 200,
+					body: getReceiptBody(RECEIPT_HTML("$10.00")),
+				},
+				b: { body: getReceiptBody(RECEIPT_HTML("$10.00")) },
+			},
+		});
+		await assert.rejects(
+			collectAllStreams(run.ctx, script.fetchPath, NO_DELAY),
+			/uber_rate_limited/,
+		);
+		assert.deepEqual(
+			script.calls,
+			operation === "GetTrip"
+				? ["Activities", "GetTrip:a"]
+				: ["Activities", "GetTrip:a", "GetReceipt:a"],
+		);
+		const cursor = backfillCursor(run.messages);
+		assert.deepEqual(
+			new Set(cursor.backfill?.pending_trip_ids),
+			new Set(["a", "b"]),
+		);
+		assert.deepEqual(cursor.backfill?.detail_failure_counts, {});
+	});
+}
+
+test("collectAllStreams: two head pages share the Activities ceiling with continuation pages", async () => {
+	const initialIds = Array.from({ length: 200 }, (_, i) => `initial-${i}`);
+	const first = makeCtx(["trips"]);
+	const initial = makeScriptedFetch({
+		activitiesPages: initialIds.map((uuid, i) => ({
+			body: activitiesBody([{ uuid }], `history-${i + 1}`),
+		})),
+		getTrip: tripResponses(initialIds),
+	});
+	await collectAllStreams(first.ctx, initial.fetchPath, NO_DELAY);
+	const second = makeCtx(["trips"]);
+	second.ctx.state = { trips: backfillCursor(first.messages) };
+	const olderIds = Array.from({ length: 200 }, (_, i) => `older-${i}`);
+	const resumed = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "new-1" }], "head-2") },
+			{
+				body: activitiesBody(
+					[{ uuid: "new-2" }, { uuid: "initial-0" }],
+					"unused-head",
+				),
+			},
+			...olderIds.map((uuid, i) => ({
+				body: activitiesBody([{ uuid }], `history-${201 + i}`),
+			})),
+		],
+		getTrip: tripResponses(["new-1", "new-2", ...olderIds]),
+	});
+	await collectAllStreams(second.ctx, resumed.fetchPath, NO_DELAY);
+	assert.equal(
+		resumed.calls.filter((call) => call === "Activities").length,
+		200,
+	);
+	assert.deepEqual(resumed.activityTokens.slice(0, 3), [
+		undefined,
+		"head-2",
+		"history-200",
+	]);
+	assert.equal(resumed.activityTokens[199], "history-397");
+	assert.deepEqual(backfillCursor(second.messages).backfill?.pages, [
+		{ next_page_token: "history-398" },
+	]);
+});
+
+for (const streams of [["receipts"], ["trips", "receipts"]] as const) {
+	test(`collectAllStreams: a failed receipt reports a detail gap (${streams.join("+")})`, async () => {
+		const run = makeCtx([...streams]);
+		const script = makeScriptedFetch({
+			activitiesPages: [{ body: activitiesBody([{ uuid: "gap-trip" }]) }],
+			getTrip: tripResponses(["gap-trip"]),
+			getReceipt: { "gap-trip": { status: 503, body: "unavailable" } },
+		});
+		await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+		assert.deepEqual(backfillCursor(run.messages).backfill?.pending_trip_ids, [
+			"gap-trip",
+		]);
+		const gaps = run.messages.filter(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "trip_details_unavailable",
+		);
+		assert.equal(gaps.length, 1);
+		const [gap] = gaps;
+		assert.ok(gap && gap.type === "SKIP_RESULT");
+		assert.equal(gap.stream, "receipts");
+		assert.deepEqual(gap.recovery_hint, {
+			action: "retry_by_runtime",
+			retryable: true,
+		});
+	});
+}
+
+test("collectAllStreams: a retired receipt reports a gap that a rerun cannot fill", async () => {
+	let cursor: ReturnType<typeof backfillCursor> | undefined;
+	for (let attempt = 1; attempt <= 3; attempt += 1) {
+		const run = makeCtx(["receipts"]);
+		if (cursor) run.ctx.state = { trips: cursor };
+		const script = makeScriptedFetch({
+			activitiesPages: [{ body: activitiesBody([{ uuid: "gone-trip" }]) }],
+			getReceipt: { "gone-trip": { status: 404, body: "not found" } },
+		});
+		await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+		cursor = backfillCursor(run.messages);
+		const gap = run.messages.find(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "trip_details_unavailable",
+		);
+		assert.ok(gap && gap.type === "SKIP_RESULT");
+		assert.deepEqual(
+			gap.recovery_hint,
+			attempt < 3
+				? { action: "retry_by_runtime", retryable: true }
+				: { action: "retry_on_connector_upgrade", retryable: false },
+		);
+	}
+	assert.equal(cursor?.backfill, undefined);
 });
