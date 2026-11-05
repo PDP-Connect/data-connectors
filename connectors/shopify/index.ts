@@ -1088,19 +1088,37 @@ interface ShopifyBackfillScope {
 	resources: string[] | null;
 }
 
+function normalizeShopifyScope(value: unknown): ShopifyBackfillScope | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const scope = value as Record<string, unknown>;
+	if ((scope.since != null && typeof scope.since !== "string") ||
+		(scope.until != null && typeof scope.until !== "string") ||
+		(scope.resources != null && (!Array.isArray(scope.resources) ||
+			!scope.resources.every((resource) => typeof resource === "string")))) return null;
+	return {
+		since: typeof scope.since === "string" ? scope.since : null,
+		until: typeof scope.until === "string" ? scope.until : null,
+		resources: Array.isArray(scope.resources) ? [...new Set(scope.resources as string[])].sort() : null,
+	};
+}
+
 function shopifyBackfillScope(args: CollectShopifyArgs): ShopifyBackfillScope {
 	const scope = args.requested.get(ORDERS_STREAM);
-	return {
-		since: scope?.time_range?.since ?? null,
-		until: scope?.time_range?.until ?? null,
-		resources: scope?.resources ? [...new Set(scope.resources)].sort() : null,
-	};
+	return normalizeShopifyScope({
+		since: scope?.time_range?.since ?? null, until: scope?.time_range?.until ?? null,
+		resources: scope?.resources ?? null,
+	}) ?? { since: null, until: null, resources: null };
 }
 
 function savedShopifyCheckpoint(value: unknown, scope: ShopifyBackfillScope): OrderHistoryCheckpoint | null {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
 	const state = value as Record<string, unknown>;
-	if (state.backfill_version !== 1 || JSON.stringify(state.backfill_scope) !== JSON.stringify(scope) ||
+	const savedScope = normalizeShopifyScope(state.backfill_scope);
+	if (state.backfill_version !== 1 || savedScope === null ||
+		savedScope.since !== scope.since || savedScope.until !== scope.until ||
+		(savedScope.resources === null ? scope.resources !== null : scope.resources === null ||
+			savedScope.resources.length !== scope.resources.length ||
+			savedScope.resources.some((resource, index) => resource !== scope.resources?.[index])) ||
 		!(state.head === null || typeof state.head === "string")) return null;
 	const backfill = state.backfill;
 	if (backfill === null) return { head: state.head as string | null, backfill: null };
@@ -1113,7 +1131,9 @@ function savedShopifyCheckpoint(value: unknown, scope: ShopifyBackfillScope): Or
 			!(position.stopAt === null || (typeof position.stopAt === "string" && position.stopAt.length > 0))) return null;
 		positions.push({ after: position.after as string | null, stopAt: position.stopAt as string | null });
 	}
-	return { head: state.head as string | null, backfill: positions };
+	const seen = Array.isArray(state.sweep_seen) && state.sweep_seen.every((id) => typeof id === "string")
+		? [...new Set(state.sweep_seen as string[])] : null;
+	return { head: state.head as string | null, backfill: positions, seen };
 }
 
 /** The connector's whole `orders` stream logic, independent of Playwright —
@@ -1128,8 +1148,8 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	const backfillScope = shopifyBackfillScope(args);
 	const savedCheckpoint = args.collectionMode === "full_refresh"
 		? null : savedShopifyCheckpoint(state[ORDERS_STREAM], backfillScope);
-	args.orderHistoryApi?.resume(savedCheckpoint);
 	const runDeadlineAt = args.runDeadlineAt ?? Date.now() + (args.runBudgetMs ?? DEFAULT_RUN_BUDGET_MS);
+	args.orderHistoryApi?.resume(savedCheckpoint, runDeadlineAt);
 	const operationTimeoutMs = args.browserOperationTimeoutMs ?? DEFAULT_BROWSER_OPERATION_TIMEOUT_MS;
 	let cachedDiagnostics = EMPTY_SHOP_DIAGNOSTICS;
 	const refreshDiagnostics = (): void => {
@@ -1297,8 +1317,9 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	const prior = state[ORDERS_STREAM];
 	const priorFingerprints = typeof prior === "object" && prior !== null && "fingerprints" in prior &&
 		typeof prior.fingerprints === "object" && prior.fingerprints !== null ? prior.fingerprints : {};
+	const sweepSeen = resumeEvidence?.resumed ? savedCheckpoint?.seen ?? null : [];
 	const knownIds = new Set([
-		...(resumeEvidence?.resumed ? Object.keys(priorFingerprints) : []),
+		...(resumeEvidence?.resumed ? sweepSeen ?? Object.keys(priorFingerprints) : []),
 		...validRecords.map((record) => String(record.id)),
 	]);
 	const mismatch = walked.countMismatch || (resumeEvidence
@@ -1378,9 +1399,13 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	const checkpointable = resumeEvidence !== null && !pageBlocked && !mismatch && discardedRows === 0 &&
 		(complete || (truncated && walked.reason === "page_budget"));
 	if (!complete && !checkpointable) return;
-	// Incremental API reads intentionally omit previously collected segments.
-	// Prune only a complete fresh scan; partial/resumed scans retain all hashes.
-	if (complete && !resumeEvidence?.resumed) cursor.dropUnseenIds();
+	// A rolling sweep retains validated IDs from earlier runs. Legacy partial
+	// checkpoints without that proof wait for the next sweep before pruning.
+	if (complete && resumeEvidence === null) cursor.dropUnseenIds();
+	const fingerprints = cursor.toState();
+	const nextFingerprints = complete && resumeEvidence !== null && sweepSeen !== null
+		? Object.fromEntries(Object.entries(fingerprints).filter(([id]) => knownIds.has(id)))
+		: fingerprints;
 
 	await emit({
 		type: "STATE",
@@ -1390,12 +1415,13 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		// connector-authoring-guide.md §6) — the cursor only recognizes its
 		// prior state nested under this key.
 		cursor: {
-			fingerprints: cursor.toState(),
+			fingerprints: nextFingerprints,
 			...(resumeEvidence ? {
 				backfill_version: 1,
 				backfill_scope: backfillScope,
 				head: resumeEvidence.checkpoint.head,
 				backfill: resumeEvidence.checkpoint.backfill,
+				sweep_seen: complete ? null : sweepSeen === null ? null : [...knownIds],
 			} : {}),
 		},
 	});

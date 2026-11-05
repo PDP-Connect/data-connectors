@@ -46,6 +46,8 @@ export interface OrderHistoryApiRequest {
 	after: string | null;
 	pageSize: number;
 	identity?: Readonly<OrderHistoryPageIdentity>;
+	/** Absolute run deadline, serialized into the browser page. */
+	deadlineAt?: number;
 }
 
 export interface OrderHistoryApiReply {
@@ -84,12 +86,18 @@ export async function fetchOrderHistoryPageInPage(
 	];
 	let reply: { status: number; body: unknown } = { status: 0, body: null };
 	for (const attempt of attempts) {
+		if (request.deadlineAt !== undefined && Date.now() >= request.deadlineAt) break;
 		const beforeUrl = new URL(location.href);
 		if (`${beforeUrl.origin}${beforeUrl.pathname}` !== identity.url || String(performance.timeOrigin) !== identity.navigation) {
 			return { status: 0, body: null };
 		}
+		const controller = new AbortController();
+		const timer = request.deadlineAt === undefined ? undefined : setTimeout(
+			() => controller.abort(), Math.max(0, request.deadlineAt - Date.now()),
+		);
 		try {
 			const response = await fetch(attempt.url, {
+				signal: controller.signal,
 				method: attempt.method,
 				credentials: "same-origin",
 				headers: attempt.body === undefined
@@ -128,6 +136,8 @@ export async function fetchOrderHistoryPageInPage(
 			if (reply.status === 0) reply = { status: response.status, body };
 		} catch {
 			// A network failure is an unusable page; the next form may still work.
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
 		}
 	}
 	return reply;
@@ -251,6 +261,8 @@ export interface OrderHistoryBackfillPosition {
 export interface OrderHistoryCheckpoint {
 	head: string | null;
 	backfill: OrderHistoryBackfillPosition[] | null;
+	/** Validated record IDs observed in this sweep; absent on legacy state. */
+	seen?: string[] | null;
 }
 
 export interface OrderHistoryResumeEvidence {
@@ -270,7 +282,7 @@ export function orderHistoryResumeEvidence(cache: ApolloCache | null): OrderHist
 
 export interface OrderHistoryApiReader {
 	/** Configure before the first read. Omitted by legacy reader callers. */
-	resume(checkpoint: OrderHistoryCheckpoint | null): void;
+	resume(checkpoint: OrderHistoryCheckpoint | null, deadlineAt?: number): void;
 	/** Last immutable successful snapshot, never an in-flight reply. */
 	snapshot(): ApolloCache | null;
 	/** Fetches further pages within a small time box and returns the cache read so far. */
@@ -292,6 +304,7 @@ export function createOrderHistoryApiReader({
 	maxPages = MAX_ORDER_HISTORY_API_PAGES,
 	readBudgetMs = DEFAULT_READ_BUDGET_MS,
 	now = Date.now,
+	runDeadlineAt = Number.POSITIVE_INFINITY,
 }: {
 	fetchPage: FetchOrderHistoryPage;
 	/** Required for browser-backed readers; omitted only by synthetic fetchers. */
@@ -299,6 +312,7 @@ export function createOrderHistoryApiReader({
 	maxPages?: number;
 	readBudgetMs?: number;
 	now?: () => number;
+	runDeadlineAt?: number;
 }): OrderHistoryApiReader {
 	const pages: OrderHistoryApiPage[] = [];
 	const cursors = new Set<string>();
@@ -327,27 +341,34 @@ export function createOrderHistoryApiReader({
 		return true;
 	};
 	return {
-		resume(checkpoint) {
+		resume(checkpoint, deadlineAt) {
+			if (deadlineAt !== undefined) runDeadlineAt = Math.min(runDeadlineAt, deadlineAt);
 			if (pages.length > 0 || fetches > 0) throw new Error("Shop history resume must be configured before reading");
 			resumable = true;
-			resumed = checkpoint !== null;
+			resumed = checkpoint?.backfill !== null && checkpoint?.backfill !== undefined;
 			head = checkpoint?.head ?? null;
 			work = [{ after: null, stopAt: head }, ...(checkpoint?.backfill ?? []).map((position) => ({ ...position }))];
 			// No prior head means no safe shortcut: scan from the first page to EOF.
-			if (head === null) work = [{ after: null, stopAt: null }];
+			// With no open segment, begin the next refresh sweep immediately.
+			// Reuse its first page for head catch-up rather than fetching it twice.
+			if (head === null || !resumed) work = [{ after: null, stopAt: null }];
 		},
 		snapshot() { return invalidated ? null : lastCache; },
 		async read() {
 			if (!(await ownsPage())) return null;
-			const deadline = now() + readBudgetMs;
+			const deadline = Math.min(runDeadlineAt, now() + readBudgetMs);
+			const initialFetches = fetches;
 			while (!ended && (resumable ? fetches : pages.length) < maxPages && consecutiveFailures < MAX_CONSECUTIVE_PAGE_FAILURES) {
+				if (now() >= runDeadlineAt || (fetches > initialFetches && now() >= deadline)) break;
 				if (!(await ownsPage())) return null;
+				if (now() >= runDeadlineAt) break;
 				const position = resumable ? work[0] : undefined;
 				if (resumable && !position) { ended = true; break; }
 				if (position) nextAfter = position.after;
 				fetches += 1;
 				const reply = await fetchPage({ after: nextAfter, pageSize: ORDER_HISTORY_API_PAGE_SIZE,
-					...(identity === null ? {} : { identity }) });
+					...(identity === null ? {} : { identity }),
+					...(Number.isFinite(runDeadlineAt) ? { deadlineAt: runDeadlineAt } : {}) });
 				if (!(await ownsPage())) return null;
 				const connection = readOrderHistoryConnection(reply);
 				if (!connection) {
@@ -358,9 +379,9 @@ export function createOrderHistoryApiReader({
 							(reply.status === 200 && /(?:invalid|expired|rejected).*cursor|cursor.*(?:invalid|expired|rejected)/i.test(JSON.stringify(reply.body) ?? "")))) {
 						restarted = true;
 						work = [{ after: null, stopAt: null }];
-						pages.length = 0;
+						// Keep validated pages so a reset checkpoint can be committed
+						// even if this rejection used the final request or deadline.
 						cursors.clear();
-						lastCache = null;
 						head = null;
 						resumed = false;
 						nextAfter = null;
@@ -378,7 +399,7 @@ export function createOrderHistoryApiReader({
 						const id = order === null ? null : orderId(order.id);
 						return id === null ? [] : [id];
 					});
-					if (pages.length === 1 && nextAfter === null) head = ids[0] ?? head;
+					if (nextAfter === null && (pages.length === 1 || head === null)) head = ids[0] ?? head;
 					if (!connection.pageInfo.hasNextPage) {
 						// EOF from the head covers every pending segment. EOF while
 						// resuming a segment also makes older segments unnecessary.
@@ -414,7 +435,7 @@ export function createOrderHistoryApiReader({
 				cacheResumeEvidence.set(cache, {
 					checkpoint: { head, backfill: work.length === 0 ? null : work.map((position) => ({ ...position })) },
 					complete: work.length === 0,
-					budgetHit: !ended && fetches >= maxPages,
+					budgetHit: !ended && (fetches >= maxPages || now() >= runDeadlineAt),
 					resumed,
 					totalCount: totals.length === 0 || invalidTotal ? null : Math.max(...totals.map(Number)),
 					invalidTotal,
