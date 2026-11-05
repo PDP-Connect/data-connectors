@@ -814,6 +814,12 @@ interface StreamPlan {
 	readonly newIds: Map<ViewName, string[]>;
 	/** The stored head ids by view, so one view cannot evict another's. */
 	readonly stored: ReadonlyMap<ViewName, readonly string[]>;
+	/**
+	 * The pinned post read or skipped as known in this run, by view. It is
+	 * kept in the saved head even when older than every kept id, so an
+	 * unchanged run does not emit it again.
+	 */
+	readonly pinned: Map<ViewName, string>;
 	/** An ISO instant; posts created before it end the walk. */
 	readonly since: string | null;
 }
@@ -1212,7 +1218,10 @@ async function takeItem(
 		if (post.id === backfill.position) backfill.phase = "backfill";
 		return null;
 	}
-	if (known) return null;
+	if (known) {
+		if (pinned) plan.pinned.set(view.name, post.id);
+		return null;
+	}
 	const alreadyEmitted = plan.emitted.has(post.id);
 	if (
 		!alreadyEmitted &&
@@ -1253,6 +1262,7 @@ async function takeItem(
 	}
 	await run.ctx.emitRecord(view.stream, postData(post));
 	outcome.saved += 1;
+	if (pinned) plan.pinned.set(view.name, post.id);
 	return null;
 }
 
@@ -2019,6 +2029,7 @@ function planStream(
 		known,
 		newIds: new Map(),
 		stored: storedByView,
+		pinned: new Map(),
 		since,
 	};
 }
@@ -2039,7 +2050,7 @@ function nextCursor(stream: PostStream, plan: StreamPlan): StreamCursor {
 	const heads = (view: ViewName): string[] => {
 		const progress = viewBackfill(plan, view);
 		if (!progress.headDone) return [...(plan.stored.get(view) ?? [])];
-		return [
+		const kept = [
 			...new Set([
 				...(plan.newIds.get(view) ?? []),
 				...progress.pendingHead,
@@ -2050,6 +2061,9 @@ function nextCursor(stream: PostStream, plan: StreamPlan): StreamCursor {
 				view === "originals" || view === "replies" ? byIdDescending : () => 0,
 			)
 			.slice(0, HEAD_IDS_KEPT);
+		// An old pinned post sorts below the kept ids; keep it known.
+		const pin = plan.pinned.get(view);
+		return pin === undefined || kept.includes(pin) ? kept : [...kept, pin];
 	};
 	for (const [view, progress] of plan.backfill) {
 		backfill[view] = {

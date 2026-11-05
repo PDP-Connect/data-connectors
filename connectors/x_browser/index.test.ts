@@ -1107,6 +1107,66 @@ test("a later run saves only what is newer, past a known pinned post", async () 
 	assert.equal(states["posts"]?.head_ids[0], "1990000000000000888");
 });
 
+test("an old pinned post stays known when the saved head holds only newer ids", async () => {
+	// Pinned post id 1, then 60 newer posts: more than the 50 head ids kept.
+	const pages = fixturePages();
+	const originals = JSON.parse(pages["UserOriginalsTimeline"]?.[""] ?? "");
+	const instructions = originals.data.user.result.timeline.timeline.instructions;
+	const pin = instructions[1].entry;
+	pin.entryId = "tweet-1";
+	pin.content.itemContent.tweet_results.result.rest_id = "1";
+	pin.content.itemContent.tweet_results.result.legacy.id_str = "1";
+	pin.content.itemContent.tweet_results.result.legacy.conversation_id_str = "1";
+	pin.content.itemContent.tweet_results.result.edit_control.edit_tweet_ids = [
+		"1",
+	];
+	const entries = instructions[2].entries as Array<{ entryId: string }>;
+	const template = entries[0];
+	const cursors = entries.filter((entry) => entry.entryId.startsWith("cursor-"));
+	const postIds = Array.from({ length: 60 }, (_, index) =>
+		String(1990000000000000300n - BigInt(index)),
+	);
+	instructions[2].entries = [
+		...postIds.map((id) => {
+			const post = structuredClone(template) as {
+				entryId: string;
+				sortIndex: string;
+				content: {
+					itemContent: {
+						tweet_results: {
+							result: { rest_id: string; legacy: Record<string, unknown> };
+						};
+					};
+				};
+			};
+			post.entryId = `tweet-${id}`;
+			post.sortIndex = id;
+			post.content.itemContent.tweet_results.result.rest_id = id;
+			post.content.itemContent.tweet_results.result.legacy["id_str"] = id;
+			post.content.itemContent.tweet_results.result.legacy[
+				"conversation_id_str"
+			] = id;
+			return post;
+		}),
+		...cursors,
+	];
+	(pages["UserOriginalsTimeline"] as Record<string, string>)[""] =
+		JSON.stringify(originals);
+
+	const first = harness(new FakeWebApp({ pages }), ["posts"]);
+	await collectXBrowser(first.ctx, FAST);
+	assert.ok(first.ids("posts").includes("1"));
+	assert.equal(first.ids("posts").filter((id) => postIds.includes(String(id))).length, 60);
+
+	const app = new FakeWebApp({ pages });
+	const second = harness(app, ["posts"], { state: first.states() });
+	await collectXBrowser(second.ctx, FAST);
+	assert.deepEqual(second.ids("posts"), []);
+	assert.deepEqual(second.skips(), {});
+	// The pin stays in the saved head, so later runs stay quiet too.
+	assert.deepEqual(second.states(), first.states());
+});
+
 test("a new reply after a known post in the same module is still read", async () => {
 	const pages = fixturePages();
 	const replies = JSON.parse(pages["UserRepliesTimeline"]?.[""] ?? "");
