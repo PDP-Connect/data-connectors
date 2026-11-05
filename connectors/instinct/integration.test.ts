@@ -1714,3 +1714,73 @@ test("the profile carries no picture link", async () => {
 	assert.ok(record);
 	assert.equal("profile_picture_url" in record.data, false);
 });
+
+/** Run collectInstinct with no runtime reporter and answer the code it throws. */
+async function standaloneFailureCode(
+	requested: ReadonlySet<string>,
+	overrides: Readonly<Record<string, ScriptedResponse>> = {},
+	transport: Readonly<Record<string, GraphqlFetchResult>> = {},
+): Promise<unknown> {
+	const source = scriptedGraphql(
+		{ ...(await loadHappyPathResponses()), ...overrides },
+		transport,
+	);
+	const harness = makeRecordingEmit(validateRecord);
+	try {
+		await collectInstinct({
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			graphql: source.graphql,
+			observedAt: OBSERVED_AT,
+			progress: async () => {
+				/* unused */
+			},
+			requested,
+		});
+	} catch (error) {
+		return (error as { code?: unknown }).code;
+	}
+	return undefined;
+}
+
+test("without a runtime reporter, the thrown code follows the cause", async () => {
+	// An answer this connector cannot read: only a connector update helps.
+	assert.equal(
+		await standaloneFailureCode(new Set(["vault_entries"]), {
+			InstinctVault: { data: { vaultEntries: [{ kind: 7 }] } },
+		}),
+		"instinct_source_unreadable",
+	);
+	// A key shared by two records: the list cannot be stored.
+	const devices = (await fixture("devices")) as {
+		data: { devices: Array<Record<string, unknown>> };
+	};
+	const [first] = devices.data.devices;
+	assert.ok(first);
+	devices.data.devices.push({ ...first });
+	assert.equal(
+		await standaloneFailureCode(new Set(["devices"]), {
+			InstinctDevices: devices,
+		}),
+		"instinct_source_unreadable",
+	);
+	// A server error keeps its own classified code.
+	assert.equal(
+		await standaloneFailureCode(
+			new Set(["devices"]),
+			{},
+			{ InstinctDevices: { json: null, status: 500 } },
+		),
+		"instinct_server_error",
+	);
+	// A GraphQL error a retry can clear stays the retryable catch-all.
+	assert.equal(
+		await standaloneFailureCode(new Set(["devices"]), {
+			InstinctDevices: {
+				data: { devices: null },
+				errors: [{ message: "internal server error", path: ["devices"] }],
+			},
+		}),
+		"instinct_stream_incomplete",
+	);
+});
