@@ -24,6 +24,7 @@ import {
 	ensureDiscordSession,
 	LOGIN_URL,
 	MAX_MESSAGES_PER_RUN,
+	MAX_REQUESTS_PER_RUN,
 	MAX_SERVERS_PER_RUN,
 	MESSAGE_WINDOW_DAYS,
 	probeDiscordBrowserSession,
@@ -345,7 +346,7 @@ function harness(
 	const messages: EmittedMessage[] = [];
 	const records: Array<{ stream: string; data: RecordData }> = [];
 	const ctx: DiscordCollectContext = {
-		collectionMode: extra.collectionMode,
+		...(extra.collectionMode ? { collectionMode: extra.collectionMode } : {}),
 		page: fake.page,
 		state,
 		requested: new Map(
@@ -1207,12 +1208,13 @@ test("an expansion cut off in the new head still reaches the older floor", async
 		messages: second.cursor("messages"),
 	});
 	await collectDiscordBrowser(third.ctx, fast());
-	const collected = new Set([
+	const collected = [
 		...first.of("messages").map((record) => String(record.id)),
 		...second.of("messages").map((record) => String(record.id)),
 		...third.of("messages").map((record) => String(record.id)),
-	]);
-	assert.equal(collected.size, 31);
+	];
+	assert.equal(collected.length, 31);
+	assert.equal(new Set(collected).size, 31);
 });
 
 test("disjoint ranges do not merge into one covered interval", async () => {
@@ -1372,12 +1374,12 @@ test("an interrupted disjoint expansion cannot omit the uncovered interval", asy
 	await collectDiscordBrowser(first.ctx, fast());
 	assert.equal(first.of("messages").length, 7);
 
-	// Run 2 asks for days 31..90 and is refused at offset 50 after days 31..50.
+	// Run 2 starts below until and is refused at offset 25 after days 31..55.
 	const two = fakeDiscord({
 		respond: discordApi(servers, (path) => {
 			if (!path.includes("/messages/search")) return undefined;
 			const url = new URL(path, ORIGIN);
-			return url.searchParams.get("offset") === "50"
+			return url.searchParams.get("offset") === "25"
 				? { status: 403, body: fixture("missing-access.json") }
 				: undefined;
 		}),
@@ -1389,7 +1391,7 @@ test("an interrupted disjoint expansion cannot omit the uncovered interval", asy
 		{ timeRange: { until } },
 	);
 	await collectDiscordBrowser(second.ctx, fast());
-	assert.equal(second.of("messages").length, 20);
+	assert.equal(second.of("messages").length, 25);
 
 	// Run 3 asks for the whole window. Days 8..30 were never read and must not
 	// be treated as covered by the failed run's resume marker.
@@ -1598,7 +1600,16 @@ test("changed since, until, resources and full refresh ignore saved backfill", a
 		);
 		await collectDiscordBrowser(h.ctx, fast([], { maxMessages: 5 }));
 		assert.equal(h.of("messages").length, 5);
-		assert.ok(searches(fake).every((call) => !call.path.includes("&max_id=")));
+		const expectedBound = extra?.timeRange?.until
+			? flake(Date.parse(extra.timeRange.until))
+			: null;
+		assert.ok(
+			searches(fake).every(
+				(call) =>
+					new URL(call.path, ORIGIN).searchParams.get("max_id") ===
+					expectedBound,
+			),
+		);
 		assert.ok(resumeState(h).servers[SERVER_A]?.backfill);
 		assert.notEqual(
 			resumeState(h).servers[SERVER_A]?.backfill?.ranges[0]?.before_id,
@@ -1609,6 +1620,182 @@ test("changed since, until, resources and full refresh ignore saved backfill", a
 			resumeState(h).servers[SERVER_A]?.scope,
 		);
 	}
+});
+
+test("an until bound reaches older history without growing ranges across three runs", async () => {
+	const untilMs = NOW - 10 * DAY_MS;
+	const inScope = messagesBy(OWNER, 2000, untilMs - 60_000);
+	const newer = messagesBy(OWNER, 2500, NOW - 60_000);
+	const servers = { [SERVER_A]: [...newer, ...inScope] };
+	let state: unknown;
+	const ids: unknown[] = [];
+	const rangeCounts: number[] = [];
+	const emittedCounts: number[] = [];
+	for (let run = 0; run < 3; run += 1) {
+		const fake = fakeDiscord({ respond: discordApi(servers) });
+		const h = harness(
+			fake,
+			["messages"],
+			{ messages: state },
+			{ timeRange: { until: new Date(untilMs).toISOString() } },
+		);
+		await collectDiscordBrowser(h.ctx, fast());
+		ids.push(...h.of("messages").map((record) => record.id));
+		emittedCounts.push(h.of("messages").length);
+		state = h.cursor("messages");
+		const ranges = resumeState(h).servers[SERVER_A]?.backfill?.ranges ?? [];
+		rangeCounts.push(ranges.length);
+		assert.equal(
+			new Set(ranges.map((range) => JSON.stringify(range))).size,
+			ranges.length,
+		);
+		assert.ok(fake.calls.length <= MAX_REQUESTS_PER_RUN);
+		assert.equal(
+			new URL(searches(fake)[0]?.path ?? "", ORIGIN).searchParams.get("max_id"),
+			flake(untilMs),
+		);
+	}
+	assert.deepEqual(emittedCounts, [1000, 1000, 0]);
+	assert.deepEqual(rangeCounts, [1, 0, 0]);
+	assert.equal(ids.length, 2000);
+	assert.equal(new Set(ids).size, 2000);
+	assert.deepEqual(
+		ids,
+		inScope.map((message) => message.id),
+	);
+});
+
+test("saving a cursor drops duplicate ranges with identical bounds", async () => {
+	const listing = messagesBy(OWNER, 70);
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+	const state = resumeState(first);
+	const cursor = state.servers[SERVER_A];
+	assert.ok(cursor?.backfill);
+	cursor.backfill.ranges.push(
+		...cursor.backfill.ranges.map((range) => ({ ...range })),
+	);
+	const second = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+		["messages"],
+		{ messages: state },
+	);
+	await collectDiscordBrowser(second.ctx, fast([], { maxRequests: 2 }));
+	assert.deepEqual(resumeState(second).servers[SERVER_A]?.backfill?.ranges, [
+		{ before_id: listing[39]?.id, stop_id: null },
+	]);
+});
+
+test("equivalent resource orders and duplicates retain saved backfill", async () => {
+	const listing = messagesBy(OWNER, 90);
+	let state: unknown;
+	const records: RecordData[] = [];
+	for (const resources of [
+		[SERVER_A, SERVER_B, SERVER_A],
+		[SERVER_B, SERVER_A],
+		[SERVER_A, SERVER_B],
+	]) {
+		const h = harness(
+			fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) }),
+			["messages"],
+			{ messages: state },
+			{ resources },
+		);
+		await collectDiscordBrowser(h.ctx, fast([], { maxMessages: 30 }));
+		records.push(...h.of("messages"));
+		state = h.cursor("messages");
+		assert.equal(
+			resumeState(h).servers[SERVER_A]?.scope,
+			JSON.stringify({
+				since: null,
+				until: null,
+				resources: [SERVER_A, SERVER_B],
+			}),
+		);
+	}
+	assert.equal(records.length, 90);
+	assert.equal(new Set(records.map((record) => record.id)).size, 90);
+	assert.deepEqual(
+		records.map((record) => record.id),
+		listing.map((message) => message.id),
+	);
+	assert.equal((state as ResumeState).servers[SERVER_A]?.backfill, null);
+});
+
+test("a permanently malformed hit checkpoints past the prefix on the next run", async () => {
+	const listing = messagesBy(OWNER, 1100);
+	const respond = discordApi({ [SERVER_A]: listing }, (path) => {
+		const url = new URL(path, ORIGIN);
+		if (!url.pathname.endsWith("/messages/search")) return undefined;
+		const maxId = url.searchParams.get("max_id");
+		const all = listing.filter(
+			(message) => maxId === null || BigInt(message.id) < BigInt(maxId),
+		);
+		const offset = Number(url.searchParams.get("offset"));
+		return ok({
+			total_results: all.length,
+			messages: all
+				.slice(offset, offset + SEARCH_PAGE)
+				.map((message) =>
+					message.id === listing[3]?.id
+						? [{ author: { id: OWNER }, hit: true }]
+						: [message],
+				),
+		});
+	});
+	const first = harness(fakeDiscord({ respond }), ["messages"]);
+	await collectDiscordBrowser(first.ctx, fast());
+	assert.equal(first.of("messages").length, 1000);
+	assert.equal(
+		resumeState(first).servers[SERVER_A]?.backfill?.ranges[0]?.before_id,
+		listing[1000]?.id,
+	);
+	assert.ok(
+		first.skips().some((skip) => skip.reason === "discord_records_unreadable"),
+	);
+	const fake = fakeDiscord({ respond });
+	const second = harness(fake, ["messages"], {
+		messages: first.cursor("messages"),
+	});
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.deepEqual(
+		second.of("messages").map((record) => record.id),
+		listing.slice(1001).map((message) => message.id),
+	);
+	assert.equal(resumeState(second).servers[SERVER_A]?.backfill, null);
+	const ids = [...first.of("messages"), ...second.of("messages")].map(
+		(record) => record.id,
+	);
+	assert.equal(ids.length, 1099);
+	assert.equal(new Set(ids).size, 1099);
+	assert.ok(fake.calls.length <= MAX_REQUESTS_PER_RUN);
+});
+
+test("adjacent same-millisecond snowflakes remain distinct at a range stop", async () => {
+	const ms = NOW - DAY_MS;
+	const message = messagesBy(OWNER, 1, ms)[0];
+	assert.ok(message);
+	const old = { ...message, id: flake(ms, 1) };
+	const added = { ...message, id: flake(ms, 2) };
+	assert.equal(Number(old.id), Number(added.id));
+	const first = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: [old] }) }),
+		["messages"],
+	);
+	await collectDiscordBrowser(first.ctx, fast());
+	const second = harness(
+		fakeDiscord({ respond: discordApi({ [SERVER_A]: [added, old] }) }),
+		["messages"],
+		{ messages: first.cursor("messages") },
+	);
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.deepEqual(
+		second.of("messages").map((record) => record.id),
+		[added.id],
+	);
 });
 
 test("reaching the end clears backfill and completes the stream", async () => {

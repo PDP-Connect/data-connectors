@@ -486,6 +486,7 @@ interface ServerWalk {
 	api: Api;
 	budget: { messagesLeft: number };
 	emitMessage: (record: RecordData) => Promise<void>;
+	emitUnreadable: (count: number) => Promise<void>;
 	/** Messages sent before this instant are outside the window. */
 	floorMs: number;
 	ownerId: string;
@@ -569,10 +570,18 @@ function reportUnreadable(
 	}
 }
 
+/** The first ID at an instant, for an exclusive timestamp upper bound. */
+function snowflakeAt(ms: number): string {
+	return String(
+		(BigInt(Math.max(ms, 1_420_070_400_000)) - 1_420_070_400_000n) << 22n,
+	);
+}
+
 /** Refresh the head, then consume saved descending intervals. */
 async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 	const { api, budget, floorMs, ownerId, prior, scope, server, untilMs } = walk;
 	const priorNewest = prior?.newest_id ?? null;
+	const headBound = untilMs === null ? null : snowflakeAt(untilMs);
 	const sameScope = prior?.scope === scope;
 	const legacy = prior !== null && prior.backfill === undefined;
 	let newest = priorNewest;
@@ -580,28 +589,53 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 	const emitted = new Set<string>();
 	const ranges: SearchRange[] = sameScope
 		? (prior?.backfill?.ranges ?? []).map((range) => ({ ...range }))
-		: [{ before_id: legacy ? priorNewest : null, stop_id: null }];
+		: [{ before_id: legacy ? priorNewest : headBound, stop_id: null }];
+	// Preserve completed coverage when a wider walk is interrupted in its
+	// new head. Separate intervals carry that gap across every later cap.
+	if (
+		!sameScope &&
+		!legacy &&
+		prior?.backfill === null &&
+		priorNewest !== null &&
+		floorMs <= prior.floor_ms &&
+		(untilMs === null || (prior.until_ms !== null && untilMs >= prior.until_ms))
+	) {
+		ranges.splice(
+			0,
+			ranges.length,
+			{ before_id: headBound, stop_id: priorNewest },
+			{ before_id: snowflakeAt(prior.floor_ms), stop_id: null },
+		);
+	}
 	// A new head interval precedes every saved gap. If the head itself fills
 	// the budget, its remaining interval is saved too, never silently skipped.
 	if ((sameScope || legacy) && priorNewest !== null) {
-		ranges.unshift({ before_id: null, stop_id: priorNewest });
+		ranges.unshift({ before_id: headBound, stop_id: priorNewest });
 	} else if (sameScope && priorNewest === null && ranges.length === 0) {
-		ranges.push({ before_id: null, stop_id: null });
+		ranges.push({ before_id: headBound, stop_id: null });
 	}
 	const snapshot = (): ServerCursor => {
 		// A head request with no progress is retried naturally next run. Do not
 		// accumulate identical unstarted head intervals on repeated failures.
-		const pending = ranges.filter(
-			(range, index) =>
-				!(
-					index === 0 &&
-					(sameScope || legacy) &&
-					priorNewest !== null &&
-					range.before_id === null &&
-					range.stop_id === priorNewest &&
-					newest === priorNewest
-				),
-		);
+		const seen = new Set<string>();
+		const pending = ranges
+			.filter(
+				(range, index) =>
+					!(
+						index === 0 &&
+						(sameScope || legacy) &&
+						priorNewest !== null &&
+						range.before_id === headBound &&
+						range.stop_id === priorNewest &&
+						newest === priorNewest
+					),
+			)
+			.filter((range) => {
+				const key = JSON.stringify([range.before_id, range.stop_id]);
+				if (seen.has(key)) return false;
+				seen.add(key);
+				return true;
+			});
 		return {
 			newest_id: newest,
 			floor_ms: floorMs,
@@ -614,11 +648,10 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 		};
 	};
 	const interrupted = (stop?: RunStop): ServerOutcome => {
-		// Never move past an unreadable position. The old cursor is retained.
-		const cursor = sawUnreadable ? undefined : snapshot();
-		return stop
-			? { kind: "stop", stop, ...(cursor ? { cursor } : {}) }
-			: { kind: "limit", ...(cursor ? { cursor } : {}) };
+		// Malformed hits are skipped, not retried forever. A readable ID after
+		// them can still checkpoint the consumed prefix of an unfinished walk.
+		const cursor = snapshot();
+		return stop ? { kind: "stop", stop, cursor } : { kind: "limit", cursor };
 	};
 
 	for (let range = ranges[0]; range; range = ranges[0]) {
@@ -629,7 +662,7 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 		while (!done) {
 			// Rebase on an ID instead of accepting Discord's offset ceiling as EOF.
 			if (offset > MAX_SEARCH_OFFSET) {
-				if (consumed === null || consumed === bound || sawUnreadable) {
+				if (consumed === null || consumed === bound) {
 					return { kind: "stop", stop: "source_unreadable" };
 				}
 				bound = consumed;
@@ -664,9 +697,23 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 			) {
 				return { kind: "stop", stop: "source_unreadable" };
 			}
+			const firstHit = page.hits[0];
+			// A known head at raw position zero ends this interval before any
+			// malformed older groups in the same response need to be inspected.
+			if (
+				firstHit &&
+				!page.unreadablePositions.includes(0) &&
+				(firstHit.timestampMs < floorMs ||
+					(range.stop_id !== null &&
+						compareSnowflakes(firstHit.id, range.stop_id) <= 0))
+			) {
+				done = true;
+				break;
+			}
 			if (page.unreadable > 0) {
 				sawUnreadable = true;
 				reportUnreadable(page.unreadable, page.unreadablePositions, offset);
+				await walk.emitUnreadable(page.unreadable);
 			}
 			for (const hit of page.hits) {
 				if (
@@ -1072,7 +1119,9 @@ export async function collectDiscordBrowser(
 	const scope = JSON.stringify({
 		since: timeRange?.since ?? null,
 		until: timeRange?.until ?? null,
-		resources: requestedScope?.resources ?? null,
+		resources: requestedScope?.resources
+			? [...new Set(requestedScope.resources)].sort()
+			: null,
 	});
 	const sinceMs = timeRange?.since ? Date.parse(timeRange.since) : Number.NaN;
 	const untilParsed = timeRange?.until
@@ -1109,6 +1158,7 @@ export async function collectDiscordBrowser(
 				await ctx.emitRecord(MESSAGES, record);
 				saved += 1;
 			},
+			emitUnreadable: (count) => emitUnreadable(ctx, MESSAGES, count),
 			floorMs,
 			ownerId,
 			prior: cursors[serverId] ?? null,
