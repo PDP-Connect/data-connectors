@@ -194,9 +194,7 @@
 			"discord_collection_interrupted": "incomplete_retry",
 			"discord_rate_limited": "provider_busy",
 			"discord_records_unreadable": "skipped_items",
-			"discord_run_limit_reached": {
-				"message": "This run reached its limit. Later runs try the remaining servers, but older messages in servers this run did not finish may stay missing."
-			},
+			"discord_run_limit_reached": "continues_later",
 			"discord_servers_skipped": {
 				"message": "Some servers could not be searched this time. A later run tries them again. No action is needed."
 			},
@@ -565,7 +563,7 @@
 			"notion_pagination_contradiction": "incomplete_retry"
 		},
 		"oura": {
-			"older_pages_deferred_page_budget": "limit_repeats",
+			"older_pages_deferred_page_budget": "continues_later",
 			"oura_auth_failed": "sign_in_again"
 		},
 		"oura-browser": {
@@ -612,7 +610,7 @@
 			"browser_handoff_readiness_probe_failed": "sign_in_unfinished",
 			"browser_handoff_readiness_timed_out": "sign_in_again",
 			"browser_sign_in_cancelled": "sign_in_again",
-			"older_pages_deferred_page_budget": "limit_repeats",
+			"older_pages_deferred_page_budget": "continues_later",
 			"shopify_apollo_state_unavailable": "incomplete_retry",
 			"shopify_browser_operation_timeout": "incomplete_retry",
 			"shopify_login_page_unreachable": "incomplete_retry",
@@ -774,8 +772,9 @@
 			"archive_not_found": "export_file_problem"
 		},
 		"uber": {
-			"trips_deferred_detail_budget": "limit_repeats",
-			"trips_deferred_page_budget": "limit_repeats"
+			"trip_details_unavailable": "skipped_items",
+			"trips_deferred_detail_budget": "continues_later",
+			"trips_deferred_page_budget": "continues_later"
 		},
 		"usaa": {
 			"credit_card_export_unverified": "incomplete_retry",
@@ -871,7 +870,7 @@
 			"collection_interrupted": "incomplete_retry",
 			"list_end_unconfirmed": "unexpected_data",
 			"records_unreadable": "skipped_items",
-			"run_budget_reached": "limit_repeats",
+			"run_budget_reached": "continues_later",
 			"run_stopped_early": {
 				"message": "This part was not read because the run stopped early for another reason. Fix that reason, then run again."
 			},

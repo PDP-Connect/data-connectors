@@ -9,7 +9,7 @@
 	},
 	"connector_key": "discord-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-	"version": "0.1.20",
+	"version": "0.1.21",
 	"display_name": "Discord (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -433,7 +433,7 @@
 		"discord_collection_interrupted": "Discord stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"discord_rate_limited": "Discord is limiting requests or having trouble right now. Wait a while, then run again.",
 		"discord_records_unreadable": "Some items could not be read and were skipped.",
-		"discord_run_limit_reached": "This run reached its limit. Later runs try the remaining servers, but older messages in servers this run did not finish may stay missing.",
+		"discord_run_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
 		"discord_servers_skipped": "Some servers could not be searched this time. A later run tries them again. No action is needed.",
 		"discord_session_dead": "Discord needs you to sign in again or update your access key. Then run again.",
 		"discord_sign_in_required": "Discord needs you to sign in again or update your access key. Then run again.",

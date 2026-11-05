@@ -39,6 +39,8 @@ import { validateRecord } from "./schemas.ts";
 
 const API = "https://api.ouraring.com/v2/usercollection";
 const MAX_PAGES = 100;
+const WINDOW_DAYS = 90;
+const FIRST_OURA_DAY = "2015-01-01";
 
 // Single per-provider send governor + retry layer (shared convergence
 // primitive). `maxAttempts: 1` keeps today's behavior byte-identical: a 429
@@ -191,27 +193,25 @@ async function oura<T>(
 }
 
 /**
- * Page one Oura collection. Exhausting the page ceiling and receiving no
- * `next_token` used to produce a byte-identical return value, so a capped walk
- * read as a finished one. `truncated` is the distinction the caller needs to
- * withhold its cursor and disclose the deferred tail.
+ * Page one bounded date window. Tokens never leave this window or survive
+ * a run; a partial window is replayed inclusively on the next run.
  */
 async function fetchAll<T>(
 	governor: OuraHttpGovernor,
 	endpoint: string,
 	token: string,
-	startDate: string | null,
+	startDate: string,
+	endDate: string,
 	maxPages: number,
-): Promise<{ rows: T[]; truncated: boolean }> {
+): Promise<{ rows: T[]; truncated: boolean; pages: number }> {
 	const all: T[] = [];
+	let pages = 0;
 	let nextToken: string | undefined;
 	const walk = await walkPagesWithCeiling({
 		maxPages,
 		fetchPage: async () => {
-			const params: OuraParams = {};
-			if (startDate) {
-				params.start_date = startDate;
-			}
+			const params: OuraParams = { start_date: startDate, end_date: endDate };
+			pages += 1;
 			if (nextToken) {
 				params.next_token = nextToken;
 			}
@@ -223,7 +223,7 @@ async function fetchAll<T>(
 			return Boolean(nextToken);
 		},
 	});
-	return { rows: all, truncated: walk.truncated };
+	return { rows: all, truncated: walk.truncated, pages };
 }
 
 /**
@@ -301,175 +301,230 @@ interface RunStreamArgs<T extends OuraRow> {
 	config: StreamConfig<T>;
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	fullRefresh: boolean;
 	governor: OuraHttpGovernor;
-	/** Page ceiling actually enforced by this walk. Injectable so a test can
-	 *  reach the capped exit with a two-page fixture instead of 100 real pages. */
+	/** The same per-resource ceiling applies across all windows in this run. */
 	maxPages: number;
 	progress: (message: string, extra?: { stream?: string }) => Promise<void>;
-	requested: Map<string, { time_range?: { since?: string } }>;
+	requested: CollectContext["requested"];
 	state: Record<string, unknown>;
+	today: string;
 	token: string;
 }
 
-function sinceFor(
-	state: Record<string, unknown>,
-	requested: Map<string, { time_range?: { since?: string } }>,
-	stream: string,
-): string | null {
-	const streamState = state[stream] as { last_day?: string } | undefined;
-	const priorDay = streamState?.last_day;
-	const scopeReq = requested.get(stream);
-	const rawScopeSince = scopeReq?.time_range?.since;
-	const scopeSince = rawScopeSince && !Number.isNaN(Date.parse(rawScopeSince))
-		? new Date(Date.parse(rawScopeSince)).toISOString().slice(0, 10)
-		: undefined;
-	return priorDay || scopeSince || null;
+interface OuraScope {
+	since: string | null;
+	until: string | null;
+	resources: string[] | null;
+}
+
+function normalizeScope(scope: {
+	since?: string | null;
+	until?: string | null;
+	resources?: unknown;
+} | undefined): OuraScope {
+	return {
+		since: scope?.since ?? null,
+		until: scope?.until ?? null,
+		resources: Array.isArray(scope?.resources)
+			? [...new Set(scope.resources.filter((value): value is string => typeof value === "string"))].sort()
+			: null,
+	};
+}
+
+function sameScope(left: OuraScope, right: OuraScope): boolean {
+	return left.since === right.since && left.until === right.until
+		&& (left.resources === null || right.resources === null
+			? left.resources === right.resources
+			: left.resources.length === right.resources.length
+				&& left.resources.every((resource, index) => resource === right.resources?.[index]));
+}
+
+interface OuraCursor {
+	/** Inclusive start date, including for legacy STATE with no other fields. */
+	last_day?: string | null;
+	scope?: OuraScope;
+	frontier?: {
+		start_date: string;
+		newest_day: string | null;
+		/** Shrinks incomplete windows; absent in older STATE. Never a page token. */
+		window_days?: number;
+	} | null;
+}
+
+function day(value: string | null | undefined): string | null {
+	return value && !Number.isNaN(Date.parse(value))
+		? new Date(Date.parse(value)).toISOString().slice(0, 10)
+		: null;
+}
+
+function addDays(value: string, count: number): string {
+	const date = new Date(value);
+	date.setUTCDate(date.getUTCDate() + count);
+	return date.toISOString().slice(0, 10);
+}
+
+type WindowRecord = { id: string; day: string; data: RecordData };
+
+async function runWindows(
+	args: Omit<RunStreamArgs<OuraRow>, "config"> & {
+		streamName: string;
+		endpoints: string[];
+		requireCompleteWindow: boolean;
+		toRecords: (rows: OuraRow[][]) => WindowRecord[];
+	},
+): Promise<void> {
+	const {
+		streamName, endpoints, requireCompleteWindow, toRecords,
+		token, state, requested, emit, emitRecord, progress, maxPages,
+		governor, fullRefresh, today,
+	} = args;
+	await progress(`Fetching ${streamName}`, { stream: streamName });
+	const request = requested.get(streamName) as {
+		time_range?: { since?: string; until?: string };
+		resources?: unknown;
+	} | undefined;
+	const scope = normalizeScope({
+		since: request?.time_range?.since ?? null,
+		until: request?.time_range?.until ?? null,
+		resources: request?.resources ?? null,
+	});
+	const saved = state[streamName] as OuraCursor | undefined;
+	const legacy = !saved?.scope && !saved?.frontier;
+	const useSaved = !fullRefresh
+		&& (legacy || sameScope(normalizeScope(saved?.scope), scope));
+	let startDate = (useSaved
+		? day(saved?.frontier?.start_date) ?? day(saved?.last_day)
+		: null) ?? day(scope.since) ?? FIRST_OURA_DAY;
+	let newestDay = useSaved
+		? (saved?.frontier ? day(saved.frontier.newest_day) : day(saved?.last_day))
+		: null;
+	const savedWindowDays = useSaved ? saved?.frontier?.window_days : undefined;
+	let windowDays = typeof savedWindowDays === "number"
+		&& Number.isInteger(savedWindowDays) && savedWindowDays > 0
+		? Math.min(savedWindowDays, WINDOW_DAYS) : WINDOW_DAYS;
+	const tomorrow = addDays(today, 1);
+	const until = day(scope.until);
+	const endDate = until && until < tomorrow ? until : tomorrow;
+	const remaining = endpoints.map(() => maxPages);
+	const emitted = new Set<string>();
+	let totalSeen = 0;
+	let complete = startDate > endDate;
+	let singleDayOverflow = false;
+
+	while (!complete && remaining.every((pages) => pages > 0)) {
+		// Oura date bounds are inclusive. Keep the established overlap between
+		// larger windows, but a one-day fallback must request exactly one day.
+		const boundary = windowDays === 1 ? startDate : addDays(startDate, windowDays);
+		const windowEnd = boundary < endDate ? boundary : endDate;
+		const results = await Promise.all(endpoints.map((endpoint, index) =>
+			fetchAll<OuraRow>(
+				governor, endpoint, token, startDate, windowEnd, remaining[index] ?? 0,
+			),
+		));
+		for (let index = 0; index < results.length; index += 1) {
+			remaining[index] = (remaining[index] ?? 0) - (results[index]?.pages ?? 0);
+		}
+		totalSeen += results[0]?.rows.length ?? 0;
+		const truncated = results.some((result) => result.truncated);
+		// Sleep must not turn a missing (not yet read) daily score into a
+		// nullable record. Both resources must finish this exact date window.
+		if (!requireCompleteWindow || !truncated) {
+			for (const record of toRecords(results.map((result) => result.rows))) {
+				if (!emitted.has(record.id)) {
+					await emitRecord(streamName, record.data);
+					emitted.add(record.id);
+				}
+				if (!newestDay || record.day > newestDay) {
+					newestDay = record.day;
+				}
+			}
+		}
+		if (truncated) {
+			// Tokens have no established cross-run lifetime. Split the date
+			// window instead of replaying an unfinishable prefix forever.
+			singleDayOverflow = startDate === windowEnd
+				&& results.some((result) => result.truncated && result.pages === maxPages);
+			windowDays = startDate === windowEnd ? 1 : Math.max(1, Math.floor(windowDays / 2));
+			break;
+		}
+		// An unordered page gives no safe date frontier. Only an exhausted
+		// window does. Retain overlap, except after an exhausted single day.
+		complete = windowEnd >= endDate;
+		startDate = windowEnd === startDate ? addDays(windowEnd, 1) : windowEnd;
+		windowDays = WINDOW_DAYS;
+	}
+
+	if (!complete) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: streamName,
+			reason: "older_pages_deferred_page_budget",
+			recovery_hint: singleDayOverflow
+				? { action: "retry_on_connector_upgrade", retryable: false }
+				: { action: "retry_by_runtime", retryable: true },
+			message: singleDayOverflow
+				? `Oura ${streamName} exceeded the ${String(maxPages)}-page limit within one day; no safe cross-run page token is available`
+				: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+			diagnostics: {
+				page_limit: maxPages,
+				total_seen: totalSeen,
+				unread_pages: 1,
+			},
+		});
+	}
+	await emit({
+		type: "STATE",
+		stream: streamName,
+		cursor: {
+			last_day: complete ? newestDay : startDate,
+			scope,
+			frontier: complete ? null : {
+				start_date: startDate,
+				newest_day: newestDay,
+				window_days: windowDays,
+			},
+		},
+	});
 }
 
 async function runStream<T extends OuraRow>(
 	args: RunStreamArgs<T>,
 ): Promise<void> {
-	const {
-		config,
-		token,
-		state,
-		requested,
-		emit,
-		emitRecord,
-		progress,
-		maxPages,
-		governor,
-	} = args;
-	const { streamName, endpoint, toRecord } = config;
-	await progress(`Fetching ${streamName}`, { stream: streamName });
-	const startDate = sinceFor(state, requested, streamName);
-	const { rows, truncated } = await fetchAll<T>(
-		governor,
-		endpoint,
-		token,
-		startDate,
-		maxPages,
-	);
-	const streamState = state[streamName] as { last_day?: string } | undefined;
-	const priorDay: string | null = streamState?.last_day || null;
-	let lastDay: string | null = priorDay;
-	for (const row of rows) {
-		await emitRecord(streamName, toRecord(row));
-		if (row.day && (!lastDay || row.day > lastDay)) {
-			lastDay = row.day;
-		}
-	}
-
-	if (truncated) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: streamName,
-			reason: "older_pages_deferred_page_budget",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-			// The ceiling reported here is the one actually enforced, not the module
-			// default — otherwise a lowered cap would disclose a limit the walk
-			// never applied.
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
-			diagnostics: {
-				page_limit: maxPages,
-				total_seen: rows.length,
-				unread_pages: 1,
-			},
-		});
-	}
-
-	await emit({
-		type: "STATE",
-		stream: streamName,
-		// `last_day` is the next run's `start_date`. Advancing it after a capped
-		// walk would skip past days this run never read, so a truncated walk holds
-		// the day it started from and re-reads the same prefix next time.
-		cursor: { last_day: truncated ? priorDay : lastDay },
+	const { config, ...common } = args;
+	await runWindows({
+		...common,
+		streamName: config.streamName,
+		endpoints: [config.endpoint],
+		requireCompleteWindow: false,
+		toRecords: (rows) => (rows[0] ?? []).map((row) => ({
+			id: row.id,
+			day: row.day,
+			data: config.toRecord(row as T),
+		})),
 	});
 }
 
-/**
- * `sleep` joins two v2 API resources by `day`: /usercollection/sleep (the
- * per-session document — bedtime, durations, average_breath,
- * restless_periods, time_in_bed, type) and /usercollection/daily_sleep (the
- * daily score + contributors aggregate). Oura can emit more than one sleep
- * session for a day (naps); every session for a day is joined against that
- * same day's single daily_sleep document. The daily_sleep walk shares the
- * sleep stream's own cursor/truncation state (`state.sleep`) rather than a
- * separate `state.daily_sleep`, since daily_sleep is sleep's supporting
- * fetch, not an independently-requestable stream.
- */
+/** Join session and daily score only after both resources finish a window. */
 async function collectSleep(
 	args: Omit<RunStreamArgs<OuraSleepSession>, "config">,
 ): Promise<void> {
-	const {
-		token,
-		state,
-		requested,
-		emit,
-		emitRecord,
-		progress,
-		maxPages,
-		governor,
-	} = args;
-	const streamName = "sleep";
-	await progress(`Fetching ${streamName}`, { stream: streamName });
-	const startDate = sinceFor(state, requested, streamName);
-
-	const [sessions, dailySleep] = await Promise.all([
-		fetchAll<OuraSleepSession>(governor, "sleep", token, startDate, maxPages),
-		fetchAll<OuraDailySleep>(
-			governor,
-			"daily_sleep",
-			token,
-			startDate,
-			maxPages,
-		),
-	]);
-	const truncated = sessions.truncated || dailySleep.truncated;
-	const streamState = state[streamName] as { last_day?: string } | undefined;
-	const priorDay: string | null = streamState?.last_day || null;
-	if (truncated) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: streamName,
-			reason: "older_pages_deferred_page_budget",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
-			diagnostics: {
-				page_limit: maxPages,
-				total_seen: sessions.rows.length,
-				unread_pages: 1,
-			},
-		});
-		await emit({
-			type: "STATE",
-			stream: streamName,
-			cursor: { last_day: priorDay },
-		});
-		return;
-	}
-
-	const dailySleepByDay = new Map<string, OuraDailySleep>();
-	for (const d of dailySleep.rows) {
-		dailySleepByDay.set(d.day, d);
-	}
-
-	let lastDay: string | null = priorDay;
-	for (const row of sessions.rows) {
-		await emitRecord(
-			streamName,
-			sleepRecord(row, dailySleepByDay.get(row.day)),
-		);
-		if (row.day && (!lastDay || row.day > lastDay)) {
-			lastDay = row.day;
-		}
-	}
-
-	await emit({
-		type: "STATE",
-		stream: streamName,
-		cursor: { last_day: lastDay },
+	await runWindows({
+		...args,
+		streamName: "sleep",
+		endpoints: ["sleep", "daily_sleep"],
+		requireCompleteWindow: true,
+		toRecords: (rows) => {
+			const dailySleepByDay = new Map<string, OuraDailySleep>();
+			for (const row of (rows[1] ?? []) as OuraDailySleep[]) {
+				dailySleepByDay.set(row.day, row);
+			}
+			return ((rows[0] ?? []) as OuraSleepSession[]).map((row) => ({
+				id: row.id,
+				day: row.day,
+				data: sleepRecord(row, dailySleepByDay.get(row.day)),
+			}));
+		},
 	});
 }
 
@@ -488,6 +543,8 @@ export async function collectOura(
 	const { state, requested, credentials, emit, emitRecord, progress } = ctx;
 	const maxPages = options.maxPages ?? MAX_PAGES;
 	const governor = options.httpGovernor ?? httpGovernor;
+	const fullRefresh = ctx.collectionMode === "full_refresh";
+	const today = day(ctx.emittedAt) ?? new Date().toISOString().slice(0, 10);
 	const token = credentials.OURA_PERSONAL_ACCESS_TOKEN;
 	if (!token) {
 		throw new Error("oura_auth_failed");
@@ -503,6 +560,8 @@ export async function collectOura(
 			progress,
 			maxPages,
 			governor,
+			fullRefresh,
+			today,
 		});
 	}
 
@@ -521,6 +580,8 @@ export async function collectOura(
 			progress,
 			maxPages,
 			governor,
+			fullRefresh,
+			today,
 		});
 	}
 
@@ -539,6 +600,8 @@ export async function collectOura(
 			progress,
 			maxPages,
 			governor,
+			fullRefresh,
+			today,
 		});
 	}
 }

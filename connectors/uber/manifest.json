@@ -9,7 +9,7 @@
 	},
 	"connector_key": "uber",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-	"version": "1.0.28",
+	"version": "1.0.29",
 	"display_name": "Uber",
 	"brand": {
 		"icon": "icon.svg",
@@ -206,7 +206,8 @@
 		}
 	],
 	"reason_display_messages": {
-		"trips_deferred_detail_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
-		"trips_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing."
+		"trip_details_unavailable": "Some items could not be read and were skipped.",
+		"trips_deferred_detail_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"trips_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed."
 	}
 }

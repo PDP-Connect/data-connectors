@@ -9,7 +9,7 @@
 	},
 	"connector_key": "shopify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-	"version": "0.2.40",
+	"version": "0.2.41",
 	"display_name": "Shopify Shop",
 	"brand": {
 		"icon": "icon.svg",
@@ -120,7 +120,7 @@
 		"browser_handoff_readiness_probe_failed": "The Shopify Shop sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
 		"browser_handoff_readiness_timed_out": "Shopify Shop needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "Shopify Shop needs you to sign in again or update your access key. Then run again.",
-		"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
+		"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
 		"shopify_apollo_state_unavailable": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"shopify_browser_operation_timeout": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"shopify_login_page_unreachable": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",

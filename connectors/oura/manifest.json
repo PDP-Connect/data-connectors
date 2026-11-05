@@ -9,7 +9,7 @@
 	},
 	"connector_key": "oura",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-	"version": "0.1.30",
+	"version": "0.1.31",
 	"display_name": "Oura",
 	"brand": {
 		"icon": "icon.svg",
@@ -330,7 +330,7 @@
 		}
 	],
 	"reason_display_messages": {
-		"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
+		"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
 		"oura_auth_failed": "Oura needs you to sign in again or update your access key. Then run again."
 	}
 }
