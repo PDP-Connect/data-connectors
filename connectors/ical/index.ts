@@ -92,10 +92,18 @@ async function loadSubscriptionSources(
 			sources.push({ name: new URL(url).hostname, text });
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
+			const cause = classifyIcsFetchFailure(msg);
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "events",
-				reason: classifyIcsFetchFailure(msg),
+				reason:
+					cause === "auth"
+						? "auth_failure"
+						: cause === "address"
+							? "ics_subscription_address_invalid"
+							: cause === "rate_limited"
+								? "rate_limited"
+								: "ics_fetch_failed",
 				message: msg,
 			});
 		}

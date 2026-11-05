@@ -258,20 +258,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A non-OK status that is not auth (401 throws AuthError first) or unavailable
+ * (403/404) reports `http_error` when a retry can clear it; any other 4xx means
+ * claude.ai rejected the request itself, which only a connector update fixes.
+ */
 function isRetryableStatus(status: number): boolean {
 	return status === 0 || status === 429 || status >= 500;
-}
-
-/**
- * Reason for a non-OK status that is not an auth failure (401 throws
- * AuthError before this) or an unavailable resource (403/404). A status a
- * retry can clear stays `http_error`; any other 4xx means claude.ai rejected
- * the request itself, which only a connector update fixes.
- */
-function httpFailureReason(status: number): string {
-	return isRetryableStatus(status)
-		? "http_error"
-		: "anthropic_live_request_rejected";
 }
 
 /** The export connector's rule: `chat`, then `claude_max`, then the first. */
@@ -371,7 +364,9 @@ export async function runAccountPlanStream(
 			await skip(
 				ctx,
 				ACCOUNT_PLAN_STREAM,
-				httpFailureReason(res.status),
+				isRetryableStatus(res.status)
+					? "http_error"
+					: "anthropic_live_request_rejected",
 				`subscription_details http ${res.status}`,
 				isRetryableStatus(res.status),
 			);
@@ -458,7 +453,9 @@ export async function runUsageLimitsStream(
 		await skip(
 			ctx,
 			USAGE_LIMITS_STREAM,
-			httpFailureReason(res.status),
+			isRetryableStatus(res.status)
+				? "http_error"
+				: "anthropic_live_request_rejected",
 			`usage http ${res.status}`,
 			isRetryableStatus(res.status),
 		);

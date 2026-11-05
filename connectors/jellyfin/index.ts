@@ -1040,6 +1040,28 @@ async function collectItems(
 	);
 }
 
+/** The code a first-sign-in failure throws with: the same reason its SKIP_RESULT carries. */
+function firstSignInFailureCode(message: string): string {
+	switch (skipReasonFor(message).reason) {
+		case "jellyfin_auth_failed":
+			return "jellyfin_auth_failed";
+		case "jellyfin_base_url_has_userinfo":
+			return "jellyfin_base_url_has_userinfo";
+		case "jellyfin_base_url_requires_https_non_loopback":
+			return "jellyfin_base_url_requires_https_non_loopback";
+		case "jellyfin_base_url_unsafe_scheme":
+			return "jellyfin_base_url_unsafe_scheme";
+		case "jellyfin_ssrf_rejected_cross_origin":
+			return "jellyfin_ssrf_rejected_cross_origin";
+		case "jellyfin_http_error":
+			return "jellyfin_http_error";
+		case "jellyfin_response_unreadable":
+			return "jellyfin_response_unreadable";
+		default:
+			return "jellyfin_error";
+	}
+}
+
 /**
  * Map a collect() failure to a SKIP_RESULT reason for both streams. One code
  * per owner remedy: rejected credentials (`jellyfin_auth_failed`), bad
@@ -1063,12 +1085,30 @@ function skipReasonFor(message: string): { reason: string; message: string } {
 				"any account) or JELLYFIN_API_KEY (admin-only, advanced)",
 		};
 	}
-	const settingsCode =
-		/^(jellyfin_base_url_\w+|jellyfin_ssrf_rejected_cross_origin)/.exec(
-			message,
-		)?.[1];
-	if (settingsCode) {
-		return { reason: settingsCode, message: `Jellyfin settings: ${message}` };
+	// One literal reason per branch (the reason-code scanner resolves literals).
+	if (message.startsWith("jellyfin_base_url_has_userinfo")) {
+		return {
+			reason: "jellyfin_base_url_has_userinfo",
+			message: `Jellyfin settings: ${message}`,
+		};
+	}
+	if (message.startsWith("jellyfin_base_url_requires_https_non_loopback")) {
+		return {
+			reason: "jellyfin_base_url_requires_https_non_loopback",
+			message: `Jellyfin settings: ${message}`,
+		};
+	}
+	if (message.startsWith("jellyfin_base_url_unsafe_scheme")) {
+		return {
+			reason: "jellyfin_base_url_unsafe_scheme",
+			message: `Jellyfin settings: ${message}`,
+		};
+	}
+	if (message.startsWith("jellyfin_ssrf_rejected_cross_origin")) {
+		return {
+			reason: "jellyfin_ssrf_rejected_cross_origin",
+			message: `Jellyfin settings: ${message}`,
+		};
 	}
 	if (
 		message.startsWith("jellyfin_configured_user_not_found") ||
@@ -1104,13 +1144,7 @@ async function emitErrorSkipResults(
 	error: unknown,
 ): Promise<void> {
 	const message = error instanceof Error ? error.message : String(error);
-	// The first-sign-in failure arrives already classified (see
-	// resolveConnection); reuse its code rather than reclassifying the wrapper.
-	const code = (error as { code?: unknown } | null)?.code;
-	const { reason, message: skipMessage } =
-		typeof code === "string"
-			? { reason: code, message: `Jellyfin sign-in failed: ${message}` }
-			: skipReasonFor(message);
+	const { reason, message: skipMessage } = skipReasonFor(message);
 	for (const stream of ["libraries", "items"]) {
 		await emit({ type: "SKIP_RESULT", stream, reason, message: skipMessage });
 	}
@@ -1167,8 +1201,9 @@ async function resolveConnection(
 			const message = err instanceof Error ? err.message : String(err);
 			// Classify by cause so the run page names the real remedy. Every
 			// branch stays non-retryable (see the comment above).
-			const { reason } = skipReasonFor(message);
-			throw createConnectorFailure(reason, `${reason}: ${message}`, {
+			// The thrown message stays the original so the SKIP_RESULT classifies
+			// the same way.
+			throw createConnectorFailure(firstSignInFailureCode(message), message, {
 				cause: err,
 				retryable: false,
 			});

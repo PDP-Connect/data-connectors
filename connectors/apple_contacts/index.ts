@@ -170,10 +170,15 @@ export function classifyCardDavRequestFailure(
 		// A retry meets the same response, so none of these is transient. An
 		// unsafe redirect keeps its own code; the rest (missing Location,
 		// oversized body, redirect loop) need a connector update.
+		if (message.startsWith("carddav_unsafe_redirect:")) {
+			return createConnectorFailure(
+				APPLE_CONTACTS_ERROR_CODE.UNSAFE_REDIRECT_REFUSED,
+				message,
+				{ cause: err, retryable: false },
+			);
+		}
 		return createConnectorFailure(
-			message.startsWith("carddav_unsafe_redirect:")
-				? APPLE_CONTACTS_ERROR_CODE.UNSAFE_REDIRECT_REFUSED
-				: APPLE_CONTACTS_ERROR_CODE.CARDDAV_RESPONSE_UNUSABLE,
+			APPLE_CONTACTS_ERROR_CODE.CARDDAV_RESPONSE_UNUSABLE,
 			message,
 			{ cause: err, retryable: false },
 		);

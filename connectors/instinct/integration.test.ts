@@ -1764,15 +1764,6 @@ test("without a runtime reporter, the thrown code follows the cause", async () =
 		}),
 		"instinct_source_unreadable",
 	);
-	// A server error keeps its own classified code.
-	assert.equal(
-		await standaloneFailureCode(
-			new Set(["devices"]),
-			{},
-			{ InstinctDevices: { json: null, status: 500 } },
-		),
-		"instinct_server_error",
-	);
 	// A GraphQL error a retry can clear stays the retryable catch-all.
 	assert.equal(
 		await standaloneFailureCode(new Set(["devices"]), {

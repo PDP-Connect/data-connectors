@@ -293,39 +293,20 @@ test("hashId: deterministic 24-char hex", () => {
 	assert.notEqual(id, hashId("a|b|d"));
 });
 
-test("classifyIcsFetchFailure: one reason per owner remedy", () => {
+test("classifyIcsFetchFailure: one class per owner remedy", () => {
 	const url = "https://cal.example.com/a.ics";
-	assert.equal(
-		classifyIcsFetchFailure(`ics_fetch_401: ${url}`),
-		"auth_failure",
-	);
-	assert.equal(
-		classifyIcsFetchFailure(`ics_fetch_403: ${url}`),
-		"auth_failure",
-	);
-	assert.equal(
-		classifyIcsFetchFailure(`ics_fetch_404: ${url}`),
-		"ics_subscription_address_invalid",
-	);
-	assert.equal(
-		classifyIcsFetchFailure(`ics_fetch_410: ${url}`),
-		"ics_subscription_address_invalid",
-	);
-	assert.equal(
-		classifyIcsFetchFailure("ics_url_invalid: not a url"),
-		"ics_subscription_address_invalid",
-	);
-	assert.equal(
-		classifyIcsFetchFailure(`ics_fetch_429: ${url}`),
-		"rate_limited",
-	);
-	assert.equal(
-		classifyIcsFetchFailure(`ics_fetch_503: ${url}`),
-		"ics_fetch_failed",
-	);
-	assert.equal(
-		classifyIcsFetchFailure(`ics_fetch_408: ${url}`),
-		"ics_fetch_failed",
-	);
-	assert.equal(classifyIcsFetchFailure("fetch failed"), "ics_fetch_failed");
+	const cases: Array<[string, string]> = [
+		[`ics_fetch_401: ${url}`, "auth"],
+		[`ics_fetch_403: ${url}`, "auth"],
+		[`ics_fetch_404: ${url}`, "address"],
+		[`ics_fetch_410: ${url}`, "address"],
+		["ics_url_invalid: not a url", "address"],
+		[`ics_fetch_429: ${url}`, "rate_limited"],
+		[`ics_fetch_503: ${url}`, "transient"],
+		[`ics_fetch_408: ${url}`, "transient"],
+		["fetch failed", "transient"],
+	];
+	for (const [message, expected] of cases) {
+		assert.equal(classifyIcsFetchFailure(message), expected, message);
+	}
 });

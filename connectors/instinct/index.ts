@@ -840,21 +840,6 @@ export function resolveConnectionGates(
 }
 
 /**
- * The code for a failure with no runtime reporter to carry the stream: the
- * error's own classified code when it has one (rate limit, server error,
- * rejected request), a reply this connector cannot read when only a connector
- * update helps, and `instinct_stream_incomplete` for what a retry can fix.
- */
-function standaloneCode(error: unknown, code: string | undefined): string {
-	if (code !== undefined) {
-		return code;
-	}
-	return errorHint(error) === "retry_on_connector_upgrade"
-		? INSTINCT_SOURCE_UNREADABLE
-		: INSTINCT_STREAM_INCOMPLETE;
-}
-
-/**
  * Fail the requested ones of `streams` for this run: no STATE, and the
  * runtime ends the run failed while the other streams keep going. A signed-out
  * answer stops the whole run instead, and an error that is neither a
@@ -883,10 +868,24 @@ async function failStreams(
 		}
 		connectorDiagnostic("instinct", "stream_failed", { retryable, stream });
 		if (!args.reportStreamFailure) {
-			throw createConnectorFailure(standaloneCode(error, code), message, {
+			// An answer this connector cannot read needs a connector update;
+			// anything else keeps the catch-all.
+			const options = {
 				retryable,
 				...(recoveryHint === undefined ? {} : { recoveryHint }),
-			});
+			};
+			if (hint === "retry_on_connector_upgrade") {
+				throw createConnectorFailure(
+					INSTINCT_SOURCE_UNREADABLE,
+					message,
+					options,
+				);
+			}
+			throw createConnectorFailure(
+				INSTINCT_STREAM_INCOMPLETE,
+				message,
+				options,
+			);
 		}
 		await args.reportStreamFailure(stream, message, {
 			retryable,

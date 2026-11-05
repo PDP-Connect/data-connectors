@@ -27,26 +27,28 @@ export const RETRYABLE_FETCH_RE = /ECONN|fetch failed/i;
 const ICS_FETCH_STATUS_RE = /^ics_fetch_(\d{3}):/;
 
 /**
- * Pick the reason code for a failed subscription fetch, one code per owner
- * remedy: rejected access (runtime `auth_failure`), an address the server
- * refuses or cannot use (`ics_subscription_address_invalid`), a throttled
- * server (runtime `rate_limited`), or a transient fault (`ics_fetch_failed`).
+ * Classify a failed subscription fetch by owner remedy. index.ts maps each
+ * class to one literal reason: `auth` -> runtime `auth_failure`, `address` ->
+ * `ics_subscription_address_invalid`, `rate_limited` -> runtime `rate_limited`,
+ * `transient` -> `ics_fetch_failed`.
  */
-export function classifyIcsFetchFailure(message: string): string {
+export function classifyIcsFetchFailure(
+	message: string,
+): "auth" | "address" | "rate_limited" | "transient" {
 	if (message.startsWith("ics_url_invalid:")) {
-		return "ics_subscription_address_invalid";
+		return "address";
 	}
 	const status = Number(ICS_FETCH_STATUS_RE.exec(message)?.[1]);
 	if (status === 401 || status === 403) {
-		return "auth_failure";
+		return "auth";
 	}
 	if (status === 429) {
 		return "rate_limited";
 	}
 	if (status >= 400 && status < 500 && status !== 408) {
-		return "ics_subscription_address_invalid";
+		return "address";
 	}
-	return "ics_fetch_failed";
+	return "transient";
 }
 export const ICAL_LINE_SPLIT_RE = /\r?\n/;
 
