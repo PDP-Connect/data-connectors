@@ -831,6 +831,7 @@
 			"whatsapp_web_refused_call": "unexpected_data",
 			"whatsapp_web_stores_not_ready": "incomplete_retry",
 			"whatsapp_web_stream_incomplete": "incomplete_retry",
+			"whatsapp_web_stream_needs_update": "unexpected_data",
 			"whatsapp_web_unexpected_shape": "unexpected_data"
 		},
 		"wholefoods": {
