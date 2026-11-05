@@ -859,7 +859,7 @@ test("apple_contacts integration: an unsafe-redirect refusal on sync-collection 
 		const done = result.messages.findLast((m) => m.type === "DONE");
 		assert.ok(done && done.type === "DONE");
 		assert.equal(done.status, "failed");
-		assert.equal(done.error?.code, "carddav_request_failed");
+		assert.equal(done.error?.code, "unsafe_redirect_refused");
 		assert.equal(
 			done.error?.retryable,
 			false,
@@ -896,7 +896,7 @@ test("apple_contacts integration: an unsafe-redirect refusal on the bounded-snap
 		const done = result.messages.findLast((m) => m.type === "DONE");
 		assert.ok(done && done.type === "DONE");
 		assert.equal(done.status, "failed");
-		assert.equal(done.error?.code, "carddav_request_failed");
+		assert.equal(done.error?.code, "unsafe_redirect_refused");
 		assert.equal(
 			done.error?.retryable,
 			false,

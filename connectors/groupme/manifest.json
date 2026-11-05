@@ -9,7 +9,7 @@
 	},
 	"connector_key": "groupme",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "GroupMe",
 	"brand": {
 		"icon": "icon.svg",
@@ -449,8 +449,11 @@
 		}
 	],
 	"reason_display_messages": {
-		"group_message_count_unanchored": "GroupMe didn't report a message count for some groups, so we can't confirm their history is complete",
-		"provider_reports_more_messages_than_walked": "GroupMe reports more messages than we collected, so some group history may be missing",
-		"history_ended_before_provider_count": "Some older group conversations stop partway: GroupMe's total for the group is higher than the history it will actually hand back, which usually means the oldest messages are no longer stored on GroupMe's side. Everything we did collect is saved. There is nothing for you to do, and we retry in case the rest becomes available."
+		"group_message_count_unanchored": "GroupMe does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+		"groupme_auth_failed": "GroupMe needs you to sign in again or update your access key. Then run again.",
+		"groupme_direct_chat_missing_identity": "This part stopped because of an internal problem reading GroupMe. It is not something you can fix.",
+		"groupme_messages_empty_page_304": "This part stopped because of an internal problem reading GroupMe. It is not something you can fix.",
+		"history_ended_before_provider_count": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+		"provider_reports_more_messages_than_walked": "Only part of this could be collected because of a size or count limit. The rest is not available."
 	}
 }

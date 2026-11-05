@@ -9,7 +9,7 @@
 	},
 	"connector_key": "discord-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-	"version": "0.1.19",
+	"version": "0.1.20",
 	"display_name": "Discord (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -426,15 +426,19 @@
 		}
 	],
 	"reason_display_messages": {
-		"discord_sign_in_required": "Discord needs you to sign in again before this can continue.",
-		"discord_verification_required": "Discord asked for a captcha or an account check, or refused a request, so collection stopped without retrying. Open Discord yourself and make sure your account is in good standing before running this again.",
-		"discord_rate_limited": "Discord asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait at least a day before running this again.",
-		"discord_client_request_not_seen": "The Discord app didn't make a request of its own in time, so nothing could be read safely. Nothing was collected. Discord may have changed its site; please report this if it keeps happening.",
-		"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved; the next run reads the range again from your newest message and the host skips what it already has.",
-		"discord_servers_skipped": "Some of your servers couldn't be searched this time, usually because search is switched off there or Discord's search index wasn't ready. Everything else was collected normally.",
-		"discord_source_unreadable": "Discord answered in a form this connector doesn't recognise, so nothing more was read. Discord may have changed its site; please report this rather than retrying.",
-		"discord_records_unreadable": "Some entries in Discord's answer couldn't be read and were skipped. Everything else was collected normally.",
-		"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run reads the range again from your newest message."
+		"browser_handoff_readiness_probe_failed": "Discord stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"browser_handoff_readiness_timed_out": "Discord needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "Discord needs you to sign in again or update your access key. Then run again.",
+		"discord_client_request_not_seen": "This part stopped because of an internal problem reading Discord. It is not something you can fix.",
+		"discord_collection_interrupted": "Discord stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"discord_rate_limited": "Discord is limiting requests or having trouble right now. Wait a while, then run again.",
+		"discord_records_unreadable": "Some items could not be read and were skipped.",
+		"discord_run_limit_reached": "This run reached its limit. Later runs try the remaining servers, but older messages in servers this run did not finish may stay missing.",
+		"discord_servers_skipped": "Some servers could not be searched this time. A later run tries them again. No action is needed.",
+		"discord_session_dead": "Discord needs you to sign in again or update your access key. Then run again.",
+		"discord_sign_in_required": "Discord needs you to sign in again or update your access key. Then run again.",
+		"discord_source_unreadable": "This part stopped because of an internal problem reading Discord. It is not something you can fix.",
+		"discord_verification_required": "Discord needs you to sign in again or update your access key. Then run again."
 	},
 	"mobile": {
 		"pageshim": {

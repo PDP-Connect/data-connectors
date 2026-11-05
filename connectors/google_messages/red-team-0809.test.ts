@@ -760,3 +760,30 @@ test("finding 2 — the chat-scan-limit reason has vetted display copy declared 
 		"gmcli_per_chat_limit_reached must also have vetted display copy in the manifest",
 	);
 });
+
+test("per-chat read failures keep their cause: not_paired and not_installed are not gmcli_query_failed", async () => {
+	const chatsJson = JSON.stringify([
+		{
+			conversation_id: "c1",
+			name: "c1",
+			source_platform: "rcs",
+			is_group: false,
+			last_message_time_ms: 1,
+		},
+	]);
+	const failingInvoker =
+		(error: Error): GmcliInvoker =>
+		(args) =>
+			args[0] === "--json"
+				? Promise.resolve({ exitCode: 0, stderr: "", stdout: chatsJson })
+				: Promise.reject(error);
+	const cases: Array<[Error, string]> = [
+		[new GmcliError("not paired", "not_paired"), "gmcli_not_paired"],
+		[new GmcliError("gmcli missing", "not_installed"), "gmcli_not_installed"],
+		[new GmcliError("exit 1", "query_failed"), "gmcli_query_failed"],
+	];
+	for (const [error, reason] of cases) {
+		const outcome = await fetchAndParseGmcliMessages(failingInvoker(error));
+		assert.equal(outcome.reason, reason);
+	}
+});

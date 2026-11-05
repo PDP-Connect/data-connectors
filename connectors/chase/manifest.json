@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chase",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-	"version": "0.2.22",
+	"version": "0.2.23",
 	"display_name": "Chase",
 	"brand": {
 		"icon": "icon.svg",
@@ -580,13 +580,13 @@
 		}
 	],
 	"reason_display_messages": {
-		"account_no_longer_discovered": "An account we tracked before is no longer listed on your dashboard",
-		"ambiguous_multi_account_overview": "We couldn't tell which account view to use",
-		"qfx_download_failed": "We couldn't download the transactions file",
-		"qfx_parse_failed": "We couldn't read the transactions file",
-		"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
-		"row_exception": "Something went wrong reading one of the rows",
-		"selectors_pending": "Support for this part of the connector isn't complete yet",
-		"statements_scrape_failed": "We couldn't read your statements page"
+		"account_no_longer_discovered": "An account saved before no longer appears on your Chase dashboard. Its saved data is kept. Check that the account is still open and visible.",
+		"ambiguous_multi_account_overview": "This part stopped because of an internal problem reading Chase. It is not something you can fix.",
+		"qfx_download_failed": "Chase stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"qfx_parse_failed": "This part stopped because of an internal problem reading Chase. It is not something you can fix.",
+		"qfx_partial_parse": "Some items could not be read and were skipped.",
+		"row_exception": "Some items could not be read and were skipped.",
+		"selectors_pending": "Chase does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+		"statements_scrape_failed": "This part stopped because of an internal problem reading Chase. It is not something you can fix."
 	}
 }

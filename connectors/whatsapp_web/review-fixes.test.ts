@@ -218,6 +218,7 @@ async function run(
 		recoveryOnly?: boolean;
 		gapPages?: DetailGapStartEntry[][];
 		scopes?: Record<string, Omit<StreamScope, "name">>;
+		noReporter?: boolean;
 	} = {},
 ): Promise<Run> {
 	const harness = makeRecordingEmit(validateRecord);
@@ -239,14 +240,22 @@ async function run(
 			emitRecord: harness.emitRecord,
 			detailGaps: options.detailGaps ?? [],
 			recoveryOnly: options.recoveryOnly === true,
-			reportStreamFailure: async (stream, message, opts = {}) => {
-				failures.push({
-					stream,
-					message,
-					retryable: opts.retryable === true,
-					recoveryHint: opts.recoveryHint,
-				});
-			},
+			...(options.noReporter
+				? {}
+				: {
+						reportStreamFailure: async (
+							stream: string,
+							message: string,
+							opts: { retryable?: boolean; recoveryHint?: unknown } = {},
+						) => {
+							failures.push({
+								stream,
+								message,
+								retryable: opts.retryable === true,
+								recoveryHint: opts.recoveryHint,
+							});
+						},
+					}),
 			...(options.gapPages
 				? {
 						requestDetailGapPage: async () => options.gapPages?.shift() ?? [],
@@ -373,6 +382,26 @@ test("review 1 #4: a chat title that cannot be stored fails chats without STATE"
 	);
 	assert.equal(stateOf(r, "chats"), undefined);
 	assert.ok(r.failures.some((f) => f.stream === "chats"));
+});
+
+test("without a runtime reporter, text that cannot be stored needs a connector update", async () => {
+	await assert.rejects(
+		run(
+			{
+				chats: () => [
+					chatRow(PEER, { title: "bad\u0000title" }),
+					chatRow(OTHER),
+				],
+			},
+			{ noReporter: true },
+		),
+		(error: Error) => {
+			const e = error as { code?: unknown; retryable?: unknown };
+			assert.equal(e.code, "whatsapp_web_stream_needs_update");
+			assert.equal(e.retryable, false);
+			return true;
+		},
+	);
 });
 
 // ─── #5 missing history-state row ────────────────────────────────────────

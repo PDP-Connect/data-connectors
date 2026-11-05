@@ -1440,6 +1440,23 @@ test("a chat list row with no usable id fails both streams without a checkpoint;
 	assert.equal(ofType(h.messages, "DETAIL_COVERAGE").length, 0);
 });
 
+test("without a runtime reporter, an unkeyed chat list row fails the run with the unreadable-payload code", async () => {
+	const chats = fixture("get-neo-chats-recent.json") as {
+		chats: Array<Record<string, unknown>>;
+	};
+	const body = structuredClone(chats);
+	assert.ok(body.chats[2]);
+	body.chats[2].chat_id = "not-a-uuid";
+	const h = harness(fakePage(defaultRoute({ chats: () => json(body) }), []));
+	Object.assign(h.ctx, { reportStreamFailure: undefined });
+	await assert.rejects(collectCharacterAi(h.ctx), (error: Error) => {
+		const e = error as { code?: unknown; retryable?: unknown };
+		assert.equal(e.code, "character_ai_invalid_payload");
+		assert.equal(e.retryable, false);
+		return true;
+	});
+});
+
 test("a page of turns that cannot be parsed is a gap for that chat, not a failed run", async () => {
 	const [, second] = CHAT_IDS;
 	assert.ok(second);

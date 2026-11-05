@@ -9,7 +9,7 @@
 	},
 	"connector_key": "apple-contacts",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
-	"version": "0.1.25",
+	"version": "0.1.27",
 	"display_name": "Apple Contacts",
 	"brand": {
 		"icon": "icon.svg",
@@ -292,6 +292,12 @@
 		}
 	],
 	"reason_display_messages": {
-		"group_inventory_short": "Your address book has contact groups we couldn't save"
+		"auth_failed": "Apple Contacts needs you to sign in again or update your access key. Then run again.",
+		"carddav_request_failed": "Apple Contacts stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"carddav_response_unusable": "This part stopped because of an internal problem reading Apple Contacts. It is not something you can fix.",
+		"discovery_failed": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"fake_carddav_server_no_port": "This part stopped because of an internal problem reading Apple Contacts. It is not something you can fix.",
+		"group_inventory_short": "Some items could not be read and were skipped.",
+		"unsafe_redirect_refused": "This part stopped because of an internal problem reading Apple Contacts. It is not something you can fix."
 	}
 }

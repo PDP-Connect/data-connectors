@@ -9,7 +9,7 @@
 	},
 	"connector_key": "steam",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "Steam",
 	"brand": {
 		"icon": "icon.svg",
@@ -55,7 +55,8 @@
 		}
 	},
 	"reason_display_messages": {
-		"steam_optional_resource_unavailable": "Steam did not make this optional account data available"
+		"steam_auth_failed": "Steam needs you to sign in again or update your access key. Then run again.",
+		"steam_optional_resource_unavailable": "Steam does not let this connector see your friends list because of your profile's privacy settings. To include it, make your friends list visible, then run again."
 	},
 	"capabilities": {
 		"human_interaction": [],

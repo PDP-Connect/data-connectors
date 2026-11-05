@@ -9,7 +9,7 @@
 	},
 	"connector_key": "netflix-export",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-	"version": "0.1.28",
+	"version": "0.1.29",
 	"display_name": "Netflix Export",
 	"brand": {
 		"icon": "icon.svg",
@@ -160,11 +160,11 @@
 		}
 	],
 	"reason_display_messages": {
-		"ambiguous_date_order": "We couldn't tell whether the dates in that file are day-first or month-first",
-		"archive_security_violation": "We couldn't safely read that export archive",
-		"csv_parse_error": "We couldn't read the viewing history file",
-		"import_exceeds_bounded_read_policy": "That export was too large to safely read in one run",
-		"records_not_found": "We didn't find any records to import",
-		"unrecognized_csv_schema": "That file didn't match a Netflix viewing history format we recognize"
+		"ambiguous_date_order": "Every date in this export could be read as day/month or month/day, so this connector cannot tell which is right. It is not something you can fix.",
+		"archive_security_violation": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"csv_parse_error": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"import_exceeds_bounded_read_policy": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"records_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"unrecognized_csv_schema": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 	}
 }

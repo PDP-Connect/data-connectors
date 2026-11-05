@@ -847,10 +847,15 @@ async function failStream(
 	const { retryable } = hint;
 	connectorDiagnostic("perplexity", "stream_failed", { stream, retryable });
 	if (!ctx.reportStreamFailure) {
-		throw createConnectorFailure("perplexity_stream_incomplete", message, {
-			retryable,
-			recoveryHint: { ...hint },
-		});
+		// A library that changed while it was read clears on a retry. A row
+		// this parser cannot place needs a newer connector.
+		throw createConnectorFailure(
+			retryable
+				? "perplexity_stream_incomplete"
+				: "perplexity_stream_needs_update",
+			message,
+			{ retryable, recoveryHint: { ...hint } },
+		);
 	}
 	await ctx.reportStreamFailure(stream, message, {
 		retryable,
