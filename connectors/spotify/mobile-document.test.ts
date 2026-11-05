@@ -16,7 +16,8 @@ const MARKER_ERROR = "PageShim evaluation returned an invalid transfer marker";
 // A page document. Its network is blocked, so a collector that runs in it
 // fails with its own error once it asks for the access token.
 function documentAt(href: string): vm.Context {
-	const location = { href, origin: new URL(href).origin };
+	const { origin, pathname, search, hash } = new URL(href);
+	const location = { href, origin, pathname, search, hash };
 	const context = vm.createContext({
 		URL,
 		Set,
@@ -111,13 +112,25 @@ test("a job installed in a document that is then replaced is collected again on 
 });
 
 test("an install before the player root settles navigates to the player and collects again", async () => {
-	const { page, state } = fakePage(documentAt(PLAYER + "intl-de/"));
+	const { page, state } = fakePage(documentAt(PLAYER + "search"));
 	await assert.rejects(
 		() => collectSpotifyMobileData(page, ["profile"]),
 		rejectsWith("synthetic_network_blocked"),
 	);
 	assert.equal(state.installs, 2);
 	assert.deepEqual(state.gotos, [PLAYER]);
+});
+
+// Spotify redirects `/` to the market's locale root on every load, so going
+// back to `/` can never leave it: that root is the player, collected as is.
+test("the locale-prefixed player root is collected without navigating away", async () => {
+	const { page, state } = fakePage(documentAt(PLAYER + "intl-id/"));
+	await assert.rejects(
+		() => collectSpotifyMobileData(page, ["profile"]),
+		rejectsWith("synthetic_network_blocked"),
+	);
+	assert.equal(state.installs, 1);
+	assert.deepEqual(state.gotos, []);
 });
 
 test("a document that keeps being replaced fails as a lost job after a bounded number of installs", async () => {

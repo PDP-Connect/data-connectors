@@ -666,15 +666,18 @@ export const spotifyPageCollector = async (
 			sourceCounts: {},
 		};
 		const navigation = new URL(window.location.href);
+		// Spotify serves the player root at a locale prefix (`/intl-id/`,
+		// `/intl-pt/`) for most non-English markets and redirects `/` there on
+		// every load, so that root is the player too, never a transient state.
 		if (
 			navigation.origin !== "https://open.spotify.com" ||
-			navigation.pathname !== "/" ||
+			!/^\/(?:intl-[a-z]{2}(?:-[a-z0-9]{2,8})?\/?)?$/i.test(navigation.pathname) ||
 			navigation.search !== "" ||
 			navigation.hash !== ""
 		) {
 			throw new Error("spotify_page_not_player");
 		}
-		const navigationProof = navigation.toString();
+		const navigationProof = navigation.origin + "/";
 		const webVersion = "1.2.56.244.g7bfe3dc8";
 		let clientId: string | null = null;
 
