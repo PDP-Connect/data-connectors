@@ -174,7 +174,6 @@ function safeAll<T>(db: DatabaseSync, sql: string): T[] | null {
 }
 
 const SOURCE_PARTITION_MISSING_REASON = "source_partition_missing";
-const OPTIONAL_STREAM_FAILED_REASON = "optional_stream_failed";
 const MAX_MISSING_CHANNEL_IDS_IN_DIAGNOSTIC = 100;
 const SLACK_TS_PATTERN = /^(\d+)\.(\d{6})$/;
 const ISO_FRACTION_PATTERN = /\.(\d{1,6})/;
