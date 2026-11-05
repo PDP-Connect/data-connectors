@@ -598,6 +598,7 @@
 			"perplexity_auth_failed": "sign_in_again",
 			"perplexity_interrupted": "incomplete_retry",
 			"perplexity_stream_incomplete": "incomplete_retry",
+			"perplexity_stream_needs_update": "unexpected_data",
 			"records_unreadable": "skipped_items",
 			"sign_in_required": "sign_in_again",
 			"source_limit_reached": "continues_later",
