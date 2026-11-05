@@ -534,7 +534,7 @@ export function buildExperienceRows(
 	const rows = emptyStreamRows<ExperienceRecord>();
 	const seenIds = new Set<unknown>();
 	for (const [groupIndex, group] of groups.entries()) {
-		for (const outcome of experienceRowsOf(group, groupIndex)) {
+		for (const outcome of experienceRowsOf(group, groupIndex, true)) {
 			if (outcome.kind === "assembled" && isCovered(outcome)) {
 				if (seenIds.has(outcome.record.id)) {
 					addOmittedRow(rows, "duplicate_experience_id");
@@ -550,7 +550,11 @@ export function buildExperienceRows(
 
 /** The experience row outcomes one source group yields: one per position,
  *  or one for the group itself when it has no positions. */
-function experienceRowsOf(group: unknown, groupIndex: number): RowOutcome[] {
+function experienceRowsOf(
+	group: unknown,
+	groupIndex: number,
+	requireSourceIdentity = false,
+): RowOutcome[] {
 	if (!isRecord(group)) return [{ kind: "omitted", reason: "malformed_row" }];
 	const positions = nestedPositions(group);
 	if (positions.kind !== "read") {
@@ -568,10 +572,16 @@ function experienceRowsOf(group: unknown, groupIndex: number): RowOutcome[] {
 		if (!EXPERIENCE_CONTENT.some((field) => own[field]?.kind === "read")) {
 			return { kind: "omitted", reason: "no_readable_content" };
 		}
-		return assembleRow(
-			EXPERIENCE_ROW,
-			positionReads(position, group, groupIndex, positionIndex),
-		);
+		const fields = positionReads(position, group, groupIndex, positionIndex);
+		const outcome = assembleRow(EXPERIENCE_ROW, fields);
+		// Keep existing unreadable-field diagnostics; only certify otherwise
+		// readable experience rows when the source itself supplied their ID.
+		return requireSourceIdentity && isCovered(outcome)
+			? assembleRow(EXPERIENCE_ROW, {
+					...fields,
+					id: textAt(position, ["entityUrn"]),
+				})
+			: outcome;
 	});
 }
 
@@ -623,7 +633,17 @@ export function buildEducationRows(
 			addOmittedRow(rows, "malformed_row");
 			return;
 		}
-		addRow(rows, assembleRow(EDUCATION_ROW, educationReads(education, index)));
+		const fields = educationReads(education, index);
+		const outcome = assembleRow(EDUCATION_ROW, fields);
+		addRow(
+			rows,
+			isCovered(outcome)
+				? assembleRow(EDUCATION_ROW, {
+						...fields,
+						id: textAt(education, ["entityUrn"]),
+					})
+				: outcome,
+		);
 	});
 	return rows;
 }
