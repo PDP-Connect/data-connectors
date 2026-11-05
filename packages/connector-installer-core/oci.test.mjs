@@ -1587,6 +1587,133 @@ test("an OCI config entrypoint preserves the exact nested member path", async ()
   });
 });
 
+const MULTI_FILE_CODE = {
+  "collection-profile.mjs": "import { util } from \"./lib/util.mjs\";\nexport const collect = () => util;\n",
+  "lib/util.mjs": "import { LIMIT } from \"./deep/constants.mjs\";\nexport const util = LIMIT;\n",
+  "lib/deep/constants.mjs": "export const LIMIT = 3;\n",
+  "a-first.mjs": "export const first = true;\n",
+};
+
+test("an OCI artifact returns every verified code-layer member, sorted, as isolated copies", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer, codeFiles: MULTI_FILE_CODE });
+    const artifact = await fetchResolvedArtifact(
+      null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)
+    );
+
+    assert.equal(artifact.codeEntrypointPath, "code/collection-profile.mjs");
+    assert.deepEqual(
+      artifact.codeFiles.map((file) => file.path),
+      [
+        "code/a-first.mjs",
+        "code/collection-profile.mjs",
+        "code/lib/deep/constants.mjs",
+        "code/lib/util.mjs",
+      ]
+    );
+    for (const file of artifact.codeFiles) {
+      const source = MULTI_FILE_CODE[file.path.slice("code/".length)];
+      assert.equal(file.buffer.toString("utf8"), source);
+      assert.deepEqual(Object.keys(file).sort(), ["buffer", "path"]);
+    }
+    // The returned entrypoint bytes are the ones the signed checksum covers.
+    const entrypointFile = artifact.codeFiles.find((file) => file.path === artifact.codeEntrypointPath);
+    assert.equal(sha256(entrypointFile.buffer), artifact.checksums.entrypoint);
+    assert.equal(sha256(artifact.entrypointBuffer), artifact.checksums.entrypoint);
+
+    // Mutating a returned member must not reach the verified entrypoint bytes
+    // or another caller's view of the same member.
+    entrypointFile.buffer.fill(0);
+    assert.equal(sha256(artifact.entrypointBuffer), artifact.checksums.entrypoint);
+    const again = await fetchResolvedArtifact(
+      null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)
+    );
+    assert.equal(
+      again.codeFiles.find((file) => file.path === again.codeEntrypointPath).buffer.toString("utf8"),
+      MULTI_FILE_CODE["collection-profile.mjs"]
+    );
+  });
+});
+
+test("installing a multi-module OCI profile writes every code member beside the entrypoint", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer, codeFiles: MULTI_FILE_CODE });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-multifile-"));
+    try {
+      const lock = { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] };
+      const options = { lock, source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer) };
+      const result = await installFromLock(options);
+      const root = join(installRoot, "collection-profiles", "ynab-pdpp");
+
+      // The entrypoint stays at the lock's entrypointPath; the modules it
+      // imports keep their position relative to it, so the imports resolve.
+      for (const [member, content] of Object.entries(MULTI_FILE_CODE)) {
+        assert.equal(readFileSync(join(root, "dist", member), "utf8"), content, member);
+      }
+      assert.ok(result.expectedPaths.includes("collection-profiles/ynab-pdpp/dist/lib/deep/constants.mjs"));
+      await verifyInstalled(options);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a nested config entrypoint installs its sibling modules at the same relative position", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const codeFiles = {
+      "nested/collection-profile.mjs": "import \"../shared.mjs\";\n",
+      "shared.mjs": "export const shared = true;\n",
+    };
+    const { digest } = publishArtifact(registry, {
+      signer, codeFiles, configOverrides: { entrypoint: "code/nested/collection-profile.mjs" },
+    });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-nested-"));
+    try {
+      await installFromLock({
+        lock: { lockVersion: "2.0", connectors: [ociLockEntry(registry, digest)] },
+        source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer),
+      });
+      const root = join(installRoot, "collection-profiles", "ynab-pdpp");
+      assert.equal(readFileSync(join(root, "dist", "collection-profile.mjs"), "utf8"), codeFiles["nested/collection-profile.mjs"]);
+      // `dist/../shared.mjs`, exactly where the entrypoint's `../shared.mjs` points.
+      assert.equal(readFileSync(join(root, "shared.mjs"), "utf8"), codeFiles["shared.mjs"]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a code member that would install outside the artifact root is refused", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      codeFiles: { "nested/collection-profile.mjs": "import \"../shared.mjs\";\n", "shared.mjs": "export {};\n" },
+      configOverrides: { entrypoint: "code/nested/collection-profile.mjs" },
+    });
+    const installRoot = mkdtempSync(join(tmpdir(), "oci-escape-"));
+    try {
+      await assert.rejects(
+        () => installFromLock({
+          lock: {
+            lockVersion: "2.0",
+            // One directory deep in the layer, none in the install tree: `../shared.mjs` has nowhere to go.
+            connectors: [ociLockEntry(registry, digest, { entrypointPath: "collection-profile.mjs" })],
+          },
+          source: null, installRoot, layout: "snapshot", ...fixtureOptions(registry, signer),
+        }),
+        /outside the artifact root/
+      );
+      assert.equal(existsSync(join(installRoot, "collection-profiles")), false);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 test("an OCI artifact whose config entrypoint member is absent from the code layer is refused", async () => {
   await withRegistry({}, async (registry) => {
     const signer = createSigner();

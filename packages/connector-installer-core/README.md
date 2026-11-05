@@ -49,8 +49,13 @@ Signed-index installation and its resolution and update APIs are no longer suppo
 
 - `fetchCatalog` — fetch and verify the signed connector catalog.
 - `fetchResolvedArtifact(null, entry, options)` — fetch and verify one
-  artifact without installing it.
-- `installFromLock` — fetch, verify and write every pinned artifact.
+  artifact without installing it. The result carries every verified
+  code-layer member as `codeFiles` (`[{ path: "code/<member>", buffer }]`,
+  sorted by path, buffers copied) and `codeEntrypointPath`, the member the
+  signed config names as the entrypoint. The artifact digest is `oci.digest`.
+- `installFromLock` — fetch, verify and write every pinned artifact. The
+  entrypoint goes to the lock's `entrypointPath`; every other code member keeps
+  its position relative to it.
 - `verifyInstalled` — re-verify an install root against its lock, and report
   the signed source declaration digest for each artifact.
 - `pruneInstalled` — remove entries an install root no longer expects.
