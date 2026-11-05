@@ -105,12 +105,11 @@ const HOME_PATH = "/home";
 // ─── Safety budget ──────────────────────────────────────────────────────
 
 /**
- * Posts X may send across every view in one run before the run stops reading.
- * Each post the web app loads counts against the owner's own daily reading
- * allowance (third parties report roughly 1,000 a day on free accounts and
- * fewer on new ones). The count includes other people's posts in reply
- * threads, which are read but not saved. It cannot include the home timeline
- * the app loads before the observer is installed, so the cap leaves room.
+ * Newly encountered posts across every view in one run before reading stops.
+ * Revisiting collected history can still use the owner's daily allowance,
+ * so the scroll ceiling bounds that work separately. Newly read posts from
+ * reply threads and incidental views count too, even when not saved. The
+ * home timeline loaded before the observer is installed cannot be counted.
  */
 export const MAX_POSTS_PER_RUN = 400;
 
@@ -452,15 +451,14 @@ const SKIP_REASON: Record<FailureReason, string> = {
 };
 
 /**
- * Nothing here is retried by the runtime: a retry is another read of the
- * owner's allowance, and after a rate limit it would make things worse. The
- * owner runs the connector again.
+ * Budget stops can continue on a later run. Refusals and rate limits still
+ * require the existing recovery path, rather than retrying in this run.
  */
 const RECOVERY_ACTION: Record<FailureReason, string> = {
 	collection_interrupted: "manual_action_required",
 	list_end_unconfirmed: "retry_on_connector_upgrade",
 	records_unreadable: "retry_on_connector_upgrade",
-	run_budget_reached: "manual_action_required",
+	run_budget_reached: "retry_by_runtime",
 	run_stopped_early: "manual_action_required",
 	sign_in_required: "manual_action_required",
 	source_rate_limited: "upstream_unblock",
@@ -597,12 +595,27 @@ export interface XCollectOptions {
 }
 
 /**
- * What STATE holds for posts, likes and bookmarks: post ids only, and the
- * `since` the stored head was collected under when the run was range-limited.
- * For posts the head is split by view, so a run of replies cannot evict the
- * originals checkpoint.
+ * STATE keeps per-view heads and oldest reached backfill positions, tied
+ * to the normalized time/resource scope. Explicit completion distinguishes
+ * exhausted history from legacy STATE whose backfill has not started.
  */
+const backfillSchema = z.object({
+	position: z.string().nullable(),
+	complete: z.boolean(),
+	// A large new head can itself span runs without losing the older backfill.
+	head_position: z.string().nullable().optional(),
+	head_ids: z.array(z.string()).optional(),
+});
 const cursorSchema = z.object({
+	backfill_scope: z.string().optional(),
+	backfill: z
+		.object({
+			originals: backfillSchema.optional(),
+			replies: backfillSchema.optional(),
+			likes: backfillSchema.optional(),
+			bookmarks: backfillSchema.optional(),
+		})
+		.optional(),
 	head_ids: z.array(z.string()).optional(),
 	reply_head_ids: z.array(z.string()).optional(),
 	requested_since: z.string().nullable().optional(),
@@ -778,18 +791,40 @@ export async function ensureXSession(args: EnsureSessionArgs): Promise<void> {
 	}
 }
 
+interface ViewBackfill {
+	position: string | null;
+	complete: boolean;
+	phase: "head" | "seek" | "backfill";
+	headDone: boolean;
+	headPosition: string | null;
+	readonly pendingHead: readonly string[];
+	headSeeking: boolean;
+	headResumePassed: boolean;
+}
+
 interface StreamPlan {
+	readonly backfill: Map<ViewName, ViewBackfill>;
+	readonly scope: string;
 	/** Ids emitted for the stream in this run, across its views. */
 	readonly emitted: Set<string>;
 	/** Read to the cap whatever is already collected. */
 	readonly fullWalk: boolean;
 	readonly known: ReadonlySet<string>;
-	/** Ids saved in this run, by view, newest first in each view's order. */
+	/** Head ids in traversal order, including a saved pending head when crossed. */
 	readonly newIds: Map<ViewName, string[]>;
 	/** The stored head ids by view, so one view cannot evict another's. */
 	readonly stored: ReadonlyMap<ViewName, readonly string[]>;
 	/** An ISO instant; posts created before it end the walk. */
 	readonly since: string | null;
+}
+
+/** Each planned view has progress; keep the invariant checked at runtime. */
+function viewBackfill(plan: StreamPlan, view: ViewName): ViewBackfill {
+	const progress = plan.backfill.get(view);
+	if (progress === undefined) {
+		throw new Error("Missing X backfill plan for " + view);
+	}
+	return progress;
 }
 
 /** The ids this run saved for one view, created on first use. */
@@ -823,6 +858,7 @@ interface ViewOutcome {
 	otherAuthors: number;
 	pages: number;
 	postResults: number;
+	budgetPosts: number;
 	saved: number;
 	unavailable: number;
 	unreadable: number;
@@ -834,6 +870,10 @@ type DrawerState = "clicked" | "no_control" | "not_tried";
 interface Run {
 	/** The stream whose view is being read, or null between views. */
 	activeStream: PostStream | null;
+	/** Only a resumed list needs per-item overlap accounting. */
+	activeOperation: TimelineOperation | null;
+	readonly budgetIds: Set<string>;
+	scrollSteps: number;
 	aborted: number;
 	readonly ctx: XCollectContext;
 	readonly delayRange: readonly [number, number];
@@ -971,9 +1011,9 @@ interface Drained {
 /**
  * Take everything the observer has buffered and check the session. Reading
  * the buffer is local to the page: it sends nothing to X. Every response's
- * post count is applied to the run's budget as it is drained, wanted or not,
- * so a run stops as soon as the posts X sent reach the cap. Wanted responses
- * accumulate in `run.pending` until the current view reads them.
+ * incidental and first/full-walk post counts are applied immediately.
+ * A resumed active list charges unread items after parsing its overlap.
+ * Wanted responses accumulate in `run.pending` until the view reads them.
  */
 async function drain(run: Run): Promise<Drained> {
 	let atBottom = false;
@@ -1000,9 +1040,11 @@ async function drain(run: Run): Promise<Drained> {
 			if (!answered) {
 				continue;
 			}
-			// Every post X sent spends the owner's allowance, whichever view
-			// the run is reading and whether or not this view reads it.
-			run.postsSeen += entry.postCount;
+			// The active list is charged after parsing, when already-collected
+			// head/backfill overlap can be distinguished from new items.
+			if (entry.operation !== run.activeOperation) {
+				run.postsSeen += entry.postCount;
+			}
 			if (entry.wanted) {
 				run.pending.push(entry);
 			}
@@ -1142,28 +1184,73 @@ async function takeItem(
 	scope: ItemScope,
 ): Promise<ViewEnd | null> {
 	const { pinned, post } = item;
+	const backfill = viewBackfill(plan, view.name);
+	const known = !plan.fullWalk && plan.known.has(post.id);
+	if (!pinned && backfill.phase === "head") {
+		if (!backfill.headResumePassed && backfill.pendingHead.includes(post.id)) {
+			if (!backfill.headSeeking) {
+				// New arrivals precede the saved head; items after its resume
+				// position must follow it, even when likes are not in id order.
+				viewIds(plan, view.name).push(...backfill.pendingHead);
+			}
+			backfill.headSeeking = true;
+		}
+		if (backfill.headSeeking) {
+			if (post.id === backfill.headPosition) {
+				backfill.headSeeking = false;
+				backfill.headResumePassed = true;
+			}
+			return null;
+		}
+		if (known && scope !== "module") {
+			backfill.headDone = true;
+			if (backfill.complete) return "reached_known";
+			backfill.phase = backfill.position === null ? "backfill" : "seek";
+		}
+	}
+	if (!pinned && backfill.phase === "seek") {
+		if (post.id === backfill.position) backfill.phase = "backfill";
+		return null;
+	}
+	if (known) return null;
+	const alreadyEmitted = plan.emitted.has(post.id);
+	if (
+		!alreadyEmitted &&
+		!pinned &&
+		plan.since !== null &&
+		post.created_at < plan.since
+	) {
+		return scope === "module" ? null : "older_than_range";
+	}
+	const budgetKey = view.name + ":" + post.id;
+	if (!plan.fullWalk && !run.budgetIds.has(budgetKey)) {
+		run.budgetIds.add(budgetKey);
+		run.postsSeen += 1;
+		outcome.budgetPosts += 1;
+	}
+	// A duplicate emission across views is not overlap with a saved range.
+	if (alreadyEmitted) return null;
 	if (!isOwnerItem(view, run, item)) {
-		// The other side of a reply thread. Read by the app, never saved.
 		outcome.otherAuthors += 1;
 		return null;
 	}
-	// The pinned post sits above the timeline whatever its age, so it says
-	// nothing about where the already-collected posts begin.
-	if (!(pinned || plan.fullWalk) && plan.known.has(post.id)) {
-		return scope === "module" ? null : "reached_known";
-	}
-	if (!pinned && plan.since !== null && post.created_at < plan.since) {
-		// Inside a module an out-of-range member is skipped rather than ending
-		// the walk: the module's newest owner post sets the range boundary.
-		return scope === "module" ? null : "older_than_range";
-	}
-	const pinnedAndCollected =
-		pinned && !plan.fullWalk && plan.known.has(post.id);
-	if (plan.emitted.has(post.id) || pinnedAndCollected) {
-		return null;
-	}
 	plan.emitted.add(post.id);
-	viewIds(plan, view.name).push(post.id);
+	// Older backfill items must not displace the list's actual head (likes
+	// and bookmarks are ordered by the action, not the post's numeric id).
+	if (
+		backfill.phase === "head" ||
+		plan.fullWalk ||
+		plan.stored.get(view.name)?.length === 0
+	) {
+		viewIds(plan, view.name).push(post.id);
+	}
+	if (!pinned) {
+		if (backfill.phase === "head" && !backfill.headDone) {
+			if (backfill.headResumePassed) backfill.headPosition = post.id;
+		} else {
+			backfill.position = post.id;
+		}
+	}
 	await run.ctx.emitRecord(view.stream, postData(post));
 	outcome.saved += 1;
 	return null;
@@ -1201,6 +1288,17 @@ async function takeTimelinePage(
 	outcome.postResults += parsed.postResults;
 	outcome.unavailable += parsed.unavailable;
 	outcome.unreadable += parsed.unreadable;
+	const backfill = viewBackfill(plan, view.name);
+	// First/full walks retain the original response-based accounting. Only
+	// resumed overlap can be excluded from the new-item budget.
+	if (plan.fullWalk) {
+		outcome.budgetPosts += parsed.postResults;
+	} else if (backfill.phase !== "seek" && !backfill.headSeeking) {
+		// Unparseable results cannot be checkpointed safely, but still cost a read.
+		const missing = Math.max(0, parsed.postResults - parsed.items.length);
+		outcome.budgetPosts += missing;
+		run.postsSeen += missing;
+	}
 	let fresh = 0;
 	for (const item of parsed.items) {
 		if (!seen.has(item.post.id)) {
@@ -1224,11 +1322,20 @@ async function takeTimelinePage(
 					!(newestOwner.pinned || plan.fullWalk) &&
 					plan.known.has(newestOwner.post.id)
 				) {
-					outcome.end = "reached_known";
-					break;
+					const backfill = viewBackfill(plan, view.name);
+					backfill.headDone = true;
+					if (backfill.complete) {
+						outcome.end = "reached_known";
+						break;
+					}
+					if (backfill.phase === "head") {
+						backfill.phase = backfill.position === null ? "backfill" : "seek";
+					}
 				}
 				if (
 					!newestOwner.pinned &&
+					plan.backfill.get(view.name)?.phase !== "seek" &&
+					!plan.backfill.get(view.name)?.headSeeking &&
 					plan.since !== null &&
 					newestOwner.post.created_at < plan.since
 				) {
@@ -1255,17 +1362,55 @@ async function takeTimelinePage(
 		count: plan.emitted.size,
 		message: `Reading your X ${view.label}: ${plan.emitted.size} saved so far`,
 	});
-	if (outcome.end !== null) {
-		return;
+	if (outcome.end === null) {
+		if (parsed.postResults === 0 || parsed.bottomCursor === null) {
+			if (
+				backfill.phase === "seek" ||
+				backfill.headSeeking ||
+				!backfill.headResumePassed
+			) {
+				// A missing saved position is not evidence of history completion.
+				outcome.failure = {
+					reason: "list_end_unconfirmed",
+					message: `X stopped loading more ${view.label} before the list ended, so older ${view.label} may be missing.`,
+				};
+			} else {
+				outcome.end = "exhausted";
+			}
+		} else if (fresh === 0) {
+			outcome.failure = {
+				reason: "list_end_unconfirmed",
+				message: `X stopped loading more ${view.label} before the list ended, so older ${view.label} may be missing.`,
+			};
+		} else if (outcome.budgetPosts >= run.viewCaps[view.name]) {
+			outcome.end = "cap_reached";
+		}
 	}
-	if (parsed.postResults === 0 || fresh === 0 || parsed.bottomCursor === null) {
-		// A page of cursors only, or of posts already seen: the list has ended.
-		outcome.end = "exhausted";
-	} else if (outcome.postResults >= run.viewCaps[view.name]) {
-		// The view's own cap is the stream's stated bound. A run stopped on the
-		// shared budget instead leaves the view open, so its cursor does not
-		// move past what the budget stopped it from reading.
-		outcome.end = "cap_reached";
+	// If every saved head anchor vanished, no transition into the saved
+	// backfill was proven. Reaching a range boundary is not a safe substitute.
+	if (
+		(outcome.end === "exhausted" || outcome.end === "older_than_range") &&
+		backfill.phase === "head" &&
+		backfill.position !== null
+	) {
+		outcome.end = null;
+		outcome.failure = {
+			reason: "list_end_unconfirmed",
+			message: `X stopped loading more ${view.label} before the list ended, so older ${view.label} may be missing.`,
+		};
+	}
+	if (outcome.end === "exhausted" || outcome.end === "older_than_range") {
+		backfill.position = null;
+		backfill.complete = true;
+		backfill.headDone = true;
+	}
+	if (
+		run.postsSeen >= run.maxPosts &&
+		outcome.end !== "exhausted" &&
+		outcome.end !== "older_than_range" &&
+		outcome.end !== "reached_known"
+	) {
+		stopRun(run, "run_budget_reached", BUDGET_STOP_MESSAGE);
 	}
 }
 
@@ -1610,6 +1755,7 @@ function emptyOutcome(): ViewOutcome {
 		otherAuthors: 0,
 		pages: 0,
 		postResults: 0,
+		budgetPosts: 0,
 		saved: 0,
 		unavailable: 0,
 		unreadable: 0,
@@ -1629,6 +1775,9 @@ async function readView(
 	plan: StreamPlan | null,
 ): Promise<ViewOutcome> {
 	const outcome = emptyOutcome();
+	// A first/full walk has no saved overlap: drain charges every fetched post,
+	// including a duplicate record, a filtered item, or an unreadable result.
+	run.activeOperation = plan === null || plan.fullWalk ? null : view.operation;
 	const steps = view.steps(handle);
 	if (steps === null) {
 		await reportLayout(run);
@@ -1646,6 +1795,8 @@ async function readView(
 	const seen = new Set<string>();
 	let waited = 0;
 	let idleAtBottom = 0;
+	const resumePosition = plan?.backfill.get(view.name)?.position ?? null;
+	let resumeScrollUsed = false;
 	for (let step = 0; ; step += 1) {
 		const drained = await drain(run);
 		const pagesBefore = outcome.pages;
@@ -1690,7 +1841,43 @@ async function readView(
 		}
 		idleAtBottom =
 			outcome.pages === pagesBefore && drained.atBottom ? idleAtBottom + 1 : 0;
-		if (idleAtBottom > MAX_IDLE_STEPS_AT_BOTTOM || step >= run.maxScrollSteps) {
+		if (
+			step >= run.maxScrollSteps ||
+			run.scrollSteps >= run.maxScrollSteps * VIEWS.length
+		) {
+			const backfill = plan?.backfill.get(view.name);
+			const resumeNeedsProgress =
+				backfill?.phase === "backfill" &&
+				resumePosition !== null &&
+				backfill.position === resumePosition;
+			if (
+				resumeNeedsProgress &&
+				!resumeScrollUsed &&
+				step === run.maxScrollSteps &&
+				run.scrollSteps < run.maxScrollSteps * VIEWS.length
+			) {
+				// Finding the anchor does not save anything. Allow one more
+				// scroll to advance, while retaining the whole-run ceiling.
+				resumeScrollUsed = true;
+			} else {
+				if (
+					backfill?.phase === "seek" ||
+					backfill?.headSeeking ||
+					backfill?.headResumePassed === false ||
+					resumeNeedsProgress
+				) {
+					// An unchanged seek cannot advance by retrying.
+					outcome.failure = {
+						reason: "list_end_unconfirmed",
+						message: `X stopped loading more ${view.label} before the list ended, so older ${view.label} may be missing.`,
+					};
+				} else {
+					outcome.end = "cap_reached";
+				}
+				break;
+			}
+		}
+		if (idleAtBottom > MAX_IDLE_STEPS_AT_BOTTOM) {
 			outcome.failure = {
 				reason: "list_end_unconfirmed",
 				message: `X stopped loading more ${view.label} before the list ended, so older ${view.label} may be missing.`,
@@ -1700,6 +1887,7 @@ async function readView(
 		const share =
 			SCROLL_VIEWPORT_SHARE_MIN +
 			Math.random() * (SCROLL_VIEWPORT_SHARE_MAX - SCROLL_VIEWPORT_SHARE_MIN);
+		run.scrollSteps += 1;
 		await runAction(run, scrollScript(share));
 	}
 	return outcome;
@@ -1719,6 +1907,29 @@ function instant(value: string | undefined): string | null {
 	}
 	const parsed = Date.parse(value);
 	return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
+}
+
+/** Stable scope identity, independent of resource order, repeats and object key order. */
+type StreamScopeWithResources = { resources?: unknown };
+function canonicalScope(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		const entries = new Map<string, unknown>();
+		for (const entry of value) {
+			const normalized = canonicalScope(entry);
+			entries.set(JSON.stringify(normalized) ?? "null", normalized);
+		}
+		return [...entries.entries()]
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([, entry]) => entry);
+	}
+	if (value !== null && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value)
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([key, entry]) => [key, canonicalScope(entry)]),
+		);
+	}
+	return value;
 }
 
 /**
@@ -1757,6 +1968,19 @@ function planStream(
 	} else {
 		storedByView.set(stream, storedIds(cursor.head_ids));
 	}
+	const scope = JSON.stringify({
+		since,
+		until: instant(range?.until),
+		resources: canonicalScope(
+			(request as StreamScopeWithResources).resources ?? null,
+		),
+	});
+	const scopeChanged =
+		cursor.backfill_scope !== undefined && cursor.backfill_scope !== scope;
+	const reset = ctx.collectionMode === "full_refresh" || scopeChanged;
+	if (reset) {
+		for (const view of storedByView.keys()) storedByView.set(view, []);
+	}
 	const known = new Set([...storedByView.values()].flat());
 	const storedSince =
 		typeof cursor.requested_since === "string" ? cursor.requested_since : null;
@@ -1764,12 +1988,34 @@ function planStream(
 	// posts older than it were never read.
 	const rangeExpanded =
 		storedSince !== null && (since === null || since < storedSince);
+	const fullWalk = reset || known.size === 0 || rangeExpanded;
+	const backfill = new Map<ViewName, ViewBackfill>();
+	for (const view of storedByView.keys()) {
+		const saved =
+			!fullWalk && cursor.backfill_scope === scope
+				? cursor.backfill?.[view]
+				: undefined;
+		const position = storedIds([saved?.position])[0] ?? null;
+		const headPosition = storedIds([saved?.head_position])[0] ?? null;
+		backfill.set(view, {
+			position,
+			complete: saved?.complete === true && position === null,
+			phase:
+				fullWalk || (storedByView.get(view)?.length ?? 0) === 0
+					? "backfill"
+					: "head",
+			headDone: fullWalk || (storedByView.get(view)?.length ?? 0) === 0,
+			headPosition,
+			pendingHead: storedIds(saved?.head_ids),
+			headSeeking: false,
+			headResumePassed: headPosition === null,
+		});
+	}
 	return {
+		backfill,
+		scope,
 		emitted: new Set(),
-		fullWalk:
-			ctx.collectionMode === "full_refresh" ||
-			known.size === 0 ||
-			rangeExpanded,
+		fullWalk,
 		known,
 		newIds: new Map(),
 		stored: storedByView,
@@ -1788,33 +2034,46 @@ function byIdDescending(a: string, b: string): number {
 	return a < b ? 1 : -1;
 }
 
-/** The kept head for one view: this run's new ids first, then the stored ids. */
-function headIds(plan: StreamPlan, view: ViewName): string[] {
-	const merged = [
-		...new Set([
-			...(plan.newIds.get(view) ?? []),
-			...(plan.stored.get(view) ?? []),
-		]),
-	];
-	// Likes and bookmarks are in the order they were made, which their ids do
-	// not follow; the run's own order (new first, then the stored head) is kept.
-	if (view === "originals" || view === "replies") {
-		merged.sort(byIdDescending);
-	}
-	return merged.slice(0, HEAD_IDS_KEPT);
-}
-
 function nextCursor(stream: PostStream, plan: StreamPlan): StreamCursor {
-	if (stream === POSTS_STREAM) {
-		return {
-			head_ids: headIds(plan, "originals"),
-			reply_head_ids: headIds(plan, "replies"),
-			requested_since: plan.since,
+	const backfill: NonNullable<StreamCursor["backfill"]> = {};
+	const heads = (view: ViewName): string[] => {
+		const progress = viewBackfill(plan, view);
+		if (!progress.headDone) return [...(plan.stored.get(view) ?? [])];
+		return [
+			...new Set([
+				...(plan.newIds.get(view) ?? []),
+				...progress.pendingHead,
+				...(plan.stored.get(view) ?? []),
+			]),
+		]
+			.sort(
+				view === "originals" || view === "replies" ? byIdDescending : () => 0,
+			)
+			.slice(0, HEAD_IDS_KEPT);
+	};
+	for (const [view, progress] of plan.backfill) {
+		backfill[view] = {
+			position: progress.complete ? null : progress.position,
+			complete: progress.complete,
+			...(!progress.headDone && progress.headPosition !== null
+				? {
+						head_position: progress.headPosition,
+						head_ids: [
+							...new Set([
+								...(plan.newIds.get(view) ?? []),
+								...progress.pendingHead,
+							]),
+						].slice(0, HEAD_IDS_KEPT),
+					}
+				: {}),
 		};
 	}
 	return {
-		head_ids: headIds(plan, stream),
+		head_ids: heads(stream === POSTS_STREAM ? "originals" : stream),
+		...(stream === POSTS_STREAM ? { reply_head_ids: heads("replies") } : {}),
 		requested_since: plan.since,
+		backfill_scope: plan.scope,
+		backfill,
 	};
 }
 
@@ -1830,7 +2089,7 @@ async function emitSkip(
 		reason: SKIP_REASON[failure.reason],
 		recovery_hint: {
 			action: RECOVERY_ACTION[failure.reason],
-			retryable: false,
+			retryable: failure.reason === "run_budget_reached",
 		},
 		message: failure.message,
 		diagnostics,
@@ -1895,8 +2154,27 @@ async function finishStream(
 			outcomes.length > 0 && run.stop !== null
 				? run.stop
 				: runStoppedEarly(run, stream);
+		if (
+			run.stop?.reason === "run_budget_reached" &&
+			[...plan.backfill.values()].some(
+				(value) => value.position !== null || value.headPosition !== null,
+			)
+		) {
+			failure = run.stop;
+		}
 	}
-	if (failure === null && counts.unreadable) {
+	if (
+		failure === null &&
+		[...plan.backfill.values()].some(
+			(value) => !value.complete || !value.headDone,
+		)
+	) {
+		failure = { reason: "run_budget_reached", message: BUDGET_STOP_MESSAGE };
+	}
+	if (
+		(failure === null || failure.reason === "run_budget_reached") &&
+		counts.unreadable
+	) {
 		failure = {
 			reason: "records_unreadable",
 			message: `${counts.unreadable} of your ${stream} had no usable id, author or date and ${counts.unreadable === 1 ? "was" : "were"} skipped.`,
@@ -1924,10 +2202,9 @@ async function finishStream(
 	if (failure !== null) {
 		await emitSkip(run.ctx, stream, failure, counts);
 	}
-	// A stream that fell short in any way keeps its old cursor, so the next
-	// run reads from the top again instead of stopping above what this run
-	// missed.
-	if (failure === null) {
+	// Budget stops retain safe progress. Other failures keep the old cursor:
+	// neither a missing anchor nor an unreadable item can prove continuity.
+	if (failure === null || failure.reason === "run_budget_reached") {
 		await run.ctx.emit({
 			type: "STATE",
 			stream,
@@ -2060,6 +2337,9 @@ export async function collectXBrowser(
 
 	const run: Run = {
 		activeStream: null,
+		activeOperation: null,
+		budgetIds: new Set(),
+		scrollSteps: 0,
 		aborted: 0,
 		ctx,
 		delayRange: options.actionDelayMs ?? [
@@ -2144,6 +2424,7 @@ export async function collectXBrowser(
 		run.activeStream = view.stream;
 		const outcome = await readView(run, view, handle, plan);
 		run.activeStream = null;
+		run.activeOperation = null;
 		if (view.name === "originals" && run.profile === null) {
 			run.profileFailure ??= outcome.failure;
 		}

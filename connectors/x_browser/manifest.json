@@ -9,7 +9,7 @@
 	},
 	"connector_key": "x-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-	"version": "0.1.19",
+	"version": "0.1.20",
 	"display_name": "X (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -38,7 +38,7 @@
 			"rate_limit_sensitivity": "high",
 			"bot_detection_sensitivity": "high",
 			"background_safe": false,
-			"rationale": "Collection reads what the x.com web app loads for the owner's own signed-in session; it sends no request of its own. X's terms do not permit automated access, and reading posts spends the owner's own daily reading allowance, so the owner starts every run and no run happens in the background. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. The first run reads at most about 400 posts in total, about 100 for each of posts, replies, likes and bookmarks; later runs stop each list at the first post already collected. It does one thing at a time, pauses 2 to 5 seconds between actions, never retries, and stops the whole run on a rate limit, an error response or a lost session. Run it at most once a day."
+			"rationale": "Collection reads what the x.com web app loads for the owner's own signed-in session; it sends no request of its own. X's terms do not permit automated access, and reading posts spends the owner's own daily reading allowance, so the owner starts every run and no run happens in the background. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. The first run reads at most about 400 posts in total, about 100 for each of posts, replies, likes and bookmarks; later runs add what is newer and continue each list into older posts, at most 60 scroll steps deep per list. To reach older posts, a run scrolls past posts it already saved; X counts those toward the daily reading allowance even though they are not saved again. It does one thing at a time, pauses 2 to 5 seconds between actions, never retries, and stops the whole run on a rate limit, an error response or a lost session. Run it at most once a day."
 		},
 		"public_listing": {
 			"tier": "development",
@@ -152,7 +152,7 @@
 		{
 			"name": "posts",
 			"required": false,
-			"description": "Posts the signed-in owner wrote on X: original posts, replies and quotes, and reposts where X lists them. Other people's posts in the same threads are not saved. The first run reads at most about 100 of the newest; later runs add what is newer than the last run. Older history is not read: use the X archive for that.",
+			"description": "Posts the signed-in owner wrote on X: original posts, replies and quotes, and reposts where X lists them. Other people's posts in the same threads are not saved. Each run reads up to about 100 new posts from the profile's posts list and about 100 from its replies list. Later runs add newer posts and continue into older ones, but a run scrolls at most 60 steps down each list, so very old posts stay out of reach. To continue, a run first scrolls back past posts it already saved, and X counts those toward the owner's daily reading allowance.",
 			"display": {
 				"label": "Your X posts",
 				"detail": "Your posts and replies: text, when you posted, what it replied to or quoted, links, hashtags, mentions, media addresses, and like, repost, reply, quote, bookmark and view counts. No direct messages."
@@ -325,7 +325,7 @@
 		{
 			"name": "likes",
 			"required": false,
-			"description": "Posts the signed-in owner liked on X, with who wrote each and its text. X does not say when a post was liked, so this stream cannot be limited to a date range. The first run reads at most about 100 of the newest; later runs add what is newer than the last run. Older history is not read: use the X archive for that.",
+			"description": "Posts the signed-in owner liked on X, with who wrote each and its text. X does not say when a post was liked, so this stream cannot be limited to a date range. Each run reads up to about 100 new likes. Later runs add newer likes and continue into older ones, but a run scrolls at most 60 steps down each list, so very old likes stay out of reach. To continue, a run first scrolls back past likes it already saved, and X counts those toward the owner's daily reading allowance.",
 			"display": {
 				"label": "Posts you liked on X",
 				"detail": "The posts you liked: who wrote each, its text, when it was posted, links, hashtags, mentions, media addresses and its counts."
@@ -496,7 +496,7 @@
 		{
 			"name": "bookmarks",
 			"required": false,
-			"description": "Posts the signed-in owner bookmarked on X, with who wrote each and its text. X does not say when a post was bookmarked, so this stream cannot be limited to a date range. The first run reads at most about 100 of the newest; later runs add what is newer than the last run. Older history is not read: use the X archive for that.",
+			"description": "Posts the signed-in owner bookmarked on X, with who wrote each and its text. X does not say when a post was bookmarked, so this stream cannot be limited to a date range. Each run reads up to about 100 new bookmarks. Later runs add newer bookmarks and continue into older ones, but a run scrolls at most 60 steps down each list, so very old bookmarks stay out of reach. To continue, a run first scrolls back past bookmarks it already saved, and X counts those toward the owner's daily reading allowance.",
 			"display": {
 				"label": "Posts you bookmarked on X",
 				"detail": "The posts you bookmarked: who wrote each, its text, when it was posted, links, hashtags, mentions, media addresses and its counts."
