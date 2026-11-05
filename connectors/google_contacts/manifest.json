@@ -9,7 +9,7 @@
 	},
 	"connector_key": "google-contacts",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-contacts",
-	"version": "0.1.24",
+	"version": "0.1.25",
 	"display_name": "Google Contacts",
 	"brand": {
 		"icon": "icon.svg",
@@ -232,6 +232,9 @@
 		}
 	],
 	"reason_display_messages": {
-		"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your contacts, so some contacts haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+		"google_contacts_auth_failed": "Google Contacts needs you to sign in again or update your access key. Then run again.",
+		"google_people_access_token_missing": "Google Contacts needs you to sign in again or update your access key. Then run again.",
+		"google_people_sync_token_expired": "This part stopped because of an internal problem reading Google Contacts. It is not something you can fix.",
+		"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing."
 	}
 }

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "codex",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-	"version": "0.3.15",
+	"version": "0.3.16",
 	"display_name": "OpenAI Codex CLI",
 	"brand": {
 		"icon": "icon.svg",
@@ -869,11 +869,11 @@
 		}
 	],
 	"reason_display_messages": {
-		"symlink_skipped": "A symbolic link in your Codex data was skipped without reading its target",
-		"malformed_jsonl_line": "Part of this session's log file couldn't be read, so those entries were skipped. Nothing was lost on your machine — the original file is unchanged",
-		"non_object_jsonl_record": "A line in this Codex session log has an unexpected format and was skipped",
-		"rollout_source_read_error": "We couldn't read part of your Codex data. It will be checked again on the next run",
-		"shape_check_failed": "The data didn't look like we expected",
-		"truncated_jsonl_tail": "The last line of this Codex session log is incomplete and will be checked again on the next run"
+		"malformed_jsonl_line": "Some items could not be read and were skipped.",
+		"non_object_jsonl_record": "Some items could not be read and were skipped.",
+		"rollout_source_read_error": "OpenAI Codex CLI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"shape_check_failed": "Some items could not be read and were skipped.",
+		"symlink_skipped": "Some items could not be read and were skipped.",
+		"truncated_jsonl_tail": "Some items could not be read and were skipped."
 	}
 }

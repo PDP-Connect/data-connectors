@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-	"version": "1.0.33",
+	"version": "1.0.34",
 	"display_name": "Strava",
 	"brand": {
 		"icon": "icon.svg",
@@ -191,12 +191,12 @@
 		}
 	],
 	"reason_display_messages": {
-		"collection_interrupted": "Your export file ended earlier than expected, so some activities are missing. Ask Strava for a fresh copy of your account and upload the new download.",
-		"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally. Importing the same file again won't recover them.",
-		"sign_in_required": "Strava needs you to sign in again before this can continue.",
-		"source_limit_reached": "We read up to the limit this import allows, so older activities haven't been collected yet.",
-		"source_unreadable": "That file isn't a Strava export we can read. It should be the .zip Strava emails you — not one you've unzipped, and not a single activity file.",
-		"strava_export_columns_unexpected": "We couldn't read your export because its columns aren't the ones we expect. Strava may have changed the format — please report this rather than retrying.",
-		"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it."
+		"collection_interrupted": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"records_unreadable": "Some items could not be read and were skipped.",
+		"sign_in_required": "Strava needs you to sign in again or update your access key. Then run again.",
+		"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"source_unreadable": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"strava_export_columns_unexpected": "This part stopped because of an internal problem reading Strava. It is not something you can fix.",
+		"strava_export_not_recognised": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 	}
 }

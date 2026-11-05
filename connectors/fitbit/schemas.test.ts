@@ -12,8 +12,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
+import { scanConnectorForReasonEmissions } from "../../packages/polyfill-connectors/src/reason-emission-scan.ts";
 import { RUNTIME_GENERIC_REASON_CODES } from "../../packages/polyfill-connectors/src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
 import { SKIP_MESSAGE } from "./collect.ts";
 import { activityType } from "./parsers.ts";
@@ -217,9 +219,14 @@ test("the manifest's enums are the Zod enums, which are the exported constants",
 test("every SKIP_RESULT reason has owner copy, and nothing else does", () => {
 	// Only a SKIP_RESULT carries a reason to the owner; the three outcomes
 	// that skip nothing appear only in the coverage line, which has no copy.
+	// Thrown terminal codes need copy too (reason-display-messages.test.ts), so the copy set is the
+	// SKIP_RESULT vocabulary plus the codes this connector can throw, and nothing else.
+	const thrownCodes = scanConnectorForReasonEmissions(
+		fileURLToPath(new URL(".", import.meta.url)),
+	).terminalCodes.filter((code) => !RUNTIME_GENERIC_REASON_CODES.has(code));
 	assert.deepEqual(
 		Object.keys(manifest().reason_display_messages).sort(),
-		Object.keys(SKIP_MESSAGE).sort(),
+		[...new Set([...Object.keys(SKIP_MESSAGE), ...thrownCodes])].sort(),
 	);
 });
 

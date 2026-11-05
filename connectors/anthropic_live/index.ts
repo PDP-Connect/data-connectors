@@ -258,6 +258,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A non-OK status that is not auth (401 throws AuthError first) or unavailable
+ * (403/404) reports `http_error` when a retry can clear it; any other 4xx means
+ * claude.ai rejected the request itself, which only a connector update fixes.
+ */
 function isRetryableStatus(status: number): boolean {
 	return status === 0 || status === 429 || status >= 500;
 }
@@ -325,7 +330,13 @@ export async function runAccountPlanStream(
 ): Promise<void> {
 	await ctx.progress("Fetching account plans", { stream: ACCOUNT_PLAN_STREAM });
 	if (!hasReadablePlanOrganizationInventory(organizations)) {
-		await skip(ctx, ACCOUNT_PLAN_STREAM, "parse_error", "The organization list contains an unreadable entry.", true);
+		await skip(
+			ctx,
+			ACCOUNT_PLAN_STREAM,
+			"parse_error",
+			"The organization list contains an unreadable entry.",
+			true,
+		);
 		return;
 	}
 	const usable = usablePlanOrganizations(organizations);
@@ -353,7 +364,9 @@ export async function runAccountPlanStream(
 			await skip(
 				ctx,
 				ACCOUNT_PLAN_STREAM,
-				"http_error",
+				isRetryableStatus(res.status)
+					? "http_error"
+					: "anthropic_live_request_rejected",
 				`subscription_details http ${res.status}`,
 				isRetryableStatus(res.status),
 			);
@@ -440,7 +453,9 @@ export async function runUsageLimitsStream(
 		await skip(
 			ctx,
 			USAGE_LIMITS_STREAM,
-			"http_error",
+			isRetryableStatus(res.status)
+				? "http_error"
+				: "anthropic_live_request_rejected",
 			`usage http ${res.status}`,
 			isRetryableStatus(res.status),
 		);

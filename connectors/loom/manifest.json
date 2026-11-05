@@ -9,7 +9,7 @@
 	},
 	"connector_key": "loom",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "Loom",
 	"brand": {
 		"icon": "icon.svg",
@@ -156,6 +156,6 @@
 		}
 	],
 	"reason_display_messages": {
-		"loom_apollo_wiring_pending": "Loom support isn't wired up yet"
+		"loom_apollo_wiring_pending": "Loom does not offer this data, or this connector cannot read it yet. There is nothing you need to do."
 	}
 }

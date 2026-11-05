@@ -37,11 +37,23 @@
  * refactored to an explicit literal-per-branch map). A `reason:` value that
  * cannot be statically resolved to a finite literal set FAILS the gate —
  * fail-closed, not silently skipped.
+ *
+ * Thrown terminal codes (`createConnectorFailure(code, ...)` and code-shaped
+ * bare `Error` messages, including those of the shared modules in
+ * `SHARED_TERMINAL_CODE_MODULES`) need copy too, with no allowlist.
+ *
+ * The source of truth for the copy is `reason-copy.json` in this directory: a
+ * small set of shared sentences plus, per connector, which sentence each code
+ * uses. `npm run reason-copy:generate` at the repo root stamps the resolved text
+ * into each manifest's `reason_display_messages`, and `npm run reason-copy:check`
+ * fails when a manifest drifts. To give a new code copy, add it to
+ * `reason-copy.json` and run the generator; never edit the manifest by hand.
  */
 
 import assert from "node:assert/strict";
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -59,6 +71,7 @@ import {
 import { connectorReasonDisplayMessages } from "./reason-display-messages.ts";
 import {
 	DETAIL_GAP_MESSAGE_REASON_LITERALS,
+	SHARED_TERMINAL_CODE_MODULES,
 	scanConnectorForReasonEmissions,
 } from "./reason-emission-scan.ts";
 import { RUNTIME_GENERIC_REASON_CODES } from "./reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
@@ -224,10 +237,44 @@ test("every connector-emitted reason code has a registered display message (that
 			.join("\n");
 		assert.fail(
 			`Reason codes emitted by connectors but missing a vetted display message:\n${lines}\n\n` +
-				"Add an entry to that connector's own manifest's reason_display_messages field " +
-				"(packages/polyfill-connectors/manifests/<connector>.json).",
+				"Add the code to that connector's entry in packages/polyfill-connectors/src/reason-copy.json, " +
+				"then run npm run reason-copy:generate at the repo root.",
 		);
 	}
+});
+
+test("every thrown terminal code has a display message (that connector's own manifest, OR RI-generic)", () => {
+	const byConnector = connectorReasonDisplayMessages();
+	const missing: string[] = [];
+	const unresolved: string[] = [];
+
+	for (const { key, dir } of listConnectorDirs()) {
+		const { terminalCodes, unresolvedTerminalCodes } =
+			scanConnectorForReasonEmissions(dir);
+		for (const { file, line, snippet } of unresolvedTerminalCodes) {
+			unresolved.push(`  ${key} (${file}:${line}): ${snippet}`);
+		}
+		const messages = byConnector[key] ?? {};
+		for (const code of terminalCodes) {
+			if (!(code in messages || RUNTIME_GENERIC_REASON_CODES.has(code))) {
+				missing.push(`  ${key}: ${code}`);
+			}
+		}
+	}
+
+	assert.deepEqual(
+		unresolved,
+		[],
+		`createConnectorFailure code argument(s) that could not be resolved to a finite literal set:\n${unresolved.join("\n")}\n\n` +
+			"Pass a string literal, a module-level const, or a literal-per-branch mapping.",
+	);
+	assert.deepEqual(
+		missing,
+		[],
+		`Thrown terminal codes with no display message:\n${missing.join("\n")}\n\n` +
+			"Add the code to that connector's entry in packages/polyfill-connectors/src/reason-copy.json, " +
+			"then run npm run reason-copy:generate at the repo root.",
+	);
 });
 
 test("falsifiability: a shipped connector emitting a reason code absent from its OWN manifest is caught, not silently passed by another connector's coverage", () => {
@@ -662,6 +709,224 @@ test("USAA's real fix: the pdf_download_* codes are now plain literals, discover
 		assert.ok(
 			literalReasons.includes(code),
 			`expected ${code} to be discovered as a live literal reason code`,
+		);
+	}
+});
+
+// ─── Thrown terminal codes ──────────────────────────────────────────────────
+
+test("terminal codes: a createConnectorFailure code is counted, whether literal, a module const, or a const-object member", () => {
+	withSyntheticConnectorFile(
+		"index.ts",
+		[
+			"import { createConnectorFailure } from '../../src/connector-runtime.ts';",
+			"const AUTH_FAILED = 'synthetic_auth_failed';",
+			"const ERROR_CODE = { TIMEOUT: 'synthetic_timeout' } as const;",
+			"export function fail(kind: string): Error {",
+			"  if (kind === 'a') throw createConnectorFailure('synthetic_literal_code', 'message');",
+			"  if (kind === 'b') return createConnectorFailure(AUTH_FAILED, 'message');",
+			"  return createConnectorFailure(ERROR_CODE.TIMEOUT, 'message');",
+			"}",
+			"",
+		].join("\n"),
+		(dir) => {
+			const { terminalCodes, unresolvedTerminalCodes, literalReasons } =
+				scanConnectorForReasonEmissions(dir);
+			assert.deepEqual(unresolvedTerminalCodes, []);
+			assert.deepEqual([...terminalCodes].sort(), [
+				"synthetic_auth_failed",
+				"synthetic_literal_code",
+				"synthetic_timeout",
+			]);
+			assert.deepEqual(
+				literalReasons,
+				[],
+				"a thrown code is not a SKIP_RESULT reason",
+			);
+		},
+	);
+});
+
+test("terminal codes: a createConnectorFailure code that does not resolve is reported, not skipped", () => {
+	withSyntheticConnectorFile(
+		"index.ts",
+		[
+			"import { createConnectorFailure } from '../../src/connector-runtime.ts';",
+			"export function fail(response: { code: string }): Error {",
+			"  return createConnectorFailure(response.code, 'message');",
+			"}",
+			"",
+		].join("\n"),
+		(dir) => {
+			const { terminalCodes, unresolvedTerminalCodes } =
+				scanConnectorForReasonEmissions(dir);
+			assert.deepEqual(terminalCodes, []);
+			assert.equal(unresolvedTerminalCodes.length, 1);
+			assert.match(unresolvedTerminalCodes[0]?.snippet ?? "", /response\.code/);
+		},
+	);
+});
+
+test("terminal codes: a code-shaped bare Error message is counted, thrown or returned, and in an Error subclass's super()", () => {
+	withSyntheticConnectorFile(
+		"index.ts",
+		[
+			"export class SyntheticCancelledError extends Error {",
+			"  constructor() { super('synthetic_cancelled'); }",
+			"}",
+			"function sessionRequired(): Error {",
+			"  return new Error('synthetic_session_required');",
+			"}",
+			"export function check(ok: boolean, timedOut: boolean): void {",
+			"  if (!ok) throw sessionRequired();",
+			"  throw new Error(timedOut ? 'synthetic_timed_out' : 'synthetic_not_ready', { cause: ok });",
+			"}",
+			"",
+		].join("\n"),
+		(dir) => {
+			const { terminalCodes } = scanConnectorForReasonEmissions(dir);
+			assert.deepEqual([...terminalCodes].sort(), [
+				"synthetic_cancelled",
+				"synthetic_not_ready",
+				"synthetic_session_required",
+				"synthetic_timed_out",
+			]);
+		},
+	);
+});
+
+test("terminal codes: an Error message that is not code-shaped is ignored", () => {
+	withSyntheticConnectorFile(
+		"index.ts",
+		[
+			"export function check(status: number): void {",
+			"  if (status === 401) throw new Error('synthetic_failed: the server said no');",
+			"  if (status === 500) throw new Error('Synthetic failure');",
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: fixture source text, not a template literal.
+			"  if (status === 502) throw new Error(`synthetic_status_${status}`);",
+			"  throw new Error('x');",
+			"}",
+			"",
+		].join("\n"),
+		(dir) => {
+			const { terminalCodes, unresolvedTerminalCodes } =
+				scanConnectorForReasonEmissions(dir);
+			assert.deepEqual(terminalCodes, []);
+			assert.deepEqual(unresolvedTerminalCodes, []);
+		},
+	);
+});
+
+/** A temp root holding `connector/` (scanned) and `shared/` (the shared modules), so a connector import of `../shared/<name>.ts` resolves. */
+function withSharedModuleFixture<T>(
+	connectorFiles: Record<string, string>,
+	sharedFiles: Record<string, string>,
+	run: (paths: { connectorDir: string; sharedDir: string }) => T,
+): T {
+	const root = mkdtempSync(join(tmpdir(), "reason-emission-scan-shared-"));
+	try {
+		const connectorDir = join(root, "connector");
+		const sharedDir = join(root, "shared");
+		mkdirSync(connectorDir);
+		mkdirSync(sharedDir);
+		for (const [name, contents] of Object.entries(connectorFiles)) {
+			writeFileSync(join(connectorDir, name), contents);
+		}
+		for (const [name, contents] of Object.entries(sharedFiles)) {
+			writeFileSync(join(sharedDir, name), contents);
+		}
+		return run({ connectorDir, sharedDir });
+	} finally {
+		rmSync(root, { force: true, recursive: true });
+	}
+}
+
+const SYNTHETIC_SHARED_FILES = {
+	"handoff.ts": [
+		"export class SharedCancelledError extends Error {",
+		"  constructor() { super('shared_sign_in_cancelled'); }",
+		"}",
+		"export function signIn(): void { throw new Error('shared_handoff_timed_out'); }",
+		"",
+	].join("\n"),
+	"login.ts": [
+		"import { signIn } from './handoff.ts';",
+		"export function login(): void { signIn(); throw new Error('shared_login_incomplete'); }",
+		"",
+	].join("\n"),
+	"unlisted.ts":
+		"export function other(): void { throw new Error('shared_unlisted_code'); }\n",
+};
+
+function syntheticSharedModules(sharedDir: string) {
+	const login = join(sharedDir, "login.ts");
+	return [
+		{ path: login, reachedThrough: [] },
+		{ path: join(sharedDir, "handoff.ts"), reachedThrough: [login] },
+	];
+}
+
+test("terminal codes: a listed shared module's codes belong to a connector that imports it, directly or through a module in reachedThrough", () => {
+	withSharedModuleFixture(
+		{
+			"index.ts": [
+				"import { login } from '../shared/login.ts';",
+				"import { other } from '../shared/unlisted.ts';",
+				"export function run(): void { login(); other(); }",
+				"",
+			].join("\n"),
+		},
+		SYNTHETIC_SHARED_FILES,
+		({ connectorDir, sharedDir }) => {
+			const { terminalCodes } = scanConnectorForReasonEmissions(
+				connectorDir,
+				syntheticSharedModules(sharedDir),
+			);
+			assert.deepEqual([...terminalCodes].sort(), [
+				"shared_handoff_timed_out",
+				"shared_login_incomplete",
+				"shared_sign_in_cancelled",
+			]);
+		},
+	);
+});
+
+test("terminal codes: a shared module reached only by a type-only import, or not imported, contributes nothing", () => {
+	withSharedModuleFixture(
+		{
+			"index.ts": [
+				"import type { SharedCancelledError } from '../shared/handoff.ts';",
+				"export type Failure = SharedCancelledError;",
+				"",
+			].join("\n"),
+		},
+		SYNTHETIC_SHARED_FILES,
+		({ connectorDir, sharedDir }) => {
+			const { terminalCodes } = scanConnectorForReasonEmissions(
+				connectorDir,
+				syntheticSharedModules(sharedDir),
+			);
+			assert.deepEqual(terminalCodes, []);
+		},
+	);
+});
+
+test("terminal codes: the real shared modules attribute Amazon sign-in and browser sign-in codes to wholefoods", () => {
+	assert.ok(
+		SHARED_TERMINAL_CODE_MODULES.length > 0,
+		"expected at least one shared terminal-code module",
+	);
+	const { terminalCodes } = scanConnectorForReasonEmissions(
+		join(CONNECTORS_DIR, "wholefoods"),
+	);
+	for (const code of [
+		"amazon_login_manual_incomplete",
+		"browser_handoff_readiness_timed_out",
+		"browser_sign_in_cancelled",
+	]) {
+		assert.ok(
+			terminalCodes.includes(code),
+			`expected wholefoods to be attributed ${code}`,
 		);
 	}
 });

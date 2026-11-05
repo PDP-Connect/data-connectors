@@ -320,6 +320,11 @@ test("runOptionalStream: a non-retryable failure (auth) is flagged non-retryable
 	const hint = (msg as { recovery_hint?: { retryable?: boolean } })
 		.recovery_hint;
 	assert.equal(hint?.retryable, false);
+	assert.equal(
+		(msg as { reason?: string }).reason,
+		"slack_auth_failed",
+		"a rejected session names the sign-in reason, not optional_stream_failed",
+	);
 });
 
 test("runOptionalStream: an auth failure requests credential refresh instead of a runtime retry", async () => {

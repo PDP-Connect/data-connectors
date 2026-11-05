@@ -9,7 +9,7 @@
 	},
 	"connector_key": "slack",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-	"version": "0.7.2",
+	"version": "0.7.4",
 	"display_name": "Slack",
 	"brand": {
 		"icon": "icon.svg",
@@ -1531,11 +1531,18 @@
 		}
 	],
 	"reason_display_messages": {
-		"channel_history_never_requested": "Some channels you're in have never been collected at all, because the archive stopped before reaching them",
-		"channel_history_not_finalized": "Some channels you're in have unproven history, so their messages may be incomplete",
+		"channel_history_never_requested": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"channel_history_not_finalized": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"channel_history_out_of_member_scope": "Some public channels weren't collected because you're not a member of them. Set the Slack option MEMBER_ONLY to false to collect every channel your workspace lists, including ones you've left and ones that are archived",
-		"optional_stream_failed": "We couldn't collect one part of your Slack data, so we skipped it",
-		"source_partition_missing": "Some previously seen Slack channels are missing from this export, so message coverage is incomplete"
+		"optional_stream_failed": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"slack_auth_failed": "Slack needs you to sign in again or update your access key. Then run again.",
+		"slack_cookie_invalid": "Slack needs you to sign in again or update your access key. Then run again.",
+		"slack_credentials_missing": "Slack needs you to sign in again or update your access key. Then run again.",
+		"slack_token_invalid": "Slack needs you to sign in again or update your access key. Then run again.",
+		"slack_workspace_invalid": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"slackdump_max_runtime": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"slackdump_timeout": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"source_partition_missing": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	},
 	"options_schema": {
 		"type": "object",

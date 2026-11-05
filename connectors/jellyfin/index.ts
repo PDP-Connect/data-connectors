@@ -1040,7 +1040,36 @@ async function collectItems(
 	);
 }
 
-/** Map a collect() failure to a SKIP_RESULT reason for both streams. */
+/** The code a first-sign-in failure throws with: the same reason its SKIP_RESULT carries. */
+function firstSignInFailureCode(message: string): string {
+	switch (skipReasonFor(message).reason) {
+		case "jellyfin_auth_failed":
+			return "jellyfin_auth_failed";
+		case "jellyfin_base_url_has_userinfo":
+			return "jellyfin_base_url_has_userinfo";
+		case "jellyfin_base_url_requires_https_non_loopback":
+			return "jellyfin_base_url_requires_https_non_loopback";
+		case "jellyfin_base_url_unsafe_scheme":
+			return "jellyfin_base_url_unsafe_scheme";
+		case "jellyfin_ssrf_rejected_cross_origin":
+			return "jellyfin_ssrf_rejected_cross_origin";
+		case "jellyfin_http_error":
+			return "jellyfin_http_error";
+		case "jellyfin_response_unreadable":
+			return "jellyfin_response_unreadable";
+		default:
+			return "jellyfin_error";
+	}
+}
+
+/**
+ * Map a collect() failure to a SKIP_RESULT reason for both streams. One code
+ * per owner remedy: rejected credentials (`jellyfin_auth_failed`), bad
+ * settings (the `jellyfin_base_url_*` codes, `jellyfin_settings_rejected`), a
+ * reply this connector cannot read (`jellyfin_response_unreadable`, needs a
+ * connector update), and everything transient (`jellyfin_http_error`,
+ * `jellyfin_error`).
+ */
 function skipReasonFor(message: string): { reason: string; message: string } {
 	if (message === "jellyfin_auth_failed") {
 		return {
@@ -1056,10 +1085,38 @@ function skipReasonFor(message: string): { reason: string; message: string } {
 				"any account) or JELLYFIN_API_KEY (admin-only, advanced)",
 		};
 	}
-	if (message.startsWith("jellyfin_authenticate_by_name_")) {
+	// One literal reason per branch (the reason-code scanner resolves literals).
+	if (message.startsWith("jellyfin_base_url_has_userinfo")) {
 		return {
-			reason: "jellyfin_auth_failed",
-			message: `Jellyfin sign-in failed: ${message}`,
+			reason: "jellyfin_base_url_has_userinfo",
+			message: `Jellyfin settings: ${message}`,
+		};
+	}
+	if (message.startsWith("jellyfin_base_url_requires_https_non_loopback")) {
+		return {
+			reason: "jellyfin_base_url_requires_https_non_loopback",
+			message: `Jellyfin settings: ${message}`,
+		};
+	}
+	if (message.startsWith("jellyfin_base_url_unsafe_scheme")) {
+		return {
+			reason: "jellyfin_base_url_unsafe_scheme",
+			message: `Jellyfin settings: ${message}`,
+		};
+	}
+	if (message.startsWith("jellyfin_ssrf_rejected_cross_origin")) {
+		return {
+			reason: "jellyfin_ssrf_rejected_cross_origin",
+			message: `Jellyfin settings: ${message}`,
+		};
+	}
+	if (
+		message.startsWith("jellyfin_configured_user_not_found") ||
+		message.startsWith("jellyfin_ambiguous_user")
+	) {
+		return {
+			reason: "jellyfin_settings_rejected",
+			message: `Jellyfin settings: ${message}`,
 		};
 	}
 	if (message.startsWith("jellyfin_http_")) {
@@ -1070,7 +1127,16 @@ function skipReasonFor(message: string): { reason: string; message: string } {
 			message: `Jellyfin HTTP error: ${message}`,
 		};
 	}
-	return { reason: "jellyfin_error", message: `Jellyfin error: ${message}` };
+	if (JELLYFIN_RETRYABLE_PATTERN.test(message)) {
+		return { reason: "jellyfin_error", message: `Jellyfin error: ${message}` };
+	}
+	// Everything else is a reply this connector could not use (malformed JSON,
+	// missing fields, oversized body, pagination that does not advance). A retry
+	// returns the same reply, so only a connector update helps.
+	return {
+		reason: "jellyfin_response_unreadable",
+		message: `Jellyfin reply could not be read: ${message}`,
+	};
 }
 
 async function emitErrorSkipResults(
@@ -1133,14 +1199,14 @@ async function resolveConnection(
 			));
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			throw createConnectorFailure(
-				"jellyfin_session_failed",
-				`jellyfin_session_failed: ${message}`,
-				{
-					cause: err,
-					retryable: false,
-				},
-			);
+			// Classify by cause so the run page names the real remedy. Every
+			// branch stays non-retryable (see the comment above).
+			// The thrown message stays the original so the SKIP_RESULT classifies
+			// the same way.
+			throw createConnectorFailure(firstSignInFailureCode(message), message, {
+				cause: err,
+				retryable: false,
+			});
 		}
 		await progress("Signed in to Jellyfin");
 

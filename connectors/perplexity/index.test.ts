@@ -1686,7 +1686,7 @@ test("a stream failure without the runtime's reporter fails the run instead of f
 			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
 			(error: unknown) =>
 				error instanceof Error &&
-				(error as { code?: string }).code === "perplexity_stream_incomplete",
+				(error as { code?: string }).code === "perplexity_stream_needs_update",
 		);
 	});
 });

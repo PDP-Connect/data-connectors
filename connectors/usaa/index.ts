@@ -626,17 +626,17 @@ export async function emitExportFailure(
 	const ccSuffix = isCreditCard
 		? ' (credit-card export flow not verified live 2026-04-19 — see design-notes/usaa.md "Fallback path: DOM scrape")'
 		: "";
-	// Credit-card exports keep their own unverified-flow reason regardless of
-	// outcome (the flow itself was never confirmed live), but still carry the
-	// structural-vs-pressure discriminator in diagnostics. For non-credit-card
-	// accounts, a missing affordance/dialog is reported as a distinct
-	// structure-changed reason so the dashboard stops conflating "the connector
-	// is broken" with "the export was momentarily unavailable".
+	// A missing or unrecognized export affordance is a structure-changed reason
+	// for every account type: a retry is pointless until the selectors are
+	// repaired, and the dashboard must not conflate "the connector is broken"
+	// with "the export was momentarily unavailable". Only a credit-card export
+	// that failed otherwise (pressure, or no diagnostic phase) keeps its own
+	// unverified-flow reason, because that flow was never confirmed live.
 	let reason: string;
-	if (isCreditCard) {
-		reason = "credit_card_export_unverified";
-	} else if (outcome === "source_structure_changed") {
+	if (outcome === "source_structure_changed") {
 		reason = "export_affordance_missing";
+	} else if (isCreditCard) {
+		reason = "credit_card_export_unverified";
 	} else {
 		reason = "export_no_download";
 	}

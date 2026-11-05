@@ -9,7 +9,7 @@
 	},
 	"connector_key": "fitbit",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
-	"version": "0.1.10",
+	"version": "0.1.11",
 	"display_name": "Fitbit",
 	"brand": {
 		"icon": "icon.svg",
@@ -349,11 +349,12 @@
 	],
 	"reason_display_messages": {
 		"awaiting_upload": "Nothing to read yet. Request your Fitbit data from Google Takeout at takeout.google.com, selecting only Fitbit (it may be listed as Google Health), with file type .zip and file size 2 GB. Google emails you a download link, usually the same day. Upload every ZIP file from that link here, together: this import can't always tell if one is missing.",
-		"collection_interrupted": "Part of your export couldn't be read to the end, so some of your data is missing. Request a fresh export from Google Takeout and upload the new download.",
+		"collection_interrupted": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 		"device_storage_unavailable": "This device couldn't finish reading your export. Nothing is wrong with the export itself. Try the import again, and check that the device has free storage space.",
 		"export_format_changed": "We couldn't read this part of your Fitbit export because its layout isn't the one we expect. Google may have changed the format, or one of the export's ZIP files may be missing. If you uploaded every ZIP file, please report this rather than retrying.",
-		"records_unreadable": "Some entries in your export couldn't be read and were skipped. Importing the same file again won't recover them.",
+		"records_unreadable": "Some items could not be read and were skipped.",
 		"source_limit_reached": "Your export is larger than this import can read, so some or all of it wasn't imported. If Takeout gave you several ZIP files, upload every one together: this import can't always tell if one is missing. If you chose Takeout files larger than 2 GB, request the export again with 2 GB files; otherwise, please report this.",
-		"source_unreadable": "The newest Google Takeout export in that upload, if there is one, isn't Fitbit data this import can read. Upload only your Fitbit export's ZIP files, every part of it together, as Takeout gave them, without unzipping them. If you chose .tgz as the file type, request the export again as .zip."
+		"source_unreadable": "The newest Google Takeout export in that upload, if there is one, isn't Fitbit data this import can read. Upload only your Fitbit export's ZIP files, every part of it together, as Takeout gave them, without unzipping them. If you chose .tgz as the file type, request the export again as .zip.",
+		"time_range_semantics_changed": "This part stopped because of an internal problem reading Fitbit. It is not something you can fix."
 	}
 }

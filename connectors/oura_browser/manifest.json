@@ -9,7 +9,7 @@
   },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.52",
+  "version": "0.1.54",
   "display_name": "Oura (Browser Sign-In)",
   "brand": {
     "icon": "icon.svg",
@@ -309,8 +309,22 @@
     }
   ],
   "reason_display_messages": {
-    "oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
-    "stream_collection_failed": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
+    "browser_handoff_readiness_probe_failed": "Oura stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+    "browser_handoff_readiness_timed_out": "Oura needs you to sign in again or update your access key. Then run again.",
+    "browser_sign_in_cancelled": "Oura needs you to sign in again or update your access key. Then run again.",
+    "oura_api_token_missing": "Oura needs you to sign in again or update your access key. Then run again.",
+    "oura_authorization_incomplete": "Oura needs you to sign in again or update your access key. Then run again.",
+    "oura_browser_window_deferred": "This run reached its limit. Later runs collect the rest. No action is needed.",
+    "oura_daily_scope_missing": "Oura needs you to sign in again or update your access key. Then run again.",
+    "oura_oauth_code_missing": "Oura needs you to sign in again or update your access key. Then run again.",
+    "oura_oauth_state_invalid": "Oura needs you to sign in again or update your access key. Then run again.",
+    "oura_portal_app_credentials_missing": "Oura API app details are missing. Finish setting up a personal API app with daily access and the required redirect address, then connect again.",
+    "oura_portal_email_invalid": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+    "oura_portal_invalid_applications": "This part stopped because of an internal problem reading Oura. It is not something you can fix.",
+    "oura_portal_origin": "This part stopped because of an internal problem reading Oura. It is not something you can fix.",
+    "oura_portal_session_unconfirmed": "Oura needs you to sign in again or update your access key. Then run again.",
+    "oura_token_invalid_payload": "This part stopped because of an internal problem reading Oura. It is not something you can fix.",
+    "stream_collection_failed": "Oura stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
   },
   "mobile": {
     "pageshim": {
