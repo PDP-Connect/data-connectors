@@ -461,13 +461,13 @@ test("e2e: a transport fault during the FIRST AuthenticateByName is forced non-r
 		() => collect(ctx),
 		(err: unknown) => {
 			assert.ok(err instanceof Error);
-			assert.match(err.message, /jellyfin_session_failed/);
 			assert.equal(
 				(err as { retryable?: boolean }).retryable,
 				false,
 				"first-auth transport faults must be non-retryable — the password was already sent",
 			);
-			assert.equal((err as { code?: string }).code, "jellyfin_session_failed");
+			// A transport fault is not a sign-in problem: it keeps the transient code.
+			assert.equal((err as { code?: string }).code, "jellyfin_error");
 			return true;
 		},
 	);
@@ -583,4 +583,94 @@ test("missing credentials entirely (no username/password, no api_key) fails fast
 	});
 
 	await assert.rejects(() => collect(ctx), /jellyfin_missing_credentials/);
+});
+
+/** The reason on the SKIP_RESULT for each stream, plus the thrown error code. */
+async function firstSignInOutcome(
+	credentials: Record<string, string>,
+	prepare?: (server: FakeJellyfinAuthServer) => void,
+): Promise<{ code: unknown; retryable: unknown; skipReasons: string[] }> {
+	const server = new FakeJellyfinAuthServer();
+	const baseUrl = await server.start();
+	prepare?.(server);
+	try {
+		const { ctx, messages } = makeContext({
+			credentials: { base_url: baseUrl, ...credentials },
+			streams: [{ name: "libraries" }, { name: "items" }],
+		});
+		let thrown: unknown;
+		try {
+			await collect(ctx);
+		} catch (err) {
+			thrown = err;
+		}
+		const skips = messages.filter((m) => m.type === "SKIP_RESULT");
+		return {
+			code: (thrown as { code?: unknown } | undefined)?.code,
+			retryable: (thrown as { retryable?: unknown } | undefined)?.retryable,
+			skipReasons: skips.map((m) => String((m as { reason?: unknown }).reason)),
+		};
+	} finally {
+		await server.stop();
+	}
+}
+
+test("first sign-in: rejected credentials surface the sign-in code, not a catch-all", async () => {
+	const out = await firstSignInOutcome(
+		{ username: "alice", password: "wrong" },
+		(server) => server.setAuthResponse("unauthorized"),
+	);
+	assert.equal(out.code, "jellyfin_auth_failed");
+	assert.equal(out.retryable, false);
+	assert.deepEqual(out.skipReasons, [
+		"jellyfin_auth_failed",
+		"jellyfin_auth_failed",
+	]);
+});
+
+test("first sign-in: a reply the connector cannot read gets its own code", async () => {
+	const out = await firstSignInOutcome(
+		{ username: "alice", password: "correct-password" },
+		(server) => server.setAuthResponse("no_access_token"),
+	);
+	assert.equal(out.code, "jellyfin_response_unreadable");
+	assert.equal(out.retryable, false);
+	assert.deepEqual(out.skipReasons, [
+		"jellyfin_response_unreadable",
+		"jellyfin_response_unreadable",
+	]);
+});
+
+test("first sign-in: a transport fault keeps the transient code on both the throw and the skip", async () => {
+	const server = new FakeJellyfinAuthServer();
+	const baseUrl = await server.start();
+	await server.stop();
+	const { ctx, messages } = makeContext({
+		credentials: { base_url: baseUrl, username: "alice", password: "pw" },
+		streams: [{ name: "libraries" }, { name: "items" }],
+	});
+	await assert.rejects(() => collect(ctx));
+	const reasons = messages
+		.filter((m) => m.type === "SKIP_RESULT")
+		.map((m) => String((m as { reason?: unknown }).reason));
+	assert.deepEqual(reasons, ["jellyfin_error", "jellyfin_error"]);
+});
+
+test("a base URL the connector refuses is reported as a settings problem, not jellyfin_error", async () => {
+	const { ctx, messages } = makeContext({
+		credentials: {
+			base_url: "http://jellyfin.example.com",
+			username: "alice",
+			password: "pw",
+		},
+		streams: [{ name: "libraries" }, { name: "items" }],
+	});
+	await assert.rejects(() => collect(ctx));
+	const reasons = messages
+		.filter((m) => m.type === "SKIP_RESULT")
+		.map((m) => String((m as { reason?: unknown }).reason));
+	assert.deepEqual(reasons, [
+		"jellyfin_base_url_requires_https_non_loopback",
+		"jellyfin_base_url_requires_https_non_loopback",
+	]);
 });

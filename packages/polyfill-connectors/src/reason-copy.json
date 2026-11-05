@@ -433,12 +433,13 @@
 			"jellyfin_base_url_requires_https_non_loopback": "fix_settings",
 			"jellyfin_base_url_unsafe_scheme": "fix_settings",
 			"jellyfin_error": {
-				"message": "Jellyfin could not be read. If your sign-in or server address changed, update the connection. Otherwise run again later."
+				"message": "Jellyfin could not be reached or stopped responding. Check that the server is running, then run again."
 			},
 			"jellyfin_http_error": "incomplete_retry",
 			"jellyfin_media_browser_device_id_empty": "unexpected_data",
 			"jellyfin_missing_credentials": "fix_settings",
-			"jellyfin_session_failed": "sign_in_again",
+			"jellyfin_response_unreadable": "unexpected_data",
+			"jellyfin_settings_rejected": "fix_settings",
 			"jellyfin_ssrf_rejected_cross_origin": "fix_settings",
 			"jellyfin_total_record_count_negative": "unexpected_data",
 			"jellyfin_total_record_count_not_finite": "unexpected_data",

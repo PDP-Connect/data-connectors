@@ -1040,7 +1040,14 @@ async function collectItems(
 	);
 }
 
-/** Map a collect() failure to a SKIP_RESULT reason for both streams. */
+/**
+ * Map a collect() failure to a SKIP_RESULT reason for both streams. One code
+ * per owner remedy: rejected credentials (`jellyfin_auth_failed`), bad
+ * settings (the `jellyfin_base_url_*` codes, `jellyfin_settings_rejected`), a
+ * reply this connector cannot read (`jellyfin_response_unreadable`, needs a
+ * connector update), and everything transient (`jellyfin_http_error`,
+ * `jellyfin_error`).
+ */
 function skipReasonFor(message: string): { reason: string; message: string } {
 	if (message === "jellyfin_auth_failed") {
 		return {
@@ -1056,10 +1063,20 @@ function skipReasonFor(message: string): { reason: string; message: string } {
 				"any account) or JELLYFIN_API_KEY (admin-only, advanced)",
 		};
 	}
-	if (message.startsWith("jellyfin_authenticate_by_name_")) {
+	const settingsCode =
+		/^(jellyfin_base_url_\w+|jellyfin_ssrf_rejected_cross_origin)/.exec(
+			message,
+		)?.[1];
+	if (settingsCode) {
+		return { reason: settingsCode, message: `Jellyfin settings: ${message}` };
+	}
+	if (
+		message.startsWith("jellyfin_configured_user_not_found") ||
+		message.startsWith("jellyfin_ambiguous_user")
+	) {
 		return {
-			reason: "jellyfin_auth_failed",
-			message: `Jellyfin sign-in failed: ${message}`,
+			reason: "jellyfin_settings_rejected",
+			message: `Jellyfin settings: ${message}`,
 		};
 	}
 	if (message.startsWith("jellyfin_http_")) {
@@ -1070,7 +1087,16 @@ function skipReasonFor(message: string): { reason: string; message: string } {
 			message: `Jellyfin HTTP error: ${message}`,
 		};
 	}
-	return { reason: "jellyfin_error", message: `Jellyfin error: ${message}` };
+	if (JELLYFIN_RETRYABLE_PATTERN.test(message)) {
+		return { reason: "jellyfin_error", message: `Jellyfin error: ${message}` };
+	}
+	// Everything else is a reply this connector could not use (malformed JSON,
+	// missing fields, oversized body, pagination that does not advance). A retry
+	// returns the same reply, so only a connector update helps.
+	return {
+		reason: "jellyfin_response_unreadable",
+		message: `Jellyfin reply could not be read: ${message}`,
+	};
 }
 
 async function emitErrorSkipResults(
@@ -1078,7 +1104,13 @@ async function emitErrorSkipResults(
 	error: unknown,
 ): Promise<void> {
 	const message = error instanceof Error ? error.message : String(error);
-	const { reason, message: skipMessage } = skipReasonFor(message);
+	// The first-sign-in failure arrives already classified (see
+	// resolveConnection); reuse its code rather than reclassifying the wrapper.
+	const code = (error as { code?: unknown } | null)?.code;
+	const { reason, message: skipMessage } =
+		typeof code === "string"
+			? { reason: code, message: `Jellyfin sign-in failed: ${message}` }
+			: skipReasonFor(message);
 	for (const stream of ["libraries", "items"]) {
 		await emit({ type: "SKIP_RESULT", stream, reason, message: skipMessage });
 	}
@@ -1133,14 +1165,13 @@ async function resolveConnection(
 			));
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			throw createConnectorFailure(
-				"jellyfin_session_failed",
-				`jellyfin_session_failed: ${message}`,
-				{
-					cause: err,
-					retryable: false,
-				},
-			);
+			// Classify by cause so the run page names the real remedy. Every
+			// branch stays non-retryable (see the comment above).
+			const { reason } = skipReasonFor(message);
+			throw createConnectorFailure(reason, `${reason}: ${message}`, {
+				cause: err,
+				retryable: false,
+			});
 		}
 		await progress("Signed in to Jellyfin");
 
