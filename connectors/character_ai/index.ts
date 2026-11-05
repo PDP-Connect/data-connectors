@@ -1266,10 +1266,15 @@ async function failStream(
 		retryable: recoveryHint.retryable,
 	});
 	if (!ctx.reportStreamFailure) {
-		throw createConnectorFailure("character_ai_stream_incomplete", message, {
-			retryable: recoveryHint.retryable,
-			recoveryHint,
-		});
+		// What a retry can clear keeps the retryable code; a payload this
+		// connector cannot read needs a newer connector.
+		throw createConnectorFailure(
+			recoveryHint.retryable
+				? "character_ai_stream_incomplete"
+				: "character_ai_invalid_payload",
+			message,
+			{ retryable: recoveryHint.retryable, recoveryHint },
+		);
 	}
 	await ctx.reportStreamFailure(stream, message, {
 		retryable: recoveryHint.retryable,
