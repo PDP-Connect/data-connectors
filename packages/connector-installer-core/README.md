@@ -55,7 +55,11 @@ Signed-index installation and its resolution and update APIs are no longer suppo
   signed config names as the entrypoint. The artifact digest is `oci.digest`.
 - `installFromLock` — fetch, verify and write every pinned artifact. The
   entrypoint goes to the lock's `entrypointPath`; every other code member keeps
-  its position relative to it.
+  its position relative to it. A code layer with more than one member must keep
+  its entrypoint file name (the lock's `entrypointPath` basename must equal the
+  config entrypoint's), because the verified bytes cannot be rewritten to fix
+  imports of the original name; otherwise install and verify refuse before any
+  write. The publisher and all locks use `collection-profile.mjs` for both.
 - `verifyInstalled` — re-verify an install root against its lock, and report
   the signed source declaration digest for each artifact.
 - `pruneInstalled` — remove entries an install root no longer expects.

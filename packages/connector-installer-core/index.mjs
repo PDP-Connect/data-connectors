@@ -577,7 +577,24 @@ async function fetchOciArtifact(entry, options = {}) {
 // The entrypoint installs at the lock's `entrypointPath`. Every other code
 // member keeps its position relative to the entrypoint, so the relative
 // imports between modules resolve in the installed tree as they did in the
-// layer. A member that would land above the install root is refused.
+// layer. That only holds when the entrypoint keeps its file name: a helper that
+// imports `./main.mjs` finds nothing if the entrypoint was installed under a
+// different name, and the signed bytes cannot be rewritten to fix it. So a
+// multi-member code layer is refused, before any write, when the lock renames
+// the entrypoint. (A single-member layer has no sibling to import it.) The
+// publisher and every lock in this repo use `collection-profile.mjs` for both.
+// A member that would land above the install root is refused as well.
+function assertCodeLayerInstallable(resolved) {
+  if (resolved.codeFiles.length > 1 &&
+      posix.basename(resolved.entry.entrypointPath) !== posix.basename(resolved.codeEntrypointPath)) {
+    throw new Error(
+      `Refusing ${resolved.connectorId}: the code layer has ${resolved.codeFiles.length} members, so its ` +
+        `entrypoint must keep its file name, but the lock installs "${resolved.codeEntrypointPath}" ` +
+        `as "${resolved.entry.entrypointPath}"`
+    );
+  }
+}
+
 function installedCodeMemberPath(resolved, file) {
   const fromEntrypoint = posix.relative(posix.dirname(resolved.codeEntrypointPath), file.path);
   const installed = posix.join(posix.dirname(resolved.entry.entrypointPath), fromEntrypoint);
@@ -591,6 +608,7 @@ function installedCodeMemberPath(resolved, file) {
 }
 
 function buildPdppCollectionProfileWrites(resolved) {
+  assertCodeLayerInstallable(resolved);
   const artifactRoot = `collection-profiles/${resolved.connectorId}`;
   const writes = [
     {
