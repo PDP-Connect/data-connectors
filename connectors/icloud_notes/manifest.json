@@ -9,7 +9,7 @@
 	},
 	"connector_key": "icloud-notes",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-	"version": "0.1.47",
+	"version": "0.1.48",
 	"display_name": "iCloud Notes",
 	"brand": {
 		"icon": "icon.svg",
@@ -205,14 +205,17 @@
 		}
 	],
 	"reason_display_messages": {
-		"stream_collection_failed": "iCloud Notes stopped before the end of this list, so it may be incomplete. Notes already read were saved.",
-		"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
-		"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
-		"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
-		"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
-		"icloud_omitted_rows": "Some iCloud Notes fields could not be read or stored. The affected rows are listed in the stream omission details, and the stream was not marked complete.",
-		"icloud_rate_limited": "iCloud Notes temporarily limited requests. Retry collection later.",
-		"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete.",
-		"icloud_readiness_exhausted": "The iCloud Notes page did not become ready within the retry budget. Collection did not start; retry when the Notes page is available."
+		"browser_handoff_readiness_probe_failed": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_timed_out": "iCloud Notes needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "iCloud Notes needs you to sign in again or update your access key. Then run again.",
+		"icloud_auth_failed": "iCloud Notes needs you to sign in again or update your access key. Then run again.",
+		"icloud_http_error": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"icloud_invalid_query_response": "This part stopped because of an internal problem reading iCloud Notes. It is not something you can fix.",
+		"icloud_navigation_changed": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"icloud_no_progress": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"icloud_omitted_rows": "Some items could not be read and were skipped.",
+		"icloud_rate_limited": "iCloud Notes is limiting requests or having trouble right now. Wait a while, then run again.",
+		"icloud_readiness_exhausted": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"stream_collection_failed": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
 	}
 }

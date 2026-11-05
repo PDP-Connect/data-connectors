@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-	"version": "0.1.45",
+	"version": "0.1.46",
 	"display_name": "Strava (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -163,13 +163,17 @@
 		}
 	],
 	"reason_display_messages": {
-		"covered_in_full": "All Strava activities in the selected date range have already been collected.",
-		"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
-		"nothing_in_range": "Strava has no activities in the selected date range.",
-		"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
-		"sign_in_required": "Strava needs you to sign in again before this can continue.",
-		"source_limit_reached": "This run reached a source limit. The next run will retry the remaining activity work.",
-		"source_unreadable": "Strava answered with a page this connector doesn't recognise, so nothing more was read. Strava may have changed its site — please report this rather than retrying."
+		"browser_handoff_readiness_probe_failed": "Strava stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_timed_out": "Strava needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "Strava needs you to sign in again or update your access key. Then run again.",
+		"collection_interrupted": "Strava stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"covered_in_full": "There was nothing to import for this request. No action is needed.",
+		"nothing_in_range": "There was nothing to import for this request. No action is needed.",
+		"records_unreadable": "Some items could not be read and were skipped.",
+		"sign_in_required": "Strava needs you to sign in again or update your access key. Then run again.",
+		"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"source_unreadable": "This part stopped because of an internal problem reading Strava. It is not something you can fix.",
+		"strava_session_dead": "Strava needs you to sign in again or update your access key. Then run again."
 	},
 	"mobile": {
 		"pageshim": {

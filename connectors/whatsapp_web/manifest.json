@@ -10,7 +10,7 @@
 	},
 	"connector_key": "whatsapp-web",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
-	"version": "0.1.9",
+	"version": "0.1.10",
 	"display_name": "WhatsApp (web)",
 	"brand": {
 		"icon": "icon.svg",
@@ -442,7 +442,19 @@
 		}
 	],
 	"reason_display_messages": {
-		"scope_not_supported": "WhatsApp messages can only be imported together with their chats. Select both to import your messages."
+		"browser_handoff_readiness_probe_failed": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_timed_out": "WhatsApp needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "WhatsApp needs you to sign in again or update your access key. Then run again.",
+		"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"whatsapp_web_auth_failed": "WhatsApp needs you to sign in again or update your access key. Then run again.",
+		"whatsapp_web_chat_list_never_settled": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"whatsapp_web_empty_chat_list": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"whatsapp_web_invalid_record": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix.",
+		"whatsapp_web_local_store_unavailable": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"whatsapp_web_refused_call": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix.",
+		"whatsapp_web_stores_not_ready": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"whatsapp_web_stream_incomplete": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"whatsapp_web_unexpected_shape": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix."
 	},
 	"mobile": {
 		"pageshim": {

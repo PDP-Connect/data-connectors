@@ -9,7 +9,7 @@
 	},
 	"connector_key": "gmail",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-	"version": "0.2.31",
+	"version": "0.2.32",
 	"display_name": "Gmail",
 	"brand": {
 		"icon": "icon.svg",
@@ -660,8 +660,22 @@
 		}
 	],
 	"reason_display_messages": {
-		"historical_backfill_pending": "This bounded sync page completed; more historical Gmail data remains and will be collected automatically",
-		"historical_message_unaccounted": "An older Gmail message could not be read, so it was skipped. It will not be retried.",
-		"schema_validation_failed": "Some data didn't match the expected format and was skipped"
+		"gmail_all_mail_exists_negative": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_all_mail_exists_not_finite": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_all_mail_exists_not_integer": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_all_mail_exists_not_number": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_invalid_instant": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_invalid_mailbox": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_invalid_page_end": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_invalid_time_range": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_invalid_uid": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_invalid_window": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_page_already_consumed": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_plan_after_outcomes": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_unexpected_stream": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"gmail_progress_unexpected_uid": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+		"historical_backfill_pending": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"historical_message_unaccounted": "Some items could not be read and were skipped.",
+		"schema_validation_failed": "Some items could not be read and were skipped."
 	}
 }

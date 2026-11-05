@@ -9,7 +9,7 @@
 	},
 	"connector_key": "facebook",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-	"version": "0.1.11",
+	"version": "0.1.12",
 	"display_name": "Facebook",
 	"brand": {
 		"icon": "icon.svg",
@@ -47,11 +47,15 @@
 		}
 	},
 	"reason_display_messages": {
-		"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time.",
-		"shape_check_failed": "Facebook sent an item this connector could not read, so it was not saved.",
-		"scope_not_supported": "Facebook does not date this list, so it cannot be limited to a time range. Choose it without a time range to import it.",
-		"facebook_auth_failed": "Facebook needs you to sign in again before this can continue.",
-		"facebook_interrupted": "The Facebook page stopped answering while signing in. Nothing was read; try again."
+		"browser_handoff_readiness_probe_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_timed_out": "Facebook needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "Facebook needs you to sign in again or update your access key. Then run again.",
+		"facebook_auth_failed": "Facebook needs you to sign in again or update your access key. Then run again.",
+		"facebook_interrupted": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"facebook_navigation_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"shape_check_failed": "Some items could not be read and were skipped.",
+		"stream_collection_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
 	},
 	"streams": [
 		{

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.3.19",
+	"version": "0.3.20",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -870,9 +870,13 @@
 		}
 	],
 	"reason_display_messages": {
-		"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
-		"stream_collection_failed": "GitHub did not show that this list was read in full, so the last complete copy was kept.",
-		"github_browser_session_missing": "GitHub did not show you as signed in. Sign in to GitHub, then try again."
+		"browser_handoff_readiness_probe_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_timed_out": "GitHub needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "GitHub needs you to sign in again or update your access key. Then run again.",
+		"github_browser_incomplete": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_browser_navigation_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_browser_session_missing": "GitHub needs you to sign in again or update your access key. Then run again.",
+		"stream_collection_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
 	},
 	"mobile": {
 		"pageshim": {

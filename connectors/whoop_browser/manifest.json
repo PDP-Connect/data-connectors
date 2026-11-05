@@ -7,7 +7,7 @@
 	},
 	"connector_key": "whoop-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop-browser",
-	"version": "0.1.8",
+	"version": "0.1.9",
 	"display_name": "WHOOP (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -387,9 +387,13 @@
 		}
 	],
 	"reason_display_messages": {
-		"collection_interrupted": "WHOOP stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
-		"sign_in_required": "WHOOP needs you to sign in again before this can continue.",
-		"source_limit_reached": "This run read as much WHOOP history as one run allows. The next run continues from where this one stopped.",
-		"source_unreadable": "WHOOP answered with something this connector doesn't recognise, so nothing more was read. WHOOP may have changed its app; please report this rather than retrying."
+		"browser_handoff_readiness_probe_failed": "WHOOP stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_timed_out": "WHOOP needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "WHOOP needs you to sign in again or update your access key. Then run again.",
+		"collection_interrupted": "WHOOP stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"sign_in_required": "WHOOP needs you to sign in again or update your access key. Then run again.",
+		"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"source_unreadable": "This part stopped because of an internal problem reading WHOOP. It is not something you can fix.",
+		"whoop_browser_session_dead": "WHOOP needs you to sign in again or update your access key. Then run again."
 	}
 }

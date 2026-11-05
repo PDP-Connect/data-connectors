@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-	"version": "0.7.7",
+	"version": "0.7.8",
 	"display_name": "GitHub",
 	"brand": {
 		"icon": "icon.svg",
@@ -1118,12 +1118,16 @@
 		}
 	],
 	"reason_display_messages": {
-		"github_event_missing_fields": "We skipped some activity events that were missing required details",
-		"github_pagination_cap_exceeded": "GitHub returned more pages than this run could safely scan, so collection stopped before claiming complete coverage",
-		"github_pagination_repeated_next": "GitHub repeated a pagination link, so collection stopped before claiming complete coverage",
-		"github_pinned_item_missing_identity": "We skipped a pinned repository whose identity was unavailable",
-		"pr_detail_fetch_failed": "We saved these pull requests but couldn't load every detail",
-		"pr_search_cap_truncated": "There were more results than the service will return, so the oldest couldn't be collected",
-		"starred_entry_missing_repo": "We skipped a starred entry whose repository was unavailable"
+		"github_auth_failed": "GitHub needs you to sign in again or update your access key. Then run again.",
+		"github_event_missing_fields": "Some items could not be read and were skipped.",
+		"github_malformed_response": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_pagination_cap_exceeded": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+		"github_pagination_gap": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_pagination_invalid_max_pages": "This part stopped because of an internal problem reading GitHub. It is not something you can fix.",
+		"github_pagination_repeated_next": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_pinned_item_missing_identity": "Some items could not be read and were skipped.",
+		"pr_detail_fetch_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"pr_search_cap_truncated": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+		"starred_entry_missing_repo": "Some items could not be read and were skipped."
 	}
 }

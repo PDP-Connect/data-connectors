@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic-live",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-	"version": "0.3.16",
+	"version": "0.3.17",
 	"display_name": "Claude (Live Session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -46,12 +46,17 @@
 		}
 	},
 	"reason_display_messages": {
-		"anthropic_live_backlog_deferred": "This run read as many changed Claude conversations as one run allows. The rest are read on later runs from the saved checkpoint.",
-		"no_chat_organization": "No Claude organization with chat access could be found for this account.",
-		"http_error": "We hit a network problem talking to Claude",
-		"parse_error": "Claude sent back a response we couldn't read",
-		"not_available": "This data isn't available for this Claude account",
-		"organization_unavailable": "Your Claude plan could not be read: the organization this run reads from has no chat plan in your account's organization list. This will retry automatically."
+		"anthropic_live_backlog_deferred": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"anthropic_live_session_required": "Claude needs you to sign in again or update your access key. Then run again.",
+		"anthropic_live_unparsed_instant": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+		"browser_handoff_readiness_probe_failed": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_timed_out": "Claude needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "Claude needs you to sign in again or update your access key. Then run again.",
+		"http_error": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"no_chat_organization": "Claude does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+		"not_available": "Claude does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+		"organization_unavailable": "Claude does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+		"parse_error": "This part stopped because of an internal problem reading Claude. It is not something you can fix."
 	},
 	"mobile": {
 		"pageshim": {

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "steam",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "Steam",
 	"brand": {
 		"icon": "icon.svg",
@@ -55,7 +55,8 @@
 		}
 	},
 	"reason_display_messages": {
-		"steam_optional_resource_unavailable": "Steam did not make this optional account data available"
+		"steam_auth_failed": "Steam needs you to sign in again or update your access key. Then run again.",
+		"steam_optional_resource_unavailable": "Steam does not offer this data, or this connector cannot read it yet. There is nothing you need to do."
 	},
 	"capabilities": {
 		"human_interaction": [],

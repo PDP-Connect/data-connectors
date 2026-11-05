@@ -9,7 +9,7 @@
 	},
 	"connector_key": "notion",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-	"version": "0.1.24",
+	"version": "0.1.25",
 	"display_name": "Notion",
 	"brand": {
 		"icon": "icon.svg",
@@ -210,5 +210,9 @@
 			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "scheduled_window"
 		}
-	]
+	],
+	"reason_display_messages": {
+		"notion_auth_failed": "Notion needs you to sign in again or update your access key. Then run again.",
+		"notion_pagination_contradiction": "Notion stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+	}
 }

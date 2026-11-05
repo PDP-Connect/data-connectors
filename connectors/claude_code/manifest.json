@@ -9,7 +9,7 @@
 	},
 	"connector_key": "claude-code",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-	"version": "0.3.29",
+	"version": "0.3.30",
 	"display_name": "Claude Code",
 	"brand": {
 		"icon": "icon.svg",
@@ -1011,15 +1011,15 @@
 		}
 	],
 	"reason_display_messages": {
-		"claude_dir_not_found": "We couldn't find your Claude Code data folder",
-		"malformed_jsonl_line": "A line in this Claude Code session log contains invalid JSON and was skipped",
-		"non_object_jsonl_record": "A line in this Claude Code session log has an unexpected format and was skipped",
-		"scope_matched_no_sources": "None of your configured project folders matched any Claude Code projects",
-		"source_directory_read_error": "We couldn't read this Claude Code folder. It will be checked again on the next run",
-		"source_read_error": "This Claude Code session log could not be collected and will be retried on the next run",
-		"source_unreadable": "We couldn't read this folder, so we don't know what's in it",
-		"symlink_skipped": "A symbolic link was skipped without reading its target. The skipped path is listed in the source diagnostics",
-		"truncated_jsonl_tail": "The last line of this Claude Code session log is incomplete and will be checked again on the next run"
+		"claude_dir_not_found": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"malformed_jsonl_line": "Some items could not be read and were skipped.",
+		"non_object_jsonl_record": "Some items could not be read and were skipped.",
+		"scope_matched_no_sources": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"source_directory_read_error": "Claude Code stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"source_read_error": "Claude Code stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"source_unreadable": "Claude Code stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"symlink_skipped": "Some items could not be read and were skipped.",
+		"truncated_jsonl_tail": "Some items could not be read and were skipped."
 	},
 	"options_schema": {
 		"type": "object",

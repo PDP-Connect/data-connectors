@@ -40,14 +40,14 @@
  *
  * Thrown terminal codes (`createConnectorFailure(code, ...)` and code-shaped
  * bare `Error` messages, including those of the shared modules in
- * `SHARED_TERMINAL_CODE_MODULES`) need copy too. When this check was added,
- * many thrown codes had none. `undeclared-terminal-reason-codes.json` lists
- * them, per connector, so the gate could start without inventing copy for
- * each. The list only shrinks: the test fails when a thrown code has no copy
- * and is not listed, when a listed code now has copy, and when a listed code
- * is no longer thrown. The owner plans a separate review of the listed codes
- * to decide which deserve their own copy and which should become a shared
- * code; do not add entries to the list to get a new code past the gate.
+ * `SHARED_TERMINAL_CODE_MODULES`) need copy too, with no allowlist.
+ *
+ * The source of truth for the copy is `reason-copy.json` in this directory: a
+ * small set of shared sentences plus, per connector, which sentence each code
+ * uses. `npm run reason-copy:generate` at the repo root stamps the resolved text
+ * into each manifest's `reason_display_messages`, and `npm run reason-copy:check`
+ * fails when a manifest drifts. To give a new code copy, add it to
+ * `reason-copy.json` and run the generator; never edit the manifest by hand.
  */
 
 import assert from "node:assert/strict";
@@ -67,7 +67,6 @@ import test from "node:test";
 import {
 	connectorsDir as CONNECTORS_DIR,
 	manifestPath as MANIFESTS_DIR,
-	packageRoot,
 } from "./connector-paths.ts";
 import { connectorReasonDisplayMessages } from "./reason-display-messages.ts";
 import {
@@ -238,43 +237,16 @@ test("every connector-emitted reason code has a registered display message (that
 			.join("\n");
 		assert.fail(
 			`Reason codes emitted by connectors but missing a vetted display message:\n${lines}\n\n` +
-				"Add an entry to that connector's own manifest's reason_display_messages field " +
-				"(packages/polyfill-connectors/manifests/<connector>.json).",
+				"Add the code to that connector's entry in packages/polyfill-connectors/src/reason-copy.json, " +
+				"then run npm run reason-copy:generate at the repo root.",
 		);
 	}
 });
 
-const UNDECLARED_TERMINAL_CODES_PATH = join(
-	packageRoot,
-	"src",
-	"undeclared-terminal-reason-codes.json",
-);
-
-function readUndeclaredTerminalCodes(): Record<string, string[]> {
-	return JSON.parse(readFileSync(UNDECLARED_TERMINAL_CODES_PATH, "utf8"));
-}
-
-test("undeclared-terminal-reason-codes.json is sorted and has no duplicates", () => {
-	const allowlist = readUndeclaredTerminalCodes();
-	const keys = Object.keys(allowlist);
-	assert.deepEqual(keys, [...keys].sort(), "connector keys must be sorted");
-	for (const [connector, codes] of Object.entries(allowlist)) {
-		assert.ok(codes.length > 0, `${connector}: remove an empty entry`);
-		assert.deepEqual(
-			codes,
-			[...new Set(codes)].sort(),
-			`${connector}: codes must be sorted and unique`,
-		);
-	}
-});
-
-test("every thrown terminal code has a display message or is in the shrink-only undeclared-terminal-reason-codes.json", () => {
+test("every thrown terminal code has a display message (that connector's own manifest, OR RI-generic)", () => {
 	const byConnector = connectorReasonDisplayMessages();
-	const allowlist = readUndeclaredTerminalCodes();
 	const missing: string[] = [];
-	const nowDeclared: string[] = [];
 	const unresolved: string[] = [];
-	const thrownByConnector = new Map<string, Set<string>>();
 
 	for (const { key, dir } of listConnectorDirs()) {
 		const { terminalCodes, unresolvedTerminalCodes } =
@@ -282,26 +254,10 @@ test("every thrown terminal code has a display message or is in the shrink-only 
 		for (const { file, line, snippet } of unresolvedTerminalCodes) {
 			unresolved.push(`  ${key} (${file}:${line}): ${snippet}`);
 		}
-		thrownByConnector.set(key, new Set(terminalCodes));
 		const messages = byConnector[key] ?? {};
-		const listed = new Set(allowlist[key] ?? []);
 		for (const code of terminalCodes) {
-			const declared =
-				code in messages || RUNTIME_GENERIC_REASON_CODES.has(code);
-			if (declared && listed.has(code)) {
-				nowDeclared.push(`  ${key}: ${code}`);
-			} else if (!(declared || listed.has(code))) {
+			if (!(code in messages || RUNTIME_GENERIC_REASON_CODES.has(code))) {
 				missing.push(`  ${key}: ${code}`);
-			}
-		}
-	}
-
-	const noLongerThrown: string[] = [];
-	for (const [key, codes] of Object.entries(allowlist)) {
-		const thrown = thrownByConnector.get(key) ?? new Set<string>();
-		for (const code of codes) {
-			if (!thrown.has(code)) {
-				noLongerThrown.push(`  ${key}: ${code}`);
 			}
 		}
 	}
@@ -316,19 +272,8 @@ test("every thrown terminal code has a display message or is in the shrink-only 
 		missing,
 		[],
 		`Thrown terminal codes with no display message:\n${missing.join("\n")}\n\n` +
-			"Add copy to that connector's manifest reason_display_messages.",
-	);
-	assert.deepEqual(
-		nowDeclared,
-		[],
-		`Codes in undeclared-terminal-reason-codes.json that now have copy:\n${nowDeclared.join("\n")}\n\n` +
-			"Delete them from the list.",
-	);
-	assert.deepEqual(
-		noLongerThrown,
-		[],
-		`Codes in undeclared-terminal-reason-codes.json that the connector no longer throws:\n${noLongerThrown.join("\n")}\n\n` +
-			"Delete them from the list.",
+			"Add the code to that connector's entry in packages/polyfill-connectors/src/reason-copy.json, " +
+			"then run npm run reason-copy:generate at the repo root.",
 	);
 });
 

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "jellyfin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-	"version": "0.2.20",
+	"version": "0.2.21",
 	"display_name": "Jellyfin",
 	"brand": {
 		"icon": "icon.svg",
@@ -247,9 +247,19 @@
 		}
 	],
 	"reason_display_messages": {
-		"jellyfin_auth_failed": "Your Jellyfin API key or token was rejected",
-		"jellyfin_error": "We hit a problem talking to your Jellyfin server",
-		"jellyfin_http_error": "We hit a network problem talking to your Jellyfin server",
-		"jellyfin_missing_credentials": "Jellyfin needs a server URL and API key to connect"
+		"jellyfin_auth_failed": "Jellyfin needs you to sign in again or update your access key. Then run again.",
+		"jellyfin_base_url_has_userinfo": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"jellyfin_base_url_requires_https_non_loopback": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"jellyfin_base_url_unsafe_scheme": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"jellyfin_error": "Jellyfin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"jellyfin_http_error": "Jellyfin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"jellyfin_media_browser_device_id_empty": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+		"jellyfin_missing_credentials": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"jellyfin_session_failed": "Jellyfin needs you to sign in again or update your access key. Then run again.",
+		"jellyfin_ssrf_rejected_cross_origin": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"jellyfin_total_record_count_negative": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+		"jellyfin_total_record_count_not_finite": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+		"jellyfin_total_record_count_not_integer": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+		"jellyfin_total_record_count_not_number": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix."
 	}
 }

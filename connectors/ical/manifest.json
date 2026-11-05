@@ -9,7 +9,7 @@
 	},
 	"connector_key": "ical",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
-	"version": "0.1.24",
+	"version": "0.1.25",
 	"display_name": "Calendar (iCal)",
 	"brand": {
 		"icon": "icon.svg",
@@ -122,7 +122,7 @@
 		}
 	],
 	"reason_display_messages": {
-		"ics_fetch_failed": "We couldn't download the calendar feed",
-		"no_calendar_sources": "No calendars are configured to import from"
+		"ics_fetch_failed": "Calendar stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"no_calendar_sources": "This connection's settings or selection cannot be used as set. Check them, then run again."
 	}
 }

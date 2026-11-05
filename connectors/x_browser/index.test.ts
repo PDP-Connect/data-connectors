@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import {
 	assertUserFacingProgress,
@@ -15,6 +16,8 @@ import type {
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { scanConnectorForReasonEmissions } from "../../packages/polyfill-connectors/src/reason-emission-scan.ts";
+import { RUNTIME_GENERIC_REASON_CODES } from "../../packages/polyfill-connectors/src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
 import {
 	ACTION_DELAY_MAX_MS,
@@ -2280,9 +2283,14 @@ test("every reason the connector can report has owner-facing copy", () => {
 	const block = /const SKIP_REASON[^{]*\{([^}]*)\}/.exec(source)?.[1] ?? "";
 	const reasons = [...block.matchAll(/: "([a-z_]+)"/g)].map((m) => m[1]);
 	assert.ok(reasons.length >= 8);
+	// Thrown terminal codes need copy too (reason-display-messages.test.ts), so the copy set is the
+	// SKIP_RESULT vocabulary plus the codes this connector can throw, and nothing else.
+	const thrownCodes = scanConnectorForReasonEmissions(
+		fileURLToPath(new URL(".", import.meta.url)),
+	).terminalCodes.filter((code) => !RUNTIME_GENERIC_REASON_CODES.has(code));
 	assert.deepEqual(
 		Object.keys(manifest.reason_display_messages).sort(),
-		[...reasons].sort(),
+		[...new Set([...reasons, ...thrownCodes])].sort(),
 	);
 });
 

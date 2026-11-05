@@ -9,7 +9,7 @@
 	},
 	"connector_key": "google-takeout",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-	"version": "0.1.27",
+	"version": "0.1.28",
 	"display_name": "Google Takeout",
 	"brand": {
 		"icon": "icon.svg",
@@ -315,9 +315,9 @@
 			}
 		],
 	"reason_display_messages": {
-		"directory_read_failed": "We couldn't read a folder in your Google Takeout export",
-		"history_not_found": "We couldn't find any history to import",
-		"photos_not_found": "We couldn't find your Google Photos export",
-		"records_not_found": "We didn't find any records to import"
+		"directory_read_failed": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"history_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"photos_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"records_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 	}
 }
