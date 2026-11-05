@@ -34,10 +34,7 @@
  */
 
 import { resourceSet } from "@pdpp/connector-protocol";
-import {
-	buildCollectionRateProgress,
-	buildPacingStateFields,
-} from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
+import { buildCollectionRateProgress } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildDetailCoverageMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
@@ -241,8 +238,8 @@ type ApiLibrary =
 
 /**
  * Collect every requested stream. `http` paces and retries every request to
- * Goodreads; its learned rate is saved with each stream's state so the next
- * run starts from it, and reported at the end of the run.
+ * Goodreads; its learned rate is reported at the end of the run and is not
+ * saved, so every run starts at the cold rate.
  */
 export async function collectGoodreads(
 	ctx: GoodreadsCollectContext,
@@ -316,7 +313,7 @@ async function collectStreams(
 	}
 
 	// 8 and 9. The Kindle highlights and notes.
-	if (wants(HIGHLIGHTS)) await collectHighlights(ctx, http, userId, get);
+	if (wants(HIGHLIGHTS)) await collectHighlights(ctx, userId, get);
 }
 
 /**
@@ -354,10 +351,10 @@ async function collectLibrary(
 		return;
 	}
 	if (booksReady && listing) {
-		await finishBooks(ctx, http, listing.books, api.shelvings);
+		await finishBooks(ctx, listing.books, api.shelvings);
 	}
 	if (wants(SHELVES)) {
-		await finishShelves(ctx, http, api.graphql, api.shelvings);
+		await finishShelves(ctx, api.graphql, api.shelvings);
 	}
 }
 
@@ -431,7 +428,6 @@ async function readAnnotatedBooks(
  */
 async function collectHighlights(
 	ctx: GoodreadsCollectContext,
-	http: GoodreadsHttp,
 	userId: string,
 	get: (path: string, label: string) => Promise<FetchOutcome>,
 ): Promise<void> {
@@ -496,7 +492,7 @@ async function collectHighlights(
 		});
 		return;
 	}
-	const emitted = await emitStream(ctx, http, HIGHLIGHTS, records);
+	const emitted = await emitStream(ctx, HIGHLIGHTS, records);
 	await ctx.progress?.(
 		`Finished reading ${records.length} Kindle highlights and notes (${emitted} new or changed)`,
 		{ count: records.length, stream: HIGHLIGHTS, total: records.length },
@@ -674,7 +670,6 @@ export function joinLibrary(
 
 async function finishBooks(
 	ctx: GoodreadsCollectContext,
-	http: GoodreadsHttp,
 	print: readonly PrintBookRecord[],
 	api: readonly GraphqlShelving[],
 ): Promise<void> {
@@ -686,7 +681,7 @@ async function finishBooks(
 		});
 		return;
 	}
-	const emitted = await emitStream(ctx, http, BOOKS, joined.books);
+	const emitted = await emitStream(ctx, BOOKS, joined.books);
 	await ctx.progress?.(
 		`Finished reading ${joined.books.length} Goodreads books (${emitted} new or changed)`,
 		{ count: joined.books.length, stream: BOOKS, total: joined.books.length },
@@ -700,7 +695,6 @@ async function finishBooks(
  */
 async function finishShelves(
 	ctx: GoodreadsCollectContext,
-	http: GoodreadsHttp,
 	graphql: GoodreadsGraphql,
 	shelvings: readonly GraphqlShelving[],
 ): Promise<void> {
@@ -746,7 +740,7 @@ async function finishShelves(
 		...shelves.value.items.map((shelf) => record(shelf, true)),
 		...tags.value.items.map((tag) => record(tag, false)),
 	];
-	await emitStream(ctx, http, SHELVES, records);
+	await emitStream(ctx, SHELVES, records);
 	await ctx.progress?.(`Read ${records.length} Goodreads shelves`, {
 		count: records.length,
 		stream: SHELVES,
@@ -858,7 +852,6 @@ function priorFingerprints(state: unknown): Record<string, string> {
  */
 async function emitStream<T extends { id: string }>(
 	ctx: GoodreadsCollectContext,
-	http: GoodreadsHttp,
 	stream: string,
 	records: readonly T[],
 ): Promise<number> {
@@ -919,10 +912,7 @@ async function emitStream<T extends { id: string }>(
 	await ctx.emit({
 		type: "STATE",
 		stream,
-		cursor: {
-			fingerprints: { ...cursor.toState(), ...kept },
-			...buildPacingStateFields(http.governor, { now: http.now }),
-		},
+		cursor: { fingerprints: { ...cursor.toState(), ...kept } },
 	});
 	return emitted;
 }

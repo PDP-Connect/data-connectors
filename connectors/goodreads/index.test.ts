@@ -29,7 +29,6 @@ import {
 	GOODREADS_PACING_INITIAL_INTERVAL_MS,
 	probeGoodreadsPage,
 	probeGoodreadsSession,
-	restoredPacingInterval,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { PrintBookRecord } from "./types.ts";
@@ -230,16 +229,11 @@ const newClock = (): FakeClock => ({
 	retries: [],
 });
 
-/**
- * Run the connector on the harness's fake clock with a governor built the
- * way the desktop runtime builds it: from the state the run starts with.
- */
+/** Run the connector with a governor on the harness's fake clock. */
 function run(h: Harness): Promise<void> {
-	const now = () => h.clock.nowMs;
 	h.http = createGoodreadsHttp({
-		now,
+		now: () => h.clock.nowMs,
 		random: () => 0.5,
-		restoredIntervalMs: restoredPacingInterval(h.ctx.state, now),
 		retrySleep: (ms) => {
 			h.clock.retries.push(ms);
 			h.clock.nowMs += ms;
@@ -1803,22 +1797,15 @@ function desktop(
 	return filtered;
 }
 
-/**
- * Each stream's saved cursor, without the governor's rate: the rate depends
- * on how the clock ran, and these tests are about records.
- */
+/** Each stream's saved cursor exactly as emitted. */
 const stateOf = (h: Harness): Record<string, unknown> =>
 	Object.fromEntries(
 		h.messages
 			.filter((m) => m.type === "STATE")
-			.map((m) => {
-				const {
-					pacing_interval_ms: _i,
-					pacing_recorded_at_ms: _at,
-					...rest
-				} = (m as { cursor: Record<string, unknown> }).cursor;
-				return [(m as { stream: string }).stream, rest];
-			}),
+			.map((m) => [
+				(m as { stream: string }).stream,
+				(m as { cursor: unknown }).cursor,
+			]),
 	);
 const deletions = (h: Harness, stream: string) =>
 	h.messages
@@ -2532,53 +2519,41 @@ test("highlights: when no highlight has text, Goodreads moved it and nothing is 
 	);
 });
 
-/** Each stream's saved cursor as emitted, the governor's rate included. */
-const rawStateOf = (h: Harness): Record<string, unknown> =>
-	Object.fromEntries(
-		h.messages
-			.filter((m) => m.type === "STATE")
-			.map((m) => [
-				(m as { stream: string }).stream,
-				(m as { cursor: unknown }).cursor,
-			]),
-	);
-
-test("pacing: the next run starts from the rate this run learned, unless it is stale", async () => {
+test("pacing: state carries no pacing keys, and old pacing keys do not warm-start a run", async () => {
 	const first = desktop(
 		harness(signedInSite(), { books: {}, highlights: {}, shelves: {} }),
 		"incremental",
 	);
 	await run(first);
-	const saved = rawStateOf(first);
+	const saved = stateOf(first);
+	for (const stream of ["books", "highlights", "shelves"]) {
+		const cursor = saved[stream] as Record<string, unknown>;
+		assert.deepEqual(Object.keys(cursor), ["fingerprints"], stream);
+	}
+
+	// State saved by the build that kept the learned rate still loads; the
+	// old keys are ignored and the run starts at the profile's cold rate.
 	const learned = first.http?.governor.snapshot()?.intervalMs;
 	assert.ok(
 		learned !== undefined && learned < GOODREADS_PACING_INITIAL_INTERVAL_MS,
 	);
-	// Every stream saves the rate; the newest save is the run's last one.
-	for (const stream of ["books", "highlights", "shelves"]) {
-		const cursor = saved[stream] as Record<string, unknown>;
-		assert.equal(typeof cursor.pacing_interval_ms, "number", stream);
-	}
-	assert.equal(
-		(saved.highlights as Record<string, unknown>).pacing_interval_ms,
-		learned,
+	const withOldKeys = Object.fromEntries(
+		Object.entries(saved).map(([stream, cursor]) => [
+			stream,
+			{
+				...(cursor as Record<string, unknown>),
+				pacing_interval_ms: learned,
+				pacing_recorded_at_ms: first.clock.nowMs,
+			},
+		]),
 	);
-
-	const warm = desktop(
+	const next = desktop(
 		harness(signedInSite(), { books: {}, highlights: {}, shelves: {} }),
 		"incremental",
-		saved,
+		withOldKeys,
 	);
-	warm.clock.nowMs = first.clock.nowMs + 60_000;
-	await run(warm);
-	assert.equal(warm.clock.paces[0], learned);
-
-	const stale = desktop(
-		harness(signedInSite(), { books: {}, highlights: {}, shelves: {} }),
-		"incremental",
-		saved,
-	);
-	stale.clock.nowMs = first.clock.nowMs + 7 * 60 * 60 * 1000;
-	await run(stale);
-	assert.equal(stale.clock.paces[0], GOODREADS_PACING_INITIAL_INTERVAL_MS);
+	next.clock.nowMs = first.clock.nowMs + 60_000;
+	await run(next);
+	assert.equal(next.clock.paces[0], GOODREADS_PACING_INITIAL_INTERVAL_MS);
+	assert.deepEqual(stateOf(next), stateOf(first));
 });

@@ -45,11 +45,7 @@ import {
 	type ManualActionReason,
 	manualBrowserLogin,
 } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
-import {
-	createConnectorHttpGovernor,
-	PACING_STATE_RECORDED_AT_KEY,
-	readPersistedPacingInterval,
-} from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
+import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
@@ -305,18 +301,19 @@ export async function ensureGoodreadsSession(
 }
 
 /**
- * The wait (ms) before each request on a cold start: the mean of the fixed
+ * The wait (ms) before the first request of every run: the mean of the fixed
  * 1.5 to 2.5 s pause this connector used before it had a governor. The
  * governor speeds up from here toward the profile's ceiling while Goodreads
- * answers, and backs off when it does not.
+ * answers, and backs off when it does not. A run does not start from the
+ * rate an earlier run learned: Goodreads refreshes at most daily, so a saved
+ * rate would almost always be too old to trust, and a rate in STATE would
+ * make each run's final state depend on real time.
  */
 export const GOODREADS_PACING_INITIAL_INTERVAL_MS = 2000;
 
 export interface GoodreadsHttpOptions {
 	now?: () => number;
 	random?: () => number;
-	/** The interval the last run learned; absent or null starts cold. */
-	restoredIntervalMs?: number | null;
 	/** The wait before a retry; defaults to `sleep`. */
 	retrySleep?: (ms: number) => void | Promise<void>;
 	/** The wait before each request. */
@@ -336,7 +333,6 @@ export function createGoodreadsHttp(
 		name: "goodreads",
 		pacingInitialIntervalMs: GOODREADS_PACING_INITIAL_INTERVAL_MS,
 		profile: goodreadsPacingProfile(),
-		restoredIntervalMs: options.restoredIntervalMs ?? null,
 		now,
 		retryBudget,
 		...(options.random === undefined ? {} : { random: options.random }),
@@ -345,39 +341,17 @@ export function createGoodreadsHttp(
 			: { retrySleep: options.retrySleep }),
 		...(options.sleep === undefined ? {} : { sleep: options.sleep }),
 	});
-	return { governor, now, retryBudget };
-}
-
-/**
- * The newest rate a previous run saved with a stream's state (books, shelves
- * and highlights each save it), or null when none is fresh enough to reuse.
- */
-export function restoredPacingInterval(
-	state: Record<string, unknown> | undefined,
-	now: () => number = Date.now,
-): number | null {
-	let newest: { at: number; intervalMs: number } | null = null;
-	for (const slice of Object.values(state ?? {})) {
-		if (typeof slice !== "object" || slice === null) continue;
-		const cursor = slice as Record<string, unknown>;
-		const intervalMs = readPersistedPacingInterval(cursor, { now });
-		const at = cursor[PACING_STATE_RECORDED_AT_KEY];
-		if (intervalMs === null || typeof at !== "number") continue;
-		if (newest === null || at > newest.at) newest = { at, intervalMs };
-	}
-	return newest?.intervalMs ?? null;
+	return { governor, retryBudget };
 }
 
 /**
  * The PageShim and desktop entry: `ctx` needs only what
- * GoodreadsCollectContext names. The governor starts from the last run's
- * learned rate; tests pass their own on a fake clock.
+ * GoodreadsCollectContext names. Tests pass their own governor on a fake
+ * clock.
  */
 export function collect(
 	ctx: GoodreadsCollectContext,
-	http: GoodreadsHttp = createGoodreadsHttp({
-		restoredIntervalMs: restoredPacingInterval(ctx.state),
-	}),
+	http: GoodreadsHttp = createGoodreadsHttp(),
 ): Promise<void> {
 	return collectGoodreads(ctx, http);
 }

@@ -175,16 +175,14 @@ export class GoodreadsRetryBudget implements HttpRetryBudget {
 }
 
 /**
- * The run's one HTTP governor (built in index.ts from the provider profile
- * and the last run's learned rate) and its retry budget. Every request to
+ * The run's one HTTP governor (built in index.ts from the provider profile)
+ * and its retry budget. Every request to
  * Goodreads goes through it: page fetches, page loads and the book API. It
  * waits before each request, starts slow, speeds up while Goodreads answers,
  * backs off on 429 and 5xx, and honours Retry-After.
  */
 export interface GoodreadsHttp {
 	governor: Pick<ConnectorHttpGovernor, "request" | "snapshot">;
-	/** The governor's clock, which also stamps the saved rate. */
-	now: () => number;
 	retryBudget: GoodreadsRetryBudget;
 }
 
