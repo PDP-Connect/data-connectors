@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The page-ceiling correction: exhausting the guard and receiving no
- * `next_token` used to produce a byte-identical result, so a capped walk read
- * as a finished one. Oura's cursor is `last_day`, which becomes the next run's
- * `start_date` — advancing it after a cap would skip days this run never read.
+ * Date-window frontiers resume a capped forward walk without assuming page
+ * order. The inclusive checkpoint advances only after a whole window is read.
  */
 
 import assert from "node:assert/strict";
@@ -101,9 +99,11 @@ function withOuraEndpointPages<T>(
 function makeContext({
 	state = {},
 	streams = [{ name: "activity" }],
+	collectionMode,
 }: {
 	readonly state?: Record<string, unknown>;
 	readonly streams?: readonly StreamScope[];
+	readonly collectionMode?: "full_refresh";
 } = {}): {
 	readonly ctx: CollectContext;
 	readonly messages: EmittedMessage[];
@@ -111,11 +111,20 @@ function makeContext({
 } {
 	const messages: EmittedMessage[] = [];
 	const records: Array<{ data: RecordData; stream: string }> = [];
-	const start: StartMessage = { type: "START", scope: { streams }, state };
+	streams = streams.map((stream) => ({
+		time_range: { since: "2026-08-01", until: "2026-08-07" },
+		...stream,
+	}));
+	const start: StartMessage = {
+		type: "START",
+		scope: { streams },
+		state,
+	};
 	return {
 		messages,
 		records,
 		ctx: {
+			...(collectionMode ? { collectionMode } : {}),
 			assist: () => Promise.resolve("asst_test"),
 			capture: null,
 			completeAssistance: () => Promise.resolve(),
@@ -155,6 +164,20 @@ function lastStateCursor(
 	return found && found.type === "STATE" ? found.cursor : undefined;
 }
 
+const defaultScope = {
+	since: "2026-08-01",
+	until: "2026-08-07",
+	resources: null,
+};
+
+function cursorFor(messages: readonly EmittedMessage[], stream = "activity") {
+	return lastStateCursor(messages, stream) as {
+		last_day: string | null;
+		scope: typeof defaultScope;
+		frontier: { start_date: string; newest_day: string | null } | null;
+	};
+}
+
 function truncationSkip(
 	messages: readonly EmittedMessage[],
 	stream: string,
@@ -188,7 +211,7 @@ test("a walk that exhausts naturally advances the cursor and discloses no trunca
 	);
 	assert.deepEqual(
 		lastStateCursor(messages, "activity"),
-		{ last_day: "2026-08-02" },
+		{ last_day: "2026-08-02", scope: defaultScope, frontier: null },
 		"an exhausted walk advances to the latest day it saw",
 	);
 });
@@ -227,12 +250,15 @@ test("a capped walk is distinguishable from an exhausted one and holds the curso
 
 	assert.deepEqual(
 		lastStateCursor(messages, "activity"),
-		{ last_day: "2026-07-31" },
+		{
+			last_day: "2026-07-31", scope: defaultScope,
+			frontier: { start_date: "2026-07-31", newest_day: "2026-08-02" },
+		},
 		"a capped walk must hold the day it started from, never advance past unread history",
 	);
 });
 
-test("a capped walk with no prior cursor holds at null rather than claiming a latest day", async () => {
+test("a capped walk with no prior cursor saves the first window start rather than a latest day", async () => {
 	const { ctx, messages } = makeContext();
 	await withOuraPages(
 		[
@@ -254,8 +280,11 @@ test("a capped walk with no prior cursor holds at null rather than claiming a la
 	);
 	assert.deepEqual(
 		lastStateCursor(messages, "activity"),
-		{ last_day: null },
-		"a first run that is capped must not claim it reached a latest day",
+		{
+			last_day: "2026-08-01", scope: defaultScope,
+			frontier: { start_date: "2026-08-01", newest_day: "2026-08-02" },
+		},
+		"a capped first run checkpoints the incomplete window",
 	);
 });
 
@@ -321,7 +350,7 @@ test("truncation is disclosed and the cursor withheld per stream, not once per r
 	);
 	assert.deepEqual(
 		lastStateCursor(messages, "sleep"),
-		{ last_day: "2026-08-05" },
+		{ last_day: "2026-08-05", scope: defaultScope, frontier: null },
 		"the exhausted stream advances normally",
 	);
 
@@ -331,7 +360,10 @@ test("truncation is disclosed and the cursor withheld per stream, not once per r
 	);
 	assert.deepEqual(
 		lastStateCursor(messages, "activity"),
-		{ last_day: "2026-07-31" },
+		{
+			last_day: "2026-07-31", scope: defaultScope,
+			frontier: { start_date: "2026-07-31", newest_day: "2026-08-06" },
+		},
 		"the capped stream holds its own cursor",
 	);
 });
@@ -446,7 +478,209 @@ test("sleep emits no partial records when its daily_sleep helper walk is truncat
 	);
 	assert.deepEqual(
 		lastStateCursor(messages, "sleep"),
-		{ last_day: "2026-07-01" },
+		{
+			last_day: "2026-07-01", scope: defaultScope,
+			frontier: { start_date: "2026-07-01", newest_day: "2026-07-01" },
+		},
 		"the sleep cursor is held until both joined resources are complete",
 	);
+});
+
+const historyScope = {
+	since: "2026-01-01",
+	until: "2026-08-07",
+	resources: null,
+};
+const historyStreams: readonly StreamScope[] = [{
+	name: "activity",
+	time_range: { since: historyScope.since, until: historyScope.until },
+}];
+
+test("a budget stop in window two saves its start, not the latest unordered row", async () => {
+	const { ctx, messages, records } = makeContext({ streams: historyStreams });
+	await withOuraPages([
+		{ data: [
+			{ id: "march", day: "2026-03-30" },
+			{ id: "january", day: "2026-01-02" },
+		] },
+		{ data: [
+			{ id: "may", day: "2026-05-20" },
+			{ id: "april", day: "2026-04-10" },
+		], next_token: "unread-in-window-two" },
+	], async (requested) => {
+		await collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 2 });
+		assert.equal(requested.length, 2);
+		assert.equal(requested[0]?.searchParams.get("start_date"), "2026-01-01");
+		assert.equal(requested[0]?.searchParams.get("end_date"), "2026-04-01");
+		assert.equal(requested[1]?.searchParams.get("start_date"), "2026-04-01");
+		assert.equal(requested[1]?.searchParams.get("end_date"), "2026-06-30");
+		assert.equal(requested[1]?.searchParams.get("next_token"), null);
+	});
+	assert.equal(records.length, 4);
+	assert.deepEqual(cursorFor(messages), {
+		last_day: "2026-04-01",
+		scope: historyScope,
+		frontier: { start_date: "2026-04-01", newest_day: "2026-05-20" },
+	});
+	assert.deepEqual(truncationSkip(messages, "activity")?.recovery_hint, {
+		action: "retry_by_runtime", retryable: true,
+	});
+});
+
+test("the next run resumes the partial window, reaches new days, and keeps overlap records identical", async () => {
+	const first = makeContext({ streams: historyStreams });
+	const overlap = { id: "overlap", day: "2026-04-10", score: 80 };
+	await withOuraPages([
+		{ data: [{ id: "old", day: "2026-01-02" }] },
+		{ data: [overlap], next_token: "unread" },
+	], () => collectOura(first.ctx, { httpGovernor: unpacedGovernor(), maxPages: 2 }));
+	const second = makeContext({
+		streams: historyStreams,
+		state: { activity: lastStateCursor(first.messages, "activity") },
+	});
+	const boundary = { id: "boundary", day: "2026-06-30", score: 90 };
+	await withOuraPages([
+		{ data: [overlap, { id: "previously-unread", day: "2026-05-01" }, boundary] },
+		{ data: [boundary, { id: "new", day: "2026-08-06" }] },
+	], async (requested) => {
+		await collectOura(second.ctx, { httpGovernor: unpacedGovernor(), maxPages: 2 });
+		assert.equal(requested[0]?.searchParams.get("start_date"), "2026-04-01");
+		assert.equal(requested[0]?.searchParams.get("next_token"), null);
+	});
+	assert.deepEqual(
+		second.records.map((record) => (record.data as Record<string, unknown>).id),
+		["overlap", "previously-unread", "boundary", "new"],
+	);
+	assert.deepEqual(
+		second.records.find((record) => (record.data as Record<string, unknown>).id === "overlap")?.data,
+		first.records.find((record) => (record.data as Record<string, unknown>).id === "overlap")?.data,
+	);
+	assert.equal(truncationSkip(second.messages, "activity"), undefined);
+	assert.deepEqual(cursorFor(second.messages), {
+		last_day: "2026-08-06", scope: historyScope, frontier: null,
+	});
+});
+
+test("scope changes and full_refresh discard the saved forward frontier", async () => {
+	const saved = {
+		last_day: "2026-04-01",
+		scope: historyScope,
+		frontier: { start_date: "2026-04-01", newest_day: "2026-05-20" },
+	};
+	const cases = [
+		{ stream: { name: "activity", time_range: { since: "2026-02-01", until: "2026-08-07" } }, expected: "2026-02-01" },
+		{ stream: { name: "activity", time_range: { since: "2026-01-01", until: "2026-07-01" } }, expected: "2026-01-01" },
+		{ stream: { name: "activity", time_range: { since: "2026-01-01", until: "2026-08-07" }, resources: [] }, expected: "2026-01-01" },
+		{ stream: historyStreams[0]!, collectionMode: "full_refresh" as const, expected: "2026-01-01" },
+	];
+	for (const scenario of cases) {
+		const { ctx, messages } = makeContext({
+			state: { activity: saved },
+			streams: [scenario.stream],
+			...(scenario.collectionMode ? { collectionMode: scenario.collectionMode } : {}),
+		});
+		await withOuraPages([{ data: [], next_token: "still-open" }], async (requested) => {
+			await collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 });
+			assert.equal(requested[0]?.searchParams.get("start_date"), scenario.expected);
+		});
+		assert.equal(cursorFor(messages).frontier?.start_date, scenario.expected);
+		assert.equal(cursorFor(messages).frontier?.newest_day, null);
+	}
+});
+
+test("finishing the final window clears the frontier even on the exact page budget", async () => {
+	const { ctx, messages } = makeContext({
+		streams: historyStreams,
+		state: { activity: {
+			last_day: "2026-06-30",
+			scope: historyScope,
+			frontier: { start_date: "2026-06-30", newest_day: "2026-05-20" },
+		} },
+	});
+	await withOuraPages([{ data: [{ id: "last", day: "2026-08-05" }] }], async (requested) => {
+		await collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 });
+		assert.equal(requested[0]?.searchParams.get("end_date"), "2026-08-07");
+	});
+	assert.equal(truncationSkip(messages, "activity"), undefined);
+	assert.equal(cursorFor(messages).frontier, null);
+	assert.equal(cursorFor(messages).last_day, "2026-08-05");
+});
+
+test("legacy last_day STATE loads inclusively and gains a scoped frontier", async () => {
+	const { ctx, messages } = makeContext({
+		streams: historyStreams,
+		state: { activity: { last_day: "2026-05-01" } },
+	});
+	await withOuraPages([
+		{ data: [{ id: "seen", day: "2026-05-20" }], next_token: "unread" },
+	], async (requested) => {
+		await collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 });
+		assert.equal(requested[0]?.searchParams.get("start_date"), "2026-05-01");
+	});
+	assert.deepEqual(cursorFor(messages), {
+		last_day: "2026-05-01", scope: historyScope,
+		frontier: { start_date: "2026-05-01", newest_day: "2026-05-20" },
+	});
+});
+
+test("empty windows consume the budget and an unscoped first run starts in 2015", async () => {
+	const { ctx, messages } = makeContext({
+		streams: [{ name: "activity", time_range: {} }],
+	});
+	await withOuraPages([{ data: [] }], async (requested) => {
+		await collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 });
+		assert.equal(requested.length, 1);
+		assert.equal(requested[0]?.searchParams.get("start_date"), "2015-01-01");
+		assert.equal(requested[0]?.searchParams.get("end_date"), "2015-04-01");
+	});
+	assert.equal(cursorFor(messages).last_day, "2015-04-01");
+	assert.equal(cursorFor(messages).frontier?.newest_day, null);
+	assert.ok(truncationSkip(messages, "activity"));
+});
+
+test("the final unbounded window ends tomorrow UTC and clears the frontier", async () => {
+	const { ctx, messages } = makeContext({
+		streams: [{ name: "activity", time_range: { since: "2026-08-01" } }],
+	});
+	await withOuraPages([{ data: [{ id: "today", day: "2026-08-07" }] }], async (requested) => {
+		await collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 });
+		assert.equal(requested[0]?.searchParams.get("end_date"), "2026-08-08");
+	});
+	assert.equal(truncationSkip(messages, "activity"), undefined);
+	assert.equal(cursorFor(messages).frontier, null);
+	assert.equal(cursorFor(messages).last_day, "2026-08-07");
+});
+
+test("sleep checkpoints only after both resources finish a window and resumes the complete join", async () => {
+	const streams: readonly StreamScope[] = [{
+		name: "sleep", time_range: { since: "2026-01-01", until: "2026-06-01" },
+	}];
+	const first = makeContext({ streams });
+	await withOuraEndpointPages({
+		sleep: [
+			{ data: [{ id: "old-sleep", day: "2026-02-01" }] },
+			{ data: [{ id: "new-sleep", day: "2026-05-01" }] },
+		],
+		daily_sleep: [
+			{ data: [{ id: "old-score", day: "2026-02-01", score: 80 }] },
+			{ data: [], next_token: "score-not-read-yet" },
+		],
+	}, () => collectOura(first.ctx, { httpGovernor: unpacedGovernor(), maxPages: 2 }));
+	assert.deepEqual(first.records.map((record) => (record.data as Record<string, unknown>).id), ["old-sleep"]);
+	assert.equal(cursorFor(first.messages, "sleep").frontier?.start_date, "2026-04-01");
+	const second = makeContext({
+		streams, state: { sleep: lastStateCursor(first.messages, "sleep") },
+	});
+	await withOuraEndpointPages({
+		sleep: [{ data: [{ id: "new-sleep", day: "2026-05-01" }] }],
+		daily_sleep: [{ data: [{ id: "new-score", day: "2026-05-01", score: 90 }] }],
+	}, async (requested) => {
+		await collectOura(second.ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 });
+		assert.equal(requested.length, 2);
+		assert.ok(requested.every((url) => url.searchParams.get("start_date") === "2026-04-01"));
+	});
+	const joined = second.records[0]?.data as Record<string, unknown>;
+	assert.equal(joined.sleep_score, 90);
+	assert.equal(cursorFor(second.messages, "sleep").frontier, null);
+	assert.equal(truncationSkip(second.messages, "sleep"), undefined);
 });
