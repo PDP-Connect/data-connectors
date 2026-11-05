@@ -88,6 +88,7 @@
 		"apple-contacts": {
 			"auth_failed": "sign_in_again",
 			"carddav_request_failed": "incomplete_retry",
+			"carddav_response_unusable": "unexpected_data",
 			"discovery_failed": "fix_settings",
 			"fake_carddav_server_no_port": "unexpected_data",
 			"group_inventory_short": "skipped_items",

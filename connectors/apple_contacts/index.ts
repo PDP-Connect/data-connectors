@@ -93,6 +93,7 @@ import { categoriesOf, type ParsedVCard, parseVCards } from "./vcard.ts";
 const APPLE_CONTACTS_ERROR_CODE = {
 	AUTH_FAILED: "auth_failed",
 	CARDDAV_REQUEST_FAILED: "carddav_request_failed",
+	CARDDAV_RESPONSE_UNUSABLE: "carddav_response_unusable",
 	DISCOVERY_FAILED: "discovery_failed",
 	UNSAFE_REDIRECT_REFUSED: "unsafe_redirect_refused",
 } as const;
@@ -160,19 +161,29 @@ function classifyDiscoveryFailure(err: unknown): Error {
  * `carddav_addressbook_query_failed`, `carddav_list_addressbooks_failed`)
  * fall through to the caller's own retryable default.
  */
-function classifyCardDavRequestFailure(
+export function classifyCardDavRequestFailure(
 	err: unknown,
 	options: { retryableByDefault: boolean },
 ): Error {
 	const message = err instanceof Error ? err.message : String(err);
 	if (err instanceof CardDavStructuralError) {
+		// A retry meets the same response, so none of these is transient. An
+		// unsafe redirect keeps its own code; the rest (missing Location,
+		// oversized body, redirect loop) need a connector update.
 		return createConnectorFailure(
-			APPLE_CONTACTS_ERROR_CODE.CARDDAV_REQUEST_FAILED,
+			message.startsWith("carddav_unsafe_redirect:")
+				? APPLE_CONTACTS_ERROR_CODE.UNSAFE_REDIRECT_REFUSED
+				: APPLE_CONTACTS_ERROR_CODE.CARDDAV_RESPONSE_UNUSABLE,
 			message,
-			{
-				cause: err,
-				retryable: false,
-			},
+			{ cause: err, retryable: false },
+		);
+	}
+	const status = Number(HTTP_STATUS_RE.exec(message)?.[1]);
+	if (status === 401 || status === 403) {
+		return createConnectorFailure(
+			APPLE_CONTACTS_ERROR_CODE.AUTH_FAILED,
+			"Apple ID or app-specific password was rejected",
+			{ cause: err },
 		);
 	}
 	return createConnectorFailure(
@@ -185,6 +196,7 @@ function classifyCardDavRequestFailure(
 	);
 }
 
+const HTTP_STATUS_RE = /status=(\d{3})/;
 const DEFAULT_ORIGIN = "https://contacts.icloud.com";
 const TRAILING_SLASHES_RE = /\/+$/;
 
