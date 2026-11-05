@@ -560,6 +560,34 @@ async function fetchOrganizations(
 	return result.json as ClaudeOrganization[];
 }
 
+/**
+ * The live project count for an organization, or null when it cannot be
+ * read. Claude's split export omits the projects category for an account
+ * with no projects, so a complete export without that category is only an
+ * empty account once the live count agrees.
+ */
+async function fetchProjectCount(
+	page: BrowserCollectContext["page"],
+	organizationId: string,
+): Promise<number | null> {
+	const result = await page.evaluate(async (orgId: string) => {
+		try {
+			const res = await fetch(
+				`https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/projects/count`,
+				{ credentials: "include", headers: { accept: "application/json" } },
+			);
+			if (!res.ok) return null;
+			const json = (await res.json()) as { count?: unknown } | null;
+			return typeof json?.count === "number" ? json.count : null;
+		} catch {
+			return null;
+		}
+	}, organizationId);
+	return typeof result === "number" && Number.isSafeInteger(result) && result >= 0
+		? result
+		: null;
+}
+
 /** Selects the chat-capable org, mirroring the legacy connector's
  * documented selection (chat, then claude_pro, then first org) — an
  * account can have several orgs, e.g. a separate API-only org, and the
@@ -2908,7 +2936,7 @@ export async function collectAnthropic({
 			return parts.length > 0 && parts.every((part, index) => part === index);
 		};
 		const conversationsManifestBoundary = categoryBoundary("conversations");
-		const projectsManifestBoundary = categoryBoundary("projects");
+		let projectsManifestBoundary = categoryBoundary("projects");
 		// Observed in parsers.ts and __fixtures__/split-export/manifest.json:
 		// these categories have no declared stream, but their parts still
 		// require the same archive accounting as consumed categories.
@@ -2966,6 +2994,15 @@ export async function collectAnthropic({
 						)),
 			);
 		archiveComplete = completeMessages = archiveManifestComplete;
+		if (
+			archiveManifestComplete &&
+			!dataFiles.some((part) => part.category === "projects") &&
+			(requested.has(PROJECTS_STREAM) || requested.has(PROJECT_DOCUMENTS_STREAM)) &&
+			(await fetchProjectCount(page, exportOrganizationId)) === 0
+		) {
+			projectsManifestBoundary = true;
+			projectsExplicitEmpty = true;
+		}
 		completeMessages &&= conversationsManifestBoundary;
 		conversationsExact &&= conversationsManifestBoundary;
 		projectsExact &&= projectsManifestBoundary;

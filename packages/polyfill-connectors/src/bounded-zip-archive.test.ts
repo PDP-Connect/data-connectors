@@ -1747,7 +1747,7 @@ for (const defect of [
 	"split disk",
 	"disk count",
 	"entry disk",
-	"ZIP64 entry",
+	"post-ZIP64 version",
 	"truncated comment",
 ] as const) {
 	test(`complete ZIP directory proof refuses ${defect} while preserving ordinary salvage`, () => {
@@ -1790,8 +1790,8 @@ for (const defect of [
 			case "entry disk":
 				bytes.writeUInt16LE(1, second + 34);
 				break;
-			case "ZIP64 entry":
-				bytes.writeUInt16LE(45, second + 6);
+			case "post-ZIP64 version":
+				bytes.writeUInt16LE(46, second + 6);
 				break;
 			case "truncated comment":
 				bytes.writeUInt16LE(1, eocd + 20);
@@ -1816,6 +1816,68 @@ for (const defect of [
 		});
 	});
 }
+
+// Python's zipfile with force_zip64 (how Claude's split export parts are
+// written) stamps "version needed" 4.5 but adds no ZIP64 field when the
+// sizes fit in 32 bits. Generated with:
+//   zipfile.ZipFile(p, "w", ZIP_DEFLATED).open("conversations.json", "w", force_zip64=True).write(b"[]")
+const PYTHON_FORCE_ZIP64_ZIP = Buffer.from(
+	"UEsDBC0AAAAIAAAAIQApu0wN//////////8SABQAY29udmVyc2F0aW9ucy5qc29uAQAQAAIAAAAAAAAABAAAAAAAAACLjgUAUEsBAi0DLQAAAAgAAAAhACm7TA0EAAAAAgAAABIAAAAAAAAAAAAAAIABAAAAAGNvbnZlcnNhdGlvbnMuanNvblBLBQYAAAAAAQABAEAAAABIAAAAAAA=",
+	"base64",
+);
+
+test("complete ZIP directory proof accepts version 4.5 entries without a ZIP64 field", () => {
+	assert.equal(
+		PYTHON_FORCE_ZIP64_ZIP.readUInt16LE(
+			PYTHON_FORCE_ZIP64_ZIP.length - 22 - 64 + 6,
+		),
+		45,
+	);
+	assert.deepEqual(
+		readZipEntries(
+			PYTHON_FORCE_ZIP64_ZIP,
+			GENEROUS_POLICY,
+			COMPLETE_DIRECTORY,
+		).map((entry) => entry.name),
+		["conversations.json"],
+	);
+	withTempZipFile(PYTHON_FORCE_ZIP64_ZIP, (fd, size) => {
+		assert.equal(
+			readZipEntriesFromFile(fd, size, GENEROUS_POLICY, COMPLETE_DIRECTORY)
+				.length,
+			1,
+		);
+	});
+});
+
+test("complete ZIP directory proof refuses an entry with a ZIP64 extra field while preserving ordinary salvage", () => {
+	const bytes = buildZip([{ name: "first.json", content: Buffer.from("[]") }]);
+	const eocd = bytes.length - 22;
+	const directory = bytes.readUInt32LE(eocd + 16);
+	const nameEnd = directory + 46 + bytes.readUInt16LE(directory + 28);
+	// A ZIP64 extended information field (id 0x0001) holding one 8-byte size.
+	const zip64 = Buffer.alloc(12);
+	zip64.writeUInt16LE(0x0001, 0);
+	zip64.writeUInt16LE(8, 2);
+	zip64.writeBigUInt64LE(2n, 4);
+	const withExtra = Buffer.concat([
+		bytes.subarray(0, nameEnd),
+		zip64,
+		bytes.subarray(nameEnd),
+	]);
+	withExtra.writeUInt16LE(45, directory + 6);
+	withExtra.writeUInt16LE(zip64.length, directory + 30);
+	const newEocd = eocd + zip64.length;
+	withExtra.writeUInt32LE(
+		bytes.readUInt32LE(eocd + 12) + zip64.length,
+		newEocd + 12,
+	);
+	assert.equal(readZipEntries(withExtra, GENEROUS_POLICY).length, 1);
+	assert.deepEqual(
+		readZipEntries(withExtra, GENEROUS_POLICY, COMPLETE_DIRECTORY),
+		[],
+	);
+});
 
 test("complete ZIP directory proof consumes every directory byte and a complete archive comment", () => {
 	const bytes = buildZip([{ name: "first.json", content: Buffer.from("[]") }]);

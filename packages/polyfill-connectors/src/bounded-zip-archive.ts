@@ -699,13 +699,38 @@ function hasCompleteStandardDirectory(
 	);
 }
 
+// Writers that can emit ZIP64 (Python's zipfile streaming writes, as in
+// Claude's split export parts) stamp "version needed" 4.5 on every entry,
+// even one with 32-bit sizes and no ZIP64 field. What makes an entry
+// non-standard is a ZIP64 extra field, not the version stamp alone.
+const ZIP_VERSION_NEEDED_ZIP64 = 45;
+const ZIP64_EXTRA_FIELD_ID = 0x0001;
+
+function hasZip64ExtraField(bytes: Buffer, offset: number): boolean {
+	const fileNameLength = bytes.readUInt16LE(offset + 28);
+	const extraLength = bytes.readUInt16LE(offset + 30);
+	const extraStart =
+		offset + ZIP_CENTRAL_DIRECTORY_HEADER_LENGTH + fileNameLength;
+	const extraEnd = extraStart + extraLength;
+	for (let cursor = extraStart; cursor + 4 <= extraEnd; ) {
+		const id = bytes.readUInt16LE(cursor);
+		const size = bytes.readUInt16LE(cursor + 2);
+		if (id === ZIP64_EXTRA_FIELD_ID) {
+			return true;
+		}
+		cursor += 4 + size;
+	}
+	return false;
+}
+
 function isStandardDirectoryEntry(
 	bytes: Buffer,
 	offset: number,
 	record: CentralDirectoryRecord,
 ): boolean {
 	return (
-		bytes.readUInt16LE(offset + 6) < 45 &&
+		bytes.readUInt16LE(offset + 6) <= ZIP_VERSION_NEEDED_ZIP64 &&
+		!hasZip64ExtraField(bytes, offset) &&
 		bytes.readUInt16LE(offset + 34) === 0 &&
 		record.compressedSize !== 0xff_ff_ff_ff &&
 		record.uncompressedSize !== 0xff_ff_ff_ff &&
