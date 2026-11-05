@@ -215,6 +215,24 @@ export function collectionAt(node: unknown, key: string): FieldRead<unknown[]> {
 	return read(collection.value.elements);
 }
 
+/** The rows a collection carries, whatever its paging says. For a section
+ *  whose first page is readable but does not prove the whole list: those rows
+ *  are upserted, and the stream still reports its enumeration as unproven. */
+export function pageElementsAt(
+	node: unknown,
+	key: string,
+): FieldRead<unknown[]> {
+	const collection = at(node, [key]);
+	if (collection.kind !== "read") return unavailable("malformed");
+	if (
+		!isRecord(collection.value) ||
+		!Array.isArray(collection.value.elements)
+	) {
+		return unavailable("malformed");
+	}
+	return read(collection.value.elements);
+}
+
 /** Row id: the Voyager entity URN, else a positional id. Voyager omits the
  *  URN on some decoration versions; a malformed URN is unreadable. */
 function idOf(node: unknown, prefix: string, index: number): FieldRead<string> {
@@ -671,11 +689,21 @@ export function buildSkillRows(
 			continue;
 		}
 		const children = at(entry, [childKey]);
-		if (children.kind !== "read" || !Array.isArray(children.value)) {
+		// A category holds its skills as a list, or as a collection of its own
+		// (`skills: { elements, paging }`).
+		const nested =
+			children.kind === "read" &&
+			isRecord(children.value) &&
+			Array.isArray(children.value.elements)
+				? children.value.elements
+				: children.kind === "read" && Array.isArray(children.value)
+					? children.value
+					: null;
+		if (nested === null) {
 			addOmittedRow(rows, "unreadable_nested_collection");
 			continue;
 		}
-		for (const skill of children.value) {
+		for (const skill of nested) {
 			if (!isRecord(skill)) {
 				addOmittedRow(rows, "malformed_row");
 				continue;
