@@ -2518,7 +2518,7 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 	});
 
 	await t.test(
-		"an unrecognised list fails closed: no activities, one omitted error",
+		"an unrecognised list fails the run: no activities, one fatal error",
 		async () => {
 			const r = await run((raw) =>
 				new URL(raw).pathname === "/athlete/training_activities"
@@ -2533,9 +2533,92 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 			assertCleanRun(r);
 			assert.equal(r.result["strava.activities"], undefined);
 			assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
-			assert.equal(r.result.errors[0].scope, "strava.activities");
-			assert.equal(r.result.errors[0].disposition, "omitted");
-			assert.deepEqual(r.result.exportSummary, c.emptyExportSummary);
+			assert.equal(r.result.errors[0].disposition, "fatal");
+			assert.equal(r.result.errors[0].code, "source_unreadable");
+			assert.match(r.result.errors[0].reason, /no models array/);
+			assert.equal(r.data.error, r.result.errors[0].reason);
+		},
+	);
+
+	// Page 1 is the only read an account with few activities makes. On the
+	// thin host an unreadable first page used to stream an empty
+	// { activities } scope, and the device showed "no data" exactly as for an
+	// account with no activities.
+	const firstPage = (reply) => (raw) => {
+		const url = new URL(raw);
+		return url.pathname === "/athlete/training_activities" &&
+			url.searchParams.get("per_page") !== "1"
+			? reply
+			: resolveFixture(raw);
+	};
+	const thinHost = (resolve, name) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve },
+			scopes: c.scopes,
+			resultStreaming: true,
+			resultSpoolDirectory: join(out, name),
+		});
+	for (const [label, reply, code] of [
+		[
+			"a signed-out list",
+			{ status: 403, contentType: "text/html", body: "<html>sign in</html>" },
+			"sign_in_required",
+		],
+		[
+			"an HTML list",
+			{ status: 200, contentType: "text/html", body: "<html>app</html>" },
+			"source_unreadable",
+		],
+		[
+			"a list in a new shape",
+			{ status: 200, contentType: "application/json", body: '{"activities":[]}' },
+			"source_unreadable",
+		],
+		[
+			"a list Strava cannot serve",
+			{ status: 503, contentType: "text/html", body: "<html>busy</html>" },
+			"collection_interrupted",
+		],
+	]) {
+		await t.test(
+			`${label} on page 1 fails the run on the thin host, with no empty scope`,
+			async () => {
+				const r = await thinHost(
+					firstPage(reply),
+					`strava-page1-${code}-${reply.status}`,
+				);
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				assert.notEqual(r.streamResult?.completed, true);
+				assert.deepEqual(r.streamScopeFiles, {});
+				assert.ok(r.data.error, "the run reports an error");
+			},
+		);
+	}
+
+	await t.test(
+		"an account with no activities completes with an empty list on the thin host",
+		async () => {
+			const r = await thinHost(
+				firstPage({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ models: [], page: 1, perPage: 20, total: 0 }),
+				}),
+				"strava-page1-empty-account",
+			);
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.equal(r.streamResult?.completed, true);
+			assert.deepEqual(r.streamResult.donePayload.errors, []);
+			assert.equal(r.data.error, undefined);
+			assert.deepEqual(
+				JSON.parse(
+					await readFile(r.streamScopeFiles["strava.activities"], "utf8"),
+				),
+				{ activities: [] },
+			);
 		},
 	);
 
