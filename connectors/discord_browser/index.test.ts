@@ -824,7 +824,7 @@ test("one short 429 is waited out once; a second ends the run", async () => {
 				// The connections request, then the second page of server A.
 				if (
 					(path === "/users/@me/connections" && call === 3) ||
-					path.endsWith("offset=25")
+					(path.includes(`/guilds/${SERVER_A}/`) && path.includes("&max_id="))
 				) {
 					limited += 1;
 					return { status: 429, body: fixture("rate-limited.json") };
@@ -845,7 +845,7 @@ test("one short 429 is waited out once; a second ends the run", async () => {
 	assert.equal(pauses.filter((ms) => ms === 4000 + 1500).length, 1);
 	assert.equal(h.of("connections").length, 2);
 	// The second 429 ended the run: server B was never searched.
-	assert.equal(fake.calls.at(-1)?.path.endsWith("offset=25"), true);
+	assert.equal(fake.calls.at(-1)?.path.includes("&max_id="), true);
 	assert.deepEqual(
 		h.skips().map((skip) => [skip.stream, skip.reason]),
 		[["messages", "discord_rate_limited"]],
@@ -1014,22 +1014,27 @@ test("messages older than the window are not read", async () => {
 
 test("a malformed hit does not stop pagination", async () => {
 	const all = messagesBy(OWNER, 50);
-	const groupsAt = (offset: number) =>
-		all
-			.slice(offset, offset + SEARCH_PAGE)
-			.map((message, index) =>
-				offset + index === 3
-					? [{ author: { id: OWNER }, hit: true }]
-					: [message],
-			);
 	const fake = fakeDiscord({
 		respond: discordApi({ [SERVER_A]: all }, (path) => {
 			const url = new URL(path, ORIGIN);
 			if (!url.pathname.endsWith("/messages/search")) return undefined;
+			const maxId = url.searchParams.get("max_id");
+			const matching = all.filter(
+				(message) => maxId === null || BigInt(message.id) < BigInt(maxId),
+			);
 			const offset = Number(url.searchParams.get("offset"));
 			return {
 				status: 200,
-				body: { total_results: all.length, messages: groupsAt(offset) },
+				body: {
+					total_results: matching.length,
+					messages: matching
+						.slice(offset, offset + SEARCH_PAGE)
+						.map((message) =>
+							message.id === all[3]?.id
+								? [{ author: { id: OWNER }, hit: true }]
+								: [message],
+						),
+				},
 			};
 		}),
 	});
@@ -1037,12 +1042,18 @@ test("a malformed hit does not stop pagination", async () => {
 	const lines = await captureDiagnostics(() =>
 		collectDiscordBrowser(h.ctx, fast()),
 	);
-	// The unreadable group is not counted, but the raw position still advances
-	// the listing, so the second page is read.
+	// The unreadable group is not counted, and the second page starts below
+	// the first page's oldest readable hit.
 	assert.equal(h.of("messages").length, 49);
 	assert.deepEqual(
-		searches(fake).map((call) => call.path.split("offset=")[1]),
-		["0", "25"],
+		searches(fake).map((call) => {
+			const params = new URL(call.path, ORIGIN).searchParams;
+			return [params.get("offset"), params.get("max_id")];
+		}),
+		[
+			["0", null],
+			["0", all[24]?.id],
+		],
 	);
 	const unreadable = lines.find((line) =>
 		line.includes("search_hits_unreadable"),
@@ -1054,25 +1065,30 @@ test("a malformed hit does not stop pagination", async () => {
 test("the unreadable-position report fits the line budget at a full page", async () => {
 	const all = messagesBy(OWNER, 10_000);
 	const lastOffset = 9_975;
+	const index = new Map(all.map((message, at) => [message.id, at]));
 	const fake = fakeDiscord({
 		respond: discordApi({ [SERVER_A]: all }, (path) => {
 			const url = new URL(path, ORIGIN);
 			if (!url.pathname.endsWith("/messages/search")) return undefined;
+			const maxId = url.searchParams.get("max_id");
+			const matching = all.filter(
+				(message) => maxId === null || BigInt(message.id) < BigInt(maxId),
+			);
 			const offset = Number(url.searchParams.get("offset"));
-			if (offset !== lastOffset) return undefined;
-			// A full page with every other group unreadable: 13 four-digit
-			// positions that do not collapse into one range.
+			// Every group before the last page is unreadable, so the walk has no
+			// ID to page by and advances by offset. The last full page has every
+			// other group unreadable: 13 four-digit positions that do not
+			// collapse into one range.
 			return {
 				status: 200,
 				body: {
-					total_results: all.length,
-					messages: all
-						.slice(offset, offset + SEARCH_PAGE)
-						.map((message, index) =>
-							index % 2 === 0
-								? [{ author: { id: OWNER }, hit: true }]
-								: [message],
-						),
+					total_results: matching.length,
+					messages: matching.slice(offset, offset + SEARCH_PAGE).map((message) => {
+						const at = index.get(message.id) ?? 0;
+						return at < lastOffset || (at - lastOffset) % 2 === 0
+							? [{ author: { id: OWNER }, hit: true }]
+							: [message];
+					}),
 				},
 			};
 		}),
@@ -1294,10 +1310,16 @@ test("a malformed group at EOF completes readable records without runtime retrie
 	);
 	assert.equal(first.of("messages").length, 79);
 	assert.deepEqual(
-		searches(broken).map((call) =>
-			new URL(call.path, ORIGIN).searchParams.get("offset"),
-		),
-		["0", "25", "50", "75"],
+		searches(broken).map((call) => {
+			const params = new URL(call.path, ORIGIN).searchParams;
+			return [params.get("offset"), params.get("max_id")];
+		}),
+		[
+			["0", null],
+			["0", all[24]?.id],
+			["0", all[49]?.id],
+			["0", all[74]?.id],
+		],
 	);
 	assert.ok(lines.some((line) => line.includes("search_hits_unreadable")));
 	assert.equal(resumeState(first).servers[SERVER_A]?.backfill, null);
@@ -1344,21 +1366,28 @@ test("an unusable author completes readable records and is recoverable by full r
 	];
 	for (const [name, author] of variants) {
 		const all = messagesBy(OWNER, 50);
-		const groupsAt = (offset: number) =>
-			all.slice(offset, offset + SEARCH_PAGE).map((message, index) => {
-				if (offset + index !== 3) return [message];
-				return author === undefined
-					? [{ hit: true, id: message.id, timestamp: message.timestamp }]
-					: [{ ...message, author }];
-			});
 		const broken = fakeDiscord({
 			respond: discordApi({ [SERVER_A]: all }, (path) => {
 				const url = new URL(path, ORIGIN);
 				if (!url.pathname.endsWith("/messages/search")) return undefined;
+				const maxId = url.searchParams.get("max_id");
+				const matching = all.filter(
+					(message) => maxId === null || BigInt(message.id) < BigInt(maxId),
+				);
 				const offset = Number(url.searchParams.get("offset"));
 				return {
 					status: 200,
-					body: { total_results: all.length, messages: groupsAt(offset) },
+					body: {
+						total_results: matching.length,
+						messages: matching
+							.slice(offset, offset + SEARCH_PAGE)
+							.map((message) => {
+								if (message.id !== all[3]?.id) return [message];
+								return author === undefined
+									? [{ hit: true, id: message.id, timestamp: message.timestamp }]
+									: [{ ...message, author }];
+							}),
+					},
 				};
 			}),
 		});
@@ -1401,12 +1430,14 @@ test("an interrupted disjoint expansion cannot omit the uncovered interval", asy
 	await collectDiscordBrowser(first.ctx, fast());
 	assert.equal(first.of("messages").length, 7);
 
-	// Run 2 starts below until and is refused at offset 25 after days 31..55.
+	// Run 2 starts below until and is refused on its second page, after
+	// days 31..55.
+	let runTwoSearches = 0;
 	const two = fakeDiscord({
 		respond: discordApi(servers, (path) => {
 			if (!path.includes("/messages/search")) return undefined;
-			const url = new URL(path, ORIGIN);
-			return url.searchParams.get("offset") === "25"
+			runTwoSearches += 1;
+			return runTwoSearches === 2
 				? { status: 403, body: fixture("missing-access.json") }
 				: undefined;
 		}),
@@ -1433,6 +1464,34 @@ test("an interrupted disjoint expansion cannot omit the uncovered interval", asy
 		...third.of("messages").map((record) => String(record.id)),
 	]);
 	assert.equal(collected.size, 90);
+});
+
+test("a message deleted between search pages does not skip a survivor", async () => {
+	// Page 2 bounds by the oldest ID on page 1, so a deletion on page 1
+	// cannot shift the next page past a message that still exists.
+	const all = messagesBy(OWNER, 51);
+	const deleted = all[3]?.id;
+	const listing = [...all];
+	let searchCalls = 0;
+	const fake = fakeDiscord({
+		respond: discordApi({ [SERVER_A]: listing }, (path) => {
+			if (path.includes("/messages/search")) {
+				searchCalls += 1;
+				if (searchCalls === 2) listing.splice(3, 1);
+			}
+			return undefined;
+		}),
+	});
+	const h = harness(fake, ["messages"]);
+	await collectDiscordBrowser(h.ctx, fast());
+	const emitted = new Set(h.of("messages").map((record) => String(record.id)));
+	const survivors = all.filter((message) => message.id !== deleted);
+	assert.deepEqual(
+		survivors.filter((message) => !emitted.has(message.id)).map((m) => m.id),
+		[],
+	);
+	assert.equal(emitted.size, 51);
+	assert.deepEqual(h.skips(), []);
 });
 
 test("the search offset ceiling rebases by ID and reaches the true end", async () => {

@@ -50,7 +50,9 @@
  * reached the range's end writes coverage for readable records; malformed
  * records are reported for a connector upgrade. Readable partial
  * walks save message-ID bounds, so later runs refresh the head and continue
- * older history without relying on search offsets across runs.
+ * older history without relying on search offsets across runs. Within a
+ * run, each search page is bounded by the oldest message ID already read,
+ * so a message deleted between requests cannot shift a survivor out of view.
  * Every server attempted in a run, finished or not, moves to the back of that
  * queue, so no server is retried before every other has been attempted.
  *
@@ -811,7 +813,16 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 				(offset < MAX_SEARCH_OFFSET && offset + page.groups >= page.total)
 			)
 				done = true;
-			offset += SEARCH_PAGE_SIZE;
+			// Page by ID: the next page starts below the oldest hit read, so a
+			// message deleted meanwhile cannot shift a survivor past the page.
+			// Unreadable groups after that hit were already reported; skip them.
+			const oldest = page.hits.find((hit) => hit.id === consumed);
+			if (oldest && consumed !== bound) {
+				bound = consumed;
+				offset = page.groups - 1 - oldest.position;
+			} else {
+				offset += SEARCH_PAGE_SIZE;
+			}
 		}
 		ranges.shift();
 	}
