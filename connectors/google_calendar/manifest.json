@@ -269,6 +269,6 @@
 		"google_calendar_access_token_missing": "Google Calendar needs you to sign in again or update your access key. Then run again.",
 		"google_calendar_auth_failed": "Google Calendar needs you to sign in again or update your access key. Then run again.",
 		"google_calendar_sync_token_expired": "This part stopped because of an internal problem reading Google Calendar. It is not something you can fix.",
-		"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed."
+		"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing."
 	}
 }

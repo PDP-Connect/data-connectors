@@ -43,13 +43,13 @@
 		}
 	},
 	"reason_display_messages": {
-		"browser_handoff_readiness_probe_failed": "Instagram stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "Instagram stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"browser_handoff_readiness_timed_out": "Instagram needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "Instagram needs you to sign in again or update your access key. Then run again.",
 		"meta_following_owner_conflict": "This part stopped because of an internal problem reading Instagram. It is not something you can fix.",
 		"meta_posts_owner_conflict": "This part stopped because of an internal problem reading Instagram. It is not something you can fix.",
 		"meta_session_required": "Instagram needs you to sign in again or update your access key. Then run again.",
-		"stream_collection_failed": "Instagram stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"stream_collection_failed": "Instagram stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	},
 	"streams": [
 		{

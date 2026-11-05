@@ -1015,9 +1015,9 @@
 		"malformed_jsonl_line": "Some items could not be read and were skipped.",
 		"non_object_jsonl_record": "Some items could not be read and were skipped.",
 		"scope_matched_no_sources": "This connection's settings or selection cannot be used as set. Check them, then run again.",
-		"source_directory_read_error": "Claude Code stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"source_read_error": "Claude Code stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"source_unreadable": "Claude Code stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"source_directory_read_error": "A local file or folder could not be read. Check that it exists and that this app can read it, then run again.",
+		"source_read_error": "A local file or folder could not be read. Check that it exists and that this app can read it, then run again.",
+		"source_unreadable": "A local file or folder could not be read. Check that it exists and that this app can read it, then run again.",
 		"symlink_skipped": "Some items could not be read and were skipped.",
 		"truncated_jsonl_tail": "Some items could not be read and were skipped."
 	},

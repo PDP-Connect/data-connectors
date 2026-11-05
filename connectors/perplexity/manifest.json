@@ -241,20 +241,20 @@
 		}
 	],
 	"reason_display_messages": {
-		"browser_handoff_readiness_probe_failed": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"browser_handoff_readiness_timed_out": "Perplexity needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "Perplexity needs you to sign in again or update your access key. Then run again.",
-		"collection_interrupted": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"collection_interrupted": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"covered_in_full": "There was nothing to import for this request. No action is needed.",
 		"nothing_in_range": "There was nothing to import for this request. No action is needed.",
 		"perplexity_auth_failed": "Perplexity needs you to sign in again or update your access key. Then run again.",
-		"perplexity_interrupted": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"perplexity_stream_incomplete": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"perplexity_interrupted": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"perplexity_stream_incomplete": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"records_unreadable": "Some items could not be read and were skipped.",
 		"sign_in_required": "Perplexity needs you to sign in again or update your access key. Then run again.",
 		"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
 		"source_unreadable": "This part stopped because of an internal problem reading Perplexity. It is not something you can fix.",
-		"stream_collection_failed": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"stream_collection_failed": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	},
 	"mobile": {
 		"pageshim": {

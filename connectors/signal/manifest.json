@@ -294,7 +294,7 @@
 		}
 	],
 	"reason_display_messages": {
-		"backfill_check_unproven_legacy_cursor": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"backfill_check_unproven_legacy_cursor": "This run could not check whether older messages are missing. The next run checks, and may ask you to run a full refresh.",
 		"message_date_unusable": "Some items could not be read and were skipped.",
 		"no_attachments_exported": "There was nothing to import for this request. No action is needed.",
 		"source_rows_below_watermark_unreachable": "Signal has older messages we haven't saved. Run a full refresh to collect them."

@@ -160,7 +160,7 @@
 		}
 	],
 	"reason_display_messages": {
-		"ambiguous_date_order": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"ambiguous_date_order": "Every date in this export could be read as day/month or month/day, so this connector cannot tell which is right. It is not something you can fix.",
 		"archive_security_violation": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 		"csv_parse_error": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 		"import_exceeds_bounded_read_policy": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",

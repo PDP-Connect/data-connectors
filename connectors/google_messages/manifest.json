@@ -122,11 +122,11 @@
 			}
 		],
 	"reason_display_messages": {
-		"gmcli_chat_scan_limit_reached": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+		"gmcli_chat_scan_limit_reached": "Some older conversations were not scanned because of the chat limit setting. Raise GMCLI_MAX_CHATS, then run again.",
 		"gmcli_not_installed": "The Google Messages helper tool is not installed on this device. Install it, then run again.",
 		"gmcli_not_paired": "This device is not paired with the Google Messages helper tool. Pair it, then run again.",
-		"gmcli_per_chat_limit_reached": "Only part of this could be collected because of a size or count limit. The rest is not available.",
-		"gmcli_query_failed": "Google Messages stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"gmcli_per_chat_limit_reached": "Older messages in some conversations were not read because of the per-chat limit setting. Raise GMCLI_MESSAGES_PER_CHAT_LIMIT, then run again.",
+		"gmcli_query_failed": "The Google Messages helper tool could not read messages. Check that it is installed and paired, then run again.",
 		"gmcli_schema_drift": "This part stopped because of an internal problem reading Google Messages. It is not something you can fix."
 	},
 	"options_schema": {

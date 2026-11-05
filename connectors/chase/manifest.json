@@ -582,7 +582,7 @@
 	"reason_display_messages": {
 		"account_no_longer_discovered": "An account saved before no longer appears on your Chase dashboard. Its saved data is kept. Check that the account is still open and visible.",
 		"ambiguous_multi_account_overview": "This part stopped because of an internal problem reading Chase. It is not something you can fix.",
-		"qfx_download_failed": "Chase stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"qfx_download_failed": "Chase stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"qfx_parse_failed": "This part stopped because of an internal problem reading Chase. It is not something you can fix.",
 		"qfx_partial_parse": "Some items could not be read and were skipped.",
 		"row_exception": "Some items could not be read and were skipped.",

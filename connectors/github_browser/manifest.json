@@ -870,13 +870,13 @@
 		}
 	],
 	"reason_display_messages": {
-		"browser_handoff_readiness_probe_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "The GitHub sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
 		"browser_handoff_readiness_timed_out": "GitHub needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "GitHub needs you to sign in again or update your access key. Then run again.",
-		"github_browser_incomplete": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"github_browser_navigation_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_browser_incomplete": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"github_browser_navigation_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"github_browser_session_missing": "GitHub needs you to sign in again or update your access key. Then run again.",
-		"stream_collection_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"stream_collection_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	},
 	"mobile": {
 		"pageshim": {

@@ -494,21 +494,21 @@
 		}
 	],
 	"reason_display_messages": {
-		"browser_handoff_readiness_probe_failed": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"browser_handoff_readiness_timed_out": "YouTube needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "YouTube needs you to sign in again or update your access key. Then run again.",
-		"page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
-		"stream_collection_failed": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"youtube_click_target_missing": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"youtube_history_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"youtube_playlist_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"youtube_profile_about_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"youtube_profile_account_header_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"youtube_profile_channel_link_unavailable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"youtube_profile_channel_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"youtube_profile_home_not_ready": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"stream_collection_failed": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"youtube_click_target_missing": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"youtube_history_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"youtube_playlist_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"youtube_profile_about_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"youtube_profile_account_header_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"youtube_profile_channel_link_unavailable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"youtube_profile_channel_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"youtube_profile_home_not_ready": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"youtube_session_dead": "YouTube needs you to sign in again or update your access key. Then run again.",
-		"youtube_video_parse_mismatch": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"youtube_video_parse_mismatch": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	}
 }

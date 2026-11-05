@@ -871,7 +871,7 @@
 	"reason_display_messages": {
 		"malformed_jsonl_line": "Some items could not be read and were skipped.",
 		"non_object_jsonl_record": "Some items could not be read and were skipped.",
-		"rollout_source_read_error": "OpenAI Codex CLI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"rollout_source_read_error": "OpenAI Codex CLI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"shape_check_failed": "Some items could not be read and were skipped.",
 		"symlink_skipped": "Some items could not be read and were skipped.",
 		"truncated_jsonl_tail": "Some items could not be read and were skipped."

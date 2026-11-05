@@ -235,6 +235,6 @@
 		"google_contacts_auth_failed": "Google Contacts needs you to sign in again or update your access key. Then run again.",
 		"google_people_access_token_missing": "Google Contacts needs you to sign in again or update your access key. Then run again.",
 		"google_people_sync_token_expired": "This part stopped because of an internal problem reading Google Contacts. It is not something you can fix.",
-		"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed."
+		"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing."
 	}
 }

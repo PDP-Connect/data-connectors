@@ -312,7 +312,7 @@
 		}
 	],
 	"reason_display_messages": {
-		"empty_export": "There was nothing to import for this request. No action is needed.",
+		"empty_export": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 		"import_exceeds_bounded_read_policy": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 		"media_exceeds_bounded_read_policy": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 		"no_exports_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",

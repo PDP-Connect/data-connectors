@@ -47,15 +47,15 @@
 		}
 	},
 	"reason_display_messages": {
-		"browser_handoff_readiness_probe_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"browser_handoff_readiness_timed_out": "Facebook needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "Facebook needs you to sign in again or update your access key. Then run again.",
 		"facebook_auth_failed": "Facebook needs you to sign in again or update your access key. Then run again.",
-		"facebook_interrupted": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"facebook_navigation_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"facebook_interrupted": "The Facebook sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+		"facebook_navigation_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
 		"shape_check_failed": "Some items could not be read and were skipped.",
-		"stream_collection_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"stream_collection_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	},
 	"streams": [
 		{

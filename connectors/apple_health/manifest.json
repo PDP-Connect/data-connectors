@@ -1628,7 +1628,7 @@
 	"reason_display_messages": {
 		"awaiting_upload": "Nothing to read yet. On your iPhone open Health, tap your picture, and choose Export All Health Data. Upload the export.zip here when it's ready.",
 		"collection_interrupted": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
-		"covered_in_full": "There was nothing to import for this request. No action is needed.",
+		"covered_in_full": "All matching data in this export was imported. No action is needed.",
 		"export_extraction_failed": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 		"newer_upload_too_large": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here.",
 		"nothing_in_range": "Your export had no data of this kind matching this request. That's not a problem - there was simply nothing to read.",

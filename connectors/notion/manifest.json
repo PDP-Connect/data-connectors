@@ -213,6 +213,6 @@
 	],
 	"reason_display_messages": {
 		"notion_auth_failed": "Notion needs you to sign in again or update your access key. Then run again.",
-		"notion_pagination_contradiction": "Notion stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"notion_pagination_contradiction": "Notion stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	}
 }

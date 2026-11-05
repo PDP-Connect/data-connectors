@@ -163,10 +163,10 @@
 		}
 	],
 	"reason_display_messages": {
-		"browser_handoff_readiness_probe_failed": "Strava stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "The Strava sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
 		"browser_handoff_readiness_timed_out": "Strava needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "Strava needs you to sign in again or update your access key. Then run again.",
-		"collection_interrupted": "Strava stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"collection_interrupted": "Strava stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"covered_in_full": "There was nothing to import for this request. No action is needed.",
 		"nothing_in_range": "There was nothing to import for this request. No action is needed.",
 		"records_unreadable": "Some items could not be read and were skipped.",

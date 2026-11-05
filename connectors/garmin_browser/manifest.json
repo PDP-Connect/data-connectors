@@ -491,10 +491,10 @@
 		}
 	],
 	"reason_display_messages": {
-		"browser_handoff_readiness_probe_failed": "Garmin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "Garmin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"browser_handoff_readiness_timed_out": "Garmin needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "Garmin needs you to sign in again or update your access key. Then run again.",
-		"collection_interrupted": "Garmin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"collection_interrupted": "Garmin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"garmin_browser_session_dead": "Garmin needs you to sign in again or update your access key. Then run again.",
 		"sign_in_required": "Garmin needs you to sign in again or update your access key. Then run again.",
 		"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",

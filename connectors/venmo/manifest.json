@@ -364,6 +364,6 @@
 	"reason_display_messages": {
 		"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
 		"transactions_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
-		"transactions_schema_blocked": "Venmo stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"transactions_schema_blocked": "Venmo stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	}
 }

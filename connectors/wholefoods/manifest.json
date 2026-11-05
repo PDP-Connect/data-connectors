@@ -492,13 +492,13 @@
 		"amazon_login_incomplete_after_submit": "Whole Foods needs you to sign in again or update your access key. Then run again.",
 		"amazon_login_manual_incomplete": "Whole Foods needs you to sign in again or update your access key. Then run again.",
 		"amazon_login_unexpected_ui": "This part stopped because of an internal problem reading Whole Foods. It is not something you can fix.",
-		"browser_handoff_readiness_probe_failed": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"browser_handoff_readiness_timed_out": "Whole Foods needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "Whole Foods needs you to sign in again or update your access key. Then run again.",
-		"stream_collection_failed": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"stream_collection_failed": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"wholefoods_filter_pending": "Whole Foods does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
-		"wholefoods_nutrition_unread": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"wholefoods_nutrition_unread": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"wholefoods_order_item_asin_missing": "Some items could not be read and were skipped.",
-		"wholefoods_order_item_count_unverified": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"wholefoods_order_item_count_unverified": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	}
 }

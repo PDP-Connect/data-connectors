@@ -208,8 +208,8 @@
 		}
 	],
 	"reason_display_messages": {
-		"doordash_orders_response_not_observed": "DoorDash stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"doordash_orders_response_not_observed": "DoorDash returned no readable order history. Your account may have no orders, or this connector may need an update.",
+		"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
 		"shape_check_failed": "Some items could not be read and were skipped."
 	}
 }

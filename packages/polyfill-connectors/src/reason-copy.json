@@ -4,11 +4,14 @@
     "continues_later": "This run reached its limit. Later runs collect the rest. No action is needed.",
     "export_file_problem": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
     "fix_settings": "This connection's settings or selection cannot be used as set. Check them, then run again.",
-    "incomplete_retry": "{site} stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+    "incomplete_retry": "{site} stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+    "limit_repeats": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
+    "local_file_unreadable": "A local file or folder could not be read. Check that it exists and that this app can read it, then run again.",
     "not_available": "{site} does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
     "nothing_to_import": "There was nothing to import for this request. No action is needed.",
     "provider_busy": "{site} is limiting requests or having trouble right now. Wait a while, then run again.",
     "sign_in_again": "{site} needs you to sign in again or update your access key. Then run again.",
+    "sign_in_unfinished": "The {site} sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
     "skipped_items": "Some items could not be read and were skipped.",
     "unexpected_data": "This part stopped because of an internal problem reading {site}. It is not something you can fix."
   },
@@ -51,13 +54,13 @@
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
       "export_auth_rejected": "sign_in_again",
-      "export_conversation_incomplete": "incomplete_retry",
-      "export_conversations_incomplete": "incomplete_retry",
+      "export_conversation_incomplete": "unexpected_data",
+      "export_conversations_incomplete": "unexpected_data",
       "export_conversations_missing": "unexpected_data",
       "export_items_unparseable": "skipped_items",
       "export_layout_unrecognized": "unexpected_data",
-      "export_manifest_incomplete": "incomplete_retry",
-      "export_oversized_conversation_incomplete": "incomplete_retry",
+      "export_manifest_incomplete": "unexpected_data",
+      "export_oversized_conversation_incomplete": "unexpected_data",
       "export_part_download_failed": "incomplete_retry",
       "export_pending": "continues_later",
       "export_projects_missing": "unexpected_data",
@@ -65,7 +68,7 @@
       "export_recently_requested": "continues_later",
       "export_request_failed": "incomplete_retry",
       "export_response_unrecognized": "unexpected_data",
-      "no_chat_organization": "not_available",
+      "no_chat_organization": "sign_in_again",
       "organization_unavailable": "not_available",
       "parse_error": "unexpected_data"
     },
@@ -95,7 +98,9 @@
         "message": "Nothing to read yet. On your iPhone open Health, tap your picture, and choose Export All Health Data. Upload the export.zip here when it's ready."
       },
       "collection_interrupted": "export_file_problem",
-      "covered_in_full": "nothing_to_import",
+      "covered_in_full": {
+        "message": "All matching data in this export was imported. No action is needed."
+      },
       "export_extraction_failed": "export_file_problem",
       "newer_upload_too_large": {
         "message": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here."
@@ -124,7 +129,7 @@
       "character_ai_api_5xx": "provider_busy",
       "character_ai_auth_failed": "sign_in_again",
       "character_ai_challenge": "sign_in_again",
-      "character_ai_interrupted": "incomplete_retry",
+      "character_ai_interrupted": "sign_in_unfinished",
       "character_ai_invalid_payload": "unexpected_data",
       "character_ai_network_error": "incomplete_retry",
       "character_ai_stream_incomplete": "incomplete_retry",
@@ -165,9 +170,9 @@
       "malformed_jsonl_line": "skipped_items",
       "non_object_jsonl_record": "skipped_items",
       "scope_matched_no_sources": "fix_settings",
-      "source_directory_read_error": "incomplete_retry",
-      "source_read_error": "incomplete_retry",
-      "source_unreadable": "incomplete_retry",
+      "source_directory_read_error": "local_file_unreadable",
+      "source_read_error": "local_file_unreadable",
+      "source_unreadable": "local_file_unreadable",
       "symlink_skipped": "skipped_items",
       "truncated_jsonl_tail": "skipped_items"
     },
@@ -187,16 +192,22 @@
       "discord_collection_interrupted": "incomplete_retry",
       "discord_rate_limited": "provider_busy",
       "discord_records_unreadable": "skipped_items",
-      "discord_run_limit_reached": "continues_later",
-      "discord_servers_skipped": "not_available",
+      "discord_run_limit_reached": {
+        "message": "This run reached its limit. Later runs try the remaining servers, but older messages in servers this run did not finish may stay missing."
+      },
+      "discord_servers_skipped": {
+        "message": "Some servers could not be searched this time. A later run tries them again. No action is needed."
+      },
       "discord_session_dead": "sign_in_again",
       "discord_sign_in_required": "sign_in_again",
       "discord_source_unreadable": "unexpected_data",
       "discord_verification_required": "sign_in_again"
     },
     "doordash": {
-      "doordash_orders_response_not_observed": "incomplete_retry",
-      "older_pages_deferred_page_budget": "continues_later",
+      "doordash_orders_response_not_observed": {
+        "message": "DoorDash returned no readable order history. Your account may have no orders, or this connector may need an update."
+      },
+      "older_pages_deferred_page_budget": "limit_repeats",
       "shape_check_failed": "skipped_items"
     },
     "facebook": {
@@ -204,7 +215,7 @@
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
       "facebook_auth_failed": "sign_in_again",
-      "facebook_interrupted": "incomplete_retry",
+      "facebook_interrupted": "sign_in_unfinished",
       "facebook_navigation_failed": "incomplete_retry",
       "scope_not_supported": "fix_settings",
       "shape_check_failed": "skipped_items",
@@ -254,7 +265,7 @@
       "starred_entry_missing_repo": "skipped_items"
     },
     "github-browser": {
-      "browser_handoff_readiness_probe_failed": "incomplete_retry",
+      "browser_handoff_readiness_probe_failed": "sign_in_unfinished",
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
       "github_browser_incomplete": "incomplete_retry",
@@ -285,13 +296,13 @@
       "google_calendar_access_token_missing": "sign_in_again",
       "google_calendar_auth_failed": "sign_in_again",
       "google_calendar_sync_token_expired": "unexpected_data",
-      "older_pages_deferred_page_budget": "continues_later"
+      "older_pages_deferred_page_budget": "limit_repeats"
     },
     "google-contacts": {
       "google_contacts_auth_failed": "sign_in_again",
       "google_people_access_token_missing": "sign_in_again",
       "google_people_sync_token_expired": "unexpected_data",
-      "older_pages_deferred_page_budget": "continues_later"
+      "older_pages_deferred_page_budget": "limit_repeats"
     },
     "google-maps": {
       "element_unaccounted": "skipped_items",
@@ -312,15 +323,21 @@
       "google_dataportability_no_authorized_resource_groups": "sign_in_again"
     },
     "google-messages": {
-      "gmcli_chat_scan_limit_reached": "capped_by_limit",
+      "gmcli_chat_scan_limit_reached": {
+        "message": "Some older conversations were not scanned because of the chat limit setting. Raise GMCLI_MAX_CHATS, then run again."
+      },
       "gmcli_not_installed": {
         "message": "The Google Messages helper tool is not installed on this device. Install it, then run again."
       },
       "gmcli_not_paired": {
         "message": "This device is not paired with the Google Messages helper tool. Pair it, then run again."
       },
-      "gmcli_per_chat_limit_reached": "capped_by_limit",
-      "gmcli_query_failed": "incomplete_retry",
+      "gmcli_per_chat_limit_reached": {
+        "message": "Older messages in some conversations were not read because of the per-chat limit setting. Raise GMCLI_MESSAGES_PER_CHAT_LIMIT, then run again."
+      },
+      "gmcli_query_failed": {
+        "message": "The Google Messages helper tool could not read messages. Check that it is installed and paired, then run again."
+      },
       "gmcli_schema_drift": "unexpected_data"
     },
     "google-takeout": {
@@ -371,7 +388,9 @@
       "unparseable_order_date": "skipped_items"
     },
     "ical": {
-      "ics_fetch_failed": "incomplete_retry",
+      "ics_fetch_failed": {
+        "message": "A calendar subscription could not be read. Check its address and access, then run again."
+      },
       "no_calendar_sources": "fix_settings"
     },
     "icloud-notes": {
@@ -394,7 +413,7 @@
       "message_date_unusable": "skipped_items"
     },
     "instinct": {
-      "browser_handoff_readiness_probe_failed": "incomplete_retry",
+      "browser_handoff_readiness_probe_failed": "sign_in_unfinished",
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
       "instinct_auth_failed": "sign_in_again",
@@ -413,7 +432,9 @@
       "jellyfin_base_url_has_userinfo": "fix_settings",
       "jellyfin_base_url_requires_https_non_loopback": "fix_settings",
       "jellyfin_base_url_unsafe_scheme": "fix_settings",
-      "jellyfin_error": "incomplete_retry",
+      "jellyfin_error": {
+        "message": "Jellyfin could not be read. If your sign-in or server address changed, update the connection. Otherwise run again later."
+      },
       "jellyfin_http_error": "incomplete_retry",
       "jellyfin_media_browser_device_id_empty": "unexpected_data",
       "jellyfin_missing_credentials": "fix_settings",
@@ -515,12 +536,16 @@
       "browser_handoff_readiness_probe_failed": "incomplete_retry",
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
-      "muse_bot_challenge": "sign_in_again",
+      "muse_bot_challenge": {
+        "message": "Muse showed a check to confirm you are a person. Complete it in the browser, then run again."
+      },
       "muse_stream_incomplete": "incomplete_retry",
       "scope_not_supported": "fix_settings"
     },
     "netflix-export": {
-      "ambiguous_date_order": "export_file_problem",
+      "ambiguous_date_order": {
+        "message": "Every date in this export could be read as day/month or month/day, so this connector cannot tell which is right. It is not something you can fix."
+      },
       "archive_security_violation": "export_file_problem",
       "csv_parse_error": "export_file_problem",
       "import_exceeds_bounded_read_policy": "export_file_problem",
@@ -532,7 +557,7 @@
       "notion_pagination_contradiction": "incomplete_retry"
     },
     "oura": {
-      "older_pages_deferred_page_budget": "continues_later",
+      "older_pages_deferred_page_budget": "limit_repeats",
       "oura_auth_failed": "sign_in_again"
     },
     "oura-browser": {
@@ -545,7 +570,9 @@
       "oura_daily_scope_missing": "sign_in_again",
       "oura_oauth_code_missing": "sign_in_again",
       "oura_oauth_state_invalid": "sign_in_again",
-      "oura_portal_app_credentials_missing": "unexpected_data",
+      "oura_portal_app_credentials_missing": {
+        "message": "Oura API app details are missing. Finish setting up a personal API app with daily access and the required redirect address, then connect again."
+      },
       "oura_portal_email_invalid": "fix_settings",
       "oura_portal_invalid_applications": "unexpected_data",
       "oura_portal_origin": "unexpected_data",
@@ -573,10 +600,10 @@
       "pocket_auth_failed": "sign_in_again"
     },
     "shopify": {
-      "browser_handoff_readiness_probe_failed": "incomplete_retry",
+      "browser_handoff_readiness_probe_failed": "sign_in_unfinished",
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
-      "older_pages_deferred_page_budget": "continues_later",
+      "older_pages_deferred_page_budget": "limit_repeats",
       "shopify_apollo_state_unavailable": "incomplete_retry",
       "shopify_browser_operation_timeout": "incomplete_retry",
       "shopify_login_page_unreachable": "incomplete_retry",
@@ -589,7 +616,9 @@
       "stream_collection_failed": "incomplete_retry"
     },
     "signal": {
-      "backfill_check_unproven_legacy_cursor": "continues_later",
+      "backfill_check_unproven_legacy_cursor": {
+        "message": "This run could not check whether older messages are missing. The next run checks, and may ask you to run a full refresh."
+      },
       "message_date_unusable": "skipped_items",
       "no_attachments_exported": "nothing_to_import",
       "source_rows_below_watermark_unreachable": {
@@ -617,7 +646,7 @@
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
       "collection_interrupted": "incomplete_retry",
-      "optional_stream_failed": "incomplete_retry",
+      "optional_stream_failed": "not_available",
       "sign_in_required": "sign_in_again",
       "slack_browser_session_missing": "sign_in_again",
       "slack_session_lost": "sign_in_again",
@@ -688,7 +717,9 @@
     },
     "steam": {
       "steam_auth_failed": "sign_in_again",
-      "steam_optional_resource_unavailable": "not_available"
+      "steam_optional_resource_unavailable": {
+        "message": "Steam does not let this connector see your friends list because of your profile's privacy settings. To include it, make your friends list visible, then run again."
+      }
     },
     "strava": {
       "collection_interrupted": "export_file_problem",
@@ -700,7 +731,7 @@
       "strava_export_not_recognised": "export_file_problem"
     },
     "strava-browser": {
-      "browser_handoff_readiness_probe_failed": "incomplete_retry",
+      "browser_handoff_readiness_probe_failed": "sign_in_unfinished",
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
       "collection_interrupted": "incomplete_retry",
@@ -717,16 +748,16 @@
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
       "stream_collection_failed": "incomplete_retry",
-      "tiktok_api_error": "provider_busy",
+      "tiktok_api_error": "incomplete_retry",
       "tiktok_app_value_not_seen": "unexpected_data",
       "tiktok_auth_failed": "sign_in_again",
       "tiktok_bot_check": "sign_in_again",
       "tiktok_interrupted": "incomplete_retry",
-      "tiktok_list_incomplete": "incomplete_retry",
+      "tiktok_list_incomplete": "unexpected_data",
       "tiktok_parent_stream_required": "fix_settings",
       "tiktok_rate_limited": "provider_busy",
       "tiktok_request_unsigned": "unexpected_data",
-      "tiktok_run_limit_reached": "continues_later",
+      "tiktok_run_limit_reached": "limit_repeats",
       "tiktok_server_error": "provider_busy",
       "tiktok_source_unreadable": "unexpected_data"
     },
@@ -734,13 +765,13 @@
       "archive_not_found": "export_file_problem"
     },
     "uber": {
-      "trips_deferred_detail_budget": "continues_later",
-      "trips_deferred_page_budget": "continues_later"
+      "trips_deferred_detail_budget": "limit_repeats",
+      "trips_deferred_page_budget": "limit_repeats"
     },
     "usaa": {
       "credit_card_export_unverified": "incomplete_retry",
       "csv_no_data_rows": "nothing_to_import",
-      "csv_no_usable_transactions": "export_file_problem",
+      "csv_no_usable_transactions": "unexpected_data",
       "csv_partial_parse": "skipped_items",
       "export_affordance_missing": "unexpected_data",
       "export_error": "incomplete_retry",
@@ -773,7 +804,7 @@
       "transactions_schema_blocked": "incomplete_retry"
     },
     "whatsapp": {
-      "empty_export": "nothing_to_import",
+      "empty_export": "export_file_problem",
       "import_exceeds_bounded_read_policy": "export_file_problem",
       "media_exceeds_bounded_read_policy": "export_file_problem",
       "no_exports_found": "export_file_problem",
@@ -828,10 +859,12 @@
       "browser_handoff_readiness_timed_out": "sign_in_again",
       "browser_sign_in_cancelled": "sign_in_again",
       "collection_interrupted": "incomplete_retry",
-      "list_end_unconfirmed": "incomplete_retry",
+      "list_end_unconfirmed": "unexpected_data",
       "records_unreadable": "skipped_items",
-      "run_budget_reached": "continues_later",
-      "run_stopped_early": "continues_later",
+      "run_budget_reached": "limit_repeats",
+      "run_stopped_early": {
+        "message": "This part was not read because the run stopped early for another reason. Fix that reason, then run again."
+      },
       "sign_in_required": "sign_in_again",
       "source_rate_limited": "provider_busy",
       "source_unreadable": "unexpected_data",

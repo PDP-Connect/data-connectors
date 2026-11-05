@@ -241,21 +241,21 @@
 		}
 	],
 	"reason_display_messages": {
-		"browser_handoff_readiness_probe_failed": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"browser_handoff_readiness_probe_failed": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"browser_handoff_readiness_timed_out": "Character.AI needs you to sign in again or update your access key. Then run again.",
 		"browser_sign_in_cancelled": "Character.AI needs you to sign in again or update your access key. Then run again.",
-		"character_ai_api_408": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"character_ai_api_408": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"character_ai_api_429": "Character.AI is limiting requests or having trouble right now. Wait a while, then run again.",
 		"character_ai_api_5xx": "Character.AI is limiting requests or having trouble right now. Wait a while, then run again.",
 		"character_ai_auth_failed": "Character.AI needs you to sign in again or update your access key. Then run again.",
 		"character_ai_challenge": "Character.AI needs you to sign in again or update your access key. Then run again.",
-		"character_ai_interrupted": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"character_ai_interrupted": "The Character.AI sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
 		"character_ai_invalid_payload": "This part stopped because of an internal problem reading Character.AI. It is not something you can fix.",
-		"character_ai_network_error": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"character_ai_stream_incomplete": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
-		"character_ai_timeout": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"character_ai_network_error": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"character_ai_stream_incomplete": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"character_ai_timeout": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
-		"stream_collection_failed": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later."
+		"stream_collection_failed": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	},
 	"mobile": {
 		"pageshim": {

@@ -1120,13 +1120,13 @@
 	"reason_display_messages": {
 		"github_auth_failed": "GitHub needs you to sign in again or update your access key. Then run again.",
 		"github_event_missing_fields": "Some items could not be read and were skipped.",
-		"github_malformed_response": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_malformed_response": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"github_pagination_cap_exceeded": "Only part of this could be collected because of a size or count limit. The rest is not available.",
-		"github_pagination_gap": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_pagination_gap": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"github_pagination_invalid_max_pages": "This part stopped because of an internal problem reading GitHub. It is not something you can fix.",
-		"github_pagination_repeated_next": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"github_pagination_repeated_next": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"github_pinned_item_missing_identity": "Some items could not be read and were skipped.",
-		"pr_detail_fetch_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later.",
+		"pr_detail_fetch_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"pr_search_cap_truncated": "Only part of this could be collected because of a size or count limit. The rest is not available.",
 		"starred_entry_missing_repo": "Some items could not be read and were skipped."
 	}
