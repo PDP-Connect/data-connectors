@@ -424,6 +424,7 @@ function backfillCursor(messages: ReturnType<typeof makeCtx>["messages"]) {
 			scope: string;
 			pages: Array<{ next_page_token: string; stop_at_trip_id?: string }>;
 			pending_trip_ids: string[];
+			detail_failure_counts?: Record<string, number>;
 		};
 	};
 }
@@ -570,7 +571,7 @@ test("collectAllStreams: full_refresh ignores and replaces the saved position", 
 	assert.deepEqual(script.activityTokens, [undefined]);
 	assert.equal(run.emitted.length, 1);
 	assert.equal(backfillCursor(run.messages).backfill, undefined);
-	assert.deepEqual(backfillCursor(run.messages).hydrated_trip_ids, ["trip-0"]);
+	assert.deepEqual(backfillCursor(run.messages).hydrated_trip_ids, []);
 });
 
 test("collectAllStreams: page budget resumes the source cursor after collecting a new head", async () => {
@@ -668,4 +669,234 @@ test("collectAllStreams: rejected saved page cursor fails without restarting his
 		run.messages.some((message) => message.type === "STATE"),
 		false,
 	);
+});
+
+for (const failedOperation of ["GetTrip", "GetReceipt", "both"]) {
+	test(`collectAllStreams: permanent ${failedOperation} failure retires after three runs without a budget skip`, async () => {
+		let cursor: ReturnType<typeof backfillCursor> | undefined;
+		for (let attempt = 1; attempt <= 4; attempt += 1) {
+			const run = makeCtx(["trips", "receipts"]);
+			if (cursor) run.ctx.state = { trips: cursor };
+			const recovered = attempt === 1 ? ["healthy"] : ["recoverable"];
+			const tripIds =
+				failedOperation === "GetTrip" || failedOperation === "both"
+					? recovered
+					: ["bad", ...recovered];
+			const receiptIds =
+				failedOperation === "GetReceipt" || failedOperation === "both"
+					? recovered
+					: ["bad", ...recovered];
+			const script = makeScriptedFetch({
+				activitiesPages: [
+					{
+						body: activitiesBody(
+							(attempt === 1 ? ["bad", "recoverable", "healthy"] : ["bad"]).map(
+								(uuid) => ({ uuid }),
+							),
+						),
+					},
+				],
+				getTrip: tripResponses(tripIds),
+				getReceipt: Object.fromEntries(
+					receiptIds.map((id) => [
+						id,
+						{ body: getReceiptBody(RECEIPT_HTML("$10.00")) },
+					]),
+				),
+			});
+			await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+			cursor = backfillCursor(run.messages);
+			assert.equal(
+				run.messages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" &&
+						message.reason === "trips_deferred_detail_budget",
+				),
+				false,
+			);
+			if (attempt < 3) {
+				assert.equal(cursor.backfill?.detail_failure_counts?.bad, attempt);
+				assert.deepEqual(
+					cursor.backfill?.pending_trip_ids,
+					attempt === 1 ? ["bad", "recoverable"] : ["bad"],
+				);
+			} else {
+				assert.equal(cursor.backfill, undefined);
+				assert.deepEqual(cursor.hydrated_trip_ids, []);
+				assert.deepEqual(cursor.hydrated_receipt_ids, []);
+			}
+			if (attempt === 2) {
+				assert.ok(script.calls.includes("GetTrip:recoverable"));
+				assert.ok(script.calls.includes("GetReceipt:recoverable"));
+				assert.equal(run.emitted.length, 2);
+				assert.equal(
+					cursor.backfill?.detail_failure_counts?.recoverable,
+					undefined,
+				);
+			}
+			if (attempt <= 3) {
+				for (const operation of ["GetTrip", "GetReceipt"]) {
+					if (failedOperation === operation || failedOperation === "both") {
+						assert.equal(
+							script.calls.filter((call) => call === `${operation}:bad`).length,
+							1,
+						);
+					}
+				}
+				const coverage = run.messages.find(
+					(message) => message.type === "DETAIL_COVERAGE",
+				);
+				assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+				if (failedOperation !== "GetReceipt") {
+					assert.ok(coverage.required_keys.includes("bad"));
+					assert.equal(coverage.hydrated_keys.includes("bad"), false);
+				}
+				assert.equal(
+					run.emitted.filter(
+						(record) =>
+							record.stream ===
+							(failedOperation === "GetTrip" ? "trips" : "receipts"),
+					).length,
+					attempt <= 2 ? 1 : 0,
+				);
+			} else {
+				assert.deepEqual(script.calls, ["Activities"]);
+			}
+		}
+	});
+}
+
+test("collectAllStreams: completed backfill and subsequent STATE contain no hydrated IDs", async () => {
+	const ids = Array.from({ length: 201 }, (_, i) => `completed-${i}`);
+	let cursor: ReturnType<typeof backfillCursor> | undefined;
+	for (let attempt = 1; attempt <= 3; attempt += 1) {
+		const run = makeCtx(["trips", "receipts"]);
+		if (cursor) run.ctx.state = { trips: cursor };
+		const script = makeScriptedFetch({
+			activitiesPages: [
+				{
+					body: activitiesBody(
+						(attempt === 1 ? ids : ["completed-0"]).map((uuid) => ({ uuid })),
+					),
+				},
+			],
+			getTrip: tripResponses(ids),
+			getReceipt: Object.fromEntries(
+				ids.map((id) => [id, { body: getReceiptBody(RECEIPT_HTML("$10.00")) }]),
+			),
+		});
+		await collectAllStreams(run.ctx, script.fetchPath, NO_DELAY);
+		cursor = backfillCursor(run.messages);
+		if (attempt === 1) {
+			assert.equal(cursor.hydrated_trip_ids.length, 200);
+			assert.equal(cursor.hydrated_receipt_ids.length, 200);
+			assert.deepEqual(cursor.backfill?.pending_trip_ids, ["completed-200"]);
+		} else {
+			assert.equal(cursor.backfill, undefined);
+			assert.deepEqual(cursor.hydrated_trip_ids, []);
+			assert.deepEqual(cursor.hydrated_receipt_ids, []);
+			assert.equal(run.emitted.length, attempt === 2 ? 2 : 0);
+		}
+	}
+});
+
+test("collectAllStreams: a capped head burst preserves both its segment and the older page position", async () => {
+	const olderIds = Array.from({ length: 200 }, (_, i) => `older-${i}`);
+	const first = makeCtx(["trips"]);
+	const initial = makeScriptedFetch({
+		activitiesPages: olderIds.map((uuid, i) => ({
+			body: activitiesBody([{ uuid }], `older-page-${i + 1}`),
+		})),
+		getTrip: tripResponses(olderIds),
+	});
+	await collectAllStreams(first.ctx, initial.fetchPath, NO_DELAY);
+	const firstCursor = backfillCursor(first.messages);
+	assert.deepEqual(firstCursor.backfill?.pages, [
+		{ next_page_token: "older-page-200" },
+	]);
+
+	const burstIds = Array.from({ length: 200 }, (_, i) => `burst-${i}`);
+	const second = makeCtx(["trips"]);
+	second.ctx.state = { trips: firstCursor };
+	const burst = makeScriptedFetch({
+		activitiesPages: burstIds.map((uuid, i) => ({
+			body: activitiesBody([{ uuid }], `burst-page-${i + 1}`),
+		})),
+		getTrip: tripResponses(burstIds),
+	});
+	await collectAllStreams(second.ctx, burst.fetchPath, NO_DELAY);
+	const secondCursor = backfillCursor(second.messages);
+	assert.deepEqual(secondCursor.backfill?.pages, [
+		{ next_page_token: "burst-page-200", stop_at_trip_id: "older-0" },
+		{ next_page_token: "older-page-200" },
+	]);
+
+	const third = makeCtx(["trips"]);
+	third.ctx.state = { trips: secondCursor };
+	const resumed = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "burst-0" }], "unused-head") },
+			{
+				body: activitiesBody(
+					[{ uuid: "burst-tail" }, { uuid: "older-0" }],
+					"unused-boundary",
+				),
+			},
+			{ body: activitiesBody([{ uuid: "older-tail" }]) },
+		],
+		getTrip: tripResponses(["burst-tail", "older-tail"]),
+	});
+	await collectAllStreams(third.ctx, resumed.fetchPath, NO_DELAY);
+	assert.deepEqual(resumed.activityTokens, [
+		undefined,
+		"burst-page-200",
+		"older-page-200",
+	]);
+	assert.deepEqual(
+		resumed.calls.filter((call) => call.startsWith("GetTrip:")),
+		["GetTrip:burst-tail", "GetTrip:older-tail"],
+	);
+	assert.equal(backfillCursor(third.messages).backfill, undefined);
+});
+
+test("collectAllStreams: reordered resources preserve the saved page position", async () => {
+	const ids = Array.from({ length: 200 }, (_, i) => `resource-trip-${i}`);
+	const first = makeCtx(["trips"]);
+	first.ctx.requested.set("trips", {
+		name: "trips",
+		resources: ["a", "b"],
+	});
+	const initial = makeScriptedFetch({
+		activitiesPages: ids.map((uuid, i) => ({
+			body: activitiesBody([{ uuid }], `resource-page-${i + 1}`),
+		})),
+		getTrip: tripResponses(ids),
+	});
+	await collectAllStreams(first.ctx, initial.fetchPath, NO_DELAY);
+	const cursor = backfillCursor(first.messages);
+	assert.deepEqual(cursor.backfill?.pages, [
+		{ next_page_token: "resource-page-200" },
+	]);
+
+	const second = makeCtx(["trips"]);
+	second.ctx.requested.set("trips", {
+		name: "trips",
+		resources: ["b", "a"],
+	});
+	second.ctx.state = { trips: cursor };
+	const resumed = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "resource-trip-0" }], "unused-head") },
+			{ body: activitiesBody([{ uuid: "resource-tail" }]) },
+		],
+		getTrip: tripResponses(["resource-tail"]),
+	});
+	await collectAllStreams(second.ctx, resumed.fetchPath, NO_DELAY);
+	assert.equal(backfillCursor(second.messages).scope, cursor.scope);
+	assert.deepEqual(resumed.activityTokens, [undefined, "resource-page-200"]);
+	assert.deepEqual(
+		resumed.calls.filter((call) => call.startsWith("GetTrip:")),
+		["GetTrip:resource-tail"],
+	);
+	assert.equal(backfillCursor(second.messages).backfill, undefined);
 });

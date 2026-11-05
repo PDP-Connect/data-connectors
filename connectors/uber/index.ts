@@ -13,8 +13,10 @@
  *     carries only a trip UUID — see parsers.ts's module doc. `trips` does
  *     its own hydration and emits its own DETAIL_COVERAGE. STATE keeps a
  *     head marker, scoped page continuations, pending detail IDs, and the
- *     successfully hydrated IDs. The source's nextPageToken resumes history
- *     after each per-run budget; an open backfill emits a retryable skip.
+ *     successfully hydrated IDs while backfill is open. The source's
+ *     nextPageToken resumes history after each per-run budget; only actual
+ *     budget deferral emits a retryable skip. Failed details retire after
+ *     three failed runs without being marked hydrated.
  *     The head boundary assumes Activities is newest-first. The prior
  *     connector flagged live confirmation of that ordering as outstanding.
  *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
@@ -471,6 +473,9 @@ export async function collectAllStreams(
 			: undefined;
 	const hydratedTrips = new Set(previous?.hydrated_trip_ids ?? []);
 	const hydratedReceipts = new Set(previous?.hydrated_receipt_ids ?? []);
+	const detailFailureCounts = new Map(
+		Object.entries(previous?.backfill?.detail_failure_counts ?? {}),
+	);
 	const head = await fetchAllActivities(fetchPath, delay, {
 		stopAtTripId: previous?.head_trip_id,
 	});
@@ -521,7 +526,7 @@ export async function collectAllStreams(
 			...(previous?.backfill?.pending_trip_ids ?? []),
 			...discoveredIds,
 		]),
-	].filter(needsDetail);
+	].filter((id) => needsDetail(id) && (detailFailureCounts.get(id) ?? 0) < 3);
 	const tripIds = candidates.slice(0, MAX_DETAIL_FETCHES);
 	const truncated = positions.length > 0;
 
@@ -563,32 +568,48 @@ export async function collectAllStreams(
 			}
 		}
 
+		// Count one failed run per trip, even when both detail calls fail.
+		if (needsDetail(tripId)) {
+			detailFailureCounts.set(
+				tripId,
+				(detailFailureCounts.get(tripId) ?? 0) + 1,
+			);
+		} else {
+			detailFailureCounts.delete(tripId);
+		}
+
 		const isLast = index === tripIds.length - 1;
 		if (!isLast && (wantTrips || wantReceipts)) {
 			await delay(DETAIL_DELAY_MS);
 		}
 	}
 
-	// Rotate failed detail attempts behind unattempted IDs so one bad trip
-	// cannot keep all older trips behind the same per-run detail budget.
+	// Rotate failed details behind unattempted IDs, but retire them after
+	// three failed runs without claiming they hydrated. Keep exhausted counts
+	// until backfill closes so overlapping pages cannot restart their retries.
 	const pendingTripIds = [
 		...candidates.slice(MAX_DETAIL_FETCHES),
-		...tripIds.filter(needsDetail),
+		...tripIds.filter(
+			(id) => needsDetail(id) && (detailFailureCounts.get(id) ?? 0) < 3,
+		),
 	];
-	const detailTruncated = pendingTripIds.length > 0;
+	const detailTruncated = candidates.length > MAX_DETAIL_FETCHES;
+	const backfillIncomplete = truncated || pendingTripIds.length > 0;
 	const headTripId = headIds[0] ?? previous?.head_trip_id;
 	const cursor: UberCursor = {
 		version: 1,
 		scope,
 		...(headTripId ? { head_trip_id: headTripId } : {}),
-		hydrated_trip_ids: [...hydratedTrips],
-		hydrated_receipt_ids: [...hydratedReceipts],
-		...(truncated || detailTruncated
+		// These sets only guard overlap while historical work remains open.
+		hydrated_trip_ids: backfillIncomplete ? [...hydratedTrips] : [],
+		hydrated_receipt_ids: backfillIncomplete ? [...hydratedReceipts] : [],
+		...(backfillIncomplete
 			? {
 					backfill: {
 						scope,
 						pages: positions,
 						pending_trip_ids: pendingTripIds,
+						detail_failure_counts: Object.fromEntries(detailFailureCounts),
 					},
 				}
 			: {}),
