@@ -4,10 +4,10 @@
 /**
  * Goodreads collection: the order of requests, what each stream is built
  * from, and what a run claims about completeness. Parsing is in parsers.ts,
- * graphql.ts and summary.ts; the page I/O (retry, WAF handling) is in
- * fetcher.ts.
+ * graphql.ts and summary.ts; the page I/O (pacing, retry, WAF handling) is
+ * in fetcher.ts.
  *
- * Requests, one at a time, with a pause between them:
+ * Requests, one at a time, each paced by the run's HTTP governor:
  *   1. /review/list            owner id, "All (N)" count
  *   2. /user/show/<id>         profile counts            (account_profile)
  *   3. /user/edit              settings                  (account_profile)
@@ -34,13 +34,19 @@
  */
 
 import { resourceSet } from "@pdpp/connector-protocol";
-import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
-	buildDetailCoverageMessage,
-	politeDelay,
-} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+	buildCollectionRateProgress,
+	buildPacingStateFields,
+} from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
+import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { buildDetailCoverageMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
-import { type FetchOutcome, type FetchPage, fetchHtml } from "./fetcher.ts";
+import {
+	type FetchOutcome,
+	type FetchPage,
+	fetchHtml,
+	type GoodreadsHttp,
+} from "./fetcher.ts";
 import {
 	FALLBACK_TOKEN_PAGE,
 	type GoodreadsGraphql,
@@ -75,8 +81,6 @@ import type {
 	ShelfRecord,
 } from "./types.ts";
 
-export const PAGE_DELAY_MIN_MS = 1500;
-export const PAGE_DELAY_JITTER_MS = 1000;
 export const PER_PAGE = 100;
 /** A library of 20,000 books is far past any real one; the cap only stops a loop. */
 export const MAX_LISTING_PAGES = 200;
@@ -223,11 +227,6 @@ export function projectFields<T extends { id: string }>(
 	) as T;
 }
 
-const pace = (): Promise<void> =>
-	politeDelay(
-		PAGE_DELAY_MIN_MS + Math.floor(Math.random() * PAGE_DELAY_JITTER_MS),
-	);
-
 interface Listing {
 	books: PrintBookRecord[];
 	complete: boolean;
@@ -240,26 +239,43 @@ type ApiLibrary =
 	| { ok: true; graphql: GoodreadsGraphql; shelvings: GraphqlShelving[] }
 	| { ok: false; stop: Stop };
 
+/**
+ * Collect every requested stream. `http` paces and retries every request to
+ * Goodreads; its learned rate is saved with each stream's state so the next
+ * run starts from it, and reported at the end of the run.
+ */
 export async function collectGoodreads(
 	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp,
+): Promise<void> {
+	const streams = [BOOKS, SHELVES, PROFILE, SUMMARY, HIGHLIGHTS].filter(
+		(stream) => ctx.requested.has(stream),
+	);
+	if (streams.length === 0) return;
+	await collectStreams(ctx, http, streams);
+	const rate = buildCollectionRateProgress(http.governor);
+	if (rate) {
+		await ctx.emit({
+			collection_rate: rate,
+			message: `Read Goodreads at about ${rate.effective_rate_per_min} requests a minute`,
+			type: "PROGRESS",
+		});
+	}
+}
+
+async function collectStreams(
+	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp,
+	streams: readonly string[],
 ): Promise<void> {
 	const wants = (stream: string): boolean => ctx.requested.has(stream);
 	const wantsPrint = wants(BOOKS) || wants(SUMMARY);
 	const wantsApi = wants(BOOKS) || wants(SHELVES);
-	if (!(wantsPrint || wantsApi || wants(PROFILE) || wants(HIGHLIGHTS))) return;
-	const streams = [BOOKS, SHELVES, PROFILE, SUMMARY, HIGHLIGHTS].filter(wants);
-	const stopAll = async (stop: Stop, only: string[] = streams) => {
+	const stopAll = async (stop: Stop, only: readonly string[] = streams) => {
 		for (const stream of only) await stopStream(ctx, stream, stop);
 	};
-	let requests = 0;
-	const paced = async (): Promise<void> => {
-		if (requests > 0) await pace();
-		requests += 1;
-	};
-	const get = async (path: string, label: string): Promise<FetchOutcome> => {
-		await paced();
-		return fetchHtml(ctx.page, path, label);
-	};
+	const get = (path: string, label: string): Promise<FetchOutcome> =>
+		fetchHtml(ctx.page, http, path, label);
 
 	// 1. Who is signed in, and how many books the library page says it has.
 	await ctx.progress?.("Opening your Goodreads library");
@@ -296,11 +312,11 @@ export async function collectGoodreads(
 
 	// 3 to 7. The library: books, shelves and the summary.
 	if (wantsPrint || wantsApi) {
-		await collectLibrary(ctx, userId, allCount, get, paced);
+		await collectLibrary(ctx, http, userId, allCount, get);
 	}
 
 	// 8 and 9. The Kindle highlights and notes.
-	if (wants(HIGHLIGHTS)) await collectHighlights(ctx, userId, get);
+	if (wants(HIGHLIGHTS)) await collectHighlights(ctx, http, userId, get);
 }
 
 /**
@@ -309,10 +325,10 @@ export async function collectGoodreads(
  */
 async function collectLibrary(
 	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp,
 	userId: string,
 	allCount: number | null,
 	get: (path: string, label: string) => Promise<FetchOutcome>,
-	paced: () => Promise<void>,
 ): Promise<void> {
 	const wants = (stream: string): boolean => ctx.requested.has(stream);
 	let listing: Listing | null = null;
@@ -328,7 +344,7 @@ async function collectLibrary(
 	}
 	const booksReady = wants(BOOKS) && listing?.complete === true;
 	if (!(booksReady || wants(SHELVES))) return;
-	const api = await readApiLibrary(ctx, userId, listing, paced);
+	const api = await readApiLibrary(ctx, http, userId, listing);
 	if (!api.ok) {
 		for (const stream of [booksReady ? BOOKS : null, SHELVES]) {
 			if (stream !== null && wants(stream)) {
@@ -338,10 +354,10 @@ async function collectLibrary(
 		return;
 	}
 	if (booksReady && listing) {
-		await finishBooks(ctx, listing.books, api.shelvings);
+		await finishBooks(ctx, http, listing.books, api.shelvings);
 	}
 	if (wants(SHELVES)) {
-		await finishShelves(ctx, api.graphql, api.shelvings);
+		await finishShelves(ctx, http, api.graphql, api.shelvings);
 	}
 }
 
@@ -415,6 +431,7 @@ async function readAnnotatedBooks(
  */
 async function collectHighlights(
 	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp,
 	userId: string,
 	get: (path: string, label: string) => Promise<FetchOutcome>,
 ): Promise<void> {
@@ -479,7 +496,7 @@ async function collectHighlights(
 		});
 		return;
 	}
-	const emitted = await emitStream(ctx, HIGHLIGHTS, records);
+	const emitted = await emitStream(ctx, http, HIGHLIGHTS, records);
 	await ctx.progress?.(
 		`Finished reading ${records.length} Kindle highlights and notes (${emitted} new or changed)`,
 		{ count: records.length, stream: HIGHLIGHTS, total: records.length },
@@ -525,14 +542,14 @@ export function notesPageProblem(
  */
 async function readApiLibrary(
 	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp,
 	userId: string,
 	listing: Listing | null,
-	paced: () => Promise<void>,
 ): Promise<ApiLibrary> {
 	await ctx.progress?.("Reading your library's details from Goodreads");
 	const opened = await openGraphql(ctx.page, {
+		http,
 		maxPages: MAX_LISTING_PAGES,
-		pace: paced,
 		tokenPageUrl:
 			listing?.books.find((book) => book.book_url)?.book_url ??
 			FALLBACK_TOKEN_PAGE,
@@ -657,6 +674,7 @@ export function joinLibrary(
 
 async function finishBooks(
 	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp,
 	print: readonly PrintBookRecord[],
 	api: readonly GraphqlShelving[],
 ): Promise<void> {
@@ -668,7 +686,7 @@ async function finishBooks(
 		});
 		return;
 	}
-	const emitted = await emitStream(ctx, BOOKS, joined.books);
+	const emitted = await emitStream(ctx, http, BOOKS, joined.books);
 	await ctx.progress?.(
 		`Finished reading ${joined.books.length} Goodreads books (${emitted} new or changed)`,
 		{ count: joined.books.length, stream: BOOKS, total: joined.books.length },
@@ -682,6 +700,7 @@ async function finishBooks(
  */
 async function finishShelves(
 	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp,
 	graphql: GoodreadsGraphql,
 	shelvings: readonly GraphqlShelving[],
 ): Promise<void> {
@@ -727,7 +746,7 @@ async function finishShelves(
 		...shelves.value.items.map((shelf) => record(shelf, true)),
 		...tags.value.items.map((tag) => record(tag, false)),
 	];
-	await emitStream(ctx, SHELVES, records);
+	await emitStream(ctx, http, SHELVES, records);
 	await ctx.progress?.(`Read ${records.length} Goodreads shelves`, {
 		count: records.length,
 		stream: SHELVES,
@@ -839,6 +858,7 @@ function priorFingerprints(state: unknown): Record<string, string> {
  */
 async function emitStream<T extends { id: string }>(
 	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp,
 	stream: string,
 	records: readonly T[],
 ): Promise<number> {
@@ -899,7 +919,10 @@ async function emitStream<T extends { id: string }>(
 	await ctx.emit({
 		type: "STATE",
 		stream,
-		cursor: { fingerprints: { ...cursor.toState(), ...kept } },
+		cursor: {
+			fingerprints: { ...cursor.toState(), ...kept },
+			...buildPacingStateFields(http.governor, { now: http.now }),
+		},
 	});
 	return emitted;
 }

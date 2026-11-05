@@ -11,15 +11,12 @@ import {
 	makeEmitRecord,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { goodreadsPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import { RUNTIME_GENERIC_REASON_CODES } from "../../packages/polyfill-connectors/src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
 import { skipPoliteDelays } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
 import { type GoodreadsCollectContext, joinLibrary } from "./collector.ts";
-import {
-	MAX_RETRY_AFTER_MS,
-	RETRY_BASE_DELAY_MS,
-	retryWait,
-} from "./fetcher.ts";
+import { type GoodreadsHttp, governed } from "./fetcher.ts";
 import {
 	FALLBACK_TOKEN_PAGE,
 	GRAPHQL_URL,
@@ -28,8 +25,11 @@ import {
 import {
 	CONNECTOR_CONFIG,
 	collect,
+	createGoodreadsHttp,
+	GOODREADS_PACING_INITIAL_INTERVAL_MS,
 	probeGoodreadsPage,
 	probeGoodreadsSession,
+	restoredPacingInterval,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { PrintBookRecord } from "./types.ts";
@@ -206,6 +206,50 @@ interface Harness {
 	records: { data: Record<string, unknown>; stream: string }[];
 	visits: string[];
 	ctx: GoodreadsCollectContext;
+	/** The fake clock the run's governor reads and advances. */
+	clock: FakeClock;
+	/** The governor of the last run, built from `ctx.state` at its start. */
+	http?: GoodreadsHttp;
+}
+
+/** A clock that only moves when the governor waits; nothing really sleeps. */
+interface FakeClock {
+	nowMs: number;
+	/** Each wait before a request, in order. */
+	paces: number[];
+	/** Each wait before a retry, in order. */
+	retries: number[];
+}
+
+/** A fixed recent epoch, so a saved rate is fresh to the next fake run. */
+const CLOCK_START_MS = Date.UTC(2026, 10, 1);
+
+const newClock = (): FakeClock => ({
+	nowMs: CLOCK_START_MS,
+	paces: [],
+	retries: [],
+});
+
+/**
+ * Run the connector on the harness's fake clock with a governor built the
+ * way the desktop runtime builds it: from the state the run starts with.
+ */
+function run(h: Harness): Promise<void> {
+	const now = () => h.clock.nowMs;
+	h.http = createGoodreadsHttp({
+		now,
+		random: () => 0.5,
+		restoredIntervalMs: restoredPacingInterval(h.ctx.state, now),
+		retrySleep: (ms) => {
+			h.clock.retries.push(ms);
+			h.clock.nowMs += ms;
+		},
+		sleep: (ms) => {
+			h.clock.paces.push(ms);
+			h.clock.nowMs += ms;
+		},
+	});
+	return collect(h.ctx, h.http);
 }
 
 interface HarnessOptions {
@@ -230,6 +274,7 @@ function harness(
 	const calls = new Map<string, number>();
 	const visits: string[] = [];
 	const state: Harness = {
+		clock: newClock(),
 		ctx: undefined as unknown as GoodreadsCollectContext,
 		failures: [],
 		graphql,
@@ -394,7 +439,7 @@ const recordsOf = (h: Harness, stream: string) =>
 
 test("a full run reads every stream across two pages and proves the listing complete", async () => {
 	const h = harness(signedInSite(), ALL_STREAMS);
-	await collect(h.ctx);
+	await run(h);
 
 	assert.deepEqual(h.failures, []);
 	assert.deepEqual(skips(h), []);
@@ -445,7 +490,7 @@ test("a full run reads every stream across two pages and proves the listing comp
 
 test("a book joins the print list's fields with the API's, on book_id", async () => {
 	const h = harness(signedInSite(), { books: {} });
-	await collect(h.ctx);
+	await run(h);
 	const book = recordsOf(h, "books").find((b) => b.book_id === "80000001");
 	// From the print list.
 	assert.equal(book?.added_on, "2021-03-05");
@@ -476,7 +521,7 @@ test("a book joins the print list's fields with the API's, on book_id", async ()
 
 test("shelves come from the API with display names and counts from the library", async () => {
 	const h = harness(signedInSite(), { shelves: {} });
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(
 		recordsOf(h, "shelves").map((s) => [
 			s.id,
@@ -524,7 +569,7 @@ test("expanding a shelf finds its books the way the server filters them", async 
 	assert.deepEqual(fkType, ["string"]);
 
 	const h = harness(signedInSite(), { books: {}, shelves: {} });
-	await collect(h.ctx);
+	await run(h);
 	const bookRecords = recordsOf(h, "books");
 	for (const shelf of recordsOf(h, "shelves")) {
 		const expanded = bookRecords.filter((b) => b.exclusive_shelf === shelf.id);
@@ -543,7 +588,7 @@ test("expanding a shelf finds its books the way the server filters them", async 
 
 test("what the account does not say about itself never reaches a record", async () => {
 	const h = harness(signedInSite(), ALL_STREAMS);
-	await collect(h.ctx);
+	await run(h);
 	const accountRecords = JSON.stringify([
 		...recordsOf(h, "account_profile"),
 		...recordsOf(h, "usage_summary"),
@@ -562,7 +607,7 @@ test("what the account does not say about itself never reaches a record", async 
 
 test("signed out: every requested stream stops with sign_in_required and nothing else is fetched", async () => {
 	const h = harness(signedOutSite, ALL_STREAMS);
-	await collect(h.ctx);
+	await run(h);
 
 	assert.deepEqual(h.records, []);
 	assert.equal(h.paths.length, 1);
@@ -614,7 +659,7 @@ test("an empty library is a legitimate empty run: shelves and a zero summary, no
 			}),
 		},
 	);
-	await collect(h.ctx);
+	await run(h);
 
 	assert.deepEqual(h.failures, []);
 	assert.deepEqual(skips(h), []);
@@ -636,7 +681,7 @@ test("a first page with no rows while the library has books is drift, not an emp
 		signedInSite({ print: () => ({ body: fixture("library-no-rows.html") }) }),
 		{ books: {}, usage_summary: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 
 	assert.equal(recordsOf(h, "books").length, 0);
 	assert.equal(recordsOf(h, "usage_summary").length, 0);
@@ -659,7 +704,7 @@ test("a page this connector does not know stops the listing as unreadable", asyn
 		}),
 		{ books: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(
 		skips(h).map((skip) => skip.reason),
 		["source_unreadable"],
@@ -684,7 +729,7 @@ test("an AWS WAF challenge loads the page once, then the retry succeeds", async 
 			cleared = true;
 		},
 	);
-	await collect(h.ctx);
+	await run(h);
 
 	assert.deepEqual(h.failures, []);
 	assert.equal(recordsOf(h, "books").length, 5);
@@ -714,7 +759,7 @@ test("an empty 200 is treated like a challenge, not like an empty library", asyn
 			cleared = true;
 		},
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(recordsOf(h, "books").length, 5);
 	assert.deepEqual(h.failures, []);
 });
@@ -725,7 +770,7 @@ test("a persistent WAF challenge fails with a clear reason and withholds the sum
 		shelves: {},
 		usage_summary: {},
 	});
-	await collect(h.ctx);
+	await run(h);
 
 	assert.equal(recordsOf(h, "books").length, 0);
 	assert.equal(recordsOf(h, "usage_summary").length, 0);
@@ -753,7 +798,7 @@ test("a 503 is retried and then succeeds; the run does not fail", async () => {
 		}),
 		{ account_profile: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.failures, []);
 	assert.deepEqual(recordsOf(h, "account_profile")[0]?.sources, {
 		profile: "read",
@@ -772,7 +817,7 @@ test("a rate limit that does not lift stops the listing as rate limited and save
 		}),
 		{ books: {}, usage_summary: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 
 	// Books are saved only after the whole list is joined with the API.
 	assert.equal(recordsOf(h, "books").length, 0);
@@ -782,24 +827,6 @@ test("a rate limit that does not lift stops the listing as rate limited and save
 	assert.equal(byStream.get("books"), "rate_limited");
 	assert.equal(byStream.get("usage_summary"), "listing_incomplete");
 	assert.equal(h.paths.filter((p) => p.includes("&page=2&")).length, 3);
-});
-
-test("a Retry-After sets the least wait, and one longer than a run sleeps stops it", () => {
-	const limited = (retryAfter: string | null) =>
-		({ kind: "response", retryAfter, status: 429 }) as const;
-	const unavailable = (retryAfter: string | null) =>
-		({ kind: "response", retryAfter, status: 503 }) as const;
-	// The server's wait wins over a shorter backoff, and the backoff over a shorter ask.
-	assert.equal(retryWait(1, limited("20")), 20_000);
-	assert.equal(retryWait(2, unavailable("1")), RETRY_BASE_DELAY_MS * 2);
-	assert.equal(retryWait(1, limited(null)), RETRY_BASE_DELAY_MS);
-	assert.equal(retryWait(1, limited("not a number")), RETRY_BASE_DELAY_MS);
-	// A wait past the ceiling, or a third failure, ends the retries.
-	const tooLong = String(MAX_RETRY_AFTER_MS / 1000 + 1);
-	assert.equal(retryWait(1, limited(tooLong)), "rate_limited");
-	assert.equal(retryWait(1, unavailable(tooLong)), "give_up");
-	assert.equal(retryWait(3, limited(null)), "rate_limited");
-	assert.equal(retryWait(3, { kind: "network_error" }), "give_up");
 });
 
 test("a rate limit asking for an hour stops the listing at once", async () => {
@@ -816,12 +843,167 @@ test("a rate limit asking for an hour stops the listing at once", async () => {
 		}),
 		{ books: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(
 		skips(h).find((s) => s.stream === "books")?.reason,
 		"rate_limited",
 	);
 	assert.equal(h.paths.filter((p) => p.includes("&page=2&")).length, 1);
+});
+
+test("pacing: the governor waits before every request, starting no faster than the old pause", async () => {
+	const h = harness(signedInSite(), ALL_STREAMS);
+	// A second pacing layer would sleep on the real clock: catch any pause of
+	// a second or more (the in-page fetch's 45 s abort timer is not one).
+	const realPauses: number[] = [];
+	const saved = globalThis.setTimeout;
+	globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+		if (ms !== undefined && ms >= 1000 && ms < 45_000) realPauses.push(ms);
+		return saved(fn, 0);
+	}) as typeof setTimeout;
+	try {
+		await run(h);
+	} finally {
+		globalThis.setTimeout = saved;
+	}
+	assert.deepEqual(h.failures, []);
+	assert.deepEqual(realPauses, []);
+
+	// One wait per request (page fetches, page loads and API calls), all of
+	// them the governor's: no second pacing layer adds its own.
+	const requests = h.paths.length + h.graphql.length + h.visits.length;
+	assert.equal(h.clock.paces.length, requests);
+	assert.deepEqual(h.clock.retries, []);
+	// A cold run starts at the old fixed pause's mean and only speeds up.
+	assert.equal(h.clock.paces[0], GOODREADS_PACING_INITIAL_INTERVAL_MS);
+	for (const [i, ms] of h.clock.paces.entries()) {
+		assert.ok(ms <= (h.clock.paces[i - 1] ?? ms), `wait ${i} is no longer`);
+	}
+	// The run reports the rate it ended at, faster than it started.
+	const rate = h.messages.find(
+		(m) => m.type === "PROGRESS" && "collection_rate" in m,
+	) as { collection_rate: { current_interval_ms: number } } | undefined;
+	assert.ok(rate);
+	assert.equal(
+		rate.collection_rate.current_interval_ms,
+		h.http?.governor.snapshot()?.intervalMs,
+	);
+	assert.ok(
+		rate.collection_rate.current_interval_ms <
+			GOODREADS_PACING_INITIAL_INTERVAL_MS,
+	);
+});
+
+test("pacing: a 429 with Retry-After waits as asked, then slows the pace", async () => {
+	let pacesAt429 = -1;
+	const h: Harness = harness(
+		signedInSite({
+			print: (path, call) => {
+				if (path.includes("&page=2&") && call === 0) {
+					pacesAt429 = h.clock.paces.length;
+					return {
+						body: "slow down",
+						headers: { "retry-after": "20" },
+						status: 429,
+					};
+				}
+				return {
+					body:
+						PRINT_PAGES[new URL(path, ORIGIN).searchParams.get("page") ?? ""] ??
+						fixture("library-no-rows.html"),
+				};
+			},
+		}),
+		{ books: {} },
+	);
+	await run(h);
+
+	assert.deepEqual(h.failures, []);
+	assert.equal(recordsOf(h, "books").length, 5);
+	// The retry waited the 20 s Goodreads asked for, not a backoff of its own.
+	assert.deepEqual(h.clock.retries, [20_000]);
+	// The wait before the 429 was the pace. The retry then waits on top of
+	// the 20 s, and the request after it waits longer than before the 429.
+	const before = h.clock.paces[pacesAt429 - 1] ?? 0;
+	const after = h.clock.paces[pacesAt429 + 1] ?? 0;
+	assert.ok(after > before, `pace slowed from ${before} ms to ${after} ms`);
+	assert.equal(h.http?.governor.snapshot()?.lastBackoff?.reason, "throttle");
+});
+
+test("pacing: success speeds up to the profile's ceiling and never past it", async () => {
+	let nowMs = CLOCK_START_MS;
+	const paces: number[] = [];
+	const http = createGoodreadsHttp({
+		now: () => nowMs,
+		sleep: (ms) => {
+			paces.push(ms);
+			nowMs += ms;
+		},
+	});
+	for (let i = 0; i < 300; i += 1) {
+		const answer = await governed(http, async () => ({
+			retryAfter: null,
+			status: 200,
+		}));
+		assert.equal(answer.ok, true);
+	}
+	const ceilingMs = goodreadsPacingProfile().pacingMinIntervalMs;
+	assert.equal(paces[0], GOODREADS_PACING_INITIAL_INTERVAL_MS);
+	assert.equal(Math.min(...paces), ceilingMs);
+	assert.equal(paces.at(-1), ceilingMs);
+	assert.equal(http.governor.snapshot()?.intervalMs, ceilingMs);
+	for (const [i, ms] of paces.entries()) {
+		assert.ok(ms <= (paces[i - 1] ?? ms), `wait ${i} is no longer`);
+	}
+});
+
+test("pacing: an answer asking for too long a wait stops that request, not the next", async () => {
+	const http = createGoodreadsHttp({ sleep: () => undefined });
+	let sent = 0;
+	// A 503 asking for an hour: no retry, the request fails at once.
+	const refused = await governed(http, async () => {
+		sent += 1;
+		return { retryAfter: "3600", status: 503 };
+	});
+	assert.deepEqual(refused, { ok: false, rateLimited: false, status: 503 });
+	assert.equal(sent, 1);
+	// The next request's network failure is still retried.
+	let attempts = 0;
+	const next = await governed(http, async () => {
+		attempts += 1;
+		if (attempts === 1) throw new Error("connection reset");
+		return { retryAfter: null, status: 200 };
+	});
+	assert.equal(next.ok, true);
+	assert.equal(attempts, 2);
+});
+
+test("pacing: a WAF challenge is not a throttle; the reload and retry are paced", async () => {
+	let cleared = false;
+	const h = harness(
+		signedInSite({
+			print: (path) => {
+				if (path.includes("&page=1&") && !cleared) return WAF_CHALLENGE;
+				return {
+					body:
+						PRINT_PAGES[new URL(path, ORIGIN).searchParams.get("page") ?? ""] ??
+						fixture("library-no-rows.html"),
+				};
+			},
+		}),
+		{ books: {} },
+		() => {
+			cleared = true;
+		},
+	);
+	await run(h);
+
+	assert.deepEqual(h.failures, []);
+	assert.equal(recordsOf(h, "books").length, 5);
+	assert.equal(h.http?.governor.snapshot()?.lastBackoff, null);
+	assert.deepEqual(h.clock.retries, []);
+	const requests = h.paths.length + h.graphql.length + h.visits.length;
+	assert.equal(h.clock.paces.length, requests);
 });
 
 test("the book API's rate limit stops books as rate limited", async () => {
@@ -836,7 +1018,7 @@ test("the book API's rate limit stops books as rate limited", async () => {
 					: fixtures(op, variables, call),
 		},
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(recordsOf(h, "books").length, 0);
 	assert.equal(
 		skips(h).find((s) => s.stream === "books")?.reason,
@@ -856,7 +1038,7 @@ test("a listing that ends short of the count is not complete and the summary is 
 		}),
 		{ books: {}, usage_summary: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 
 	assert.equal(recordsOf(h, "books").length, 0);
 	assert.equal(recordsOf(h, "usage_summary").length, 0);
@@ -869,7 +1051,7 @@ test("a listing that ends short of the count is not complete and the summary is 
 
 test("a usage_summary-only request reads the whole listing but emits no books", async () => {
 	const h = harness(signedInSite(), { usage_summary: {} });
-	await collect(h.ctx);
+	await run(h);
 
 	assert.deepEqual(h.failures, []);
 	assert.equal(recordsOf(h, "books").length, 0);
@@ -888,7 +1070,7 @@ test("a usage_summary-only request reads the whole listing but emits no books", 
 
 test("an account_profile-only request does not read the library", async () => {
 	const h = harness(signedInSite(), { account_profile: {} });
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(recordsOf(h, "account_profile").length, 1);
 	assert.equal(
 		h.paths.some((p) => p.includes("print=true")),
@@ -899,7 +1081,7 @@ test("an account_profile-only request does not read the library", async () => {
 
 test("a books-only request does not emit shelves, profile or summary", async () => {
 	const h = harness(signedInSite(), { books: {} });
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual([...new Set(h.records.map((r) => r.stream))], ["books"]);
 });
 
@@ -907,7 +1089,7 @@ test("consented fields: a dropped review and notes never reach the record", asyn
 	const h = harness(signedInSite(), {
 		books: { fields: ["title", "rating", "added_on", "book_id"] },
 	});
-	await collect(h.ctx);
+	await run(h);
 	const first = recordsOf(h, "books")[0];
 	// added_at, the consent time field, stays so a time range can apply.
 	assert.deepEqual(Object.keys(first ?? {}).sort(), [
@@ -930,7 +1112,7 @@ test("account_profile: a source Goodreads answered but this cannot read leaves a
 		signedInSite({ settings: () => ({ body: "<html>redesigned</html>" }) }),
 		{ account_profile: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 
 	const record = recordsOf(h, "account_profile")[0];
 	assert.deepEqual(record?.sources, { profile: "read", settings: "failed" });
@@ -950,7 +1132,7 @@ test("account_profile: a source that did not answer this time stops the stream, 
 		signedOutSite,
 	]) {
 		const h = harness(signedInSite({ settings }), { account_profile: {} });
-		await collect(h.ctx);
+		await run(h);
 		assert.equal(recordsOf(h, "account_profile").length, 0);
 		assert.equal(h.failures.length, 1);
 		assert.notEqual(skips(h)[0]?.reason, "source_unreadable");
@@ -965,7 +1147,7 @@ test("account_profile: both sources failing emits no record and stops the stream
 		}),
 		{ account_profile: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(recordsOf(h, "account_profile").length, 0);
 	assert.deepEqual(
 		skips(h).map((skip) => skip.reason),
@@ -1034,7 +1216,7 @@ test("shelves are saved only when the API's lists are shown to be whole", async 
 			{ books: {}, shelves: {} },
 			{ api: fixtureApi(edit) },
 		);
-		await collect(h.ctx);
+		await run(h);
 		assert.equal(recordsOf(h, "shelves").length, 0, label);
 		assert.deepEqual(
 			skips(h).map((skip) => [skip.stream, skip.reason]),
@@ -1049,7 +1231,7 @@ test("shelves are saved only when the API's lists are shown to be whole", async 
 
 test("a shelves-only run reads the API without the print list", async () => {
 	const h = harness(signedInSite(), { shelves: {} });
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(recordsOf(h, "shelves").length, 6);
 	assert.deepEqual(h.paths, ["/review/list"]);
 	assert.deepEqual(h.visits, [FALLBACK_TOKEN_PAGE]);
@@ -1064,7 +1246,10 @@ test("a shelves-only run reads the API without the print list", async () => {
 test("a host without the stream-failure hook fails the run instead of passing it", async () => {
 	const h = harness(signedOutSite, { books: {} });
 	const { reportStreamFailure: _hook, ...ctx } = h.ctx;
-	await assert.rejects(collect(ctx), /goodreads_stream_failure_unreported/);
+	await assert.rejects(
+		collect(ctx, createGoodreadsHttp({ sleep: () => undefined })),
+		/goodreads_stream_failure_unreported/,
+	);
 });
 
 test("consented fields: the keys each stream's schema requires are always kept", async () => {
@@ -1074,7 +1259,7 @@ test("consented fields: the keys each stream's schema requires are always kept",
 		shelves: { fields: ["book_count"] },
 		usage_summary: { fields: ["books_total"] },
 	});
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.failures, []);
 	assert.deepEqual(Object.keys(recordsOf(h, "books")[0] ?? {}).sort(), [
 		"added_at",
@@ -1115,7 +1300,7 @@ test("a row this connector cannot read stops the listing as unreadable, not as a
 		}),
 		{ books: {}, usage_summary: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 	const byStream = new Map(skips(h).map((skip) => [skip.stream, skip]));
 	assert.equal(byStream.get("books")?.reason, "source_unreadable");
 	assert.match(byStream.get("books")?.message ?? "", /1 rows/);
@@ -1126,7 +1311,7 @@ test("a row this connector cannot read stops the listing as unreadable, not as a
 
 test("every count a run reports for books and shelves comes with its total", async () => {
 	const h = harness(signedInSite(), { books: {}, shelves: {} });
-	await collect(h.ctx);
+	await run(h);
 	const counted = h.messages
 		.filter((m) => m.type === "PROGRESS")
 		.map((m) => m as { count?: number; stream?: string; total?: number })
@@ -1147,7 +1332,7 @@ test("every count a run reports for books and shelves comes with its total", asy
 
 test("a usage_summary-only run reports its progress under usage_summary", async () => {
 	const h = harness(signedInSite(), { usage_summary: {} });
-	await collect(h.ctx);
+	await run(h);
 	const tagged = h.messages
 		.filter((m) => m.type === "PROGRESS")
 		.map((m) => (m as { stream?: string }).stream)
@@ -1192,7 +1377,7 @@ test("a date range on books keeps the books added inside it, by the instant adde
 			.map((book) => book.added_at as string)
 			.sort();
 	const all = runtimeFiltered(harness(signedInSite(), { books: {} }));
-	await collect(all.ctx);
+	await run(all);
 	const instants = addedAt(all);
 	assert.equal(instants.length, 5);
 
@@ -1201,7 +1386,7 @@ test("a date range on books keeps the books added inside it, by the instant adde
 			books: { time_range: { since: "2026-01-01T00:00:00Z" } },
 		}),
 	);
-	await collect(since.ctx);
+	await run(since);
 	assert.deepEqual(
 		addedAt(since),
 		instants.filter((at) => at >= "2026-01-01"),
@@ -1215,7 +1400,7 @@ test("a date range on books keeps the books added inside it, by the instant adde
 			books: { time_range: { until: instants[2] as string } },
 		}),
 	);
-	await collect(until.ctx);
+	await run(until);
 	assert.deepEqual(
 		addedAt(until),
 		instants.filter((at) => at < (instants[2] as string)),
@@ -1254,7 +1439,7 @@ test("an API entry without a date added stops books as unreadable", async () => 
 			}),
 		},
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(recordsOf(h, "books").length, 0);
 	assert.deepEqual(
 		skips(h).map((skip) => [skip.stream, skip.reason]),
@@ -1267,7 +1452,7 @@ test("an API entry without a date added stops books as unreadable", async () => 
 
 test("a resource selection keeps only the named books and shelves", async () => {
 	const all = runtimeFiltered(harness(signedInSite(), { books: {} }));
-	await collect(all.ctx);
+	await run(all);
 	const wanted = recordsOf(all, "books")[1]?.id as string;
 	const h = runtimeFiltered(
 		harness(signedInSite(), {
@@ -1275,7 +1460,7 @@ test("a resource selection keeps only the named books and shelves", async () => 
 			shelves: { resources: ["read"] },
 		}),
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(
 		recordsOf(h, "books").map((book) => book.id),
 		[wanted],
@@ -1290,7 +1475,7 @@ test("a resource selection keeps only the named books and shelves", async () => 
 
 test("a run that asks for none of this connector's streams does nothing", async () => {
 	const h = harness(signedInSite(), {});
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.paths, []);
 	assert.deepEqual(h.messages, []);
 });
@@ -1316,7 +1501,7 @@ test("every SKIP_RESULT reason the run can emit has display copy, in the manifes
 		[signedInSite(), shortTags],
 	] as [Site, Api?][]) {
 		const h = harness(site, ALL_STREAMS, api ? { api } : {});
-		await collect(h.ctx);
+		await run(h);
 		for (const skip of skips(h)) reasons.add(skip.reason);
 	}
 	assert.deepEqual([...reasons].sort(), [
@@ -1374,7 +1559,7 @@ test("the print list and the API disagreeing on a book saves no books, and says 
 			{ books: {}, shelves: {}, usage_summary: {} },
 			{ api: fixtureApi({ GoodreadsShelvings: editShelvings(edit) }) },
 		);
-		await collect(h.ctx);
+		await run(h);
 		assert.equal(recordsOf(h, "books").length, 0, label);
 		const books = skips(h).find((skip) => skip.stream === "books");
 		assert.equal(books?.reason, "collection_interrupted", label);
@@ -1399,7 +1584,7 @@ test("an API listing shorter than its own total stops books and shelves as inter
 			}),
 		},
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.records, []);
 	assert.deepEqual(
 		skips(h).map((skip) => [skip.stream, skip.reason]),
@@ -1427,7 +1612,7 @@ test("the API's pages are followed by their tokens; a repeated token stops the r
 		return { body: JSON.stringify(body) };
 	};
 	const h = harness(signedInSite(), { books: {} }, { api: twoPages });
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.failures, []);
 	assert.equal(recordsOf(h, "books").length, 5);
 	assert.deepEqual(h.graphql, ["GoodreadsShelvings", "GoodreadsShelvings"]);
@@ -1441,7 +1626,7 @@ test("the API's pages are followed by their tokens; a repeated token stops the r
 		return { body: JSON.stringify(answer) };
 	};
 	const stuck = harness(signedInSite(), { books: {} }, { api: looping });
-	await collect(stuck.ctx);
+	await run(stuck);
 	assert.equal(stuck.graphql.length, 2);
 	assert.equal(skips(stuck)[0]?.reason, "source_unreadable");
 });
@@ -1465,7 +1650,7 @@ test("a library that changes between API pages is read again, not trusted", asyn
 		return { body: JSON.stringify(body) };
 	};
 	const h = harness(signedInSite(), { books: {} }, { api: shifting });
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(recordsOf(h, "books").length, 0);
 	assert.deepEqual(coverageOf(h), {});
 	assert.equal(skips(h)[0]?.reason, "collection_interrupted");
@@ -1483,7 +1668,7 @@ test("a refused token is read again once from a fresh page; refused twice stops 
 				}
 			: fixtureApi()(op, variables, call);
 	const h = harness(signedInSite(), { books: {} }, { api: refusedOnce });
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.failures, []);
 	assert.equal(recordsOf(h, "books").length, 5);
 	assert.deepEqual(h.visits, [FIRST_BOOK_PAGE, FIRST_BOOK_PAGE]);
@@ -1493,7 +1678,7 @@ test("a refused token is read again once from a fresh page; refused twice stops 
 		{ books: {} },
 		{ api: () => ({ body: "{}", status: 401 }) },
 	);
-	await collect(refused.ctx);
+	await run(refused);
 	assert.equal(refused.graphql.length, 2);
 	assert.equal(skips(refused)[0]?.reason, "source_unreadable");
 	assert.match(skips(refused)[0]?.message ?? "", /refused the token/);
@@ -1513,7 +1698,7 @@ test("a token close to its end is read again before the next request", async () 
 			bookPage: () => soon,
 		},
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.failures, []);
 	// One page load to open the API, then one before each of the 3 requests.
 	assert.equal(h.visits.length, 4);
@@ -1548,7 +1733,7 @@ test("a book page without a usable token stops books and shelves with a reason",
 			{ books: {}, shelves: {}, usage_summary: {} },
 			{ bookPage },
 		);
-		await collect(h.ctx);
+		await run(h);
 		assert.deepEqual(
 			skips(h).map((skip) => [skip.stream, skip.reason]),
 			[
@@ -1562,7 +1747,7 @@ test("a book page without a usable token stops books and shelves with a reason",
 	}
 	// A missing token is looked for again after the WAF settle, then on a second load.
 	const h = harness(signedInSite(), { shelves: {} }, { bookPage: () => null });
-	await collect(h.ctx);
+	await run(h);
 	assert.equal(h.visits.length, 2);
 });
 
@@ -1572,7 +1757,7 @@ test("API errors: a 503 is retried; a GraphQL error or a strange answer stops th
 			? { body: "busy", status: 503 }
 			: fixtureApi()(op, variables, call);
 	const h = harness(signedInSite(), { books: {} }, { api: flaky });
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.failures, []);
 	assert.equal(h.graphql.length, 3);
 
@@ -1595,7 +1780,7 @@ test("API errors: a 503 is retried; a GraphQL error or a strange answer stops th
 			{ books: {} },
 			{ api: () => answer },
 		);
-		await collect(failed.ctx);
+		await run(failed);
 		assert.equal(recordsOf(failed, "books").length, 0, label);
 		assert.deepEqual(
 			skips(failed).map((skip) => skip.reason),
@@ -1618,14 +1803,22 @@ function desktop(
 	return filtered;
 }
 
+/**
+ * Each stream's saved cursor, without the governor's rate: the rate depends
+ * on how the clock ran, and these tests are about records.
+ */
 const stateOf = (h: Harness): Record<string, unknown> =>
 	Object.fromEntries(
 		h.messages
 			.filter((m) => m.type === "STATE")
-			.map((m) => [
-				(m as { stream: string }).stream,
-				(m as { cursor: unknown }).cursor,
-			]),
+			.map((m) => {
+				const {
+					pacing_interval_ms: _i,
+					pacing_recorded_at_ms: _at,
+					...rest
+				} = (m as { cursor: Record<string, unknown> }).cursor;
+				return [(m as { stream: string }).stream, rest];
+			}),
 	);
 const deletions = (h: Harness, stream: string) =>
 	h.messages
@@ -1642,7 +1835,7 @@ test("incremental: a second run emits only what changed, and deletions for what 
 		harness(signedInSite(), { books: {}, shelves: {} }),
 		"incremental",
 	);
-	await collect(first.ctx);
+	await run(first);
 	assert.equal(recordsOf(first, "books").length, 5);
 	assert.equal(recordsOf(first, "shelves").length, 6);
 	const saved = stateOf(first);
@@ -1653,7 +1846,7 @@ test("incremental: a second run emits only what changed, and deletions for what 
 		"incremental",
 		saved,
 	);
-	await collect(same.ctx);
+	await run(same);
 	assert.deepEqual(same.records, []);
 	assert.deepEqual(same.failures, []);
 	assert.deepEqual(stateOf(same), saved);
@@ -1692,7 +1885,7 @@ test("incremental: a second run emits only what changed, and deletions for what 
 		"incremental",
 		saved,
 	);
-	await collect(changed.ctx);
+	await run(changed);
 	assert.deepEqual(changed.failures, []);
 	assert.deepEqual(
 		recordsOf(changed, "books").map((book) => [book.book_id, book.rating]),
@@ -1723,7 +1916,7 @@ test("incremental: a book its schema rejects is retried, not covered or saved", 
 		harness(signedInSite(), { books: {} }, { api: rejecting }),
 		"incremental",
 	);
-	await collect(first.ctx);
+	await run(first);
 	const kept = recordsOf(first, "books").map((book) => book.book_id);
 	assert.equal(kept.length, 4);
 	assert.ok(!kept.includes("80000001"));
@@ -1745,7 +1938,7 @@ test("incremental: a book its schema rejects is retried, not covered or saved", 
 		"incremental",
 		saved,
 	);
-	await collect(fixed.ctx);
+	await run(fixed);
 	assert.deepEqual(
 		recordsOf(fixed, "books").map((book) => book.book_id),
 		["80000001"],
@@ -1761,7 +1954,7 @@ test("incremental: a book its schema rejects is retried, not covered or saved", 
 		"incremental",
 		whole,
 	);
-	await collect(broken.ctx);
+	await run(broken);
 	assert.deepEqual(deletions(broken, "books"), []);
 	assert.deepEqual(coverageOf(broken).books, [5, 4]);
 	assert.deepEqual(stateOf(broken), whole);
@@ -1803,7 +1996,7 @@ test("join: two list rows for one book cannot hide a book only the API lists", (
 test("incremental: a book or shelf gone from Goodreads is emitted as a deletion", async () => {
 	const streams = { books: {}, shelves: {} };
 	const first = desktop(harness(signedInSite(), streams), "incremental");
-	await collect(first.ctx);
+	await run(first);
 	const saved = stateOf(first);
 	const plus = (stream: string, id: string) => ({
 		fingerprints: {
@@ -1816,7 +2009,7 @@ test("incremental: a book or shelf gone from Goodreads is emitted as a deletion"
 		books: plus("books", "90199999"),
 		shelves: plus("shelves", "old-shelf"),
 	});
-	await collect(next.ctx);
+	await run(next);
 	assert.deepEqual(next.records, []);
 	assert.deepEqual(deletions(next, "books"), ["90199999"]);
 	assert.deepEqual(deletions(next, "shelves"), ["old-shelf"]);
@@ -1825,14 +2018,14 @@ test("incremental: a book or shelf gone from Goodreads is emitted as a deletion"
 
 test("a full refresh emits every record, still marks deletions, and saves state", async () => {
 	const first = desktop(harness(signedInSite(), { books: {} }), "incremental");
-	await collect(first.ctx);
+	await run(first);
 	const saved = stateOf(first);
 	const refresh = desktop(
 		harness(signedInSite(), { books: {} }),
 		"full_refresh",
 		{ books: { fingerprints: { "90199999": "0000" } } },
 	);
-	await collect(refresh.ctx);
+	await run(refresh);
 	assert.equal(recordsOf(refresh, "books").length, 5);
 	assert.deepEqual(deletions(refresh, "books"), ["90199999"]);
 	assert.deepEqual(stateOf(refresh), saved);
@@ -1840,7 +2033,7 @@ test("a full refresh emits every record, still marks deletions, and saves state"
 
 test("a narrowed run, or a host without collection modes, emits every record and saves no state", async () => {
 	const first = desktop(harness(signedInSite(), { books: {} }), "incremental");
-	await collect(first.ctx);
+	await run(first);
 	const saved = stateOf(first);
 	for (const [label, scope] of [
 		["time range", { time_range: { since: "2000-01-01T00:00:00Z" } }],
@@ -1851,7 +2044,7 @@ test("a narrowed run, or a host without collection modes, emits every record and
 			"incremental",
 			saved,
 		);
-		await collect(h.ctx);
+		await run(h);
 		assert.ok(recordsOf(h, "books").length > 0, label);
 		assert.deepEqual(stateOf(h), {}, label);
 		assert.deepEqual(deletions(h, "books"), [], label);
@@ -1859,7 +2052,7 @@ test("a narrowed run, or a host without collection modes, emits every record and
 	// PageShim: no collectionMode, and its host stores each result whole.
 	const shim = harness(signedInSite(), { books: {} });
 	shim.ctx = { ...shim.ctx, state: saved };
-	await collect(shim.ctx);
+	await run(shim);
 	assert.equal(recordsOf(shim, "books").length, 5);
 	assert.deepEqual(stateOf(shim), {});
 });
@@ -1919,19 +2112,19 @@ test("coverage: an un-narrowed run proves every stream it saved; a narrowed or f
 		usage_summary: [1, 1],
 	};
 	const shim = harness(signedInSite(), ALL_STREAMS);
-	await collect(shim.ctx);
+	await run(shim);
 	assert.deepEqual(coverageOf(shim), whole);
 
 	// A quiet incremental run emits no records, yet still covers the stream.
 	const first = desktop(harness(signedInSite(), ALL_STREAMS), "incremental");
-	await collect(first.ctx);
+	await run(first);
 	assert.deepEqual(coverageOf(first), whole);
 	const quiet = desktop(
 		harness(signedInSite(), ALL_STREAMS),
 		"incremental",
 		stateOf(first),
 	);
-	await collect(quiet.ctx);
+	await run(quiet);
 	assert.deepEqual(recordsOf(quiet, "books"), []);
 	assert.deepEqual(coverageOf(quiet), whole);
 
@@ -1943,11 +2136,11 @@ test("coverage: an un-narrowed run proves every stream it saved; a narrowed or f
 		}),
 		"incremental",
 	);
-	await collect(narrowed.ctx);
+	await run(narrowed);
 	assert.deepEqual(coverageOf(narrowed), {});
 
 	const signedOut = harness(signedOutSite, ALL_STREAMS);
-	await collect(signedOut.ctx);
+	await run(signedOut);
 	assert.deepEqual(coverageOf(signedOut), {});
 });
 
@@ -2096,7 +2289,7 @@ const notesList =
 
 test("highlights: every item of every annotated book, keyed so a later note keeps the id", async () => {
 	const h = harness(signedInSite(), { highlights: {} });
-	await collect(h.ctx);
+	await run(h);
 
 	assert.deepEqual(h.failures, []);
 	// A highlights-only run reads the notes, not the library.
@@ -2161,7 +2354,7 @@ test("highlights: the notes list is followed page by page with its start token",
 		}),
 	});
 	const h = harness(site, { highlights: {} });
-	await collect(h.ctx);
+	await run(h);
 
 	assert.deepEqual(h.failures, []);
 	assert.deepEqual(h.paths.slice(1, 3), [
@@ -2199,7 +2392,7 @@ test("highlights: a notes list that does not finish or repeats itself saves noth
 			books: {},
 			highlights: {},
 		});
-		await collect(h.ctx);
+		await run(h);
 		assert.deepEqual(recordsOf(h, "highlights"), [], label);
 		assert.deepEqual(
 			skips(h).map((skip) => [skip.stream, skip.reason]),
@@ -2248,7 +2441,7 @@ test("highlights: a notes page that shows fewer items than it counts, or another
 			}),
 			{ highlights: {} },
 		);
-		await collect(h.ctx);
+		await run(h);
 		assert.deepEqual(h.records, [], label);
 		assert.deepEqual(
 			skips(h).map((skip) => [skip.stream, skip.reason]),
@@ -2266,7 +2459,7 @@ test("highlights incremental: a note added keeps the record's id; a book gone is
 		harness(signedInSite(), { highlights: {} }),
 		"incremental",
 	);
-	await collect(first.ctx);
+	await run(first);
 	assert.equal(recordsOf(first, "highlights").length, 5);
 	const saved = stateOf(first);
 
@@ -2300,7 +2493,7 @@ test("highlights incremental: a note added keeps the record's id; a book gone is
 		"incremental",
 		saved,
 	);
-	await collect(second.ctx);
+	await run(second);
 	assert.deepEqual(second.failures, []);
 	assert.deepEqual(
 		recordsOf(second, "highlights").map((r) => [r.id, r.note_id, r.note_text]),
@@ -2331,10 +2524,61 @@ test("highlights: when no highlight has text, Goodreads moved it and nothing is 
 		}),
 		{ highlights: {} },
 	);
-	await collect(h.ctx);
+	await run(h);
 	assert.deepEqual(h.records, []);
 	assert.deepEqual(
 		skips(h).map((skip) => [skip.stream, skip.reason]),
 		[["highlights", "source_unreadable"]],
 	);
+});
+
+/** Each stream's saved cursor as emitted, the governor's rate included. */
+const rawStateOf = (h: Harness): Record<string, unknown> =>
+	Object.fromEntries(
+		h.messages
+			.filter((m) => m.type === "STATE")
+			.map((m) => [
+				(m as { stream: string }).stream,
+				(m as { cursor: unknown }).cursor,
+			]),
+	);
+
+test("pacing: the next run starts from the rate this run learned, unless it is stale", async () => {
+	const first = desktop(
+		harness(signedInSite(), { books: {}, highlights: {}, shelves: {} }),
+		"incremental",
+	);
+	await run(first);
+	const saved = rawStateOf(first);
+	const learned = first.http?.governor.snapshot()?.intervalMs;
+	assert.ok(
+		learned !== undefined && learned < GOODREADS_PACING_INITIAL_INTERVAL_MS,
+	);
+	// Every stream saves the rate; the newest save is the run's last one.
+	for (const stream of ["books", "highlights", "shelves"]) {
+		const cursor = saved[stream] as Record<string, unknown>;
+		assert.equal(typeof cursor.pacing_interval_ms, "number", stream);
+	}
+	assert.equal(
+		(saved.highlights as Record<string, unknown>).pacing_interval_ms,
+		learned,
+	);
+
+	const warm = desktop(
+		harness(signedInSite(), { books: {}, highlights: {}, shelves: {} }),
+		"incremental",
+		saved,
+	);
+	warm.clock.nowMs = first.clock.nowMs + 60_000;
+	await run(warm);
+	assert.equal(warm.clock.paces[0], learned);
+
+	const stale = desktop(
+		harness(signedInSite(), { books: {}, highlights: {}, shelves: {} }),
+		"incremental",
+		saved,
+	);
+	stale.clock.nowMs = first.clock.nowMs + 7 * 60 * 60 * 1000;
+	await run(stale);
+	assert.equal(stale.clock.paces[0], GOODREADS_PACING_INITIAL_INTERVAL_MS);
 });

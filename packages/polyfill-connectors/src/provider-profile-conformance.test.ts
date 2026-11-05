@@ -57,6 +57,7 @@ const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 // hand-maintained; this closes the "added but unlisted" hole).
 const GOVERNOR_USING_CONNECTORS = [
 	"github",
+	"goodreads",
 	"google_calendar",
 	"google_contacts",
 	"groupme",

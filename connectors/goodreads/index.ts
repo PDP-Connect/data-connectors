@@ -30,8 +30,8 @@
  * for retries and AWS WAF handling.
  *
  * Robots: goodreads.com disallows /review/list for crawlers. This reads the
- * owner's own list in the owner's own session, one request at a time with a
- * pause of about two seconds.
+ * owner's own list in the owner's own session, one request at a time, paced
+ * by the shared HTTP governor (see createGoodreadsHttp).
  *
  * Reachability probe: permanently exempt. Every page needs the owner's
  * session (the browser-automation-behind-a-login-wall case in
@@ -45,12 +45,25 @@ import {
 	type ManualActionReason,
 	manualBrowserLogin,
 } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import {
+	createConnectorHttpGovernor,
+	PACING_STATE_RECORDED_AT_KEY,
+	readPersistedPacingInterval,
+} from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { goodreadsPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import { collectGoodreads, type GoodreadsCollectContext } from "./collector.ts";
+import {
+	type GoodreadsHttp,
+	GoodreadsRetryBudget,
+	MAX_ATTEMPTS,
+	MAX_RETRY_AFTER_MS,
+	RETRY_BASE_DELAY_MS,
+} from "./fetcher.ts";
 import { ORIGIN } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import {
@@ -291,9 +304,82 @@ export async function ensureGoodreadsSession(
 	}
 }
 
-/** The PageShim and desktop entry: `ctx` needs only what GoodreadsCollectContext names. */
-export function collect(ctx: GoodreadsCollectContext): Promise<void> {
-	return collectGoodreads(ctx);
+/**
+ * The wait (ms) before each request on a cold start: the mean of the fixed
+ * 1.5 to 2.5 s pause this connector used before it had a governor. The
+ * governor speeds up from here toward the profile's ceiling while Goodreads
+ * answers, and backs off when it does not.
+ */
+export const GOODREADS_PACING_INITIAL_INTERVAL_MS = 2000;
+
+export interface GoodreadsHttpOptions {
+	now?: () => number;
+	random?: () => number;
+	/** The interval the last run learned; absent or null starts cold. */
+	restoredIntervalMs?: number | null;
+	/** The wait before a retry; defaults to `sleep`. */
+	retrySleep?: (ms: number) => void | Promise<void>;
+	/** The wait before each request. */
+	sleep?: (ms: number) => void | Promise<void>;
+}
+
+/** The run's one governor, which every request to Goodreads goes through. */
+export function createGoodreadsHttp(
+	options: GoodreadsHttpOptions = {},
+): GoodreadsHttp {
+	const retryBudget = new GoodreadsRetryBudget();
+	const now = options.now ?? Date.now;
+	const governor = createConnectorHttpGovernor({
+		baseDelayMs: RETRY_BASE_DELAY_MS,
+		maxAttempts: MAX_ATTEMPTS,
+		maxRetryAfterMs: MAX_RETRY_AFTER_MS,
+		name: "goodreads",
+		pacingInitialIntervalMs: GOODREADS_PACING_INITIAL_INTERVAL_MS,
+		profile: goodreadsPacingProfile(),
+		restoredIntervalMs: options.restoredIntervalMs ?? null,
+		now,
+		retryBudget,
+		...(options.random === undefined ? {} : { random: options.random }),
+		...(options.retrySleep === undefined
+			? {}
+			: { retrySleep: options.retrySleep }),
+		...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+	});
+	return { governor, now, retryBudget };
+}
+
+/**
+ * The newest rate a previous run saved with a stream's state (books, shelves
+ * and highlights each save it), or null when none is fresh enough to reuse.
+ */
+export function restoredPacingInterval(
+	state: Record<string, unknown> | undefined,
+	now: () => number = Date.now,
+): number | null {
+	let newest: { at: number; intervalMs: number } | null = null;
+	for (const slice of Object.values(state ?? {})) {
+		if (typeof slice !== "object" || slice === null) continue;
+		const cursor = slice as Record<string, unknown>;
+		const intervalMs = readPersistedPacingInterval(cursor, { now });
+		const at = cursor[PACING_STATE_RECORDED_AT_KEY];
+		if (intervalMs === null || typeof at !== "number") continue;
+		if (newest === null || at > newest.at) newest = { at, intervalMs };
+	}
+	return newest?.intervalMs ?? null;
+}
+
+/**
+ * The PageShim and desktop entry: `ctx` needs only what
+ * GoodreadsCollectContext names. The governor starts from the last run's
+ * learned rate; tests pass their own on a fake clock.
+ */
+export function collect(
+	ctx: GoodreadsCollectContext,
+	http: GoodreadsHttp = createGoodreadsHttp({
+		restoredIntervalMs: restoredPacingInterval(ctx.state),
+	}),
+): Promise<void> {
+	return collectGoodreads(ctx, http);
 }
 
 /**

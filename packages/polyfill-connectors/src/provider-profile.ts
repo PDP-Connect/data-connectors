@@ -278,3 +278,17 @@ export function groupmePacingProfile(): ProviderPacingProfile {
 export function jellyfinPacingProfile(): ProviderPacingProfile {
 	return { pacingMinIntervalMs: 100 };
 }
+
+/**
+ * Goodreads — 1000ms (60 req/min). Goodreads publishes no rate limit and has
+ * no public API; the connector reads the owner's own pages and the GraphQL API
+ * those pages call, in the owner's signed-in browser, behind AWS WAF. The
+ * ceiling matches GroupMe's for an undocumented provider. The connector starts
+ * each cold run at 2000ms (its earlier fixed pause of 1.5 to 2.5 s), so the
+ * governor only speeds up from there while Goodreads keeps answering, and backs
+ * off on 429/5xx and Retry-After.
+ * Doc: none published (checked 2026-11-05).
+ */
+export function goodreadsPacingProfile(): ProviderPacingProfile {
+	return { pacingMinIntervalMs: 1000 };
+}

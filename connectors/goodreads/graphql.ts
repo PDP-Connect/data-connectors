@@ -24,8 +24,9 @@ import { politeDelay } from "../../packages/polyfill-connectors/src/connector-ru
 import {
 	type FetchOutcome,
 	type FetchPage,
+	type GoodreadsHttp,
+	governed,
 	navigate,
-	retryWait,
 	WAF_SETTLE_MS,
 } from "./fetcher.ts";
 import { ORIGIN } from "./parsers.ts";
@@ -366,8 +367,8 @@ export interface GoodreadsGraphql {
 }
 
 export interface GraphqlOptions {
-	/** Waits between requests; shared with the page reads so the pace is one. */
-	pace: () => Promise<void>;
+	/** The run's governor, shared with the page reads so the pace is one. */
+	http: GoodreadsHttp;
 	now?: () => number;
 	/** A signed-in book page to read the token from. */
 	tokenPageUrl: string;
@@ -392,8 +393,7 @@ export async function openGraphql(
 			attempt <= 2 && reading.kind === "missing";
 			attempt++
 		) {
-			await options.pace();
-			if (!(await navigate(page, options.tokenPageUrl))) {
+			if (!(await navigate(page, options.http, options.tokenPageUrl))) {
 				return {
 					ok: false,
 					reason: "collection_interrupted",
@@ -432,7 +432,6 @@ export async function openGraphql(
 		label: string,
 		body: string,
 	): Promise<GraphqlOutcome<Record<string, unknown>>> => {
-		let failures = 0;
 		let refreshed = false;
 		for (;;) {
 			if (now() > session.expiresAtMs - TOKEN_MARGIN_MS) {
@@ -440,35 +439,30 @@ export async function openGraphql(
 				if (!next.ok) return next;
 				session = next.value;
 			}
-			await options.pace();
-			const raw = await rawPost(page, session.token, body);
-			if (
-				raw.kind === "network_error" ||
-				raw.status === 429 ||
-				raw.status >= 500
-			) {
-				failures += 1;
-				const wait = retryWait(failures, raw);
-				if (wait === "rate_limited") {
+			const { token } = session;
+			const answer = await governed(options.http, async () => {
+				const raw = await rawPost(page, token, body);
+				if (raw.kind === "network_error") throw new Error(raw.message);
+				return raw;
+			});
+			if (!answer.ok) {
+				if (answer.rateLimited) {
 					return {
 						ok: false,
 						reason: "rate_limited",
 						message: `Goodreads' book API asked this run to slow down (HTTP 429) while reading ${label}, and did not lift the limit in time.`,
 					};
 				}
-				if (wait === "give_up") {
-					return {
-						ok: false,
-						reason: "collection_interrupted",
-						message:
-							raw.kind === "network_error"
-								? `Goodreads' book API could not be reached while reading ${label}.`
-								: `Goodreads' book API kept answering with an error (${raw.status}) while reading ${label}.`,
-					};
-				}
-				await politeDelay(wait);
-				continue;
+				return {
+					ok: false,
+					reason: "collection_interrupted",
+					message:
+						answer.status === null
+							? `Goodreads' book API could not be reached while reading ${label}.`
+							: `Goodreads' book API kept answering with an error (${answer.status}) while reading ${label}.`,
+				};
 			}
+			const raw = answer.value;
 			let parsed: unknown = null;
 			try {
 				parsed = JSON.parse(raw.body);
