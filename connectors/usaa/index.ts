@@ -4278,6 +4278,32 @@ function clickUsaaExportButton(selector: string): boolean {
 }
 
 /**
+ * Candidates for the Mobile Export dialog. USAA pages also carry OneTrust's
+ * "Privacy Preference Center", a hidden `[role="dialog"]`, so the page
+ * functions below take this selector and keep only a candidate that is
+ * rendered (has client rects). Each repeats that small lookup: `evaluate`
+ * sends a function's source text, so they cannot share a helper.
+ */
+const USAA_EXPORT_DIALOG_SELECTOR =
+	'[role="dialog"]:not([aria-hidden="true"]):not([hidden]):not([id*="onetrust" i]):not([aria-label="Privacy Preference Center"]):not(#onetrust-consent-sdk [role="dialog"])';
+/** Polling bound for the Export dialog's date fields after "date range" is chosen. */
+const USAA_DATE_FIELDS_WAIT_MS = 3000;
+
+/**
+ * Whether the Export dialog is "ready" (its `selectionType` control has
+ * rendered), only "open", or "none". Runs in the page.
+ */
+function usaaExportDialogState(selector: string): "ready" | "open" | "none" {
+	const dialog = Array.from(
+		document.querySelectorAll<HTMLElement>(selector),
+	).find((el) => el.getClientRects().length > 0);
+	if (!dialog) return "none";
+	return dialog.querySelector('select[name="selectionType"]')
+		? "ready"
+		: "open";
+}
+
+/**
  * Choose "date range" in the Export dialog and type both dates, through the
  * native value setter so that a framework-controlled input sees the change.
  * Runs in the page. Returns the step that failed, or null.
@@ -4285,8 +4311,12 @@ function clickUsaaExportButton(selector: string): boolean {
 async function fillUsaaExportDialog(arg: {
 	from: string;
 	to: string;
+	selector: string;
+	fieldsWaitMs: number;
 }): Promise<string | null> {
-	const dialog = document.querySelector('[role="dialog"]');
+	const dialog = Array.from(
+		document.querySelectorAll<HTMLElement>(arg.selector),
+	).find((el) => el.getClientRects().length > 0);
 	if (!dialog) return "dialog_not_open";
 	const fire = (el: Element): void => {
 		for (const type of ["input", "change", "blur"]) {
@@ -4303,12 +4333,23 @@ async function fillUsaaExportDialog(arg: {
 		)?.set;
 		setSelect?.call(select, "date-range");
 		fire(select);
-		await new Promise((resolve) => setTimeout(resolve, 300));
 	}
-	const from = dialog.querySelector<HTMLInputElement>(
-		'input[name="fromDate"], input[name="startDate"]',
-	);
-	const to = dialog.querySelector<HTMLInputElement>('input[name="endDate"]');
+	const fields = (): [HTMLInputElement | null, HTMLInputElement | null] => [
+		dialog.querySelector<HTMLInputElement>(
+			'input[name="fromDate"], input[name="startDate"]',
+		),
+		dialog.querySelector<HTMLInputElement>('input[name="endDate"]'),
+	];
+	// The date fields render or enable after the change event; poll, bounded.
+	const deadline = Date.now() + arg.fieldsWaitMs;
+	let [from, to] = fields();
+	while (
+		!(from && to && !from.disabled && !to.disabled) &&
+		Date.now() < deadline
+	) {
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		[from, to] = fields();
+	}
 	if (!(from && to) || from.disabled || to.disabled)
 		return "date_fields_missing";
 	const setInput = Object.getOwnPropertyDescriptor(
@@ -4329,18 +4370,21 @@ async function fillUsaaExportDialog(arg: {
 }
 
 /** Submit the Export dialog. Runs in the page. */
-function submitUsaaExportDialog(): boolean {
-	const submit = document.querySelector<HTMLElement>(
-		'[role="dialog"] button[type="submit"]',
-	);
+function submitUsaaExportDialog(selector: string): boolean {
+	const dialog = Array.from(
+		document.querySelectorAll<HTMLElement>(selector),
+	).find((el) => el.getClientRects().length > 0);
+	const submit = dialog?.querySelector<HTMLElement>('button[type="submit"]');
 	if (!submit) return false;
 	submit.click();
 	return true;
 }
 
 /** The Export dialog's error or no-data text, if any. Runs in the page. */
-function readUsaaExportDialogMessage(): string {
-	const dialog = document.querySelector('[role="dialog"]');
+function readUsaaExportDialogMessage(selector: string): string {
+	const dialog = Array.from(
+		document.querySelectorAll<HTMLElement>(selector),
+	).find((el) => el.getClientRects().length > 0);
 	if (!dialog) return "";
 	const error = dialog.querySelector('[class*="errorMessage"]');
 	const errorText = (error?.textContent ?? "").trim();
@@ -4433,22 +4477,36 @@ export function inPageCsvExport(): UsaaCsvExport {
 			) {
 				return fail("no_export_affordance", "export_button_not_found");
 			}
-			const opened = await page
+			// Wait for the Export dialog's own controls, not for any dialog: the
+			// dialog renders before its selectionType control.
+			await page
 				.waitForFunction(
-					() => document.querySelector('[role="dialog"]') !== null,
-					undefined,
+					(selector: string) => {
+						const dialog = Array.from(
+							document.querySelectorAll<HTMLElement>(selector),
+						).find((el) => el.getClientRects().length > 0);
+						return (
+							dialog?.querySelector('select[name="selectionType"]') != null
+						);
+					},
+					USAA_EXPORT_DIALOG_SELECTOR,
 					{ timeout: EXPORT_CLICK_TIMEOUT_MS, polling: 250 },
 				)
-				.then(
-					() => true,
-					() => false,
-				);
-			if (!opened) {
+				.catch((): undefined => undefined);
+			const dialogState = await page.evaluate(
+				usaaExportDialogState,
+				USAA_EXPORT_DIALOG_SELECTOR,
+			);
+			if (dialogState === "none") {
 				return fail("export_dialog_unexpected_shape", "dialog_not_open");
 			}
+			// "open" without selectionType: fill anyway, which reports the
+			// missing fields if the dates cannot be set either.
 			const fillError = await page.evaluate(fillUsaaExportDialog, {
 				from: mmddyyyy(options.sinceDate),
 				to: mmddyyyy(options.untilDate),
+				selector: USAA_EXPORT_DIALOG_SELECTOR,
+				fieldsWaitMs: USAA_DATE_FIELDS_WAIT_MS,
 			});
 			if (fillError) {
 				return fail(
@@ -4458,7 +4516,12 @@ export function inPageCsvExport(): UsaaCsvExport {
 					fillError,
 				);
 			}
-			if (!(await page.evaluate(submitUsaaExportDialog, undefined))) {
+			if (
+				!(await page.evaluate(
+					submitUsaaExportDialog,
+					USAA_EXPORT_DIALOG_SELECTOR,
+				))
+			) {
 				return fail("export_dialog_unexpected_shape", "submit_button_missing");
 			}
 			const deadline = Date.now() + MOBILE_EXPORT_WAIT_MS;
@@ -4482,7 +4545,7 @@ export function inPageCsvExport(): UsaaCsvExport {
 				}
 				const message = await page.evaluate(
 					readUsaaExportDialogMessage,
-					undefined,
+					USAA_EXPORT_DIALOG_SELECTOR,
 				);
 				if (message) {
 					return isNoDataExportMessage(message)

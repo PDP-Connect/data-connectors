@@ -4711,7 +4711,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/usaa/index.ts",
-			line: 4466,
+			line: 4350,
+			column: 3,
+			category: "bounded_retry_polling",
+			note: "fillUsaaExportDialog(): in-page poll until the Export dialog's date fields render and enable, bounded by fieldsWaitMs",
+		},
+		{
+			path: "connectors/usaa/index.ts",
+			line: 4529,
 			column: 20,
 			category: "bounded_retry_polling",
 			note: "inPageCsvExport().drive: polls the page for the export's download intent or dialog message until a deadline",

@@ -82,6 +82,9 @@ const table = (rows) =>
 		.map((cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`)
 		.join("")}</tbody></table>`;
 
+/** How long the Export dialog stays empty before its controls render. */
+const EXPORT_DIALOG_RENDER_DELAY_MS = 1500;
+
 const dashboardHtml = () => `
 <nav><a href="/my/checking">View</a></nav>
 <ul class="accounts">${ACCOUNTS.map(
@@ -89,8 +92,10 @@ const dashboardHtml = () => `
 ).join("")}</ul>`;
 
 /**
- * The account page and its Export dialog. The date inputs stay disabled
- * until "date-range" is chosen. Submit filters the rows by date and clicks a
+ * The account page and its Export dialog. The page also carries OneTrust's
+ * hidden "Privacy Preference Center" dialog ahead of it, as usaa.com does.
+ * The Export dialog opens empty and renders its controls a moment later, as
+ * on a device. The date inputs stay disabled until "date-range" is chosen. Submit filters the rows by date and clicks a
  * `data:text/csv` link, or shows USAA's no-transactions message.
  */
 const accountHtml = (account) => {
@@ -100,6 +105,7 @@ const accountHtml = (account) => {
 				.join("")}</dl>`
 		: "";
 	return `
+<div id="onetrust-consent-sdk"><div id="onetrust-pc-sdk" role="dialog" aria-label="Privacy Preference Center" style="display:none"><button type="submit">Confirm my choices</button></div></div>
 <div class="${account.barClass}"><button type="button" class="${account.exportClass}">Export</button></div>
 ${billing}
 <table aria-label="transactions"><tbody><tr><td>Recent activity</td></tr></tbody></table>
@@ -109,16 +115,21 @@ const ACCOUNT_ID = ${JSON.stringify(account.id)};
 const toIso = (us) => { const [m, d, y] = us.split("/"); return y + "-" + m + "-" + d; };
 const csvCell = (v) => /[",]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
 document.querySelector("button.export, button.as_credit__export").addEventListener("click", () => {
-  if (document.querySelector('[role="dialog"]')) return;
+  if (document.querySelector(".export-dialog")) return;
   const dialog = document.createElement("div");
+  dialog.className = "export-dialog";
   dialog.setAttribute("role", "dialog");
+  dialog.textContent = "Loading";
+  document.body.append(dialog);
+  setTimeout(() => renderExportDialog(dialog), ${EXPORT_DIALOG_RENDER_DELAY_MS});
+});
+function renderExportDialog(dialog) {
   dialog.innerHTML =
     '<form>' +
     '<select name="selectionType"><option value="current">Current statement</option><option value="date-range">Date range</option></select>' +
     '<input name="fromDate" disabled><input name="endDate" disabled>' +
     '<p class="export_errorMessage"></p>' +
     '<button type="submit">Export</button></form>';
-  document.body.append(dialog);
   const select = dialog.querySelector("select");
   const from = dialog.querySelector('input[name="fromDate"]');
   const to = dialog.querySelector('input[name="endDate"]');
@@ -149,7 +160,7 @@ document.querySelector("button.export, button.as_credit__export").addEventListen
     link.click();
     link.remove();
   });
-});
+}
 function toUs(iso) { const [y, m, d] = iso.split("-"); return m + "/" + d + "/" + y; }
 </script>`;
 };
