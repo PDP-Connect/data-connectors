@@ -70,10 +70,13 @@ left off". A non-resumable one restarts from zero every time the user switches a
 `page.evaluate` + `fetch` runs in the page, carries its cookies and its TLS
 fingerprint, and works on every runtime.
 
-Reading **response bodies** off the app's own traffic (`page.captureNetwork` +
-`page.getCapturedResponse`) is desktop-only in practice: iOS WKWebView has no API
-for it and Android can only intercept partially. Use capture as a **fallback**, never
-as the primary data path, or declare the connector desktop-only (rule 6).
+When a request cannot be made from the page (its body carries tokens only the
+site's own scripts mint), read the app's own traffic with
+`createPageExchangeCapture` (`packages/polyfill-connectors/src/page-exchange-capture.ts`).
+It wraps the page's `fetch` and `XMLHttpRequest` and works on Desktop and
+Mobile. It sees first-load traffic only where the host runs init scripts
+(`page_init_script`); elsewhere it starts when the document has loaded, and
+says so. Use it as a **fallback**, never as the primary data path.
 
 ### 4. Keep `page.evaluate` payloads self-contained
 
@@ -154,7 +157,7 @@ interactions. Prefer data over DOM wherever the site exposes it.
 | `showBrowser` / `promptUser` | yes | yes (always headed) |
 | `httpFetch` (native HTTP with session cookies) | yes | yes |
 | `requestInput` | yes | **no** (deliberate) |
-| `captureNetwork` response bodies | yes | **iOS no, Android partial** |
+| page's own traffic (`createPageExchangeCapture`) | yes | yes; first-load requests only with `page_init_script` |
 | `captureDownload`, `extractZipEntries` | yes | **not yet** |
 | cross-origin `page.frame_*` | yes | **no** |
 | true headless | yes | n/a (hidden instead) |

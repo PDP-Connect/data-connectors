@@ -36,12 +36,16 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - name: connector gates a-m
-            args: '--test-name-pattern="^[a-m].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
+          # Split by gate time, not alphabet: with chase and usaa the two
+          # old shards reached about 650 s and 890 s of the 900 s deadline.
+          - name: connector gates a-f
+            args: '--test-name-pattern="^[a-f].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
+          - name: connector gates g-s
+            args: '--test-name-pattern="^[g-s].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
           - name: connector gates other
-            args: '--test-name-pattern="^[^a-m].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
+            args: '--test-name-pattern="^[^a-s].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
           - name: regressions
-            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/harness-timing.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/timing-bounds.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs
+            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/harness-timing.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/exchange-capture.test.mjs scripts/pageshim/timing-bounds.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -64,6 +64,15 @@ import {
 	type FingerprintCursor,
 	openFingerprintCursor,
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import {
+	armDownloadCapture,
+	type DownloadIntent,
+	decodeDataUrl,
+	disarmDownloadCapture,
+	fetchSameOriginFile,
+	formIntentUrl,
+	waitForDownloadIntent,
+} from "../../packages/polyfill-connectors/src/in-page-download.ts";
 import { readPlaywrightDownloadBufferDetailed } from "../../packages/polyfill-connectors/src/playwright-download.ts";
 import { statementFingerprintExcludeKeys } from "../../packages/polyfill-connectors/src/statement-content-fingerprint.ts";
 import {
@@ -124,6 +133,8 @@ import type {
 	ParseMeta,
 	StatementRecord,
 	TransactionsPriorState,
+	UsaaExportDialogCheck,
+	UsaaExportDialogObservation,
 } from "./types.ts";
 
 // Explicit, literal-per-branch mapping from the statement-PDF download
@@ -276,6 +287,24 @@ export interface EmitDeps {
 	 * id; without this a downloaded statement leaves its gap pending forever
 	 * (see `recoverServedStatementGaps`). */
 	servedStatementGaps?: ReadonlyMap<string, string>;
+	/** Mobile (PageShim) only: the CSV export runs in the page and the CSV
+	 *  stays in memory, because that host has no file store. Desktop leaves
+	 *  this unset and uses `driveExport` and a temp file. */
+	csvExport?: UsaaCsvExport;
+	/** Mobile (PageShim) only: emit the statements index without PDFs. That
+	 *  host has no file store and cannot read PDF text. */
+	skipStatementPdfs?: boolean;
+}
+
+/** Where the transactions CSV comes from and how its text is read back. */
+export interface UsaaCsvExport {
+	drive: (
+		page: Page,
+		accountUrl: string,
+		options: DriveExportOptions,
+	) => Promise<DriveExportResult>;
+	read: (path: string) => Promise<string>;
+	discard: (path: string) => Promise<void>;
 }
 
 /** Aggregate shape from the PDF hydration pass. Exposed so the emit-
@@ -612,6 +641,7 @@ export async function emitExportFailure(
 	deps: EmitDeps,
 	a: DashboardAccount,
 	lastDiag: DiagnosticInfo | null,
+	position?: { ordinal: number; total: number },
 ): Promise<void> {
 	const isCreditCard = CREDIT_CARD_TYPE_RE.test(a.account_type);
 	const outcome = classifyExportLadderOutcome(lastDiag);
@@ -652,6 +682,10 @@ export async function emitExportFailure(
 		for (const [key, value] of Object.entries(baseDiagnostics)) {
 			durableDiagnostics[key] = value;
 		}
+	}
+	if (position) {
+		durableDiagnostics.account_ordinal = position.ordinal;
+		durableDiagnostics.account_total = position.total;
 	}
 	await deps.emit({
 		type: "SKIP_RESULT",
@@ -707,6 +741,47 @@ function sanitizeDiagnosticInfo(diag: DiagnosticInfo): Record<string, unknown> {
 			source: diag.download.source ?? null,
 		};
 	}
+	if (diag.export_dialog) {
+		sanitized.export_dialog = sanitizeExportDialogObservation(
+			diag.export_dialog,
+		);
+	}
+	return sanitized;
+}
+
+/** Copy only the closed fields: `export_dialog` reaches the SKIP_RESULT. */
+function sanitizeExportDialogObservation(
+	observation: UsaaExportDialogObservation,
+): UsaaExportDialogObservation {
+	const shape = (value: string | undefined): string | undefined =>
+		value === undefined
+			? undefined
+			: value
+					.replace(/[0-9]/g, "9")
+					.replace(/[^9/.\- ]/g, "a")
+					.slice(0, 16);
+	const sanitized: UsaaExportDialogObservation = {
+		check: observation.check,
+		dialog_state: observation.dialog_state,
+		dialog_wait_ms: observation.dialog_wait_ms,
+		role_dialogs_visible: observation.role_dialogs_visible,
+		export_dialog_candidates: observation.export_dialog_candidates,
+	};
+	for (const key of [
+		"selection_type",
+		"from_field",
+		"to_field",
+		"date_inputs_in_document",
+		"fields_wait_ms",
+	] as const) {
+		if (observation[key] !== undefined) {
+			Object.assign(sanitized, { [key]: observation[key] });
+		}
+	}
+	const fromShape = shape(observation.from_value_shape);
+	const toShape = shape(observation.to_value_shape);
+	if (fromShape !== undefined) sanitized.from_value_shape = fromShape;
+	if (toShape !== undefined) sanitized.to_value_shape = toShape;
 	return sanitized;
 }
 
@@ -765,6 +840,9 @@ function formatDiagnosticInfo(diag: DiagnosticInfo): string {
 	const download = summarizeDownloadDiagnostics(diag);
 	if (download) {
 		parts.push(download);
+	}
+	if (diag.export_dialog) {
+		parts.push(`check=${diag.export_dialog.check}`);
 	}
 	return parts.join("; ");
 }
@@ -1702,7 +1780,7 @@ class CsvArtifactError extends Error {
 	}
 }
 
-type DriveExportResult =
+export type DriveExportResult =
 	| { kind: "artifact"; path: string }
 	| { kind: "empty" }
 	| { kind: "failed" };
@@ -2295,7 +2373,7 @@ export async function runSingleLadderAttempt({
 		onDiagnostics(info);
 	};
 	try {
-		const exportResult = await driveExport(
+		const exportResult = await (deps.csvExport?.drive ?? driveExport)(
 			page,
 			`https://www.usaa.com${a.account_url}`,
 			{
@@ -2496,7 +2574,9 @@ export async function emitCsvTransactions(
 	accountTotal: number,
 	fingerprintCursor?: FingerprintCursor,
 ): Promise<CsvTransactionEmitResult> {
-	const text = await readFile(csvPath, "utf8");
+	const text = deps.csvExport
+		? await deps.csvExport.read(csvPath)
+		: await readFile(csvPath, "utf8");
 	const { rows, malformed: malformedQuotes } = parseCsvWithIntegrity(text);
 	const malformed = malformedQuotes || !hasCsvTransactionHeader(rows[0]);
 	const txnAccountId = a.account_id_raw || a.last_four || "unknown";
@@ -2576,15 +2656,19 @@ export async function emitCsvTransactions(
 			latest = t.date;
 		}
 	}
-	await unlink(csvPath).catch((): undefined => undefined);
-	const dir = csvPath.replace(TEMP_DIR_PREFIX_RE, "");
-	await readdir(dir)
-		.then((f): void => {
-			if (!f.length) {
-				rmSync(dir, { recursive: true, force: true });
-			}
-		})
-		.catch((): undefined => undefined);
+	if (deps.csvExport) {
+		await deps.csvExport.discard(csvPath);
+	} else {
+		await unlink(csvPath).catch((): undefined => undefined);
+		const dir = csvPath.replace(TEMP_DIR_PREFIX_RE, "");
+		await readdir(dir)
+			.then((f): void => {
+				if (!f.length) {
+					rmSync(dir, { recursive: true, force: true });
+				}
+			})
+			.catch((): undefined => undefined);
+	}
 	return {
 		dataRows,
 		latest,
@@ -3011,7 +3095,10 @@ export async function processAccountTransactions(
 				outcome: { accountId, kind: "no_activity" },
 			};
 		}
-		await emitExportFailure(deps, a, lastDiag);
+		await emitExportFailure(deps, a, lastDiag, {
+			ordinal: accountOrdinal,
+			total: accountTotal,
+		});
 		const errorClass =
 			lastDiag && isFatalDiagPhase(lastDiag)
 				? "source_structure_changed"
@@ -3461,7 +3548,19 @@ export async function runStatementsStream(
 			stream: "statements",
 			message: `Found ${indexRows.length} statement index row(s)`,
 		});
-		const summary = await hydratePdfsForIndex(deps, indexRows, context);
+		const summary: HydrationSummary = deps.skipStatementPdfs
+			? { attempts: 0, results: new Map(), successes: 0 }
+			: await hydratePdfsForIndex(deps, indexRows, context);
+		if (deps.skipStatementPdfs && requested.has("statements")) {
+			await deps.emit({
+				type: "SKIP_RESULT",
+				stream: "statements",
+				reason: "statement_pdfs_partial_on_mobile",
+				message:
+					"The Mobile app saved the statement list without the PDF files. Run USAA on Desktop to save statement PDFs.",
+				diagnostics: { listed_statements: indexRows.length },
+			});
+		}
 
 		if (requested.has("statements")) {
 			await emitStatementRecords(
@@ -4120,6 +4219,554 @@ async function maybeRunCreditCardBillingStreams(
 
 // ─── Connector entry point ────────────────────────────────────────────────
 
+// ─── Mobile (PageShim) ────────────────────────────────────────────────────
+//
+// The Mobile app runs this connector inside its own browser. Its page facade
+// gives `goto`, `content`, `evaluate` and `waitForFunction` only
+// (scripts/pageshim/runtime.ts), there is no file store, and the owner signs
+// in by hand, so there is no automated re-login. The Mobile collect runs the
+// same streams as Desktop with three differences:
+//   - `mobilePage` adds the two other members the shared stream code reads,
+//     `url()` and `waitForSelector()`, on top of the facade;
+//   - the transactions export runs in the page: the connector opens USAA's
+//     own Export dialog, fills the date range and submits it, and keeps the
+//     CSV the page builds (USAA hands it to the browser as a `data:` link)
+//     in memory;
+//   - statement PDFs are not downloaded; the statements index still is.
+
+const USAA_DASHBOARD_URL = "https://www.usaa.com/my/usaa";
+const MOBILE_SESSION_PROBE_MS = 3000;
+const MOBILE_EXPORT_WAIT_MS = 45_000;
+const MOBILE_EXPORT_POLL_MS = 500;
+const MOBILE_CSV_KEY_PREFIX = "pageshim-csv:";
+
+/** The members of the collect context the Mobile path reads. */
+export type UsaaPageShimContext = Pick<
+	BrowserCollectContext,
+	"emit" | "emitRecord" | "page" | "progress" | "requested" | "state"
+>;
+
+/** True on a signed-in USAA page that lists an account. Runs in the page. */
+function usaaPageShowsAccounts(selector: string): boolean {
+	return (
+		location.hostname === "www.usaa.com" &&
+		location.pathname.startsWith("/my/") &&
+		!/\/my\/logon|\/access-management\//.test(location.pathname) &&
+		document.querySelector(selector) !== null
+	);
+}
+
+/**
+ * Mobile session probe. It reads the current page only: the host calls it
+ * again while the owner signs in, so it must not navigate.
+ */
+export async function probeUsaaPageShimSession(page: Page): Promise<boolean> {
+	try {
+		await page.waitForFunction(usaaPageShowsAccounts, DASHBOARD_SELECTOR_WAIT, {
+			timeout: MOBILE_SESSION_PROBE_MS,
+			polling: 250,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The facade plus `url()` and `waitForSelector()`. `url()` is synchronous in
+ * Playwright, so the adapter reads `location.href` after each navigation and
+ * keeps it. Other members go to the facade unchanged, so a member the facade
+ * lacks is still reported by the host.
+ */
+export function mobilePage(page: Page): Page {
+	let current = "about:blank";
+	const refreshUrl = async (): Promise<void> => {
+		current = await page
+			.evaluate(() => location.href, undefined)
+			.catch((): string => current);
+	};
+	const members: Record<string, unknown> = {
+		goto: async (url: string, options?: unknown): Promise<null> => {
+			try {
+				await page.goto(url, options as Parameters<Page["goto"]>[1]);
+			} finally {
+				await refreshUrl();
+			}
+			return null;
+		},
+		url: (): string => current,
+		waitForSelector: async (
+			selector: string,
+			options?: { timeout?: number },
+		): Promise<null> => {
+			await page.waitForFunction(
+				(css: string) => document.querySelector(css) !== null,
+				selector,
+				{
+					timeout: options?.timeout ?? DASHBOARD_SELECTOR_TIMEOUT_MS,
+					polling: 250,
+				},
+			);
+			return null;
+		},
+	};
+	return new Proxy(page, {
+		get(target, key, receiver) {
+			return typeof key === "string" && key in members
+				? members[key]
+				: Reflect.get(target, key, receiver);
+		},
+	});
+}
+
+/** Click the account page's Export button. Runs in the page. */
+function clickUsaaExportButton(selector: string): boolean {
+	const exact = document.querySelector<HTMLElement>(selector);
+	const byText = Array.from(
+		document.querySelectorAll<HTMLElement>('button, [role="button"]'),
+	).find((el) => /^\s*Export\s*$/i.test(el.textContent ?? ""));
+	const button = exact ?? byText;
+	if (!button) return false;
+	button.click();
+	return true;
+}
+
+/**
+ * Candidates for the Mobile Export dialog. USAA pages also carry OneTrust's
+ * "Privacy Preference Center", a hidden `[role="dialog"]`, so the page
+ * functions below take this selector and keep only a candidate that is
+ * rendered (has client rects). Each repeats that small lookup: `evaluate`
+ * sends a function's source text, so they cannot share a helper.
+ */
+const USAA_EXPORT_DIALOG_SELECTOR =
+	'[role="dialog"]:not([aria-hidden="true"]):not([hidden]):not([id*="onetrust" i]):not([aria-label="Privacy Preference Center"]):not(#onetrust-consent-sdk [role="dialog"])';
+/** Polling bound for the Export dialog's date fields after "date range" is chosen. */
+const USAA_DATE_FIELDS_WAIT_MS = 3000;
+/**
+ * The least time between choosing "date range" and typing the dates. The
+ * fill that exported all four device accounts waited 300 ms here; filling as
+ * soon as the fields appeared got `date_fields_rejected` on two of four.
+ */
+const USAA_DATE_FILL_SETTLE_MS = 300;
+
+/**
+ * Whether the Export dialog is "ready" (its `selectionType` control has
+ * rendered), only "open", or "none", with the dialog counts that tell a
+ * missing dialog from one the selector rejected. Runs in the page.
+ */
+function usaaExportDialogState(selector: string): {
+	state: "ready" | "open" | "none";
+	role_dialogs_visible: number;
+	export_dialog_candidates: number;
+} {
+	const rendered = (el: HTMLElement): boolean => el.getClientRects().length > 0;
+	const candidates = Array.from(
+		document.querySelectorAll<HTMLElement>(selector),
+	).filter(rendered);
+	const dialog = candidates[0];
+	return {
+		state: dialog
+			? dialog.querySelector('select[name="selectionType"]')
+				? "ready"
+				: "open"
+			: "none",
+		role_dialogs_visible: Array.from(
+			document.querySelectorAll<HTMLElement>('[role="dialog"]'),
+		).filter(rendered).length,
+		export_dialog_candidates: candidates.length,
+	};
+}
+
+/** What `fillUsaaExportDialog` saw; `check` is null when the dates took. */
+type UsaaExportFill = Omit<
+	UsaaExportDialogObservation,
+	| "check"
+	| "dialog_state"
+	| "dialog_wait_ms"
+	| "role_dialogs_visible"
+	| "export_dialog_candidates"
+> & {
+	check: Exclude<UsaaExportDialogCheck, "submit_missing"> | null;
+};
+
+/**
+ * Choose "date range" in the Export dialog and type both dates, through the
+ * native value setter so that a framework-controlled input sees the change.
+ * Runs in the page. Reports which check failed, and what it saw, without
+ * field values.
+ */
+async function fillUsaaExportDialog(arg: {
+	from: string;
+	to: string;
+	selector: string;
+	fieldsWaitMs: number;
+	settleMs: number;
+}): Promise<UsaaExportFill> {
+	const dialog = Array.from(
+		document.querySelectorAll<HTMLElement>(arg.selector),
+	).find((el) => el.getClientRects().length > 0);
+	if (!dialog) return { check: "dialog_not_found" };
+	const fire = (el: Element): void => {
+		for (const type of ["input", "change", "blur"]) {
+			el.dispatchEvent(new Event(type, { bubbles: true }));
+		}
+	};
+	const fromSelector = 'input[name="fromDate"], input[name="startDate"]';
+	const toSelector = 'input[name="endDate"]';
+	const select = dialog.querySelector<HTMLSelectElement>(
+		'select[name="selectionType"]',
+	);
+	let selectionType: UsaaExportFill["selection_type"] = "missing";
+	if (select) {
+		const setSelect = Object.getOwnPropertyDescriptor(
+			HTMLSelectElement.prototype,
+			"value",
+		)?.set;
+		setSelect?.call(select, "date-range");
+		fire(select);
+		selectionType = select.value === "date-range" ? "accepted" : "rejected";
+	}
+	const fields = (): [HTMLInputElement | null, HTMLInputElement | null] => [
+		dialog.querySelector<HTMLInputElement>(fromSelector),
+		dialog.querySelector<HTMLInputElement>(toSelector),
+	];
+	// The date fields render or enable after the change event; poll, bounded,
+	// and give them at least settleMs before typing into them.
+	const started = Date.now();
+	const deadline = started + arg.fieldsWaitMs;
+	const settled = started + arg.settleMs;
+	let [from, to] = fields();
+	while (
+		(!(from && to && !from.disabled && !to.disabled) &&
+			Date.now() < deadline) ||
+		Date.now() < settled
+	) {
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		[from, to] = fields();
+	}
+	if (select && selectionType === "accepted" && select.value !== "date-range") {
+		selectionType = "reverted";
+	}
+	const fieldState = (
+		input: HTMLInputElement | null,
+	): "missing" | "disabled" | "ready" =>
+		input ? (input.disabled ? "disabled" : "ready") : "missing";
+	const seen = {
+		selection_type: selectionType,
+		from_field: fieldState(from),
+		to_field: fieldState(to),
+		date_inputs_in_document: document.querySelectorAll(
+			`${fromSelector}, ${toSelector}`,
+		).length,
+		fields_wait_ms: Date.now() - started,
+	};
+	if (!(from && to) || from.disabled || to.disabled) {
+		let check: UsaaExportFill["check"] = "date_fields_missing";
+		if (selectionType === "missing") check = "selection_type_missing";
+		else if (selectionType !== "accepted") check = "selection_type_rejected";
+		return { check, ...seen };
+	}
+	const setInput = Object.getOwnPropertyDescriptor(
+		HTMLInputElement.prototype,
+		"value",
+	)?.set;
+	for (const [input, value] of [
+		[from, arg.from],
+		[to, arg.to],
+	] as const) {
+		input.focus();
+		setInput?.call(input, value);
+		fire(input);
+	}
+	if (from.value === arg.from && to.value === arg.to) {
+		return { check: null, ...seen };
+	}
+	const shape = (value: string): string =>
+		value
+			.replace(/[0-9]/g, "9")
+			.replace(/[^9/.\- ]/g, "a")
+			.slice(0, 16);
+	return {
+		check: "dates_rejected",
+		...seen,
+		from_value_shape: shape(from.value),
+		to_value_shape: shape(to.value),
+	};
+}
+
+/** Submit the Export dialog. Runs in the page. */
+function submitUsaaExportDialog(selector: string): boolean {
+	const dialog = Array.from(
+		document.querySelectorAll<HTMLElement>(selector),
+	).find((el) => el.getClientRects().length > 0);
+	const submit = dialog?.querySelector<HTMLElement>('button[type="submit"]');
+	if (!submit) return false;
+	submit.click();
+	return true;
+}
+
+/** The Export dialog's error or no-data text, if any. Runs in the page. */
+function readUsaaExportDialogMessage(selector: string): string {
+	const dialog = Array.from(
+		document.querySelectorAll<HTMLElement>(selector),
+	).find((el) => el.getClientRects().length > 0);
+	if (!dialog) return "";
+	const error = dialog.querySelector('[class*="errorMessage"]');
+	const errorText = (error?.textContent ?? "").trim();
+	if (errorText) return errorText;
+	const text = (dialog.textContent ?? "").replace(/\s+/g, " ");
+	const match = /no transactions[^.]*|nothing to export[^.]*/i.exec(text);
+	return match ? match[0].trim() : "";
+}
+
+/** Read the file a captured download intent points at, as text. */
+async function readIntentText(
+	page: Page,
+	intent: DownloadIntent,
+): Promise<{ text: string } | { error: string }> {
+	if (intent.kind === "link" && intent.dataUrl) {
+		return {
+			text: new TextDecoder().decode(decodeDataUrl(intent.dataUrl).bytes),
+		};
+	}
+	if (intent.kind === "link" && intent.error) {
+		return { error: intent.error };
+	}
+	const file =
+		intent.kind === "form" && intent.method === "POST"
+			? await fetchSameOriginFile(page, new URL(intent.action).href, {
+					as: "text",
+					method: "POST",
+					body: new URLSearchParams(intent.fields).toString(),
+					headers: { "content-type": "application/x-www-form-urlencoded" },
+				})
+			: await fetchSameOriginFile(
+					page,
+					intent.kind === "form" ? formIntentUrl(intent) : intent.url,
+					{ as: "text" },
+				);
+	return file.ok && file.text !== undefined
+		? { text: file.text }
+		: { error: file.error ?? `http_${file.status}` };
+}
+
+/**
+ * The Mobile `UsaaCsvExport`: `drive` runs USAA's Export dialog in the page
+ * and keeps the CSV text under an in-memory key that `read` and `discard`
+ * use in place of a file path.
+ */
+export function inPageCsvExport(): UsaaCsvExport {
+	const files = new Map<string, string>();
+	let next = 0;
+	const drive = async (
+		page: Page,
+		accountUrl: string,
+		options: DriveExportOptions,
+	): Promise<DriveExportResult> => {
+		const { onDiagnostics } = options;
+		const fail = (
+			phase: string,
+			error: string,
+			exportDialog?: UsaaExportDialogObservation,
+		): DriveExportResult => {
+			onDiagnostics?.({
+				diag: null,
+				error,
+				phase,
+				...(exportDialog ? { export_dialog: exportDialog } : {}),
+			});
+			return { kind: "failed" };
+		};
+		await page.goto(accountUrl, {
+			waitUntil: "domcontentloaded",
+			timeout: ACCOUNT_NAV_TIMEOUT_MS,
+		});
+		if (!(await settleOnAccountPage(page, accountUrl, 0))) {
+			return fail("no_export_affordance", "account_page_not_reached");
+		}
+		const found = await page
+			.waitForFunction(
+				(selector: string) =>
+					document.querySelector(selector) !== null ||
+					Array.from(document.querySelectorAll('button, [role="button"]')).some(
+						(el) => /^\s*Export\s*$/i.test(el.textContent ?? ""),
+					),
+				USAA_EXPORT_AFFORDANCE_SELECTOR,
+				{ timeout: ACCOUNT_NAV_TIMEOUT_MS, polling: 250 },
+			)
+			.then(
+				() => true,
+				() => false,
+			);
+		if (!found) {
+			return fail("no_export_affordance", "export_button_not_found");
+		}
+		await armDownloadCapture(page);
+		try {
+			if (
+				!(await page.evaluate(
+					clickUsaaExportButton,
+					USAA_EXPORT_AFFORDANCE_SELECTOR,
+				))
+			) {
+				return fail("no_export_affordance", "export_button_not_found");
+			}
+			// Wait for the Export dialog's own controls, not for any dialog: the
+			// dialog renders before its selectionType control.
+			const clickedAt = Date.now();
+			await page
+				.waitForFunction(
+					(selector: string) => {
+						const dialog = Array.from(
+							document.querySelectorAll<HTMLElement>(selector),
+						).find((el) => el.getClientRects().length > 0);
+						return (
+							dialog?.querySelector('select[name="selectionType"]') != null
+						);
+					},
+					USAA_EXPORT_DIALOG_SELECTOR,
+					{ timeout: EXPORT_CLICK_TIMEOUT_MS, polling: 250 },
+				)
+				.catch((): undefined => undefined);
+			const dialogWaitMs = Date.now() - clickedAt;
+			const dialog = await page.evaluate(
+				usaaExportDialogState,
+				USAA_EXPORT_DIALOG_SELECTOR,
+			);
+			const observed = {
+				dialog_state: dialog.state,
+				dialog_wait_ms: dialogWaitMs,
+				role_dialogs_visible: dialog.role_dialogs_visible,
+				export_dialog_candidates: dialog.export_dialog_candidates,
+			};
+			if (dialog.state === "none") {
+				return fail("export_dialog_unexpected_shape", "dialog_not_open", {
+					check: "dialog_not_found",
+					...observed,
+				});
+			}
+			// "open" without selectionType: fill anyway, which reports the
+			// missing fields if the dates cannot be set either.
+			const fill = await page.evaluate(fillUsaaExportDialog, {
+				from: mmddyyyy(options.sinceDate),
+				to: mmddyyyy(options.untilDate),
+				selector: USAA_EXPORT_DIALOG_SELECTOR,
+				fieldsWaitMs: USAA_DATE_FIELDS_WAIT_MS,
+				settleMs: USAA_DATE_FILL_SETTLE_MS,
+			});
+			if (fill.check) {
+				const fillError = {
+					dialog_not_found: "dialog_not_open",
+					selection_type_missing: "date_fields_missing",
+					selection_type_rejected: "date_fields_missing",
+					date_fields_missing: "date_fields_missing",
+					dates_rejected: "date_fields_rejected",
+				}[fill.check];
+				return fail(
+					fill.check === "dates_rejected"
+						? "export_dialog_fill_failed"
+						: "export_dialog_unexpected_shape",
+					fillError,
+					{ ...fill, check: fill.check, ...observed },
+				);
+			}
+			if (
+				!(await page.evaluate(
+					submitUsaaExportDialog,
+					USAA_EXPORT_DIALOG_SELECTOR,
+				))
+			) {
+				return fail("export_dialog_unexpected_shape", "submit_button_missing", {
+					check: "submit_missing",
+					...observed,
+				});
+			}
+			const deadline = Date.now() + MOBILE_EXPORT_WAIT_MS;
+			for (;;) {
+				const intent = await waitForDownloadIntent(page, { timeoutMs: 0 });
+				if (intent) {
+					const read = await readIntentText(page, intent);
+					if ("error" in read) {
+						return fail(
+							"export_artifact_wait_failed",
+							`csv_read_failed: ${read.error}`,
+						);
+					}
+					if (!CSV_HEAD_RE.test(read.text.split("\n", 1)[0] ?? "")) {
+						return fail("export_artifact_wait_failed", "download_not_csv");
+					}
+					next += 1;
+					const key = `${MOBILE_CSV_KEY_PREFIX}${next}`;
+					files.set(key, read.text);
+					return { kind: "artifact", path: key };
+				}
+				const message = await page.evaluate(
+					readUsaaExportDialogMessage,
+					USAA_EXPORT_DIALOG_SELECTOR,
+				);
+				if (message) {
+					return isNoDataExportMessage(message)
+						? { kind: "empty" }
+						: fail("export_dialog_error", message.slice(0, ID_TEXT_SNIP));
+				}
+				if (Date.now() >= deadline) {
+					return fail("export_artifact_wait_failed", "no_download_started");
+				}
+				await politeDelay(MOBILE_EXPORT_POLL_MS);
+			}
+		} finally {
+			await disarmDownloadCapture(page);
+		}
+	};
+	return {
+		drive,
+		read: async (path) => {
+			const text = files.get(path);
+			if (text === undefined) throw new Error("pageshim csv not found");
+			return text;
+		},
+		discard: async (path) => {
+			files.delete(path);
+		},
+	};
+}
+
+/** Mobile (PageShim) collect. Desktop uses `collectUsaa`. */
+export async function collectUsaaPageShim(
+	ctx: UsaaPageShimContext,
+): Promise<void> {
+	const page = mobilePage(ctx.page);
+	await page.goto(USAA_DASHBOARD_URL, {
+		waitUntil: "domcontentloaded",
+		timeout: DASHBOARD_NAV_TIMEOUT_MS,
+	});
+	const deps: EmitDeps = {
+		capture: null,
+		csvExport: inPageCsvExport(),
+		emit: ctx.emit,
+		emitRecord: ctx.emitRecord,
+		skipStatementPdfs: true,
+	};
+	// The owner signs in by hand on Mobile: a logon bounce ends the stream
+	// instead of starting an automated login.
+	const streamState: UsaaRunState = {
+		sessionDeadMidRun: false,
+		sessionRepairAttempted: true,
+	};
+	await runUsaaStreams(
+		{
+			...ctx,
+			context: undefined as unknown as BrowserContext,
+			emittedAt: nowIso(),
+			page,
+			sendInteraction:
+				undefined as unknown as BrowserCollectContext["sendInteraction"],
+		},
+		deps,
+		streamState,
+	);
+}
+
 export const USAA_RETRYABLE_PATTERN =
 	/ECONN|ETIMEDOUT|timeout|source_unavailable/i;
 
@@ -4188,25 +4835,12 @@ if (isMainModule(import.meta.url)) {
  * unit behavior already covered in `late-auth-self-heal.test.ts`).
  */
 export async function collectUsaa(ctx: BrowserCollectContext): Promise<void> {
-	const {
-		state,
-		requested,
-		context,
-		page,
-		emit,
-		emitRecord,
-		progress,
-		capture,
-		sendInteraction,
-		emittedAt,
-		browserSurface,
-	} = ctx;
 	const deps: EmitDeps = {
-		browserSurface: browserSurfaceManagedState(browserSurface),
-		capture,
+		browserSurface: browserSurfaceManagedState(ctx.browserSurface),
+		capture: ctx.capture,
 		credentials: ctx.credentials,
-		emit,
-		emitRecord,
+		emit: ctx.emit,
+		emitRecord: ctx.emitRecord,
 		servedAccountTransactionGaps: buildServedAccountTransactionGapLookup(
 			ctx.detailGaps,
 		),
@@ -4226,6 +4860,37 @@ export async function collectUsaa(ctx: BrowserCollectContext): Promise<void> {
 		sessionDeadMidRun: false,
 		sessionRepairAttempted: false,
 	};
+	await runUsaaStreams(ctx, deps, streamState);
+}
+
+/** Every USAA stream, in order. Shared by the Desktop and Mobile collects. */
+async function runUsaaStreams(
+	ctx: Pick<
+		BrowserCollectContext,
+		| "context"
+		| "emit"
+		| "emitRecord"
+		| "emittedAt"
+		| "page"
+		| "progress"
+		| "requested"
+		| "sendInteraction"
+		| "state"
+	>,
+	deps: EmitDeps,
+	streamState: UsaaRunState,
+): Promise<void> {
+	const {
+		state,
+		requested,
+		context,
+		page,
+		emit,
+		progress,
+		sendInteraction,
+		emittedAt,
+	} = ctx;
+	const { capture } = deps;
 
 	// ACCOUNTS — extract from dashboard; emit optionally based on requested.
 	await progress("Extracting accounts from dashboard");

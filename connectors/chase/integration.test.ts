@@ -365,11 +365,82 @@ test("Chase durable failure diagnostics keep only structural recovery facts", ()
 	assert.deepEqual(diagnostic, {
 		artifact: "qfx",
 		error_class: "Error",
+		error_message: "<url> <text> label",
 		failure_code: "qfx_download_failed",
 	});
 	assert.doesNotMatch(
 		JSON.stringify(diagnostic),
 		/secure\.chase\.com|private\/path|account=owner|header=private/,
+	);
+});
+
+test("Chase durable failure diagnostics keep the reason code and a value-free message", () => {
+	// Mobile failures are strings: a bare reason code, or a code and detail.
+	assert.deepEqual(
+		buildChaseDurableFailureDiagnostic(
+			"qfx",
+			"qfx_download_failed",
+			"download_request_not_found",
+		),
+		{
+			artifact: "qfx",
+			error_class: "unknown",
+			error_code: "download_request_not_found",
+			failure_code: "qfx_download_failed",
+		},
+	);
+	assert.equal(
+		buildChaseDurableFailureDiagnostic(
+			"qfx",
+			"qfx_download_failed",
+			"download_form_not_rendered",
+		).error_code,
+		"download_form_not_rendered",
+	);
+	const thrown = buildChaseDurableFailureDiagnostic(
+		"qfx",
+		"qfx_download_failed",
+		"in_page_fetch_threw: TypeError: Failed to fetch https://secure.chase.com/svc?acct=800100200 for 'STARBUCKS #12' STARBUCKS COFFEE $4.50 balance -1,234.56 account 800100200 ref=abc owner@example.com\nsecond line 999",
+	);
+	assert.deepEqual(thrown, {
+		artifact: "qfx",
+		error_class: "unknown",
+		error_code: "in_page_fetch_threw",
+		error_message:
+			"TypeError: Failed to fetch <url> for <text> <text> <text> <n> balance <n> account <n> <text> <email>",
+		failure_code: "qfx_download_failed",
+	});
+	assert.doesNotMatch(
+		JSON.stringify(thrown),
+		/800100200|STARBUCKS|COFFEE|4\.50|1,234|example\.com|abc|999|second line/,
+	);
+	assert.ok(
+		(
+			buildChaseDurableFailureDiagnostic(
+				"qfx",
+				"qfx_download_failed",
+				`in_page_fetch_threw: ${"timeout ".repeat(100)}`,
+			).error_message ?? ""
+		).length <= 160,
+	);
+	assert.equal(
+		buildChaseDurableFailureDiagnostic(
+			"statement",
+			"row_exception",
+			new Error(
+				"EACCES: permission denied, mkdir /home/owner/runs/x C:\\Users\\owner\\x",
+			),
+		).error_message,
+		"<text>: permission denied, mkdir <path> <path>",
+	);
+	// A URL is not a reason code.
+	assert.equal(
+		buildChaseDurableFailureDiagnostic(
+			"qfx",
+			"qfx_download_failed",
+			"https_x://secure.chase.com/a",
+		).error_code,
+		undefined,
 	);
 });
 
@@ -407,6 +478,9 @@ test("runTransactionsAndBalances: QFX failure emits only the allowlisted durable
 		account_total: 1,
 		artifact: "qfx",
 		error_class: "unknown",
+		error_code: "activity_select_failed",
+		error_message:
+			"(All transactions): activity_control_unavailable: <text> #select-downloadActivityOptionId: <url>",
 		failure_code: "qfx_download_failed",
 	});
 	assert.doesNotMatch(

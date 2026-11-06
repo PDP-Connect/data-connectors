@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.66",
+				"version": "0.2.67",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -1090,7 +1090,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.16",
+				"version": "0.3.17",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -3757,7 +3757,7 @@
 				},
 				"connector_key": "character-ai",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "Character.AI",
 				"brand": {
 					"icon": "icon.svg",
@@ -4031,7 +4031,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.2.22",
+				"version": "0.2.25",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -4040,10 +4040,17 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_content_read",
+								"page_condition_wait"
+							]
 						}
 					},
 					"environment_variables": ["CHASE_2FA_METHOD"]
@@ -4612,11 +4619,27 @@
 					"account_no_longer_discovered": "An account we tracked before is no longer listed on your dashboard",
 					"ambiguous_multi_account_overview": "We couldn't tell which account view to use",
 					"qfx_download_failed": "We couldn't download the transactions file",
+					"qfx_history_partial": "Chase did not send part of the transaction history we asked for",
 					"qfx_parse_failed": "We couldn't read the transactions file",
 					"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 					"row_exception": "Something went wrong reading one of the rows",
 					"selectors_pending": "Support for this part of the connector isn't complete yet",
+					"statement_list_unreadable_on_mobile": "The Mobile app couldn't read your statement list",
+					"statement_pdfs_partial_on_mobile": "The Mobile app saves the statement list without the PDF files",
 					"statements_scrape_failed": "We couldn't read your statements page"
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "chase",
+						"login_url": "https://secure.chase.com/web/auth/dashboard",
+						"login_message": "Sign in to Chase, then return here.",
+						"collect_export": "collectChasePageShim",
+						"probe_export": "probeChasePageShimSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
 				}
 			}
 		},
@@ -4635,7 +4658,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.14",
+				"version": "0.3.15",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -8247,7 +8270,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -8927,7 +8950,7 @@
 				},
 				"connector_key": "facebook",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-				"version": "0.1.11",
+				"version": "0.1.12",
 				"display_name": "Facebook",
 				"brand": {
 					"icon": "icon.svg",
@@ -11384,7 +11407,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.18",
+				"version": "0.3.19",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15494,7 +15517,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.46",
+				"version": "0.1.47",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -15964,7 +15987,7 @@
 				},
 				"connector_key": "instinct",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Instinct",
 				"brand": {
 					"icon": "icon.svg",
@@ -17135,7 +17158,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.43",
+				"version": "0.3.44",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -17765,7 +17788,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.42",
+				"version": "0.4.43",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -18117,7 +18140,7 @@
 				},
 				"connector_key": "muse",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-				"version": "0.1.11",
+				"version": "0.1.12",
 				"display_name": "Muse (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19468,7 +19491,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.52",
+				"version": "0.1.53",
 				"display_name": "Oura (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19806,7 +19829,7 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Perplexity (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -20206,7 +20229,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.7",
+				"version": "0.4.8",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -23053,7 +23076,7 @@
 				},
 				"connector_key": "slack-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-				"version": "0.1.3",
+				"version": "0.1.4",
 				"display_name": "Slack (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -24249,7 +24272,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.54",
+				"version": "0.1.55",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -25350,7 +25373,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.46",
+				"version": "0.1.47",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25550,7 +25573,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.14",
+				"version": "0.3.15",
 				"display_name": "TikTok (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -26690,7 +26713,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.23",
+				"version": "0.2.26",
 				"display_name": "USAA",
 				"brand": {
 					"icon": "icon.svg",
@@ -26699,10 +26722,17 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_content_read",
+								"page_condition_wait"
+							]
 						}
 					}
 				},
@@ -27333,7 +27363,21 @@
 					"scrape_failed": "We couldn't read the page contents",
 					"selectors_pending": "Support for this part of the connector isn't complete yet",
 					"session_dead_reauth_failed": "Your sign-in expired and we couldn't refresh it",
+					"statement_pdfs_partial_on_mobile": "The Mobile app saves the statement list without the PDF files",
 					"statement_unreconciled": "A statement's transactions don't add up to its printed balances"
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "usaa",
+						"login_url": "https://www.usaa.com/my/usaa",
+						"login_message": "Sign in to USAA, then return here.",
+						"collect_export": "collectUsaaPageShim",
+						"probe_export": "probeUsaaPageShimSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
 				}
 			}
 		},
@@ -28075,7 +28119,7 @@
 				},
 				"connector_key": "whatsapp-web",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "WhatsApp (web)",
 				"brand": {
 					"icon": "icon.svg",
@@ -29818,7 +29862,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -31929,7 +31973,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.48",
+				"version": "0.2.49",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",

@@ -334,7 +334,7 @@ test("the legacy dual placement is accepted: host_http_request validates on both
 });
 
 test("a new (non-legacy) feature placed on the wrong kind is still rejected", () => {
-  for (const feature of ["page_input", "cookie_read", "page_response_observation", "host_cookie_jar_request"]) {
+  for (const feature of ["page_input", "cookie_read", "page_response_observation", "page_init_script", "host_cookie_jar_request"]) {
     assert.equal(validate(manifestWith({ network: { required: true, features: [feature] } })), false, feature);
   }
   assert.equal(validate(manifestWith({ browser: { required: true, features: ["same_origin_page_fetch"] } })), false);

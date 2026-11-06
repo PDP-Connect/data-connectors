@@ -23,6 +23,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { chromium } from "playwright";
+import {
+	PAGE_INIT_SCRIPT_UNSUPPORTED,
+	pageInitScriptRefusal,
+	providerHostForCookieDomain,
+	wrapPageInitScript,
+} from "./init-script-host.mjs";
 import { ResultStreamHarness } from "./result-stream-harness.mjs";
 
 const PAGE_BRIDGE_MAX_UNITS = 256 * 1024;
@@ -105,10 +111,6 @@ export const SHIM_METHODS = [
 	"fill",
 	"press",
 	"waitForSelector",
-	"captureNetwork",
-	"clearNetworkCaptures",
-	"getCapturedResponse",
-	"hasCapturedResponse",
 	"captureDownload",
 	"extractZipEntries",
 	"readZipEntryChunk",
@@ -120,6 +122,15 @@ export const SHIM_METHODS = [
 export const THIN_HOST_SHIM_METHODS = SHIM_METHODS.flatMap((method) =>
 	method === "requestedScopeEntries" ? [method, "input"] : [method],
 );
+
+// A host with the browser feature page_init_script also offers
+// page.addInitScript(source): the script runs in the main frame at the start
+// of every later document in the run, before the page's own scripts.
+export function withInitScriptMethod(methods) {
+	return methods.flatMap((method) =>
+		method === "evaluate" ? [method, "addInitScript"] : [method],
+	);
+}
 
 // Runs inside the RUNNER page. Builds the shim `page`, runs the bundle.
 async function hostMain({
@@ -135,6 +146,7 @@ async function hostMain({
 	includeScopeEntries,
 	omitScopeEntries,
 	thinHost,
+	pageInitScript,
 }) {
 	// Deadline time must continue advancing when fixture calendar time is frozen.
 	const elapsedNow = performance.now.bind(performance);
@@ -156,7 +168,6 @@ async function hostMain({
 		return r;
 	};
 	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-	const captured = new Set();
 	const impl = {
 		requestedScopes: () =>
 			scopes.map((scope) =>
@@ -167,6 +178,9 @@ async function hostMain({
 		// Opaque run input from the web layer; null for catalog runs.
 		...(thinHost ? { input: () => null } : {}),
 		evaluate: (code) => call("evaluate", [String(code)]),
+		...(pageInitScript
+			? { addInitScript: async (source) => { await call("addInitScript", [source]); } }
+			: {}),
 		goto: (url) => call("goto", [url]),
 		sleep,
 		setData: (k, v) =>
@@ -194,13 +208,6 @@ async function hostMain({
 				await sleep(200);
 			}
 		},
-		captureNetwork: (c) => call("captureNetwork", [c || {}]),
-		clearNetworkCaptures: async () => {
-			captured.clear();
-			return call("clearNetworkCaptures", []);
-		},
-		getCapturedResponse: (k) => call("getCapturedResponse", [String(k)]),
-		hasCapturedResponse: (k) => captured.has(String(k)),
 		captureDownload: (u, o) => call("captureDownload", [String(u), o || null]),
 		extractZipEntries: async (h, o) => {
 			const r = await call("extractZipEntries", [
@@ -512,6 +519,8 @@ function untilAborted(promise, signal) {
  * @param {boolean} [o.resultStreaming] model the thin host: offer page.input and accept only streamed results
  * @param {boolean} [o.acceptLegacyResult] also accept a one-message result (default: only without resultStreaming)
  * @param {boolean} [o.fixtureReady] await fixture load instead of the host navigation delay
+ * @param {boolean | "unsupported"} [o.pageInitScript] model a host with the browser feature page_init_script (page.addInitScript); "unsupported" models a host that has the member but rejects every call, as a device without document-start scripts does
+ * @param {string} [o.cookieDomain] the row's cookieDomain, which binds init scripts (default: the host catalog's default, "." + the login URL's hostname)
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
@@ -556,8 +565,13 @@ export async function runHarness({
 	acceptLegacyResult,
 	observeBridge,
 	signal,
+	pageInitScript = false,
+	cookieDomain = `.${new URL(fixtures.loginUrl).hostname}`,
 }) {
 	const source = readFileSync(bundle, "utf8");
+	const initScripts = [];
+	let initScriptBytes = 0;
+	const initScriptHost = providerHostForCookieDomain(cookieDomain);
 	const log = [];
 	const calls = {};
 	const pageNavigations = [];
@@ -740,6 +754,23 @@ export async function runHarness({
 					return null;
 				case "showBrowser":
 					return { headed: true };
+				case "addInitScript": {
+					// page_init_script, as the Mobile host runs it: refused (never
+					// truncated) over a limit or when it does not balance; otherwise
+					// wrapped in a labelled block that runs it at the start of every
+					// later document, in the main frame, on the row's host only.
+					if (pageInitScript === "unsupported")
+						return { __shimError: PAGE_INIT_SCRIPT_UNSUPPORTED };
+					if (initScriptHost === null)
+						return { __shimError: "page.addInitScript refused: the row has no host to bind the script to" };
+					const script = a[0];
+					const refusal = pageInitScriptRefusal(script, { count: initScripts.length, bytes: initScriptBytes });
+					if (refusal) return { __shimError: refusal };
+					initScripts.push(script);
+					initScriptBytes += Buffer.byteLength(script, "utf8");
+					await target.addInitScript(wrapPageInitScript([initScriptHost], script));
+					return null;
+				}
 				case "url":
 					return target.url();
 				case "captureDownload":
@@ -790,7 +821,7 @@ export async function runHarness({
 					return { ok: r.status >= 200 && r.status < 300, json, ...r };
 				}
 				default:
-					// click/fill/press/selectorState/captureNetwork etc. exist
+					// click/fill/press/selectorState etc. exist
 					// on the host but no eligible connector uses them yet. Fail loudly
 					// rather than fake a result.
 					return {
@@ -883,7 +914,9 @@ export async function runHarness({
 			scopes,
 			initialState,
 			supportsStateArgument,
-			methods: resultStreaming ? THIN_HOST_SHIM_METHODS : SHIM_METHODS,
+			methods: (pageInitScript ? withInitScriptMethod : (m) => m)(
+				resultStreaming ? THIN_HOST_SHIM_METHODS : SHIM_METHODS,
+			),
 			loginWaitMs,
 			env,
 			timerScale,
@@ -891,6 +924,7 @@ export async function runHarness({
 			includeScopeEntries: !legacyScopeBridge,
 			omitScopeEntries: missingScopeEntries,
 			thinHost: resultStreaming,
+			pageInitScript,
 		});
 		const ret = await untilAborted(evaluated, signal);
 		sampling = false;
@@ -923,6 +957,7 @@ export async function runHarness({
 						)
 					: {},
 			archiveStats: archive.stats,
+			initScripts,
 			stubHits: stubLine ? JSON.parse(stubLine.split("stubHits=")[1]) : null,
 			log,
 		};

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /** Browser-first YouTube Collection Profile. The owner signs in in PDPP's browser. */
-import type { Request, Response } from "playwright";
+import type { Response } from "playwright";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -116,14 +116,75 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 		: null;
 }
 
+/** One /youtubei/v1/browse response, as the history walk reads it. */
+export interface HistoryBrowseResponse {
+	url(): string;
+	/** The request's JSON body; throws when it is absent or not JSON. */
+	requestJson(): unknown;
+	status(): number;
+	json(): Promise<unknown>;
+}
+
+/**
+ * Where the history walk's browse responses come from. Desktop listens to
+ * Playwright response events; Mobile reads an in-page capture, which it
+ * installs around the navigation and drains on `poll`.
+ */
+export interface HistoryResponseSource {
+	listen(listener: (response: HistoryBrowseResponse) => void): void;
+	dispose(): void;
+	beforeNavigation?(): Promise<void>;
+	afterNavigation?(): Promise<void>;
+	/** Deliver the responses that arrived since the last poll. */
+	poll?(): Promise<void>;
+	/** False once the source may have missed a browse response. */
+	readonly complete?: boolean;
+	readonly diagnostics?: HistoryResponseSourceDiagnostics;
+}
+
+/** What an in-page source reports about its own capture. */
+export interface HistoryResponseSourceDiagnostics {
+	mode: "init_script" | "evaluate" | null;
+	attached: boolean;
+	earlyTrafficMissed: boolean | null;
+	overflowed: boolean;
+	documentReplaced: boolean;
+	drainFailed: boolean;
+}
+
+export type HistoryResponseSourceFactory = (
+	page: BrowserCollectContext["page"],
+) => HistoryResponseSource;
+
+function playwrightHistoryResponses(
+	page: BrowserCollectContext["page"],
+): HistoryResponseSource {
+	let onResponse: ((response: Response) => void) | null = null;
+	return {
+		listen(listener) {
+			onResponse = (response) =>
+				listener({
+					url: () => response.url(),
+					requestJson: () => response.request().postDataJSON(),
+					status: () => response.status(),
+					json: () => response.json(),
+				});
+			page.on("response", onResponse);
+		},
+		dispose() {
+			if (onResponse) page.off("response", onResponse);
+		},
+	};
+}
+
 class HistoryResponseTracker {
 	private static readonly MAX_TRACKED_TOKENS = HISTORY_MAX_SCROLL_ROUNDS + 8;
 	private static readonly MAX_PRESEED_RESPONSES = 32;
-	private readonly page: BrowserCollectContext["page"];
+	private readonly source: HistoryResponseSource;
 	private readonly tokens = new Set<string>();
 	private readonly requestedTokens = new Set<string>();
 	private readonly preSeedResponses: Array<{
-		response: Response;
+		response: HistoryBrowseResponse;
 		version: number;
 	}> = [];
 	private seeded = false;
@@ -144,7 +205,7 @@ class HistoryResponseTracker {
 	private unrecognizedResponseCount = 0;
 	private latestStatus: number | null = null;
 	private pending = Promise.resolve();
-	private readonly onResponse = (response: Response): void => {
+	private readonly onResponse = (response: HistoryBrowseResponse): void => {
 		if (!response.url().includes("/youtubei/v1/browse")) return;
 		const version = ++this.evidenceVersion;
 		if (!this.seeded) {
@@ -159,9 +220,9 @@ class HistoryResponseTracker {
 		this.enqueue(response, version);
 	};
 
-	constructor(page: BrowserCollectContext["page"]) {
-		this.page = page;
-		page.on("response", this.onResponse);
+	constructor(source: HistoryResponseSource) {
+		this.source = source;
+		source.listen(this.onResponse);
 	}
 
 	seed(tokens: readonly string[], page: ListEnd): void {
@@ -194,6 +255,9 @@ class HistoryResponseTracker {
 			latestRecognized: this.latestResponse?.recognized ?? null,
 			latestHasContinuation: this.latestResponse?.hasContinuation ?? null,
 			preSeedOverflow: this.preSeedOverflow,
+			...(this.source.diagnostics
+				? { responseSource: this.source.diagnostics }
+				: {}),
 		};
 	}
 
@@ -206,7 +270,7 @@ class HistoryResponseTracker {
 	}
 
 	get trackingComplete(): boolean {
-		return !this.preSeedOverflow;
+		return !this.preSeedOverflow && this.source.complete !== false;
 	}
 
 	get allArrivalsProcessed(): boolean {
@@ -214,14 +278,15 @@ class HistoryResponseTracker {
 	}
 
 	async flush(): Promise<void> {
+		if (this.source.poll) await this.source.poll();
 		await this.pending;
 	}
 
 	dispose(): void {
-		this.page.off("response", this.onResponse);
+		this.source.dispose();
 	}
 
-	private enqueue(response: Response, version: number): void {
+	private enqueue(response: HistoryBrowseResponse, version: number): void {
 		this.pending = this.pending
 			.then(async () => {
 				try {
@@ -234,13 +299,12 @@ class HistoryResponseTracker {
 			});
 	}
 
-	private async inspect(response: Response): Promise<void> {
+	private async inspect(response: HistoryBrowseResponse): Promise<void> {
 		if (!response.url().includes("/youtubei/v1/browse")) return;
 		this.browseResponseCount += 1;
 		let requestBody: Record<string, unknown> | null = null;
-		const request: Request = response.request();
 		try {
-			requestBody = recordValue(request.postDataJSON());
+			requestBody = recordValue(response.requestJson());
 		} catch {
 			this.uncorrelatedResponseCount += 1;
 			return;
@@ -842,6 +906,7 @@ interface VideoReadResult extends ListRead<BrowserVideo> {
 		scrollRounds: number;
 		unchangedRounds: number;
 		scrollGeometry: HistoryScrollGeometry | null;
+		responseSource?: HistoryResponseSourceDiagnostics;
 	};
 	readonly blocked?: boolean;
 	/** The read can save a fully accounted prefix without claiming an end. */
@@ -871,6 +936,17 @@ function reportHistoryTraversal(history: HistoryTraversalDiagnostics): void {
 		recognized: history.latestRecognized,
 		has_continuation: history.latestHasContinuation,
 	});
+	if (history.responseSource) {
+		const source = history.responseSource;
+		connectorDiagnostic("youtube", "history_capture", {
+			mode: source.mode,
+			attached: source.attached,
+			early_missed: source.earlyTrafficMissed,
+			overflowed: source.overflowed,
+			replaced: source.documentReplaced,
+			drain_failed: source.drainFailed,
+		});
+	}
 	connectorDiagnostic("youtube", "history_scroll", {
 		rows_start: history.rowsAtStart,
 		rows_end: history.rowsAtEnd,
@@ -1016,13 +1092,17 @@ async function readHistoryVideoList(
 	collectionMode: BrowserCollectContext["collectionMode"],
 	emitRecord: HistoryStreamRecord,
 	identityForVideo: (video: BrowserVideo) => string,
+	historyResponses: HistoryResponseSourceFactory = playwrightHistoryResponses,
 ): Promise<VideoReadResult> {
 	const startedAt = performance.now();
-	const responseTracker = new HistoryResponseTracker(page);
+	const responseSource = historyResponses(page);
+	const responseTracker = new HistoryResponseTracker(responseSource);
+	await responseSource.beforeNavigation?.();
 	await page.goto(url, {
 		waitUntil: "domcontentloaded",
 		timeout: HISTORY_TIME_BUDGET_MS,
 	});
+	await responseSource.afterNavigation?.();
 	let remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
 	if (remainingMs <= 0) {
 		responseTracker.dispose();
@@ -1474,6 +1554,7 @@ function readWatchHistoryList(
 	collectionMode?: BrowserCollectContext["collectionMode"],
 	emitRecord?: HistoryStreamRecord,
 	identityForVideo?: (video: BrowserVideo) => string,
+	historyResponses?: HistoryResponseSourceFactory,
 ): Promise<VideoReadResult> {
 	return readHistoryVideoList(
 		page,
@@ -1483,6 +1564,7 @@ function readWatchHistoryList(
 		collectionMode,
 		emitRecord ?? (async () => undefined),
 		identityForVideo ?? videoIdentity,
+		historyResponses,
 	);
 }
 
@@ -1507,6 +1589,7 @@ async function readableVideos(
 						ctx.collectionMode,
 						historyRecord,
 						historyIdentityForVideo,
+						ctx.historyResponses,
 					)
 				: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);
 		if (
@@ -1538,6 +1621,8 @@ type BrowserContext = Pick<
 > & {
 	state?: BrowserCollectContext["state"];
 	capture?: BrowserCollectContext["capture"];
+	/** Where watch history's browse responses come from; Desktop: response events. */
+	historyResponses?: HistoryResponseSourceFactory;
 };
 
 async function emitCoverageProgress(

@@ -1,31 +1,41 @@
 # YouTube on PageShim
 
 The explicit entry forwards saved state and the host's state capability to the
-shared runtime. The six non-history streams reuse the Desktop collector and its
+shared runtime. Every stream reuses the Desktop collector and its
 source-evidence checks: profile, subscriptions, playlists, playlist_items, likes,
-and watch_later. Connector-local adapters implement count/click/readiness using
-evaluate and use bounded local sleeps; no missing facade member is probed.
+watch_later and watch_history. Connector-local adapters implement
+count/click/readiness using evaluate and use bounded local sleeps; no missing
+facade member is probed.
 
 Record IDs use WebCrypto SHA-256 with the same 24-hex-character IDs as Desktop.
-Timing uses the browser/global performance clock. Desktop response correlation,
-history traversal limits, and completeness checks are unchanged.
+Timing uses the browser/global performance clock. History traversal limits and
+completeness checks are Desktop's.
 
-## History limitation
+## Watch history
 
-Mobile currently reads at most 50 already-rendered history rows, only after the
-target page's authenticated session and page-wall checks. A selected,
-source-proven empty history can acknowledge an empty checkpoint. A nonempty
-prefix emits inventory_not_proven_complete with retry_by_runtime and no STATE,
-even if a saved cursor claims a prior complete inventory. Full continuation
-traversal is not supported by this adapter: the facade lacks response events,
-and a direct in-page browse fetch needs equivalent owner-bound response parsing
-and row accounting before it can replace Desktop's correlated response/DOM proof.
+Desktop correlates the history page's `/youtubei/v1/browse` continuation
+responses with the rows it reads, and claims the end only from a correlated
+response without a continuation. The facade has no response events, so on
+PageShim those responses come from the shared in-page capture
+(`packages/polyfill-connectors/src/page-exchange-capture.ts`, through
+`pageShimHistoryResponses`). The Desktop tracker receives them in arrival
+order each time it flushes.
 
-The shared PageShim runtime classifies inventory_not_proven_complete as Partial.
-Regression coverage checks the 50-row cap, Partial status and absence of STATE
-on both one-message and streaming hosts, including a saved complete cursor.
-No stream_collection_failed companion is needed for an ordinary incomplete
-inventory. Owner-bound, source-verified empty history retains its empty STATE.
+- With `page_init_script`, the capture runs at the start of the history
+  document and sees every browse response.
+- Without it, the capture is installed after the page loads. A continuation
+  the page sent before then is missed. Later tokens then do not correlate, so
+  the walk keeps the rows it read and reports the list as not proven complete.
+- A full capture buffer, a replaced document or an unreadable drain makes the
+  response source incomplete, with the same result.
+
+Records and cursors are Desktop's. Record IDs are `history|<video>|<date>`;
+before 0.2.49 Mobile used `history|<video>` and read at most 50 rows, so the
+first run after the update writes new record IDs for rows it saved before.
+
+`scripts/pageshim/pageshim.test.mjs` runs a synthetic history app in both
+install modes: continuations over XHR and fetch to the end, an error status, a
+replaced document, and a continuation sent while the document loads.
 
 ## Device validation still required
 
@@ -38,4 +48,8 @@ Verify mobile WebView DOM/layout parity (especially m.youtube.com redirects),
 account-menu click behavior, login/consent walls and session loss, WebCrypto
 availability, evaluate size/30-second call limits under slow networks, real
 playlist/subscription continuation and exhaustion evidence, and accepted STATE
-persistence on supported hosts. Do not claim a full history export from this port.
+persistence on supported hosts. For watch history, confirm that the mobile
+history page sends its continuations to `/youtubei/v1/browse` through the page's
+own fetch or XMLHttpRequest, and that a full read ends with a correlated
+response without a continuation (the `history_capture` and `history_latest`
+diagnostics show both).
