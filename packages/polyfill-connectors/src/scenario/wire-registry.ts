@@ -48,6 +48,22 @@ export const KNOWN_MESSAGE_TYPES = {
 } satisfies Record<EmittedMessage["type"], true>;
 
 /**
+ * Message kinds this package's connector library emits that the published
+ * `@pdpp/connector-protocol` `EmittedMessage` union does not list yet. They
+ * are well-formed wire messages, so a replay or recording accepts them. The
+ * trace oracle ignores them: `normalizeTraceMessage` returns `undefined` for
+ * a type with no normalizer.
+ */
+export const EXTENSION_MESSAGE_TYPES = {
+	ACCOUNT_IDENTITY: true,
+} as const;
+
+/** Every message `type` a replay or recording accepts. */
+export type KnownMessageType =
+	| EmittedMessage["type"]
+	| keyof typeof EXTENSION_MESSAGE_TYPES;
+
+/**
  * Thrown by both `bin/scenario-verify.ts`'s `StdoutProtocolAccumulator` and
  * `bin/scenario-record.ts`'s subprocess line handler when a parsed stdout
  * JSON object's `type` is not one of `KNOWN_MESSAGE_TYPES` — a connector (or
@@ -69,10 +85,12 @@ export class UnknownMessageTypeError extends Error {
 }
 
 /** True when `type` is one of `KNOWN_MESSAGE_TYPES`'s keys. */
-export function isKnownMessageType(
-	type: unknown,
-): type is EmittedMessage["type"] {
-	return typeof type === "string" && Object.hasOwn(KNOWN_MESSAGE_TYPES, type);
+export function isKnownMessageType(type: unknown): type is KnownMessageType {
+	return (
+		typeof type === "string" &&
+		(Object.hasOwn(KNOWN_MESSAGE_TYPES, type) ||
+			Object.hasOwn(EXTENSION_MESSAGE_TYPES, type))
+	);
 }
 
 /**
