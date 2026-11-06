@@ -288,6 +288,18 @@ async function buildSyntheticBundle(
 	return outfile;
 }
 
+test("the runtime reports what each stream found, and whether it answered", { timeout: 120_000 }, async () => {
+	const answered = await runCoverageOutcome([
+		{ type: "STATE", stream: "conversations", cursor: { checkpoint: "latest" } },
+	]);
+	assert.equal(answered.data.scopeCounts["chatgpt.conversations"].ok, true);
+	assert.ok(answered.data.scopeCounts["chatgpt.conversations"].found >= 1);
+	const skipped = await runCoverageOutcome([
+		{ type: "SKIP_RESULT", stream: "conversations", reason: "source_unreadable" },
+	]);
+	assert.equal(skipped.data.scopeCounts["chatgpt.conversations"].ok, false);
+});
+
 test("a rejected result completion after STATE ack leaves the prior cursor uncommitted", {
 	timeout: 180_000,
 }, async () => {
