@@ -17,6 +17,7 @@ import type {
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
+import { noteRecordEmitted } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	ACTION_DELAY_MAX_MS,
 	ACTION_DELAY_MIN_MS,
@@ -795,6 +796,7 @@ function harness(
 		emitRecord: async (stream: string, data: RecordData) => {
 			const parsed = validateRecord(stream, data);
 			assert.equal(parsed.ok, true, JSON.stringify(parsed));
+			noteRecordEmitted();
 			records.push({ stream, data });
 		},
 	};
@@ -883,13 +885,20 @@ function layoutReport(lines: string[]): {
 	};
 }
 
-// Every run below reads the same synthetic owner, so one capture serves the file.
-const accountIdentity = captureAccountIdentity();
+// The runs in this file read one synthetic account; keep its id off the test runner's stdout.
+captureAccountIdentity();
 
 test("a run reports the owner's numeric user id from the session cookie", async () => {
 	const app = new FakeWebApp();
-	await captureDiagnostics(() => collectXBrowser(harness(app).ctx, FAST));
-	assert.deepEqual(accountIdentity.ids, [OWNER_ID]);
+	// A recorder of its own, so records from earlier tests do not count.
+	const thisRun = captureAccountIdentity();
+	try {
+		await captureDiagnostics(() => collectXBrowser(harness(app).ctx, FAST));
+	} finally {
+		thisRun.restore();
+	}
+	assert.deepEqual(thisRun.ids, [OWNER_ID]);
+	assert.equal(thisRun.recordsBeforeIdentity, 0);
 });
 
 test("a first run reads the profile, posts, bookmarks and likes the app loads", async () => {

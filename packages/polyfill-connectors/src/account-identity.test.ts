@@ -2,8 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import {
 	type AccountIdentityMessage,
@@ -11,13 +20,26 @@ import {
 	accountIdFromSource,
 	createAccountIdentityReporter,
 	reportAccountIdentity,
+	requireAccountIdentity,
 } from "./account-identity.ts";
+import {
+	AccountIdentityScanner,
+	type AccountIdentityUse,
+	listConnectorSourceFiles,
+} from "./account-identity-call-scan.ts";
+import {
+	assertAccountIdentity,
+	captureAccountIdentity,
+} from "./account-identity-test-support.ts";
 import {
 	packageRoot as PACKAGE_ROOT,
 	repoRoot as REPO_ROOT,
 } from "./connector-paths.ts";
 import { isKnownMessageType } from "./scenario/wire-registry.ts";
-import { runConnectorProtocolSubprocess } from "./test-harness.ts";
+import {
+	noteRecordEmitted,
+	runConnectorProtocolSubprocess,
+} from "./test-harness.ts";
 
 test("the runtime schema agrees with the JSON schema's shared corpus", () => {
 	// schemas/account-identity.schema.test.mjs checks the JSON schema against
@@ -211,29 +233,41 @@ test("a connector declares account_identity if and only if its source reports on
 	const root = join(REPO_ROOT, "connectors");
 	const declared: string[] = [];
 	const reporting: string[] = [];
-	for (const name of readdirSync(root).sort()) {
-		const manifestPath = join(root, name, "manifest.json");
-		if (!existsSync(manifestPath)) {
-			continue;
-		}
-		const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-			account_identity?: string;
-		};
-		if (manifest.account_identity === "required") {
-			declared.push(name);
-		}
-		const calls = readdirSync(join(root, name))
-			.filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))
-			.some((file) =>
-				/\breportAccountIdentity\(/u.test(
-					readFileSync(join(root, name, file), "utf8"),
-				),
+	const directEmits: string[] = [];
+	const scanner = new AccountIdentityScanner(
+		join(PACKAGE_ROOT, "tsconfig.json"),
+	);
+	try {
+		for (const name of readdirSync(root).sort()) {
+			const manifestPath = join(root, name, "manifest.json");
+			if (!existsSync(manifestPath)) {
+				continue;
+			}
+			const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+				account_identity?: string;
+			};
+			if (manifest.account_identity === "required") {
+				declared.push(name);
+			}
+			const uses = listConnectorSourceFiles(join(root, name)).map((file) =>
+				scanner.use(file),
 			);
-		if (calls) {
-			reporting.push(name);
+			if (uses.some((use) => use.reportCalls > 0)) {
+				reporting.push(name);
+			}
+			if (uses.some((use) => use.wireTypeLiterals > 0)) {
+				directEmits.push(name);
+			}
 		}
+	} finally {
+		scanner.close();
 	}
 	assert.deepEqual(declared, reporting);
+	assert.deepEqual(
+		directEmits,
+		[],
+		"a connector must report through reportAccountIdentity, not write the wire message itself",
+	);
 	assert.ok(declared.length > 0);
 	const inventory = readFileSync(
 		join(REPO_ROOT, "docs", "account-identity-inventory.md"),
@@ -245,4 +279,217 @@ test("a connector declares account_identity if and only if its source reports on
 		.map((match) => match[1])
 		.sort();
 	assert.deepEqual(implemented, declared);
+});
+
+// ─── The call scan itself ───────────────────────────────────────────────
+
+const ACCOUNT_IDENTITY_MODULE = join(
+	PACKAGE_ROOT,
+	"src",
+	"account-identity.ts",
+);
+
+/**
+ * Writes `files` (name → source, `MODULE` standing for the import path of the
+ * real account-identity module as seen from that file) into a scratch
+ * project, scans each, and returns the use per file.
+ */
+function scanScratch(
+	files: Record<string, string>,
+): Record<string, AccountIdentityUse> {
+	const dir = mkdtempSync(join(tmpdir(), "account-identity-scan-"));
+	try {
+		for (const [name, source] of Object.entries(files)) {
+			const path = join(dir, name);
+			mkdirSync(dirname(path), { recursive: true });
+			const importPath = relative(dirname(path), ACCOUNT_IDENTITY_MODULE);
+			writeFileSync(path, source.replaceAll("MODULE", importPath));
+		}
+		const tsconfig = join(dir, "tsconfig.json");
+		writeFileSync(
+			tsconfig,
+			JSON.stringify({
+				compilerOptions: {
+					allowImportingTsExtensions: true,
+					module: "NodeNext",
+					moduleResolution: "NodeNext",
+					noEmit: true,
+					skipLibCheck: true,
+					target: "ES2023",
+					types: [],
+				},
+				files: Object.keys(files),
+			}),
+		);
+		const scanner = new AccountIdentityScanner(tsconfig);
+		try {
+			return Object.fromEntries(
+				Object.keys(files).map((name) => [name, scanner.use(join(dir, name))]),
+			);
+		} finally {
+			scanner.close();
+		}
+	} finally {
+		rmSync(dir, { force: true, recursive: true });
+	}
+}
+
+test("the call scan counts real calls and ignores comments, strings and look-alikes", () => {
+	const use = scanScratch({
+		"real.ts": `import { reportAccountIdentity } from "MODULE";
+export const run = (id: string) => reportAccountIdentity(id);`,
+		"spaced.ts": `import { reportAccountIdentity } from "MODULE";
+export const run = (id: string) => reportAccountIdentity
+	(id);`,
+		"commented.ts": `import { reportAccountIdentity } from "MODULE";
+// await reportAccountIdentity(id);
+/* await reportAccountIdentity(id); */
+export const text = "reportAccountIdentity(id)";
+export const noop = reportAccountIdentity;`,
+		"aliased.ts": `import { reportAccountIdentity as report } from "MODULE";
+export const run = (id: string) => report(id);`,
+		"required.ts": `import { requireAccountIdentity } from "MODULE";
+export const run = (id: string) => requireAccountIdentity(id);`,
+		"namespace.ts": `import * as identity from "MODULE";
+export const run = (id: string) => identity.reportAccountIdentity(id);`,
+		"other-module.ts": `import { reportAccountIdentity } from "./local.ts";
+export const run = (id: string) => reportAccountIdentity(id);`,
+		"local.ts": `export const reportAccountIdentity = (_id: string) => true;
+export const run = (id: string) => reportAccountIdentity(id);`,
+		"type-only.ts": `import type { AccountIdentityReporter } from "MODULE";
+export type Reporter = AccountIdentityReporter;`,
+		"nested/deep/module.ts": `import { reportAccountIdentity } from "MODULE";
+export const run = (id: string) => reportAccountIdentity(id);`,
+	});
+	const calls = Object.fromEntries(
+		Object.entries(use).map(([name, found]) => [name, found.reportCalls]),
+	);
+	assert.deepEqual(calls, {
+		"real.ts": 1,
+		"spaced.ts": 1,
+		"commented.ts": 0,
+		"aliased.ts": 1,
+		"required.ts": 1,
+		"namespace.ts": 1,
+		"other-module.ts": 0,
+		"local.ts": 0,
+		"type-only.ts": 0,
+		"nested/deep/module.ts": 1,
+	});
+});
+
+test("the call scan finds a direct wire emit, not a comment about one", () => {
+	const use = scanScratch({
+		"emit.ts": `export const message = { type: "ACCOUNT_IDENTITY", account_id: "x" };`,
+		"comment.ts": `// { type: "ACCOUNT_IDENTITY" }
+export const none = 1;`,
+	});
+	assert.equal(use["emit.ts"]?.wireTypeLiterals, 1);
+	assert.equal(use["comment.ts"]?.wireTypeLiterals, 0);
+});
+
+test("the call scan refuses a file that is not in its project", () => {
+	const scanner = new AccountIdentityScanner(
+		join(PACKAGE_ROOT, "tsconfig.json"),
+	);
+	try {
+		assert.throws(
+			() => scanner.use(join(REPO_ROOT, "docs", "not-a-source-file.ts")),
+			/not part of the scanned project/u,
+		);
+	} finally {
+		scanner.close();
+	}
+});
+
+test("the source listing walks nested modules and skips tests and fixtures", () => {
+	const dir = mkdtempSync(join(tmpdir(), "account-identity-list-"));
+	try {
+		for (const name of [
+			"index.ts",
+			"index.test.ts",
+			"lib/deep/helper.ts",
+			"lib/deep/helper.test.ts",
+			"__fixtures__/runtime.ts",
+			"fixtures/recorded.ts",
+			"notes.md",
+		]) {
+			const path = join(dir, name);
+			mkdirSync(dirname(path), { recursive: true });
+			writeFileSync(path, "");
+		}
+		assert.deepEqual(
+			listConnectorSourceFiles(dir).map((file) => relative(dir, file)),
+			["index.ts", join("lib", "deep", "helper.ts")],
+		);
+	} finally {
+		rmSync(dir, { force: true, recursive: true });
+	}
+});
+
+test("requireAccountIdentity reports a usable id and throws, naming no id, for an unusable one", async () => {
+	const written: AccountIdentityMessage[] = [];
+	const reporter = createAccountIdentityReporter((m) => {
+		written.push(m);
+		return Promise.resolve();
+	});
+	await assert.rejects(
+		() => requireAccountIdentity(undefined, reporter),
+		(err: unknown) =>
+			Reflect.get(Object(err), "code") === "account_identity_missing",
+	);
+	await assert.rejects(
+		() => requireAccountIdentity("has space", reporter),
+		(err: unknown) =>
+			Reflect.get(Object(err), "code") === "account_identity_missing",
+	);
+	assert.deepEqual(written, []);
+	await requireAccountIdentity("u-1", reporter);
+	await requireAccountIdentity("u-1", reporter);
+	assert.deepEqual(written, [{ type: "ACCOUNT_IDENTITY", account_id: "u-1" }]);
+	await assert.rejects(
+		() => requireAccountIdentity("u-2", reporter),
+		(err: unknown) =>
+			Reflect.get(Object(err), "code") === "account_identity_conflict",
+	);
+});
+
+test("the order checks catch a record that comes before the account id", async () => {
+	assert.throws(
+		() =>
+			assertAccountIdentity(
+				[
+					{ type: "RECORD" },
+					{ type: "ACCOUNT_IDENTITY", account_id: "u-1" },
+					{ type: "DONE" },
+				],
+				"u-1",
+			),
+		/before the first RECORD/u,
+	);
+	assertAccountIdentity(
+		[
+			{ type: "ACCOUNT_IDENTITY", account_id: "u-1" },
+			{ type: "RECORD" },
+			{ type: "DONE" },
+		],
+		"u-1",
+	);
+	const late = captureAccountIdentity();
+	try {
+		noteRecordEmitted();
+		await reportAccountIdentity("u-1");
+		noteRecordEmitted();
+	} finally {
+		late.restore();
+	}
+	assert.equal(late.recordsBeforeIdentity, 1, "only the first record is early");
+	const early = captureAccountIdentity();
+	try {
+		await reportAccountIdentity("u-1");
+		noteRecordEmitted();
+	} finally {
+		early.restore();
+	}
+	assert.equal(early.recordsBeforeIdentity, 0);
 });

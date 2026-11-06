@@ -13,6 +13,8 @@ import { validateRecord } from "./schemas.ts";
 
 /** The account ids the last `collectAllStreams` call reported. */
 let lastAccountIds: string[] = [];
+/** How many records the last call emitted before it reported an id. */
+let lastRecordsBeforeIdentity = 0;
 /** `collectAllStreams` with a fresh account-identity recorder per call, so tests that switch accounts do not trip the one-id-per-run check. */
 async function collectAllStreams(ctx: BrowserCollectContext): Promise<void> {
 	const accountIdentity = captureAccountIdentity();
@@ -20,6 +22,7 @@ async function collectAllStreams(ctx: BrowserCollectContext): Promise<void> {
 		await collectAllStreamsOnWire(ctx);
 	} finally {
 		lastAccountIds = accountIdentity.ids;
+		lastRecordsBeforeIdentity = accountIdentity.recordsBeforeIdentity;
 		accountIdentity.restore();
 	}
 }
@@ -98,6 +101,7 @@ test("profile: emits the source fullName with its real dsid using only the exist
 	const run = fixture({ dsid: "12345", fullName: " Zoë 李 " });
 	await collectAllStreams(run.ctx);
 	assert.deepEqual(lastAccountIds, ["12345"], "the dsid is also the account id");
+	assert.equal(lastRecordsBeforeIdentity, 0);
 	assert.deepEqual(run.calls, [VALIDATE_URL]);
 	assert.equal(run.harness.emitted.length, 1);
 	assert.equal(run.harness.emitted[0]?.stream, "profile");
@@ -195,6 +199,7 @@ test("account id: reported for a run that requests no profile, and for a numeric
 	const notesOnly = fixture({ dsid: 12_345, fullName: "Test User" }, {}, ["notes"]);
 	await collectAllStreams(notesOnly.ctx).catch(() => undefined);
 	assert.deepEqual(lastAccountIds, ["12345"]);
+	assert.equal(lastRecordsBeforeIdentity, 0);
 });
 
 test("profile: stream selection adds no profile calls or records when unrequested", async () => {

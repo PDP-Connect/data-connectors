@@ -139,3 +139,23 @@ export async function reportAccountIdentity(
 	await reporter(accountId);
 	return true;
 }
+
+/**
+ * Like `reportAccountIdentity`, for a connector that must know the account
+ * before it reads anything with a credential. A source that gave no usable id
+ * fails the run here, before any read, instead of leaving the host to find the
+ * missing id at the end. Use it wherever a different or absent id means the
+ * credential may belong to another account (for example after a token
+ * refresh). `reporter` is for tests.
+ */
+export async function requireAccountIdentity(
+	sourceValue: unknown,
+	reporter: AccountIdentityReporter = processReporter,
+): Promise<void> {
+	if (!(await reportAccountIdentity(sourceValue, reporter))) {
+		throw new TerminalError(
+			"The connector could not read the account id from the source",
+			{ code: "account_identity_missing" },
+		);
+	}
+}

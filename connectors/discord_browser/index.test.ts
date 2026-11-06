@@ -17,6 +17,7 @@ import type {
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
+import { noteRecordEmitted } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	APP_URL,
 	collectDiscordBrowser,
@@ -357,6 +358,7 @@ function harness(
 		emitRecord: async (stream: string, data: RecordData) => {
 			const parsed = validateRecord(stream, data);
 			assert.equal(parsed.ok, true, JSON.stringify(parsed));
+			noteRecordEmitted();
 			records.push({ stream, data });
 		},
 	};
@@ -468,13 +470,22 @@ test("without a session, the owner signs in on the login page", async () => {
 	assert.deepEqual(fake.calls, []);
 });
 
-// Every run below reads the same synthetic owner, so one capture serves the file.
-const accountIdentity = captureAccountIdentity();
+// The runs in this file read one synthetic account; keep its id off the test runner's stdout.
+captureAccountIdentity();
 
 test("a run reports the owner's snowflake id before it reads the other streams", async () => {
-	const h = harness(fakeDiscord({ apiVersion: "v10", respond: discordApi({}) }));
-	await collectDiscordBrowser(h.ctx, fast());
-	assert.deepEqual(accountIdentity.ids, ["552071489126400001"]);
+	const h = harness(
+		fakeDiscord({ apiVersion: "v10", respond: discordApi({}) }),
+	);
+	// A recorder of its own, so records from earlier tests do not count.
+	const thisRun = captureAccountIdentity();
+	try {
+		await collectDiscordBrowser(h.ctx, fast());
+	} finally {
+		thisRun.restore();
+	}
+	assert.deepEqual(thisRun.ids, ["552071489126400001"]);
+	assert.equal(thisRun.recordsBeforeIdentity, 0);
 });
 
 test("a run reads the four streams with the client's own headers", async () => {

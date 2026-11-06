@@ -223,14 +223,21 @@ test("collectTransactions: a partial page emits every modeled record and clears 
 	);
 });
 
-// Every run below reads the same synthetic owner, so one capture serves the file.
-const accountIdentity = captureAccountIdentity();
+// The runs in this file read one synthetic account; keep its id off the test runner's stdout.
+captureAccountIdentity();
 
 test("a run reports the owner's user id, whichever streams it reads", async () => {
 	const { fetchPath } = makeScriptedFetch({});
 	const { ctx } = makeCtx({}, []);
-	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
-	assert.deepEqual(accountIdentity.ids, [OWNER_ID]);
+	// A recorder of its own, so records from earlier tests do not count.
+	const thisRun = captureAccountIdentity();
+	try {
+		await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	} finally {
+		thisRun.restore();
+	}
+	assert.deepEqual(thisRun.ids, [OWNER_ID]);
+	assert.equal(thisRun.recordsBeforeIdentity, 0);
 });
 
 test("collectTransactions emits zone-less dates and stores a normalized latest cursor", async () => {

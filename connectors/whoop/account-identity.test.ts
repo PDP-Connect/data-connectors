@@ -33,6 +33,11 @@ async function reportedIds(streams: string[]): Promise<string[]> {
 			requested: new Set(streams),
 			state: {},
 		});
+		assert.equal(
+			capture.recordsBeforeIdentity,
+			0,
+			"the id is reported before the first record",
+		);
 		return capture.ids;
 	} finally {
 		capture.restore();

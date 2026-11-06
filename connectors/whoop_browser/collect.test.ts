@@ -302,6 +302,8 @@ interface RunOptions {
 }
 /** The account ids the last `collect` call reported. */
 let lastAccountIds: string[] = [];
+/** How many records the last `collect` call emitted before it reported an id. */
+let lastRecordsBeforeIdentity = 0;
 async function collect(
 	fake: Fake,
 	options: RunOptions = {},
@@ -328,6 +330,7 @@ async function collect(
 		);
 	} finally {
 		lastAccountIds = accountIdentity.ids;
+		lastRecordsBeforeIdentity = accountIdentity.recordsBeforeIdentity;
 		accountIdentity.restore();
 	}
 	return h;
@@ -434,6 +437,7 @@ function assertStateLast(h: RecordingEmit): void {
 test("collect: reports the bootstrap's user id (the fixture's synthetic 41001) once", async () => {
 	await collect(fakeWhoop(fixtures()));
 	assert.deepEqual(lastAccountIds, ["41001"]);
+	assert.equal(lastRecordsBeforeIdentity, 0);
 });
 
 // ── First run ──────────────────────────────────────────────────────────────

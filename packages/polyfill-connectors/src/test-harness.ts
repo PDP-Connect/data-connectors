@@ -227,6 +227,28 @@ export interface ConnectorSubprocessOptions {
  * isn't the point (e.g. scope-filter gates, ordering invariants on
  * synthetic data that intentionally omits fields).
  */
+let recordWatcher: (() => void) | undefined;
+
+/**
+ * Test seam: calls `onRecord` every time an in-process test double emits a
+ * record, so a test can tell what happened before the first record (the account
+ * id must already be reported). Returns a function that stops watching.
+ * In-process doubles that do not use `makeRecordingEmit` call
+ * `noteRecordEmitted()` themselves.
+ */
+export function watchRecordEmission(onRecord: () => void): () => void {
+	const previous = recordWatcher;
+	recordWatcher = onRecord;
+	return () => {
+		recordWatcher = previous;
+	};
+}
+
+/** Tells the active `watchRecordEmission` watcher that a record was emitted. */
+export function noteRecordEmitted(): void {
+	recordWatcher?.();
+}
+
 export function makeRecordingEmit(
 	validateRecord?: ValidateRecord,
 ): RecordingEmit {
@@ -260,6 +282,7 @@ export function makeRecordingEmit(
 			}
 		}
 		if (typeof options === "object") await options.beforeEmit?.();
+		noteRecordEmitted();
 		emitted.push({ stream, data });
 		events.push({ kind: "record", stream, data, skipped: false });
 	};

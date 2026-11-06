@@ -16,6 +16,7 @@ import { packageRoot, repoRoot } from "./connector-paths.ts";
 import {
 	type ConnectorSubprocessOptions,
 	runConnectorProtocolSubprocess,
+	watchRecordEmission,
 } from "./test-harness.ts";
 
 export interface StubFetchRoute {
@@ -79,23 +80,43 @@ export function assertAccountIdentity(
 	const doneAt = wire.findIndex((m) => m.type === "DONE");
 	const identityAt = wire.findIndex((m) => m.type === "ACCOUNT_IDENTITY");
 	assert.ok(doneAt > identityAt, "ACCOUNT_IDENTITY must come before DONE");
+	const firstRecordAt = wire.findIndex((m) => m.type === "RECORD");
+	assert.ok(
+		firstRecordAt === -1 || identityAt < firstRecordAt,
+		"ACCOUNT_IDENTITY must come before the first RECORD",
+	);
 }
 
 /**
  * For tests that call a connector's `collect` in this process: records the
  * account ids it reports instead of writing them to stdout. Call `restore`
- * in a `finally`.
+ * in a `finally`. `recordsBeforeIdentity` counts records the run emitted
+ * before it reported an id; a connector must report first, so tests assert 0.
  */
 export function captureAccountIdentity(): {
 	ids: string[];
+	recordsBeforeIdentity: number;
 	restore: () => void;
 } {
-	const ids: string[] = [];
-	const restore = replaceProcessAccountIdentityReporterForTest(
+	const capture = {
+		ids: [] as string[],
+		recordsBeforeIdentity: 0,
+		restore: () => {},
+	};
+	const restoreReporter = replaceProcessAccountIdentityReporterForTest(
 		createAccountIdentityReporter((message) => {
-			ids.push(message.account_id);
+			capture.ids.push(message.account_id);
 			return Promise.resolve();
 		}),
 	);
-	return { ids, restore };
+	const stopWatching = watchRecordEmission(() => {
+		if (capture.ids.length === 0) {
+			capture.recordsBeforeIdentity += 1;
+		}
+	});
+	capture.restore = () => {
+		stopWatching();
+		restoreReporter();
+	};
+	return capture;
 }

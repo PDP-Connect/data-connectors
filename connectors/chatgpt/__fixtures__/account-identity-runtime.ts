@@ -18,14 +18,32 @@ import {
 } from "../index.ts";
 import { validateRecord } from "../schemas.ts";
 
-const SESSION = {
-	accessToken: "synthetic-token",
-	user: { id: process.env.SYNTHETIC_USER_ID ?? "user-synthetic0001" },
-};
+/**
+ * One session body per `/api/auth/session` read, in order; the last one repeats.
+ * `SYNTHETIC_SESSIONS` is a JSON array of bodies. `SYNTHETIC_REVOKED_TOKENS`
+ * (a JSON array) makes the backend answer 401 for those tokens; any other token
+ * gets one memory named after it, so a test can see which token read data.
+ * With neither set, every backend call answers 404.
+ */
+const SESSIONS: unknown[] = process.env.SYNTHETIC_SESSIONS
+	? JSON.parse(process.env.SYNTHETIC_SESSIONS)
+	: [
+			{
+				accessToken: "synthetic-token",
+				user: { id: process.env.SYNTHETIC_USER_ID ?? "user-synthetic0001" },
+			},
+		];
+const REVOKED_TOKENS: string[] = process.env.SYNTHETIC_REVOKED_TOKENS
+	? JSON.parse(process.env.SYNTHETIC_REVOKED_TOKENS)
+	: [];
+const SERVES_DATA = process.env.SYNTHETIC_SESSIONS !== undefined;
+let sessionReads = 0;
+const nextSession = (): unknown =>
+	SESSIONS[Math.min(sessionReads++, SESSIONS.length - 1)];
 
 const page: Pick<Page, "evaluate" | "goto" | "waitForFunction"> = {
 	evaluate: ((fn: unknown, arg?: unknown): Promise<unknown> => {
-		if (typeof fn === "function") {
+		if (typeof fn === "function" && arg === undefined) {
 			return Promise.resolve("https://chatgpt.com/");
 		}
 		if (arg === undefined) {
@@ -37,9 +55,23 @@ const page: Pick<Page, "evaluate" | "goto" | "waitForFunction"> = {
 						getElementById: () => null,
 					},
 					fetch: () =>
-						Promise.resolve({ json: () => Promise.resolve(SESSION), ok: true }),
+						Promise.resolve({
+							json: () => Promise.resolve(nextSession()),
+							ok: true,
+						}),
 				}),
 			);
+		}
+		const token = (arg as { auth?: { accessToken?: string } }).auth
+			?.accessToken;
+		if (token !== undefined && REVOKED_TOKENS.includes(token)) {
+			return Promise.resolve({ json: null, status: 401 });
+		}
+		if (SERVES_DATA && token !== undefined) {
+			return Promise.resolve({
+				json: { memories: [{ id: `memory-read-with-${token}` }] },
+				status: 200,
+			});
 		}
 		return Promise.resolve({ json: null, status: 404 });
 	}) as Page["evaluate"],

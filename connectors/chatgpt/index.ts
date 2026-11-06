@@ -22,7 +22,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import {
 	RetryExhaustedError,
 	retryAfterMsFromHeaders,
@@ -224,7 +224,8 @@ export const CHATGPT_AUTH_EXTRACTION_EXPRESSION = `
   const asRecord = (value) => (value && typeof value === "object" ? value : {});
   // The session object carries the signed-in user's id next to the token
   // (user.id), so the account id costs no extra request. A source with no
-  // token is skipped, as before.
+  // token is skipped. A token is only trusted with the id read from the same
+  // session object: the id names the account the token reads.
   const pickSession = (value) => {
     const record = asRecord(value);
     const session = asRecord(record.session);
@@ -263,18 +264,30 @@ export const CHATGPT_AUTH_EXTRACTION_EXPRESSION = `
     if (!nextDataText) {
       return null;
     }
-    const nextData = asRecord(JSON.parse(nextDataText));
-    const props = asRecord(nextData.props);
-    const pageProps = asRecord(props.pageProps);
-    return pickSession(pageProps.session);
+    try {
+      const nextData = asRecord(JSON.parse(nextDataText));
+      const props = asRecord(nextData.props);
+      const pageProps = asRecord(props.pageProps);
+      return pickSession(pageProps.session);
+    } catch {
+      return null;
+    }
   };
   const readDeviceId = () => {
     const match = (document.cookie || "").match(/oai-did=([^;]+)/);
     return match?.[1] ? decodeURIComponent(match[1]) : null;
   };
 
-  const picked =
-    (await readSessionEndpoint().catch(() => null)) ?? readBootstrap() ?? readNextData();
+  // The first source holding BOTH a token and a user id wins. A token-only
+  // source is used only when no source has a complete session; its id is then
+  // null and the run fails before it reads with that token. A token is never
+  // paired with an id from another source.
+  const sessions = [
+    await readSessionEndpoint().catch(() => null),
+    readBootstrap(),
+    readNextData(),
+  ].filter(Boolean);
+  const picked = sessions.find((item) => item.userId) ?? sessions[0] ?? null;
   const deviceId = readDeviceId();
   return { accessToken: picked ? picked.accessToken : null, userId: picked ? picked.userId : null, deviceId };
 })()
@@ -1707,13 +1720,31 @@ async function reportChatGptRetryPressure({
 	}
 }
 
+/**
+ * Binds one run to one account. Call it with the user id of every freshly read
+ * session before that session's token is used. The first id is reported as the
+ * run's account id; the same id again is a no-op; a different id, or none,
+ * throws a terminal error, so a run can never read one account's data under
+ * another account's id.
+ */
+export function bindChatGptRunToAccount(userId: unknown): Promise<void> {
+	return requireAccountIdentity(userId);
+}
+
 export function createChatGptApi({
+	bindAccount,
 	capture,
 	emit,
 	onUnlanedRateLimited,
 	page,
 	providerBudget,
 }: {
+	/**
+	 * Run for every fresh auth (the first one and each one after a 401) before
+	 * its token is cached or used. Throwing aborts the run. Left out only by
+	 * tests that exercise the client without an account.
+	 */
+	bindAccount?: (userId: string | null | undefined) => Promise<void>;
 	capture: CaptureSession | null;
 	emit?: CollectContext["emit"];
 	// Invoked once per served 429 that happens OUTSIDE an adaptive lane run
@@ -1735,14 +1766,27 @@ export function createChatGptApi({
 	let authGeneration = 0;
 	// The reauth in progress, so concurrent 401s wait for its token.
 	let refreshing: Promise<ChatGptAuth> | null = null;
+	// Set when a fresh auth names another account or none. Every later auth
+	// call rethrows it, so a stream that catches the first error cannot go on
+	// to read with the rejected session.
+	let accountFailure: unknown = null;
 	function loadAuth(): Promise<ChatGptAuth> {
 		const generation = authGeneration;
 		const pending = (async (): Promise<ChatGptAuth> => {
+			if (accountFailure) throw accountFailure;
 			const fresh = await getAuthFromPage(page);
 			if (!fresh.accessToken) {
 				throw new Error(
 					"chatgpt_auth_missing: could not extract bearer token from #client-bootstrap",
 				);
+			}
+			// The account check comes before the cache fill: a token that
+			// belongs to another account must never be cached or returned.
+			try {
+				await bindAccount?.(fresh.userId);
+			} catch (error) {
+				accountFailure = error;
+				throw error;
 			}
 			if (generation === authGeneration) authCache = fresh;
 			return authCache ?? fresh;
@@ -1756,6 +1800,7 @@ export function createChatGptApi({
 		return pending;
 	}
 	function auth(): Promise<ChatGptAuth> {
+		if (accountFailure) return Promise.reject(accountFailure);
 		if (authCache) return Promise.resolve(authCache);
 		return authLoading ?? loadAuth();
 	}
@@ -1894,6 +1939,10 @@ export function createChatGptApi({
 		// retries N times causes ONE ×2 backoff, not N. Reset per request because
 		// this closure is fresh each call.
 		let pacingThrottleRecordedForThisRequest = false;
+		// retryHttp retries anything `request` throws. A rejected account is
+		// not a network fault: it is passed through as a terminal 401 and
+		// rethrown unchanged below, with no retry and no backoff.
+		let rejectedAccount: unknown = null;
 		return retryHttp({
 			baseDelayMs: CHATGPT_RATE_LIMIT_BASE_DELAY_MS,
 			beforeAttempt: async () => {
@@ -1996,6 +2045,10 @@ export function createChatGptApi({
 					}
 					return result;
 				} catch (err) {
+					if (accountFailure !== null && err === accountFailure) {
+						rejectedAccount = err;
+						return { json: null, status: 401 };
+					}
 					const m = err instanceof Error ? err.message : String(err);
 					throw new Error(`apiFetch network error on ${method} ${path}: ${m}`, {
 						cause: err,
@@ -2004,6 +2057,9 @@ export function createChatGptApi({
 			},
 			shouldAbort: (result) => result.status === 401 || result.status === 403,
 		}).catch((err: unknown) => {
+			if (rejectedAccount !== null) {
+				throw rejectedAccount;
+			}
 			if (err instanceof TerminalHttpStatusError) {
 				throw new Error(
 					`apiFetch got ${err.status} on ${method} ${path} (auth - not retryable)`,
@@ -8240,14 +8296,16 @@ export async function collectChatGpt(
 		onUnlanedRateLimited: (retryAfterWaitMs) =>
 			recordChatGptUnlanedRateLimit(preDetailPressure, retryAfterWaitMs),
 		providerBudget,
+		// The signed-in user's id from the session object (`user.id`), not the
+		// email or a workspace id. Checked on every fresh auth, not only the
+		// first: the browser can switch accounts mid-run.
+		bindAccount: bindChatGptRunToAccount,
 	});
 	const emitRecord = makeEmitRecord(baseEmitRecord);
 
-	// Verify session (extract bearer token for /backend-api calls)
+	// Verify session (extract bearer token for /backend-api calls). The first
+	// auth reports the account id before the token is used.
 	const auth = await api.auth();
-	// The signed-in user's id from the session object (`user.id`), not the
-	// email or a workspace id.
-	await reportAccountIdentity(auth.userId);
 	chatGptDiagnostic(
 		`authenticated (device_id=${auth.deviceId ? `${auth.deviceId.slice(0, 8)}…` : "unknown"})`,
 	);

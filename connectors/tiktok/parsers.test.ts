@@ -15,6 +15,7 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { establishSession } from "../../packages/polyfill-connectors/src/session-establish.ts";
 import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
+import { noteRecordEmitted } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	CLIENT_NOT_SEEN,
 	checkTikTokSession,
@@ -300,6 +301,7 @@ function harness(
 			emitRecord: async (stream: string, data: RecordData) => {
 				const valid = validateRecord(stream, data);
 				assert.equal(valid.ok, true, JSON.stringify(valid));
+				noteRecordEmitted();
 				records.push({ stream, data });
 				messages.push({ type: "RECORD", stream, data } as EmittedMessage);
 			},
@@ -365,13 +367,20 @@ const ALL = [
 	"followers",
 ];
 
-// Every run below reads the same synthetic account, so one capture serves the file.
-const accountIdentity = captureAccountIdentity();
+// The runs in this file read one synthetic account; keep its id off the test runner's stdout.
+captureAccountIdentity();
 
 test("a run reports the account's user_id_str once", async () => {
 	const { page } = fakePage(standardAnswer);
-	await collectTikTok(harness(ALL, page).ctx, noDelay);
-	assert.deepEqual(accountIdentity.ids, ["100007"]);
+	// A recorder of its own, so records from earlier tests do not count.
+	const thisRun = captureAccountIdentity();
+	try {
+		await collectTikTok(harness(ALL, page).ctx, noDelay);
+	} finally {
+		thisRun.restore();
+	}
+	assert.deepEqual(thisRun.ids, ["100007"]);
+	assert.equal(thisRun.recordsBeforeIdentity, 0);
 });
 
 test("a full run reads every stream from its own path and checkpoints each after its records", async () => {

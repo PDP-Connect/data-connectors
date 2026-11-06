@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
+import { noteRecordEmitted } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	activityUrl,
 	type CollectorContext,
@@ -140,6 +141,7 @@ function harness(args: {
 			emitRecord: async (stream, data) => {
 				const check = validateRecord(stream, data);
 				assert.equal(check.ok, true, `${stream} record validates`);
+				noteRecordEmitted();
 				h.records.push({ stream, data });
 				h.emitted.push({ type: "RECORD", message: { stream } });
 			},
@@ -232,8 +234,8 @@ function stateFor(h: Harness, stream: string): unknown {
 	)?.message;
 }
 
-// Every run below reads the same synthetic viewer, so one capture serves the file.
-const accountIdentity = captureAccountIdentity();
+// The runs in this file read one synthetic account; keep its id off the test runner's stdout.
+captureAccountIdentity();
 
 describe("collectFacebook", () => {
 	it("reports the viewer's numeric id before it reads any stream", async () => {
@@ -243,8 +245,15 @@ describe("collectFacebook", () => {
 			captured: [],
 			replies: [],
 		});
-		await collectFacebook(h.ctx, h.services).catch(() => undefined);
-		assert.deepEqual(accountIdentity.ids, [TIMELINE_VIEWER]);
+		// A recorder of its own, so records from earlier tests do not count.
+		const thisRun = captureAccountIdentity();
+		try {
+			await collectFacebook(h.ctx, h.services).catch(() => undefined);
+		} finally {
+			thisRun.restore();
+		}
+		assert.deepEqual(thisRun.ids, [TIMELINE_VIEWER]);
+		assert.equal(thisRun.recordsBeforeIdentity, 0);
 	});
 
 	it("walks friends from the preloaded first page to the source's end signal", async () => {
