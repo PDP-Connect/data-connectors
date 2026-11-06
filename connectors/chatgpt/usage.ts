@@ -425,6 +425,10 @@ export async function chatGptUsageFetchInBrowser(
 					const country = j.country;
 					const region = j.region_code;
 					return {
+						user_id:
+							typeof j.id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(j.id)
+								? j.id
+								: null,
 						created: h.epoch(j.created),
 						mfa_enabled: h.bool(j.mfa_flag_enabled),
 						email_domain_type: h.slug(j.email_domain_type),
@@ -1418,6 +1422,9 @@ export function buildAccountProfileRecord(
 		: null;
 	return {
 		id: "account_profile",
+		// Opaque signed-in user id: lets a consumer tell one ChatGPT account
+		// from another. Same id /me returns; no name or email goes with it.
+		user_id: idOrNull(me.user_id),
 		// Two different moments: /me.created is when the user signed up;
 		// accounts/check created_time is when the current (e.g. paid) account
 		// was created. account_plan.account_created_at carries the latter.

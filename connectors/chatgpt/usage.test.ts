@@ -54,12 +54,19 @@ const CANARY_CONVERSATION = readFixture("usage-conversation-canary.json");
 const CANARY_ID = "c0ffee00-0000-4000-8000-00000000ca1a";
 const ACCOUNTS_CHECK = readFixture("accounts-check.json");
 const ENDPOINTS = readFixture("usage-account-endpoints-canary.json");
+const ENDPOINTS_USER_ID = (ENDPOINTS.me as Record<string, unknown>)
+	.id as string;
 const AUTH = { accessToken: "tok-CANARY-bearer", deviceId: "dev-CANARY" };
 const NOW_MS = Date.UTC(2026, 9, 15, 12);
 
-/** Fails if any planted canary, raw id, IP or secret reaches `value`. */
+/**
+ * Fails if any planted canary, raw id, IP or secret reaches `value`. The
+ * `user_id` field is the one intended carrier of the user id, so it is skipped.
+ */
 function assertNoLeak(value: unknown, label: string): void {
-	const text = JSON.stringify(value).toLowerCase();
+	const text = JSON.stringify(value, (k, v: unknown) =>
+		k === "user_id" ? undefined : v,
+	).toLowerCase();
 	for (const needle of [
 		"canary",
 		CANARY_ID,
@@ -398,6 +405,7 @@ test("/me is reduced to creation time, MFA, domain type, country codes and org c
 	installFakeSite(siteRoutes());
 	const res = await inPage("/me", "me_profile");
 	assert.deepEqual(res.json, {
+		user_id: ENDPOINTS_USER_ID,
 		created: 1673776800,
 		mfa_enabled: true,
 		email_domain_type: "social",
@@ -856,6 +864,19 @@ test("account_profile keeps the user and account creation times apart and prefer
 	assert.equal(r.project_file_count, 3);
 });
 
+test("account_profile carries the signed-in user id and drops one that is not an opaque id", () => {
+	const r = buildAccountProfileRecord(
+		profileInput({ me: { ...profileInput().me, user_id: ENDPOINTS_USER_ID } }),
+	);
+	assert.equal(validateRecord("account_profile", r).ok, true);
+	assert.equal(r.user_id, ENDPOINTS_USER_ID);
+	const bad = buildAccountProfileRecord(
+		profileInput({ me: { ...profileInput().me, user_id: "not an id!" } }),
+	);
+	assert.equal(bad.user_id, null);
+	assert.equal(buildAccountProfileRecord(profileInput()).user_id, null);
+});
+
 test("account_profile falls back to the network country and labels it", () => {
 	const r = buildAccountProfileRecord(
 		profileInput({ me: null, sources: { ...ALL_OK, me: "failed" } }),
@@ -1021,6 +1042,7 @@ test("a full run of both streams emits valid records and leaks no canary anywher
 		assert.ok(!call.path.startsWith("/conversations/search"), call.path);
 	}
 	// Records, protocol messages (PROGRESS, SKIP, STATE, coverage): nothing leaks.
+	assert.equal(profile.user_id, ENDPOINTS_USER_ID);
 	assertNoLeak(harness.emitted, "emitted records");
 	assertNoLeak(harness.protocolMessages, "protocol messages");
 	assert.equal(

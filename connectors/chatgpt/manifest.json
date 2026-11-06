@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.3.14",
+	"version": "0.3.15",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {
@@ -669,7 +669,7 @@
 			},
 			"display": {
 				"label": "Your ChatGPT account profile",
-				"detail": "When the account was created and how long you have had it, your country and region code (or the network country, labelled, when the account has none), billing currency, whether MFA is on, subscription facts such as a complimentary or trial plan, data residency, which beta features are switched on, whether custom instructions, memory and a personality are set (not their contents), how many memories, projects, project files and scheduled tasks you have. Your email, name, phone, picture, ids, region name, organisation names and all text are not collected. Plan, renewal and cancellation dates are in the account plan stream. Singleton."
+				"detail": "When the account was created and how long you have had it, your country and region code (or the network country, labelled, when the account has none), billing currency, whether MFA is on, subscription facts such as a complimentary or trial plan, data residency, which beta features are switched on, whether custom instructions, memory and a personality are set (not their contents), how many memories, projects, project files and scheduled tasks you have. An opaque user id (to tell accounts apart) is kept. Your email, name, phone, picture, other ids, region name, organisation names and all text are not collected. Plan, renewal and cancellation dates are in the account plan stream. Singleton."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -678,6 +678,11 @@
 					"id": {
 						"type": "string",
 						"const": "account_profile"
+					},
+					"user_id": {
+						"type": ["string", "null"],
+						"pattern": "^[A-Za-z0-9_-]{1,128}$",
+						"description": "Opaque ChatGPT user id (/me id), so one account can be told from another. Absent in records written before this field existed."
 					},
 					"user_created_at": {
 						"type": ["string", "null"],

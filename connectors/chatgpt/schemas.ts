@@ -244,6 +244,12 @@ const sourceStatus = z.enum(["ok", "not_available", "failed", "partial"]);
 export const accountProfileSchema = z
 	.object({
 		id: z.literal("account_profile"),
+		// Optional so records written before this field existed stay valid.
+		user_id: z
+			.string()
+			.regex(/^[A-Za-z0-9_-]{1,128}$/)
+			.nullable()
+			.optional(),
 		user_created_at: looseTimestamp.nullable(),
 		chatgpt_account_created_at: looseTimestamp.nullable(),
 		tenure_months: count.nullable(),
