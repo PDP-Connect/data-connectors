@@ -10,6 +10,7 @@ import {
 	accountIdentityMessageSchema,
 	accountIdFromSource,
 	createAccountIdentityReporter,
+	reportAccountIdentity,
 } from "./account-identity.ts";
 import {
 	packageRoot as PACKAGE_ROOT,
@@ -176,4 +177,21 @@ test("through the real runtime, a different second id or an invalid id fails the
 		assert.equal(Reflect.get(Object(done), "status"), "failed", mode);
 		assert.equal(Reflect.get(Object(done?.error), "code"), code, mode);
 	}
+});
+
+test("reportAccountIdentity sends a usable id and reports false for an unusable one", async () => {
+	const written: AccountIdentityMessage[] = [];
+	const reporter = createAccountIdentityReporter((m) => {
+		written.push(m);
+		return Promise.resolve();
+	});
+	assert.equal(await reportAccountIdentity(undefined, reporter), false);
+	assert.equal(await reportAccountIdentity("", reporter), false);
+	assert.equal(await reportAccountIdentity(-1, reporter), false);
+	assert.deepEqual(written, []);
+	assert.equal(await reportAccountIdentity(424_242, reporter), true);
+	assert.equal(await reportAccountIdentity("424242", reporter), true);
+	assert.deepEqual(written, [
+		{ type: "ACCOUNT_IDENTITY", account_id: "424242" },
+	]);
 });

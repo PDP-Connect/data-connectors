@@ -69,10 +69,6 @@ import type {
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { Browser, BrowserContext, CDPSession, Page } from "playwright";
 import {
-	type AccountIdentityReporter,
-	createAccountIdentityReporter,
-} from "./account-identity.ts";
-import {
 	DEADLINE_TIMEOUT,
 	prepareBrowserInteractionTarget,
 	unregisterBrowserInteractionTarget,
@@ -321,19 +317,6 @@ interface BaseCollectContext {
 		message: string,
 		options?: StreamFailureOptions,
 	) => Promise<void>;
-	/**
-	 * Report the stable upstream account id (Collection Profile Section 5.14).
-	 * A connector whose manifest declares `account_identity: "required"` calls
-	 * this once it knows the id, at any point before the run ends; the id is
-	 * the source's own immutable user id as a string, never an email or handle
-	 * when the source offers a better one. The runtime writes one
-	 * `ACCOUNT_IDENTITY` message. The host fails a declaring run that never
-	 * reports one.
-	 *
-	 * Optional for compatibility with hand-built test contexts. The real runtime
-	 * always supplies it.
-	 */
-	reportAccountIdentity?: AccountIdentityReporter;
 	requestDetailGapPage: (req?: {
 		maxBytes?: number;
 		streams?: readonly string[];
@@ -1368,8 +1351,6 @@ export function runConnector(config: RunConnectorConfig): void {
 		});
 	};
 
-	const reportAccountIdentity = createAccountIdentityReporter();
-
 	// Kick off the run. The outer catch distinguishes TerminalError (which
 	// the runtime threw deliberately with an explicit retryable bit) from
 	// unexpected throws (where we pattern-match the message).
@@ -1511,7 +1492,6 @@ export function runConnector(config: RunConnectorConfig): void {
 			completeAssistance,
 			progress,
 			reportStreamFailure,
-			reportAccountIdentity,
 			capture,
 			sendInteraction,
 			emittedAt,

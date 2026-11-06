@@ -9,7 +9,7 @@
  * - the message's zod schema (the JSON schema is
  *   `schemas/account-identity.schema.json`; both are checked against
  *   `schemas/fixtures/account-identity-corpus.json`);
- * - the connector-side reporter behind `ctx.reportAccountIdentity`, which
+ * - the connector-side reporter behind `reportAccountIdentity`, which
  *   writes the message once and refuses a second, different id.
  *
  * The connector passes the id exactly as the source reports it. It adds no
@@ -95,4 +95,32 @@ export function createAccountIdentityReporter(
 		reported = parsed.data.account_id;
 		await write(parsed.data);
 	};
+}
+
+/** One reporter per process: a connector process serves one run. */
+const processReporter = createAccountIdentityReporter();
+
+/**
+ * What a connector calls once it has read the account id from the source.
+ * `sourceValue` is the id as the source returned it (a string or an integer).
+ * Returns `true` when the id was reported (or already was). Returns `false`
+ * and sends nothing when the source gave no usable id: the host then fails the
+ * run, which is the honest outcome for a connector that declared
+ * `account_identity` and could not learn it. A different valid id in the same
+ * run, or an invalid string, throws a `TerminalError`.
+ *
+ * This module imports no runtime code on purpose: a connector's published
+ * artifact then changes only for connectors that call it. `reporter` is for
+ * tests.
+ */
+export async function reportAccountIdentity(
+	sourceValue: unknown,
+	reporter: AccountIdentityReporter = processReporter,
+): Promise<boolean> {
+	const accountId = accountIdFromSource(sourceValue);
+	if (accountId === undefined) {
+		return false;
+	}
+	await reporter(accountId);
+	return true;
 }
