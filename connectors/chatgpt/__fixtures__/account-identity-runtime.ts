@@ -12,7 +12,10 @@
 import { runInNewContext } from "node:vm";
 import type { Page } from "playwright";
 import { runConnector } from "../../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { CHATGPT_AUTH_EXTRACTION_EXPRESSION, collectChatGpt } from "../index.ts";
+import {
+	CHATGPT_AUTH_EXTRACTION_EXPRESSION,
+	collectChatGpt,
+} from "../index.ts";
 import { validateRecord } from "../schemas.ts";
 
 const SESSION = {

@@ -16,7 +16,8 @@ import {
 } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import { packageRoot } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 
-const RUNTIME = "../../connectors/chatgpt/__fixtures__/account-identity-runtime.ts";
+const RUNTIME =
+	"../../connectors/chatgpt/__fixtures__/account-identity-runtime.ts";
 
 test("collectChatGpt reports the session's user id before the run ends", async () => {
 	const wire = await runAndReadWire({
@@ -35,5 +36,8 @@ test("the id comes from the user, not from a workspace or the email", async () =
 		start: { type: "START", scope: { streams: [{ name: "memories" }] } },
 	});
 	const identity = wire.find((m) => m.type === "ACCOUNT_IDENTITY");
-	assert.equal(Reflect.get(Object(identity), "account_id"), "user-synthetic0002");
+	assert.equal(
+		Reflect.get(Object(identity), "account_id"),
+		"user-synthetic0002",
+	);
 });

@@ -22,11 +22,11 @@ import {
 	type ServerResponse,
 } from "node:http";
 import { test } from "node:test";
+import { assertAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
 } from "../../packages/polyfill-connectors/src/connector-paths.ts";
-import { assertAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 
 const ENTRYPOINT = connectorEntrypoint("jellyfin");
