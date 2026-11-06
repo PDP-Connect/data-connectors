@@ -427,7 +427,9 @@ test("Chase durable failure diagnostics keep the reason code and a value-free me
 		buildChaseDurableFailureDiagnostic(
 			"statement",
 			"row_exception",
-			new Error("EACCES: permission denied, mkdir /home/owner/runs/x C:\\Users\\owner\\x"),
+			new Error(
+				"EACCES: permission denied, mkdir /home/owner/runs/x C:\\Users\\owner\\x",
+			),
 		).error_message,
 		"<text>: permission denied, mkdir <path> <path>",
 	);

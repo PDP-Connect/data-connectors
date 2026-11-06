@@ -8,6 +8,7 @@ import {
 	type DownloadIntent,
 	decodeDataUrl,
 	disarmDownloadCapture,
+	type EvaluatingPage,
 	fetchSameOriginFile,
 	formIntentUrl,
 	waitForDownloadIntent,
@@ -123,12 +124,18 @@ async function withStubPage<T>(fn: () => Promise<T>): Promise<T> {
 	set("open", realOpen);
 	set("addEventListener", () => undefined);
 	set("removeEventListener", () => undefined);
-	set("HTMLAnchorElement", class {
-		click(): void {}
-	});
-	set("HTMLFormElement", class {
-		submit(): void {}
-	});
+	set(
+		"HTMLAnchorElement",
+		class {
+			click(): void {}
+		},
+	);
+	set(
+		"HTMLFormElement",
+		class {
+			submit(): void {}
+		},
+	);
 	set("HTMLIFrameElement", class {});
 	set("HTMLButtonElement", class {});
 	set("HTMLInputElement", class {});
@@ -144,8 +151,11 @@ async function withStubPage<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 test("armDownloadCapture: window.open records the intent and returns a window that does not navigate", async () => {
-	const page = {
-		evaluate: async <T, A>(fn: (arg: A) => T, arg: A): Promise<T> => fn(arg),
+	const page: EvaluatingPage = {
+		evaluate: async <R, A>(
+			fn: (arg: A) => R | Promise<R>,
+			arg: A,
+		): Promise<R> => fn(arg),
 	};
 	await withStubPage(async () => {
 		assert.equal(await armDownloadCapture(page), true);

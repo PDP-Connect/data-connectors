@@ -264,7 +264,8 @@ export type ChaseDurableFailureCode =
 
 const CHASE_ERROR_MESSAGE_MAX = 160;
 /** A reason code at the start of an error string, as in `code` or `code: detail`. */
-const CHASE_ERROR_CODE_RE = /^([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?=$|\s|\(|:(?!\/\/))/;
+const CHASE_ERROR_CODE_RE =
+	/^([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?=$|\s|\(|:(?!\/\/))/;
 
 /**
  * Error text with every value taken out, for durable diagnostics: URLs,
