@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	EmittedMessage,
@@ -363,6 +364,15 @@ const ALL = [
 	"following",
 	"followers",
 ];
+
+// Every run below reads the same synthetic account, so one capture serves the file.
+const accountIdentity = captureAccountIdentity();
+
+test("a run reports the account's user_id_str once", async () => {
+	const { page } = fakePage(standardAnswer);
+	await collectTikTok(harness(ALL, page).ctx, noDelay);
+	assert.deepEqual(accountIdentity.ids, ["100007"]);
+});
 
 test("a full run reads every stream from its own path and checkpoints each after its records", async () => {
 	const { calls, page } = fakePage(standardAnswer);

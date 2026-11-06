@@ -57,6 +57,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import type { Page } from "playwright";
 import { z } from "zod";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
@@ -2057,6 +2058,9 @@ export async function collectXBrowser(
 		await reportSignedOut(ctx, requestedStreams);
 		return;
 	}
+	// The numeric user id from the `twid` cookie (not a credential): it does not
+	// change with the @handle.
+	await reportAccountIdentity(reading.userId);
 
 	const run: Run = {
 		activeStream: null,

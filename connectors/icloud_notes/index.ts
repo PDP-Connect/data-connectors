@@ -95,6 +95,7 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
+import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import {
 	probeICloudSession,
 	probeICloudSessionInPlace,
@@ -1226,6 +1227,9 @@ export async function collectAllStreams(
 			"icloud_navigation_changed: page changed while resolving CloudKit owner",
 		);
 	}
+	// The Apple DSID (dsInfo.dsid): it does not change with the Apple ID email
+	// or the account name.
+	await reportAccountIdentity(config.dsid);
 	if (requested.has("profile")) {
 		const profile = {
 			id: config.dsid,

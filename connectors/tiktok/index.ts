@@ -135,6 +135,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
@@ -1261,6 +1262,8 @@ export async function collectTikTok(
 			"tiktok_auth_failed: TikTok's account endpoint returned no signed-in account",
 		);
 	}
+	// The numeric TikTok user id (user_id_str): it does not change with the handle.
+	await reportAccountIdentity(account.id);
 	const secUid = account.secUid;
 	/** Base query of the owner's own item lists. */
 	const ownList: Params = { secUid, coverFormat: "2" };

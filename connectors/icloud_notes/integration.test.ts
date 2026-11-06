@@ -26,7 +26,11 @@ import type {
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import { collectAllStreams, ensureICloudNotesSession } from "./index.ts";
+
+// These runs read one synthetic account; keep its id off the test runner's stdout.
+captureAccountIdentity();
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";

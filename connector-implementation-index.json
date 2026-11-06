@@ -15498,8 +15498,9 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.46",
+				"version": "0.1.47",
 				"display_name": "iCloud Notes",
+				"account_identity": "required",
 				"brand": {
 					"icon": "icon.svg",
 					"background_color": "#FFD426"
@@ -25556,8 +25557,9 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.14",
+				"version": "0.3.15",
 				"display_name": "TikTok (Browser Sign-In)",
+				"account_identity": "required",
 				"brand": {
 					"icon": "icon.svg",
 					"background_color": "#000000"
@@ -27358,8 +27360,9 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.30",
+				"version": "0.2.31",
 				"display_name": "Venmo",
+				"account_identity": "required",
 				"brand": {
 					"icon": "icon.svg",
 					"background_color": "#3D95CE"
@@ -29826,8 +29829,9 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "X (Browser Sign-In)",
+				"account_identity": "required",
 				"brand": {
 					"icon": "icon.svg",
 					"background_color": "#000000"

@@ -9,8 +9,9 @@
 	},
 	"connector_key": "venmo",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-	"version": "0.2.30",
+	"version": "0.2.31",
 	"display_name": "Venmo",
+	"account_identity": "required",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#3D95CE"

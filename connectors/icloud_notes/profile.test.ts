@@ -7,8 +7,22 @@ import { test } from "node:test";
 import type { Page } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams } from "./index.ts";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
+import { collectAllStreams as collectAllStreamsOnWire } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+/** The account ids the last `collectAllStreams` call reported. */
+let lastAccountIds: string[] = [];
+/** `collectAllStreams` with a fresh account-identity recorder per call, so tests that switch accounts do not trip the one-id-per-run check. */
+async function collectAllStreams(ctx: BrowserCollectContext): Promise<void> {
+	const accountIdentity = captureAccountIdentity();
+	try {
+		await collectAllStreamsOnWire(ctx);
+	} finally {
+		lastAccountIds = accountIdentity.ids;
+		accountIdentity.restore();
+	}
+}
 
 const VALIDATE_URL = "https://setup.icloud.com/setup/ws/1/validate";
 const NOTES_URL = "https://www.icloud.com/notes";
@@ -83,6 +97,7 @@ function profileState(harness: ReturnType<typeof makeRecordingEmit>) {
 test("profile: emits the source fullName with its real dsid using only the existing validate request", async () => {
 	const run = fixture({ dsid: "12345", fullName: " Zoë 李 " });
 	await collectAllStreams(run.ctx);
+	assert.deepEqual(lastAccountIds, ["12345"], "the dsid is also the account id");
 	assert.deepEqual(run.calls, [VALIDATE_URL]);
 	assert.equal(run.harness.emitted.length, 1);
 	assert.equal(run.harness.emitted[0]?.stream, "profile");
@@ -174,6 +189,12 @@ test("profile: fingerprinting suppresses unchanged data and emits changed or rem
 		JSON.stringify(profileState(switched.harness)).includes("12345"),
 		false,
 	);
+});
+
+test("account id: reported for a run that requests no profile, and for a numeric dsid", async () => {
+	const notesOnly = fixture({ dsid: 12_345, fullName: "Test User" }, {}, ["notes"]);
+	await collectAllStreams(notesOnly.ctx).catch(() => undefined);
+	assert.deepEqual(lastAccountIds, ["12345"]);
 });
 
 test("profile: stream selection adds no profile calls or records when unrequested", async () => {

@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, test } from "node:test";
 import type { Page } from "playwright";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	makeRecordingEmit,
@@ -220,6 +221,16 @@ test("collectTransactions: a partial page emits every modeled record and clears 
 		"2026-07-02T00:00:00Z",
 		"latest date_created across the page wins",
 	);
+});
+
+// Every run below reads the same synthetic owner, so one capture serves the file.
+const accountIdentity = captureAccountIdentity();
+
+test("a run reports the owner's user id, whichever streams it reads", async () => {
+	const { fetchPath } = makeScriptedFetch({});
+	const { ctx } = makeCtx({}, []);
+	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.deepEqual(accountIdentity.ids, [OWNER_ID]);
 });
 
 test("collectTransactions emits zone-less dates and stores a normalized latest cursor", async () => {

@@ -9,8 +9,9 @@
 	},
 	"connector_key": "tiktok",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-	"version": "0.3.14",
+	"version": "0.3.15",
 	"display_name": "TikTok (Browser Sign-In)",
+	"account_identity": "required",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#000000"

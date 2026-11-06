@@ -9,8 +9,9 @@
 	},
 	"connector_key": "x-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-	"version": "0.1.19",
+	"version": "0.1.20",
 	"display_name": "X (Browser Sign-In)",
+	"account_identity": "required",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#000000"

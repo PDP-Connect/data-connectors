@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import {
 	assertUserFacingProgress,
 	DIAGNOSTIC_LINE_MAX_CHARS,
@@ -881,6 +882,15 @@ function layoutReport(lines: string[]): {
 		lines: reportLines,
 	};
 }
+
+// Every run below reads the same synthetic owner, so one capture serves the file.
+const accountIdentity = captureAccountIdentity();
+
+test("a run reports the owner's numeric user id from the session cookie", async () => {
+	const app = new FakeWebApp();
+	await captureDiagnostics(() => collectXBrowser(harness(app).ctx, FAST));
+	assert.deepEqual(accountIdentity.ids, [OWNER_ID]);
+});
 
 test("a first run reads the profile, posts, bookmarks and likes the app loads", async () => {
 	const app = new FakeWebApp();
