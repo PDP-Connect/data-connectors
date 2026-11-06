@@ -600,7 +600,7 @@
 	"mobile": {
 		"pageshim": {
 			"scope_prefix": "chase",
-			"login_url": "https://secure.chase.com/web/auth/dashboard#/dashboard/overview",
+			"login_url": "https://secure.chase.com/web/auth/dashboard",
 			"login_message": "Sign in to Chase, then return here.",
 			"collect_export": "collectChasePageShim",
 			"probe_export": "probeChasePageShimSession",

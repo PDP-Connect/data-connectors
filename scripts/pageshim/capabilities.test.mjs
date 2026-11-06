@@ -364,3 +364,17 @@ test("chase and usaa: Mobile eligibility comes from their declared features", ()
 		);
 	}
 });
+
+test("every mobile.pageshim.login_url is an https URL without a fragment", () => {
+	// The Mobile catalog copies login_url to the shell's startUrl, and the
+	// shell rejects any startUrl that is not https or that has a fragment.
+	const root = fileURLToPath(new URL("../..", import.meta.url));
+	for (const name of pageShimConnectors(root)) {
+		const loginUrl = manifest(name).mobile?.pageshim?.login_url;
+		if (loginUrl === undefined) continue;
+		const url = new URL(loginUrl);
+		assert.equal(url.protocol, "https:", name);
+		assert.equal(url.hash, "", name);
+		assert.equal(loginUrl.includes("#"), false, name);
+	}
+});

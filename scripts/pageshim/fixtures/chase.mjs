@@ -207,7 +207,7 @@ export const chaseFixtures = {
 	hosts: /^https:\/\/secure\.chase\.com\//,
 	resolve: resolveFixture,
 	setLoggedIn,
-	loginUrl: `${ORIGIN}/web/auth/dashboard#/dashboard/overview`,
+	loginUrl: `${ORIGIN}/web/auth/dashboard`,
 	homeUrl: `${ORIGIN}/web/auth/dashboard`,
 };
 
