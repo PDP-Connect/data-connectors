@@ -61,7 +61,12 @@ export interface ShimPage {
 		offset: number,
 		length: number,
 	) => Promise<{ ok: boolean; text?: string; error?: string }>;
+	/** Optional runtime features the shell can take. Absent on older shells. */
+	capabilities?: () => string[];
 }
+
+/** The shell takes `delete:<stream>` messages and `covered` in `result:done`. */
+export const RECORD_OPS_CAPABILITY = "record-ops";
 
 type Msg = { type: string; [k: string]: unknown };
 type Rec = Record<string, unknown>;
@@ -157,6 +162,17 @@ function withBridgeCallTimeout(
 function hostAcceptsStreamedResults(page: ShimPage): boolean {
 	try {
 		return typeof (page as { input?: unknown }).input === "function";
+	} catch {
+		return false;
+	}
+}
+
+function hostHasCapability(page: ShimPage, name: string): boolean {
+	try {
+		const offered = (page as { capabilities?: unknown }).capabilities;
+		if (typeof offered !== "function") return false;
+		const names = offered.call(page) as unknown;
+		return Array.isArray(names) && names.includes(name);
 	} catch {
 		return false;
 	}
@@ -354,6 +370,8 @@ export interface PageshimConnector {
 	loginMessage: string;
 	validateRecord: Parameters<typeof makeEmitRecord>[0]["validateRecord"];
 	probe: (page: ReturnType<typeof playwrightPageFacade>) => Promise<boolean>;
+	/** Marks a record as a delete. Used only when the shell offers `record-ops`. */
+	isTombstone?: (stream: string, data: Rec) => boolean;
 	/** Optional one-time navigation before the first probe; repeated probes must be observational. */
 	prepareProbe?: (
 		page: ReturnType<typeof playwrightPageFacade>,
@@ -478,6 +496,9 @@ export async function runOnPageShim(
 	for (const [stream, scope] of scopeByStream)
 		if (Object.hasOwn(initialState, scope)) state[stream] = initialState[scope];
 	const outcome = new CollectionOutcome(prefix, requested.keys());
+	const recordOps = hostHasCapability(pageShim, RECORD_OPS_CAPABILITY);
+	// A stream that starts from a saved cursor is read incrementally.
+	const incrementalStreams = new Set(Object.keys(state));
 	const streamedStreams = new Set<string>();
 	// A thin host accepts streamed results only (mobile-host-v1 amendment A6).
 	const streamingHost = hostAcceptsStreamedResults(pageShim);
@@ -790,6 +811,14 @@ export async function runOnPageShim(
 		switch (msg.type) {
 			case "RECORD": {
 				const stream = String(msg.stream);
+				if (recordOps && msg.op === "delete") {
+					// A delete is not a collected row: it never reaches result:*
+					// and does not count as a live record for coverage.
+					if (!requested.has(stream))
+						throw new Error(`unrequested collection stream: ${stream}`);
+					await shim.setData(`delete:${stream}`, msg.data);
+					return;
+				}
 				outcome.record(stream);
 				if (streamConfig) {
 					const target = streamOrder[0];
@@ -873,7 +902,7 @@ export async function runOnPageShim(
 		emit: emit as never,
 		emittedAt: new Date().toISOString(),
 		validateRecord: connector.validateRecord,
-		isTombstone: undefined,
+		isTombstone: recordOps ? connector.isTombstone : undefined,
 		timeRangeFieldFor,
 	});
 	const result = (
@@ -991,6 +1020,19 @@ export async function runOnPageShim(
 		const outcomesByStream = new Map(
 			finalized.streams.map((stream) => [stream.stream, stream]),
 		);
+		// Streams whose output is complete for what was asked. The shell reads
+		// this instead of recomputing it from records.
+		const covered = (): string[] =>
+			finalized.streams
+				.filter(
+					(stream) =>
+						!stream.partial &&
+						((outcome.counts[stream.stream] ?? 0) > 0 ||
+							stream.confirmedEmptyInventory ||
+							incrementalStreams.has(stream.stream)),
+				)
+				.map((stream) => stream.stream);
+		const coveredField = recordOps ? { covered: covered() } : {};
 		const completionStatus = (summary: { count: number; label: string }) =>
 			`${finalized.partial ? "Partial:" : "Complete!"} ${summary.count} ${summary.label}`;
 		const flushCheckpoints = async (): Promise<void> => {
@@ -1028,6 +1070,7 @@ export async function runOnPageShim(
 					scopeCount: streamedScopeCount,
 					exportSummary,
 					errors,
+					...coveredField,
 				});
 				await shim.setData("status", completionStatus(exportSummary));
 				return;
@@ -1075,6 +1118,7 @@ export async function runOnPageShim(
 				scopeCount: scopeEntries.length,
 				exportSummary,
 				errors,
+				...coveredField,
 			});
 			await shim.setData("status", completionStatus(exportSummary));
 			return;

@@ -121,6 +121,12 @@ export const THIN_HOST_SHIM_METHODS = SHIM_METHODS.flatMap((method) =>
 	method === "requestedScopeEntries" ? [method, "input"] : [method],
 );
 
+// A shell may also list optional features, e.g. "record-ops".
+const withCapabilities = (methods) => {
+	const at = methods.indexOf("input") + 1 || methods.indexOf("requestedScopeEntries") + 1;
+	return [...methods.slice(0, at), "capabilities", ...methods.slice(at)];
+};
+
 // Runs inside the RUNNER page. Builds the shim `page`, runs the bundle.
 async function hostMain({
 	source,
@@ -135,6 +141,7 @@ async function hostMain({
 	includeScopeEntries,
 	omitScopeEntries,
 	thinHost,
+	hostCapabilities,
 }) {
 	// Deadline time must continue advancing when fixture calendar time is frozen.
 	const elapsedNow = performance.now.bind(performance);
@@ -166,6 +173,7 @@ async function hostMain({
 			includeScopeEntries ? scopes : undefined,
 		// Opaque run input from the web layer; null for catalog runs.
 		...(thinHost ? { input: () => null } : {}),
+		...(hostCapabilities ? { capabilities: () => hostCapabilities } : {}),
 		evaluate: (code) => call("evaluate", [String(code)]),
 		goto: (url) => call("goto", [url]),
 		sleep,
@@ -553,6 +561,7 @@ export async function runHarness({
 	clockNowMs,
 	legacyScopeBridge = false,
 	missingScopeEntries = false,
+	hostCapabilities,
 	acceptLegacyResult,
 	observeBridge,
 	signal,
@@ -562,6 +571,7 @@ export async function runHarness({
 	const calls = {};
 	const pageNavigations = [];
 	const data = {};
+	const deletes = {};
 	const states = { ...initialState };
 	const pendingStates = {};
 	const stateMessages = [];
@@ -729,6 +739,8 @@ export async function runHarness({
 						/^(Complete!|Partial:)/.test(String(a[1]))
 					) {
 						return { __shimError: "synthetic final status write failed" };
+					} else if (String(a[0]).startsWith("delete:")) {
+						(deletes[a[0].slice("delete:".length)] ??= []).push(a[1]);
 					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":
@@ -883,7 +895,11 @@ export async function runHarness({
 			scopes,
 			initialState,
 			supportsStateArgument,
-			methods: resultStreaming ? THIN_HOST_SHIM_METHODS : SHIM_METHODS,
+			methods: ((methods) =>
+				hostCapabilities ? withCapabilities(methods) : methods)(
+				resultStreaming ? THIN_HOST_SHIM_METHODS : SHIM_METHODS,
+			),
+			hostCapabilities: hostCapabilities ?? null,
 			loginWaitMs,
 			env,
 			timerScale,
@@ -905,6 +921,7 @@ export async function runHarness({
 			bridgeCallCount,
 			maxBridgePayloadUnits,
 			data,
+			deletes,
 			stateAckOrder,
 			resultDoneAttemptOrder,
 			resultWriteOrder,
