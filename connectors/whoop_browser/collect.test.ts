@@ -704,6 +704,9 @@ for (const failure of BOOTSTRAP_FAILURES) {
 		assert.deepEqual(h.emitted, []);
 		assert.deepEqual(messagesOf(h, "STATE"), []);
 		assert.deepEqual(messagesOf(h, "PROGRESS"), []);
+		// A run that reads nothing under an unknown account may end without an
+		// id; only a bootstrap that carries one lets the walk start.
+		assert.deepEqual(lastAccountIds, []);
 	});
 }
 
