@@ -394,6 +394,33 @@ test("chase: QFX history Chase will not send is reported with its range", {
 	}
 });
 
+test("usaa: Export date fields that initialize late still take the dates", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/usaa.mjs");
+	fx.useExportDateFields("late_init");
+	try {
+		const built = await buildPageshim({
+			connector: "usaa",
+			outfile: join(out, "usaa-late-date-fields.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["usaa.accounts", "usaa.transactions"],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.equal(
+			r.result.exportSummary.details.transactions,
+			fx.pageshimCase.exportSummary.details.transactions,
+		);
+	} finally {
+		fx.useExportDateFields("normal");
+	}
+});
+
 test("usaa: a failed Export dialog names the failed check for each account", {
 	timeout: 300_000,
 }, async () => {

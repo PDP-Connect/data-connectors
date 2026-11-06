@@ -4342,6 +4342,12 @@ const USAA_EXPORT_DIALOG_SELECTOR =
 	'[role="dialog"]:not([aria-hidden="true"]):not([hidden]):not([id*="onetrust" i]):not([aria-label="Privacy Preference Center"]):not(#onetrust-consent-sdk [role="dialog"])';
 /** Polling bound for the Export dialog's date fields after "date range" is chosen. */
 const USAA_DATE_FIELDS_WAIT_MS = 3000;
+/**
+ * The least time between choosing "date range" and typing the dates. The
+ * fill that exported all four device accounts waited 300 ms here; filling as
+ * soon as the fields appeared got `date_fields_rejected` on two of four.
+ */
+const USAA_DATE_FILL_SETTLE_MS = 300;
 
 /**
  * Whether the Export dialog is "ready" (its `selectionType` control has
@@ -4394,6 +4400,7 @@ async function fillUsaaExportDialog(arg: {
 	to: string;
 	selector: string;
 	fieldsWaitMs: number;
+	settleMs: number;
 }): Promise<UsaaExportFill> {
 	const dialog = Array.from(
 		document.querySelectorAll<HTMLElement>(arg.selector),
@@ -4423,13 +4430,16 @@ async function fillUsaaExportDialog(arg: {
 		dialog.querySelector<HTMLInputElement>(fromSelector),
 		dialog.querySelector<HTMLInputElement>(toSelector),
 	];
-	// The date fields render or enable after the change event; poll, bounded.
+	// The date fields render or enable after the change event; poll, bounded,
+	// and give them at least settleMs before typing into them.
 	const started = Date.now();
 	const deadline = started + arg.fieldsWaitMs;
+	const settled = started + arg.settleMs;
 	let [from, to] = fields();
 	while (
-		!(from && to && !from.disabled && !to.disabled) &&
-		Date.now() < deadline
+		(!(from && to && !from.disabled && !to.disabled) &&
+			Date.now() < deadline) ||
+		Date.now() < settled
 	) {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		[from, to] = fields();
@@ -4642,6 +4652,7 @@ export function inPageCsvExport(): UsaaCsvExport {
 				to: mmddyyyy(options.untilDate),
 				selector: USAA_EXPORT_DIALOG_SELECTOR,
 				fieldsWaitMs: USAA_DATE_FIELDS_WAIT_MS,
+				settleMs: USAA_DATE_FILL_SETTLE_MS,
 			});
 			if (fill.check) {
 				const fillError = {
