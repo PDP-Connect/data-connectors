@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chaseMobileQfxWindow } from "./index.ts";
+import { chaseMobileQfxWindow, shorterChaseQfxWindowFrom } from "./index.ts";
 
 // Chase's download form offers at most 24 months of card activity.
 const RUN = "2026-11-05T12:00:00.000Z";
@@ -52,4 +52,23 @@ test("Mobile QFX window: a requested range is clamped to 24 months", () => {
 		),
 		{ activity: "date_range", from: "2026-03-01", to: "2026-11-05" },
 	);
+});
+
+test("Mobile QFX window: an empty response halves the window down to 30 days", () => {
+	const to = "2026-11-05";
+	const froms: string[] = [];
+	let from: string | null = EARLIEST;
+	while (from !== null) {
+		froms.push(from);
+		from = shorterChaseQfxWindowFrom(from, to);
+	}
+	// 729, 364, 182, 91 and 45 days; 22 would be under the floor.
+	assert.deepEqual(froms, [
+		EARLIEST,
+		"2025-11-06",
+		"2026-05-07",
+		"2026-08-06",
+		"2026-09-21",
+	]);
+	assert.equal(shorterChaseQfxWindowFrom("2026-10-06", to), null);
 });

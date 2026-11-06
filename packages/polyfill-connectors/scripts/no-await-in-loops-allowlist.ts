@@ -812,14 +812,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/chase/index.ts",
-			line: 3317,
+			line: 3344,
 			column: 18,
 			category: "bounded_retry_polling",
 			note: "waitForChaseFormIntent(): reads capture intents in arrival order until the form submission or the deadline",
 		},
 		{
 			path: "connectors/chase/index.ts",
-			line: 3585,
+			line: 3442,
+			column: 7,
+			category: "bounded_retry_polling",
+			note: "fetchChaseQfxInPage(): asks for a shorter QFX window only after the longer one came back empty, down to a floor",
+		},
+		{
+			path: "connectors/chase/index.ts",
+			line: 3652,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitStatementIndexOnly(): Mobile statements index, Collection Profile protocol emission requiring in-order delivery",

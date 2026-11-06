@@ -30,6 +30,9 @@ const TRANSACTIONS = [
 	{ fitid: "2024SYN0004", date: isoDay(900), amount: "-5.00", name: "OUTSIDE WINDOW" },
 ];
 
+/** The longest QFX window this synthetic account serves; longer gets 204. */
+const SERVED_WINDOW_DAYS = 400;
+
 let loggedIn = true;
 /** Every QFX request the site answered, for assertions. */
 export const qfxRequests = [];
@@ -182,6 +185,10 @@ function resolveQfx(url) {
 	const end = params.get("end-date") ?? "";
 	if (!/^\d{8}$/.test(start) || !/^\d{8}$/.test(end)) return html("Choose a date range", 400);
 	const iso = (p) => `${p.slice(0, 4)}-${p.slice(4, 6)}-${p.slice(6, 8)}`;
+	// Chase answers a window longer than it will serve with 204 and no body.
+	if ((Date.parse(iso(end)) - Date.parse(iso(start))) / DAY_MS > SERVED_WINDOW_DAYS) {
+		return { status: 204, contentType: "application/vnd.intu.qfx", body: "" };
+	}
 	return {
 		status: 200,
 		contentType: "application/vnd.intu.qfx",
@@ -235,8 +242,18 @@ export const pageshimCase = {
 		label: "records",
 		details: { accounts: 0, transactions: 0, current_activity: 0, statements: 0, balances: 0 },
 	},
-	// Statement PDFs are not kept on Mobile; the statement list is.
+	// The QFX endpoint serves at most SERVED_WINDOW_DAYS, so the connector
+	// halves its 729-day window once and says so. Statement PDFs are not kept
+	// on Mobile; the statement list is.
 	partialErrors: [
+		{
+			errorClass: "partial",
+			reason: `Chase served activity from ${isoDay(364)} to ${isoDay(0)} for account 1/1, not from ${isoDay(729)}`,
+			scope: "chase.transactions",
+			phase: "collect",
+			disposition: "degraded",
+			code: "qfx_history_partial",
+		},
 		{
 			errorClass: "partial",
 			reason:

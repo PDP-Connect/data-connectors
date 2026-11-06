@@ -3151,8 +3151,15 @@ const CHASE_DOCUMENTS_URL =
 	"https://secure.chase.com/web/auth/dashboard#/dashboard/documents/myDocs/index;mode=documents";
 const CHASE_DOCUMENTS_ROW_SELECTOR = '[id^="button-documentsAccordion-"]';
 const CHASE_DOWNLOAD_BUTTON_SELECTOR = "mds-button#download";
-/** Chase's download form serves about 24 months of activity. */
+/**
+ * The longest window a Mobile QFX request asks for: the download form offers
+ * about 24 months. Chase can answer a long window with HTTP 204 and no body
+ * (seen for 600 days and more on one account), so the request is retried
+ * with shorter windows; see `shorterChaseQfxWindowFrom`.
+ */
 const CHASE_QFX_WINDOW_DAYS = 729;
+/** The shortest window the 204 retry asks for. */
+const CHASE_QFX_MIN_WINDOW_DAYS = 30;
 const MOBILE_SESSION_PROBE_MS = 3000;
 const MOBILE_FORM_INTENT_WAIT_MS = 10_000;
 const MOBILE_QFX_FIELDS = {
@@ -3258,6 +3265,26 @@ export function chaseMobileQfxWindow(
 	return { activity: "all", from: earliest, to: today };
 }
 
+function isoDaysBetween(from: string, to: string): number {
+	return Math.round(
+		(Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) /
+			86_400_000,
+	);
+}
+
+/**
+ * The start date of the next, shorter QFX window after Chase answered
+ * `from`..`to` with an empty response: half the length, ending on the same
+ * day. Null when that would be shorter than CHASE_QFX_MIN_WINDOW_DAYS.
+ */
+export function shorterChaseQfxWindowFrom(
+	from: string,
+	to: string,
+): string | null {
+	const days = Math.floor(isoDaysBetween(from, to) / 2);
+	return days < CHASE_QFX_MIN_WINDOW_DAYS ? null : isoDaysBefore(to, days);
+}
+
 /** Click the download form's Download button. Runs in the page. */
 function clickChaseDownloadButton(selector: string): boolean {
 	const host = document.querySelector<HTMLElement>(selector);
@@ -3326,7 +3353,14 @@ async function waitForChaseFormIntent(
 }
 
 type ChaseQfxFetch =
-	| { kind: "qfx"; text: string }
+	| {
+			kind: "qfx";
+			text: string;
+			/** The start of the window Chase served; later than asked if shortened. */
+			from: string;
+			/** Length in days of each window asked for, in order. */
+			windowsTried: number[];
+	  }
 	| { kind: "no_activity" }
 	| { kind: "failed"; error: string; diagnostics: Record<string, unknown> };
 
@@ -3393,41 +3427,57 @@ async function fetchChaseQfxInPage(
 	if (action.origin !== "https://secure.chase.com") {
 		return { kind: "failed", error: "download_form_cross_origin", diagnostics };
 	}
-	const overrides: Record<string, string> = {
-		[MOBILE_QFX_FIELDS.type]: "QFX",
-		[MOBILE_QFX_FIELDS.start]: window.from.replaceAll("-", ""),
-		[MOBILE_QFX_FIELDS.end]: window.to.replaceAll("-", ""),
-	};
-	const url = formIntentUrl(intent, overrides);
-	const file =
-		intent.method === "POST"
-			? await fetchSameOriginFile(page, action.origin + action.pathname, {
-					as: "text",
-					method: "POST",
-					body: new URL(url).search.slice(1),
-					headers: { "content-type": "application/x-www-form-urlencoded" },
-				})
-			: await fetchSameOriginFile(page, url, { as: "text" });
-	const responseDiagnostics = {
-		...diagnostics,
-		http_status: file.status,
-		content_type: file.contentType,
-		byte_length: file.byteLength,
-		...(file.error ? { fetch_error: file.error } : {}),
-	};
-	const text = file.text ?? "";
-	const head = text.slice(0, 1024).toUpperCase();
-	if (file.ok && (head.includes("OFXHEADER:") || head.includes("<OFX>"))) {
-		return { kind: "qfx", text };
+	const windowsTried: number[] = [];
+	let from = window.from;
+	for (;;) {
+		windowsTried.push(isoDaysBetween(from, window.to));
+		const overrides: Record<string, string> = {
+			[MOBILE_QFX_FIELDS.type]: "QFX",
+			[MOBILE_QFX_FIELDS.start]: from.replaceAll("-", ""),
+			[MOBILE_QFX_FIELDS.end]: window.to.replaceAll("-", ""),
+		};
+		const url = formIntentUrl(intent, overrides);
+		const file =
+			intent.method === "POST"
+				? await fetchSameOriginFile(page, action.origin + action.pathname, {
+						as: "text",
+						method: "POST",
+						body: new URL(url).search.slice(1),
+						headers: { "content-type": "application/x-www-form-urlencoded" },
+					})
+				: await fetchSameOriginFile(page, url, { as: "text" });
+		const responseDiagnostics = {
+			...diagnostics,
+			http_status: file.status,
+			content_type: file.contentType,
+			byte_length: file.byteLength,
+			windows_tried_days: windowsTried,
+			...(file.error ? { fetch_error: file.error } : {}),
+		};
+		const text = file.text ?? "";
+		const head = text.slice(0, 1024).toUpperCase();
+		if (file.ok && (head.includes("OFXHEADER:") || head.includes("<OFX>"))) {
+			return { kind: "qfx", text, from, windowsTried };
+		}
+		if (file.ok && NO_ACTIVITY_CONFIRMATION_RE.test(text)) {
+			return { kind: "no_activity" };
+		}
+		// Chase answers a window it will not serve with 204 and no body.
+		const empty = file.ok && text.trim() === "";
+		const shorter = empty ? shorterChaseQfxWindowFrom(from, window.to) : null;
+		if (shorter === null) {
+			return {
+				kind: "failed",
+				error: empty
+					? "qfx_window_rejected"
+					: file.ok
+						? "response_not_qfx"
+						: `http_${file.status || "error"}`,
+				diagnostics: responseDiagnostics,
+			};
+		}
+		from = shorter;
 	}
-	if (file.ok && NO_ACTIVITY_CONFIRMATION_RE.test(text)) {
-		return { kind: "no_activity" };
-	}
-	return {
-		kind: "failed",
-		error: file.ok ? "response_not_qfx" : `http_${file.status || "error"}`,
-		diagnostics: responseDiagnostics,
-	};
 }
 
 /** `runTransactionsAndBalances` per-account step for the Mobile path. */
@@ -3471,6 +3521,8 @@ async function processAccountInPage(
 		await emitNoActivityProgress(deps, window.activity);
 		return classifyNoActivityOutcome(account.internal_id, window.activity);
 	}
+	// A shortened window is a bounded range, not the history asked for.
+	const shortened = fetched.kind === "qfx" && fetched.from > window.from;
 	let parsed: unknown;
 	let failure: {
 		reason: "qfx_download_failed" | "qfx_parse_failed";
@@ -3517,10 +3569,25 @@ async function processAccountInPage(
 			errorClass: failure.reason,
 		};
 	}
+	if (shortened && fetched.kind === "qfx") {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "qfx_history_partial",
+			message: `Chase served activity from ${fetched.from} to ${window.to} for account ${progressLabel}, not from ${window.from}`,
+			diagnostics: {
+				requested_from: window.from,
+				covered_from: fetched.from,
+				covered_to: window.to,
+				windows_tried_days: fetched.windowsTried,
+				...accountProgressDiagnostic(accountProgress),
+			},
+		});
+	}
 	return processParsedAccountQfx(
 		deps,
 		account,
-		window.activity,
+		shortened ? "date_range" : window.activity,
 		parsed,
 		progressLabel,
 	);
