@@ -22,16 +22,35 @@ const visibleDate = (iso) => {
 	return `${MONTHS[m - 1]} ${d}, ${y}`;
 };
 
-/** Card activity the QFX endpoint serves. One row is older than the 24-month window. */
+/**
+ * Card activity the QFX endpoint serves. Two rows are older than a year, so
+ * only a second request reads them; one row is older than the 24-month
+ * window. One FITID is listed twice, as a device QFX did.
+ */
 const TRANSACTIONS = [
+	{ fitid: "2026SYN0001", date: isoDay(3), amount: "-42.17", name: "SYNTHETIC GROCER" },
 	{ fitid: "2026SYN0001", date: isoDay(3), amount: "-42.17", name: "SYNTHETIC GROCER" },
 	{ fitid: "2026SYN0002", date: isoDay(12), amount: "-9.99", name: "SYNTHETIC STREAMING" },
 	{ fitid: "2026SYN0003", date: isoDay(40), amount: "250.00", name: "PAYMENT THANK YOU" },
+	{ fitid: "2025SYN0005", date: isoDay(450), amount: "-18.40", name: "SYNTHETIC BOOKSHOP" },
+	{ fitid: "2024SYN0006", date: isoDay(700), amount: "-61.25", name: "SYNTHETIC HARDWARE" },
 	{ fitid: "2024SYN0004", date: isoDay(900), amount: "-5.00", name: "OUTSIDE WINDOW" },
 ];
 
-/** The longest QFX window this synthetic account serves; longer gets 204. */
+/**
+ * The longest range one QFX request may span; a longer one gets 204 and no
+ * body, as on the device (729 days got 204, 364 days got activity).
+ */
 const SERVED_WINDOW_DAYS = 400;
+
+let olderHistoryServed = true;
+/**
+ * Whether the endpoint serves requests that start more than a year back.
+ * When false it answers them with 204, however short the range.
+ */
+export function useOlderHistoryServed(value) {
+	olderHistoryServed = value;
+}
 
 let loggedIn = true;
 /** Every QFX request the site answered, for assertions. */
@@ -223,7 +242,10 @@ function resolveQfx(url) {
 	if (!/^\d{8}$/.test(start) || !/^\d{8}$/.test(end)) return html("Choose a date range", 400);
 	const iso = (p) => `${p.slice(0, 4)}-${p.slice(4, 6)}-${p.slice(6, 8)}`;
 	// Chase answers a window longer than it will serve with 204 and no body.
-	if ((Date.parse(iso(end)) - Date.parse(iso(start))) / DAY_MS > SERVED_WINDOW_DAYS) {
+	if (
+		(Date.parse(iso(end)) - Date.parse(iso(start))) / DAY_MS > SERVED_WINDOW_DAYS ||
+		(!olderHistoryServed && iso(start) < isoDay(364))
+	) {
 		return { status: 204, contentType: "application/vnd.intu.qfx", body: "" };
 	}
 	return {
@@ -270,27 +292,19 @@ export const pageshimCase = {
 		"chase.balances",
 	],
 	exportSummary: {
-		count: 9,
+		count: 11,
 		label: "records",
-		details: { accounts: 1, transactions: 3, current_activity: 2, statements: 2, balances: 1 },
+		details: { accounts: 1, transactions: 5, current_activity: 2, statements: 2, balances: 1 },
 	},
 	emptyExportSummary: {
 		count: 0,
 		label: "records",
 		details: { accounts: 0, transactions: 0, current_activity: 0, statements: 0, balances: 0 },
 	},
-	// The QFX endpoint serves at most SERVED_WINDOW_DAYS, so the connector
-	// halves its 729-day window once and says so. Statement PDFs are not kept
-	// on Mobile; the statement list is.
+	// The QFX endpoint serves at most SERVED_WINDOW_DAYS per request, so the
+	// connector reads its 729 days as two windows and reports no gap.
+	// Statement PDFs are not kept on Mobile; the statement list is.
 	partialErrors: [
-		{
-			errorClass: "partial",
-			reason: `Chase served activity from ${isoDay(364)} to ${isoDay(0)} for account 1/1, not from ${isoDay(729)}`,
-			scope: "chase.transactions",
-			phase: "collect",
-			disposition: "degraded",
-			code: "qfx_history_partial",
-		},
 		{
 			errorClass: "partial",
 			reason:

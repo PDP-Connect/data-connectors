@@ -353,6 +353,47 @@ test("chase: a documents page without the statement list is not reported as a sa
 	}
 });
 
+test("chase: QFX history Chase will not send is reported with its range", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chase.mjs");
+	fx.useOlderHistoryServed(false);
+	try {
+		const built = await buildPageshim({
+			connector: "chase",
+			outfile: join(out, "chase-mobile-qfx-partial.js"),
+		});
+		fx.qfxRequests.length = 0;
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["chase.accounts", "chase.transactions"],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		const day = (offset) =>
+			new Date(Date.now() - offset * 86_400_000).toISOString().slice(0, 10);
+		assert.deepEqual(
+			r.result.errors.map(({ scope, code, reason }) => ({ scope, code, reason })),
+			[
+				{
+					scope: "chase.transactions",
+					code: "qfx_history_partial",
+					reason: `Chase did not send activity from ${day(729)} to ${day(365)} for account 1/1`,
+				},
+			],
+		);
+		assert.equal(r.result.exportSummary.details.transactions, 3);
+		// The newest year, then the older year halved down to 45-day windows.
+		const qfx = fx.qfxRequests.filter(
+			(q) => q["account-activity-download-type-code"] === "QFX",
+		);
+		assert.equal(qfx.length, 1 + 1 + 2 + 4 + 8);
+	} finally {
+		fx.useOlderHistoryServed(true);
+	}
+});
+
 test("chatgpt: complete bounded walk is not marked partial just because STATE was emitted", {
 	timeout: 180_000,
 }, async () => {
