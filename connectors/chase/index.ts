@@ -1831,10 +1831,19 @@ export async function emitTransactionsForAccount(
 	activity: ActivityKind,
 	transactions: ReturnType<typeof extractFromQfx>["transactions"],
 	fingerprintCursor?: FingerprintCursor,
-): Promise<void> {
+): Promise<number> {
 	const prior = deps.maxSeenByAccount[account.internal_id];
 	let maxDate: string | null = prior?.max_seen_date ?? null;
+	// A QFX file can list one FITID twice (seen on a device: 741 rows, 740
+	// FITIDs). Both rows map to one record id, so emit each id once, keeping
+	// the last row as the store would.
+	const byFitid = new Map<string, (typeof transactions)[number]>();
 	for (const t of transactions) {
+		if (t.date) {
+			byFitid.set(t.fitid, t);
+		}
+	}
+	for (const t of byFitid.values()) {
 		if (!t.date) {
 			continue;
 		}
@@ -1881,6 +1890,7 @@ export async function emitTransactionsForAccount(
 			last_fetched_at: deps.emittedAt,
 		};
 	}
+	return byFitid.size;
 }
 
 export async function emitCurrentActivityForAccount(
@@ -2556,8 +2566,9 @@ export async function processParsedAccountQfx(
 		? { ...deps, maxSeenByAccount: { ...deps.maxSeenByAccount } }
 		: deps;
 
+	let distinctTransactions = 0;
 	if (deps.wantsTransactions) {
-		await emitTransactionsForAccount(
+		distinctTransactions = await emitTransactionsForAccount(
 			transactionDeps,
 			account,
 			activity,
@@ -2588,7 +2599,7 @@ export async function processParsedAccountQfx(
 	await deps.emit({
 		type: "PROGRESS",
 		stream: "transactions",
-		message: `Parsed account ${progressLabel}: emitted ${transactions.length} transaction(s)`,
+		message: `Parsed account ${progressLabel}: emitted ${distinctTransactions} transaction(s)`,
 	});
 	if (partial) {
 		await deps.emit({
