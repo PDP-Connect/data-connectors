@@ -61,6 +61,7 @@ import {
 	retryHttp,
 } from "@pdpp/connector-protocol/http-retry";
 import type { Page } from "playwright";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import type { AdaptiveLaneRunContext } from "../../packages/polyfill-connectors/src/adaptive-lane.ts";
 import { CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE } from "../../packages/polyfill-connectors/src/auto-login/chatgpt.ts";
 import {
@@ -131,6 +132,9 @@ import type {
 	ChatGptNode,
 	ConversationListItem,
 } from "./types.ts";
+
+// collectChatGpt reports the account id; keep it off the test runner's stdout.
+captureAccountIdentity();
 
 /** These scenarios isolate search/detail behavior against a healthy empty primary source. */
 const runConversationsAndMessagesStreams: typeof runUnionStreams = (
@@ -13611,7 +13615,11 @@ async function collectWithOversizeMessage(
 				return Promise.resolve("https://chatgpt.com/");
 			}
 			if (arg === undefined) {
-				return Promise.resolve({ accessToken: "tok", deviceId: "dev" });
+				return Promise.resolve({
+					accessToken: "tok",
+					deviceId: "dev",
+					userId: "user-synthetic-integration",
+				});
 			}
 			const { path } = arg as { path: string };
 			if (path.startsWith("/conversations/search?")) {
