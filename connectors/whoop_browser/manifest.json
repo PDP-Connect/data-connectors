@@ -7,8 +7,9 @@
 	},
 	"connector_key": "whoop-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop-browser",
-	"version": "0.1.8",
+	"version": "0.1.9",
 	"display_name": "WHOOP (Browser Sign-In)",
+	"account_identity": "required",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#000000"

@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import type {
 	EmittedMessage,
 	StreamScope,
@@ -299,28 +300,36 @@ interface RunOptions {
 	state?: Record<string, unknown>;
 	streams?: readonly Stream[];
 }
+/** The account ids the last `collect` call reported. */
+let lastAccountIds: string[] = [];
 async function collect(
 	fake: Fake,
 	options: RunOptions = {},
 ): Promise<RecordingEmit> {
 	const h = makeRecordingEmit(validateRecord);
+	const accountIdentity = captureAccountIdentity();
 	const requested = new Map<string, StreamScope>();
 	for (const name of options.streams ?? STREAMS) {
 		const range = options.ranges?.[name];
 		requested.set(name, range ? { name, time_range: range } : { name });
 	}
-	await collectWhoopBrowser(
-		{
-			collectionMode: options.mode ?? "incremental",
-			emit: h.emit,
-			emitRecord: h.emitRecord,
-			page: fake.page,
-			requested,
-			state: options.state ?? {},
-		},
-		{ requestDelayMs: 0, sleep: fake.sleep, ...options.pacing },
-		options.now ?? NOW,
-	);
+	try {
+		await collectWhoopBrowser(
+			{
+				collectionMode: options.mode ?? "incremental",
+				emit: h.emit,
+				emitRecord: h.emitRecord,
+				page: fake.page,
+				requested,
+				state: options.state ?? {},
+			},
+			{ requestDelayMs: 0, sleep: fake.sleep, ...options.pacing },
+			options.now ?? NOW,
+		);
+	} finally {
+		lastAccountIds = accountIdentity.ids;
+		accountIdentity.restore();
+	}
 	return h;
 }
 
@@ -420,6 +429,12 @@ function assertStateLast(h: RecordingEmit): void {
 		);
 	}
 }
+
+// ── Account identity ───────────────────────────────────────────────────────
+test("collect: reports the bootstrap's user id (the fixture's synthetic 41001) once", async () => {
+	await collect(fakeWhoop(fixtures()));
+	assert.deepEqual(lastAccountIds, ["41001"]);
+});
 
 // ── First run ──────────────────────────────────────────────────────────────
 test("collect: a first run emits each fixture record once, though every window answers the whole fixture", async () => {

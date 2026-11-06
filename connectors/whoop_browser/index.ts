@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,6 +11,7 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
+import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
@@ -743,6 +745,10 @@ export async function collectWhoopBrowser(
 	// The user id the cycles call takes and the account's start; the only read that may navigate.
 	const bootstrap = await fetchJson(ctx.page, PROBE_PATH, p, readOnOrigin);
 	const facts = bootstrap.ok ? bootstrapFacts(bootstrap.json) : null;
+	if (facts) {
+		// The WHOOP user id: it does not change with the account email or name.
+		await reportAccountIdentity(facts.userId);
+	}
 	let failure: Failure | null = bootstrap.ok
 		? facts
 			? null
