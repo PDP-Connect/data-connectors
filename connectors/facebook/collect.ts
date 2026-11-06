@@ -33,7 +33,7 @@
  * shortens a later wide one.
  */
 
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
@@ -1095,7 +1095,7 @@ export async function collectFacebook(
 				"the page shows no signed-in person",
 			);
 		// The numeric Facebook user id: it does not change with the name or profile URL.
-		await reportAccountIdentity(viewer.id);
+		await requireAccountIdentity(viewer.id);
 		for (const stream of streams) {
 			await say(PROGRESS[stream]);
 			try {

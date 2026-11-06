@@ -66,7 +66,7 @@
 
 import { createHash } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { redactTransportDetail } from "@pdpp/connector-protocol/http-retry";
 import type { Page } from "playwright";
 import {
@@ -1015,7 +1015,7 @@ export async function collectAllStreams(
 	const progress = ctx.progress as VenmoProgress;
 
 	// The Venmo user id from /account: it does not change with the username.
-	await reportAccountIdentity(ownerId);
+	await requireAccountIdentity(ownerId);
 
 	if (requested.has("profile")) {
 		await collectProfile(ctx, fetchPath, account);

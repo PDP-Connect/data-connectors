@@ -9,7 +9,7 @@
  * - the message's zod schema (the JSON schema is
  *   `schemas/account-identity.schema.json`; both are checked against
  *   `schemas/fixtures/account-identity-corpus.json`);
- * - the connector-side reporter behind `reportAccountIdentity`, which
+ * - the connector-side reporter behind `requireAccountIdentity`, which
  *   writes the message once and refuses a second, different id.
  *
  * The connector passes the id exactly as the source reports it. It adds no
@@ -61,7 +61,7 @@ export function accountIdFromSource(value: unknown): string | undefined {
 export type AccountIdentityReporter = (accountId: string) => Promise<void>;
 
 /**
- * Builds the reporter behind `reportAccountIdentity`. The first valid id
+ * Builds the reporter behind `requireAccountIdentity`. The first valid id
  * is written once. The same id again is a no-op, so a connector that learns
  * the id on several paths can report it on each. A different id is a
  * connector defect and fails the run: two ids mean the run read two accounts.
@@ -118,44 +118,29 @@ export function replaceProcessAccountIdentityReporterForTest(
 /**
  * What a connector calls once it has read the account id from the source.
  * `sourceValue` is the id as the source returned it (a string or an integer).
- * Returns `true` when the id was reported (or already was). Returns `false`
- * and sends nothing when the source gave no usable id: the host then fails the
- * run, which is the honest outcome for a connector that declared
- * `account_identity` and could not learn it. A different valid id in the same
- * run, or an invalid string, throws a `TerminalError`.
+ * The id is written once per run; reporting the same id again is a no-op, so a
+ * connector that learns it on several paths may call this on each. A different
+ * valid id in the same run fails the run: the run read two accounts.
+ *
+ * A source that gave no usable id fails the run here, before any read, instead
+ * of leaving the host to find the missing id at the end. This is the only
+ * account-identity call a connector makes: every connector that declares
+ * `account_identity` must know the id, so there is no silent path. `reporter`
+ * is for tests.
  *
  * This module imports no runtime code on purpose: a connector's published
- * artifact then changes only for connectors that call it. `reporter` is for
- * tests.
- */
-export async function reportAccountIdentity(
-	sourceValue: unknown,
-	reporter: AccountIdentityReporter = processReporter,
-): Promise<boolean> {
-	const accountId = accountIdFromSource(sourceValue);
-	if (accountId === undefined) {
-		return false;
-	}
-	await reporter(accountId);
-	return true;
-}
-
-/**
- * Like `reportAccountIdentity`, for a connector that must know the account
- * before it reads anything with a credential. A source that gave no usable id
- * fails the run here, before any read, instead of leaving the host to find the
- * missing id at the end. Use it wherever a different or absent id means the
- * credential may belong to another account (for example after a token
- * refresh). `reporter` is for tests.
+ * artifact then changes only for connectors that call it.
  */
 export async function requireAccountIdentity(
 	sourceValue: unknown,
 	reporter: AccountIdentityReporter = processReporter,
 ): Promise<void> {
-	if (!(await reportAccountIdentity(sourceValue, reporter))) {
+	const accountId = accountIdFromSource(sourceValue);
+	if (accountId === undefined) {
 		throw new TerminalError(
 			"The connector could not read the account id from the source",
 			{ code: "account_identity_missing" },
 		);
 	}
+	await reporter(accountId);
 }

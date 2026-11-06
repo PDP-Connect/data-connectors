@@ -95,7 +95,7 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import {
 	probeICloudSession,
 	probeICloudSessionInPlace,
@@ -1229,7 +1229,7 @@ export async function collectAllStreams(
 	}
 	// The Apple DSID (dsInfo.dsid): it does not change with the Apple ID email
 	// or the account name.
-	await reportAccountIdentity(config.dsid);
+	await requireAccountIdentity(config.dsid);
 	if (requested.has("profile")) {
 		const profile = {
 			id: config.dsid,

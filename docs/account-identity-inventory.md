@@ -36,8 +36,12 @@ one connector apart.
 - Declare `"account_identity": "required"` in the manifest only if every
   successful run can report the id. The host fails a successful run that
   declares the field and sends no id.
-- Call `reportAccountIdentity(id)` from `packages/polyfill-connectors/src/account-identity.ts`.
-  It sends one `ACCOUNT_IDENTITY` message. It adds no prefix, hash or namespace.
+- Call `requireAccountIdentity(id)` from `packages/polyfill-connectors/src/account-identity.ts`
+  once you have the id, before the first record and before any state write. It
+  sends one `ACCOUNT_IDENTITY` message and fails the run with
+  `account_identity_missing` when the source gave no usable id. It adds no
+  prefix, hash or namespace. It is the only account-identity call: a connector
+  cannot report one silently.
 - A connector whose id costs an extra request makes that request only if the
   request is trivial, and says so in a comment. GitHub is the one case here.
 

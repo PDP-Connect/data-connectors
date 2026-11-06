@@ -67,7 +67,7 @@
 
 import { createHash } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import {
 	buildDetailCoverageMessage,
@@ -1221,7 +1221,7 @@ async function collect(ctx: CollectContext): Promise<void> {
 			repairBudget,
 		);
 		// The server-assigned user GUID: it survives a rename of the user.
-		await reportAccountIdentity(conn.userId);
+		await requireAccountIdentity(conn.userId);
 
 		if (requested.has("libraries")) {
 			await collectLibraries(conn, ctx, now);

@@ -51,7 +51,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import {
 	buildCollectionRateProgress,
 	buildPacingStateFields,
@@ -655,17 +655,17 @@ async function declareListConsidered(
 	);
 }
 
-/** One `GET /user`, only to report the account id when no `user` stream asked for it. */
-export async function reportAccountFromUser(ctx: StreamCtx): Promise<void> {
+/** One `GET /user`, only to learn the account id (and fail the run without one) when no `user` stream asked for it. */
+export async function requireAccountFromUser(ctx: StreamCtx): Promise<void> {
 	const { data: u } = await gh<GitHubUser>(ctx, "/user");
-	await reportAccountIdentity(u.id);
+	await requireAccountIdentity(u.id);
 }
 
 export async function collectUser(ctx: StreamCtx): Promise<void> {
 	await ctx.progress("Fetching user profile", { stream: "user" });
 	const { data: u } = await gh<GitHubUser>(ctx, "/user");
 	// The numeric user id never changes when the login is renamed.
-	await reportAccountIdentity(u.id);
+	await requireAccountIdentity(u.id);
 
 	if (ctx.requested.has("user")) {
 		// Entity record: stable identity fields only. Gate on fingerprint so
@@ -2028,7 +2028,7 @@ if (isMainModule(import.meta.url)) {
 				// Only the `user` streams read `/user`. A run that asks for other
 				// streams makes this one extra GET so that every successful run
 				// reports the account id.
-				await reportAccountFromUser(ctx);
+				await requireAccountFromUser(ctx);
 			}
 			if (requested.has("repositories")) {
 				await collectRepositories(ctx);

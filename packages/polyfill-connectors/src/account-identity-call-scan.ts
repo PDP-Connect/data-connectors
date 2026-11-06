@@ -4,15 +4,14 @@
 /**
  * Test support: finds the places where a connector source file really reports
  * an account id, by parsing it. A regex over the text counts a commented-out
- * call and misses `reportAccountIdentity (id)` or an aliased import; this scan
+ * call and misses `requireAccountIdentity (id)` or an aliased import; this scan
  * reads the syntax tree and follows each import to the module it names.
  *
- * What counts as a report: a call of `reportAccountIdentity` or
- * `requireAccountIdentity` bound by an import whose specifier resolves to
- * `src/account-identity.ts`, under any local alias or through a namespace
- * import. What counts as a direct wire emit (not allowed in a connector, which
- * must go through the single-report reporter): the string literal
- * `"ACCOUNT_IDENTITY"`.
+ * What counts as a report: a call of `requireAccountIdentity` bound by an
+ * import whose specifier resolves to `src/account-identity.ts`, under any local
+ * alias or through a namespace import. What counts as a direct wire emit (not
+ * allowed in a connector, which must go through the single-report reporter):
+ * the string literal `"ACCOUNT_IDENTITY"`.
  *
  * Parsing uses the TypeScript native API (`typescript/unstable/sync`): the
  * only parser TypeScript 7 ships for JavaScript callers.
@@ -41,7 +40,6 @@ const ACCOUNT_IDENTITY_MODULE = resolve(
 	"account-identity.ts",
 );
 const REPORTING_EXPORTS: ReadonlySet<string> = new Set([
-	"reportAccountIdentity",
 	"requireAccountIdentity",
 ]);
 const WIRE_TYPE = "ACCOUNT_IDENTITY";

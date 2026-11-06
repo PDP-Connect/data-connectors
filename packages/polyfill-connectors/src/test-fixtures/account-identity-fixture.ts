@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Test-only connector for `reportAccountIdentity` (Collection Profile
+ * Test-only connector for `requireAccountIdentity` (Collection Profile
  * Section 5.14). It learns its synthetic account id after it emitted a record,
- * as a source that reveals the id late would. `FIXTURE_MODE` picks the case:
- * `late` (default), `twice_same`, `twice_different`, or `invalid` (an id with whitespace).
+ * as a source that reveals the id late would: the reporter writes the message
+ * whenever it is called, so this pins that the wire order is the connector's
+ * choice, not the reporter's. `FIXTURE_MODE` picks the case: `late` (default),
+ * `twice_same`, `twice_different`, or `invalid` (an id with whitespace).
  * NOT a production connector.
  */
 
-import { reportAccountIdentity } from "../account-identity.ts";
+import { requireAccountIdentity } from "../account-identity.ts";
 import { runConnector } from "../connector-runtime.ts";
 
 runConnector({
@@ -18,15 +20,15 @@ runConnector({
 		await ctx.emitRecord("items", { id: "item-1" });
 		const mode = process.env.FIXTURE_MODE ?? "late";
 		if (mode === "invalid") {
-			await reportAccountIdentity("has whitespace");
+			await requireAccountIdentity("has whitespace");
 			return;
 		}
-		await reportAccountIdentity("synthetic-user-0001");
+		await requireAccountIdentity("synthetic-user-0001");
 		if (mode === "twice_same") {
-			await reportAccountIdentity("synthetic-user-0001");
+			await requireAccountIdentity("synthetic-user-0001");
 		}
 		if (mode === "twice_different") {
-			await reportAccountIdentity("synthetic-user-0002");
+			await requireAccountIdentity("synthetic-user-0002");
 		}
 	},
 });

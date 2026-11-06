@@ -11,7 +11,7 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
@@ -747,7 +747,10 @@ export async function collectWhoopBrowser(
 	const facts = bootstrap.ok ? bootstrapFacts(bootstrap.json) : null;
 	if (facts) {
 		// The WHOOP user id: it does not change with the account email or name.
-		await reportAccountIdentity(facts.userId);
+		// A bootstrap that failed or carried no usable id has its own failure
+		// (`failure` below), which ends the run without a record; requiring the
+		// id here would replace that reason with a less specific one.
+		await requireAccountIdentity(facts.userId);
 	}
 	let failure: Failure | null = bootstrap.ok
 		? facts

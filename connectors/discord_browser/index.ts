@@ -69,7 +69,7 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	connectorDiagnostic,
@@ -915,7 +915,7 @@ export async function collectDiscordBrowser(
 	}
 	const ownerId = String(profile.id);
 	// The snowflake id: it does not change with the username or display name.
-	await reportAccountIdentity(ownerId);
+	await requireAccountIdentity(ownerId);
 	if (ctx.requested.has(PROFILE)) {
 		await ctx.emitRecord(PROFILE, profile);
 		await checkpoint(PROFILE);

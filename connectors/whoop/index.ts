@@ -5,7 +5,7 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
-import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
+import { requireAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
@@ -341,7 +341,7 @@ async function emitAggregateRecord(
 export async function collectWhoop(args: CollectWhoopArgs): Promise<void> {
 	const bootstrap = await fetchBootstrap(args.fetchPath);
 	// The WHOOP user id: it does not change with the account email or name.
-	await reportAccountIdentity(bootstrap.user.id);
+	await requireAccountIdentity(bootstrap.user.id);
 	if (args.requested.has("profile")) {
 		await args.emitRecord("profile", profileRecord(bootstrap));
 		await args.emit({
