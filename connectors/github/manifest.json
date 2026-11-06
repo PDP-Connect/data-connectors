@@ -9,8 +9,9 @@
 	},
 	"connector_key": "github",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-	"version": "0.7.7",
+	"version": "0.7.8",
 	"display_name": "GitHub",
+	"account_identity": "required",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#181717"
