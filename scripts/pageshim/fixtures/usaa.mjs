@@ -85,6 +85,18 @@ const table = (rows) =>
 /** How long the Export dialog stays empty before its controls render. */
 const EXPORT_DIALOG_RENDER_DELAY_MS = 1500;
 
+/**
+ * How the Export dialog's date fields behave after "date-range" is chosen:
+ * "normal" enables them at once; "late_init" enables them but drops any
+ * value typed in the first 150 ms, as a field that finishes initializing
+ * after it renders; "never" leaves them disabled.
+ */
+let dateFieldsMode = "normal";
+export function useExportDateFields(mode) {
+	dateFieldsMode = mode;
+}
+const DATE_FIELDS_INIT_MS = 150;
+
 const dashboardHtml = () => `
 <nav><a href="/my/checking">View</a></nav>
 <ul class="accounts">${ACCOUNTS.map(
@@ -133,9 +145,18 @@ function renderExportDialog(dialog) {
   const select = dialog.querySelector("select");
   const from = dialog.querySelector('input[name="fromDate"]');
   const to = dialog.querySelector('input[name="endDate"]');
+  const mode = ${JSON.stringify(dateFieldsMode)};
+  let initializedAt = Infinity;
   select.addEventListener("change", () => {
+    if (mode === "never") return;
     from.disabled = to.disabled = select.value !== "date-range";
+    initializedAt = Date.now() + (mode === "late_init" ? ${DATE_FIELDS_INIT_MS} : 0);
   });
+  for (const input of [from, to]) {
+    input.addEventListener("input", () => {
+      if (Date.now() < initializedAt) input.value = "";
+    });
+  }
   dialog.querySelector("form").addEventListener("submit", (event) => {
     event.preventDefault();
     const error = dialog.querySelector(".export_errorMessage");

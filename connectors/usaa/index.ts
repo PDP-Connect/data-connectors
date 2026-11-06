@@ -133,6 +133,8 @@ import type {
 	ParseMeta,
 	StatementRecord,
 	TransactionsPriorState,
+	UsaaExportDialogCheck,
+	UsaaExportDialogObservation,
 } from "./types.ts";
 
 // Explicit, literal-per-branch mapping from the statement-PDF download
@@ -639,6 +641,7 @@ export async function emitExportFailure(
 	deps: EmitDeps,
 	a: DashboardAccount,
 	lastDiag: DiagnosticInfo | null,
+	position?: { ordinal: number; total: number },
 ): Promise<void> {
 	const isCreditCard = CREDIT_CARD_TYPE_RE.test(a.account_type);
 	const outcome = classifyExportLadderOutcome(lastDiag);
@@ -679,6 +682,10 @@ export async function emitExportFailure(
 		for (const [key, value] of Object.entries(baseDiagnostics)) {
 			durableDiagnostics[key] = value;
 		}
+	}
+	if (position) {
+		durableDiagnostics.account_ordinal = position.ordinal;
+		durableDiagnostics.account_total = position.total;
 	}
 	await deps.emit({
 		type: "SKIP_RESULT",
@@ -734,6 +741,47 @@ function sanitizeDiagnosticInfo(diag: DiagnosticInfo): Record<string, unknown> {
 			source: diag.download.source ?? null,
 		};
 	}
+	if (diag.export_dialog) {
+		sanitized.export_dialog = sanitizeExportDialogObservation(
+			diag.export_dialog,
+		);
+	}
+	return sanitized;
+}
+
+/** Copy only the closed fields: `export_dialog` reaches the SKIP_RESULT. */
+function sanitizeExportDialogObservation(
+	observation: UsaaExportDialogObservation,
+): UsaaExportDialogObservation {
+	const shape = (value: string | undefined): string | undefined =>
+		value === undefined
+			? undefined
+			: value
+					.replace(/[0-9]/g, "9")
+					.replace(/[^9/.\- ]/g, "a")
+					.slice(0, 16);
+	const sanitized: UsaaExportDialogObservation = {
+		check: observation.check,
+		dialog_state: observation.dialog_state,
+		dialog_wait_ms: observation.dialog_wait_ms,
+		role_dialogs_visible: observation.role_dialogs_visible,
+		export_dialog_candidates: observation.export_dialog_candidates,
+	};
+	for (const key of [
+		"selection_type",
+		"from_field",
+		"to_field",
+		"date_inputs_in_document",
+		"fields_wait_ms",
+	] as const) {
+		if (observation[key] !== undefined) {
+			Object.assign(sanitized, { [key]: observation[key] });
+		}
+	}
+	const fromShape = shape(observation.from_value_shape);
+	const toShape = shape(observation.to_value_shape);
+	if (fromShape !== undefined) sanitized.from_value_shape = fromShape;
+	if (toShape !== undefined) sanitized.to_value_shape = toShape;
 	return sanitized;
 }
 
@@ -792,6 +840,9 @@ function formatDiagnosticInfo(diag: DiagnosticInfo): string {
 	const download = summarizeDownloadDiagnostics(diag);
 	if (download) {
 		parts.push(download);
+	}
+	if (diag.export_dialog) {
+		parts.push(`check=${diag.export_dialog.check}`);
 	}
 	return parts.join("; ");
 }
@@ -3044,7 +3095,10 @@ export async function processAccountTransactions(
 				outcome: { accountId, kind: "no_activity" },
 			};
 		}
-		await emitExportFailure(deps, a, lastDiag);
+		await emitExportFailure(deps, a, lastDiag, {
+			ordinal: accountOrdinal,
+			total: accountTotal,
+		});
 		const errorClass =
 			lastDiag && isFatalDiagPhase(lastDiag)
 				? "source_structure_changed"
@@ -4291,41 +4345,71 @@ const USAA_DATE_FIELDS_WAIT_MS = 3000;
 
 /**
  * Whether the Export dialog is "ready" (its `selectionType` control has
- * rendered), only "open", or "none". Runs in the page.
+ * rendered), only "open", or "none", with the dialog counts that tell a
+ * missing dialog from one the selector rejected. Runs in the page.
  */
-function usaaExportDialogState(selector: string): "ready" | "open" | "none" {
-	const dialog = Array.from(
+function usaaExportDialogState(selector: string): {
+	state: "ready" | "open" | "none";
+	role_dialogs_visible: number;
+	export_dialog_candidates: number;
+} {
+	const rendered = (el: HTMLElement): boolean => el.getClientRects().length > 0;
+	const candidates = Array.from(
 		document.querySelectorAll<HTMLElement>(selector),
-	).find((el) => el.getClientRects().length > 0);
-	if (!dialog) return "none";
-	return dialog.querySelector('select[name="selectionType"]')
-		? "ready"
-		: "open";
+	).filter(rendered);
+	const dialog = candidates[0];
+	return {
+		state: dialog
+			? dialog.querySelector('select[name="selectionType"]')
+				? "ready"
+				: "open"
+			: "none",
+		role_dialogs_visible: Array.from(
+			document.querySelectorAll<HTMLElement>('[role="dialog"]'),
+		).filter(rendered).length,
+		export_dialog_candidates: candidates.length,
+	};
 }
+
+/** What `fillUsaaExportDialog` saw; `check` is null when the dates took. */
+type UsaaExportFill = Omit<
+	UsaaExportDialogObservation,
+	| "check"
+	| "dialog_state"
+	| "dialog_wait_ms"
+	| "role_dialogs_visible"
+	| "export_dialog_candidates"
+> & {
+	check: Exclude<UsaaExportDialogCheck, "submit_missing"> | null;
+};
 
 /**
  * Choose "date range" in the Export dialog and type both dates, through the
  * native value setter so that a framework-controlled input sees the change.
- * Runs in the page. Returns the step that failed, or null.
+ * Runs in the page. Reports which check failed, and what it saw, without
+ * field values.
  */
 async function fillUsaaExportDialog(arg: {
 	from: string;
 	to: string;
 	selector: string;
 	fieldsWaitMs: number;
-}): Promise<string | null> {
+}): Promise<UsaaExportFill> {
 	const dialog = Array.from(
 		document.querySelectorAll<HTMLElement>(arg.selector),
 	).find((el) => el.getClientRects().length > 0);
-	if (!dialog) return "dialog_not_open";
+	if (!dialog) return { check: "dialog_not_found" };
 	const fire = (el: Element): void => {
 		for (const type of ["input", "change", "blur"]) {
 			el.dispatchEvent(new Event(type, { bubbles: true }));
 		}
 	};
+	const fromSelector = 'input[name="fromDate"], input[name="startDate"]';
+	const toSelector = 'input[name="endDate"]';
 	const select = dialog.querySelector<HTMLSelectElement>(
 		'select[name="selectionType"]',
 	);
+	let selectionType: UsaaExportFill["selection_type"] = "missing";
 	if (select) {
 		const setSelect = Object.getOwnPropertyDescriptor(
 			HTMLSelectElement.prototype,
@@ -4333,15 +4417,15 @@ async function fillUsaaExportDialog(arg: {
 		)?.set;
 		setSelect?.call(select, "date-range");
 		fire(select);
+		selectionType = select.value === "date-range" ? "accepted" : "rejected";
 	}
 	const fields = (): [HTMLInputElement | null, HTMLInputElement | null] => [
-		dialog.querySelector<HTMLInputElement>(
-			'input[name="fromDate"], input[name="startDate"]',
-		),
-		dialog.querySelector<HTMLInputElement>('input[name="endDate"]'),
+		dialog.querySelector<HTMLInputElement>(fromSelector),
+		dialog.querySelector<HTMLInputElement>(toSelector),
 	];
 	// The date fields render or enable after the change event; poll, bounded.
-	const deadline = Date.now() + arg.fieldsWaitMs;
+	const started = Date.now();
+	const deadline = started + arg.fieldsWaitMs;
 	let [from, to] = fields();
 	while (
 		!(from && to && !from.disabled && !to.disabled) &&
@@ -4350,8 +4434,28 @@ async function fillUsaaExportDialog(arg: {
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		[from, to] = fields();
 	}
-	if (!(from && to) || from.disabled || to.disabled)
-		return "date_fields_missing";
+	if (select && selectionType === "accepted" && select.value !== "date-range") {
+		selectionType = "reverted";
+	}
+	const fieldState = (
+		input: HTMLInputElement | null,
+	): "missing" | "disabled" | "ready" =>
+		input ? (input.disabled ? "disabled" : "ready") : "missing";
+	const seen = {
+		selection_type: selectionType,
+		from_field: fieldState(from),
+		to_field: fieldState(to),
+		date_inputs_in_document: document.querySelectorAll(
+			`${fromSelector}, ${toSelector}`,
+		).length,
+		fields_wait_ms: Date.now() - started,
+	};
+	if (!(from && to) || from.disabled || to.disabled) {
+		let check: UsaaExportFill["check"] = "date_fields_missing";
+		if (selectionType === "missing") check = "selection_type_missing";
+		else if (selectionType !== "accepted") check = "selection_type_rejected";
+		return { check, ...seen };
+	}
 	const setInput = Object.getOwnPropertyDescriptor(
 		HTMLInputElement.prototype,
 		"value",
@@ -4364,9 +4468,20 @@ async function fillUsaaExportDialog(arg: {
 		setInput?.call(input, value);
 		fire(input);
 	}
-	return from.value === arg.from && to.value === arg.to
-		? null
-		: "date_fields_rejected";
+	if (from.value === arg.from && to.value === arg.to) {
+		return { check: null, ...seen };
+	}
+	const shape = (value: string): string =>
+		value
+			.replace(/[0-9]/g, "9")
+			.replace(/[^9/.\- ]/g, "a")
+			.slice(0, 16);
+	return {
+		check: "dates_rejected",
+		...seen,
+		from_value_shape: shape(from.value),
+		to_value_shape: shape(to.value),
+	};
 }
 
 /** Submit the Export dialog. Runs in the page. */
@@ -4439,8 +4554,17 @@ export function inPageCsvExport(): UsaaCsvExport {
 		options: DriveExportOptions,
 	): Promise<DriveExportResult> => {
 		const { onDiagnostics } = options;
-		const fail = (phase: string, error: string): DriveExportResult => {
-			onDiagnostics?.({ diag: null, error, phase });
+		const fail = (
+			phase: string,
+			error: string,
+			exportDialog?: UsaaExportDialogObservation,
+		): DriveExportResult => {
+			onDiagnostics?.({
+				diag: null,
+				error,
+				phase,
+				...(exportDialog ? { export_dialog: exportDialog } : {}),
+			});
 			return { kind: "failed" };
 		};
 		await page.goto(accountUrl, {
@@ -4479,6 +4603,7 @@ export function inPageCsvExport(): UsaaCsvExport {
 			}
 			// Wait for the Export dialog's own controls, not for any dialog: the
 			// dialog renders before its selectionType control.
+			const clickedAt = Date.now();
 			await page
 				.waitForFunction(
 					(selector: string) => {
@@ -4493,27 +4618,45 @@ export function inPageCsvExport(): UsaaCsvExport {
 					{ timeout: EXPORT_CLICK_TIMEOUT_MS, polling: 250 },
 				)
 				.catch((): undefined => undefined);
-			const dialogState = await page.evaluate(
+			const dialogWaitMs = Date.now() - clickedAt;
+			const dialog = await page.evaluate(
 				usaaExportDialogState,
 				USAA_EXPORT_DIALOG_SELECTOR,
 			);
-			if (dialogState === "none") {
-				return fail("export_dialog_unexpected_shape", "dialog_not_open");
+			const observed = {
+				dialog_state: dialog.state,
+				dialog_wait_ms: dialogWaitMs,
+				role_dialogs_visible: dialog.role_dialogs_visible,
+				export_dialog_candidates: dialog.export_dialog_candidates,
+			};
+			if (dialog.state === "none") {
+				return fail("export_dialog_unexpected_shape", "dialog_not_open", {
+					check: "dialog_not_found",
+					...observed,
+				});
 			}
 			// "open" without selectionType: fill anyway, which reports the
 			// missing fields if the dates cannot be set either.
-			const fillError = await page.evaluate(fillUsaaExportDialog, {
+			const fill = await page.evaluate(fillUsaaExportDialog, {
 				from: mmddyyyy(options.sinceDate),
 				to: mmddyyyy(options.untilDate),
 				selector: USAA_EXPORT_DIALOG_SELECTOR,
 				fieldsWaitMs: USAA_DATE_FIELDS_WAIT_MS,
 			});
-			if (fillError) {
+			if (fill.check) {
+				const fillError = {
+					dialog_not_found: "dialog_not_open",
+					selection_type_missing: "date_fields_missing",
+					selection_type_rejected: "date_fields_missing",
+					date_fields_missing: "date_fields_missing",
+					dates_rejected: "date_fields_rejected",
+				}[fill.check];
 				return fail(
-					fillError === "dialog_not_open" || fillError === "date_fields_missing"
-						? "export_dialog_unexpected_shape"
-						: "export_dialog_fill_failed",
+					fill.check === "dates_rejected"
+						? "export_dialog_fill_failed"
+						: "export_dialog_unexpected_shape",
 					fillError,
+					{ ...fill, check: fill.check, ...observed },
 				);
 			}
 			if (
@@ -4522,7 +4665,10 @@ export function inPageCsvExport(): UsaaCsvExport {
 					USAA_EXPORT_DIALOG_SELECTOR,
 				))
 			) {
-				return fail("export_dialog_unexpected_shape", "submit_button_missing");
+				return fail("export_dialog_unexpected_shape", "submit_button_missing", {
+					check: "submit_missing",
+					...observed,
+				});
 			}
 			const deadline = Date.now() + MOBILE_EXPORT_WAIT_MS;
 			for (;;) {

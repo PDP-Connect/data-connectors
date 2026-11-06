@@ -394,6 +394,38 @@ test("chase: QFX history Chase will not send is reported with its range", {
 	}
 });
 
+test("usaa: a failed Export dialog names the failed check for each account", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/usaa.mjs");
+	fx.useExportDateFields("never");
+	try {
+		const built = await buildPageshim({
+			connector: "usaa",
+			outfile: join(out, "usaa-date-fields-missing.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["usaa.accounts", "usaa.transactions"],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		const exportErrors = r.result.errors.filter(
+			(error) => error.scope === "usaa.transactions",
+		);
+		assert.equal(exportErrors.length, 2, JSON.stringify(r.result.errors));
+		for (const error of exportErrors) {
+			assert.match(
+				error.reason,
+				/^Export ladder exhausted \(source_structure_changed\); export_dialog_unexpected_shape; page=unavailable; check=date_fields_missing/,
+			);
+		}
+	} finally {
+		fx.useExportDateFields("normal");
+	}
+});
+
 test("chatgpt: complete bounded walk is not marked partial just because STATE was emitted", {
 	timeout: 180_000,
 }, async () => {
