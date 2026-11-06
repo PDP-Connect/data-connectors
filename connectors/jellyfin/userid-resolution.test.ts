@@ -415,6 +415,35 @@ test("regression: Users success with a user entry missing Id must fail the run, 
 	}
 });
 
+test("regression: a resolved user id the wire cannot carry fails the run with account_identity_missing before any record", async () => {
+	const server = await startServer((res) => {
+		res.writeHead(200);
+		// One user whose Id has whitespace: it resolves, but is not a usable
+		// account id, so the run must stop here, not at the host after reading.
+		res.end(JSON.stringify([{ Id: "has whitespace", Name: "Someone" }]));
+	});
+	const baseUrl = await server.url;
+
+	try {
+		const { ctx, records } = makeContext({
+			credentials: { base_url: baseUrl, secret: "test-key" },
+			streams: [{ name: "libraries" }],
+		});
+		let error: unknown;
+		await collect(ctx).catch((thrown: unknown) => {
+			error = thrown;
+		});
+		assert.equal(
+			Reflect.get(Object(error), "code"),
+			"account_identity_missing",
+			"a missing id fails the run here, not at the host",
+		);
+		assert.deepEqual(records, [], "no record is emitted");
+	} finally {
+		await server.stop();
+	}
+});
+
 test("regression: Users success with a non-array body must fail the run, not substitute a placeholder user id", async () => {
 	const server = await startServer((res) => {
 		res.writeHead(200);

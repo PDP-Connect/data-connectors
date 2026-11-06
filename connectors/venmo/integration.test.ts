@@ -240,6 +240,23 @@ test("a run reports the owner's user id, whichever streams it reads", async () =
 	assert.equal(thisRun.recordsBeforeIdentity, 0);
 });
 
+test("a run with no owner id fails with account_identity_missing before any record", async () => {
+	const { fetchPath } = makeScriptedFetch({});
+	const { ctx, emitted } = makeCtx({}, ["profile"]);
+	let error: unknown;
+	await collectAllStreams(ctx, fetchPath, "", accountUser(), NO_DELAY).catch(
+		(thrown: unknown) => {
+			error = thrown;
+		},
+	);
+	assert.equal(
+		Reflect.get(Object(error), "code"),
+		"account_identity_missing",
+		"a missing id fails the run here, not at the host",
+	);
+	assert.deepEqual(emitted, [], "no record is emitted");
+});
+
 test("collectTransactions emits zone-less dates and stores a normalized latest cursor", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [

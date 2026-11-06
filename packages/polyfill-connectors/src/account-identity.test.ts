@@ -19,7 +19,6 @@ import {
 	accountIdentityMessageSchema,
 	accountIdFromSource,
 	createAccountIdentityReporter,
-	reportAccountIdentity,
 	requireAccountIdentity,
 } from "./account-identity.ts";
 import {
@@ -199,8 +198,9 @@ test("through the real runtime, a different second id fails the run", async () =
 	);
 });
 
-test("through the real runtime, an unusable id sends nothing, so the host can fail the run", async () => {
+test("through the real runtime, an unusable id fails the run and sends no identity", async () => {
 	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
 		cwd: PACKAGE_ROOT,
 		entrypoint: FIXTURE,
 		env: { FIXTURE_MODE: "invalid" },
@@ -210,23 +210,14 @@ test("through the real runtime, an unusable id sends nothing, so the host can fa
 		wireLines(result.rawStdout).some((l) => l.type === "ACCOUNT_IDENTITY"),
 		false,
 	);
-});
-
-test("reportAccountIdentity sends a usable id and reports false for an unusable one", async () => {
-	const written: AccountIdentityMessage[] = [];
-	const reporter = createAccountIdentityReporter((m) => {
-		written.push(m);
-		return Promise.resolve();
-	});
-	assert.equal(await reportAccountIdentity(undefined, reporter), false);
-	assert.equal(await reportAccountIdentity("", reporter), false);
-	assert.equal(await reportAccountIdentity(-1, reporter), false);
-	assert.deepEqual(written, []);
-	assert.equal(await reportAccountIdentity(424_242, reporter), true);
-	assert.equal(await reportAccountIdentity("424242", reporter), true);
-	assert.deepEqual(written, [
-		{ type: "ACCOUNT_IDENTITY", account_id: "424242" },
-	]);
+	const done = result.messages.findLast((m) => m.type === "DONE");
+	assert.equal(Reflect.get(Object(done), "status"), "failed");
+	// An id the wire shape rejects is indistinguishable from no id at the
+	// requiring call, and takes the same remedy: read the right field.
+	assert.equal(
+		Reflect.get(Object(done?.error), "code"),
+		"account_identity_missing",
+	);
 });
 
 test("a connector declares account_identity if and only if its source reports one, and the inventory agrees", () => {
@@ -266,7 +257,7 @@ test("a connector declares account_identity if and only if its source reports on
 	assert.deepEqual(
 		directEmits,
 		[],
-		"a connector must report through reportAccountIdentity, not write the wire message itself",
+		"a connector must report through requireAccountIdentity, not write the wire message itself",
 	);
 	assert.ok(declared.length > 0);
 	const inventory = readFileSync(
@@ -336,30 +327,30 @@ function scanScratch(
 
 test("the call scan counts real calls and ignores comments, strings and look-alikes", () => {
 	const use = scanScratch({
-		"real.ts": `import { reportAccountIdentity } from "MODULE";
-export const run = (id: string) => reportAccountIdentity(id);`,
-		"spaced.ts": `import { reportAccountIdentity } from "MODULE";
-export const run = (id: string) => reportAccountIdentity
-	(id);`,
-		"commented.ts": `import { reportAccountIdentity } from "MODULE";
-// await reportAccountIdentity(id);
-/* await reportAccountIdentity(id); */
-export const text = "reportAccountIdentity(id)";
-export const noop = reportAccountIdentity;`,
-		"aliased.ts": `import { reportAccountIdentity as report } from "MODULE";
-export const run = (id: string) => report(id);`,
-		"required.ts": `import { requireAccountIdentity } from "MODULE";
+		"real.ts": `import { requireAccountIdentity } from "MODULE";
 export const run = (id: string) => requireAccountIdentity(id);`,
+		"spaced.ts": `import { requireAccountIdentity } from "MODULE";
+export const run = (id: string) => requireAccountIdentity
+	(id);`,
+		"commented.ts": `import { requireAccountIdentity } from "MODULE";
+// await requireAccountIdentity(id);
+/* await requireAccountIdentity(id); */
+export const text = "requireAccountIdentity(id)";
+export const noop = requireAccountIdentity;`,
+		"aliased.ts": `import { requireAccountIdentity as require } from "MODULE";
+export const run = (id: string) => require(id);`,
+		"old-name.ts": `import { reportAccountIdentity } from "MODULE";
+export const run = (id: string) => reportAccountIdentity(id);`,
 		"namespace.ts": `import * as identity from "MODULE";
-export const run = (id: string) => identity.reportAccountIdentity(id);`,
-		"other-module.ts": `import { reportAccountIdentity } from "./local.ts";
-export const run = (id: string) => reportAccountIdentity(id);`,
-		"local.ts": `export const reportAccountIdentity = (_id: string) => true;
-export const run = (id: string) => reportAccountIdentity(id);`,
+export const run = (id: string) => identity.requireAccountIdentity(id);`,
+		"other-module.ts": `import { requireAccountIdentity } from "./local.ts";
+export const run = (id: string) => requireAccountIdentity(id);`,
+		"local.ts": `export const requireAccountIdentity = (_id: string) => true;
+export const run = (id: string) => requireAccountIdentity(id);`,
 		"type-only.ts": `import type { AccountIdentityReporter } from "MODULE";
 export type Reporter = AccountIdentityReporter;`,
-		"nested/deep/module.ts": `import { reportAccountIdentity } from "MODULE";
-export const run = (id: string) => reportAccountIdentity(id);`,
+		"nested/deep/module.ts": `import { requireAccountIdentity } from "MODULE";
+export const run = (id: string) => requireAccountIdentity(id);`,
 	});
 	const calls = Object.fromEntries(
 		Object.entries(use).map(([name, found]) => [name, found.reportCalls]),
@@ -369,7 +360,7 @@ export const run = (id: string) => reportAccountIdentity(id);`,
 		"spaced.ts": 1,
 		"commented.ts": 0,
 		"aliased.ts": 1,
-		"required.ts": 1,
+		"old-name.ts": 0,
 		"namespace.ts": 1,
 		"other-module.ts": 0,
 		"local.ts": 0,
@@ -444,9 +435,11 @@ test("requireAccountIdentity reports a usable id and throws, naming no id, for a
 			Reflect.get(Object(err), "code") === "account_identity_missing",
 	);
 	assert.deepEqual(written, []);
-	await requireAccountIdentity("u-1", reporter);
-	await requireAccountIdentity("u-1", reporter);
-	assert.deepEqual(written, [{ type: "ACCOUNT_IDENTITY", account_id: "u-1" }]);
+	await requireAccountIdentity(424_242, reporter);
+	await requireAccountIdentity("424242", reporter);
+	assert.deepEqual(written, [
+		{ type: "ACCOUNT_IDENTITY", account_id: "424242" },
+	]);
 	await assert.rejects(
 		() => requireAccountIdentity("u-2", reporter),
 		(err: unknown) =>
@@ -478,7 +471,7 @@ test("the order checks catch a record that comes before the account id", async (
 	const late = captureAccountIdentity();
 	try {
 		noteRecordEmitted();
-		await reportAccountIdentity("u-1");
+		await requireAccountIdentity("u-1");
 		noteRecordEmitted();
 	} finally {
 		late.restore();
@@ -486,7 +479,7 @@ test("the order checks catch a record that comes before the account id", async (
 	assert.equal(late.recordsBeforeIdentity, 1, "only the first record is early");
 	const early = captureAccountIdentity();
 	try {
-		await reportAccountIdentity("u-1");
+		await requireAccountIdentity("u-1");
 		noteRecordEmitted();
 	} finally {
 		early.restore();

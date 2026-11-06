@@ -51,3 +51,35 @@ test("collectWhoop reports the bootstrap user id once for a profile-only run", a
 test("collectWhoop reports the same id when more streams run", async () => {
 	assert.deepEqual(await reportedIds(["profile", "body"]), ["41002"]);
 });
+
+test("a bootstrap with an unusable user id fails the run with account_identity_missing before any record", async () => {
+	// The bootstrap schema requires an integer `user.id`; `-1` passes it and is
+	// not a usable account id, so the requiring call is what fails the run.
+	const bootstrap = JSON.parse(
+		await readFile(join(fixturesDir("whoop"), "bootstrap.json"), "utf8"),
+	) as { user: { id?: unknown } };
+	bootstrap.user.id = -1;
+	const capture = captureAccountIdentity();
+	const harness = makeRecordingEmit(validateRecord);
+	let error: unknown;
+	try {
+		await collectWhoop({
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			fetchPath: () => Promise.resolve({ status: 200, json: bootstrap }),
+			now: new Date("2026-08-13T00:00:00.000Z"),
+			requested: new Set(["profile"]),
+			state: {},
+		}).catch((thrown: unknown) => {
+			error = thrown;
+		});
+		assert.equal(
+			Reflect.get(Object(error), "code"),
+			"account_identity_missing",
+			"an unusable id fails the run here, not at the host",
+		);
+		assert.equal(harness.emitted.length, 0, "no record is emitted");
+	} finally {
+		capture.restore();
+	}
+});

@@ -130,13 +130,18 @@ test("protocol subprocess: jellyfin entrypoint completes START to DONE over real
 		assert.equal(result.code, 0);
 
 		// The fake server's only user is `user-123`; the connector reports that
-		// user GUID once, before DONE.
-		assertAccountIdentity(
-			result.rawStdout
-				.split("\n")
-				.filter((line) => line.trim())
-				.map((line): Record<string, unknown> => JSON.parse(line)),
-			"user-123",
+		// user GUID once, before DONE and before the first record.
+		const wire = result.rawStdout
+			.split("\n")
+			.filter((line) => line.trim())
+			.map((line): Record<string, unknown> => JSON.parse(line));
+		assertAccountIdentity(wire, "user-123");
+		const identityAt = wire.findIndex((m) => m.type === "ACCOUNT_IDENTITY");
+		const firstRecordAt = wire.findIndex((m) => m.type === "RECORD");
+		assert.ok(firstRecordAt > 0, "the run emits a record");
+		assert.ok(
+			identityAt >= 0 && identityAt < firstRecordAt,
+			"ACCOUNT_IDENTITY must come before the first RECORD",
 		);
 
 		const record = result.messages.find(

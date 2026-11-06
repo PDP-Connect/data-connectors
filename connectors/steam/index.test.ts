@@ -691,12 +691,19 @@ test("Steam protocol execution: optional friends 401 emits exact SKIP_RESULT and
 			},
 		});
 		assert.equal(result.code, 0);
-		assertAccountIdentity(
-			result.rawStdout
-				.split("\n")
-				.filter((line) => line.trim())
-				.map((line): Record<string, unknown> => JSON.parse(line)),
-			"76561198012345678",
+		const wire = result.rawStdout
+			.split("\n")
+			.filter((line) => line.trim())
+			.map((line): Record<string, unknown> => JSON.parse(line));
+		assertAccountIdentity(wire, "76561198012345678");
+		// Named here so the order is visible in the connector's own test: the
+		// resolved SteamID64 precedes the first record of any stream.
+		const identityAt = wire.findIndex((m) => m.type === "ACCOUNT_IDENTITY");
+		const firstRecordAt = wire.findIndex((m) => m.type === "RECORD");
+		assert.ok(firstRecordAt > 0, "the run emits a record");
+		assert.ok(
+			identityAt >= 0 && identityAt < firstRecordAt,
+			"ACCOUNT_IDENTITY must come before the first RECORD",
 		);
 		const skip = result.messages.find(
 			(message) => message.type === "SKIP_RESULT",

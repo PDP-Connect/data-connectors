@@ -17,12 +17,19 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { collect as collectOnWire } from "./index.ts";
 
+/** The account ids the last `collect` call reported. */
+let lastAccountIds: string[] = [];
+/** How many records the last `collect` call emitted before it reported an id. */
+let lastRecordsBeforeIdentity = 0;
+
 /** `collect` with a fresh account-identity recorder per run: these tests switch users in one process. */
 const collect: typeof collectOnWire = async (ctx) => {
 	const accountIdentity = captureAccountIdentity();
 	try {
 		await collectOnWire(ctx);
 	} finally {
+		lastAccountIds = accountIdentity.ids;
+		lastRecordsBeforeIdentity = accountIdentity.recordsBeforeIdentity;
 		accountIdentity.restore();
 	}
 };
@@ -356,6 +363,16 @@ test("e2e: header auth (X-Emby-Token) and no query param credentials", async () 
 
 		const libraryRecords = records.filter((r) => r.stream === "libraries");
 		assert.equal(libraryRecords.length, 1, "Should emit 1 library");
+
+		// The run's own identity: the resolved user GUID, reported before the
+		// first record, so no library lands under an unknown account.
+		assert.ok(libraryRecords.length > 0, "the run emits a record");
+		assert.deepEqual(lastAccountIds, ["test-user-123"]);
+		assert.equal(
+			lastRecordsBeforeIdentity,
+			0,
+			"ACCOUNT_IDENTITY must come before the first RECORD",
+		);
 
 		const requests = server.getRequestLog();
 
