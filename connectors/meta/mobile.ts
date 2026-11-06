@@ -90,6 +90,9 @@ function describeProfileInfoFailure(answer: ProfileInfoAnswer): string {
  }
 }
 
+const redactAccount = (text: string, username: string): string =>
+ username ? text.split(username).join("[account]") : text;
+
 /** The web profile API takes only a username and the public web app id.
  * The caller still requires both returned id and username to match web_info.
  * Missing fields stay missing; this does not manufacture GraphQL counts.
@@ -102,7 +105,8 @@ export async function fetchMobileProfileUser(
  const answer = await (page.evaluate(profileInfoScript(username)) as Promise<ProfileInfoAnswer>)
   .catch((error: unknown): ProfileInfoAnswer => ({
    status: 0, contentType: null, body: null, failure: "page_call",
-   detail: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+   // A host error can echo the script, which carries the username.
+   detail: redactAccount(error instanceof Error ? error.message : String(error), username).slice(0, 200),
   }));
  observe(answer.body, answer.status);
  if (answer.failure !== null) return {user: null, problem: describeProfileInfoFailure(answer)};

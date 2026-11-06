@@ -68,6 +68,8 @@ test("each other failing step is named", async () => {
 			problem: "the web_profile_info request failed in the page (TypeError)", status: 0 },
 		{ name: "page call fails", page: { evaluate: async () => { throw new Error("bridge closed"); } } as unknown as Page,
 			problem: "the page call for web_profile_info failed (bridge closed)", status: 0 },
+		{ name: "page call error that echoes the script", page: { evaluate: async () => { throw new Error('SyntaxError in (async () => { const username = "testuser"; })'); } } as unknown as Page,
+			problem: 'the page call for web_profile_info failed (SyntaxError in (async () => { const username = "[account]"; }))', status: 0 },
 		{ name: "HTTP error with JSON", page: pageAnswering({ status: 429, contentType: "application/json", body: JSON.stringify({ message: "wait" }) }),
 			problem: "web_profile_info answered HTTP 429 (application/json)", status: 429 },
 		{ name: "error envelope", page: pageAnswering({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "fail" }) }),

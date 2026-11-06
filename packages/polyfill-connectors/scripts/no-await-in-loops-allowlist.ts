@@ -6700,7 +6700,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/meta/mobile-profile.test.ts",
-			line: 79,
+			line: 81,
 			column: 39,
 			category: "test_assertion_sequencing",
 			note: "Each failure case reads through its own fake page and checks the named step before the next case.",
