@@ -17,25 +17,32 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import { collectWhoop } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
-test("collectWhoop reports the bootstrap user id once, whichever streams run", async () => {
+/** Runs `collectWhoop` over the bootstrap fixture and returns the ids it reported. */
+async function reportedIds(streams: string[]): Promise<string[]> {
 	const bootstrap = JSON.parse(
 		await readFile(join(fixturesDir("whoop"), "bootstrap.json"), "utf8"),
 	) as unknown;
-	for (const streams of [["profile"], ["profile", "body"]]) {
-		const capture = captureAccountIdentity();
-		try {
-			const harness = makeRecordingEmit(validateRecord);
-			await collectWhoop({
-				emit: harness.emit,
-				emitRecord: harness.emitRecord,
-				fetchPath: () => Promise.resolve({ status: 200, json: bootstrap }),
-				now: new Date("2026-08-13T00:00:00.000Z"),
-				requested: new Set(streams),
-				state: {},
-			});
-			assert.deepEqual(capture.ids, ["41002"], streams.join(","));
-		} finally {
-			capture.restore();
-		}
+	const capture = captureAccountIdentity();
+	try {
+		const harness = makeRecordingEmit(validateRecord);
+		await collectWhoop({
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			fetchPath: () => Promise.resolve({ status: 200, json: bootstrap }),
+			now: new Date("2026-08-13T00:00:00.000Z"),
+			requested: new Set(streams),
+			state: {},
+		});
+		return capture.ids;
+	} finally {
+		capture.restore();
 	}
+}
+
+test("collectWhoop reports the bootstrap user id once for a profile-only run", async () => {
+	assert.deepEqual(await reportedIds(["profile"]), ["41002"]);
+});
+
+test("collectWhoop reports the same id when more streams run", async () => {
+	assert.deepEqual(await reportedIds(["profile", "body"]), ["41002"]);
 });
