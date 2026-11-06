@@ -826,7 +826,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/chase/index.ts",
-			line: 3694,
+			line: 3717,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitStatementIndexOnly(): Mobile statements index, Collection Profile protocol emission requiring in-order delivery",

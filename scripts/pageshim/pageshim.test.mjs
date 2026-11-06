@@ -319,6 +319,40 @@ test("oura_browser: a sign-in after 45 s outlives the 30 s bridge-call timeout",
 	assert.deepEqual(r.streamDone.exportSummary, c.exportSummary);
 });
 
+test("chase: a documents page without the statement list is not reported as a saved list", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chase.mjs");
+	fx.useDocumentsShape("mobile");
+	try {
+		const built = await buildPageshim({
+			connector: "chase",
+			outfile: join(out, "chase-mobile-documents.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["chase.statements"],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(
+			r.result.errors.map(({ scope, code, disposition }) => ({ scope, code, disposition })),
+			[
+				{
+					scope: "chase.statements",
+					code: "statement_list_unreadable_on_mobile",
+					disposition: "omitted",
+				},
+			],
+		);
+		assert.match(r.result.errors[0].reason, /could not read the statement list/);
+		assert.equal(r.result.exportSummary.details.statements, 0);
+	} finally {
+		fx.useDocumentsShape("desktop");
+	}
+});
+
 test("chatgpt: complete bounded walk is not marked partial just because STATE was emitted", {
 	timeout: 180_000,
 }, async () => {

@@ -74,6 +74,21 @@ const documentsHtml = () => `
 </div>`;
 
 /**
+ * The documents page as the Mobile WebView rendered it on a device: a tab bar
+ * and a dialog, no statement accordion and no tables. The real Mobile
+ * statement markup is not captured yet.
+ */
+const mobileDocumentsHtml = () => `
+<mds-tab-bar></mds-tab-bar>
+<mds-dialog></mds-dialog>`;
+
+let documentsShape = "desktop";
+/** Serve the documents page in its "desktop" or "mobile" shape. */
+export function useDocumentsShape(shape) {
+	documentsShape = shape;
+}
+
+/**
  * The download form. `mds-button` keeps its button in a shadow root; the
  * click builds a hidden GET form, as chase.com does, defaulting to CSV.
  */
@@ -82,10 +97,13 @@ const downloadFormHtml = (accountId) => `
 <mds-select id="downloadActivityOptionId" value="CURRENT_DISPLAY"></mds-select>
 <mds-button id="download" data-account="${accountId}"></mds-button>`;
 
-const SPA = `
+const spa = () => `
 <div id="app"></div>
 <script>
-const views = ${JSON.stringify({ overview: overviewHtml(), documents: documentsHtml() })};
+const views = ${JSON.stringify({
+	overview: overviewHtml(),
+	documents: documentsShape === "mobile" ? mobileDocumentsHtml() : documentsHtml(),
+})};
 const formHtml = ${JSON.stringify(downloadFormHtml("__ID__"))};
 if (!customElements.get("mds-button")) {
   customElements.define("mds-button", class extends HTMLElement {
@@ -203,7 +221,7 @@ export function resolveFixture(raw) {
 	if (url.pathname === QFX_PATH) return resolveQfx(url);
 	if (url.pathname === "/web/auth/dashboard") {
 		return loggedIn
-			? html(SPA)
+			? html(spa())
 			: html(`<script>location.replace("/web/auth/#/logon/logon/chaseOnline")</script>`);
 	}
 	if (url.pathname === "/web/auth/") return LOGON;

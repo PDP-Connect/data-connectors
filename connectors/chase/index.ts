@@ -3653,13 +3653,17 @@ async function runStatementIndexInPage(
 		message: "Navigating to Statements & Documents",
 	});
 	let rows: StatementRow[];
+	let listFound: boolean;
+	let tableCount: number;
 	try {
-		await gotoAndWaitFor(
+		listFound = await gotoAndWaitFor(
 			page,
 			CHASE_DOCUMENTS_URL,
 			CHASE_DOCUMENTS_ROW_SELECTOR,
 		);
-		rows = parseStatementsListDom(await page.content());
+		const html = await page.content();
+		tableCount = countStructuralMarker(html, /<table\b/gi);
+		rows = parseStatementsListDom(html);
 	} catch (err) {
 		await deps.emit({
 			type: "SKIP_RESULT",
@@ -3671,6 +3675,25 @@ async function runStatementIndexInPage(
 				"statements_scrape_failed",
 				err,
 			),
+		});
+		return;
+	}
+	if (rows.length === 0) {
+		// The Mobile documents page did not render the statement list this
+		// path reads. Saying "saved the statement list" would claim an empty
+		// list that was never read.
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "statements",
+			reason: "statement_list_unreadable_on_mobile",
+			message:
+				"The Mobile app could not read the statement list. Run Chase on Desktop to save statements.",
+			recovery_hint: "retry_on_connector_upgrade",
+			diagnostics: {
+				statement_list_found: listFound,
+				table_count: tableCount,
+				rows: 0,
+			},
 		});
 		return;
 	}

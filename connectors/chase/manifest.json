@@ -595,6 +595,7 @@
 		"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 		"row_exception": "Something went wrong reading one of the rows",
 		"selectors_pending": "Support for this part of the connector isn't complete yet",
+		"statement_list_unreadable_on_mobile": "The Mobile app couldn't read your statement list",
 		"statement_pdfs_partial_on_mobile": "The Mobile app saves the statement list without the PDF files",
 		"statements_scrape_failed": "We couldn't read your statements page"
 	},
