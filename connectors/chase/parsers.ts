@@ -5,9 +5,9 @@
 // I/O (except sha256 + fs path helpers that are purely computational)
 // so they can be unit-tested in isolation.
 
-import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { parseHTML } from "linkedom";
+import { sha256Hex as sha256HexOf } from "../../packages/polyfill-connectors/src/statement-content-fingerprint.ts";
 import type {
 	ActivityChoice,
 	ActivityKind,
@@ -134,7 +134,7 @@ export function truncate(s: string, max: number): string {
 // ─── Hash + URL helpers ──────────────────────────────────────────────────
 
 export function sha256Hex(buf: Buffer | Uint8Array): string {
-	return createHash("sha256").update(buf).digest("hex");
+	return sha256HexOf(buf);
 }
 
 /**
@@ -164,10 +164,12 @@ export function isUsablePdfBuffer(buf: Buffer | Uint8Array): boolean {
 }
 
 // "%PDF" — the leading magic bytes every PDF file carries (PDF spec §7.5.2).
-const PDF_MAGIC = Buffer.from("%PDF", "ascii");
+// A byte array, not a Buffer: the Mobile (PageShim) bundle loads this module
+// and has no Buffer.
+const PDF_MAGIC = Uint8Array.of(0x25, 0x50, 0x44, 0x46);
 
 export function shortHash(s: string): string {
-	return createHash("sha256").update(s).digest("hex").slice(0, HASH_SLUG_LEN);
+	return sha256HexOf(s).slice(0, HASH_SLUG_LEN);
 }
 
 export function fileUrl(p: string | null | undefined): string | null {

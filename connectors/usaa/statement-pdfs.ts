@@ -79,8 +79,12 @@ import type {
 // `document_url` pointing at these files. They live on the deployment-owned
 // artifact root, not under homedir(), which the documented single-volume
 // deployment discards on container replacement. See
-// src/connector-artifact-root.ts.
-const STATEMENT_ROOT = resolveConnectorArtifactDir("usaa", ["statements"]).root;
+// src/connector-artifact-root.ts. Resolved on first use, not at module
+// load: the Mobile (PageShim) bundle loads this module and has no home
+// directory.
+function statementRoot(): string {
+	return resolveConnectorArtifactDir("usaa", ["statements"]).root;
+}
 
 // ─── Selector regexes (kept here; Node-side, not pure data) ──────────────
 const OPTIONS_BUTTON_TEXT_RE = /^\s*(Options|More|\.{3})\s*$/i;
@@ -600,7 +604,7 @@ async function persistPdf({
 }): Promise<{ pdfPath: string; pdfSha256: string }> {
 	const pdfSha256 = sha256Hex(buffer);
 	const slug = safeAccountSlug(accountId, "unknown");
-	const dir = join(STATEMENT_ROOT, slug);
+	const dir = join(statementRoot(), slug);
 	await mkdir(dir, { recursive: true });
 	const ym = yearMonthFromDate(dateDelivered);
 	const pdfPath = join(dir, `${ym}-${pdfSha256.slice(0, 16)}.pdf`);
@@ -959,5 +963,7 @@ export const _internals = {
 	parseCreditCardEra,
 	detectStatementYear,
 	currencyToCentsFromStatement: _currencyFromStatement,
-	STATEMENT_ROOT,
+	get STATEMENT_ROOT(): string {
+		return statementRoot();
+	},
 };

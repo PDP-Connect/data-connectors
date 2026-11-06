@@ -44,6 +44,7 @@ const NODE_ONLY = new Set([
 	"os",
 	"patchright",
 	"readline",
+	"stream/promises",
 ]);
 const manifestOf = (name) =>
 	JSON.parse(
@@ -316,6 +317,140 @@ test("oura_browser: a sign-in after 45 s outlives the 30 s bridge-call timeout",
 	assert.equal(r.calls.promptUser, 1);
 	assert.equal(r.streamResult.completed, true);
 	assert.deepEqual(r.streamDone.exportSummary, c.exportSummary);
+});
+
+test("chase: a documents page without the statement list is not reported as a saved list", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chase.mjs");
+	fx.useDocumentsShape("mobile");
+	try {
+		const built = await buildPageshim({
+			connector: "chase",
+			outfile: join(out, "chase-mobile-documents.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["chase.statements"],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(
+			r.result.errors.map(({ scope, code, disposition }) => ({ scope, code, disposition })),
+			[
+				{
+					scope: "chase.statements",
+					code: "statement_list_unreadable_on_mobile",
+					disposition: "omitted",
+				},
+			],
+		);
+		assert.match(r.result.errors[0].reason, /could not read the statement list/);
+		assert.equal(r.result.exportSummary.details.statements, 0);
+	} finally {
+		fx.useDocumentsShape("desktop");
+	}
+});
+
+test("chase: QFX history Chase will not send is reported with its range", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chase.mjs");
+	fx.useOlderHistoryServed(false);
+	try {
+		const built = await buildPageshim({
+			connector: "chase",
+			outfile: join(out, "chase-mobile-qfx-partial.js"),
+		});
+		fx.qfxRequests.length = 0;
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["chase.accounts", "chase.transactions"],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		const day = (offset) =>
+			new Date(Date.now() - offset * 86_400_000).toISOString().slice(0, 10);
+		assert.deepEqual(
+			r.result.errors.map(({ scope, code, reason }) => ({ scope, code, reason })),
+			[
+				{
+					scope: "chase.transactions",
+					code: "qfx_history_partial",
+					reason: `Chase did not send activity from ${day(729)} to ${day(365)} for account 1/1`,
+				},
+			],
+		);
+		assert.equal(r.result.exportSummary.details.transactions, 3);
+		// The newest year, then the older year halved down to 45-day windows.
+		const qfx = fx.qfxRequests.filter(
+			(q) => q["account-activity-download-type-code"] === "QFX",
+		);
+		assert.equal(qfx.length, 1 + 1 + 2 + 4 + 8);
+	} finally {
+		fx.useOlderHistoryServed(true);
+	}
+});
+
+test("usaa: Export date fields that initialize late still take the dates", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/usaa.mjs");
+	fx.useExportDateFields("late_init");
+	try {
+		const built = await buildPageshim({
+			connector: "usaa",
+			outfile: join(out, "usaa-late-date-fields.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["usaa.accounts", "usaa.transactions"],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.equal(
+			r.result.exportSummary.details.transactions,
+			fx.pageshimCase.exportSummary.details.transactions,
+		);
+	} finally {
+		fx.useExportDateFields("normal");
+	}
+});
+
+test("usaa: a failed Export dialog names the failed check for each account", {
+	timeout: 300_000,
+}, async () => {
+	const fx = await import("./fixtures/usaa.mjs");
+	fx.useExportDateFields("never");
+	try {
+		const built = await buildPageshim({
+			connector: "usaa",
+			outfile: join(out, "usaa-date-fields-missing.js"),
+		});
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["usaa.accounts", "usaa.transactions"],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		const exportErrors = r.result.errors.filter(
+			(error) => error.scope === "usaa.transactions",
+		);
+		assert.equal(exportErrors.length, 2, JSON.stringify(r.result.errors));
+		for (const error of exportErrors) {
+			assert.match(
+				error.reason,
+				/^Export ladder exhausted \(source_structure_changed\); export_dialog_unexpected_shape; page=unavailable; check=date_fields_missing/,
+			);
+		}
+	} finally {
+		fx.useExportDateFields("normal");
+	}
 });
 
 test("chatgpt: complete bounded walk is not marked partial just because STATE was emitted", {

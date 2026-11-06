@@ -172,8 +172,44 @@ export interface DiagnosticInfo {
 	diag: PageDiagnostics | null;
 	download?: DownloadDiagnostics | null;
 	error?: string;
+	/** Mobile only: which Export dialog check failed, as closed facts. */
+	export_dialog?: UsaaExportDialogObservation;
 	no_export_observation?: NoExportAffordanceObservation;
 	phase: string;
+}
+
+/** The check of the Mobile Export dialog that failed. */
+export type UsaaExportDialogCheck =
+	| "dialog_not_found"
+	| "selection_type_missing"
+	| "selection_type_rejected"
+	| "date_fields_missing"
+	| "dates_rejected"
+	| "submit_missing";
+
+/**
+ * Closed facts from a failed Mobile Export dialog step. Counts, states,
+ * timings and value shapes (digits as 9, letters as a) only: no field values.
+ */
+export interface UsaaExportDialogObservation {
+	check: UsaaExportDialogCheck;
+	/** "ready": selectionType rendered; "open": a dialog without it. */
+	dialog_state: "ready" | "open" | "none";
+	/** From the Export click until selectionType rendered or the wait ended. */
+	dialog_wait_ms: number;
+	/** Rendered `[role="dialog"]` elements, and how many the Export selector kept. */
+	role_dialogs_visible: number;
+	export_dialog_candidates: number;
+	/** "reverted": took "date-range", then lost it while the date fields were awaited. */
+	selection_type?: "missing" | "accepted" | "rejected" | "reverted";
+	from_field?: "missing" | "disabled" | "ready";
+	to_field?: "missing" | "disabled" | "ready";
+	/** Date inputs anywhere in the document, inside the dialog or not. */
+	date_inputs_in_document?: number;
+	/** From choosing "date-range" until both date fields were ready or the wait ended. */
+	fields_wait_ms?: number;
+	from_value_shape?: string;
+	to_value_shape?: string;
 }
 
 /** Closed facts collected only for the no-export terminal diagnostic. */
