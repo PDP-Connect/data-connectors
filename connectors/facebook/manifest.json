@@ -9,8 +9,9 @@
 	},
 	"connector_key": "facebook",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-	"version": "0.1.11",
+	"version": "0.1.12",
 	"display_name": "Facebook",
+	"account_identity": "required",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#0866FF"

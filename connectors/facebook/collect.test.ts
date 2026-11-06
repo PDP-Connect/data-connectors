@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import {
 	activityUrl,
 	type CollectorContext,
@@ -231,7 +232,21 @@ function stateFor(h: Harness, stream: string): unknown {
 	)?.message;
 }
 
+// Every run below reads the same synthetic viewer, so one capture serves the file.
+const accountIdentity = captureAccountIdentity();
+
 describe("collectFacebook", () => {
+	it("reports the viewer's numeric id before it reads any stream", async () => {
+		const h = harness({
+			streams: ["friends"],
+			pages: { [ME]: meSnapshot },
+			captured: [],
+			replies: [],
+		});
+		await collectFacebook(h.ctx, h.services).catch(() => undefined);
+		assert.deepEqual(accountIdentity.ids, [TIMELINE_VIEWER]);
+	});
+
 	it("walks friends from the preloaded first page to the source's end signal", async () => {
 		const first = friendsPage(0, {
 			end_cursor: "cursor-1",

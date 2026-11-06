@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import {
 	assertUserFacingProgress,
 	DIAGNOSTIC_LINE_MAX_CHARS,
@@ -465,6 +466,15 @@ test("without a session, the owner signs in on the login page", async () => {
 	assert.deepEqual(fake.visits, [APP_URL, LOGIN_URL]);
 	assert.deepEqual(statuses, ["resolved"]);
 	assert.deepEqual(fake.calls, []);
+});
+
+// Every run below reads the same synthetic owner, so one capture serves the file.
+const accountIdentity = captureAccountIdentity();
+
+test("a run reports the owner's snowflake id before it reads the other streams", async () => {
+	const h = harness(fakeDiscord({ apiVersion: "v10", respond: discordApi({}) }));
+	await collectDiscordBrowser(h.ctx, fast());
+	assert.deepEqual(accountIdentity.ids, ["552071489126400001"]);
 });
 
 test("a run reads the four streams with the client's own headers", async () => {
