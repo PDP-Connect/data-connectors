@@ -126,7 +126,7 @@
 				"account_no_longer_discovered": "An account we tracked before is no longer listed on your dashboard",
 				"ambiguous_multi_account_overview": "We couldn't tell which account view to use",
 				"qfx_download_failed": "We couldn't download the transactions file",
-				"qfx_history_partial": "Chase sent a shorter stretch of transaction history than we asked for",
+				"qfx_history_partial": "Chase did not send part of the transaction history we asked for",
 				"qfx_parse_failed": "We couldn't read the transactions file",
 				"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 				"row_exception": "Something went wrong reading one of the rows",
