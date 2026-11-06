@@ -262,7 +262,36 @@ export type ChaseDurableFailureCode =
 	| "row_exception"
 	| "statements_scrape_failed";
 
-/** Durable failure evidence is a closed structural shape; error text stays local. */
+const CHASE_ERROR_MESSAGE_MAX = 160;
+/** A reason code at the start of an error string, as in `code` or `code: detail`. */
+const CHASE_ERROR_CODE_RE = /^([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?=$|\s|\(|:(?!\/\/))/;
+
+/**
+ * Error text with every value taken out, for durable diagnostics: URLs,
+ * file paths, quoted text, `key=value` pairs, e-mail addresses, any token with a digit
+ * or currency sign (account numbers, balances, dates) and all-capitals
+ * words (QFX merchant names) become placeholders. First line only, bounded.
+ */
+export function chaseValueFreeErrorText(text: string): string {
+	return (text.split(/\r?\n/, 1)[0] ?? "")
+		.replace(/"[^"]*"|'[^']*'|`[^`]*`/g, "<text>")
+		.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S*/gi, "<url>")
+		.replace(/\b(?:data|blob|about|javascript):\S*/gi, "<url>")
+		.replace(/(?:[A-Za-z]:\\|~?\/)[^\s:]*[\\/][^\s:]*/g, "<path>")
+		.replace(/\S+@\S+/g, "<email>")
+		.replace(/[^\s<>]*=[^\s<>]*/g, "<text>")
+		.replace(/[^\s<>]*[\d$€£][^\s<>]*/g, "<n>")
+		.replace(/\b[A-Z][A-Z&'.-]+\b/g, "<text>")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, CHASE_ERROR_MESSAGE_MAX);
+}
+
+/**
+ * Durable failure evidence: a closed structural shape plus the error's reason
+ * code (`download_request_not_found`) and a value-free message. Raw error
+ * text stays local; see `chaseValueFreeErrorText`.
+ */
 export function buildChaseDurableFailureDiagnostic(
 	artifact: ChaseDurableFailureArtifact,
 	failureCode: ChaseDurableFailureCode,
@@ -270,11 +299,24 @@ export function buildChaseDurableFailureDiagnostic(
 ): {
 	artifact: ChaseDurableFailureArtifact;
 	error_class: "Error" | "unknown";
+	error_code?: string;
+	error_message?: string;
 	failure_code: ChaseDurableFailureCode;
 } {
+	const text =
+		error instanceof Error
+			? error.message
+			: typeof error === "string"
+				? error
+				: "";
+	const code = CHASE_ERROR_CODE_RE.exec(text)?.[1];
+	const rest = code ? text.slice(code.length).replace(/^:\s*/, "") : text;
+	const message = chaseValueFreeErrorText(rest);
 	return {
 		artifact,
 		error_class: error instanceof Error ? "Error" : "unknown",
+		...(code ? { error_code: code } : {}),
+		...(message ? { error_message: message } : {}),
 		failure_code: failureCode,
 	};
 }
