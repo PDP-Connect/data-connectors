@@ -92,6 +92,9 @@ if (!customElements.get("mds-button")) {
       const button = document.createElement("button");
       button.textContent = "Download";
       button.addEventListener("click", () => {
+        // chase.com opens "_self" first and builds the form only when that
+        // returns a window.
+        if (!window.open("", "_self")) return;
         const form = document.createElement("form");
         form.method = "GET";
         form.action = ${JSON.stringify(QFX_PATH)};
@@ -112,6 +115,8 @@ if (!customElements.get("mds-button")) {
         form.append(submit);
         document.body.append(form);
         submit.click();
+        // The connector must read the submission, not the leftover form.
+        form.remove();
       });
       root.append(button);
     }

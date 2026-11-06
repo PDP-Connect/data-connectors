@@ -303,12 +303,29 @@ export function armDownloadCapture(page: EvaluatingPage): Promise<boolean> {
 			recordForm(this);
 		};
 		const originalOpen = window.open;
-		window.open = (url?: string | URL): null => {
+		// Return a window-like object, not null: some sites (chase.com) call
+		// `window.open("", "_self")` and submit their download form only when
+		// that returns a window. The object does nothing, so nothing navigates.
+		window.open = (url?: string | URL, target?: string): Window => {
 			store.intents.push({
 				kind: "open",
 				url: new URL(String(url ?? ""), location.href).href,
 			});
-			return null;
+			const noop = (): void => undefined;
+			const opened = {
+				closed: false,
+				name: target ?? "",
+				opener: window,
+				location: { href: "about:blank" },
+				document: { open: noop, write: noop, writeln: noop, close: noop },
+				focus: noop,
+				blur: noop,
+				postMessage: noop,
+				close: (): void => {
+					opened.closed = true;
+				},
+			};
+			return opened as unknown as Window;
 		};
 		const frameSrc = Object.getOwnPropertyDescriptor(
 			HTMLIFrameElement.prototype,

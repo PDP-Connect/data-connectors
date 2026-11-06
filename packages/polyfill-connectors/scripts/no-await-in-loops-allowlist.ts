@@ -812,7 +812,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/chase/index.ts",
-			line: 3563,
+			line: 3317,
+			column: 18,
+			category: "bounded_retry_polling",
+			note: "waitForChaseFormIntent(): reads capture intents in arrival order until the form submission or the deadline",
+		},
+		{
+			path: "connectors/chase/index.ts",
+			line: 3585,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitStatementIndexOnly(): Mobile statements index, Collection Profile protocol emission requiring in-order delivery",
@@ -6314,7 +6321,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/in-page-download.ts",
-			line: 382,
+			line: 399,
 			column: 18,
 			category: "bounded_retry_polling",
 			note: "waitForDownloadIntent(): polls the page's capture store until an intent arrives or the timeout ends",

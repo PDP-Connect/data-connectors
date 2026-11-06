@@ -4,9 +4,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	armDownloadCapture,
+	type DownloadIntent,
 	decodeDataUrl,
+	disarmDownloadCapture,
 	fetchSameOriginFile,
 	formIntentUrl,
+	waitForDownloadIntent,
 } from "./in-page-download.ts";
 
 test("formIntentUrl replaces overridden fields in place and appends new ones", () => {
@@ -78,4 +82,97 @@ test("fetchSameOriginFile refuses a cross-origin URL before fetching", async () 
 	assert.equal(result.ok, false);
 	assert.equal(result.error, "cross_origin");
 	assert.equal(calls.length, 1);
+});
+
+/**
+ * Run `fn` with the page globals `armDownloadCapture` touches stubbed on
+ * `globalThis`, then put the originals back.
+ */
+async function withStubPage<T>(fn: () => Promise<T>): Promise<T> {
+	const g = globalThis as unknown as Record<string, unknown>;
+	const names = [
+		"window",
+		"location",
+		"document",
+		"open",
+		"addEventListener",
+		"removeEventListener",
+		"HTMLAnchorElement",
+		"HTMLFormElement",
+		"HTMLIFrameElement",
+		"HTMLButtonElement",
+		"HTMLInputElement",
+		"FileReader",
+	];
+	const saved = names.map(
+		(name) => [name, Object.getOwnPropertyDescriptor(g, name)] as const,
+	);
+	const set = (name: string, value: unknown): void => {
+		Object.defineProperty(g, name, {
+			configurable: true,
+			writable: true,
+			value,
+		});
+	};
+	const realOpen = (): null => {
+		throw new Error("the stub must not call the real window.open");
+	};
+	set("window", globalThis);
+	set("location", { href: "https://bank.example/dashboard" });
+	set("document", { addEventListener() {}, removeEventListener() {} });
+	set("open", realOpen);
+	set("addEventListener", () => undefined);
+	set("removeEventListener", () => undefined);
+	set("HTMLAnchorElement", class {
+		click(): void {}
+	});
+	set("HTMLFormElement", class {
+		submit(): void {}
+	});
+	set("HTMLIFrameElement", class {});
+	set("HTMLButtonElement", class {});
+	set("HTMLInputElement", class {});
+	set("FileReader", class {});
+	try {
+		return await fn();
+	} finally {
+		for (const [name, descriptor] of saved) {
+			if (descriptor) Object.defineProperty(g, name, descriptor);
+			else delete g[name];
+		}
+	}
+}
+
+test("armDownloadCapture: window.open records the intent and returns a window that does not navigate", async () => {
+	const page = {
+		evaluate: async <T, A>(fn: (arg: A) => T, arg: A): Promise<T> => fn(arg),
+	};
+	await withStubPage(async () => {
+		assert.equal(await armDownloadCapture(page), true);
+		const opened = (
+			globalThis as unknown as {
+				open: (url?: string, target?: string) => Window | null;
+			}
+		).open("", "_self");
+		// chase.com submits its download form only when this is a window.
+		assert.notEqual(opened, null);
+		assert.equal(opened?.closed, false);
+		assert.equal(opened?.name, "_self");
+		opened?.focus();
+		opened?.document.write("");
+		opened?.close();
+		assert.equal(opened?.closed, true);
+		const intent: DownloadIntent | null = await waitForDownloadIntent(page, {
+			timeoutMs: 0,
+		});
+		assert.deepEqual(intent, {
+			kind: "open",
+			url: "https://bank.example/dashboard",
+		});
+		await disarmDownloadCapture(page);
+		assert.throws(
+			() => (globalThis as unknown as { open: () => unknown }).open(),
+			/must not call the real window.open/,
+		);
+	});
 });

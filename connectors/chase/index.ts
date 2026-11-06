@@ -3302,6 +3302,29 @@ function findChaseDownloadForm(): {
 	return null;
 }
 
+/**
+ * Wait for the download form's submission. Chase calls `window.open("",
+ * "_self")` before it submits the form, so an `open` intent can come first;
+ * skip it and keep waiting. Returns the last intent seen when no form came.
+ */
+async function waitForChaseFormIntent(
+	page: Page,
+	seenKinds: DownloadIntent["kind"][],
+): Promise<DownloadIntent | null> {
+	const deadline = Date.now() + MOBILE_FORM_INTENT_WAIT_MS;
+	let last: DownloadIntent | null = null;
+	for (;;) {
+		const intent = await waitForDownloadIntent(page, {
+			timeoutMs: Math.max(0, deadline - Date.now()),
+		});
+		if (!intent) return last;
+		seenKinds.push(intent.kind);
+		if (intent.kind === "form") return intent;
+		last = intent;
+		if (Date.now() >= deadline) return last;
+	}
+}
+
 type ChaseQfxFetch =
 	| { kind: "qfx"; text: string }
 	| { kind: "no_activity" }
@@ -3336,6 +3359,7 @@ async function fetchChaseQfxInPage(
 	}
 	await armDownloadCapture(page);
 	let intent: DownloadIntent | null = null;
+	const seenKinds: DownloadIntent["kind"][] = [];
 	try {
 		if (
 			await page.evaluate(
@@ -3343,14 +3367,12 @@ async function fetchChaseQfxInPage(
 				CHASE_DOWNLOAD_BUTTON_SELECTOR,
 			)
 		) {
-			intent = await waitForDownloadIntent(page, {
-				timeoutMs: MOBILE_FORM_INTENT_WAIT_MS,
-			});
+			intent = await waitForChaseFormIntent(page, seenKinds);
 		}
 	} finally {
 		await disarmDownloadCapture(page);
 	}
-	const intentKind = intent?.kind ?? "none";
+	const intentKind = seenKinds.join(",") || "none";
 	if (intent?.kind !== "form") {
 		intent = await page.evaluate(findChaseDownloadForm, undefined);
 	}
