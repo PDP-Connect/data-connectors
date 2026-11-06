@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PDP-Connect/data-connectors/schemas/account-identity.schema.json",
+  "title": "Collection Profile ACCOUNT_IDENTITY message",
+  "description": "Machine-readable half of docs/spec/collection-profile.md Section 5.14 (the connector ACCOUNT_IDENTITY message). The schema checks one message. It does not check that the connector declares account_identity, that a run carries at most one message, or that a declaring connector emits one; the runtime checks those (Section 5.14).",
+  "type": "object",
+  "required": ["type", "account_id"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "ACCOUNT_IDENTITY" },
+    "account_id": {
+      "description": "The stable upstream account id, as a string with no whitespace.",
+      "type": "string",
+      "pattern": "^\\S{1,256}$"
+    }
+  }
+}

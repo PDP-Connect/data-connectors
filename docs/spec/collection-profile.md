@@ -28,6 +28,11 @@ that every manifest under `connectors/` validates against it.
 [`schemas/observation.schema.json`](../../schemas/observation.schema.json)
 validates the `OBSERVATION` message of Section 5.10 and the
 `diagnostic_descriptors` member of Section 3.8.
+[`schemas/account-identity.schema.json`](../../schemas/account-identity.schema.json)
+validates the `ACCOUNT_IDENTITY` message of Section 5.14.
+[`schemas/account-identity.schema.test.mjs`](../../schemas/account-identity.schema.test.mjs)
+checks that schema, the `account_identity` manifest member of Section 3.9, and
+every connector manifest that declares it.
 [`schemas/observation.schema.test.mjs`](../../schemas/observation.schema.test.mjs)
 checks that the fact table in Section 5.10.1 matches that schema.
 
@@ -120,6 +125,7 @@ features it needs, and describes the streams it can emit.
 | `display_name` | REQUIRED non-empty display name. |
 | `runtime_requirements.bindings` | OPTIONAL binding-requirement map. Absence means no required binding. |
 | `protocol_capabilities` | OPTIONAL array of required optional wire capabilities. Absence means the empty set. |
+| `account_identity` | OPTIONAL. The only value is `"required"` (Section 3.9). Absence means the connector does not report an upstream account id. |
 | `streams` | REQUIRED non-empty array of stream declarations. |
 
 Current manifests can also contain `connector_id` and `manifest_uri` during the
@@ -1047,6 +1053,34 @@ own observations.
 A manifest that declares `diagnostic_descriptors` or the `OBSERVATION`
 capability declares `protocol_version` `0.2.0`.
 
+### 3.9 Account identity
+
+`account_identity` is an OPTIONAL string member. Its only value is
+`"required"`. Any other value is invalid. A connector that does not declare the
+member omits it.
+
+```json
+{ "account_identity": "required" }
+```
+
+A manifest declares `account_identity: "required"` only when the connector
+can read a stable account id from the source in every run that it completes.
+A runtime that holds two accounts of one connector uses the reported id to
+keep them apart (Section 5.14). A connector that cannot get such an id omits
+the member.
+
+The stable id MUST NOT change when the account changes its email address,
+username, handle, or display name, if the source offers an id that does not
+change. The connector prefers an immutable numeric or UUID user id over an
+email address or a username. When the source has both a user id and a
+workspace or organization id, the connector reports the id of the signed-in
+user.
+
+A connector that declares the member emits `ACCOUNT_IDENTITY` (Section 5.14)
+in every run that ends with `DONE.status` `succeeded`. The runtime, not the
+connector, enforces that rule. The member is not a `protocol_capabilities`
+value: it is the declaration that Section 3.4 requires for this message.
+
 ## 4. Run protocol
 
 The runtime and connector exchange one JSON object per line. The runtime writes
@@ -1751,6 +1785,43 @@ names the remaining parts. It does not define their behavior.
   `OBSERVATION` with any other `fact` value is invalid.
 - The structure of a shared diagnostic report.
 
+### 5.14 `ACCOUNT_IDENTITY`
+
+```json
+{ "type": "ACCOUNT_IDENTITY", "account_id": "1234567" }
+```
+
+`ACCOUNT_IDENTITY` reports the stable id of the source account that the run
+read. A connector MUST NOT emit it unless its manifest declares
+`account_identity: "required"` (Section 3.9).
+
+`account_id` is REQUIRED. It is a string of 1 to 256 characters with no
+whitespace. The connector writes the id exactly as the source reports it, as a
+string. For example, it writes a numeric id in decimal digits. The connector
+MUST NOT add a connector-specific prefix, hash the id, or combine it with
+another value to make it unique. The value is opaque: a runtime MUST NOT parse
+it or give it a meaning. It MUST NOT be a credential, a token, or a session
+value.
+
+The connector emits the message at most once in a run. It can emit the
+message at any time after `START` and before `DONE`, because some sources
+reveal the account id only after a later request. A runtime MUST treat a
+second `ACCOUNT_IDENTITY` in one run as a protocol violation.
+
+A runtime MUST fail a run for a connector that declares
+`account_identity: "required"` and reaches `DONE` with status `succeeded`
+without a valid `ACCOUNT_IDENTITY`. The connector cannot waive this rule. A
+run that fails for another reason does not need the message. A runtime MUST NOT
+commit state from a run that it fails under this rule.
+
+`ACCOUNT_IDENTITY` does not change connector state and does not prove
+collection coverage. The account id is personal data. A connector SHOULD NOT
+copy it into `PROGRESS` messages or diagnostics, and a runtime keeps it on the
+owner's device or deployment as Section 5.12 requires for diagnostics.
+
+This profile defines no storage, namespace, or hashing for the id. Those are
+runtime concerns.
+
 ## 6. Conformance
 
 ### 6.1 Connector conformance
@@ -1786,6 +1857,10 @@ A conforming connector:
     missing list container, or a next-page control that may not have rendered
     is not evidence. A runtime cannot verify this item, as with
     `STREAM_EVIDENCE.considered` (Section 5.7).
+15. Declares `account_identity: "required"` only when it can read a stable
+    upstream account id, and then emits `ACCOUNT_IDENTITY` once, as Section
+    5.14 defines, in every run that succeeds. It emits the message only when
+    it declares the member.
 
 ### 6.2 Runtime conformance
 
@@ -1813,6 +1888,9 @@ A conforming runtime:
     presents one as an instruction, and keeps the connector's error text
     visible.
 12. Transmits diagnostic data only as Section 5.12 allows.
+13. For a connector that declares `account_identity: "required"`, fails a
+    successful run that carries no valid `ACCOUNT_IDENTITY`, and treats a second
+    `ACCOUNT_IDENTITY` as a protocol violation (Section 5.14).
 
 Connector conformance and runtime conformance are separate claims. An artifact
 registry entry or successful package installation does not establish either
@@ -2076,6 +2154,12 @@ Version 0.2.0 adds the `OBSERVATION` capability and message, the
 5.11 to 5.13. Every valid 0.1.0 exchange stays valid. A 0.2.0 runtime
 presents the recovery hints of 0.1.0 connectors through the gate of
 Section 5.11.
+
+The `account_identity` manifest member and the `ACCOUNT_IDENTITY` message
+(Sections 3.9 and 5.14) are an optional addition to this draft. They do not
+change `protocol_version`. A runtime that does not know the member ignores
+it, and an older fail-closed runtime rejects the message. Roll out runtimes
+that understand the message before connectors that declare the member.
 
 ## 9. Provisional source-backed fulfillment
 

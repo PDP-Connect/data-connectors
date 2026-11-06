@@ -177,7 +177,7 @@ export const connectorManifestSchema = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/PDP-Connect/data-connectors/schemas/connector-manifest.schema.json",
   "title": "Collection Profile manifest runtime requirements",
-  "description": "Machine-readable half of docs/spec/collection-profile.md Section 3.3: binding instances, kinds, interface versions, typed constraints, binding features, and filesystem inputs. Other manifest fields are outside this schema's scope, except the coverage_stores declaration rule of Section 7.1.1, which reads only `streams` and `protocol_capabilities`. String patterns for constraint grammars (Section 3.3.4, 3.3.5) are a necessary but not sufficient structural check: they accept the canonical output of schemas/connector-binding-grammar.mjs, but full IDNA canonicalization, IPv4-looking-label rejection, and IPv6 normalization are that module's job, not this schema's. A string this schema accepts can still be non-canonical in a way only that module detects.",
+  "description": "Machine-readable half of docs/spec/collection-profile.md Section 3.3: binding instances, kinds, interface versions, typed constraints, binding features, and filesystem inputs. Other manifest fields are outside this schema's scope, except the coverage_stores declaration rule of Section 7.1.1, which reads only `streams` and `protocol_capabilities`, and the `account_identity` member of Section 3.9. String patterns for constraint grammars (Section 3.3.4, 3.3.5) are a necessary but not sufficient structural check: they accept the canonical output of schemas/connector-binding-grammar.mjs, but full IDNA canonicalization, IPv4-looking-label rejection, and IPv6 normalization are that module's job, not this schema's. A string this schema accepts can still be non-canonical in a way only that module detects.",
   "type": "object",
   "properties": {
     "runtime_requirements": {
@@ -187,6 +187,10 @@ export const connectorManifestSchema = {
           "$ref": "#/$defs/bindings"
         }
       }
+    },
+    "account_identity": {
+      "description": "Section 3.9: the connector reports a stable upstream account id in an ACCOUNT_IDENTITY message (Section 5.14). Omit the member when the connector cannot get such an id.",
+      "const": "required"
     }
   },
   "allOf": [

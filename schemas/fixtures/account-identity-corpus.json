@@ -1,0 +1,83 @@
+{
+  "description": "Shared ACCOUNT_IDENTITY corpus. schemas/account-identity.schema.test.mjs checks the JSON schema against it and packages/polyfill-connectors/src/account-identity.test.ts checks the runtime's zod projection against it, so the two cannot drift apart. Each invalid case names the rule it breaks. Ids are synthetic. The 256-character boundary is checked in code, not here.",
+  "valid": [
+    {
+      "type": "ACCOUNT_IDENTITY",
+      "account_id": "1234567"
+    },
+    {
+      "type": "ACCOUNT_IDENTITY",
+      "account_id": "user-AbCdEf123456"
+    },
+    {
+      "type": "ACCOUNT_IDENTITY",
+      "account_id": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "type": "ACCOUNT_IDENTITY",
+      "account_id": "T0000000/U0000000"
+    },
+    {
+      "type": "ACCOUNT_IDENTITY",
+      "account_id": "a"
+    }
+  ],
+  "invalid": [
+    {
+      "rule": "account_id is required",
+      "message": {
+        "type": "ACCOUNT_IDENTITY"
+      }
+    },
+    {
+      "rule": "account_id is a string, not a number",
+      "message": {
+        "type": "ACCOUNT_IDENTITY",
+        "account_id": 1234567
+      }
+    },
+    {
+      "rule": "account_id is not empty",
+      "message": {
+        "type": "ACCOUNT_IDENTITY",
+        "account_id": ""
+      }
+    },
+    {
+      "rule": "account_id has no whitespace",
+      "message": {
+        "type": "ACCOUNT_IDENTITY",
+        "account_id": "12 34"
+      }
+    },
+    {
+      "rule": "account_id has no leading whitespace",
+      "message": {
+        "type": "ACCOUNT_IDENTITY",
+        "account_id": " 1234"
+      }
+    },
+    {
+      "rule": "account_id has no trailing newline",
+      "message": {
+        "type": "ACCOUNT_IDENTITY",
+        "account_id": "1234\n"
+      }
+    },
+    {
+      "rule": "the type is exact",
+      "message": {
+        "type": "ACCOUNT_IDENTITIES",
+        "account_id": "1234567"
+      }
+    },
+    {
+      "rule": "no other member",
+      "message": {
+        "type": "ACCOUNT_IDENTITY",
+        "account_id": "1234567",
+        "email": "synthetic@example.invalid"
+      }
+    }
+  ]
+}
