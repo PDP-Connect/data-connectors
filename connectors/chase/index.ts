@@ -164,7 +164,7 @@ const DASHBOARD_ACCOUNT_SELECTOR =
 export const CHASE_CURRENT_ACTIVITY_ROW_SELECTOR =
 	'tr.mds-activity-table__row[data-values], tr[id*="activity" i][data-values]';
 const CHASE_CURRENT_ACTIVITY_TABLE_MARKER_RE =
-	/<table\b[^>]*\bclass=["'][^"']*\bmds-activity-table\b[^"']*["']/giu;
+	/<table\b[^>]*\bclass=["'][^"']*\bmds-activity-table(?:__mobile)?\b[^"']*["']/giu;
 const CHASE_DASHBOARD_MARKER_RE =
 	/\baccounts-name-link-button-[a-z0-9_-]+\b/giu;
 const CHASE_DASHBOARD_OVERVIEW_PATH = "/web/auth/dashboard";
@@ -3203,6 +3203,13 @@ const CHASE_QFX_WINDOW_DAYS = 729;
 /** The shortest window the 204 retry asks for. */
 const CHASE_QFX_MIN_WINDOW_DAYS = 30;
 const MOBILE_SESSION_PROBE_MS = 3000;
+/**
+ * The overview renders its activity tables after the account list. The
+ * Mobile layout splits recent activity into `mds-activity-table__mobile`
+ * subtables.
+ */
+const CHASE_ACTIVITY_TABLE_SELECTOR = `table.mds-activity-table, .mds-activity-table__mobile, ${CHASE_CURRENT_ACTIVITY_ROW_SELECTOR}`;
+const MOBILE_ACTIVITY_TABLE_WAIT_MS = 10_000;
 const MOBILE_FORM_INTENT_WAIT_MS = 10_000;
 const MOBILE_QFX_FIELDS = {
 	type: "account-activity-download-type-code",
@@ -3791,6 +3798,22 @@ export async function collectChasePageShim(
 		CHASE_OVERVIEW_URL,
 		DASHBOARD_ACCOUNT_SELECTOR,
 	);
+	// Current activity is parsed from this same read, so let the activity
+	// tables render first. An account with no recent activity may never
+	// render one; the wait is bounded and the parse then reports what it saw.
+	const activityTableRendered =
+		accountsRendered && deps.wantsCurrentActivity
+			? await page
+					.waitForFunction(
+						(css: string) => document.querySelector(css) !== null,
+						CHASE_ACTIVITY_TABLE_SELECTOR,
+						{ timeout: MOBILE_ACTIVITY_TABLE_WAIT_MS, polling: 250 },
+					)
+					.then(
+						() => true,
+						() => false,
+					)
+			: accountsRendered;
 	const dashboardHtml = await page.content().catch((): string => "");
 	const dashboardUrl = await page
 		.evaluate(() => location.href, undefined)
@@ -3865,7 +3888,7 @@ export async function collectChasePageShim(
 				readCount: 1,
 				route: classifyChaseCurrentActivityRoute(dashboardUrl),
 				targetCount: parserCount,
-				waitOutcome: accountsRendered ? "resolved" : "timed_out",
+				waitOutcome: activityTableRendered ? "resolved" : "timed_out",
 			}),
 		);
 	}

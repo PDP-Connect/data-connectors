@@ -895,3 +895,24 @@ test("parseStatementsListDom: local real capture parses ≥1 statement row", {
 		assert.ok(r.date_delivered_raw.length > 0);
 	}
 });
+
+test("parseCurrentActivityDom reads rows from every Mobile activity subtable", () => {
+	// The Mobile overview splits recent activity into several
+	// mds-activity-table__mobile subtables; the parser reads the whole
+	// document, not the first table. Row markup here is the Desktop one.
+	const html = [1, 2, 3, 4, 5]
+		.map(
+			(n) => `<table class="mds-activity-table__mobile"><tbody>
+  <tr id="ovd-recent-activity-table-dataTableId-row-${n}" class="mds-activity-table__row" data-values="Oct ${n}, 2026,SYNTHETIC SHOP ${n},$${n}.00,">
+    <td>Oct ${n}, 2026</td><td>SYNTHETIC SHOP ${n}</td><td>$${n}.00</td>
+  </tr>
+</tbody></table>`,
+		)
+		.join("\n");
+	const rows = parseCurrentActivityDom(html, "2026-11-05");
+	assert.equal(rows.length, 5);
+	assert.deepEqual(
+		rows.map((row) => row.activity_date),
+		["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"],
+	);
+});

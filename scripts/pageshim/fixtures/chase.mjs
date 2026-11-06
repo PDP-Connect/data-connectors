@@ -49,14 +49,26 @@ const overviewHtml = () => `
     <span id="accounts-name-link-button-${ACCOUNT_ID}-label">Sapphire Preferred (...9241)</span>
   </button>
 </div>
-<table class="mds-activity-table"><tbody>
+<div id="activity"></div>`;
+
+/**
+ * Recent activity, one subtable per row as the Mobile layout groups it. The
+ * row markup is the Desktop one: the Mobile row markup is not captured yet.
+ */
+const activityHtml = () => `
+<table class="mds-activity-table__mobile"><tbody>
   <tr id="ovd-recent-activity-table-dataTableId-row-1" class="mds-activity-table__row" data-values="Pending,SYNTHETIC CAFE,$6.50,">
     <td>Pending</td><td>SYNTHETIC CAFE</td><td>$6.50</td>
   </tr>
+</tbody></table>
+<table class="mds-activity-table__mobile"><tbody>
   <tr id="ovd-recent-activity-table-dataTableId-row-2" class="mds-activity-table__row" data-values="${visibleDate(isoDay(3))},SYNTHETIC GROCER,$42.17,">
     <td>${visibleDate(isoDay(3))}</td><td>SYNTHETIC GROCER</td><td>$42.17</td>
   </tr>
 </tbody></table>`;
+
+/** How long after the accounts the activity tables render, as on a device. */
+const ACTIVITY_RENDER_DELAY_MS = 1500;
 
 const documentsHtml = () => `
 <div class="documents-page">
@@ -102,6 +114,7 @@ const spa = () => `
 <script>
 const views = ${JSON.stringify({
 	overview: overviewHtml(),
+	activity: activityHtml(),
 	documents: documentsShape === "mobile" ? mobileDocumentsHtml() : documentsHtml(),
 })};
 const formHtml = ${JSON.stringify(downloadFormHtml("__ID__"))};
@@ -149,7 +162,13 @@ function render() {
   const download = /downloadAccountTransactions\\/index;params=[A-Z]+,[A-Z]+,(\\d+)/.exec(hash);
   if (download) app.innerHTML = formHtml.replace("__ID__", download[1]);
   else if (hash.includes("/documents/")) app.innerHTML = views.documents;
-  else app.innerHTML = views.overview;
+  else {
+    app.innerHTML = views.overview;
+    setTimeout(() => {
+      const slot = document.getElementById("activity");
+      if (slot) slot.innerHTML = views.activity;
+    }, ${ACTIVITY_RENDER_DELAY_MS});
+  }
 }
 addEventListener("hashchange", render);
 render();
