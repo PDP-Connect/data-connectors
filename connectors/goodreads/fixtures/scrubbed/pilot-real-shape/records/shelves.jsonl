@@ -1,0 +1,6 @@
+{"book_count":2,"exclusive":true,"id":"read","name":"Read","url":"https://www.goodreads.com/review/list/90000001?shelf=read"}
+{"book_count":1,"exclusive":true,"id":"currently-reading","name":"Currently Reading","url":"https://www.goodreads.com/review/list/90000001?shelf=currently-reading"}
+{"book_count":1,"exclusive":true,"id":"to-read","name":"Want to Read","url":"https://www.goodreads.com/review/list/90000001?shelf=to-read"}
+{"book_count":1,"exclusive":true,"id":"abandoned","name":"Abandoned","url":"https://www.goodreads.com/review/list/90000001?shelf=abandoned"}
+{"book_count":1,"exclusive":false,"id":"favorites-synthetic","name":"favorites-synthetic","url":"https://www.goodreads.com/review/list/90000001?shelf=favorites-synthetic"}
+{"book_count":2,"exclusive":false,"id":"winter-list","name":"winter-list","url":"https://www.goodreads.com/review/list/90000001?shelf=winter-list"}

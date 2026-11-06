@@ -169,6 +169,13 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		messages: { field: "received_at", format: "date-time" },
 		threads: { field: "first_message_date", format: "date-time" },
 	},
+	goodreads: {
+		account_profile: null,
+		books: { field: "added_at", format: "date-time" },
+		highlights: null,
+		shelves: null,
+		usage_summary: null,
+	},
 	google_calendar: {
 		calendars: null,
 		events: { field: "start", format: "date-time" },

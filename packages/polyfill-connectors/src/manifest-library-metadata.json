@@ -308,6 +308,21 @@
 		}
 	},
 	{
+		"file": "goodreads.json",
+		"manifest": {
+			"connector_key": "goodreads",
+			"reason_display_messages": {
+				"bot_challenge": "Goodreads is asking the browser to pass a verification check and did not let this run read the page. Open Goodreads in the connector's browser, pass the check, then run collection again.",
+				"collection_interrupted": "Goodreads stopped answering partway through, so some of your library is missing. Run collection again.",
+				"goodreads_session_missing": "This run ended before Goodreads had a signed-in session in the connector's browser. Sign in to Goodreads there (any method, with Keep me signed in ticked), then run collection again.",
+				"listing_incomplete": "Your reading summary was not saved because the library list could not be read to its end, and a summary of part of a library would be wrong.",
+				"shelf_list_incomplete": "Your shelves were not saved because Goodreads showed only part of your shelf list, and saving part of it would drop the rest. Please report this; running again will not help.",
+				"sign_in_required": "Goodreads needs you to sign in again before this can continue.",
+				"source_unreadable": "Goodreads answered with a page this connector doesn't recognise, so nothing more was read. Goodreads may have changed its site - please report this rather than retrying."
+			}
+		}
+	},
+	{
 		"file": "google_calendar.json",
 		"manifest": {
 			"connector_key": "google-calendar",
