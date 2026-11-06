@@ -8,6 +8,10 @@
 
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import {
+	createAccountIdentityReporter,
+	replaceProcessAccountIdentityReporterForTest,
+} from "./account-identity.ts";
 import { packageRoot, repoRoot } from "./connector-paths.ts";
 import {
 	type ConnectorSubprocessOptions,
@@ -75,4 +79,23 @@ export function assertAccountIdentity(
 	const doneAt = wire.findIndex((m) => m.type === "DONE");
 	const identityAt = wire.findIndex((m) => m.type === "ACCOUNT_IDENTITY");
 	assert.ok(doneAt > identityAt, "ACCOUNT_IDENTITY must come before DONE");
+}
+
+/**
+ * For tests that call a connector's `collect` in this process: records the
+ * account ids it reports instead of writing them to stdout. Call `restore`
+ * in a `finally`.
+ */
+export function captureAccountIdentity(): {
+	ids: string[];
+	restore: () => void;
+} {
+	const ids: string[] = [];
+	const restore = replaceProcessAccountIdentityReporterForTest(
+		createAccountIdentityReporter((message) => {
+			ids.push(message.account_id);
+			return Promise.resolve();
+		}),
+	);
+	return { ids, restore };
 }

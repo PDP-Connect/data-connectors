@@ -98,7 +98,22 @@ export function createAccountIdentityReporter(
 }
 
 /** One reporter per process: a connector process serves one run. */
-const processReporter = createAccountIdentityReporter();
+let processReporter = createAccountIdentityReporter();
+
+/**
+ * Test seam for connector tests that call `collect` in this process: swaps
+ * the process reporter for one that records instead of writing to stdout.
+ * Returns a function that restores the previous reporter.
+ */
+export function replaceProcessAccountIdentityReporterForTest(
+	reporter: AccountIdentityReporter,
+): () => void {
+	const previous = processReporter;
+	processReporter = reporter;
+	return () => {
+		processReporter = previous;
+	};
+}
 
 /**
  * What a connector calls once it has read the account id from the source.
