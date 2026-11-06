@@ -261,16 +261,17 @@ async function applicationAfterSessionSettles(page: Page, email: string, interac
 }
 
 async function pkce(page: Page): Promise<{ challenge: string; state: string; verifier: string }> {
+	// No named function in here: tsx/esbuild wraps a named one in a Node-only
+	// `__name(...)` that does not exist in the page.
 	return page.evaluate(async () => {
-		const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes))
-			.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-		const verifier = base64url(crypto.getRandomValues(new Uint8Array(48)));
+		const encoded = [crypto.getRandomValues(new Uint8Array(48)), crypto.getRandomValues(new Uint8Array(16))]
+			.map((bytes) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""));
+		const verifier = encoded[0] ?? "";
+		const stateBytes = encoded[1] ?? "";
 		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-		return {
-			verifier,
-			challenge: base64url(new Uint8Array(digest)),
-			state: `vana-${base64url(crypto.getRandomValues(new Uint8Array(16)))}`,
-		};
+		const challenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
+			.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+		return { verifier, challenge, state: `vana-${stateBytes}` };
 	});
 }
 
