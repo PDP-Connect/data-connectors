@@ -167,6 +167,8 @@ export function createMetaFixtures(options = {}) {
    }
    if (url.pathname === "/api/v1/users/web_profile_info/") {
     if (options.profileFailure) return json({message: "unavailable"}, 503);
+    // A login or challenge page where JSON was expected.
+    if (options.profileAnswer === "html") return html('<form><input type="password"></form>');
     return json({status: "ok", data: {user: profile}, ...options.profileEnvelope});
    }
    if (url.pathname.includes("/following/")) {

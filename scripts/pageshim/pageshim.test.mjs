@@ -3977,6 +3977,47 @@ test("meta: posts and post_likes on PageShim read the app's own posts query thro
  }
 });
 
+test("meta: an empty account's posts are complete from an owner-bound end page, and a non-JSON profile read is named", {timeout: 600_000}, async () => {
+ const {createMetaFixtures, timelinePage} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-empty-account.js")});
+ const scopes = ["instagram.profile", "instagram.posts", "instagram.post_likes"];
+ // The profile endpoint answers a login page, so there is no post count; the
+ // timeline's first page is empty and says has_next_page false.
+ const ownerless = {data: {xdt_api__v1__feed__user_timeline_graphql_connection: {edges: [],
+  page_info: {has_next_page: false, end_cursor: null}}}};
+ const cases = [
+  {name: "owner-bound end page", page: timelinePage([], null), complete: true},
+  {name: "no owner on the page", page: ownerless, complete: false,
+   reason: /did not show that they belong to the signed-in account/},
+  // The app never asks for page 2, so the walk stops without the end signal.
+  {name: "no end signal", page: timelinePage([], "synthetic-cursor-1"), options: {scroll: false}, complete: false,
+   reason: /gave no exact posts count \(web_profile_info answered HTTP 200.*\), and the read never reached a page with has_next_page false/},
+ ];
+ for (const pageInitScript of [false, true]) {
+  for (const c of cases) {
+   const label = `${c.name} (${pageInitScript ? "init script" : "evaluate"})`;
+   const fixtures = createMetaFixtures({postsPages: {"": c.page}, profileAnswer: "html", ...c.options});
+   const r = await runHarness({bundle: built.outfile, fixtures, scopes, pageInitScript,
+    initialState: {"instagram.posts": {old: true}, "instagram.post_likes": {old: true}}});
+   assertCleanRun(r);
+   assert.deepEqual(r.ret, {ok: true}, label);
+   assert.deepEqual(fixtures.postsRequests.map(p => p.cursor), [""], label);
+   assert.equal(r.result["instagram.posts"]?.records.length ?? 0, 0, label);
+   const errors = Object.fromEntries(r.result.errors.map(e => [e.scope, e.reason]));
+   assert.match(errors["instagram.profile"],
+    /web_profile_info answered HTTP 200 \(text\/html\) with a body that is not JSON/, label);
+   for (const scope of ["instagram.posts", "instagram.post_likes"]) {
+    if (c.complete) assert.equal(errors[scope], undefined, `${label} ${scope}`);
+    else assert.match(errors[scope], c.reason, `${label} ${scope}`);
+    assert.doesNotMatch(errors[scope] ?? "", /no end signal/, `${label} ${scope}`);
+   }
+   assert.deepEqual(r.stateMessages.map(m => m.stream).filter(s => s !== "instagram.profile"),
+    c.complete ? ["instagram.posts", "instagram.post_likes"] : [], label);
+   assert.deepEqual(r.states["instagram.posts"], c.complete ? {} : {old: true}, label);
+  }
+ }
+});
+
 test("facebook: Mobile takes a list's query from the page's own request through the in-page capture", { timeout: 300_000 }, async () => {
 	const { pageRequestFixtures } = await import("./fixtures/facebook.mjs");
 	const built = await buildPageshim({ connector: "facebook", outfile: join(out, "facebook-page-request.js") });

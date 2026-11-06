@@ -3942,9 +3942,13 @@ for (const [label, envelope, complete] of [
 		});
 		await collectAllStreams(ctx, NO_DELAY, TEST_POSTS_CLOCK, makeVirtualAdsClock(), TEST_PROFILE_CLOCK);
 		assert.equal(harness.emitted.length, 0);
+		// EMPTY_POSTS names the owner and ends the list, so posts and post_likes
+		// are proven empty whatever the profile says; following needs the
+		// profile's exact zero.
 		for (const stream of ["posts", "post_likes", "following"]) {
-			assert.equal(harness.protocolMessages.some(m => m.type === "STATE" && m.stream === stream), complete, `${stream} STATE`);
-			assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === stream), !complete, `${stream} SKIP_RESULT`);
+			const proven = stream === "following" ? complete : true;
+			assert.equal(harness.protocolMessages.some(m => m.type === "STATE" && m.stream === stream), proven, `${stream} STATE`);
+			assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === stream), !proven, `${stream} SKIP_RESULT`);
 		}
 	});
 }

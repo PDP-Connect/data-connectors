@@ -35,33 +35,94 @@ export async function buildAdRecordsWebCrypto(input: {
  }));
 }
 
+/** What the profile-info read saw, when it could not return a user. */
+export interface MobileProfileRead {
+ user: InstagramProfilePageUser | null;
+ /** Which step failed and what it saw; null when a user was read. */
+ problem: string | null;
+}
+
+/** The page's answer to the profile-info request, or the step that failed. */
+interface ProfileInfoAnswer {
+ status: number;
+ contentType: string | null;
+ body: unknown;
+ failure: "page_origin" | "fetch" | "body_read" | "not_json" | "page_call" | null;
+ detail: string | null;
+}
+
+/** The in-page read. A complete expression in a string (CONNECTOR-GUIDELINES
+ * rule 4). It keeps the real status and content type when the body is not
+ * JSON (a login or challenge page), so the caller can say which step failed. */
+export function profileInfoScript(username: string): string {
+ return `(async () => {
+ const answer = (status, contentType, body, failure, detail) => ({status, contentType, body, failure, detail});
+ if (location.origin !== "https://www.instagram.com") return answer(0, null, null, "page_origin", String(location.origin));
+ let res;
+ try {
+  res = await fetch("/api/v1/users/web_profile_info/?username=" + encodeURIComponent(${JSON.stringify(username)}), {
+   credentials: "include", signal: AbortSignal.timeout(20000),
+   headers: {"x-ig-app-id": "936619743392459", "x-requested-with": "XMLHttpRequest"},
+  });
+ } catch (error) {
+  return answer(0, null, null, "fetch", String((error && error.name) || "error"));
+ }
+ const contentType = res.headers.get("content-type");
+ let text;
+ try { text = await res.text(); } catch (error) {
+  return answer(res.status, contentType, null, "body_read", String((error && error.name) || "error"));
+ }
+ try { return answer(res.status, contentType, JSON.parse(text), null, null); } catch (error) {
+  return answer(res.status, contentType, null, "not_json", text.length + " bytes");
+ }
+})()`;
+}
+
+function describeProfileInfoFailure(answer: ProfileInfoAnswer): string {
+ const http = `HTTP ${answer.status} (${answer.contentType ?? "no content type"})`;
+ switch (answer.failure) {
+  case "page_origin": return `web_profile_info was not requested: the page was on ${answer.detail}, not https://www.instagram.com`;
+  case "fetch": return `the web_profile_info request failed in the page (${answer.detail})`;
+  case "body_read": return `web_profile_info answered ${http} but its body could not be read (${answer.detail})`;
+  case "not_json": return `web_profile_info answered ${http} with a body that is not JSON (${answer.detail})`;
+  case "page_call": return `the page call for web_profile_info failed (${answer.detail})`;
+  default: return `web_profile_info answered ${http}`;
+ }
+}
+
 /** The web profile API takes only a username and the public web app id.
  * The caller still requires both returned id and username to match web_info.
  * Missing fields stay missing; this does not manufacture GraphQL counts.
+ * When no user is read, `problem` names the step that failed.
  */
 export async function fetchMobileProfileUser(
  page: Page, username: string,
  observe: (body: unknown, status: number) => void = () => {},
-): Promise<InstagramProfilePageUser | null> {
- const response = await page.evaluate(async (name) => {
-  if (location.origin !== "https://www.instagram.com") return {status: 0, body: null};
-  try {
-   const res = await fetch(`/api/v1/users/web_profile_info/?username=${encodeURIComponent(name)}`, {
-    credentials: "include", signal: AbortSignal.timeout(20_000),
-    headers: {"x-ig-app-id": "936619743392459", "x-requested-with": "XMLHttpRequest"},
-   });
-   return {status: res.status, body: await res.json()};
-  } catch { return {status: 0, body: null}; }
- }, username).catch(() => ({status: 0, body: null}));
- observe(response.body, response.status);
- const body = response.body;
- if (response.status < 200 || response.status >= 300 || !body ||
+): Promise<MobileProfileRead> {
+ const answer = await (page.evaluate(profileInfoScript(username)) as Promise<ProfileInfoAnswer>)
+  .catch((error: unknown): ProfileInfoAnswer => ({
+   status: 0, contentType: null, body: null, failure: "page_call",
+   detail: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+  }));
+ observe(answer.body, answer.status);
+ if (answer.failure !== null) return {user: null, problem: describeProfileInfoFailure(answer)};
+ const body = answer.body as {
+  status?: unknown; ok?: unknown; error?: unknown; errorCode?: unknown; error_code?: unknown;
+  errors?: unknown; partial?: unknown; is_final?: unknown;
+  extensions?: {code?: unknown; partial?: unknown; is_final?: unknown} | null;
+  data?: {user?: InstagramProfilePageUser | null} | null;
+ } | null;
+ if (answer.status < 200 || answer.status >= 300) return {user: null, problem: describeProfileInfoFailure(answer)};
+ if (!body || typeof body !== "object" ||
   (body.status !== undefined && body.status !== "ok") || body.ok === false ||
   body.error !== undefined || body.errorCode !== undefined || body.error_code !== undefined ||
   (body.errors != null && (!Array.isArray(body.errors) || body.errors.length > 0)) ||
   body.partial === true || body.is_final === false || body.extensions?.code === "UNAUTHENTICATED" ||
-  body.extensions?.partial === true || body.extensions?.is_final === false) return null;
- return body.data?.user ?? null;
+  body.extensions?.partial === true || body.extensions?.is_final === false) {
+  return {user: null, problem: `${describeProfileInfoFailure(answer)} with an error or partial envelope`};
+ }
+ const user = (body.data?.user ?? null) as InstagramProfilePageUser | null;
+ return user ? {user, problem: null} : {user: null, problem: `${describeProfileInfoFailure(answer)} with no user`};
 }
 
 // ─── Posts on PageShim: the app's own posts query, through page capture ───

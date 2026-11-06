@@ -2903,13 +2903,38 @@ export async function scrapeTargetingCategories(
 
 
 /** Only exact source totals or an explicit source end can prove a list.
- * A contradictory exact total vetoes an end signal. Empty inventories require\n * an exact zero; an end signal alone cannot distinguish login/challenge shells. */
+ * A contradictory exact total vetoes an end signal. An empty list needs an
+ * exact zero, or `emptyOwnerBound`: the source listed no items at all, ended
+ * the list explicitly, and its response named the owner. An end signal
+ * without owner evidence cannot tell an empty list from a login or
+ * challenge shell. */
 export function sourceInventoryComplete(
-	read: number, sourceTotal: unknown, sourceEnd: boolean,
+	read: number, sourceTotal: unknown, sourceEnd: boolean, emptyOwnerBound = false,
 ): boolean {
-	const exact = typeof sourceTotal === "number" &&
-		Number.isSafeInteger(sourceTotal) && sourceTotal >= 0;
-	return exact ? sourceTotal === read : read > 0 && sourceEnd;
+	return exactSourceTotal(sourceTotal) ? sourceTotal === read : sourceEnd && (read > 0 || emptyOwnerBound);
+}
+
+function exactSourceTotal(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Why a list read is not proven complete, in terms of what the run saw.
+ * `endSignal` names the source's end marker; `totalProblem` says why the
+ * profile gave no total, when that is known. */
+export function inventoryGapReason(list: string, seen: {
+	read: number; sourceItems: number; sourceTotal: unknown; sourceEnd: boolean; ownerBound: boolean;
+	endSignal: string; totalProblem?: string | null;
+}): string {
+	if (!seen.ownerBound) return `the ${list} responses did not show that they belong to the signed-in account`;
+	if (exactSourceTotal(seen.sourceTotal)) {
+		return `the profile reports ${seen.sourceTotal} ${list} but ${seen.read} were read`;
+	}
+	const noTotal = `the profile gave no exact ${list} count${seen.totalProblem ? ` (${seen.totalProblem})` : ""}`;
+	if (!seen.sourceEnd) return `${noTotal}, and the read never reached ${seen.endSignal}`;
+	if (seen.read < seen.sourceItems) {
+		return `${noTotal}, and ${seen.sourceItems - seen.read} of the ${seen.sourceItems} ${list} the source listed could not be read`;
+	}
+	return `${noTotal}; the source ended the list with ${seen.endSignal}`;
 }
 
 /** The facepile is normally a sample. It is exhaustive only when its distinct
@@ -3102,9 +3127,12 @@ export async function collectAllStreams(
 		// when profile output was not requested. Unknown is not proof of empty.
 		let observedPostCount: number | null = null;
 		let observedFollowingCount: number | null = null;
+		/** Why the profile gave no counts, when the read can tell (Mobile only). */
+		let profileCountProblem: string | null = null;
 		if ((wantsProfile || wantsPosts || wantsPostLikes || wantsFollowing) && user && identity) {
 			await progress("Fetching Instagram profile counts");
-			const profileUser = mobile ? await fetchMobileProfileUser(page, identity.username, (body, status) => observeAuthentication(page, body, status)) : await fetchProfilePageUser(
+			const profileUser = mobile ? await fetchMobileProfileUser(page, identity.username, (body, status) => observeAuthentication(page, body, status))
+				.then(read => { profileCountProblem = read.problem; return read.user; }) : await fetchProfilePageUser(
 				page,
 				identity.username,
 				capture,
@@ -3117,6 +3145,7 @@ export async function collectAllStreams(
 				profileUser.username.toLowerCase() === identity.username.toLowerCase(),
 			);
 			const trustedProfileUser = profileUserMatchesIdentity ? profileUser : null;
+			if (profileUser && !profileUserMatchesIdentity) profileCountProblem = "the profile read described another account";
 			const counts = profileCountsFromGraphQL(
 				trustedProfileUser
 					? { data: { user: trustedProfileUser } }
@@ -3132,7 +3161,7 @@ export async function collectAllStreams(
 				if (validProfile) await emitRecord("profile", profile as RecordData);
 				if (!readableSources || !validProfile || !profileEnrichmentIsComplete(trustedProfileUser)) {
 					await queueInventoryResult(ctx, "profile", validProfile ? 1 : 0, false,
-						"Instagram profile enrichment was incomplete; the emitted profile is a partial record");
+						`Instagram profile enrichment was incomplete; the emitted profile is a partial record${profileCountProblem ? ` (${profileCountProblem})` : ""}`);
 				}
 			}
 		}
@@ -3140,6 +3169,7 @@ export async function collectAllStreams(
 		if ((wantsPosts || wantsPostLikes) && identity) {
 			await progress("Fetching Instagram posts");
 			let edges: InstagramTimelineEdge[] = [];
+			let sourceItems = 0;
 			let sourceEnd = false;
 			let readable = true;
 			let ownerBound = false;
@@ -3148,6 +3178,7 @@ export async function collectAllStreams(
 				const result = await (mobile ? fetchAllPostsMobile : fetchAllPosts)(
 					page, identity.username, capture, progress, delay, postsClock, identity.id);
 				edges = result.edges;
+				sourceItems = result.sourceEdgeCount;
 				ownerBound = result.ownerBound;
 				sourceEnd = result.sourceEnd;
 			} catch (error) {
@@ -3156,12 +3187,24 @@ export async function collectAllStreams(
 				if (error instanceof PartialWalkFailure) edges = [...error.partial];
 			}
 			const emitted = await emitPostRecords(ctx, edges);
-			const postsComplete = readable && ownerBound && sourceInventoryComplete(edges.length, observedPostCount, sourceEnd);
-			const postsWhy = readable ? undefined : "the posts read failed before the source's end";
-			if (wantsPosts) await queueInventoryResult(ctx, "posts", emitted.posts, postsComplete && emitted.postsReadable, postsWhy, postsFailedRead);
+			const postsComplete = readable && ownerBound &&
+				sourceInventoryComplete(edges.length, observedPostCount, sourceEnd, ownerBound && sourceItems === 0);
+			const postsGap = !readable ? "the posts read failed before the source's end"
+				: !postsComplete ? inventoryGapReason("posts", {
+					read: edges.length, sourceItems, sourceTotal: observedPostCount, sourceEnd, ownerBound,
+					endSignal: "a page with has_next_page false", totalProblem: profileCountProblem,
+				})
+				: undefined;
+			if (wantsPosts) {
+				await queueInventoryResult(ctx, "posts", emitted.posts, postsComplete && emitted.postsReadable,
+					postsGap ?? (emitted.postsReadable ? undefined : "some posts could not be recorded"), postsFailedRead);
+			}
 			if (wantsPostLikes) {
+				const likesSampled = !edges.every(postLikesAreComplete);
 				await queueInventoryResult(ctx, "post_likes", emitted.likes,
-					postsComplete && emitted.likesReadable && edges.every(postLikesAreComplete), postsWhy, postsFailedRead);
+					postsComplete && emitted.likesReadable && !likesSampled,
+					postsGap ?? (!emitted.likesReadable ? "some likes could not be recorded"
+						: likesSampled ? "some posts list only a sample of their likers" : undefined), postsFailedRead);
 			}
 		}
 
