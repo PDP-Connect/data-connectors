@@ -9,9 +9,10 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.3.14",
+	"version": "0.3.15",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
+	"account_identity": "required",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#10A37F"

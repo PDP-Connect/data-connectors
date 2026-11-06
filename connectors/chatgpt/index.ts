@@ -22,6 +22,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import {
 	RetryExhaustedError,
 	retryAfterMsFromHeaders,
@@ -218,37 +219,46 @@ export const normalizeChatGptTerminalError: NormalizeTerminalError = ({
 
 // ─── Browser auth ───────────────────────────────────────────────────────
 
-const CHATGPT_AUTH_EXTRACTION_EXPRESSION = `
+export const CHATGPT_AUTH_EXTRACTION_EXPRESSION = `
 (async () => {
   const asRecord = (value) => (value && typeof value === "object" ? value : {});
-  const pickAccessToken = (value) => {
+  // The session object carries the signed-in user's id next to the token
+  // (user.id), so the account id costs no extra request. A source with no
+  // token is skipped, as before.
+  const pickSession = (value) => {
     const record = asRecord(value);
     const session = asRecord(record.session);
-    const candidate = [record.accessToken, record.access_token, session.accessToken, session.access_token].find(
+    const accessToken = [record.accessToken, record.access_token, session.accessToken, session.access_token].find(
       (item) => typeof item === "string" && item.length > 0
     );
-    return candidate || null;
+    if (!accessToken) {
+      return null;
+    }
+    const userId = [asRecord(record.user).id, asRecord(session.user).id].find(
+      (item) => typeof item === "string" && item.length > 0
+    );
+    return { accessToken, userId: userId || null };
   };
 
-  const readSessionEndpointToken = async () => {
+  const readSessionEndpoint = async () => {
     const res = await fetch("/api/auth/session", {
       cache: "no-store",
       credentials: "include",
     });
-    return res.ok ? pickAccessToken(await res.json()) : null;
+    return res.ok ? pickSession(await res.json()) : null;
   };
-  const readBootstrapToken = () => {
+  const readBootstrap = () => {
     const el = document.getElementById("client-bootstrap");
     if (!el) {
       return null;
     }
     try {
-      return pickAccessToken(JSON.parse(el.textContent || "{}"));
+      return pickSession(JSON.parse(el.textContent || "{}"));
     } catch {
       return null;
     }
   };
-  const readNextDataToken = () => {
+  const readNextData = () => {
     const nextDataText = document.getElementById("__NEXT_DATA__")?.textContent;
     if (!nextDataText) {
       return null;
@@ -256,17 +266,17 @@ const CHATGPT_AUTH_EXTRACTION_EXPRESSION = `
     const nextData = asRecord(JSON.parse(nextDataText));
     const props = asRecord(nextData.props);
     const pageProps = asRecord(props.pageProps);
-    return pickAccessToken(pageProps.session);
+    return pickSession(pageProps.session);
   };
   const readDeviceId = () => {
     const match = (document.cookie || "").match(/oai-did=([^;]+)/);
     return match?.[1] ? decodeURIComponent(match[1]) : null;
   };
 
-  const accessToken =
-    (await readSessionEndpointToken().catch(() => null)) ?? readBootstrapToken() ?? readNextDataToken();
+  const picked =
+    (await readSessionEndpoint().catch(() => null)) ?? readBootstrap() ?? readNextData();
   const deviceId = readDeviceId();
-  return { accessToken, deviceId };
+  return { accessToken: picked ? picked.accessToken : null, userId: picked ? picked.userId : null, deviceId };
 })()
 `;
 
@@ -8235,6 +8245,9 @@ export async function collectChatGpt(
 
 	// Verify session (extract bearer token for /backend-api calls)
 	const auth = await api.auth();
+	// The signed-in user's id from the session object (`user.id`), not the
+	// email or a workspace id.
+	await reportAccountIdentity(auth.userId);
 	chatGptDiagnostic(
 		`authenticated (device_id=${auth.deviceId ? `${auth.deviceId.slice(0, 8)}…` : "unknown"})`,
 	);

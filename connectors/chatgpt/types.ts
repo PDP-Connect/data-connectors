@@ -116,6 +116,8 @@ export interface ToolCallSynthetic {
 export interface ChatGptAuth {
 	accessToken: string | null;
 	deviceId: string | null;
+	/** The signed-in user's id from the session object; absent in a hand-built auth. */
+	userId?: string | null;
 }
 
 export interface ChatGptFetchResult {
