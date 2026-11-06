@@ -4031,7 +4031,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.2.23",
+				"version": "0.2.24",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -26713,7 +26713,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.24",
+				"version": "0.2.25",
 				"display_name": "USAA",
 				"brand": {
 					"icon": "icon.svg",
