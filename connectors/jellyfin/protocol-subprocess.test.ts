@@ -26,6 +26,7 @@ import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
 } from "../../packages/polyfill-connectors/src/connector-paths.ts";
+import { assertAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 
 const ENTRYPOINT = connectorEntrypoint("jellyfin");
@@ -127,6 +128,16 @@ test("protocol subprocess: jellyfin entrypoint completes START to DONE over real
 		});
 
 		assert.equal(result.code, 0);
+
+		// The fake server's only user is `user-123`; the connector reports that
+		// user GUID once, before DONE.
+		assertAccountIdentity(
+			result.rawStdout
+				.split("\n")
+				.filter((line) => line.trim())
+				.map((line): Record<string, unknown> => JSON.parse(line)),
+			"user-123",
+		);
 
 		const record = result.messages.find(
 			(m): m is Extract<(typeof result.messages)[number], { type: "RECORD" }> =>

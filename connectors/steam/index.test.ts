@@ -13,6 +13,7 @@ import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
 } from "../../packages/polyfill-connectors/src/connector-paths.ts";
+import { assertAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	classifySteamHttpResponse,
@@ -690,6 +691,13 @@ test("Steam protocol execution: optional friends 401 emits exact SKIP_RESULT and
 			},
 		});
 		assert.equal(result.code, 0);
+		assertAccountIdentity(
+			result.rawStdout
+				.split("\n")
+				.filter((line) => line.trim())
+				.map((line): Record<string, unknown> => JSON.parse(line)),
+			"76561198012345678",
+		);
 		const skip = result.messages.find(
 			(message) => message.type === "SKIP_RESULT",
 		);

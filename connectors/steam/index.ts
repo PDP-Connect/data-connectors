@@ -30,6 +30,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import { reportAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity.ts";
 import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import {
 	type CollectContext,
@@ -946,6 +947,8 @@ export async function steamCollect({
 		);
 	}
 	const steamid = await resolveSteamId(apiKey, rawSteamId);
+	// The SteamID64 never changes when the profile name or vanity URL does.
+	await reportAccountIdentity(steamid);
 
 	const newState: Record<string, unknown> = JSON.parse(JSON.stringify(state));
 	const deps: StreamDeps = { emit, emitRecord, progress };
