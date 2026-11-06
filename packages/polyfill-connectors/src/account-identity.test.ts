@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -161,22 +161,33 @@ test("through the real runtime, reporting the same id twice still sends one mess
 	);
 });
 
-test("through the real runtime, a different second id or an invalid id fails the run", async () => {
-	for (const [mode, code] of [
-		["twice_different", "account_identity_conflict"],
-		["invalid", "account_identity_invalid"],
-	] as const) {
-		const result = await runConnectorProtocolSubprocess({
-			allowFailedDone: true,
-			cwd: PACKAGE_ROOT,
-			entrypoint: FIXTURE,
-			env: { FIXTURE_MODE: mode },
-			start: startMessage(),
-		});
-		const done = result.messages.findLast((m) => m.type === "DONE");
-		assert.equal(Reflect.get(Object(done), "status"), "failed", mode);
-		assert.equal(Reflect.get(Object(done?.error), "code"), code, mode);
-	}
+test("through the real runtime, a different second id fails the run", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		allowFailedDone: true,
+		cwd: PACKAGE_ROOT,
+		entrypoint: FIXTURE,
+		env: { FIXTURE_MODE: "twice_different" },
+		start: startMessage(),
+	});
+	const done = result.messages.findLast((m) => m.type === "DONE");
+	assert.equal(Reflect.get(Object(done), "status"), "failed");
+	assert.equal(
+		Reflect.get(Object(done?.error), "code"),
+		"account_identity_conflict",
+	);
+});
+
+test("through the real runtime, an unusable id sends nothing, so the host can fail the run", async () => {
+	const result = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: FIXTURE,
+		env: { FIXTURE_MODE: "invalid" },
+		start: startMessage(),
+	});
+	assert.equal(
+		wireLines(result.rawStdout).some((l) => l.type === "ACCOUNT_IDENTITY"),
+		false,
+	);
 });
 
 test("reportAccountIdentity sends a usable id and reports false for an unusable one", async () => {
@@ -194,4 +205,44 @@ test("reportAccountIdentity sends a usable id and reports false for an unusable 
 	assert.deepEqual(written, [
 		{ type: "ACCOUNT_IDENTITY", account_id: "424242" },
 	]);
+});
+
+test("a connector declares account_identity if and only if its source reports one, and the inventory agrees", () => {
+	const root = join(REPO_ROOT, "connectors");
+	const declared: string[] = [];
+	const reporting: string[] = [];
+	for (const name of readdirSync(root).sort()) {
+		const manifestPath = join(root, name, "manifest.json");
+		if (!existsSync(manifestPath)) {
+			continue;
+		}
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+			account_identity?: string;
+		};
+		if (manifest.account_identity === "required") {
+			declared.push(name);
+		}
+		const calls = readdirSync(join(root, name))
+			.filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))
+			.some((file) =>
+				/\breportAccountIdentity\(/u.test(
+					readFileSync(join(root, name, file), "utf8"),
+				),
+			);
+		if (calls) {
+			reporting.push(name);
+		}
+	}
+	assert.deepEqual(declared, reporting);
+	assert.ok(declared.length > 0);
+	const inventory = readFileSync(
+		join(REPO_ROOT, "docs", "account-identity-inventory.md"),
+		"utf8",
+	);
+	const implemented = [
+		...inventory.matchAll(/^\| `([a-z_0-9]+)` \|[^\n]*\| Implemented;/gmu),
+	]
+		.map((match) => match[1])
+		.sort();
+	assert.deepEqual(implemented, declared);
 });

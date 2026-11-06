@@ -5,7 +5,7 @@
  * Test-only connector for `reportAccountIdentity` (Collection Profile
  * Section 5.14). It learns its synthetic account id after it emitted a record,
  * as a source that reveals the id late would. `FIXTURE_MODE` picks the case:
- * `late` (default), `twice_same`, `twice_different`, or `invalid`.
+ * `late` (default), `twice_same`, `twice_different`, or `invalid` (an id with whitespace).
  * NOT a production connector.
  */
 
