@@ -31,13 +31,24 @@ import {
 	type ServerResponse,
 } from "node:http";
 import { test } from "node:test";
+import { captureAccountIdentity } from "../../packages/polyfill-connectors/src/account-identity-test-support.ts";
 import type {
 	CollectContext,
 	EmittedMessage,
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { collect } from "./index.ts";
+import { collect as collectOnWire } from "./index.ts";
+
+/** `collect` with a fresh account-identity recorder per run: these tests switch users in one process. */
+const collect: typeof collectOnWire = async (ctx) => {
+	const accountIdentity = captureAccountIdentity();
+	try {
+		await collectOnWire(ctx);
+	} finally {
+		accountIdentity.restore();
+	}
+};
 
 /** Build a real CollectContext — same protocol shape runConnector() builds. */
 function makeContext({

@@ -61,7 +61,7 @@ export function accountIdFromSource(value: unknown): string | undefined {
 export type AccountIdentityReporter = (accountId: string) => Promise<void>;
 
 /**
- * Builds the reporter behind `ctx.reportAccountIdentity`. The first valid id
+ * Builds the reporter behind `reportAccountIdentity`. The first valid id
  * is written once. The same id again is a no-op, so a connector that learns
  * the id on several paths can report it on each. A different id is a
  * connector defect and fails the run: two ids mean the run read two accounts.
