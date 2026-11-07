@@ -80,6 +80,31 @@ test("drops a query string and a path that climbs out of its root", () => {
 	);
 });
 
+test("keeps the rightmost code root and rejects a stray @", () => {
+	assert.equal(
+		errorStackFrames(
+			withStack(
+				"Error\n    at f (/Users/jane/connectors/acme-client-secret/data-connectors/connectors/strava/index.ts:12:3)",
+			),
+		),
+		"    at connectors/strava/index.ts:12:3",
+	);
+	assert.equal(
+		errorStackFrames(
+			withStack(
+				"Error\n    at f (/srv/connectors/strava/jane@example.com/index.ts:1:2)",
+			),
+		),
+		undefined,
+	);
+	assert.equal(
+		errorStackFrames(
+			withStack("Error\n    at f (/srv/connectors/strava@0.1.46/index.ts:1:2)"),
+		),
+		"    at connectors/strava@0.1.46/index.ts:1:2",
+	);
+});
+
 test("is bounded and tolerates anything that is not an error", () => {
 	const many = Array.from(
 		{ length: 40 },

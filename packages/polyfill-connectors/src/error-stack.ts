@@ -42,8 +42,13 @@ const AT_FRAME =
 const FOREIGN_FILE =
 	/^(?:[a-z][a-z0-9+.-]*-extension:|https?:|blob:|data:|webkit-masked-url:|node:|wasm:|about:)|\beval\b|<anonymous>|^native$|(?:^|\/)node_modules\//iu;
 
+// The greedy prefix makes the rightmost root win: a folder above the code
+// that happens to be named like a root is not part of the kept path.
 const ROOT =
-	/(?:^|\/)((?:vana-connector|collection-profiles|connectors|packages\/polyfill-connectors)\/[A-Za-z0-9_.@/-]+)$/u;
+	/^(?:.*\/)?((?:vana-connector|collection-profiles|connectors|packages\/polyfill-connectors)\/[A-Za-z0-9_.@/-]+)$/u;
+// A kept segment: `@` only as `<name>@<semver>` (`jane@example.com` is not).
+const SEGMENT =
+	/^[A-Za-z0-9_.-]{1,64}(?:@\d{1,4}\.\d{1,4}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,32})?)?$/u;
 
 function rootRelative(file: string): string | undefined {
 	if (FOREIGN_FILE.test(file)) return undefined;
@@ -57,7 +62,10 @@ function rootRelative(file: string): string | undefined {
 	}
 	path = path.replace(/\\/gu, "/").replace(/[?#].*$/u, "");
 	const kept = ROOT.exec(path)?.[1];
-	if (kept === undefined || kept.split("/").includes("..")) return undefined;
+	if (kept === undefined) return undefined;
+	const segments = kept.split("/");
+	if (segments.some((segment) => segment === ".." || !SEGMENT.test(segment)))
+		return undefined;
 	return kept;
 }
 
