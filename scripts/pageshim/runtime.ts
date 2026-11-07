@@ -20,6 +20,7 @@ import {
 	makeEmitRecord,
 	withholdsBoundedProgress,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { errorStackFrames } from "../../packages/polyfill-connectors/src/error-stack.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	CollectionOutcome,
@@ -1106,6 +1107,13 @@ export async function runOnPageShim(
 		// Only a run with no accepted payload may emit an empty fatal result.
 		if (!streamProtocolUsed && !streamingHost && !legacyResultAccepted)
 			await shim.setData("result", result({}, [fatal]));
+		// Where in the bundle it broke, as root-relative frames only (no
+		// message, no paths outside the code roots); the host turns this into
+		// its crash telemetry frame. Hosts that predate the key ignore it, and
+		// a refusal must not mask the run's own error.
+		const frames = errorStackFrames(error);
+		if (frames !== undefined)
+			await shim.setData("errorStack", frames).catch(() => undefined);
 		await shim.setData("error", fatal.reason);
 	} finally {
 		const hits = [
