@@ -80,6 +80,7 @@ import {
 } from "./browser-window.ts";
 import { connectorDiagnostic } from "./connector-diagnostic.ts";
 import { flushAndExitAfterRuntimeAck } from "./connector-exit.ts";
+import { errorStackFrames } from "./error-stack.ts";
 import {
 	type CaptureSession,
 	createCaptureSession,
@@ -1085,6 +1086,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		code?: string,
 		errorBasis: readonly string[] = [],
 		recoveryHint?: TerminalErrorDetails["recovery_hint"],
+		stackFrames?: string,
 	): void => {
 		// The runtime ACK handshake may outlive every ref'd process handle. Mark
 		// the natural exit path before emitting DONE so it cannot contradict the
@@ -1100,10 +1102,17 @@ export function runConnector(config: RunConnectorConfig): void {
 		// `DONE.error.basis` cites the OBSERVATION ids the failure rests on
 		// (Section 5.8). It is a connector claim, distinct from a diagnosis
 		// cause's basis; the runtime decides scope on its own records.
-		const terminalError =
+		const withBasis =
 			observationsDeclared && errorBasis.length > 0
 				? { ...normalized, basis: errorBasis }
 				: normalized;
+		// Where the run broke, for the host's crash telemetry: root-relative
+		// frame lines only (`errorStackFrames`), never the message or a path
+		// outside the code roots. Hosts that do not read it ignore it.
+		const terminalError =
+			stackFrames === undefined
+				? withBasis
+				: { ...withBasis, diagnostics: { stack_frames: stackFrames } };
 		// Fire-and-forget. emit() resolves after stdout drains; we're about to
 		// exit(1) anyway, so we don't need to block. If it rejects (the write
 		// fails), the process is dying either way.
@@ -1356,6 +1365,7 @@ export function runConnector(config: RunConnectorConfig): void {
 	// unexpected throws (where we pattern-match the message).
 	run().catch((err: unknown) => {
 		const errorBasis = observationBasisOf(err);
+		const stackFrames = errorStackFrames(err);
 		if (err instanceof TerminalError) {
 			emitFailed(
 				err.message,
@@ -1364,6 +1374,7 @@ export function runConnector(config: RunConnectorConfig): void {
 				err.code,
 				errorBasis,
 				err.recoveryHint,
+				stackFrames,
 			);
 			return;
 		}
@@ -1374,6 +1385,8 @@ export function runConnector(config: RunConnectorConfig): void {
 			undefined,
 			undefined,
 			errorBasis,
+			undefined,
+			stackFrames,
 		);
 	});
 

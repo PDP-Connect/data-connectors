@@ -267,7 +267,12 @@ async function hostMain({
 		const parameters = supportsStateArgument
 			? ["page", "process", "initialState"]
 			: ["page", "process"];
-		await new AsyncFunction(...parameters, code)(...runArgs);
+		// Hosts name the bundle with a sourceURL so its stack frames are
+		// attributable (the runtime's `errorStack`); the harness does the same.
+		await new AsyncFunction(
+			...parameters,
+			`${code}\n//# sourceURL=vana-connector/pageshim-harness.js`,
+		)(...runArgs);
 		const testMetrics = window.__pageshimTestMetrics;
 		return testMetrics ? { ok: true, testMetrics } : { ok: true };
 	} catch (e) {

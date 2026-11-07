@@ -238,6 +238,13 @@ for (const name of pageShimConnectors(
 			assert.equal(r.result, null);
 			assert.equal(r.streamResult, null);
 			assert.match(r.data.error, /login/i);
+			// The host also gets where it broke: bundle frames only, never the
+			// message.
+			assert.equal(typeof r.data.errorStack, "string");
+			for (const line of r.data.errorStack.split("\n")) {
+				assert.match(line, /^ {4}at vana-connector\/pageshim-harness\.js:\d+(?::\d+)?$/);
+			}
+			assert.doesNotMatch(r.data.errorStack, /login|wait/i);
 		});
 
 		await t.test("signed out, then sign-in: every scope", async () => {
