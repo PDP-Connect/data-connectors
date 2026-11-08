@@ -9,7 +9,7 @@
 	},
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.55",
+	"version": "0.1.56",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",
@@ -487,11 +487,13 @@
 		}
 	},
 	"reason_display_messages": {
-		"stream_collection_failed": "Spotify could not be read completely this time, so this part was not marked complete. Try again later.",
 		"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 		"spotify_library_rows_unsupported": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing.",
+		"spotify_playlist_rows_unsupported": "Some playlist entries are a type this connector does not read yet, so they were skipped. The rest of each playlist was read.",
 		"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 		"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
-		"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
+		"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld.",
+		"spotify_stream_outcome_unproven": "Spotify did not confirm whether this part was read completely, so it was not marked complete. Try again later.",
+		"stream_collection_failed": "Spotify could not be read completely this time, so this part was not marked complete. Try again later."
 	}
 }
