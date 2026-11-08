@@ -192,6 +192,11 @@ export interface BrowserData {
 	>;
 	/** Isolated streams that failed in the page; their rows are dropped. */
 	streamFailures?: Partial<Record<SpotifyIsolatedStream, SpotifyStreamFailure>>;
+	/**
+	 * Ranked lists Spotify answered with a total of 0 in every time window:
+	 * the list is empty, not capped, so it exports as "collected, none".
+	 */
+	topProvenEmpty?: Partial<Record<"top_artists" | "top_tracks", boolean>>;
 	diagnostics?: SpotifyCollectorDiagnostics;
 }
 
@@ -3060,6 +3065,8 @@ async function collectSpotifyWebDataObserved(
 		try {
 			const rows: Record<string, unknown>[] = [];
 			const counts = { considered: 0, covered: 0 };
+			// Spotify said "total 0" for every window it was asked about.
+			let windowsEmpty = true;
 			for (const timeRange of ["short_term", "long_term"] as const) {
 				const payloads = pages
 					.filter((entry) => readPath(entry, "timeRange") === timeRange.toUpperCase())
@@ -3068,9 +3075,20 @@ async function collectSpotifyWebDataObserved(
 				rows.push(...parsed.rows);
 				counts.considered += parsed.considered;
 				counts.covered += parsed.rows.length;
+				const key = stream === "top_artists" ? "topArtists" : "topTracks";
+				const totals = payloads.map((payload) =>
+					readPath(payload, "data", "me", "profile", key, "totalCount"),
+				);
+				if (totals.length === 0 || totals.some((total) => total !== 0)) {
+					windowsEmpty = false;
+				}
 			}
 			evaluated[stream] = rows;
 			evaluated.sourceCounts[stream] = counts;
+			if (windowsEmpty && counts.considered === 0) {
+				evaluated.topProvenEmpty ??= {};
+				evaluated.topProvenEmpty[stream] = true;
+			}
 		} catch (error) {
 			evaluated[stream] = [];
 			delete evaluated.sourceCounts[stream];
@@ -3532,12 +3550,51 @@ export async function spotifyCollect({
 			});
 		}
 		if (stream === "recently_played_contexts") {
+			// Spotify answers 404 with an empty body at offset 0 both for an empty
+			// history and, intermittently, for one that has plays: on 8 Nov 2026
+			// two RSS users got it on four runs in a row and a page of contexts
+			// on the next run a minute later. It is not proof of "none", so the
+			// scope is reported unavailable and retryable, not empty.
+			if (data.diagnostics?.recentlyPlayed?.endedBy === "not_found_at_start") {
+				connectorDiagnostic("spotify", "recently_played_unavailable", {
+					endedBy: "not_found_at_start",
+					othersRequested: String(othersRequested([stream])),
+				});
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "spotify_recently_played_unavailable",
+					message:
+						"Spotify did not return your recently played list this time, so it was not exported. Try again later.",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+				});
+				continue;
+			}
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
 				reason: "spotify_recent_context_boundary_unverified",
 				message: "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
 				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+			});
+		} else if (data.topProvenEmpty?.[stream] === true) {
+			// Total 0 in every window: nothing is beyond the 100-row bound, so
+			// the ranking is complete and empty. The checkpoint is what lets
+			// PageShim and RSS export it as "collected, none" instead of
+			// omitting it (and failing a run that asked only for rankings).
+			connectorDiagnostic("spotify", "ranked_list_empty", { stream });
+			await emit({
+				type: "STATE",
+				stream,
+				cursor: {
+					full_scan_at: new Date().toISOString(),
+					completion: {
+						operation: "userTopContent",
+						rows: 0,
+						total: 0,
+						time_ranges: ["short_term", "long_term"],
+					},
+				},
 			});
 		} else {
 			await emit({
