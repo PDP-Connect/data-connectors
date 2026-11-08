@@ -4048,7 +4048,7 @@ test("spotify: every requested scope is produced or omitted when the library, a 
 		return base;
 	} });
 	const json = (body, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(body) });
-	await t.test("an account with no playlists, no history and no rankings exports empty playlist scopes", async () => {
+	await t.test("an account with no playlists, no history and no rankings exports empty playlist and ranking scopes", async () => {
 		const fixtures = gqlOverride((operation, variables) => {
 			if (operation === "libraryV3") return json({ data: { me: { libraryV3: { offset: variables.offset, totalCount: 1, items: [
 				{ item: { data: { __typename: "LikedSongs", uri: "spotify:collection:tracks" } } },
@@ -4070,10 +4070,16 @@ test("spotify: every requested scope is produced or omitted when the library, a 
 				assert.deepEqual(result["spotify.playlists"], { records: [] });
 				assert.deepEqual(result["spotify.playlist_items"], { records: [] });
 				assert.deepEqual(result["spotify.saved_tracks"], { records: [] });
+				// Total 0 in every window is a complete, empty ranking (0.1.57).
+				assert.deepEqual(result["spotify.top_artists"], { records: [] });
+				assert.deepEqual(result["spotify.top_tracks"], { records: [] });
+				// An offset-0 404 is not proof of an empty history.
+				assert.equal(Object.hasOwn(result, "spotify.recently_played_contexts"), false);
+				assert.ok(result.errors.some((e) => e.scope === "spotify.recently_played_contexts" && e.disposition === "omitted" && /recently played list this time/.test(e.reason)));
 			} else {
-				// profile, playlists, playlist_items and saved_tracks are sent.
+				// profile, playlists, playlist_items, saved_tracks and both rankings are sent.
 				assert.equal(r.streamResult.completed, true);
-				assert.equal(r.streamResult.scopeCount, 4);
+				assert.equal(r.streamResult.scopeCount, 6);
 			}
 			assert.equal(r.states["spotify.playlists"].completion.operation, "libraryV3");
 			assert.equal(r.states["spotify.playlist_items"].completion.rows, 1);
