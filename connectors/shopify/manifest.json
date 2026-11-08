@@ -9,7 +9,7 @@
 	},
 	"connector_key": "shopify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-	"version": "0.2.38",
+	"version": "0.2.41",
 	"display_name": "Shopify Shop",
 	"brand": {
 		"icon": "icon.svg",
@@ -117,14 +117,19 @@
 		}
 	],
 	"reason_display_messages": {
-		"shopify_browser_operation_timeout": "Shop did not respond within the collection time budget. Retry the collection.",
-		"shopify_signed_out_or_blocked": "Sign in to Shop and open your order history before retrying.",
-		"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
-		"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
-		"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",
-		"stream_collection_failed": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
-		"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
-		"shopify_order_rows_unresolved": "Some Shop orders could not be read completely; retry to collect them",
-		"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
+		"browser_handoff_readiness_probe_failed": "The Shopify Shop sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+		"browser_handoff_readiness_timed_out": "Shopify Shop needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "Shopify Shop needs you to sign in again or update your access key. Then run again.",
+		"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"shopify_apollo_state_unavailable": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"shopify_browser_operation_timeout": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"shopify_login_page_unreachable": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"shopify_order_history_evidence_timeout": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"shopify_order_history_readiness_timeout": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"shopify_order_history_unconfirmed": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"shopify_order_id_unresolvable": "This part stopped because of an internal problem reading Shopify Shop. It is not something you can fix.",
+		"shopify_order_rows_unresolved": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"shopify_signed_out_or_blocked": "Shopify Shop needs you to sign in again or update your access key. Then run again.",
+		"stream_collection_failed": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	}
 }

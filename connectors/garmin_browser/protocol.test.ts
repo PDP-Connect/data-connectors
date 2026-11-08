@@ -9,12 +9,15 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import {
 	consentTimeFieldResolver,
 	type EmittedMessage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { scanConnectorForReasonEmissions } from "../../packages/polyfill-connectors/src/reason-emission-scan.ts";
+import { RUNTIME_GENERIC_REASON_CODES } from "../../packages/polyfill-connectors/src/reference-implementation-stand-in/runtime/recovery-reason-codes.ts";
 import {
 	type ConnectorSubprocessResult,
 	runConnectorProtocolSubprocess,
@@ -544,9 +547,17 @@ test("garmin_browser: every reason the connector can emit has its own copy, and 
 			`${literal} is in SKIP_REASON`,
 		);
 	}
+	// Thrown terminal codes need copy too (reason-display-messages.test.ts), so the copy set is the
+	// SKIP_RESULT vocabulary plus the codes this connector can throw, and nothing else.
+	const thrownCodes = scanConnectorForReasonEmissions(
+		fileURLToPath(new URL(".", import.meta.url)),
+	).terminalCodes.filter((code) => !RUNTIME_GENERIC_REASON_CODES.has(code));
 	const copy = manifest.reason_display_messages;
-	assert.deepEqual(Object.keys(copy).toSorted(), reasons.toSorted());
-	for (const reason of reasons) {
+	assert.deepEqual(
+		Object.keys(copy).toSorted(),
+		[...new Set([...reasons, ...thrownCodes])].toSorted(),
+	);
+	for (const reason of Object.keys(copy)) {
 		const message = copy[reason];
 		assert.ok(message?.trim(), `${reason} has copy`);
 		assert.notEqual(message?.trim(), reason, `${reason}: copy is not the key`);

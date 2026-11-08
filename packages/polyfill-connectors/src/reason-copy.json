@@ -1,0 +1,918 @@
+{
+	"shared": {
+		"capped_by_limit": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+		"continues_later": "This run reached its limit. Later runs collect the rest. No action is needed.",
+		"export_file_problem": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"fix_settings": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+		"incomplete_retry": "{site} stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"limit_repeats": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
+		"local_file_unreadable": "A local file or folder could not be read. Check that it exists and that this app can read it, then run again.",
+		"not_available": "{site} does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+		"nothing_to_import": "There was nothing to import for this request. No action is needed.",
+		"provider_busy": "{site} is limiting requests or having trouble right now. Wait a while, then run again.",
+		"sign_in_again": "{site} needs you to sign in again or update your access key. Then run again.",
+		"sign_in_unfinished": "The {site} sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+		"skipped_items": "Some items could not be read and were skipped.",
+		"unexpected_data": "This part stopped because of an internal problem reading {site}. It is not something you can fix."
+	},
+	"connectors": {
+		"amazon": {
+			"amazon_2fa_not_provided": "sign_in_again",
+			"amazon_empty_history_after_prior_orders": {
+				"message": "Amazon reported no order history for a year in which we previously collected orders. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove those orders are gone"
+			},
+			"amazon_empty_list_page_renderer_diagnostics_failed": "incomplete_retry",
+			"amazon_list_page_navigation_failed": "incomplete_retry",
+			"amazon_list_page_readiness_timeout": "incomplete_retry",
+			"amazon_login_incomplete_after_submit": "sign_in_again",
+			"amazon_login_manual_incomplete": "sign_in_again",
+			"amazon_login_unexpected_ui": "unexpected_data",
+			"amazon_session_required": "sign_in_again",
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"empty_first_page_without_diagnostics": "incomplete_retry",
+			"empty_first_page_without_terminal_signal": "incomplete_retry",
+			"item_count_shortfall": "skipped_items",
+			"list_page_navigation_failed": "incomplete_retry",
+			"list_page_order_id_not_found": "skipped_items",
+			"list_page_readiness_timeout": "incomplete_retry",
+			"list_page_shape_check_failed": "skipped_items",
+			"no_orders_text": "nothing_to_import",
+			"older_pages_deferred_page_budget": {
+				"message": "Amazon has more order pages for one year than a single run reads, so older orders from that year are missing. Later runs read the same pages again, so they may stay missing."
+			},
+			"pagination_exhausted": "nothing_to_import",
+			"profile_page_read_failed": "incomplete_retry",
+			"renderer_diagnostics_failed": "incomplete_retry",
+			"selector_drift": "unexpected_data",
+			"source_auth_or_challenge": "sign_in_again",
+			"unparseable_order_date": "skipped_items"
+		},
+		"anthropic": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"export_auth_rejected": "sign_in_again",
+			"export_conversation_incomplete": "unexpected_data",
+			"export_conversations_incomplete": "unexpected_data",
+			"export_conversations_missing": "unexpected_data",
+			"export_items_unparseable": "skipped_items",
+			"export_layout_unrecognized": "unexpected_data",
+			"export_manifest_incomplete": "unexpected_data",
+			"export_oversized_conversation_incomplete": "unexpected_data",
+			"export_part_download_failed": "incomplete_retry",
+			"export_pending": "continues_later",
+			"export_projects_missing": "unexpected_data",
+			"export_rate_limited": "provider_busy",
+			"export_recently_requested": "continues_later",
+			"export_request_failed": "incomplete_retry",
+			"export_response_unrecognized": "unexpected_data",
+			"no_chat_organization": "sign_in_again",
+			"organization_unavailable": "not_available",
+			"parse_error": "unexpected_data"
+		},
+		"anthropic-live": {
+			"anthropic_live_backlog_deferred": "continues_later",
+			"anthropic_live_request_rejected": "unexpected_data",
+			"anthropic_live_session_required": "sign_in_again",
+			"anthropic_live_unparsed_instant": "unexpected_data",
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"http_error": "incomplete_retry",
+			"no_chat_organization": "not_available",
+			"not_available": "not_available",
+			"organization_unavailable": "not_available",
+			"parse_error": "unexpected_data"
+		},
+		"apple-contacts": {
+			"auth_failed": "sign_in_again",
+			"carddav_request_failed": "incomplete_retry",
+			"carddav_response_unusable": "unexpected_data",
+			"discovery_failed": "fix_settings",
+			"fake_carddav_server_no_port": "unexpected_data",
+			"group_inventory_short": "skipped_items",
+			"unsafe_redirect_refused": "unexpected_data"
+		},
+		"apple-health": {
+			"awaiting_upload": {
+				"message": "Nothing to read yet. On your iPhone open Health, tap your picture, and choose Export All Health Data. Upload the export.zip here when it's ready."
+			},
+			"collection_interrupted": "export_file_problem",
+			"covered_in_full": {
+				"message": "All matching data in this export was imported. No action is needed."
+			},
+			"export_extraction_failed": "export_file_problem",
+			"newer_upload_too_large": {
+				"message": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here."
+			},
+			"nothing_in_range": {
+				"message": "Your export had no data of this kind matching this request. That's not a problem - there was simply nothing to read."
+			},
+			"records_unreadable": "skipped_items",
+			"source_unreadable": "export_file_problem",
+			"uploads_not_all_compared": {
+				"message": "You have more than 100 uploads and only 100 were checked, so a newer export among the others may not have been read. Remove old exports from your uploads, then import again."
+			},
+			"window_unavailable": {
+				"message": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have."
+			}
+		},
+		"apple-photos": {
+			"export_not_found": "export_file_problem"
+		},
+		"character-ai": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"character_ai_api_408": "incomplete_retry",
+			"character_ai_api_429": "provider_busy",
+			"character_ai_api_5xx": "provider_busy",
+			"character_ai_auth_failed": "sign_in_again",
+			"character_ai_challenge": "sign_in_again",
+			"character_ai_interrupted": "sign_in_unfinished",
+			"character_ai_invalid_payload": "unexpected_data",
+			"character_ai_network_error": "incomplete_retry",
+			"character_ai_stream_incomplete": "incomplete_retry",
+			"character_ai_timeout": "incomplete_retry",
+			"scope_not_supported": "fix_settings",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"chase": {
+			"account_no_longer_discovered": {
+				"message": "An account saved before no longer appears on your Chase dashboard. Its saved data is kept. Check that the account is still open and visible."
+			},
+			"ambiguous_multi_account_overview": "unexpected_data",
+			"qfx_download_failed": "incomplete_retry",
+			"qfx_parse_failed": "unexpected_data",
+			"qfx_partial_parse": "skipped_items",
+			"row_exception": "skipped_items",
+			"selectors_pending": "not_available",
+			"statements_scrape_failed": "unexpected_data"
+		},
+		"chatgpt": {
+			"branch_structurally_incomplete": "incomplete_retry",
+			"branch_tip_missing": "skipped_items",
+			"branch_truncated": "skipped_items",
+			"conversation_list_unstable": "incomplete_retry",
+			"detail_http_error": "incomplete_retry",
+			"detail_mapping_missing": "incomplete_retry",
+			"empty_detail": "skipped_items",
+			"http_error": "incomplete_retry",
+			"message_shape_rejected": "skipped_items",
+			"missing_mapping": "skipped_items",
+			"not_available": "not_available",
+			"pagination_cap_truncated": "capped_by_limit",
+			"parse_error": "unexpected_data",
+			"shape_check_failed": "skipped_items"
+		},
+		"claude-code": {
+			"claude_dir_not_found": "fix_settings",
+			"malformed_jsonl_line": "skipped_items",
+			"non_object_jsonl_record": "skipped_items",
+			"scope_matched_no_sources": "fix_settings",
+			"source_directory_read_error": "local_file_unreadable",
+			"source_read_error": "local_file_unreadable",
+			"source_unreadable": "local_file_unreadable",
+			"symlink_skipped": "skipped_items",
+			"truncated_jsonl_tail": "skipped_items"
+		},
+		"codex": {
+			"malformed_jsonl_line": "skipped_items",
+			"non_object_jsonl_record": "skipped_items",
+			"rollout_source_read_error": "incomplete_retry",
+			"shape_check_failed": "skipped_items",
+			"symlink_skipped": "skipped_items",
+			"truncated_jsonl_tail": "skipped_items"
+		},
+		"discord-browser": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"discord_client_request_not_seen": "unexpected_data",
+			"discord_collection_interrupted": "incomplete_retry",
+			"discord_rate_limited": "provider_busy",
+			"discord_records_unreadable": "skipped_items",
+			"discord_run_limit_reached": "continues_later",
+			"discord_servers_skipped": {
+				"message": "Some servers could not be searched this time. A later run tries them again. No action is needed."
+			},
+			"discord_session_dead": "sign_in_again",
+			"discord_sign_in_required": "sign_in_again",
+			"discord_source_unreadable": "unexpected_data",
+			"discord_verification_required": "sign_in_again"
+		},
+		"doordash": {
+			"doordash_orders_response_not_observed": {
+				"message": "DoorDash returned no readable order history. Your account may have no orders, or this connector may need an update."
+			},
+			"older_pages_deferred_page_budget": "limit_repeats",
+			"shape_check_failed": "skipped_items"
+		},
+		"facebook": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"facebook_auth_failed": "sign_in_again",
+			"facebook_interrupted": "sign_in_unfinished",
+			"facebook_navigation_failed": "incomplete_retry",
+			"scope_not_supported": "fix_settings",
+			"shape_check_failed": "skipped_items",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"fitbit": {
+			"awaiting_upload": {
+				"message": "Nothing to read yet. Request your Fitbit data from Google Takeout at takeout.google.com, selecting only Fitbit (it may be listed as Google Health), with file type .zip and file size 2 GB. Google emails you a download link, usually the same day. Upload every ZIP file from that link here, together: this import can't always tell if one is missing."
+			},
+			"collection_interrupted": "export_file_problem",
+			"device_storage_unavailable": {
+				"message": "This device couldn't finish reading your export. Nothing is wrong with the export itself. Try the import again, and check that the device has free storage space."
+			},
+			"export_format_changed": {
+				"message": "We couldn't read this part of your Fitbit export because its layout isn't the one we expect. Google may have changed the format, or one of the export's ZIP files may be missing. If you uploaded every ZIP file, please report this rather than retrying."
+			},
+			"records_unreadable": "skipped_items",
+			"source_limit_reached": {
+				"message": "Your export is larger than this import can read, so some or all of it wasn't imported. If Takeout gave you several ZIP files, upload every one together: this import can't always tell if one is missing. If you chose Takeout files larger than 2 GB, request the export again with 2 GB files; otherwise, please report this."
+			},
+			"source_unreadable": {
+				"message": "The newest Google Takeout export in that upload, if there is one, isn't Fitbit data this import can read. Upload only your Fitbit export's ZIP files, every part of it together, as Takeout gave them, without unzipping them. If you chose .tgz as the file type, request the export again as .zip."
+			},
+			"time_range_semantics_changed": "unexpected_data"
+		},
+		"garmin-browser": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"collection_interrupted": "incomplete_retry",
+			"garmin_browser_session_dead": "sign_in_again",
+			"sign_in_required": "sign_in_again",
+			"source_limit_reached": "continues_later",
+			"source_unreadable": "unexpected_data"
+		},
+		"github": {
+			"github_auth_failed": "sign_in_again",
+			"github_event_missing_fields": "skipped_items",
+			"github_malformed_response": "incomplete_retry",
+			"github_pagination_cap_exceeded": "capped_by_limit",
+			"github_pagination_gap": "incomplete_retry",
+			"github_pagination_invalid_max_pages": "unexpected_data",
+			"github_pagination_repeated_next": "incomplete_retry",
+			"github_pinned_item_missing_identity": "skipped_items",
+			"pr_detail_fetch_failed": "incomplete_retry",
+			"pr_search_cap_truncated": "capped_by_limit",
+			"starred_entry_missing_repo": "skipped_items"
+		},
+		"github-browser": {
+			"browser_handoff_readiness_probe_failed": "sign_in_unfinished",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"github_browser_incomplete": "incomplete_retry",
+			"github_browser_navigation_failed": "incomplete_retry",
+			"github_browser_session_missing": "sign_in_again",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"gmail": {
+			"gmail_all_mail_exists_negative": "unexpected_data",
+			"gmail_all_mail_exists_not_finite": "unexpected_data",
+			"gmail_all_mail_exists_not_integer": "unexpected_data",
+			"gmail_all_mail_exists_not_number": "unexpected_data",
+			"gmail_progress_invalid_instant": "fix_settings",
+			"gmail_progress_invalid_mailbox": "unexpected_data",
+			"gmail_progress_invalid_page_end": "unexpected_data",
+			"gmail_progress_invalid_time_range": "fix_settings",
+			"gmail_progress_invalid_uid": "unexpected_data",
+			"gmail_progress_invalid_window": "unexpected_data",
+			"gmail_progress_page_already_consumed": "unexpected_data",
+			"gmail_progress_plan_after_outcomes": "unexpected_data",
+			"gmail_progress_unexpected_stream": "unexpected_data",
+			"gmail_progress_unexpected_uid": "unexpected_data",
+			"historical_backfill_pending": "continues_later",
+			"historical_message_unaccounted": "skipped_items",
+			"schema_validation_failed": "skipped_items"
+		},
+		"google-calendar": {
+			"google_calendar_access_token_missing": "sign_in_again",
+			"google_calendar_auth_failed": "sign_in_again",
+			"google_calendar_sync_token_expired": "unexpected_data",
+			"older_pages_deferred_page_budget": "limit_repeats"
+		},
+		"google-contacts": {
+			"google_contacts_auth_failed": "sign_in_again",
+			"google_people_access_token_missing": "sign_in_again",
+			"google_people_sync_token_expired": "unexpected_data",
+			"older_pages_deferred_page_budget": "limit_repeats"
+		},
+		"google-maps": {
+			"element_unaccounted": "skipped_items",
+			"invalid_json": "export_file_problem",
+			"record_too_large": {
+				"message": "This Google Maps Timeline record is too large. Re-export your Timeline, then run again."
+			},
+			"timeline_points_not_found": "export_file_problem",
+			"timeline_segments_not_found": "export_file_problem",
+			"unsupported_shape": "export_file_problem"
+		},
+		"google-maps-data-portability": {
+			"google_data_portability_access_token_missing": "sign_in_again",
+			"google_data_portability_archive_job_id_missing": "unexpected_data",
+			"google_data_portability_archive_state_missing": "unexpected_data",
+			"google_data_portability_resources_missing": "unexpected_data",
+			"google_dataportability_access_token_missing": "sign_in_again",
+			"google_dataportability_no_authorized_resource_groups": "sign_in_again"
+		},
+		"google-messages": {
+			"gmcli_chat_scan_limit_reached": {
+				"message": "Some older conversations were not scanned because of the chat limit setting. Raise GMCLI_MAX_CHATS, then run again."
+			},
+			"gmcli_not_installed": {
+				"message": "The Google Messages helper tool is not installed on this device. Install it, then run again."
+			},
+			"gmcli_not_paired": {
+				"message": "This device is not paired with the Google Messages helper tool. Pair it, then run again."
+			},
+			"gmcli_per_chat_limit_reached": {
+				"message": "Older messages in some conversations were not read because of the per-chat limit setting. Raise GMCLI_MESSAGES_PER_CHAT_LIMIT, then run again."
+			},
+			"gmcli_query_failed": {
+				"message": "The Google Messages helper tool failed while reading messages. Run again later. If it keeps happening, check the tool's own output."
+			},
+			"gmcli_schema_drift": "unexpected_data"
+		},
+		"google-takeout": {
+			"directory_read_failed": "export_file_problem",
+			"history_not_found": "export_file_problem",
+			"photos_not_found": "export_file_problem",
+			"records_not_found": "export_file_problem"
+		},
+		"groupme": {
+			"group_message_count_unanchored": "not_available",
+			"groupme_auth_failed": "sign_in_again",
+			"groupme_direct_chat_missing_identity": "unexpected_data",
+			"groupme_messages_empty_page_304": "unexpected_data",
+			"history_ended_before_provider_count": "capped_by_limit",
+			"provider_reports_more_messages_than_walked": "capped_by_limit"
+		},
+		"heb": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"empty_page_before_max_page": "incomplete_retry",
+			"heb_empty_history_after_prior_orders": {
+				"message": "H-E-B reported no order history, but we previously collected orders for this account. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove your history is gone"
+			},
+			"heb_session_required": "sign_in_again",
+			"item_count_short": "skipped_items",
+			"list_page_navigation_failed": "incomplete_retry",
+			"list_page_shape_check_failed": "skipped_items",
+			"nutrition_navigation_failed": "incomplete_retry",
+			"nutrition_source_coverage_incomplete": "incomplete_retry",
+			"older_pages_deferred_page_budget": {
+				"message": "Only the most recent pages of your order history were read, so older orders are missing. Orders already read are kept."
+			},
+			"pagination_exhausted": "nothing_to_import",
+			"pagination_metadata_absent": "incomplete_retry",
+			"pagination_metadata_contradictory": "incomplete_retry",
+			"profile_navigation_failed": "incomplete_retry",
+			"profile_shape_check_failed": "unexpected_data",
+			"scope_not_supported": "fix_settings",
+			"selector_drift": "unexpected_data",
+			"session_repair_required": "sign_in_again",
+			"source_auth_or_challenge": "sign_in_again",
+			"source_reported_empty": "nothing_to_import",
+			"source_reported_empty_after_retention": {
+				"message": "H-E-B no longer lists your orders because they're older than its retention window. Your collected orders are retained and untouched, and new orders will be collected normally"
+			},
+			"stream_collection_failed": "incomplete_retry",
+			"unparseable_order_date": "skipped_items"
+		},
+		"ical": {
+			"ics_fetch_failed": {
+				"message": "A calendar subscription could not be reached or did not answer. Run again later."
+			},
+			"ics_subscription_address_invalid": {
+				"message": "A calendar subscription address is not valid or the calendar is no longer there. Check the address in this connection's settings, then run again."
+			},
+			"no_calendar_sources": "fix_settings"
+		},
+		"icloud-notes": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"icloud_auth_failed": "sign_in_again",
+			"icloud_http_error": "incomplete_retry",
+			"icloud_invalid_query_response": "unexpected_data",
+			"icloud_navigation_changed": "incomplete_retry",
+			"icloud_no_progress": "incomplete_retry",
+			"icloud_omitted_rows": "skipped_items",
+			"icloud_rate_limited": "provider_busy",
+			"icloud_readiness_exhausted": "incomplete_retry",
+			"icloud_request_rejected": "unexpected_data",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"imessage": {
+			"attachment_tables_missing": "unexpected_data",
+			"chat_handle_join_table_missing": "unexpected_data",
+			"message_date_unusable": "skipped_items"
+		},
+		"instinct": {
+			"browser_handoff_readiness_probe_failed": "sign_in_unfinished",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"instinct_auth_failed": "sign_in_again",
+			"instinct_interrupted": "incomplete_retry",
+			"instinct_rate_limited": "provider_busy",
+			"instinct_request_rejected": "provider_busy",
+			"instinct_server_error": "provider_busy",
+			"instinct_source_unreadable": "unexpected_data",
+			"instinct_stream_incomplete": "incomplete_retry",
+			"scope_not_supported": "fix_settings",
+			"shape_check_failed": "skipped_items",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"jellyfin": {
+			"jellyfin_auth_failed": "sign_in_again",
+			"jellyfin_base_url_has_userinfo": "fix_settings",
+			"jellyfin_base_url_requires_https_non_loopback": "fix_settings",
+			"jellyfin_base_url_unsafe_scheme": "fix_settings",
+			"jellyfin_error": {
+				"message": "Jellyfin could not be reached or stopped responding. Check that the server is running, then run again."
+			},
+			"jellyfin_http_error": "incomplete_retry",
+			"jellyfin_media_browser_device_id_empty": "unexpected_data",
+			"jellyfin_missing_credentials": "fix_settings",
+			"jellyfin_response_unreadable": "unexpected_data",
+			"jellyfin_settings_rejected": "fix_settings",
+			"jellyfin_ssrf_rejected_cross_origin": "fix_settings",
+			"jellyfin_total_record_count_negative": "unexpected_data",
+			"jellyfin_total_record_count_not_finite": "unexpected_data",
+			"jellyfin_total_record_count_not_integer": "unexpected_data",
+			"jellyfin_total_record_count_not_number": "unexpected_data"
+		},
+		"linkedin": {
+			"absent": "not_available",
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"collection_continuation_advertised": "incomplete_retry",
+			"collection_malformed": "incomplete_retry",
+			"collection_paging_invalid": "incomplete_retry",
+			"collection_total_mismatch": "incomplete_retry",
+			"collection_urn_duplicate": "incomplete_retry",
+			"collection_urn_missing": "incomplete_retry",
+			"connection_confirmation_malformed": "incomplete_retry",
+			"connection_confirmation_missing": "incomplete_retry",
+			"connection_paging_total_mismatch": "incomplete_retry",
+			"connection_total_mismatch": "incomplete_retry",
+			"connection_urn_missing": "incomplete_retry",
+			"connection_walk_continuation_advertised": "incomplete_retry",
+			"connection_walk_malformed_page": "incomplete_retry",
+			"connection_walk_page_budget": "incomplete_retry",
+			"connection_walk_page_error": "incomplete_retry",
+			"connection_walk_repeated_page": "incomplete_retry",
+			"connection_walk_unavailable": "incomplete_retry",
+			"enrichment_unresolved": "incomplete_retry",
+			"experience_nested_collection_continuation_advertised": "incomplete_retry",
+			"experience_nested_collection_malformed": "incomplete_retry",
+			"experience_nested_collection_paging_invalid": "incomplete_retry",
+			"experience_nested_collection_total_mismatch": "incomplete_retry",
+			"experience_nested_collection_urn_duplicate": "incomplete_retry",
+			"experience_nested_collection_urn_missing": "incomplete_retry",
+			"id_absent": "skipped_items",
+			"id_empty": "skipped_items",
+			"id_enrichment_unresolved": "incomplete_retry",
+			"id_invalid_value": "skipped_items",
+			"id_malformed": "skipped_items",
+			"id_source_row_uncovered": "incomplete_retry",
+			"id_source_unavailable": "incomplete_retry",
+			"id_walk_unverified": "incomplete_retry",
+			"invalid_record_shape": "skipped_items",
+			"invalid_value": "skipped_items",
+			"linkedin_connection_enrichment_incomplete": "skipped_items",
+			"linkedin_connections_continuation_advertised": "incomplete_retry",
+			"linkedin_connections_page_failed": "incomplete_retry",
+			"linkedin_connections_page_malformed": "incomplete_retry",
+			"linkedin_dash_profile_unavailable": "skipped_items",
+			"linkedin_fields_unreadable": "skipped_items",
+			"linkedin_login_page_unreachable": "incomplete_retry",
+			"linkedin_profile_fields_unavailable": "skipped_items",
+			"linkedin_profile_section_unavailable": "skipped_items",
+			"linkedin_session_dead": "sign_in_again",
+			"malformed": "skipped_items",
+			"malformed_row": "skipped_items",
+			"name_absent": "skipped_items",
+			"name_empty": "skipped_items",
+			"name_enrichment_unresolved": "incomplete_retry",
+			"name_invalid_value": "skipped_items",
+			"name_malformed": "skipped_items",
+			"name_source_row_uncovered": "incomplete_retry",
+			"name_source_unavailable": "incomplete_retry",
+			"name_walk_unverified": "incomplete_retry",
+			"no_readable_content": "skipped_items",
+			"older_connections_deferred_page_budget": "continues_later",
+			"owner_identity_missing": "unexpected_data",
+			"profile_identity_mismatch": "unexpected_data",
+			"skills_nested_unproven": "incomplete_retry",
+			"source_row_uncovered": "incomplete_retry",
+			"source_unavailable": "incomplete_retry",
+			"stream_collection_failed": "incomplete_retry",
+			"summary_owner_mismatch": "incomplete_retry",
+			"summary_request_failed": "incomplete_retry",
+			"summary_total_changed": "incomplete_retry",
+			"summary_total_invalid": "incomplete_retry",
+			"unreadable_nested_collection": "skipped_items",
+			"walk_unverified": "incomplete_retry",
+			"withheld_unreadable_fields": "skipped_items"
+		},
+		"loom": {
+			"loom_apollo_wiring_pending": "not_available"
+		},
+		"meta": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"meta_following_owner_conflict": "unexpected_data",
+			"meta_posts_owner_conflict": "unexpected_data",
+			"meta_session_required": "sign_in_again",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"muse": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"muse_bot_challenge": {
+				"message": "Muse showed a check to confirm you are a person. Complete it in the browser, then run again."
+			},
+			"muse_stream_incomplete": "incomplete_retry",
+			"muse_stream_needs_update": "unexpected_data",
+			"scope_not_supported": "fix_settings"
+		},
+		"netflix-export": {
+			"ambiguous_date_order": {
+				"message": "Every date in this export could be read as day/month or month/day, so this connector cannot tell which is right. It is not something you can fix."
+			},
+			"archive_security_violation": "export_file_problem",
+			"csv_parse_error": "export_file_problem",
+			"import_exceeds_bounded_read_policy": "export_file_problem",
+			"records_not_found": "export_file_problem",
+			"unrecognized_csv_schema": "export_file_problem"
+		},
+		"notion": {
+			"notion_auth_failed": "sign_in_again",
+			"notion_pagination_contradiction": "incomplete_retry"
+		},
+		"oura": {
+			"older_pages_deferred_page_budget": "continues_later",
+			"oura_auth_failed": "sign_in_again"
+		},
+		"oura-browser": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"oura_api_token_missing": "sign_in_again",
+			"oura_authorization_incomplete": "sign_in_again",
+			"oura_browser_window_deferred": "continues_later",
+			"oura_daily_scope_missing": "sign_in_again",
+			"oura_oauth_code_missing": "sign_in_again",
+			"oura_oauth_state_invalid": "sign_in_again",
+			"oura_portal_app_credentials_missing": {
+				"message": "Oura API app details are missing. Finish setting up a personal API app with daily access and the required redirect address, then connect again."
+			},
+			"oura_portal_email_invalid": "fix_settings",
+			"oura_portal_invalid_applications": "unexpected_data",
+			"oura_portal_origin": "unexpected_data",
+			"oura_portal_session_unconfirmed": "sign_in_again",
+			"oura_token_invalid_payload": "unexpected_data",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"perplexity": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"collection_interrupted": "incomplete_retry",
+			"covered_in_full": "nothing_to_import",
+			"nothing_in_range": "nothing_to_import",
+			"perplexity_auth_failed": "sign_in_again",
+			"perplexity_interrupted": "incomplete_retry",
+			"perplexity_stream_incomplete": "incomplete_retry",
+			"perplexity_stream_needs_update": "unexpected_data",
+			"records_unreadable": "skipped_items",
+			"sign_in_required": "sign_in_again",
+			"source_limit_reached": "continues_later",
+			"source_unreadable": "unexpected_data",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"pocket": {
+			"pocket_auth_failed": "sign_in_again"
+		},
+		"shopify": {
+			"browser_handoff_readiness_probe_failed": "sign_in_unfinished",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"older_pages_deferred_page_budget": "continues_later",
+			"shopify_apollo_state_unavailable": "incomplete_retry",
+			"shopify_browser_operation_timeout": "incomplete_retry",
+			"shopify_login_page_unreachable": "incomplete_retry",
+			"shopify_order_history_evidence_timeout": "incomplete_retry",
+			"shopify_order_history_readiness_timeout": "incomplete_retry",
+			"shopify_order_history_unconfirmed": "incomplete_retry",
+			"shopify_order_id_unresolvable": "unexpected_data",
+			"shopify_order_rows_unresolved": "incomplete_retry",
+			"shopify_signed_out_or_blocked": "sign_in_again",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"signal": {
+			"backfill_check_unproven_legacy_cursor": {
+				"message": "This run could not check whether older messages are missing. The next run checks, and may ask you to run a full refresh."
+			},
+			"message_date_unusable": "skipped_items",
+			"no_attachments_exported": "nothing_to_import",
+			"source_rows_below_watermark_unreachable": {
+				"message": "Signal has older messages we haven't saved. Run a full refresh to collect them."
+			}
+		},
+		"slack": {
+			"channel_history_never_requested": "incomplete_retry",
+			"channel_history_not_finalized": "incomplete_retry",
+			"channel_history_out_of_member_scope": {
+				"message": "Some public channels weren't collected because you're not a member of them. Set the Slack option MEMBER_ONLY to false to collect every channel your workspace lists, including ones you've left and ones that are archived"
+			},
+			"optional_stream_failed": "incomplete_retry",
+			"slack_auth_failed": "sign_in_again",
+			"slack_cookie_invalid": "sign_in_again",
+			"slack_credentials_missing": "sign_in_again",
+			"slack_token_invalid": "sign_in_again",
+			"slack_workspace_invalid": "fix_settings",
+			"slackdump_max_runtime": "incomplete_retry",
+			"slackdump_timeout": "incomplete_retry",
+			"source_partition_missing": "incomplete_retry"
+		},
+		"slack-browser": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"collection_interrupted": "incomplete_retry",
+			"optional_stream_failed": "not_available",
+			"sign_in_required": "sign_in_again",
+			"slack_browser_session_missing": "sign_in_again",
+			"slack_session_lost": "sign_in_again",
+			"source_auth_or_challenge": "sign_in_again",
+			"source_unreadable": "unexpected_data",
+			"workspace_not_signed_in": {
+				"message": "The workspace named in SLACK_WORKSPACE is not one this browser is signed in to. Sign in to it, or clear SLACK_WORKSPACE to read every signed-in workspace."
+			}
+		},
+		"spotify": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"spotify_browser_stage1_deferred": "not_available",
+			"spotify_library_count_mismatch": "incomplete_retry",
+			"spotify_library_identity_invalid": "unexpected_data",
+			"spotify_library_identity_missing": "unexpected_data",
+			"spotify_library_identity_repeated": "incomplete_retry",
+			"spotify_library_pagination_no_progress": "incomplete_retry",
+			"spotify_library_playlist_identity_missing": "unexpected_data",
+			"spotify_library_response_invalid": "unexpected_data",
+			"spotify_library_row_invalid": "unexpected_data",
+			"spotify_library_rows_unsupported": {
+				"message": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing."
+			},
+			"spotify_library_terminal_unverified": "incomplete_retry",
+			"spotify_library_total_changed": "incomplete_retry",
+			"spotify_library_total_invalid": "unexpected_data",
+			"spotify_mobile_disposed": "incomplete_retry",
+			"spotify_mobile_evaluate_source_too_large": "unexpected_data",
+			"spotify_mobile_install_failed": "incomplete_retry",
+			"spotify_mobile_job_lost": "incomplete_retry",
+			"spotify_mobile_result_lost": "incomplete_retry",
+			"spotify_page_not_player": "incomplete_retry",
+			"spotify_pagination_invalid_next": "incomplete_retry",
+			"spotify_pagination_no_progress": "incomplete_retry",
+			"spotify_playlist_count_mismatch": "incomplete_retry",
+			"spotify_playlist_identity_mismatch": "incomplete_retry",
+			"spotify_playlist_items_completion_unproven": "incomplete_retry",
+			"spotify_playlist_pagination_no_progress": "incomplete_retry",
+			"spotify_playlist_response_invalid": "unexpected_data",
+			"spotify_playlist_revision_unproven": "incomplete_retry",
+			"spotify_playlist_row_invalid": "unexpected_data",
+			"spotify_playlist_row_type_unrecognized": "unexpected_data",
+			"spotify_playlist_rows_unsupported": {
+				"message": "Some playlist entries are a type this connector does not read yet, so they were skipped. The rest of each playlist was read."
+			},
+			"spotify_playlist_terminal_unverified": "incomplete_retry",
+			"spotify_playlist_total_changed": "incomplete_retry",
+			"spotify_playlist_total_invalid": "unexpected_data",
+			"spotify_playlists_completion_unproven": "incomplete_retry",
+			"spotify_profile_enrichment_http_status": "incomplete_retry",
+			"spotify_ranked_list_capped": "capped_by_limit",
+			"spotify_recent_context_boundary_unverified": {
+				"message": "Recently played contexts were read, but Spotify does not show where that history ends, so this part is not marked complete. No action is needed."
+			},
+			"spotify_recently_played_malformed": "unexpected_data",
+			"spotify_recently_played_owner_unavailable": "unexpected_data",
+			"spotify_recently_played_pagination_no_progress": "incomplete_retry",
+			"spotify_recently_played_repeated_identity": "incomplete_retry",
+			"spotify_retryable_status_unknown": "incomplete_retry",
+			"spotify_saved_tracks_completion_unproven": "incomplete_retry",
+			"spotify_saved_tracks_count_mismatch": "incomplete_retry",
+			"spotify_saved_tracks_identity_repeated": "incomplete_retry",
+			"spotify_saved_tracks_pagination_no_progress": "incomplete_retry",
+			"spotify_saved_tracks_response_invalid": "unexpected_data",
+			"spotify_saved_tracks_row_invalid": "unexpected_data",
+			"spotify_saved_tracks_terminal_unverified": "incomplete_retry",
+			"spotify_saved_tracks_total_changed": "incomplete_retry",
+			"spotify_saved_tracks_total_invalid": "unexpected_data",
+			"spotify_session_dead": "sign_in_again",
+			"spotify_source_row_unavailable": "skipped_items",
+			"spotify_stream_outcome_unproven": "incomplete_retry",
+			"stream_collection_failed": "incomplete_retry"
+		},
+		"steam": {
+			"steam_auth_failed": "sign_in_again",
+			"steam_optional_resource_unavailable": {
+				"message": "Steam does not let this connector see your friends list because of your profile's privacy settings. To include it, make your friends list visible, then run again."
+			}
+		},
+		"strava": {
+			"collection_interrupted": "export_file_problem",
+			"records_unreadable": "skipped_items",
+			"sign_in_required": "sign_in_again",
+			"source_limit_reached": "continues_later",
+			"source_unreadable": "export_file_problem",
+			"strava_export_columns_unexpected": "unexpected_data",
+			"strava_export_not_recognised": "export_file_problem"
+		},
+		"strava-browser": {
+			"browser_handoff_readiness_probe_failed": "sign_in_unfinished",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"collection_interrupted": "incomplete_retry",
+			"covered_in_full": "nothing_to_import",
+			"nothing_in_range": "nothing_to_import",
+			"records_unreadable": "skipped_items",
+			"sign_in_required": "sign_in_again",
+			"source_limit_reached": "continues_later",
+			"source_unreadable": "unexpected_data",
+			"strava_session_dead": "sign_in_again"
+		},
+		"tiktok": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"stream_collection_failed": "incomplete_retry",
+			"tiktok_api_error": "incomplete_retry",
+			"tiktok_app_value_not_seen": "unexpected_data",
+			"tiktok_auth_failed": "sign_in_again",
+			"tiktok_bot_check": "sign_in_again",
+			"tiktok_interrupted": "incomplete_retry",
+			"tiktok_list_incomplete": "unexpected_data",
+			"tiktok_parent_stream_required": "fix_settings",
+			"tiktok_rate_limited": "provider_busy",
+			"tiktok_request_unsigned": "unexpected_data",
+			"tiktok_run_limit_reached": "limit_repeats",
+			"tiktok_server_error": "provider_busy",
+			"tiktok_source_unreadable": "unexpected_data"
+		},
+		"twitter-archive": {
+			"archive_not_found": "export_file_problem"
+		},
+		"uber": {
+			"trip_details_unavailable": "skipped_items",
+			"trips_deferred_detail_budget": "continues_later",
+			"trips_deferred_page_budget": "continues_later"
+		},
+		"usaa": {
+			"credit_card_export_unverified": "incomplete_retry",
+			"csv_no_data_rows": "nothing_to_import",
+			"csv_no_usable_transactions": "unexpected_data",
+			"csv_partial_parse": "skipped_items",
+			"export_affordance_missing": "unexpected_data",
+			"export_error": "incomplete_retry",
+			"export_no_download": "incomplete_retry",
+			"export_window_incomplete": "incomplete_retry",
+			"hydrate_crashed": "unexpected_data",
+			"inbox_rows_unresolved": "unexpected_data",
+			"pdf_download_click_failed": "unexpected_data",
+			"pdf_download_direct_link_failed": "incomplete_retry",
+			"pdf_download_empty": "unexpected_data",
+			"pdf_download_no_download_menuitem": "unexpected_data",
+			"pdf_download_no_options_affordance": "unexpected_data",
+			"pdf_download_options_click_failed": "unexpected_data",
+			"pdf_download_persist_failed": "unexpected_data",
+			"pdf_download_row_missing": "incomplete_retry",
+			"pdf_download_timeout": "incomplete_retry",
+			"pdf_parse_failed": "unexpected_data",
+			"pdf_template_unknown": "not_available",
+			"scrape_failed": "unexpected_data",
+			"selectors_pending": "not_available",
+			"session_dead_reauth_failed": "sign_in_again",
+			"session_dead_redirect_to_logon": "sign_in_again",
+			"statement_unreconciled": "unexpected_data"
+		},
+		"venmo": {
+			"friends_deferred_page_budget": {
+				"message": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window"
+			},
+			"transactions_deferred_page_budget": "continues_later",
+			"transactions_schema_blocked": "incomplete_retry"
+		},
+		"whatsapp": {
+			"empty_export": "export_file_problem",
+			"import_exceeds_bounded_read_policy": "export_file_problem",
+			"media_exceeds_bounded_read_policy": "export_file_problem",
+			"no_exports_found": "export_file_problem",
+			"unsupported_export": "export_file_problem"
+		},
+		"whatsapp-web": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"scope_not_supported": "fix_settings",
+			"whatsapp_web_auth_failed": "sign_in_again",
+			"whatsapp_web_chat_list_never_settled": "incomplete_retry",
+			"whatsapp_web_empty_chat_list": "incomplete_retry",
+			"whatsapp_web_invalid_record": "unexpected_data",
+			"whatsapp_web_local_store_unavailable": "incomplete_retry",
+			"whatsapp_web_refused_call": "unexpected_data",
+			"whatsapp_web_stores_not_ready": "incomplete_retry",
+			"whatsapp_web_stream_incomplete": "incomplete_retry",
+			"whatsapp_web_stream_needs_update": "unexpected_data",
+			"whatsapp_web_unexpected_shape": "unexpected_data"
+		},
+		"wholefoods": {
+			"amazon_2fa_not_provided": "sign_in_again",
+			"amazon_login_incomplete_after_submit": "sign_in_again",
+			"amazon_login_manual_incomplete": "sign_in_again",
+			"amazon_login_unexpected_ui": "unexpected_data",
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"stream_collection_failed": "incomplete_retry",
+			"wholefoods_filter_pending": "not_available",
+			"wholefoods_nutrition_unread": "incomplete_retry",
+			"wholefoods_order_item_asin_missing": "skipped_items",
+			"wholefoods_order_item_count_unverified": "incomplete_retry"
+		},
+		"whoop": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again"
+		},
+		"whoop-browser": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"collection_interrupted": "incomplete_retry",
+			"sign_in_required": "sign_in_again",
+			"source_limit_reached": "continues_later",
+			"source_unreadable": "unexpected_data",
+			"whoop_browser_session_dead": "sign_in_again"
+		},
+		"x-browser": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"collection_interrupted": "incomplete_retry",
+			"list_end_unconfirmed": "unexpected_data",
+			"records_unreadable": "skipped_items",
+			"run_budget_reached": "continues_later",
+			"run_stopped_early": {
+				"message": "This part was not read because the run stopped early for another reason. Fix that reason, then run again."
+			},
+			"sign_in_required": "sign_in_again",
+			"source_rate_limited": "provider_busy",
+			"source_unreadable": "unexpected_data",
+			"x_session_dead": "sign_in_again"
+		},
+		"ynab": {
+			"ynab_auth_failed": "sign_in_again"
+		},
+		"youtube": {
+			"browser_handoff_readiness_probe_failed": "incomplete_retry",
+			"browser_handoff_readiness_timed_out": "sign_in_again",
+			"browser_sign_in_cancelled": "sign_in_again",
+			"page_unreadable": "incomplete_retry",
+			"scope_not_supported": "fix_settings",
+			"stream_collection_failed": "incomplete_retry",
+			"youtube_click_target_missing": "incomplete_retry",
+			"youtube_history_page_unreadable": "incomplete_retry",
+			"youtube_playlist_page_unreadable": "incomplete_retry",
+			"youtube_profile_about_page_unreadable": "incomplete_retry",
+			"youtube_profile_account_header_unreadable": "incomplete_retry",
+			"youtube_profile_channel_link_unavailable": "incomplete_retry",
+			"youtube_profile_channel_page_unreadable": "incomplete_retry",
+			"youtube_profile_home_not_ready": "incomplete_retry",
+			"youtube_session_dead": "sign_in_again",
+			"youtube_video_parse_mismatch": "incomplete_retry"
+		},
+		"youtube-takeout": {
+			"file_not_found_in_export": "export_file_problem",
+			"records_unreadable": "skipped_items",
+			"source_unreadable": {
+				"message": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents."
+			}
+		}
+	}
+}

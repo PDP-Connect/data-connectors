@@ -9,7 +9,7 @@
 	},
 	"connector_key": "google-maps-data-portability",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
-	"version": "0.1.24",
+	"version": "0.1.25",
 	"display_name": "Google Maps Data Portability",
 	"brand": {
 		"icon": "icon.svg",
@@ -230,5 +230,13 @@
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"
 		}
-	]
+	],
+	"reason_display_messages": {
+		"google_data_portability_access_token_missing": "Google Maps Data Portability needs you to sign in again or update your access key. Then run again.",
+		"google_data_portability_archive_job_id_missing": "This part stopped because of an internal problem reading Google Maps Data Portability. It is not something you can fix.",
+		"google_data_portability_archive_state_missing": "This part stopped because of an internal problem reading Google Maps Data Portability. It is not something you can fix.",
+		"google_data_portability_resources_missing": "This part stopped because of an internal problem reading Google Maps Data Portability. It is not something you can fix.",
+		"google_dataportability_access_token_missing": "Google Maps Data Portability needs you to sign in again or update your access key. Then run again.",
+		"google_dataportability_no_authorized_resource_groups": "Google Maps Data Portability needs you to sign in again or update your access key. Then run again."
+	}
 }

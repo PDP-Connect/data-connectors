@@ -4,22 +4,33 @@
 		"manifest": {
 			"connector_key": "amazon",
 			"reason_display_messages": {
+				"amazon_2fa_not_provided": "Amazon needs you to sign in again or update your access key. Then run again.",
 				"amazon_empty_history_after_prior_orders": "Amazon reported no order history for a year in which we previously collected orders. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove those orders are gone",
-				"empty_first_page_without_diagnostics": "The first page came back empty and we couldn't tell why",
-				"item_count_shortfall": "An order lists more items than we could save",
-				"list_page_order_id_not_found": "We skipped some order cards on this page because we couldn't find their order IDs",
-				"empty_first_page_without_terminal_signal": "The first page came back empty with no sign it was really the end",
-				"list_page_navigation_failed": "We couldn't load an orders page, so we stopped before advancing",
-				"list_page_readiness_timeout": "The orders page took too long to load. Try again.",
-				"list_page_shape_check_failed": "The page didn't look like we expected",
-				"no_orders_text": "This account shows no orders to import",
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages for one year, so some older orders from that year haven't been collected yet. Nothing was lost — that year stays open so a later run can finish it",
-				"pagination_exhausted": "We reached the end of the available pages",
-				"profile_page_read_failed": "We couldn't read the page to get your account profile",
-				"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
-				"selector_drift": "The page layout changed and we couldn't find what we needed",
-				"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
-				"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+				"amazon_empty_list_page_renderer_diagnostics_failed": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"amazon_list_page_navigation_failed": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"amazon_list_page_readiness_timeout": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"amazon_login_incomplete_after_submit": "Amazon needs you to sign in again or update your access key. Then run again.",
+				"amazon_login_manual_incomplete": "Amazon needs you to sign in again or update your access key. Then run again.",
+				"amazon_login_unexpected_ui": "This part stopped because of an internal problem reading Amazon. It is not something you can fix.",
+				"amazon_session_required": "Amazon needs you to sign in again or update your access key. Then run again.",
+				"browser_handoff_readiness_probe_failed": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Amazon needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Amazon needs you to sign in again or update your access key. Then run again.",
+				"empty_first_page_without_diagnostics": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"empty_first_page_without_terminal_signal": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"item_count_shortfall": "Some items could not be read and were skipped.",
+				"list_page_navigation_failed": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"list_page_order_id_not_found": "Some items could not be read and were skipped.",
+				"list_page_readiness_timeout": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"list_page_shape_check_failed": "Some items could not be read and were skipped.",
+				"no_orders_text": "There was nothing to import for this request. No action is needed.",
+				"older_pages_deferred_page_budget": "Amazon has more order pages for one year than a single run reads, so older orders from that year are missing. Later runs read the same pages again, so they may stay missing.",
+				"pagination_exhausted": "There was nothing to import for this request. No action is needed.",
+				"profile_page_read_failed": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"renderer_diagnostics_failed": "Amazon stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"selector_drift": "This part stopped because of an internal problem reading Amazon. It is not something you can fix.",
+				"source_auth_or_challenge": "Amazon needs you to sign in again or update your access key. Then run again.",
+				"unparseable_order_date": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -28,24 +39,27 @@
 		"manifest": {
 			"connector_key": "anthropic",
 			"reason_display_messages": {
-				"export_pending": "Claude is still preparing your data export. This will finish automatically on a later run.",
-				"no_chat_organization": "No Claude organization with chat access could be found for this account.",
-				"export_request_failed": "Claude couldn't start preparing your data export. This will retry automatically.",
-				"export_rate_limited": "Claude is limiting export requests for this account. No new export is requested before the time Claude gave, or for 24 hours if Claude gave no time.",
-				"export_auth_rejected": "Claude rejected the export request. Sign in to Claude again, then retry.",
-				"export_response_unrecognized": "Claude answered the export request in a format this connector does not recognize. Your existing data was not changed.",
-				"export_part_download_failed": "Part of your Claude data export could not be downloaded (the link may have already been used or expired). A later run downloads the same export again when it can, or requests a new one after 24 hours.",
-				"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
-				"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
-				"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
-				"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
-				"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
-				"parse_error": "Claude sent back a plan we couldn't read. Your existing plan data was not changed. This will retry automatically.",
-				"organization_unavailable": "Your Claude plan could not be read: the organization this data export came from is not in your signed-in account's organization list. This will retry automatically.",
-				"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed.",
-				"export_manifest_incomplete": "Your Claude export is incomplete or inconsistent. Affected data was not marked as fully imported.",
-				"export_conversations_incomplete": "Your Claude export is missing some conversation files. Conversations and messages were not marked as fully imported.",
-				"export_projects_missing": "Your Claude export has no complete projects section. Projects and project documents were not marked as fully imported."
+				"browser_handoff_readiness_probe_failed": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Claude needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Claude needs you to sign in again or update your access key. Then run again.",
+				"export_auth_rejected": "Claude needs you to sign in again or update your access key. Then run again.",
+				"export_conversation_incomplete": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"export_conversations_incomplete": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"export_conversations_missing": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"export_items_unparseable": "Some items could not be read and were skipped.",
+				"export_layout_unrecognized": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"export_manifest_incomplete": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"export_oversized_conversation_incomplete": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"export_part_download_failed": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"export_pending": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"export_projects_missing": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"export_rate_limited": "Claude is limiting requests or having trouble right now. Wait a while, then run again.",
+				"export_recently_requested": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"export_request_failed": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"export_response_unrecognized": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"no_chat_organization": "Claude needs you to sign in again or update your access key. Then run again.",
+				"organization_unavailable": "Claude does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"parse_error": "This part stopped because of an internal problem reading Claude. It is not something you can fix."
 			}
 		}
 	},
@@ -54,12 +68,18 @@
 		"manifest": {
 			"connector_key": "anthropic-live",
 			"reason_display_messages": {
-				"anthropic_live_backlog_deferred": "This run read as many changed Claude conversations as one run allows. The rest are read on later runs from the saved checkpoint.",
-				"no_chat_organization": "No Claude organization with chat access could be found for this account.",
-				"http_error": "We hit a network problem talking to Claude",
-				"parse_error": "Claude sent back a response we couldn't read",
-				"not_available": "This data isn't available for this Claude account",
-				"organization_unavailable": "Your Claude plan could not be read: the organization this run reads from has no chat plan in your account's organization list. This will retry automatically."
+				"anthropic_live_backlog_deferred": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"anthropic_live_request_rejected": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"anthropic_live_session_required": "Claude needs you to sign in again or update your access key. Then run again.",
+				"anthropic_live_unparsed_instant": "This part stopped because of an internal problem reading Claude. It is not something you can fix.",
+				"browser_handoff_readiness_probe_failed": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Claude needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Claude needs you to sign in again or update your access key. Then run again.",
+				"http_error": "Claude stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"no_chat_organization": "Claude does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"not_available": "Claude does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"organization_unavailable": "Claude does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"parse_error": "This part stopped because of an internal problem reading Claude. It is not something you can fix."
 			}
 		}
 	},
@@ -68,7 +88,13 @@
 		"manifest": {
 			"connector_key": "apple-contacts",
 			"reason_display_messages": {
-				"group_inventory_short": "Your address book has contact groups we couldn't save"
+				"auth_failed": "Apple Contacts needs you to sign in again or update your access key. Then run again.",
+				"carddav_request_failed": "Apple Contacts stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"carddav_response_unusable": "This part stopped because of an internal problem reading Apple Contacts. It is not something you can fix.",
+				"discovery_failed": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"fake_carddav_server_no_port": "This part stopped because of an internal problem reading Apple Contacts. It is not something you can fix.",
+				"group_inventory_short": "Some items could not be read and were skipped.",
+				"unsafe_redirect_refused": "This part stopped because of an internal problem reading Apple Contacts. It is not something you can fix."
 			}
 		}
 	},
@@ -77,16 +103,16 @@
 		"manifest": {
 			"connector_key": "apple-health",
 			"reason_display_messages": {
-				"covered_in_full": "Everything of this kind in your export for this period was imported.",
-				"nothing_in_range": "Your export had no data of this kind matching this request. That's not a problem - there was simply nothing to read.",
 				"awaiting_upload": "Nothing to read yet. On your iPhone open Health, tap your picture, and choose Export All Health Data. Upload the export.zip here when it's ready.",
-				"source_unreadable": "That file isn't an Apple Health export we can read. It should be the export.zip your iPhone produced, or the export.xml from inside it.",
-				"export_extraction_failed": "We couldn't read your export, so nothing was imported. If it is a .zip that is incomplete, take a fresh export on your iPhone and upload it again. If the .zip cannot be opened here and the export XML inside it is under 8 GB, unzip it on a computer and upload that XML instead.",
-				"collection_interrupted": "Your export file ended earlier than expected, so some records may be missing. Take a fresh export on your iPhone and upload the new file.",
-				"records_unreadable": "Some entries in your export couldn't be read and were skipped - everything else imported normally. Importing the same file again won't recover them.",
-				"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have.",
+				"collection_interrupted": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"covered_in_full": "All matching data in this export was imported. No action is needed.",
+				"export_extraction_failed": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 				"newer_upload_too_large": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here.",
-				"uploads_not_all_compared": "You have more than 100 uploads and only 100 were checked, so a newer export among the others may not have been read. Remove old exports from your uploads, then import again."
+				"nothing_in_range": "Your export had no data of this kind matching this request. That's not a problem - there was simply nothing to read.",
+				"records_unreadable": "Some items could not be read and were skipped.",
+				"source_unreadable": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"uploads_not_all_compared": "You have more than 100 uploads and only 100 were checked, so a newer export among the others may not have been read. Remove old exports from your uploads, then import again.",
+				"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have."
 			}
 		}
 	},
@@ -95,7 +121,7 @@
 		"manifest": {
 			"connector_key": "apple-photos",
 			"reason_display_messages": {
-				"export_not_found": "We couldn't find an export to import"
+				"export_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 			}
 		}
 	},
@@ -104,17 +130,21 @@
 		"manifest": {
 			"connector_key": "character-ai",
 			"reason_display_messages": {
-				"stream_collection_failed": "Character.AI could not be read completely this time. Nothing already saved was lost.",
-				"scope_not_supported": "Character.AI messages can only be imported together with your chats. Select both to import your messages.",
-				"character_ai_auth_failed": "Your Character.AI session has ended. Sign in to Character.AI again to continue.",
-				"character_ai_challenge": "Character.AI is asking for a human check. Complete it in the browser, then sync again.",
-				"character_ai_interrupted": "The Character.AI page was closed or reloaded during the sync. Sync again to continue.",
-				"character_ai_api_429": "Character.AI is limiting requests right now. The sync will try again later.",
-				"character_ai_api_408": "Character.AI took too long to answer. The sync will try again later.",
-				"character_ai_api_5xx": "Character.AI is having trouble right now. The sync will try again later.",
-				"character_ai_timeout": "Character.AI took too long to answer. The sync will try again later.",
-				"character_ai_network_error": "Character.AI could not be reached. Check your connection; the sync will try again later.",
-				"character_ai_invalid_payload": "Character.AI answered in a format this connector does not recognize. A connector update is needed."
+				"browser_handoff_readiness_probe_failed": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Character.AI needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Character.AI needs you to sign in again or update your access key. Then run again.",
+				"character_ai_api_408": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"character_ai_api_429": "Character.AI is limiting requests or having trouble right now. Wait a while, then run again.",
+				"character_ai_api_5xx": "Character.AI is limiting requests or having trouble right now. Wait a while, then run again.",
+				"character_ai_auth_failed": "Character.AI needs you to sign in again or update your access key. Then run again.",
+				"character_ai_challenge": "Character.AI needs you to sign in again or update your access key. Then run again.",
+				"character_ai_interrupted": "The Character.AI sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+				"character_ai_invalid_payload": "This part stopped because of an internal problem reading Character.AI. It is not something you can fix.",
+				"character_ai_network_error": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"character_ai_stream_incomplete": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"character_ai_timeout": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"stream_collection_failed": "Character.AI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -123,14 +153,14 @@
 		"manifest": {
 			"connector_key": "chase",
 			"reason_display_messages": {
-				"account_no_longer_discovered": "An account we tracked before is no longer listed on your dashboard",
-				"ambiguous_multi_account_overview": "We couldn't tell which account view to use",
-				"qfx_download_failed": "We couldn't download the transactions file",
-				"qfx_parse_failed": "We couldn't read the transactions file",
-				"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
-				"row_exception": "Something went wrong reading one of the rows",
-				"selectors_pending": "Support for this part of the connector isn't complete yet",
-				"statements_scrape_failed": "We couldn't read your statements page"
+				"account_no_longer_discovered": "An account saved before no longer appears on your Chase dashboard. Its saved data is kept. Check that the account is still open and visible.",
+				"ambiguous_multi_account_overview": "This part stopped because of an internal problem reading Chase. It is not something you can fix.",
+				"qfx_download_failed": "Chase stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"qfx_parse_failed": "This part stopped because of an internal problem reading Chase. It is not something you can fix.",
+				"qfx_partial_parse": "Some items could not be read and were skipped.",
+				"row_exception": "Some items could not be read and were skipped.",
+				"selectors_pending": "Chase does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"statements_scrape_failed": "This part stopped because of an internal problem reading Chase. It is not something you can fix."
 			}
 		}
 	},
@@ -139,16 +169,20 @@
 		"manifest": {
 			"connector_key": "chatgpt",
 			"reason_display_messages": {
-				"branch_tip_missing": "A conversation points at a message we couldn't find, so part of it is missing",
-				"branch_truncated": "A conversation is missing earlier messages from its current thread",
-				"conversation_list_unstable": "ChatGPT's conversation list changed between checks, so try again",
-				"empty_detail": "We opened this conversation but found no messages to import",
-				"http_error": "We hit a network problem talking to the service",
-				"missing_mapping": "We opened this conversation but it had no message data to read",
-				"not_available": "This data isn't available through the current connection",
-				"pagination_cap_truncated": "There were more ChatGPT results than we could safely page through in one run, so we stopped early",
-				"parse_error": "ChatGPT sent back a response we couldn't read",
-				"shape_check_failed": "The data didn't look like we expected"
+				"branch_structurally_incomplete": "ChatGPT stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"branch_tip_missing": "Some items could not be read and were skipped.",
+				"branch_truncated": "Some items could not be read and were skipped.",
+				"conversation_list_unstable": "ChatGPT stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"detail_http_error": "ChatGPT stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"detail_mapping_missing": "ChatGPT stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"empty_detail": "Some items could not be read and were skipped.",
+				"http_error": "ChatGPT stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"message_shape_rejected": "Some items could not be read and were skipped.",
+				"missing_mapping": "Some items could not be read and were skipped.",
+				"not_available": "ChatGPT does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"pagination_cap_truncated": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+				"parse_error": "This part stopped because of an internal problem reading ChatGPT. It is not something you can fix.",
+				"shape_check_failed": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -177,15 +211,15 @@
 				}
 			},
 			"reason_display_messages": {
-				"claude_dir_not_found": "We couldn't find your Claude Code data folder",
-				"malformed_jsonl_line": "A line in this Claude Code session log contains invalid JSON and was skipped",
-				"non_object_jsonl_record": "A line in this Claude Code session log has an unexpected format and was skipped",
-				"scope_matched_no_sources": "None of your configured project folders matched any Claude Code projects",
-				"source_directory_read_error": "We couldn't read this Claude Code folder. It will be checked again on the next run",
-				"source_read_error": "This Claude Code session log could not be collected and will be retried on the next run",
-				"source_unreadable": "We couldn't read this folder, so we don't know what's in it",
-				"symlink_skipped": "A symbolic link was skipped without reading its target. The skipped path is listed in the source diagnostics",
-				"truncated_jsonl_tail": "The last line of this Claude Code session log is incomplete and will be checked again on the next run"
+				"claude_dir_not_found": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"malformed_jsonl_line": "Some items could not be read and were skipped.",
+				"non_object_jsonl_record": "Some items could not be read and were skipped.",
+				"scope_matched_no_sources": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"source_directory_read_error": "A local file or folder could not be read. Check that it exists and that this app can read it, then run again.",
+				"source_read_error": "A local file or folder could not be read. Check that it exists and that this app can read it, then run again.",
+				"source_unreadable": "A local file or folder could not be read. Check that it exists and that this app can read it, then run again.",
+				"symlink_skipped": "Some items could not be read and were skipped.",
+				"truncated_jsonl_tail": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -194,12 +228,12 @@
 		"manifest": {
 			"connector_key": "codex",
 			"reason_display_messages": {
-				"symlink_skipped": "A symbolic link in your Codex data was skipped without reading its target",
-				"malformed_jsonl_line": "Part of this session's log file couldn't be read, so those entries were skipped. Nothing was lost on your machine — the original file is unchanged",
-				"non_object_jsonl_record": "A line in this Codex session log has an unexpected format and was skipped",
-				"rollout_source_read_error": "We couldn't read part of your Codex data. It will be checked again on the next run",
-				"shape_check_failed": "The data didn't look like we expected",
-				"truncated_jsonl_tail": "The last line of this Codex session log is incomplete and will be checked again on the next run"
+				"malformed_jsonl_line": "Some items could not be read and were skipped.",
+				"non_object_jsonl_record": "Some items could not be read and were skipped.",
+				"rollout_source_read_error": "OpenAI Codex CLI stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"shape_check_failed": "Some items could not be read and were skipped.",
+				"symlink_skipped": "Some items could not be read and were skipped.",
+				"truncated_jsonl_tail": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -208,15 +242,19 @@
 		"manifest": {
 			"connector_key": "discord-browser",
 			"reason_display_messages": {
-				"discord_sign_in_required": "Discord needs you to sign in again before this can continue.",
-				"discord_verification_required": "Discord asked for a captcha or an account check, or refused a request, so collection stopped without retrying. Open Discord yourself and make sure your account is in good standing before running this again.",
-				"discord_rate_limited": "Discord asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait at least a day before running this again.",
-				"discord_client_request_not_seen": "The Discord app didn't make a request of its own in time, so nothing could be read safely. Nothing was collected. Discord may have changed its site; please report this if it keeps happening.",
-				"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved; the next run reads the range again from your newest message and the host skips what it already has.",
-				"discord_servers_skipped": "Some of your servers couldn't be searched this time, usually because search is switched off there or Discord's search index wasn't ready. Everything else was collected normally.",
-				"discord_source_unreadable": "Discord answered in a form this connector doesn't recognise, so nothing more was read. Discord may have changed its site; please report this rather than retrying.",
-				"discord_records_unreadable": "Some entries in Discord's answer couldn't be read and were skipped. Everything else was collected normally.",
-				"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run reads the range again from your newest message."
+				"browser_handoff_readiness_probe_failed": "Discord stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Discord needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Discord needs you to sign in again or update your access key. Then run again.",
+				"discord_client_request_not_seen": "This part stopped because of an internal problem reading Discord. It is not something you can fix.",
+				"discord_collection_interrupted": "Discord stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"discord_rate_limited": "Discord is limiting requests or having trouble right now. Wait a while, then run again.",
+				"discord_records_unreadable": "Some items could not be read and were skipped.",
+				"discord_run_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"discord_servers_skipped": "Some servers could not be searched this time. A later run tries them again. No action is needed.",
+				"discord_session_dead": "Discord needs you to sign in again or update your access key. Then run again.",
+				"discord_sign_in_required": "Discord needs you to sign in again or update your access key. Then run again.",
+				"discord_source_unreadable": "This part stopped because of an internal problem reading Discord. It is not something you can fix.",
+				"discord_verification_required": "Discord needs you to sign in again or update your access key. Then run again."
 			}
 		}
 	},
@@ -225,9 +263,9 @@
 		"manifest": {
 			"connector_key": "doordash",
 			"reason_display_messages": {
-				"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — we'll try again on the next scheduled run.",
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your DoorDash order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up more history.",
-				"shape_check_failed": "The data didn't look like we expected"
+				"doordash_orders_response_not_observed": "DoorDash returned no readable order history. Your account may have no orders, or this connector may need an update.",
+				"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
+				"shape_check_failed": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -236,11 +274,15 @@
 		"manifest": {
 			"connector_key": "facebook",
 			"reason_display_messages": {
-				"stream_collection_failed": "Facebook did not show that this list was read in full, so it will be read again next time.",
-				"shape_check_failed": "Facebook sent an item this connector could not read, so it was not saved.",
-				"scope_not_supported": "Facebook does not date this list, so it cannot be limited to a time range. Choose it without a time range to import it.",
-				"facebook_auth_failed": "Facebook needs you to sign in again before this can continue.",
-				"facebook_interrupted": "The Facebook page stopped answering while signing in. Nothing was read; try again."
+				"browser_handoff_readiness_probe_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Facebook needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Facebook needs you to sign in again or update your access key. Then run again.",
+				"facebook_auth_failed": "Facebook needs you to sign in again or update your access key. Then run again.",
+				"facebook_interrupted": "The Facebook sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+				"facebook_navigation_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"shape_check_failed": "Some items could not be read and were skipped.",
+				"stream_collection_failed": "Facebook stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -250,12 +292,13 @@
 			"connector_key": "fitbit",
 			"reason_display_messages": {
 				"awaiting_upload": "Nothing to read yet. Request your Fitbit data from Google Takeout at takeout.google.com, selecting only Fitbit (it may be listed as Google Health), with file type .zip and file size 2 GB. Google emails you a download link, usually the same day. Upload every ZIP file from that link here, together: this import can't always tell if one is missing.",
-				"collection_interrupted": "Part of your export couldn't be read to the end, so some of your data is missing. Request a fresh export from Google Takeout and upload the new download.",
+				"collection_interrupted": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
 				"device_storage_unavailable": "This device couldn't finish reading your export. Nothing is wrong with the export itself. Try the import again, and check that the device has free storage space.",
 				"export_format_changed": "We couldn't read this part of your Fitbit export because its layout isn't the one we expect. Google may have changed the format, or one of the export's ZIP files may be missing. If you uploaded every ZIP file, please report this rather than retrying.",
-				"records_unreadable": "Some entries in your export couldn't be read and were skipped. Importing the same file again won't recover them.",
+				"records_unreadable": "Some items could not be read and were skipped.",
 				"source_limit_reached": "Your export is larger than this import can read, so some or all of it wasn't imported. If Takeout gave you several ZIP files, upload every one together: this import can't always tell if one is missing. If you chose Takeout files larger than 2 GB, request the export again with 2 GB files; otherwise, please report this.",
-				"source_unreadable": "The newest Google Takeout export in that upload, if there is one, isn't Fitbit data this import can read. Upload only your Fitbit export's ZIP files, every part of it together, as Takeout gave them, without unzipping them. If you chose .tgz as the file type, request the export again as .zip."
+				"source_unreadable": "The newest Google Takeout export in that upload, if there is one, isn't Fitbit data this import can read. Upload only your Fitbit export's ZIP files, every part of it together, as Takeout gave them, without unzipping them. If you chose .tgz as the file type, request the export again as .zip.",
+				"time_range_semantics_changed": "This part stopped because of an internal problem reading Fitbit. It is not something you can fix."
 			}
 		}
 	},
@@ -264,10 +307,14 @@
 		"manifest": {
 			"connector_key": "garmin-browser",
 			"reason_display_messages": {
-				"collection_interrupted": "Garmin Connect stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
-				"sign_in_required": "Garmin Connect needs you to sign in again before this can continue.",
-				"source_limit_reached": "This run read as much Garmin history as one run allows. The next run continues from where this one stopped.",
-				"source_unreadable": "Garmin Connect answered with something this connector doesn't recognise, so nothing more was read. Garmin may have changed its site; please report this rather than retrying."
+				"browser_handoff_readiness_probe_failed": "Garmin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Garmin needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Garmin needs you to sign in again or update your access key. Then run again.",
+				"collection_interrupted": "Garmin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"garmin_browser_session_dead": "Garmin needs you to sign in again or update your access key. Then run again.",
+				"sign_in_required": "Garmin needs you to sign in again or update your access key. Then run again.",
+				"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"source_unreadable": "This part stopped because of an internal problem reading Garmin. It is not something you can fix."
 			}
 		}
 	},
@@ -276,13 +323,17 @@
 		"manifest": {
 			"connector_key": "github",
 			"reason_display_messages": {
-				"github_event_missing_fields": "We skipped some activity events that were missing required details",
-				"github_pagination_cap_exceeded": "GitHub returned more pages than this run could safely scan, so collection stopped before claiming complete coverage",
-				"github_pagination_repeated_next": "GitHub repeated a pagination link, so collection stopped before claiming complete coverage",
-				"github_pinned_item_missing_identity": "We skipped a pinned repository whose identity was unavailable",
-				"pr_detail_fetch_failed": "We saved these pull requests but couldn't load every detail",
-				"pr_search_cap_truncated": "There were more results than the service will return, so the oldest couldn't be collected",
-				"starred_entry_missing_repo": "We skipped a starred entry whose repository was unavailable"
+				"github_auth_failed": "GitHub needs you to sign in again or update your access key. Then run again.",
+				"github_event_missing_fields": "Some items could not be read and were skipped.",
+				"github_malformed_response": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"github_pagination_cap_exceeded": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+				"github_pagination_gap": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"github_pagination_invalid_max_pages": "This part stopped because of an internal problem reading GitHub. It is not something you can fix.",
+				"github_pagination_repeated_next": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"github_pinned_item_missing_identity": "Some items could not be read and were skipped.",
+				"pr_detail_fetch_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"pr_search_cap_truncated": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+				"starred_entry_missing_repo": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -291,8 +342,13 @@
 		"manifest": {
 			"connector_key": "github-browser",
 			"reason_display_messages": {
-				"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
-				"stream_collection_failed": "GitHub did not show that this list was read in full, so the last complete copy was kept."
+				"browser_handoff_readiness_probe_failed": "The GitHub sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+				"browser_handoff_readiness_timed_out": "GitHub needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "GitHub needs you to sign in again or update your access key. Then run again.",
+				"github_browser_incomplete": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"github_browser_navigation_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"github_browser_session_missing": "GitHub needs you to sign in again or update your access key. Then run again.",
+				"stream_collection_failed": "GitHub stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -301,9 +357,23 @@
 		"manifest": {
 			"connector_key": "gmail",
 			"reason_display_messages": {
-				"historical_backfill_pending": "This bounded sync page completed; more historical Gmail data remains and will be collected automatically",
-				"historical_message_unaccounted": "A historical message could not be represented; its UID was recorded as a permanent coverage gap",
-				"schema_validation_failed": "Some data didn't match the expected format and was skipped"
+				"gmail_all_mail_exists_negative": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_all_mail_exists_not_finite": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_all_mail_exists_not_integer": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_all_mail_exists_not_number": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_progress_invalid_instant": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"gmail_progress_invalid_mailbox": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_progress_invalid_page_end": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_progress_invalid_time_range": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"gmail_progress_invalid_uid": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_progress_invalid_window": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_progress_page_already_consumed": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_progress_plan_after_outcomes": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_progress_unexpected_stream": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"gmail_progress_unexpected_uid": "This part stopped because of an internal problem reading Gmail. It is not something you can fix.",
+				"historical_backfill_pending": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"historical_message_unaccounted": "Some items could not be read and were skipped.",
+				"schema_validation_failed": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -312,7 +382,10 @@
 		"manifest": {
 			"connector_key": "google-calendar",
 			"reason_display_messages": {
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of this calendar, so older events haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"google_calendar_access_token_missing": "Google Calendar needs you to sign in again or update your access key. Then run again.",
+				"google_calendar_auth_failed": "Google Calendar needs you to sign in again or update your access key. Then run again.",
+				"google_calendar_sync_token_expired": "This part stopped because of an internal problem reading Google Calendar. It is not something you can fix.",
+				"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing."
 			}
 		}
 	},
@@ -321,7 +394,10 @@
 		"manifest": {
 			"connector_key": "google-contacts",
 			"reason_display_messages": {
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your contacts, so some contacts haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"google_contacts_auth_failed": "Google Contacts needs you to sign in again or update your access key. Then run again.",
+				"google_people_access_token_missing": "Google Contacts needs you to sign in again or update your access key. Then run again.",
+				"google_people_sync_token_expired": "This part stopped because of an internal problem reading Google Contacts. It is not something you can fix.",
+				"older_pages_deferred_page_budget": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing."
 			}
 		}
 	},
@@ -330,12 +406,26 @@
 		"manifest": {
 			"connector_key": "google-maps",
 			"reason_display_messages": {
-				"element_unaccounted": "Some Timeline entries had no usable time or ID, so we couldn't save them",
-				"invalid_json": "We couldn't read one of your Google Maps Timeline export files",
-				"record_too_large": "This Google Maps Timeline record is too large; re-export your Timeline and try again",
-				"timeline_points_not_found": "We couldn't find any location points to import",
-				"timeline_segments_not_found": "We couldn't find any timeline segments to import",
-				"unsupported_shape": "Your Google Maps Timeline export has an unsupported structure; re-export it as a supported JSON file"
+				"element_unaccounted": "Some items could not be read and were skipped.",
+				"invalid_json": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"record_too_large": "This Google Maps Timeline record is too large. Re-export your Timeline, then run again.",
+				"timeline_points_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"timeline_segments_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"unsupported_shape": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
+			}
+		}
+	},
+	{
+		"file": "google_maps_data_portability.json",
+		"manifest": {
+			"connector_key": "google-maps-data-portability",
+			"reason_display_messages": {
+				"google_data_portability_access_token_missing": "Google Maps Data Portability needs you to sign in again or update your access key. Then run again.",
+				"google_data_portability_archive_job_id_missing": "This part stopped because of an internal problem reading Google Maps Data Portability. It is not something you can fix.",
+				"google_data_portability_archive_state_missing": "This part stopped because of an internal problem reading Google Maps Data Portability. It is not something you can fix.",
+				"google_data_portability_resources_missing": "This part stopped because of an internal problem reading Google Maps Data Portability. It is not something you can fix.",
+				"google_dataportability_access_token_missing": "Google Maps Data Portability needs you to sign in again or update your access key. Then run again.",
+				"google_dataportability_no_authorized_resource_groups": "Google Maps Data Portability needs you to sign in again or update your access key. Then run again."
 			}
 		}
 	},
@@ -371,12 +461,12 @@
 				}
 			},
 			"reason_display_messages": {
-				"gmcli_chat_scan_limit_reached": "You have more conversations than we could scan in this run; the most recently active ones were kept",
-				"gmcli_not_installed": "The Google Messages helper tool isn't installed on this device",
-				"gmcli_not_paired": "Your Android device isn't paired with the Google Messages helper tool",
-				"gmcli_per_chat_limit_reached": "Some conversations had more messages than we could fetch in this run",
-				"gmcli_query_failed": "We couldn't read your Google Messages data from the helper tool",
-				"gmcli_schema_drift": "The Google Messages helper tool returned data in a format we didn't expect"
+				"gmcli_chat_scan_limit_reached": "Some older conversations were not scanned because of the chat limit setting. Raise GMCLI_MAX_CHATS, then run again.",
+				"gmcli_not_installed": "The Google Messages helper tool is not installed on this device. Install it, then run again.",
+				"gmcli_not_paired": "This device is not paired with the Google Messages helper tool. Pair it, then run again.",
+				"gmcli_per_chat_limit_reached": "Older messages in some conversations were not read because of the per-chat limit setting. Raise GMCLI_MESSAGES_PER_CHAT_LIMIT, then run again.",
+				"gmcli_query_failed": "The Google Messages helper tool failed while reading messages. Run again later. If it keeps happening, check the tool's own output.",
+				"gmcli_schema_drift": "This part stopped because of an internal problem reading Google Messages. It is not something you can fix."
 			}
 		}
 	},
@@ -385,10 +475,10 @@
 		"manifest": {
 			"connector_key": "google-takeout",
 			"reason_display_messages": {
-				"directory_read_failed": "We couldn't read a folder in your Google Takeout export",
-				"history_not_found": "We couldn't find any history to import",
-				"photos_not_found": "We couldn't find your Google Photos export",
-				"records_not_found": "We didn't find any records to import"
+				"directory_read_failed": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"history_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"photos_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"records_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 			}
 		}
 	},
@@ -397,9 +487,12 @@
 		"manifest": {
 			"connector_key": "groupme",
 			"reason_display_messages": {
-				"group_message_count_unanchored": "GroupMe didn't report a message count for some groups, so we can't confirm their history is complete",
-				"provider_reports_more_messages_than_walked": "GroupMe reports more messages than we collected, so some group history may be missing",
-				"history_ended_before_provider_count": "Some older group conversations stop partway: GroupMe's total for the group is higher than the history it will actually hand back, which usually means the oldest messages are no longer stored on GroupMe's side. Everything we did collect is saved. There is nothing for you to do, and we retry in case the rest becomes available."
+				"group_message_count_unanchored": "GroupMe does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"groupme_auth_failed": "GroupMe needs you to sign in again or update your access key. Then run again.",
+				"groupme_direct_chat_missing_identity": "This part stopped because of an internal problem reading GroupMe. It is not something you can fix.",
+				"groupme_messages_empty_page_304": "This part stopped because of an internal problem reading GroupMe. It is not something you can fix.",
+				"history_ended_before_provider_count": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+				"provider_reports_more_messages_than_walked": "Only part of this could be collected because of a size or count limit. The rest is not available."
 			}
 		}
 	},
@@ -408,27 +501,31 @@
 		"manifest": {
 			"connector_key": "heb",
 			"reason_display_messages": {
-				"empty_page_before_max_page": "We hit an empty page of orders before we expected to, so we stopped to check rather than assume we were done",
+				"browser_handoff_readiness_probe_failed": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "H-E-B needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "H-E-B needs you to sign in again or update your access key. Then run again.",
+				"empty_page_before_max_page": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 				"heb_empty_history_after_prior_orders": "H-E-B reported no order history, but we previously collected orders for this account. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove your history is gone",
-				"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
-				"list_page_navigation_failed": "We couldn't load a page of your H-E-B order history and didn't want to assume that meant the end",
-				"list_page_shape_check_failed": "The page didn't look like we expected",
-				"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
-				"nutrition_source_coverage_incomplete": "We did not mark H-E-B nutrition complete because the order history or order-item detail coverage is incomplete",
-				"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Valid records were retained; the unread tail remains unproven",
-				"pagination_exhausted": "We reached the end of the available pages",
-				"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
-				"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
-				"profile_navigation_failed": "We couldn't load your H-E-B account profile page",
-				"profile_shape_check_failed": "Your H-E-B account profile page didn't look like we expected",
-				"scope_not_supported": "This can't be collected with the streams you selected",
-				"selector_drift": "The page layout changed and we couldn't find what we needed",
-				"session_repair_required": "We need you to sign in or pass a verification check to continue",
-				"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
-				"source_reported_empty": "H-E-B showed us your order history and it has no orders in it",
+				"heb_session_required": "H-E-B needs you to sign in again or update your access key. Then run again.",
+				"item_count_short": "Some items could not be read and were skipped.",
+				"list_page_navigation_failed": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"list_page_shape_check_failed": "Some items could not be read and were skipped.",
+				"nutrition_navigation_failed": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"nutrition_source_coverage_incomplete": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"older_pages_deferred_page_budget": "Only the most recent pages of your order history were read, so older orders are missing. Orders already read are kept.",
+				"pagination_exhausted": "There was nothing to import for this request. No action is needed.",
+				"pagination_metadata_absent": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"pagination_metadata_contradictory": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"profile_navigation_failed": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"profile_shape_check_failed": "This part stopped because of an internal problem reading H-E-B. It is not something you can fix.",
+				"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"selector_drift": "This part stopped because of an internal problem reading H-E-B. It is not something you can fix.",
+				"session_repair_required": "H-E-B needs you to sign in again or update your access key. Then run again.",
+				"source_auth_or_challenge": "H-E-B needs you to sign in again or update your access key. Then run again.",
+				"source_reported_empty": "There was nothing to import for this request. No action is needed.",
 				"source_reported_empty_after_retention": "H-E-B no longer lists your orders because they're older than its retention window. Your collected orders are retained and untouched, and new orders will be collected normally",
-				"stream_collection_failed": "We couldn't confirm we reached the end of this H-E-B data, so we didn't mark it complete. The next run tries again",
-				"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+				"stream_collection_failed": "H-E-B stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"unparseable_order_date": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -437,8 +534,9 @@
 		"manifest": {
 			"connector_key": "ical",
 			"reason_display_messages": {
-				"ics_fetch_failed": "We couldn't download the calendar feed",
-				"no_calendar_sources": "No calendars are configured to import from"
+				"ics_fetch_failed": "A calendar subscription could not be reached or did not answer. Run again later.",
+				"ics_subscription_address_invalid": "A calendar subscription address is not valid or the calendar is no longer there. Check the address in this connection's settings, then run again.",
+				"no_calendar_sources": "This connection's settings or selection cannot be used as set. Check them, then run again."
 			}
 		}
 	},
@@ -447,15 +545,19 @@
 		"manifest": {
 			"connector_key": "icloud-notes",
 			"reason_display_messages": {
-				"stream_collection_failed": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
-				"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
-				"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
-				"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
-				"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
-				"icloud_omitted_rows": "Some iCloud Notes fields could not be read or stored. The affected rows are listed in the stream omission details, and the stream was not marked complete.",
-				"icloud_rate_limited": "iCloud Notes temporarily limited requests. Retry collection later.",
-				"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete.",
-				"icloud_readiness_exhausted": "The iCloud Notes page did not become ready within the retry budget. Collection did not start; retry when the Notes page is available."
+				"browser_handoff_readiness_probe_failed": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "iCloud Notes needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "iCloud Notes needs you to sign in again or update your access key. Then run again.",
+				"icloud_auth_failed": "iCloud Notes needs you to sign in again or update your access key. Then run again.",
+				"icloud_http_error": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"icloud_invalid_query_response": "This part stopped because of an internal problem reading iCloud Notes. It is not something you can fix.",
+				"icloud_navigation_changed": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"icloud_no_progress": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"icloud_omitted_rows": "Some items could not be read and were skipped.",
+				"icloud_rate_limited": "iCloud Notes is limiting requests or having trouble right now. Wait a while, then run again.",
+				"icloud_readiness_exhausted": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"icloud_request_rejected": "This part stopped because of an internal problem reading iCloud Notes. It is not something you can fix.",
+				"stream_collection_failed": "iCloud Notes stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -464,9 +566,9 @@
 		"manifest": {
 			"connector_key": "imessage",
 			"reason_display_messages": {
-				"attachment_tables_missing": "Your Messages database is missing attachment data we need",
-				"chat_handle_join_table_missing": "Your Messages database is missing chat-participant data we need",
-				"message_date_unusable": "We skipped a message with a date we couldn't read"
+				"attachment_tables_missing": "This part stopped because of an internal problem reading iMessage. It is not something you can fix.",
+				"chat_handle_join_table_missing": "This part stopped because of an internal problem reading iMessage. It is not something you can fix.",
+				"message_date_unusable": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -475,16 +577,19 @@
 		"manifest": {
 			"connector_key": "instinct",
 			"reason_display_messages": {
-				"shape_check_failed": "The data from Instinct did not look like we expected",
-				"instinct_auth_failed": "Instinct needs you to sign in again before this can continue.",
-				"instinct_interrupted": "Instinct did not answer when we checked your sign-in. Nothing was collected; try again.",
-				"instinct_rate_limited": "Instinct asked us to slow down, so collection stopped early. What was collected is saved; try again later.",
-				"instinct_server_error": "Instinct's servers had a problem partway through. What was collected is saved; try again later.",
-				"instinct_request_rejected": "Instinct refused one of the requests, so collection stopped.",
-				"instinct_source_unreadable": "Instinct answered in a form this connector does not recognise. Instinct may have changed its app; please report this.",
-				"instinct_stream_incomplete": "Instinct did not show the end of this list, so it was not saved as complete.",
-				"scope_not_supported": "This part of your Instinct data cannot be collected with the selection you made: account details have no date to limit by, and chat events are collected only together with your chats.",
-				"stream_collection_failed": "Instinct did not show all of this part of your account, so it was not saved as complete. Try again later."
+				"browser_handoff_readiness_probe_failed": "The Instinct sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+				"browser_handoff_readiness_timed_out": "Instinct needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Instinct needs you to sign in again or update your access key. Then run again.",
+				"instinct_auth_failed": "Instinct needs you to sign in again or update your access key. Then run again.",
+				"instinct_interrupted": "Instinct stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"instinct_rate_limited": "Instinct is limiting requests or having trouble right now. Wait a while, then run again.",
+				"instinct_request_rejected": "Instinct is limiting requests or having trouble right now. Wait a while, then run again.",
+				"instinct_server_error": "Instinct is limiting requests or having trouble right now. Wait a while, then run again.",
+				"instinct_source_unreadable": "This part stopped because of an internal problem reading Instinct. It is not something you can fix.",
+				"instinct_stream_incomplete": "Instinct stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"shape_check_failed": "Some items could not be read and were skipped.",
+				"stream_collection_failed": "Instinct stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -493,10 +598,21 @@
 		"manifest": {
 			"connector_key": "jellyfin",
 			"reason_display_messages": {
-				"jellyfin_auth_failed": "Your Jellyfin API key or token was rejected",
-				"jellyfin_error": "We hit a problem talking to your Jellyfin server",
-				"jellyfin_http_error": "We hit a network problem talking to your Jellyfin server",
-				"jellyfin_missing_credentials": "Jellyfin needs a server URL and API key to connect"
+				"jellyfin_auth_failed": "Jellyfin needs you to sign in again or update your access key. Then run again.",
+				"jellyfin_base_url_has_userinfo": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"jellyfin_base_url_requires_https_non_loopback": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"jellyfin_base_url_unsafe_scheme": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"jellyfin_error": "Jellyfin could not be reached or stopped responding. Check that the server is running, then run again.",
+				"jellyfin_http_error": "Jellyfin stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"jellyfin_media_browser_device_id_empty": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+				"jellyfin_missing_credentials": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"jellyfin_response_unreadable": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+				"jellyfin_settings_rejected": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"jellyfin_ssrf_rejected_cross_origin": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"jellyfin_total_record_count_negative": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+				"jellyfin_total_record_count_not_finite": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+				"jellyfin_total_record_count_not_integer": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix.",
+				"jellyfin_total_record_count_not_number": "This part stopped because of an internal problem reading Jellyfin. It is not something you can fix."
 			}
 		}
 	},
@@ -505,74 +621,79 @@
 		"manifest": {
 			"connector_key": "linkedin",
 			"reason_display_messages": {
-				"absent": "LinkedIn did not provide this field",
-				"malformed": "LinkedIn returned this field in an unreadable format",
-				"invalid_value": "LinkedIn returned a value outside the expected format",
-				"source_unavailable": "LinkedIn did not return the source needed for this field",
-				"enrichment_unresolved": "LinkedIn could not resolve a connection's profile details",
-				"walk_unverified": "LinkedIn did not provide enough paging evidence to verify the full list",
-				"source_row_uncovered": "LinkedIn could not verify the source row for this derived field",
-				"withheld_unreadable_fields": "LinkedIn withheld an entry because one or more fields were unreadable",
-				"unreadable_nested_collection": "LinkedIn returned an unreadable nested collection",
-				"malformed_row": "LinkedIn returned an entry in an unreadable format",
-				"no_readable_content": "LinkedIn returned an entry with no readable content",
-				"invalid_record_shape": "LinkedIn returned an entry outside the expected record shape",
-				"id_absent": "LinkedIn did not provide the entry identifier",
-				"id_malformed": "LinkedIn returned the entry identifier in an unreadable format",
-				"id_invalid_value": "LinkedIn returned an entry identifier outside the expected format",
-				"id_source_unavailable": "LinkedIn did not return the source for the entry identifier",
-				"id_enrichment_unresolved": "LinkedIn could not resolve the connection identifier to a profile",
-				"id_walk_unverified": "LinkedIn did not verify the entry identifier in a complete list",
-				"id_source_row_uncovered": "LinkedIn could not verify the source row for the entry identifier",
-				"id_empty": "LinkedIn returned an empty entry identifier",
-				"name_absent": "LinkedIn did not provide the entry name",
-				"name_malformed": "LinkedIn returned the entry name in an unreadable format",
-				"name_invalid_value": "LinkedIn returned an entry name outside the expected format",
-				"name_source_unavailable": "LinkedIn did not return the source for the entry name",
-				"name_enrichment_unresolved": "LinkedIn could not resolve the connection name",
-				"name_walk_unverified": "LinkedIn did not verify the entry name in a complete list",
-				"name_source_row_uncovered": "LinkedIn could not verify the source row for the entry name",
-				"name_empty": "LinkedIn returned an empty entry name",
-				"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
-				"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
-				"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
-				"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
-				"linkedin_connections_continuation_advertised": "LinkedIn advertised another connections page, so the exact connection count is unavailable",
-				"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
-				"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
-				"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
-				"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
-				"stream_collection_failed": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
-				"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
-				"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
-				"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
-				"summary_total_invalid": "LinkedIn inventory could not be verified: summary total invalid",
-				"summary_owner_mismatch": "LinkedIn inventory could not be verified: summary owner mismatch",
-				"summary_total_changed": "LinkedIn inventory could not be verified: summary total changed",
-				"collection_malformed": "LinkedIn inventory could not be verified: collection malformed",
-				"collection_paging_invalid": "LinkedIn inventory could not be verified: collection paging invalid",
-				"collection_urn_missing": "LinkedIn inventory could not be verified: collection urn missing",
-				"collection_urn_duplicate": "LinkedIn inventory could not be verified: collection urn duplicate",
-				"collection_total_mismatch": "LinkedIn inventory could not be verified: collection total mismatch",
-				"collection_continuation_advertised": "LinkedIn inventory could not be verified: collection continuation advertised",
-				"skills_nested_unproven": "LinkedIn inventory could not be verified: skills nested unproven",
-				"connection_urn_missing": "LinkedIn inventory could not be verified: connection urn missing",
-				"connection_walk_continuation_advertised": "LinkedIn inventory could not be verified: connection walk continuation advertised",
-				"connection_walk_page_error": "LinkedIn inventory could not be verified: connection walk page error",
-				"connection_walk_malformed_page": "LinkedIn inventory could not be verified: connection walk malformed page",
-				"connection_walk_repeated_page": "LinkedIn inventory could not be verified: connection walk repeated page",
-				"connection_walk_page_budget": "LinkedIn inventory could not be verified: connection walk page budget",
-				"connection_paging_total_mismatch": "LinkedIn inventory could not be verified: connection paging total mismatch",
-				"connection_total_mismatch": "LinkedIn inventory could not be verified: connection total mismatch",
-				"connection_confirmation_missing": "LinkedIn inventory could not be verified: connection confirmation missing",
-				"connection_confirmation_malformed": "LinkedIn inventory could not be verified: connection confirmation malformed",
-				"connection_walk_unavailable": "LinkedIn inventory could not be verified: connection walk unavailable",
-				"experience_nested_collection_malformed": "LinkedIn inventory could not be verified: experience nested collection malformed",
-				"experience_nested_collection_paging_invalid": "LinkedIn inventory could not be verified: experience nested collection paging invalid",
-				"experience_nested_collection_urn_missing": "LinkedIn inventory could not be verified: experience nested collection urn missing",
-				"experience_nested_collection_urn_duplicate": "LinkedIn inventory could not be verified: experience nested collection urn duplicate",
-				"experience_nested_collection_total_mismatch": "LinkedIn inventory could not be verified: experience nested collection total mismatch",
-				"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised"
+				"absent": "LinkedIn does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"browser_handoff_readiness_probe_failed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "LinkedIn needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "LinkedIn needs you to sign in again or update your access key. Then run again.",
+				"collection_continuation_advertised": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"collection_malformed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"collection_paging_invalid": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"collection_total_mismatch": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"collection_urn_duplicate": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"collection_urn_missing": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_confirmation_malformed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_confirmation_missing": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_paging_total_mismatch": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_total_mismatch": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_urn_missing": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_walk_continuation_advertised": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_walk_malformed_page": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_walk_page_budget": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_walk_page_error": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_walk_repeated_page": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"connection_walk_unavailable": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"enrichment_unresolved": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"experience_nested_collection_continuation_advertised": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"experience_nested_collection_malformed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"experience_nested_collection_paging_invalid": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"experience_nested_collection_total_mismatch": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"experience_nested_collection_urn_duplicate": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"experience_nested_collection_urn_missing": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"id_absent": "Some items could not be read and were skipped.",
+				"id_empty": "Some items could not be read and were skipped.",
+				"id_enrichment_unresolved": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"id_invalid_value": "Some items could not be read and were skipped.",
+				"id_malformed": "Some items could not be read and were skipped.",
+				"id_source_row_uncovered": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"id_source_unavailable": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"id_walk_unverified": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"invalid_record_shape": "Some items could not be read and were skipped.",
+				"invalid_value": "Some items could not be read and were skipped.",
+				"linkedin_connection_enrichment_incomplete": "Some items could not be read and were skipped.",
+				"linkedin_connections_continuation_advertised": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"linkedin_connections_page_failed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"linkedin_connections_page_malformed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"linkedin_dash_profile_unavailable": "Some items could not be read and were skipped.",
+				"linkedin_fields_unreadable": "Some items could not be read and were skipped.",
+				"linkedin_login_page_unreachable": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"linkedin_profile_fields_unavailable": "Some items could not be read and were skipped.",
+				"linkedin_profile_section_unavailable": "Some items could not be read and were skipped.",
+				"linkedin_session_dead": "LinkedIn needs you to sign in again or update your access key. Then run again.",
+				"malformed": "Some items could not be read and were skipped.",
+				"malformed_row": "Some items could not be read and were skipped.",
+				"name_absent": "Some items could not be read and were skipped.",
+				"name_empty": "Some items could not be read and were skipped.",
+				"name_enrichment_unresolved": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"name_invalid_value": "Some items could not be read and were skipped.",
+				"name_malformed": "Some items could not be read and were skipped.",
+				"name_source_row_uncovered": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"name_source_unavailable": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"name_walk_unverified": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"no_readable_content": "Some items could not be read and were skipped.",
+				"older_connections_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"owner_identity_missing": "This part stopped because of an internal problem reading LinkedIn. It is not something you can fix.",
+				"profile_identity_mismatch": "This part stopped because of an internal problem reading LinkedIn. It is not something you can fix.",
+				"skills_nested_unproven": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"source_row_uncovered": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"source_unavailable": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"stream_collection_failed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"summary_owner_mismatch": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"summary_request_failed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"summary_total_changed": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"summary_total_invalid": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"unreadable_nested_collection": "Some items could not be read and were skipped.",
+				"walk_unverified": "LinkedIn stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"withheld_unreadable_fields": "Some items could not be read and were skipped."
 			}
 		}
 	},
@@ -581,7 +702,7 @@
 		"manifest": {
 			"connector_key": "loom",
 			"reason_display_messages": {
-				"loom_apollo_wiring_pending": "Loom support isn't wired up yet"
+				"loom_apollo_wiring_pending": "Loom does not offer this data, or this connector cannot read it yet. There is nothing you need to do."
 			}
 		}
 	},
@@ -590,7 +711,13 @@
 		"manifest": {
 			"connector_key": "meta",
 			"reason_display_messages": {
-				"stream_collection_failed": "Instagram did not show that this list was read in full, so it will be read again next time."
+				"browser_handoff_readiness_probe_failed": "Instagram stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Instagram needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Instagram needs you to sign in again or update your access key. Then run again.",
+				"meta_following_owner_conflict": "This part stopped because of an internal problem reading Instagram. It is not something you can fix.",
+				"meta_posts_owner_conflict": "This part stopped because of an internal problem reading Instagram. It is not something you can fix.",
+				"meta_session_required": "Instagram needs you to sign in again or update your access key. Then run again.",
+				"stream_collection_failed": "Instagram stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -599,7 +726,13 @@
 		"manifest": {
 			"connector_key": "muse",
 			"reason_display_messages": {
-				"scope_not_supported": "Muse messages can only be imported together with their conversations. Select both to import your messages."
+				"browser_handoff_readiness_probe_failed": "Muse stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Muse needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Muse needs you to sign in again or update your access key. Then run again.",
+				"muse_bot_challenge": "Muse showed a check to confirm you are a person. Complete it in the browser, then run again.",
+				"muse_stream_incomplete": "Muse stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"muse_stream_needs_update": "This part stopped because of an internal problem reading Muse. It is not something you can fix.",
+				"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again."
 			}
 		}
 	},
@@ -608,12 +741,22 @@
 		"manifest": {
 			"connector_key": "netflix-export",
 			"reason_display_messages": {
-				"ambiguous_date_order": "We couldn't tell whether the dates in that file are day-first or month-first",
-				"archive_security_violation": "We couldn't safely read that export archive",
-				"csv_parse_error": "We couldn't read the viewing history file",
-				"import_exceeds_bounded_read_policy": "That export was too large to safely read in one run",
-				"records_not_found": "We didn't find any records to import",
-				"unrecognized_csv_schema": "That file didn't match a Netflix viewing history format we recognize"
+				"ambiguous_date_order": "Every date in this export could be read as day/month or month/day, so this connector cannot tell which is right. It is not something you can fix.",
+				"archive_security_violation": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"csv_parse_error": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"import_exceeds_bounded_read_policy": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"records_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"unrecognized_csv_schema": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
+			}
+		}
+	},
+	{
+		"file": "notion.json",
+		"manifest": {
+			"connector_key": "notion",
+			"reason_display_messages": {
+				"notion_auth_failed": "Notion needs you to sign in again or update your access key. Then run again.",
+				"notion_pagination_contradiction": "Notion stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -622,7 +765,8 @@
 		"manifest": {
 			"connector_key": "oura",
 			"reason_display_messages": {
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your Oura history, so some earlier days haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"oura_auth_failed": "Oura needs you to sign in again or update your access key. Then run again."
 			}
 		}
 	},
@@ -631,8 +775,22 @@
 		"manifest": {
 			"connector_key": "oura-browser",
 			"reason_display_messages": {
-				"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
-				"stream_collection_failed": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
+				"browser_handoff_readiness_probe_failed": "Oura stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Oura needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Oura needs you to sign in again or update your access key. Then run again.",
+				"oura_api_token_missing": "Oura needs you to sign in again or update your access key. Then run again.",
+				"oura_authorization_incomplete": "Oura needs you to sign in again or update your access key. Then run again.",
+				"oura_browser_window_deferred": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"oura_daily_scope_missing": "Oura needs you to sign in again or update your access key. Then run again.",
+				"oura_oauth_code_missing": "Oura needs you to sign in again or update your access key. Then run again.",
+				"oura_oauth_state_invalid": "Oura needs you to sign in again or update your access key. Then run again.",
+				"oura_portal_app_credentials_missing": "Oura API app details are missing. Finish setting up a personal API app with daily access and the required redirect address, then connect again.",
+				"oura_portal_email_invalid": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"oura_portal_invalid_applications": "This part stopped because of an internal problem reading Oura. It is not something you can fix.",
+				"oura_portal_origin": "This part stopped because of an internal problem reading Oura. It is not something you can fix.",
+				"oura_portal_session_unconfirmed": "Oura needs you to sign in again or update your access key. Then run again.",
+				"oura_token_invalid_payload": "This part stopped because of an internal problem reading Oura. It is not something you can fix.",
+				"stream_collection_failed": "Oura stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -641,14 +799,30 @@
 		"manifest": {
 			"connector_key": "perplexity",
 			"reason_display_messages": {
-				"covered_in_full": "All Perplexity threads in the selected time range have already been collected.",
-				"collection_interrupted": "Perplexity stopped answering partway through, so some threads are missing. The next run continues from where this one stopped.",
-				"nothing_in_range": "There are no Perplexity threads in the selected time range.",
-				"records_unreadable": "Some Perplexity threads or answers couldn't be read by this version of the connector and were skipped. Everything else was collected normally.",
-				"sign_in_required": "Perplexity needs you to sign in (and pass its human check) before this can continue.",
-				"source_limit_reached": "This run reached a Perplexity limit. The next run will retry the remaining threads.",
-				"stream_collection_failed": "Perplexity's library could not be read completely in this run, so nothing was checkpointed. A later run, or a newer version of this connector, can finish it.",
-				"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site, so please report this rather than retrying."
+				"browser_handoff_readiness_probe_failed": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Perplexity needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Perplexity needs you to sign in again or update your access key. Then run again.",
+				"collection_interrupted": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"covered_in_full": "There was nothing to import for this request. No action is needed.",
+				"nothing_in_range": "There was nothing to import for this request. No action is needed.",
+				"perplexity_auth_failed": "Perplexity needs you to sign in again or update your access key. Then run again.",
+				"perplexity_interrupted": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"perplexity_stream_incomplete": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"perplexity_stream_needs_update": "This part stopped because of an internal problem reading Perplexity. It is not something you can fix.",
+				"records_unreadable": "Some items could not be read and were skipped.",
+				"sign_in_required": "Perplexity needs you to sign in again or update your access key. Then run again.",
+				"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"source_unreadable": "This part stopped because of an internal problem reading Perplexity. It is not something you can fix.",
+				"stream_collection_failed": "Perplexity stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
+			}
+		}
+	},
+	{
+		"file": "pocket.json",
+		"manifest": {
+			"connector_key": "pocket",
+			"reason_display_messages": {
+				"pocket_auth_failed": "Pocket needs you to sign in again or update your access key. Then run again."
 			}
 		}
 	},
@@ -657,15 +831,20 @@
 		"manifest": {
 			"connector_key": "shopify",
 			"reason_display_messages": {
-				"shopify_browser_operation_timeout": "Shop did not respond within the collection time budget. Retry the collection.",
-				"shopify_signed_out_or_blocked": "Sign in to Shop and open your order history before retrying.",
-				"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
-				"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
-				"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",
-				"stream_collection_failed": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
-				"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
-				"shopify_order_rows_unresolved": "Some Shop orders could not be read completely; retry to collect them",
-				"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
+				"browser_handoff_readiness_probe_failed": "The Shopify Shop sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+				"browser_handoff_readiness_timed_out": "Shopify Shop needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Shopify Shop needs you to sign in again or update your access key. Then run again.",
+				"older_pages_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"shopify_apollo_state_unavailable": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"shopify_browser_operation_timeout": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"shopify_login_page_unreachable": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"shopify_order_history_evidence_timeout": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"shopify_order_history_readiness_timeout": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"shopify_order_history_unconfirmed": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"shopify_order_id_unresolvable": "This part stopped because of an internal problem reading Shopify Shop. It is not something you can fix.",
+				"shopify_order_rows_unresolved": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"shopify_signed_out_or_blocked": "Shopify Shop needs you to sign in again or update your access key. Then run again.",
+				"stream_collection_failed": "Shopify Shop stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -674,10 +853,10 @@
 		"manifest": {
 			"connector_key": "signal",
 			"reason_display_messages": {
-				"backfill_check_unproven_legacy_cursor": "We couldn't check for older messages this run; the next run will check properly",
-				"message_date_unusable": "We skipped a message with a date we couldn't read",
-				"no_attachments_exported": "sigtop found no attachments to export for this account",
-				"source_rows_below_watermark_unreachable": "Signal has older messages we haven't saved — run a full refresh to collect them"
+				"backfill_check_unproven_legacy_cursor": "This run could not check whether older messages are missing. The next run checks, and may ask you to run a full refresh.",
+				"message_date_unusable": "Some items could not be read and were skipped.",
+				"no_attachments_exported": "There was nothing to import for this request. No action is needed.",
+				"source_rows_below_watermark_unreachable": "Signal has older messages we haven't saved. Run a full refresh to collect them."
 			}
 		}
 	},
@@ -731,11 +910,18 @@
 				}
 			},
 			"reason_display_messages": {
-				"channel_history_never_requested": "Some channels you're in have never been collected at all, because the archive stopped before reaching them",
-				"channel_history_not_finalized": "Some channels you're in have unproven history, so their messages may be incomplete",
+				"channel_history_never_requested": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"channel_history_not_finalized": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 				"channel_history_out_of_member_scope": "Some public channels weren't collected because you're not a member of them. Set the Slack option MEMBER_ONLY to false to collect every channel your workspace lists, including ones you've left and ones that are archived",
-				"optional_stream_failed": "We couldn't collect one part of your Slack data, so we skipped it",
-				"source_partition_missing": "Some previously seen Slack channels are missing from this export, so message coverage is incomplete"
+				"optional_stream_failed": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"slack_auth_failed": "Slack needs you to sign in again or update your access key. Then run again.",
+				"slack_cookie_invalid": "Slack needs you to sign in again or update your access key. Then run again.",
+				"slack_credentials_missing": "Slack needs you to sign in again or update your access key. Then run again.",
+				"slack_token_invalid": "Slack needs you to sign in again or update your access key. Then run again.",
+				"slack_workspace_invalid": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"slackdump_max_runtime": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"slackdump_timeout": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"source_partition_missing": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -744,12 +930,16 @@
 		"manifest": {
 			"connector_key": "slack-browser",
 			"reason_display_messages": {
-				"collection_interrupted": "Slack stopped answering partway through, so some conversations are missing. The next run continues from where this one stopped.",
-				"optional_stream_failed": "We couldn't read one part of your Slack data, so we skipped it. Everything else was collected normally.",
-				"sign_in_required": "Slack needs you to sign in again before this can continue.",
-				"slack_browser_session_missing": "This run ended before Slack had a signed-in session in the connector's browser. Sign in to Slack there, then run collection again.",
-				"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
-				"source_unreadable": "Slack answered with something this connector doesn't recognise, so nothing more was read. Slack may have changed its API - please report this rather than retrying.",
+				"browser_handoff_readiness_probe_failed": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Slack needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Slack needs you to sign in again or update your access key. Then run again.",
+				"collection_interrupted": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"optional_stream_failed": "Slack does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"sign_in_required": "Slack needs you to sign in again or update your access key. Then run again.",
+				"slack_browser_session_missing": "Slack needs you to sign in again or update your access key. Then run again.",
+				"slack_session_lost": "Slack needs you to sign in again or update your access key. Then run again.",
+				"source_auth_or_challenge": "Slack needs you to sign in again or update your access key. Then run again.",
+				"source_unreadable": "This part stopped because of an internal problem reading Slack. It is not something you can fix.",
 				"workspace_not_signed_in": "The workspace named in SLACK_WORKSPACE is not one this browser is signed in to. Sign in to it, or clear SLACK_WORKSPACE to read every signed-in workspace."
 			}
 		}
@@ -759,14 +949,64 @@
 		"manifest": {
 			"connector_key": "spotify",
 			"reason_display_messages": {
-				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+				"browser_handoff_readiness_probe_failed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Spotify needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Spotify needs you to sign in again or update your access key. Then run again.",
+				"spotify_browser_stage1_deferred": "Spotify does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"spotify_library_count_mismatch": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_library_identity_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_library_identity_missing": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_library_identity_repeated": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_library_pagination_no_progress": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_library_playlist_identity_missing": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_library_response_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_library_row_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 				"spotify_library_rows_unsupported": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing.",
+				"spotify_library_terminal_unverified": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_library_total_changed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_library_total_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_mobile_disposed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_mobile_evaluate_source_too_large": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_mobile_install_failed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_mobile_job_lost": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_mobile_result_lost": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_page_not_player": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_pagination_invalid_next": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_pagination_no_progress": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_playlist_count_mismatch": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_playlist_identity_mismatch": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_playlist_items_completion_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_playlist_pagination_no_progress": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_playlist_response_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_playlist_revision_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_playlist_row_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_playlist_row_type_unrecognized": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 				"spotify_playlist_rows_unsupported": "Some playlist entries are a type this connector does not read yet, so they were skipped. The rest of each playlist was read.",
-				"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
-				"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
-				"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld.",
-				"spotify_stream_outcome_unproven": "Spotify did not confirm whether this part was read completely, so it was not marked complete. Try again later.",
-				"stream_collection_failed": "Spotify could not be read completely this time, so this part was not marked complete. Try again later."
+				"spotify_playlist_terminal_unverified": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_playlist_total_changed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_playlist_total_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_playlists_completion_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_profile_enrichment_http_status": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_ranked_list_capped": "Only part of this could be collected because of a size or count limit. The rest is not available.",
+				"spotify_recent_context_boundary_unverified": "Recently played contexts were read, but Spotify does not show where that history ends, so this part is not marked complete. No action is needed.",
+				"spotify_recently_played_malformed": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_recently_played_owner_unavailable": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_recently_played_pagination_no_progress": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_recently_played_repeated_identity": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_retryable_status_unknown": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_saved_tracks_completion_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_saved_tracks_count_mismatch": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_saved_tracks_identity_repeated": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_saved_tracks_pagination_no_progress": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_saved_tracks_response_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_saved_tracks_row_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_saved_tracks_terminal_unverified": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_saved_tracks_total_changed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"spotify_saved_tracks_total_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+				"spotify_session_dead": "Spotify needs you to sign in again or update your access key. Then run again.",
+				"spotify_source_row_unavailable": "Some items could not be read and were skipped.",
+				"spotify_stream_outcome_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"stream_collection_failed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -775,7 +1015,8 @@
 		"manifest": {
 			"connector_key": "steam",
 			"reason_display_messages": {
-				"steam_optional_resource_unavailable": "Steam did not make this optional account data available"
+				"steam_auth_failed": "Steam needs you to sign in again or update your access key. Then run again.",
+				"steam_optional_resource_unavailable": "Steam does not let this connector see your friends list because of your profile's privacy settings. To include it, make your friends list visible, then run again."
 			}
 		}
 	},
@@ -784,13 +1025,13 @@
 		"manifest": {
 			"connector_key": "strava",
 			"reason_display_messages": {
-				"collection_interrupted": "Your export file ended earlier than expected, so some activities are missing. Ask Strava for a fresh copy of your account and upload the new download.",
-				"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally. Importing the same file again won't recover them.",
-				"sign_in_required": "Strava needs you to sign in again before this can continue.",
-				"source_limit_reached": "We read up to the limit this import allows, so older activities haven't been collected yet.",
-				"source_unreadable": "That file isn't a Strava export we can read. It should be the .zip Strava emails you — not one you've unzipped, and not a single activity file.",
-				"strava_export_columns_unexpected": "We couldn't read your export because its columns aren't the ones we expect. Strava may have changed the format — please report this rather than retrying.",
-				"strava_export_not_recognised": "That file doesn't look like a Strava account export. Upload the ZIP Strava emailed you, or the activities.csv from inside it."
+				"collection_interrupted": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"records_unreadable": "Some items could not be read and were skipped.",
+				"sign_in_required": "Strava needs you to sign in again or update your access key. Then run again.",
+				"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"source_unreadable": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"strava_export_columns_unexpected": "This part stopped because of an internal problem reading Strava. It is not something you can fix.",
+				"strava_export_not_recognised": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 			}
 		}
 	},
@@ -799,13 +1040,17 @@
 		"manifest": {
 			"connector_key": "strava-browser",
 			"reason_display_messages": {
-				"covered_in_full": "All Strava activities in the selected date range have already been collected.",
-				"collection_interrupted": "Strava stopped answering partway through, so some activities are missing. The next run continues from where this one stopped.",
-				"nothing_in_range": "Strava has no activities in the selected date range.",
-				"records_unreadable": "Some activities in your Strava list couldn't be read and were skipped — everything else was collected normally.",
-				"sign_in_required": "Strava needs you to sign in again before this can continue.",
-				"source_limit_reached": "This run reached a source limit. The next run will retry the remaining activity work.",
-				"source_unreadable": "Strava answered with a page this connector doesn't recognise, so nothing more was read. Strava may have changed its site — please report this rather than retrying."
+				"browser_handoff_readiness_probe_failed": "The Strava sign-in was interrupted or did not finish. Run again and complete sign-in if asked.",
+				"browser_handoff_readiness_timed_out": "Strava needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Strava needs you to sign in again or update your access key. Then run again.",
+				"collection_interrupted": "Strava stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"covered_in_full": "There was nothing to import for this request. No action is needed.",
+				"nothing_in_range": "There was nothing to import for this request. No action is needed.",
+				"records_unreadable": "Some items could not be read and were skipped.",
+				"sign_in_required": "Strava needs you to sign in again or update your access key. Then run again.",
+				"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"source_unreadable": "This part stopped because of an internal problem reading Strava. It is not something you can fix.",
+				"strava_session_dead": "Strava needs you to sign in again or update your access key. Then run again."
 			}
 		}
 	},
@@ -814,19 +1059,22 @@
 		"manifest": {
 			"connector_key": "tiktok",
 			"reason_display_messages": {
-				"tiktok_auth_failed": "TikTok needs you to sign in again before this can continue.",
-				"tiktok_bot_check": "TikTok showed a check or refused a request, so collection stopped without retrying. Open TikTok yourself and make sure your account works normally before running this again.",
-				"tiktok_request_unsigned": "TikTok's page did not sign a request the way it signs its own, so nothing more could be read safely. TikTok may have changed its site; please report this if it keeps happening.",
-				"tiktok_rate_limited": "TikTok asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait a while before running this again.",
-				"tiktok_server_error": "TikTok's servers had a problem partway through. What was collected is saved; try again later.",
-				"tiktok_interrupted": "The TikTok page stopped answering partway through. What was collected is saved; try again.",
-				"tiktok_run_limit_reached": "This run reached its safety limit on requests. What was collected is saved; the next run continues.",
-				"tiktok_source_unreadable": "TikTok answered in a form this connector does not recognise, so this part was not saved as complete. TikTok may have changed its site; please report this.",
-				"tiktok_api_error": "TikTok refused one of the requests, so this part was not saved as complete.",
-				"tiktok_list_incomplete": "TikTok did not show the end of this list, so it was not saved as complete. What was read is saved.",
-				"tiktok_app_value_not_seen": "The TikTok app did not send a value it uses for collection contents, so the videos in your collections were not read. Nothing was guessed; please report this if it keeps happening.",
-				"stream_collection_failed": "TikTok did not let this part be read in full, so it was not saved as complete. What was read is saved.",
-				"tiktok_parent_stream_required": "The videos in your Favorites collections can only be collected together with the collections themselves. Select both and run again."
+				"browser_handoff_readiness_probe_failed": "TikTok stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "TikTok needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "TikTok needs you to sign in again or update your access key. Then run again.",
+				"stream_collection_failed": "TikTok stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"tiktok_api_error": "TikTok stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"tiktok_app_value_not_seen": "This part stopped because of an internal problem reading TikTok. It is not something you can fix.",
+				"tiktok_auth_failed": "TikTok needs you to sign in again or update your access key. Then run again.",
+				"tiktok_bot_check": "TikTok needs you to sign in again or update your access key. Then run again.",
+				"tiktok_interrupted": "TikTok stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"tiktok_list_incomplete": "This part stopped because of an internal problem reading TikTok. It is not something you can fix.",
+				"tiktok_parent_stream_required": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"tiktok_rate_limited": "TikTok is limiting requests or having trouble right now. Wait a while, then run again.",
+				"tiktok_request_unsigned": "This part stopped because of an internal problem reading TikTok. It is not something you can fix.",
+				"tiktok_run_limit_reached": "This run reached its limit before reading everything. Later runs start from the same place, so older data may stay missing.",
+				"tiktok_server_error": "TikTok is limiting requests or having trouble right now. Wait a while, then run again.",
+				"tiktok_source_unreadable": "This part stopped because of an internal problem reading TikTok. It is not something you can fix."
 			}
 		}
 	},
@@ -835,7 +1083,7 @@
 		"manifest": {
 			"connector_key": "twitter-archive",
 			"reason_display_messages": {
-				"archive_not_found": "We couldn't find an export archive to read"
+				"archive_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 			}
 		}
 	},
@@ -844,8 +1092,9 @@
 		"manifest": {
 			"connector_key": "uber",
 			"reason_display_messages": {
-				"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
-				"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit"
+				"trip_details_unavailable": "Some items could not be read and were skipped.",
+				"trips_deferred_detail_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"trips_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed."
 			}
 		}
 	},
@@ -854,31 +1103,32 @@
 		"manifest": {
 			"connector_key": "usaa",
 			"reason_display_messages": {
-				"credit_card_export_unverified": "We couldn't confirm the credit card export",
-				"csv_no_data_rows": "The transactions file had no rows to import",
-				"csv_no_usable_transactions": "We couldn't find any usable transactions in that file",
-				"csv_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
-				"export_affordance_missing": "We couldn't find the export controls on this page — the site may have changed",
-				"export_error": "The export couldn't be downloaded",
-				"export_no_download": "The export didn't produce a downloadable file",
-				"export_window_incomplete": "The export did not cover all of the requested transaction history",
-				"hydrate_crashed": "Something went wrong while loading the page",
-				"inbox_rows_unresolved": "We found inbox messages but couldn't read them — the site may have changed",
-				"pdf_download_click_failed": "We couldn't click the download option for a statement PDF",
-				"pdf_download_direct_link_failed": "We couldn't download a statement PDF from its direct link",
-				"pdf_download_empty": "A statement PDF download didn't produce any file",
-				"pdf_download_no_download_menuitem": "We couldn't find the download option for a statement",
-				"pdf_download_no_options_affordance": "We couldn't find any way to download a statement",
-				"pdf_download_options_click_failed": "We couldn't open the options menu for a statement",
-				"pdf_download_persist_failed": "We downloaded a statement PDF but couldn't save it",
-				"pdf_download_row_missing": "A statement row disappeared before we could download it",
-				"pdf_download_timeout": "A statement PDF download took too long and was skipped",
-				"pdf_parse_failed": "We couldn't read one of the statement PDFs",
-				"pdf_template_unknown": "We don't recognize the format of this statement yet",
-				"scrape_failed": "We couldn't read the page contents",
-				"selectors_pending": "Support for this part of the connector isn't complete yet",
-				"session_dead_reauth_failed": "Your sign-in expired and we couldn't refresh it",
-				"statement_unreconciled": "A statement's transactions don't add up to its printed balances"
+				"credit_card_export_unverified": "USAA stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"csv_no_data_rows": "There was nothing to import for this request. No action is needed.",
+				"csv_no_usable_transactions": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"csv_partial_parse": "Some items could not be read and were skipped.",
+				"export_affordance_missing": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"export_error": "USAA stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"export_no_download": "USAA stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"export_window_incomplete": "USAA stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"hydrate_crashed": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"inbox_rows_unresolved": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"pdf_download_click_failed": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"pdf_download_direct_link_failed": "USAA stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"pdf_download_empty": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"pdf_download_no_download_menuitem": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"pdf_download_no_options_affordance": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"pdf_download_options_click_failed": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"pdf_download_persist_failed": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"pdf_download_row_missing": "USAA stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"pdf_download_timeout": "USAA stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"pdf_parse_failed": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"pdf_template_unknown": "USAA does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"scrape_failed": "This part stopped because of an internal problem reading USAA. It is not something you can fix.",
+				"selectors_pending": "USAA does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"session_dead_reauth_failed": "USAA needs you to sign in again or update your access key. Then run again.",
+				"session_dead_redirect_to_logon": "USAA needs you to sign in again or update your access key. Then run again.",
+				"statement_unreconciled": "This part stopped because of an internal problem reading USAA. It is not something you can fix."
 			}
 		}
 	},
@@ -888,8 +1138,8 @@
 			"connector_key": "venmo",
 			"reason_display_messages": {
 				"friends_deferred_page_budget": "We stopped after reading 200 pages of your Venmo friends. Older friends may remain uncollected because each run reads the same capped window",
-				"transactions_deferred_page_budget": "Some Venmo transaction history is still pending. Saved positions let later runs resume it while refreshing recent activity. A large volume of new activity may delay completion",
-				"transactions_schema_blocked": "A Venmo transaction could not be validated. The unread history after that record will be retried"
+				"transactions_deferred_page_budget": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"transactions_schema_blocked": "Venmo stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -898,11 +1148,11 @@
 		"manifest": {
 			"connector_key": "whatsapp",
 			"reason_display_messages": {
-				"empty_export": "That WhatsApp export did not contain any messages to import",
-				"import_exceeds_bounded_read_policy": "That export was too large to safely read in one run",
-				"media_exceeds_bounded_read_policy": "Some media files in that WhatsApp export were too large to safely import",
-				"no_exports_found": "We couldn't find any exports yet",
-				"unsupported_export": "We could not read that WhatsApp export format yet"
+				"empty_export": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"import_exceeds_bounded_read_policy": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"media_exceeds_bounded_read_policy": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"no_exports_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"unsupported_export": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 			}
 		}
 	},
@@ -911,7 +1161,20 @@
 		"manifest": {
 			"connector_key": "whatsapp-web",
 			"reason_display_messages": {
-				"scope_not_supported": "WhatsApp messages can only be imported together with their chats. Select both to import your messages."
+				"browser_handoff_readiness_probe_failed": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "WhatsApp needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "WhatsApp needs you to sign in again or update your access key. Then run again.",
+				"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"whatsapp_web_auth_failed": "WhatsApp needs you to sign in again or update your access key. Then run again.",
+				"whatsapp_web_chat_list_never_settled": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"whatsapp_web_empty_chat_list": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"whatsapp_web_invalid_record": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix.",
+				"whatsapp_web_local_store_unavailable": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"whatsapp_web_refused_call": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix.",
+				"whatsapp_web_stores_not_ready": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"whatsapp_web_stream_incomplete": "WhatsApp stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"whatsapp_web_stream_needs_update": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix.",
+				"whatsapp_web_unexpected_shape": "This part stopped because of an internal problem reading WhatsApp. It is not something you can fix."
 			}
 		}
 	},
@@ -920,11 +1183,29 @@
 		"manifest": {
 			"connector_key": "wholefoods",
 			"reason_display_messages": {
-				"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
-				"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
-				"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
-				"stream_collection_failed": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh.",
-				"wholefoods_nutrition_unread": "Some Whole Foods products' nutrition panels could not be read, so those products have no nutrition row. Retry to read them."
+				"amazon_2fa_not_provided": "Whole Foods needs you to sign in again or update your access key. Then run again.",
+				"amazon_login_incomplete_after_submit": "Whole Foods needs you to sign in again or update your access key. Then run again.",
+				"amazon_login_manual_incomplete": "Whole Foods needs you to sign in again or update your access key. Then run again.",
+				"amazon_login_unexpected_ui": "This part stopped because of an internal problem reading Whole Foods. It is not something you can fix.",
+				"browser_handoff_readiness_probe_failed": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "Whole Foods needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "Whole Foods needs you to sign in again or update your access key. Then run again.",
+				"stream_collection_failed": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"wholefoods_filter_pending": "Whole Foods does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+				"wholefoods_nutrition_unread": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"wholefoods_order_item_asin_missing": "Some items could not be read and were skipped.",
+				"wholefoods_order_item_count_unverified": "Whole Foods stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
+			}
+		}
+	},
+	{
+		"file": "whoop.json",
+		"manifest": {
+			"connector_key": "whoop",
+			"reason_display_messages": {
+				"browser_handoff_readiness_probe_failed": "WHOOP stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "WHOOP needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "WHOOP needs you to sign in again or update your access key. Then run again."
 			}
 		}
 	},
@@ -933,10 +1214,14 @@
 		"manifest": {
 			"connector_key": "whoop-browser",
 			"reason_display_messages": {
-				"collection_interrupted": "WHOOP stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
-				"sign_in_required": "WHOOP needs you to sign in again before this can continue.",
-				"source_limit_reached": "This run read as much WHOOP history as one run allows. The next run continues from where this one stopped.",
-				"source_unreadable": "WHOOP answered with something this connector doesn't recognise, so nothing more was read. WHOOP may have changed its app; please report this rather than retrying."
+				"browser_handoff_readiness_probe_failed": "WHOOP stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "WHOOP needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "WHOOP needs you to sign in again or update your access key. Then run again.",
+				"collection_interrupted": "WHOOP stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"sign_in_required": "WHOOP needs you to sign in again or update your access key. Then run again.",
+				"source_limit_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"source_unreadable": "This part stopped because of an internal problem reading WHOOP. It is not something you can fix.",
+				"whoop_browser_session_dead": "WHOOP needs you to sign in again or update your access key. Then run again."
 			}
 		}
 	},
@@ -945,14 +1230,27 @@
 		"manifest": {
 			"connector_key": "x-browser",
 			"reason_display_messages": {
-				"collection_interrupted": "X stopped answering normally partway through, so this run stopped straight away. What was already read is saved. Wait a while, then run it again.",
-				"list_end_unconfirmed": "X stopped loading more before the end of the list, so some older items may be missing. What was read is saved.",
-				"records_unreadable": "Some posts couldn't be read and were skipped. Everything else was collected normally.",
-				"run_budget_reached": "This run reached its own limit on how many posts it reads from X in one go, to protect your daily reading allowance. Run it again tomorrow for the rest.",
-				"run_stopped_early": "The run stopped before it got to this part. Nothing is wrong with it. Run it again later.",
-				"sign_in_required": "X needs you to sign in again before this can continue.",
-				"source_rate_limited": "X asked this connector to slow down, so the run stopped straight away. What was already read is saved. Wait a day before running it again.",
-				"source_unreadable": "X showed a page this connector doesn't recognise, so this part wasn't read. X may have changed its site. Please report this rather than retrying."
+				"browser_handoff_readiness_probe_failed": "X stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "X needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "X needs you to sign in again or update your access key. Then run again.",
+				"collection_interrupted": "X stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"list_end_unconfirmed": "This part stopped because of an internal problem reading X. It is not something you can fix.",
+				"records_unreadable": "Some items could not be read and were skipped.",
+				"run_budget_reached": "This run reached its limit. Later runs collect the rest. No action is needed.",
+				"run_stopped_early": "This part was not read because the run stopped early for another reason. Fix that reason, then run again.",
+				"sign_in_required": "X needs you to sign in again or update your access key. Then run again.",
+				"source_rate_limited": "X is limiting requests or having trouble right now. Wait a while, then run again.",
+				"source_unreadable": "This part stopped because of an internal problem reading X. It is not something you can fix.",
+				"x_session_dead": "X needs you to sign in again or update your access key. Then run again."
+			}
+		}
+	},
+	{
+		"file": "ynab.json",
+		"manifest": {
+			"connector_key": "ynab",
+			"reason_display_messages": {
+				"ynab_auth_failed": "YNAB needs you to sign in again or update your access key. Then run again."
 			}
 		}
 	},
@@ -961,14 +1259,22 @@
 		"manifest": {
 			"connector_key": "youtube",
 			"reason_display_messages": {
-				"stream_collection_failed": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
-				"page_unreadable": "The signed-in page did not expose a trustworthy record.",
-				"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
-				"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",
-				"youtube_profile_account_header_unreadable": "The signed-in YouTube account menu did not finish loading.",
-				"youtube_profile_channel_link_unavailable": "The YouTube account menu did not expose the owner's channel link.",
-				"youtube_profile_channel_page_unreadable": "The owner's YouTube channel page did not expose a readable identity.",
-				"youtube_profile_about_page_unreadable": "The owner's YouTube About page did not finish loading."
+				"browser_handoff_readiness_probe_failed": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"browser_handoff_readiness_timed_out": "YouTube needs you to sign in again or update your access key. Then run again.",
+				"browser_sign_in_cancelled": "YouTube needs you to sign in again or update your access key. Then run again.",
+				"page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"scope_not_supported": "This connection's settings or selection cannot be used as set. Check them, then run again.",
+				"stream_collection_failed": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_click_target_missing": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_history_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_playlist_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_profile_about_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_profile_account_header_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_profile_channel_link_unavailable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_profile_channel_page_unreadable": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_profile_home_not_ready": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+				"youtube_session_dead": "YouTube needs you to sign in again or update your access key. Then run again.",
+				"youtube_video_parse_mismatch": "YouTube stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 			}
 		}
 	},
@@ -977,9 +1283,9 @@
 		"manifest": {
 			"connector_key": "youtube-takeout",
 			"reason_display_messages": {
-				"records_unreadable": "Some entries in your export couldn't be read and were skipped — everything else imported normally.",
-				"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents.",
-				"file_not_found_in_export": "This stream's expected file was not found in your Takeout export. Google's Takeout export contents can vary; check the expected path and report a mismatch if you expected data here."
+				"file_not_found_in_export": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+				"records_unreadable": "Some items could not be read and were skipped.",
+				"source_unreadable": "The import folder contains a .zip, not an extracted export. Extract it and point the import directory at the extracted contents."
 			}
 		}
 	}

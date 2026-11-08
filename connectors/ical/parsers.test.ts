@@ -13,6 +13,7 @@ import {
 	advanceCursor,
 	applyIcsProperty,
 	buildEventRecord,
+	classifyIcsFetchFailure,
 	hashId,
 	isBeforeCursor,
 	parseIcs,
@@ -290,4 +291,22 @@ test("hashId: deterministic 24-char hex", () => {
 	assert.match(id, /^[0-9a-f]{24}$/);
 	assert.equal(id, hashId("a|b|c"));
 	assert.notEqual(id, hashId("a|b|d"));
+});
+
+test("classifyIcsFetchFailure: one class per owner remedy", () => {
+	const url = "https://cal.example.com/a.ics";
+	const cases: Array<[string, string]> = [
+		[`ics_fetch_401: ${url}`, "auth"],
+		[`ics_fetch_403: ${url}`, "auth"],
+		[`ics_fetch_404: ${url}`, "address"],
+		[`ics_fetch_410: ${url}`, "address"],
+		["ics_url_invalid: not a url", "address"],
+		[`ics_fetch_429: ${url}`, "rate_limited"],
+		[`ics_fetch_503: ${url}`, "transient"],
+		[`ics_fetch_408: ${url}`, "transient"],
+		["fetch failed", "transient"],
+	];
+	for (const [message, expected] of cases) {
+		assert.equal(classifyIcsFetchFailure(message), expected, message);
+	}
 });

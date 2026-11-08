@@ -6,7 +6,8 @@ import { test } from "node:test";
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import type { DiscoveryFetch, DiscoveryFetchResponse } from "./discovery.ts";
-import { collectAddressBook } from "./index.ts";
+import { CardDavStructuralError } from "./carddav-client.ts";
+import { classifyCardDavRequestFailure, collectAddressBook } from "./index.ts";
 
 const BOOK_URL = "https://contacts.example/addressbooks/owner/card/";
 const BOOK_KEY = "https://contacts.example/addressbooks/owner/card";
@@ -133,4 +134,58 @@ test("collectAddressBook: legacy token without an initialization boundary re-enu
 		["", "next-token"],
 		"the initialized follow-up must resume its quiet token",
 	);
+});
+
+test("classifyCardDavRequestFailure: one reason per cause", () => {
+	const classify = (err: unknown) =>
+		classifyCardDavRequestFailure(err, {
+			retryableByDefault: true,
+		}) as Error & {
+			code?: string;
+			retryable?: boolean;
+		};
+	const cases: Array<[unknown, string, boolean]> = [
+		[
+			new Error("carddav_sync_collection_failed: status=401"),
+			"auth_failed",
+			false,
+		],
+		[
+			new Error("carddav_addressbook_query_failed: status=403"),
+			"auth_failed",
+			false,
+		],
+		[
+			new Error("carddav_sync_collection_failed: status=503"),
+			"carddav_request_failed",
+			true,
+		],
+		[
+			new CardDavStructuralError(
+				"carddav_unsafe_redirect: https://a -> https://b",
+			),
+			"unsafe_redirect_refused",
+			false,
+		],
+		[
+			new CardDavStructuralError("carddav_redirect_missing_location"),
+			"carddav_response_unusable",
+			false,
+		],
+		[
+			new CardDavStructuralError("carddav_response_too_large: 9"),
+			"carddav_response_unusable",
+			false,
+		],
+		[
+			new CardDavStructuralError("carddav_too_many_redirects: https://a"),
+			"carddav_response_unusable",
+			false,
+		],
+	];
+	for (const [err, code, retryable] of cases) {
+		const out = classify(err);
+		assert.equal(out.code, code, String(err));
+		assert.equal(out.retryable, retryable, String(err));
+	}
 });

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "google-maps",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
-	"version": "0.1.24",
+	"version": "0.1.25",
 	"display_name": "Google Maps Timeline Import",
 	"brand": {
 		"icon": "icon.svg",
@@ -258,11 +258,11 @@
 		}
 	],
 	"reason_display_messages": {
-		"element_unaccounted": "Some Timeline entries had no usable time or ID, so we couldn't save them",
-		"invalid_json": "We couldn't read one of your Google Maps Timeline export files",
-		"record_too_large": "This Google Maps Timeline record is too large; re-export your Timeline and try again",
-		"timeline_points_not_found": "We couldn't find any location points to import",
-		"timeline_segments_not_found": "We couldn't find any timeline segments to import",
-		"unsupported_shape": "Your Google Maps Timeline export has an unsupported structure; re-export it as a supported JSON file"
+		"element_unaccounted": "Some items could not be read and were skipped.",
+		"invalid_json": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"record_too_large": "This Google Maps Timeline record is too large. Re-export your Timeline, then run again.",
+		"timeline_points_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"timeline_segments_not_found": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again.",
+		"unsupported_shape": "The export file is missing, incomplete, too large, or in a format this connector cannot read. Add a fresh, complete export, then run again."
 	}
 }

@@ -906,10 +906,15 @@ async function failStream(
 	// and what it cannot (text that cannot be stored) needs a newer connector.
 	const recoveryHint = retryable ? RETRY_BY_RUNTIME : RETRY_ON_UPGRADE;
 	if (!ctx.reportStreamFailure) {
-		throw createConnectorFailure("whatsapp_web_stream_incomplete", message, {
-			retryable,
-			recoveryHint,
-		});
+		// What a retry can clear keeps the retryable code; text that cannot be
+		// stored needs a newer connector.
+		throw createConnectorFailure(
+			retryable
+				? "whatsapp_web_stream_incomplete"
+				: "whatsapp_web_stream_needs_update",
+			message,
+			{ retryable, recoveryHint },
+		);
 	}
 	await ctx.reportStreamFailure(stream, message, { retryable, recoveryHint });
 }

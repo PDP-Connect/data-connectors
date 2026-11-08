@@ -9,7 +9,7 @@
 	},
 	"connector_key": "slack-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-	"version": "0.1.3",
+	"version": "0.1.4",
 	"display_name": "Slack (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -1162,12 +1162,16 @@
 		}
 	],
 	"reason_display_messages": {
-		"collection_interrupted": "Slack stopped answering partway through, so some conversations are missing. The next run continues from where this one stopped.",
-		"optional_stream_failed": "We couldn't read one part of your Slack data, so we skipped it. Everything else was collected normally.",
-		"sign_in_required": "Slack needs you to sign in again before this can continue.",
-		"slack_browser_session_missing": "This run ended before Slack had a signed-in session in the connector's browser. Sign in to Slack there, then run collection again.",
-		"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
-		"source_unreadable": "Slack answered with something this connector doesn't recognise, so nothing more was read. Slack may have changed its API - please report this rather than retrying.",
+		"browser_handoff_readiness_probe_failed": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"browser_handoff_readiness_timed_out": "Slack needs you to sign in again or update your access key. Then run again.",
+		"browser_sign_in_cancelled": "Slack needs you to sign in again or update your access key. Then run again.",
+		"collection_interrupted": "Slack stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
+		"optional_stream_failed": "Slack does not offer this data, or this connector cannot read it yet. There is nothing you need to do.",
+		"sign_in_required": "Slack needs you to sign in again or update your access key. Then run again.",
+		"slack_browser_session_missing": "Slack needs you to sign in again or update your access key. Then run again.",
+		"slack_session_lost": "Slack needs you to sign in again or update your access key. Then run again.",
+		"source_auth_or_challenge": "Slack needs you to sign in again or update your access key. Then run again.",
+		"source_unreadable": "This part stopped because of an internal problem reading Slack. It is not something you can fix.",
 		"workspace_not_signed_in": "The workspace named in SLACK_WORKSPACE is not one this browser is signed in to. Sign in to it, or clear SLACK_WORKSPACE to read every signed-in workspace."
 	},
 	"mobile": {

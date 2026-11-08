@@ -408,8 +408,16 @@ test("organization selection follows the export connector's rule", () => {
 });
 
 test("account_plan rejects malformed raw secondary organizations before certifying inventory", async () => {
-	for (const malformed of [{ uuid: "team" }, { uuid: "team", capabilities: "raven" }, { capabilities: ["raven"] }, null]) {
-		const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed] });
+	for (const malformed of [
+		{ uuid: "team" },
+		{ uuid: "team", capabilities: "raven" },
+		{ capabilities: ["raven"] },
+		null,
+	]) {
+		const h = harness([], {
+			streams: ["account_plan"],
+			orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed],
+		});
 		await collectAnthropicLive(h.ctx);
 		assert.deepEqual(h.of("account_plan"), []);
 		assert.deepEqual(h.states("account_plan"), []);
@@ -424,9 +432,36 @@ test("account_plan rejects malformed raw secondary organizations before certifyi
 });
 
 test("account_plan treats a valid empty-capabilities secondary as a clean snapshot", async () => {
-	const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, { uuid: "api", capabilities: [] }] });
+	const h = harness([], {
+		streams: ["account_plan"],
+		orgs: [
+			{ uuid: ORG, capabilities: ["chat"] },
+			{ uuid: "api", capabilities: [] },
+		],
+	});
 	await collectAnthropicLive(h.ctx);
 	assert.equal(h.of("account_plan").length, 1);
 	assert.equal(h.skips().length, 0);
 	assert.ok(h.emitted.some((event) => event.type === "DETAIL_COVERAGE"));
+});
+
+test("a non-retryable client error is reported as a rejected request, not http_error", async () => {
+	for (const [stream, suffix, status, reason] of [
+		[
+			"account_plan",
+			"/subscription_details",
+			400,
+			"anthropic_live_request_rejected",
+		],
+		["account_plan", "/subscription_details", 503, "http_error"],
+		["usage_limits", "/usage", 400, "anthropic_live_request_rejected"],
+		["usage_limits", "/usage", 429, "http_error"],
+	] as const) {
+		const h = harness([], {
+			streams: [stream],
+			route: (url) => (url.pathname.endsWith(suffix) ? { status } : undefined),
+		});
+		await collectAnthropicLive(h.ctx);
+		assert.equal(h.skips()[0]?.reason, reason, `${stream} ${status}`);
+	}
 });
