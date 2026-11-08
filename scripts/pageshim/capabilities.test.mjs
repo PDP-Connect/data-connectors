@@ -16,6 +16,7 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"anthropic",
 		"anthropic_live",
 		"character_ai",
+		"chase",
 		"chatgpt",
 		"discord_browser",
 		"facebook",
@@ -32,11 +33,12 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"spotify",
 		"strava_browser",
 		"tiktok",
+		"usaa",
 		"whatsapp_web",
 		"x_browser",
 		"youtube",
 	]);
-	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "character_ai", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok", "whatsapp_web", "perplexity", "instinct", "slack_browser", "reddit"]) {
+	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "character_ai", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok", "whatsapp_web", "perplexity", "instinct", "slack_browser", "reddit", "chase", "usaa"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -57,6 +59,7 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 		"page_input",
 		"cookie_read",
 		"page_response_observation",
+		"page_init_script",
 		"host_cookie_jar_request",
 	];
 	const catalogSchema = JSON.parse(
@@ -150,6 +153,33 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 		},
 	};
 	assert.equal(isPageShimCapable(capabilityConnector), true);
+});
+
+test("page_init_script is optional on PageShim: usable, never required", () => {
+	const withBrowser = (browser) => ({
+		runtime_requirements: {
+			bindings: {
+				browser,
+				network: { required: true, features: ["same_origin_page_fetch"] },
+			},
+		},
+	});
+	assert.deepEqual(
+		pageShimIncompatibilities(withBrowser({ required: true, features: ["page_navigation", "page_init_script"] })),
+		["browser feature page_init_script is optional on PageShim and cannot be required"],
+	);
+	assert.deepEqual(
+		pageShimIncompatibilities({
+			runtime_requirements: {
+				bindings: {
+					network: { required: true, features: ["same_origin_page_fetch"] },
+					browser: { required: false, features: ["page_init_script"] },
+				},
+			},
+		}),
+		["browser binding is not required"],
+	);
+	assert.equal(isPageShimCapable(withBrowser({ required: true, features: ["page_navigation"] })), true);
 });
 
 test("every declared mobile connector remains PageShim eligible", () => {
@@ -251,6 +281,13 @@ test("every declared mobile connector remains PageShim eligible", () => {
 				"host_archive_extraction",
 				"host_archive_entry_chunk_read",
 			],
+		},		chase: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_content_read", "page_condition_wait"],
+		},
+		usaa: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_content_read", "page_condition_wait"],
 		},
 	};
 	assert.deepEqual(
@@ -333,5 +370,39 @@ test("PageShim rejects legacy API method names as capability declarations", () =
 			},
 		};
 		assert.equal(isPageShimCapable(connector), false, name);
+	}
+});
+
+test("chase and usaa: Mobile eligibility comes from their declared features", () => {
+	// Before the Mobile port both banks required the browser and network
+	// bindings without naming a feature, which PageShim must refuse.
+	for (const name of ["chase", "usaa"]) {
+		const connector = manifest(name);
+		assert.deepEqual(pageShimIncompatibilities(connector), [], name);
+		assert.equal(typeof connector.mobile.pageshim.login_url, "string", name);
+		const undeclared = structuredClone(connector);
+		undeclared.runtime_requirements.bindings = {
+			network: { required: true },
+			browser: { required: true },
+		};
+		assert.deepEqual(
+			pageShimIncompatibilities(undeclared),
+			["required network features are not declared", "required browser features are not declared"],
+			name,
+		);
+	}
+});
+
+test("every mobile.pageshim.login_url is an https URL without a fragment", () => {
+	// The Mobile catalog copies login_url to the shell's startUrl, and the
+	// shell rejects any startUrl that is not https or that has a fragment.
+	const root = fileURLToPath(new URL("../..", import.meta.url));
+	for (const name of pageShimConnectors(root)) {
+		const loginUrl = manifest(name).mobile?.pageshim?.login_url;
+		if (loginUrl === undefined) continue;
+		const url = new URL(loginUrl);
+		assert.equal(url.protocol, "https:", name);
+		assert.equal(url.hash, "", name);
+		assert.equal(loginUrl.includes("#"), false, name);
 	}
 });

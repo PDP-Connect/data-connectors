@@ -9,7 +9,7 @@
 	},
 	"connector_key": "usaa",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-	"version": "0.2.23",
+	"version": "0.2.26",
 	"display_name": "USAA",
 	"brand": {
 		"icon": "icon.svg",
@@ -18,10 +18,17 @@
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
-				"required": true
+				"required": true,
+				"features": ["same_origin_page_fetch"]
 			},
 			"browser": {
-				"required": true
+				"required": true,
+				"features": [
+					"page_navigation",
+					"page_script_evaluation",
+					"page_content_read",
+					"page_condition_wait"
+				]
 			}
 		}
 	},
@@ -652,6 +659,20 @@
 		"scrape_failed": "We couldn't read the page contents",
 		"selectors_pending": "Support for this part of the connector isn't complete yet",
 		"session_dead_reauth_failed": "Your sign-in expired and we couldn't refresh it",
+		"statement_pdfs_partial_on_mobile": "The Mobile app saves the statement list without the PDF files",
 		"statement_unreconciled": "A statement's transactions don't add up to its printed balances"
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "usaa",
+			"login_url": "https://www.usaa.com/my/usaa",
+			"login_message": "Sign in to USAA, then return here.",
+			"collect_export": "collectUsaaPageShim",
+			"probe_export": "probeUsaaPageShimSession",
+			"summary": {
+				"singular": "record",
+				"plural": "records"
+			}
+		}
 	}
 }

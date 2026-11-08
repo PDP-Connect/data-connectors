@@ -34,6 +34,11 @@ declare const PAGESHIM_CONNECTOR_MANIFEST: string | undefined;
 export interface ShimPage {
 	requestedScopes: () => string[];
 	evaluate: (code: string) => Promise<unknown>;
+	/**
+	 * Only on hosts with the browser feature page_init_script: run `source`
+	 * in the main frame at the start of every later document.
+	 */
+	addInitScript?: (source: string) => Promise<void>;
 	goto: (url: string) => Promise<null>;
 	sleep: (ms: number) => Promise<void>;
 	setData: (key: string, value: unknown) => Promise<void>;
@@ -274,9 +279,26 @@ function boundedPageEvaluate(shim: ShimPage) {
 	};
 }
 
+/**
+ * Whether the host has page.addInitScript. A host page can be a Proxy that
+ * throws on unknown members, so reading the member is guarded. Having the
+ * member is not having the feature: the host lists page_init_script only in
+ * its capabilities() reply, which a bundle cannot read, and a device without
+ * document-start scripts rejects the call. Callers treat a rejection as "not
+ * offered" (createPageExchangeCapture falls back to page.evaluate).
+ */
+function hostOffersInitScript(page: ShimPage): boolean {
+	try {
+		return typeof page.addInitScript === "function";
+	} catch {
+		return false;
+	}
+}
+
 /** The Playwright `Page` members that connectors on this target call, over the shim. */
 export function playwrightPageFacade(shim: ShimPage) {
 	const evaluateInPage = boundedPageEvaluate(shim);
+	const initScript = hostOffersInitScript(shim);
 	const evaluate = (fn: unknown, arg?: unknown): Promise<unknown> =>
 		evaluateInPage(
 			typeof fn === "function"
@@ -291,6 +313,12 @@ export function playwrightPageFacade(shim: ShimPage) {
 		content: async () =>
 			(await evaluateInPage("document.documentElement.outerHTML")) as string,
 		evaluate,
+		// Present as a key either way, so a `typeof` check is not a stub hit.
+		addInitScript: initScript
+			? async (source: string) => {
+					await shim.addInitScript?.(String(source));
+				}
+			: undefined,
 		waitForFunction: async (
 			fn: unknown,
 			arg: unknown,

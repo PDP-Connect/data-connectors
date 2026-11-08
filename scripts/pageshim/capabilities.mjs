@@ -18,6 +18,14 @@ const PAGE_SHIM_BINDING_FEATURES = {
 	network: new Set(["same_origin_page_fetch", "host_http_request"]),
 };
 
+// Features that only some PageShim hosts provide. A connector may use one
+// when the host offers it (and must work without it), so a manifest must not
+// require one: that would make the connector ineligible on every host that
+// lacks it.
+export const PAGE_SHIM_OPTIONAL_FEATURES = {
+	browser: new Set(["page_init_script"]),
+};
+
 export function pageShimIncompatibilities(manifest) {
 	const bindings = manifest.runtime_requirements?.bindings;
 	if (!bindings || typeof bindings !== "object") return ["runtime bindings are missing"];
@@ -35,9 +43,11 @@ export function pageShimIncompatibilities(manifest) {
 	for (const [name, requirement] of Object.entries(bindings)) {
 		if (requirement?.required === true) continue;
 		const supported = PAGE_SHIM_BINDING_FEATURES[name];
+		const optional = PAGE_SHIM_OPTIONAL_FEATURES[name];
 		if (supported && Array.isArray(requirement?.features)) {
 			for (const feature of requirement.features)
-				if (!supported.has(feature)) failures.push(`${name} feature ${feature} is not provided`);
+				if (!supported.has(feature) && !optional?.has(feature))
+					failures.push(`${name} feature ${feature} is not provided`);
 		}
 	}
 	for (const [name, requirement] of required) {
@@ -51,7 +61,9 @@ export function pageShimIncompatibilities(manifest) {
 			continue;
 		}
 		for (const feature of requirement.features) {
-			if (!supported.has(feature)) failures.push(`${name} feature ${feature} is not provided`);
+			if (PAGE_SHIM_OPTIONAL_FEATURES[name]?.has(feature))
+				failures.push(`${name} feature ${feature} is optional on PageShim and cannot be required`);
+			else if (!supported.has(feature)) failures.push(`${name} feature ${feature} is not provided`);
 		}
 	}
 	return failures;

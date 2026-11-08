@@ -15,19 +15,29 @@ import { validateRecord } from "./schemas.ts";
 
 
 for (const wantsProfile of [false, true]) {
-	for (const { label, user, proven } of [
-		{ label: "unobserved", user: null, proven: false },
-		{ label: "unknown", user: {}, proven: false },
-		{ label: "null", user: { media_count: null }, proven: false },
-		{ label: "malformed", user: { media_count: "0" }, proven: false },
-		{ label: "negative", user: { media_count: -1 }, proven: false },
-		{ label: "fractional", user: { media_count: 0.5 }, proven: false },
-		{ label: "different id", user: { id: "other", media_count: 0 }, proven: false },
-		{ label: "different username", user: { username: "other", media_count: 0 }, proven: false },
-		{ label: "positive", user: { media_count: 3 }, proven: false },
+	// The timeline's empty first page names its owner and ends the list, so it
+	// proves the empty list by itself unless the profile's exact count
+	// contradicts it. Without the owner, only an exact zero proves it. (A page
+	// without the end signal makes this fake wait for page 2; mobile-profile
+	// and the PageShim harness cover that case.)
+	const OWNED_END = { owner: true };
+	for (const { label, user, timeline = OWNED_END, proven, reason } of [
+		{ label: "unobserved", user: null, proven: true },
+		{ label: "unknown", user: {}, proven: true },
+		{ label: "null", user: { media_count: null }, proven: true },
+		{ label: "malformed", user: { media_count: "0" }, proven: true },
+		{ label: "negative", user: { media_count: -1 }, proven: true },
+		{ label: "fractional", user: { media_count: 0.5 }, proven: true },
+		{ label: "different id", user: { id: "other", media_count: 0 }, proven: true },
+		{ label: "different username", user: { username: "other", media_count: 0 }, proven: true },
+		{ label: "positive", user: { media_count: 3 }, proven: false, reason: /the profile reports 3 posts but 0 were read/ },
 		{ label: "proven zero", user: { media_count: 0 }, proven: true },
+		{ label: "no owner on the page", user: null, timeline: { owner: false }, proven: false,
+			reason: /did not show that they belong to the signed-in account/ },
+		{ label: "no owner on the page, proven zero", user: { media_count: 0 }, timeline: { owner: false }, proven: false,
+			reason: /did not show that they belong to the signed-in account/ },
 	]) {
-		test(`empty timeline requires same-owner exact zero: ${label}, profile requested=${wantsProfile}`, async () => {
+		test(`empty timeline needs an exact zero or an owner-bound end page: ${label}, profile requested=${wantsProfile}`, async () => {
 			const requested = [...(wantsProfile ? ["profile"] : []), "posts", "post_likes"];
 			const { ctx, emitNavigation, emitRequest, emitResponse, failures, harness } = setup(requested);
 			let pendingResolve: ((response: Response) => void) | null = null;
@@ -56,7 +66,7 @@ for (const wantsProfile of [false, true]) {
 				}
 				if (pendingResolve) {
 					const response = nonterminalPostsResponse([], null, ctx.page);
-					response.json = async () => ({ data: { user: {id: "u1", username: "testuser"},
+					response.json = async () => ({ data: { ...(timeline.owner ? { user: {id: "u1", username: "testuser"} } : {}),
 						xdt_api__v1__feed__user_timeline_graphql_connection: {
 							edges: [], page_info: { end_cursor: null, has_next_page: false },
 						},
@@ -71,6 +81,8 @@ for (const wantsProfile of [false, true]) {
 			for (const stream of ["posts", "post_likes"]) {
 				assert.equal(harness.protocolMessages.some(message => message.type === "STATE" && message.stream === stream), proven, `${stream} STATE`);
 				assert.equal(failures.includes(stream), !proven, `${stream} failure`);
+				const skip = harness.protocolMessages.find(message => message.type === "SKIP_RESULT" && message.stream === stream);
+				if (reason) assert.match(String((skip as { message?: unknown } | undefined)?.message), reason, `${stream} reason`);
 			}
 			assert.equal(profileReads, 1, "profile-count evidence is gathered independently of requested output");
 			if (!wantsProfile) {
@@ -1004,17 +1016,21 @@ for (const stream of ["posts", "following"] as const) {
    });
   }
  }
+ // An owner-bound empty timeline page that ends the list proves empty posts
+ // without a total; following still needs a same-owner zero total.
+ const ownerBoundEndProves = stream !== "following";
  for (const total of [undefined, null, 1, 0]) {
-  test(`empty ${stream} requires same-owner zero total: ${total}`, async () => {
+  test(`empty ${stream} needs a same-owner zero total${ownerBoundEndProves ? " or an owner-bound end page" : ""}: ${total}`, async () => {
    const harness = await sourceRun({stream, total, empty: true, pageInfo: {has_next_page: false}, followingEnd: false});
-   assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), total === 0);
+   assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), total === 0 || (ownerBoundEndProves && total == null));
    assert.equal(harness.emitted.length, 0);
   });
  }
- test(`empty ${stream} rejects different-owner profile zero`, async () => {
+ test(`empty ${stream} ignores a different-owner profile zero`, async () => {
   const harness = await sourceRun({stream, total: 0, profileOwner: {id: "other"}, empty: true,
    pageInfo: {has_next_page: false}, followingEnd: false});
-  assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
+  // The other account's count is not used; only the owner-bound end page can prove the list.
+  assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), ownerBoundEndProves);
  });
 }
 
@@ -1088,7 +1104,8 @@ for (const {name, total, identity, challenge, complete} of [
 for (const {name, total, viewerOwner, envelopeOwner, challenge, complete} of [
  {name: "matching viewer and zero total", total: 0, viewerOwner: {id: "u1"}, complete: true},
  {name: "positive total", total: 1, viewerOwner: {id: "u1"}, complete: false},
- {name: "unknown total", viewerOwner: {id: "u1"}, complete: false},
+ // The owner-bound empty end page proves the empty list without a total.
+ {name: "unknown total", viewerOwner: {id: "u1"}, complete: true},
  {name: "different viewer", total: 0, viewerOwner: {id: "other"}, complete: false},
  {name: "conflicting envelope", total: 0, viewerOwner: {id: "u1"}, envelopeOwner: {id: "other"}, complete: false},
  {name: "body challenge", total: 0, viewerOwner: {id: "u1"}, challenge: "body" as const, complete: false},

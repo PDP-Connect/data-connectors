@@ -78,6 +78,14 @@ import type {
 	CaptureSession,
 	LocatorProbe,
 } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
+import {
+	armDownloadCapture,
+	type DownloadIntent,
+	disarmDownloadCapture,
+	fetchSameOriginFile,
+	formIntentUrl,
+	waitForDownloadIntent,
+} from "../../packages/polyfill-connectors/src/in-page-download.ts";
 import { savePlaywrightDownload } from "../../packages/polyfill-connectors/src/playwright-download.ts";
 import {
 	extractStatementContentFingerprint,
@@ -156,7 +164,7 @@ const DASHBOARD_ACCOUNT_SELECTOR =
 export const CHASE_CURRENT_ACTIVITY_ROW_SELECTOR =
 	'tr.mds-activity-table__row[data-values], tr[id*="activity" i][data-values]';
 const CHASE_CURRENT_ACTIVITY_TABLE_MARKER_RE =
-	/<table\b[^>]*\bclass=["'][^"']*\bmds-activity-table\b[^"']*["']/giu;
+	/<table\b[^>]*\bclass=["'][^"']*\bmds-activity-table(?:__mobile)?\b[^"']*["']/giu;
 const CHASE_DASHBOARD_MARKER_RE =
 	/\baccounts-name-link-button-[a-z0-9_-]+\b/giu;
 const CHASE_DASHBOARD_OVERVIEW_PATH = "/web/auth/dashboard";
@@ -254,7 +262,37 @@ export type ChaseDurableFailureCode =
 	| "row_exception"
 	| "statements_scrape_failed";
 
-/** Durable failure evidence is a closed structural shape; error text stays local. */
+const CHASE_ERROR_MESSAGE_MAX = 160;
+/** A reason code at the start of an error string, as in `code` or `code: detail`. */
+const CHASE_ERROR_CODE_RE =
+	/^([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?=$|\s|\(|:(?!\/\/))/;
+
+/**
+ * Error text with every value taken out, for durable diagnostics: URLs,
+ * file paths, quoted text, `key=value` pairs, e-mail addresses, any token with a digit
+ * or currency sign (account numbers, balances, dates) and all-capitals
+ * words (QFX merchant names) become placeholders. First line only, bounded.
+ */
+export function chaseValueFreeErrorText(text: string): string {
+	return (text.split(/\r?\n/, 1)[0] ?? "")
+		.replace(/"[^"]*"|'[^']*'|`[^`]*`/g, "<text>")
+		.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S*/gi, "<url>")
+		.replace(/\b(?:data|blob|about|javascript):\S*/gi, "<url>")
+		.replace(/(?:[A-Za-z]:\\|~?\/)[^\s:]*[\\/][^\s:]*/g, "<path>")
+		.replace(/\S+@\S+/g, "<email>")
+		.replace(/[^\s<>]*=[^\s<>]*/g, "<text>")
+		.replace(/[^\s<>]*[\d$€£][^\s<>]*/g, "<n>")
+		.replace(/\b[A-Z][A-Z&'.-]+\b/g, "<text>")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, CHASE_ERROR_MESSAGE_MAX);
+}
+
+/**
+ * Durable failure evidence: a closed structural shape plus the error's reason
+ * code (`download_request_not_found`) and a value-free message. Raw error
+ * text stays local; see `chaseValueFreeErrorText`.
+ */
 export function buildChaseDurableFailureDiagnostic(
 	artifact: ChaseDurableFailureArtifact,
 	failureCode: ChaseDurableFailureCode,
@@ -262,11 +300,24 @@ export function buildChaseDurableFailureDiagnostic(
 ): {
 	artifact: ChaseDurableFailureArtifact;
 	error_class: "Error" | "unknown";
+	error_code?: string;
+	error_message?: string;
 	failure_code: ChaseDurableFailureCode;
 } {
+	const text =
+		error instanceof Error
+			? error.message
+			: typeof error === "string"
+				? error
+				: "";
+	const code = CHASE_ERROR_CODE_RE.exec(text)?.[1];
+	const rest = code ? text.slice(code.length).replace(/^:\s*/, "") : text;
+	const message = chaseValueFreeErrorText(rest);
 	return {
 		artifact,
 		error_class: error instanceof Error ? "Error" : "unknown",
+		...(code ? { error_code: code } : {}),
+		...(message ? { error_message: message } : {}),
 		failure_code: failureCode,
 	};
 }
@@ -1067,9 +1118,11 @@ async function fillDateRange(
 // not simply re-resolve). They live on the deployment-owned artifact root, not
 // under homedir(), which the documented single-volume deployment discards on
 // container replacement. See src/connector-artifact-root.ts.
-const STATEMENT_ROOT = resolveConnectorArtifactDir("chase", [
-	"statements",
-]).root;
+// Resolved on use, not at module load: the Mobile (PageShim) bundle loads
+// this module but has no home directory and never stores a statement PDF.
+function statementRoot(): string {
+	return resolveConnectorArtifactDir("chase", ["statements"]).root;
+}
 
 async function navigateToStatementsPage(page: Page): Promise<void> {
 	// Warm overview first — direct-nav to the documents URL can bounce through
@@ -1295,7 +1348,7 @@ async function downloadStatementPdf(
 
 	const isoDate = parseDateDelivered(row.date_delivered_raw);
 	const slug = accountSlug(accountId);
-	const dir = join(STATEMENT_ROOT, slug);
+	const dir = join(statementRoot(), slug);
 	await mkdir(dir, { recursive: true });
 	const pdfPath = join(
 		dir,
@@ -1455,6 +1508,11 @@ function hasParse(v: unknown): v is OfxParser {
 }
 
 export async function parseQfxFile(path: string): Promise<unknown> {
+	return parseQfxText(await readFile(path, "utf8"));
+}
+
+/** Parse QFX text. The Mobile path has the text in memory, not in a file. */
+export async function parseQfxText(content: string): Promise<unknown> {
 	// ofx-js (0.2.x) ships no declaration file. The default export has
 	// shifted shape across versions (top-level OFX, nested under default,
 	// bare parse). types/ofx-js.d.ts shims the module as `unknown`; we
@@ -1474,7 +1532,6 @@ export async function parseQfxFile(path: string): Promise<unknown> {
 	if (!parser) {
 		throw new Error("ofx-js module shape not recognized");
 	}
-	const content = await readFile(path, "utf8");
 	return parser.parse(content);
 }
 
@@ -1774,10 +1831,19 @@ export async function emitTransactionsForAccount(
 	activity: ActivityKind,
 	transactions: ReturnType<typeof extractFromQfx>["transactions"],
 	fingerprintCursor?: FingerprintCursor,
-): Promise<void> {
+): Promise<number> {
 	const prior = deps.maxSeenByAccount[account.internal_id];
 	let maxDate: string | null = prior?.max_seen_date ?? null;
+	// A QFX file can list one FITID twice (seen on a device: 741 rows, 740
+	// FITIDs). Both rows map to one record id, so emit each id once, keeping
+	// the last row as the store would.
+	const byFitid = new Map<string, (typeof transactions)[number]>();
 	for (const t of transactions) {
+		if (t.date) {
+			byFitid.set(t.fitid, t);
+		}
+	}
+	for (const t of byFitid.values()) {
 		if (!t.date) {
 			continue;
 		}
@@ -1824,6 +1890,7 @@ export async function emitTransactionsForAccount(
 			last_fetched_at: deps.emittedAt,
 		};
 	}
+	return byFitid.size;
 }
 
 export async function emitCurrentActivityForAccount(
@@ -2489,7 +2556,23 @@ export async function processParsedAccountQfx(
 	parsed: unknown,
 	progressLabel = "?/?",
 ): Promise<AccountDetailOutcome> {
-	const { transactions, balance, integrity } = extractFromQfx(parsed);
+	return processExtractedAccountQfx(
+		deps,
+		account,
+		activity,
+		extractFromQfx(parsed),
+		progressLabel,
+	);
+}
+
+/** `processParsedAccountQfx` after extraction; Mobile merges its windows first. */
+async function processExtractedAccountQfx(
+	deps: EmitDeps,
+	account: ChaseAccount,
+	activity: ActivityKind,
+	{ transactions, balance, integrity }: ReturnType<typeof extractFromQfx>,
+	progressLabel: string,
+): Promise<AccountDetailOutcome> {
 	const partial =
 		deps.wantsTransactions &&
 		(!integrity.sourceShapeValid || integrity.malformedCount > 0);
@@ -2499,8 +2582,9 @@ export async function processParsedAccountQfx(
 		? { ...deps, maxSeenByAccount: { ...deps.maxSeenByAccount } }
 		: deps;
 
+	let distinctTransactions = 0;
 	if (deps.wantsTransactions) {
-		await emitTransactionsForAccount(
+		distinctTransactions = await emitTransactionsForAccount(
 			transactionDeps,
 			account,
 			activity,
@@ -2531,7 +2615,7 @@ export async function processParsedAccountQfx(
 	await deps.emit({
 		type: "PROGRESS",
 		stream: "transactions",
-		message: `Parsed account ${progressLabel}: emitted ${transactions.length} transaction(s)`,
+		message: `Parsed account ${progressLabel}: emitted ${distinctTransactions} transaction(s)`,
 	});
 	if (partial) {
 		await deps.emit({
@@ -3118,6 +3202,887 @@ export async function runStatements(
 			),
 		});
 	}
+}
+
+// ─── Mobile (PageShim) ────────────────────────────────────────────────────
+//
+// The Mobile app runs this connector inside its own browser, with no file
+// store and no download events. The page facade gives `goto`, `content`,
+// `evaluate` and `waitForFunction` only (scripts/pageshim/runtime.ts), so this
+// path reads the same dashboard and documents HTML as Desktop and gets each
+// QFX file with an in-page same-origin fetch of the request the download form
+// makes. Statement PDFs are not kept: there is no file store, and Chase
+// re-encrypts each PDF download, so a hash-only record would change on every
+// run. The statements stream emits the statement list only and says so.
+
+const CHASE_OVERVIEW_URL =
+	"https://secure.chase.com/web/auth/dashboard#/dashboard/overview";
+const CHASE_DOCUMENTS_URL =
+	"https://secure.chase.com/web/auth/dashboard#/dashboard/documents/myDocs/index;mode=documents";
+const CHASE_DOCUMENTS_ROW_SELECTOR = '[id^="button-documentsAccordion-"]';
+const CHASE_DOWNLOAD_BUTTON_SELECTOR = "mds-button#download";
+/**
+ * The earliest day a Mobile QFX read asks for, in days before the run: the
+ * download form offers about 24 months.
+ */
+const CHASE_QFX_WINDOW_DAYS = 729;
+/**
+ * The span of one Mobile QFX request, in days after its start day. Chase
+ * limits the range of one request: on one account it answered 729 days with
+ * HTTP 204 and no body, but 364 days with activity, and the two older
+ * stretches separately with their own activity. So a longer range is read as
+ * consecutive windows of this span; see `chaseQfxRequestWindows`.
+ */
+const CHASE_QFX_REQUEST_SPAN_DAYS = 364;
+/** The shortest window that an empty-response retry asks for. */
+const CHASE_QFX_MIN_WINDOW_DAYS = 30;
+const MOBILE_SESSION_PROBE_MS = 3000;
+/**
+ * The overview renders its activity tables after the account list. The
+ * Mobile layout splits recent activity into `mds-activity-table__mobile`
+ * subtables.
+ */
+const CHASE_ACTIVITY_TABLE_SELECTOR = `table.mds-activity-table, .mds-activity-table__mobile, ${CHASE_CURRENT_ACTIVITY_ROW_SELECTOR}`;
+const MOBILE_ACTIVITY_TABLE_WAIT_MS = 10_000;
+const MOBILE_FORM_INTENT_WAIT_MS = 10_000;
+const MOBILE_QFX_FIELDS = {
+	type: "account-activity-download-type-code",
+	start: "start-date",
+	end: "end-date",
+} as const;
+
+/** The members of the collect context the Mobile path reads. */
+export type ChasePageShimContext = Pick<
+	BrowserCollectContext,
+	"emit" | "emitRecord" | "page" | "progress" | "requested" | "state"
+>;
+
+/** True on the signed-in Chase dashboard once an account has rendered. Runs in the page. */
+function chaseDashboardShowsAccounts(selector: string): boolean {
+	return (
+		location.hostname === "secure.chase.com" &&
+		location.pathname.startsWith("/web/auth/dashboard") &&
+		!/logon/i.test(location.hash) &&
+		document.querySelector(selector) !== null
+	);
+}
+
+/**
+ * Mobile session probe. It reads the current page only: the host calls it
+ * again while the owner signs in, so it must not navigate.
+ */
+export async function probeChasePageShimSession(page: Page): Promise<boolean> {
+	try {
+		await page.waitForFunction(
+			chaseDashboardShowsAccounts,
+			DASHBOARD_ACCOUNT_SELECTOR,
+			{ timeout: MOBILE_SESSION_PROBE_MS, polling: 250 },
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Navigate, then wait (fail-soft) until `selector` is in the document. */
+async function gotoAndWaitFor(
+	page: Page,
+	url: string,
+	selector: string,
+): Promise<boolean> {
+	await page.goto(url, {
+		waitUntil: "domcontentloaded",
+		timeout: NAV_TIMEOUT_MS,
+	});
+	return page
+		.waitForFunction(
+			(css: string) => document.querySelector(css) !== null,
+			selector,
+			{ timeout: DOM_WAIT_MS, polling: 250 },
+		)
+		.then(
+			() => true,
+			() => false,
+		);
+}
+
+function isoDaysBefore(isoDate: string, days: number): string {
+	return new Date(Date.parse(`${isoDate}T00:00:00.000Z`) - days * 86_400_000)
+		.toISOString()
+		.slice(0, 10);
+}
+
+/**
+ * The explicit window a Mobile QFX request asks for. The download form's
+ * "since last statement" and "all transactions" choices are UI options, so
+ * the Mobile path states the dates instead: a fresh cursor becomes a range
+ * from the cursor date (one day of overlap, as the stale-cursor range on
+ * Desktop), and "all" is the whole window the form serves.
+ */
+export function chaseMobileQfxWindow(
+	choice: {
+		activity: ActivityKind;
+		dateRange?: { from?: string | undefined; to?: string | undefined };
+	},
+	cursorDate: string | undefined,
+	runDate: string,
+): { activity: ActivityKind; from: string; to: string } {
+	const today = runDate.slice(0, 10);
+	const earliest = isoDaysBefore(today, CHASE_QFX_WINDOW_DAYS);
+	const clamp = (from: string | undefined): string =>
+		from && from > earliest ? from : earliest;
+	if (choice.activity === "date_range") {
+		return {
+			activity: "date_range",
+			from: clamp(choice.dateRange?.from),
+			to: choice.dateRange?.to ?? today,
+		};
+	}
+	if (choice.activity === "since_last_statement" && cursorDate) {
+		return {
+			activity: "date_range",
+			from: clamp(cursorDate.slice(0, 10)),
+			to: today,
+		};
+	}
+	return { activity: "all", from: earliest, to: today };
+}
+
+function isoDaysBetween(from: string, to: string): number {
+	return Math.round(
+		(Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) /
+			86_400_000,
+	);
+}
+
+/** An inclusive range of ISO days that one QFX request asks for. */
+export interface ChaseQfxWindow {
+	from: string;
+	to: string;
+}
+
+/**
+ * The QFX requests that read `from`..`to`: consecutive windows that do not
+ * overlap, newest first, each at most CHASE_QFX_REQUEST_SPAN_DAYS long. A
+ * range within one span (an incremental run) is one request.
+ */
+export function chaseQfxRequestWindows(
+	from: string,
+	to: string,
+): ChaseQfxWindow[] {
+	if (from > to) return [{ from, to }];
+	const windows: ChaseQfxWindow[] = [];
+	let end = to;
+	while (end >= from) {
+		const start = isoDaysBefore(end, CHASE_QFX_REQUEST_SPAN_DAYS);
+		windows.push({ from: start > from ? start : from, to: end });
+		end = isoDaysBefore(start, 1);
+	}
+	return windows;
+}
+
+/**
+ * The two halves of a window that Chase answered with an empty response,
+ * newer half first. Null when a half would be shorter than
+ * CHASE_QFX_MIN_WINDOW_DAYS.
+ */
+export function splitChaseQfxWindow(
+	window: ChaseQfxWindow,
+): [ChaseQfxWindow, ChaseQfxWindow] | null {
+	const days = Math.floor(isoDaysBetween(window.from, window.to) / 2);
+	if (days < CHASE_QFX_MIN_WINDOW_DAYS) return null;
+	const laterFrom = isoDaysBefore(window.to, days);
+	return [
+		{ from: laterFrom, to: window.to },
+		{ from: window.from, to: isoDaysBefore(laterFrom, 1) },
+	];
+}
+
+/** Join windows that touch (one ends the day before the next starts). */
+export function joinChaseQfxWindows(
+	windows: readonly ChaseQfxWindow[],
+): ChaseQfxWindow[] {
+	const sorted = [...windows].sort((a, b) => a.from.localeCompare(b.from));
+	const joined: ChaseQfxWindow[] = [];
+	for (const window of sorted) {
+		const last = joined.at(-1);
+		if (last && isoDaysBefore(window.from, 1) <= last.to) {
+			if (window.to > last.to) last.to = window.to;
+		} else {
+			joined.push({ ...window });
+		}
+	}
+	return joined;
+}
+
+/** Click the download form's Download button. Runs in the page. */
+function clickChaseDownloadButton(selector: string): boolean {
+	const host = document.querySelector<HTMLElement>(selector);
+	if (!host) return false;
+	const inner = host.shadowRoot?.querySelector<HTMLElement>("button");
+	(inner ?? host).click();
+	return true;
+}
+
+/**
+ * Find a form in the document (also in open shadow roots) that carries a
+ * `csrftoken` field, as a form intent. Runs in the page. This is the
+ * fallback when the button click did not submit a form.
+ */
+function findChaseDownloadForm(): {
+	kind: "form";
+	method: string;
+	action: string;
+	fields: [string, string][];
+} | null {
+	const roots: (Document | ShadowRoot)[] = [document];
+	for (let i = 0; i < roots.length; i += 1) {
+		const root = roots[i] as Document | ShadowRoot;
+		for (const form of Array.from(root.querySelectorAll("form"))) {
+			const data = new FormData(form);
+			if (!data.has("csrftoken")) continue;
+			const fields: [string, string][] = [];
+			for (const [name, value] of data.entries()) {
+				fields.push([name, typeof value === "string" ? value : ""]);
+			}
+			return {
+				kind: "form",
+				method: (form.getAttribute("method") || "GET").toUpperCase(),
+				action: form.action || location.href,
+				fields,
+			};
+		}
+		for (const el of Array.from(root.querySelectorAll("*"))) {
+			if (el.shadowRoot) roots.push(el.shadowRoot);
+		}
+	}
+	return null;
+}
+
+/**
+ * Wait for the download form's submission. Chase calls `window.open("",
+ * "_self")` before it submits the form, so an `open` intent can come first;
+ * skip it and keep waiting. Returns the last intent seen when no form came.
+ */
+async function waitForChaseFormIntent(
+	page: Page,
+	seenKinds: DownloadIntent["kind"][],
+): Promise<DownloadIntent | null> {
+	const deadline = Date.now() + MOBILE_FORM_INTENT_WAIT_MS;
+	let last: DownloadIntent | null = null;
+	for (;;) {
+		const intent = await waitForDownloadIntent(page, {
+			timeoutMs: Math.max(0, deadline - Date.now()),
+		});
+		if (!intent) return last;
+		seenKinds.push(intent.kind);
+		if (intent.kind === "form") return intent;
+		last = intent;
+		if (Date.now() >= deadline) return last;
+	}
+}
+
+/** The download request the site built, ready to resend with other fields. */
+interface ChaseQfxForm {
+	intent: Extract<DownloadIntent, { kind: "form" }>;
+	action: URL;
+	diagnostics: Record<string, unknown>;
+}
+
+type ChaseQfxWindowFetch =
+	| { kind: "qfx"; text: string }
+	| { kind: "no_activity" }
+	/** HTTP 2xx with no body: Chase will not serve this range in one request. */
+	| { kind: "empty" }
+	| { kind: "failed"; error: string; diagnostics: Record<string, unknown> };
+
+type ChaseQfxFetch =
+	| {
+			kind: "qfx";
+			/** One QFX text per window that returned activity, newest first. */
+			texts: string[];
+			/** The windows that could not be read, with the reason for each. */
+			unread: { window: ChaseQfxWindow; error: string }[];
+			/** Length in days of each window asked for, in order. */
+			windowsTried: number[];
+	  }
+	| { kind: "no_activity" }
+	| { kind: "failed"; error: string; diagnostics: Record<string, unknown> };
+
+/**
+ * Open one account's download form and let the site build its request (the
+ * CSRF token comes from the site).
+ */
+async function openChaseQfxForm(
+	page: Page,
+	account: ChaseAccount,
+): Promise<ChaseQfxForm | Extract<ChaseQfxFetch, { kind: "failed" }>> {
+	const params =
+		account.type === "checking"
+			? `DDA,PRIMARY,${account.internal_id},SECONDARY`
+			: `CARD,BAC,${account.internal_id}`;
+	const formUrl = `https://secure.chase.com/web/auth/dashboard#/dashboard/accountDetails/downloadAccountTransactions/index;params=${params}`;
+	const formReady = await gotoAndWaitFor(
+		page,
+		formUrl,
+		CHASE_QFX_FILE_TYPE_SELECT_SELECTOR,
+	);
+	if (!formReady) {
+		return {
+			kind: "failed",
+			error: "download_form_not_rendered",
+			diagnostics: {},
+		};
+	}
+	await armDownloadCapture(page);
+	let intent: DownloadIntent | null = null;
+	const seenKinds: DownloadIntent["kind"][] = [];
+	try {
+		if (
+			await page.evaluate(
+				clickChaseDownloadButton,
+				CHASE_DOWNLOAD_BUTTON_SELECTOR,
+			)
+		) {
+			intent = await waitForChaseFormIntent(page, seenKinds);
+		}
+	} finally {
+		await disarmDownloadCapture(page);
+	}
+	const intentKind = seenKinds.join(",") || "none";
+	if (intent?.kind !== "form") {
+		intent = await page.evaluate(findChaseDownloadForm, undefined);
+	}
+	if (intent?.kind !== "form") {
+		return {
+			kind: "failed",
+			error: "download_request_not_found",
+			diagnostics: { intent_kind: intentKind },
+		};
+	}
+	const action = new URL(intent.action);
+	const diagnostics: Record<string, unknown> = {
+		intent_kind: intentKind,
+		form_method: intent.method,
+		form_action_path: action.pathname,
+		form_field_names: intent.fields.map(([name]) => name).sort(),
+	};
+	if (action.origin !== "https://secure.chase.com") {
+		return { kind: "failed", error: "download_form_cross_origin", diagnostics };
+	}
+	return { intent, action, diagnostics };
+}
+
+/** Resend the captured download request for one window, as a QFX file. */
+async function fetchChaseQfxWindow(
+	page: Page,
+	form: ChaseQfxForm,
+	window: ChaseQfxWindow,
+): Promise<ChaseQfxWindowFetch> {
+	const { intent, action } = form;
+	const overrides: Record<string, string> = {
+		[MOBILE_QFX_FIELDS.type]: "QFX",
+		[MOBILE_QFX_FIELDS.start]: window.from.replaceAll("-", ""),
+		[MOBILE_QFX_FIELDS.end]: window.to.replaceAll("-", ""),
+	};
+	const url = formIntentUrl(intent, overrides);
+	const file =
+		intent.method === "POST"
+			? await fetchSameOriginFile(page, action.origin + action.pathname, {
+					as: "text",
+					method: "POST",
+					body: new URL(url).search.slice(1),
+					headers: { "content-type": "application/x-www-form-urlencoded" },
+				})
+			: await fetchSameOriginFile(page, url, { as: "text" });
+	const text = file.text ?? "";
+	const head = text.slice(0, 1024).toUpperCase();
+	if (file.ok && (head.includes("OFXHEADER:") || head.includes("<OFX>"))) {
+		return { kind: "qfx", text };
+	}
+	if (file.ok && NO_ACTIVITY_CONFIRMATION_RE.test(text)) {
+		return { kind: "no_activity" };
+	}
+	// Chase answers a window it will not serve with 204 and no body.
+	if (file.ok && text.trim() === "") return { kind: "empty" };
+	return {
+		kind: "failed",
+		error: file.ok ? "response_not_qfx" : `http_${file.status || "error"}`,
+		diagnostics: {
+			http_status: file.status,
+			content_type: file.contentType,
+			byte_length: file.byteLength,
+			...(file.error ? { fetch_error: file.error } : {}),
+		},
+	};
+}
+
+/**
+ * Get one account's QFX text for `window` in the page: open the download
+ * form, then resend its request once per window of `chaseQfxRequestWindows`.
+ * A window that comes back empty is split in half, down to
+ * CHASE_QFX_MIN_WINDOW_DAYS; a window still empty at that length is unread.
+ * A failed request ends the read: the rest of the range is unread too.
+ */
+async function fetchChaseQfxInPage(
+	page: Page,
+	account: ChaseAccount,
+	window: ChaseQfxWindow,
+): Promise<ChaseQfxFetch> {
+	const form = await openChaseQfxForm(page, account);
+	if ("kind" in form) return form;
+	// Newest window last, so that pop() reads the newest first.
+	const pending = chaseQfxRequestWindows(window.from, window.to).reverse();
+	const texts: string[] = [];
+	const unread: { window: ChaseQfxWindow; error: string }[] = [];
+	const windowsTried: number[] = [];
+	let noActivity = false;
+	let lastFailure: Record<string, unknown> = {};
+	for (let next = pending.pop(); next; next = pending.pop()) {
+		windowsTried.push(isoDaysBetween(next.from, next.to));
+		const fetched = await fetchChaseQfxWindow(page, form, next);
+		if (fetched.kind === "qfx") {
+			texts.push(fetched.text);
+		} else if (fetched.kind === "no_activity") {
+			noActivity = true;
+		} else if (fetched.kind === "empty") {
+			const halves = splitChaseQfxWindow(next);
+			if (halves) {
+				pending.push(halves[1], halves[0]);
+			} else {
+				unread.push({ window: next, error: "qfx_window_rejected" });
+			}
+		} else {
+			lastFailure = fetched.diagnostics;
+			unread.push({ window: next, error: fetched.error });
+			for (const rest of pending.splice(0)) {
+				unread.push({ window: rest, error: "not_requested" });
+			}
+		}
+	}
+	if (texts.length > 0) return { kind: "qfx", texts, unread, windowsTried };
+	if (unread.length === 0 && noActivity) return { kind: "no_activity" };
+	return {
+		kind: "failed",
+		error:
+			unread.find((u) => u.error !== "not_requested")?.error ??
+			"qfx_window_rejected",
+		diagnostics: {
+			...form.diagnostics,
+			...lastFailure,
+			windows_tried_days: windowsTried,
+		},
+	};
+}
+
+type QfxExtraction = ReturnType<typeof extractFromQfx>;
+
+/**
+ * One account's QFX windows as one extraction. The windows do not overlap;
+ * a FITID listed twice is emitted once (`emitTransactionsForAccount`). The
+ * balance comes from the newest window that has one.
+ */
+function mergeQfxExtractions(parts: readonly QfxExtraction[]): QfxExtraction {
+	const sum = (
+		key: "rawCandidateCount" | "extractedCount" | "malformedCount",
+	) => parts.reduce((total, part) => total + part.integrity[key], 0);
+	return {
+		transactions: parts.flatMap((part) => part.transactions),
+		balance: parts.find((part) => part.balance)?.balance ?? null,
+		integrity: {
+			rawCandidateCount: sum("rawCandidateCount"),
+			extractedCount: sum("extractedCount"),
+			malformedCount: sum("malformedCount"),
+			sourceShapeValid: parts.every((part) => part.integrity.sourceShapeValid),
+		},
+	};
+}
+
+/** `runTransactionsAndBalances` per-account step for the Mobile path. */
+async function processAccountInPage(
+	deps: EmitDeps,
+	page: Page,
+	account: ChaseAccount,
+	accountProgress?: { index: number; total: number },
+): Promise<AccountDetailOutcome> {
+	const choice = chooseActivity(
+		deps.requested,
+		deps.txState,
+		deps.wantsTransactions ? "transactions" : "balances",
+		account.internal_id,
+		deps.emittedAt,
+	);
+	const window = chaseMobileQfxWindow(
+		choice,
+		deps.txState.per_account?.[account.internal_id]?.max_seen_date ?? undefined,
+		deps.emittedAt,
+	);
+	const progressLabel = accountProgressLabel(accountProgress);
+	await deps.emit({
+		type: "PROGRESS",
+		stream: "transactions",
+		message: accountProgress
+			? `Downloading transactions for account ${accountProgress.index} of ${accountProgress.total}`
+			: "Downloading transactions for an account",
+		...(accountProgress
+			? { count: accountProgress.index, total: accountProgress.total }
+			: {}),
+	});
+	const fetched = await fetchChaseQfxInPage(page, account, window).catch(
+		(err: unknown): ChaseQfxFetch => ({
+			kind: "failed",
+			error: `in_page_fetch_threw: ${truncate(errMessage(err), ERROR_MESSAGE_SLICE)}`,
+			diagnostics: {},
+		}),
+	);
+	if (fetched.kind === "no_activity") {
+		await emitNoActivityProgress(deps, window.activity);
+		return classifyNoActivityOutcome(account.internal_id, window.activity);
+	}
+	const extractions: QfxExtraction[] = [];
+	let failure: {
+		reason: "qfx_download_failed" | "qfx_parse_failed";
+		error: unknown;
+		diagnostics: Record<string, unknown>;
+	} | null = null;
+	if (fetched.kind === "failed") {
+		failure = {
+			reason: "qfx_download_failed",
+			error: fetched.error,
+			diagnostics: fetched.diagnostics,
+		};
+	} else {
+		try {
+			const parsed = await Promise.all(fetched.texts.map(parseQfxText));
+			extractions.push(...parsed.map(extractFromQfx));
+		} catch (err) {
+			failure = { reason: "qfx_parse_failed", error: err, diagnostics: {} };
+		}
+	}
+	if (failure) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason:
+				failure.reason === "qfx_parse_failed"
+					? "qfx_parse_failed"
+					: "qfx_download_failed",
+			message: `QFX ${failure.reason === "qfx_parse_failed" ? "parse" : "download"} failed for account ${progressLabel}; retry by runtime`,
+			recovery_hint: "retry_by_runtime",
+			diagnostics: {
+				...buildChaseDurableFailureDiagnostic(
+					"qfx",
+					failure.reason,
+					failure.error,
+				),
+				...failure.diagnostics,
+				...accountProgressDiagnostic(accountProgress),
+			},
+		});
+		return {
+			kind: "gap",
+			accountId: account.internal_id,
+			reason: "temporary_unavailable",
+			errorClass: failure.reason,
+		};
+	}
+	// Part of the range unread: the result is a bounded range, not the
+	// history asked for.
+	const unread =
+		fetched.kind === "qfx"
+			? joinChaseQfxWindows(fetched.unread.map((u) => u.window))
+			: [];
+	if (fetched.kind === "qfx" && unread.length > 0) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "qfx_history_partial",
+			message: `Chase did not send activity from ${unread
+				.map((range) => `${range.from} to ${range.to}`)
+				.join(", ")} for account ${progressLabel}`,
+			diagnostics: {
+				requested_from: window.from,
+				requested_to: window.to,
+				unread_ranges: unread,
+				unread_errors: [...new Set(fetched.unread.map((u) => u.error))].sort(),
+				windows_tried_days: fetched.windowsTried,
+				...accountProgressDiagnostic(accountProgress),
+			},
+		});
+	}
+	return processExtractedAccountQfx(
+		deps,
+		account,
+		unread.length > 0 ? "date_range" : window.activity,
+		mergeQfxExtractions(extractions),
+		progressLabel,
+	);
+}
+
+/**
+ * Mobile statements: the statement list only. Each listed statement is one
+ * record without PDF fields, and one SKIP_RESULT says why the PDFs are absent.
+ */
+async function runStatementIndexInPage(
+	deps: EmitDeps,
+	page: Page,
+	filteredAccounts: readonly ChaseAccount[],
+	accounts: readonly ChaseAccount[],
+	accountsResFilter: ReadonlySet<string> | null,
+	fingerprintCursor: FingerprintCursor,
+): Promise<void> {
+	await deps.emit({
+		type: "PROGRESS",
+		stream: "statements",
+		message: "Navigating to Statements & Documents",
+	});
+	let rows: StatementRow[];
+	let listFound: boolean;
+	let tableCount: number;
+	try {
+		listFound = await gotoAndWaitFor(
+			page,
+			CHASE_DOCUMENTS_URL,
+			CHASE_DOCUMENTS_ROW_SELECTOR,
+		);
+		const html = await page.content();
+		tableCount = countStructuralMarker(html, /<table\b/gi);
+		rows = parseStatementsListDom(html);
+	} catch (err) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "statements",
+			reason: "statements_scrape_failed",
+			message: "Statements scrape failed; retry by runtime",
+			diagnostics: buildChaseDurableFailureDiagnostic(
+				"statement",
+				"statements_scrape_failed",
+				err,
+			),
+		});
+		return;
+	}
+	if (rows.length === 0) {
+		// The Mobile documents page did not render the statement list this
+		// path reads. Saying "saved the statement list" would claim an empty
+		// list that was never read.
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "statements",
+			reason: "statement_list_unreadable_on_mobile",
+			message:
+				"The Mobile app could not read the statement list. Run Chase on Desktop to save statements.",
+			recovery_hint: "retry_on_connector_upgrade",
+			diagnostics: {
+				statement_list_found: listFound,
+				table_count: tableCount,
+				rows: 0,
+			},
+		});
+		return;
+	}
+	let listed = 0;
+	for (const row of rows) {
+		const dateIso = parseDateDelivered(row.date_delivered_raw);
+		const accountId =
+			resolveAccountIdForRow(row, filteredAccounts) ??
+			resolveAccountIdForRow(row, accounts);
+		if (
+			(accountsResFilter?.size &&
+				accountId &&
+				!accountsResFilter.has(accountId)) ||
+			statementRowOutsideTimeRange(deps, dateIso)
+		) {
+			continue;
+		}
+		const id = shortHash(
+			`${row.account_reference ?? ""}|${dateIso ?? row.date_delivered_raw}|${row.title}`,
+		);
+		await emitStatementIndexOnly(
+			deps,
+			id,
+			row,
+			accountId,
+			dateIso,
+			fingerprintCursor,
+		);
+		listed += 1;
+	}
+	await deps.emit({
+		type: "SKIP_RESULT",
+		stream: "statements",
+		reason: "statement_pdfs_partial_on_mobile",
+		message:
+			"The Mobile app saved the statement list without the PDF files. Run Chase on Desktop to save statement PDFs.",
+		diagnostics: { listed_statements: listed },
+	});
+}
+
+/** Mobile (PageShim) collect. Desktop uses the `runConnector` collect below. */
+export async function collectChasePageShim(
+	ctx: ChasePageShimContext,
+): Promise<void> {
+	const {
+		emit,
+		emitRecord,
+		page,
+		progress,
+		requested,
+		state: startState,
+	} = ctx;
+	const txState = (startState.transactions ??
+		startState) as TransactionsStateShape;
+	const resFilters = new Map<string, ReadonlySet<string> | null>();
+	for (const [streamName, scope] of requested) {
+		resFilters.set(streamName, resourceSet(scope));
+	}
+	const deps: EmitDeps = {
+		capture: null,
+		currentActivityFingerprintCursor: requested.has("current_activity")
+			? openFingerprintCursor(startState.current_activity, {
+					excludeFromFingerprint: ["fetched_at"],
+					priorFingerprints: readPriorCurrentActivityFingerprints(startState),
+				})
+			: undefined,
+		emit,
+		emitRecord,
+		emittedAt: new Date().toISOString(),
+		maxSeenByAccount: { ...(txState.per_account ?? {}) } as Record<
+			string,
+			TransactionCursor
+		>,
+		progress,
+		requested,
+		resFilters,
+		tmpDir: "",
+		txState,
+		transactionsFingerprintCursor: requested.has("transactions")
+			? openFingerprintCursor(startState.transactions, {
+					excludeFromFingerprint: ["fetched_at", "source"],
+					priorFingerprints: readPriorTransactionFingerprints(startState),
+				})
+			: undefined,
+		wantsAccounts: requested.has("accounts"),
+		wantsBalances: requested.has("balances"),
+		wantsCurrentActivity: requested.has("current_activity"),
+		wantsStatements: requested.has("statements"),
+		wantsTransactions: requested.has("transactions"),
+	};
+
+	await progress("Reading Chase accounts");
+	const accountsRendered = await gotoAndWaitFor(
+		page,
+		CHASE_OVERVIEW_URL,
+		DASHBOARD_ACCOUNT_SELECTOR,
+	);
+	// Current activity is parsed from this same read, so let the activity
+	// tables render first. An account with no recent activity may never
+	// render one; the wait is bounded and the parse then reports what it saw.
+	const activityTableRendered =
+		accountsRendered && deps.wantsCurrentActivity
+			? await page
+					.waitForFunction(
+						(css: string) => document.querySelector(css) !== null,
+						CHASE_ACTIVITY_TABLE_SELECTOR,
+						{ timeout: MOBILE_ACTIVITY_TABLE_WAIT_MS, polling: 250 },
+					)
+					.then(
+						() => true,
+						() => false,
+					)
+			: accountsRendered;
+	const dashboardHtml = await page.content().catch((): string => "");
+	const dashboardUrl = await page
+		.evaluate(() => location.href, undefined)
+		.catch((): string => "");
+	const accounts = parseDashboardAccountsDom(dashboardHtml);
+	if (accounts.length === 0) {
+		await emitNoAccountsDiagnostic(await readDashboardDiagnostics(page), emit);
+		return;
+	}
+	const { dropped } = prunePerAccountCursors(
+		deps.maxSeenByAccount,
+		new Set(accounts.map((a) => a.internal_id)),
+	);
+	if (dropped.length > 0) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "account_no_longer_discovered",
+			message:
+				"An account with a saved position is no longer listed on the dashboard",
+			diagnostics: { dropped_account_count: dropped.length },
+		});
+		for (const accountId of dropped) {
+			delete deps.maxSeenByAccount[accountId];
+		}
+	}
+	await progress(`Found ${accounts.length} account(s)`);
+	const { accountsResFilter, filteredAccounts } = filterAccountsByScope(
+		accounts,
+		resFilters,
+	);
+
+	if (deps.wantsAccounts) {
+		await emitAccountsStream(
+			deps,
+			filteredAccounts,
+			openFingerprintCursor(startState.accounts, {
+				excludeFromFingerprint: ["fetched_at"],
+				priorFingerprints: readPriorAccountFingerprints(startState),
+			}),
+		);
+	}
+	if (deps.wantsTransactions || deps.wantsBalances) {
+		await runTransactionsAndBalances(
+			deps,
+			page,
+			filteredAccounts,
+			processAccountInPage,
+		);
+	}
+	if (deps.wantsCurrentActivity) {
+		// The overview HTML read above: the download forms are not the overview.
+		const parserCount = parseCurrentActivityDom(
+			dashboardHtml,
+			deps.emittedAt.slice(0, 10),
+		).length;
+		await runCurrentActivity(
+			deps,
+			dashboardHtml,
+			filteredAccounts,
+			chaseCurrentActivityDiagnostic({
+				activityTableMarkerCount: countStructuralMarker(
+					dashboardHtml,
+					CHASE_CURRENT_ACTIVITY_TABLE_MARKER_RE,
+				),
+				dashboardMarkerCount: countStructuralMarker(
+					dashboardHtml,
+					CHASE_DASHBOARD_MARKER_RE,
+				),
+				managedSurface: "unknown",
+				parserCount,
+				readCount: 1,
+				route: classifyChaseCurrentActivityRoute(dashboardUrl),
+				targetCount: parserCount,
+				waitOutcome: activityTableRendered ? "resolved" : "timed_out",
+			}),
+		);
+	}
+	if (deps.wantsStatements) {
+		await runStatementIndexInPage(
+			deps,
+			page,
+			filteredAccounts,
+			accounts,
+			accountsResFilter,
+			openFingerprintCursor(startState.statements, {
+				resolveExcludeFromFingerprint: statementFingerprintExcludeKeys,
+				priorFingerprints: readPriorStatementFingerprints(startState),
+			}),
+		);
+	}
+	await emitTransactionsStateIfAny(deps);
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────

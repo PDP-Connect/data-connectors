@@ -7,12 +7,16 @@ const html = (body) => ({ status: 200, contentType: "text/html; charset=utf-8", 
 let loggedIn = true;
 const withAvatar = (body) => body.replace("<body>", "<body>" + avatar);
 export const setLoggedIn = (value) => { loggedIn = value; };
+// The watch history page with no history. YouTube renders the page data's
+// message in the message renderer, which the walk's readiness check reads.
+const emptyHistoryPage = () => sample("liked-videos-empty-tab").replaceAll("No videos in this playlist", "No watch history")
+	.replace("<ytd-message-renderer></ytd-message-renderer>", "<ytd-message-renderer>No watch history</ytd-message-renderer>");
 export function resolveFixture(raw) {
 	const url = new URL(raw);
 	if (!loggedIn) return html('<!doctype html><a href="https://accounts.google.com/ServiceLogin">Sign in</a>');
 	if (url.pathname === "/feed/channels") return html(withAvatar(sample("subscriptions-four-source-items")));
 	if (url.pathname === "/feed/playlists") return html(withAvatar(sample("playlist-index-view-model")));
-	if (url.pathname === "/feed/history") return html(sample("liked-videos-empty-tab").replaceAll("No videos in this playlist", "No watch history"));
+	if (url.pathname === "/feed/history") return html(emptyHistoryPage());
 	if (url.pathname === "/playlist") return html(withAvatar(sample("watch-later-playlist-items").replaceAll("WL", url.searchParams.get("list"))).replace("</body>", '<h1 id="title">Synthetic playlist</h1></body>'));
 	return accountHomeFixture();
 }
@@ -30,16 +34,6 @@ export const pageshimCase = {
 	exportSummary: { count: 12, label: "records", details },
 	emptyExportSummary: { count: 0, label: "records", details: Object.fromEntries(Object.keys(details).map((s) => [s, 0])) },
 };
-export function historyPrefixFixture(count = 1) {
-	const videos = Array.from({ length: count }, (_, index) => ({ videoRenderer: { videoId: count === 1 ? "synthetic-history" : `synthetic-history-${index}` } }));
-	const rows = videos.map(({ videoRenderer: { videoId } }) => `<ytd-video-renderer><a href="/watch?v=${videoId}"></a><h3>Synthetic history</h3></ytd-video-renderer>`).join("");
-	const data = { contents: { twoColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { selected: true, content: { sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: [
-		...videos,
-		{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "synthetic-next" } } } },
-	] } }] } } } }] } } };
-	return html('<!doctype html><html><body>' + avatar + '<ytd-item-section-renderer><div id="header"><span id="title">Today</span></div>' + rows + '<ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-item-section-renderer><script>window.ytInitialData=' + JSON.stringify(data) + '</script></body></html>');
-}
-
 export function accountHomeFixture(ownChannel = false) {
 	const header = '<ytd-active-account-header-renderer><span id="email">synthetic@example.test</span>' +
 		(ownChannel ? '<a href="/@synthetic-owner">Your channel</a>' : '') + '</ytd-active-account-header-renderer>';
@@ -74,7 +68,7 @@ export function switchAccountEmailFixture(raw, handlerOn = "renderer") {
 		'}</script></body></html>');
 }
 export function historyEvidenceLossFixture(kind) {
-	let body = sample("liked-videos-empty-tab").replaceAll("No videos in this playlist", "No watch history");
+	let body = emptyHistoryPage();
 	const login = '<a href="https://accounts.google.com/ServiceLogin">Sign in</a>';
 	if (kind === "login-wall") body = body.replace(avatar, login);
 	else if (kind === "consent-wall") body = body.replace("</body>", '<div id="consent-bump">Consent required</div></body>');
@@ -101,4 +95,96 @@ export function historyEvidenceLossFixture(kind) {
 		}).toString().replaceAll("LOSS_KIND", JSON.stringify(kind)).replaceAll("LOGIN_WALL", JSON.stringify(login)) + ')()</script></body>');
 	}
 	return html(body);
+}
+
+// A synthetic watch history app. The page data holds the first rows and a
+// continuation token; when a scroll brings the continuation near the
+// viewport, the app sends POST /youtubei/v1/browse with that token and
+// appends the rows of its response. `pages` lists each response's row count
+// and transport; the last page has no continuation. `status` answers one
+// token with an error status (the app shows nothing for it), `reloadOn`
+// makes the app reload the document instead of appending, and `eager` makes
+// it request the first continuation while the document loads.
+export function historyAppFixture({
+	first = 4,
+	pages = [{ rows: 4, transport: "xhr" }, { rows: 3, transport: "fetch" }],
+	status = {},
+	reloadOn = null,
+	eager = false,
+} = {}) {
+	const browseRequests = [];
+	const id = (n) => "syntheticH" + String.fromCharCode(65 + n);
+	const token = (n) => "synthetic-token-" + n;
+	const videos = (from, count) => Array.from({ length: count }, (_, i) => ({ videoRenderer: { videoId: id(from + i) } }));
+	const continuation = (n) => ({ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: token(n) } } } });
+	const starts = [first];
+	for (const page of pages) starts.push(starts[starts.length - 1] + page.rows);
+	const data = { contents: { twoColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { selected: true, content: { sectionListRenderer: { contents: [
+		{ itemSectionRenderer: { contents: videos(0, first) } },
+		...(pages.length > 0 ? [continuation(1)] : []),
+	] } } } }] } } };
+	const app = `(() => {
+ const transports = ${JSON.stringify(pages.map((page) => page.transport))};
+ const reloadOn = ${JSON.stringify(reloadOn)};
+ const section = document.querySelector("ytd-item-section-renderer");
+ const marker = document.querySelector("ytd-continuation-item-renderer");
+ const row = (videoId) => '<ytd-video-renderer style="display:block;height:300px"><a href="/watch?v=' + videoId + '"></a><h3>Synthetic history ' + videoId + '</h3></ytd-video-renderer>';
+ let next = ${pages.length > 0 ? 1 : 0};
+ let loading = false;
+ const append = (text) => {
+  let body = null;
+  try { body = JSON.parse(text); } catch (error) { return; }
+  const items = body.onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems;
+  const ids = [];
+  let token = null;
+  for (const item of items) {
+   for (const child of item.itemSectionRenderer?.contents ?? []) ids.push(child.videoRenderer.videoId);
+   if (item.continuationItemRenderer) token = item.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
+  }
+  section.insertAdjacentHTML("beforeend", ids.map(row).join(""));
+  if (token) { next += 1; section.appendChild(marker); } else { next = 0; marker.remove(); }
+ };
+ const load = (force) => {
+  if (loading || !next || (!force && marker.getBoundingClientRect().top > window.innerHeight + 300)) return;
+  if (reloadOn === next) { location.reload(); return; }
+  loading = true;
+  const body = JSON.stringify({ context: { client: { clientName: "WEB" } }, continuation: "synthetic-token-" + next });
+  const done = (status, text) => { loading = false; if (status === 200) append(text); };
+  if (transports[next - 1] === "fetch") {
+   fetch("/youtubei/v1/browse?prettyPrint=false", { method: "POST", body, headers: { "content-type": "application/json" } })
+    .then((response) => response.text().then((text) => done(response.status, text)));
+  } else {
+   const xhr = new XMLHttpRequest();
+   xhr.open("POST", "/youtubei/v1/browse?prettyPrint=false");
+   xhr.setRequestHeader("content-type", "application/json");
+   xhr.onload = () => done(xhr.status, xhr.responseText);
+   xhr.send(body);
+  }
+ };
+ window.addEventListener("scroll", () => load(false));
+ if (${JSON.stringify(eager)}) load(true);
+})();`;
+	const historyPage = () => html('<!doctype html><html><body>' + avatar +
+		'<ytd-item-section-renderer><div id="header"><span id="title">Today</span></div>' +
+		videos(0, first).map(({ videoRenderer: { videoId } }) => '<ytd-video-renderer style="display:block;height:300px"><a href="/watch?v=' + videoId + '"></a><h3>Synthetic history ' + videoId + '</h3></ytd-video-renderer>').join("") +
+		(pages.length > 0 ? '<ytd-continuation-item-renderer style="display:block;height:40px"></ytd-continuation-item-renderer>' : '') +
+		'</ytd-item-section-renderer><script>window.ytInitialData=' + JSON.stringify(data) + '</script><script>' + app + '</script></body></html>');
+	const resolve = (raw, request = {}) => {
+		const url = new URL(raw);
+		if (url.pathname === "/feed/history") return historyPage();
+		if (url.pathname === "/youtubei/v1/browse") {
+			let requested = null;
+			try { requested = JSON.parse(request.postData ?? "null")?.continuation ?? null; } catch {}
+			browseRequests.push(requested);
+			const n = Number(String(requested).replace("synthetic-token-", ""));
+			const page = pages[n - 1];
+			if (!page) return { status: 404, contentType: "application/json", body: "{}" };
+			if (status[requested]) return { status: status[requested], contentType: "application/json", body: '{"error":{}}' };
+			const items = [{ itemSectionRenderer: { contents: videos(starts[n - 1], page.rows) } }, ...(n < pages.length ? [continuation(n + 1)] : [])];
+			return { status: 200, contentType: "application/json",
+				body: JSON.stringify({ onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: items } }] }) };
+		}
+		return resolveFixture(raw);
+	};
+	return { resolve, browseRequests, ids: Array.from({ length: starts[starts.length - 1] }, (_, n) => id(n)) };
 }

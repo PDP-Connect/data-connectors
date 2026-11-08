@@ -67,6 +67,10 @@
  *     comments mutable; failures that need a newer connector say so; a record
  *     the schema rejects fails its stream; the session probe reads the page
  *     only, not the cookie jar, which the manifest never declared.
+ *   v0.1.12 (2026-11-05): on PageShim (Mobile) the page's own GraphQL
+ *     requests are read through the shared in-page capture, so Mobile takes
+ *     the list's query from the page's request, as Desktop does, before it
+ *     falls back to the loaded modules.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
@@ -79,6 +83,11 @@ import {
 	type ProbeSessionArgs,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	createPageExchangeCapture,
+	type ExchangeRule,
+	type PageExchangeCapture,
+} from "../../packages/polyfill-connectors/src/page-exchange-capture.ts";
 import { isConnectorErrorCodeShaped } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import {
 	type CollectorContext,
@@ -386,16 +395,69 @@ function locationHrefInPage(): string {
 	return location.href;
 }
 
+/** The capture's name in the page. */
+export const GRAPHQL_CAPTURE_NAME = "facebook_graphql";
+/** The page's own GraphQL requests; only the form body and two headers are read. */
+export const GRAPHQL_CAPTURE_RULES: readonly ExchangeRule[] = [{
+	url: /^https:\/\/www\.facebook\.com\/api\/graphql\/(?:[?#]|$)/,
+	method: "POST",
+	requestHeaders: ["x-fb-friendly-name", "x-asbd-id"],
+	responseBody: false,
+}];
+
+/** One of the page's own GraphQL requests as a query template, or null. */
+function capturedOperation(request: {
+	url: string;
+	method: string;
+	postData: string | null;
+	headers: Record<string, string>;
+}): CapturedOperation | null {
+	try {
+		return parseCapturedGraphqlRequest(request);
+	} catch {
+		// A request that cannot be read is simply not a template.
+		return null;
+	}
+}
+
 /**
- * Page-backed services. `observeRequests` watches the page's own GraphQL
- * requests (desktop Playwright). The mobile PageShim host has no request
- * events, so there the query id comes only from the page's loaded modules.
+ * Page-backed services. They watch the page's own GraphQL requests for each
+ * list's query: on Desktop through Playwright request events
+ * (`requests: "page_events"`), on the PageShim (Mobile) host, which has no
+ * request events, through the shared in-page capture
+ * (`requests: "page_capture"`). Without page_init_script the capture is
+ * installed after each page loads, so it sees only the requests the page
+ * sends after that, such as the ones a scroll triggers.
  */
 export function createPageServices(
 	page: Page,
-	options: { observeRequests: boolean } = { observeRequests: true },
+	options: { requests: "page_events" | "page_capture" } = { requests: "page_events" },
 ): FacebookServices & { dispose: () => void } {
 	let captured: CapturedOperation[] = [];
+	const events = options.requests === "page_events";
+	let exchangeCapture: PageExchangeCapture | null = null;
+	/** The generation of the opened document's capture; 0 when not attached. */
+	let generation = 0;
+	const attach = async (): Promise<void> => {
+		if (!exchangeCapture || generation !== 0) return;
+		const attached = await exchangeCapture.attach().catch(() => null);
+		if (attached) generation = attached.generation;
+	};
+	const drainCaptured = async (): Promise<void> => {
+		await attach();
+		if (!exchangeCapture || generation === 0) return;
+		const drain = await exchangeCapture.drain().catch(() => null);
+		for (const exchange of drain?.exchanges ?? []) {
+			if (exchange.generation !== generation) continue;
+			const operation = capturedOperation({
+				url: exchange.url,
+				method: exchange.method,
+				postData: exchange.requestBody,
+				headers: exchange.requestHeaders,
+			});
+			if (operation) captured.push(operation);
+		}
+	};
 	const onRequest = (request: Request): void => {
 		try {
 			const operation = parseCapturedGraphqlRequest({
@@ -409,17 +471,26 @@ export function createPageServices(
 			// A request that cannot be read is simply not a template.
 		}
 	};
-	if (options.observeRequests) page.on("request", onRequest);
+	if (events) page.on("request", onRequest);
 	return {
-		observesRequests: options.observeRequests,
+		observesRequests: true,
 		dispose: () => {
-			if (options.observeRequests) page.off("request", onRequest);
+			if (events) page.off("request", onRequest);
 			captured = [];
 		},
 		open: async (url: string): Promise<PageSnapshot> => {
 			captured = [];
+			if (!events) {
+				// Before the first load, so a host with page_init_script runs it there.
+				exchangeCapture ??= await createPageExchangeCapture(page, {
+					name: GRAPHQL_CAPTURE_NAME,
+					rules: GRAPHQL_CAPTURE_RULES,
+				});
+				generation = 0;
+			}
 			await gotoWithRetry(page, url);
-			const landedUrl = options.observeRequests
+			if (!events) await attach();
+			const landedUrl = events
 				? page.url()
 				: await page.evaluate(locationHrefInPage);
 			assertLandedOnContent(landedUrl);
@@ -432,10 +503,14 @@ export function createPageServices(
 		scroll: async () => {
 			await page.evaluate(scrollInPage);
 		},
-		takeCaptured: (spec) =>
-			captured.findLast((operation) =>
-				operationMatches(spec, operation.friendlyName),
-			) ?? null,
+		takeCaptured: async (spec) => {
+			if (!events) await drainCaptured();
+			return (
+				captured.findLast((operation) =>
+					operationMatches(spec, operation.friendlyName),
+				) ?? null
+			);
+		},
 		resolveModule: async (friendlyName: string): Promise<ModuleOperation> => {
 			const result = await evaluateInMainWorld(
 				page,
@@ -594,11 +669,11 @@ export async function probeFacebookSessionOnPage(page: Page): Promise<boolean> {
 	}
 }
 
-/** The PageShim (mobile) entry: the same walk, without request observation. */
+/** The PageShim (mobile) entry: the same walk, with the in-page request capture. */
 export async function collectFacebookOnPage(
 	ctx: CollectorContext & { page: Page },
 ): Promise<void> {
-	const services = createPageServices(ctx.page, { observeRequests: false });
+	const services = createPageServices(ctx.page, { requests: "page_capture" });
 	try {
 		await collectFacebook(ctx, services);
 	} finally {

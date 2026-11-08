@@ -679,6 +679,7 @@ placements predate this rule and stay valid as named legacy exceptions:
 | `page_input` | `browser` | Interact with the active page: click and type. |
 | `cookie_read` | `browser` | Read the active page's cookie jar. |
 | `page_response_observation` | `browser` | Observe page network responses, including response body content. |
+| `page_init_script` | `browser` | Run script in the main frame at the start of every later document, before the page's own scripts. |
 | `host_download_capture` | `browser` | Capture content downloaded by the active page. |
 | `host_archive_extraction` | `browser` | Extract downloaded archive contents in the host runtime. |
 | `host_archive_entry_chunk_read` | `browser` | Read an extracted archive entry in chunks. |

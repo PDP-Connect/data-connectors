@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.32)
+ * PDPP Meta (Instagram) Connector (v0.4.43)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -93,6 +93,13 @@
  *   - Tested surface: single-account, EN locale, personal (non-business)
  *     account (see the connector cutover report's Live evidence section
  *     for exact per-stream counts and the two-run incremental proof).
+ *   - posts/post_likes on PageShim (Mobile) read the app's own posts query
+ *     through the shared in-page capture (page-exchange-capture.ts,
+ *     fetchAllPostsMobile). Only the synthetic harness in scripts/pageshim
+ *     exercises it; whether Instagram's mobile web app sends the query
+ *     through the wrapped fetch/XHR (after a client-side profile link click,
+ *     or on a direct profile load when the host offers page_init_script),
+ *     and loads later pages on scroll, is unverified on a device.
  *   - Reachability probe: permanently exempt. This connector is
  *     browser-automation-only against a login wall with no fixed,
  *     unauthenticated-probeable public endpoint (per
@@ -100,6 +107,9 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.43 — reads posts and post_likes on PageShim through the shared
+ *     in-page capture of the app's own posts query, with Desktop's owner,
+ *     cursor, end and contradiction checks.
  *   v0.4.32 — scrape legacy targeting categories before advertiser pagination
  *     so slow advertiser expansion cannot consume their collection window.
  *   v0.4.25 — restores legacy profile capture, stream-gap reporting, initial
@@ -158,6 +168,12 @@ import {
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
+	type AttachResult,
+	type CapturedExchange,
+	createPageExchangeCapture,
+	type ExchangeDrain,
+} from "../../packages/polyfill-connectors/src/page-exchange-capture.ts";
+import {
 	buildAdRecords,
 	dedupeFollowingByUsername,
 	FOLLOWING_MAX_PAGES,
@@ -170,7 +186,17 @@ import {
 	profileRecord,
 	profileSourceFieldsAreReadable,
 } from "./parsers.ts";
-import { buildAdRecordsWebCrypto, fetchMobileProfileUser } from "./mobile.ts";
+import {
+	buildAdRecordsWebCrypto,
+	fetchMobileProfileUser,
+	isOwnerProfilePath,
+	openProfileScript,
+	POSTS_CAPTURE_MAX_BUFFERED,
+	POSTS_CAPTURE_NAME,
+	POSTS_CAPTURE_RULES,
+	POSTS_SCROLL_SCRIPT,
+	postsRequestVariablesText,
+} from "./mobile.ts";
 import { adsSchema, followingSchema, postLikesSchema, postsSchema, profileSchema, validateRecord } from "./schemas.ts";
 import type {
 	InstagramFollowingPage,
@@ -664,9 +690,8 @@ type CompleteTimelineConnection = InstagramTimelineConnection & {
  * bare-fetchable v1 endpoint for this data, unlike `following`. This can only
  * be read by passively observing the request the profile page's own render
  * already issues, not by constructing an equivalent request from
- * `page.evaluate`. Matches the legacy connector's
- * `page.captureNetwork`/`getCapturedResponse` pattern, using Playwright's own
- * `waitForResponse` instead of that bespoke shim.
+ * `page.evaluate`. Desktop observes it with Playwright's own response events;
+ * Mobile with the shared in-page capture (`createPageExchangeCapture`).
  */
 type PostsTimelineRequest = Pick<
 	Request,
@@ -770,7 +795,15 @@ function postsRequestTargetsOwner(
 	username: string,
 	userId: string | undefined,
 ): boolean {
-	const variables = postsRequestVariables(request);
+	return postsVariablesTargetOwner(postsRequestVariables(request), username, userId);
+}
+
+/** The owner test on a posts request's parsed `variables`. */
+function postsVariablesTargetOwner(
+	variables: unknown,
+	username: string,
+	userId: string | undefined,
+): boolean {
 	const usernames = valuesForVariableKeys(variables, POSTS_USERNAME_VARIABLES);
 	const userIds = valuesForVariableKeys(variables, POSTS_USER_ID_VARIABLES);
 	const expectedUsername = username.toLowerCase();
@@ -799,8 +832,16 @@ function postsRequestHasCursor(
 	request: PostsTimelineRequest,
 	expectedCursor: string | null,
 ): boolean {
+	return postsVariablesHaveCursor(postsRequestVariables(request), expectedCursor);
+}
+
+/** The cursor test on a posts request's parsed `variables`. */
+function postsVariablesHaveCursor(
+	variables: unknown,
+	expectedCursor: string | null,
+): boolean {
 	const cursorValues = valuesForVariableKeys(
-		postsRequestVariables(request),
+		variables,
 		POSTS_CURSOR_VARIABLES,
 	);
 	const nonemptyCursors = cursorValues.filter(
@@ -969,36 +1010,22 @@ class PartialWalkFailure<T> extends Error {
 }
 
 /**
- * Walk the owner's own timeline feed connection to completion by navigating
- * to the profile page (which triggers the first page as a side effect of
- * rendering) and scrolling to trigger subsequent pages, capturing each
- * `PolarisProfilePostsQuery`-shaped response passively.
+ * The posts read so far, merged by id. A repeated observation of a post must
+ * be identical or readable; a changed or unreadable version marks the walk
+ * conflicting. Likers seen across repeats are unioned. Shared by the Desktop
+ * and PageShim walks so both apply the same merge rules.
  */
-export async function fetchAllPosts(
-	page: Page,
-	username: string,
-	capture: CaptureSession | null,
-	progress?: (
-		message: string,
-		extra?: Record<string, unknown>,
-	) => Promise<void>,
-	delay: (ms: number) => Promise<void> = politeDelay,
-	postsClock: PostsClock = realPostsClock,
-	expectedUserId?: string,
-): Promise<{
+function createPostReconciler(): {
 	edges: InstagramTimelineEdge[];
-	sourceEdgeCount: number;
-	sourceEnd: boolean;
-	truncated: boolean;
-	ownerBound: boolean;
-}> {
+	conflicting: boolean;
+	reconcile: (edge: InstagramTimelineEdge, id: string) => void;
+} {
 	const edges: InstagramTimelineEdge[] = [];
 	const postIndexes = new Map<string, number>();
 	const readableVersions = new Map<string, InstagramTimelineEdge>();
-	let conflictingVersions = false;
 	// Validate each observation before considering its id a duplicate. Keep the
 	// raw readable snapshot separate from the merged liker sample for comparison.
-	const reconcilePost = (edge: InstagramTimelineEdge, id: string): void => {
+	const reconcile = (edge: InstagramTimelineEdge, id: string): void => {
 		let readable = false;
 		try {
 			const record = postRecord(edge);
@@ -1012,10 +1039,10 @@ export async function fetchAllPosts(
 				likers.push(edge.node.facepile_top_likers![like.liker_ordinal]!);
 			}
 		} catch { likesReadable = false; }
-		if (!readable || !likesReadable) conflictingVersions = true;
+		if (!readable || !likesReadable) reconciler.conflicting = true;
 		const previousVersion = readableVersions.get(id);
 		if (readable) {
-			if (previousVersion && !isDeepStrictEqual(previousVersion.node, edge.node)) conflictingVersions = true;
+			if (previousVersion && !isDeepStrictEqual(previousVersion.node, edge.node)) reconciler.conflicting = true;
 			readableVersions.set(id, edge);
 		}
 		const index = postIndexes.get(id);
@@ -1042,6 +1069,37 @@ export async function fetchAllPosts(
 		edges[index] = { ...(readable ? edge : previous),
 			node: { ...(readable ? edge.node : previous.node), facepile_top_likers: union } };
 	};
+	const reconciler = { edges, conflicting: false, reconcile };
+	return reconciler;
+}
+
+/**
+ * Walk the owner's own timeline feed connection to completion by navigating
+ * to the profile page (which triggers the first page as a side effect of
+ * rendering) and scrolling to trigger subsequent pages, capturing each
+ * `PolarisProfilePostsQuery`-shaped response passively.
+ */
+export async function fetchAllPosts(
+	page: Page,
+	username: string,
+	capture: CaptureSession | null,
+	progress?: (
+		message: string,
+		extra?: Record<string, unknown>,
+	) => Promise<void>,
+	delay: (ms: number) => Promise<void> = politeDelay,
+	postsClock: PostsClock = realPostsClock,
+	expectedUserId?: string,
+): Promise<{
+	edges: InstagramTimelineEdge[];
+	sourceEdgeCount: number;
+	sourceEnd: boolean;
+	truncated: boolean;
+	ownerBound: boolean;
+}> {
+	const posts = createPostReconciler();
+	const { edges } = posts;
+	const reconcilePost = posts.reconcile;
 	let sawValidResponse = false;
 	let ownerBound = true;
 	const owner = {id: expectedUserId ?? "", username};
@@ -1427,7 +1485,339 @@ export async function fetchAllPosts(
 		throw edges.length > 0 ? new PartialWalkFailure(error, edges) : error;
 	}
 	stopObserving();
-	if (conflictingVersions) {
+	if (posts.conflicting) {
+		throw new PartialWalkFailure(
+			new Error("meta_posts_timeline_contradictory: post versions changed or were unreadable"),
+			edges,
+		);
+	}
+	if (unrecordableSourceEdges > 0) {
+		throw new PartialWalkFailure(
+			new Error("meta_posts_unrecordable_edges: posts included unreadable ids"),
+			edges,
+		);
+	}
+	return { edges, sourceEdgeCount, sourceEnd: sawTerminalPage, truncated: walk.truncated, ownerBound };
+}
+
+// ─── Posts on PageShim (in-page capture) ──────────────────────────────────
+
+/** How long Mobile waits for the app to request one posts page; Desktop's
+ *  `waitForResponse` waits the same 15 seconds. */
+const MOBILE_POSTS_WAIT_MS = 15_000;
+const MOBILE_POSTS_POLL_MS = 500;
+/** Pause before the last drain, for repeats the app sends after the end. */
+const MOBILE_POSTS_SETTLE_MS = 1_000;
+
+/**
+ * The PageShim counterpart of {@link fetchAllPosts}. PageShim has no
+ * request/response events, so this reads the same posts query through the
+ * shared in-page capture (`createPageExchangeCapture`) and applies the same
+ * rules to what it buffers:
+ *   - owner: a request whose variables do not target the owner is ignored,
+ *     and each response must be owner-bound and not owner-conflicting;
+ *   - cursor continuity: page N is the first unconsumed observation whose
+ *     request cursor equals page N-1's `end_cursor` (page 1: no cursor);
+ *   - end: `has_next_page: false`, or a null `end_cursor` with no flag;
+ *   - contradiction: every observation is merged by id, and a repeat of a
+ *     cursor that drops posts, or a changed or unreadable post, fails the walk.
+ * Navigation binding: every drain must see the document the walk attached
+ * to, or the document was replaced and the walk fails; a page is accepted
+ * only while the location is the owner's profile. A full capture buffer, or a
+ * posts-shaped request whose body could not be read, fails the walk as
+ * unproven.
+ *
+ * First page: when the host runs init scripts (page_init_script), the
+ * capture is in every document from its start, so the walk loads the
+ * profile directly. Otherwise the capture cannot see requests made before it
+ * was installed, so a full load of the profile page is useless. The walk then
+ * loads the home page, attaches the capture, and follows the app's own link
+ * to the profile. The app then requests the first page in the captured
+ * document.
+ */
+export async function fetchAllPostsMobile(
+	page: Page,
+	username: string,
+	capture: CaptureSession | null,
+	progress?: (
+		message: string,
+		extra?: Record<string, unknown>,
+	) => Promise<void>,
+	delay: (ms: number) => Promise<void> = politeDelay,
+	postsClock: PostsClock = realPostsClock,
+	expectedUserId?: string,
+): Promise<{
+	edges: InstagramTimelineEdge[];
+	sourceEdgeCount: number;
+	sourceEnd: boolean;
+	truncated: boolean;
+	ownerBound: boolean;
+}> {
+	const posts = createPostReconciler();
+	const { edges } = posts;
+	const owner = { id: expectedUserId ?? "", username };
+	const observations: Array<{
+		connection: CompleteTimelineConnection | null;
+		status: number;
+		variables: unknown;
+	}> = [];
+	const cursorSnapshots = new Map<string, Set<string>>();
+	const exchanges = await createPageExchangeCapture(page, {
+		name: POSTS_CAPTURE_NAME,
+		rules: POSTS_CAPTURE_RULES,
+		maxBuffered: POSTS_CAPTURE_MAX_BUFFERED,
+	});
+	/** The generation of the document the walk attached to; 0 before. */
+	let attachedGeneration = 0;
+	let currentPath = "";
+	let dropped = false;
+	let unreadableRequests = false;
+	const consumed = new Set<number>();
+	let ownerBound = true;
+	let observationFailure: Error | undefined;
+	let unrecordableSourceEdges = 0;
+	let sawValidResponse = false;
+	let sawTerminalPage = false;
+	/** The request cursor of the accepted end page; undefined before it. */
+	let terminalCursor: string | null | undefined;
+	let initialPageWasTerminal = false;
+	let sourceEdgeCount = 0;
+	let expectedContinuationCursor: string | null = null;
+
+	const evaluate = async (script: string, failure: string): Promise<unknown> => {
+		try {
+			return await page.evaluate(script);
+		} catch {
+			throw new Error(failure);
+		}
+	};
+	const isEnd = (connection: CompleteTimelineConnection): boolean =>
+		connection.page_info?.has_next_page === false ||
+		(connection.page_info?.has_next_page == null && connection.page_info?.end_cursor === null);
+
+	// Merge one captured response, as Desktop's reconcileObserved does.
+	const observe = async (entry: CapturedExchange): Promise<void> => {
+		let variables: unknown = null;
+		try {
+			variables = JSON.parse(postsRequestVariablesText(entry.requestBody)) as unknown;
+		} catch {
+			variables = null;
+		}
+		if (!postsVariablesTargetOwner(variables, username, expectedUserId)) return;
+		const text = entry.responseText;
+		const connection = text === null ? null : await readTimelineConnection({
+			status: () => entry.status,
+			json: async () => JSON.parse(text) as unknown,
+		}, page, owner);
+		observations.push({ connection, status: entry.status, variables });
+		ownerBound &&= connection?.ownerBound === true;
+		if (!connection || connection.ownerConflict) {
+			observationFailure ??= new Error(connection?.ownerConflict
+				? "meta_posts_owner_conflict"
+				: "meta_posts_timeline_unavailable: matching timeline response was not a successful complete page");
+			return;
+		}
+		const cursor = JSON.stringify(valuesForVariableKeys(variables, POSTS_CURSOR_VARIABLES)
+			.filter(value => value !== null && value !== "").map(String).sort());
+		const responseIds = new Set<string>();
+		for (const edge of connection.edges) {
+			const id = edge?.node?.id ?? edge?.node?.pk ?? edge?.node?.media_id ?? edge?.node?.code;
+			if (typeof id !== "string" || !id) {
+				unrecordableSourceEdges += 1;
+				continue;
+			}
+			responseIds.add(id);
+			posts.reconcile(edge, id);
+		}
+		const previousIds = cursorSnapshots.get(cursor);
+		if (previousIds && [...previousIds].some(id => !responseIds.has(id))) {
+			observationFailure ??= new Error(
+				"meta_posts_timeline_contradictory: a timeline response omitted posts the source had already returned",
+			);
+		}
+		cursorSnapshots.set(cursor, new Set([...(previousIds ?? []), ...responseIds]));
+		if (terminalCursor !== undefined && postsVariablesHaveCursor(variables, terminalCursor)) {
+			sawTerminalPage = isEnd(connection);
+		}
+	};
+	// Read everything captured so far, in arrival order.
+	const drainAll = async (): Promise<void> => {
+		let drain: ExchangeDrain;
+		try {
+			drain = await exchanges.drain();
+		} catch {
+			throw new Error("meta_posts_navigation_failed: the posts capture could not be read");
+		}
+		if (drain.documentReplaced || drain.generation === 0 || drain.generation !== attachedGeneration) {
+			throw new Error("meta_posts_navigation_failed: the page was replaced during the posts walk");
+		}
+		try {
+			currentPath = new URL(drain.documentUrl).pathname;
+		} catch {
+			currentPath = "";
+		}
+		dropped ||= drain.overflowed;
+		for (const entry of drain.exchanges) {
+			// A GraphQL POST whose body could not be read may have been a posts page.
+			if (!entry.ruleCertain) unreadableRequests = true;
+			else await observe(entry);
+		}
+	};
+	const queued = (expectedCursor: string | null): number => {
+		for (let index = 0; index < observations.length; index += 1) {
+			if (!consumed.has(index) && postsVariablesHaveCursor(observations[index]?.variables, expectedCursor)) return index;
+		}
+		return -1;
+	};
+	const polls = Math.ceil(MOBILE_POSTS_WAIT_MS / MOBILE_POSTS_POLL_MS);
+	const waitForPage = async (expectedCursor: string | null): Promise<number> => {
+		for (let poll = 0; poll <= polls; poll += 1) {
+			await drainAll();
+			const index = queued(expectedCursor);
+			if (index >= 0 && isOwnerProfilePath(currentPath, username)) return index;
+			if (poll < polls) await postsClock.sleep(MOBILE_POSTS_POLL_MS);
+		}
+		if (queued(expectedCursor) >= 0) {
+			throw new Error("meta_posts_navigation_failed: the profile view was not open when its posts page arrived");
+		}
+		return -1;
+	};
+	// A document that is still loading may refuse a script; poll again.
+	const attach = async (): Promise<AttachResult | null> => {
+		for (let poll = 0; poll <= polls; poll += 1) {
+			const attached = await exchanges.attach();
+			if (attached) return attached;
+			if (poll < polls) await postsClock.sleep(MOBILE_POSTS_POLL_MS);
+		}
+		return null;
+	};
+	const openProfile = async (): Promise<void> => {
+		// With init scripts, the profile document is captured from its start.
+		if (exchanges.mode === "init_script") {
+			if (!(await safeGoto(page, `${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`))) {
+				throw new Error("meta_posts_navigation_failed: profile timeline did not load");
+			}
+			const attached = await attach();
+			if (attached && !attached.earlyTrafficMissed) {
+				attachedGeneration = attached.generation;
+				return;
+			}
+			// The host did not run the script at document start: use the link.
+		}
+		// Load home, attach there, then follow the app's profile link.
+		if (!(await safeGoto(page, `${INSTAGRAM_ORIGIN}/`))) {
+			throw new Error("meta_posts_navigation_failed: profile timeline did not load");
+		}
+		for (let poll = 0; poll <= polls; poll += 1) {
+			const last = poll === polls;
+			const attached = await exchanges.attach();
+			if (attached) {
+				const opened = await page.evaluate(openProfileScript(username, last))
+					.catch(() => null) as { via?: unknown } | null;
+				if (opened?.via === "link" || opened?.via === "history") {
+					attachedGeneration = attached.generation;
+					return;
+				}
+				if (opened?.via === "already_there") {
+					throw new Error("meta_posts_navigation_failed: the profile was open before the posts capture");
+				}
+			}
+			if (!last) await postsClock.sleep(MOBILE_POSTS_POLL_MS);
+		}
+		throw new Error("meta_posts_navigation_failed: no link to the profile was found");
+	};
+
+	let walk: Awaited<ReturnType<typeof walkPagesWithCeiling>>;
+	try {
+		walk = await walkPagesWithCeiling({
+			fetchPage: async (pageNumber) => {
+				const expectedCursor = pageNumber === 1 ? null : expectedContinuationCursor;
+				let index = pageNumber === 1 ? -1 : queued(expectedCursor);
+				if (index < 0) {
+					if (pageNumber === 1) {
+						await openProfile();
+					} else {
+						await evaluate(POSTS_SCROLL_SCRIPT, "meta_posts_navigation_failed: timeline page did not advance");
+					}
+					index = await waitForPage(expectedCursor);
+					if (index < 0 && pageNumber === 1) {
+						await evaluate(POSTS_SCROLL_SCRIPT,
+							"meta_posts_navigation_failed: initial timeline fallback scroll failed");
+						index = await waitForPage(expectedCursor);
+					}
+					if (index < 0) return false;
+				}
+				consumed.add(index);
+				const { connection, status } = observations[index] ?? { connection: null, status: 0 };
+				if (!connection) {
+					throw new Error(
+						"meta_posts_timeline_unavailable: matching timeline response was not a successful complete page",
+					);
+				}
+				if (connection.ownerConflict) throw new Error("meta_posts_owner_conflict");
+				sawValidResponse = true;
+				sourceEdgeCount += connection.edges.length;
+				capture?.captureHttp(
+					`posts-page-${String(pageNumber - 1).padStart(3, "0")}`,
+					connection,
+					{ status },
+				);
+				await progress?.("Fetched Instagram posts page", {
+					item_count: connection.edges.length,
+					page_index: pageNumber,
+					total_seen: edges.length,
+				});
+				const pageInfo = connection.page_info;
+				if (
+					pageInfo?.has_next_page === true &&
+					(typeof pageInfo.end_cursor !== "string" || !pageInfo.end_cursor)
+				) {
+					throw new Error(
+						"meta_posts_cursor_unavailable: continuing timeline page had no cursor",
+					);
+				}
+				expectedContinuationCursor = pageInfo?.end_cursor ?? null;
+				if (isEnd(connection)) {
+					sawTerminalPage = true;
+					terminalCursor = expectedCursor;
+					initialPageWasTerminal ||= pageNumber === 1;
+					return false;
+				}
+				if (pageInfo?.has_next_page !== true) return false;
+				await delay(1500);
+				return true;
+			},
+			maxPages: POSTS_MAX_PAGES,
+		});
+	} catch (error) {
+		throw sawValidResponse && edges.length > 0
+			? new PartialWalkFailure(error, edges)
+			: error;
+	}
+	if (!sawValidResponse) {
+		throw new Error(
+			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
+		);
+	}
+	try {
+		await postsClock.sleep(MOBILE_POSTS_SETTLE_MS);
+		await drainAll();
+		if (initialPageWasTerminal) sourceEdgeCount = edges.length + unrecordableSourceEdges;
+		if (observationFailure) throw observationFailure;
+		if (dropped) {
+			throw new Error(
+				"meta_posts_observations_dropped: the page sent more posts responses than the capture keeps",
+			);
+		}
+		if (unreadableRequests) {
+			throw new Error(
+				"meta_posts_observations_dropped: a posts-shaped request body could not be read",
+			);
+		}
+	} catch (error) {
+		throw edges.length > 0 ? new PartialWalkFailure(error, edges) : error;
+	}
+	if (posts.conflicting) {
 		throw new PartialWalkFailure(
 			new Error("meta_posts_timeline_contradictory: post versions changed or were unreadable"),
 			edges,
@@ -2513,13 +2903,38 @@ export async function scrapeTargetingCategories(
 
 
 /** Only exact source totals or an explicit source end can prove a list.
- * A contradictory exact total vetoes an end signal. Empty inventories require\n * an exact zero; an end signal alone cannot distinguish login/challenge shells. */
+ * A contradictory exact total vetoes an end signal. An empty list needs an
+ * exact zero, or `emptyOwnerBound`: the source listed no items at all, ended
+ * the list explicitly, and its response named the owner. An end signal
+ * without owner evidence cannot tell an empty list from a login or
+ * challenge shell. */
 export function sourceInventoryComplete(
-	read: number, sourceTotal: unknown, sourceEnd: boolean,
+	read: number, sourceTotal: unknown, sourceEnd: boolean, emptyOwnerBound = false,
 ): boolean {
-	const exact = typeof sourceTotal === "number" &&
-		Number.isSafeInteger(sourceTotal) && sourceTotal >= 0;
-	return exact ? sourceTotal === read : read > 0 && sourceEnd;
+	return exactSourceTotal(sourceTotal) ? sourceTotal === read : sourceEnd && (read > 0 || emptyOwnerBound);
+}
+
+function exactSourceTotal(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Why a list read is not proven complete, in terms of what the run saw.
+ * `endSignal` names the source's end marker; `totalProblem` says why the
+ * profile gave no total, when that is known. */
+export function inventoryGapReason(list: string, seen: {
+	read: number; sourceItems: number; sourceTotal: unknown; sourceEnd: boolean; ownerBound: boolean;
+	endSignal: string; totalProblem?: string | null;
+}): string {
+	if (!seen.ownerBound) return `the ${list} responses did not show that they belong to the signed-in account`;
+	if (exactSourceTotal(seen.sourceTotal)) {
+		return `the profile reports ${seen.sourceTotal} ${list} but ${seen.read} were read`;
+	}
+	const noTotal = `the profile gave no exact ${list} count${seen.totalProblem ? ` (${seen.totalProblem})` : ""}`;
+	if (!seen.sourceEnd) return `${noTotal}, and the read never reached ${seen.endSignal}`;
+	if (seen.read < seen.sourceItems) {
+		return `${noTotal}, and ${seen.sourceItems - seen.read} of the ${seen.sourceItems} ${list} the source listed could not be read`;
+	}
+	return `${noTotal}; the source ended the list with ${seen.endSignal}`;
 }
 
 /** The facepile is normally a sample. It is exhaustive only when its distinct
@@ -2588,7 +3003,7 @@ async function reportCollectionFailure(
  *  Any other walk error (navigation, an unsuccessful or unobserved page, a
  *  page-script or transport error) means the read itself failed. */
 const UNPROVEN_WALK_ERROR =
-	/^meta_(?:posts_owner_conflict|posts_cursor_unavailable|posts_timeline_contradictory|posts_unrecordable_edges|following_owner_conflict|following_unreadable_row)\b/;
+	/^meta_(?:posts_owner_conflict|posts_cursor_unavailable|posts_timeline_contradictory|posts_unrecordable_edges|posts_observations_dropped|following_owner_conflict|following_unreadable_row)\b/;
 
 /** The connector's own error code for a failed walk read, or `null` when the
  *  walk ended without a failure that means the read did not complete. */
@@ -2712,9 +3127,12 @@ export async function collectAllStreams(
 		// when profile output was not requested. Unknown is not proof of empty.
 		let observedPostCount: number | null = null;
 		let observedFollowingCount: number | null = null;
+		/** Why the profile gave no counts, when the read can tell (Mobile only). */
+		let profileCountProblem: string | null = null;
 		if ((wantsProfile || wantsPosts || wantsPostLikes || wantsFollowing) && user && identity) {
 			await progress("Fetching Instagram profile counts");
-			const profileUser = mobile ? await fetchMobileProfileUser(page, identity.username, (body, status) => observeAuthentication(page, body, status)) : await fetchProfilePageUser(
+			const profileUser = mobile ? await fetchMobileProfileUser(page, identity.username, (body, status) => observeAuthentication(page, body, status))
+				.then(read => { profileCountProblem = read.problem; return read.user; }) : await fetchProfilePageUser(
 				page,
 				identity.username,
 				capture,
@@ -2727,6 +3145,7 @@ export async function collectAllStreams(
 				profileUser.username.toLowerCase() === identity.username.toLowerCase(),
 			);
 			const trustedProfileUser = profileUserMatchesIdentity ? profileUser : null;
+			if (profileUser && !profileUserMatchesIdentity) profileCountProblem = "the profile read described another account";
 			const counts = profileCountsFromGraphQL(
 				trustedProfileUser
 					? { data: { user: trustedProfileUser } }
@@ -2742,7 +3161,7 @@ export async function collectAllStreams(
 				if (validProfile) await emitRecord("profile", profile as RecordData);
 				if (!readableSources || !validProfile || !profileEnrichmentIsComplete(trustedProfileUser)) {
 					await queueInventoryResult(ctx, "profile", validProfile ? 1 : 0, false,
-						"Instagram profile enrichment was incomplete; the emitted profile is a partial record");
+						`Instagram profile enrichment was incomplete; the emitted profile is a partial record${profileCountProblem ? ` (${profileCountProblem})` : ""}`);
 				}
 			}
 		}
@@ -2750,30 +3169,42 @@ export async function collectAllStreams(
 		if ((wantsPosts || wantsPostLikes) && identity) {
 			await progress("Fetching Instagram posts");
 			let edges: InstagramTimelineEdge[] = [];
+			let sourceItems = 0;
 			let sourceEnd = false;
 			let readable = true;
 			let ownerBound = false;
 			let postsFailedRead: string | null = null;
 			try {
-				if (mobile) throw new Error("PageShim lacks passive GraphQL request/response capture; page-minted posts doc_id, variables and anti-bot parameters are not available");
-				const result = await fetchAllPosts(page, identity.username, capture, progress, delay, postsClock, identity.id);
+				const result = await (mobile ? fetchAllPostsMobile : fetchAllPosts)(
+					page, identity.username, capture, progress, delay, postsClock, identity.id);
 				edges = result.edges;
+				sourceItems = result.sourceEdgeCount;
 				ownerBound = result.ownerBound;
 				sourceEnd = result.sourceEnd;
 			} catch (error) {
 				readable = false;
-				if (!mobile) postsFailedRead = failedWalkRead(error);
+				postsFailedRead = failedWalkRead(error);
 				if (error instanceof PartialWalkFailure) edges = [...error.partial];
 			}
 			const emitted = await emitPostRecords(ctx, edges);
-			const postsComplete = readable && ownerBound && sourceInventoryComplete(edges.length, observedPostCount, sourceEnd);
-			const postsWhy = mobile
-				? "PageShim lacks passive GraphQL request/response capture; page-minted posts doc_id, variables and anti-bot parameters are not available"
-				: readable ? undefined : "the posts read failed before the source's end";
-			if (wantsPosts) await queueInventoryResult(ctx, "posts", emitted.posts, postsComplete && emitted.postsReadable, postsWhy, postsFailedRead);
+			const postsComplete = readable && ownerBound &&
+				sourceInventoryComplete(edges.length, observedPostCount, sourceEnd, ownerBound && sourceItems === 0);
+			const postsGap = !readable ? "the posts read failed before the source's end"
+				: !postsComplete ? inventoryGapReason("posts", {
+					read: edges.length, sourceItems, sourceTotal: observedPostCount, sourceEnd, ownerBound,
+					endSignal: "a page with has_next_page false", totalProblem: profileCountProblem,
+				})
+				: undefined;
+			if (wantsPosts) {
+				await queueInventoryResult(ctx, "posts", emitted.posts, postsComplete && emitted.postsReadable,
+					postsGap ?? (emitted.postsReadable ? undefined : "some posts could not be recorded"), postsFailedRead);
+			}
 			if (wantsPostLikes) {
+				const likesSampled = !edges.every(postLikesAreComplete);
 				await queueInventoryResult(ctx, "post_likes", emitted.likes,
-					postsComplete && emitted.likesReadable && edges.every(postLikesAreComplete), postsWhy, postsFailedRead);
+					postsComplete && emitted.likesReadable && !likesSampled,
+					postsGap ?? (!emitted.likesReadable ? "some likes could not be recorded"
+						: likesSampled ? "some posts list only a sample of their likers" : undefined), postsFailedRead);
 			}
 		}
 

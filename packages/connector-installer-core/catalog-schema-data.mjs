@@ -586,7 +586,7 @@ export const connectorManifestSchema = {
     },
     "browserFeature": {
       "type": "string",
-      "description": "Features the browser kind provides (Section 3.3.1):\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.\n- page_input: Interact with the active page: click and type.\n- cookie_read: Read the active page's cookie jar.\n- page_response_observation: Observe page network responses, including response body content.\n- host_cookie_jar_request: Make an HTTP request from the host runtime using the active page's cookie jar.",
+      "description": "Features the browser kind provides (Section 3.3.1):\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.\n- page_input: Interact with the active page: click and type.\n- cookie_read: Read the active page's cookie jar.\n- page_response_observation: Observe page network responses, including response body content.\n- page_init_script: Run script in the main frame at the start of every later document, before the page's own scripts.\n- host_cookie_jar_request: Make an HTTP request from the host runtime using the active page's cookie jar.",
       "enum": [
         "page_navigation",
         "page_script_evaluation",
@@ -598,6 +598,7 @@ export const connectorManifestSchema = {
         "page_input",
         "cookie_read",
         "page_response_observation",
+        "page_init_script",
         "host_cookie_jar_request"
       ]
     },
@@ -618,7 +619,7 @@ export const connectorManifestSchema = {
     },
     "bindingFeature": {
       "type": "string",
-      "description": "Host capability definitions (Section 3.3.8; each belongs to exactly one kind, see browserFeature and networkFeature):\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- same_origin_page_fetch: Fetch same-origin resources from the active page context.\n- host_http_request: Make an HTTP request from the host runtime outside the page context.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.\n- page_input: Interact with the active page: click and type.\n- cookie_read: Read the active page's cookie jar.\n- page_response_observation: Observe page network responses, including response body content.\n- host_cookie_jar_request: Make an HTTP request from the host runtime using the active page's cookie jar.",
+      "description": "Host capability definitions (Section 3.3.8; each belongs to exactly one kind, see browserFeature and networkFeature):\n- page_navigation: Navigate the active page to a URL.\n- page_script_evaluation: Run script in the active page context.\n- page_content_read: Read rendered page content.\n- page_condition_wait: Wait until a condition in the active page becomes true.\n- same_origin_page_fetch: Fetch same-origin resources from the active page context.\n- host_http_request: Make an HTTP request from the host runtime outside the page context.\n- host_download_capture: Capture content downloaded by the active page.\n- host_archive_extraction: Extract downloaded archive contents in the host runtime.\n- host_archive_entry_chunk_read: Read an extracted archive entry in chunks.\n- page_input: Interact with the active page: click and type.\n- cookie_read: Read the active page's cookie jar.\n- page_response_observation: Observe page network responses, including response body content.\n- page_init_script: Run script in the main frame at the start of every later document, before the page's own scripts.\n- host_cookie_jar_request: Make an HTTP request from the host runtime using the active page's cookie jar.",
       "enum": [
         "page_navigation",
         "page_script_evaluation",
@@ -632,6 +633,7 @@ export const connectorManifestSchema = {
         "page_input",
         "cookie_read",
         "page_response_observation",
+        "page_init_script",
         "host_cookie_jar_request"
       ]
     },
