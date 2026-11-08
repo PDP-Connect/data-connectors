@@ -695,6 +695,7 @@
 			"spotify_playlist_items_completion_unproven": "incomplete_retry",
 			"spotify_playlist_pagination_no_progress": "incomplete_retry",
 			"spotify_playlist_response_invalid": "unexpected_data",
+			"spotify_playlist_revision_unproven": "incomplete_retry",
 			"spotify_playlist_row_invalid": "unexpected_data",
 			"spotify_playlist_row_type_unrecognized": "unexpected_data",
 			"spotify_playlist_rows_unsupported": {

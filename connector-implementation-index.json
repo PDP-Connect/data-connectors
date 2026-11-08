@@ -24928,6 +24928,7 @@
 					"spotify_playlist_items_completion_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 					"spotify_playlist_pagination_no_progress": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 					"spotify_playlist_response_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+					"spotify_playlist_revision_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 					"spotify_playlist_row_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 					"spotify_playlist_row_type_unrecognized": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 					"spotify_playlist_rows_unsupported": "Some playlist entries are a type this connector does not read yet, so they were skipped. The rest of each playlist was read.",
