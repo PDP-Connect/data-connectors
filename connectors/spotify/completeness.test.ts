@@ -1326,22 +1326,52 @@ test("known Spotify pseudo-playlists count in inventory proof without becoming p
 	);
 });
 
-test("playlist item rows reject unrecognized types instead of silently skipping them", async () => {
-	await assertRejectedWithoutAuthority(
-		(_offset, _index, operationName, variables) => {
-			if (operationName === "libraryV3") {
+test("playlist item rows of an unrecognized type are skipped as uncovered rows, not a failed run", async () => {
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	let result: Awaited<ReturnType<typeof collectSavedTracks>>;
+	try {
+		result = await collectSavedTracks(
+			(_offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") {
+					return {
+						data: {
+							me: {
+								libraryV3: {
+									offset: 0,
+									totalCount: 1,
+									items: [
+										{
+											item: {
+												data: {
+													__typename: "Playlist",
+													uri: "spotify:playlist:pl1",
+												},
+											},
+										},
+									],
+								},
+							},
+						},
+					};
+				}
 				return {
 					data: {
-						me: {
-							libraryV3: {
-								offset: 0,
-								totalCount: 1,
+						playlistV2: {
+							uri: String(variables?.uri),
+							name: "List",
+							content: {
+								totalCount: 2,
+								offset: variables?.offset,
 								items: [
+									{ itemV2: { data: { __typename: "FutureType", uri: "spotify:future:x", name: "secret" } } },
 									{
-										item: {
+										itemV2: {
 											data: {
-												__typename: "Playlist",
-												uri: "spotify:playlist:pl1",
+												__typename: "Track",
+												uri: "spotify:track:t1",
+												name: "t1",
+												artists: { items: [] },
 											},
 										},
 									},
@@ -1350,23 +1380,36 @@ test("playlist item rows reject unrecognized types instead of silently skipping 
 						},
 					},
 				};
-			}
-			return {
-				data: {
-					playlistV2: {
-						uri: String(variables?.uri),
-						name: "List",
-						content: {
-							totalCount: 1,
-							offset: variables?.offset,
-							items: [{ itemV2: { data: { __typename: "FutureType" } } }],
-						},
-					},
-				},
-			};
-		},
-		{ requested: ["playlist_items"] },
+			},
+			{ requested: ["playlists", "playlist_items"] },
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const items = result.emittedRecords.filter((record) => record.stream === "playlist_items");
+	assert.equal(items.length, 1);
+	// The source position of the known row is kept.
+	assert.equal(items[0]?.data.position, 1);
+	assert.equal(result.emittedRecords.filter((record) => record.stream === "playlists").length, 1);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE" && message.stream === "playlist_items",
+	) as { considered?: number; covered?: number } | undefined;
+	assert.deepEqual([coverage?.considered, coverage?.covered], [2, 1]);
+	assert.ok(
+		result.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "playlist_items" &&
+				message.reason === "spotify_playlist_rows_unsupported",
+		),
 	);
+	// No full-scan checkpoint for a stream with a skipped row; playlists keeps one.
+	const states = result.messages.filter((message) => message.type === "STATE").map((message) => message.stream);
+	assert.deepEqual(states, ["playlists"]);
+	const skipped = diagnostics.find((line) => line.includes("playlist_rows_skipped"));
+	assert.ok(skipped);
+	assert.match(skipped, /FutureType:1/);
+	assert.doesNotMatch(diagnostics.join("\n"), /secret|spotify:future/);
 });
 
 test("playlist item positions retain source slots occupied by episodes", async () => {

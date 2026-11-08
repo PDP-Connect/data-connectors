@@ -24249,7 +24249,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.55",
+				"version": "0.1.56",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",

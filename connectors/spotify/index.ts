@@ -40,14 +40,21 @@ export const spotifyRetryablePattern =
 /**
  * Streams that read one source surface each. A failure on that surface fails
  * only its own stream: the other streams still export (RSS run 8553d363 lost
- * every stream to a recently-played 404).
+ * every stream to a recently-played 404). The library surface (libraryV3 and
+ * fetchPlaylist) is one unit: playlists and playlist_items fail together.
+ * When the failing streams are all that was asked for, the run fails as before.
  */
 export const SPOTIFY_ISOLATED_STREAMS = [
+	"playlists",
+	"playlist_items",
+	"saved_tracks",
 	"recently_played_contexts",
 	"top_artists",
 	"top_tracks",
 ] as const;
 export type SpotifyIsolatedStream = (typeof SPOTIFY_ISOLATED_STREAMS)[number];
+/** The streams the manifest declares; every one of them, once requested, ends produced or skipped. */
+const SPOTIFY_STREAMS: readonly string[] = ["profile", ...SPOTIFY_ISOLATED_STREAMS];
 
 /**
  * Bounded, non-identifying facts about one failed stream. `endpoint` is a
@@ -151,6 +158,12 @@ export interface BrowserData {
 	 * name to its row count; it never carries a URI or other row content.
 	 */
 	librarySkipped?: { count: number; types: Record<string, number> };
+	/**
+	 * Playlist rows whose `__typename` the connector does not map. Each is
+	 * skipped and counted as an uncovered playlist_items row instead of failing
+	 * the run. `types` holds bounded type names only, never row content.
+	 */
+	playlistRowsSkipped?: { count: number; types: Record<string, number> };
 	completion: Partial<
 		Record<"playlists" | "playlist_items" | "saved_tracks", SpotifyEndEvidence>
 	>;
@@ -1720,8 +1733,17 @@ export const spotifyPageCollector = async (
 			}
 		}
 
+		// A stream group fails alone when anything else was asked for; when it is
+		// all that was asked for, its error fails the run as before.
+		const othersWanted = (group: readonly string[]) =>
+			[...wanted].some((stream) => !group.includes(stream));
+		const playlistGroup = ["playlists", "playlist_items"] as const;
+
 		if (wanted.has("playlists") || wanted.has("playlist_items")) {
+			try {
 			const playlistUris: string[] = [];
+			let playlistRowSkippedCount = 0;
+			const playlistRowSkippedTypes: Record<string, number> = {};
 			let libraryOffset = 0;
 			const libraryLimit = 200;
 			const libraryPageSignatures = new Set<string>();
@@ -1924,6 +1946,9 @@ export const spotifyPageCollector = async (
 					let offset = 0;
 					let position = 0;
 					let trackCount = 0;
+					// Rows of a type the connector does not map, for this attempt only:
+					// a revision retry reads the playlist again from the start.
+					const attemptSkippedTypes: Record<string, number> = {};
 					const requestedPlaylistId = idFromUri(uri);
 					if (requestedPlaylistId === null) {
 						throw new Error("spotify_library_playlist_identity_missing");
@@ -2079,7 +2104,23 @@ export const spotifyPageCollector = async (
 							if (trackData.__typename !== "Track" && !isLocalTrack) {
 								if (["Episode", "PodcastEpisode"].includes(trackData.__typename))
 									continue;
-								throw new Error("spotify_playlist_row_type_unrecognized");
+								// Through 0.1.55 this failed the whole export
+								// (spotify_playlist_row_type_unrecognized). The row is now
+								// skipped and counted as an uncovered playlist_items row, so
+								// the stream reads degraded and the type name (bounded, no
+								// row content) reaches the run log. If Spotify renamed
+								// Track, every row lands here and playlist_items reads
+								// omitted, which is still visible.
+								const typeName = trackData.__typename;
+								const typeLabel = !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(typeName)
+									? "unparseable"
+									: Object.hasOwn(attemptSkippedTypes, typeName) ||
+											Object.hasOwn(playlistRowSkippedTypes, typeName) ||
+											Object.keys({ ...playlistRowSkippedTypes, ...attemptSkippedTypes }).length < 16
+										? typeName
+										: "other";
+								attemptSkippedTypes[typeLabel] = (attemptSkippedTypes[typeLabel] ?? 0) + 1;
+								continue;
 							}
 							trackCount += 1;
 							if (wanted.has("playlist_items")) childTrackCount += 1;
@@ -2268,13 +2309,23 @@ export const spotifyPageCollector = async (
 					} else if (wanted.has("playlists")) {
 						playlistRowUnavailableCount += 1;
 					}
+					for (const [type, rows] of Object.entries(attemptSkippedTypes)) {
+						playlistRowSkippedTypes[type] = (playlistRowSkippedTypes[type] ?? 0) + rows;
+						playlistRowSkippedCount += rows;
+					}
 					playlistCoherent = true;
 					break;
 				}
 				if (!playlistCoherent) {
-					result.playlistRevisionUnproven = true;
-					return result;
+					// Caught below: only the playlist streams are given up.
+					throw new Error("spotify_playlist_revision_unproven");
 				}
+			}
+			if (playlistRowSkippedCount > 0) {
+				result.playlistRowsSkipped = {
+					count: playlistRowSkippedCount,
+					types: playlistRowSkippedTypes,
+				};
 			}
 			if (wanted.has("playlist_items")) {
 				result.completion.playlist_items =
@@ -2292,7 +2343,7 @@ export const spotifyPageCollector = async (
 								pageCount: childPageCount,
 								rawCount: childRawCount,
 								expectedCount: childCountKnown ? childExpectedCount : null,
-								discardedCount: childTrackUnavailableCount,
+								discardedCount: childTrackUnavailableCount + playlistRowSkippedCount,
 								remaining: false,
 								terminal:
 									childRawCount === 0 ? "empty_verified" : "total_reached",
@@ -2310,13 +2361,36 @@ export const spotifyPageCollector = async (
 				// Each skipped library row is at least one unread unit, so the
 				// stream cannot read complete while any row was skipped.
 				result.sourceCounts.playlist_items = {
-					considered: childTrackCount + librarySkippedCount,
+					considered: childTrackCount + librarySkippedCount + playlistRowSkippedCount,
 					covered: childTrackCoveredCount,
 				};
+			}
+			} catch (error) {
+				// The library surface fails its own two streams. Nothing partial is
+				// kept: no playlist rows, proofs or counts from this attempt.
+				const revision =
+					error instanceof Error && error.message === "spotify_playlist_revision_unproven";
+				if (!revision && !othersWanted(playlistGroup)) throw error;
+				result.playlists.splice(0);
+				result.playlist_items.splice(0);
+				result.playlistUris = [];
+				delete result.completion.playlists;
+				delete result.completion.playlist_items;
+				delete result.sourceCounts.playlists;
+				delete result.sourceCounts.playlist_items;
+				delete result.librarySkipped;
+				delete result.playlistRowsSkipped;
+				if (revision) result.playlistRevisionUnproven = true;
+				else {
+					for (const stream of playlistGroup) {
+						if (wanted.has(stream)) failStream(stream, error);
+					}
+				}
 			}
 		}
 
 		if (wanted.has("saved_tracks")) {
+			try {
 			let offset = 0;
 			const savedTrackPageSignatures = new Set<string>();
 			const savedTrackIdentities = new Set<string>();
@@ -2541,6 +2615,13 @@ export const spotifyPageCollector = async (
 				remaining: false,
 				terminal,
 			};
+			} catch (error) {
+				if (!othersWanted(["saved_tracks"])) throw error;
+				result.saved_tracks.splice(0);
+				delete result.completion.saved_tracks;
+				delete result.sourceCounts.saved_tracks;
+				failStream("saved_tracks", error);
+			}
 		}
 
 		if (wanted.has("recently_played_contexts")) {
@@ -3046,10 +3127,15 @@ async function reportIsolatedStreamFailure(
 	reportStreamFailure: BrowserCollectContext["reportStreamFailure"],
 ): Promise<void> {
 	const retryable = spotifyRetryablePattern.test(failure.code);
-	const message =
-		stream === "recently_played_contexts"
-			? "Spotify did not return recently played contexts this time; the other Spotify data was still read."
-			: "Spotify did not return this ranking this time; the other Spotify data was still read.";
+	const what: Record<SpotifyIsolatedStream, string> = {
+		playlists: "your playlists",
+		playlist_items: "your playlist tracks",
+		saved_tracks: "your saved tracks",
+		recently_played_contexts: "recently played contexts",
+		top_artists: "this ranking",
+		top_tracks: "this ranking",
+	};
+	const message = `Spotify did not return ${what[stream]} this time; the other Spotify data was still read.`;
 	const recoveryHint = retryable
 		? { action: "retry_by_runtime" as const, retryable: true }
 		: { action: "retry_on_connector_upgrade" as const, retryable: false };
@@ -3073,11 +3159,11 @@ async function reportIsolatedStreamFailure(
 }
 
 export async function spotifyCollect({
-	emit,
-	emitRecord,
+	emit: hostEmit,
+	emitRecord: hostEmitRecord,
 	page,
 	progress,
-	reportStreamFailure,
+	reportStreamFailure: hostReportStreamFailure,
 	requested,
 }: Pick<
 	BrowserCollectContext,
@@ -3085,10 +3171,51 @@ export async function spotifyCollect({
 > &
 	Partial<Pick<BrowserCollectContext, "reportStreamFailure">>, evaluateData?: (page: BrowserCollectContext["page"], streams: string[]) => Promise<BrowserData>): Promise<void> {
 	const requestedNames = [...requested.keys()];
+	// Every requested stream must end with a record, a checkpoint or a skip
+	// receipt. A host rejects a run that says nothing about a requested scope
+	// (RSS: "requested scope 'spotify.playlists' must be produced or marked
+	// omitted", 0.1.55 with an empty library). Track what each stream said so
+	// the end of this function can close any stream left silent.
+	const accounted = new Set<string>();
+	const emit = async (msg: EmittedMessage): Promise<void> => {
+		const m = msg as unknown as Record<string, unknown>;
+		const stream = typeof m.stream === "string" ? m.stream : "";
+		if (
+			m.type === "RECORD" ||
+			m.type === "STATE" ||
+			m.type === "SKIP_RESULT" ||
+			(m.type === "DETAIL_COVERAGE" &&
+				typeof m.considered === "number" &&
+				typeof m.covered === "number" &&
+				m.covered < m.considered)
+		) {
+			accounted.add(stream);
+		}
+		await hostEmit(msg);
+	};
+	const emitRecord = async (stream: string, data: Record<string, unknown>): Promise<void> => {
+		accounted.add(stream);
+		await hostEmitRecord(stream, data);
+	};
+	const reportStreamFailure: BrowserCollectContext["reportStreamFailure"] = hostReportStreamFailure
+		? async (stream, message, options) => {
+				accounted.add(stream);
+				await hostReportStreamFailure(stream, message, options);
+			}
+		: undefined;
+	// A stream group fails alone when anything else was asked for; when it is
+	// all that was asked for, the run fails as before.
+	const othersRequested = (group: readonly string[]) =>
+		requestedNames.some((stream) => !group.includes(stream));
+	const playlistGroup = ["playlists", "playlist_items"] as const;
+
 	await progress("Fetching Spotify data");
 	const data = await collectSpotifyWebData(page, requestedNames, evaluateData);
+	data.streamFailures ??= {};
+	const failures = data.streamFailures;
 	if (data.playlistRevisionUnproven) {
-		for (const stream of requested.keys()) {
+		for (const stream of playlistGroup) {
+			if (!requested.has(stream)) continue;
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
@@ -3098,8 +3225,10 @@ export async function spotifyCollect({
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 			});
 		}
-		return;
 	}
+	const playlistsHandled = (stream: string) =>
+		data.playlistRevisionUnproven === true &&
+		(playlistGroup as readonly string[]).includes(stream);
 	const librarySkipped =
 		data.librarySkipped && data.librarySkipped.count > 0
 			? data.librarySkipped
@@ -3108,6 +3237,19 @@ export async function spotifyCollect({
 		connectorDiagnostic("spotify", "library_rows_skipped", {
 			skipped: librarySkipped.count,
 			types: Object.entries(librarySkipped.types)
+				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+				.map(([type, rows]) => `${type}:${rows}`)
+				.join(","),
+		});
+	}
+	const playlistRowsSkipped =
+		data.playlistRowsSkipped && data.playlistRowsSkipped.count > 0
+			? data.playlistRowsSkipped
+			: null;
+	if (playlistRowsSkipped) {
+		connectorDiagnostic("spotify", "playlist_rows_skipped", {
+			skipped: playlistRowsSkipped.count,
+			types: Object.entries(playlistRowsSkipped.types)
 				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 				.map(([type, rows]) => `${type}:${rows}`)
 				.join(","),
@@ -3124,7 +3266,7 @@ export async function spotifyCollect({
 		["playlist_items", data.playlist_items],
 		["saved_tracks", data.saved_tracks],
 	] as const) {
-		if (requested.has(stream)) {
+		if (requested.has(stream) && !failures[stream]) {
 			const validRecords = records.filter(
 				(record) => validateRecord(stream, record).ok,
 			);
@@ -3194,20 +3336,36 @@ export async function spotifyCollect({
 		owner: "spotify:user:me:collection",
 		selector: "spotify:user:me:collection",
 	};
+	// A stream whose end the page could not prove fails alone, like any
+	// other isolated stream, unless it is all that was asked for.
+	const unproven = (
+		stream: "playlists" | "playlist_items" | "saved_tracks",
+		group: readonly string[],
+		code: string,
+	) => {
+		if (!othersRequested(group)) throw new Error(code);
+		failures[stream] = { code };
+		if (stream === "saved_tracks") data.saved_tracks = [];
+		else data[stream] = [];
+	};
 	if (
 		requested.has("playlists") &&
+		!failures.playlists &&
+		!playlistsHandled("playlists") &&
 		!hasSpotifyTerminalBoundary(data.completion.playlists, libraryExpectation)
 	) {
-		throw new Error("spotify_playlists_completion_unproven");
+		unproven("playlists", playlistGroup, "spotify_playlists_completion_unproven");
 	}
 	if (
 		requested.has("playlist_items") &&
+		!failures.playlist_items &&
+		!playlistsHandled("playlist_items") &&
 		!hasSpotifyTerminalBoundary(
 			data.completion.playlist_items,
 			playlistItemsExpectation,
 		)
 	) {
-		throw new Error("spotify_playlist_items_completion_unproven");
+		unproven("playlist_items", playlistGroup, "spotify_playlist_items_completion_unproven");
 	}
 	const savedProof = data.completion.saved_tracks;
 	const savedBoundaryProven =
@@ -3221,10 +3379,11 @@ export async function spotifyCollect({
 				(data.sourceCounts.saved_tracks?.considered ?? 0));
 	if (
 		requested.has("saved_tracks") &&
+		!failures.saved_tracks &&
 		!savedBoundaryProven &&
 		!savedBoundaryWithIncompleteRows
 	) {
-		throw new Error("spotify_saved_tracks_completion_unproven");
+		unproven("saved_tracks", ["saved_tracks"], "spotify_saved_tracks_completion_unproven");
 	}
 	if (requested.has("profile")) {
 		if (data.profile) await emitRecord("profile", data.profile);
@@ -3240,33 +3399,52 @@ export async function spotifyCollect({
 			},
 		);
 	}
-	if (requested.has("playlists")) {
-		await emitRecordsWithCoverage(
-			"playlists",
-			data.playlists,
-			data.sourceCounts.playlists ?? {
-				considered: data.playlists.length,
-				covered: data.playlists.length,
+	// A proven, gap-free full read of the library saves a full-scan checkpoint,
+	// as saved_tracks does. On hosts that export a scope only when it has rows
+	// or a checkpoint (PageShim, RSS), this is what lets an empty library, or
+	// playlists with no tracks, export as "collected, none" instead of being
+	// silently dropped.
+	const fullScanState = async (
+		stream: "playlists" | "playlist_items",
+		proof: SpotifyEndEvidence,
+	) =>
+		emit({
+			type: "STATE",
+			stream,
+			cursor: {
+				full_scan_at: new Date().toISOString(),
+				completion: {
+					operation: proof.operation,
+					pages: proof.pageCount,
+					rows: proof.rawCount,
+					terminal: proof.terminal,
+				},
 			},
-			emit,
-			emitRecord,
-		);
-	}
-	if (requested.has("playlist_items")) {
-		await emitRecordsWithCoverage(
-			"playlist_items",
-			data.playlist_items,
-			data.sourceCounts.playlist_items ?? {
-				considered: data.playlist_items.length,
-				covered: data.playlist_items.length,
-			},
-			emit,
-			emitRecord,
-		);
-	}
-	if (librarySkipped) {
-		for (const stream of ["playlists", "playlist_items"] as const) {
-			if (!requested.has(stream)) continue;
+		});
+	for (const [stream, expectation] of [
+		["playlists", libraryExpectation],
+		["playlist_items", playlistItemsExpectation],
+	] as const) {
+		if (!requested.has(stream) || playlistsHandled(stream)) continue;
+		const failure = failures[stream];
+		if (failure) {
+			await reportIsolatedStreamFailure(stream, failure, emit, reportStreamFailure);
+			continue;
+		}
+		const records = data[stream];
+		const counts = data.sourceCounts[stream] ?? {
+			considered: records.length,
+			covered: records.length,
+		};
+		await emitRecordsWithCoverage(stream, records, counts, emit, emitRecord);
+		const proof = data.completion[stream];
+		if (
+			counts.covered >= counts.considered &&
+			hasSpotifyEndProof(proof, expectation)
+		) {
+			await fullScanState(stream, proof);
+		}
+		if (librarySkipped) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
@@ -3279,32 +3457,50 @@ export async function spotifyCollect({
 				},
 			});
 		}
-	}
-	if (requested.has("saved_tracks")) {
-		await emitRecordsWithCoverage(
-			"saved_tracks",
-			data.saved_tracks,
-			data.sourceCounts.saved_tracks ?? {
-				considered: data.saved_tracks.length,
-				covered: data.saved_tracks.length,
-			},
-			emit,
-			emitRecord,
-		);
-		if (savedBoundaryProven) {
+		if (stream === "playlist_items" && playlistRowsSkipped) {
 			await emit({
-				type: "STATE",
-				stream: "saved_tracks",
-				cursor: {
-					full_scan_at: new Date().toISOString(),
-					completion: {
-						operation: savedProof.operation,
-						pages: savedProof.pageCount,
-						rows: savedProof.rawCount,
-						terminal: savedProof.terminal,
-					},
+				type: "SKIP_RESULT",
+				stream,
+				reason: "spotify_playlist_rows_unsupported",
+				message:
+					"Some playlist entries of a type this connector does not read yet were skipped; the other playlist tracks were still read.",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
 				},
 			});
+		}
+	}
+	if (requested.has("saved_tracks")) {
+		const failure = failures.saved_tracks;
+		if (failure) {
+			await reportIsolatedStreamFailure("saved_tracks", failure, emit, reportStreamFailure);
+		} else {
+			await emitRecordsWithCoverage(
+				"saved_tracks",
+				data.saved_tracks,
+				data.sourceCounts.saved_tracks ?? {
+					considered: data.saved_tracks.length,
+					covered: data.saved_tracks.length,
+				},
+				emit,
+				emitRecord,
+			);
+			if (savedBoundaryProven) {
+				await emit({
+					type: "STATE",
+					stream: "saved_tracks",
+					cursor: {
+						full_scan_at: new Date().toISOString(),
+						completion: {
+							operation: savedProof.operation,
+							pages: savedProof.pageCount,
+							rows: savedProof.rawCount,
+							terminal: savedProof.terminal,
+						},
+					},
+				});
+			}
 		}
 	}
 	for (const stream of [
@@ -3313,7 +3509,7 @@ export async function spotifyCollect({
 		"top_tracks",
 	] as const) {
 		if (!requested.has(stream)) continue;
-		const failure = data.streamFailures?.[stream];
+		const failure = failures[stream];
 		if (failure) {
 			await reportIsolatedStreamFailure(stream, failure, emit, reportStreamFailure);
 			continue;
@@ -3352,6 +3548,19 @@ export async function spotifyCollect({
 				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			});
 		}
+	}
+	// Last line of defence for the invariant above: a stream that reached
+	// here with no record, checkpoint or receipt is reported, never dropped.
+	for (const stream of requestedNames) {
+		if (accounted.has(stream) || !SPOTIFY_STREAMS.includes(stream)) continue;
+		connectorDiagnostic("spotify", "stream_outcome_missing", { stream });
+		await emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "spotify_stream_outcome_unproven",
+			message: "The connector could not prove this stream complete, so it was not exported this time.",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+		});
 	}
 }
 

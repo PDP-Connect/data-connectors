@@ -4016,6 +4016,104 @@ test("spotify: seven mobile streams retain capped inventory semantics on both ho
 	}
 });
 
+// RSS's result classifier rejects a run that is silent about a requested
+// scope ("requested scope 'spotify.playlists' must be produced or marked
+// omitted", 0.1.55). Each requested scope must be in the result or carry an
+// omitted error; a degraded one must also be in the result.
+function assertEveryScopeAccounted(result, scopes) {
+	const omitted = new Set(result.errors.filter((e) => e.disposition === "omitted").map((e) => e.scope));
+	const degraded = new Set(result.errors.filter((e) => e.disposition === "degraded").map((e) => e.scope));
+	for (const scope of scopes) {
+		const produced = Object.hasOwn(result, scope);
+		assert.ok(produced || omitted.has(scope), `${scope} neither produced nor omitted`);
+		assert.ok(!(produced && omitted.has(scope)), `${scope} both produced and omitted`);
+		if (degraded.has(scope)) assert.ok(produced, `${scope} degraded but absent`);
+	}
+	assert.equal(result.errors.some((e) => e.disposition === "fatal"), false);
+}
+
+test("spotify: every requested scope is produced or omitted when the library, a playlist row or a stream fails", { timeout: 300_000 }, async (t) => {
+	const fx = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-scope-outcomes.js") });
+	const scopes = fx.pageshimCase.scopes;
+	const gqlOverride = (override) => ({ ...fx.spotifyFixtures, resolve(raw, request) {
+		const base = fx.resolveFixture(raw, request);
+		const url = new URL(raw);
+		if (url.hostname === "api-partner.spotify.com") {
+			const body = JSON.parse(request.postData ?? "{}");
+			const replaced = override(body.operationName, body.variables ?? {}, base);
+			if (replaced) return replaced;
+		}
+		if (url.pathname.includes("/recently-played/")) return override("recently-played", {}, base) ?? base;
+		return base;
+	} });
+	const json = (body, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(body) });
+	await t.test("an account with no playlists, no history and no rankings exports empty playlist scopes", async () => {
+		const fixtures = gqlOverride((operation, variables) => {
+			if (operation === "libraryV3") return json({ data: { me: { libraryV3: { offset: variables.offset, totalCount: 1, items: [
+				{ item: { data: { __typename: "LikedSongs", uri: "spotify:collection:tracks" } } },
+			] } } } });
+			if (operation === "fetchLibraryTracks") return json({ data: { me: { library: { tracks: { offset: variables.offset, totalCount: 0, items: [] } } } } });
+			if (operation === "userTopContent") return json({ data: { me: { profile: { topArtists: { totalCount: 0, items: [] }, topTracks: { totalCount: 0, items: [] } } } } });
+			// A fresh account: Spotify answers an empty 404 at offset 0.
+			if (operation === "recently-played") return { status: 404, contentType: "application/json", body: "" };
+			return null;
+		});
+		for (const resultStreaming of [false, true]) {
+			const r = await runHarness({ bundle: built.outfile, fixtures, scopes, resultStreaming, gotoDelayMs: 0,
+				resultSpoolDirectory: join(out, "spotify-empty-" + resultStreaming) });
+			assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+			assertCleanRun(r);
+			const result = resultStreaming ? { ...r.streamDone } : r.result;
+			if (!resultStreaming) {
+				assertEveryScopeAccounted(result, scopes);
+				assert.deepEqual(result["spotify.playlists"], { records: [] });
+				assert.deepEqual(result["spotify.playlist_items"], { records: [] });
+				assert.deepEqual(result["spotify.saved_tracks"], { records: [] });
+			} else {
+				// profile, playlists, playlist_items and saved_tracks are sent.
+				assert.equal(r.streamResult.completed, true);
+				assert.equal(r.streamResult.scopeCount, 4);
+			}
+			assert.equal(r.states["spotify.playlists"].completion.operation, "libraryV3");
+			assert.equal(r.states["spotify.playlist_items"].completion.rows, 1);
+		}
+	});
+	await t.test("a library that fails omits only the two playlist scopes", async () => {
+		const fixtures = gqlOverride((operation) =>
+			operation === "libraryV3" ? json({ errors: [{ message: "synthetic library failure" }] }) : null);
+		const r = await runHarness({ bundle: built.outfile, fixtures, scopes, gotoDelayMs: 0 });
+		assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+		assertCleanRun(r);
+		assertEveryScopeAccounted(r.result, scopes);
+		for (const scope of ["spotify.playlists", "spotify.playlist_items"]) {
+			assert.equal(Object.hasOwn(r.result, scope), false);
+			assert.ok(r.result.errors.some((e) => e.scope === scope && e.disposition === "omitted" && e.code === "stream_collection_failed"));
+		}
+		assert.equal(r.result["spotify.saved_tracks"].records.length, 1);
+		assert.equal(r.result["spotify.profile"].records.length, 1);
+	});
+	await t.test("a playlist row of an unknown type degrades playlist_items instead of failing the run", async () => {
+		const fixtures = gqlOverride((operation, variables, base) => {
+			if (operation !== "fetchPlaylist") return null;
+			const payload = JSON.parse(base.body);
+			const content = payload.data.playlistV2.content;
+			content.items.unshift({ itemV2: { data: { __typename: "SyntheticFutureRow", uri: "spotify:future:x" } } });
+			content.totalCount = content.items.length;
+			return json(payload);
+		});
+		const r = await runHarness({ bundle: built.outfile, fixtures, scopes, gotoDelayMs: 0 });
+		assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+		assertCleanRun(r);
+		assertEveryScopeAccounted(r.result, scopes);
+		assert.equal(r.result["spotify.playlist_items"].records.length, 1);
+		assert.equal(r.result["spotify.playlist_items"].records[0].position, 1);
+		assert.ok(r.result.errors.some((e) => e.scope === "spotify.playlist_items" && e.disposition === "degraded"));
+		assert.equal(r.result["spotify.playlists"].records.length, 1);
+		assert.equal(r.states["spotify.playlist_items"], undefined);
+	});
+});
+
 test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeout: 180_000 }, async (t) => {
 	const fx = await import("./fixtures/spotify.mjs");
 	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-state.js") });
