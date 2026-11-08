@@ -35,7 +35,7 @@ const SPOTIFY_WEB_HOME = "https://open.spotify.com/";
 // Only 429 and 5xx are worth a retry. A 4xx (the recently-played 404 Spotify
 // began returning on 6 Nov 2026) fails the same way on every attempt.
 export const spotifyRetryablePattern =
-	/rate_limited|ECONN|fetch failed|retryable status (?:429|5\d\d)\b|spotify_retryable_status_(?:429|5\d\d|unknown)\b/i;
+	/rate_limited|ECONN|fetch failed|retryable status (?:429|5\d\d)\b|spotify_retryable_status_(?:429|5\d\d|unknown)\b|spotify_retryable_network\b/i;
 
 /**
  * Streams that read one source surface each. A failure on that surface fails
@@ -759,12 +759,25 @@ export const spotifyPageCollector = async (
 			detail: Omit<SpotifyStreamFailure, "code"> = {},
 		): void {
 			const message = error instanceof Error ? error.message : String(error);
-			const code = /^spotify_[a-z0-9_,]+/i.exec(message)?.[0] ?? "spotify_stream_failed";
+			const name = error instanceof Error ? error.name : "";
+			// A browser network failure ("Failed to fetch", "Load failed",
+			// "NetworkError ...") is a TypeError; the mobile bridge's 12 s deadline
+			// is an AbortError. Both can pass on a later run.
+			const network =
+				name === "TypeError" ||
+				name === "AbortError" ||
+				name === "TimeoutError" ||
+				/failed to fetch|load failed|networkerror|network request failed|aborted|timed? ?out/i.test(message);
+			const code =
+				/^spotify_[a-z0-9_,]+/i.exec(message)?.[0] ??
+				(network ? "spotify_retryable_network" : "spotify_stream_failed");
 			result.streamFailures = result.streamFailures ?? {};
 			result.streamFailures[stream] = { code, ...detail };
 		}
 		function safeSnippet(text: string, username: string | null): string {
-			let cleaned = text.slice(0, 400);
+			// Mask the whole (bounded) body first, then cut, so a cut can never
+			// leave part of a username, email or token behind.
+			let cleaned = text.slice(0, 16_384);
 			if (username) cleaned = cleaned.split(username).join("{user}");
 			cleaned = cleaned
 				.replace(/[^\s"'<>@]+@[^\s"'<>@]+/g, "{email}")
@@ -2567,34 +2580,35 @@ export const spotifyPageCollector = async (
 						},
 					},
 				);
-				// Spotify answers 404 with an empty body for an offset past the end
-				// of the list, not an empty page (live probe 8 Nov 2026: offset 0
-				// gave 200 with 9 contexts, offsets 50 to 500 gave 404). A history
-				// that exactly fills its last page therefore always ends in a 404,
-				// which until 0.1.55 failed the whole export for those users. At
-				// offset 0 it is an empty history. A 403 is an owner mismatch and
-				// still fails the stream.
-				if (response.status === 404) {
-					diagnostics.recentlyPlayed = {
-						pages: pageNumber,
-						endedBy: offset > 0 ? "not_found_past_end" : "not_found_at_start",
-					};
-					terminal = true;
-					break;
-				}
 				if (!response.ok) {
 					let body = "";
 					try {
 						body = await response.text();
 					} catch {}
+					// Spotify answers 404 with an EMPTY body for an offset past the
+					// end of the list, not an empty page (live probe 8 Nov 2026:
+					// offset 0 gave 200 with 9 contexts, offsets 50 to 500 gave 404
+					// with 0 bytes). A history that exactly fills its last page
+					// therefore always ends in that 404, which until 0.1.55 failed
+					// the whole export for those users. At offset 0 it is an empty
+					// history. A 404 with a body is not that answer and fails the
+					// stream, as does a 403 (owner mismatch).
+					if (response.status === 404 && body.trim() === "") {
+						diagnostics.recentlyPlayed = {
+							pages: pageNumber,
+							endedBy: offset > 0 ? "not_found_past_end" : "not_found_at_start",
+						};
+						terminal = true;
+						break;
+					}
 					failureDetail = {
 						endpoint: recentEndpoint,
 						status: response.status,
 						contentType: (response.headers.get("content-type") ?? "").split(";")[0]?.trim() || "none",
 						snippet: safeSnippet(body, recentUsername),
 					};
-					// 429 and 5xx can pass on a later run; any other status (the 404
-					// Spotify began returning on 6 Nov 2026) will not.
+					// 429 and 5xx can pass on a later run; any other status (403, a
+					// 404 with a body) will not.
 					throw new Error(
 						response.status === 429 || response.status >= 500
 							? `spotify_retryable_status_${response.status}`
@@ -2865,12 +2879,13 @@ async function collectSpotifyWebDataObserved(
 ): Promise<BrowserCollectResult> {
 	await openSpotify(page);
 	let attempt = 0;
-	const evaluate = async (): Promise<BrowserData> => {
+	let reloaded = false;
+	const evaluate = async (streams: string[] = requestedStreams): Promise<BrowserData> => {
 		attempt += 1;
 		const data = evaluateData
-			? await evaluateData(page, requestedStreams)
+			? await evaluateData(page, streams)
 			: ((await page.evaluate(
-					spotifyPageEvaluateSource(requestedStreams, spotifyPageCollector, { ...playerHashes }),
+					spotifyPageEvaluateSource(streams, spotifyPageCollector, { ...playerHashes }),
 				)) as BrowserData);
 		logCollectorDiagnostics(data, attempt);
 		return data;
@@ -2897,9 +2912,46 @@ async function collectSpotifyWebDataObserved(
 			playerRequestHashes: Object.keys(playerHashes).sort().join(","),
 		});
 		await page.goto(SPOTIFY_WEB_HOME, { waitUntil: "load" });
+		reloaded = true;
 		evaluated = await evaluate();
 	}
 	evaluated.streamFailures ??= {};
+	// Only userTopContent was missing, so the other streams were read and the
+	// ranked lists failed. Load the player once more, as 0.1.54 does for a
+	// missing hash, and read the ranked lists alone before giving them up.
+	const missingTop = (["top_artists", "top_tracks"] as const).filter((stream) =>
+		evaluated.streamFailures?.[stream]?.code.startsWith("spotify_missing_hashes_"),
+	);
+	if (missingTop.length > 0 && !reloaded) {
+		connectorDiagnostic("spotify", "query_hashes_reload", {
+			missing: "userTopContent",
+			streams: missingTop.join(","),
+			playerRequestHashes: Object.keys(playerHashes).sort().join(","),
+		});
+		reloaded = true;
+		let again: BrowserData | null = null;
+		let againError: unknown = null;
+		try {
+			await page.goto(SPOTIFY_WEB_HOME, { waitUntil: "load" });
+			again = await evaluate([...missingTop]);
+		} catch (error) {
+			againError = error;
+		}
+		for (const stream of missingTop) {
+			const failure = again?.streamFailures?.[stream];
+			if (again && !failure) {
+				delete evaluated.streamFailures[stream];
+				if (stream === "top_artists") evaluated.top_artist_pages = again.top_artist_pages ?? [];
+				else evaluated.top_track_pages = again.top_track_pages ?? [];
+			} else if (failure) {
+				evaluated.streamFailures[stream] = failure;
+			} else if (againError) {
+				const message = againError instanceof Error ? againError.message : String(againError);
+				const code = /^spotify_[a-z0-9_,]+/i.exec(message)?.[0];
+				if (code) evaluated.streamFailures[stream] = { code };
+			}
+		}
+	}
 	if (
 		requestedStreams.includes("recently_played_contexts") &&
 		!evaluated.streamFailures.recently_played_contexts
@@ -2917,6 +2969,35 @@ async function collectSpotifyWebDataObserved(
 			};
 		}
 	}
+	evaluated.top_artists ??= [];
+	evaluated.top_tracks ??= [];
+	for (const stream of ["top_artists", "top_tracks"] as const) {
+		if (!requestedStreams.includes(stream) || evaluated.streamFailures[stream]) continue;
+		const pages = (stream === "top_artists" ? evaluated.top_artist_pages : evaluated.top_track_pages) ?? [];
+		// One bad ranking page (a total that changed between pages, a
+		// malformed page) omits only this stream, as for recently played.
+		try {
+			const rows: Record<string, unknown>[] = [];
+			const counts = { considered: 0, covered: 0 };
+			for (const timeRange of ["short_term", "long_term"] as const) {
+				const payloads = pages
+					.filter((entry) => readPath(entry, "timeRange") === timeRange.toUpperCase())
+					.map((entry) => readPath(entry, "payload"));
+				const parsed = parseTopRows(payloads, stream, timeRange);
+				rows.push(...parsed.rows);
+				counts.considered += parsed.considered;
+				counts.covered += parsed.rows.length;
+			}
+			evaluated[stream] = rows;
+			evaluated.sourceCounts[stream] = counts;
+		} catch (error) {
+			evaluated[stream] = [];
+			delete evaluated.sourceCounts[stream];
+			evaluated.streamFailures[stream] = {
+				code: error instanceof Error ? (/^spotify_[a-z0-9_,]+/i.exec(error.message)?.[0] ?? "spotify_top_content_malformed") : "spotify_top_content_malformed",
+			};
+		}
+	}
 	for (const [stream, failure] of Object.entries(evaluated.streamFailures)) {
 		if (!failure) continue;
 		connectorDiagnostic("spotify", "stream_failed", {
@@ -2927,36 +3008,6 @@ async function collectSpotifyWebDataObserved(
 			contentType: failure.contentType,
 			snippet: failure.snippet,
 		});
-	}
-	evaluated.top_artists ??= [];
-	evaluated.top_tracks ??= [];
-	for (const timeRange of ["short_term", "long_term"] as const) {
-		const artistPages = (evaluated.top_artist_pages ?? [])
-			.filter((entry) =>
-				readPath(entry, "timeRange") === timeRange.toUpperCase(),
-			)
-			.map((entry) => readPath(entry, "payload"));
-		const trackPages = (evaluated.top_track_pages ?? [])
-			.filter((entry) =>
-				readPath(entry, "timeRange") === timeRange.toUpperCase(),
-			)
-			.map((entry) => readPath(entry, "payload"));
-		if (requestedStreams.includes("top_artists") && !evaluated.streamFailures.top_artists) {
-			const parsed = parseTopRows(artistPages, "top_artists", timeRange);
-			evaluated.top_artists.push(...parsed.rows);
-			const counts = evaluated.sourceCounts.top_artists ?? { considered: 0, covered: 0 };
-			counts.considered += parsed.considered;
-			counts.covered += parsed.rows.length;
-			evaluated.sourceCounts.top_artists = counts;
-		}
-		if (requestedStreams.includes("top_tracks") && !evaluated.streamFailures.top_tracks) {
-			const parsed = parseTopRows(trackPages, "top_tracks", timeRange);
-			evaluated.top_tracks.push(...parsed.rows);
-			const counts = evaluated.sourceCounts.top_tracks ?? { considered: 0, covered: 0 };
-			counts.considered += parsed.considered;
-			counts.covered += parsed.rows.length;
-			evaluated.sourceCounts.top_tracks = counts;
-		}
 	}
 	return evaluated;
 }

@@ -793,7 +793,9 @@ async function collectWithInPageFetch(
 		messages: EmittedMessage[];
 	}) => void,
 	overrides: {
-		bundle?: string;
+		/** The bundle body, or one per bundle request (1-based). */
+		bundle?: string | ((request: number) => string);
+		onGoto?: (url: string, options: unknown) => void;
 		recentlyPlayed?: (url: string) => Response;
 		reportStreamFailure?: (stream: string, message: string, options?: unknown) => Promise<void>;
 		seededHashes?: Record<string, string>;
@@ -806,6 +808,7 @@ async function collectWithInPageFetch(
 }> {
 	const restoreGlobals = installSpotifyBrowserGlobals();
 	const originalFetch = globalThis.fetch;
+	let bundleRequests = 0;
 	const emittedRecords: Array<{
 		stream: string;
 		data: Record<string, unknown>;
@@ -844,7 +847,12 @@ async function collectWithInPageFetch(
 						body: JSON.stringify({ operationName, variables: {}, extensions: { persistedQuery: { version: 1, sha256Hash } } }),
 					});
 				}
-				return new Response(overrides.bundle ?? spotifyWebFixtureBundle(), { status: 200 });
+				bundleRequests += 1;
+				const body =
+					typeof overrides.bundle === "function"
+						? overrides.bundle(bundleRequests)
+						: overrides.bundle;
+				return new Response(body ?? spotifyWebFixtureBundle(), { status: 200 });
 			}
 			if (url.startsWith("https://spclient.wg.spotify.com/recently-played/")) {
 				if (overrides.recentlyPlayed) return overrides.recentlyPlayed(url);
@@ -877,7 +885,10 @@ async function collectWithInPageFetch(
 					return Promise.resolve();
 				},
 				page: {
-					goto: () => Promise.resolve(null),
+					goto: (url: string, options: unknown) => {
+						overrides.onGoto?.(url, options);
+						return Promise.resolve(null);
+					},
 					evaluate: (source: string) =>
 						(0, eval)(source) as Promise<unknown>,
 					...(overrides.seededHashes
@@ -1475,4 +1486,104 @@ test("hashes the player sends while the page collector runs are heard in the pag
 	// The gql calls run after the scan: by then the page fetch is the original.
 	assert.equal(typeof fetchDuringRun, "function");
 	assert.doesNotMatch(String(fetchDuringRun), /notePathfinder/);
+});
+
+test("a recently-played 404 that carries a body is not the end of the list and fails the stream", async () => {
+	const failures: Array<{ stream: string; options: unknown }> = [];
+	const result = await collectWithInPageFetch(["recently_played_contexts", "top_artists"], profileAndTopFixture, undefined, {
+		recentlyPlayed: () =>
+			new Response(JSON.stringify({ error: { status: 404, message: "Not found" } }), {
+				status: 404,
+				headers: { "content-type": "application/json" },
+			}),
+		reportStreamFailure: async (stream, _message, options) => {
+			failures.push({ stream, options });
+		},
+	});
+	assert.deepEqual(failures.map((f) => f.stream), ["recently_played_contexts"]);
+	assert.deepEqual((failures[0]?.options as { diagnostics?: { original_reason?: string } }).diagnostics?.original_reason, "spotify_recently_played_status_404");
+	assert.equal(result.emittedRecords.filter((r) => r.stream === "top_artists").length, 2);
+});
+
+async function recentFailureOptions(error: Error): Promise<unknown[]> {
+	const failures: unknown[] = [];
+	await collectWithInPageFetch(["recently_played_contexts"], profileAndTopFixture, undefined, {
+		recentlyPlayed: () => {
+			throw error;
+		},
+		reportStreamFailure: async (_stream, _message, options) => {
+			failures.push(options);
+		},
+	});
+	return failures;
+}
+
+test("a browser network failure or bridge timeout on recently played is retryable", async () => {
+	const expected = [
+		{
+			recoveryHint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: { original_reason: "spotify_retryable_network" },
+		},
+	];
+	assert.deepEqual(await recentFailureOptions(new TypeError("Failed to fetch")), expected);
+	assert.deepEqual(
+		await recentFailureOptions(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })),
+		expected,
+	);
+});
+
+test("a player missing only userTopContent is loaded once more before the ranked lists are given up", async () => {
+	const gotos: unknown[] = [];
+	const failures: string[] = [];
+	const without = spotifyWebFixtureBundle().split(";").filter((part) => !part.includes("userTopContent")).join(";");
+	const result = await withoutTimers(() =>
+		collectWithInPageFetch(["recently_played_contexts", "top_artists"], profileAndTopFixture, undefined, {
+			// The first evaluation scans three times without it; the reloaded
+			// player has it.
+			bundle: (request) => (request <= 3 ? without : spotifyWebFixtureBundle()),
+			onGoto: (_url, options) => gotos.push(options),
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
+			},
+		}),
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(gotos.slice(-1), [{ waitUntil: "load" }]);
+	assert.equal(result.emittedRecords.filter((r) => r.stream === "top_artists").length, 2);
+});
+
+test("a ranking whose total changes between pages omits only that stream", async () => {
+	const page = (total: number, id: string) => ({
+		timeRange: "SHORT_TERM",
+		payload: {
+			data: {
+				me: {
+					profile: {
+						topArtists: {
+							totalCount: total,
+							items: [{ data: { uri: `spotify:artist:${id}`, name: id, genres: [], stats: { followers: 1 }, popularity: 5 } }],
+						},
+					},
+				},
+			},
+		},
+	});
+	const data = {
+		...webFixture,
+		recent_context_pages: [{ playContexts: [{ uri: "spotify:album:album1", lastPlayedTime: 1720000000123, lastPlayedTrackUri: null }] }],
+		top_artist_pages: [page(2, "a1"), page(3, "a2")],
+		top_track_pages: [],
+		sourceCounts: {},
+	};
+	const failures: string[] = [];
+	const { ctx, emittedRecords } = makeContext(data, ["recently_played_contexts", "top_artists"]);
+	await spotifyCollect({
+		...ctx,
+		reportStreamFailure: async (stream) => {
+			failures.push(stream);
+		},
+	});
+	assert.deepEqual(failures, ["top_artists"]);
+	assert.equal(emittedRecords.filter((r) => r.stream === "recently_played_contexts").length, 1);
+	assert.equal(emittedRecords.some((r) => r.stream === "top_artists"), false);
 });
