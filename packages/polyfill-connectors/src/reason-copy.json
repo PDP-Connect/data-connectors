@@ -676,7 +676,9 @@
 			"spotify_library_playlist_identity_missing": "unexpected_data",
 			"spotify_library_response_invalid": "unexpected_data",
 			"spotify_library_row_invalid": "unexpected_data",
-			"spotify_library_rows_unsupported": "skipped_items",
+			"spotify_library_rows_unsupported": {
+				"message": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing."
+			},
 			"spotify_library_terminal_unverified": "incomplete_retry",
 			"spotify_library_total_changed": "incomplete_retry",
 			"spotify_library_total_invalid": "unexpected_data",
@@ -695,6 +697,9 @@
 			"spotify_playlist_response_invalid": "unexpected_data",
 			"spotify_playlist_row_invalid": "unexpected_data",
 			"spotify_playlist_row_type_unrecognized": "unexpected_data",
+			"spotify_playlist_rows_unsupported": {
+				"message": "Some playlist entries are a type this connector does not read yet, so they were skipped. The rest of each playlist was read."
+			},
 			"spotify_playlist_terminal_unverified": "incomplete_retry",
 			"spotify_playlist_total_changed": "incomplete_retry",
 			"spotify_playlist_total_invalid": "unexpected_data",
@@ -720,6 +725,7 @@
 			"spotify_saved_tracks_total_invalid": "unexpected_data",
 			"spotify_session_dead": "sign_in_again",
 			"spotify_source_row_unavailable": "skipped_items",
+			"spotify_stream_outcome_unproven": "incomplete_retry",
 			"stream_collection_failed": "incomplete_retry"
 		},
 		"steam": {

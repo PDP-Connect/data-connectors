@@ -9,7 +9,7 @@
 	},
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.55",
+	"version": "0.1.57",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",
@@ -499,7 +499,7 @@
 		"spotify_library_playlist_identity_missing": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 		"spotify_library_response_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 		"spotify_library_row_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
-		"spotify_library_rows_unsupported": "Some items could not be read and were skipped.",
+		"spotify_library_rows_unsupported": "Some Spotify library entries, such as folders or entry types this connector does not read yet, were skipped. Playlists inside them may be missing.",
 		"spotify_library_terminal_unverified": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"spotify_library_total_changed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"spotify_library_total_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
@@ -518,6 +518,7 @@
 		"spotify_playlist_response_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 		"spotify_playlist_row_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 		"spotify_playlist_row_type_unrecognized": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
+		"spotify_playlist_rows_unsupported": "Some playlist entries are a type this connector does not read yet, so they were skipped. The rest of each playlist was read.",
 		"spotify_playlist_terminal_unverified": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"spotify_playlist_total_changed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"spotify_playlist_total_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
@@ -541,6 +542,7 @@
 		"spotify_saved_tracks_total_invalid": "This part stopped because of an internal problem reading Spotify. It is not something you can fix.",
 		"spotify_session_dead": "Spotify needs you to sign in again or update your access key. Then run again.",
 		"spotify_source_row_unavailable": "Some items could not be read and were skipped.",
+		"spotify_stream_outcome_unproven": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update.",
 		"stream_collection_failed": "Spotify stopped responding or did not confirm a full read, so this part was not marked complete. Run again later. If it keeps happening, this connector may need an update."
 	}
 }

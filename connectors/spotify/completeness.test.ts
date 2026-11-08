@@ -75,6 +75,8 @@ async function collectSavedTracks(
 		serviceWorker?: string;
 		/** Bodies for precached chunk URLs the service worker lists. */
 		chunks?: Record<string, string>;
+		/** More loaded script URLs after bundle.js (serve their bodies via `chunks`). */
+		extraScripts?: string[];
 		pathname?: string;
 		requested?: string[];
 		profileEnrichment?: unknown;
@@ -108,7 +110,10 @@ async function collectSavedTracks(
 		},
 	};
 	(globalThis as unknown as { document: unknown }).document = {
-		querySelectorAll: () => [{ src: "https://open.spotifycdn.com/bundle.js" }],
+		querySelectorAll: () => [
+			{ src: "https://open.spotifycdn.com/bundle.js" },
+			...(options.extraScripts ?? []).map((src) => ({ src })),
+		],
 	};
 	(globalThis as unknown as { caches: unknown }).caches = {
 		keys: () =>
@@ -359,6 +364,26 @@ test("hash discovery reads lazy chunks from the service worker manifest when the
 		`${cdn}/xpui-routes-collection-songs.933cac3b.js`,
 	]);
 	assert.deepEqual(result.requests, [0]);
+});
+
+test("a fresh session's many loaded scripts do not use up the service worker chunk budget", async () => {
+	// Live probe 8 Nov 2026: with no precache the player had ~70 loaded scripts
+	// and none defined userTopContent. One shared 60-bundle budget was spent on
+	// them, so the profile chunk the service worker lists was never read.
+	const cdn = "https://open.spotifycdn.com/cdn/build/web-player";
+	const extraScripts = Array.from({ length: 70 }, (_, index) => `${cdn}/loaded-${index}.js`);
+	const serviceWorker = `e=[{'revision':null,'url':'${cdn}/xpui-routes-profile.72480c98.js'}]`;
+	const chunks: Record<string, string> = Object.fromEntries(extraScripts.map((url) => [url, "unrelated"]));
+	chunks[`${cdn}/xpui-routes-profile.72480c98.js`] = `new a.b("userTopContent","query","${"e".repeat(64)}")`;
+	const result = await collectSavedTracks(() => savedResponse([], 0), {
+		requested: ["saved_tracks", "top_artists"],
+		bundle: () => bundleFor(["fetchLibraryTracks"]),
+		serviceWorker,
+		chunks,
+		extraScripts,
+	});
+	assert.ok(result.chunkRequests.includes(`${cdn}/xpui-routes-profile.72480c98.js`));
+	assert.ok(result.operations.some((operation) => operation.name === "userTopContent"));
 });
 
 test("playlist library pagination continues after a short page while totalCount remains", async () => {
@@ -1301,22 +1326,52 @@ test("known Spotify pseudo-playlists count in inventory proof without becoming p
 	);
 });
 
-test("playlist item rows reject unrecognized types instead of silently skipping them", async () => {
-	await assertRejectedWithoutAuthority(
-		(_offset, _index, operationName, variables) => {
-			if (operationName === "libraryV3") {
+test("playlist item rows of an unrecognized type are skipped as uncovered rows, not a failed run", async () => {
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	let result: Awaited<ReturnType<typeof collectSavedTracks>>;
+	try {
+		result = await collectSavedTracks(
+			(_offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") {
+					return {
+						data: {
+							me: {
+								libraryV3: {
+									offset: 0,
+									totalCount: 1,
+									items: [
+										{
+											item: {
+												data: {
+													__typename: "Playlist",
+													uri: "spotify:playlist:pl1",
+												},
+											},
+										},
+									],
+								},
+							},
+						},
+					};
+				}
 				return {
 					data: {
-						me: {
-							libraryV3: {
-								offset: 0,
-								totalCount: 1,
+						playlistV2: {
+							uri: String(variables?.uri),
+							name: "List",
+							content: {
+								totalCount: 2,
+								offset: variables?.offset,
 								items: [
+									{ itemV2: { data: { __typename: "FutureType", uri: "spotify:future:x", name: "secret" } } },
 									{
-										item: {
+										itemV2: {
 											data: {
-												__typename: "Playlist",
-												uri: "spotify:playlist:pl1",
+												__typename: "Track",
+												uri: "spotify:track:t1",
+												name: "t1",
+												artists: { items: [] },
 											},
 										},
 									},
@@ -1325,23 +1380,36 @@ test("playlist item rows reject unrecognized types instead of silently skipping 
 						},
 					},
 				};
-			}
-			return {
-				data: {
-					playlistV2: {
-						uri: String(variables?.uri),
-						name: "List",
-						content: {
-							totalCount: 1,
-							offset: variables?.offset,
-							items: [{ itemV2: { data: { __typename: "FutureType" } } }],
-						},
-					},
-				},
-			};
-		},
-		{ requested: ["playlist_items"] },
+			},
+			{ requested: ["playlists", "playlist_items"] },
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const items = result.emittedRecords.filter((record) => record.stream === "playlist_items");
+	assert.equal(items.length, 1);
+	// The source position of the known row is kept.
+	assert.equal(items[0]?.data.position, 1);
+	assert.equal(result.emittedRecords.filter((record) => record.stream === "playlists").length, 1);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE" && message.stream === "playlist_items",
+	) as { considered?: number; covered?: number } | undefined;
+	assert.deepEqual([coverage?.considered, coverage?.covered], [2, 1]);
+	assert.ok(
+		result.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "playlist_items" &&
+				message.reason === "spotify_playlist_rows_unsupported",
+		),
 	);
+	// No full-scan checkpoint for a stream with a skipped row; playlists keeps one.
+	const states = result.messages.filter((message) => message.type === "STATE").map((message) => message.stream);
+	assert.deepEqual(states, ["playlists"]);
+	const skipped = diagnostics.find((line) => line.includes("playlist_rows_skipped"));
+	assert.ok(skipped);
+	assert.match(skipped, /FutureType:1/);
+	assert.doesNotMatch(diagnostics.join("\n"), /secret|spotify:future/);
 });
 
 test("playlist item positions retain source slots occupied by episodes", async () => {
