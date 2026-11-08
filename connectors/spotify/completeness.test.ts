@@ -75,6 +75,8 @@ async function collectSavedTracks(
 		serviceWorker?: string;
 		/** Bodies for precached chunk URLs the service worker lists. */
 		chunks?: Record<string, string>;
+		/** More loaded script URLs after bundle.js (serve their bodies via `chunks`). */
+		extraScripts?: string[];
 		pathname?: string;
 		requested?: string[];
 		profileEnrichment?: unknown;
@@ -108,7 +110,10 @@ async function collectSavedTracks(
 		},
 	};
 	(globalThis as unknown as { document: unknown }).document = {
-		querySelectorAll: () => [{ src: "https://open.spotifycdn.com/bundle.js" }],
+		querySelectorAll: () => [
+			{ src: "https://open.spotifycdn.com/bundle.js" },
+			...(options.extraScripts ?? []).map((src) => ({ src })),
+		],
 	};
 	(globalThis as unknown as { caches: unknown }).caches = {
 		keys: () =>
@@ -359,6 +364,26 @@ test("hash discovery reads lazy chunks from the service worker manifest when the
 		`${cdn}/xpui-routes-collection-songs.933cac3b.js`,
 	]);
 	assert.deepEqual(result.requests, [0]);
+});
+
+test("a fresh session's many loaded scripts do not use up the service worker chunk budget", async () => {
+	// Live probe 8 Nov 2026: with no precache the player had ~70 loaded scripts
+	// and none defined userTopContent. One shared 60-bundle budget was spent on
+	// them, so the profile chunk the service worker lists was never read.
+	const cdn = "https://open.spotifycdn.com/cdn/build/web-player";
+	const extraScripts = Array.from({ length: 70 }, (_, index) => `${cdn}/loaded-${index}.js`);
+	const serviceWorker = `e=[{'revision':null,'url':'${cdn}/xpui-routes-profile.72480c98.js'}]`;
+	const chunks: Record<string, string> = Object.fromEntries(extraScripts.map((url) => [url, "unrelated"]));
+	chunks[`${cdn}/xpui-routes-profile.72480c98.js`] = `new a.b("userTopContent","query","${"e".repeat(64)}")`;
+	const result = await collectSavedTracks(() => savedResponse([], 0), {
+		requested: ["saved_tracks", "top_artists"],
+		bundle: () => bundleFor(["fetchLibraryTracks"]),
+		serviceWorker,
+		chunks,
+		extraScripts,
+	});
+	assert.ok(result.chunkRequests.includes(`${cdn}/xpui-routes-profile.72480c98.js`));
+	assert.ok(result.operations.some((operation) => operation.name === "userTopContent"));
 });
 
 test("playlist library pagination continues after a short page while totalCount remains", async () => {

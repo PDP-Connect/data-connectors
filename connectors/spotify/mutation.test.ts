@@ -19,6 +19,8 @@ import {
 	parseRecentContextRows,
 	parseTopRows,
 	spotifyCollect,
+	spotifyPathfinderHash,
+	spotifyRetryablePattern,
 	spotifyTotp,
 } from "./index.ts";
 import { playlistItemsSchema } from "./schemas.ts";
@@ -790,12 +792,23 @@ async function collectWithInPageFetch(
 		emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
 		messages: EmittedMessage[];
 	}) => void,
+	overrides: {
+		/** The bundle body, or one per bundle request (1-based). */
+		bundle?: string | ((request: number) => string);
+		onGoto?: (url: string, options: unknown) => void;
+		recentlyPlayed?: (url: string) => Response;
+		reportStreamFailure?: (stream: string, message: string, options?: unknown) => Promise<void>;
+		seededHashes?: Record<string, string>;
+		/** The player sends this pathfinder operation while the bundles are read. */
+		playerRequestDuringScan?: { operationName: string; sha256Hash: string };
+	} = {},
 ): Promise<{
 	emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
 	messages: EmittedMessage[];
 }> {
 	const restoreGlobals = installSpotifyBrowserGlobals();
 	const originalFetch = globalThis.fetch;
+	let bundleRequests = 0;
 	const emittedRecords: Array<{
 		stream: string;
 		data: Record<string, unknown>;
@@ -826,9 +839,23 @@ async function collectWithInPageFetch(
 				);
 			}
 			if (url === "https://open.spotifycdn.com/bundle.js") {
-				return new Response(spotifyWebFixtureBundle(), { status: 200 });
+				if (overrides.playerRequestDuringScan) {
+					const { operationName, sha256Hash } = overrides.playerRequestDuringScan;
+					// The page's own code calls the global fetch, as the player does.
+					await globalThis.fetch("https://api-partner.spotify.com/pathfinder/v2/query", {
+						method: "POST",
+						body: JSON.stringify({ operationName, variables: {}, extensions: { persistedQuery: { version: 1, sha256Hash } } }),
+					});
+				}
+				bundleRequests += 1;
+				const body =
+					typeof overrides.bundle === "function"
+						? overrides.bundle(bundleRequests)
+						: overrides.bundle;
+				return new Response(body ?? spotifyWebFixtureBundle(), { status: 200 });
 			}
 			if (url.startsWith("https://spclient.wg.spotify.com/recently-played/")) {
+				if (overrides.recentlyPlayed) return overrides.recentlyPlayed(url);
 				return new Response(JSON.stringify({ playContexts: [] }), { status: 200 });
 			}
 			if (url === "https://api-partner.spotify.com/pathfinder/v2/query") {
@@ -858,11 +885,31 @@ async function collectWithInPageFetch(
 					return Promise.resolve();
 				},
 				page: {
-					goto: () => Promise.resolve(null),
+					goto: (url: string, options: unknown) => {
+						overrides.onGoto?.(url, options);
+						return Promise.resolve(null);
+					},
 					evaluate: (source: string) =>
 						(0, eval)(source) as Promise<unknown>,
+					...(overrides.seededHashes
+						? {
+								on: (_event: string, listener: (request: unknown) => void) => {
+									for (const [operationName, sha256Hash] of Object.entries(overrides.seededHashes ?? {})) {
+										listener({
+											url: () => "https://api-partner.spotify.com/pathfinder/v2/query",
+											postData: () =>
+												JSON.stringify({ operationName, variables: {}, extensions: { persistedQuery: { version: 1, sha256Hash } } }),
+										});
+									}
+								},
+								off: () => undefined,
+							}
+						: {}),
 				} as never,
 				progress: () => Promise.resolve(),
+				...(overrides.reportStreamFailure
+					? { reportStreamFailure: overrides.reportStreamFailure }
+					: {}),
 				requested: new Map<string, StreamScope>(
 					requestedNames.map((name) => [name, { name }]),
 				),
@@ -1230,4 +1277,313 @@ test("top rows: a field the operation never carries is null, a malformed one wit
 	assert.equal(withGenres([1]).rows.length, 0, "a malformed genres is a gap");
 	assert.equal(withGenres([1]).withheld, 1);
 	assert.equal(withGenres("pop").withheld, 1);
+});
+
+function profileAndTopFixture(operationName: string): unknown {
+	if (operationName === "profileAttributes") {
+		return { data: { me: { profile: { username: "secret-user-name", uri: "spotify:user:secret-user-name", name: "Someone" } } } };
+	}
+	return {
+		data: {
+			me: {
+				profile: {
+					topArtists: {
+						totalCount: 1,
+						items: [{ data: { uri: "spotify:artist:artist1", name: "Artist One", genres: [], stats: { followers: 1 }, popularity: 5 } }],
+					},
+				},
+			},
+		},
+	};
+}
+
+test("a recently-played 403 fails that stream alone, is not retryable, and logs no username", async () => {
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	const failures: Array<{ stream: string; options: unknown }> = [];
+	let recentCalls = 0;
+	try {
+		const result = await collectWithInPageFetch(
+			["recently_played_contexts", "top_artists"],
+			profileAndTopFixture,
+			undefined,
+			{
+				recentlyPlayed: () => {
+					recentCalls += 1;
+					return new Response("<html>Forbidden secret-user-name</html>", {
+						status: 403,
+						headers: { "content-type": "text/html; charset=utf-8" },
+					});
+				},
+				reportStreamFailure: async (stream, _message, options) => {
+					failures.push({ stream, options });
+				},
+			},
+		);
+		assert.equal(recentCalls, 1);
+		assert.equal(result.emittedRecords.filter((r) => r.stream === "top_artists").length, 2);
+		assert.equal(result.emittedRecords.some((r) => r.stream === "recently_played_contexts"), false);
+		assert.deepEqual(failures, [
+			{
+				stream: "recently_played_contexts",
+				options: {
+					recoveryHint: { action: "retry_on_connector_upgrade", retryable: false },
+					diagnostics: {
+						original_reason: "spotify_recently_played_status_403",
+						status: 403,
+						endpoint: "spclient.wg.spotify.com/recently-played/v3/user/{user}/recently-played",
+					},
+				},
+			},
+		]);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const line = diagnostics.find((entry) => entry.includes("stream_failed"));
+	assert.ok(line);
+	assert.match(line, /"status":403/);
+	assert.match(line, /"contentType":"text\/html"/);
+	assert.doesNotMatch(diagnostics.join("\n"), /secret-user-name|access-token|client-token/);
+	assert.equal(spotifyRetryablePattern.test("spotify_recently_played_status_404"), false);
+	assert.equal(spotifyRetryablePattern.test("spotify_retryable_status_404"), false);
+	assert.equal(spotifyRetryablePattern.test("spotify_retryable_status_429"), true);
+	assert.equal(spotifyRetryablePattern.test("spotify_retryable_status_503"), true);
+});
+
+test("a player without the userTopContent hash fails only the ranked lists", async () => {
+	const bundle = spotifyWebFixtureBundle().split(";").filter((part) => !part.includes("userTopContent")).join(";");
+	const failures: string[] = [];
+	const result = await withoutTimers(() =>
+		collectWithInPageFetch(["recently_played_contexts", "top_artists", "top_tracks"], profileAndTopFixture, undefined, {
+			bundle,
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
+			},
+		}),
+	);
+	assert.deepEqual(failures.sort(), ["top_artists", "top_tracks"]);
+	assert.equal(
+		result.messages.some((m) => m.type === "SKIP_RESULT" && m.reason === "spotify_recent_context_boundary_unverified"),
+		true,
+	);
+});
+
+test("hashes the player sent to pathfinder are used when the bundles carry none", async () => {
+	const result = await withoutTimers(() =>
+		collectWithInPageFetch(["top_artists"], profileAndTopFixture, undefined, {
+			bundle: "",
+			seededHashes: { userTopContent: "f".repeat(64), home: "0".repeat(64) },
+		}),
+	);
+	assert.equal(result.emittedRecords.filter((r) => r.stream === "top_artists").length, 2);
+	assert.deepEqual(
+		spotifyPathfinderHash(
+			"https://api-partner.spotify.com/pathfinder/v1/query?operationName=libraryV3&variables=%7B%7D&extensions=" +
+				encodeURIComponent(JSON.stringify({ persistedQuery: { version: 1, sha256Hash: "c".repeat(64) } })),
+			null,
+		),
+		{ operation: "libraryV3", hash: "c".repeat(64) },
+	);
+	assert.equal(spotifyPathfinderHash("https://example.com/pathfinder/v2/query", "{}"), null);
+});
+
+test("the looser hash pattern reads quoted, spaced and bare-constructor definitions", async () => {
+	const bundle = [
+		`new Xy("fetchLibraryTracks", 'query', "${"a".repeat(64)}", null)`,
+		`new a.b.c("profileAttributes","query","${"d".repeat(64)}")`,
+		`{name:"userTopContent",operation:"query",sha256Hash:"${"e".repeat(64)}"}`,
+	].join(";");
+	const operations: string[] = [];
+	await withoutTimers(() =>
+		collectWithInPageFetch(["profile", "top_artists"], (operationName) => {
+			operations.push(operationName);
+			return profileAndTopFixture(operationName);
+		}, undefined, { bundle }).catch(() => undefined),
+	);
+	assert.ok(operations.includes("profileAttributes"));
+	assert.ok(operations.includes("userTopContent"));
+});
+
+async function withoutTimers<T>(run: () => Promise<T>): Promise<T> {
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+		callback();
+		return 0 as unknown as NodeJS.Timeout;
+	}) as typeof globalThis.setTimeout;
+	try {
+		return await run();
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+	}
+}
+
+test("a history that fills its last page ends at Spotify's past-the-end 404 and still exports", async () => {
+	// Live probe 8 Nov 2026: offset 0 answered 200, offsets past the end 404
+	// with an empty body. A full first page used to page into that 404 and
+	// fail the export for every heavy listener.
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	const offsets: string[] = [];
+	const failures: string[] = [];
+	try {
+		const result = await collectWithInPageFetch(["recently_played_contexts"], profileAndTopFixture, undefined, {
+			recentlyPlayed: (url) => {
+				const offset = new URL(url).searchParams.get("offset") ?? "";
+				offsets.push(offset);
+				if (offset !== "0") return new Response("", { status: 404 });
+				return new Response(
+					JSON.stringify({
+						playContexts: Array.from({ length: 50 }, (_, index) => ({
+							uri: `spotify:album:album${index}`,
+							lastPlayedTime: 1_720_000_000_000 - index,
+							lastPlayedTrackUri: null,
+						})),
+					}),
+					{ status: 200 },
+				);
+			},
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
+			},
+		});
+		assert.deepEqual(offsets, ["0", "50"]);
+		assert.deepEqual(failures, []);
+		assert.equal(result.emittedRecords.filter((r) => r.stream === "recently_played_contexts").length, 50);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.ok(diagnostics.some((line) => line.includes("recently_played_end") && line.includes("not_found_past_end")));
+});
+
+test("a recently-played 404 at offset 0 is an empty history, not a failure", async () => {
+	const failures: string[] = [];
+	const result = await collectWithInPageFetch(["recently_played_contexts"], profileAndTopFixture, undefined, {
+		recentlyPlayed: () => new Response("", { status: 404 }),
+		reportStreamFailure: async (stream) => {
+			failures.push(stream);
+		},
+	});
+	assert.deepEqual(failures, []);
+	assert.equal(result.emittedRecords.some((r) => r.stream === "recently_played_contexts"), false);
+	const coverage = result.messages.find((m) => m.type === "DETAIL_COVERAGE" && m.stream === "recently_played_contexts");
+	assert.ok(coverage);
+});
+
+test("hashes the player sends while the page collector runs are heard in the page and the page fetch is restored", async () => {
+	// PageShim (RSS) passes its own evaluator, so there are no host request
+	// events; the in-page listener is the only way to hear the player there.
+	let fetchDuringRun: unknown = null;
+	const result = await withoutTimers(() =>
+		collectWithInPageFetch(["top_artists"], (operationName) => {
+			fetchDuringRun = globalThis.fetch;
+			return profileAndTopFixture(operationName);
+		}, undefined, {
+			bundle: "",
+			playerRequestDuringScan: { operationName: "userTopContent", sha256Hash: "f".repeat(64) },
+		}),
+	);
+	assert.equal(result.emittedRecords.filter((r) => r.stream === "top_artists").length, 2);
+	// The gql calls run after the scan: by then the page fetch is the original.
+	assert.equal(typeof fetchDuringRun, "function");
+	assert.doesNotMatch(String(fetchDuringRun), /notePathfinder/);
+});
+
+test("a recently-played 404 that carries a body is not the end of the list and fails the stream", async () => {
+	const failures: Array<{ stream: string; options: unknown }> = [];
+	const result = await collectWithInPageFetch(["recently_played_contexts", "top_artists"], profileAndTopFixture, undefined, {
+		recentlyPlayed: () =>
+			new Response(JSON.stringify({ error: { status: 404, message: "Not found" } }), {
+				status: 404,
+				headers: { "content-type": "application/json" },
+			}),
+		reportStreamFailure: async (stream, _message, options) => {
+			failures.push({ stream, options });
+		},
+	});
+	assert.deepEqual(failures.map((f) => f.stream), ["recently_played_contexts"]);
+	assert.deepEqual((failures[0]?.options as { diagnostics?: { original_reason?: string } }).diagnostics?.original_reason, "spotify_recently_played_status_404");
+	assert.equal(result.emittedRecords.filter((r) => r.stream === "top_artists").length, 2);
+});
+
+async function recentFailureOptions(error: Error): Promise<unknown[]> {
+	const failures: unknown[] = [];
+	await collectWithInPageFetch(["recently_played_contexts"], profileAndTopFixture, undefined, {
+		recentlyPlayed: () => {
+			throw error;
+		},
+		reportStreamFailure: async (_stream, _message, options) => {
+			failures.push(options);
+		},
+	});
+	return failures;
+}
+
+test("a browser network failure or bridge timeout on recently played is retryable", async () => {
+	const expected = [
+		{
+			recoveryHint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: { original_reason: "spotify_retryable_network" },
+		},
+	];
+	assert.deepEqual(await recentFailureOptions(new TypeError("Failed to fetch")), expected);
+	assert.deepEqual(
+		await recentFailureOptions(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })),
+		expected,
+	);
+});
+
+test("a player missing only userTopContent is loaded once more before the ranked lists are given up", async () => {
+	const gotos: unknown[] = [];
+	const failures: string[] = [];
+	const without = spotifyWebFixtureBundle().split(";").filter((part) => !part.includes("userTopContent")).join(";");
+	const result = await withoutTimers(() =>
+		collectWithInPageFetch(["recently_played_contexts", "top_artists"], profileAndTopFixture, undefined, {
+			// The first evaluation scans three times without it; the reloaded
+			// player has it.
+			bundle: (request) => (request <= 3 ? without : spotifyWebFixtureBundle()),
+			onGoto: (_url, options) => gotos.push(options),
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
+			},
+		}),
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(gotos.slice(-1), [{ waitUntil: "load" }]);
+	assert.equal(result.emittedRecords.filter((r) => r.stream === "top_artists").length, 2);
+});
+
+test("a ranking whose total changes between pages omits only that stream", async () => {
+	const page = (total: number, id: string) => ({
+		timeRange: "SHORT_TERM",
+		payload: {
+			data: {
+				me: {
+					profile: {
+						topArtists: {
+							totalCount: total,
+							items: [{ data: { uri: `spotify:artist:${id}`, name: id, genres: [], stats: { followers: 1 }, popularity: 5 } }],
+						},
+					},
+				},
+			},
+		},
+	});
+	const data = {
+		...webFixture,
+		recent_context_pages: [{ playContexts: [{ uri: "spotify:album:album1", lastPlayedTime: 1720000000123, lastPlayedTrackUri: null }] }],
+		top_artist_pages: [page(2, "a1"), page(3, "a2")],
+		top_track_pages: [],
+		sourceCounts: {},
+	};
+	const failures: string[] = [];
+	const { ctx, emittedRecords } = makeContext(data, ["recently_played_contexts", "top_artists"]);
+	await spotifyCollect({
+		...ctx,
+		reportStreamFailure: async (stream) => {
+			failures.push(stream);
+		},
+	});
+	assert.deepEqual(failures, ["top_artists"]);
+	assert.equal(emittedRecords.filter((r) => r.stream === "recently_played_contexts").length, 1);
+	assert.equal(emittedRecords.some((r) => r.stream === "top_artists"), false);
 });
