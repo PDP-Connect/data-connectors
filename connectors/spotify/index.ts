@@ -193,10 +193,12 @@ export interface BrowserData {
 	/** Isolated streams that failed in the page; their rows are dropped. */
 	streamFailures?: Partial<Record<SpotifyIsolatedStream, SpotifyStreamFailure>>;
 	/**
-	 * Ranked lists Spotify answered with a total of 0 in every time window:
-	 * the list is empty, not capped, so it exports as "collected, none".
+	 * Ranked lists read to Spotify's own total in every time window (a total
+	 * of at most 100, every row returned). Nothing lies beyond the request
+	 * bound, so the list is complete, not capped; with a total of 0 it
+	 * exports as "collected, none".
 	 */
-	topProvenEmpty?: Partial<Record<"top_artists" | "top_tracks", boolean>>;
+	topProvenComplete?: Partial<Record<"top_artists" | "top_tracks", { rows: number; total: number }>>;
 	diagnostics?: SpotifyCollectorDiagnostics;
 }
 
@@ -3065,8 +3067,9 @@ async function collectSpotifyWebDataObserved(
 		try {
 			const rows: Record<string, unknown>[] = [];
 			const counts = { considered: 0, covered: 0 };
-			// Spotify said "total 0" for every window it was asked about.
-			let windowsEmpty = true;
+			// Every window was read to the total Spotify reported for it.
+			let windowsComplete = true;
+			let total = 0;
 			for (const timeRange of ["short_term", "long_term"] as const) {
 				const payloads = pages
 					.filter((entry) => readPath(entry, "timeRange") === timeRange.toUpperCase())
@@ -3076,18 +3079,20 @@ async function collectSpotifyWebDataObserved(
 				counts.considered += parsed.considered;
 				counts.covered += parsed.rows.length;
 				const key = stream === "top_artists" ? "topArtists" : "topTracks";
-				const totals = payloads.map((payload) =>
-					readPath(payload, "data", "me", "profile", key, "totalCount"),
-				);
-				if (totals.length === 0 || totals.some((total) => total !== 0)) {
-					windowsEmpty = false;
+				// parseTopRows has already proven the total is the same on every
+				// page. A total above the 100-row bound leaves rows unread.
+				const windowTotal = readPath(payloads[0], "data", "me", "profile", key, "totalCount");
+				if (typeof windowTotal !== "number" || parsed.considered !== windowTotal) {
+					windowsComplete = false;
+				} else {
+					total += windowTotal;
 				}
 			}
 			evaluated[stream] = rows;
 			evaluated.sourceCounts[stream] = counts;
-			if (windowsEmpty && counts.considered === 0) {
-				evaluated.topProvenEmpty ??= {};
-				evaluated.topProvenEmpty[stream] = true;
+			if (windowsComplete) {
+				evaluated.topProvenComplete ??= {};
+				evaluated.topProvenComplete[stream] = { rows: counts.considered, total };
 			}
 		} catch (error) {
 			evaluated[stream] = [];
@@ -3550,23 +3555,44 @@ export async function spotifyCollect({
 			});
 		}
 		if (stream === "recently_played_contexts") {
-			// Spotify answers 404 with an empty body at offset 0 both for an empty
-			// history and, intermittently, for one that has plays: on 8 Nov 2026
-			// two RSS users got it on four runs in a row and a page of contexts
-			// on the next run a minute later. It is not proof of "none", so the
-			// scope is reported unavailable and retryable, not empty.
-			if (data.diagnostics?.recentlyPlayed?.endedBy === "not_found_at_start") {
-				connectorDiagnostic("spotify", "recently_played_unavailable", {
-					endedBy: "not_found_at_start",
-					othersRequested: String(othersRequested([stream])),
-				});
+			// Spotify's pager ends in one of three ways: a page shorter than the
+			// limit, a 404 with an empty body past the end, or that same 404 at
+			// offset 0 for a history with nothing in it. Each is Spotify's own
+			// end of the list it holds for this account, so the list is
+			// complete and checkpointed (with 0 rows at offset 0). Only the
+			// 20-page cap leaves contexts unread.
+			//
+			// 0.1.57 called the offset-0 404 "unavailable": two users who got it
+			// on several runs then got contexts. On RSS prod (8 to 9 Nov 2026,
+			// 21 such reads) the 404 was steady per user across retries up to
+			// 80 minutes apart, 10 of the 15 full runs that got it were
+			// accounts with no saved tracks, playlists or top items, and the one
+			// user whose next run had contexts had exactly 1: a first play.
+			const recent = data.diagnostics?.recentlyPlayed;
+			if (
+				recent &&
+				(recent.endedBy === "short_page" ||
+					recent.endedBy === "not_found_past_end" ||
+					recent.endedBy === "not_found_at_start")
+			) {
+				if (recent.endedBy === "not_found_at_start") {
+					connectorDiagnostic("spotify", "recently_played_empty", {
+						endedBy: recent.endedBy,
+						othersRequested: String(othersRequested([stream])),
+					});
+				}
 				await emit({
-					type: "SKIP_RESULT",
+					type: "STATE",
 					stream,
-					reason: "spotify_recently_played_unavailable",
-					message:
-						"Spotify did not return your recently played list this time, so it was not exported. Try again later.",
-					recovery_hint: { action: "retry_by_runtime", retryable: true },
+					cursor: {
+						full_scan_at: new Date().toISOString(),
+						completion: {
+							operation: "recently-played/v3",
+							pages: recent.pages,
+							rows: counts.considered,
+							terminal: recent.endedBy,
+						},
+					},
 				});
 				continue;
 			}
@@ -3577,12 +3603,15 @@ export async function spotifyCollect({
 				message: "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
 				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			});
-		} else if (data.topProvenEmpty?.[stream] === true) {
-			// Total 0 in every window: nothing is beyond the 100-row bound, so
-			// the ranking is complete and empty. The checkpoint is what lets
-			// PageShim and RSS export it as "collected, none" instead of
-			// omitting it (and failing a run that asked only for rankings).
-			connectorDiagnostic("spotify", "ranked_list_empty", { stream });
+		} else if (data.topProvenComplete?.[stream]) {
+			// Every window was read to Spotify's own total (at most 100): no
+			// row is beyond the request bound, so the ranking is complete,
+			// whether it holds 0 rows or 40. The checkpoint is what lets
+			// PageShim and RSS export it as collected instead of degraded (or,
+			// when empty, omitted). Until 0.1.58 only a total of 0 counted, so
+			// every short ranking was reported capped and the run partial.
+			const proof = data.topProvenComplete[stream];
+			if (proof.total === 0) connectorDiagnostic("spotify", "ranked_list_empty", { stream });
 			await emit({
 				type: "STATE",
 				stream,
@@ -3590,8 +3619,8 @@ export async function spotifyCollect({
 					full_scan_at: new Date().toISOString(),
 					completion: {
 						operation: "userTopContent",
-						rows: 0,
-						total: 0,
+						rows: proof.rows,
+						total: proof.total,
 						time_ranges: ["short_term", "long_term"],
 					},
 				},

@@ -3990,7 +3990,7 @@ test("meta: rejected streamed completion never commits following STATE", {timeou
  assert.notEqual(r.streamResult.completed, true);
 });
 
-test("spotify: seven mobile streams retain capped inventory semantics on both hosts", { timeout: 180_000 }, async () => {
+test("spotify: seven mobile streams read to their end export clean and checkpointed on both hosts", { timeout: 180_000 }, async () => {
 	const { pageshimCase: c } = await import("./fixtures/spotify.mjs");
 	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-seven-streams.js") });
 	for (const resultStreaming of [false, true]) {
@@ -4000,13 +4000,15 @@ test("spotify: seven mobile streams retain capped inventory semantics on both ho
 		assert.deepEqual(r.ret, { ok: true });
 		assertCleanRun(r);
 		assert.equal(r.data.error, undefined);
-		assert.match(r.data.status, /^Partial:/);
+		assert.doesNotMatch(r.data.status, /^Partial:/);
 		const result = resultStreaming ? r.streamDone : r.result;
 		assert.deepEqual(result.exportSummary, c.exportSummary);
-		assert.deepEqual(result.errors, c.partialErrors);
-		assert.equal(result.errors.length, 3, "no failure companion for an incomplete inventory");
-		for (const stream of ["recently_played_contexts", "top_artists", "top_tracks"]) {
-			assert.equal(r.states["spotify." + stream], undefined);
+		assert.deepEqual(result.errors, []);
+		// Rankings read to Spotify's total and a recent list Spotify ended are
+		// complete; a total above the 100-row bound would still be capped.
+		assert.equal(r.states["spotify.recently_played_contexts"].completion.terminal, "short_page");
+		for (const stream of ["top_artists", "top_tracks"]) {
+			assert.equal(r.states["spotify." + stream].completion.rows, r.states["spotify." + stream].completion.total);
 		}
 		assert.equal(r.states["spotify.saved_tracks"].completion.rows, 1);
 		if (resultStreaming) {
@@ -4048,7 +4050,7 @@ test("spotify: every requested scope is produced or omitted when the library, a 
 		return base;
 	} });
 	const json = (body, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(body) });
-	await t.test("an account with no playlists, no history and no rankings exports empty playlist and ranking scopes", async () => {
+	await t.test("an account with no playlists, no history and no rankings exports every scope empty and clean", async () => {
 		const fixtures = gqlOverride((operation, variables) => {
 			if (operation === "libraryV3") return json({ data: { me: { libraryV3: { offset: variables.offset, totalCount: 1, items: [
 				{ item: { data: { __typename: "LikedSongs", uri: "spotify:collection:tracks" } } },
@@ -4073,14 +4075,16 @@ test("spotify: every requested scope is produced or omitted when the library, a 
 				// Total 0 in every window is a complete, empty ranking (0.1.57).
 				assert.deepEqual(result["spotify.top_artists"], { records: [] });
 				assert.deepEqual(result["spotify.top_tracks"], { records: [] });
-				// An offset-0 404 is not proof of an empty history.
-				assert.equal(Object.hasOwn(result, "spotify.recently_played_contexts"), false);
-				assert.ok(result.errors.some((e) => e.scope === "spotify.recently_played_contexts" && e.disposition === "omitted" && /recently played list this time/.test(e.reason)));
+				// Spotify's empty 404 at offset 0 is the end of an empty history
+				// (0.1.58): steady per user on RSS prod, and seen on accounts with
+				// nothing else in them.
+				assert.deepEqual(result["spotify.recently_played_contexts"], { records: [] });
+				assert.deepEqual(result.errors, []);
 			} else {
-				// profile, playlists, playlist_items, saved_tracks and both rankings are sent.
 				assert.equal(r.streamResult.completed, true);
-				assert.equal(r.streamResult.scopeCount, 6);
+				assert.equal(r.streamResult.scopeCount, 7);
 			}
+			assert.equal(r.states["spotify.recently_played_contexts"].completion.terminal, "not_found_at_start");
 			assert.equal(r.states["spotify.playlists"].completion.operation, "libraryV3");
 			assert.equal(r.states["spotify.playlist_items"].completion.rows, 1);
 		}

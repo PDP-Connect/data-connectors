@@ -205,7 +205,7 @@ test("bounded Spotify streams emit typed gaps and never claim full-scan STATE", 
 	);
 });
 
-test("recent contexts request their profile query hash and remain explicitly incomplete", async () => {
+test("recent contexts request their profile query hash and checkpoint the list Spotify ended", async () => {
 	const requestedOperations: string[] = [];
 	const result = await collectWithInPageFetch(
 		["recently_played_contexts"],
@@ -215,17 +215,16 @@ test("recent contexts request their profile query hash and remain explicitly inc
 		},
 	);
 	assert.deepEqual(requestedOperations, ["profileAttributes"]);
+	assert.equal(result.messages.some((message) => message.type === "SKIP_RESULT"), false);
 	assert.equal(
 		result.messages.some(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "spotify_recent_context_boundary_unverified",
+			(message) => message.type === "STATE" && message.stream === "recently_played_contexts",
 		),
 		true,
 	);
 });
 
-test("ranked-list query hash is discovered and a short page continues to the reported total", async () => {
+test("ranked-list query hash is discovered, a short page continues to the reported total, and a ranking read to its total is complete", async () => {
 	const offsets: number[] = [];
 	const result = await collectWithInPageFetch(["top_artists"], (operationName, variables) => {
 		assert.equal(operationName, "userTopContent");
@@ -252,7 +251,26 @@ test("ranked-list query hash is discovered and a short page continues to the rep
 	});
 	assert.deepEqual(offsets, [0, 1, 0, 1]);
 	assert.equal(result.emittedRecords.filter((record) => record.stream === "top_artists").length, 6);
+	const state = result.messages.find((message) => message.type === "STATE" && message.stream === "top_artists");
+	assert.deepEqual(state?.type === "STATE" ? (state.cursor as { completion: unknown }).completion : undefined, {
+		operation: "userTopContent",
+		rows: 6,
+		total: 6,
+		time_ranges: ["short_term", "long_term"],
+	});
+	assert.equal(result.messages.some((message) => message.type === "SKIP_RESULT"), false);
+});
+
+test("a ranking whose total is above the 100-row bound stays capped", async () => {
+	const result = await collectWithInPageFetch(["top_artists"], (_operationName, variables) => {
+		const { offset, limit } = variables.topArtistsInput as { offset: number; limit: number };
+		const items = Array.from({ length: limit }, (_, index) => ({
+			data: { uri: `spotify:artist:a${offset + index}`, name: `Artist ${offset + index}`, genres: [], stats: { followers: 1 }, popularity: 1 },
+		}));
+		return { data: { me: { profile: { topArtists: { items, totalCount: 150 } } } } };
+	});
 	assert.equal(result.messages.some((message) => message.type === "STATE" && message.stream === "top_artists"), false);
+	assert.ok(result.messages.some((message) => message.type === "SKIP_RESULT" && message.reason === "spotify_ranked_list_capped"));
 });
 
 function makeContext(
@@ -1363,7 +1381,7 @@ test("a player without the userTopContent hash fails only the ranked lists", asy
 	);
 	assert.deepEqual(failures.sort(), ["top_artists", "top_tracks"]);
 	assert.equal(
-		result.messages.some((m) => m.type === "SKIP_RESULT" && m.reason === "spotify_recent_context_boundary_unverified"),
+		result.messages.some((m) => m.type === "STATE" && m.stream === "recently_played_contexts"),
 		true,
 	);
 });
