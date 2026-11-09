@@ -24249,7 +24249,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.57",
+				"version": "0.1.58",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -24564,7 +24564,7 @@
 					},
 					{
 						"name": "recently_played_contexts",
-						"description": "Recently played playback contexts and each context’s last played track. Spotify returns contexts, not individual play events. The connector withholds checkpoint state unless it can verify a request-bound boundary.",
+						"description": "Recently played playback contexts and each context’s last played track. Spotify returns contexts, not individual play events. The connector saves checkpoint state when Spotify ends the list (a short page, or an empty 404 past the end or at the start) and withholds it at its 20-page cap.",
 						"display": {
 							"label": "Recently played contexts",
 							"detail": "Album, playlist, or artist context URI, its most recently played track, and last played time."
