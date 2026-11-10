@@ -8,8 +8,9 @@
  *
  * `connectors/anthropic` collects through Claude's official data export,
  * which can be requested once per 24 hours and emails the owner each time.
- * This connector is the second profile for the same source
- * (`sources/claude`), for continuous incremental collection. It requests no
+ * This connector owns its own source (`sources/claude`; the export connector
+ * owns `sources/claude_export`) and collects continuously and incrementally.
+ * It requests no
  * export and sends no email. Every read is an in-page `fetch` from the
  * claude.ai document, the web app's own JSON endpoints:
  *

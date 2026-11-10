@@ -58,15 +58,6 @@ function streamContract(stream) {
   return contract;
 }
 
-// Sources whose canonical member's connector key is not the source's own
-// name. The published `anthropic` artifact predates its `anthropic-live`
-// sibling, and renaming a published connector key would change its OCI
-// identity, so the source URI `/claude` names it explicitly. Matching is on
-// the exact connector key; any other source still needs a namespace match.
-const CANONICAL_CONNECTOR_KEY_BY_SOURCE = Object.freeze({
-  "https://registry.pdpp.dev/sources/claude": "anthropic",
-});
-
 function lastPathSegment(uri) {
   return new URL(uri).pathname.split("/").filter(Boolean).at(-1);
 }
@@ -91,8 +82,7 @@ export function declarationVersion(declaration) {
  * of the members' streams. A stream several members collect must have the
  * same contract in each (streamContract); its prose comes from the
  * canonical member, the one whose connector key matches the last segment of
- * `source.id` (for example `oura`, not `oura-browser`), or the one
- * CANONICAL_CONNECTOR_KEY_BY_SOURCE names for that source. Each artifact's own
+ * `source.id` (for example `oura`, not `oura-browser`). Each artifact's own
  * Collection Profile keeps its method-specific prose.
  */
 export function buildSourceDeclaration(profiles) {
@@ -109,15 +99,10 @@ export function buildSourceDeclaration(profiles) {
     }
   }
   const namespace = lastPathSegment(first.source.id);
-  const canonicalKey = CANONICAL_CONNECTOR_KEY_BY_SOURCE[first.source.id];
   const canonical =
     members.length === 1
       ? first
-      : members.find((member) =>
-          canonicalKey === undefined
-            ? member.connector_key.replaceAll("-", "_") === namespace
-            : member.connector_key === canonicalKey,
-        );
+      : members.find((member) => member.connector_key.replaceAll("-", "_") === namespace);
   if (!canonical) {
     throw new Error(`${first.source.id}: no member artifact's connector key matches "${namespace}"`);
   }

@@ -344,29 +344,6 @@ describe("buildSourceDeclaration — one declaration per source", () => {
     );
   });
 
-  it("names the canonical member of the claude source explicitly, and only that source", () => {
-    const rehome = (key, id) => ({
-      ...structuredClone(browserProfile),
-      connector_key: key,
-      source: { ...browserProfile.source, id },
-    });
-    const claude = "https://registry.pdpp.dev/sources/claude";
-    const named = rehome("anthropic", claude);
-    const sibling = { ...rehome("anthropic-live", claude), streams: [structuredClone(browserProfile.streams[1])] };
-    const declaration = buildSourceDeclaration([sibling, named]);
-    assert.equal(declaration.streams[0].description, browserProfile.streams[0].description);
-    assert.throws(
-      () => {
-        const other = "https://registry.pdpp.dev/sources/other";
-        return buildSourceDeclaration([
-          rehome("anthropic", other),
-          { ...rehome("anthropic-live", other), streams: sibling.streams },
-        ]);
-      },
-      /no member artifact's connector key matches/,
-    );
-  });
-
   it("refuses members that disagree on the source", () => {
     const other = structuredClone(browserProfile);
     other.source.display.name = "Oura Ring";
@@ -435,19 +412,6 @@ describe("source declarations — connector fleet", () => {
     assert.deepEqual(invalid, []);
   });
 
-  it("strava-browser fits the published strava declaration without changing it", () => {
-    const profileOf = (name) => manifests.find(({ manifest }) => manifest === name).profile;
-    const file = profileOf("strava");
-    const browser = profileOf("strava_browser");
-    const published = buildSourceDeclaration(sourceDeclarationMembers(file));
-    assert.deepEqual(profileDeclarationErrors(browser, published), []);
-    // Publishing strava-browser beside strava later must not change the bytes.
-    assert.deepEqual(
-      serializeSourceDeclaration(buildSourceDeclaration([file, browser])),
-      serializeSourceDeclaration(published),
-    );
-  });
-
   it("every publishable artifact of one source carries byte-identical declaration bytes", () => {
     const bySource = new Map();
     for (const { manifest, exclusionReason, profile } of manifests) {
@@ -460,11 +424,23 @@ describe("source declarations — connector fleet", () => {
         bySource.set(profile.source.id, { manifest, bytes });
       }
     }
-    // Oura's PAT and browser artifacts are the multi-artifact source today.
-    assert.ok(bySource.has("https://registry.pdpp.dev/sources/oura"));
-    assert.equal(
-      manifests.filter(({ exclusionReason, profile }) => exclusionReason === null && profile.source.id.endsWith("/oura")).length,
-      2,
-    );
+    // Each Oura artifact owns its source, so the two can be active together.
+    const oura = (name) => manifests.find(({ manifest }) => manifest === name).profile.source.id;
+    assert.equal(oura("oura_browser"), "https://registry.pdpp.dev/sources/oura");
+    assert.equal(oura("oura"), "https://registry.pdpp.dev/sources/oura_pat");
+  });
+});
+
+describe("each connector owns its source", () => {
+  it("no two connectors of a pair share a source id", () => {
+    const sourceOf = (name) =>
+      JSON.parse(readFileSync(new URL(`../../connectors/${name}/manifest.json`, import.meta.url), "utf8")).source.id;
+    for (const [owner, other] of [
+      ["anthropic_live", "anthropic"],
+      ["oura_browser", "oura"],
+      ["strava_browser", "strava"],
+    ]) {
+      assert.notEqual(sourceOf(owner), sourceOf(other), `${owner} and ${other}`);
+    }
   });
 });

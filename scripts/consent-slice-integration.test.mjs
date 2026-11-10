@@ -7,8 +7,8 @@
 // builder scripts end to end, so a builder that loses its slice wiring fails
 // here even when the esbuild plugin and the hash are still correct.
 //
-// strava_browser supports both builder modes (Core and PageShim). It shares a
-// source with strava, and reddit is an unrelated connector, so one fixture
+// strava_browser supports both builder modes (Core and PageShim). strava is its API
+// sibling, and reddit is an unrelated connector, so one fixture
 // also shows which artifacts a slice-policy change moves.
 
 import assert from "node:assert/strict";
@@ -140,8 +140,7 @@ const SCENARIOS = [
     name: "a manifest changed without regenerating",
     pattern: /consent-time-field slice .*strava_browser\.generated\.ts is stale/,
     damage(fx) {
-      // strava shares the source, and a shared stream must be declared the same
-      // way by both, so the valid edit changes both manifests.
+      // strava declares the same stream, so the valid edit changes both manifests.
       for (const dir of [SELECTED, "strava"]) {
         const manifest = fx.read(`connectors/${dir}/manifest.json`);
         assert.ok(manifest.includes('"consent_time_field": "start_date_local"'));

@@ -2,14 +2,14 @@
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/oura",
 	"source": {
-		"id": "https://registry.pdpp.dev/sources/oura",
+		"id": "https://registry.pdpp.dev/sources/oura_pat",
 		"display": {
 			"name": "Oura"
 		}
 	},
 	"connector_key": "oura",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-	"version": "0.1.28",
+	"version": "0.1.29",
 	"display_name": "Oura",
 	"brand": {
 		"icon": "icon.svg",

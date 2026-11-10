@@ -373,14 +373,14 @@
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 				"source": {
-					"id": "https://registry.pdpp.dev/sources/claude",
+					"id": "https://registry.pdpp.dev/sources/claude_export",
 					"display": {
 						"name": "Claude"
 					}
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.66",
+				"version": "0.2.67",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -1090,7 +1090,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.16",
+				"version": "0.3.17",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19121,14 +19121,14 @@
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/oura",
 				"source": {
-					"id": "https://registry.pdpp.dev/sources/oura",
+					"id": "https://registry.pdpp.dev/sources/oura_pat",
 					"display": {
 						"name": "Oura"
 					}
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "Oura",
 				"brand": {
 					"icon": "icon.svg",
@@ -25139,14 +25139,14 @@
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/strava",
 				"source": {
-					"id": "https://registry.pdpp.dev/sources/strava",
+					"id": "https://registry.pdpp.dev/sources/strava_api",
 					"display": {
 						"name": "Strava"
 					}
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.33",
+				"version": "1.0.34",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
