@@ -950,7 +950,6 @@ export function inspectInventoryPage(
 		url.searchParams.sort();
 		return url.href;
 	};
-	const nextTargets = new Set(nextControls.map(node => isDisabled(node) ? "disabled" : sameTarget(githubUrl(node.getAttribute("href")))));
 	const next = nextControls[0] ?? null;
 	const disabled = next !== null && isDisabled(next);
 	// The starred tab pages by cursor: its enabled Next link carries `after`, not a page
@@ -962,6 +961,9 @@ export function inspectInventoryPage(
 		const href = githubUrl(link.getAttribute("href"));
 		return href !== null && new URL(href).searchParams.has("after") && (nextControls.includes(link) || labelled(link, /^next$/iu));
 	});
+	// Every recognized Next control, marked or labelled, must name one target.
+	const nextTargets = new Set([...nextControls, ...cursorLinks.filter(link => !nextControls.includes(link))]
+		.map(node => isDisabled(node) ? "disabled" : sameTarget(githubUrl(node.getAttribute("href")))));
 	const cursorHref = cursorLinks.length === 1 ? githubUrl(cursorLinks[0]?.getAttribute("href") ?? null) : null;
 	const cursorNext = cursorHref !== null && boundCursor(cursorHref, page.currentUrl) !== null ? cursorHref : null;
 	// A Previous link is a back link on a cursor page; it is never followed.

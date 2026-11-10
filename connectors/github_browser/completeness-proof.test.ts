@@ -306,6 +306,15 @@ for (const [name, href] of ([
 	});
 }
 
+test("starred marked numbered Next beside an unmarked cursor Next stays unknown", () => {
+	const marked = '<a rel="next" class="next_page" href="/sample-user?page=2&tab=stars">Next</a>';
+	const html = starredPage(Array.from({ length: 30 }, (_, i) => i), marked + cursorNext("https://github.com/sample-user?after=Y3Vyc29y&tab=stars"));
+	const proof = inspectInventoryPage({ requestedUrl: starsUrl, currentUrl: starsUrl, html }, "starred", "sample-user", 1, 30, 0);
+	assert.equal(proof.complete, false);
+	assert.equal(proof.reason, "unknown_continuation");
+	assert.equal(proof.continuation.kind, "unknown");
+});
+
 test("repositories cursor Next stays unknown", () => {
 	const url = "https://github.com/sample-user?page=1&tab=repositories";
 	const html = owner + '<ul id="user-repositories-list"><li><h3><a href="/sample-user/a">a</a></h3></li></ul>' +
