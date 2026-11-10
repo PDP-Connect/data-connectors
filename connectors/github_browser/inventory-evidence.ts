@@ -11,7 +11,7 @@ export interface CollectionBoundary {
 /** What one page says about the rest of its inventory. Only inspectors build these. */
 export type Continuation =
 	/** An inspector-bound successor; the walk still checks selection support. */
-	| { kind: "next"; url: string }
+	| { kind: "next"; url: string; cursor?: string }
 	/** Positive source-end evidence on this page. */
 	| { kind: "end" }
 	/** No successor and no positive end evidence. */
@@ -51,6 +51,11 @@ export class InventoryEvidence {
 	private readonly seen = new Set<string>();
 	private readonly observed = new Set<string>();
 	private readonly requests = new Set<string>();
+	/** Cursor successors an inspector bound to their page; no other cursor URL is requested. */
+	private readonly boundCursors = new Set<string>();
+	/** Request URLs already answered, and cursor values already issued: a repeat is a cycle. */
+	private readonly answered = new Set<string>();
+	private readonly cursorsSeen = new Set<string>();
 	private readonly totals = new Set<number>();
 	private pages = 0;
 	private failure: string | null = null;
@@ -137,6 +142,7 @@ export class InventoryEvidence {
 		const pageNumber = this.request?.page ?? this.pages;
 		if (page.continuation.kind === "next") {
 			this.requests.add(page.continuation.url);
+			if (page.continuation.cursor !== undefined) this.boundCursors.add(page.continuation.url);
 			this.linkedPage = Math.max(this.linkedPage, pageNumber + 1);
 		} else if (page.continuation.kind === "end") {
 			if (this.lastPage !== null && this.lastPage !== pageNumber) this.fail("end_before_advertised_last");
@@ -166,6 +172,7 @@ export class InventoryEvidence {
 			this.fail(continuation.reason);
 			return added;
 		}
+		this.answered.add(request.url);
 		const { noProgress } = this.previewPage(page.ids);
 		if (!page.rowsComplete || page.rejectedRows > 0) this.fail("discarded_rows");
 		for (const id of page.ids) {
@@ -180,7 +187,11 @@ export class InventoryEvidence {
 		else if (continuation.kind === "end") {
 			this.endProven = true;
 		} else if (continuation.kind === "next") {
-			if (this.lastPage !== null && request.page >= this.lastPage) this.fail("continuation_beyond_advertised_last");
+			const repeated = this.answered.has(continuation.url) ||
+				(continuation.cursor !== undefined && this.cursorsSeen.has(continuation.cursor));
+			if (continuation.cursor !== undefined) this.cursorsSeen.add(continuation.cursor);
+			if (repeated) this.fail("continuation_cycle");
+			else if (this.lastPage !== null && request.page >= this.lastPage) this.fail("continuation_beyond_advertised_last");
 			else if (request.page >= this.pageLimit) this.fail("page_limit_reached");
 			else this.request = { url: continuation.url, page: request.page + 1 };
 		}
@@ -216,7 +227,8 @@ export class InventoryEvidence {
 		for (const request of this.requests) {
 			try {
 				const url = new URL(request);
-				if (["after", "before", "cursor"].some(key => url.searchParams.has(key))) return "unknown_continuation";
+				const cursor = ["after", "before", "cursor"].some(key => url.searchParams.has(key));
+				if (cursor && !this.boundCursors.has(request)) return "unknown_continuation";
 			} catch {
 				return "unknown_continuation";
 			}

@@ -11384,7 +11384,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.18",
+				"version": "0.3.19",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
