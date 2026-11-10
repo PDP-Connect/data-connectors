@@ -43,7 +43,7 @@
     "url": "https://github.com/PDP-Connect/data-connectors/issues"
   },
   "dependencies": {
-    "sigstore": "^5.0.0",
+    "sigstore": "^5.0.1",
     "@sigstore/bundle": "^5.0.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
