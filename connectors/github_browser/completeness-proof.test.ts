@@ -266,7 +266,8 @@ test("events withholds an empty later page with unobserved pagination", async ()
 	assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
 });
 
-const starredCard = (i: number) => `<li><h3><a href="/sample-user/repo${i}">repo${i}</a></h3></li>`;
+// Real starred cards show owner/repo as the link text (see starred-card-with-auxiliary-links.html).
+const starredCard = (i: number) => `<li><h3><a href="/sample-user/repo${i}">sample-user/repo${i}</a></h3></li>`;
 const starredPage = (ids: number[], controls: string) => owner +
 	`<ul id="user-starred-repos">${ids.map(starredCard).join("")}</ul>` +
 	`<div class="paginate-container"><div class="BtnGroup" data-test-selector="pagination">${controls}</div></div>`;
@@ -419,3 +420,174 @@ for (const stream of ["events", "starred"] as const) {
 		});
 	}
 }
+
+// Full-run replay: synthetic inputs only; no network, parser stubs or collector stubs.
+type ReplayApi = { link: string | null; data: unknown };
+const replayNow = "2026-01-01T00:00:00.000Z";
+const replaySecret = "ghp_SYNTHETIC_SENTINEL_DO_NOT_EMIT";
+const replayProfileUrl = "https://github.com/sample-user";
+const replayEventsUrl = (page: number) => `https://api.github.com/users/sample-user/events/public?per_page=100&page=${page}`;
+// The collector builds page 1 with encodeURIComponent but later pages by re-serializing
+// the Link successor, so the same GitHub query can arrive as %20 or +. The offline router
+// keys by canonicalUrl, which both forms reduce to.
+const canonicalUrl = (url: string) => {
+	const parsed = new URL(url);
+	parsed.search = new URLSearchParams(parsed.search).toString();
+	return parsed.toString();
+};
+const replayHistoryUrl = (type: string, page: number) =>
+	canonicalUrl(`https://api.github.com/search/issues?q=${encodeURIComponent(`author:sample-user type:${type}`)}&sort=created&order=desc&per_page=100&page=${page}`);
+const replayYearUrl = (year: number) => `${replayProfileUrl}?from=${year}-01-01&to=${year}-12-31`;
+const replayRepoUrl = (page: number) => `${replayProfileUrl}?page=${page}&tab=repositories`;
+const replayDates = (start: string, end: string) => {
+	const dates: string[] = [];
+	for (let date = new Date(start); date.toISOString().slice(0, 10) <= end; date.setUTCDate(date.getUTCDate() + 1))
+		dates.push(date.toISOString().slice(0, 10));
+	return dates;
+};
+const replayCalendar = (dates: string[]) =>
+	`<h2 id="js-contribution-activity-description">${dates.length} contributions in the last year</h2><svg class="js-calendar-graph">${dates.map(date => `<rect class="day" data-date="${date}" data-count="1" data-level="1"></rect>`).join("")}</svg>`;
+
+async function replayFixtures() {
+	const fixture = async (name: string) => readFile(new URL(`./__fixtures__/synthetic/${name}`, import.meta.url), "utf8");
+	const profile = (await fixture("profile-pinned-listitem-current-github.html"))
+		.replace(/<h2 id="js-contribution-activity-description"[\s\S]*?<\/h2>/u, "");
+	const row = await fixture("repository-row-current-github.html");
+	const event = JSON.parse(await fixture("events.json"))[0];
+	const html = new Map<string, string | Error>([
+		["https://github.com/", owner],
+		[replayProfileUrl, profile + replayCalendar(replayDates("2025-01-02", "2026-01-01"))],
+	]);
+	for (const year of [2025, 2024, 2023])
+		html.set(replayYearUrl(year), owner + replayCalendar(replayDates(`${year}-01-01`, `${year}-12-31`)));
+	const names = [["alpha", "beta"], ["gamma", "delta"], ["epsilon"]];
+	names.forEach((pageNames, index) => {
+		const page = index + 1;
+		const previous = page === 1 ? '<span class="previous_page disabled" aria-disabled="true">Previous</span>'
+			: `<a class="previous_page" rel="prev" href="${replayRepoUrl(page - 1)}">Previous</a>`;
+		const next = page === 3 ? '<span class="next_page disabled" aria-disabled="true">Next</span>'
+			: `<a class="next_page" rel="next" href="${replayRepoUrl(page + 1)}">Next</a>`;
+		html.set(replayRepoUrl(page), owner + `<div id="user-repositories-list"><ul>${pageNames.map(name => row.replaceAll("REPO", name)).join("")}</ul><div class="paginate-container"><div class="pagination">${previous}${next}</div></div></div>`);
+	});
+	html.set(starsUrl, starredPage(ids(0), disabledControl("Previous") + cursorNext(cursorUrl("c1"))));
+	html.set(cursorUrl("c1"), starredPage(ids(30), cursorPrev("https://github.com/sample-user?before=p1&tab=stars") + cursorNext(cursorUrl("c2"))));
+	html.set(cursorUrl("c2"), starredPage(ids(60, 5), cursorPrev("https://github.com/sample-user?before=p2&tab=stars") + disabledControl("Next")));
+	const api = new Map<string, ReplayApi | Error>([
+		["https://api.github.com/users/sample-user/starred?per_page=100&page=1", restList(ids(0, 65))()],
+		[replayEventsUrl(1), { link: `<${replayEventsUrl(2)}>; rel="next"`, data: ids(1, 100).map(id => ({ ...event, id: String(id) })) }],
+		[replayEventsUrl(2), { link: `<${replayEventsUrl(1)}>; rel="prev"`, data: ids(101, 2).map(id => ({ ...event, id: String(id) })) }],
+	]);
+	for (const type of ["issue", "pr"]) for (const page of [1, 2]) {
+		api.set(replayHistoryUrl(type, page), {
+			link: `<${replayHistoryUrl(type, page === 1 ? 2 : 1)}>; rel="${page === 1 ? "next" : "prev"}"`,
+			data: { total_count: 101, incomplete_results: false, items: ids(page === 1 ? 1 : 101, page === 1 ? 100 : 1).map(id => ({
+				id, number: id, repository_url: "https://api.github.com/repos/sample-user/demo",
+				title: `Synthetic ${type} ${id}`, body: null, state: "open", created_at: replayNow, updated_at: replayNow,
+				closed_at: null, html_url: `https://github.com/sample-user/demo/${type === "issue" ? "issues" : "pull"}/${id}`,
+				comments: 0, reactions: { total_count: 0 }, labels: [], draft: false, pull_request: { merged_at: null },
+			})) },
+		});
+	}
+	return { html, api };
+}
+
+async function replayAll(mutate?: (routes: Awaited<ReturnType<typeof replayFixtures>>) => void) {
+	const routes = await replayFixtures();
+	mutate?.(routes);
+	const manifest = JSON.parse(await readFile(new URL("./manifest.json", import.meta.url), "utf8"));
+	const requested: string[] = manifest.streams.map((stream: { name: string }) => stream.name);
+	assert.deepEqual([...requested].sort(), ["contributions", "events", "history", "profile", "repositories", "starred"]);
+	const state: Record<string, unknown> = Object.fromEntries(requested.map(stream => [stream, structuredClone(prior)]));
+	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const messages: Array<{ type: string; stream?: string; diagnostics?: unknown }> = [];
+	const failures: Array<{ stream: string; message: string; options: unknown }> = [];
+	const timeline: Array<{ kind: string; stream?: string; url?: string; milliseconds?: number }> = [];
+	const progress: string[] = [];
+	const unmapped: string[] = [];
+	const read = <T>(map: Map<string, T | Error>, url: string): T => {
+		const value = map.get(canonicalUrl(url));
+		if (value === undefined) { unmapped.push(url); throw new Error("unmapped offline request"); }
+		if (value instanceof Error) throw value;
+		return structuredClone(value);
+	};
+	await collectGitHubBrowser({
+		requested: new Set(requested), state,
+		emit: async message => { messages.push(structuredClone(message)); timeline.push({ kind: message.type, stream: "stream" in message ? message.stream : undefined }); },
+		emitRecord: async (stream, data) => { records.push({ stream, data: structuredClone(data) }); timeline.push({ kind: "record", stream }); },
+		reportStreamFailure: async (stream, message, options) => { failures.push({ stream, message, options }); timeline.push({ kind: "failure", stream }); },
+		progress: async message => { progress.push(message); },
+	}, {
+		openPage: async url => { timeline.push({ kind: "html", url: canonicalUrl(url) }); return { requestedUrl: url, currentUrl: url, html: read(routes.html, url) }; },
+		fetchPublicJson: async url => { timeline.push({ kind: "json", url: canonicalUrl(url) }); return { requestedUrl: url, responseUrl: url, status: 200, ...read(routes.api, url) }; },
+		now: () => new Date(replayNow),
+		sleep: async milliseconds => { timeline.push({ kind: "sleep", milliseconds }); },
+	});
+	// The collector isolates source exceptions, so assert misses outside its catch boundary.
+	assert.deepEqual(unmapped, []);
+	assert.ok(!JSON.stringify({ records, messages, failures, state, progress }).includes(replaySecret));
+	return { requested, records, messages, failures, state, timeline };
+}
+
+function assertReplayPublished(result: Awaited<ReturnType<typeof replayAll>>, stream: string) {
+	assert.equal(result.records.filter(record => record.stream === stream).length, 1, stream);
+	assert.equal(result.messages.filter(message => message.type === "STATE" && message.stream === stream).length, 1, stream);
+	assert.ok(result.timeline.findIndex(item => item.kind === "record" && item.stream === stream) <
+		result.timeline.findIndex(item => item.kind === "STATE" && item.stream === stream), stream);
+	assert.equal((result.state[stream] as { fetched_at: string }).fetched_at, replayNow);
+	assert.equal(result.messages.filter(message => message.type === "DETAIL_COVERAGE" && message.stream === stream).length, stream === "profile" ? 0 : 1);
+}
+
+test("full GitHub replay publishes every manifest stream in one offline collector call", async () => {
+	const result = await replayAll();
+	for (const stream of result.requested) assertReplayPublished(result, stream);
+	assert.deepEqual(result.failures, []);
+	assert.equal(result.messages.filter(message => message.type === "SKIP_RESULT").length, 0);
+	const data = (stream: string) => result.records.find(record => record.stream === stream)!.data;
+	assert.deepEqual((data("repositories").repositories as Array<{ name: string }>).map(row => row.name), ["alpha", "beta", "gamma", "delta", "epsilon"]);
+	assert.deepEqual((data("starred").starred as Array<{ fullName: string }>).map(row => row.fullName), ids(0, 65).map(id => `sample-user/repo${id}`));
+	assert.deepEqual((data("events").events as Array<{ id: string }>).map(row => row.id), ids(1, 102).map(String));
+	for (const [key, type] of [["issues", "issue"], ["pullRequests", "pr"]])
+		assert.deepEqual((data("history")[key] as Array<{ id: string }>).map(row => row.id), ids(1, 101).map(id => `gh-${type}-${id}`));
+	assert.deepEqual((data("contributions").days as Array<{ date: string }>).map(day => day.date).sort(), replayDates("2023-01-01", "2026-01-01"));
+	assert.equal(data("contributions").totalContributionsLastYear, 365);
+	assert.deepEqual(data("contributions").yearTotals, [{ year: 2026, total: 365 }, { year: 2025, total: 365 }, { year: 2024, total: 366 }, { year: 2023, total: 365 }]);
+	assert.deepEqual(result.timeline.filter(item => item.kind === "sleep").map(item => item.milliseconds), [6500, 6500]);
+	assert.deepEqual(result.timeline.filter(item => item.url).map(({ kind, url }) => [kind, url]), [
+		["html", "https://github.com/"], ["html", replayProfileUrl],
+		...[1, 2, 3].map(page => ["html", replayRepoUrl(page)]),
+		["html", starsUrl], ["html", cursorUrl("c1")], ["html", cursorUrl("c2")],
+		["json", "https://api.github.com/users/sample-user/starred?per_page=100&page=1"],
+		["json", replayEventsUrl(1)], ["json", replayEventsUrl(2)], ["html", replayProfileUrl],
+		...[2025, 2024, 2023].map(year => ["html", replayYearUrl(year)]),
+		...["issue", "pr"].flatMap(type => [1, 2].map(page => ["json", replayHistoryUrl(type, page)])),
+	]);
+});
+
+const replayFailures: Array<{ name: string; stream: string; cause: string; mutate: (routes: Awaited<ReturnType<typeof replayFixtures>>) => void }> = [
+	{ name: "unknown event Link", stream: "events", cause: "unreadable_pagination", mutate: ({ api }) => {
+		const response = api.get(replayEventsUrl(1)) as ReplayApi;
+		api.set(replayEventsUrl(1), { ...response, link: "unreadable" });
+	} },
+	{ name: "incomplete history search", stream: "history", cause: "search_incomplete_results", mutate: ({ api }) => {
+		const response = api.get(replayHistoryUrl("issue", 1)) as ReplayApi;
+		api.set(replayHistoryUrl("issue", 1), { ...response, data: { ...(response.data as object), incomplete_results: true } });
+	} },
+	{ name: "missing contribution year", stream: "contributions", cause: "year_view_unavailable", mutate: ({ html }) => { html.set(replayYearUrl(2024), owner); } },
+	{ name: "repeated starred cursor", stream: "starred", cause: "continuation_cycle", mutate: ({ html }) => {
+		html.set(cursorUrl("c1"), (html.get(cursorUrl("c1")) as string).replace(cursorUrl("c2"), cursorUrl("c1")));
+	} },
+	{ name: "secret-looking source exception", stream: "events", cause: "source_request_failed", mutate: ({ api }) => { api.set(replayEventsUrl(1), new Error(replaySecret)); } },
+];
+for (const scenario of replayFailures) test(`full GitHub replay isolates ${scenario.name}`, async () => {
+	const result = await replayAll(scenario.mutate);
+	assert.deepEqual(result.state[scenario.stream], prior);
+	assert.equal(result.records.filter(record => record.stream === scenario.stream).length, 0);
+	assert.equal(result.messages.filter(message => message.type === "STATE" && message.stream === scenario.stream).length, 0);
+	assert.equal(result.messages.filter(message => message.type === "DETAIL_COVERAGE" && message.stream === scenario.stream).length, 0);
+	const outcomes = [...result.messages.filter(message => message.type === "SKIP_RESULT"), ...result.failures];
+	assert.equal(outcomes.length, 1);
+	assert.equal(outcomes[0].stream, scenario.stream);
+	assert.ok(JSON.stringify(outcomes[0]).includes(`"${scenario.cause}"`));
+	assert.ok(JSON.stringify(outcomes[0]).length < 2000, "failure remains bounded");
+	for (const stream of result.requested.filter(stream => stream !== scenario.stream)) assertReplayPublished(result, stream);
+});
