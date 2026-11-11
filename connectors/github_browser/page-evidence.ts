@@ -24,11 +24,15 @@ export interface InventoryEndEvidence {
 	readonly hasUnknownContinuation: boolean;
 	readonly terminalProof: InventoryTerminalProof;
 	readonly nextUrl: string | null;
+	/** A cursor successor the starred inspector already bound to this page, or null. */
+	readonly cursorNext?: string | null;
 }
 
 export interface InventoryEndResult {
 	readonly complete: boolean;
 	readonly nextUrl: string | null;
+	/** The cursor value of a bound cursor successor; null for page-numbered successors. */
+	readonly cursor?: string | null;
 	readonly reason:
 		| "blocked_page"
 		| "wrong_navigation"
@@ -66,6 +70,12 @@ export function inspectInventoryEnd(
 		return { complete: false, nextUrl: null, reason: "unknown_continuation" };
 	if (evidence.noProgress)
 		return { complete: false, nextUrl: null, reason: "no_progress" };
+	if (evidence.cursorNext != null) {
+		const cursor = boundCursor(evidence.cursorNext, page.currentUrl);
+		return cursor === null
+			? { complete: false, nextUrl: null, reason: "unknown_continuation" }
+			: { complete: false, nextUrl: evidence.cursorNext, cursor, reason: "remaining_continuation" };
+	}
 	if (evidence.nextUrl !== null) {
 		const next = validContinuation(
 			evidence.nextUrl,
@@ -95,11 +105,14 @@ function isExpectedRequest(
 		const starsRoute =
 			stream === "starred" && url.pathname === `/stars/${username}`;
 		const expectedTab = stream === "repositories" ? "repositories" : "stars";
+		// A starred cursor request carries `after` and no page number. The walk
+		// accepts it only when an inspector bound it (see InventoryEvidence).
+		const cursorRequest = stream === "starred" && url.searchParams.has("after");
 		return (
 			url.origin === "https://github.com" &&
 			(profileRoute || starsRoute) &&
 			validSelection(url, starsRoute) &&
-			Number(url.searchParams.get("page")) === pageNumber &&
+			(cursorRequest ? !url.searchParams.has("page") : Number(url.searchParams.get("page")) === pageNumber) &&
 			(starsRoute || url.searchParams.get("tab") === expectedTab)
 		);
 	} catch {
@@ -194,6 +207,29 @@ function validContinuation(
 		)
 			return null;
 		return url.href;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The cursor value of a Next link that is a safe successor of `current`: same
+ * origin, same path and same tab, one non-empty `after` value, nothing else.
+ * Returns null for any other link, which stays an unknown continuation.
+ */
+export function boundCursor(href: string, current: string): string | null {
+	try {
+		const next = new URL(href);
+		const from = new URL(current);
+		const cursor = next.searchParams.getAll("after");
+		const keys = Array.from(next.searchParams.keys());
+		if (next.origin !== "https://github.com" || from.origin !== next.origin ||
+			next.username !== "" || next.password !== "" || next.hash !== "" ||
+			next.pathname !== from.pathname || next.searchParams.get("tab") !== from.searchParams.get("tab") ||
+			cursor.length !== 1 || (cursor[0] ?? "").trim() === "" ||
+			!keys.every(key => key === "after" || key === "tab") ||
+			next.searchParams.getAll("tab").length !== (from.searchParams.has("tab") ? 1 : 0)) return null;
+		return cursor[0] ?? null;
 	} catch {
 		return null;
 	}

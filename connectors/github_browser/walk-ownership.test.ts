@@ -394,7 +394,11 @@ for (const stream of ["repositories", "starred"] as const) {
 							: inventoryPage(stream, ["c"], disabledNext);
 					});
 					assertWithheld(result, stream);
-					assert.ok(result.browserRequests.every(url => !new URL(url).searchParams.has("after")));
+					// A starred cursor Next on the page's own path is an inspector-bound successor, so the
+					// walk requests it; this page then reads as the owner shell and the stream stays withheld.
+					// Every other cursor link stays unbound and is never requested.
+					const cursorRequests = result.browserRequests.filter(url => new URL(url).searchParams.has("after"));
+					assert.equal(cursorRequests.length > 0, stream === "starred" && !numericPage);
 				});
 			}
 		}
