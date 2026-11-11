@@ -269,12 +269,12 @@ function harness(
 const FAST = { pageDelayMs: 0, activityDelayMs: 0, rateLimitDelayMs: 0 };
 const BOTH = ["activities"];
 
-test("shares the strava source and its stream names", () => {
-	// The contract identity is asserted against the published declaration in
+test("owns its own source and shares the strava stream names", () => {
+	// The exact source ids are pinned in
 	// packages/connector-installer-core/source-declaration.test.mjs.
 	const file = manifest("strava");
 	const browser = manifest("strava_browser");
-	assert.equal(browser.source.id, file.source.id);
+	assert.notEqual(browser.source.id, file.source.id);
 	assert.equal(browser.connector_key, "strava-browser");
 	assert.ok(browser.connector_id.endsWith(`/${browser.connector_key}`));
 	assert.equal(browser.setup, undefined);
