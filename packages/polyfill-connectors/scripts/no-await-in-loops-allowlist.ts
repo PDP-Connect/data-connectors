@@ -70,28 +70,28 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 	[
 		{
 			path: "connectors/readwise/index.ts",
-			line: 73,
+			line: 76,
 			column: 18,
 			category: "dependent_file_cursor",
 			note: "Read one bounded response-body chunk before advancing its reader.",
 		},
 		{
 			path: "connectors/readwise/index.ts",
-			line: 101,
+			line: 104,
 			column: 32,
 			category: "dependent_pagination",
 			note: "Read the next Kindle book-list page only after its predecessor supplies the URL.",
 		},
 		{
 			path: "connectors/readwise/index.ts",
-			line: 129,
+			line: 132,
 			column: 34,
 			category: "dependent_pagination",
 			note: "Export the next page only after its predecessor supplies pageCursor; preserve provider pacing.",
 		},
 		{
 			path: "connectors/readwise/index.ts",
-			line: 151,
+			line: 154,
 			column: 6,
 			category: "ordered_protocol_emission",
 			note: "Emit each validated highlight in protocol order with runtime backpressure.",

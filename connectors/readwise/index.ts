@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Readwise v2 official API only; never starts a Kindle import/sync.
  * Full bounded snapshots of Kindle books selected by the provider's source field.
