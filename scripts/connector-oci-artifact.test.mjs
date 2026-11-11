@@ -347,15 +347,14 @@ describe("W28 — the source declaration is a normative PDPP SourceDeclaration",
 		assert.match(result.stderr, /not a valid PDPP SourceDeclaration/);
 	});
 
-	it("every artifact of one source carries the same declaration bytes", () => {
+	it("artifacts of different sources carry their own declarations", () => {
 		const browserArtifact = join(workspace, "oura-browser");
 		const built = build(["--connector", "oura_browser", "--out", browserArtifact]);
 		assert.equal(built.status, 0, `${built.stdout}\n${built.stderr}`);
-		assert.ok(
-			readFileSync(join(browserArtifact, "source-declaration.json")).equals(
-				readFileSync(join(ouraArtifact, "source-declaration.json")),
-			),
-		);
+		const sourceOf = (artifact) =>
+			JSON.parse(readFileSync(join(artifact, "source-declaration.json"), "utf8")).source.id;
+		assert.equal(sourceOf(browserArtifact), "https://registry.pdpp.dev/sources/oura");
+		assert.equal(sourceOf(ouraArtifact), "https://registry.pdpp.dev/sources/oura_pat");
 		assert.equal(verify(browserArtifact).status, 0);
 	});
 
