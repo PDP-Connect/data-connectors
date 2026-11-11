@@ -100,6 +100,10 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.43 — the ads stream is complete once every ads surface was reached
+ *     (each surface's "See more"/"View all" control gone and every click
+ *     loaded rows, or its source-authored empty message shown); it emits
+ *     coverage and STATE then, and still skips when any surface is unreached.
  *   v0.4.32 — scrape legacy targeting categories before advertiser pagination
  *     so slow advertiser expansion cannot consume their collection window.
  *   v0.4.25 — restores legacy profile capture, stream-gap reporting, initial
@@ -2841,14 +2845,16 @@ export async function collectAllStreams(
 			for (const ad of readableAds) {
 				await emitRecord("ads", ad as RecordData);
 			}
-			// The retained live dialogs state neither exact totals nor a terminal
-			// pagination signal. Layout/expansion diagnostics never prove inventory.
-			// An unreachable sub-section only names itself in the skip: the rows
-			// above still upsert and the other streams finish with their STATE.
+			// Ads are complete when every ads surface was reached: each surface's
+			// `reached` flag is true only after its "See more"/"View all" control
+			// was clicked until it was gone and every click loaded rows (or its
+			// source-authored empty message was shown). Layout diagnostics alone
+			// never set it. An unreached surface names itself in the skip: the
+			// rows above still upsert and the other streams finish with their STATE.
 			const unreached = [advertisers, adTopics, categories]
 				.filter((scrape) => !scrape.reached)
 				.map((scrape) => `${scrape.surface} (${scrape.step ?? "unread"})`);
-			await queueInventoryResult(ctx, "ads", readableAds.length, false,
+			await queueInventoryResult(ctx, "ads", readableAds.length, unreached.length === 0,
 				unreached.length > 0
 					? `the ads sections not reached: ${unreached.join(", ")}`
 					: undefined);

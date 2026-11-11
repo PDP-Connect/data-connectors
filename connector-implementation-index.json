@@ -11384,7 +11384,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.19",
+				"version": "0.3.20",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -17765,7 +17765,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.42",
+				"version": "0.4.43",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",

@@ -76,8 +76,10 @@ export async function collectGitHubBrowser(
 		try { return await request(); }
 		catch (error) {
 			if (error instanceof CollectionError) throw error;
-			const status = error instanceof Error ? /^github_browser_http_(\d{3})$/u.exec(error.message)?.[1] : undefined;
-			throw new CollectionError({ ...counts, origin: "source", cause: "source_request_failed",
+			// Playwright prefixes page-thrown errors ("page.evaluate: Error: ..."), so match the token anywhere.
+			const status = error instanceof Error ? /github_browser_http_(\d{3})\b/u.exec(error.message)?.[1] : undefined;
+			throw new CollectionError({ ...counts, origin: "source",
+				cause: status === "429" ? "http_rate_limited" : "source_request_failed",
 				...(status === undefined ? {} : { status: Number(status) }) });
 		}
 	};

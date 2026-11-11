@@ -151,14 +151,15 @@ export async function collect({
 						"X-GitHub-Api-Version": "2022-11-28",
 					},
 				});
-				if (!response.ok)
-					throw new Error(`github_browser_http_${response.status}`);
+				// Carry the status out as data: the collector classifies non-200
+				// responses (429 is rate-limited); an exception message would lose
+				// it behind Playwright's "page.evaluate:" prefix.
 				return {
 					requestedUrl: target,
 					responseUrl: response.url,
 					status: response.status,
 					link: response.headers.get("Link"),
-					data: await response.json(),
+					data: response.ok ? await response.json() : null,
 				};
 			}, url),
 		now: () => new Date(),
