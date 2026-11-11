@@ -432,15 +432,22 @@ describe("source declarations — connector fleet", () => {
 });
 
 describe("each connector owns its source", () => {
-  it("no two connectors of a pair share a source id", () => {
-    const sourceOf = (name) =>
-      JSON.parse(readFileSync(new URL(`../../connectors/${name}/manifest.json`, import.meta.url), "utf8")).source.id;
-    for (const [owner, other] of [
-      ["anthropic_live", "anthropic"],
-      ["oura_browser", "oura"],
-      ["strava_browser", "strava"],
-    ]) {
-      assert.notEqual(sourceOf(owner), sourceOf(other), `${owner} and ${other}`);
-    }
-  });
+  const EXPECTED = {
+    anthropic_live: ["https://registry.pdpp.dev/sources/claude", "Claude"],
+    anthropic: ["https://registry.pdpp.dev/sources/claude_export", "Claude"],
+    oura_browser: ["https://registry.pdpp.dev/sources/oura", "Oura"],
+    oura: ["https://registry.pdpp.dev/sources/oura_pat", "Oura"],
+    strava_browser: ["https://registry.pdpp.dev/sources/strava", "Strava"],
+    strava: ["https://registry.pdpp.dev/sources/strava_api", "Strava"],
+  };
+
+  for (const [connector, [id, name]] of Object.entries(EXPECTED)) {
+    it(`${connector} declares source ${id} named "${name}"`, () => {
+      const { source } = JSON.parse(
+        readFileSync(new URL(`../../connectors/${connector}/manifest.json`, import.meta.url), "utf8"),
+      );
+      assert.equal(source.id, id);
+      assert.equal(source.display.name, name);
+    });
+  }
 });
