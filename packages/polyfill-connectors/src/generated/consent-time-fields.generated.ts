@@ -286,6 +286,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	pocket: {
 		items: { field: "time_added", format: "date-time" },
 	},
+	readwise: {
+		kindle_highlights: null,
+	},
 	reddit: {
 		comments: { field: "created_utc", format: "date-time" },
 		comments_stats: { field: "created_utc", format: "date-time" },

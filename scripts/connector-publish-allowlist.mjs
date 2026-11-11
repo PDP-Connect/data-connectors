@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
  */
 export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
   [
+    ["readwise", "readwise"],
     ["amazon", "amazon"],
     ["anthropic", "anthropic"],
     ["anthropic_live", "anthropic-live"],

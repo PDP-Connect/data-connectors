@@ -1326,6 +1326,8 @@ export const REDDIT_EXCLUDED_DRIVER: ConnectorDriver = {
 // silent bypass: growing this list is a visible, reviewable diff, and
 // shrinking it is enforced automatically the moment a driver exists.
 export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
+	// Readwise Development collector has synthetic API tests; the shared coverage driver is pending.
+	"readwise.kindle_highlights",
 	// Apple Photos (REAL_UNLISTED_CONNECTORS): filesystem/export snapshot-import
 	// receipts, no driver yet. Apple Health has no entry: every one of its
 	// streams is required:false, so none is an unexercised REQUIRED stream. Its

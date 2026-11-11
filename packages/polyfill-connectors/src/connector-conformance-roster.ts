@@ -80,6 +80,7 @@ export const KNOWN_SCAFFOLD_CONNECTORS = ["loom"] as const;
  * or Supported; the conformance test keeps the rosters disjoint.
  */
 export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
+	readwise: { testFile: "connectors/readwise/index.test.ts" },
 	// Tier development. The oracle is the end-to-end protocol test, matching
 	// strava.
 	apple_health: { testFile: "connectors/apple_health/index.test.ts" },

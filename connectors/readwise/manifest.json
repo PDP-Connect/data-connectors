@@ -1,0 +1,167 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/readwise",
+	"connector_key": "readwise",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/readwise",
+	"version": "0.1.1",
+	"display_name": "Readwise Kindle",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#222222"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"constraints": {
+					"hosts": ["readwise.io"]
+				}
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": [],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"recommended_interval_seconds": 21600,
+			"minimum_interval_seconds": 3600,
+			"maximum_staleness_seconds": 86400,
+			"interaction_posture": "none",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "low",
+			"background_safe": false,
+			"rationale": "Manual bounded snapshot of existing Readwise Kindle highlights using the official API; never initiates Kindle synchronization."
+		},
+		"public_listing": {
+			"tier": "development"
+		},
+		"auth": {
+			"kind": "env",
+			"required": ["READWISE_API_TOKEN"]
+		}
+	},
+	"streams": [
+		{
+			"name": "kindle_highlights",
+			"description": "Existing Kindle highlights stored in Readwise, with book title, author, notes and locations.",
+			"display": {
+				"label": "Your Kindle highlights",
+				"detail": "Highlight text, notes, book title and author, Kindle location and Readwise links."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"book_id": {
+						"type": "string"
+					},
+					"title": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"author": {
+						"type": ["string", "null"]
+					},
+					"text": {
+						"type": "string"
+					},
+					"note": {
+						"type": ["string", "null"]
+					},
+					"location": {
+						"type": ["integer", "null"]
+					},
+					"location_type": {
+						"type": ["string", "null"]
+					},
+					"highlighted_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"updated_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"readwise_url": {
+						"type": "string"
+					},
+					"source": {
+						"type": "string",
+						"enum": ["kindle"]
+					},
+					"tags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"deleted": {
+						"type": "boolean"
+					}
+				},
+				"required": [
+					"id",
+					"book_id",
+					"title",
+					"author",
+					"text",
+					"note",
+					"location",
+					"location_type",
+					"highlighted_at",
+					"updated_at",
+					"readwise_url",
+					"source",
+					"tags",
+					"deleted"
+				]
+			},
+			"primary_key": ["id"],
+			"required": true,
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"query": {
+				"range_filters": {
+					"highlighted_at": ["gte", "gt", "lte", "lt"],
+					"updated_at": ["gte", "gt", "lte", "lt"]
+				},
+				"search": {
+					"lexical_fields": ["title", "author", "text", "note"],
+					"semantic_fields": ["title", "text", "note"]
+				}
+			},
+			"coverage_strategy": "snapshot_import_receipt",
+			"freshness_strategy": "manual_as_of"
+		}
+	],
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/readwise",
+		"display": {
+			"name": "Readwise Kindle"
+		}
+	},
+	"setup": {
+		"modality": "static_secret",
+		"credential_capture": {
+			"kind": "personal_access_token",
+			"label": "Readwise access token",
+			"fields": [
+				{
+					"name": "secret",
+					"label": "Readwise access token",
+					"type": "password",
+					"secret": true,
+					"required": true,
+					"env": ["READWISE_API_TOKEN"],
+					"help_url": "https://readwise.io/access_token"
+				}
+			]
+		}
+	}
+}
