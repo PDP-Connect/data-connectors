@@ -108,6 +108,11 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	// Tier development. Collects through the signed-in muse.ai app's own
 	// gateway client; the oracle is the collection protocol test.
 	muse: { testFile: "connectors/muse/index.test.ts" },
+	// Tier development. Reads the signed-in mountainproject.com session's own
+	// tick and to-do CSV exports; the oracle is the collection test over a
+	// synthetic page and the real exports of a project-owned test account. No
+	// full run through the browser handoff on a real account yet.
+	mountain_project: { testFile: "connectors/mountain_project/index.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
 	// not scaffold: it parses a
 	// genuine Netflix export rather than emitting a SKIP_RESULT placeholder.

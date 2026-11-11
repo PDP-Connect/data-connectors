@@ -33,6 +33,7 @@ export const DATE_BOUND_STREAMS = new Set([
 	"garmin_browser.daily_summaries",
 	"garmin_browser.hrv",
 	"garmin_browser.training_status",
+	"mountain_project.ticks",
 	"oura_browser.activity",
 	"oura_browser.readiness",
 	"oura_browser.sleep",

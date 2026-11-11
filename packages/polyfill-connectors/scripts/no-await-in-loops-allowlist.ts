@@ -1154,6 +1154,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "runs the filtered-record replay cases one at a time so each case drives and asserts an ordered per-case side effect.",
 		},
 		{
+			path: "connectors/mountain_project/index.ts",
+			line: 545,
+			column: 3,
+			category: "ordered_protocol_emission",
+			note: "Emit each export row's RECORD in export order, before the stream's coverage and STATE, which must follow every record they account for.",
+		},
+		{
 			path: "connectors/character_ai/index.ts",
 			line: 564,
 			column: 3,
