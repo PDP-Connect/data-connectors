@@ -1,0 +1,48 @@
+{
+	"id": 8351200017,
+	"nextTrainingId": -1,
+	"previousTrainingId": 8349588454,
+	"userId": 11111111,
+	"feeling": null,
+	"note": "Easy mobility session",
+	"latitude": null,
+	"longitude": null,
+	"startDate": "2026-11-05T18:30:00",
+	"stopTime": "2026-11-05T19:00:00",
+	"duration": "PT30M",
+	"distance": null,
+	"kiloCalories": 210,
+	"trainingLoad": null,
+	"trainingBenefit": null,
+	"hrMax": 0,
+	"hrAverage": 0,
+	"timezoneOffset": null,
+	"trainingLoadPro": null,
+	"exercises": {
+		"8379200001": {
+			"id": 8379200001,
+			"sport": { "id": 105 },
+			"startTime": "2026-11-05T18:30:00",
+			"stopTime": "2026-11-05T19:00:00",
+			"duration": "PT30M",
+			"distance": null,
+			"calories": 210,
+			"trainingStatistic": {
+				"HEART_RATE": { "max": 0, "avg": 0, "min": null }
+			},
+			"sportParent": "OTHER",
+			"defaultSpeedViewSettings": "SPEED"
+		}
+	},
+	"periodDataUuid": null,
+	"deviceName": "",
+	"trainingSessionName": null,
+	"clubModel": { "clubTrainingSession": false, "inZone": 0, "duration": 0 },
+	"teamTrainingSessionType": null,
+	"coachNotes": [],
+	"hasUserCoach": false,
+	"sportId": null,
+	"startTrigger": null,
+	"hasRRsamples": false,
+	"trimmed": false
+}

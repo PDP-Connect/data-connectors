@@ -119,6 +119,9 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	netflix_export: { testFile: "connectors/netflix_export/integration.test.ts" },
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	perplexity: { testFile: "connectors/perplexity/index.test.ts" },
+	// Tier development. Reads the signed-in flow.polar.com web app's own JSON;
+	// shapes are inferred from the web bundle until a seeded account confirms them.
+	polar_flow: { testFile: "connectors/polar_flow/index.test.ts" },
 	// Real collector, Development tier: the artifact still depends on a host
 	// helper and installability is not yet proven.
 	slack: { testFile: "connectors/slack/integration.test.ts" },

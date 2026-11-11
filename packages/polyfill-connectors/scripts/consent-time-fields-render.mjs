@@ -37,6 +37,10 @@ export const DATE_BOUND_STREAMS = new Set([
 	"oura_browser.activity",
 	"oura_browser.readiness",
 	"oura_browser.sleep",
+	"polar_flow.daily_activity",
+	"polar_flow.nightly_recharge",
+	"polar_flow.sleep",
+	"polar_flow.training_sessions",
 	"strava.activities",
 	"strava_browser.activities",
 ]);

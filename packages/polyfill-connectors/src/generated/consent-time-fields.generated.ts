@@ -291,6 +291,13 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	pocket: {
 		items: { field: "time_added", format: "date-time" },
 	},
+	polar_flow: {
+		daily_activity: { field: "date", format: "date" },
+		nightly_recharge: { field: "date", format: "date" },
+		profile: null,
+		sleep: { field: "date", format: "date" },
+		training_sessions: { field: "start_date", format: "date" },
+	},
 	reddit: {
 		comments: { field: "created_utc", format: "date-time" },
 		comments_stats: { field: "created_utc", format: "date-time" },
