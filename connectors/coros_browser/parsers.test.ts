@@ -192,7 +192,8 @@ test("plannedRecords joins entries to workouts by place in plan and plan id", ()
 		completed_activity_id: "476000000000000202",
 	});
 	assert.equal(ahead?.completed_activity_id, null);
-	assert.equal(ahead?.completion_rate, 0);
+	// COROS writes "-1.00" for a workout it has not rated yet (live, 2026-11-12).
+	assert.equal(ahead?.completion_rate, null);
 	for (const record of [done, ahead]) {
 		assert.ok(record);
 		assert.equal(validateRecord("planned_workouts", record).ok, true);

@@ -390,6 +390,8 @@ export function plannedRecords(
 		const program = programs.get(`${inPlan}&${planId}`) ?? {};
 		const sportType = integer(program.sportType);
 		const done = isObj(entity.sportData) ? entity.sportData : null;
+		// "-1.00" until COROS rates the workout: not yet rated, not a rate.
+		const rate = numeric(entity.completeRate);
 		return {
 			ok: true,
 			record: {
@@ -399,7 +401,7 @@ export function plannedRecords(
 				sport_type: sportType,
 				sport: planSportName(sportType),
 				planned_training_load: finite(program.trainingLoad),
-				completion_rate: numeric(entity.completeRate),
+				completion_rate: rate !== null && rate >= 0 ? rate : null,
 				completed_activity_id: done ? idOf(done.labelId) : null,
 			},
 		};

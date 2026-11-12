@@ -20,3 +20,23 @@ the first signed-in `connector-dev` run.
 Units assumed (to verify live): activity `distance` in metres, `calorie` in calories (the list
 divides by 1000 for kcal), `totalTime`/`workoutTime` in seconds, `startTime` in epoch seconds,
 `startTimezone` in quarter hours, daily `ltsp` in seconds per kilometre, HRV in milliseconds.
+
+## Live check, 2026-11-12
+
+A signed-in `connector-dev` run against a canary US-region account (`CPL-coros-region=1`,
+teamapi.coros.com) confirmed, with one FIT activity imported through Training Hub's Import data
+and one Quick Training added to its calendar:
+
+- `CPL-coros-token` and `CPL-coros-region` are readable from `document.cookie` (domain
+  `.coros.com`, not HttpOnly); the app sends `accessToken` and `YFHeader: {"language":"en-US"}`.
+- Envelope `{ result, message, data }` with `"0000"`; a missing or bad token answers HTTP 200 with
+  `result: "1019"`, which the app meets with `POST /account/refresh` before sending the owner to
+  `/login`.
+- Activity units as assumed: `distance` metres, `calorie` calories (320000 for 320 kcal),
+  `totalTime` seconds, `startTime` epoch seconds, `startTimezone` quarter hours (-32 for UTC-8).
+  `trainingLoad` and `device` can be absent from a row. An empty window answers `{ count: 0 }`
+  with no `dataList`; a page past `totalPage` answers without `dataList`.
+- 28-day `dayDetail` and `schedule` windows are accepted. An empty calendar has no `entities` or
+  `programs` keys; a planned entry not yet rated has `completeRate: "-1.00"`.
+
+The files here stay synthetic.

@@ -19,7 +19,7 @@
 			"happenDay": 20261112,
 			"planId": "",
 			"idInPlan": "4",
-			"completeRate": 0,
+			"completeRate": "-1.00",
 			"thirdParty": false,
 			"exerciseBarChart": []
 		}

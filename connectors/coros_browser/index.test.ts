@@ -163,10 +163,29 @@ async function inPage<T>(globals: Globals, run: () => Promise<T>): Promise<T> {
 		}
 	}
 }
-/** A page whose evaluate runs the connector's own in-page function, here, against the stubbed globals. */
+/**
+ * A page whose evaluate runs the connector's own in-page function from its source, as a browser
+ * does: outside this module, so a helper tsx adds here (`__name`) is not in scope.
+ */
 const evaluatingPage = {
-	evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => fn(arg),
+	evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) =>
+		new Function("arg", `return (${String(fn)})(arg);`)(arg) as unknown,
 } as unknown as CorosCollectContext["page"];
+
+test("pageFetch: the in-page function is self-contained, with no tsx __name helper", async () => {
+	const sources: string[] = [];
+	await pageFetch(
+		{
+			evaluate: async (fn: unknown) => {
+				sources.push(String(fn));
+				return { kind: "no_token" };
+			},
+		} as unknown as CorosCollectContext["page"],
+		"/account/query",
+	);
+	assert.equal(sources.length, 1);
+	assert.doesNotMatch(sources[0] ?? "", /__name/);
+});
 
 test("pageFetch: reads the token and region cookies, calls the region's host with the app's headers, returns no token", async () => {
 	const calls: Array<{ url: string; init: RequestInit }> = [];

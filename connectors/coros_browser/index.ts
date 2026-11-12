@@ -123,7 +123,8 @@ export type PageFetch =
 
 /**
  * Reads an API path on the account's regional host, with the token from the app's cookie, read
- * and sent here and never returned. The region comes from the app's region cookie, else from the
+ * and sent here and never returned. The function runs from its own source in the page, so it
+ * declares no named function: tsx would wrap one in a `__name` helper that only exists here. The region comes from the app's region cookie, else from the
  * app's own initial state, as Training Hub's getRegionConfig picks it.
  */
 export async function pageFetch(
@@ -136,22 +137,24 @@ export async function pageFetch(
 				if (location.origin !== origin) {
 					return { kind: "wrong_origin", origin: location.origin };
 				}
-				const cookie = (name: string): string | null => {
-					const prefix = `${name}=`;
-					const part = document.cookie
-						.split(";")
-						.map((p) => p.trim())
-						.find((p) => p.startsWith(prefix));
-					if (!part) return null;
+				// No named function in here: tsx wraps one in a `__name` helper the page lacks.
+				const cookies: Record<string, string | null> = {};
+				for (const raw of document.cookie.split(";")) {
+					const part = raw.trim();
+					const at = part.indexOf("=");
+					if (at <= 0) continue;
+					const name = part.slice(0, at);
+					if (name !== tokenCookie && name !== regionCookie) continue;
+					if (name in cookies) continue;
 					try {
-						return decodeURIComponent(part.slice(prefix.length));
+						cookies[name] = decodeURIComponent(part.slice(at + 1));
 					} catch {
-						return null;
+						cookies[name] = null;
 					}
-				};
-				const token = cookie(tokenCookie);
+				}
+				const token = cookies[tokenCookie];
 				if (!token) return { kind: "no_token" };
-				let region = Number(cookie(regionCookie));
+				let region = Number(cookies[regionCookie]);
 				if (!hosts[String(region)]) {
 					try {
 						const state = (window as unknown as { __INITIAL_STATE__?: unknown })
