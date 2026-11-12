@@ -81,6 +81,7 @@ import {
 	NO_DETAIL_WAITS,
 	withEmptyConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
+import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
 	applyChatGptColdStatePreflight,
 	buildChatGptCollectionRateProgress,
@@ -110,7 +111,7 @@ import {
 	resolveChatGptProviderBudget,
 	resolveChatGptRateLimitDensityStop,
 	runAccountPlanStream,
-	runConversationsAndMessagesStreams,
+	runConversationsAndMessagesStreams as runUnionStreams,
 	runCustomGptsStream,
 	runCustomInstructionsStream,
 	runMemoriesStream,
@@ -131,11 +132,67 @@ import type {
 	ConversationListItem,
 } from "./types.ts";
 
+/** These scenarios isolate search/detail behavior against a healthy empty primary source. */
+const runConversationsAndMessagesStreams: typeof runUnionStreams = (
+	deps,
+	state,
+	options,
+) =>
+	runUnionStreams(
+		{ ...deps, api: withEmptyPrimaryList(deps.api) },
+		state,
+		options,
+	);
+
 interface RecordingHarness {
 	deps: StreamDeps;
 	emitted: EmittedRecord[];
 	messages: EmittedMessage[];
 	skipped: SkippedRecord[];
+}
+
+/** Search can finish before primary: only a subsequent primary pass can
+ * authorize the coverage/watermark assertions in these search replay tests. */
+async function completePrimaryAfterSearch(
+	deps: StreamDeps,
+	skipped: ReturnType<typeof makeRecordingEmit>,
+	priorWatermark: unknown,
+): Promise<ReturnType<typeof makeRecordingEmit>> {
+	assert.equal(
+		skipped.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE",
+		),
+		false,
+		"a skipped primary pass cannot certify coverage",
+	);
+	const state = skipped.protocolMessages.findLast(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(state && state.type === "STATE");
+	const cursor = state.cursor as Record<string, unknown>;
+	assert.equal(
+		cursor.last_update_time,
+		priorWatermark,
+		"unread primary keeps the watermark pinned",
+	);
+	assert.equal(cursor.backfill, undefined, "search backfill finished first");
+	const finalRun = makeRecordingEmit(validateRecord);
+	const primaryApi = withEmptyPrimaryList(deps.api);
+	let primaryReads = 0;
+	const api: ChatGptApi = {
+		...primaryApi,
+		fetch: (path, options) => {
+			if (path.startsWith("/conversations?")) primaryReads += 1;
+			return primaryApi.fetch(path, options);
+		},
+	};
+	await runUnionStreams(
+		{ ...deps, api, emit: finalRun.emit, emitRecord: finalRun.emitRecord },
+		{ conversations: cursor },
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
+	assert.ok(primaryReads > 0, "coverage follows an actual primary pass");
+	return finalRun;
 }
 
 test("persistent listing circuit publishes completed metadata through successful partial DONE", async () => {
@@ -2248,8 +2305,11 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 		false,
 		"the replayed overlap was read in run 1, so run 2 does not emit it again",
 	);
+	const finalRun = await completePrimaryAfterSearch(
+		secondDeps, second, firstCursor.last_update_time,
+	);
 	// The detail pass checkpoints every 25 settled rows; the last STATE is final.
-	const finalState = second.protocolMessages
+	const finalState = finalRun.protocolMessages
 		.filter(
 			(message) =>
 				message.type === "STATE" && message.stream === "conversations",
@@ -2263,7 +2323,7 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	);
 	assert.equal(finalCursor.backfill, undefined);
 	assert.equal(
-		second.protocolMessages.some(
+		finalRun.protocolMessages.some(
 			(message) => message.type === "DETAIL_COVERAGE",
 		),
 		true,
@@ -6106,11 +6166,15 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 		deps,
 		{
 			conversations: {
+				enumeration_version: 1,
 				last_update_time: "2026-06-15T00:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,
 			},
-			messages: { last_update_time: "2026-06-15T00:00:00.000Z" },
+			messages: {
+				enumeration_version: 1,
+				last_update_time: "2026-06-15T00:00:00.000Z",
+			},
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -6153,10 +6217,14 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 	assert.deepEqual(
 		states.map((state) => [state.stream, state.cursor]),
 		[
-			["messages", { last_update_time: "2026-06-15T00:00:00.000Z" }],
+			[
+				"messages",
+				{ enumeration_version: 1, last_update_time: "2026-06-15T00:00:00.000Z" },
+			],
 			[
 				"conversations",
 				{
+					enumeration_version: 1,
 					last_update_time: "2026-06-15T00:00:00.000Z",
 					detail_version: 2,
 					detail_frontier: null,
@@ -6215,6 +6283,7 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 		states.map((state) => state.cursor),
 		[
 			{
+				enumeration_version: 1,
 				last_update_time: "2026-06-15T00:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,
@@ -6324,7 +6393,10 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		emittedIds.has("old-40"),
 		"a conversation reordered by update is collected",
 	);
-	const secondState = second.harness.protocolMessages.find(
+	const finalRun = await completePrimaryAfterSearch(
+		second.deps, second.harness, firstCursor.last_update_time,
+	);
+	const secondState = finalRun.protocolMessages.find(
 		(message) => message.type === "STATE" && message.stream === "conversations",
 	);
 	assert.ok(secondState && secondState.type === "STATE");
@@ -6334,7 +6406,7 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		"the re-seen boundary clears backfill",
 	);
 	assert.ok(
-		second.harness.protocolMessages.some(
+		finalRun.protocolMessages.some(
 			(message) =>
 				message.type === "DETAIL_COVERAGE" &&
 				message.stream === "conversations",
@@ -6411,7 +6483,12 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 	});
 	// old-0 sits before the prior suffix cursor. It already has a record, so the
 	// walk reports it in its coverage count rather than emitting it again.
-	const restartedCoverage = restartedSuffixRun.harness.protocolMessages.find(
+	const confirmedRestart = await completePrimaryAfterSearch(
+		restartedSuffixRun.deps,
+		restartedSuffixRun.harness,
+		suffixCursor.last_update_time,
+	);
+	const restartedCoverage = confirmedRestart.protocolMessages.find(
 		(
 			message,
 		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
@@ -6423,7 +6500,7 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		"the restarted walk includes rows before the prior suffix cursor",
 	);
 	assert.ok(
-		restartedSuffixRun.harness.protocolMessages.some(
+		confirmedRestart.protocolMessages.some(
 			(message) =>
 				message.type === "DETAIL_COVERAGE" &&
 				message.stream === "conversations",
@@ -6466,8 +6543,13 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		undefined,
 		"the retry re-observes its persisted boundary and clears backfill",
 	);
+	const confirmedRetry = await completePrimaryAfterSearch(
+		resumedAfterRateLimit.deps,
+		resumedAfterRateLimit.harness,
+		(rateLimitedState.cursor as Record<string, unknown>).last_update_time,
+	);
 	assert.ok(
-		resumedAfterRateLimit.harness.protocolMessages.some(
+		confirmedRetry.protocolMessages.some(
 			(message) =>
 				message.type === "DETAIL_COVERAGE" &&
 				message.stream === "conversations",
@@ -6539,8 +6621,11 @@ test("runConversationsAndMessagesStreams: equal-time rows moved before the resum
 		second.harness.emitted.some((record) => record.data.id === "tie-30"),
 		"the unseen equal-time row is collected after moving before the saved boundary ID",
 	);
+	const finalRun = await completePrimaryAfterSearch(
+		second.deps, second.harness, firstCursor.last_update_time,
+	);
 	assert.ok(
-		second.harness.protocolMessages.some(
+		finalRun.protocolMessages.some(
 			(message) =>
 				message.type === "DETAIL_COVERAGE" &&
 				message.stream === "conversations",
@@ -6556,11 +6641,10 @@ test("runConversationsAndMessagesStreams: equal-time rows moved before the resum
 // the instant it re-sees anything <= the new cursor, so the unseen tail is
 // permanently skipped, not just delayed. The fix is to never advance past
 // priorConversationsCursor on ANY truncation, regardless of how much of the
-// prefix was proven. This two-run oracle is the fail-before/pass-after gate:
-// run 1 proves the cursor stays PINNED after a partial-then-malformed walk;
-// run 2 proves a healthy re-list from that unchanged cursor re-observes the
-// safe prefix AND reaches the formerly-missing tail, advancing the cursor
-// exactly once, only after a genuinely clean pass.
+// prefix was proven. This three-run oracle proves the cursor stays pinned:
+// run 1 reads a partial prefix; run 2 drains search and reaches its missing
+// tail while primary is skipped; run 3 really reads primary before coverage
+// and watermark advancement can follow the completed enumeration.
 test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk leaves the list cursor pinned; a later healthy run reaches the previously-missing tail", async () => {
 	const priorCursorIso = "2026-06-01T00:00:00.000Z";
 	const priorCursorUnix = Math.floor(new Date(priorCursorIso).getTime() / 1000);
@@ -6734,41 +6818,42 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		);
 	}
 
-	const run2ListCoverage = run2.protocolMessages.find(
+	const finalRun = await completePrimaryAfterSearch(run2Deps, run2, priorCursorIso);
+	const finalListCoverage = finalRun.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 			m.type === "DETAIL_COVERAGE" && m.stream === "conversations",
 	);
 	assert.ok(
-		run2ListCoverage,
+		finalListCoverage,
 		"a genuinely clean full walk must certify list coverage",
 	);
-	assert.equal(run2ListCoverage?.considered, 50);
-	assert.equal(run2ListCoverage?.covered, 50);
+	assert.equal(finalListCoverage?.considered, 50);
+	assert.equal(finalListCoverage?.covered, 50);
 
-	const run2Skip = run2.protocolMessages.find(
+	const finalSkip = finalRun.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "conversations",
 	);
 	assert.equal(
-		run2Skip,
+		finalSkip,
 		undefined,
 		"a clean run must not emit a truncation SKIP_RESULT",
 	);
 
-	const run2States = run2.protocolMessages.filter(
+	const finalStates = finalRun.protocolMessages.filter(
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 			m.type === "STATE" && m.stream === "conversations",
 	);
-	// Run 1 read the overlap; run 2 reads only the 20-item tail, so no checkpoint.
-	assert.equal(run2States.length, 1);
+	// The final primary pass reuses the detail reads, so no mid-pass checkpoint.
+	assert.equal(finalStates.length, 1);
 	assert.equal(
-		(run2States.at(-1)?.cursor as { last_update_time?: string } | undefined)
+		(finalStates.at(-1)?.cursor as { last_update_time?: string } | undefined)
 			?.last_update_time,
 		trueMaxUpdateIso,
 		"older backfill items do not move the newest-seen watermark backwards",
 	);
 	assert.equal(
-		(run2States.at(-1)?.cursor as { backfill?: unknown } | undefined)?.backfill,
+		(finalStates.at(-1)?.cursor as { backfill?: unknown } | undefined)?.backfill,
 		undefined,
 		"the completed backfill clears its continuation",
 	);

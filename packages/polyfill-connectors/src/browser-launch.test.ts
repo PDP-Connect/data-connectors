@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -52,21 +52,41 @@ test("macOS local connector browser uses system Chrome with its sandbox enabled"
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-browser-security-"));
 	const previousRoot = process.env.PDPP_BROWSER_PROFILE_ROOT;
 	const previousChannel = process.env.PDPP_BROWSER_CHANNEL;
+	const previousCdpHost = process.env.PDPP_BROWSER_CDP_HOST;
+	const previousCdpPort = process.env.PDPP_BROWSER_CDP_PORT;
 	let handle: Awaited<ReturnType<typeof acquireIsolatedBrowser>> | undefined;
 	process.env.PDPP_BROWSER_PROFILE_ROOT = dir;
 	delete process.env.PDPP_BROWSER_CHANNEL;
 	t.after(async () => {
 		await handle?.release();
-		if (previousRoot === undefined)
+		if (previousRoot === undefined) {
 			delete process.env.PDPP_BROWSER_PROFILE_ROOT;
-		else process.env.PDPP_BROWSER_PROFILE_ROOT = previousRoot;
-		if (previousChannel === undefined) delete process.env.PDPP_BROWSER_CHANNEL;
-		else process.env.PDPP_BROWSER_CHANNEL = previousChannel;
+		} else {
+			process.env.PDPP_BROWSER_PROFILE_ROOT = previousRoot;
+		}
+		if (previousChannel === undefined) {
+			delete process.env.PDPP_BROWSER_CHANNEL;
+		} else {
+			process.env.PDPP_BROWSER_CHANNEL = previousChannel;
+		}
+		if (previousCdpHost === undefined) {
+			delete process.env.PDPP_BROWSER_CDP_HOST;
+		} else {
+			process.env.PDPP_BROWSER_CDP_HOST = previousCdpHost;
+		}
+		if (previousCdpPort === undefined) {
+			delete process.env.PDPP_BROWSER_CDP_PORT;
+		} else {
+			process.env.PDPP_BROWSER_CDP_PORT = previousCdpPort;
+		}
 		await rm(dir, { recursive: true, force: true });
 	});
 	handle = await acquireIsolatedBrowser({
 		profileName: "security-check",
 		headless: true,
+		streamingEnabled: true,
+		harRecording: { path: join(dir, "capture.har") },
+		storageStateRecording: { path: join(dir, "storage.json") },
 	});
 	const browser = handle.context.browser();
 	assert.ok(browser);
@@ -89,7 +109,200 @@ test("macOS local connector browser uses system Chrome with its sandbox enabled"
 		!command.includes("--no-sandbox"),
 		"connector must retain Chromium sandboxing on macOS",
 	);
+	await handle.context.route("http://fixture.invalid/**", (route) =>
+		route.fulfill({
+			contentType: "text/html",
+			body: '<input type="file"><a download="fixture.txt" href="data:text/plain,synthetic">download</a>',
+		}),
+	);
+	const page = await handle.context.newPage();
+	await page.goto("http://fixture.invalid/");
+	await page.evaluate(() => localStorage.setItem("fixture", "retained"));
+	await handle.context.addCookies([
+		{
+			name: "fixture",
+			value: "cookie",
+			url: "http://fixture.invalid",
+			expires: Date.now() / 1000 + 3600,
+		},
+	]);
+	await page.locator("input").setInputFiles({
+		name: "upload.txt",
+		mimeType: "text/plain",
+		buffer: Buffer.from("upload"),
+	});
+	assert.equal(
+		await page.locator("input").evaluate((input) => {
+			if (!(input instanceof HTMLInputElement)) {
+				throw new Error("missing file input");
+			}
+			return input.files?.[0]?.text();
+		}),
+		"upload",
+	);
+	const download = page.waitForEvent("download");
+	await page.locator("a").click();
+	await (await download).saveAs(join(dir, "download.txt"));
+	assert.equal(await readFile(join(dir, "download.txt"), "utf8"), "synthetic");
+	const running = await cdp.send("SystemInfo.getProcessInfo");
+	const renderers = running.processInfo.filter(
+		(entry) => entry.type === "renderer",
+	);
+	assert.ok(renderers.length > 0, "must inspect at least one real renderer");
+	for (const renderer of renderers) {
+		assert.equal(
+			execFileSync(
+				"/usr/bin/python3",
+				[
+					"-c",
+					"import ctypes,sys; f=ctypes.CDLL('/usr/lib/libsandbox.1.dylib').sandbox_check; print(f(int(sys.argv[1]),None,0))",
+					String(renderer.id),
+				],
+				{ encoding: "utf8" },
+			).trim(),
+			"1",
+			"renderer must have the macOS sandbox enabled",
+		);
+	}
+	const remote = await acquireIsolatedBrowser({
+		profileName: "remote-security-check",
+		headless: true,
+		remoteCdpUrl: `http://127.0.0.1:${process.env.PDPP_BROWSER_CDP_PORT}`,
+		preserveRemotePagesOnAcquire: true,
+	});
+	try {
+		assert.ok(
+			remote.context.pages().some((entry) => entry.url() === page.url()),
+		);
+		const remotePage = await remote.context.newPage();
+		await remotePage.setContent("<title>remote fixture</title>");
+		assert.equal(await remotePage.title(), "remote fixture");
+	} finally {
+		await remote.release();
+	}
+	assert.equal(
+		await page.evaluate(() => localStorage.getItem("fixture")),
+		"retained",
+	);
+	await handle.release();
+	assert.equal((await handle.harRecordingOutcome?.())?.flushed, true);
+	assert.equal((await handle.storageStateRecordingOutcome?.())?.flushed, true);
+	handle = await acquireIsolatedBrowser({
+		profileName: "security-check",
+		headless: true,
+	});
+	await handle.context.route("http://fixture.invalid/**", (route) =>
+		route.fulfill({ body: "fixture" }),
+	);
+	const reopened = await handle.context.newPage();
+	await reopened.goto("http://fixture.invalid/");
+	assert.equal(
+		await reopened.evaluate(() => localStorage.getItem("fixture")),
+		"retained",
+	);
+	assert.equal(
+		(await handle.context.cookies()).find((cookie) => cookie.name === "fixture")
+			?.value,
+		"cookie",
+	);
 });
+
+test("macOS missing Chrome fails before profile creation even with a prepared browser cache", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-missing-chrome-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const result = spawnSync(
+		process.execPath,
+		[
+			"--import",
+			"tsx",
+			"--input-type=module",
+			"--eval",
+			`
+		import fs from "node:fs";
+		import { syncBuiltinESMExports } from "node:module";
+		import assert from "node:assert/strict";
+		Object.defineProperty(process, "platform", { value: "darwin" });
+		const exists = fs.existsSync;
+		const access = fs.accessSync;
+		fs.accessSync = (path, mode) => { if (path === "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") throw new Error("simulated missing Chrome"); return access(path, mode); };
+		fs.existsSync = path => path === "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ? false : exists(path);
+		syncBuiltinESMExports();
+		delete process.env.PDPP_BROWSER_CHANNEL;
+		process.env.PDPP_BROWSER_PROFILE_ROOT = ${JSON.stringify(join(dir, "profiles"))};
+		process.env.PLAYWRIGHT_BROWSERS_PATH = ${JSON.stringify(join(dir, "cache"))};
+		const { chromium } = await import("patchright");
+		const binary = chromium.executablePath();
+		fs.mkdirSync(new URL(".", "file://" + binary), { recursive: true });
+		fs.writeFileSync(binary, ${JSON.stringify("#!/bin/sh\nexit 97\n")}, { mode: 0o700 });
+		const { acquireIsolatedBrowser } = await import(${JSON.stringify(new URL("./browser-launch.ts", import.meta.url).href)});
+		// copy-assertion-ok: missing-Chrome recovery must require the updated system browser in Applications.
+		await assert.rejects(acquireIsolatedBrowser({ profileName: "missing", headless: true }), /Install or update Google Chrome.*Applications/);
+		assert.equal(fs.existsSync(process.env.PDPP_BROWSER_PROFILE_ROOT), false);
+	`,
+		],
+		{ encoding: "utf8", timeout: 30_000 },
+	);
+	assert.equal(result.status, 0, result.stderr);
+});
+
+for (const [message, expected] of [
+	[
+		"[err] sandbox initialization failed: Operation not permitted",
+		// copy-assertion-ok: the sandbox-init remedy must require approved execution while retaining browser sandboxing.
+		/browser sandbox.*failed.*approved execution outside that sandbox/i,
+	],
+	["Timeout 30000ms exceeded", /^Timeout 30000ms exceeded$/],
+	["spawn EPERM", /^spawn EPERM$/],
+	[
+		"sandbox initialization failed: unknown reason",
+		/^sandbox initialization failed: unknown reason$/,
+	],
+] as const) {
+	test(`local launch diagnostic preserves the observed cause: ${message}`, async (t) => {
+		const dir = await mkdtemp(join(tmpdir(), "pdpp-launch-error-"));
+		t.after(() => rm(dir, { recursive: true, force: true }));
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--import",
+				"tsx",
+				"--input-type=module",
+				"--eval",
+				`
+			import { registerHooks } from "node:module";
+			import assert from "node:assert/strict";
+			Object.defineProperty(process, "platform", { value: "darwin" });
+			process.env.PDPP_BROWSER_PROFILE_ROOT = ${JSON.stringify(dir)};
+			process.env.PDPP_BROWSER_CHANNEL = "chromium";
+			registerHooks({ resolve(specifier, context, next) {
+				if (specifier === "patchright") return { url: "data:text/javascript," + encodeURIComponent(${JSON.stringify(`import assert from "node:assert/strict";
+				export const attempts = [];
+				export const chromium = { launchPersistentContext(_profile, options) {
+					attempts.push(options);
+					assert.equal(options.chromiumSandbox, true);
+					assert.equal(options.args.some(flag => /^--(?:no-sandbox|disable-setuid-sandbox)(?:=|$)/.test(flag)), false);
+					throw new Error(${JSON.stringify(message)});
+				} };`)}), shortCircuit: true };
+				return next(specifier, context);
+			} });
+			const { acquireIsolatedBrowser } = await import(${JSON.stringify(new URL("./browser-launch.ts", import.meta.url).href)});
+			const { attempts } = await import("patchright");
+			await assert.rejects(acquireIsolatedBrowser({ profileName: "failure", headless: true }), error => {
+				// copy-assertion-ok: known sandbox-init failure gets approved-execution guidance; unrelated causes remain unchanged.
+				assert.match(error.message, ${expected.toString()});
+				${message.includes("Operation not permitted") ? `assert.equal(error.cause.message, ${JSON.stringify(message)});` : ""}
+				return true;
+			});
+			assert.equal(attempts.length, 1, "startup failure must not retry the browser launch");
+			assert.equal(attempts[0].chromiumSandbox, true);
+			assert.equal(attempts[0].args.some(flag => /^--(?:no-sandbox|disable-setuid-sandbox)(?:=|$)/.test(flag)), false);
+		`,
+			],
+			{ encoding: "utf8", timeout: 30_000 },
+		);
+		assert.equal(result.status, 0, result.stderr);
+	});
+}
 
 function withEnv(values: Partial<Record<(typeof ENV_VARS)[number], string>>) {
 	const previous = new Map<string, string | undefined>();

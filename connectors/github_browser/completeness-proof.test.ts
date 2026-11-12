@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseHTML } from "linkedom";
-import { InventoryEvidence } from "./inventory-evidence.ts";
+import { type Continuation, InventoryEvidence } from "./inventory-evidence.ts";
 import { collectGitHubBrowser } from "./collector.ts";
 import { inspectInventoryPage, parseProfilePage } from "./parsers.ts";
 
@@ -266,22 +266,132 @@ test("events withholds an empty later page with unobserved pagination", async ()
 	assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
 });
 
-for (const disabled of [false, true]) {
-	test(`starred real BtnGroup pagination, disabled Next ${disabled}, cannot certify end`, async () => {
-		const list = `<ul id="user-starred-repos">${Array.from({ length: 30 }, (_, i) => `<li><h3><a href="/sample-user/repo${i}">repo${i}</a></h3></li>`).join("")}</ul>`;
-		const control = disabled ? '<button class="btn BtnGroup-item" disabled="disabled">Next</button>'
-			: '<a rel="nofollow" class="btn BtnGroup-item" href="https://github.com/sample-user?after=Y3Vyc29y&tab=stars">Next</a>';
-		const html = owner + list + `<div class="paginate-container"><div class="BtnGroup" data-test-selector="pagination"><button class="btn BtnGroup-item" disabled="disabled">Previous</button>${control}</div></div>`;
-		const url = "https://github.com/sample-user?page=1&tab=stars";
-		const proof = inspectInventoryPage({ requestedUrl: url, currentUrl: url, html }, "starred", "sample-user", 1, 30, 0);
+const starredCard = (i: number) => `<li><h3><a href="/sample-user/repo${i}">repo${i}</a></h3></li>`;
+const starredPage = (ids: number[], controls: string) => owner +
+	`<ul id="user-starred-repos">${ids.map(starredCard).join("")}</ul>` +
+	`<div class="paginate-container"><div class="BtnGroup" data-test-selector="pagination">${controls}</div></div>`;
+const cursorNext = (href: string) => `<a rel="nofollow" class="btn BtnGroup-item" href="${href}">Next</a>`;
+const cursorPrev = (href: string) => `<a rel="nofollow" class="btn BtnGroup-item" href="${href}">Previous</a>`;
+const disabledControl = (label: string) => `<button class="btn BtnGroup-item" disabled="disabled">${label}</button>`;
+const starsUrl = "https://github.com/sample-user?page=1&tab=stars";
+
+test("starred real BtnGroup pagination with disabled Next alone cannot certify end", () => {
+	const html = starredPage(Array.from({ length: 30 }, (_, i) => i), disabledControl("Previous") + disabledControl("Next"));
+	const proof = inspectInventoryPage({ requestedUrl: starsUrl, currentUrl: starsUrl, html }, "starred", "sample-user", 1, 30, 0);
+	assert.equal(proof.complete, false);
+	assert.equal(proof.reason, "terminal_unverified");
+});
+
+test("starred cursor Next is an inspector-bound successor", () => {
+	const html = starredPage(Array.from({ length: 30 }, (_, i) => i), disabledControl("Previous") + cursorNext("https://github.com/sample-user?after=Y3Vyc29y&tab=stars"));
+	const proof = inspectInventoryPage({ requestedUrl: starsUrl, currentUrl: starsUrl, html }, "starred", "sample-user", 1, 30, 0);
+	assert.equal(proof.complete, false);
+	assert.equal(proof.reason, "remaining_continuation");
+	assert.deepEqual(proof.continuation, { kind: "next", url: "https://github.com/sample-user?after=Y3Vyc29y&tab=stars", cursor: "Y3Vyc29y" });
+});
+
+for (const [name, href] of ([
+	["cross-path", "https://github.com/other-user?after=Y3Vyc29y&tab=stars"],
+	["cross-origin", "https://example.com/sample-user?after=Y3Vyc29y&tab=stars"],
+	["other tab", "https://github.com/sample-user?after=Y3Vyc29y&tab=repositories"],
+	["empty cursor", "https://github.com/sample-user?after=&tab=stars"],
+	["extra parameter", "https://github.com/sample-user?after=Y3Vyc29y&tab=stars&q=x"],
+] as const)) {
+	test(`starred cursor Next stays unknown: ${name}`, () => {
+		const html = starredPage(Array.from({ length: 30 }, (_, i) => i), cursorNext(href));
+		const proof = inspectInventoryPage({ requestedUrl: starsUrl, currentUrl: starsUrl, html }, "starred", "sample-user", 1, 30, 0);
 		assert.equal(proof.complete, false);
-		assert.equal(proof.reason, disabled ? "terminal_unverified" : "unknown_continuation");
-		const result = await collect("starred", () => html);
-		assert.deepEqual(result.records, []);
-		assert.deepEqual(result.state, { starred: prior });
-		assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+		assert.equal(proof.reason, "unknown_continuation");
+		assert.equal(proof.continuation.kind, "unknown");
 	});
 }
+
+test("starred marked numbered Next beside an unmarked cursor Next stays unknown", () => {
+	const marked = '<a rel="next" class="next_page" href="/sample-user?page=2&tab=stars">Next</a>';
+	const html = starredPage(Array.from({ length: 30 }, (_, i) => i), marked + cursorNext("https://github.com/sample-user?after=Y3Vyc29y&tab=stars"));
+	const proof = inspectInventoryPage({ requestedUrl: starsUrl, currentUrl: starsUrl, html }, "starred", "sample-user", 1, 30, 0);
+	assert.equal(proof.complete, false);
+	assert.equal(proof.reason, "unknown_continuation");
+	assert.equal(proof.continuation.kind, "unknown");
+});
+
+test("repositories cursor Next stays unknown", () => {
+	const url = "https://github.com/sample-user?page=1&tab=repositories";
+	const html = owner + '<ul id="user-repositories-list"><li><h3><a href="/sample-user/a">a</a></h3></li></ul>' +
+		'<div class="paginate-container"><div class="BtnGroup">' + cursorNext("https://github.com/sample-user?after=Y3Vyc29y&tab=repositories") + "</div></div>";
+	const proof = inspectInventoryPage({ requestedUrl: url, currentUrl: url, html }, "repositories", "sample-user", 1, 1, 0);
+	assert.equal(proof.reason, "unknown_continuation");
+});
+
+const cursorUrl = (value: string) => `https://github.com/sample-user?after=${value}&tab=stars`;
+const stars = (...pages: Array<{ ids: number[]; control: string }>) => {
+	const requests: string[] = [];
+	const pageFor = (url: string) => {
+		requests.push(url);
+		const index = url === starsUrl ? 0 : pages.findIndex((_, i) => url === cursorUrl(`c${i}`));
+		const page = pages[index];
+		return page === undefined ? owner : starredPage(page.ids, (index > 0 ? cursorPrev(`https://github.com/sample-user?before=p${index}&tab=stars`) : disabledControl("Previous")) + page.control);
+	};
+	return { pageFor, requests };
+};
+const restList = (all: number[]) => () => ({ link: null, data: all.map(i => ({ full_name: `sample-user/repo${i}`, html_url: `https://github.com/sample-user/repo${i}` })) });
+const ids = (from: number, count = 30) => Array.from({ length: count }, (_, i) => from + i);
+
+test("starred collects every page of a cursor-paginated list and ends on a disabled Next", async () => {
+	const { pageFor, requests } = stars(
+		{ ids: ids(0), control: cursorNext(cursorUrl("c1")) },
+		{ ids: ids(30), control: cursorNext(cursorUrl("c2")) },
+		{ ids: ids(60, 5), control: disabledControl("Next") },
+	);
+	// The last page has no source-end proof of its own; the REST list is the independent witness, as for any starred walk.
+	const result = await collect("starred", url => url === "https://github.com/" ? owner : pageFor(url), restList([...ids(0), ...ids(30), ...ids(60, 5)]));
+	assert.equal((result.records[0] as { starred: unknown[] }).starred.length, 65);
+	assert.deepEqual(result.messages.map(message => message.type), ["STATE", "DETAIL_COVERAGE"]);
+	assert.deepEqual(requests.filter(url => url !== "https://github.com/"), [starsUrl, cursorUrl("c1"), cursorUrl("c2")]);
+});
+
+test("starred single page with no further Next ends with proof", async () => {
+	const { pageFor } = stars({ ids: ids(0, 3), control: disabledControl("Next") });
+	const result = await collect("starred", url => url === "https://github.com/" ? owner : pageFor(url), restList(ids(0, 3)));
+	assert.equal((result.records[0] as { starred: unknown[] }).starred.length, 3);
+	assert.deepEqual(result.messages.map(message => message.type), ["STATE", "DETAIL_COVERAGE"]);
+});
+
+test("starred repeated cursor fails the walk", async () => {
+	const { pageFor } = stars(
+		{ ids: ids(0), control: cursorNext(cursorUrl("c1")) },
+		{ ids: ids(30), control: cursorNext(cursorUrl("c1")) },
+	);
+	const result = await collect("starred", url => url === "https://github.com/" ? owner : pageFor(url));
+	assert.deepEqual(result.records, []);
+	assert.deepEqual(result.state, { starred: prior });
+	assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+});
+
+test("starred cursor to another path fails the walk", async () => {
+	const { pageFor } = stars({ ids: ids(0), control: cursorNext("https://github.com/other-user?after=c1&tab=stars") });
+	const result = await collect("starred", url => url === "https://github.com/" ? owner : pageFor(url), () => ({ link: null, data: [] }));
+	assert.deepEqual(result.records, []);
+	assert.deepEqual(result.state, { starred: prior });
+});
+
+test("InventoryEvidence follows a bound cursor and rejects an unbound one", () => {
+	const page = (continuation: Continuation, i: number) =>
+		({ ids: [String(i)], rowsComplete: true, rejectedRows: 0, continuation });
+	const bound = new InventoryEvidence(starsUrl);
+	bound.observePage(page({ kind: "next", url: cursorUrl("c1"), cursor: "c1" }, 1));
+	assert.deepEqual(bound.next, { url: cursorUrl("c1"), page: 2 });
+	bound.observePage(page({ kind: "end" }, 2));
+	assert.equal(bound.decide(2), null);
+	const unbound = new InventoryEvidence(starsUrl);
+	unbound.observePage(page({ kind: "next", url: cursorUrl("c1") }, 1));
+	assert.equal(unbound.next, null);
+	assert.equal(unbound.decide(1), "unknown_continuation");
+	const cycle = new InventoryEvidence(starsUrl);
+	cycle.observePage(page({ kind: "next", url: cursorUrl("c1"), cursor: "c1" }, 1));
+	cycle.observePage(page({ kind: "next", url: cursorUrl("c1"), cursor: "c1" }, 2));
+	assert.equal(cycle.decide(2), "continuation_cycle");
+});
 
 for (const matches of [false, true]) {
 	test(`starred missing browser pagination needs independent REST reconciliation: matches ${matches}`, async () => {

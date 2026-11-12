@@ -259,6 +259,11 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		posts: { field: "taken_at", format: "date-time" },
 		profile: null,
 	},
+	mountain_project: {
+		profile: null,
+		saved_routes: null,
+		ticks: { field: "date", format: "date" },
+	},
 	muse: {
 		activities: { field: "timestamp", format: "date-time" },
 		connected_apps: null,

@@ -34,6 +34,7 @@ import {
 	NO_DETAIL_WAITS,
 	withEmptyConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
+import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
 	ChatGptPlannedProviderBudgetDeferredError,
 	ChatGptRecoverableRetryExhaustedError,
@@ -51,10 +52,14 @@ const runConversationsAndMessagesStreams: typeof runStreams = (
 	state,
 	options,
 ) =>
-	runStreams({ ...deps, api: withEmptyConversationDetails(deps.api) }, state, {
-		...options,
-		detailPacing: { ...NO_DETAIL_WAITS, ...options?.detailPacing },
-	});
+	runStreams(
+		{ ...deps, api: withEmptyPrimaryList(withEmptyConversationDetails(deps.api)) },
+		state,
+		{
+			...options,
+			detailPacing: { ...NO_DETAIL_WAITS, ...options?.detailPacing },
+		},
+	);
 
 const PRODUCTION_WIDTH = 6;
 const SEARCH_PREFIX = "/conversations/search?query=&cursor=";

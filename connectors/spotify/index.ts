@@ -32,8 +32,64 @@ export { spotifyMobileCollect, probeSpotifyMobileSession } from "./mobile.ts";
 
 const API = "https://api.spotify.com/v1";
 const SPOTIFY_WEB_HOME = "https://open.spotify.com/";
+// Only 429 and 5xx are worth a retry. A 4xx (the recently-played 404 Spotify
+// began returning on 6 Nov 2026) fails the same way on every attempt.
 export const spotifyRetryablePattern =
-	/rate_limited|ECONN|fetch failed|retryable status \d+|spotify_retryable_status_\d+/i;
+	/rate_limited|ECONN|fetch failed|retryable status (?:429|5\d\d)\b|spotify_retryable_status_(?:429|5\d\d|unknown)\b|spotify_retryable_network\b/i;
+
+/**
+ * Streams that read one source surface each. A failure on that surface fails
+ * only its own stream: the other streams still export (RSS run 8553d363 lost
+ * every stream to a recently-played 404). The library surface (libraryV3 and
+ * fetchPlaylist) is one unit: playlists and playlist_items fail together.
+ * When the failing streams are all that was asked for, the run fails as before.
+ */
+export const SPOTIFY_ISOLATED_STREAMS = [
+	"playlists",
+	"playlist_items",
+	"saved_tracks",
+	"recently_played_contexts",
+	"top_artists",
+	"top_tracks",
+] as const;
+export type SpotifyIsolatedStream = (typeof SPOTIFY_ISOLATED_STREAMS)[number];
+/** The streams the manifest declares; every one of them, once requested, ends produced or skipped. */
+const SPOTIFY_STREAMS: readonly string[] = ["profile", ...SPOTIFY_ISOLATED_STREAMS];
+
+/**
+ * Bounded, non-identifying facts about one failed stream. `endpoint` is a
+ * host and path template (the username is `{user}`); `snippet` is at most 80
+ * characters of the response with the username and any email removed.
+ */
+export interface SpotifyStreamFailure {
+	code: string;
+	endpoint?: string;
+	status?: number;
+	contentType?: string;
+	snippet?: string;
+}
+
+/** What the in-page collector learned about the player, for the run log. */
+export interface SpotifyCollectorDiagnostics {
+	webVersion: string;
+	detectedWebVersion: string | null;
+	hashesFound: string[];
+	hashesMissing: string[];
+	hashesFromPlayerRequests: string[];
+	/** Which source supplied each found hash. */
+	hashSources: Record<string, "requests" | "precache" | "scripts" | "sw-manifest">;
+	/** JS entries in the workbox precache; 0 on a first visit before the service worker installs. */
+	precacheEntries: number;
+	/** Bundles read per source in the last scan. */
+	bundlesBySource: Record<string, number>;
+	bundlesRead: number;
+	scanAttempts: number;
+	/** How the recently-played pager ended. */
+	recentlyPlayed?: {
+		pages: number;
+		endedBy: "short_page" | "not_found_past_end" | "not_found_at_start" | "page_cap" | "failed";
+	};
+}
 
 interface SpotifyImage {
 	height?: number | null;
@@ -102,6 +158,12 @@ export interface BrowserData {
 	 * name to its row count; it never carries a URI or other row content.
 	 */
 	librarySkipped?: { count: number; types: Record<string, number> };
+	/**
+	 * Playlist rows whose `__typename` the connector does not map. Each is
+	 * skipped and counted as an uncovered playlist_items row instead of failing
+	 * the run. `types` holds bounded type names only, never row content.
+	 */
+	playlistRowsSkipped?: { count: number; types: Record<string, number> };
 	completion: Partial<
 		Record<"playlists" | "playlist_items" | "saved_tracks", SpotifyEndEvidence>
 	>;
@@ -128,6 +190,16 @@ export interface BrowserData {
 			{ considered: number; covered: number }
 		>
 	>;
+	/** Isolated streams that failed in the page; their rows are dropped. */
+	streamFailures?: Partial<Record<SpotifyIsolatedStream, SpotifyStreamFailure>>;
+	/**
+	 * Ranked lists read to Spotify's own total in every time window (a total
+	 * of at most 100, every row returned). Nothing lies beyond the request
+	 * bound, so the list is complete, not capped; with a total of 0 it
+	 * exports as "collected, none".
+	 */
+	topProvenComplete?: Partial<Record<"top_artists" | "top_tracks", { rows: number; total: number }>>;
+	diagnostics?: SpotifyCollectorDiagnostics;
 }
 
 type TopTimeRange = "short_term" | "long_term";
@@ -648,9 +720,11 @@ async function ensureSpotifySession({
 export const spotifyPageCollector = async (
 	requested: string[],
 	fetch: typeof globalThis.fetch = globalThis.fetch,
+	seededHashes: Record<string, string> = {},
 ): Promise<BrowserData> => {
 		const wanted = new Set(requested);
 		const result: BrowserData = {
+			streamFailures: {},
 			completion: {},
 			profile: null,
 			playlistUris: [],
@@ -666,17 +740,72 @@ export const spotifyPageCollector = async (
 			sourceCounts: {},
 		};
 		const navigation = new URL(window.location.href);
+		// Spotify serves the player root at a locale prefix (`/intl-id/`,
+		// `/intl-pt/`) for most non-English markets and redirects `/` there on
+		// every load, so that root is the player too, never a transient state.
 		if (
 			navigation.origin !== "https://open.spotify.com" ||
-			navigation.pathname !== "/" ||
+			!/^\/(?:intl-[a-z]{2}(?:-[a-z0-9]{2,8})?\/?)?$/i.test(navigation.pathname) ||
 			navigation.search !== "" ||
 			navigation.hash !== ""
 		) {
 			throw new Error("spotify_page_not_player");
 		}
-		const navigationProof = navigation.toString();
+		const navigationProof = navigation.origin + "/";
 		const webVersion = "1.2.56.244.g7bfe3dc8";
 		let clientId: string | null = null;
+		const versionPattern = /\b(1\.2\.\d+\.\d+\.g[0-9a-f]{6,12})\b/;
+		let detectedWebVersion: string | null = null;
+		const diagnostics: NonNullable<BrowserData["diagnostics"]> = {
+			webVersion,
+			detectedWebVersion: null,
+			hashesFound: [],
+			hashesMissing: [],
+			hashesFromPlayerRequests: [],
+			hashSources: {},
+			precacheEntries: 0,
+			bundlesBySource: {},
+			bundlesRead: 0,
+			scanAttempts: 0,
+		};
+		result.diagnostics = diagnostics;
+
+		// A failed isolated stream keeps only bounded facts: the endpoint as a
+		// host and path template, the status, the content type and a short
+		// snippet with the username and anything shaped like an email removed.
+		function failStream(
+			stream: SpotifyIsolatedStream,
+			error: unknown,
+			detail: Omit<SpotifyStreamFailure, "code"> = {},
+		): void {
+			const message = error instanceof Error ? error.message : String(error);
+			const name = error instanceof Error ? error.name : "";
+			// A browser network failure ("Failed to fetch", "Load failed",
+			// "NetworkError ...") is a TypeError; the mobile bridge's 12 s deadline
+			// is an AbortError. Both can pass on a later run.
+			const network =
+				name === "TypeError" ||
+				name === "AbortError" ||
+				name === "TimeoutError" ||
+				/failed to fetch|load failed|networkerror|network request failed|aborted|timed? ?out/i.test(message);
+			const code =
+				/^spotify_[a-z0-9_,]+/i.exec(message)?.[0] ??
+				(network ? "spotify_retryable_network" : "spotify_stream_failed");
+			result.streamFailures = result.streamFailures ?? {};
+			result.streamFailures[stream] = { code, ...detail };
+		}
+		function safeSnippet(text: string, username: string | null): string {
+			// Mask the whole (bounded) body first, then cut, so a cut can never
+			// leave part of a username, email or token behind.
+			let cleaned = text.slice(0, 16_384);
+			if (username) cleaned = cleaned.split(username).join("{user}");
+			cleaned = cleaned
+				.replace(/[^\s"'<>@]+@[^\s"'<>@]+/g, "{email}")
+				.replace(/[A-Za-z0-9_-]{24,}/g, "{token}")
+				.replace(/\s+/g, " ")
+				.trim();
+			return cleaned.slice(0, 80);
+		}
 
 		function idFromUri(uri: unknown): string | null {
 			if (typeof uri !== "string") return null;
@@ -1080,36 +1209,103 @@ export const spotifyPageCollector = async (
 				needed.add("fetchPlaylist");
 			}
 			if (wanted.has("saved_tracks")) needed.add("fetchLibraryTracks");
+			// The ranked lists are the only streams that need userTopContent, and
+			// some players never ship it (RSS: `spotify_missing_hashes_userTopContent`
+			// alone). Missing it fails top_artists and top_tracks, not the run,
+			// unless they are all that was asked for.
+			const optional = new Set<string>();
+			if (
+				needed.has("userTopContent") &&
+				[...wanted].some((stream) => stream !== "top_artists" && stream !== "top_tracks")
+			) {
+				optional.add("userTopContent");
+			}
+			// Hashes the player itself sent to pathfinder in this session are the
+			// ones it is using now, so they are taken as found. They come from the
+			// host's request events (desktop and RSS native) and from the in-page
+			// listener below (every host), and are read again before each scan.
+			const seeded: Record<string, string> = {};
+			const refreshSeeded = () => {
+				notePerformance();
+				for (const [name, hash] of Object.entries(playerHashes)) {
+					if (needed.has(name) && typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash)) {
+						seeded[name] = hash;
+					}
+				}
+				diagnostics.hashesFromPlayerRequests = Object.keys(seeded).sort();
+			};
+			refreshSeeded();
+			// Each source has its own budget. With one shared budget a fresh
+			// session's ~70 loaded scripts used it all, so the service-worker
+			// chunk list (the only place the lazy profile chunk with
+			// userTopContent is named when the precache is still empty) was
+			// never read.
+			type HashSource = "precache" | "scripts" | "sw-manifest";
 			const maxBundles = 60;
-			const maxBundleBytes = 64 * 1024 * 1024;
-			const hashPattern =
-				/new\s+\w+\.\w+\("(\w+)","(?:query|mutation)","([a-f0-9]{64})"/g;
+			const maxBundleBytes = 48 * 1024 * 1024;
+			// Persisted-query definitions in the player bundles. The minifier has
+			// shipped `new a.b("name","query","<sha>")`; the call shape below also
+			// takes a bare or deeper constructor, single quotes, spaces and extra
+			// arguments. The object shape takes `{name:"x",...sha256Hash:"<sha>"}`.
+			const hashPatterns = [
+				/\(\s*["'`](\w+)["'`]\s*,\s*["'`](?:query|mutation)["'`]\s*,\s*["'`]([a-f0-9]{64})["'`]/g,
+				/\b(?:operationName|name)\s*:\s*["'`](\w+)["'`][^{}]{0,160}?\bsha256Hash\s*:\s*["'`]([a-f0-9]{64})["'`]/g,
+			];
 			const complete = (found: Record<string, string>) =>
-				[...needed].every((name) => typeof found[name] === "string");
+				[...needed].every(
+					(name) => typeof found[name] === "string" || optional.has(name),
+				) && [...optional].every((name) => typeof found[name] === "string");
 			async function scan(): Promise<Record<string, string>> {
-				const found: Record<string, string> = {};
-				let bundlesRead = 0;
-				let bytesRead = 0;
+				const found: Record<string, string> = { ...seeded };
+				const sources: Record<string, string> = {};
+				for (const name of Object.keys(seeded)) sources[name] = "requests";
+				const spent: Record<HashSource, { bundles: number; bytes: number }> = {
+					precache: { bundles: 0, bytes: 0 },
+					scripts: { bundles: 0, bytes: 0 },
+					"sw-manifest": { bundles: 0, bytes: 0 },
+				};
+				let source: HashSource = "precache";
+				const exhausted = () =>
+					spent[source].bundles >= maxBundles || spent[source].bytes >= maxBundleBytes;
+				const finish = () => {
+					diagnostics.hashSources = { ...sources } as SpotifyCollectorDiagnostics["hashSources"];
+					diagnostics.bundlesBySource = {
+						precache: spent.precache.bundles,
+						scripts: spent.scripts.bundles,
+						"sw-manifest": spent["sw-manifest"].bundles,
+					};
+					diagnostics.bundlesRead =
+						spent.precache.bundles + spent.scripts.bundles + spent["sw-manifest"].bundles;
+					return found;
+				};
 				const extract = (text: string) => {
-					const re = new RegExp(hashPattern.source, "g");
-					let match = re.exec(text);
-					while (match !== null) {
-						const operation = match[1];
-						const hash = match[2];
-						if (operation && hash && needed.has(operation))
-							found[operation] = hash;
-						match = re.exec(text);
+					if (detectedWebVersion === null) {
+						const version = versionPattern.exec(text)?.[1];
+						if (version) detectedWebVersion = version;
+					}
+					for (const pattern of hashPatterns) {
+						const re = new RegExp(pattern.source, "g");
+						let match = re.exec(text);
+						while (match !== null) {
+							const operation = match[1];
+							const hash = match[2];
+							if (
+								operation &&
+								hash &&
+								needed.has(operation) &&
+								typeof found[operation] !== "string"
+							) {
+								found[operation] = hash;
+								sources[operation] = source;
+							}
+							match = re.exec(text);
+						}
 					}
 				};
 				const read = async (response: Response | undefined | null) => {
-					if (
-						!response ||
-						bundlesRead >= maxBundles ||
-						bytesRead >= maxBundleBytes
-					)
-						return;
-					bundlesRead += 1;
-					const remainingBytes = maxBundleBytes - bytesRead;
+					if (!response || exhausted()) return;
+					spent[source].bundles += 1;
+					const remainingBytes = maxBundleBytes - spent[source].bytes;
 					const declaredLength = response.headers.get("content-length");
 					const declaredBytes =
 						declaredLength === null ? -1 : Number(declaredLength);
@@ -1135,7 +1331,7 @@ export const spotifyPageCollector = async (
 						joined.set(chunk, offset);
 						offset += chunk.byteLength;
 					}
-					bytesRead += bytes;
+					spent[source].bytes += bytes;
 					extract(new TextDecoder().decode(joined));
 				};
 				try {
@@ -1147,6 +1343,7 @@ export const spotifyPageCollector = async (
 						const entries = (await cache.keys())
 							.filter((req) => req.url.endsWith(".js"))
 							.map((req, index) => ({ req, index }));
+						diagnostics.precacheEntries += entries.length;
 						const sized = await Promise.all(
 							entries.map(async (entry) => {
 								const response = await cache.match(entry.req);
@@ -1165,13 +1362,13 @@ export const spotifyPageCollector = async (
 						sized.sort((a, b) => b.size - a.size || a.index - b.index);
 						for (const entry of sized) {
 							await read(entry.response);
-							if (complete(found)) return found;
-							if (bundlesRead >= maxBundles || bytesRead >= maxBundleBytes)
-								break;
+							if (complete(found)) return finish();
+							if (exhausted()) break;
 						}
 					}
 				} catch {}
-				if (complete(found)) return found;
+				if (complete(found)) return finish();
+				source = "scripts";
 				const scripts = [
 					...Array.from(document.querySelectorAll("script[src]")).map(
 						(s) => (s as HTMLScriptElement).src,
@@ -1189,13 +1386,14 @@ export const spotifyPageCollector = async (
 						url.includes("spotify") && all.indexOf(url) === index,
 				);
 				for (const url of scripts) {
-					if (bundlesRead >= maxBundles || bytesRead >= maxBundleBytes) break;
+					if (exhausted()) break;
 					try {
 						const response = await fetch(url);
 						if (response.ok) await read(response);
-						if (complete(found)) return found;
+						if (complete(found)) return finish();
 					} catch {}
 				}
+				source = "sw-manifest";
 				// Some operations (userTopContent) live only in lazily loaded route
 				// chunks that the home page never loads. Desktop browsers have them
 				// in the workbox precache above, but a WebView without service
@@ -1240,18 +1438,27 @@ export const spotifyPageCollector = async (
 					(a, b) => Number(hinted(b)) - Number(hinted(a)),
 				);
 				for (const url of precacheUrls) {
-					if (bundlesRead >= maxBundles || bytesRead >= maxBundleBytes) break;
+					if (exhausted()) break;
 					try {
 						const response = await fetch(url);
 						if (response.ok) await read(response);
-						if (complete(found)) return found;
+						if (complete(found)) return finish();
 					} catch {}
 				}
-				return found;
+				return finish();
 			}
 			let found: Record<string, string> = {};
+			const record = () => {
+				diagnostics.scanAttempts += 1;
+				diagnostics.detectedWebVersion = detectedWebVersion;
+				diagnostics.hashesFound = [...needed].filter((name) => typeof found[name] === "string").sort();
+				diagnostics.hashesMissing = [...needed].filter((name) => typeof found[name] !== "string").sort();
+			};
 			for (let attempt = 0; attempt < 3; attempt += 1) {
+				diagnostics.precacheEntries = 0;
+				refreshSeeded();
 				found = await scan();
+				record();
 				if (complete(found)) return found;
 				if (attempt < 2)
 					await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -1259,12 +1466,96 @@ export const spotifyPageCollector = async (
 			const missing = [...needed].filter(
 				(name) => typeof found[name] !== "string",
 			);
-			throw new Error(`spotify_missing_hashes_${missing.join(",")}`);
+			if (missing.every((name) => optional.has(name))) {
+				for (const stream of ["top_artists", "top_tracks"] as const) {
+					if (wanted.has(stream)) {
+						failStream(stream, new Error(`spotify_missing_hashes_${missing.join(",")}`));
+					}
+				}
+				return found;
+			}
+			// Bounded, non-identifying context for the run log: operation names,
+			// how many bundles were read, and the player version if one was seen.
+			throw new Error(
+				`spotify_missing_hashes_${missing.join(",")} found=${diagnostics.hashesFound.join(",") || "none"} seeded=${diagnostics.hashesFromPlayerRequests.length} bundles=${diagnostics.bundlesRead} webVersion=${detectedWebVersion ?? "unknown"}`,
+			);
 		}
 
-		const access = await accessToken();
-		const client = await clientToken();
-		const hashes = await queryHashes();
+		// Listen to the player's own pathfinder requests while the token calls
+		// and the bundle scans run: the player keeps loading after
+		// domcontentloaded, and a fresh session may have no precache at all.
+		// The page's fetch is wrapped transparently and restored afterwards.
+		const playerHashes: Record<string, string> = { ...(seededHashes ?? {}) };
+		const pathfinderPattern = /^https:\/\/api-partner\.spotify\.com\/pathfinder\/v\d+\/query/;
+		const notePathfinder = (url: string, body: unknown) => {
+			if (!pathfinderPattern.test(url)) return;
+			let operation: unknown = null;
+			let extensions: unknown = null;
+			if (typeof body === "string") {
+				const parsed = JSON.parse(body) as { operationName?: unknown; extensions?: unknown };
+				operation = parsed.operationName;
+				extensions = parsed.extensions;
+			} else {
+				const query = new URL(url).searchParams;
+				operation = query.get("operationName");
+				const raw = query.get("extensions");
+				extensions = raw ? JSON.parse(raw) : null;
+			}
+			const hash = (extensions as { persistedQuery?: { sha256Hash?: unknown } } | null)
+				?.persistedQuery?.sha256Hash;
+			if (
+				typeof operation === "string" &&
+				/^\w{1,80}$/.test(operation) &&
+				typeof hash === "string" &&
+				/^[a-f0-9]{64}$/.test(hash) &&
+				typeof playerHashes[operation] !== "string"
+			) {
+				playerHashes[operation] = hash;
+			}
+		};
+		const pageScope = globalThis as unknown as { fetch?: typeof globalThis.fetch };
+		const pageFetch = pageScope.fetch;
+		let listening: typeof globalThis.fetch | null = null;
+		const notePerformance = () => {
+			try {
+				for (const entry of performance.getEntriesByType("resource")) {
+					try {
+						notePathfinder(entry.name, null);
+					} catch {}
+				}
+			} catch {}
+		};
+		if (typeof pageFetch === "function") {
+			try {
+				const wrapper = function (this: unknown, ...args: Parameters<typeof globalThis.fetch>) {
+					try {
+						const [input, init] = args;
+						const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request)?.url;
+						if (typeof url === "string") notePathfinder(url, init?.body);
+					} catch {}
+					return pageFetch.apply(this, args);
+				} as typeof globalThis.fetch;
+				pageScope.fetch = wrapper;
+				listening = wrapper;
+			} catch {}
+		}
+		let access: string;
+		let client: string;
+		let hashes: Record<string, string>;
+		try {
+			notePerformance();
+			access = await accessToken();
+			client = await clientToken();
+			notePerformance();
+			hashes = await queryHashes();
+		} finally {
+			if (listening) {
+				try {
+					// Only undo our own wrapper; never replace a later one.
+					if (pageScope.fetch === listening && pageFetch) pageScope.fetch = pageFetch;
+				} catch {}
+			}
+		}
 		async function gql(
 			operationName: string,
 			variables: Record<string, unknown>,
@@ -1449,8 +1740,17 @@ export const spotifyPageCollector = async (
 			}
 		}
 
+		// A stream group fails alone when anything else was asked for; when it is
+		// all that was asked for, its error fails the run as before.
+		const othersWanted = (group: readonly string[]) =>
+			[...wanted].some((stream) => !group.includes(stream));
+		const playlistGroup = ["playlists", "playlist_items"] as const;
+
 		if (wanted.has("playlists") || wanted.has("playlist_items")) {
+			try {
 			const playlistUris: string[] = [];
+			let playlistRowSkippedCount = 0;
+			const playlistRowSkippedTypes: Record<string, number> = {};
 			let libraryOffset = 0;
 			const libraryLimit = 200;
 			const libraryPageSignatures = new Set<string>();
@@ -1519,6 +1819,11 @@ export const spotifyPageCollector = async (
 						"Track",
 						"LikedSongs",
 						"YourEpisodes",
+						// Saved shows, audiobooks and pre-saved releases are ordinary
+						// library items that cannot hide a playlist: read past, no gap.
+						"Podcast",
+						"Audiobook",
+						"PreRelease",
 					];
 					if (!supportedLibraryTypes.includes(typeName)) {
 						// A folder (its playlists are not traversed) or a row type this
@@ -1537,7 +1842,9 @@ export const spotifyPageCollector = async (
 							(librarySkippedTypes[typeLabel] ?? 0) + 1;
 						continue;
 					}
-					const uri = data._uri ?? data.uri;
+					// The web player puts the URI on the response wrapper for some types.
+					const uri =
+						data._uri ?? data.uri ?? (isRecord(libraryItem) ? libraryItem._uri : undefined);
 					if (typeof uri !== "string" || uri.length === 0) {
 						throw new Error("spotify_library_identity_missing");
 					}
@@ -1550,6 +1857,9 @@ export const spotifyPageCollector = async (
 						Track: ["track"],
 						LikedSongs: ["collection"],
 						YourEpisodes: ["collection"],
+						Podcast: ["show"],
+						Audiobook: ["show", "audiobook"],
+						PreRelease: ["prerelease", "album"],
 					};
 					const uriParts = uri.split(":");
 					if (
@@ -1643,6 +1953,9 @@ export const spotifyPageCollector = async (
 					let offset = 0;
 					let position = 0;
 					let trackCount = 0;
+					// Rows of a type the connector does not map, for this attempt only:
+					// a revision retry reads the playlist again from the start.
+					const attemptSkippedTypes: Record<string, number> = {};
 					const requestedPlaylistId = idFromUri(uri);
 					if (requestedPlaylistId === null) {
 						throw new Error("spotify_library_playlist_identity_missing");
@@ -1791,38 +2104,82 @@ export const spotifyPageCollector = async (
 							}
 							const trackPosition = position;
 							position += 1;
-							if (trackData.__typename !== "Track") {
+							// A local file added to a playlist arrives as a LocalTrack row
+							// (inside a LocalTrackResponseWrapper) with flat artist/album
+							// fields and a spotify:local: URI instead of a catalog track.
+							const isLocalTrack = trackData.__typename === "LocalTrack";
+							if (trackData.__typename !== "Track" && !isLocalTrack) {
 								if (["Episode", "PodcastEpisode"].includes(trackData.__typename))
 									continue;
-								throw new Error("spotify_playlist_row_type_unrecognized");
+								// Through 0.1.55 this failed the whole export
+								// (spotify_playlist_row_type_unrecognized). The row is now
+								// skipped and counted as an uncovered playlist_items row, so
+								// the stream reads degraded and the type name (bounded, no
+								// row content) reaches the run log. If Spotify renamed
+								// Track, every row lands here and playlist_items reads
+								// omitted, which is still visible.
+								const typeName = trackData.__typename;
+								const typeLabel = !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(typeName)
+									? "unparseable"
+									: Object.hasOwn(attemptSkippedTypes, typeName) ||
+											Object.hasOwn(playlistRowSkippedTypes, typeName) ||
+											Object.keys({ ...playlistRowSkippedTypes, ...attemptSkippedTypes }).length < 16
+										? typeName
+										: "other";
+								attemptSkippedTypes[typeLabel] = (attemptSkippedTypes[typeLabel] ?? 0) + 1;
+								continue;
 							}
 							trackCount += 1;
 							if (wanted.has("playlist_items")) childTrackCount += 1;
 							if (!wanted.has("playlist_items")) continue;
 							try {
-								const artistNames = requireField(
-									sourceArtists(trackData.artists, "playlist_track_artists"),
-									"spotify_playlist",
-								);
 								const trackUri = requireField(
 									readString(trackData.uri, "playlist_track_uri"),
 									"spotify_playlist",
 								);
+								if (
+									isLocalTrack &&
+									(trackUri === null || !trackUri.startsWith("spotify:local:"))
+								) {
+									throw new Error(
+										"spotify_playlist_field_unavailable:playlist_local_track_uri_malformed",
+									);
+								}
 								const trackName = requireField(
 									readString(trackData.name, "playlist_track_name"),
 									"spotify_playlist",
 								);
-								const album = sourceContainer(
-									trackData.albumOfTrack,
-									"album",
-									"spotify_playlist",
-								);
-								const albumName = requireField(
-									readString(child(album, "name"), "playlist_album_name"),
-									"spotify_playlist",
-								);
+								let artistNames: string[];
+								let albumName: string | null;
+								if (isLocalTrack) {
+									const localArtist = requireField(
+										readString(trackData.artistName, "playlist_track_artists"),
+										"spotify_playlist",
+									);
+									artistNames = localArtist ? [localArtist] : [];
+									albumName = requireField(
+										readString(trackData.albumName, "playlist_album_name"),
+										"spotify_playlist",
+									);
+								} else {
+									artistNames = requireField(
+										sourceArtists(trackData.artists, "playlist_track_artists"),
+										"spotify_playlist",
+									);
+									const album = sourceContainer(
+										trackData.albumOfTrack,
+										"album",
+										"spotify_playlist",
+									);
+									albumName = requireField(
+										readString(child(album, "name"), "playlist_album_name"),
+										"spotify_playlist",
+									);
+								}
 								const durationContainer = sourceContainer(
-									trackData.trackDuration,
+									isLocalTrack
+										? trackData.localTrackDuration
+										: trackData.trackDuration,
 									"duration",
 									"spotify_playlist",
 								);
@@ -1959,13 +2316,23 @@ export const spotifyPageCollector = async (
 					} else if (wanted.has("playlists")) {
 						playlistRowUnavailableCount += 1;
 					}
+					for (const [type, rows] of Object.entries(attemptSkippedTypes)) {
+						playlistRowSkippedTypes[type] = (playlistRowSkippedTypes[type] ?? 0) + rows;
+						playlistRowSkippedCount += rows;
+					}
 					playlistCoherent = true;
 					break;
 				}
 				if (!playlistCoherent) {
-					result.playlistRevisionUnproven = true;
-					return result;
+					// Caught below: only the playlist streams are given up.
+					throw new Error("spotify_playlist_revision_unproven");
 				}
+			}
+			if (playlistRowSkippedCount > 0) {
+				result.playlistRowsSkipped = {
+					count: playlistRowSkippedCount,
+					types: playlistRowSkippedTypes,
+				};
 			}
 			if (wanted.has("playlist_items")) {
 				result.completion.playlist_items =
@@ -1983,7 +2350,7 @@ export const spotifyPageCollector = async (
 								pageCount: childPageCount,
 								rawCount: childRawCount,
 								expectedCount: childCountKnown ? childExpectedCount : null,
-								discardedCount: childTrackUnavailableCount,
+								discardedCount: childTrackUnavailableCount + playlistRowSkippedCount,
 								remaining: false,
 								terminal:
 									childRawCount === 0 ? "empty_verified" : "total_reached",
@@ -2001,13 +2368,36 @@ export const spotifyPageCollector = async (
 				// Each skipped library row is at least one unread unit, so the
 				// stream cannot read complete while any row was skipped.
 				result.sourceCounts.playlist_items = {
-					considered: childTrackCount + librarySkippedCount,
+					considered: childTrackCount + librarySkippedCount + playlistRowSkippedCount,
 					covered: childTrackCoveredCount,
 				};
+			}
+			} catch (error) {
+				// The library surface fails its own two streams. Nothing partial is
+				// kept: no playlist rows, proofs or counts from this attempt.
+				const revision =
+					error instanceof Error && error.message === "spotify_playlist_revision_unproven";
+				if (!revision && !othersWanted(playlistGroup)) throw error;
+				result.playlists.splice(0);
+				result.playlist_items.splice(0);
+				result.playlistUris = [];
+				delete result.completion.playlists;
+				delete result.completion.playlist_items;
+				delete result.sourceCounts.playlists;
+				delete result.sourceCounts.playlist_items;
+				delete result.librarySkipped;
+				delete result.playlistRowsSkipped;
+				if (revision) result.playlistRevisionUnproven = true;
+				else {
+					for (const stream of playlistGroup) {
+						if (wanted.has(stream)) failStream(stream, error);
+					}
+				}
 			}
 		}
 
 		if (wanted.has("saved_tracks")) {
+			try {
 			let offset = 0;
 			const savedTrackPageSignatures = new Set<string>();
 			const savedTrackIdentities = new Set<string>();
@@ -2232,14 +2622,28 @@ export const spotifyPageCollector = async (
 				remaining: false,
 				terminal,
 			};
+			} catch (error) {
+				if (!othersWanted(["saved_tracks"])) throw error;
+				result.saved_tracks.splice(0);
+				delete result.completion.saved_tracks;
+				delete result.sourceCounts.saved_tracks;
+				failStream("saved_tracks", error);
+			}
 		}
 
 		if (wanted.has("recently_played_contexts")) {
+			const recentEndpoint =
+				"spclient.wg.spotify.com/recently-played/v3/user/{user}/recently-played";
+			let failureDetail: Omit<SpotifyStreamFailure, "code"> = {};
+			let recentUsername: string | null = null;
+			const pagesBefore = result.recent_context_pages.length;
+			try {
 			const attrs = await gql("profileAttributes", {});
 			const profile = attrs?.data?.me?.profile;
 			if (typeof profile?.username !== "string" || profile.username.length === 0) {
 				throw new Error("spotify_recently_played_owner_unavailable");
 			}
+			recentUsername = profile.username;
 			const pageSize = 50;
 			const maxPages = 20;
 			const pageSignatures = new Set<string>();
@@ -2265,7 +2669,39 @@ export const spotifyPageCollector = async (
 					},
 				);
 				if (!response.ok) {
-					throw new Error(`spotify_retryable_status_${response.status}`);
+					let body = "";
+					try {
+						body = await response.text();
+					} catch {}
+					// Spotify answers 404 with an EMPTY body for an offset past the
+					// end of the list, not an empty page (live probe 8 Nov 2026:
+					// offset 0 gave 200 with 9 contexts, offsets 50 to 500 gave 404
+					// with 0 bytes). A history that exactly fills its last page
+					// therefore always ends in that 404, which until 0.1.55 failed
+					// the whole export for those users. At offset 0 it is an empty
+					// history. A 404 with a body is not that answer and fails the
+					// stream, as does a 403 (owner mismatch).
+					if (response.status === 404 && body.trim() === "") {
+						diagnostics.recentlyPlayed = {
+							pages: pageNumber,
+							endedBy: offset > 0 ? "not_found_past_end" : "not_found_at_start",
+						};
+						terminal = true;
+						break;
+					}
+					failureDetail = {
+						endpoint: recentEndpoint,
+						status: response.status,
+						contentType: (response.headers.get("content-type") ?? "").split(";")[0]?.trim() || "none",
+						snippet: safeSnippet(body, recentUsername),
+					};
+					// 429 and 5xx can pass on a later run; any other status (403, a
+					// 404 with a body) will not.
+					throw new Error(
+						response.status === 429 || response.status >= 500
+							? `spotify_retryable_status_${response.status}`
+							: `spotify_recently_played_status_${response.status}`,
+					);
 				}
 				const payload: unknown = await response.json();
 				const contexts = (payload as { playContexts?: unknown })?.playContexts;
@@ -2290,6 +2726,7 @@ export const spotifyPageCollector = async (
 				}
 				result.recent_context_pages.push(payload);
 				if (contexts.length < pageSize) {
+					diagnostics.recentlyPlayed = { pages: pageNumber + 1, endedBy: "short_page" };
 					terminal = true;
 					break;
 				}
@@ -2304,18 +2741,32 @@ export const spotifyPageCollector = async (
 				covered: 0,
 			};
 			if (!terminal) {
+				diagnostics.recentlyPlayed = { pages: maxPages, endedBy: "page_cap" };
 				result.sourceCounts.recently_played_contexts.covered = 0;
+			}
+			} catch (error) {
+				// The stream fails alone; its pages so far are dropped so no partial
+				// list is exported as if it were the whole one.
+				diagnostics.recentlyPlayed = {
+					pages: result.recent_context_pages.length - pagesBefore,
+					endedBy: "failed",
+				};
+				result.recent_context_pages.splice(pagesBefore);
+				delete result.sourceCounts.recently_played_contexts;
+				failStream("recently_played_contexts", error, failureDetail);
 			}
 		}
 
 		if (wanted.has("top_artists") || wanted.has("top_tracks")) {
 			const pageSize = 50;
 			const maxItems = 100;
+			for (const stream of ["top_artists", "top_tracks"] as const) {
+				if (!wanted.has(stream) || result.streamFailures?.[stream]) continue;
+				const pages = stream === "top_artists" ? result.top_artist_pages : result.top_track_pages;
+				try {
 			for (const timeRange of ["SHORT_TERM", "LONG_TERM"] as const) {
-				for (const stream of ["top_artists", "top_tracks"] as const) {
-					if (!wanted.has(stream)) continue;
+				{
 					const key = stream === "top_artists" ? "topArtists" : "topTracks";
-					const pages = stream === "top_artists" ? result.top_artist_pages : result.top_track_pages;
 					const seenPages = new Set<string>();
 					let offset = 0;
 					let expectedTotal: number | null = null;
@@ -2358,6 +2809,11 @@ export const spotifyPageCollector = async (
 					}
 				}
 			}
+				} catch (error) {
+					pages.splice(0);
+					failStream(stream, error);
+				}
+			}
 		}
 
 		return result;
@@ -2371,9 +2827,121 @@ export const spotifyPageCollector = async (
  */
 export function spotifyPageEvaluateSource(
 	requested: string[],
-	collector: (requested: string[]) => Promise<BrowserData> = spotifyPageCollector,
+	collector: (
+		requested: string[],
+		fetch?: typeof globalThis.fetch,
+		seededHashes?: Record<string, string>,
+	) => Promise<BrowserData> = spotifyPageCollector,
+	seededHashes: Record<string, string> = {},
 ): string {
-	return `(async () => {\nconst __name = (target) => target;\nreturn (${collector.toString()})(${JSON.stringify(requested)});\n})()`;
+	return `(async () => {\nconst __name = (target) => target;\nreturn (${collector.toString()})(${JSON.stringify(requested)}, undefined, ${JSON.stringify(seededHashes)});\n})()`;
+}
+
+const PATHFINDER_URL = /^https:\/\/api-partner\.spotify\.com\/pathfinder\/v\d+\/query/;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+
+/**
+ * Reads `operationName` and `sha256Hash` from one pathfinder request the
+ * player sent: a POST body (v2) or the `operationName` and `extensions` query
+ * parameters (v1 GET). Returns null for anything else. Never reads variables.
+ */
+export function spotifyPathfinderHash(
+	url: string,
+	postData: string | null,
+): { operation: string; hash: string } | null {
+	if (!PATHFINDER_URL.test(url)) return null;
+	const pick = (operation: unknown, extensions: unknown) => {
+		const hash = (extensions as { persistedQuery?: { sha256Hash?: unknown } } | null)
+			?.persistedQuery?.sha256Hash;
+		return typeof operation === "string" &&
+			/^\w{1,80}$/.test(operation) &&
+			typeof hash === "string" &&
+			SHA256_HEX.test(hash)
+			? { operation, hash }
+			: null;
+	};
+	try {
+		if (postData) {
+			const body = JSON.parse(postData) as { operationName?: unknown; extensions?: unknown };
+			const found = pick(body.operationName, body.extensions);
+			if (found) return found;
+		}
+		const query = new URL(url).searchParams;
+		const extensions = query.get("extensions");
+		return pick(query.get("operationName"), extensions ? JSON.parse(extensions) : null);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Collects the persisted-query hashes the player itself sends while it loads,
+ * a source that does not depend on the bundle text the scan reads. Hosts whose
+ * page has no request events (PageShim) get an empty map.
+ */
+function observePlayerHashes(page: BrowserCollectContext["page"]): {
+	hashes: Record<string, string>;
+	stop: () => void;
+} {
+	const hashes: Record<string, string> = {};
+	const target = page as unknown as {
+		on?: (event: "request", listener: (request: unknown) => void) => unknown;
+		off?: (event: "request", listener: (request: unknown) => void) => unknown;
+	};
+	if (typeof target.on !== "function") return { hashes, stop: () => undefined };
+	const listener = (request: unknown) => {
+		try {
+			const r = request as { url?: () => string; postData?: () => string | null };
+			const url = typeof r.url === "function" ? r.url() : "";
+			if (!PATHFINDER_URL.test(url)) return;
+			const found = spotifyPathfinderHash(url, typeof r.postData === "function" ? r.postData() : null);
+			if (found) hashes[found.operation] = found.hash;
+		} catch {
+			// An observer must never fail a run.
+		}
+	};
+	try {
+		target.on("request", listener);
+	} catch {
+		return { hashes, stop: () => undefined };
+	}
+	return {
+		hashes,
+		stop: () => {
+			try {
+				target.off?.("request", listener);
+			} catch {}
+		},
+	};
+}
+
+function logCollectorDiagnostics(data: BrowserData | null, attempt: number): void {
+	const d = data?.diagnostics;
+	if (!d) return;
+	connectorDiagnostic("spotify", "query_hashes", {
+		attempt,
+		webVersion: d.webVersion,
+		detectedWebVersion: d.detectedWebVersion ?? "unknown",
+		found: d.hashesFound.join(","),
+		missing: d.hashesMissing.join(","),
+		fromPlayerRequests: d.hashesFromPlayerRequests.join(","),
+		sources: Object.entries(d.hashSources ?? {})
+			.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+			.map(([name, source]) => `${name}:${source}`)
+			.join(","),
+		precacheEntries: d.precacheEntries,
+		bundlesBySource: Object.entries(d.bundlesBySource ?? {})
+			.map(([source, count]) => `${source}:${count}`)
+			.join(","),
+		bundles: d.bundlesRead,
+		scans: d.scanAttempts,
+	});
+	if (d.recentlyPlayed) {
+		connectorDiagnostic("spotify", "recently_played_end", {
+			pages: d.recentlyPlayed.pages,
+			endedBy: d.recentlyPlayed.endedBy,
+		});
+	}
 }
 
 async function collectSpotifyWebData(
@@ -2381,47 +2949,169 @@ async function collectSpotifyWebData(
 	requestedStreams: string[],
 	evaluateData?: (page: BrowserCollectContext["page"], streams: string[]) => Promise<BrowserData>,
 ): Promise<BrowserCollectResult> {
+	const observer = evaluateData
+		? { hashes: {} as Record<string, string>, stop: () => undefined }
+		: observePlayerHashes(page);
+	try {
+		return await collectSpotifyWebDataObserved(page, requestedStreams, observer.hashes, evaluateData);
+	} finally {
+		observer.stop();
+	}
+}
+
+async function collectSpotifyWebDataObserved(
+	page: BrowserCollectContext["page"],
+	requestedStreams: string[],
+	playerHashes: Record<string, string>,
+	evaluateData?: (page: BrowserCollectContext["page"], streams: string[]) => Promise<BrowserData>,
+): Promise<BrowserCollectResult> {
 	await openSpotify(page);
-	const evaluated = evaluateData ? await evaluateData(page, requestedStreams) : (await page.evaluate(
-		spotifyPageEvaluateSource(requestedStreams),
-	)) as BrowserData;
-	if (requestedStreams.includes("recently_played_contexts")) {
-		const recent = parseRecentContextRows(evaluated.recent_context_pages ?? []);
-		evaluated.recently_played_contexts = recent.rows;
-		evaluated.sourceCounts.recently_played_contexts = {
-			considered: recent.considered,
-			covered: recent.rows.length,
-		};
+	let attempt = 0;
+	let reloaded = false;
+	const evaluate = async (streams: string[] = requestedStreams): Promise<BrowserData> => {
+		attempt += 1;
+		const data = evaluateData
+			? await evaluateData(page, streams)
+			: ((await page.evaluate(
+					spotifyPageEvaluateSource(streams, spotifyPageCollector, { ...playerHashes }),
+				)) as BrowserData);
+		logCollectorDiagnostics(data, attempt);
+		return data;
+	};
+	let evaluated: BrowserData;
+	try {
+		evaluated = await evaluate();
+	} catch (error) {
+		// The query hashes are read from the web player's own bundles. A player
+		// that yielded none of them (RSS run e898e5d4: all five missing on a
+		// remote browser, while the same account read them ten minutes earlier)
+		// is loaded once more, to completion, and read again before the export
+		// is given up.
+		const message = error instanceof Error ? error.message : String(error);
+		if (!message.includes("spotify_missing_hashes_")) throw error;
+		const tail = message.slice(message.indexOf("spotify_missing_hashes_") + 23);
+		const context = (key: string) => new RegExp(`\\b${key}=(\\S+)`).exec(tail)?.[1];
+		connectorDiagnostic("spotify", "query_hashes_reload", {
+			missing: tail.split(/\s/)[0] ?? "",
+			found: context("found"),
+			seeded: context("seeded"),
+			bundles: context("bundles"),
+			webVersion: context("webVersion"),
+			playerRequestHashes: Object.keys(playerHashes).sort().join(","),
+		});
+		await page.goto(SPOTIFY_WEB_HOME, { waitUntil: "load" });
+		reloaded = true;
+		evaluated = await evaluate();
+	}
+	evaluated.streamFailures ??= {};
+	// Only userTopContent was missing, so the other streams were read and the
+	// ranked lists failed. Load the player once more, as 0.1.54 does for a
+	// missing hash, and read the ranked lists alone before giving them up.
+	const missingTop = (["top_artists", "top_tracks"] as const).filter((stream) =>
+		evaluated.streamFailures?.[stream]?.code.startsWith("spotify_missing_hashes_"),
+	);
+	if (missingTop.length > 0 && !reloaded) {
+		connectorDiagnostic("spotify", "query_hashes_reload", {
+			missing: "userTopContent",
+			streams: missingTop.join(","),
+			playerRequestHashes: Object.keys(playerHashes).sort().join(","),
+		});
+		reloaded = true;
+		let again: BrowserData | null = null;
+		let againError: unknown = null;
+		try {
+			await page.goto(SPOTIFY_WEB_HOME, { waitUntil: "load" });
+			again = await evaluate([...missingTop]);
+		} catch (error) {
+			againError = error;
+		}
+		for (const stream of missingTop) {
+			const failure = again?.streamFailures?.[stream];
+			if (again && !failure) {
+				delete evaluated.streamFailures[stream];
+				if (stream === "top_artists") evaluated.top_artist_pages = again.top_artist_pages ?? [];
+				else evaluated.top_track_pages = again.top_track_pages ?? [];
+			} else if (failure) {
+				evaluated.streamFailures[stream] = failure;
+			} else if (againError) {
+				const message = againError instanceof Error ? againError.message : String(againError);
+				const code = /^spotify_[a-z0-9_,]+/i.exec(message)?.[0];
+				if (code) evaluated.streamFailures[stream] = { code };
+			}
+		}
+	}
+	if (
+		requestedStreams.includes("recently_played_contexts") &&
+		!evaluated.streamFailures.recently_played_contexts
+	) {
+		try {
+			const recent = parseRecentContextRows(evaluated.recent_context_pages ?? []);
+			evaluated.recently_played_contexts = recent.rows;
+			evaluated.sourceCounts.recently_played_contexts = {
+				considered: recent.considered,
+				covered: recent.rows.length,
+			};
+		} catch (error) {
+			evaluated.streamFailures.recently_played_contexts = {
+				code: error instanceof Error ? error.message : "spotify_recently_played_malformed",
+			};
+		}
 	}
 	evaluated.top_artists ??= [];
 	evaluated.top_tracks ??= [];
-	for (const timeRange of ["short_term", "long_term"] as const) {
-		const artistPages = (evaluated.top_artist_pages ?? [])
-			.filter((entry) =>
-				readPath(entry, "timeRange") === timeRange.toUpperCase(),
-			)
-			.map((entry) => readPath(entry, "payload"));
-		const trackPages = (evaluated.top_track_pages ?? [])
-			.filter((entry) =>
-				readPath(entry, "timeRange") === timeRange.toUpperCase(),
-			)
-			.map((entry) => readPath(entry, "payload"));
-		if (requestedStreams.includes("top_artists")) {
-			const parsed = parseTopRows(artistPages, "top_artists", timeRange);
-			evaluated.top_artists.push(...parsed.rows);
-			const counts = evaluated.sourceCounts.top_artists ?? { considered: 0, covered: 0 };
-			counts.considered += parsed.considered;
-			counts.covered += parsed.rows.length;
-			evaluated.sourceCounts.top_artists = counts;
+	for (const stream of ["top_artists", "top_tracks"] as const) {
+		if (!requestedStreams.includes(stream) || evaluated.streamFailures[stream]) continue;
+		const pages = (stream === "top_artists" ? evaluated.top_artist_pages : evaluated.top_track_pages) ?? [];
+		// One bad ranking page (a total that changed between pages, a
+		// malformed page) omits only this stream, as for recently played.
+		try {
+			const rows: Record<string, unknown>[] = [];
+			const counts = { considered: 0, covered: 0 };
+			// Every window was read to the total Spotify reported for it.
+			let windowsComplete = true;
+			let total = 0;
+			for (const timeRange of ["short_term", "long_term"] as const) {
+				const payloads = pages
+					.filter((entry) => readPath(entry, "timeRange") === timeRange.toUpperCase())
+					.map((entry) => readPath(entry, "payload"));
+				const parsed = parseTopRows(payloads, stream, timeRange);
+				rows.push(...parsed.rows);
+				counts.considered += parsed.considered;
+				counts.covered += parsed.rows.length;
+				const key = stream === "top_artists" ? "topArtists" : "topTracks";
+				// parseTopRows has already proven the total is the same on every
+				// page. A total above the 100-row bound leaves rows unread.
+				const windowTotal = readPath(payloads[0], "data", "me", "profile", key, "totalCount");
+				if (typeof windowTotal !== "number" || parsed.considered !== windowTotal) {
+					windowsComplete = false;
+				} else {
+					total += windowTotal;
+				}
+			}
+			evaluated[stream] = rows;
+			evaluated.sourceCounts[stream] = counts;
+			if (windowsComplete) {
+				evaluated.topProvenComplete ??= {};
+				evaluated.topProvenComplete[stream] = { rows: counts.considered, total };
+			}
+		} catch (error) {
+			evaluated[stream] = [];
+			delete evaluated.sourceCounts[stream];
+			evaluated.streamFailures[stream] = {
+				code: error instanceof Error ? (/^spotify_[a-z0-9_,]+/i.exec(error.message)?.[0] ?? "spotify_top_content_malformed") : "spotify_top_content_malformed",
+			};
 		}
-		if (requestedStreams.includes("top_tracks")) {
-			const parsed = parseTopRows(trackPages, "top_tracks", timeRange);
-			evaluated.top_tracks.push(...parsed.rows);
-			const counts = evaluated.sourceCounts.top_tracks ?? { considered: 0, covered: 0 };
-			counts.considered += parsed.considered;
-			counts.covered += parsed.rows.length;
-			evaluated.sourceCounts.top_tracks = counts;
-		}
+	}
+	for (const [stream, failure] of Object.entries(evaluated.streamFailures)) {
+		if (!failure) continue;
+		connectorDiagnostic("spotify", "stream_failed", {
+			stream,
+			code: failure.code,
+			endpoint: failure.endpoint,
+			status: failure.status,
+			contentType: failure.contentType,
+			snippet: failure.snippet,
+		});
 	}
 	return evaluated;
 }
@@ -2447,21 +3137,108 @@ async function emitRecordsWithCoverage(
 	);
 }
 
+/**
+ * One isolated stream failed; the others still export. Through the runtime's
+ * `reportStreamFailure` the stream goes out as the portable
+ * `stream_collection_failed` SKIP_RESULT. RSS's native host maps that to an
+ * omitted scope and delivers the rest as a successful run.
+ */
+async function reportIsolatedStreamFailure(
+	stream: SpotifyIsolatedStream,
+	failure: SpotifyStreamFailure,
+	emit: (msg: EmittedMessage) => Promise<void>,
+	reportStreamFailure: BrowserCollectContext["reportStreamFailure"],
+): Promise<void> {
+	const retryable = spotifyRetryablePattern.test(failure.code);
+	const what: Record<SpotifyIsolatedStream, string> = {
+		playlists: "your playlists",
+		playlist_items: "your playlist tracks",
+		saved_tracks: "your saved tracks",
+		recently_played_contexts: "recently played contexts",
+		top_artists: "this ranking",
+		top_tracks: "this ranking",
+	};
+	const message = `Spotify did not return ${what[stream]} this time; the other Spotify data was still read.`;
+	const recoveryHint = retryable
+		? { action: "retry_by_runtime" as const, retryable: true }
+		: { action: "retry_on_connector_upgrade" as const, retryable: false };
+	const diagnostics = {
+		original_reason: failure.code,
+		...(failure.status === undefined ? {} : { status: failure.status }),
+		...(failure.endpoint === undefined ? {} : { endpoint: failure.endpoint }),
+	};
+	if (reportStreamFailure) {
+		await reportStreamFailure(stream, message, { recoveryHint, diagnostics });
+		return;
+	}
+	await emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason: "stream_collection_failed",
+		message,
+		recovery_hint: recoveryHint,
+		diagnostics,
+	});
+}
+
 export async function spotifyCollect({
-	emit,
-	emitRecord,
+	emit: hostEmit,
+	emitRecord: hostEmitRecord,
 	page,
 	progress,
+	reportStreamFailure: hostReportStreamFailure,
 	requested,
 }: Pick<
 	BrowserCollectContext,
 	"emit" | "emitRecord" | "page" | "progress" | "requested"
->, evaluateData?: (page: BrowserCollectContext["page"], streams: string[]) => Promise<BrowserData>): Promise<void> {
+> &
+	Partial<Pick<BrowserCollectContext, "reportStreamFailure">>, evaluateData?: (page: BrowserCollectContext["page"], streams: string[]) => Promise<BrowserData>): Promise<void> {
 	const requestedNames = [...requested.keys()];
+	// Every requested stream must end with a record, a checkpoint or a skip
+	// receipt. A host rejects a run that says nothing about a requested scope
+	// (RSS: "requested scope 'spotify.playlists' must be produced or marked
+	// omitted", 0.1.55 with an empty library). Track what each stream said so
+	// the end of this function can close any stream left silent.
+	const accounted = new Set<string>();
+	const emit = async (msg: EmittedMessage): Promise<void> => {
+		const m = msg as unknown as Record<string, unknown>;
+		const stream = typeof m.stream === "string" ? m.stream : "";
+		if (
+			m.type === "RECORD" ||
+			m.type === "STATE" ||
+			m.type === "SKIP_RESULT" ||
+			(m.type === "DETAIL_COVERAGE" &&
+				typeof m.considered === "number" &&
+				typeof m.covered === "number" &&
+				m.covered < m.considered)
+		) {
+			accounted.add(stream);
+		}
+		await hostEmit(msg);
+	};
+	const emitRecord = async (stream: string, data: Record<string, unknown>): Promise<void> => {
+		accounted.add(stream);
+		await hostEmitRecord(stream, data);
+	};
+	const reportStreamFailure: BrowserCollectContext["reportStreamFailure"] = hostReportStreamFailure
+		? async (stream, message, options) => {
+				accounted.add(stream);
+				await hostReportStreamFailure(stream, message, options);
+			}
+		: undefined;
+	// A stream group fails alone when anything else was asked for; when it is
+	// all that was asked for, the run fails as before.
+	const othersRequested = (group: readonly string[]) =>
+		requestedNames.some((stream) => !group.includes(stream));
+	const playlistGroup = ["playlists", "playlist_items"] as const;
+
 	await progress("Fetching Spotify data");
 	const data = await collectSpotifyWebData(page, requestedNames, evaluateData);
+	data.streamFailures ??= {};
+	const failures = data.streamFailures;
 	if (data.playlistRevisionUnproven) {
-		for (const stream of requested.keys()) {
+		for (const stream of playlistGroup) {
+			if (!requested.has(stream)) continue;
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
@@ -2471,8 +3248,10 @@ export async function spotifyCollect({
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 			});
 		}
-		return;
 	}
+	const playlistsHandled = (stream: string) =>
+		data.playlistRevisionUnproven === true &&
+		(playlistGroup as readonly string[]).includes(stream);
 	const librarySkipped =
 		data.librarySkipped && data.librarySkipped.count > 0
 			? data.librarySkipped
@@ -2481,6 +3260,19 @@ export async function spotifyCollect({
 		connectorDiagnostic("spotify", "library_rows_skipped", {
 			skipped: librarySkipped.count,
 			types: Object.entries(librarySkipped.types)
+				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+				.map(([type, rows]) => `${type}:${rows}`)
+				.join(","),
+		});
+	}
+	const playlistRowsSkipped =
+		data.playlistRowsSkipped && data.playlistRowsSkipped.count > 0
+			? data.playlistRowsSkipped
+			: null;
+	if (playlistRowsSkipped) {
+		connectorDiagnostic("spotify", "playlist_rows_skipped", {
+			skipped: playlistRowsSkipped.count,
+			types: Object.entries(playlistRowsSkipped.types)
 				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 				.map(([type, rows]) => `${type}:${rows}`)
 				.join(","),
@@ -2497,7 +3289,7 @@ export async function spotifyCollect({
 		["playlist_items", data.playlist_items],
 		["saved_tracks", data.saved_tracks],
 	] as const) {
-		if (requested.has(stream)) {
+		if (requested.has(stream) && !failures[stream]) {
 			const validRecords = records.filter(
 				(record) => validateRecord(stream, record).ok,
 			);
@@ -2567,20 +3359,36 @@ export async function spotifyCollect({
 		owner: "spotify:user:me:collection",
 		selector: "spotify:user:me:collection",
 	};
+	// A stream whose end the page could not prove fails alone, like any
+	// other isolated stream, unless it is all that was asked for.
+	const unproven = (
+		stream: "playlists" | "playlist_items" | "saved_tracks",
+		group: readonly string[],
+		code: string,
+	) => {
+		if (!othersRequested(group)) throw new Error(code);
+		failures[stream] = { code };
+		if (stream === "saved_tracks") data.saved_tracks = [];
+		else data[stream] = [];
+	};
 	if (
 		requested.has("playlists") &&
+		!failures.playlists &&
+		!playlistsHandled("playlists") &&
 		!hasSpotifyTerminalBoundary(data.completion.playlists, libraryExpectation)
 	) {
-		throw new Error("spotify_playlists_completion_unproven");
+		unproven("playlists", playlistGroup, "spotify_playlists_completion_unproven");
 	}
 	if (
 		requested.has("playlist_items") &&
+		!failures.playlist_items &&
+		!playlistsHandled("playlist_items") &&
 		!hasSpotifyTerminalBoundary(
 			data.completion.playlist_items,
 			playlistItemsExpectation,
 		)
 	) {
-		throw new Error("spotify_playlist_items_completion_unproven");
+		unproven("playlist_items", playlistGroup, "spotify_playlist_items_completion_unproven");
 	}
 	const savedProof = data.completion.saved_tracks;
 	const savedBoundaryProven =
@@ -2594,10 +3402,11 @@ export async function spotifyCollect({
 				(data.sourceCounts.saved_tracks?.considered ?? 0));
 	if (
 		requested.has("saved_tracks") &&
+		!failures.saved_tracks &&
 		!savedBoundaryProven &&
 		!savedBoundaryWithIncompleteRows
 	) {
-		throw new Error("spotify_saved_tracks_completion_unproven");
+		unproven("saved_tracks", ["saved_tracks"], "spotify_saved_tracks_completion_unproven");
 	}
 	if (requested.has("profile")) {
 		if (data.profile) await emitRecord("profile", data.profile);
@@ -2613,33 +3422,52 @@ export async function spotifyCollect({
 			},
 		);
 	}
-	if (requested.has("playlists")) {
-		await emitRecordsWithCoverage(
-			"playlists",
-			data.playlists,
-			data.sourceCounts.playlists ?? {
-				considered: data.playlists.length,
-				covered: data.playlists.length,
+	// A proven, gap-free full read of the library saves a full-scan checkpoint,
+	// as saved_tracks does. On hosts that export a scope only when it has rows
+	// or a checkpoint (PageShim, RSS), this is what lets an empty library, or
+	// playlists with no tracks, export as "collected, none" instead of being
+	// silently dropped.
+	const fullScanState = async (
+		stream: "playlists" | "playlist_items",
+		proof: SpotifyEndEvidence,
+	) =>
+		emit({
+			type: "STATE",
+			stream,
+			cursor: {
+				full_scan_at: new Date().toISOString(),
+				completion: {
+					operation: proof.operation,
+					pages: proof.pageCount,
+					rows: proof.rawCount,
+					terminal: proof.terminal,
+				},
 			},
-			emit,
-			emitRecord,
-		);
-	}
-	if (requested.has("playlist_items")) {
-		await emitRecordsWithCoverage(
-			"playlist_items",
-			data.playlist_items,
-			data.sourceCounts.playlist_items ?? {
-				considered: data.playlist_items.length,
-				covered: data.playlist_items.length,
-			},
-			emit,
-			emitRecord,
-		);
-	}
-	if (librarySkipped) {
-		for (const stream of ["playlists", "playlist_items"] as const) {
-			if (!requested.has(stream)) continue;
+		});
+	for (const [stream, expectation] of [
+		["playlists", libraryExpectation],
+		["playlist_items", playlistItemsExpectation],
+	] as const) {
+		if (!requested.has(stream) || playlistsHandled(stream)) continue;
+		const failure = failures[stream];
+		if (failure) {
+			await reportIsolatedStreamFailure(stream, failure, emit, reportStreamFailure);
+			continue;
+		}
+		const records = data[stream];
+		const counts = data.sourceCounts[stream] ?? {
+			considered: records.length,
+			covered: records.length,
+		};
+		await emitRecordsWithCoverage(stream, records, counts, emit, emitRecord);
+		const proof = data.completion[stream];
+		if (
+			counts.covered >= counts.considered &&
+			hasSpotifyEndProof(proof, expectation)
+		) {
+			await fullScanState(stream, proof);
+		}
+		if (librarySkipped) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
@@ -2652,32 +3480,50 @@ export async function spotifyCollect({
 				},
 			});
 		}
-	}
-	if (requested.has("saved_tracks")) {
-		await emitRecordsWithCoverage(
-			"saved_tracks",
-			data.saved_tracks,
-			data.sourceCounts.saved_tracks ?? {
-				considered: data.saved_tracks.length,
-				covered: data.saved_tracks.length,
-			},
-			emit,
-			emitRecord,
-		);
-		if (savedBoundaryProven) {
+		if (stream === "playlist_items" && playlistRowsSkipped) {
 			await emit({
-				type: "STATE",
-				stream: "saved_tracks",
-				cursor: {
-					full_scan_at: new Date().toISOString(),
-					completion: {
-						operation: savedProof.operation,
-						pages: savedProof.pageCount,
-						rows: savedProof.rawCount,
-						terminal: savedProof.terminal,
-					},
+				type: "SKIP_RESULT",
+				stream,
+				reason: "spotify_playlist_rows_unsupported",
+				message:
+					"Some playlist entries of a type this connector does not read yet were skipped; the other playlist tracks were still read.",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
 				},
 			});
+		}
+	}
+	if (requested.has("saved_tracks")) {
+		const failure = failures.saved_tracks;
+		if (failure) {
+			await reportIsolatedStreamFailure("saved_tracks", failure, emit, reportStreamFailure);
+		} else {
+			await emitRecordsWithCoverage(
+				"saved_tracks",
+				data.saved_tracks,
+				data.sourceCounts.saved_tracks ?? {
+					considered: data.saved_tracks.length,
+					covered: data.saved_tracks.length,
+				},
+				emit,
+				emitRecord,
+			);
+			if (savedBoundaryProven) {
+				await emit({
+					type: "STATE",
+					stream: "saved_tracks",
+					cursor: {
+						full_scan_at: new Date().toISOString(),
+						completion: {
+							operation: savedProof.operation,
+							pages: savedProof.pageCount,
+							rows: savedProof.rawCount,
+							terminal: savedProof.terminal,
+						},
+					},
+				});
+			}
 		}
 	}
 	for (const stream of [
@@ -2686,6 +3532,11 @@ export async function spotifyCollect({
 		"top_tracks",
 	] as const) {
 		if (!requested.has(stream)) continue;
+		const failure = failures[stream];
+		if (failure) {
+			await reportIsolatedStreamFailure(stream, failure, emit, reportStreamFailure);
+			continue;
+		}
 		const counts = data.sourceCounts[stream] ?? { considered: 0, covered: 0 };
 		await emitRecordsWithCoverage(
 			stream,
@@ -2704,12 +3555,75 @@ export async function spotifyCollect({
 			});
 		}
 		if (stream === "recently_played_contexts") {
+			// Spotify's pager ends in one of three ways: a page shorter than the
+			// limit, a 404 with an empty body past the end, or that same 404 at
+			// offset 0 for a history with nothing in it. Each is Spotify's own
+			// end of the list it holds for this account, so the list is
+			// complete and checkpointed (with 0 rows at offset 0). Only the
+			// 20-page cap leaves contexts unread.
+			//
+			// 0.1.57 called the offset-0 404 "unavailable": two users who got it
+			// on several runs then got contexts. On RSS prod (8 to 9 Nov 2026,
+			// 21 such reads) the 404 was steady per user across retries up to
+			// 80 minutes apart, 10 of the 15 full runs that got it were
+			// accounts with no saved tracks, playlists or top items, and the one
+			// user whose next run had contexts had exactly 1: a first play.
+			const recent = data.diagnostics?.recentlyPlayed;
+			if (
+				recent &&
+				(recent.endedBy === "short_page" ||
+					recent.endedBy === "not_found_past_end" ||
+					recent.endedBy === "not_found_at_start")
+			) {
+				if (recent.endedBy === "not_found_at_start") {
+					connectorDiagnostic("spotify", "recently_played_empty", {
+						endedBy: recent.endedBy,
+						othersRequested: String(othersRequested([stream])),
+					});
+				}
+				await emit({
+					type: "STATE",
+					stream,
+					cursor: {
+						full_scan_at: new Date().toISOString(),
+						completion: {
+							operation: "recently-played/v3",
+							pages: recent.pages,
+							rows: counts.considered,
+							terminal: recent.endedBy,
+						},
+					},
+				});
+				continue;
+			}
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
 				reason: "spotify_recent_context_boundary_unverified",
 				message: "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
 				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+			});
+		} else if (data.topProvenComplete?.[stream]) {
+			// Every window was read to Spotify's own total (at most 100): no
+			// row is beyond the request bound, so the ranking is complete,
+			// whether it holds 0 rows or 40. The checkpoint is what lets
+			// PageShim and RSS export it as collected instead of degraded (or,
+			// when empty, omitted). Until 0.1.58 only a total of 0 counted, so
+			// every short ranking was reported capped and the run partial.
+			const proof = data.topProvenComplete[stream];
+			if (proof.total === 0) connectorDiagnostic("spotify", "ranked_list_empty", { stream });
+			await emit({
+				type: "STATE",
+				stream,
+				cursor: {
+					full_scan_at: new Date().toISOString(),
+					completion: {
+						operation: "userTopContent",
+						rows: proof.rows,
+						total: proof.total,
+						time_ranges: ["short_term", "long_term"],
+					},
+				},
 			});
 		} else {
 			await emit({
@@ -2720,6 +3634,19 @@ export async function spotifyCollect({
 				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			});
 		}
+	}
+	// Last line of defence for the invariant above: a stream that reached
+	// here with no record, checkpoint or receipt is reported, never dropped.
+	for (const stream of requestedNames) {
+		if (accounted.has(stream) || !SPOTIFY_STREAMS.includes(stream)) continue;
+		connectorDiagnostic("spotify", "stream_outcome_missing", { stream });
+		await emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "spotify_stream_outcome_unproven",
+			message: "The connector could not prove this stream complete, so it was not exported this time.",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+		});
 	}
 }
 

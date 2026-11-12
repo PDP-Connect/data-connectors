@@ -62,6 +62,13 @@ export const needsShellForPatchrightSpawn = (platformName) =>
 	platformName === "win32";
 
 const main = () => {
+	if (platform === "darwin") {
+		console.log(
+			"macOS uses system Chrome. Install or update Google Chrome in /Applications before running a browser connector. Skipping the bundled Chromium download.",
+		);
+		process.exit(0);
+	}
+
 	if (
 		isTruthyEnv(process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD) ||
 		isTruthyEnv(process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD)

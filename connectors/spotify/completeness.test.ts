@@ -75,6 +75,8 @@ async function collectSavedTracks(
 		serviceWorker?: string;
 		/** Bodies for precached chunk URLs the service worker lists. */
 		chunks?: Record<string, string>;
+		/** More loaded script URLs after bundle.js (serve their bodies via `chunks`). */
+		extraScripts?: string[];
 		pathname?: string;
 		requested?: string[];
 		profileEnrichment?: unknown;
@@ -108,7 +110,10 @@ async function collectSavedTracks(
 		},
 	};
 	(globalThis as unknown as { document: unknown }).document = {
-		querySelectorAll: () => [{ src: "https://open.spotifycdn.com/bundle.js" }],
+		querySelectorAll: () => [
+			{ src: "https://open.spotifycdn.com/bundle.js" },
+			...(options.extraScripts ?? []).map((src) => ({ src })),
+		],
 	};
 	(globalThis as unknown as { caches: unknown }).caches = {
 		keys: () =>
@@ -359,6 +364,26 @@ test("hash discovery reads lazy chunks from the service worker manifest when the
 		`${cdn}/xpui-routes-collection-songs.933cac3b.js`,
 	]);
 	assert.deepEqual(result.requests, [0]);
+});
+
+test("a fresh session's many loaded scripts do not use up the service worker chunk budget", async () => {
+	// Live probe 8 Nov 2026: with no precache the player had ~70 loaded scripts
+	// and none defined userTopContent. One shared 60-bundle budget was spent on
+	// them, so the profile chunk the service worker lists was never read.
+	const cdn = "https://open.spotifycdn.com/cdn/build/web-player";
+	const extraScripts = Array.from({ length: 70 }, (_, index) => `${cdn}/loaded-${index}.js`);
+	const serviceWorker = `e=[{'revision':null,'url':'${cdn}/xpui-routes-profile.72480c98.js'}]`;
+	const chunks: Record<string, string> = Object.fromEntries(extraScripts.map((url) => [url, "unrelated"]));
+	chunks[`${cdn}/xpui-routes-profile.72480c98.js`] = `new a.b("userTopContent","query","${"e".repeat(64)}")`;
+	const result = await collectSavedTracks(() => savedResponse([], 0), {
+		requested: ["saved_tracks", "top_artists"],
+		bundle: () => bundleFor(["fetchLibraryTracks"]),
+		serviceWorker,
+		chunks,
+		extraScripts,
+	});
+	assert.ok(result.chunkRequests.includes(`${cdn}/xpui-routes-profile.72480c98.js`));
+	assert.ok(result.operations.some((operation) => operation.name === "userTopContent"));
 });
 
 test("playlist library pagination continues after a short page while totalCount remains", async () => {
@@ -1301,22 +1326,52 @@ test("known Spotify pseudo-playlists count in inventory proof without becoming p
 	);
 });
 
-test("playlist item rows reject unrecognized types instead of silently skipping them", async () => {
-	await assertRejectedWithoutAuthority(
-		(_offset, _index, operationName, variables) => {
-			if (operationName === "libraryV3") {
+test("playlist item rows of an unrecognized type are skipped as uncovered rows, not a failed run", async () => {
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	let result: Awaited<ReturnType<typeof collectSavedTracks>>;
+	try {
+		result = await collectSavedTracks(
+			(_offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") {
+					return {
+						data: {
+							me: {
+								libraryV3: {
+									offset: 0,
+									totalCount: 1,
+									items: [
+										{
+											item: {
+												data: {
+													__typename: "Playlist",
+													uri: "spotify:playlist:pl1",
+												},
+											},
+										},
+									],
+								},
+							},
+						},
+					};
+				}
 				return {
 					data: {
-						me: {
-							libraryV3: {
-								offset: 0,
-								totalCount: 1,
+						playlistV2: {
+							uri: String(variables?.uri),
+							name: "List",
+							content: {
+								totalCount: 2,
+								offset: variables?.offset,
 								items: [
+									{ itemV2: { data: { __typename: "FutureType", uri: "spotify:future:x", name: "secret" } } },
 									{
-										item: {
+										itemV2: {
 											data: {
-												__typename: "Playlist",
-												uri: "spotify:playlist:pl1",
+												__typename: "Track",
+												uri: "spotify:track:t1",
+												name: "t1",
+												artists: { items: [] },
 											},
 										},
 									},
@@ -1325,23 +1380,36 @@ test("playlist item rows reject unrecognized types instead of silently skipping 
 						},
 					},
 				};
-			}
-			return {
-				data: {
-					playlistV2: {
-						uri: String(variables?.uri),
-						name: "List",
-						content: {
-							totalCount: 1,
-							offset: variables?.offset,
-							items: [{ itemV2: { data: { __typename: "FutureType" } } }],
-						},
-					},
-				},
-			};
-		},
-		{ requested: ["playlist_items"] },
+			},
+			{ requested: ["playlists", "playlist_items"] },
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const items = result.emittedRecords.filter((record) => record.stream === "playlist_items");
+	assert.equal(items.length, 1);
+	// The source position of the known row is kept.
+	assert.equal(items[0]?.data.position, 1);
+	assert.equal(result.emittedRecords.filter((record) => record.stream === "playlists").length, 1);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE" && message.stream === "playlist_items",
+	) as { considered?: number; covered?: number } | undefined;
+	assert.deepEqual([coverage?.considered, coverage?.covered], [2, 1]);
+	assert.ok(
+		result.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "playlist_items" &&
+				message.reason === "spotify_playlist_rows_unsupported",
+		),
 	);
+	// No full-scan checkpoint for a stream with a skipped row; playlists keeps one.
+	const states = result.messages.filter((message) => message.type === "STATE").map((message) => message.stream);
+	assert.deepEqual(states, ["playlists"]);
+	const skipped = diagnostics.find((line) => line.includes("playlist_rows_skipped"));
+	assert.ok(skipped);
+	assert.match(skipped, /FutureType:1/);
+	assert.doesNotMatch(diagnostics.join("\n"), /secret|spotify:future/);
 });
 
 test("playlist item positions retain source slots occupied by episodes", async () => {
@@ -1403,6 +1471,96 @@ test("playlist item positions retain source slots occupied by episodes", async (
 	assert.equal(items.length, 1);
 	assert.equal(items[0]?.data.id, "pl1:1");
 	assert.equal(items[0]?.data.position, 1);
+});
+
+// Shape observed live (2026-10-22, values redacted): a local file added to a
+// playlist arrives as itemV2 { __typename: LocalTrackResponseWrapper,
+// data { __typename: LocalTrack, albumName, artistName,
+// localTrackDuration { totalMilliseconds }, name, uri } }.
+function localPlaylistTrackItem(
+	data: Record<string, unknown> = {},
+): Record<string, unknown> {
+	return {
+		addedAt: { isoString: "2024-01-02T00:00:00Z" },
+		addedBy: { data: { name: "Adder" } },
+		itemV2: {
+			__typename: "LocalTrackResponseWrapper",
+			data: {
+				__typename: "LocalTrack",
+				albumName: "Local Album",
+				artistName: "Local Artist",
+				localTrackDuration: { totalMilliseconds: 180000 },
+				name: "Local Track",
+				uri: "spotify:local:Local%20Artist:Local%20Album:Local%20Track:180",
+				...data,
+			},
+		},
+	};
+}
+
+test("local files in a playlist are exported as playlist items without a catalog track id", async () => {
+	const result = await collectSavedTracks(
+		(offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") return playlistLibraryResponse();
+			return playlistDetailResponse(String(variables?.uri), offset, [
+				completePlaylistTrackItem(),
+				localPlaylistTrackItem(),
+			]);
+		},
+		{ requested: ["playlist_items"], completeFixtures: false },
+	);
+	const items = result.emittedRecords.filter(
+		(record) => record.stream === "playlist_items",
+	);
+	assert.equal(items.length, 2);
+	assert.deepEqual(items[1]?.data, {
+		id: "pl1:1",
+		playlist_id: "pl1",
+		track_id: null,
+		uri: "spotify:local:Local%20Artist:Local%20Album:Local%20Track:180",
+		position: 1,
+		added_at: "2024-01-02T00:00:00Z",
+		added_by: "Adder",
+		name: "Local Track",
+		artist_names: ["Local Artist"],
+		album_name: "Local Album",
+		duration_ms: 180000,
+	});
+	assert.deepEqual(playlistCoverage(result.messages, "playlist_items"), {
+		considered: 2,
+		covered: 2,
+	});
+});
+
+test("a local playlist track with a missing field or a non-local URI is withheld and counted as a gap", async () => {
+	const variants: Array<Record<string, unknown>> = [
+		{ uri: "spotify:track:t2" },
+		{ uri: undefined },
+		{ artistName: undefined },
+		{ localTrackDuration: undefined },
+		{ localTrackDuration: [] },
+	];
+	for (const variant of variants) {
+		const result = await collectSavedTracks(
+			(offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") return playlistLibraryResponse();
+				return playlistDetailResponse(String(variables?.uri), offset, [
+					localPlaylistTrackItem(variant),
+				]);
+			},
+			{ requested: ["playlist_items"], completeFixtures: false },
+		);
+		assert.deepEqual(
+			result.emittedRecords.filter(
+				(record) => record.stream === "playlist_items",
+			),
+			[],
+		);
+		assert.deepEqual(playlistCoverage(result.messages, "playlist_items"), {
+			considered: 1,
+			covered: 0,
+		});
+	}
 });
 
 test("malformed playlist item fields withhold the whole row before coverage", async () => {
@@ -2158,6 +2316,25 @@ test("a request made from a non-player navigation cannot prove an empty saved-tr
 	});
 });
 
+test("the locale-prefixed player root Spotify redirects to collects like the bare root", async () => {
+	for (const pathname of ["/intl-id/", "/intl-pt/", "/intl-pt-BR/", "/intl-de"]) {
+		const result = await collectSavedTracks(() => savedResponse([], 0), {
+			bundle: () => bundleFor(["fetchLibraryTracks"]),
+			pathname,
+		});
+		assert.deepEqual(result.requests, [0], pathname);
+	}
+});
+
+test("a locale prefix on any page other than the player root is still not the player", async () => {
+	for (const pathname of ["/intl-id/search", "/intl-id/login", "/intl-/", "/intlx-id/"]) {
+		await assertRejectedWithoutAuthority(() => savedResponse([], 0), {
+			bundle: () => bundleFor(["fetchLibraryTracks"]),
+			pathname,
+		});
+	}
+});
+
 test("Spotify end proof requires the exact player navigation, owner, request, and terminal counts", () => {
 	const evidence = {
 		stream: "saved_tracks",
@@ -2639,4 +2816,134 @@ test("a profile image absent from one source is read from the other, absent from
 		profileEnrichment: { ...enrichment(), image_url: 42 },
 	});
 	assert.deepEqual(malformed.emittedRecords, []);
+});
+
+// Carried forward from #545 (1b1db834): saved shows, audiobooks and pre-saved
+// releases are ordinary library rows. They cannot hide a playlist, so they are
+// read past without a coverage gap, unlike a folder or an unknown type.
+function knownLibraryRow(
+	typeName: string,
+	uri: string,
+	wrapper?: string,
+): Record<string, unknown> {
+	return {
+		item: wrapper
+			? { __typename: wrapper, _uri: uri, data: { __typename: typeName } }
+			: { data: { __typename: typeName, uri } },
+	};
+}
+
+function libraryOnly(rows: Record<string, unknown>[]) {
+	return (
+		offset: number,
+		_index: number,
+		operationName?: string,
+		variables?: Record<string, unknown>,
+	) =>
+		operationName === "libraryV3"
+			? {
+					data: {
+						me: {
+							libraryV3: { offset: 0, totalCount: rows.length, items: rows },
+						},
+					},
+				}
+			: playlistDetailResponse(String(variables?.uri), offset, [
+					completePlaylistTrackItem(),
+				]);
+}
+
+test("saved shows, audiobooks and pre-saved releases in the library are read past without a gap", async () => {
+	const result = await collectSavedTracks(
+		libraryOnly([
+			knownLibraryRow("Playlist", "spotify:playlist:pl1"),
+			knownLibraryRow("Podcast", "spotify:show:sh1"),
+			knownLibraryRow("Audiobook", "spotify:show:ab1"),
+			knownLibraryRow("Audiobook", "spotify:audiobook:ab2"),
+			knownLibraryRow("PreRelease", "spotify:prerelease:pr1"),
+			knownLibraryRow("Podcast", "spotify:show:sh2", "PodcastResponseWrapper"),
+		]),
+		{ requested: ["playlists", "playlist_items"] },
+	);
+	assert.deepEqual(
+		result.emittedRecords
+			.filter((record) => record.stream === "playlists")
+			.map((record) => record.data.id),
+		["pl1"],
+	);
+	assert.deepEqual(playlistCoverage(result.messages, "playlists"), {
+		considered: 1,
+		covered: 1,
+	});
+	assert.equal(
+		result.messages.some((message) => message.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("a known non-playlist library row still has to carry its own resource identity", async () => {
+	for (const row of [
+		knownLibraryRow("Podcast", "spotify:album:a1"),
+		{ item: { data: { __typename: "Audiobook" } } },
+		knownLibraryRow("PreRelease", "spotify:playlist:p1"),
+	]) {
+		await assertRejectedWithoutAuthority(
+			() => ({
+				data: {
+					me: { libraryV3: { offset: 0, totalCount: 1, items: [row] } },
+				},
+			}),
+			{ requested: ["playlists"] },
+		);
+	}
+});
+
+async function withoutHashWaits<T>(run: () => Promise<T>): Promise<T> {
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+		callback();
+		return 0 as unknown as NodeJS.Timeout;
+	}) as typeof globalThis.setTimeout;
+	try {
+		return await run();
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+	}
+}
+
+test("a player that yields no query hashes is loaded again and read once more", async () => {
+	// RSS run e898e5d4: all five hashes missing after the in-page retries.
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		const result = await withoutHashWaits(() =>
+			collectSavedTracks(() => savedResponse([], 0), {
+				bundle: (attempt) =>
+					attempt <= 3 ? "" : bundleFor(["fetchLibraryTracks"]),
+			}),
+		);
+		assert.equal(result.bundleRequests, 4);
+		assert.deepEqual(result.requests, [0]);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const reload = diagnostics.find((line) => line.includes("query_hashes_reload"));
+	assert.ok(reload);
+	assert.match(reload, /"missing":"fetchLibraryTracks"/);
+});
+
+test("a player that yields no query hashes after the reload still fails the export", async () => {
+	let bundleRequests = 0;
+	await withoutHashWaits(() =>
+		assert.rejects(
+			collectSavedTracks(() => savedResponse([], 0), {
+				bundle: () => {
+					bundleRequests += 1;
+					return "";
+				},
+			}),
+			/spotify_missing_hashes_fetchLibraryTracks/,
+		),
+	);
+	assert.equal(bundleRequests, 6);
 });
