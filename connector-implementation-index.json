@@ -3757,7 +3757,7 @@
 				},
 				"connector_key": "character-ai",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "Character.AI",
 				"brand": {
 					"icon": "icon.svg",
@@ -3792,7 +3792,7 @@
 						"rationale": "Collection reuses the owner's character.ai browser session and the API token the signed-in page holds. Existing sessions can refresh without a prompt while valid; first collection and expired sessions require the owner to sign in through the browser handoff."
 					},
 					"public_listing": {
-						"tier": "development"
+						"tier": "preview"
 					}
 				},
 				"streams": [

@@ -33,6 +33,7 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		apple_contacts: {
 			testFile: "connectors/apple_contacts/integration.test.ts",
 		},
+		character_ai: { testFile: "connectors/character_ai/parsers.test.ts" },
 		chase: { testFile: "connectors/chase/integration.test.ts" },
 		chatgpt: { testFile: "connectors/chatgpt/integration.test.ts" },
 		claude_code: { testFile: "connectors/claude_code/integration.test.ts" },
@@ -84,7 +85,6 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	// strava.
 	apple_health: { testFile: "connectors/apple_health/index.test.ts" },
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
-	character_ai: { testFile: "connectors/character_ai/parsers.test.ts" },
 	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
 	facebook: { testFile: "connectors/facebook/collect.test.ts" },
