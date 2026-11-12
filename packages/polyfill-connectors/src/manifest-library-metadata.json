@@ -595,6 +595,23 @@
 		}
 	},
 	{
+		"file": "mountain_project.json",
+		"manifest": {
+			"connector_key": "mountain-project",
+			"reason_display_messages": {
+				"stream_collection_failed": "Mountain Project could not be read completely this time. Nothing already saved was lost.",
+				"records_unreadable": "Some rows of your Mountain Project export could not be read and were not saved. Everything else was saved.",
+				"export_shorter_than_profile_count": "Your Mountain Project export had fewer entries than your profile counts, so this list may be incomplete. Everything in the export was saved.",
+				"mountain_project_auth_failed": "Your Mountain Project session has ended. Sign in to Mountain Project again to continue.",
+				"mountain_project_interrupted": "The Mountain Project page was closed or left during the sync. Sync again to continue.",
+				"mountain_project_rate_limited": "Mountain Project is limiting requests right now. The sync will try again later.",
+				"mountain_project_server_error": "Mountain Project is having trouble right now. The sync will try again later.",
+				"mountain_project_network_error": "Mountain Project could not be reached. Check your connection; the sync will try again later.",
+				"mountain_project_invalid_payload": "Mountain Project answered in a format this connector does not recognize. A connector update is needed."
+			}
+		}
+	},
+	{
 		"file": "muse.json",
 		"manifest": {
 			"connector_key": "muse",
