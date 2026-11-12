@@ -204,6 +204,18 @@
 		}
 	},
 	{
+		"file": "coros_browser.json",
+		"manifest": {
+			"connector_key": "coros-browser",
+			"reason_display_messages": {
+				"collection_interrupted": "COROS Training Hub stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
+				"sign_in_required": "COROS Training Hub needs you to sign in again before this can continue.",
+				"source_limit_reached": "This run read as much COROS history as one run allows. The next run continues from where this one stopped.",
+				"source_unreadable": "COROS Training Hub answered with something this connector doesn't recognise, so nothing more was read. COROS may have changed its site; please report this rather than retrying."
+			}
+		}
+	},
+	{
 		"file": "discord_browser.json",
 		"manifest": {
 			"connector_key": "discord-browser",

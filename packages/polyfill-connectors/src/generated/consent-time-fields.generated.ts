@@ -111,6 +111,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		shell_snapshots: null,
 		skills: null,
 	},
+	coros_browser: {
+		activities: { field: "start_at", format: "date-time" },
+		daily_metrics: { field: "date", format: "date" },
+		planned_workouts: { field: "date", format: "date" },
+		profile: null,
+	},
 	discord_browser: {
 		connections: null,
 		messages: { field: "timestamp", format: "date-time" },

@@ -1,0 +1,53 @@
+{
+	"entities": [
+		{
+			"id": "9001",
+			"happenDay": 20261108,
+			"planId": "",
+			"idInPlan": "3",
+			"completeRate": "0.96",
+			"thirdParty": false,
+			"sportData": {
+				"labelId": "476000000000000202",
+				"sportType": 100,
+				"startTime": 1794151800
+			},
+			"exerciseBarChart": []
+		},
+		{
+			"id": "9002",
+			"happenDay": 20261112,
+			"planId": "",
+			"idInPlan": "4",
+			"completeRate": 0,
+			"thirdParty": false,
+			"exerciseBarChart": []
+		}
+	],
+	"programs": [
+		{
+			"idInPlan": "3",
+			"planId": "",
+			"name": "Easy 8k",
+			"sportType": 1,
+			"trainingLoad": 70,
+			"createTimestamp": 1793900000,
+			"overview": ""
+		},
+		{
+			"idInPlan": "4",
+			"planId": "",
+			"name": "Threshold intervals",
+			"sportType": 1,
+			"trainingLoad": 95,
+			"createTimestamp": 1793900000,
+			"overview": ""
+		}
+	],
+	"sportDatasNotInPlan": [],
+	"eventTags": [],
+	"competitions": [],
+	"weekStages": [],
+	"maxIdInPlan": 4,
+	"maxPlanProgramId": 4
+}

@@ -28,6 +28,8 @@
 
 /** `<connector>.<stream>` whose `format: "date"` consent field is compared. */
 export const DATE_BOUND_STREAMS = new Set([
+	"coros_browser.daily_metrics",
+	"coros_browser.planned_workouts",
 	"fitbit.daily_summaries",
 	"fitbit.sleep",
 	"garmin_browser.daily_summaries",
