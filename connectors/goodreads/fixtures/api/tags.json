@@ -1,0 +1,25 @@
+{
+	"data": {
+		"getUserTags": {
+			"totalCount": 2,
+			"pageInfo": {
+				"hasNextPage": false,
+				"nextPageToken": null
+			},
+			"edges": [
+				{
+					"node": {
+						"name": "favorites-synthetic",
+						"webUrl": "/review/list/90000001?shelf=favorites-synthetic"
+					}
+				},
+				{
+					"node": {
+						"name": "winter-list",
+						"webUrl": "/review/list/90000001?shelf=winter-list"
+					}
+				}
+			]
+		}
+	}
+}
