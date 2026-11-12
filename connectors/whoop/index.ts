@@ -65,56 +65,160 @@ function decodeJsonResponse(status: number, text: string): WhoopFetchResult {
 }
 
 export function makeWhoopPageFetch(page: Page): WhoopFetch {
+	// The token source (0 cookie, 1 whoop.security.accessToken, 2 Cognito) that
+	// last answered with a 2xx. The page body tries it first, so a run whose
+	// cookie token is refused pays the 401 once, not on every request.
+	let preferredSource: number | null = null;
 	return async (path: string): Promise<WhoopFetchResult> => {
-		const result = await page.evaluate(
+		const { source, ...result } = await page.evaluate(
 			async ({
 				apiBase,
 				requestPath,
-			}): Promise<{ invalidJson?: boolean; json: unknown; status: number }> => {
-				let token: string | null = null;
+				preferredSource,
+			}): Promise<{
+				invalidJson?: boolean;
+				json: unknown;
+				source?: number;
+				status: number;
+			}> => {
+				// The web app's own access token, read and used here and never
+				// returned. WHOOP's web app (whoop-web 5.1.10, app.whoop.com
+				// assets/shared.js WhoopAuth.putState) writes the token it got from
+				// the login response to both the `whoop-auth-token` cookie (domain
+				// .whoop.com, raw value, its own Cookies.put: no encodeURIComponent)
+				// and localStorage `whoop.security.accessToken` (angular-local-storage
+				// with prefix "whoop", which may JSON-quote a string). Its readState
+				// takes the localStorage value first and the cookie second; its API
+				// interceptor then sends `bearer ` + that token, as here. The cookie
+				// is read first here: the sign-in on id.whoop.com hands the session
+				// over in .whoop.com cookies (clearState also removes
+				// whoop-auth-refresh-token and whoop-auth-expiry cookies that putState
+				// never writes), so right after sign-in the cookie is the one store
+				// known to hold a token; after putState both hold the same value.
+				// When the stores disagree and the first token is refused with a
+				// 401, the next distinct one is tried once in the same call: on the
+				// remote surface, fresh sign-ins whose cookie was accepted still got
+				// a 401 on the first read, and the other store is where the app
+				// itself would have looked. URL-decoding and unquoting are
+				// defensive: a JWT is unchanged by either, and a quoted localStorage
+				// string needs the quotes gone. The Cognito key is kept last for
+				// sessions written by older builds of the app; the current bundle
+				// has no such key. (No named helper here: this body is serialized
+				// into the page, where a transpiler's name helper would not exist.)
+				const candidates: Array<{ source: number; value: string }> = [];
 				try {
 					const cookiePrefix = "whoop-auth-token=";
 					const authCookie = document.cookie
 						.split(";")
 						.map((cookie) => cookie.trim())
 						.find((cookie) => cookie.startsWith(cookiePrefix));
-					const cookieToken = authCookie?.slice(cookiePrefix.length);
-					const tokenKey = cookieToken
-						? undefined
-						: Object.keys(localStorage).find(
-								(key) =>
-									key.startsWith("CognitoIdentityServiceProvider.") &&
-									key.endsWith(".accessToken"),
-							);
-					token =
-						cookieToken ?? (tokenKey ? localStorage.getItem(tokenKey) : null);
+					for (let source = 0; source < 3; source += 1) {
+						let raw: string | null | undefined;
+						try {
+							if (source === 0) {
+								raw = authCookie?.slice(cookiePrefix.length);
+							} else if (source === 1) {
+								raw = localStorage.getItem("whoop.security.accessToken");
+							} else {
+								const cognitoKey = Object.keys(localStorage).find(
+									(key) =>
+										key.startsWith("CognitoIdentityServiceProvider.") &&
+										key.endsWith(".accessToken"),
+								);
+								raw = cognitoKey ? localStorage.getItem(cognitoKey) : null;
+							}
+						} catch {
+							// A store that cannot be read (storage disabled for the
+							// origin) gives no token; the others still count.
+							continue;
+						}
+						if (!raw) continue;
+						let value = raw;
+						try {
+							value = decodeURIComponent(value);
+						} catch {
+							// Not URL-encoded after all: use it as it is.
+						}
+						if (value.startsWith('"')) {
+							try {
+								const parsed: unknown = JSON.parse(value);
+								value = typeof parsed === "string" ? parsed : "";
+							} catch {
+								value = "";
+							}
+						}
+						value = value.trim();
+						if (value && !candidates.some((c) => c.value === value)) {
+							candidates.push({ source, value });
+						}
+					}
 				} catch {
 					return { status: 401, json: null };
 				}
-				if (!token) {
+				// The source that answered the previous read goes first.
+				const preferredIndex = candidates.findIndex(
+					(c) => c.source === preferredSource,
+				);
+				if (preferredIndex > 0) {
+					candidates.unshift(...candidates.splice(preferredIndex, 1));
+				}
+				const first = candidates[0];
+				if (!first) {
 					return { status: 401, json: null };
 				}
+				const second = candidates[1];
+				const url = `${apiBase}${requestPath}`;
+				let attempt = first;
 				let response: Response;
 				try {
-					response = await fetch(`${apiBase}${requestPath}`, {
+					response = await fetch(url, {
 						credentials: "include",
 						headers: {
 							accept: "application/json",
-							authorization: `bearer ${token}`,
+							authorization: `bearer ${attempt.value}`,
 						},
 					});
 				} catch {
 					return { status: 0, json: null };
 				}
+				if (response.status === 401 && second) {
+					// One retry with the next distinct token; a failed retry keeps
+					// the 401 it was answering.
+					try {
+						const retry = await fetch(url, {
+							credentials: "include",
+							headers: {
+								accept: "application/json",
+								authorization: `bearer ${second.value}`,
+							},
+						});
+						attempt = second;
+						response = retry;
+					} catch {
+						// The first answer stands.
+					}
+				}
 				const text = await response.text();
 				try {
-					return { status: response.status, json: JSON.parse(text) as unknown };
+					return {
+						status: response.status,
+						json: JSON.parse(text) as unknown,
+						source: attempt.source,
+					};
 				} catch {
-					return { status: response.status, json: null, invalidJson: true };
+					return {
+						status: response.status,
+						json: null,
+						invalidJson: true,
+						source: attempt.source,
+					};
 				}
 			},
-			{ apiBase: API_BASE, requestPath: path },
+			{ apiBase: API_BASE, requestPath: path, preferredSource },
 		);
+		if (source !== undefined && result.status >= 200 && result.status < 300) {
+			preferredSource = source;
+		}
 		return result;
 	};
 }
