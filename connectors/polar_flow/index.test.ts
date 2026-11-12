@@ -275,6 +275,32 @@ test("loadFour is asked for the window's third day, which answers the window", (
 		"/api/activity-timeline/loadFour?day=2026-11-05&maxSampleCount=200",
 	);
 	assert.equal(r.method, "GET");
+	// A short last window is never asked past today.
+	assert.equal(
+		activityRequest({ from: "2026-11-05", to: "2026-11-05" }, "2026-11-05").url,
+		"/api/activity-timeline/loadFour?day=2026-11-05&maxSampleCount=200",
+	);
+});
+
+test("no loadFour request asks for a day after the owner's today", async () => {
+	const s = site();
+	const { ctx } = context(
+		s,
+		["daily_activity"],
+		{},
+		{
+			daily_activity: { since: "2026-10-20" },
+		},
+	);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	const days = s.fetches
+		.filter((f) => f.url.startsWith("/api/activity-timeline/loadFour"))
+		.map((f) => new URL(f.url, FLOW).searchParams.get("day") ?? "");
+	assert.ok(days.length > 0);
+	assert.ok(
+		days.every((day) => day <= "2026-11-05"),
+		days.join(","),
+	);
 });
 
 test("the sleep report is widened back to its 30-day floor, and goes to the sleep host", () => {
@@ -505,7 +531,7 @@ test("off flow.polar.com, the first read goes to the app once", async () => {
 	assert.equal(recordsOf(out, "profile").length, 1);
 });
 
-test("an unreadable session holds the cursor at its window, and the rest still ships", async () => {
+test("an unreadable session holds the cursor at its window, reports it, and the rest still ships", async () => {
 	for (const corrupt of [
 		(row: Record<string, unknown>) => {
 			row.startDate = "2026-11-03 7:12";
@@ -535,9 +561,166 @@ test("an unreadable session holds the cursor at its window, and the rest still s
 		assert.deepEqual(stateOf(out, "training_sessions"), {
 			next_day: "2026-11-01",
 			floor: "2026-10-01",
+			held_at: "2026-11-01",
 		});
-		assert.deepEqual(skipsOf(out), []);
+		// Not a clean success: the stream says records were dropped, naming fields, not values.
+		const [skip] = skipsOf(out);
+		assert.equal(skip?.reason, "source_unreadable");
+		assert.equal(
+			(skip?.recovery_hint as { action?: string } | undefined)?.action,
+			"retry_on_connector_upgrade",
+		);
+		const diagnostics = skip?.diagnostics as
+			| { unreadable: number; fields: string[] }
+			| undefined;
+		assert.ok(diagnostics);
+		assert.equal(diagnostics.unreadable, 1);
+		assert.ok(diagnostics.fields.length > 0);
+		assert.equal(JSON.stringify(skip).includes("45 min"), false);
 	}
+});
+
+test("a hold is retried once: the next run at the same day moves the cursor past it", async () => {
+	const data = fixtureData();
+	const bad = data.training[0];
+	assert.ok(bad);
+	bad.duration = "45 min";
+	const held = {
+		training_sessions: {
+			next_day: "2026-11-01",
+			floor: "2026-10-01",
+			held_at: "2026-11-01",
+		},
+	};
+	const { ctx, out } = context(site({ data }), ["training_sessions"], held);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	assert.equal(recordsOf(out, "training_sessions").length, 1);
+	assert.deepEqual(stateOf(out, "training_sessions"), {
+		next_day: "2026-11-06",
+		floor: "2026-10-01",
+	});
+	// Still reported, so the drop is visible, but no longer pinning the stream.
+	assert.equal(skipsOf(out)[0]?.reason, "source_unreadable");
+
+	// A hold from an earlier day is a new hold, not a retry.
+	const other = context(site({ data }), ["training_sessions"], {
+		training_sessions: { ...held.training_sessions, held_at: "2026-10-15" },
+	});
+	await collectPolarFlow(other.ctx, { sleep: instant }, NOW);
+	assert.deepEqual(stateOf(other.out, "training_sessions"), {
+		next_day: "2026-11-01",
+		floor: "2026-10-01",
+		held_at: "2026-11-01",
+	});
+});
+
+test("a clean run clears an old hold", async () => {
+	const { ctx, out } = context(site(), ["training_sessions"], {
+		training_sessions: {
+			next_day: "2026-11-01",
+			floor: "2026-10-01",
+			held_at: "2026-11-01",
+		},
+	});
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	assert.deepEqual(stateOf(out, "training_sessions"), {
+		next_day: "2026-11-06",
+		floor: "2026-10-01",
+	});
+	assert.deepEqual(skipsOf(out), []);
+});
+
+test("a summary that is not the JSON expected ships the list fields but counts as unreadable", async () => {
+	const s = site({
+		override: (url) =>
+			url.includes("/api/training/analysis/")
+				? new Response("<html>moved</html>", {
+						status: 200,
+						headers: { "content-type": "text/html" },
+					})
+				: undefined,
+	});
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	const rows = recordsOf(out, "training_sessions");
+	assert.equal(rows.length, 2);
+	assert.equal(rows[0]?.max_heart_rate_bpm, null);
+	const [skip] = skipsOf(out);
+	assert.equal(skip?.reason, "source_unreadable");
+	assert.deepEqual(
+		(skip?.diagnostics as { fields: string[] } | undefined)?.fields,
+		["(analysis summary)"],
+	);
+	assert.equal(
+		(stateOf(out, "training_sessions") as { held_at?: string }).held_at,
+		"2026-11-01",
+	);
+});
+
+test("an unreadable activity day is reported, not a silent success", async () => {
+	const data = fixtureData();
+	const day = data.activity["2026-11-03"] as {
+		dataPanelData: Record<string, unknown>;
+	};
+	day.dataPanelData.stepCount = -5;
+	const { ctx, out } = context(
+		site({ data }),
+		["daily_activity"],
+		{},
+		{ daily_activity: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	const [skip] = skipsOf(out);
+	assert.equal(skip?.reason, "source_unreadable");
+	assert.deepEqual(
+		(skip?.diagnostics as { fields: string[] } | undefined)?.fields,
+		["steps"],
+	);
+});
+
+test("a Nightly Recharge 404 page is a moved endpoint; a bare 404 is an empty range", async () => {
+	const moved = site({
+		override: (url) =>
+			url.startsWith("/api/nightly-recovery/")
+				? new Response("<!doctype html><title>Not Found</title>", {
+						status: 404,
+						headers: { "content-type": "text/html; charset=UTF-8" },
+					})
+				: undefined,
+	});
+	const a = context(
+		moved,
+		["nightly_recharge"],
+		{},
+		{
+			nightly_recharge: { since: "2026-11-01" },
+		},
+	);
+	await collectPolarFlow(a.ctx, { sleep: instant }, NOW);
+	assert.equal(skipsOf(a.out)[0]?.reason, "source_unreadable");
+	assert.equal(stateOf(a.out, "nightly_recharge"), undefined);
+
+	const data = fixtureData();
+	data.nightly = [];
+	const b = context(
+		site({ data }),
+		["nightly_recharge"],
+		{},
+		{
+			nightly_recharge: { since: "2026-11-01" },
+		},
+	);
+	await collectPolarFlow(b.ctx, { sleep: instant }, NOW);
+	assert.deepEqual(skipsOf(b.out), []);
+	assert.deepEqual(stateOf(b.out, "nightly_recharge"), {
+		next_day: "2026-11-06",
+		floor: "2026-11-01",
+	});
 });
 
 test("a session whose summary 404s keeps its list fields, the summary's null", async () => {
@@ -646,6 +829,27 @@ test("probeSession: signed in is live, signed out is not, an outage is not a sig
 		override: () => new Response("", { status: 503 }),
 	});
 	assert.equal(await probeSession(pageOn(down)), true);
+});
+
+test("a profile answer in an unknown shape is a live session that collection reports unreadable", async () => {
+	const s = site({
+		override: (url) =>
+			url === "/api/account/users/current/user"
+				? new Response('{"account":{"uid":"abc"}}', {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					})
+				: undefined,
+	});
+	assert.equal(await probeSession(pageOn(s)), true);
+	const { ctx, out } = context(s, ["profile", "sleep"]);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	const skips = skipsOf(out);
+	assert.deepEqual(
+		skips.map((skip) => skip.reason),
+		["source_unreadable", "source_unreadable"],
+	);
+	assert.equal(out.records.length, 0);
 });
 
 test("ensureSession returns without a handoff when the session is already there", async () => {

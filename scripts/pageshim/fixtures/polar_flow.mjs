@@ -12,7 +12,10 @@
 // flow.polar.com answer a plain page, since the harness serves no
 // auth.polar.com.
 
-import { fixtureData, polarApi } from "../../../connectors/polar_flow/fake-polar.ts";
+import {
+	fixtureData,
+	polarApi,
+} from "../../../connectors/polar_flow/fake-polar.ts";
 
 const ORIGIN = "https://flow.polar.com";
 const DAY_MS = 86_400_000;
@@ -21,17 +24,24 @@ const LAST_FIXTURE_DAY = "2026-11-06";
 const shiftDays = (() => {
 	const today = new Date().toISOString().slice(0, 10);
 	return Math.round(
-		(Date.parse(`${today}T00:00:00Z`) - 2 * DAY_MS - Date.parse(`${LAST_FIXTURE_DAY}T00:00:00Z`)) / DAY_MS,
+		(Date.parse(`${today}T00:00:00Z`) -
+			2 * DAY_MS -
+			Date.parse(`${LAST_FIXTURE_DAY}T00:00:00Z`)) /
+			DAY_MS,
 	);
 })();
 
 const shift = (day) =>
-	new Date(Date.parse(`${day}T00:00:00Z`) + shiftDays * DAY_MS).toISOString().slice(0, 10);
+	new Date(Date.parse(`${day}T00:00:00Z`) + shiftDays * DAY_MS)
+		.toISOString()
+		.slice(0, 10);
 
 // Only the fixture week moves: the profile's other dates (birthday, settings)
 // are not activity days.
 const shifted = JSON.parse(
-	JSON.stringify(fixtureData()).replace(/2026-1[01]-\d{2}/g, (day) => shift(day)),
+	JSON.stringify(fixtureData()).replace(/2026-1[01]-\d{2}/g, (day) =>
+		shift(day),
+	),
 );
 const api = polarApi(shifted);
 
@@ -54,17 +64,26 @@ export const requests = [];
 export function resolveFixture(raw, request = {}) {
 	const url = new URL(raw);
 	const method = request.method ?? "GET";
-	if (method === "OPTIONS") return { status: 204, contentType: "text/plain", body: "" };
+	if (method === "OPTIONS")
+		return { status: 204, contentType: "text/plain", body: "" };
 	requests.push({ method, host: url.host, path: url.pathname });
 	if (url.origin === ORIGIN && !url.pathname.startsWith("/api/")) {
 		return page(loggedIn ? "<h1>Diary</h1>" : "<form>Sign in</form>");
 	}
 	const answer = api(
 		raw,
-		{ method, headers: request.headers ?? {}, body: request.postData ?? undefined },
+		{
+			method,
+			headers: request.headers ?? {},
+			body: request.postData ?? undefined,
+		},
 		loggedIn,
 	);
-	return { status: answer.status, contentType: answer.contentType || "text/plain", body: answer.body };
+	return {
+		status: answer.status,
+		contentType: answer.contentType || "text/plain",
+		body: answer.body,
+	};
 }
 
 export const polarFlowFixtures = {
@@ -87,11 +106,23 @@ export const pageshimCase = {
 	exportSummary: {
 		count: 9,
 		label: "records",
-		details: { profile: 1, training_sessions: 2, daily_activity: 2, sleep: 2, nightly_recharge: 2 },
+		details: {
+			profile: 1,
+			training_sessions: 2,
+			daily_activity: 2,
+			sleep: 2,
+			nightly_recharge: 2,
+		},
 	},
 	emptyExportSummary: {
 		count: 0,
 		label: "records",
-		details: { profile: 0, training_sessions: 0, daily_activity: 0, sleep: 0, nightly_recharge: 0 },
+		details: {
+			profile: 0,
+			training_sessions: 0,
+			daily_activity: 0,
+			sleep: 0,
+			nightly_recharge: 0,
+		},
 	},
 };

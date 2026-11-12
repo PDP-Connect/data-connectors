@@ -25,7 +25,7 @@
 			"startTime": "2026-11-05T18:30:00",
 			"stopTime": "2026-11-05T19:00:00",
 			"duration": "PT30M",
-			"distance": null,
+			"distance": 0,
 			"calories": 210,
 			"trainingStatistic": {
 				"HEART_RATE": { "max": 0, "avg": 0, "min": null }

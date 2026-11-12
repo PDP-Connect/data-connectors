@@ -72,6 +72,33 @@ test("profile: identity, body and zone settings, never the e-mail", () => {
 	assert.equal(utcOffset(user), "+02:00");
 });
 
+test("profile: a country not in ISO alpha-2 form is null, not a lost profile", () => {
+	for (const [country, expected] of [
+		["Finland", null],
+		["fi", "FI"],
+		["", null],
+	] as const) {
+		const { user } = fixtureData() as {
+			user: { user: Record<string, unknown> };
+		};
+		user.user.country = country;
+		assert.equal(valid("profile", profileRecord(user)).country, expected);
+	}
+});
+
+test("daily activity: fractional calories are rounded, not a lost day", () => {
+	const { activity } = fixtureData();
+	const day = structuredClone(activity["2026-11-03"]) as {
+		dataPanelData: Record<string, unknown>;
+	};
+	day.dataPanelData.kiloCalories = 1987.6;
+	assert.equal(
+		valid("daily_activity", dailyActivityRecord("2026-11-03", day))
+			.calories_kcal,
+		1988,
+	);
+});
+
 test("profile: a missing id is unreadable; a zone name instead of an offset is null", () => {
 	assert.deepEqual(profileRecord({ user: { firstName: "A" } }), {
 		kind: "unreadable",
@@ -135,6 +162,27 @@ test("training session: a manual entry's zero heart rate and empty device read a
 	assert.equal(record.name, null);
 	assert.equal(record.distance_m, null);
 	assert.equal(record.note, "Easy mobility session");
+});
+
+test("training session: a manual entry's distance comes from its exercises", () => {
+	const data = fixtureData();
+	const row = parseTrainingRow(data.training[1]);
+	assert.ok(row);
+	const summary = structuredClone(data.summaries["8351200017"]) as {
+		exercises: Record<string, { distance: number | null }>;
+	};
+	for (const exercise of Object.values(summary.exercises)) {
+		exercise.distance = 7500;
+	}
+	const record = valid(
+		"training_sessions",
+		trainingSessionRecord(row, parseTrainingSummary(summary)),
+	);
+	assert.equal(record.distance_m, 7500);
+	assert.equal(
+		parseTrainingSummary({ ...summary, exercises: { 1: { distance: "7.5" } } }),
+		null,
+	);
 });
 
 test("training session: a summary about another session is not used", () => {

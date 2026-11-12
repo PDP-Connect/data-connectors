@@ -85,6 +85,33 @@ const measured = (value: number | null | undefined): number | null =>
 
 const orNull = <T>(value: T | null | undefined): T | null => value ?? null;
 
+/**
+ * A session's distance in metres: the list's, else the summary's, else the sum of its exercises'.
+ * A manual entry carries it only on its exercise, and a manual entry without one says 0 there.
+ */
+function sessionDistance(
+	row: TrainingHistoryRow,
+	summary: TrainingSummaryResponse | null,
+): number | null {
+	const listed = row.distance ?? summary?.distance;
+	if (typeof listed === "number") return listed;
+	const total = Object.values(summary?.exercises ?? {}).reduce(
+		(sum, exercise) => sum + (exercise.distance ?? 0),
+		0,
+	);
+	return total > 0 ? total : null;
+}
+
+/** A whole number, as the day's calories are shown; Polar may send a fraction. */
+const roundOrNull = (value: number | null | undefined): number | null =>
+	typeof value === "number" ? Math.round(value) : null;
+
+/** An ISO 3166 alpha-2 code, or nothing: a country in another form does not cost the profile. */
+function countryCode(value: string | null | undefined): string | null {
+	const code = typeof value === "string" ? value.trim().toUpperCase() : "";
+	return /^[A-Z]{2}$/.test(code) ? code : null;
+}
+
 /** Text that is empty or blank says nothing (Polar stores a blank note as " "). */
 function text(value: string | null | undefined): string | null {
 	if (typeof value !== "string") return null;
@@ -128,7 +155,7 @@ export function profileRecord(json: unknown): Built {
 		id: String(user.id),
 		first_name: text(user.firstName),
 		last_name: text(user.lastName),
-		country: text(user.country),
+		country: countryCode(user.country),
 		birthday: birthday(phys?.birthday),
 		sex: text(phys?.sex),
 		training_background: text(phys?.trainingBackground),
@@ -189,7 +216,7 @@ export function trainingSessionRecord(
 		start_time_local: start,
 		end_time_local: s ? localTime(s.stopTime) : null,
 		duration_s: row.duration / 1000,
-		distance_m: orNull(row.distance),
+		distance_m: sessionDistance(row, s),
 		calories_kcal: orNull(row.calories),
 		average_heart_rate_bpm: measured(row.hrAvg ?? s?.hrAverage),
 		max_heart_rate_bpm: measured(s?.hrMax),
@@ -237,7 +264,7 @@ export function dailyActivityRecord(day: string, json: unknown): Built {
 		steps: orNull(panel.stepCount),
 		active_time_min: orNull(panel.activeTime),
 		distance_from_steps_m: orNull(panel.distanceFromSteps),
-		calories_kcal: orNull(panel.kiloCalories),
+		calories_kcal: roundOrNull(panel.kiloCalories),
 		daily_goal_pct: orNull(panel.dailyActivityGoal),
 		sleep_duration_min: orNull(panel.sleepDuration),
 		inactivity_alert_count: orNull(panel.inactivityAlertCount),

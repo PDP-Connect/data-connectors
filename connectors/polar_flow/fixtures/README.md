@@ -38,9 +38,14 @@ guard and the sleep API both require it.
 
 The account's UTC offset is `+02:00`. The first training session carries Polar's blank note
 (`" "`), which reads as no note. The second is a manual entry: no heart rate (Polar reports `0`),
-no device, no name. The third activity day is all zeros with no
+no device, no name, and no distance anywhere but its exercise's `0`. The third activity day is all zeros with no
 sync (a day no device recorded, which builds no record); the fourth is past the last sync
 (`dataPanelData: null`). The second Nightly Recharge night has an `ansRate` of 0, which the web app
 treats as no rating and no ANS charge.
+
+Checked on 12 November 2026 against a live, device-less account with three manual entries: every
+endpoint above answers in the shape these files use (sleep `[]`, Nightly Recharge a bare `404`,
+activity days with no sync), and a manual entry's distance is null in the list and the summary and
+present only on `exercises.<id>.distance`, in metres (`0` when the entry has none).
 
 `../fake-polar.ts` serves these files to the tests.

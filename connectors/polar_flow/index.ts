@@ -150,10 +150,16 @@ export function trainingSummaryRequest(id: number): PolarRequest {
 	return { url: `/api/training/analysis/${id}/summary`, method: "GET" };
 }
 
-/** loadFour answers [day-2, day+1]: asked for the window's third day, it answers the window. */
-export function activityRequest(window: Window): PolarRequest {
+/**
+ * loadFour answers [day-2, day+1]: asked for the window's third day, it answers the window. The
+ * day asked is never past `today`, as the web app never asks for one; [today-2, today+1] still
+ * covers a short last window that ends today.
+ */
+export function activityRequest(window: Window, today?: string): PolarRequest {
+	const third = addDays(window.from, 2);
+	const day = today !== undefined && third > today ? today : third;
 	return {
-		url: `/api/activity-timeline/loadFour?day=${addDays(window.from, 2)}&maxSampleCount=${MAX_SAMPLE_COUNT}`,
+		url: `/api/activity-timeline/loadFour?day=${day}&maxSampleCount=${MAX_SAMPLE_COUNT}`,
 		method: "GET",
 	};
 }
@@ -262,12 +268,17 @@ async function readOnOrigin(
 
 const PROBE: PolarRequest = { url: PROBE_PATH, method: "GET" };
 
-/** A signed-in answer: 200 JSON holding a user id. A 401 or the landing page is not. */
+/**
+ * A signed-in answer: 200 JSON from the profile API. A 401 or the landing page is not. Whether the
+ * profile holds a usable user id is collection's question: a changed profile shape then fails the
+ * run as unreadable instead of sending a signed-in owner to a sign-in that can never pass.
+ */
 function isLive(r: PageFetch): boolean {
 	if (r.kind !== "response" || r.status !== 200 || !/json/i.test(r.contentType))
 		return false;
 	try {
-		return userId(JSON.parse(r.body) as unknown) !== null;
+		const json = JSON.parse(r.body) as unknown;
+		return typeof json === "object" && json !== null;
 	} catch {
 		return false;
 	}
@@ -410,11 +421,13 @@ function retryAfterMs(header: string | null, now: number): number {
 
 /**
  * One answer, classified. `notFoundIsEmpty` is for the reads where Flow answers 404 for a range or
- * a session it holds nothing for; elsewhere a 404 means the endpoint moved.
+ * a session it holds nothing for; elsewhere a 404 means the endpoint moved. "not_html" takes only
+ * a bare 404 as empty: an HTML 404 page is the answer for a path Flow does not know.
  */
+export type NotFound = boolean | "not_html";
 export function classify(
 	r: PageFetch,
-	notFoundIsEmpty = false,
+	notFoundIsEmpty: NotFound = false,
 	now = Date.now(),
 ): Outcome {
 	if (r.kind === "wrong_origin") {
@@ -452,7 +465,11 @@ export function classify(
 			message: `HTTP ${r.status}.`,
 		};
 	}
-	if (r.status === 404 && notFoundIsEmpty) {
+	if (
+		r.status === 404 &&
+		(notFoundIsEmpty === true ||
+			(notFoundIsEmpty === "not_html" && !/html/i.test(r.contentType)))
+	) {
 		return { ok: true, json: null, status: 404 };
 	}
 	if (r.status === 200 && /json/i.test(r.contentType)) {
@@ -479,7 +496,7 @@ async function fetchJson(
 	page: Pick<Page, "evaluate" | "goto">,
 	request: PolarRequest,
 	p: Pacing,
-	options: { notFoundIsEmpty?: boolean; read?: Reader } = {},
+	options: { notFoundIsEmpty?: NotFound; read?: Reader } = {},
 ): Promise<Outcome> {
 	const read = options.read ?? pageFetch;
 	for (let waits = 0; ; waits += 1) {
@@ -508,18 +525,21 @@ async function fetchJson(
 export interface DayCursor {
 	next_day?: string;
 	floor?: string;
+	/** The `next_day` a run left in place for an unreadable record; the next run retries it once. */
+	held_at?: string;
 }
 /** A cursor a run reads from: both days set. */
 export interface Cursor {
 	next_day: string;
 	floor: string;
+	held_at?: string;
 }
 
 export function readCursor(value: unknown): DayCursor {
 	if (typeof value !== "object" || value === null) return {};
-	const { next_day, floor } = value as Record<string, unknown>;
+	const { next_day, floor, held_at } = value as Record<string, unknown>;
 	if (!isDay(next_day) || !isDay(floor) || floor > next_day) return {};
-	return { next_day, floor };
+	return isDay(held_at) ? { next_day, floor, held_at } : { next_day, floor };
 }
 
 /** A grant in days: `since` inclusive, `until` exclusive. */
@@ -600,14 +620,23 @@ export type PolarCollectContext = Pick<
 	"collectionMode" | "emit" | "emitRecord" | "requested" | "state"
 > & { page: Pick<Page, "evaluate" | "goto"> };
 
-/** Emits only a clean record: the runtime answers a failing one with a skip of the whole stream. */
+/**
+ * Emits only a record that validates (vocabulary drift included, which the runtime keeps and
+ * reports): the runtime answers a failing one with a skip of the whole stream. A failing record's
+ * field paths, never its values, go to `issues` for the stream's skip diagnostics.
+ */
 async function emitClean(
 	ctx: PolarCollectContext,
 	stream: Stream,
 	record: RecordData,
+	issues: Set<string>,
 ): Promise<boolean> {
 	const check = validateRecord(stream, record);
-	if (!check.ok || check.anomalies?.length) return false;
+	if (!check.ok) {
+		for (const issue of check.issues ?? [])
+			issues.add(issue.path || "(record)");
+		return false;
+	}
 	await ctx.emitRecord(stream, record);
 	return true;
 }
@@ -617,10 +646,14 @@ async function deliver(
 	ctx: PolarCollectContext,
 	stream: Stream,
 	built: Built,
+	issues: Set<string>,
 ): Promise<boolean> {
 	if (built.kind === "empty") return false;
-	if (built.kind === "unreadable") return true;
-	return !(await emitClean(ctx, stream, built.record));
+	if (built.kind === "unreadable") {
+		issues.add("(source row)");
+		return true;
+	}
+	return !(await emitClean(ctx, stream, built.record, issues));
 }
 
 interface WindowRead {
@@ -641,6 +674,9 @@ interface Run {
 	ctx: PolarCollectContext;
 	p: Pacing;
 	user: number;
+	today: string;
+	/** Per stream: the field paths of records that did not validate, for the skip diagnostics. */
+	issues: Record<Stream, Set<string>>;
 }
 
 /** One window of training history, each session's analysis summary read after it. */
@@ -658,12 +694,9 @@ async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 	let unreadable = 0;
 	for (const raw of rows) {
 		const row = parseTrainingRow(raw);
-		if (row === null) {
-			unreadable += 1;
-			continue;
-		}
-		const start = localTime(row.startDate);
-		if (start === null) {
+		const start = row === null ? null : localTime(row.startDate);
+		if (row === null || start === null) {
+			run.issues.training_sessions.add("(source row)");
 			unreadable += 1;
 			continue;
 		}
@@ -678,20 +711,24 @@ async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 				notFoundIsEmpty: true,
 			},
 		);
-		// A session Flow no longer serves an analysis for keeps its list fields; anything else stops.
+		// A 404 (Flow serves no analysis for the session) keeps the list fields. A summary that is
+		// not the JSON expected also ships the list fields, but counts as unreadable, so the window
+		// is read again and the stream reports it. Anything else stops the window.
 		if (!detail.ok && detail.reason !== "source_unreadable") {
 			return { failure: detail, unreadable };
 		}
 		const summary = detail.ok ? parseTrainingSummary(detail.json) : null;
-		if (
-			await deliver(
-				ctx,
-				"training_sessions",
-				trainingSessionRecord(row, summary),
-			)
-		) {
-			unreadable += 1;
-		}
+		const summaryUnreadable =
+			!detail.ok || (detail.json !== null && summary === null);
+		if (summaryUnreadable)
+			run.issues.training_sessions.add("(analysis summary)");
+		const undelivered = await deliver(
+			ctx,
+			"training_sessions",
+			trainingSessionRecord(row, summary),
+			run.issues.training_sessions,
+		);
+		if (undelivered || summaryUnreadable) unreadable += 1;
 	}
 	return { failure: null, unreadable };
 }
@@ -699,7 +736,7 @@ async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 async function readActivity(run: Run, w: Window): Promise<WindowRead> {
 	const { ctx, p } = run;
 	await p.sleep(p.requestDelayMs);
-	const outcome = await fetchJson(ctx.page, activityRequest(w), p);
+	const outcome = await fetchJson(ctx.page, activityRequest(w, run.today), p);
 	if (!outcome.ok) return { failure: outcome, unreadable: 0 };
 	const days = activityDays(outcome.json);
 	if (days === null) return { failure: unreadableAnswer(), unreadable: 0 };
@@ -708,11 +745,19 @@ async function readActivity(run: Run, w: Window): Promise<WindowRead> {
 		a < b ? -1 : 1,
 	)) {
 		if (!isDay(day)) {
+			run.issues.daily_activity.add("(day key)");
 			unreadable += 1;
 			continue;
 		}
 		if (!within(day, w)) continue;
-		if (await deliver(ctx, "daily_activity", dailyActivityRecord(day, value))) {
+		if (
+			await deliver(
+				ctx,
+				"daily_activity",
+				dailyActivityRecord(day, value),
+				run.issues.daily_activity,
+			)
+		) {
 			unreadable += 1;
 		}
 	}
@@ -731,7 +776,7 @@ async function readRows(
 		ctx.page,
 		sleep ? sleepRequest(w) : nightlyRequest(w),
 		p,
-		{ notFoundIsEmpty: !sleep },
+		{ notFoundIsEmpty: sleep ? false : "not_html" },
 	);
 	if (!outcome.ok) return { failure: outcome, unreadable: 0 };
 	if (outcome.json === null) return { failure: null, unreadable: 0 };
@@ -741,12 +786,13 @@ async function readRows(
 	for (const row of rows) {
 		const date = rowDate(row);
 		if (date === null) {
+			run.issues[stream].add("(row date)");
 			unreadable += 1;
 			continue;
 		}
 		if (!within(date, w)) continue;
 		const built = sleep ? sleepRecord(row) : nightlyRechargeRecord(row);
-		if (await deliver(ctx, stream, built)) unreadable += 1;
+		if (await deliver(ctx, stream, built, run.issues[stream])) unreadable += 1;
 	}
 	return { failure: null, unreadable };
 }
@@ -771,7 +817,10 @@ interface Walk {
 /**
  * Reads a stream's windows oldest first, at most maxWindowsPerRun. A window read in full moves
  * `next_day` past it, until the first window holding an unreadable record: from there the cursor
- * stays, so the next run reads that window again, while this run still delivers what reads.
+ * stays, so the next run reads that window again, while this run still delivers what reads. The
+ * hold is retried once: with `release` (the previous run held at this same `next_day`), an
+ * unreadable record no longer holds the cursor, so one record Polar keeps serving in a shape the
+ * connector cannot read does not pin the stream for good. `held_at` records a hold for that.
  */
 async function walkStream(
 	run: Run,
@@ -779,6 +828,7 @@ async function walkStream(
 	cursor: Cursor,
 	from: string,
 	to: string,
+	release: boolean,
 ): Promise<Walk> {
 	const plan = PLANS[stream];
 	const walk: Walk = {
@@ -800,7 +850,7 @@ async function walkStream(
 			return walk;
 		}
 		walk.progressed += 1;
-		if (read.unreadable > 0) held = true;
+		if (read.unreadable > 0 && !release) held = true;
 		if (!held && w.to >= cursor.next_day) {
 			cursor.next_day = addDays(w.to, 1);
 		}
@@ -808,26 +858,41 @@ async function walkStream(
 	return walk;
 }
 
+/** After a walk: a hold remembers its day, anything else clears it. */
+function markHold(cursor: Cursor, walk: Walk, release: boolean): void {
+	if (walk.unreadable > 0 && !release) cursor.held_at = cursor.next_day;
+	else delete cursor.held_at;
+}
+
+/**
+ * Reports a stream: one SKIP_RESULT when it is not whole (a failure first, then unreadable
+ * records, then the per-run cap), so a run that dropped records never reads as a clean success.
+ * Diagnostics name the fields that did not validate, never their values.
+ */
 async function finish(
 	ctx: PolarCollectContext,
 	stream: Stream,
 	walk: Walk,
 	cursor: Cursor | null,
+	issues: Set<string>,
 ): Promise<void> {
 	if (walk.unreadable > 0) {
 		await ctx.emit({
 			type: "PROGRESS",
 			stream,
 			count: walk.unreadable,
-			message: `${walk.unreadable} record(s) unreadable; their days are read again next run.`,
+			message: `${walk.unreadable} record(s) unreadable.`,
 		});
 	}
 	const reason: Reason | null = walk.failure
 		? walk.failure.reason
-		: walk.deferred
-			? "source_limit_reached"
-			: null;
+		: walk.unreadable > 0
+			? "source_unreadable"
+			: walk.deferred
+				? "source_limit_reached"
+				: null;
 	if (reason) {
+		const unreadableMessage = `${walk.unreadable} record(s) were not in the shape expected and were not saved in full; their days are read once more on the next run.`;
 		await ctx.emit({
 			type: "SKIP_RESULT",
 			stream,
@@ -835,7 +900,17 @@ async function finish(
 			recovery_hint: hintFor(reason),
 			message:
 				walk.failure?.message ??
-				"Read as much as one run allows; the next run continues from the saved day.",
+				(walk.unreadable > 0
+					? unreadableMessage
+					: "Read as much as one run allows; the next run continues from the saved day."),
+			...(issues.size > 0
+				? {
+						diagnostics: {
+							unreadable: walk.unreadable,
+							fields: [...issues].sort().slice(0, 20),
+						},
+					}
+				: {}),
 		});
 	}
 	if (cursor && (walk.progressed > 0 || !walk.failure)) {
@@ -864,7 +939,10 @@ export async function collectPolarFlow(
 			: null
 		: me;
 	const today = localDay(now, me.ok ? utcOffset(me.json) : null);
-	const run: Run = { ctx, p, user: user ?? 0 };
+	const issues = Object.fromEntries(
+		STREAMS.map((stream) => [stream, new Set<string>()]),
+	) as Record<Stream, Set<string>>;
+	const run: Run = { ctx, p, user: user ?? 0, today, issues };
 	for (const stream of streams) {
 		const empty: Walk = {
 			failure: stop,
@@ -878,25 +956,37 @@ export async function collectPolarFlow(
 					ctx,
 					"profile",
 					profileRecord(me.json),
+					issues.profile,
 				))
 					? 1
 					: 0;
 				if (empty.unreadable > 0) empty.failure = unreadableAnswer();
 			}
-			await finish(ctx, stream, empty, null);
+			await finish(ctx, stream, empty, null, issues.profile);
 			continue;
 		}
+		const prev = readCursor(ctx.state[stream]);
 		const planned = planDays(
-			readCursor(ctx.state[stream]),
+			prev,
 			today,
 			grantDays(ctx.requested.get(stream)?.time_range),
 			ctx.collectionMode === "full_refresh",
 			PLANS[stream],
 		);
+		const release =
+			prev.held_at !== undefined && prev.held_at === planned.cursor.next_day;
 		const walk = stop
 			? empty
-			: await walkStream(run, stream, planned.cursor, planned.from, planned.to);
-		await finish(ctx, stream, walk, planned.cursor);
+			: await walkStream(
+					run,
+					stream,
+					planned.cursor,
+					planned.from,
+					planned.to,
+					release,
+				);
+		if (!stop) markHold(planned.cursor, walk, release);
+		await finish(ctx, stream, walk, planned.cursor, issues[stream]);
 		if (walk.failure?.reason === "sign_in_required") stop = walk.failure;
 	}
 }

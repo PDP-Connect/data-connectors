@@ -94,6 +94,7 @@ export const trainingSummaryResponse = z.looseObject({
 	id: z.int().positive(),
 	startDate: str,
 	stopTime: str,
+	distance: num,
 	hrMax: num,
 	hrAverage: num,
 	kiloCalories: num,
@@ -101,6 +102,8 @@ export const trainingSummaryResponse = z.looseObject({
 	timezoneOffset: int,
 	deviceName: str,
 	trainingSessionName: str,
+	// Keyed by exercise id. A manual entry's distance is only here: the list and the summary say null.
+	exercises: z.record(z.string(), z.looseObject({ distance: num })).nullish(),
 });
 export type TrainingSummaryResponse = z.infer<typeof trainingSummaryResponse>;
 
