@@ -9,7 +9,7 @@
 	},
 	"connector_key": "mountain-project",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/mountain-project",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Mountain Project",
 	"runtime_requirements": {
 		"bindings": {
