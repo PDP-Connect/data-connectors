@@ -566,18 +566,29 @@ export function planDays(
 			? addDays(today, PLAN_AHEAD_DAYS)
 			: // Today in UTC+14.
 				addDays(today, 1);
-	const to =
-		until !== undefined && addDays(until, 1) < horizon
-			? addDays(until, 1)
-			: horizon;
+	// A date stream's grant end is an exclusive day, so its last day is the one before; an
+	// activity's end is an instant, and the owner's local day can run a day past its UTC day.
+	const last =
+		until === undefined
+			? undefined
+			: stream === "activities"
+				? addDays(until, 1)
+				: addDays(until, -1);
+	const to = last !== undefined && last < horizon ? last : horizon;
 	const initial =
 		stream === "activities"
 			? HISTORY_FLOOR
 			: stream === "daily_metrics"
 				? addDays(today, -INITIAL_METRIC_DAYS)
 				: addDays(today, -PLAN_PAST_DAYS);
+	// Without a grant start the stream starts at its initial day, or at an older floor a cursor
+	// already reached; a cursor whose floor was raised by an earlier grant start does not narrow it.
 	const start =
-		since !== undefined ? addDays(since, -1) : (previous?.floor ?? initial);
+		since !== undefined
+			? addDays(since, -1)
+			: previous && previous.floor <= initial
+				? previous.floor
+				: initial;
 	if (
 		previous &&
 		!fullRefresh &&
@@ -617,7 +628,7 @@ export const activitiesPath = (
 export const dayDetailPath = (window: { from: string; to: string }): string =>
 	`/analyse/dayDetail/query?startDay=${queryDay(window.from)}&endDay=${queryDay(window.to)}`;
 export const schedulePath = (window: { from: string; to: string }): string =>
-	`/training/schedule/query?startDate=${queryDay(window.from)}&endDate=${queryDay(window.to)}&supportRestExercise=1`;
+	`/training/schedule/query?startDate=${queryDay(window.from)}&endDate=${queryDay(window.to)}`;
 
 // ── Collect ────────────────────────────────────────────────────────────────
 /** Structural, so the desktop runtime and test fakes both satisfy it. */
@@ -686,7 +697,13 @@ async function readWindow(
 		const listed = activityPage(outcome.data);
 		if (listed === null) return SHAPELESS("An activity-list answer");
 		built.push(...listed.rows.map(activityRecord));
-		if (listed.rows.length < PAGE_SIZE || pageNumber >= listed.totalPage) {
+		// An empty page always ends the window. When COROS says how many pages there are, that
+		// count decides, so a server that caps the page below PAGE_SIZE still reads every page;
+		// only when it does not say does a short page end the window.
+		if (listed.rows.length === 0) return { ok: true, built };
+		if (listed.totalPage !== null) {
+			if (pageNumber >= listed.totalPage) return { ok: true, built };
+		} else if (listed.rows.length < PAGE_SIZE) {
 			return { ok: true, built };
 		}
 	}
@@ -738,13 +755,22 @@ async function collectDays(
 	run: Run,
 	today: string,
 ): Promise<Failure | null> {
+	const range = ctx.requested.get(stream)?.time_range;
 	const plan = planDays(
 		stream,
 		readCursor(ctx.state[stream]),
-		ctx.requested.get(stream)?.time_range,
+		range,
 		ctx.collectionMode === "full_refresh",
 		today,
 	);
+	// Activities read a day past the grant's end for the owner's time zone. Those that start at or
+	// after it are left out here rather than handed to the runtime to withhold, which would keep
+	// every cursor of the run from saving; the cursor stops at the first such day instead.
+	const untilMs =
+		stream === "activities" && range?.until !== undefined
+			? Date.parse(range.until)
+			: Number.NaN;
+	let beyond: string | null = null;
 	let unreadable = 0;
 	let failure: Failure | null = null;
 	let readTo: string | null = null;
@@ -763,6 +789,17 @@ async function collectDays(
 		}
 		unreadable += read.built.length - records.length;
 		for (const record of records) {
+			if (Number.isFinite(untilMs)) {
+				const startMs = Date.parse(String(record.start_at));
+				if (Number.isFinite(startMs) && startMs >= untilMs) {
+					const day =
+						typeof record.start_date === "string"
+							? record.start_date
+							: String(record.start_at).slice(0, 10);
+					if (beyond === null || day < beyond) beyond = day;
+					continue;
+				}
+			}
 			const id = String(record.id);
 			if (seen.has(id)) continue;
 			seen.add(id);
@@ -772,7 +809,11 @@ async function collectDays(
 	}
 	await finishStream(ctx, stream, unreadable, failure);
 	// The cursor moves only over days read through; a run that read none keeps the old one.
-	const reached = readTo === null ? undefined : addDays(readTo, 1);
+	const readThrough = readTo === null ? undefined : addDays(readTo, 1);
+	const reached =
+		readThrough !== undefined && beyond !== null && beyond < readThrough
+			? beyond
+			: readThrough;
 	const next =
 		plan.kept !== undefined && (reached === undefined || plan.kept > reached)
 			? plan.kept
@@ -838,12 +879,30 @@ async function collectProfile(
 	const region = regionKey(account.region);
 	if (region === null) return SHAPELESS("The account's region");
 	const dashboard = await fetchData(ctx.page, DASHBOARD_PATH, p, run);
-	let failure: Failure | null = dashboard.ok ? null : dashboard;
+	// A dashboard COROS answered in a shape or with a code this connector does not read only
+	// leaves the heart-rate fields null, since the account itself was read. Anything that may pass
+	// (an outage, a rate limit) or that stops the run skips the stream, so a retry can fill them
+	// rather than a record with them emptied.
+	if (!dashboard.ok && dashboard.reason !== "source_unreadable") {
+		await finishStream(ctx, "profile", 0, dashboard);
+		return dashboard;
+	}
+	let failure: Failure | null = null;
 	let unreadable = 0;
-	if (dashboard.ok) {
-		const record = profileRecord(account.data, dashboard.data, region);
-		if (record === null) failure = SHAPELESS("The account answer");
-		else if (!(await emitClean(ctx, "profile", record))) unreadable = 1;
+	const record = profileRecord(
+		account.data,
+		dashboard.ok ? dashboard.data : null,
+		region,
+	);
+	if (record === null) failure = SHAPELESS("The account answer");
+	else if (!(await emitClean(ctx, "profile", record))) unreadable = 1;
+	if (!dashboard.ok && failure === null) {
+		await ctx.emit({
+			type: "PROGRESS",
+			stream: "profile",
+			message:
+				"The dashboard could not be read; heart-rate fields are left empty.",
+		});
 	}
 	await finishStream(ctx, "profile", unreadable, failure);
 	return failure;

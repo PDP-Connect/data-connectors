@@ -245,15 +245,21 @@ const activityPageSchema = z.object({
 });
 export interface ActivityPage {
 	rows: unknown[];
-	totalPage: number;
+	/** Pages COROS says the window has, or null when it did not say (absent, zero or negative). */
+	totalPage: number | null;
 }
+const positivePages = (value: number | null | undefined): number | null => {
+	if (typeof value !== "number" || !Number.isFinite(value)) return null;
+	const pages = Math.trunc(value);
+	return pages > 0 ? pages : null;
+};
 /** `/activity/query`: one page of the activity list. A list with no activities may omit dataList. */
 export function activityPage(data: unknown): ActivityPage | null {
 	const parsed = activityPageSchema.safeParse(data);
 	if (!parsed.success) return null;
 	return {
 		rows: parsed.data.dataList ?? [],
-		totalPage: Math.max(0, Math.trunc(parsed.data.totalPage ?? 0)),
+		totalPage: positivePages(parsed.data.totalPage),
 	};
 }
 
@@ -287,7 +293,8 @@ export function activityRecord(row: unknown): RecordData | null {
 		utc_offset_minutes: offset,
 		total_time_s: finite(row.totalTime),
 		workout_time_s: finite(row.workoutTime),
-		distance_m: finite(row.distance),
+		// A strength or indoor session reports distance 0: no distance, not zero metres.
+		distance_m: reading(row.distance),
 		calories_kcal: calories === null ? null : Math.round(calories) / 1000,
 		average_heart_rate_bpm: reading(row.avgHr),
 		training_load: finite(row.trainingLoad),
@@ -353,6 +360,12 @@ export function schedule(data: unknown): Schedule | null {
 	};
 }
 
+/** A plan id for joining: a missing, empty or zero plan id all mean "no plan". */
+const planKey = (value: unknown): string => {
+	const id = idOf(value);
+	return id === null || id === "0" ? "" : id;
+};
+
 /**
  * One planned workout: a calendar entry joined to its program by `idInPlan` and `planId`, as
  * Training Hub joins them. The id is the day, plan and place in the plan, which stay put across runs.
@@ -365,7 +378,7 @@ export function plannedRecords(
 		if (!isObj(program)) continue;
 		const inPlan = idOf(program.idInPlan);
 		if (inPlan !== null) {
-			programs.set(`${inPlan}&${idOf(program.planId) ?? ""}`, program);
+			programs.set(`${inPlan}&${planKey(program.planId)}`, program);
 		}
 	}
 	return value.entities.map((entity) => {
@@ -373,7 +386,7 @@ export function plannedRecords(
 		const date = corosDay(entity.happenDay);
 		const inPlan = idOf(entity.idInPlan);
 		if (date === null || inPlan === null) return { ok: false };
-		const planId = idOf(entity.planId) ?? "";
+		const planId = planKey(entity.planId);
 		const program = programs.get(`${inPlan}&${planId}`) ?? {};
 		const sportType = integer(program.sportType);
 		const done = isObj(entity.sportData) ? entity.sportData : null;

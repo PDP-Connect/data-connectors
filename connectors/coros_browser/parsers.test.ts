@@ -108,6 +108,8 @@ test("activityRecord: units, local day from the quarter-hour zone, zero readings
 	const strength = activityRecord(at(rows, 2));
 	assert.equal(strength?.average_heart_rate_bpm, null);
 	assert.equal(strength?.average_power_w, null);
+	// The strength session reports distance 0: no distance, so null.
+	assert.equal(strength?.distance_m, null);
 	assert.equal(strength?.start_date, "2026-10-20");
 	for (const row of rows as unknown[]) {
 		const record = activityRecord(row);
@@ -140,8 +142,12 @@ test("activityRecord: without a zone the row's own date is the local day; withou
 test("activityPage and dayList and schedule refuse a shape that is not theirs", () => {
 	assert.deepEqual(activityPage({ count: 0, totalPage: 0 }), {
 		rows: [],
-		totalPage: 0,
+		totalPage: null,
 	});
+	// A page count COROS did not give, or gave as nonsense, is unknown rather than zero.
+	assert.equal(activityPage({ dataList: [] })?.totalPage, null);
+	assert.equal(activityPage({ dataList: [], totalPage: -2 })?.totalPage, null);
+	assert.equal(activityPage({ dataList: [], totalPage: 3 })?.totalPage, 3);
 	assert.equal(activityPage({ dataList: "nope" }), null);
 	assert.deepEqual(dayList({}), []);
 	assert.equal(dayList({ dayList: {} }), null);

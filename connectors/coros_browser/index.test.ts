@@ -308,8 +308,31 @@ test("planDays: first runs, resumed runs with overlap, grants that move", () => 
 			false,
 			TODAY,
 		),
-		{ from: "2026-09-30", to: "2026-10-16", floor: "2026-09-30" },
+		{ from: "2026-09-30", to: "2026-10-14", floor: "2026-09-30" },
 	);
+	// An activity's grant end is an instant; the owner's local day may run a day past it.
+	assert.equal(
+		planDays(
+			"activities",
+			null,
+			{ until: "2026-10-15T00:00:00Z" },
+			false,
+			TODAY,
+		).to,
+		"2026-10-16",
+	);
+	// A grant that drops its start reads again from the stream's initial day, not from a floor
+	// an earlier grant start raised.
+	const raised: DayCursor = {
+		v: 1,
+		floor: "2026-09-30",
+		next_day: "2026-11-01",
+	};
+	assert.deepEqual(planDays("activities", raised, undefined, false, TODAY), {
+		from: "2016-01-01",
+		to: "2026-11-11",
+		floor: "2016-01-01",
+	});
 	// A grant reaching back past the cursor's floor reads afresh from it.
 	const late: DayCursor = { v: 1, floor: "2026-10-01", next_day: "2026-11-01" };
 	assert.equal(
@@ -363,7 +386,7 @@ test("paths name COROS's own query parameters", () => {
 	);
 	assert.equal(
 		schedulePath(window),
-		"/training/schedule/query?startDate=20261101&endDate=20261128&supportRestExercise=1",
+		"/training/schedule/query?startDate=20261101&endDate=20261128",
 	);
 });
 
@@ -451,6 +474,125 @@ test("collect: a full page of activities reads the next page of the window", asy
 	await collectCorosBrowser(ctx, FAST, NOW);
 	assert.equal(idsOf(records, "activities").length, 51);
 	assert.ok(paths.some((p) => p.includes("pageNumber=2")));
+});
+
+test("collect: a page count COROS does not give: a full page still reads the next page", async () => {
+	const data = fixtureData();
+	const base = data.activities[1] as Record<string, unknown>;
+	data.activities = Array.from({ length: 51 }, (_, i) => ({
+		...base,
+		labelId: `47600000000000${String(1000 + i)}`,
+		startTime: 1794151800 - i * 60,
+	}));
+	const api = corosApi(data);
+	const { page, paths } = fakePage((path) => {
+		const answer = api(path);
+		if (!path.startsWith("/activity/query")) return answer;
+		const body = JSON.parse(answer.body) as { data: Record<string, unknown> };
+		delete body.data.totalPage;
+		return { ...answer, body: JSON.stringify(body) };
+	});
+	const state = {
+		activities: { v: 1, floor: "2016-01-01", next_day: "2026-11-09" },
+	};
+	const { ctx, records } = context(page, { activities: undefined }, state);
+	await collectCorosBrowser(ctx, FAST, NOW);
+	assert.equal(idsOf(records, "activities").length, 51);
+	assert.ok(paths.some((p) => p.includes("pageNumber=2")));
+});
+
+test("collect: a server that caps the page below the size asked still reads every page it counts", async () => {
+	const data = fixtureData();
+	const base = data.activities[1] as Record<string, unknown>;
+	data.activities = Array.from({ length: 45 }, (_, i) => ({
+		...base,
+		labelId: `47600000000000${String(1000 + i)}`,
+		startTime: 1794151800 - i * 60,
+	}));
+	const api = corosApi(data);
+	// Pages of 20, whatever size was asked.
+	const { page, paths } = fakePage((path) => {
+		if (!path.startsWith("/activity/query")) return api(path);
+		const pageNumber = Number(
+			new URL(path, "https://x").searchParams.get("pageNumber"),
+		);
+		const capped = api(path.replace("size=50", "size=20"));
+		const body = JSON.parse(capped.body) as { data: Record<string, unknown> };
+		body.data.pageNumber = pageNumber;
+		return { ...capped, body: JSON.stringify(body) };
+	});
+	const state = {
+		activities: { v: 1, floor: "2016-01-01", next_day: "2026-11-09" },
+	};
+	const { ctx, records } = context(page, { activities: undefined }, state);
+	await collectCorosBrowser(ctx, FAST, NOW);
+	assert.equal(idsOf(records, "activities").length, 45);
+	assert.equal(paths.filter((p) => p.startsWith("/activity/query")).length, 3);
+});
+
+test("collect: activities at or after the grant's end are left out and the cursor stops before them", async () => {
+	const { page } = fakePage(corosApi());
+	const { ctx, messages, records } = context(page, {
+		activities: { until: "2026-11-09T00:00:00Z" },
+	});
+	await collectCorosBrowser(ctx, FAST, NOW);
+	// 203 starts 2026-11-09T01:10Z, after the end; 202 and 201 before it.
+	assert.deepEqual(idsOf(records, "activities"), [
+		"476000000000000201",
+		"476000000000000202",
+	]);
+	assert.deepEqual(skipsOf(messages), []);
+	// The cursor is saved, and only up to the local day of the first activity left out.
+	assert.deepEqual(statesOf(messages), {
+		activities: { v: 1, floor: "2016-01-01", next_day: "2026-11-08" },
+	});
+});
+
+test("collect: a dashboard COROS answers with an unknown code still emits the profile, heart rate empty", async () => {
+	const { page } = fakePage(
+		corosApi(fixtureData(), (_data, path) =>
+			path.startsWith("/dashboard/query") ? coded("9999") : undefined,
+		),
+	);
+	const { ctx, messages, records } = context(page, { profile: undefined });
+	await collectCorosBrowser(ctx, FAST, NOW);
+	assert.deepEqual(idsOf(records, "profile"), ["472000000000000101"]);
+	const profile = records.find((r) => r.stream === "profile")?.data;
+	assert.equal(profile?.resting_heart_rate_bpm, null);
+	assert.deepEqual(skipsOf(messages), []);
+});
+
+test("collect: a dashboard outage skips the profile rather than emptying its heart rate", async () => {
+	const { page } = fakePage(
+		corosApi(fixtureData(), (_data, path) =>
+			path.startsWith("/dashboard/query")
+				? { status: 503, contentType: "text/html", body: "" }
+				: undefined,
+		),
+	);
+	const { ctx, messages, records } = context(page, { profile: undefined });
+	await collectCorosBrowser(ctx, FAST, NOW);
+	assert.deepEqual(idsOf(records, "profile"), []);
+	assert.deepEqual(skipsOf(messages)[0]?.slice(0, 2), [
+		"profile",
+		"collection_interrupted",
+	]);
+});
+
+test("collect: a sign-in that is still expired after the one reload stops with sign_in_required", async () => {
+	const { page, gotos } = fakePage(
+		corosApi(fixtureData(), (_data, path) =>
+			path.startsWith("/dashboard/query") ? coded("1019") : undefined,
+		),
+	);
+	const { ctx, messages, records } = context(page, { profile: undefined });
+	await collectCorosBrowser(ctx, FAST, NOW);
+	assert.deepEqual(gotos, ["https://t.coros.com/"]);
+	assert.deepEqual(idsOf(records, "profile"), []);
+	assert.deepEqual(skipsOf(messages)[0]?.slice(0, 2), [
+		"profile",
+		"sign_in_required",
+	]);
 });
 
 test("collect: an expired session reloads the app once and goes on", async () => {
