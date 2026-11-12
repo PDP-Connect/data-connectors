@@ -26,6 +26,7 @@ export const EXCLUDED_TESTS = new Set(["connectors/github/index.test.ts"]);
 // `connectors/...` paths for connectors and package-relative paths otherwise.
 // A file may also be in NAMESPACE_TESTS. Connector owners append paths here.
 export const VITEST_TESTS = new Set([
+	"connectors/chatgpt/branch-tree-properties.test.ts",
 	"connectors/groupme/index.test.ts",
 	"connectors/groupme/schemas.test.ts",
 	"connectors/groupme/completeness-anchor.test.ts",

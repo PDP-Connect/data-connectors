@@ -51,21 +51,23 @@ export function readConversationDetail(path: string): ChatGptFetchResult {
  * A listing test asks for `conversations` and serves only list pages. The
  * connector also reads each conversation's detail for that stream, so a detail
  * path the test does not serve (a 404, or a fake that throws on a path it does
- * not know) would fail the run. This answers such a detail path with an empty
- * detail (no messages). Every other path, and a detail the test serves itself,
- * stays as the test wrote it.
+ * not know) would fail the run. A missing mapping represents an unavailable
+ * detail without inventing a branch. Other paths and served details stay as
+ * the test wrote them.
  */
-export function withEmptyConversationDetails(api: ChatGptApi): ChatGptApi {
+export function withUnavailableConversationDetails(
+	api: ChatGptApi,
+): ChatGptApi {
 	return {
 		...api,
 		fetch: async (path, options): Promise<ChatGptFetchResult> => {
 			if (!path.startsWith(DETAIL_PATH)) return api.fetch(path, options);
-			const empty = emptyConversationDetail(path);
+			const unavailable: ChatGptFetchResult = { status: 200, json: {} };
 			try {
 				const result = await api.fetch(path, options);
-				return result.status === 404 ? empty : result;
+				return result.status === 404 ? unavailable : result;
 			} catch {
-				return empty;
+				return unavailable;
 			}
 		},
 	};

@@ -361,7 +361,7 @@ test("an all-filtered current branch has no current node and reports zero messag
 	);
 });
 
-test("a roleless current tip is reported as a filtered non-message node", async () => {
+test("a roleless current tip emits a gap instead of a partial branch", async () => {
 	const mapping: Record<string, ChatGptNode> = {
 		root: { parent: null, children: ["m1"] },
 		m1: {
@@ -374,17 +374,13 @@ test("a roleless current tip is reported as a filtered non-message node", async 
 		},
 		leaf: { parent: "m1", children: [], message: {} },
 	};
-	const { emitted } = await runWithFilteredRecords(mapping, "leaf", new Set());
-	const conversation = emitted.find(
-		(record) => record.stream === "conversations",
+	const { emitted, protocolMessages } = await runWithFilteredRecords(
+		mapping,
+		"leaf",
+		new Set(),
 	);
-	assert.equal(conversation?.data.current_node, "m1");
-	assert.equal(conversation?.data.message_count_on_current_branch, 1);
-	assert.ok(
-		diagnostics.some((line) =>
-			line.includes("current_node_filtered=non_message"),
-		),
-	);
+	assert.deepEqual(emitted, []);
+	assert.ok(protocolMessages.some((message) => message.type === "DETAIL_GAP"));
 });
 
 test("chatgpt branch: a whole conversation reconciles clean and reports no gap", async () => {
@@ -429,31 +425,13 @@ test("chatgpt branch: a truncated branch is surfaced as a gap, not a silent pass
 });
 
 test("chatgpt branch: the tautological count check would have passed this truncated payload", async () => {
-	// Proves the point of the whole contract. The conversation record's declared
-	// count is derived from the same truncated mapping, so declared == emitted
-	// and a count-based reconciliation reads complete. The gap is the only signal.
+	// Both the declared count and emitted branch count came from the same
+	// truncated mapping, so only the structural check could detect the gap.
 	const { emitted, skips } = await run(truncatedBranch(), "a1");
-
-	const convo = emitted.find((r) => r.stream === "conversations");
-	const declared = convo?.data.message_count_on_current_branch;
-	const emittedOnBranch = emitted.filter(
-		(r) => r.stream === "messages" && r.data.on_current_branch === true,
-	).length;
-
-	assert.equal(
-		declared,
-		1,
-		"the declared count shrank to match the truncation",
-	);
-	assert.equal(
-		emittedOnBranch,
-		1,
-		"so declared == emitted and the counts agree",
-	);
-	assert.equal(
+	assert.deepEqual(emitted, [], "a truncated conversation emits no records");
+	assert.ok(
 		skips().some((s) => s.reason === "branch_truncated"),
-		true,
-		"only the structural check catches it",
+		"the structural check still reports the gap",
 	);
 });
 
@@ -628,4 +606,88 @@ test("model_counts is null when the conversation detail could not be read", asyn
 	);
 	assert.equal(conversation?.data.message_count_on_current_branch, null);
 	assert.equal(conversation?.data.model_counts, null);
+});
+
+test("structurally incomplete conversations publish no records while complete conversations publish normally", async () => {
+	const { deps, emitted, skips } = makeHarness();
+	const good = { ...makeConvo("a1"), id: "good" };
+	const bad = { ...makeConvo("a1"), id: "bad" };
+	await processConversationDetail(
+		deps,
+		good,
+		{ status: 200, json: { mapping: wholeBranch(), current_node: "a1" } },
+		emitConversation(deps),
+	);
+	const goodRecords = JSON.stringify(emitted);
+	const baseline = readFileSync(
+		new URL("./__fixtures__/whole-branch-0.3.12.json", import.meta.url),
+		"utf8",
+	).trim();
+	assert.equal(goodRecords, baseline);
+	await processConversationDetail(
+		deps,
+		bad,
+		{ status: 200, json: { mapping: truncatedBranch(), current_node: "a1" } },
+		emitConversation(deps),
+	);
+	assert.equal(JSON.stringify(emitted), goodRecords);
+	assert.ok(skips().some((s) => s.reason === "branch_truncated"));
+	assert.ok(emitted.length > 0);
+});
+
+test("conversations-only shape failure reports why the conversation was withheld", async () => {
+	const { deps, emitted, messages } = makeHarness(["conversations"]);
+	deps.conversationDetailOnly = true;
+	const mapping = wholeBranch();
+	mapping.a1 = {
+		...assistantNode("u1"),
+		message: {
+			author: { role: "r".repeat(41) },
+			content: { content_type: "text", parts: ["invalid role"] },
+		},
+	};
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo("a1"),
+		{ status: 200, json: { mapping, current_node: "a1" } },
+		emitConversation(deps),
+	);
+	assert.deepEqual(outcome, {
+		complete: false,
+		reason: "message_shape_rejected",
+	});
+	assert.deepEqual(emitted, []);
+	assert.equal(
+		messages.some((message) => message.type === "DETAIL_GAP"),
+		false,
+	);
+	assert.ok(
+		diagnostics.some((line) =>
+			line.startsWith("conversation_detail_incomplete: message_shape_rejected"),
+		),
+	);
+});
+
+test("conversations-only truncated detail reports a withheld conversation", async () => {
+	const { deps, emitted, messages } = makeHarness(["conversations"]);
+	deps.conversationDetailOnly = true;
+	const result = await processConversationDetail(
+		deps,
+		makeConvo("a1"),
+		{ status: 200, json: { mapping: truncatedBranch(), current_node: "a1" } },
+		emitConversation(deps),
+	);
+	assert.deepEqual(result, {
+		complete: false,
+		reason: "branch_structurally_incomplete",
+	});
+	assert.deepEqual(emitted, []);
+	assert.ok(!messages.some((m) => m.type === "DETAIL_GAP"));
+	assert.ok(
+		diagnostics.some((line) =>
+			line.startsWith(
+				"conversation_detail_incomplete: branch_structurally_incomplete",
+			),
+		),
+	);
 });

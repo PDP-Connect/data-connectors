@@ -32,8 +32,14 @@ function child(args, cwd, env = {}) {
 	assert.equal(result.signal, null, result.stderr);
 	return result;
 }
-test("exact isolated pins and conservative native configuration", () => {
+test("exact shared test-tool pins and conservative native configuration", () => {
 	const pkg = JSON.parse(readFileSync(join(toolsRoot, "package.json"), "utf8"));
+	assert.deepEqual(pins, {
+		"@stryker-mutator/core": "10.0.0",
+		"@stryker-mutator/vitest-runner": "10.0.0",
+		"fast-check": "4.10.2",
+		vitest: "4.1.12",
+	});
 	assert.deepEqual(pkg.devDependencies, pins);
 	assert.equal(pkg.private, true);
 	assert.equal(

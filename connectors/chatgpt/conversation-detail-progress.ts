@@ -352,6 +352,8 @@ export interface AdvanceInput {
 	settled: ReadonlySet<string>;
 	/** Rows asked for that could not be read this run. */
 	failed: ReadonlySet<string>;
+	/** Structurally incomplete rows must stay owed without the ordinary retry cap. */
+	withheld?: ReadonlySet<string>;
 	/**
 	 * Whether the walk proved it listed every row down to its cursor. A walk cut
 	 * short proves nothing about the rows between the ones it saw, so it moves no
@@ -374,18 +376,37 @@ export function advanceDetailProgress({
 	rows,
 	settled,
 	failed,
+	withheld = new Set(),
 	listComplete,
 	floorMs,
 }: AdvanceInput): { progress: DetailProgress; released: Set<string> } {
 	const listed = timed(rows);
-	const start = effectiveProgress(prior, listed);
+	const initial = effectiveProgress(prior, listed);
+	// A withheld row must not be represented by the covered interior, even if
+	// it was previously settled. Reopen history and retain observed good rows as
+	// bounded exact keys. Overflow may repeat work, but can never settle a gap.
+	const start: DetailProgress =
+		withheld.size === 0
+			? initial
+			: {
+					...initial,
+					frontier: initial.watermark,
+					done: new Set(
+						listed
+							.filter(
+								(row) =>
+									!withheld.has(row.id) && isDetailDone(initial, row.id, row.t),
+							)
+							.map((row) => doneKey(row.id, row.t)),
+					),
+				};
 	const byId = new Map(listed.map((row) => [row.id, row]));
 
 	// The retry table: carry what this run did not decide, count what it failed.
 	const failures: Record<string, DetailFailure> = {};
 	const released = new Set<string>();
 	for (const [id, failure] of Object.entries(start.failures)) {
-		if (settled.has(id) || failed.has(id)) continue;
+		if (settled.has(id) || failed.has(id) || withheld.has(id)) continue;
 		const row = byId.get(id);
 		// A row that moved is a new conversation to read; one a complete walk
 		// no longer lists is gone.
@@ -426,9 +447,10 @@ export function advanceDetailProgress({
 		settled.has(row.id) ||
 		released.has(row.id);
 	const passable = (row: TimedRow): boolean =>
-		isDetailDone(start, row.id, row.t) ||
-		observed(row) ||
-		keptFailures[row.id]?.t === row.t;
+		!withheld.has(row.id) &&
+		(isDetailDone(start, row.id, row.t) ||
+			observed(row) ||
+			keptFailures[row.id]?.t === row.t);
 
 	let { watermark, frontier } = start;
 	if (listComplete && watermark !== null) {

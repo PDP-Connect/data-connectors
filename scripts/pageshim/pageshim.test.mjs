@@ -1407,6 +1407,13 @@ test("chatgpt: capped PageShim walk reports partial with omitted detail evidence
 	assert.deepEqual(r.result.errors, [
 		{
 			errorClass: "partial",
+			reason: "Detail coverage leaves requested inventory uncollected.",
+			disposition: "degraded",
+			scope: "chatgpt.conversations",
+			phase: "collect",
+		},
+		{
+			errorClass: "partial",
 			reason:
 				"PageShim collected a bounded ChatGPT prefix with conversation details pending. PageShim does not persist STATE or DETAIL_GAP recovery state, so another PageShim run starts a new bounded walk instead of resuming this omitted tail.",
 			disposition: "degraded",
