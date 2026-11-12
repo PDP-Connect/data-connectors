@@ -60,6 +60,8 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   // simple-icons carries no Mountain Project mark; the site's own logo is a
   // wide wordmark (/img/climb/logoHex2.svg), not a square glyph.
   "mountain_project.json",
+  // No COROS mark with checked provenance yet; monogram until one is sourced.
+  "coros_browser.json",
 ]);
 
 function assertRealBrandMarkShape(source, filename) {
