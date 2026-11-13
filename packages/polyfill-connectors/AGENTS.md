@@ -1,15 +1,17 @@
-# Polyfill connectors: agent rules
+# Polyfill connector agent rules
 
-Rules for anyone who edits `packages/polyfill-connectors`. Run the commands from this directory. The connector command sequence is in [AUTHORING.md](../../AUTHORING.md); test lanes are in [TESTING.md](../../TESTING.md).
+Rules for anyone who edits `packages/polyfill-connectors`. Run the commands from this directory. The steps to build a connector are in [AUTHORING.md](../../AUTHORING.md). The test commands and lanes are in [TESTING.md](../../TESTING.md).
 
 ## Before a PR
 
-1. `npm run verify` runs the library metadata check, `tsc --noEmit` with the strict flags in `tsconfig.json`, the Biome check (`npm run check`) and three package guards. CI runs the same command in the `verify` job.
-2. `npm run test:fast` runs the tests related to your change.
+1. Run `npm run verify`. CI runs the same command in the `verify` job.
+2. Run `npm run test:fast` while you edit, and `npm test` from the repo root before the PR.
+
+[TESTING.md](../../TESTING.md#tiers) says what each command runs and holds the rule that a fix needs a test.
 
 ## Rules in TypeScript files
 
-Biome (Ultracite rules at error severity) rejects each of these:
+Biome rejects each of these with its Ultracite rules at error severity.
 
 1. `any`. Use `unknown` and narrow, or write the real type.
 2. `@ts-ignore`. Use `@ts-expect-error` with a comment.
@@ -31,10 +33,10 @@ const data = (await res.json()) as OrderResponse;
 const data = orderResponseSchema.parse(await res.json());
 ```
 
-Each connector's `connectors/<key>/schemas.ts` exports `validateRecord`. Use it for record shapes, and add a schema for each new shape instead of widening a type.
+Each connector's `connectors/<key>/schemas.ts` exports `validateRecord`. Use it to check records, and add a schema for each new record format instead of widening a type.
 
 ## What the runtime owns
 
-The runtime in `src/` owns the Collection Profile protocol messages, browser lifecycle, tracing, fixture capture, counters, retryable-error classification and auth resolution. A connector owns which records it produces, how it parses them, and its stream logic (cursors, tombstones through `isTombstone`).
+The runtime in `src/` owns the protocol messages, and a connector owns its records and stream logic. [collection-profile-runtime.md](docs/collection-profile-runtime.md) lists which side owns what.
 
-If a connector needs protocol plumbing, look for the runtime seam first, and add one to the runtime when none exists. Do not work around the runtime inside a connector.
+If a connector needs something the runtime does, find the shared helper in `src/` first, and add one when none exists. Do not work around the runtime inside a connector.

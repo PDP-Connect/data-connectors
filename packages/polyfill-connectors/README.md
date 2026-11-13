@@ -1,8 +1,8 @@
 # Polyfill connector scenario tools
 
-Reference for the two commands that record a connector run and replay it. The command sequence for building a connector is in [AUTHORING.md](../../AUTHORING.md). The replay verifier compares records, cursor state and captured completeness messages against the connector subprocess. It starts no reference server.
+Reference for the two commands that record a connector run and replay it. The steps to build a connector are in [AUTHORING.md](../../AUTHORING.md). The replay verifier runs the connector again and compares its records, its cursor state and the coverage reports it sent against the recorded run.
 
-Run the commands from `packages/polyfill-connectors` with Node 24 after `npm ci --ignore-scripts` in the repo root:
+Install the dependencies as [AUTHORING.md](../../AUTHORING.md#before-you-start) says. Then run the commands from `packages/polyfill-connectors`.
 
 ```sh
 node --import tsx bin/scenario-record.ts oura --out runs/oura/scenario.json
@@ -11,7 +11,7 @@ node --import tsx bin/scenario-verify.ts oura runs/oura/scenario.json
 
 ## scenario-record
 
-Recording contacts the provider with your configured credentials. It captures two runs by default: a full refresh, then an incremental run seeded with the first run's committed state.
+Recording contacts the provider with your configured credentials. It captures two runs by default. The first is a full refresh. The second is an incremental run that starts from the state the first run committed.
 
 | Option | Effect |
 |---|---|
@@ -21,7 +21,7 @@ Recording contacts the provider with your configured credentials. It captures tw
 | `--answer <id-or-index>=<value>`, `--answers <json-file>` | Answer connector prompts without a terminal. |
 | `--persist-otp` | Store one-time-code answers in the scenario. |
 | `--timeout <seconds>` | Set the inactivity limit. The recorder kills a connector subprocess that is silent for that long. |
-| `--record-har` | Capture the HAR and storage state of a local browser context. Browser recording needs the package's browser installation. |
+| `--record-har` | Capture the HAR and storage state of a local browser context. Browser recording needs the Playwright browsers installed (`npx playwright install chromium`). |
 
 With `PDPP_<NAME>_REMOTE_CDP_URL` set, `--record-har` records the attached browser. The recording covers the whole attached browser context, including traffic and cookies from tabs the connector did not open. Attach a dedicated browser or profile that is signed in to a test account.
 
@@ -38,9 +38,9 @@ Replay uses the current connector source.
 | `--require-capture-source` | Require the source and declaration digests recorded at capture time to match. |
 | `--json <path>` | Write the claim record to `<path>`. The directory must exist. |
 
-A mismatch in replayed output, or an invalid scenario, exits with a nonzero code. The printed `recorded_replay` claim has its own eligibility checks, and no driver earns it, because the isolation-evidence boundary is not proven (`isolationEvidenceBoundaryProven` is `false` in `bin/scenario-verify.ts`). A passing replay therefore does not certify that the isolation boundary is closed. Browser replay also reports the evidence limits of its driver.
+A passing replay does not prove that the sandbox around the replay isolates the connector. The tool does not treat that isolation boundary as proven, so no driver earns the printed `recorded_replay` claim (`isolationEvidenceBoundaryProven` is `false` in `bin/scenario-verify.ts`). Browser replay also reports the evidence limits of its driver.
 
-`src/scenario/verify.ts` implements the runtime's state-merge rule locally. The scenario commands use only the path and manifest helpers of `src/orchestrator.ts`.
+A mismatch in replayed output, or an invalid scenario, exits with a nonzero code.
 
 ## Validate changes to the tools
 
@@ -51,4 +51,4 @@ npm run verify
 npm test
 ```
 
-`npm test` runs the sandboxed lane and the namespaces lane. [TESTING.md](../../TESTING.md) describes both lanes and the faster `npm run test:fast`.
+[TESTING.md](../../TESTING.md) describes what these commands run, and the faster `npm run test:fast`.
