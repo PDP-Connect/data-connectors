@@ -4,15 +4,16 @@ You have a working browser connector and want it in the mobile app build. You wi
 
 ## Steps
 
-1. Declare the connector's bindings and features under `runtime_requirements.bindings` in `connectors/<connector>/manifest.json`, as [the next section](#declare-runtime-binding-features) shows. The mobile build takes a connector only when all of these hold.
+1. Declare the connector's bindings and features under `runtime_requirements.bindings` in `connectors/<connector>/manifest.json`, as [the next section](#declare-runtime-binding-features) shows. The mobile build takes every connector for which all of these hold, and the PageShim tests then fail until steps 2 to 4 are done. A browser scaffold lists no `network` features, so it stays out until you declare them.
    1. The `browser` binding is required.
    2. The `network` binding is required, or the `browser` features include `page_script_evaluation`.
-   3. Each required binding lists at least one feature.
-   4. The mobile app provides every binding and feature the manifest declares.
-2. Add a `mobile.pageshim` entry to the manifest. A connector without one stays out of the mobile build. The generic entry reads the scope prefix, sign-in URL, sign-in message, probe export and collect export from it; `connectors/character_ai/manifest.json` is a working example. Write an entry file in `scripts/pageshim/entries/` and name it in `mobile.pageshim.entry` only when the connector needs something the generic entry does not do, such as a different output shape or a host method the facade does not offer. The entry receives the manifest's streams as `PAGESHIM_CONNECTOR_STREAMS` and must serve every one.
-3. Add a fixture in `scripts/pageshim/fixtures/` with the expected scope summaries. `scripts/pageshim/fixtures/character_ai.mjs` is a working example; its pages and API responses are synthetic. Never put real account data in a fixture.
-4. Run `npm run mobile:bundle -- <connector>` from the repository root. The command builds the bundle, runs the PageShim harness against those exact bytes, writes the bundle to `.tmp/mobile-connectors/<connector>.js`, and prints the file path, size in bytes and SHA-256. You are done when it prints those three values. If it says the connector does not declare only PageShim-supported runtime bindings, go back to step 1.
-5. Open the PR. When it merges, the publish workflow (`.github/workflows/publish-polyfill-connectors.yml`) attaches the bundle to the connector's artifact, if the connector is published and its version is new. [publishing.md](publishing.md) describes publication.
+   3. Each required binding lists at least one feature, and the mobile app provides each one.
+   4. The mobile app provides each feature listed under an optional `browser` or `network` binding.
+2. Add a `mobile.pageshim` entry to the manifest. The generic entry reads the scope prefix, sign-in URL, sign-in message, probe export and collect export from it; `connectors/character_ai/manifest.json` is a working example. Write an entry file in `scripts/pageshim/entries/` and name it in `mobile.pageshim.entry` only when the connector needs something the generic entry does not do, such as a different output shape or a host method the facade does not offer. The entry receives the manifest's streams as `PAGESHIM_CONNECTOR_STREAMS` and must serve every one.
+3. Add `scripts/pageshim/ports/<connector>.json`. Copy `scripts/pageshim/ports/character_ai.json` and change `connector`; the empty `modules` and `inject` lists mean the connector needs no port to host methods.
+4. Add a fixture in `scripts/pageshim/fixtures/` with the expected scope summaries. `scripts/pageshim/fixtures/character_ai.mjs` is a working example; its pages and API responses are synthetic. Never put real account data in a fixture.
+5. Run `npm run mobile:bundle -- <connector>` from the repository root. The command builds the bundle, runs the PageShim harness against those exact bytes, writes the bundle to `.tmp/mobile-connectors/<connector>.js`, and prints the file path, size in bytes and SHA-256. You are done when it prints those three values. If it says the connector does not declare only PageShim-supported runtime bindings, go back to step 1.
+6. Open the PR. When it merges, the publish workflow (`.github/workflows/publish-polyfill-connectors.yml`) attaches the bundle to the connector's artifact, if the connector is published and its version is new. [publishing.md](publishing.md) describes publication.
 
 The harness runs the bundle against fixture responses. It does not show that the site behaves the same on a real device.
 

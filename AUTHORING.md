@@ -55,7 +55,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
    | Reads everything on each run | `full_inventory` |
    | Holds one record, such as a profile | `singleton_presence` |
    | Comes from a file the user imports | `snapshot_import_receipt` |
-   | Holds detail rows read under a parent stream | `parent_detail_accounting` |
+   | Advances a parent's checkpoint only after the detail rows under it are accounted for | `parent_detail_accounting` |
 
    | What sets the time | `freshness_strategy` |
    |---|---|
@@ -76,7 +76,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 3. Choose the refresh policy in `capabilities.refresh_policy`. The app reads it to decide whether to run the connector on a schedule, and it rejects a manifest whose fields contradict each other, so answer these questions in order.
 
    1. Can a run need a person? Set `interaction_posture` to `none` if the connector uses a stored token or needs no credentials. Set it to `credentials` if the connector signs in with a stored user name and password, such as an app password, and sign-in never asks for more. Set it to `manual_action_likely` if a sign-in page or a bot check can stop a run until a person acts, and to `otp_likely` if sign-in often asks for a one-time code.
-   2. Is it safe to run with nobody at the screen? It is when a run cannot stop for a person and its requests stay inside the platform's limits, which the intervals below control. Set `background_safe` to `true` only then.
+   2. Is it safe to run with nobody at the screen? It is when a run either needs no person or reuses a saved session and asks for help only if the site challenges it, and when its requests stay inside the platform's limits. Set `background_safe` to `true` only then.
    3. Should the app schedule runs by default? `recommended_mode` follows from the first two answers, as the table shows.
 
    | `interaction_posture` | `background_safe` | `recommended_mode` | Also required |
@@ -168,7 +168,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
 9. Register the connector in the shared files. A new connector also changes these files outside its directory.
 
-   1. Add `brand` to the manifest, with an `icon.svg` in the connector directory that is the platform's real mark (`connectors/character_ai/` is an example). If the platform has no mark you can use, leave `brand` out and add the manifest name to `CONNECTORS_WITHOUT_A_BRAND_MARK` in `scripts/brand-icon-fleet.test.mjs`.
+   1. Add `brand` to the manifest, with an `icon.svg` in the connector directory that is the platform's real mark (`connectors/character_ai/` is an example). If the platform has no mark you can use, leave `brand` out and add `"<key>.json"` to `CONNECTORS_WITHOUT_A_BRAND_MARK` in `scripts/brand-icon-fleet.test.mjs`.
    2. Add `["<key>", "<public-key>"]` to `CONNECTOR_PUBLISH_INVENTORY` in `scripts/connector-publish-allowlist.mjs`. The public key is the directory name with hyphens in place of underscores. Add a third item, the reason, only if the connector cannot be published yet.
    3. Add the connector to `REAL_UNLISTED_CONNECTORS` in `packages/polyfill-connectors/src/connector-conformance-roster.ts`, with the test file that runs its collection.
    4. Add a coverage driver to `CONNECTOR_DRIVERS` in `connectors/_conformance/coverage-conformance-drivers.ts`. A driver runs the connector against a fake local server and lists the streams it covers; `driveJellyfin` is an example.

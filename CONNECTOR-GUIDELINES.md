@@ -44,7 +44,7 @@ Use DOM selectors only when none of these exists, and then pick structural selec
 
 ### 2. Make the run resumable
 
-The mobile app can lose the page in the middle of a run, when the OS ends the WebView under memory pressure or the user leaves the app. Only the `STATE` the runtime has already committed survives.
+The mobile app can lose the page in the middle of a run, when the OS ends the WebView under memory pressure or the user leaves the app. The mobile runtime commits a run's `STATE` only after `collect()` ends and the host accepts the stream, so an interrupted run starts again from the `STATE` of the last finished run.
 
 1. Emit `STATE` only after every record it covers has been emitted, and key it by a stable cursor (offset, page token or last ID), not by array position.
 2. Use a `primary_key` that stays the same across runs, because a resumed run emits some records again and the store replaces them by key.
@@ -78,7 +78,7 @@ Some desktop connectors sign in for the user with a stored password, through a m
 
 List each binding and feature the connector uses under `runtime_requirements.bindings` in the manifest. [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md#declare-runtime-binding-features) lists the feature names.
 
-A connector enters the mobile build only when its manifest has a `mobile.pageshim` entry and the mobile app provides every feature it declares. To keep a connector desktop-only, leave out `mobile.pageshim`. Do the same for a connector that reads a cross-origin iframe, because no feature name covers frames yet.
+The mobile build takes every connector whose declared bindings pass the admission rules in that guide. A connector that uses a feature the mobile app lacks, such as `page_input` for clicks and typing, declares it and so stays desktop-only. No feature name covers cross-origin iframes yet, so ask a maintainer how to keep such a connector out of the mobile build.
 
 ### 7. Report progress, and bound the work
 
