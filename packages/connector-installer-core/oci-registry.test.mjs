@@ -14,6 +14,7 @@ import test from "node:test";
 import {
   checkTokenRealm,
   classifyManifestResponse,
+  createRegistryTokenCache,
   cosignSignatureTag,
   fetchBlob,
   isValidConnectorKey,
@@ -23,6 +24,7 @@ import {
   parseConnectorOciReference,
   parseDistributionErrorCodes,
   parseOciReference,
+  settleWithConcurrency,
   sha256Digest,
 } from "./oci-registry.mjs";
 
@@ -538,4 +540,145 @@ test("an IPv6 loopback realm is compared as the URL parser spelled it", () => {
     }),
     /neither the registry origin/,
   );
+});
+
+// One prepare reads dozens of paths from one repository. Each anonymous request
+// answered 401 and paid its own token exchange before the retry.
+function bearerRegistry({ rejectToken = () => false } = {}) {
+  const log = { anonymous: 0, tokens: 0, authorized: 0, scopes: [] };
+  let issued = 0;
+  const fetchImpl = async (url, options) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/token") {
+      log.tokens += 1;
+      log.scopes.push(parsed.searchParams.get("scope"));
+      issued += 1;
+      return new Response(JSON.stringify({ token: `token-${issued}` }), { status: 200 });
+    }
+    const authorization = options.headers.authorization;
+    if (!authorization) {
+      log.anonymous += 1;
+      return new Response("{}", {
+        status: 401,
+        headers: { "www-authenticate": 'Bearer realm="https://registry.example/token",service="fixture"' },
+      });
+    }
+    if (rejectToken(authorization)) return new Response("{}", { status: 401 });
+    log.authorized += 1;
+    const blob = Buffer.from(`blob for ${parsed.pathname}`);
+    return new Response(blob, { status: 200 });
+  };
+  return { fetchImpl, log };
+}
+
+async function pullBlobs({ fetchImpl, repository = "pdp-connect/connector/ynab", count, tokenCache, concurrent = false }) {
+  const blobs = Array.from({ length: count }, (_, i) => {
+    const bytes = Buffer.from(`blob for /v2/${repository}/blobs/${sha256Digest(Buffer.from(`x${i}`))}`);
+    return { digest: sha256Digest(bytes), bytes };
+  });
+  // The registry above answers any blob path with bytes named by the path, so
+  // serve each digest its own bytes to keep the digest check honest.
+  const served = async (url, options) => {
+    const response = await fetchImpl(url, options);
+    const digest = new URL(url).pathname.split("/blobs/")[1];
+    const known = blobs.find((blob) => blob.digest === digest);
+    return response.status === 200 && known ? new Response(known.bytes, { status: 200 }) : response;
+  };
+  const get = (blob) =>
+    fetchBlob({
+      registry: "registry.example",
+      repository,
+      digest: blob.digest,
+      fetchImpl: served,
+      tokenCache,
+      retryOptions: retryTestOptions(),
+    });
+  return concurrent ? Promise.all(blobs.map(get)) : Promise.all([]).then(async () => {
+    const out = [];
+    for (const blob of blobs) out.push(await get(blob));
+    return out;
+  });
+}
+
+test("one token exchange serves every request of one scope in one prepare", async () => {
+  const { fetchImpl, log } = bearerRegistry();
+  const tokenCache = createRegistryTokenCache();
+  await pullBlobs({ fetchImpl, count: 8, tokenCache });
+  assert.equal(log.tokens, 1);
+  assert.equal(log.anonymous, 1, "only the first request is anonymous");
+  assert.equal(log.authorized, 8);
+});
+
+test("concurrent first requests share one token exchange", async () => {
+  const { fetchImpl, log } = bearerRegistry();
+  await pullBlobs({ fetchImpl, count: 6, tokenCache: createRegistryTokenCache(), concurrent: true });
+  assert.equal(log.tokens, 1);
+  assert.equal(log.authorized, 6);
+});
+
+test("without a cache every request keeps its own token exchange", async () => {
+  const { fetchImpl, log } = bearerRegistry();
+  await pullBlobs({ fetchImpl, count: 3 });
+  assert.equal(log.tokens, 3);
+  assert.equal(log.anonymous, 3);
+});
+
+test("a cached token never crosses repositories", async () => {
+  const { fetchImpl, log } = bearerRegistry();
+  const tokenCache = createRegistryTokenCache();
+  await pullBlobs({ fetchImpl, repository: "pdp-connect/connector/ynab", count: 2, tokenCache });
+  await pullBlobs({ fetchImpl, repository: "pdp-connect/connector/oura", count: 2, tokenCache });
+  assert.equal(log.tokens, 2);
+  assert.deepEqual(log.scopes, [
+    "repository:pdp-connect/connector/ynab:pull",
+    "repository:pdp-connect/connector/oura:pull",
+  ]);
+});
+
+test("a cached token the registry refuses is replaced once, not retried forever", async () => {
+  let expired = null;
+  const { fetchImpl, log } = bearerRegistry({ rejectToken: (authorization) => authorization === expired });
+  const tokenCache = createRegistryTokenCache();
+  await pullBlobs({ fetchImpl, count: 1, tokenCache });
+  // token-1 expires; the next request must fetch token-2 and carry on.
+  expired = "Bearer token-1";
+  assert.equal((await pullBlobs({ fetchImpl, count: 1, tokenCache })).length, 1);
+  assert.equal(log.tokens, 2);
+  const after = await pullBlobs({ fetchImpl, count: 3, tokenCache });
+  assert.equal(after.length, 3);
+  assert.equal(log.tokens, 2, "the replacement token is cached in turn");
+});
+
+test("a failed token exchange is not cached", async () => {
+  let tokens = 0;
+  const fetchImpl = async (url) => {
+    if (new URL(url).pathname === "/token") {
+      tokens += 1;
+      return new Response("nope", { status: 500 });
+    }
+    return new Response("{}", {
+      status: 401,
+      headers: { "www-authenticate": 'Bearer realm="https://registry.example/token",service="fixture"' },
+    });
+  };
+  const tokenCache = createRegistryTokenCache();
+  await assert.rejects(pullBlobs({ fetchImpl, count: 1, tokenCache }), (error) => error.reason === "unverifiable");
+  const afterFirst = tokens;
+  await assert.rejects(pullBlobs({ fetchImpl, count: 1, tokenCache }), (error) => error.reason === "unverifiable");
+  assert.ok(tokens > afterFirst, "the second call asked the token endpoint again");
+});
+
+test("settleWithConcurrency never runs more than the limit and reports in input order", async () => {
+  let running = 0;
+  let peak = 0;
+  const settled = await settleWithConcurrency([1, 2, 3, 4, 5, 6, 7], 3, async (n) => {
+    running += 1;
+    peak = Math.max(peak, running);
+    await new Promise((resolve) => setTimeout(resolve, 5 * (8 - n)));
+    running -= 1;
+    if (n === 4) throw new Error("four");
+    return n * 10;
+  });
+  assert.equal(peak, 3);
+  assert.deepEqual(settled.map((r) => (r.status === "fulfilled" ? r.value : r.reason.message)), [10, 20, 30, "four", 50, 60, 70]);
 });

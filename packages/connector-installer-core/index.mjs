@@ -24,8 +24,10 @@ import {
   DEFAULT_OCI_REGISTRY as DEFAULT_OCI_REGISTRY_NAME,
   OciRegistryError,
   discoverSourceDeclarationReferrers,
+  createRegistryTokenCache,
   fetchBlob,
   fetchManifestByDigest,
+  settleWithConcurrency,
   isValidConnectorKey,
   parseOciReference,
   resolveVersionToDigest,
@@ -249,6 +251,10 @@ async function readLayerArchive(
  *   6. every blob is verified against its descriptor digest            (C4.1)
  *   7. config and profile are cross-checked                            (C4.4)
  */
+// Blobs and referrers one prepare reads at a time. Four keeps a prepare off the
+// registry's per-client connection and rate limits while it removes the wait.
+const OCI_FETCH_CONCURRENCY = 4;
+
 async function fetchOciDescriptorBlob(transport, descriptor, label) {
   if (!Number.isSafeInteger(descriptor?.size) || descriptor.size < 0) {
     throw new OciRegistryError(`Refusing ${transport.repository}: ${label} has an invalid size`, "tampered");
@@ -366,6 +372,8 @@ async function fetchOciArtifact(entry, options = {}) {
     timeoutMs: options.ociTimeoutMs,
     fetchImpl: options.fetchImpl,
     retryOptions: options.retryOptions,
+    // One bearer token per scope for this prepare; see createRegistryTokenCache.
+    tokenCache: createRegistryTokenCache(),
   };
 
   // A pinned digest is used as-is, and an unpinned entry is REFUSED rather
@@ -410,19 +418,51 @@ async function fetchOciArtifact(entry, options = {}) {
 
   // Every one of these is digest-verified inside `fetchBlob` against the
   // descriptor that named it (C4.1).
-  const configBytes = await fetchOciDescriptorBlob(transport, manifest.config, "connector config");
-  const profileBytes = await fetchOciDescriptorBlob(transport, layers.profile, "profile layer");
-  const codeBytes = await fetchOciDescriptorBlob(transport, layers.code, "code layer");
-  const layerDeclarationBytes = layers.sourceDeclaration
-    ? await fetchOciDescriptorBlob(transport, layers.sourceDeclaration, "source declaration layer")
-    : null;
-  const referrerDeclarationBytes = await fetchDeclarationReferrerBytes({
-    transport,
-    imageDigest: digest,
-    imageManifest: manifest,
-    imageManifestBytes: manifestBytes,
-    options,
-  });
+  // The blobs and the declaration referrer do not depend on one another, and
+  // nothing is written until all of them have verified. Run them a few at a
+  // time, wait for every one to settle, then surface the failure of the first
+  // task in this order, so which error a caller sees does not depend on timing.
+  const fetchTasks = [
+    ["referrer", () => fetchDeclarationReferrerBytes({
+      transport,
+      imageDigest: digest,
+      imageManifest: manifest,
+      imageManifestBytes: manifestBytes,
+      options,
+    })],
+    ["config", () => fetchOciDescriptorBlob(transport, manifest.config, "connector config")],
+    ["profile", () => fetchOciDescriptorBlob(transport, layers.profile, "profile layer")],
+    ["code", () => fetchOciDescriptorBlob(transport, layers.code, "code layer")],
+    ["declarationLayer", () => layers.sourceDeclaration
+      ? fetchOciDescriptorBlob(transport, layers.sourceDeclaration, "source declaration layer")
+      : null],
+    ["provenance", () => fetchOciDescriptorBlob(transport, layers.provenance, "provenance layer")],
+    ["licenses", () => fetchOciDescriptorBlob(transport, layers.licenses, "licenses layer")],
+    ["assets", () => layers.assets
+      ? fetchOciDescriptorBlob(transport, layers.assets, "assets layer")
+      : null],
+  ];
+  const settled = await settleWithConcurrency(fetchTasks, OCI_FETCH_CONCURRENCY, ([, task]) => task());
+  const throwFirstFailure = (names) => {
+    for (const name of names) {
+      const result = settled[fetchTasks.findIndex(([taskName]) => taskName === name)];
+      if (result.status === "rejected") throw result.reason;
+    }
+  };
+  // The sequential code checked the declarations before it fetched provenance,
+  // licenses and assets, so their failures surface after those checks.
+  throwFirstFailure(["config", "profile", "code", "declarationLayer", "referrer"]);
+  const fetched = Object.fromEntries(fetchTasks.map(([name], i) => [name, settled[i].value]));
+  const {
+    config: configBytes,
+    profile: profileBytes,
+    code: codeBytes,
+    declarationLayer: layerDeclarationBytes,
+    referrer: referrerDeclarationBytes,
+    provenance: provenanceBytes,
+    licenses: licensesBytes,
+    assets: assetsBytes,
+  } = fetched;
   if (layerDeclarationBytes && referrerDeclarationBytes &&
       !layerDeclarationBytes.equals(referrerDeclarationBytes)) {
     throw new OciRegistryError(
@@ -437,11 +477,7 @@ async function fetchOciArtifact(entry, options = {}) {
       "unsigned"
     );
   }
-  const provenanceBytes = await fetchOciDescriptorBlob(transport, layers.provenance, "provenance layer");
-  const licensesBytes = await fetchOciDescriptorBlob(transport, layers.licenses, "licenses layer");
-  const assetsBytes = layers.assets
-    ? await fetchOciDescriptorBlob(transport, layers.assets, "assets layer")
-    : null;
+  throwFirstFailure(["provenance", "licenses", "assets"]);
 
   let config;
   let profile;
