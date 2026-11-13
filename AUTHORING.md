@@ -40,6 +40,20 @@ The rules behind each step are in [the authoring guide](packages/polyfill-connec
 
    Where the package already does a job, use its helper instead of your own code. For example, `createConnectorHttpGovernor` paces requests and handles rate limits, and `buildFullScanCoverageMessage` reports coverage for a stream that reads everything on each run. They are in `packages/polyfill-connectors/src/connector-http-governor.ts` and `packages/polyfill-connectors/src/connector-runtime.ts`.
 
+   The scaffold fills the settings below with defaults. Each one changes what the app does with your connector, so check each one in `manifest.json`.
+
+   | Setting | What it changes | How to choose |
+   |---|---|---|
+   | `capabilities.public_listing.tier` | Who sees the connector in the app. `development` appears only when the user turns on Developer mode. `preview` is offered with a warning to use data that is not critical. `supported` is offered with no warning. | Keep `development`. Step 7 says when you can propose `preview`. Only a maintainer sets `supported`, after a run against a real account. |
+   | `capabilities.refresh_policy.interaction_posture` | Whether a run can need a person. | `none` for an API that runs with a stored token or with no credentials. `manual_action_likely` for a site where a sign-in or a check can stop a run. `otp_likely` when sign-in often asks for a one-time code. |
+   | `capabilities.refresh_policy.background_safe` | Whether the app may run the connector on a schedule with nobody at the screen. | `true` when the posture is `none` or `credentials`. For a browser connector, `true` only if a saved session lets a run finish unattended. This setting does not say whether the connector is proven; the tier says that. |
+   | `capabilities.refresh_policy.recommended_mode` | Whether the app schedules runs by default. | `automatic` when the posture is `none` or `credentials`, or when `background_safe` is `true`. Otherwise `manual`. The app rejects a manifest whose posture, `background_safe` and mode disagree. |
+   | `recommended_interval_seconds`, `minimum_interval_seconds` and `maximum_staleness_seconds` in `refresh_policy` | The default time between scheduled runs, the shortest interval a user can set before the app warns them, and the age at which the app marks the data out of date. | Base the minimum on the platform's published or measured rate limits. Make the recommended interval at least the minimum, and the staleness age longer than the recommended interval. Give your reasons in `rationale`. |
+   | `semantics` on each stream | Whether records can change after they are collected. | `append_only` for events that never change or disappear, such as plays or payments. `mutable_state` for anything the user can edit or delete. |
+   | `coverage_strategy` on each stream | What a run must report to show that it read the whole stream. | `checkpoint_window` for a stream that continues from a saved cursor. `full_inventory` for one that reads everything on each run. `singleton_presence` for one record, such as a profile. `snapshot_import_receipt` for an imported file. `parent_detail_accounting` for detail rows read under a parent stream. |
+   | `freshness_strategy` on each stream | What sets the time the data is current as of. | `scheduled_window` when the app runs the connector on a schedule. `manual_as_of` when a person starts each run or imports a file. `device_heartbeat` for a collector on the user's own device. |
+   | `consent_time_field` on each stream | When a user shares only a time range of a stream, the app filters the records by this field. A stream without it cannot be limited to a time range. | The record's own time, such as when it was sent or played. Leave it out for records that have no time. |
+
 2. Give the connector its inputs, then run it against your account.
 
    The tools on this page read inputs from the environment and from `.env.local` at the repository root. Put each value there once, and every step uses it. Git ignores `.env.local`; never commit it.
@@ -109,7 +123,7 @@ The rules behind each step are in [the authoring guide](packages/polyfill-connec
 
    The [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) explains each check and what each tier needs.
 
-7. Open the PR. Set the version in `manifest.json` to `0.1.0` and the tier to `development`, then run `npm run connector-implementation-index:generate` and commit `connector-implementation-index.json`. The description states:
+7. Open the PR. Set the version in `manifest.json` to `0.1.0`. Keep the tier at `development`, or propose `preview` in the PR if the report shows `✔` for `evidence`, `pilot fixture` and `mock mutation`. The maintainer decides. Then run `npm run connector-implementation-index:generate` and commit `connector-implementation-index.json`. The description states:
 
    1. What the connector collects.
    2. What it leaves out, and why.
