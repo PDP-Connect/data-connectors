@@ -810,25 +810,29 @@ test(`overlapping contribution views ${countConflict ? "withhold conflicting cou
 // unauthenticated REST rate limit, transport) never read the inventory. It is
 // a failed read reported through reportStreamFailure, not an unproven
 // enumeration (Collection Profile 5.5).
-for (const { stream, services } of [
+for (const { stream, cause, services } of [
 	{
 		stream: "events",
+		cause: "http_rate_limited",
 		services: {
 			fetchPublicJson: async (): Promise<never> => {
-				throw new Error("github_browser_http_429");
+				// Playwright prefixes errors thrown inside page.evaluate.
+				throw new Error("page.evaluate: Error: github_browser_http_429\n    at eval");
 			},
 		},
 	},
 	{
 		stream: "history",
+		cause: "source_request_failed",
 		services: {
 			fetchPublicJson: async (): Promise<never> => {
-				throw new Error("github_browser_http_403");
+				throw new Error("page.evaluate: Error: github_browser_http_403");
 			},
 		},
 	},
 	{
 		stream: "contributions",
+		cause: "source_request_failed",
 		services: {
 			openContributionPage: async (): Promise<never> => {
 				throw new Error("net::ERR_TIMED_OUT at https://github.com/sample-user");
@@ -870,7 +874,7 @@ for (const { stream, services } of [
 		assert.equal(reports[0]?.stream, stream);
 		assert.equal(
 			reports[0]?.message,
-			"GitHub requests for this stream failed: source_request_failed.",
+			`GitHub requests for this stream failed: ${cause}.`,
 		);
 		const options = reports[0]?.options as {
 			recoveryHint: unknown;
@@ -880,7 +884,7 @@ for (const { stream, services } of [
 			action: "retry_by_runtime",
 			retryable: true,
 		});
-		assert.equal(options.diagnostics.reason, "source_request_failed");
+		assert.equal(options.diagnostics.reason, cause);
 		assert.equal(
 			options.diagnostics.source_error,
 			stream === "events" ? "http_429" : stream === "history" ? "http_403" : undefined,
@@ -1135,3 +1139,37 @@ test("an omitted optional profile name succeeds through the real runtime", async
 		assert.equal(done.records_emitted, records.length);
 	}
 });
+
+// A non-200 response returned as data (the status survives page.evaluate)
+// classifies by status: 429 is rate-limited, other statuses are status failures.
+for (const { status, cause } of [
+	{ status: 429, cause: "http_rate_limited" },
+	{ status: 503, cause: "http_status_failed" },
+] as const) {
+	test(`an events response with status ${status} is classified as ${cause}`, async () => {
+		const profile = await readFixture("profile.html");
+		const reports: Array<{ message: string; options: unknown }> = [];
+		await collectGitHubBrowser(
+			{
+				emit: async () => {},
+				emitRecord: async () => {},
+				progress: async () => {},
+				reportStreamFailure: async (_stream, message, options) => {
+					reports.push({ message, options });
+				},
+				requested: new Set(["events"]),
+				state: {},
+			},
+			{
+				fetchPublicJson: async (url) => ({ ...apiObservation(url, null), status }),
+				now: () => new Date("2026-01-01T00:00:00Z"),
+				openPage: async (url) => pageObservation(url, profile),
+				sleep: async () => {},
+			},
+		);
+		assert.equal(reports.length, 1);
+		assert.equal(reports[0]?.message, `GitHub requests for this stream failed: ${cause}.`);
+		const diagnostics = (reports[0]?.options as { diagnostics: Record<string, unknown> }).diagnostics;
+		assert.equal(diagnostics.source_error, `http_${status}`);
+	});
+}
