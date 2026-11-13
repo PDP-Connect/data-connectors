@@ -1,33 +1,54 @@
 # Polyfill connector scenario tools
 
-Record a connector run, then replay the captured scenario against the connector subprocess. The verifier compares records, cursor state, and captured completeness messages. It does not start the reference implementation or require a pdpp checkout.
+Reference for the two commands that record a connector run and replay it. The command sequence for building a connector is in [AUTHORING.md](../../AUTHORING.md). The replay verifier compares records, cursor state and captured completeness messages against the connector subprocess. It starts no reference server.
 
-Run commands from this package directory with Node 24:
+Run the commands from `packages/polyfill-connectors` with Node 24 after `npm ci --ignore-scripts` in the repo root:
 
 ```sh
-npm ci --ignore-scripts
 node --import tsx bin/scenario-record.ts oura --out runs/oura/scenario.json
 node --import tsx bin/scenario-verify.ts oura runs/oura/scenario.json
 ```
 
-Recording contacts the provider with your configured credentials and captures two runs by default. Add `--runs 1` for one run, `--streams <names>` to select streams, or `--record-har` to capture a local browser context's HAR and storage state. Browser recording requires the package's browser installation. With `PDPP_<NAME>_REMOTE_CDP_URL` set, `--record-har` records the attached browser instead. That recording covers the whole attached browser context, including traffic and cookies from tabs the connector did not open, so point it at a dedicated sandbox browser or profile signed in to a test account.
+## scenario-record
 
-## Attached CDP HAR recording
+Recording contacts the provider with your configured credentials. It captures two runs by default: a full refresh, then an incremental run seeded with the first run's committed state.
 
-With an attached CDP browser, a popup's first navigation can be missing from the scenario HAR under load. A missing popup request alone does not prove a connector defect. See [the recorder gap](https://github.com/PDP-Connect/data-connectors/issues/523).
+| Option | Effect |
+|---|---|
+| `--runs 1` | Capture only the first run. |
+| `--out <path>` | Write the scenario file to `<path>`. The default is `runs/<connector>/<iso>-scenario.json`. |
+| `--streams <names>` | Capture only the comma-separated streams. |
+| `--answer <id-or-index>=<value>`, `--answers <json-file>` | Answer connector prompts without a terminal. |
+| `--persist-otp` | Store one-time-code answers in the scenario. |
+| `--timeout <seconds>` | Set the inactivity limit. The recorder kills a connector subprocess that is silent for that long. |
+| `--record-har` | Capture the HAR and storage state of a local browser context. Browser recording needs the package's browser installation. |
 
-Replay uses the current connector source. Add `--require-capture-source` to require the source digest recorded at capture time. A mismatch in replayed output or invalid scenario exits nonzero. The printed `recorded_replay` claim has separate eligibility checks: the isolation-evidence claim remains withheld exactly as in [pdpp #274](https://github.com/PDP-Connect/pdpp/pull/274). Passing replay is not certification that the isolation boundary is closed. Browser replay also reports its driver-specific evidence limitations.
+With `PDPP_<NAME>_REMOTE_CDP_URL` set, `--record-har` records the attached browser. The recording covers the whole attached browser context, including traffic and cookies from tabs the connector did not open. Attach a dedicated browser or profile that is signed in to a test account.
 
-Captures default to the ignored `runs/` directory. They contain account data; browser storage-state files retain live session credentials. Keep captures local and review/redact them before sharing, including captures written elsewhere with `--out`.
+With an attached browser under load, the HAR can miss the first navigation of a popup. A missing popup request alone does not show a connector defect.
 
-`src/scenario/verify.ts` documents the reference runtime's state-merge rule but implements it locally. The scenario CLIs only use the path/manifest helpers from `src/orchestrator.ts`; they never call its embedded-server functions. The existing `bin/orchestrate.ts` remains dependent on the external reference implementation and outside this repository's local test/typecheck coverage.
+Captures go to the git-ignored `runs/` directory. They contain account data, and storage-state files hold live session credentials. Keep captures local and redact them before sharing, including captures written elsewhere with `--out`.
 
-Validation:
+## scenario-verify
+
+Replay uses the current connector source.
+
+| Option | Effect |
+|---|---|
+| `--require-capture-source` | Require the source and declaration digests recorded at capture time to match. |
+| `--json <path>` | Write the claim record to `<path>`. The directory must exist. |
+
+A mismatch in replayed output, or an invalid scenario, exits with a nonzero code. The printed `recorded_replay` claim has its own eligibility checks, and no driver earns it, because the isolation-evidence boundary is not proven (`isolationEvidenceBoundaryProven` is `false` in `bin/scenario-verify.ts`). A passing replay therefore does not certify that the isolation boundary is closed. Browser replay also reports the evidence limits of its driver.
+
+`src/scenario/verify.ts` implements the runtime's state-merge rule locally. The scenario commands use only the path and manifest helpers of `src/orchestrator.ts`.
+
+## Validate changes to the tools
+
+Run these from `packages/polyfill-connectors`:
 
 ```sh
 npm run verify
-node scripts/run-tests.mjs
-node --test --import tsx bin/scenario-verify-strict.test.ts src/scenario/isolation-mechanism.test.ts
+npm test
 ```
 
-The test runner discovers both `bin/**/*.test.ts` and `src/**/*.test.ts`. CI retains its 10-minute verify budget. This port is tracked by [pdpp #337](https://github.com/PDP-Connect/pdpp/issues/337).
+`npm test` runs the sandboxed lane and the namespaces lane. [TESTING.md](../../TESTING.md) describes both lanes and the faster `npm run test:fast`.

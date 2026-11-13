@@ -1,44 +1,103 @@
-# Connector authoring
+# Build a connector
 
-Create and maintain PDPP Collection Profile implementations in this repository under `connectors/<key>/`. Keep the connector's code, `manifest.json`, icon, tests, and reviewed scrubbed fixtures together. Use the shared runtime in `packages/polyfill-connectors/src/`. The [PDPP Collection Profile](docs/spec/collection-profile.md) is the normative manifest and wire contract. The [runtime note](packages/polyfill-connectors/docs/collection-profile-runtime.md) records current package entry points and known implementation gaps.
+This page takes you from an empty directory to a connector PR that a maintainer can review. A connector lives in `connectors/<key>/` with its code, `manifest.json`, icon, tests and fixtures. The maintainer who reviews your PR does not have your account and cannot run your connector, so the PR carries the proof: a replay claim recorded from your own account, and a `conformance` report with no open failures.
 
-## Submit a new connector
+The rules behind each step are in [the authoring guide](packages/polyfill-connectors/docs/connector-authoring-guide.md). The contract for manifests and messages is the [Collection Profile](docs/spec/collection-profile.md).
 
-Maintainers usually cannot run your connector: they do not have your account. Your PR must show that it works; `conformance` and a reviewer check the rest. Do these five things:
+## Before you start
 
-1. **Start from the closest existing connector.** Scaffold with `connector-init` (step 1 below), then follow a peer of the same kind: `connectors/steam/` for an API with a token, `connectors/chatgpt/` for a signed-in browser session, `connectors/apple_health/` for a file import. Use the shared helpers in `packages/polyfill-connectors/src/` instead of your own versions, for example `createConnectorHttpGovernor` for rate limits and `buildFullScanCoverageMessage` for coverage.
-2. **Cover the platform.** List what the platform holds from its API reference or its data export, and collect what a user would expect to find. Keep the fields the API returns unless you have a reason to drop them. Add `account_profile`, `account_plan` or `usage_summary` streams where the platform has that data.
-3. **Run it against your own account and commit the claim.** Steps 2 to 5 below. Commit only `connectors/<key>/evidence/claim.json`; the scenario holds your data and stays on your machine. Record again after each code change: a claim from older code reads as stale.
-4. **Run `npm run conformance -- <key>` until no line starts with `✖` or `?`.** Fix each `⚠` and `·` line, or say in the PR why it does not apply. A connector with no HTTP requests keeps `?` on `mock mutation`; say so in the PR. CI prints the same report in the "Connector evidence summary" job of your PR.
-5. **Open the PR at version `0.1.0` and tier `development`.** In the description, state what the connector collects, what it leaves out and why, and how you tested it (paste the `streams exercised` lines that `scenario-verify` prints). List each `conformance` line you left open, with the reason. Describe the connector, not the tool that helped you write it.
+1. Install the dependencies from the repository root. Run every command on this page from the root.
 
-Reviewers use [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md) for the questions no check can answer. Read it before you open the PR.
+   ```bash
+   npm ci
+   npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+   ```
 
-## Local authoring loop
+   npm can warn that it blocked install scripts for some packages. The steps on this page do not need them.
 
-Run these commands from the repository root after installing dependencies:
+2. Choose the existing connector closest to yours, and read it before you write code.
 
-```bash
-npm ci
-npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
-```
+   | Your source | Start from |
+   |---|---|
+   | An API with a token or key, or with no credentials | `connectors/steam/` |
+   | A server the user hosts, at a URL they give | `connectors/jellyfin/` |
+   | A website that needs a signed-in browser | `connectors/chatgpt/` |
+   | A file the user exports and imports | `connectors/apple_health/` |
 
-The second install provides the isolated Vitest dependencies used by package verification and tests. `--json` writes to the path as given, relative to the current working directory; using the root keeps the claim at `connectors/<key>/evidence/claim.json`.
+3. List what the platform holds, from its API reference or its data export. Your streams cover what a user expects to find. Add `account_profile`, `account_plan` or `usage_summary` streams where the platform has that data, and keep the fields the API returns unless you have a reason to drop them.
 
-1. **Scaffold:** `node --import tsx packages/polyfill-connectors/bin/connector-init.ts <key> [--display-name <name>] [--stream <stream>] [--browser]`. The key and stream use lowercase snake_case. The default creates an API connector; `--browser` creates a browser connector. The command refuses to overwrite existing paths. The scaffold leaves `TODO` stubs for stream descriptions, the upstream request, and (for `--browser`) navigation and extraction. Fill them in, and configure credentials or a browser session, before step 2.
-2. **Run and watch:** `node --import tsx packages/polyfill-connectors/bin/connector-dev.ts <key> [--streams <name,name,...>] [--summary-out <path>]`. This runs the connector against its live upstream using configured credentials and prints records and progress locally. It is a development run, not an ingest proof. Keep output and summaries private.
-3. **Capture:** `node --import tsx packages/polyfill-connectors/bin/scenario-record.ts <key> [--runs 1|2] [--streams <name,name,...>] [--record-har]`. For browser replay, pass `--record-har` and confirm that capture produced usable HAR and storage-state files; keep both private. Without them, a browser scenario cannot provide that replay. By default it records two runs. `--runs 1` records only the first. The default scenario destination is `packages/polyfill-connectors/runs/<key>/`; captures, HAR files, storage state, and run output can contain account data or credentials. Keep them local; do not blindly commit or share them. Two runs do not by themselves prove full-refresh or incremental semantics.
-4. **Replay:** `node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <scenario-path> [--require-capture-source]`. Replay runs the current connector against the captured interactions. A passing replay checks output against that scenario; it does not collect fresh account data or establish provider freshness or stability under provider churn. The optional source flag also requires source and declaration digests to match capture time. Use the scenario path printed by capture (normally `packages/polyfill-connectors/runs/<key>/<file>`).
-5. **Write dated evidence:** after replay, create the evidence directory and write the verifier's claim record: `mkdir -p connectors/<key>/evidence && node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <scenario-path> --json connectors/<key>/evidence/claim.json`. The scaffold does not create that directory, and the verifier does not create it either. If the write fails, the verifier prints a warning and keeps its replay exit code, so remove the old claim before running the command, or verify that the new claim has the current verification timestamp and expected digests. Review its content before committing it; an existing file alone does not prove a new write succeeded. The record holds the claim and its limitations, capture and verification timestamps, the coverage labels earned (for example `empty_state_run`), the run count, the names of the drivers used, captured and verified source and declaration digests, and the scenario file name. It does not hold per-stream coverage; the `streams exercised` summary prints only to the verifier's stdout. Commit the claim only; keep its scenario and related raw files private. A `diagnostic_replay` claim records limitations. Currently `recorded_replay` is withheld for every driver pending independent review of the isolation evidence boundary. See the [scenario claim details](packages/polyfill-connectors/docs/connector-authoring-guide.md#92-scenario-replay-evidence-claimjson) for interpretation and boundaries.
+## Steps
 
-Then run `npm run conformance -- <key>` (step 4 above). The [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) explains each of its steps and what each tier needs. Run package verification and focused tests before you open the PR. For artifact build and publication flow, see the repository README and `scripts/build-connector-oci-artifact.mjs` / `scripts/verify-connector-oci-artifact.mjs`.
+1. Scaffold the connector. The key and the stream names use lowercase snake_case. Add `--browser` for a browser connector.
 
-The historical Playwright scope catalog is frozen. A new Collection Profile stream does not automatically replace a Desktop scope or authorize writing raw records under a legacy scope ID. Such a replacement needs a separately reviewed projection and consumer activation.
+   ```bash
+   node --import tsx packages/polyfill-connectors/bin/connector-init.ts <key> --display-name "<Name>" --stream <stream>
+   ```
 
-Implementation or manifest-contract changes require a connector version bump. Publication is selected by `scripts/select-publish-connectors.mjs` and signed from the protected main workflow.
+   The command creates `connectors/<key>/` and refuses to overwrite a path that exists. Fill in each `TODO` it leaves: stream descriptions, the request to the platform and, for `--browser`, navigation and extraction. Use the shared helpers in `packages/polyfill-connectors/src/` for work they already do, for example `createConnectorHttpGovernor` for rate limits and `buildFullScanCoverageMessage` for coverage.
 
-## Review and publish a connector
+2. Give the connector its inputs, then run it against your account.
 
-1. **Review the PR.** The maintainer who picks it up checks that CI is green, reads the "Connector readiness" section of the "Connector evidence summary" job, and works through [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md). The evidence must meet the proposed tier in the [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md). Ask for missing evidence or changes in the PR. Share only reviewed, scrubbed or synthetic examples.
-2. **Approve and merge when it is ready to publish.** For a publishable connector, check its entry in the [publish inventory](scripts/connector-publish-allowlist.mjs) and confirm the intended version. Merging an eligible change to `main` can publish it through the [connector publication workflow](.github/workflows/publish-polyfill-connectors.yml).
-3. **Confirm publication.** Open the workflow run for the merge and check that the connector version was signed and the catalog lists the same version and digest. Post the run and published digest in the PR. If publication fails or the entry is missing, post the failed step or missing entry and name the maintainer taking it from there. Confirm availability in Vana separately when applicable.
+   The tools on this page read inputs from the environment and from `.env.local` at the repository root. Put each value there once, and every step uses it. Never commit `.env.local`.
+
+   | Input | Where to declare it | Example |
+   |---|---|---|
+   | A secret (token, key, password) | `auth.required` in the `runConnector` call in `index.ts` | `STEAM_API_KEY` in `connectors/steam/index.ts` |
+   | A setting that is not secret and that the connector needs (user ID, server URL) | Read `process.env` in the connector. Keep it out of `auth.required`, which would prompt the user for it as a credential | `STEAM_USER_ID` in `connectors/steam/index.ts` |
+   | An option the user can change (lookback, include list) | `options_schema` in the manifest, read with `readOptions` | `connectors/claude_code/manifest.json` |
+
+   The scaffold declares one token, `<KEY>_API_TOKEN`. If the platform needs no credentials, delete the `auth` entry from `index.ts` and from the manifest's `capabilities`. [Connector options](packages/polyfill-connectors/docs/connector-authoring-guide.md#connector-options) describes `options_schema` and `readOptions`.
+
+   ```bash
+   node --import tsx packages/polyfill-connectors/bin/connector-dev.ts <key>
+   ```
+
+   The command prints each record and progress message as the connector emits them. Fix the connector until a run ends without an error and the records hold what you expect. This output holds your account data, so keep it on your machine.
+
+3. Record a scenario. The command runs the connector twice against your account: once from empty state, and once from the state the first run saved.
+
+   ```bash
+   node --import tsx packages/polyfill-connectors/bin/scenario-record.ts <key>
+   ```
+
+   It prints the path of the scenario file, under `packages/polyfill-connectors/runs/<key>/`. The scenario holds your account data and stays on your machine. For a browser connector, add `--record-har`; without the HAR and storage-state files it writes, the scenario cannot replay.
+
+4. Replay the scenario against your code.
+
+   ```bash
+   node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <scenario-path>
+   ```
+
+   A pass prints `streams exercised: <n> of <m> declared` and names each declared stream the scenario did not reach. Copy that line into your PR. Replay runs on a faster clock than the recording, so state that holds the current time differs between the two and fails the replay. Put the run's `emittedAt` in `STATE`, not `nowIso()`.
+
+   If your connector reads everything on each run, the second run repeats the first, and the verifier prints that it did not see incremental behavior. That is expected; say so in the PR.
+
+5. Write the claim. The claim records that this code replayed your scenario, and it holds no account data.
+
+   ```bash
+   mkdir -p connectors/<key>/evidence
+   node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <scenario-path> --json connectors/<key>/evidence/claim.json
+   ```
+
+   Commit `claim.json`, and nothing else from steps 3 to 5. After each change to the code or the manifest, do steps 3 to 5 again: a claim from older code reads as stale. If the verifier cannot write the file, it prints a warning and keeps the replay's exit code, so check the `verified_at` time in the claim. [Scenario replay evidence](packages/polyfill-connectors/docs/connector-authoring-guide.md#92-scenario-replay-evidence-claimjson) describes each field.
+
+6. Run the conformance report.
+
+   ```bash
+   npm run conformance -- <key>
+   ```
+
+   Each line starts with a mark: `✔` pass, `⚠` weak, `·` advisory, `✖` fail, `?` unknown. Fix every `✖` and `?` line. Fix each `⚠` and `·` line, or give the reason it does not apply in the PR. A connector that makes no HTTP requests keeps `?` on `mock mutation`; say so in the PR. The [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) explains each step of the report and what each tier needs.
+
+7. Open the PR. Set the version in `manifest.json` to `0.1.0` and the tier to `development`. The description states:
+
+   1. What the connector collects.
+   2. What it leaves out, and why.
+   3. How you tested it, with the `streams exercised` line from step 4.
+   4. Each `conformance` line you left open, with its reason.
+
+   Describe the connector, not the tools that helped you write it. CI runs the same report in the "Connector evidence summary" job. A maintainer reviews the PR with [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md); read it before you open the PR.
+
+## Change an existing connector
+
+Make the change, then do steps 2 to 6 for that connector. A change to the code or the manifest needs a higher version in `manifest.json`; [docs/publishing.md](docs/publishing.md) gives the rule.

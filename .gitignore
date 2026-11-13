@@ -3,6 +3,7 @@
 .DS_Store
 .fetch-cache.json
 .env
+.env.local
 node_modules/
 
 # Test runner output

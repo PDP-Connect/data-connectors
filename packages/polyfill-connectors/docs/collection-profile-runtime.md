@@ -1,7 +1,5 @@
 # Collection Profile runtime note
 
-Status: Informative
-
 This note describes the current `polyfill-connectors` implementation and the
 `@pdpp/*` packages it installs. The normative protocol is the
 [PDPP Collection Profile](../../../docs/spec/collection-profile.md).
@@ -31,11 +29,7 @@ version. It defines two protocol capabilities, `STREAM_EVIDENCE` and `BLOB`.
 The collector-runtime placement helper can reject a connector whose required
 protocol capability is absent.
 
-Of the 51 manifests under `connectors/`, only `anthropic` declares
-`protocol_capabilities` (`["BLOB"]`). The others omit it, which means the empty
-set. Local collector definitions carry an explicit empty array because the
-current TypeScript interface requires one. These are two serializations of the
-same declaration, not two capability models.
+The manifests of `anthropic` and `chatgpt` declare `protocol_capabilities` (`["BLOB"]`). The others omit it, which means the empty set. Local collector definitions carry an explicit empty array because the current TypeScript interface requires one. Both forms are the same declaration.
 
 ## TypeScript projection
 
@@ -47,7 +41,7 @@ authority for portable meaning. A type that admits an extension field does not
 make that field part of v0.1 conformance.
 
 The current projection is not exact. Its `StartMessage` omits `run_id`,
-`bindings`, `now`, and stream-level `fields`. It also declares
+`bindings` and `now`. It also declares
 `INTERACTION_RESPONSE.status: "error"`, while the package interaction handler
 (`src/interaction-handler.ts`) accepts `success`, `cancelled`, and `timeout`.
 Its record union omits explicit `op: "upsert"`. The normative profile follows
@@ -91,32 +85,25 @@ against Section 3.
 | Profile requirement | Current package status |
 | --- | --- |
 | Binding registry | The packaged collector capability profile advertises `network`, `browser`, `filesystem`, and `local_device`. It does not advertise `desktop_session`, which `signal` requires. `local_device` is a runtime mode in the profile, not a binding. |
-| Filesystem inputs | No manifest declares `filesystem.inputs` yet, and no runtime confines a connector to declared inputs. Six manifests still use `setup.manual_or_upload.import_dir_env_var`. `claude_code` and `codex` describe fixed home paths in `runtime_requirements.local_paths`. |
+| Filesystem inputs | No manifest declares `filesystem.inputs` yet, and no runtime confines a connector to declared inputs. Seven manifests (`fitbit`, `strava`, `google_maps`, `youtube_takeout`, `whatsapp`, `netflix_export`, `apple_health`) use `setup.manual_or_upload.import_dir_env_var`. `claude_code` and `codex` describe fixed home paths in `runtime_requirements.local_paths`. |
 | Catalog projection of inputs | `scripts/generate-connector-catalog.mjs` projects each published binding to `required` and `features`, so the catalog carries no `inputs` or `rationale`. Installers validate the catalog against the schema bundled in their release, which closes each binding object. A versioned catalog is needed before the catalog can carry inputs. |
-| Runtime clock | No runtime sends `START.now`, and no connector reads it. |
-| Collection time in record data | Seven connectors (`amazon`, `chase`, `heb`, `jellyfin`, `reddit`, `slack`, `usaa`) declare a `fetched_at` field in record data. A separate change removes them. |
-| Manifest validation before spawn | Placement checks bindings and protocol capabilities, but no local validator checks the full Collection Profile manifest. |
+| Runtime clock | The `StartMessage` type has no `now` field and the connector runtime does not read one. |
 | Exactly one `START` | The first line is checked. A later `START` is not rejected by the connector-side runtime. |
 | Scope stream enforcement | A non-empty scope is required. `emitRecord()` does not reject an undeclared stream or project `fields`. The parent runtime is expected to enforce both before durable write. |
 | Record envelope | The parent runtime is expected to check key, data, operation, and ISO 8601 `emitted_at`. The ingest path remains responsible for schema and record-identity checks. |
-| Delete records | `emitRecord()` builds a tombstone from `data.id` alone: `key` is `String(data.id)` and `data` is `{ id }`. That meets the profile only for a stream whose primary key is the single field `id`. |
-| Consent time | Time-bounded runs reject absent or unparseable values. Three Steam streams (`owned_games`, `recently_played_games`, `friends`) declare integer Unix-time consent fields instead of ISO 8601 strings. |
 | Interaction timeout | The package interaction handler accepts `timeout`. The connector-protocol type declares `error` instead. |
 | State durability | The connector-side runtime emits state. The parent runtime owns durable writes and commit decisions. |
 | Recovery-hint vocabulary | The package types admit arbitrary action strings. They do not enforce the portable closed set. |
 | Protocol capabilities | The `STREAM_EVIDENCE` and `BLOB` types and the placement gate exist. The packaged collector capability profile advertises neither, although `anthropic` declares `BLOB`. |
-| `OBSERVATION` (profile 0.2.0) | Implemented in this package only. `runConnector({ protocolCapabilities: ["OBSERVATION"] })` sends the facts that shared helpers such as `waitForElementExpectation` record, and adds `DONE.error.basis`. `bin/connector-dev.ts` accepts and records them, and `bin/diagnose.ts` applies the cause rules and the recovery-hint gate. `@pdpp/connector-protocol` does not list the capability, and the parent runtime does not accept the message, so no production connector declares it yet. `connector-dev` bounds the count and size of facts per run, not their rate or the storage kept across runs. |
-| Recovery-hint gate (Section 5.11) | `connector-dev` and `diagnose` present hints through the gate. The parent runtime does not yet apply it. |
+| `OBSERVATION` (profile 0.2.0) | Implemented in this package only. `runConnector({ protocolCapabilities: ["OBSERVATION"] })` sends the facts that shared helpers such as `waitForElementExpectation` record, and adds `DONE.error.basis`. `bin/connector-dev.ts` accepts and records them, and `bin/diagnose.ts` applies the cause rules and the recovery-hint gate. `@pdpp/connector-protocol` does not list the capability, and no manifest declares it. `connector-dev` bounds the count and size of facts per run, not their rate or the storage kept across runs. |
+| Recovery-hint gate (Section 5.11) | `connector-dev` and `diagnose` present hints through the gate. This repository applies it nowhere else. |
 | Terminal status | Connector-protocol types expose only `succeeded` and `failed`. |
 
-The parent runtime that spawns connectors lives outside this repository. The
-statements about it above come from the earlier revision of this note and were
-not re-verified against its current code.
+`@pdpp/connector-protocol` is the authority for what this package emits. The parent runtime that spawns connectors lives outside this repository, so the rows that name it describe expected behavior, not code here.
 
-The normative profile is the target contract. Do not describe the current
-package as fully conforming until these gaps close.
+The normative profile is the target contract. Do not describe the current package as fully conforming until these gaps close.
 
-## Identifier migration
+## Connector identifiers
 
 Each manifest carries `connector_key`, a URL-shaped `connector_id`
 (`https://registry.pdpp.dev/connectors/<connector_key>`), and an equal
@@ -137,8 +124,7 @@ kind. It cannot decide whether an option changes collection scope. The
 platform-owned registry decides the enforced kind. An unknown option defaults
 to `collection_scope`, which requires owner confirmation.
 
-This resolves the self-classification defect for the current implementation.
-The manifest claim remains informative until runtime policy accepts it.
+The manifest claim stays informative until runtime policy accepts it.
 
 ## Connector-reported evidence
 
@@ -148,21 +134,8 @@ an empty source boundary. The normative profile labels these values as
 connector assertions and prevents them from gating checkpoint commit.
 
 The current `DETAIL_COVERAGE.considered` and `.covered` extension accepts
-connector-supplied counts. A separate decision is still needed on whether that
-extension should reconcile counts with runtime-observed records or remain an
-explicitly non-portable assertion.
+connector-supplied counts. The profile gives `optional_skip_keys` no portable coverage credit. A connector that reports unavailable keys there stays runtime-specific.
 
-GroupMe (`connectors/groupme/index.ts`) reports unavailable attachment keys as
-`optional_skip_keys` without the portable `DETAIL_GAP` evidence required for
-`gap_keys`. The profile gives `optional_skip_keys` no portable coverage credit.
-That connector remains runtime-specific until the evidence is reconciled.
+## Source-backed fulfillment
 
-## Provisional source-backed fulfillment
-
-`fulfillment.source_backed` is not implemented in this package. Accepted design
-work proposes a static per-stream capability and an owner-selected,
-per-connection posture. It also proposes an accepted-not-collected health
-disposition for a stream served on demand.
-
-This work remains provisional pending OD-4. It is not a v0.1 conformance
-requirement. This note does not decide its permanent document or schema home.
+`fulfillment.source_backed` is not implemented in this package. The Collection Profile ([docs/spec/collection-profile.md](../../../docs/spec/collection-profile.md)) proposes it as a per-stream capability. It is not a v0.1 conformance requirement.
