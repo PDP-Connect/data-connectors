@@ -18,9 +18,11 @@
  * against the current tree. Digest COMPARISON is bin/scenario-verify.ts's
  * job: by default it REPORTS `captured_with` vs. the current subject's
  * digests (differing is expected and fine — that is what lets a scenario
- * serve as a refactor oracle); `--require-capture-source` restores strict
- * equality for exact-artifact reproduction. See `ScenarioCapturedWith`'s doc
- * comment below for the full rationale.
+ * serve as a refactor oracle); `--require-capture-source` rejects a mismatch
+ * only when both digests in the pair are present. Missing digests are not
+ * required, and `--entrypoint` bypasses comparison (the flag is a no-op).
+ * Passing replay is not verified capture-source provenance; claim eligibility
+ * is a separate decision. See `ScenarioCapturedWith`'s doc comment below.
  */
 
 export const SCENARIO_FORMAT = "pdpp.connector-scenario/1";
@@ -97,9 +99,12 @@ export interface ScenarioConnectorRef {
  * model this way replaces the old `ScenarioConnectorRef.declaration_digest`/
  * `source_digest` pair's strict-equality drift check (which rejected ANY
  * code change since capture, defeating replay-as-refactor-oracle) with a
- * REPORTED comparison by default, and strict equality only when
- * `--require-capture-source` explicitly asks for exact-artifact
- * reproduction.
+ * REPORTED comparison by default. `--require-capture-source` rejects source
+ * or declaration mismatches only when the corresponding captured and current
+ * digests are both present; it does not require missing digests. With
+ * `--entrypoint`, comparison is bypassed and this flag is a no-op. Neither
+ * replay success nor this flag alone establishes capture-source provenance;
+ * digest presence/equality and claim eligibility remain separate checks.
  */
 export interface ScenarioCapturedWith {
 	/** sha256 (hex) of the connector's manifest JSON bytes at capture time —
@@ -148,6 +153,10 @@ export interface ScenarioProviderContact {
 }
 
 export interface ScenarioCapture {
+	/** Producer-required string; validate.ts checks neither presence, type,
+	 *  nor date validity. The verifier copies this value into the claim:
+	 *  missing/undefined is omitted by JSON serialization, while null or
+	 *  other JSON values pass through. Replay success does not validate it. */
 	captured_at: string;
 	/**
 	 * False when the recorder failed to persist part of the capture: a storage

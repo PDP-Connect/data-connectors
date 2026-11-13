@@ -2,6 +2,8 @@
 
 Record a connector run, then replay the captured scenario against the connector subprocess. The verifier compares records, cursor state, and captured completeness messages. It does not start the reference implementation or require a pdpp checkout.
 
+See the [scenario consumer contract](docs/scenario-consumer-contract.md) for the `pdpp.connector-scenario/1` format and versioned CLI contract.
+
 Run commands from this package directory with Node 24:
 
 ```sh
@@ -16,7 +18,7 @@ Recording contacts the provider with your configured credentials and captures tw
 
 With an attached CDP browser, a popup's first navigation can be missing from the scenario HAR under load. A missing popup request alone does not prove a connector defect. See [the recorder gap](https://github.com/PDP-Connect/data-connectors/issues/523).
 
-Replay uses the current connector source. Add `--require-capture-source` to require the source digest recorded at capture time. A mismatch in replayed output or invalid scenario exits nonzero. The printed `recorded_replay` claim has separate eligibility checks: the isolation-evidence claim remains withheld exactly as in [pdpp #274](https://github.com/PDP-Connect/pdpp/pull/274). Passing replay is not certification that the isolation boundary is closed. Browser replay also reports its driver-specific evidence limitations.
+Replay uses the current connector source. Add `--require-capture-source` to reject source or declaration digest mismatches when both captured and current values are present. The flag does not require missing digests and is a no-op with `--entrypoint`, which bypasses digest comparison. Passing replay, even with this flag, does not establish verified capture-source provenance; consumers requiring source binding must check digest presence and equality separately. A mismatch in replayed output or invalid scenario exits nonzero. The printed `recorded_replay` claim has separate eligibility checks: the isolation-evidence claim remains withheld exactly as in [pdpp #274](https://github.com/PDP-Connect/pdpp/pull/274). Passing replay is not certification that the isolation boundary is closed. Browser replay also reports its driver-specific evidence limitations.
 
 Captures default to the ignored `runs/` directory. They contain account data; browser storage-state files retain live session credentials. Keep captures local and review/redact them before sharing, including captures written elsewhere with `--out`.
 
