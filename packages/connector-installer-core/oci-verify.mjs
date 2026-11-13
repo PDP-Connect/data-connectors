@@ -387,6 +387,7 @@ async function tryLegacySignature({
   timeoutMs,
   fetchImpl,
   retryOptions,
+  tokenCache,
   certificateIdentityURI,
   certificateIssuer,
   sigstoreVerifier,
@@ -399,6 +400,7 @@ async function tryLegacySignature({
     timeoutMs,
     fetchImpl,
     retryOptions,
+    tokenCache,
   });
   if (signatureObject === null) return { ok: false, signed: false, failures: [] };
 
@@ -451,6 +453,7 @@ async function tryLegacySignature({
         timeoutMs,
         fetchImpl,
         retryOptions,
+        tokenCache,
       });
 
       // Checked BEFORE the cryptographic verification, so a signature lifted
@@ -502,11 +505,12 @@ async function tryBundleSignature({
   timeoutMs,
   fetchImpl,
   retryOptions,
+  tokenCache,
   certificateIdentityURI,
   certificateIssuer,
   sigstoreVerifier,
 }) {
-  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions };
+  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions, tokenCache };
 
   const candidates = await discoverCosignBundleReferrers({ ...shared, digest });
   if (candidates.length === 0) return { ok: false, signed: false, failures: [] };
@@ -596,6 +600,7 @@ export async function verifyOciSignature({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
   certificateIdentityResolver = defaultOciCertificateIdentityResolver,
   certificateIssuer = DEFAULT_OCI_SIGSTORE_CERTIFICATE_ISSUER,
   sigstoreVerifier = verifySigstoreBundle,
@@ -618,6 +623,7 @@ export async function verifyOciSignature({
     timeoutMs,
     fetchImpl,
     retryOptions,
+    tokenCache,
     certificateIdentityURI,
     certificateIssuer,
     sigstoreVerifier,

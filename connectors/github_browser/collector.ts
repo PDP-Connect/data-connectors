@@ -26,6 +26,7 @@ import {
 	parseRepositoriesPage,
 	parseStarredPage,
 } from "./parsers.ts";
+import { createRateLimitPacer } from "./rate-limit.ts";
 import { validateEntity, validateRecord } from "./schemas.ts";
 import type { BrowserServices, LegacyContributionDay } from "./types.ts";
 
@@ -81,8 +82,10 @@ export async function collectGitHubBrowser(
 				...(status === undefined ? {} : { status: Number(status) }) });
 		}
 	};
+	// Every API call is paced from GitHub's own rate-limit headers.
+	const pacer = createRateLimitPacer({ now: () => services.now(), sleep: (ms) => services.sleep(ms) });
 	const fetchJson = async (url: string, counts: CoverageCounts = { considered: 0, covered: 0 }) => {
-		const response = await sourceRequest(() => services.fetchPublicJson(url), counts);
+		const response = await sourceRequest(() => pacer.send(url, () => services.fetchPublicJson(url)), counts);
 		if (response.status !== 200) throw new CollectionError({ ...counts, origin: "source",
 			cause: response.status === 429 ? "http_rate_limited" : "http_status_failed", status: response.status });
 		if (!apiResponseMatches(response, url)) throw new CollectionError({ ...counts, origin: "source", cause: "wrong_navigation" });
@@ -222,235 +225,246 @@ export async function collectGitHubBrowser(
 		}
 	};
 
-	if (wants.has("profile")) {
-		await runIsolated("profile", async () => {
-			const url = `${GITHUB}/${username}`;
-			// The contribution heading loads after the profile shell, so read the
-			// profile through the loader that waits for the contribution section.
-			const page = await sourceRequest(() => (services.openContributionPage ?? services.openPage)(url));
-			if (!inspectProfilePage(page, username, url)) {
-				await incomplete("profile", "wrong_page_or_owner");
-				return;
+	const collectEvents = () => runIsolated("events", async () => {
+		const evidence = new InventoryEvidence(`${API}/users/${username}/events/public?per_page=100&page=1`, { pages: 3 });
+		let considered = 0;
+		let covered = 0;
+		for (let request = evidence.next; request !== null; request = evidence.next) {
+			const response = await fetchJson(request.url, { considered, covered });
+			if (!Array.isArray(response.data)) {
+				evidence.fail("invalid_events_response");
+				break;
 			}
-			const parsed = parseProfilePage(page.html, url);
-			const record = parsed.row;
-			if (record === null || record.username !== username) {
-				await incomplete("profile", "unreadable_profile");
-				return;
+			considered += response.data.length;
+			const events = response.data.map(raw => parseLegacyEventPageItem(raw));
+			const rows = events.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
+			const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: events.every(parsed => parsed.complete),
+				rejectedRows: events.length - rows.length,
+				...inspectApiWindow(response.link, request.url, response.data.length) });
+			for (const event of rows) {
+				if (added.delete(event.id) && await emitEntity("events", event)) covered += 1;
 			}
-			const collectionFailure = parsed.collectionFailures[0];
-			if (collectionFailure !== undefined) {
-				await incomplete("profile", { ...collectionFailure, origin: "source", considered: 1, covered: 0 });
-				return;
-			}
-			const emitted = await emitEntity("profile", {
-				id: snapshotId("profile"),
-				...record,
-			});
-			if (!emitted) {
-				await incomplete("profile", "invalid_record_shape", {
-					considered: 1,
-					covered: 0,
-				});
-				return;
-			}
-			// Singleton presence only, with readable embedded collections.
-			// Never issue self coverage or derive deletes from these fields.
-			if (await flush("profile")) {
-				await checkpoint("profile", { fetched_at: services.now().toISOString() }, { considered: 1, covered: 1 });
-			} else await incomplete("profile", "invalid_snapshot_shape");
-		});
-	}
+		}
+		// Neither a short page nor our loop limit establishes the source end.
+		const reason = evidence.decide(covered);
+		if (reason === null) await complete("events", { considered, covered });
+		else await incomplete("events", reason, { considered, covered });
+	});
 
-	for (const stream of ["repositories", "starred"] as const) {
-		if (!wants.has(stream)) continue;
-		await runIsolated(stream, async () => {
-			let covered = 0;
-			const evidence = new InventoryEvidence(inventoryUrl(username, stream, 1), { pages: INVENTORY_PAGE_LIMIT });
-			const counts = () => ({ considered: evidence.expectedTotal ?? evidence.identities.size, covered });
-			for (let request = evidence.next; request !== null; request = evidence.next) {
-				const inspect = (page: BrowserPageObservation, parsed: ReturnType<typeof inventoryRows>) => {
-					const { distinct, noProgress } = evidence.previewPage(parsed.rows.map(row => row.id));
-					return inspectInventoryPage(page, stream, username, request.page, distinct, parsed.rejectedRows, noProgress);
-				};
-				const read = async (url: string) => {
-					const page = await sourceRequest(() => services.openPage(url), counts());
-					const parsed = inventoryRows(stream, page.html);
-					return { ...inspect(page, parsed), rows: parsed.rows, ids: parsed.rows.map(row => row.id),
-						rowsComplete: parsed.entriesComplete, rejectedRows: parsed.rejectedRows };
-				};
-				const primary = await read(request.url);
-				const alternate = stream === "starred" && request.page === 1 &&
-					(primary.reason === "terminal_unverified" || primary.reason === "unreadable_list")
-					? await read(`${GITHUB}/stars/${username}?page=1`) : undefined;
-				const { selected, added } = evidence.observeRoutes(primary, alternate);
-				for (const row of selected.rows) {
-					if (added.delete(row.id) && await emitEntity(stream, row)) covered += 1;
-				}
-			}
-			// Without an exact total, the REST list is the independent enumeration.
-			if (stream === "starred" && evidence.decide(covered) === "terminal_unverified") {
-				evidence.reconcile(await sourceRequest(() => enumerateStarredRest(
-					restUrl => fetchJson(restUrl, counts()), username), counts()));
-			}
-			const reason = evidence.decide(covered);
-			if (reason === null) await complete(stream, counts());
-			else await incomplete(stream, reason, counts());
-		});
-	}
-
-	if (wants.has("events")) {
-		await runIsolated("events", async () => {
-			const evidence = new InventoryEvidence(`${API}/users/${username}/events/public?per_page=100&page=1`, { pages: 3 });
-			let considered = 0;
-			let covered = 0;
-			for (let request = evidence.next; request !== null; request = evidence.next) {
-				const response = await fetchJson(request.url, { considered, covered });
-				if (!Array.isArray(response.data)) {
-					evidence.fail("invalid_events_response");
-					break;
-				}
-				considered += response.data.length;
-				const events = response.data.map(raw => parseLegacyEventPageItem(raw));
-				const rows = events.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
-				const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: events.every(parsed => parsed.complete),
-					rejectedRows: events.length - rows.length,
-					...inspectApiWindow(response.link, request.url, response.data.length) });
-				for (const event of rows) {
-					if (added.delete(event.id) && await emitEntity("events", event)) covered += 1;
-				}
-			}
-			// Neither a short page nor our loop limit establishes the source end.
-			const reason = evidence.decide(covered);
-			if (reason === null) await complete("events", { considered, covered });
-			else await incomplete("events", reason, { considered, covered });
-		});
-	}
-
-	if (wants.has("contributions")) {
-		await runIsolated("contributions", async () => {
-			const year = services.now().getUTCFullYear();
-			const graphs: Array<{
-				days: LegacyContributionDay[];
-				total: number;
-				year: number;
-			}> = [];
-			let considered = 0;
-			let rejected = 0;
-			let sourceFailure: CollectionFailure | null = null;
-			const openContributionPage =
-				services.openContributionPage ?? services.openPage;
-			for (let offset = 0; offset < 4; offset += 1) {
-				const itemYear = year - offset;
-				const suffix =
-					offset === 0 ? "" : `?from=${itemYear}-01-01&to=${itemYear}-12-31`;
-				const url = `${GITHUB}/${username}${suffix}`;
-				let page: BrowserPageObservation;
-				try {
-					page = await openContributionPage(url);
-				} catch {
-					sourceFailure ??= { origin: "source", cause: "source_request_failed", considered, covered: 0 };
-					continue;
-				}
-				if (
-					!sameNavigation(page.requestedUrl, page.currentUrl) ||
-					page.currentUrl !== url ||
-					!hasExpectedOwner(page.html, username)
-				) {
-					sourceFailure ??= { origin: "source", cause: "wrong_page_or_owner", considered, covered: 0 };
-					continue;
-				}
-				const graph = parseContributionHtml(page.html);
-				if (!graph.complete) sourceFailure ??= { origin: "source", cause: "year_view_unavailable", considered, covered: 0 };
-				considered += graph.rawDays;
-				rejected += graph.rejectedDays;
-				graphs.push({ ...graph, year: itemYear });
-			}
-			const snapshot = buildContributionSnapshot(
-				graphs,
-				services.now().toISOString(),
+	// History and events read only the API, never the browser page, so each runs in
+	// its own lane beside the browser streams, and a rate-limit wait in one never
+	// holds up another. Each stream still emits its own records, checkpoint and
+	// failure in order, and every message is one whole JSONL line, so the runtime
+	// sees streams interleave only between messages, never within one.
+	const collectHistory = () => runIsolated("history", async () => {
+		const issueResult = await collectHistoryType("issue");
+		if (issueResult.failure !== null) {
+			await incomplete("history", issueResult.failure);
+			return;
+		}
+		const prResult = await collectHistoryType("pr");
+		const considered = issueResult.considered + prResult.considered;
+		const covered = issueResult.covered + prResult.covered;
+		if (prResult.failure !== null) {
+			await incomplete(
+				"history",
+				{ ...prResult.failure, considered, covered },
 			);
-			const days = new Map<string, LegacyContributionDay>();
-			for (const graph of graphs) {
-				for (const day of graph.days) {
-					if (days.has(day.date)) {
-						const prior = days.get(day.date); // Keep the first (rolling) view's relative color level.
-						if (prior?.count !== day.count)
-							rejected += 1;
+			return;
+		}
+		await complete(
+			"history",
+			{ considered, covered },
+			{
+				window: "github_author_search",
+				window_limit_per_type: HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT,
+				bounded_window:
+					issueResult.capped || prResult.capped,
+			},
+		);
+	});
+
+	// A failure in one lane never leaves the other emitting after the run reports it.
+	const settle = (work: Promise<void>): Promise<{ error: unknown } | null> =>
+		work.then(() => null, (error: unknown) => ({ error }));
+	const history = wants.has("history") ? settle(collectHistory()) : Promise.resolve(null);
+	const events = wants.has("events") ? settle(collectEvents()) : Promise.resolve(null);
+	const browserStreams = settle((async () => {
+		if (wants.has("profile")) {
+			await runIsolated("profile", async () => {
+				const url = `${GITHUB}/${username}`;
+				// The contribution heading loads after the profile shell, so read the
+				// profile through the loader that waits for the contribution section.
+				const page = await sourceRequest(() => (services.openContributionPage ?? services.openPage)(url));
+				if (!inspectProfilePage(page, username, url)) {
+					await incomplete("profile", "wrong_page_or_owner");
+					return;
+				}
+				const parsed = parseProfilePage(page.html, url);
+				const record = parsed.row;
+				if (record === null || record.username !== username) {
+					await incomplete("profile", "unreadable_profile");
+					return;
+				}
+				const collectionFailure = parsed.collectionFailures[0];
+				if (collectionFailure !== undefined) {
+					await incomplete("profile", { ...collectionFailure, origin: "source", considered: 1, covered: 0 });
+					return;
+				}
+				const emitted = await emitEntity("profile", {
+					id: snapshotId("profile"),
+					...record,
+				});
+				if (!emitted) {
+					await incomplete("profile", "invalid_record_shape", {
+						considered: 1,
+						covered: 0,
+					});
+					return;
+				}
+				// Singleton presence only, with readable embedded collections.
+				// Never issue self coverage or derive deletes from these fields.
+				if (await flush("profile")) {
+					await checkpoint("profile", { fetched_at: services.now().toISOString() }, { considered: 1, covered: 1 });
+				} else await incomplete("profile", "invalid_snapshot_shape");
+			});
+		}
+
+		for (const stream of ["repositories", "starred"] as const) {
+			if (!wants.has(stream)) continue;
+			await runIsolated(stream, async () => {
+				let covered = 0;
+				const evidence = new InventoryEvidence(inventoryUrl(username, stream, 1), { pages: INVENTORY_PAGE_LIMIT });
+				const counts = () => ({ considered: evidence.expectedTotal ?? evidence.identities.size, covered });
+				for (let request = evidence.next; request !== null; request = evidence.next) {
+					const inspect = (page: BrowserPageObservation, parsed: ReturnType<typeof inventoryRows>) => {
+						const { distinct, noProgress } = evidence.previewPage(parsed.rows.map(row => row.id));
+						return inspectInventoryPage(page, stream, username, request.page, distinct, parsed.rejectedRows, noProgress);
+					};
+					const read = async (url: string) => {
+						const page = await sourceRequest(() => services.openPage(url), counts());
+						const parsed = inventoryRows(stream, page.html);
+						return { ...inspect(page, parsed), rows: parsed.rows, ids: parsed.rows.map(row => row.id),
+							rowsComplete: parsed.entriesComplete, rejectedRows: parsed.rejectedRows };
+					};
+					const primary = await read(request.url);
+					const alternate = stream === "starred" && request.page === 1 &&
+						(primary.reason === "terminal_unverified" || primary.reason === "unreadable_list")
+						? await read(`${GITHUB}/stars/${username}?page=1`) : undefined;
+					const { selected, added } = evidence.observeRoutes(primary, alternate);
+					for (const row of selected.rows) {
+						if (added.delete(row.id) && await emitEntity(stream, row)) covered += 1;
+					}
+				}
+				// Without an exact total, the REST list is the independent enumeration.
+				if (stream === "starred" && evidence.decide(covered) === "terminal_unverified") {
+					evidence.reconcile(await sourceRequest(() => enumerateStarredRest(
+						restUrl => fetchJson(restUrl, counts()), username), counts()));
+				}
+				const reason = evidence.decide(covered);
+				if (reason === null) await complete(stream, counts());
+				else await incomplete(stream, reason, counts());
+			});
+		}
+
+		if (wants.has("contributions")) {
+			await runIsolated("contributions", async () => {
+				const year = services.now().getUTCFullYear();
+				const graphs: Array<{
+					days: LegacyContributionDay[];
+					total: number;
+					year: number;
+				}> = [];
+				let considered = 0;
+				let rejected = 0;
+				let sourceFailure: CollectionFailure | null = null;
+				const openContributionPage =
+					services.openContributionPage ?? services.openPage;
+				for (let offset = 0; offset < 4; offset += 1) {
+					const itemYear = year - offset;
+					const suffix =
+						offset === 0 ? "" : `?from=${itemYear}-01-01&to=${itemYear}-12-31`;
+					const url = `${GITHUB}/${username}${suffix}`;
+					let page: BrowserPageObservation;
+					try {
+						page = await openContributionPage(url);
+					} catch {
+						sourceFailure ??= { origin: "source", cause: "source_request_failed", considered, covered: 0 };
 						continue;
 					}
-					days.set(day.date, day);
+					if (
+						!sameNavigation(page.requestedUrl, page.currentUrl) ||
+						page.currentUrl !== url ||
+						!hasExpectedOwner(page.html, username)
+					) {
+						sourceFailure ??= { origin: "source", cause: "wrong_page_or_owner", considered, covered: 0 };
+						continue;
+					}
+					const graph = parseContributionHtml(page.html);
+					if (!graph.complete) sourceFailure ??= { origin: "source", cause: "year_view_unavailable", considered, covered: 0 };
+					considered += graph.rawDays;
+					rejected += graph.rejectedDays;
+					graphs.push({ ...graph, year: itemYear });
 				}
-			}
-			let covered = 0;
-			for (const day of days.values()) {
-				if (await emitEntity("contributions", { recordType: "day", ...day }))
-					covered += 1;
-				else rejected += 1;
-			}
-			if (snapshot !== null) {
-				considered += 1;
-				const summary = {
-					recordType: "summary",
-					id: snapshotId("contributions"),
-					username,
-					fetchedAt: snapshot.fetchedAt,
-					totalContributionsLastYear: snapshot.totalContributionsLastYear,
-					yearTotals: snapshot.yearTotals,
-					monthlyTotals: snapshot.monthlyTotals,
-					topDay: snapshot.topDay,
-				};
-				if (await emitEntity("contributions", summary)) covered += 1;
-				else rejected += 1;
-			}
-			if (
-				sourceFailure !== null ||
-				snapshot === null ||
-				rejected > 0 ||
-				covered !== days.size + (snapshot === null ? 0 : 1)
-			) {
-				await incomplete(
-					"contributions",
-					sourceFailure !== null
-						? { ...sourceFailure, considered, covered }
-						: "date_coverage_or_shape_mismatch",
-					{ considered, covered },
+				const snapshot = buildContributionSnapshot(
+					graphs,
+					services.now().toISOString(),
 				);
-				return;
-			}
-			await complete("contributions", { considered: covered, covered });
-		});
-	}
-
-	if (wants.has("history")) {
-		await runIsolated("history", async () => {
-			const issueResult = await collectHistoryType("issue");
-			if (issueResult.failure !== null) {
-				await incomplete("history", issueResult.failure);
-				return;
-			}
-			const prResult = await collectHistoryType("pr");
-			const considered = issueResult.considered + prResult.considered;
-			const covered = issueResult.covered + prResult.covered;
-			if (prResult.failure !== null) {
-				await incomplete(
-					"history",
-					{ ...prResult.failure, considered, covered },
-				);
-				return;
-			}
-			await complete(
-				"history",
-				{ considered, covered },
-				{
-					window: "github_author_search",
-					window_limit_per_type: HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT,
-					bounded_window:
-						issueResult.capped || prResult.capped,
-				},
-			);
-		});
-	}
+				const days = new Map<string, LegacyContributionDay>();
+				for (const graph of graphs) {
+					for (const day of graph.days) {
+						if (days.has(day.date)) {
+							const prior = days.get(day.date); // Keep the first (rolling) view's relative color level.
+							if (prior?.count !== day.count)
+								rejected += 1;
+							continue;
+						}
+						days.set(day.date, day);
+					}
+				}
+				let covered = 0;
+				for (const day of days.values()) {
+					if (await emitEntity("contributions", { recordType: "day", ...day }))
+						covered += 1;
+					else rejected += 1;
+				}
+				if (snapshot !== null) {
+					considered += 1;
+					const summary = {
+						recordType: "summary",
+						id: snapshotId("contributions"),
+						username,
+						fetchedAt: snapshot.fetchedAt,
+						totalContributionsLastYear: snapshot.totalContributionsLastYear,
+						yearTotals: snapshot.yearTotals,
+						monthlyTotals: snapshot.monthlyTotals,
+						topDay: snapshot.topDay,
+					};
+					if (await emitEntity("contributions", summary)) covered += 1;
+					else rejected += 1;
+				}
+				if (
+					sourceFailure !== null ||
+					snapshot === null ||
+					rejected > 0 ||
+					covered !== days.size + (snapshot === null ? 0 : 1)
+				) {
+					await incomplete(
+						"contributions",
+						sourceFailure !== null
+							? { ...sourceFailure, considered, covered }
+							: "date_coverage_or_shape_mismatch",
+						{ considered, covered },
+					);
+					return;
+				}
+				await complete("contributions", { considered: covered, covered });
+			});
+		}
+	})());
+	const outcomes = await Promise.all([browserStreams, history, events]);
+	const failed = outcomes.find((outcome) => outcome !== null) ?? null;
+	if (failed !== null) throw failed.error;
 
 	async function collectHistoryType(
 		type: "issue" | "pr",
@@ -466,7 +480,6 @@ export async function collectGitHubBrowser(
 		let capped = false;
 		const counts = () => ({ considered: evidence.expectedTotal ?? evidence.identities.size, covered });
 		for (let request = evidence.next; request !== null; request = evidence.next) {
-			if (request.page > 1) await services.sleep(6500);
 			let response: Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>;
 			try { response = await fetchJson(request.url, counts()); }
 			catch (error) {
