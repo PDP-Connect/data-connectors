@@ -111,6 +111,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		shell_snapshots: null,
 		skills: null,
 	},
+	coros_browser: {
+		activities: { field: "start_at", format: "date-time" },
+		daily_metrics: { field: "date", format: "date" },
+		planned_workouts: { field: "date", format: "date" },
+		profile: null,
+	},
 	discord_browser: {
 		connections: null,
 		messages: { field: "timestamp", format: "date-time" },
@@ -252,6 +258,11 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		posts: { field: "taken_at", format: "date-time" },
 		profile: null,
 	},
+	mountain_project: {
+		profile: null,
+		saved_routes: null,
+		ticks: { field: "date", format: "date" },
+	},
 	muse: {
 		activities: { field: "timestamp", format: "date-time" },
 		connected_apps: null,
@@ -285,6 +296,13 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	},
 	pocket: {
 		items: { field: "time_added", format: "date-time" },
+	},
+	polar_flow: {
+		daily_activity: { field: "date", format: "date" },
+		nightly_recharge: { field: "date", format: "date" },
+		profile: null,
+		sleep: { field: "date", format: "date" },
+		training_sessions: { field: "start_date", format: "date" },
 	},
 	readwise: {
 		kindle_highlights: null,
