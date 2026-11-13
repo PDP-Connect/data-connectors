@@ -337,6 +337,27 @@ jobs:
         working-directory: packages/polyfill-connectors
         run: node --import tsx scripts/connector-evidence-summary.ts $CHANGED_CONNECTORS
 
+      # The static `conformance` steps for each touched connector, in the job
+      # summary, so a reviewer sees the same gaps the author was shown. It
+      # skips the steps that run connector code. Informational, like the rest
+      # of this job: it never fails the check.
+      - name: Summarize connector readiness (conformance --static)
+        if: steps.connectors.outputs.list != ''
+        env:
+          CHANGED_CONNECTORS: ${{ steps.connectors.outputs.list }}
+        working-directory: packages/polyfill-connectors
+        run: |
+          {
+            echo "## Connector readiness"
+            echo "Output of \`npm run conformance -- <key> --static\`. Advisory steps are decisions for the author; see AUTHORING.md."
+            for connector in $CHANGED_CONNECTORS; do
+              [ -f "../../connectors/$connector/manifest.json" ] || continue
+              echo '```text'
+              node --import tsx scripts/conformance.ts "$connector" --static || true
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Labels need a WRITE token. On a pull_request from a FORK, GitHub
       # downgrades GITHUB_TOKEN to read-only no matter what this job's
       # `permissions:` block says (security default — this workflow stays

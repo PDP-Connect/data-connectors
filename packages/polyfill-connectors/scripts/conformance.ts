@@ -4,41 +4,43 @@
 
 /**
  * `conformance <connector>` — the one command a connector author runs to
- * find out whether their connector is done.
+ * find out whether their connector is ready for review.
  *
- * Before this existed the answer was "read the roster comments in
- * connector-conformance-roster.ts and hope". The individual checks all
- * existed; nothing composed them, so nobody ran them together and the
- * result was 8 of 42 connectors at evidence level `proven`.
- *
- * This composes what is already here. It adds no new assertions of its own —
- * every verdict below comes from a check that already shipped:
+ * Steps:
  *
  *   1. manifest present + parseable, declares its own streams
  *   2. a test file exists, and its own suite passes
  *   3. pilot-real-shape fixture present (locks emitted-record shape
  *      against schema drift — src/pilot-fixture-test-helper.ts)
- *   4. mock-mutation verdict (scripts/mock-mutation-check.ts) — ADVISORY
- *   5. reachability coverage (scripts/connector-reachability.mjs) — ADVISORY
+ *   4. evidence: a committed replay claim bound to this exact code
+ *      (scripts/connector-evidence-summary.ts decides bound/stale/none)
+ *   5. coverage: declared coverage strategies are emitted and exercised by
+ *      the shared coverage oracle
+ *   6. version: a new connector starts at 0.1.0 — ADVISORY
+ *   7. shared helpers: jobs done by hand that the package already does — ADVISORY
+ *   8. semantics: optional manifest declarations left undecided — ADVISORY
+ *   9. mock-mutation verdict (scripts/mock-mutation-check.ts) — ADVISORY
  *
- * HONESTY CONTRACT, inherited from the checks it wraps:
+ * Steps 4-8 are pure functions in scripts/conformance-readiness.ts.
+ *
+ * HONESTY CONTRACT:
  *   - A check that cannot run reports UNKNOWN. It never becomes a PASS.
- *   - Steps 4 and 5 are ADVISORY: most connectors have no path-matching mock
- *     and no fixed public API base, and neither absence is actionable in a
- *     single PR. They print, they do not fail.
+ *   - ADVISORY steps print, they do not fail: each is a decision for the
+ *     author, and some do not apply to every connector.
  *   - Passing every step means "nothing mechanical is wrong". It does NOT
- *     mean the connector works against a real account — only a real run
- *     against a real account shows that, which is the whole argument of
- *     docs/inbox/design-note-connector-conformance.md.
+ *     mean the connector works against a real account. The evidence step
+ *     says whether the author recorded such a run; a reviewer still reads
+ *     the PR (CONNECTOR-REVIEW.md).
  *
- * Usage:
- *   node --import tsx scripts/conformance.ts <connector>
- *   node --import tsx scripts/conformance.ts <connector> --json
+ * Usage (from the repository root):
+ *   npm run conformance -- <connector>
+ *   npm run conformance -- <connector> --json
+ *   npm run conformance -- <connector> --static   (skip tests and mock mutation; used by CI)
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { KNOWN_SCAFFOLD_CONNECTORS } from "../src/connector-conformance-roster.ts";
 import {
@@ -48,17 +50,22 @@ import {
 	repoRoot,
 	manifestPath as seamManifestPath,
 } from "../src/connector-paths.ts";
-
-type Verdict = "PASS" | "FAIL" | "UNKNOWN" | "ADVISORY" | "WEAK";
-
-interface Step {
-	readonly advisory?: boolean;
-	readonly detail: string;
-	readonly name: string;
-	/** The specific command or edit that moves this step off its current verdict. Absent only for PASS. */
-	readonly nextAction?: string;
-	readonly verdict: Verdict;
-}
+import {
+	computeDeclarationDigest,
+	computeSourceDigest,
+} from "../src/scenario/validate.ts";
+import {
+	checkCoverageProof,
+	checkEvidence,
+	checkSemantics,
+	checkSharedHelpers,
+	checkVersion,
+	parseUnexercisedCoverage,
+	type ReadinessManifest,
+	type Step,
+	type Verdict,
+} from "./conformance-readiness.ts";
+import { evaluateConnectorEvidence } from "./connector-evidence-summary.ts";
 
 function manifestPath(connector: string): string {
 	return seamManifestPath(connector);
@@ -68,9 +75,9 @@ export function checkManifest(connector: string): Step {
 	const file = manifestPath(connector);
 	if (!existsSync(file)) {
 		return {
-			detail: `no manifest at manifests/${connector}.json`,
+			detail: `no manifest at connectors/${connector}/manifest.json`,
 			name: "manifest",
-			nextAction: `create manifests/${connector}.json — copy the shape of an existing manifest (e.g. manifests/ynab.json) and declare this connector's streams`,
+			nextAction: `create connectors/${connector}/manifest.json — copy the shape of an existing manifest (e.g. connectors/ynab/manifest.json) and declare this connector's streams`,
 			verdict: "FAIL",
 		};
 	}
@@ -86,7 +93,7 @@ export function checkManifest(connector: string): Step {
 			return {
 				detail: "manifest declares no streams",
 				name: "manifest",
-				nextAction: `add at least one entry to the "streams" array in manifests/${connector}.json`,
+				nextAction: `add at least one entry to the "streams" array in connectors/${connector}/manifest.json`,
 				verdict: "FAIL",
 			};
 		}
@@ -100,7 +107,7 @@ export function checkManifest(connector: string): Step {
 		return {
 			detail: `manifest is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
 			name: "manifest",
-			nextAction: `fix the JSON syntax error in manifests/${connector}.json`,
+			nextAction: `fix the JSON syntax error in connectors/${connector}/manifest.json`,
 			verdict: "FAIL",
 		};
 	}
@@ -124,7 +131,7 @@ function checkTests(connector: string): Step {
 			detail:
 				"no test file — cannot be checked, which is not the same as passing",
 			name: "tests",
-			nextAction: `add a connectors/${connector}/integration.test.ts that exercises real collection logic — see docs/reference/connector-authoring-guide.md`,
+			nextAction: `add a connectors/${connector}/integration.test.ts that exercises real collection logic — see packages/polyfill-connectors/docs/connector-authoring-guide.md`,
 			verdict: "UNKNOWN",
 		};
 	}
@@ -157,6 +164,20 @@ function checkTests(connector: string): Step {
 	}
 }
 
+const PILOT_GUIDE =
+	'packages/polyfill-connectors/docs/connector-authoring-guide.md, "The pilot-real-shape fixture"';
+
+function pilotProvenance(dir: string): string {
+	try {
+		const parsed = JSON.parse(
+			readFileSync(join(dir, "provenance.json"), "utf8"),
+		) as { class?: unknown };
+		return typeof parsed.class === "string" ? parsed.class : "unlabelled";
+	} catch {
+		return "unlabelled";
+	}
+}
+
 function checkPilotFixture(connector: string): Step {
 	const dir = join(fixturesDir(connector), "scrubbed", "pilot-real-shape");
 	if (!existsSync(dir)) {
@@ -164,7 +185,7 @@ function checkPilotFixture(connector: string): Step {
 			detail:
 				"no pilot-real-shape fixture — emitted-record shape is not locked against schema drift",
 			name: "pilot fixture",
-			nextAction: `capture one: run this connector with PDPP_CAPTURE_FIXTURES=1 against a real account, then run the scrub-connector-fixtures pipeline to produce fixtures/${connector}/scrubbed/pilot-real-shape/`,
+			nextAction: `add connectors/${connector}/fixtures/scrubbed/pilot-real-shape/records/<stream>.jsonl: synthetic rows with the field shapes a real run emits (connector-init writes a starter set), plus a pilot-fixture.test.ts that calls registerPilotFixtureTests. Never commit real account rows there (${PILOT_GUIDE})`,
 			verdict: "UNKNOWN",
 		};
 	}
@@ -174,7 +195,7 @@ function checkPilotFixture(connector: string): Step {
 		: 0;
 	if (streams > 0) {
 		return {
-			detail: `${streams} stream fixture(s) present`,
+			detail: `${streams} stream fixture(s) present (provenance: ${pilotProvenance(dir)})`,
 			name: "pilot fixture",
 			verdict: "PASS",
 		};
@@ -182,7 +203,7 @@ function checkPilotFixture(connector: string): Step {
 	return {
 		detail: `${streams} stream fixture(s) present`,
 		name: "pilot fixture",
-		nextAction: `fixtures/${connector}/scrubbed/pilot-real-shape/records/ exists but has no .jsonl files — re-run the fixture capture, the directory was created without records`,
+		nextAction: `connectors/${connector}/fixtures/scrubbed/pilot-real-shape/records/ has no .jsonl files — add one synthetic, shape-real file per stream (${PILOT_GUIDE})`,
 		verdict: "UNKNOWN",
 	};
 }
@@ -239,49 +260,106 @@ function checkMockMutation(connector: string): Step {
 	}
 }
 
-function checkReachability(connector: string): Step {
-	const script = join(repoRoot, "scripts", "connector-reachability.mjs");
-	if (!existsSync(script)) {
-		return {
-			advisory: true,
-			detail: "probe script not found",
-			name: "reachability",
-			nextAction:
-				"scripts/connector-reachability.mjs is missing from the repo root — this is a repo-wide problem, not specific to this connector",
-			verdict: "UNKNOWN",
-		};
-	}
-	const source = readFileSync(script, "utf8");
-	if (!source.includes(`connector: "${connector}"`)) {
-		return {
-			advisory: true,
-			detail:
-				"no probe target defined — add one to scripts/connector-reachability.mjs to cover this connector",
-			name: "reachability",
-			nextAction: `if this connector calls a fixed public API base directly (not browser-automation, not local-file-only), add a TARGETS entry to scripts/connector-reachability.mjs using the exact path from this connector's own source — see the file's header comment for the shape. If it's browser-automation-only or file-import-only, this stays UNKNOWN permanently and that's correct.`,
-			verdict: "UNKNOWN",
-		};
-	}
-	return {
-		advisory: true,
-		detail:
-			"probe target defined; run `node scripts/connector-reachability.mjs` (needs network)",
-		name: "reachability",
-		verdict: "ADVISORY",
+/** Concatenated non-test source of a connector, for the static readiness checks. */
+function connectorSource(connector: string): string {
+	const root = join(CONNECTORS_DIR, connector);
+	const parts: string[] = [];
+	const walk = (dir: string): void => {
+		for (const entry of readdirSync(dir)) {
+			const path = join(dir, entry);
+			if (statSync(path).isDirectory()) {
+				if (!["evidence", "fixtures", "node_modules"].includes(entry)) {
+					walk(path);
+				}
+			} else if (
+				/\.(?:[cm]?[jt]s)$/.test(entry) &&
+				!/\.test\.[cm]?[jt]s$/.test(entry)
+			) {
+				parts.push(`// ${relative(root, path)}\n${readFileSync(path, "utf8")}`);
+			}
+		}
 	};
+	if (existsSync(root)) walk(root);
+	return parts.join("\n");
 }
 
-export function runConformance(connector: string): Step[] {
+/** The manifest version on the base branch; null = connector is new; undefined = no base to compare. */
+function baseManifestVersion(connector: string): string | null | undefined {
+	const git = (args: string[]): string =>
+		execFileSync("git", args, {
+			cwd: repoRoot,
+			encoding: "utf8",
+			stdio: "pipe",
+		});
+	for (const ref of ["origin/main", "upstream/main", "main"]) {
+		try {
+			git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+		} catch {
+			continue;
+		}
+		try {
+			const text = git([
+				"show",
+				`${ref}:connectors/${connector}/manifest.json`,
+			]);
+			const version = (JSON.parse(text) as { version?: unknown }).version;
+			return typeof version === "string" ? version : "";
+		} catch {
+			return null;
+		}
+	}
+	return undefined;
+}
+
+export function readinessSteps(connector: string): Step[] {
+	const manifestFile = manifestPath(connector);
+	const manifest = JSON.parse(
+		readFileSync(manifestFile, "utf8"),
+	) as ReadinessManifest;
+	const dir = join(CONNECTORS_DIR, connector);
+	const source = connectorSource(connector);
+	const driversFile = join(
+		CONNECTORS_DIR,
+		"_conformance",
+		"coverage-conformance-drivers.ts",
+	);
+	const unexercised = existsSync(driversFile)
+		? parseUnexercisedCoverage(readFileSync(driversFile, "utf8"))
+		: new Set<string>();
+	const evidence = evaluateConnectorEvidence(
+		connector,
+		join(dir, "evidence", "claim.json"),
+		computeSourceDigest(dir),
+		computeDeclarationDigest(manifestFile),
+	);
+	const version = checkVersion(manifest, baseManifestVersion(connector));
+	return [
+		checkEvidence(connector, evidence.status, evidence.malformedError),
+		checkCoverageProof(connector, manifest, source, unexercised),
+		...(version ? [version] : []),
+		checkSharedHelpers(source, manifest),
+		checkSemantics(manifest),
+	];
+}
+
+/**
+ * `staticOnly` skips the two steps that execute connector code (its test
+ * suite and the mock-mutation run), so CI can report the rest in seconds.
+ */
+export function runConformance(
+	connector: string,
+	{ staticOnly = false }: { staticOnly?: boolean } = {},
+): Step[] {
 	const manifest = checkManifest(connector);
 	if (manifest.verdict === "FAIL") {
 		return [manifest];
 	}
 	return [
 		manifest,
-		checkTests(connector),
+		...(staticOnly ? [] : [checkTests(connector)]),
 		checkPilotFixture(connector),
-		checkMockMutation(connector),
-		checkReachability(connector),
+		...readinessSteps(connector),
+		...(staticOnly ? [] : [checkMockMutation(connector)]),
 	];
 }
 
@@ -296,13 +374,14 @@ const GLYPH: Record<Verdict, string> = {
 function main(): void {
 	const args = process.argv.slice(2);
 	const jsonOut = args.includes("--json");
+	const staticOnly = args.includes("--static");
 	const connector = args.find((a) => !a.startsWith("--"));
 	if (!connector) {
-		console.error("usage: conformance <connector> [--json]");
+		console.error("usage: conformance <connector> [--json] [--static]");
 		process.exit(2);
 	}
 
-	const steps = runConformance(connector);
+	const steps = runConformance(connector, { staticOnly });
 	const isKnownScaffold = (
 		KNOWN_SCAFFOLD_CONNECTORS as readonly string[]
 	).includes(connector);
@@ -313,7 +392,7 @@ function main(): void {
 		console.log(`\nconformance: ${connector}\n`);
 		if (isKnownScaffold) {
 			console.log(
-				`NOTE: ${connector} is a KNOWN SCAFFOLD (src/connector-conformance-roster.ts) — it emits an unconditional SKIP_RESULT and does not collect yet. The pilot-fixture/mock-mutation/reachability gaps below are expected until real collection is wired up; they are not this connector's next action. Wiring the collector is.\n`,
+				`NOTE: ${connector} is a KNOWN SCAFFOLD (src/connector-conformance-roster.ts) — it emits an unconditional SKIP_RESULT and does not collect yet. The pilot-fixture, evidence, coverage and mock-mutation gaps below are expected until real collection is wired up; they are not this connector's next action. Wiring the collector is.\n`,
 			);
 		}
 		for (const s of steps) {
