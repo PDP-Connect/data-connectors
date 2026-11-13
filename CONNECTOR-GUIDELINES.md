@@ -50,15 +50,15 @@ The mobile host can lose the runtime in the middle of a run. The OS ends the Web
 
 Checkpoint progress durably in IndexedDB on the source origin, and resume from the cursor on the next run.
 
-1. key checkpoints by a stable cursor (offset, page token, last id), not by array position
-2. make writes idempotent because a resumed run sees some items again
-3. record what is already fetched so a resume does not re-download it
+1. Key each checkpoint by a stable cursor (offset, page token or last ID), not by array position.
+2. Make writes idempotent, because a resumed run sees some items again.
+3. Record what is already fetched, so a resume does not download it again.
 
 ### 3. Fetch from inside the page, do not intercept the network
 
 `page.evaluate` with `fetch` runs in the page, carries the page's cookies and TLS fingerprint, and works on every host.
 
-Reading response bodies from the site's own traffic (`page.captureNetwork` and `page.getCapturedResponse`) works on desktop only. The mobile host does not provide it (see the [mobile capability list](docs/add-a-connector-to-mobile.md#declare-runtime-binding-features)). Use capture only as a fallback, never as the primary data path, or declare the connector desktop-only (rule 6).
+Reading response bodies from the site's own traffic (`page.captureNetwork` and `page.getCapturedResponse`) works on desktop only. The mobile app does not provide it yet; support is planned (see [what runs on desktop and on mobile](#what-runs-on-desktop-and-on-mobile)). Use capture only as a fallback, never as the primary data path, or declare the connector desktop-only (rule 6).
 
 ### 4. Keep `page.evaluate` payloads self-contained
 
@@ -89,7 +89,7 @@ Treat the URL you pass to `showBrowser` as a hint. On mobile the browser is alre
 
 ### 6. Declare desktop-only features and fail cleanly
 
-If a connector needs a capability that the mobile runtime does not have, such as cross-origin iframe access (`page.frame_*`), network response bodies or the cookie jar, declare it under `runtime_requirements.bindings` in the manifest. [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md#declare-runtime-binding-features) lists the feature names and shows a manifest example. Then check at runtime.
+If a connector needs a capability that the mobile app does not have, such as cross-origin iframe access (`page.frame_*`), network response bodies or the cookie jar, declare it under `runtime_requirements.bindings` in the manifest. [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md#declare-runtime-binding-features) lists the feature names and shows a manifest example. Then check at runtime.
 
 ```js
 if (typeof page.captureNetwork !== 'function') {
@@ -104,9 +104,9 @@ A clean failure with a reason routes the user to the desktop host. A silent fail
 
 Run time grows with the size of the account. The UI shows true progress only if the connector reports it.
 
-1. call `page.setProgress` with `count` and, when known, the total
-2. emit progress at every page of pagination, not once at the end
-3. keep going through partial failures and record them in `errors[]` rather than aborting the whole export
+1. Call `page.setProgress` with `count` and, when known, the total.
+2. Report progress on each page of results, not once at the end.
+3. Continue after a partial failure and record it in `errors[]`. Do not stop the whole export.
 
 ### 8. Do not assume desktop layout or viewport
 
@@ -114,23 +114,21 @@ Do not rely on fixed pixel positions, on a sidebar being open, or on hover-only 
 
 ---
 
-## Capability matrix
+## What runs on desktop and on mobile
 
-| Capability | Desktop (Playwright) | Mobile (WebView shim) |
-|---|---|---|
-| `page.evaluate`, `goto`, `sleep`, `setData`, `setProgress` | yes | yes |
-| in-page `fetch` of private APIs | yes | yes |
-| localStorage and IndexedDB, read in the page | yes | yes |
-| cookie jar read | yes | no |
-| `showBrowser` / `promptUser` | yes | yes (always headed) |
-| `httpFetch` (host HTTP request) | yes | yes |
-| `requestInput` | yes | no (deliberate) |
-| `captureNetwork` response bodies | yes | no |
-| `captureDownload`, `extractZipEntries` | yes | yes |
-| cross-origin `page.frame_*` | yes | no |
-| true headless | yes | n/a (hidden instead) |
+Most of the `page` contract works on both hosts. The table lists the parts the mobile app does not provide, and what to do instead. `scripts/pageshim/capabilities.mjs` is the current mobile support list.
 
-The feature names and the full list of what mobile does not support are in [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md#declare-runtime-binding-features). Send authenticated requests from inside the page with `fetch` (rule 3).
+| Capability | Desktop | Mobile app | On mobile, do this instead |
+|---|---|---|---|
+| Read the cookie jar (manifest feature `cookie_read`) | yes | no | Send requests with `fetch` from inside the page. They carry the page's cookies (rule 3). |
+| Read response bodies of the site's own traffic with `captureNetwork` (`page_response_observation`) | yes | no, support is planned | Call the same API with `fetch` from inside the page (rule 3). |
+| Host HTTP request that sends the page's cookies (`host_cookie_jar_request`) | yes | no | Use `fetch` inside the page for signed-in requests. `httpFetch` still works for requests that need no sign-in. |
+| Click and type in the page (`page_input`) | yes | no | Read data through the site's API, not through the page's controls. |
+| Cross-origin iframes with `page.frame_*` | yes | no | Declare the connector desktop-only and fail with a clear message (rule 6). |
+| `requestInput` (ask the user for a password) | yes | no, by design (the app never handles a password for another service) | Use `showBrowser` and `promptUser` so the user signs in on the site itself (rule 5). |
+| Headless run | yes | the page runs hidden | Nothing. The connector code is the same. |
+
+All other `page` methods, such as `evaluate`, `goto`, `setData`, `setProgress`, `showBrowser`, `promptUser`, `httpFetch`, `captureDownload` and `extractZipEntries`, work on both hosts. [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md#declare-runtime-binding-features) lists every manifest feature name.
 
 ---
 
