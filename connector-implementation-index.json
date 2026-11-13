@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.2.21",
+				"version": "0.2.22",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.66",
+				"version": "0.2.67",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -1090,7 +1090,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.16",
+				"version": "0.3.17",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -1541,7 +1541,7 @@
 				},
 				"connector_key": "apple-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Apple Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -1951,7 +1951,7 @@
 				},
 				"connector_key": "apple-health",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
-				"version": "0.2.9",
+				"version": "0.2.10",
 				"display_name": "Apple Health",
 				"brand": {
 					"icon": "icon.svg",
@@ -3596,7 +3596,7 @@
 				},
 				"connector_key": "apple-photos",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Apple Photos",
 				"brand": {
 					"icon": "icon.svg",
@@ -3757,7 +3757,7 @@
 				},
 				"connector_key": "character-ai",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "Character.AI",
 				"brand": {
 					"icon": "icon.svg",
@@ -4031,7 +4031,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.2.22",
+				"version": "0.2.23",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -4635,7 +4635,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.14",
+				"version": "0.3.15",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -6257,7 +6257,7 @@
 				},
 				"connector_key": "claude-code",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-				"version": "0.3.29",
+				"version": "0.3.30",
 				"display_name": "Claude Code",
 				"brand": {
 					"icon": "icon.svg",
@@ -8233,6 +8233,524 @@
 			}
 		},
 		{
+			"connectorId": "https://registry.pdpp.dev/connectors/coros-browser",
+			"entry": "./connectors/coros_browser/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/coros-browser",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/coros_browser",
+					"display": {
+						"name": "COROS (Browser Sign-In)"
+					}
+				},
+				"connector_key": "coros-browser",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/coros-browser",
+				"version": "0.1.1",
+				"display_name": "COROS (Browser Sign-In)",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true
+						},
+						"browser": {
+							"required": true
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"recommended_interval_seconds": 86400,
+						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 604800,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": false,
+						"rationale": "Collection reads the account, activity list, daily metrics and training calendar that t.coros.com (COROS Training Hub) loads for the owner's own signed-in session, from inside that page, with the access token the app keeps in its own cookie, on the account's regional API host; every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on COROS's own sign-in page. The first run reads activities from the start of the grant, or all of them when the grant sets no start; daily metrics from the start of the grant or the last 180 days; and the training calendar from four weeks back to four weeks ahead. Later runs re-read the last two weeks of activities, the last week of daily metrics and the calendar's coming four weeks, then continue from where the last run stopped. One run makes at most 400 requests, one at a time with pauses; past that, the next run continues."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": false,
+						"description": "The owner's COROS account: their user id, nickname, region and unit system, how many activities COROS holds, and their current resting, threshold and maximum heart rate. No email address, birthday or body measurements are read.",
+						"display": {
+							"label": "Your COROS profile",
+							"detail": "Nickname, region, units, activity count and current heart-rate thresholds."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "COROS's user id."
+								},
+								"nickname": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title",
+									"description": "The owner's COROS nickname."
+								},
+								"region": {
+									"type": "string",
+									"enum": ["us", "cn", "eu", "sg"],
+									"description": "The COROS data region the account lives in."
+								},
+								"unit_system": {
+									"type": ["string", "null"],
+									"enum": ["metric", "imperial", null],
+									"description": "The unit system the owner chose in COROS."
+								},
+								"activity_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "How many activities COROS holds for the account."
+								},
+								"resting_heart_rate_bpm": {
+									"type": ["number", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Current resting heart rate, in beats per minute."
+								},
+								"threshold_heart_rate_bpm": {
+									"type": ["number", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Current lactate threshold heart rate, in beats per minute."
+								},
+								"max_heart_rate_bpm": {
+									"type": ["number", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Current maximum heart rate, in beats per minute."
+								}
+							},
+							"required": [
+								"id",
+								"nickname",
+								"region",
+								"unit_system",
+								"activity_count",
+								"resting_heart_rate_bpm",
+								"threshold_heart_rate_bpm",
+								"max_heart_rate_bpm"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "activities",
+						"required": false,
+						"description": "Activities in the owner's COROS Training Hub activity list: the sport, when each started (UTC) and on which local day, total and active time, distance, calories, average heart rate, COROS training load, ascent and descent, average power and cadence, steps and the device name. Activity names, routes, GPS tracks and laps are not read.",
+						"display": {
+							"label": "Your COROS activities",
+							"detail": "Sport, start time, duration, distance, calories, heart rate and training load for each activity. No names, routes or locations."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "COROS's activity id (labelId)."
+								},
+								"sport_type": {
+									"type": "integer",
+									"description": "COROS's numeric sport type, such as 100 for Run or 200 for Bike."
+								},
+								"sport": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title",
+									"description": "COROS's name for the sport type, as Training Hub writes it, such as Run, Trail_Run, Bike or Pool_Swim; null for a sport type this connector does not know. COROS's vocabulary, which may grow: show an unrecognised value as it is."
+								},
+								"start_at": {
+									"type": "string",
+									"format": "date-time",
+									"x_pdpp_role": "event-time",
+									"description": "When the activity started (RFC 3339, UTC)."
+								},
+								"end_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the activity ended (RFC 3339, UTC); null when COROS gives no end."
+								},
+								"start_date": {
+									"type": ["string", "null"],
+									"format": "date",
+									"description": "The local calendar day the activity started on, from the activity's own time zone; null when COROS gives neither a zone nor a day."
+								},
+								"utc_offset_minutes": {
+									"type": ["integer", "null"],
+									"minimum": -960,
+									"maximum": 960,
+									"description": "The activity's offset from UTC at its start, in minutes, as the watch recorded it."
+								},
+								"total_time_s": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Time from start to finish, pauses included, in seconds."
+								},
+								"workout_time_s": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Active (timer) time, in seconds."
+								},
+								"distance_m": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"x_pdpp_role": "amount",
+									"description": "Distance, in metres; null for an activity without one."
+								},
+								"calories_kcal": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Energy expended, in kilocalories."
+								},
+								"average_heart_rate_bpm": {
+									"type": ["number", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Average heart rate, in beats per minute; null when none was recorded."
+								},
+								"training_load": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "COROS's training load score for the activity."
+								},
+								"ascent_m": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Total ascent, in metres."
+								},
+								"descent_m": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Total descent, in metres."
+								},
+								"average_power_w": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 5000,
+									"description": "Average power, in watts; null when none was recorded."
+								},
+								"average_cadence": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 1000,
+									"description": "Average cadence as COROS reports it (steps or revolutions per minute, by sport); null when none was recorded."
+								},
+								"steps": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Steps during the activity; null when none were counted."
+								},
+								"device": {
+									"type": ["string", "null"],
+									"description": "The name of the device that recorded the activity, such as a watch model, or the owner's own name for it."
+								}
+							},
+							"required": [
+								"id",
+								"sport_type",
+								"sport",
+								"start_at",
+								"end_at",
+								"start_date",
+								"utc_offset_minutes",
+								"total_time_s",
+								"workout_time_s",
+								"distance_m",
+								"calories_kcal",
+								"average_heart_rate_bpm",
+								"training_load",
+								"ascent_m",
+								"descent_m",
+								"average_power_w",
+								"average_cadence",
+								"steps",
+								"device"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"cursor_field": "start_at",
+						"consent_time_field": "start_at",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"start_at": ["gte", "gt", "lte", "lt"],
+								"end_at": ["gte", "gt", "lte", "lt"],
+								"start_date": ["gte", "gt", "lte", "lt"],
+								"distance_m": ["gte", "gt", "lte", "lt"],
+								"total_time_s": ["gte", "gt", "lte", "lt"],
+								"training_load": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["start_at", "start_date"],
+								"group_by": ["sport"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "daily_metrics",
+						"required": false,
+						"description": "COROS's training and recovery metrics for each of the owner's days: resting heart rate, overnight heart rate variability and its normal range, the day's training load, acute and chronic load, fatigue and load ratio, VO2max, threshold heart rate and pace, and COROS's stamina level. A day COROS holds nothing for has no record.",
+						"display": {
+							"label": "Your COROS daily metrics",
+							"detail": "Resting heart rate, HRV, training load, fatigue, VO2max and threshold values for each day."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The day, YYYY-MM-DD; one record per day."
+								},
+								"date": {
+									"type": "string",
+									"format": "date",
+									"x_pdpp_role": "event-time",
+									"description": "The owner's local calendar day, as COROS dates it."
+								},
+								"resting_heart_rate_bpm": {
+									"type": ["number", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Resting heart rate for the day, in beats per minute."
+								},
+								"hrv_ms": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 1000,
+									"x_pdpp_role": "amount",
+									"description": "Average overnight heart rate variability, in milliseconds; null for a night without a reading."
+								},
+								"hrv_normal_low_ms": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 1000,
+									"description": "Low end of the owner's normal overnight HRV range, in milliseconds, as COROS sets it."
+								},
+								"hrv_normal_high_ms": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 1000,
+									"description": "High end of the owner's normal overnight HRV range, in milliseconds, as COROS sets it."
+								},
+								"training_load": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Training load accumulated over the day, on COROS's scale."
+								},
+								"acute_load": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "COROS's acute (short-term) training load."
+								},
+								"chronic_load": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "COROS's chronic (long-term, base fitness) training load."
+								},
+								"fatigue": {
+									"type": ["number", "null"],
+									"description": "COROS's fatigue value for the day."
+								},
+								"load_ratio": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "COROS's ratio of acute to chronic training load."
+								},
+								"vo2max": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 100,
+									"description": "COROS's VO2max estimate, in ml/kg/min."
+								},
+								"threshold_heart_rate_bpm": {
+									"type": ["number", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Lactate threshold heart rate, in beats per minute."
+								},
+								"threshold_pace_s_per_km": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 3600,
+									"description": "Lactate threshold pace, in seconds per kilometre."
+								},
+								"stamina_level": {
+									"type": ["number", "null"],
+									"description": "COROS's stamina level score for the day."
+								},
+								"stamina_level_7d": {
+									"type": ["number", "null"],
+									"description": "COROS's seven-day stamina level score."
+								}
+							},
+							"required": [
+								"id",
+								"date",
+								"resting_heart_rate_bpm",
+								"hrv_ms",
+								"hrv_normal_low_ms",
+								"hrv_normal_high_ms",
+								"training_load",
+								"acute_load",
+								"chronic_load",
+								"fatigue",
+								"load_ratio",
+								"vo2max",
+								"threshold_heart_rate_bpm",
+								"threshold_pace_s_per_km",
+								"stamina_level",
+								"stamina_level_7d"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"cursor_field": "date",
+						"consent_time_field": "date",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"date": ["gte", "gt", "lte", "lt"],
+								"resting_heart_rate_bpm": ["gte", "gt", "lte", "lt"],
+								"hrv_ms": ["gte", "gt", "lte", "lt"],
+								"training_load": ["gte", "gt", "lte", "lt"],
+								"vo2max": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["date"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "planned_workouts",
+						"required": false,
+						"description": "Workouts on the owner's COROS Training Hub calendar, past and up to four weeks ahead: the day, the workout's name and sport, its planned training load, how much of it was completed and the activity that completed it.",
+						"display": {
+							"label": "Your COROS training calendar",
+							"detail": "Planned workouts by day, with their sport, planned load and completion."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The day, the plan's id and the workout's place in that plan, joined by colons; the plan id is empty for a workout outside a plan."
+								},
+								"date": {
+									"type": "string",
+									"format": "date",
+									"x_pdpp_role": "event-time",
+									"description": "The calendar day the workout is planned for."
+								},
+								"name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title",
+									"description": "The workout's name, as the owner or their coach wrote it; null when it has none."
+								},
+								"sport_type": {
+									"type": ["integer", "null"],
+									"description": "COROS's numeric sport for the workout: a workout category from 1 (Run) to 9 (Hyrox), or an activity sport type such as 100."
+								},
+								"sport": {
+									"type": ["string", "null"],
+									"description": "The sport's name as Training Hub's calendar shows it, such as Run, Bike, Swim or Strength; null when unknown. COROS's vocabulary, which may grow: show an unrecognised value as it is."
+								},
+								"planned_training_load": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "The workout's planned training load, on COROS's scale."
+								},
+								"completion_rate": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "How much of the workout was completed, as COROS rates it (1 is fully)."
+								},
+								"completed_activity_id": {
+									"type": ["string", "null"],
+									"description": "The id of the activity that completed the workout, matching an activities record; null while none has."
+								}
+							},
+							"required": [
+								"id",
+								"date",
+								"name",
+								"sport_type",
+								"sport",
+								"planned_training_load",
+								"completion_rate",
+								"completed_activity_id"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"cursor_field": "date",
+						"consent_time_field": "date",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							},
+							"range_filters": {
+								"date": ["gte", "gt", "lte", "lt"],
+								"planned_training_load": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["date"],
+								"group_by": ["sport"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					}
+				],
+				"reason_display_messages": {
+					"collection_interrupted": "COROS Training Hub stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
+					"sign_in_required": "COROS Training Hub needs you to sign in again before this can continue.",
+					"source_limit_reached": "This run read as much COROS history as one run allows. The next run continues from where this one stopped.",
+					"source_unreadable": "COROS Training Hub answered with something this connector doesn't recognise, so nothing more was read. COROS may have changed its site; please report this rather than retrying."
+				}
+			}
+		},
+		{
 			"brandIcon": "./connectors/discord_browser/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/discord-browser",
 			"entry": "./connectors/discord_browser/index.ts",
@@ -8247,7 +8765,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -8707,7 +9225,7 @@
 				},
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.2.28",
+				"version": "0.2.29",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icon.svg",
@@ -8927,7 +9445,7 @@
 				},
 				"connector_key": "facebook",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-				"version": "0.1.11",
+				"version": "0.1.12",
 				"display_name": "Facebook",
 				"brand": {
 					"icon": "icon.svg",
@@ -9359,7 +9877,7 @@
 				},
 				"connector_key": "fitbit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Fitbit",
 				"brand": {
 					"icon": "icon.svg",
@@ -9723,7 +10241,7 @@
 				},
 				"connector_key": "garmin-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/garmin-browser",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "Garmin (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -11384,7 +11902,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.18",
+				"version": "0.3.20",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -12083,7 +12601,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.30",
+				"version": "0.2.31",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",
@@ -12760,7 +13278,7 @@
 				},
 				"connector_key": "google-calendar",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-calendar",
-				"version": "0.1.24",
+				"version": "0.1.25",
 				"display_name": "Google Calendar",
 				"brand": {
 					"icon": "icon.svg",
@@ -13036,7 +13554,7 @@
 				},
 				"connector_key": "google-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-contacts",
-				"version": "0.1.24",
+				"version": "0.1.25",
 				"display_name": "Google Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -13278,7 +13796,7 @@
 				},
 				"connector_key": "google-maps",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
-				"version": "0.1.24",
+				"version": "0.1.25",
 				"display_name": "Google Maps Timeline Import",
 				"brand": {
 					"icon": "icon.svg",
@@ -13559,7 +14077,7 @@
 				},
 				"connector_key": "google-maps-data-portability",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
-				"version": "0.1.24",
+				"version": "0.1.25",
 				"display_name": "Google Maps Data Portability",
 				"brand": {
 					"icon": "icon.svg",
@@ -13967,7 +14485,7 @@
 				},
 				"connector_key": "google-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-				"version": "0.1.27",
+				"version": "0.1.28",
 				"display_name": "Google Takeout",
 				"brand": {
 					"icon": "icon.svg",
@@ -14300,7 +14818,7 @@
 				},
 				"connector_key": "groupme",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "GroupMe",
 				"brand": {
 					"icon": "icon.svg",
@@ -14761,7 +15279,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.30",
+				"version": "0.6.31",
 				"display_name": "H-E-B",
 				"brand": {
 					"icon": "icon.svg",
@@ -15361,7 +15879,7 @@
 				},
 				"connector_key": "ical",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Calendar (iCal)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15494,7 +16012,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.46",
+				"version": "0.1.47",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -15718,7 +16236,7 @@
 				},
 				"connector_key": "imessage",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "iMessage (macOS)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15964,7 +16482,7 @@
 				},
 				"connector_key": "instinct",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Instinct",
 				"brand": {
 					"icon": "icon.svg",
@@ -16875,7 +17393,7 @@
 				},
 				"connector_key": "jellyfin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-				"version": "0.2.20",
+				"version": "0.2.21",
 				"display_name": "Jellyfin",
 				"brand": {
 					"icon": "icon.svg",
@@ -17135,7 +17653,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.43",
+				"version": "0.3.44",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -17599,7 +18117,7 @@
 				},
 				"connector_key": "loom",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Loom",
 				"brand": {
 					"icon": "icon.svg",
@@ -17765,7 +18283,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.42",
+				"version": "0.4.43",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -18103,6 +18621,426 @@
 			}
 		},
 		{
+			"connectorId": "https://registry.pdpp.dev/connectors/mountain-project",
+			"entry": "./connectors/mountain_project/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/mountain-project",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/mountain_project",
+					"display": {
+						"name": "Mountain Project"
+					}
+				},
+				"connector_key": "mountain-project",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/mountain-project",
+				"version": "0.1.1",
+				"display_name": "Mountain Project",
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"],
+							"constraints": {
+								"hosts": ["https://www.mountainproject.com"]
+							}
+						},
+						"browser": {
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"recommended_interval_seconds": 86400,
+						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 604800,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "low",
+						"bot_detection_sensitivity": "low",
+						"background_safe": false,
+						"rationale": "Collection reuses the owner's signed-in mountainproject.com session and makes three same-origin GETs per run, one second apart: the profile page and the site's own CSV exports of the owner's ticks and to-do list. First collection and an expired session need the owner to sign in through the browser handoff."
+					},
+					"public_listing": {
+						"tier": "development",
+						"rationale": "Built 2026-11-11. The parsers were checked against the real tick and to-do exports and the profile page of a project-owned test account (5 ticks, 3 to-dos; counts matched); a full connector run through the browser handoff on a real account has not been done yet."
+					}
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "mountain_project",
+						"login_url": "https://www.mountainproject.com/auth/login",
+						"login_message": "Sign in to Mountain Project (email, onX, Facebook or Apple), then return here.",
+						"collect_export": "collectMountainProject",
+						"probe_export": "probeMountainProjectSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": false,
+						"description": "The owner's own Mountain Project profile: name, location, join date, picture and the profile's tick and to-do counts. Age, gender and points are not collected.",
+						"display": {
+							"label": "Your Mountain Project profile",
+							"detail": "Display name, profile location, member-since date, profile picture link, and how many ticks and to-dos the profile counts."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,12}$",
+									"description": "Mountain Project's user id.",
+									"x_pdpp_role": "secondary"
+								},
+								"display_name": {
+									"type": "string",
+									"maxLength": 500,
+									"description": "The name shown on the profile.",
+									"x_pdpp_role": "primary-title"
+								},
+								"profile_url": {
+									"type": "string",
+									"description": "The owner's profile page."
+								},
+								"avatar_url": {
+									"type": ["string", "null"],
+									"description": "The profile picture URL; null when none is shown."
+								},
+								"location": {
+									"type": ["string", "null"],
+									"maxLength": 500,
+									"description": "The location the owner put on their profile."
+								},
+								"member_since": {
+									"type": ["string", "null"],
+									"format": "date",
+									"description": "The day the account was created, as the profile states it."
+								},
+								"tick_count": {
+									"type": ["integer", "null"],
+									"description": "How many ticks the profile counts; null when the profile shows no count."
+								},
+								"todo_count": {
+									"type": ["integer", "null"],
+									"description": "How many to-do routes the profile counts; null when the profile shows no count."
+								}
+							},
+							"required": [
+								"id",
+								"display_name",
+								"profile_url",
+								"avatar_url",
+								"location",
+								"member_since",
+								"tick_count",
+								"todo_count"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["display_name", "location"]
+							},
+							"range_filters": {
+								"member_since": ["gte", "gt", "lte", "lt"],
+								"tick_count": ["gte", "gt", "lte", "lt"],
+								"todo_count": ["gte", "gt", "lte", "lt"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "ticks",
+						"required": true,
+						"description": "Every climb the owner logged (ticked) on Mountain Project, one record per tick, read from the site's own tick CSV export: the day, the route with its grade, type, location and length, how it was climbed, pitches, the owner's notes, stars and suggested grade. Every run re-reads the whole export. The time range applies to the tick's day.",
+						"display": {
+							"label": "Your ticks",
+							"detail": "Each climb you logged: date, route, grade, route type, location, style and lead style, pitches, your notes, your stars and your suggested grade."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "<route_id>:<date>:<n>. The export carries no tick id; n counts the owner's ticks of the same route on the same day, in export order (newest first), from 1. Adding or deleting one such tick shifts the others' n."
+								},
+								"date": {
+									"type": "string",
+									"format": "date",
+									"description": "The day of the climb.",
+									"x_pdpp_role": "event-time"
+								},
+								"route_id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,12}$",
+									"description": "Mountain Project's route id, from the route URL."
+								},
+								"route_name": {
+									"type": "string",
+									"maxLength": 500,
+									"description": "The route's name.",
+									"x_pdpp_role": "primary-title"
+								},
+								"route_url": {
+									"type": "string",
+									"description": "The route's page on mountainproject.com."
+								},
+								"rating": {
+									"type": ["string", "null"],
+									"maxLength": 200,
+									"description": "The route's grade as Mountain Project shows it, for example \"5.10a\", \"V4\" or \"5.11 V1+\"."
+								},
+								"rating_code": {
+									"type": ["integer", "null"],
+									"description": "Mountain Project's numeric sort code for the grade."
+								},
+								"location": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "The route's location path, outermost area first (state or country down to the crag)."
+								},
+								"avg_stars": {
+									"type": ["number", "null"],
+									"description": "The community's average star rating of the route."
+								},
+								"your_stars": {
+									"type": ["number", "null"],
+									"description": "The owner's own star rating of the route; null when they gave none."
+								},
+								"route_type": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Route types, for example Trad, Sport, TR, Boulder, Alpine, Ice."
+								},
+								"your_rating": {
+									"type": ["string", "null"],
+									"maxLength": 200,
+									"description": "The grade the owner suggested for the route; null when they gave none."
+								},
+								"length_ft": {
+									"type": ["integer", "null"],
+									"description": "The route's length in feet, as the export states it."
+								},
+								"pitches": {
+									"type": ["integer", "null"],
+									"description": "Pitches recorded on the tick."
+								},
+								"style": {
+									"type": ["string", "null"],
+									"maxLength": 100,
+									"description": "How the route was climbed: Lead, Follow, TR, Solo, Send, Flash or Attempt. Null when the owner left it blank."
+								},
+								"lead_style": {
+									"type": ["string", "null"],
+									"maxLength": 100,
+									"description": "For a lead: Onsight, Flash, Redpoint, Pinkpoint or Fell/Hung. Null otherwise."
+								},
+								"notes": {
+									"type": ["string", "null"],
+									"maxLength": 100000,
+									"description": "The owner's notes on the tick."
+								}
+							},
+							"required": [
+								"id",
+								"date",
+								"route_id",
+								"route_name",
+								"route_url",
+								"rating",
+								"rating_code",
+								"location",
+								"avg_stars",
+								"your_stars",
+								"route_type",
+								"your_rating",
+								"length_ft",
+								"pitches",
+								"style",
+								"lead_style",
+								"notes"
+							]
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "date",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["route_name", "notes", "rating"],
+								"semantic_fields": ["notes"]
+							},
+							"range_filters": {
+								"date": ["gte", "gt", "lte", "lt"],
+								"rating_code": ["gte", "gt", "lte", "lt"],
+								"pitches": ["gte", "gt", "lte", "lt"],
+								"length_ft": ["gte", "gt", "lte", "lt"],
+								"your_stars": ["gte", "gt", "lte", "lt"],
+								"avg_stars": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["date"],
+								"group_by": ["style", "lead_style"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "saved_routes",
+						"required": false,
+						"description": "The routes on the owner's Mountain Project to-do list, one record per route, read from the site's own to-do CSV export: the route with its grade, type, location, length and pitch count, plus the owner's stars and suggested grade when given. Every run re-reads the whole list. A route the owner removes from the list is not reported as deleted.",
+						"display": {
+							"label": "Your to-do list",
+							"detail": "Each route on your to-do list: name, grade, route type, location, length, pitches, average stars, and your own stars and grade if you gave them."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,12}$",
+									"description": "The route id; a route is on the to-do list at most once."
+								},
+								"route_id": {
+									"type": "string",
+									"pattern": "^[0-9]{1,12}$",
+									"description": "Mountain Project's route id, from the route URL."
+								},
+								"route_name": {
+									"type": "string",
+									"maxLength": 500,
+									"description": "The route's name.",
+									"x_pdpp_role": "primary-title"
+								},
+								"route_url": {
+									"type": "string",
+									"description": "The route's page on mountainproject.com."
+								},
+								"rating": {
+									"type": ["string", "null"],
+									"maxLength": 200,
+									"description": "The route's grade as Mountain Project shows it, for example \"5.10a\", \"V4\" or \"5.11 V1+\"."
+								},
+								"rating_code": {
+									"type": ["integer", "null"],
+									"description": "Mountain Project's numeric sort code for the grade."
+								},
+								"location": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "The route's location path, outermost area first (state or country down to the crag)."
+								},
+								"avg_stars": {
+									"type": ["number", "null"],
+									"description": "The community's average star rating of the route."
+								},
+								"your_stars": {
+									"type": ["number", "null"],
+									"description": "The owner's own star rating of the route; null when they gave none."
+								},
+								"route_type": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Route types, for example Trad, Sport, TR, Boulder, Alpine, Ice."
+								},
+								"your_rating": {
+									"type": ["string", "null"],
+									"maxLength": 200,
+									"description": "The grade the owner suggested for the route; null when they gave none."
+								},
+								"length_ft": {
+									"type": ["integer", "null"],
+									"description": "The route's length in feet, as the export states it."
+								},
+								"pitches": {
+									"type": ["integer", "null"],
+									"description": "The route's pitch count."
+								}
+							},
+							"required": [
+								"id",
+								"route_id",
+								"route_name",
+								"route_url",
+								"rating",
+								"rating_code",
+								"location",
+								"avg_stars",
+								"your_stars",
+								"route_type",
+								"your_rating",
+								"length_ft",
+								"pitches"
+							]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["route_name", "rating"]
+							},
+							"range_filters": {
+								"rating_code": ["gte", "gt", "lte", "lt"],
+								"pitches": ["gte", "gt", "lte", "lt"],
+								"length_ft": ["gte", "gt", "lte", "lt"],
+								"avg_stars": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "manual_as_of"
+					}
+				],
+				"reason_display_messages": {
+					"stream_collection_failed": "Mountain Project could not be read completely this time. Nothing already saved was lost.",
+					"records_unreadable": "Some rows of your Mountain Project export could not be read and were not saved. Everything else was saved.",
+					"export_shorter_than_profile_count": "Your Mountain Project export had fewer entries than your profile counts, so this list may be incomplete. Everything in the export was saved.",
+					"mountain_project_auth_failed": "Your Mountain Project session has ended. Sign in to Mountain Project again to continue.",
+					"mountain_project_interrupted": "The Mountain Project page was closed or left during the sync. Sync again to continue.",
+					"mountain_project_rate_limited": "Mountain Project is limiting requests right now. The sync will try again later.",
+					"mountain_project_server_error": "Mountain Project is having trouble right now. The sync will try again later.",
+					"mountain_project_network_error": "Mountain Project could not be reached. Check your connection; the sync will try again later.",
+					"mountain_project_invalid_payload": "Mountain Project answered in a format this connector does not recognize. A connector update is needed."
+				}
+			}
+		},
+		{
 			"brandIcon": "./connectors/muse/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/muse",
 			"entry": "./connectors/muse/index.ts",
@@ -18117,7 +19055,7 @@
 				},
 				"connector_key": "muse",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-				"version": "0.1.11",
+				"version": "0.1.12",
 				"display_name": "Muse (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -18734,7 +19672,7 @@
 				},
 				"connector_key": "netflix-export",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "Netflix Export",
 				"brand": {
 					"icon": "icon.svg",
@@ -18909,7 +19847,7 @@
 				},
 				"connector_key": "notion",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-				"version": "0.1.24",
+				"version": "0.1.25",
 				"display_name": "Notion",
 				"brand": {
 					"icon": "icon.svg",
@@ -19128,7 +20066,7 @@
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "Oura",
 				"brand": {
 					"icon": "icon.svg",
@@ -19468,7 +20406,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.52",
+				"version": "0.1.53",
 				"display_name": "Oura (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19806,7 +20744,7 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Perplexity (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -20077,7 +21015,7 @@
 				},
 				"connector_key": "pocket",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Pocket",
 				"brand": {
 					"icon": "icon.svg",
@@ -20192,6 +21130,765 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/polar_flow/icon.svg",
+			"connectorId": "https://registry.pdpp.dev/connectors/polar-flow",
+			"entry": "./connectors/polar_flow/index.ts",
+			"manifest": {
+				"protocol_version": "0.1.0",
+				"connector_id": "https://registry.pdpp.dev/connectors/polar-flow",
+				"source": {
+					"id": "https://registry.pdpp.dev/sources/polar_flow",
+					"display": {
+						"name": "Polar Flow"
+					}
+				},
+				"connector_key": "polar-flow",
+				"manifest_uri": "https://registry.pdpp.dev/connectors/polar-flow",
+				"version": "0.1.1",
+				"display_name": "Polar Flow",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#E2002B"
+				},
+				"runtime_requirements": {
+					"bindings": {
+						"network": {
+							"required": true,
+							"features": ["same_origin_page_fetch"],
+							"constraints": {
+								"hosts": [
+									"https://flow.polar.com",
+									"https://sleep-api.flow.polar.com"
+								]
+							}
+						},
+						"browser": {
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
+						}
+					}
+				},
+				"capabilities": {
+					"human_interaction": ["manual_action"],
+					"refresh_policy": {
+						"recommended_mode": "manual",
+						"recommended_interval_seconds": 86400,
+						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 604800,
+						"interaction_posture": "manual_action_likely",
+						"rate_limit_sensitivity": "medium",
+						"bot_detection_sensitivity": "medium",
+						"background_safe": false,
+						"rationale": "Collection reads the profile, training sessions, daily activity, sleep and Nightly Recharge that flow.polar.com loads for the owner's own signed-in session, from inside that page; the sleep report comes from sleep-api.flow.polar.com, which accepts the same session from that page. Every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on Polar's own sign-in page. The first run reads from the start of the grant or, without one, the last two years of training sessions, the last 90 days of daily activity and the last year of sleep and Nightly Recharge, oldest first. Each later run re-reads the last days before where the last one stopped (two weeks of sessions, three days of activity, a week of sleep and Nightly Recharge, which devices may sync late) and continues to today. A day whose record did not read cleanly is reported and read once more on the next run. One run reads at most 40 months of sessions, 400 days of activity, 5 years of sleep and 20 four-week windows of Nightly Recharge; the next run continues from there. Requests go one at a time with pauses."
+					},
+					"public_listing": {
+						"tier": "development"
+					}
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "polar_flow",
+						"login_url": "https://flow.polar.com/login",
+						"login_message": "Sign in to Polar Flow, then return here.",
+						"collect_export": "collectPolarFlow",
+						"probe_export": "probeOnPage",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
+						}
+					}
+				},
+				"streams": [
+					{
+						"name": "profile",
+						"required": false,
+						"description": "The owner's Polar Flow profile: name, country, birthday, sex, training background, body measurements and the heart rate, VO2max, power and sleep settings Polar uses for zones and feedback, with the account's UTC offset, unit system and language. The login e-mail and profile picture are not read.",
+						"display": {
+							"label": "Your Polar Flow profile",
+							"detail": "Name, country, birthday, body measurements, heart rate and training settings."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Polar's numeric user id."
+								},
+								"first_name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title",
+									"description": "First name as entered in the profile."
+								},
+								"last_name": {
+									"type": ["string", "null"],
+									"description": "Last name as entered in the profile."
+								},
+								"country": {
+									"type": ["string", "null"],
+									"description": "Country, as an ISO 3166-1 alpha-2 code."
+								},
+								"birthday": {
+									"type": ["string", "null"],
+									"format": "date",
+									"description": "Date of birth."
+								},
+								"sex": {
+									"type": ["string", "null"],
+									"description": "Sex as set in the profile, as Polar writes it, such as FEMALE or MALE."
+								},
+								"training_background": {
+									"type": ["string", "null"],
+									"description": "Training background as set in the profile, as Polar writes it, such as OCCASIONAL, REGULAR or PROFESSIONAL. Polar's vocabulary, which may grow: show an unrecognised value as it is."
+								},
+								"weight_kg": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 700,
+									"description": "Body weight, in kilograms."
+								},
+								"height_cm": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 300,
+									"description": "Height, in centimetres."
+								},
+								"max_heart_rate_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Maximum heart rate setting, in beats per minute."
+								},
+								"resting_heart_rate_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Resting heart rate setting, in beats per minute."
+								},
+								"aerobic_threshold_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Aerobic threshold, in beats per minute."
+								},
+								"anaerobic_threshold_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Anaerobic threshold, in beats per minute."
+								},
+								"vo2max": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 120,
+									"description": "VO2max setting, in ml/kg/min."
+								},
+								"functional_threshold_power_w": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 3000,
+									"description": "Cycling functional threshold power, in watts."
+								},
+								"sleep_goal_hours": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"maximum": 24,
+									"description": "Nightly sleep goal, in hours."
+								},
+								"utc_offset": {
+									"type": ["string", "null"],
+									"description": "The account's UTC offset as Polar holds it, as +HH:MM or -HH:MM."
+								},
+								"measurement_unit": {
+									"type": ["string", "null"],
+									"description": "The unit system the owner sees, METRIC or IMPERIAL. Records are always metric."
+								},
+								"language": {
+									"type": ["string", "null"],
+									"description": "Polar Flow's language for the owner, as an ISO 639-1 code."
+								}
+							},
+							"required": [
+								"id",
+								"first_name",
+								"last_name",
+								"country",
+								"birthday",
+								"sex",
+								"training_background",
+								"weight_kg",
+								"height_cm",
+								"max_heart_rate_bpm",
+								"resting_heart_rate_bpm",
+								"aerobic_threshold_bpm",
+								"anaerobic_threshold_bpm",
+								"vo2max",
+								"functional_threshold_power_w",
+								"sleep_goal_hours",
+								"utc_offset",
+								"measurement_unit",
+								"language"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["first_name", "last_name"]
+							},
+							"range_filters": {
+								"birthday": ["gte", "gt", "lte", "lt"],
+								"weight_kg": ["gte", "gt", "lte", "lt"]
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "training_sessions",
+						"required": false,
+						"description": "Training sessions in Polar Flow, from a watch, a sensor or entered by hand: the sport, when each started on the owner's local clock, its duration, distance, calories, average and highest heart rate, training load, the device that recorded it, its name and the owner's note. GPS routes, samples, laps and zones are not read.",
+						"display": {
+							"label": "Your Polar training sessions",
+							"detail": "Sport, start time, duration, distance, calories, heart rate and training load for each session. No routes or locations."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Polar's training session id."
+								},
+								"sport_id": {
+									"type": "integer",
+									"description": "Polar's numeric sport id."
+								},
+								"sport_name": {
+									"type": ["string", "null"],
+									"x_pdpp_role": "primary-title",
+									"description": "The sport's name in the owner's Polar Flow language, as Polar writes it, such as Running."
+								},
+								"name": {
+									"type": ["string", "null"],
+									"description": "The session's name, when it has one."
+								},
+								"start_date": {
+									"type": "string",
+									"format": "date",
+									"description": "The owner's local calendar day the session started on.",
+									"x_pdpp_role": "event-time"
+								},
+								"start_time_local": {
+									"type": "string",
+									"description": "When the session started, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone: Polar keeps none for a session)."
+								},
+								"end_time_local": {
+									"type": ["string", "null"],
+									"description": "When the session ended, on the owner's local clock; null when Polar served no analysis for it."
+								},
+								"duration_s": {
+									"type": "number",
+									"minimum": 0,
+									"maximum": 1209600,
+									"description": "Duration, in seconds."
+								},
+								"distance_m": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"x_pdpp_role": "amount",
+									"description": "Distance, in metres; null for a session without one."
+								},
+								"calories_kcal": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Energy expended, in kilocalories."
+								},
+								"average_heart_rate_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Average heart rate, in beats per minute; null when none was recorded."
+								},
+								"max_heart_rate_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Highest heart rate, in beats per minute; null when none was recorded or Polar served no analysis."
+								},
+								"training_load": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Polar's training load for the session; null when Polar computed none."
+								},
+								"device_name": {
+									"type": ["string", "null"],
+									"description": "The Polar device that recorded the session; null for a session entered by hand."
+								},
+								"note": {
+									"type": ["string", "null"],
+									"description": "The owner's note on the session."
+								},
+								"is_test": {
+									"type": ["boolean", "null"],
+									"description": "Whether the session is a fitness test."
+								},
+								"has_training_target": {
+									"type": ["boolean", "null"],
+									"description": "Whether the session was done against a planned training target."
+								}
+							},
+							"required": [
+								"id",
+								"sport_id",
+								"sport_name",
+								"name",
+								"start_date",
+								"start_time_local",
+								"end_time_local",
+								"duration_s",
+								"distance_m",
+								"calories_kcal",
+								"average_heart_rate_bpm",
+								"max_heart_rate_bpm",
+								"training_load",
+								"device_name",
+								"note",
+								"is_test",
+								"has_training_target"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"cursor_field": "start_date",
+						"consent_time_field": "start_date",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"search": {
+								"lexical_fields": ["sport_name", "name", "note"],
+								"semantic_fields": ["note"]
+							},
+							"range_filters": {
+								"start_date": ["gte", "gt", "lte", "lt"],
+								"duration_s": ["gte", "gt", "lte", "lt"],
+								"distance_m": ["gte", "gt", "lte", "lt"],
+								"calories_kcal": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["start_date"],
+								"group_by": ["sport_name"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "daily_activity",
+						"required": false,
+						"description": "Polar's 24/7 activity summary for each of the owner's local calendar days a Polar device recorded: steps, active time, distance from steps, calories, progress toward the daily activity goal, inactivity alerts, time in each activity level, the day's and night's lowest and highest heart rate, and when the device last synced. A day no device recorded has no record.",
+						"display": {
+							"label": "Your Polar daily activity",
+							"detail": "Steps, active time, calories, activity goal and heart rate range for each day."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The day, YYYY-MM-DD; one record per day."
+								},
+								"date": {
+									"type": "string",
+									"format": "date",
+									"description": "The owner's local calendar day.",
+									"x_pdpp_role": "event-time"
+								},
+								"steps": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"x_pdpp_role": "amount",
+									"description": "Steps over the day."
+								},
+								"active_time_min": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 1440,
+									"description": "Active time, in minutes."
+								},
+								"distance_from_steps_m": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"description": "Distance estimated from steps, in metres."
+								},
+								"calories_kcal": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Calories over the day, in kilocalories."
+								},
+								"daily_goal_pct": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"maximum": 10000,
+									"description": "Progress toward the daily activity goal, in percent; over 100 when the goal was beaten."
+								},
+								"sleep_duration_min": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 1440,
+									"description": "Sleep counted for the day, in minutes."
+								},
+								"inactivity_alert_count": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"description": "Inactivity alerts the device gave during the day."
+								},
+								"sedentary_min": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 1440,
+									"description": "Time sitting or still, in minutes."
+								},
+								"light_activity_min": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 1440,
+									"description": "Time in light activity, in minutes."
+								},
+								"moderate_activity_min": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 1440,
+									"description": "Time in moderate activity, in minutes."
+								},
+								"vigorous_activity_min": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 1440,
+									"description": "Time in vigorous activity, in minutes."
+								},
+								"day_min_heart_rate_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Lowest heart rate while awake, in beats per minute."
+								},
+								"day_max_heart_rate_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Highest heart rate over the day, in beats per minute."
+								},
+								"night_min_heart_rate_bpm": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 300,
+									"description": "Lowest heart rate during sleep, in beats per minute."
+								},
+								"last_sync_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When a device last synced data for the day (RFC 3339, UTC)."
+								}
+							},
+							"required": [
+								"id",
+								"date",
+								"steps",
+								"active_time_min",
+								"distance_from_steps_m",
+								"calories_kcal",
+								"daily_goal_pct",
+								"sleep_duration_min",
+								"inactivity_alert_count",
+								"sedentary_min",
+								"light_activity_min",
+								"moderate_activity_min",
+								"vigorous_activity_min",
+								"day_min_heart_rate_bpm",
+								"day_max_heart_rate_bpm",
+								"night_min_heart_rate_bpm",
+								"last_sync_at"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"cursor_field": "date",
+						"consent_time_field": "date",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"date": ["gte", "gt", "lte", "lt"],
+								"steps": ["gte", "gt", "lte", "lt"],
+								"calories_kcal": ["gte", "gt", "lte", "lt"],
+								"active_time_min": ["gte", "gt", "lte", "lt"],
+								"last_sync_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["date"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "sleep",
+						"required": false,
+						"description": "Polar's record of each night's sleep from a device with Sleep Plus Stages, dated by the day the owner woke: when the night began and ended on the owner's local clock, the offsets to falling asleep and waking, time in bed, the sleep score, continuity, sleep cycles and the owner's own rating. A night no device recorded has no record.",
+						"display": {
+							"label": "Your Polar sleep",
+							"detail": "Bedtime and wake time, sleep score, continuity and cycles for each night."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The day the owner woke, YYYY-MM-DD; one record per night."
+								},
+								"date": {
+									"type": "string",
+									"format": "date",
+									"description": "The owner's local calendar day the night ended on, as Polar dates it.",
+									"x_pdpp_role": "event-time"
+								},
+								"sleep_start_local": {
+									"type": "string",
+									"description": "When the night began, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone)."
+								},
+								"sleep_end_local": {
+									"type": "string",
+									"description": "When the night ended, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone)."
+								},
+								"fell_asleep_offset_s": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 86400,
+									"description": "Seconds from the start of the night to falling asleep."
+								},
+								"woke_up_offset_s": {
+									"type": ["integer", "null"],
+									"minimum": -86400,
+									"maximum": 86400,
+									"description": "Seconds added to the end of the night to reach the moment of waking."
+								},
+								"time_in_bed_s": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 172800,
+									"x_pdpp_role": "amount",
+									"description": "From the start to the end of the night, in seconds."
+								},
+								"sleep_score": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"maximum": 100,
+									"description": "Polar's Sleep Score, from 1 to 100; null when the night has none."
+								},
+								"continuity_index": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"maximum": 5,
+									"description": "Sleep continuity on Polar's 1 to 5 scale."
+								},
+								"continuity_class": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 10,
+									"description": "Polar's class for the continuity, as Polar sends it."
+								},
+								"sleep_cycles": {
+									"type": ["integer", "null"],
+									"minimum": 0,
+									"maximum": 50,
+									"description": "Sleep cycles detected."
+								},
+								"sleep_rating": {
+									"type": ["string", "null"],
+									"description": "The owner's own rating of the night, as Polar writes it, such as SLEPT_WELL. Polar's vocabulary, which may grow: show an unrecognised value as it is."
+								}
+							},
+							"required": [
+								"id",
+								"date",
+								"sleep_start_local",
+								"sleep_end_local",
+								"fell_asleep_offset_s",
+								"woke_up_offset_s",
+								"time_in_bed_s",
+								"sleep_score",
+								"continuity_index",
+								"continuity_class",
+								"sleep_cycles",
+								"sleep_rating"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"cursor_field": "date",
+						"consent_time_field": "date",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"date": ["gte", "gt", "lte", "lt"],
+								"sleep_score": ["gte", "gt", "lte", "lt"],
+								"time_in_bed_s": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["date"],
+								"group_by": ["sleep_rating"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "nightly_recharge",
+						"required": false,
+						"description": "Polar's Nightly Recharge for each night a device measured it, dated by the day the owner woke: the Nightly Recharge status, the ANS charge and its rating against the owner's usual, and the night's average beat-to-beat interval, heart rate variability (RMSSD) and breathing interval, each beside its 28-day average. A night without a measurement has no record.",
+						"display": {
+							"label": "Your Polar Nightly Recharge",
+							"detail": "Nightly Recharge status, ANS charge, heart rate variability and breathing for each night."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The day the owner woke, YYYY-MM-DD; one record per night."
+								},
+								"date": {
+									"type": "string",
+									"format": "date",
+									"description": "The owner's local calendar day the night ended on, as Polar dates it.",
+									"x_pdpp_role": "event-time"
+								},
+								"nightly_recharge_status": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 6,
+									"x_pdpp_role": "amount",
+									"description": "Nightly Recharge status on Polar's 1 (very poor) to 6 (very good) scale."
+								},
+								"ans_charge": {
+									"type": ["number", "null"],
+									"minimum": -10,
+									"maximum": 10,
+									"description": "ANS charge on Polar's -10 to +10 scale."
+								},
+								"ans_charge_status": {
+									"type": ["integer", "null"],
+									"minimum": 1,
+									"maximum": 5,
+									"description": "Polar's rating of the ANS charge against the owner's usual level, from 1 (much below) to 5 (much above)."
+								},
+								"beat_to_beat_interval_ms": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 20000,
+									"description": "Average interval between heart beats during the night, in milliseconds."
+								},
+								"beat_to_beat_interval_28d_avg_ms": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 20000,
+									"description": "The 28-day average of the beat-to-beat interval, in milliseconds."
+								},
+								"hrv_rmssd_ms": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"exclusiveMaximum": 1000,
+									"description": "Heart rate variability during the night (RMSSD), in milliseconds."
+								},
+								"hrv_rmssd_28d_avg_ms": {
+									"type": ["number", "null"],
+									"minimum": 0,
+									"exclusiveMaximum": 1000,
+									"description": "The 28-day average of heart rate variability (RMSSD), in milliseconds."
+								},
+								"breathing_interval_ms": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 20000,
+									"description": "Average interval between breaths during the night, in milliseconds."
+								},
+								"breathing_interval_28d_avg_ms": {
+									"type": ["number", "null"],
+									"exclusiveMinimum": 0,
+									"exclusiveMaximum": 20000,
+									"description": "The 28-day average of the breathing interval, in milliseconds."
+								}
+							},
+							"required": [
+								"id",
+								"date",
+								"nightly_recharge_status",
+								"ans_charge",
+								"ans_charge_status",
+								"beat_to_beat_interval_ms",
+								"beat_to_beat_interval_28d_avg_ms",
+								"hrv_rmssd_ms",
+								"hrv_rmssd_28d_avg_ms",
+								"breathing_interval_ms",
+								"breathing_interval_28d_avg_ms"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"cursor_field": "date",
+						"consent_time_field": "date",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"date": ["gte", "gt", "lte", "lt"],
+								"ans_charge": ["gte", "gt", "lte", "lt"],
+								"hrv_rmssd_ms": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["date"],
+								"group_by": ["nightly_recharge_status"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					}
+				],
+				"reason_display_messages": {
+					"collection_interrupted": "Polar Flow stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
+					"sign_in_required": "Polar Flow needs you to sign in again before this can continue.",
+					"source_limit_reached": "This run read as much Polar Flow history as one run allows. The next run continues from where this one stopped.",
+					"source_unreadable": "Polar Flow answered with something this connector doesn't recognise, so nothing more was read. Polar may have changed its site; please report this rather than retrying."
+				}
+			}
+		},
+		{
 			"brandIcon": "./connectors/reddit/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/reddit",
 			"entry": "./connectors/reddit/index.ts",
@@ -20206,7 +21903,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.7",
+				"version": "0.4.8",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -21006,7 +22703,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.38",
+				"version": "0.2.39",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -23053,7 +24750,7 @@
 				},
 				"connector_key": "slack-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-				"version": "0.1.3",
+				"version": "0.1.4",
 				"display_name": "Slack (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -24249,7 +25946,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.58",
+				"version": "0.1.59",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -24754,7 +26451,7 @@
 				},
 				"connector_key": "steam",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Steam",
 				"brand": {
 					"icon": "icon.svg",
@@ -25146,7 +26843,7 @@
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.33",
+				"version": "1.0.34",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
@@ -25353,7 +27050,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.46",
+				"version": "0.1.48",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25553,7 +27250,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.14",
+				"version": "0.3.15",
 				"display_name": "TikTok (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -26295,7 +27992,7 @@
 				},
 				"connector_key": "twitter-archive",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/twitter-archive",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Twitter/X Archive",
 				"brand": {
 					"icon": "icon.svg",
@@ -26476,7 +28173,7 @@
 				},
 				"connector_key": "uber",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-				"version": "1.0.27",
+				"version": "1.0.28",
 				"display_name": "Uber",
 				"brand": {
 					"icon": "icon.svg",
@@ -26693,7 +28390,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.23",
+				"version": "0.2.24",
 				"display_name": "USAA",
 				"brand": {
 					"icon": "icon.svg",
@@ -27355,7 +29052,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.30",
+				"version": "0.2.31",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
@@ -27751,7 +29448,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.26",
+				"version": "0.2.27",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
@@ -28078,7 +29775,7 @@
 				},
 				"connector_key": "whatsapp-web",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "WhatsApp (web)",
 				"brand": {
 					"icon": "icon.svg",
@@ -28558,7 +30255,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.47",
+				"version": "0.3.48",
 				"display_name": "Whole Foods",
 				"brand": {
 					"icon": "icon.svg",
@@ -28907,7 +30604,7 @@
 				},
 				"connector_key": "whoop",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-				"version": "0.1.28",
+				"version": "0.1.30",
 				"display_name": "WHOOP",
 				"brand": {
 					"icon": "icon.svg",
@@ -29401,7 +31098,7 @@
 				},
 				"connector_key": "whoop-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop-browser",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "WHOOP (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -29821,7 +31518,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -30520,7 +32217,7 @@
 				},
 				"connector_key": "ynab",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-				"version": "0.3.26",
+				"version": "0.3.27",
 				"display_name": "YNAB",
 				"brand": {
 					"icon": "icon.svg",
@@ -31932,7 +33629,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.48",
+				"version": "0.2.49",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",

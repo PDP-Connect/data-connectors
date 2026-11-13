@@ -1,0 +1,45 @@
+{
+	"user": {
+		"userName": "athlete@example.com",
+		"firstName": "Alex",
+		"lastName": "Example",
+		"nickName": null,
+		"id": 11111111,
+		"pictureUrl": null,
+		"country": "FI"
+	},
+	"localizationInfo": {
+		"firstDayOfWeek": "MONDAY",
+		"measurementUnit": "METRIC",
+		"dateFormat": "DAY_MONTH_YEAR",
+		"dateSeparator": "DOT",
+		"timeFormat": "TIMEFORMAT_24",
+		"timeFormatSeparator": "COLON",
+		"timeZone": "+02:00",
+		"flowLanguage": "en",
+		"userAgentLanguage": "en"
+	},
+	"physicalInfo": {
+		"birthday": [1990, 4, 7],
+		"sex": "FEMALE",
+		"trainingBackground": "REGULAR",
+		"typicalDay": null,
+		"weight": 62.5,
+		"height": 168,
+		"maximumHeartRate": 188,
+		"restingHeartRate": 52,
+		"aerobicThreshold": 141,
+		"anaerobicThreshold": 169,
+		"vo2Max": 47,
+		"metThreshold": null,
+		"weeklyRecoveryTimeSum": null,
+		"functionalThresholdPower": null,
+		"speedCalibrationOffset": null,
+		"sleepGoal": 8,
+		"maximumAerobicPower": null
+	},
+	"sportProfiles": [],
+	"applicationRoles": [],
+	"capabilities": [],
+	"productCapabilities": []
+}

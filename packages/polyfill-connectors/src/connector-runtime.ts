@@ -421,6 +421,16 @@ interface BaseRunConnectorConfig {
 	 * (stderr, outside the protocol channel) to report hook activity instead.
 	 */
 	onDurableCommit?: (log: (message: string) => void) => void | Promise<void>;
+	/**
+	 * The manifest `primary_key` of each stream whose key is not `id` alone.
+	 * Collection Profile: a RECORD's `key` names the same values as the
+	 * primary-key fields of its `data`, as an array for a composite key, and a
+	 * runtime rejects a record whose identities disagree. A stream not listed
+	 * here is keyed by `String(data.id)`, which is only right for
+	 * `primary_key: ["id"]`. Connector tests check each entry against the
+	 * manifest.
+	 */
+	recordKeyFields?: Readonly<Record<string, readonly string[]>>;
 	retryablePattern?: RegExp;
 	/**
 	 * Record field that scope.time_range filters on, for a connector with no
@@ -990,6 +1000,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			error: TerminalErrorDetails,
 		): TerminalErrorDetails => error,
 		onDurableCommit,
+		recordKeyFields,
 		retryablePattern = DEFAULT_RETRYABLE_PATTERN,
 		timeRangeField,
 		isTombstone,
@@ -1447,6 +1458,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			validateRecord,
 			isTombstone,
 			timeRangeFieldFor,
+			recordKeyFields,
 		});
 		observedCounters = emitRecord.counters;
 		const emittedAt = nowIso();
@@ -1715,6 +1727,7 @@ export function makeEmitRecord(deps: {
 	validateRecord: ValidateRecord | undefined;
 	isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
 	timeRangeFieldFor: (stream: string) => ConsentTimeField | null;
+	recordKeyFields?: Readonly<Record<string, readonly string[]>> | undefined;
 }): {
 	emit: (
 		stream: string,
@@ -1740,7 +1753,53 @@ export function makeEmitRecord(deps: {
 		validateRecord,
 		isTombstone,
 		timeRangeFieldFor,
+		recordKeyFields,
 	} = deps;
+	for (const [stream, fields] of Object.entries(recordKeyFields ?? {})) {
+		if (
+			fields.length === 0 ||
+			fields.some((field) => typeof field !== "string" || field === "")
+		) {
+			throw new Error(
+				`runConnector: recordKeyFields.${stream} must be a non-empty list of field names`,
+			);
+		}
+	}
+	const keyFieldsFor = (stream: string): readonly string[] | null =>
+		recordKeyFields && Object.hasOwn(recordKeyFields, stream)
+			? (recordKeyFields[stream] ?? null)
+			: null;
+	/**
+	 * The record's key, or null when a key field is absent. A composite key is
+	 * the array of its string components in primary-key order; its canonical
+	 * form (the `resources` entry) is that array as minified JSON.
+	 */
+	const recordKey = (
+		stream: string,
+		data: RecordData,
+	): { key: string | string[]; canonical: string } | null => {
+		const fields = keyFieldsFor(stream);
+		if (fields === null) {
+			return data.id == null
+				? null
+				: { key: String(data.id), canonical: String(data.id) };
+		}
+		const parts: string[] = [];
+		for (const field of fields) {
+			const value = data[field];
+			if (
+				typeof value !== "string" &&
+				typeof value !== "number" &&
+				typeof value !== "boolean"
+			) {
+				return null;
+			}
+			parts.push(String(value));
+		}
+		return parts.length === 1
+			? { key: parts[0]!, canonical: parts[0]! }
+			: { key: parts, canonical: JSON.stringify(parts) };
+	};
 	// `totalAnomalous` counts records RETAINED despite unmodeled values; it is a
 	// subset of totalEmitted, not a sibling of totalSkipped.
 	const counters = { totalEmitted: 0, totalSkipped: 0, totalAnomalous: 0 };
@@ -1757,9 +1816,10 @@ export function makeEmitRecord(deps: {
 		data: RecordData,
 		options: EmitRecordOptions = {},
 	): "skip" | "tombstone" | "record" => {
-		if (data.id == null) return "skip";
+		const identity = recordKey(stream, data);
+		if (identity === null) return "skip";
 		const rs = resFilters.get(stream);
-		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
+		if (!options.skipResourceFilter && rs && !rs.has(identity.canonical))
 			return "skip";
 		const streamScope = requested.get(stream);
 		const consent = timeRangeFieldFor(stream);
@@ -1797,15 +1857,18 @@ export function makeEmitRecord(deps: {
 		data: RecordData,
 		options: EmitRecordOptions = {},
 	): Promise<void> => {
+		const identity = recordKey(stream, data);
+		if (identity === null) return Promise.resolve();
 		const selection = selectRecord(stream, data, options);
-		if (selection === "skip" || data.id == null) return Promise.resolve();
+		if (selection === "skip") return Promise.resolve();
 		if (selection === "tombstone") {
 			counters.totalEmitted += 1;
+			const fields = keyFieldsFor(stream) ?? ["id"];
 			return emit({
 				type: "RECORD",
 				stream,
-				key: String(data.id),
-				data: { id: data.id },
+				key: identity.key,
+				data: Object.fromEntries(fields.map((field) => [field, data[field]])),
 				emitted_at: emittedAt,
 				op: "delete",
 			});
@@ -1823,7 +1886,7 @@ export function makeEmitRecord(deps: {
 		const record: EmittedMessage = {
 			type: "RECORD",
 			stream,
-			key: String(data.id),
+			key: identity.key,
 			data,
 			emitted_at: emittedAt,
 		};

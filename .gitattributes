@@ -1,0 +1,3 @@
+# Real export captures committed byte for byte: a CRLF inside a quoted CSV
+# field is part of what the parser tests exercise, so Git must not normalize it.
+connectors/mountain_project/__fixtures__/canary-*.csv -text

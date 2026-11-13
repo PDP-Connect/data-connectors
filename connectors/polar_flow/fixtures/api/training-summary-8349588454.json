@@ -1,0 +1,65 @@
+{
+	"id": 8349588454,
+	"nextTrainingId": 8351200017,
+	"previousTrainingId": -1,
+	"userId": 11111111,
+	"feeling": 0.39,
+	"note": " ",
+	"latitude": 60.1699,
+	"longitude": 24.9384,
+	"startDate": "2026-11-03T07:12:09",
+	"stopTime": "2026-11-03T07:57:44",
+	"duration": "PT45M35S",
+	"distance": null,
+	"kiloCalories": 498,
+	"trainingLoad": 64.2,
+	"trainingBenefit": "STEADY_STATE_TRAINING_PLUS",
+	"carboPercentage": 61,
+	"fatPercentage": 32,
+	"proteinPercentage": 7,
+	"hrMax": 176,
+	"hrAverage": 151,
+	"timezoneOffset": 120,
+	"trainingLoadPro": null,
+	"exercises": {
+		"8379162593": {
+			"id": 8379162593,
+			"sport": { "id": 1 },
+			"startTime": "2026-11-03T07:12:09",
+			"stopTime": "2026-11-03T07:57:44",
+			"duration": "PT45M35S",
+			"distance": 7012.4,
+			"calories": 498,
+			"trainingStatistic": {
+				"HEART_RATE": { "max": 176, "avg": 151, "min": 98 }
+			},
+			"sportParent": "RUNNING",
+			"defaultSpeedViewSettings": "PACE"
+		}
+	},
+	"periodDataUuid": null,
+	"deviceName": "Polar Pacer Pro",
+	"trainingSessionName": "Morning run",
+	"trainingUserInfo": {
+		"firstname": "Alex",
+		"lastname": "Example",
+		"pictureUrl": null,
+		"city": null,
+		"countryCode": null
+	},
+	"clubModel": { "clubTrainingSession": false, "inZone": 0, "duration": 0 },
+	"teamTrainingSessionType": null,
+	"coachNotes": [],
+	"hasUserCoach": false,
+	"sportId": null,
+	"startTrigger": "MANUAL",
+	"physicalInformationSnapshot": {
+		"maximumHeartRate": 188,
+		"weight": 62.5,
+		"functionalThresholdPower": null,
+		"maximumAerobicPower": null,
+		"maximumAerobicSpeed": null
+	},
+	"hasRRsamples": false,
+	"trimmed": false
+}

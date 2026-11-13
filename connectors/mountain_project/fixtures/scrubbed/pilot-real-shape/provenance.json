@@ -1,0 +1,8 @@
+{
+	"format": "pdpp.fixture-provenance/1",
+	"class": "synthetic-but-shape-real",
+	"derived_from": "tick and to-do exports and public profile page of a project-owned Mountain Project test account seeded 2026-11-11 (5 ticks, 3 to-dos), inspected offline; the raw exports are committed as connectors/mountain_project/__fixtures__/canary-*.csv because they carry no owner identifier",
+	"note": "Route names, ids, URLs, locations, dates, notes and the profile are invented. The field set and the nullability seen on the real exports are preserved: Notes, Lead Style, Your Rating and Length empty on most rows, Your Stars -1 (null) when the owner gave none, several route types in one cell, a grade with a protection suffix, no avatar and no location on a profile that set none.",
+	"labeled_by": "human-reviewed",
+	"labeled_at": "2026-11-11"
+}
