@@ -8233,6 +8233,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/coros_browser/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/coros-browser",
 			"entry": "./connectors/coros_browser/index.ts",
 			"manifest": {
@@ -8246,8 +8247,12 @@
 				},
 				"connector_key": "coros-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/coros-browser",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "COROS (Browser Sign-In)",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#F8273B"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
@@ -18621,6 +18626,7 @@
 			}
 		},
 		{
+			"brandIcon": "./connectors/mountain_project/icon.svg",
 			"connectorId": "https://registry.pdpp.dev/connectors/mountain-project",
 			"entry": "./connectors/mountain_project/index.ts",
 			"manifest": {
@@ -18634,8 +18640,12 @@
 				},
 				"connector_key": "mountain-project",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/mountain-project",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Mountain Project",
+				"brand": {
+					"icon": "icon.svg",
+					"background_color": "#336799"
+				},
 				"runtime_requirements": {
 					"bindings": {
 						"network": {

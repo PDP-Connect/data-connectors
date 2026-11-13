@@ -9,8 +9,12 @@
 	},
 	"connector_key": "mountain-project",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/mountain-project",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Mountain Project",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#336799"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
