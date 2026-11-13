@@ -36,7 +36,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
    node --import tsx packages/polyfill-connectors/bin/connector-init.ts <key> --display-name "<Name>" --stream <stream>
    ```
 
-   The command creates `connectors/<key>/` and refuses to overwrite a path that exists. It leaves a `TODO` for each stream description and for the request to the platform, and a browser scaffold also leaves one for navigation and extraction. Fill in each `TODO`.
+   The command creates `connectors/<key>/` and refuses to overwrite a path that exists. It leaves a `TODO` for each stream description and for the request to the platform, and a browser scaffold also leaves one for navigation and extraction. Fill in each `TODO`. The scaffold writes only the stream that `--stream` names, and step 2 says how to add the others.
 
    Where the package already does a job, use its helper instead of your own code. For example, `createConnectorHttpGovernor` paces requests and handles rate limits, and `buildFullScanCoverageMessage` reports coverage for a stream that reads everything on each run. They are in `packages/polyfill-connectors/src/connector-http-governor.ts` and `packages/polyfill-connectors/src/connector-runtime.ts`.
 
@@ -65,7 +65,13 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
    | Contact with the user's own device sets the time | `device_heartbeat` |
    | Nothing gives a useful time | `not_trackable` |
 
-   To add another stream, copy the stream entry in `manifest.json`, then add its schema in `schemas.ts` and a pilot record file at `connectors/<key>/fixtures/scrubbed/pilot-real-shape/records/<stream>.jsonl`. Pilot rows are synthetic, with the field formats of real records; never put real account rows there.
+   To add another stream, change these files in `connectors/<key>/`.
+
+   1. `manifest.json`: copy the stream entry, rename it and set its fields as above.
+   2. `types.ts` and `parsers.ts`: add the record type and the function that builds it from the platform's response.
+   3. `schemas.ts`: add the stream's schema.
+   4. `index.ts`: read the data and emit the stream's records in `collect()`.
+   5. `fixtures/scrubbed/pilot-real-shape/records/<stream>.jsonl`: add pilot records. They are synthetic, with the field formats of real records; never put real account rows there.
 
 3. Choose the refresh policy in `capabilities.refresh_policy`. The app reads it to decide whether to run the connector on a schedule, and it rejects a manifest whose fields contradict each other, so answer these questions in order.
 
@@ -85,7 +91,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
    2. `recommended_interval_seconds` is the default time between scheduled runs. It must be at least the minimum. The app warns a user who sets a shorter interval than either one.
    3. `maximum_staleness_seconds` is the data age after which the data counts as stale. Make it longer than the recommended interval.
    4. `rate_limit_sensitivity` and `bot_detection_sensitivity` (`low`, `medium` or `high`) say how quickly the platform limits or blocks frequent requests. The app does not read them yet; set them for the reviewer.
-   5. `rationale` gives your reasons in one or two sentences, and must not be empty.
+   5. `rationale` gives your reasons in one or two sentences, and must not be empty. If the platform publishes no limit, keep the scaffold's intervals or longer ones, and say in `rationale` that no limit is published.
 
 4. Give the connector its inputs, then run it against your account.
 
@@ -164,17 +170,18 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
    1. Add `brand` to the manifest, with an `icon.svg` in the connector directory that is the platform's real mark (`connectors/character_ai/` is an example). If the platform has no mark you can use, leave `brand` out and add the manifest name to `CONNECTORS_WITHOUT_A_BRAND_MARK` in `scripts/brand-icon-fleet.test.mjs`.
    2. Add `["<key>", "<public-key>"]` to `CONNECTOR_PUBLISH_INVENTORY` in `scripts/connector-publish-allowlist.mjs`. The public key is the directory name with hyphens in place of underscores. Add a third item, the reason, only if the connector cannot be published yet.
-   3. Add a coverage driver to `connectors/_conformance/coverage-conformance-drivers.ts`.
-   4. Run `npm run connector-implementation-index:generate` and commit `connector-implementation-index.json`.
+   3. Add the connector to `REAL_UNLISTED_CONNECTORS` in `packages/polyfill-connectors/src/connector-conformance-roster.ts`, with the test file that runs its collection.
+   4. Add a coverage driver to `CONNECTOR_DRIVERS` in `connectors/_conformance/coverage-conformance-drivers.ts`. A driver runs the connector against a fake local server and lists the streams it covers; `driveJellyfin` is an example.
+   5. Run `npm run connector-implementation-index:generate` and commit `connector-implementation-index.json`.
 
-   Then run `npm test`. It fails until the brand, the publish entry and the index are done, and each failing test names the file to change.
+   Then run `npm test`. It fails until each of these is done, and each failing test names the file to change.
 
 10. Open the PR. Keep the version at `0.1.0` and choose the tier in `capabilities.public_listing.tier`.
 
     | Tier | Who sees the connector in the app | When to use it |
     |---|---|---|
     | `development` | Only users who turn on Developer mode | Every new connector starts here |
-    | `preview` | Every user, with a warning to use data that is not critical | Propose it in the PR when `evidence`, `pilot fixture` and `mock mutation` show `✔`. A connector that makes no HTTP requests can keep `?` on `mock mutation` |
+    | `preview` | Every user, with a warning to use data that is not critical | Propose it in the PR when `evidence`, `pilot fixture` and `mock mutation` show `✔`. A connector that makes no HTTP requests can keep `?` on `mock mutation`. Move the connector from `REAL_UNLISTED_CONNECTORS` to `PRODUCTION_READY_CONNECTORS` in the same PR |
     | `supported` | Every user, with no tier warning | Only a maintainer sets it, after a run against a real account |
 
     The maintainer decides the tier. The PR description states these four things.
