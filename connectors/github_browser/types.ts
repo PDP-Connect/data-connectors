@@ -3,6 +3,7 @@
 
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { BrowserPageObservation } from "./page-evidence.ts";
+import type { RateLimitObservation } from "./rate-limit.ts";
 
 export type GitHubBrowserCollectContext = Pick<
 	BrowserCollectContext,
@@ -17,6 +18,8 @@ export interface BrowserServices {
 		readonly data: unknown;
 		/** Observed HTTP Link header; undefined means headers were not captured. */
 		readonly link?: string | null | undefined;
+		/** Observed `x-ratelimit-*` headers; undefined means they were not captured. */
+		readonly rateLimit?: RateLimitObservation | undefined;
 	}>;
 	now(): Date;
 	openPage(url: string): Promise<BrowserPageObservation>;

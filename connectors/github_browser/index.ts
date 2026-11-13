@@ -143,24 +143,40 @@ export async function collect({
 	| "state"
 >): Promise<void> {
 	const services = {
-		fetchPublicJson: async (url: string) =>
-			page.evaluate(async (target) => {
+		fetchPublicJson: async (url: string) => {
+			const result = await page.evaluate(async (target) => {
 				const response = await fetch(target, {
 					headers: {
 						Accept: "application/vnd.github+json",
 						"X-GitHub-Api-Version": "2022-11-28",
 					},
 				});
-				if (!response.ok)
-					throw new Error(`github_browser_http_${response.status}`);
+				const header = (name: string): number | null => {
+					const value = response.headers.get(name);
+					return value !== null && /^\d+$/u.test(value) ? Number(value) : null;
+				};
 				return {
+					ok: response.ok,
 					requestedUrl: target,
 					responseUrl: response.url,
 					status: response.status,
 					link: response.headers.get("Link"),
-					data: await response.json(),
+					rateLimit: {
+						remaining: header("x-ratelimit-remaining"),
+						resetEpochSeconds: header("x-ratelimit-reset"),
+						retryAfterSeconds: header("retry-after"),
+					},
+					data: response.ok ? await response.json() : null,
 				};
-			}, url),
+			}, url);
+			const { ok, ...response } = result;
+			if (!ok)
+				// The collector classifies on the message; the pacer reads the headers.
+				throw Object.assign(new Error(`github_browser_http_${response.status}`), {
+					rateLimit: response.rateLimit,
+				});
+			return response;
+		},
 		now: () => new Date(),
 		openPage: async (url: string) => openGitHubPage(page, url),
 		openContributionPage: async (url: string) =>

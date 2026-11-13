@@ -26,6 +26,7 @@ import {
 	parseRepositoriesPage,
 	parseStarredPage,
 } from "./parsers.ts";
+import { createRateLimitPacer } from "./rate-limit.ts";
 import { validateEntity, validateRecord } from "./schemas.ts";
 import type { BrowserServices, LegacyContributionDay } from "./types.ts";
 
@@ -81,8 +82,10 @@ export async function collectGitHubBrowser(
 				...(status === undefined ? {} : { status: Number(status) }) });
 		}
 	};
+	// Every API call is paced from GitHub's own rate-limit headers.
+	const pacer = createRateLimitPacer({ now: () => services.now(), sleep: (ms) => services.sleep(ms) });
 	const fetchJson = async (url: string, counts: CoverageCounts = { considered: 0, covered: 0 }) => {
-		const response = await sourceRequest(() => services.fetchPublicJson(url), counts);
+		const response = await sourceRequest(() => pacer.send(url, () => services.fetchPublicJson(url)), counts);
 		if (response.status !== 200) throw new CollectionError({ ...counts, origin: "source",
 			cause: response.status === 429 ? "http_rate_limited" : "http_status_failed", status: response.status });
 		if (!apiResponseMatches(response, url)) throw new CollectionError({ ...counts, origin: "source", cause: "wrong_navigation" });
@@ -466,7 +469,6 @@ export async function collectGitHubBrowser(
 		let capped = false;
 		const counts = () => ({ considered: evidence.expectedTotal ?? evidence.identities.size, covered });
 		for (let request = evidence.next; request !== null; request = evidence.next) {
-			if (request.page > 1) await services.sleep(6500);
 			let response: Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>;
 			try { response = await fetchJson(request.url, counts()); }
 			catch (error) {
