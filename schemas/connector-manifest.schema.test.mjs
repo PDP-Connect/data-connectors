@@ -99,15 +99,15 @@ function profileSection(heading, nextHeading) {
 
 test("Section 3.4 preserves pre-spawn refusal of unsupported required capabilities", () => {
   const text = profileSection("### 3.4 Human interaction and protocol capabilities", "### 3.5 ");
-  assert.match(text, /It MUST reject a connector with an unsupported required capability before spawn\./);
-  assert.match(text, /A runtime that implements profile version 0\.2\.0 MUST advertise and support `OBSERVATION`\./);
+  assert.match(text, /It MUST reject a connector with an unsupported required capability before spawn, except for `RUN_COVERAGE_V1` when the runtime implements the elective exception in Section 7\.1\./);
+  assert.match(text, /DETAIL_GAP, DETAIL_COVERAGE and OBSERVATION are mandatory runtime features of 0\.3\.0, including Sections 5\.10 through 5\.13 and the recovery-hint gate\./);
 });
 
 test("Section 3.4 limits the elective exception to readers implementing it", () => {
   const text = profileSection("### 3.4 Human interaction and protocol capabilities", "### 3.5 ");
-  assert.match(text, /A runtime that does not advertise a declared capability MUST NOT start that connector, unless the section that defines the capability makes it elective and the runtime implements that elective exception\./);
-  assert.match(text, /This exception does not waive any other placement requirement\./);
-  assert.match(text, /`RUN_COVERAGE_V1` \(Section 7\.1, which defines it as elective\)/);
+  assert.match(text, /A runtime that implements its elective exception MAY start a connector without supporting that extension only as Section 7\.1 permits and only if all other placement requirements pass\./);
+  assert.match(text, /This exception MUST NOT weaken mandatory 0\.3\.0 accounting or diagnosis\./);
+  assert.match(text, /`RUN_COVERAGE_V1` \(Section 7\.1\) is an elective optional extension\. A connector that uses it MUST declare `RUN_COVERAGE_V1` in `protocol_capabilities`\./);
   assert.doesNotMatch(text, /an elective capability never blocks spawn/i);
 });
 
@@ -169,10 +169,11 @@ test("terminal store evidence defines omission, runtime authority, release bindi
   assert.match(text, /A failed `DONE` MUST NOT contain `coverage`\./);
   assert.match(
     text,
-    /In this extension, durable admission means that the durable write path accepted the effect, and outstanding debt means unrecovered durable detail gaps \(Section 5\.6\)\./,
+    /In this extension, durable admission means that the durable write path accepted the effect, and outstanding debt means unrecovered durable detail gaps \(Section 5\.6 of the applicable base profile; Sections 5\.6\.2 and 5\.6\.6 under 0\.3\.0, where pending seals remain debt until commit\)\./,
   );
   assert.match(text, /The connector's assertion MUST NOT override runtime evidence/);
-  assert.match(text, /debt settlement still follows the detail-gap accounting of Section 5\.6\./);
+  assert.match(text, /A later fully validated run for the same obligation may replace a negative; under 0\.3\.0, debt settlement still requires Sections 5\.6\.2, 5\.6\.3 and 5\.6\.6\. For older versions, debt settlement still follows Section 5\.6 of the applicable base profile\./);
+  assert.match(text, /`DONE\.coverage` MUST NOT authorize STATE advancement, materialization receipts, debt settlement or absence-derived deletion\./);
   assert.match(text, /`scoped: false` supplies no such assertion and MUST NOT support positive coverage for that stream\./);
   assert.match(text, /The artifact digest and manifest fingerprint MUST match a release pair/);
   assert.match(
