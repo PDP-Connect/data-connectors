@@ -4,7 +4,7 @@ This repository holds connectors that collect a person's own data from a platfor
 
 ## Contribute a connector
 
-1. Follow [AUTHORING.md](AUTHORING.md). It takes you from install to an open PR, with one command per step.
+1. Follow [AUTHORING.md](AUTHORING.md). It takes you from install to an open PR, step by step, and says how to choose each manifest setting.
 2. For a browser connector, also follow the [browser connector guidelines](CONNECTOR-GUIDELINES.md). They say what works in the desktop app and in the mobile app.
 3. Sign off each commit with `git commit -s`. If AI helped with a commit, add an `Assisted-by: AI` trailer. [CONTRIBUTING.md](https://github.com/PDP-Connect/.github/blob/main/CONTRIBUTING.md) gives the full policy.
 

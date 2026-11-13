@@ -619,7 +619,7 @@ Three committed pilots show the shapes.
 
 ### 9.2 Scenario replay evidence (`claim.json`)
 
-The commands are steps 3 to 5 of [AUTHORING.md](../../../AUTHORING.md#steps). Recording is live collection with your credentials. Replay is offline against the captured interactions and checks the current connector's output against that scenario. Replay does not test provider freshness or stability under provider churn. For browser replay, confirm that capture produced usable HAR and storage-state files. Keep both private, because they can hold credentials or account data.
+The commands are steps 5 to 7 of [AUTHORING.md](../../../AUTHORING.md#steps). Recording is live collection with your credentials. Replay is offline against the captured interactions and checks the current connector's output against that scenario. Replay does not test provider freshness or stability under provider churn. For browser replay, confirm that capture produced usable HAR and storage-state files. Keep both private, because they can hold credentials or account data.
 
 `--json` writes to the path relative to the process working directory. Neither the scaffold nor the verifier creates `connectors/<key>/evidence/`, so create it first. If the write fails, the verifier prints a warning and keeps its replay exit code. A file that exists after the run does not prove the write succeeded. Delete the old claim before verification, or check that the new claim has the current `verified_at` and the expected digests, and review the content.
 

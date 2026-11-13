@@ -102,7 +102,7 @@ export function stripComments(source: string): string {
 export type EvidenceStatus = "bound" | "malformed" | "none" | "stale";
 
 const RECORD_COMMANDS =
-	"record a run against your own account and commit the claim: `node --import tsx packages/polyfill-connectors/bin/scenario-record.ts <key>`, then `node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <scenario-path> --json connectors/<key>/evidence/claim.json` (AUTHORING.md steps 3-5). Commit only claim.json; the scenario can hold your data.";
+	"record a run against your own account and commit the claim: `node --import tsx packages/polyfill-connectors/bin/scenario-record.ts <key>`, then `node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <scenario-path> --json connectors/<key>/evidence/claim.json` (AUTHORING.md steps 5-7). Commit only claim.json; the scenario can hold your data.";
 
 export function checkEvidence(
 	connector: string,
