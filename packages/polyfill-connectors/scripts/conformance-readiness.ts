@@ -64,17 +64,37 @@ const PROOF_STRATEGIES: ReadonlySet<string> = new Set([
 const COVERAGE_RATCHET =
 	"connectors/_conformance/coverage-conformance-drivers.ts";
 
+/** The manifest's stream entries that are objects; `checkManifest` reports the rest. */
+function streamsOf(manifest: ReadinessManifest): ManifestStream[] {
+	return Array.isArray(manifest.streams)
+		? manifest.streams.filter(
+				(s): s is ManifestStream => typeof s === "object" && s !== null,
+			)
+		: [];
+}
+
 function streamName(stream: ManifestStream): string {
 	return typeof stream.name === "string" ? stream.name : "(unnamed)";
 }
 
 /** Streams that declare a coverage strategy the shared oracle asks a run to prove. */
 function proofStreams(manifest: ReadinessManifest): ManifestStream[] {
-	return (manifest.streams ?? []).filter(
+	return streamsOf(manifest).filter(
 		(s) =>
 			typeof s.coverage_strategy === "string" &&
 			PROOF_STRATEGIES.has(s.coverage_strategy),
 	);
+}
+
+/**
+ * Source text without comments, so a comment such as `// TODO emit
+ * DETAIL_COVERAGE` neither satisfies nor triggers a rule. A `//` preceded by
+ * `:` (a URL in a string) is kept.
+ */
+export function stripComments(source: string): string {
+	return source
+		.replace(/\/\*[\s\S]*?\*\//g, "")
+		.replace(/(^|[^:\\])\/\/[^\n]*/g, "$1");
 }
 
 // ─── evidence: has the author recorded a real run of this exact code? ─────
@@ -87,14 +107,17 @@ const RECORD_COMMANDS =
 export function checkEvidence(
 	connector: string,
 	status: EvidenceStatus,
-	malformedError?: string,
+	detail: {
+		claim?: string | undefined;
+		malformedError?: string | undefined;
+	} = {},
 ): Step {
+	const { claim, malformedError } = detail;
 	const commands = RECORD_COMMANDS.replaceAll("<key>", connector);
 	switch (status) {
 		case "bound":
 			return {
-				detail:
-					"evidence/claim.json was recorded from this exact source and manifest",
+				detail: `evidence/claim.json (${claim ?? "unknown claim"}) was recorded by the author from this exact source and manifest. CI does not re-run it; read its limitations.`,
 				name: "evidence",
 				verdict: "PASS",
 			};
@@ -149,7 +172,7 @@ export function checkCoverageProof(
 			verdict: "PASS",
 		};
 	}
-	if (!COVERAGE_EMISSION.test(source)) {
+	if (!COVERAGE_EMISSION.test(stripComments(source))) {
 		return {
 			detail: `${streams.length} stream(s) declare a coverage strategy, but the source never reports coverage (no DETAIL_COVERAGE, coverage helper or coverage_diagnostics receipt). Unless a shared runtime reports it for you, a successful run reads as "coverage not measured".`,
 			name: "coverage",
@@ -252,7 +275,18 @@ export const SHARED_HELPER_RULES: readonly SharedHelperRule[] = [
  * error message; its default (/ECONN|ETIMEDOUT|timeout/i) matches neither.
  */
 const RETRYABLE_ERROR_THROWN =
-	/throw\s+new\s+\w*Error\(\s*[`'"][^`'"\n]*(?:rate_?limit|_5xx|http_\$\{)/i;
+	/throw\s+new\s+\w*Error\(\s*[`'"][^`'"\n]*(?:rate_?limit|_5xx|http_\$\{|\b429\b|\b5\d\d\b)/i;
+/**
+ * The governor throws ConnectorRateLimitedError (`<name>_rate_limited`) when
+ * 429s persist. Unless the connector catches it, only `retryablePattern`
+ * makes that failure retryable.
+ */
+function governorErrorEscapes(code: string): boolean {
+	return (
+		/createConnectorHttpGovernor/.test(code) &&
+		!/ConnectorRateLimitedError/.test(code)
+	);
+}
 const RUN_CONNECTOR_CALL = /\brunConnector\s*\(/;
 
 function needsBrowser(manifest: ReadinessManifest): boolean {
@@ -263,20 +297,21 @@ export function checkSharedHelpers(
 	source: string,
 	manifest: ReadinessManifest,
 ): Step {
+	const code = stripComments(source);
 	const kind = needsBrowser(manifest) ? "browser" : "api";
 	const findings = SHARED_HELPER_RULES.filter(
 		(rule) =>
 			(rule.appliesTo === "all" || rule.appliesTo === kind) &&
-			rule.handRolled.test(source) &&
-			!rule.usesShared.test(source),
+			rule.handRolled.test(code) &&
+			!rule.usesShared.test(code),
 	).map((rule) => `${rule.id}: ${rule.message}`);
 	if (
-		RUN_CONNECTOR_CALL.test(source) &&
-		RETRYABLE_ERROR_THROWN.test(source) &&
-		!/retryablePattern/.test(source)
+		RUN_CONNECTOR_CALL.test(code) &&
+		(RETRYABLE_ERROR_THROWN.test(code) || governorErrorEscapes(code)) &&
+		!/\bretryablePattern\s*:/.test(code)
 	) {
 		findings.push(
-			"retryable-pattern: throws rate-limit or HTTP-status errors, but runConnector sets no retryablePattern. The default (/ECONN|ETIMEDOUT|timeout/i) matches neither, so a rate limit or a 5xx fails the run as terminal. Set a pattern that matches the errors a later run can recover from.",
+			"retryable-pattern: throws rate-limit or HTTP-status errors (or uses the governor, which throws <name>_rate_limited), but runConnector sets no retryablePattern. The default (/ECONN|ETIMEDOUT|timeout/i) matches neither, so a rate limit or a 5xx fails the run as terminal. Set a pattern that matches the errors a later run can recover from.",
 		);
 	}
 	if (findings.length === 0) {
@@ -301,7 +336,7 @@ export function checkSharedHelpers(
 /** Up to three date-time fields of a stream, as candidates for its time semantics. */
 function timeFields(stream: ManifestStream): string {
 	return Object.entries(stream.schema?.properties ?? {})
-		.filter(([, prop]) => prop.format === "date-time")
+		.filter(([, prop]) => prop?.format === "date-time")
 		.map(([field]) => field)
 		.slice(0, 3)
 		.join(", ");
@@ -328,7 +363,7 @@ const ACCOUNT_STREAM =
  */
 export function listOpenSemantics(manifest: ReadinessManifest): string[] {
 	const open: string[] = [];
-	const streams = manifest.streams ?? [];
+	const streams = streamsOf(manifest);
 	let fields = 0;
 	let described = 0;
 	for (const stream of streams) {
@@ -353,7 +388,9 @@ export function listOpenSemantics(manifest: ReadinessManifest): string[] {
 				`${name}: cursor_field — names the field the incremental cursor follows`,
 			);
 		}
-		const props = Object.values(stream.schema?.properties ?? {});
+		const props = Object.values(stream.schema?.properties ?? {}).filter(
+			(p): p is SchemaProperty => typeof p === "object" && p !== null,
+		);
 		fields += props.length;
 		described += props.filter(
 			(p) => typeof p.description === "string" && p.description !== "",

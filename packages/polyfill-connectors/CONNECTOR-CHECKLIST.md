@@ -51,7 +51,7 @@ These rules apply to each new promotion. Most connectors already at
 
 | Rule | Check | Applies to |
 |---|---|---|
-| A replay claim from a run against a real account, recorded from the current source and manifest | `conformance <connector>` → `evidence` step is PASS (`connectors/<connector>/evidence/claim.json`, written by `bin/scenario-verify.ts --json`; see AUTHORING.md) | every connector. Commit only `claim.json`; the scenario and HAR files stay private |
+| The author recorded a run against their own account, and its replay claim is bound to the current source and manifest | `conformance <connector>` → `evidence` step is PASS (`connectors/<connector>/evidence/claim.json`, written by `bin/scenario-verify.ts --json`; see AUTHORING.md). PASS shows the digests match; CI does not re-run the capture, so read the claim's limitations | every connector. Commit only `claim.json`; the scenario and HAR files stay private |
 | Pilot fixture present, locks emitted shape against drift | `conformance <connector>` → `pilot fixture` step (looks for `connectors/<connector>/fixtures/scrubbed/pilot-real-shape/`) | any schema-bearing connector. The rows are synthetic with real field shapes; `connector-init` writes a starter set. Never commit real account rows there |
 | Mock-mutation verdict is `PASS` (every path literal in the test suite is load-bearing) | `node --import tsx scripts/mock-mutation-check.ts --connector=<connector>` from `packages/polyfill-connectors/` — see `conformance`'s `mock mutation` step | any connector with a path-asserting mock. A connector with zero HTTP surface reports `UNKNOWN` here permanently and correctly — that is not a gap to close |
 

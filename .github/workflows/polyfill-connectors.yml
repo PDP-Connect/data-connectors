@@ -345,6 +345,7 @@ jobs:
         if: steps.connectors.outputs.list != ''
         env:
           CHANGED_CONNECTORS: ${{ steps.connectors.outputs.list }}
+          CONFORMANCE_BASE_REF: ${{ github.event.pull_request.base.sha }}
         working-directory: packages/polyfill-connectors
         run: |
           {
@@ -353,7 +354,7 @@ jobs:
             for connector in $CHANGED_CONNECTORS; do
               [ -f "../../connectors/$connector/manifest.json" ] || continue
               echo '```text'
-              node --import tsx scripts/conformance.ts "$connector" --static || true
+              node --import tsx scripts/conformance.ts "$connector" --static 2>&1 || echo "(conformance exited non-zero for $connector)"
               echo '```'
             done
           } >> "$GITHUB_STEP_SUMMARY"

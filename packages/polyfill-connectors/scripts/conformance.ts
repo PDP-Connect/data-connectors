@@ -283,7 +283,12 @@ function connectorSource(connector: string): string {
 	return parts.join("\n");
 }
 
-/** The manifest version on the base branch; null = connector is new; undefined = no base to compare. */
+/**
+ * The manifest version on the base branch: null when the connector does not
+ * exist there (new), undefined when there is no base to compare. CI passes
+ * the PR's base commit in CONFORMANCE_BASE_REF; locally the upstream main
+ * comes before a fork's own main.
+ */
 function baseManifestVersion(connector: string): string | null | undefined {
 	const git = (args: string[]): string =>
 		execFileSync("git", args, {
@@ -291,27 +296,51 @@ function baseManifestVersion(connector: string): string | null | undefined {
 			encoding: "utf8",
 			stdio: "pipe",
 		});
-	for (const ref of ["origin/main", "upstream/main", "main"]) {
+	const refs = [
+		process.env.CONFORMANCE_BASE_REF,
+		"upstream/main",
+		"origin/main",
+		"main",
+	].filter((ref): ref is string => Boolean(ref));
+	for (const ref of refs) {
 		try {
 			git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
 		} catch {
 			continue;
 		}
+		const path = `${ref}:connectors/${connector}/manifest.json`;
 		try {
-			const text = git([
-				"show",
-				`${ref}:connectors/${connector}/manifest.json`,
-			]);
-			const version = (JSON.parse(text) as { version?: unknown }).version;
-			return typeof version === "string" ? version : "";
+			git(["cat-file", "-e", path]);
 		} catch {
 			return null;
+		}
+		try {
+			const version = (JSON.parse(git(["show", path])) as { version?: unknown })
+				.version;
+			return typeof version === "string" ? version : "";
+		} catch {
+			return undefined;
 		}
 	}
 	return undefined;
 }
 
 export function readinessSteps(connector: string): Step[] {
+	try {
+		return readinessStepsOrThrow(connector);
+	} catch (err) {
+		return [
+			{
+				detail: `readiness checks could not run: ${err instanceof Error ? err.message : String(err)}`,
+				name: "readiness",
+				nextAction: `check that every entry in connectors/${connector}/manifest.json "streams" is an object with a "name"`,
+				verdict: "FAIL",
+			},
+		];
+	}
+}
+
+function readinessStepsOrThrow(connector: string): Step[] {
 	const manifestFile = manifestPath(connector);
 	const manifest = JSON.parse(
 		readFileSync(manifestFile, "utf8"),
@@ -334,7 +363,10 @@ export function readinessSteps(connector: string): Step[] {
 	);
 	const version = checkVersion(manifest, baseManifestVersion(connector));
 	return [
-		checkEvidence(connector, evidence.status, evidence.malformedError),
+		checkEvidence(connector, evidence.status, {
+			claim: evidence.claim,
+			malformedError: evidence.malformedError,
+		}),
 		checkCoverageProof(connector, manifest, source, unexercised),
 		...(version ? [version] : []),
 		checkSharedHelpers(source, manifest),
@@ -402,7 +434,9 @@ function main(): void {
 			}
 		}
 		const blocking = steps.filter((s) => !s.advisory && s.verdict === "FAIL");
-		const unknown = steps.filter((s) => !s.advisory && s.verdict === "UNKNOWN");
+		const unknown = steps.filter(
+			(s) => !s.advisory && (s.verdict === "UNKNOWN" || s.verdict === "WEAK"),
+		);
 		// An advisory WEAK/UNKNOWN still qualifies the all-clear: a decorative mock
 		// means the suite that just passed would not have caught a wrong path, which
 		// is precisely how jellyfin shipped green and broken.

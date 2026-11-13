@@ -47,7 +47,9 @@ test("evidence: no claim is a gap that names the record and verify commands", ()
 test("evidence: bound passes, stale is weak, malformed fails", () => {
 	assert.equal(checkEvidence("x", "bound").verdict, "PASS");
 	assert.equal(checkEvidence("x", "stale").verdict, "WEAK");
-	const malformed = checkEvidence("x", "malformed", "not valid JSON");
+	const malformed = checkEvidence("x", "malformed", {
+		malformedError: "not valid JSON",
+	});
 	assert.equal(malformed.verdict, "FAIL");
 	assert.match(malformed.detail, /not valid JSON/);
 });
@@ -116,6 +118,27 @@ test("parseUnexercisedCoverage reads the real ratchet without importing the driv
 	assert.ok(set.has("chase.accounts"), "known ratchet entry present");
 	assert.ok(![...set].some((e) => e.includes("//")), "comments stripped");
 	assert.ok([...set].every((e) => /^[a-z0-9_]+\.[a-z0-9_]+$/.test(e)));
+});
+
+test("coverage: a comment that names DETAIL_COVERAGE is not a coverage report", () => {
+	const step = checkCoverageProof(
+		"x",
+		snapshotManifest,
+		'// TODO emit DETAIL_COVERAGE\nctx.emit({ type: "STATE" });',
+		new Set(),
+	);
+	assert.equal(step.verdict, "UNKNOWN");
+});
+
+test("readiness steps tolerate a malformed stream entry", () => {
+	const manifest = {
+		streams: [null, { name: "a", schema: { properties: { b: null } } }],
+	} as unknown as ReadinessManifest;
+	assert.doesNotThrow(() => listOpenSemantics(manifest));
+	assert.equal(
+		checkCoverageProof("x", manifest, "", new Set()).verdict,
+		"PASS",
+	);
 });
 
 // ─── version ──────────────────────────────────────────────────────────────
@@ -198,6 +221,36 @@ test("shared helpers: a hand-built DETAIL_COVERAGE message is flagged", () => {
 		apiManifest,
 	);
 	assert.match(step.nextAction ?? "", /coverage-message/);
+});
+
+test("shared helpers: a governed connector still needs a retryablePattern for <name>_rate_limited", () => {
+	const source =
+		"const gov = createConnectorHttpGovernor({ name, profile });\nrunConnector({ name, collect });";
+	const step = checkSharedHelpers(source, apiManifest);
+	assert.match(step.nextAction ?? "", /retryable-pattern/);
+	assert.equal(
+		checkSharedHelpers(
+			`${source}\nrunConnector({ retryablePattern: /rate_limited/ });`,
+			apiManifest,
+		).verdict,
+		"PASS",
+	);
+	// goodreads catches the governor's error and reports a rate_limited skip.
+	assert.equal(
+		checkSharedHelpers(
+			`${source}\nif (error instanceof ConnectorRateLimitedError) return skip;`,
+			apiManifest,
+		).verdict,
+		"PASS",
+	);
+});
+
+test("shared helpers: a literal HTTP 429 error counts, and a comment does not set retryablePattern", () => {
+	const step = checkSharedHelpers(
+		'throw new Error("HTTP 429");\n// TODO retryablePattern\nrunConnector({ collect });',
+		browserManifest,
+	);
+	assert.match(step.nextAction ?? "", /retryable-pattern/);
 });
 
 // ─── semantics ────────────────────────────────────────────────────────────
