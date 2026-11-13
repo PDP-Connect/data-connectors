@@ -1,0 +1,27 @@
+{
+	"nextPageCursor": null,
+	"results": [
+		{
+			"user_book_id": 11,
+			"source": "kindle",
+			"category": "books",
+			"title": "Synthetic Book",
+			"author": "Example Author",
+			"is_deleted": false,
+			"highlights": [
+				{
+					"id": 101,
+					"text": "A synthetic highlight.",
+					"note": null,
+					"location": 45,
+					"location_type": "location",
+					"highlighted_at": null,
+					"updated_at": "2026-01-01T00:00:00Z",
+					"readwise_url": "https://readwise.io/open/101",
+					"tags": [],
+					"is_deleted": false
+				}
+			]
+		}
+	]
+}
