@@ -1,36 +1,49 @@
 # Add a connector to mobile
 
-## Runtime binding features
+You have a working browser connector and want it in the mobile app build. You will finish with a connector that `npm run mobile:bundle` builds and that passes the PageShim harness. First check the connector against the [browser connector guidelines](../CONNECTOR-GUIDELINES.md); the mobile app gives the connector only part of the desktop `page`.
 
-`runtime_requirements.bindings.<binding>.features` lists the host capabilities a connector needs for each binding. The feature names are host-neutral capabilities, not PageShim method names:
+## Steps
 
-| Feature | Capability the host provides |
-| --- | --- |
-| `page_navigation` | Navigate the active page to a URL. |
-| `page_script_evaluation` | Run script in the active page context. |
-| `page_content_read` | Read rendered page content. |
-| `page_condition_wait` | Wait until a condition in the active page becomes true. |
-| `same_origin_page_fetch` | Fetch same-origin resources from the active page context. |
-| `host_http_request` | Make an HTTP request from the host runtime outside the page context. |
-| `host_download_capture` | Capture content downloaded by the active page. |
-| `host_archive_extraction` | Extract downloaded archive contents in the host runtime. |
-| `host_archive_entry_chunk_read` | Read an extracted archive entry in chunks. |
-| `page_input` | Interact with the active page: click and type. |
-| `cookie_read` | Read the active page's cookie jar. |
-| `page_response_observation` | Observe page network responses, including response body content. |
-| `host_cookie_jar_request` | Make an HTTP request from the host runtime using the active page's cookie jar. |
+1. Declare the connector's bindings and features under `runtime_requirements.bindings` in `connectors/<connector>/manifest.json`, as [the next section](#declare-runtime-binding-features) shows. The mobile build takes every connector for which all of these hold, and the PageShim tests then fail until steps 2 to 4 are done. A browser scaffold lists no `network` features, so it stays out until you declare them.
+   1. The `browser` binding is required.
+   2. The `network` binding is required, or the `browser` features include `page_script_evaluation`.
+   3. Each required binding lists at least one feature, and the mobile app provides each one.
+   4. The mobile app provides each feature listed under an optional `browser` or `network` binding.
+2. Add a `mobile.pageshim` entry to the manifest. The generic entry reads the scope prefix, sign-in URL, sign-in message, probe export and collect export from it; `connectors/character_ai/manifest.json` is a working example. Write an entry file in `scripts/pageshim/entries/` and name it in `mobile.pageshim.entry` only when the connector needs something the generic entry does not do, such as a different output shape or a host method the facade does not offer. The entry receives the manifest's streams as `PAGESHIM_CONNECTOR_STREAMS` and must serve every one.
+3. Add `scripts/pageshim/ports/<connector>.json`. Copy `scripts/pageshim/ports/character_ai.json` and change `connector`; the empty `modules` and `inject` lists mean the connector needs no port to host methods.
+4. Add a fixture in `scripts/pageshim/fixtures/` with the expected scope summaries. `scripts/pageshim/fixtures/character_ai.mjs` is a working example; its pages and API responses are synthetic. Never put real account data in a fixture.
+5. Run `npm run mobile:bundle -- <connector>` from the repository root. The command builds the bundle, runs the PageShim harness against those exact bytes, writes the bundle to `.tmp/mobile-connectors/<connector>.js`, and prints the file path, size in bytes and SHA-256. You are done when it prints those three values. If it says the connector does not declare only PageShim-supported runtime bindings, go back to step 1.
+6. Open the PR. When it merges, the publish workflow (`.github/workflows/publish-polyfill-connectors.yml`) attaches the bundle to the connector's artifact, if the connector is published and its version is new. [publishing.md](publishing.md) describes publication.
 
-PageShim does not implement the last four features yet (Collection Profile
-Section 3.3.8); they are part of the shared vocabulary so a connector can
-declare them, and a host that does not support them is simply ineligible for
-that connector, the same as any other unsupported feature.
+The harness runs the bundle against fixture responses. It does not show that the site behaves the same on a real device.
 
-The enum is defined in `schemas/connector-manifest.schema.json`; the catalog and implementation-index schemas reference that shared definition. A host declares support with a set of feature names for each binding. PageShim's binding-to-feature support map is in `scripts/pageshim/capabilities.mjs`; another host publishes its own map. Eligibility requires every required binding and declared feature to be supported.
+## Declare runtime binding features
 
-1. **Declare the host features the connector needs.** In `manifest.json`, list every required host binding under `runtime_requirements.bindings` and add its required features. Do not add a mobile-enabled flag. A connector stays out of the mobile build until PageShim supports every required binding and feature.
-2. **Expose the connector's standard browser hooks and manifest data.** Every entry serves every stream in `manifest.streams`: a generic entry reads them directly, and an entry file gets them as `PAGESHIM_CONNECTOR_STREAMS`. The PageShim gate fails when a bundle refuses or cannot run a manifest stream. A generic entry reads its scope prefix, login URL, probe export, and collect export from `manifest.mobile.pageshim`. Keep an entry file only when it must preserve a real host or output exception. Give the connector a scrubbed fixture in `scripts/pageshim/fixtures/` and expected scope summaries.
-3. **Run the local build and harness.** Run `npm run mobile:bundle -- <connector>`. This developer convenience builds the bundle, runs the PageShim harness against those exact bytes, then prints the file path, byte size, and SHA-256. The artifact is written under `.tmp/mobile-connectors/`.
-4. **Use the current mobile catalog handoff.** Until the signed artifact path is available, copy the verified bundle to `unity-surfaces/apps/mobile/public/connectors/`, add or update its row in `index.json`, and point `scriptUrl` at the bundle. The app fetches the row and script from the same catalog origin.
-5. **Let publish CI build mobile-capable connectors.** The #267 packaging path runs for each selected connector. It derives capability from the declared requirements, builds and harnesses eligible bundles, then attaches them to the connector's existing OCI assets layer. The connector's OCI digest and Cosign signature cover the mobile bytes with the desktop release. The mobile catalog can resolve the bundle from that signed artifact instead of copying a standalone JavaScript file.
+A binding is a broad service that the connector needs from its host, such as `browser`, `network`, `filesystem` or `desktop_session`. A feature is one capability inside a binding. `runtime_requirements.bindings.<binding>.features` lists the features the connector uses. This example is the declaration in `connectors/character_ai/manifest.json`, shortened.
 
-The binding names describe broad services such as `browser`, `network`, `filesystem`, and `desktop_session`; feature names describe the specific capabilities a connector needs from a host. The current harness is synthetic; it does not prove provider behavior on a device.
+```json
+"runtime_requirements": {
+  "bindings": {
+    "network": { "required": true, "features": ["same_origin_page_fetch"] },
+    "browser": { "required": true, "features": ["page_script_evaluation", "page_navigation"] }
+  }
+}
+```
+
+| Feature | What the host does | Mobile app |
+| --- | --- | --- |
+| `page_navigation` | Navigate the active page to a URL. | yes |
+| `page_script_evaluation` | Run script in the active page. | yes |
+| `page_content_read` | Read the rendered page content. | yes |
+| `page_condition_wait` | Wait until a condition in the active page becomes true. | yes |
+| `same_origin_page_fetch` | Fetch same-origin resources from inside the active page. | yes |
+| `host_http_request` | Make an HTTP request from the host, outside the page. | yes |
+| `host_download_capture` | Capture a file the active page downloads. | only through an adapter for one connector |
+| `host_archive_extraction` | Extract a downloaded archive in the host. | only through an adapter for one connector |
+| `host_archive_entry_chunk_read` | Read an extracted archive entry in chunks. | only through an adapter for one connector |
+| `page_input` | Click and type in the active page. | no |
+| `cookie_read` | Read the active page's cookie jar. | no |
+| `page_response_observation` | Observe the page's network responses, with their bodies. | no, support is planned |
+| `host_cookie_jar_request` | Make an HTTP request from the host with the active page's cookies. | no |
+
+[What runs on desktop and on mobile](../CONNECTOR-GUIDELINES.md#what-runs-on-desktop-and-on-mobile) says what to use instead of each missing feature. `scripts/pageshim/capabilities.mjs` is the current support list, and `schemas/connector-manifest.schema.json` defines the feature names.

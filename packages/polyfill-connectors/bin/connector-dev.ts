@@ -1163,8 +1163,8 @@ function printBrowserRendererNote(env: NodeJS.ProcessEnv): void {
 	printLine(
 		"BROWSER  no DISPLAY/WAYLAND_DISPLAY detected — browser-class connectors run headless. " +
 			"Headless browser dev currently has no attach surface from this CLI (no CDP/devtools URL is " +
-			"observable outside the connector subprocess); see src/browser-launch.ts's module docstring " +
-			"and docs/reference/ for the streaming-companion path used in production.",
+			"observable outside the connector subprocess); see the module comment in " +
+			"packages/polyfill-connectors/src/browser-launch.ts.",
 	);
 }
 
