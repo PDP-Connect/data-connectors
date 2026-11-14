@@ -192,21 +192,34 @@ export function isoToPacked(iso: string): string | null {
 	return `${m}${d}${y}`;
 }
 
-/**
- * Chase's Statements page renders dates like "Apr 13, 2026". v8's Date
- * parser handles that reliably; we lower-cap into YYYY-MM-DD.
- */
+/** Format a validated calendar date without a host-zone conversion. */
+function calendarDate(year: number, month: number, day: number): string | null {
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+	if (
+		!Number.isInteger(year) || year < 1 || year > 9999 ||
+		!Number.isInteger(month) || month < 1 || month > 12 ||
+		!Number.isInteger(day) || day < 1 || day > (days[month - 1] ?? 0)
+	) return null;
+	return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+const CALENDAR_ISO_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
+const CALENDAR_US_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
+
+/** Chase statement dates are calendar dates, not instants. */
 export function parseDateDelivered(
 	raw: string | null | undefined,
 ): string | null {
-	if (!raw) {
-		return null;
-	}
-	const d = new Date(raw);
-	if (Number.isNaN(d.getTime())) {
-		return null;
-	}
-	return d.toISOString().slice(0, 10);
+	if (!raw) return null;
+	const value = raw.trim();
+	const iso = CALENDAR_ISO_RE.exec(value);
+	if (iso) return calendarDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+	const numeric = CALENDAR_US_RE.exec(value);
+	if (numeric) return calendarDate(Number(numeric[3]), Number(numeric[1]), Number(numeric[2]));
+	const month = DATE_MONTH_RE.exec(value);
+	if (month?.[0] !== value || !month?.[1] || !month[2] || !month[3]) return null;
+	return calendarDate(Number(month[3]), Number(MONTH_INDEX[month[1].toLowerCase()]), Number(month[2]));
 }
 
 export function yearMonthFromIso(iso: string | null): string {
@@ -381,24 +394,37 @@ function inferActivityStatus(text: string): CurrentActivityStatus {
 	return "unknown";
 }
 
+function activityCalendarDate(
+	month: number,
+	day: number,
+	yearRaw: string | undefined,
+	referenceDateIso: string,
+): string | null {
+	if (yearRaw) {
+		const year = yearRaw.length === 2 ? Number(`20${yearRaw}`) : Number(yearRaw);
+		return calendarDate(year, month, day);
+	}
+	const reference = CALENDAR_ISO_RE.exec(referenceDateIso);
+	if (!reference || !calendarDate(Number(reference[1]), Number(reference[2]), Number(reference[3]))) return null;
+	let year = Number(reference[1]);
+	// The most recent occurrence not after the scrape day (at most one year
+	// back). Do not normalize an impossible day or search older leap years.
+	if (month > Number(reference[2]) || (month === Number(reference[2]) && day > Number(reference[3]))) year -= 1;
+	return calendarDate(year, month, day);
+}
+
 function parseVisibleDate(
 	text: string,
 	referenceDateIso: string,
 ): string | null {
 	const month = DATE_MONTH_RE.exec(text);
 	if (month?.[1] && month[2]) {
-		const monthNum =
-			MONTH_INDEX[month[1].toLowerCase().replace(MONTH_DOT_RE, "")];
-		const year = month[3] ?? referenceDateIso.slice(0, 4);
-		if (monthNum) {
-			return `${year.padStart(4, "20")}-${monthNum}-${month[2].padStart(2, "0")}`;
-		}
+		const monthNum = MONTH_INDEX[month[1].toLowerCase().replace(MONTH_DOT_RE, "")];
+		if (monthNum) return activityCalendarDate(Number(monthNum), Number(month[2]), month[3], referenceDateIso);
 	}
 	const numeric = DATE_NUMERIC_RE.exec(text);
 	if (numeric?.[1] && numeric[2]) {
-		const yearRaw = numeric[3] ?? referenceDateIso.slice(0, 4);
-		const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
-		return `${year}-${numeric[1].padStart(2, "0")}-${numeric[2].padStart(2, "0")}`;
+		return activityCalendarDate(Number(numeric[1]), Number(numeric[2]), numeric[3], referenceDateIso);
 	}
 	return null;
 }
