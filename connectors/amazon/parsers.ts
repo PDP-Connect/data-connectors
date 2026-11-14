@@ -227,7 +227,10 @@ function parseOrderCard(
 
 // ─── Order-detail DOM parsing ───────────────────────────────────────────
 
-const CANCELLED_RE = /has been cancelled/i;
+// Only an explicit whole-order statement may discard items and totals.
+// Unknown or item-level wording must not become a guessed order state.
+const CANCELLED_RE = /^(?:this|your) order has been cancelled[.!]?$/i;
+const ITEM_CANCELLED_RE = /^one item has been cancelled[.!]?$/i;
 const PAY_PREFIX_RE = /^Payment method\s*/i;
 const PAY_SUFFIX_RE = /\s*View related transactions.*$/i;
 const CARD_PATCH_RE =
@@ -707,6 +710,15 @@ export function parseOrderDetailDom(
 	let status_detail: string | null = null;
 	if (isCancelled) {
 		status_detail = "This order has been cancelled";
+	} else if (cancelledText) {
+		// Preserve the recognized partial cancellation without dropping
+		// purchased items. An unrecognized cancellation stays unknown.
+		if (
+			ITEM_CANCELLED_RE.test(cancelledText) &&
+			cancelledText.length < STATUS_MAX_LEN
+		) {
+			status_detail = cancelledText;
+		}
 	} else {
 		const alertsEl = od.querySelector('[data-component="alerts"]');
 		const alertText = normText(alertsEl);
