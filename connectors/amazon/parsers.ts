@@ -109,19 +109,12 @@ function parseListPageItem(titleEl: HTMLElement): ListPageItem | null {
 
 function collectListPageItems(card: HTMLElement): ListPageItem[] {
 	const items: ListPageItem[] = [];
-	const seenAsins = new Set<string>();
 	for (const titleEl of card.querySelectorAll<HTMLElement>(
 		".yohtmlc-product-title",
 	)) {
 		const item = parseListPageItem(titleEl);
 		if (!item) {
 			continue;
-		}
-		if (item.asin) {
-			if (seenAsins.has(item.asin)) {
-				continue;
-			}
-			seenAsins.add(item.asin);
 		}
 		items.push(item);
 	}
@@ -760,24 +753,29 @@ export function parseCurrencyCents(
 }
 
 /**
- * Canonical form for name-based item identity. Collapses runs of whitespace
- * (so "Item  Name" and "Item\tName" dedupe), trims, and lowercases. Used as
- * the map key in mergeDetailByKey and by itemId's name fallback, so both
- * sides agree on what "same item" means.
+ * Canonical name for fallback matching and legacy name-based item identity.
+ * A normalized product name is not, by itself, a purchased-line identity.
  */
 function normalizeItemName(name: string): string {
 	return name.replace(ITEM_ID_WHITESPACE_RE, " ").trim().toLowerCase();
 }
 
+// Internal merge metadata, never emitted as a record field. A symbol keeps
+// this separate from parsed product data and survives ordinary object spreads.
+const ITEM_LINE_SUFFIX = Symbol("amazon.itemLineSuffix");
+type LineMergedItem = MergedItem & { [ITEM_LINE_SUFFIX]?: string };
+
 export function itemId(
 	orderId: string,
-	it: { asin?: string | null; name?: string },
+	it: { asin?: string | null; name?: string; [ITEM_LINE_SUFFIX]?: string },
 ): string {
 	const key =
 		it.asin || (it.name ? normalizeItemName(it.name) : "") || "unknown";
-	return `${orderId}|${key}`;
+	return `${orderId}|${key}${it[ITEM_LINE_SUFFIX] ?? ""}`;
 }
 
+// Legacy lookup helper retained for callers; the line merge below must not
+// use these lossy product-keyed maps.
 export function mergeDetailByKey(detailItems: DetailItem[]): {
 	byAsin: Map<string, DetailItem>;
 	byName: Map<string, DetailItem>;
@@ -799,54 +797,92 @@ export function mergeDetailByKey(detailItems: DetailItem[]): {
 const RETURNED_RE = /return/i;
 
 /**
- * Merge list-page items with detail-page items into the final emit-ordered
- * sequence. Preserves original collect() semantics exactly:
- *   1. For each list-page item, find its detail-page counterpart (ASIN first,
- *      then normalized name), spread list→detail, emit.
- *   2. After that, append any detail-page items not seen in the list
- *      (dedup by ASIN or normalized name against list items).
- *   3. Dedup emitted items by their final itemId() so repeats within a
- *      single order aren't duplicated.
+ * Pair observations once per line, never sum quantities across surfaces.
+ * Equal-sized ASIN groups pair in source order. Unequal groups are not
+ * collapsed; name fallback is allowed only for a unique pair on both sides
+ * with no conflicting ASIN. Unmatched observations retain their multiplicity.
  */
 export function mergeOrderItems(
 	listOrder: ListPageOrder,
 	detail: OrderDetail | null,
 ): MergedItem[] {
+	const listItems = listOrder.items;
 	const detailItems = detail?.items ?? [];
-	const { byAsin: detailByAsin, byName: detailByName } =
-		mergeDetailByKey(detailItems);
-	const emittedIds = new Set<string>();
-	const out: MergedItem[] = [];
-
-	const push = (merged: MergedItem): void => {
-		const id = itemId(listOrder.orderId, merged);
-		if (emittedIds.has(id)) {
-			return;
-		}
-		emittedIds.add(id);
-		out.push(merged);
+	const pairs = new Map<number, number>();
+	const usedDetails = new Set<number>();
+	const indexes = <T>(items: T[], keyOf: (item: T) => string) => {
+		const groups = new Map<string, number[]>();
+		items.forEach((item, index) => {
+			const key = keyOf(item);
+			if (!key) return;
+			const group = groups.get(key) ?? [];
+			group.push(index);
+			groups.set(key, group);
+		});
+		return groups;
 	};
-
-	for (const it of listOrder.items) {
-		const d: Partial<DetailItem> =
-			(it.asin ? detailByAsin.get(it.asin) : undefined) ??
-			(it.name ? detailByName.get(normalizeItemName(it.name)) : undefined) ??
-			{};
-		push({ ...it, ...d });
+	const listAsins = indexes(listItems, (item) => item.asin || "");
+	const detailAsins = indexes(detailItems, (item) => item.asin || "");
+	for (const [asin, left] of listAsins) {
+		const right = detailAsins.get(asin);
+		if (!right || left.length !== right.length) continue;
+		left.forEach((listIndex, offset) => {
+			const detailIndex = right[offset]!;
+			pairs.set(listIndex, detailIndex);
+			usedDetails.add(detailIndex);
+		});
 	}
-	// Detail-page items that weren't in the list.
-	for (const di of detailItems) {
-		const dupByAsin =
-			di.asin && listOrder.items.some((x) => x.asin === di.asin);
-		const diNorm = di.name ? normalizeItemName(di.name) : "";
-		const dupByName =
-			diNorm &&
-			listOrder.items.some(
-				(x) => x.name && normalizeItemName(x.name) === diNorm,
-			);
-		if (!(dupByAsin || dupByName)) {
-			push(di);
+
+	// Snapshot unmatched groups before matching: consuming one observation
+	// must never turn an initially ambiguous name into an apparent singleton.
+	const listNames = indexes(listItems, (item) => normalizeItemName(item.name));
+	const detailNames = indexes(detailItems, (item) =>
+		normalizeItemName(item.name),
+	);
+	for (const [name, listGroup] of listNames) {
+		const left = listGroup.filter((index) => !pairs.has(index));
+		const right = (detailNames.get(name) ?? []).filter(
+			(index) => !usedDetails.has(index),
+		);
+		if (left.length !== 1 || right.length !== 1) continue;
+		const listIndex = left[0]!;
+		const detailIndex = right[0]!;
+		const li = listItems[listIndex]!;
+		const di = detailItems[detailIndex]!;
+		if (li.asin && di.asin) continue;
+		pairs.set(listIndex, detailIndex);
+		usedDetails.add(detailIndex);
+	}
+
+	const out: LineMergedItem[] = listItems.map((item, index) => {
+		const detailIndex = pairs.get(index);
+		return detailIndex === undefined
+			? { ...item }
+			: { ...item, ...detailItems[detailIndex] };
+	});
+	detailItems.forEach((item, index) => {
+		if (!usedDetails.has(index)) out.push({ ...item });
+	});
+
+	// Reserve every legacy base id so a generated suffix cannot steal the
+	// ordinary id of another (possibly name-keyed) line. First occurrences
+	// keep their exact preexisting ids; only additional lines get suffixes.
+	const reserved = new Set(out.map((item) => itemId(listOrder.orderId, item)));
+	const usedIds = new Set<string>();
+	for (const item of out) {
+		const base = itemId(listOrder.orderId, item);
+		if (!usedIds.has(base)) {
+			usedIds.add(base);
+			continue;
 		}
+		let occurrence = 2;
+		let suffix = `|line:${occurrence}`;
+		while (reserved.has(base + suffix) || usedIds.has(base + suffix)) {
+			occurrence += 1;
+			suffix = `|line:${occurrence}`;
+		}
+		item[ITEM_LINE_SUFFIX] = suffix;
+		usedIds.add(base + suffix);
 	}
 	return out;
 }

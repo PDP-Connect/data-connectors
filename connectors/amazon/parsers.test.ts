@@ -757,18 +757,113 @@ test("mergeOrderItems: matches by normalized name when ASIN missing", () => {
 	assert.equal(merged[0]?.unit_price, "$7.50");
 });
 
-test("mergeOrderItems: dedups duplicate ASINs across list+detail", () => {
-	// Deduping is by final itemId (orderId|asin). If the list and detail
-	// both reference ASIN B01X only the first emission is kept.
-	const listOrder = makeListOrder({
+test("mergeOrderItems: preserves repeated list lines without detail", () => {
+	const list = makeListOrder({
 		items: [
-			{ asin: "B01DUPDUPDX", name: "A", url: null },
-			{ asin: "B01DUPDUPDX", name: "A again", url: null },
+			{ asin: "B000000001", name: "Milk", url: null },
+			{ asin: "B000000001", name: "Milk", url: null },
 		],
 	});
-	const merged = mergeOrderItems(listOrder, null);
+	const merged = mergeOrderItems(list, null);
+	assert.equal(merged.length, 2); // Base drops the second ASIN.
+	const records = merged.map((item) =>
+		buildOrderItemRecord(list.orderId, "2024-01-15", item),
+	);
+	assert.equal(records[0]?.id, itemId(list.orderId, list.items[0]!));
+	assert.notEqual(records[1]?.id, records[0]?.id);
+});
+
+test("mergeOrderItems: repeated ASIN lines retain quantities and stable first id", () => {
+	const html = `<div class="order-card js-order-card">
+		<div class="yohtmlc-order-id"><span>111-2222222-3333333</span></div>
+		<div class="item-box"><a href="/dp/B000000001">Milk</a><span class="yohtmlc-product-title">Milk</span></div>
+		<div class="item-box"><a href="/dp/B000000001">Milk</a><span class="yohtmlc-product-title">Milk</span></div>
+	</div>`;
+	const list = parseOrdersListDom(html)[0];
+	assert.ok(list);
+	assert.equal(list.items.length, 2); // Base list parser discards line two.
+	const detail = makeDetail({
+		items: [1, 2].map((quantity) =>
+			makeDetailItem({ asin: "B000000001", name: "Milk", quantity }),
+		),
+	});
+	for (const observedList of [list, { ...list, items: [] }]) {
+		const records: ReturnType<typeof buildOrderItemRecord>[] = mergeOrderItems(
+			observedList,
+			detail,
+		).map((item) => buildOrderItemRecord(list.orderId, "2024-01-15", item));
+		assert.deepEqual(
+			records.map((item) => item.quantity),
+			[1, 2],
+		);
+		assert.equal(records[0]?.id, list.orderId + "|B000000001");
+		assert.equal(new Set(records.map((item) => item.id)).size, 2);
+		assert.deepEqual(
+			records,
+			mergeOrderItems(observedList, detail).map((item) =>
+				buildOrderItemRecord(list.orderId, "2024-01-15", item),
+			),
+		);
+	}
+});
+
+test("mergeOrderItems: unique no-ASIN list name adopts detail ASIN and quantity", () => {
+	const list = makeListOrder({
+		items: [{ asin: null, name: " Milk ", url: null }],
+	});
+	const detail = makeDetail({
+		items: [makeDetailItem({ asin: "B000000001", name: "milk", quantity: 2 })],
+	});
+	const merged = mergeOrderItems(list, detail);
 	assert.equal(merged.length, 1);
-	assert.equal(merged[0]?.name, "A");
+	assert.equal(merged[0]?.asin, "B000000001"); // Base leaves null and suppresses detail.
+	const record = buildOrderItemRecord(list.orderId, "2024-01-15", merged[0]!);
+	assert.equal(record.quantity, 2);
+	assert.equal(record.id, list.orderId + "|B000000001");
+});
+
+test("mergeOrderItems: unequal repeated groups remain unmerged, never reuse a detail", () => {
+	for (const asin of [null, "B000000001"]) {
+		const list = makeListOrder({
+			items: [
+				{ asin, name: "Milk", url: null },
+				{ asin, name: "Milk", url: null },
+			],
+		});
+		const detail = makeDetail({
+			items: [
+				makeDetailItem({ asin: "B000000001", name: "Milk", quantity: 2 }),
+			],
+		});
+		const merged = mergeOrderItems(list, detail);
+		assert.equal(merged.length, 3); // Base collapses/suppresses these observations.
+		assert.deepEqual(
+			merged.map((item) => item.quantity),
+			[undefined, undefined, 2],
+		);
+		const records = merged.map((item) =>
+			buildOrderItemRecord(list.orderId, "2024-01-15", item),
+		);
+		assert.equal(new Set(records.map((item) => item.id)).size, 3);
+		assert.equal(records[0]?.id, itemId(list.orderId, list.items[0]!));
+	}
+});
+
+test("mergeOrderItems: ambiguous detail names are retained rather than guessed", () => {
+	const list = makeListOrder({
+		items: [{ asin: null, name: "Milk", url: null }],
+	});
+	const detail = makeDetail({
+		items: ["B000000001", "B000000002"].map((asin) =>
+			makeDetailItem({ asin, name: "Milk", quantity: 2 }),
+		),
+	});
+	const merged = mergeOrderItems(list, detail);
+	assert.equal(merged.length, 3); // Base suppresses both detail rows by name.
+	assert.deepEqual(
+		merged.map((item) => item.asin),
+		[null, "B000000001", "B000000002"],
+	);
 });
 
 test("buildOrderRecord: both list + detail present — detail wins for enrichment fields", () => {
