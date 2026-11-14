@@ -856,6 +856,34 @@ test("buildOrderItemRecord: builds emit-ready shape with cents, returned flag, a
 	assert.equal(rec.refund_status, "Returned January 20");
 });
 
+test("buildOrderItemRecord: distinguishes returns from return-window wording", () => {
+	const cases: [string | null, boolean][] = [
+		["Return or replace items: Eligible through November 30, 2026", false],
+		["Return window closed on October 4, 2026", false],
+		["Eligible for Return", false],
+		["Return items: Eligible through Dec 1, 2026", false],
+		[null, false],
+		["", false],
+		["Unknown status", false],
+		["Returned January 20", true],
+		["Return started", true],
+		["Return complete", true],
+		["Return received", true],
+		["Refund issued", true],
+		["Refunded", true],
+		["Your return is complete. Your refund has been issued.", true],
+		["Item returned", true],
+	];
+	for (const [status, returned] of cases) {
+		const rec = buildOrderItemRecord("111-2222222-3333333", "2024-01-15", {
+			name: "Widget",
+			refund_status: status,
+		});
+		assert.equal(rec.returned, returned, `status=${JSON.stringify(status)}`);
+		assert.equal(rec.refund_status, status);
+	}
+});
+
 test("mergeDetailByKey: buckets by ASIN first, name second", () => {
 	const items: DetailItem[] = [
 		{
