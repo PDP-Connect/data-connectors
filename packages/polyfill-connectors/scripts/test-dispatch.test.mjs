@@ -10,6 +10,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -125,3 +126,35 @@ test("node:test commands work when Vitest is absent", () => {
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
+
+// Exercise the actual argv entry point, not just the imported helpers.
+for (const [name, assertion, status] of [
+	["passing", "assert.equal(1, 1)", 0],
+	["failing", "assert.equal(1, 2)", 1],
+]) {
+	test(`dispatcher CLI returns ${status} for a ${name} node:test file`, () => {
+		const directory = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+		const file = join(directory, "fixture.test.mjs");
+		try {
+			writeFileSync(
+				file,
+				`import assert from "node:assert/strict";\nimport { test } from "node:test";\ntest("dispatch CLI fixture", () => { ${assertion}; });\n`,
+			);
+			const result = spawnSync(
+				process.execPath,
+				["scripts/test-dispatch.mjs", "1", file],
+				{
+					cwd: packageRoot,
+					env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+					encoding: "utf8",
+					timeout: 30_000,
+				},
+			);
+			assert.equal(result.error, undefined);
+			assert.equal(result.status, status, result.stdout + result.stderr);
+			assert.match(result.stdout, /dispatch CLI fixture/);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+}
