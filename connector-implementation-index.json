@@ -15284,7 +15284,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.31",
+				"version": "0.6.32",
 				"display_name": "H-E-B",
 				"brand": {
 					"icon": "icon.svg",
@@ -15328,6 +15328,18 @@
 								"env": ["HEB_PASSWORD"]
 							}
 						]
+					}
+				},
+				"options_schema": {
+					"type": "object",
+					"description": "Owner options for the H-E-B connector, resolved from the connector_instance_config_revisions spine. declared_option_kind is this connector's claim only; packages/polyfill-connectors/src/connector-config-option-kind-registry.ts decides the kind that gates self-activation.",
+					"properties": {
+						"HEB_COLLECT_NUTRITION": {
+							"type": "boolean",
+							"description": "When true, read the H-E-B product page of each purchased product to collect the nutrition stream. Off by default: long runs of product-page reads are where H-E-B's bot protection has redirected a signed-in session to sign-in and ended the run. Orders, order items and profile are collected either way.",
+							"default": false,
+							"declared_option_kind": "collection_scope"
+						}
 					}
 				},
 				"capabilities": {
@@ -15653,7 +15665,7 @@
 					{
 						"name": "nutrition",
 						"required": false,
-						"description": "Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Unread, loading, mismatched or blocked product responses remain retryable unknown lookups; safely observed product fields are retained. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
+						"description": "Off unless the HEB_COLLECT_NUTRITION option is on. Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Unread, loading, mismatched or blocked product responses remain retryable unknown lookups; safely observed product fields are retained. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
 						"display": {
 							"label": "Your H-E-B product nutrition",
 							"detail": "Calories, macros, vitamins/minerals, serving size, ingredients, and allergens for products in your orders."
@@ -15865,7 +15877,8 @@
 					"source_reported_empty": "H-E-B showed us your order history and it has no orders in it",
 					"source_reported_empty_after_retention": "H-E-B no longer lists your orders because they're older than its retention window. Your collected orders are retained and untouched, and new orders will be collected normally",
 					"stream_collection_failed": "We couldn't confirm we reached the end of this H-E-B data, so we didn't mark it complete. The next run tries again",
-					"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+					"unparseable_order_date": "We skipped some orders because their dates couldn't be read",
+					"disabled_by_option": "Nutrition is turned off for this connection, so no H-E-B product pages were read. Turn on the nutrition option to collect it"
 				}
 			}
 		},

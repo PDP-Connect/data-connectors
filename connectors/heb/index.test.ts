@@ -87,6 +87,8 @@ import type { ListPageDiagnostics, ListPageOrder } from "./types.ts";
 // DOM fixtures contain date-only English labels; pin this test process so
 // absolute fixture dates do not depend on the host's local timezone.
 process.env.TZ = "UTC";
+// Nutrition is off unless the owner option is on; these tests exercise it.
+process.env.HEB_COLLECT_NUTRITION = "true";
 // Pacing pauses are anti-bot courtesy that these tests do not assert on, so
 // they fire on the next tick instead of sleeping.
 after(skipPoliteDelays());

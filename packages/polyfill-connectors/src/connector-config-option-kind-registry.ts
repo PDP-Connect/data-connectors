@@ -60,6 +60,12 @@ const PLATFORM_OPTION_KINDS: Readonly<Record<string, ConnectorOptionKinds>> =
 			// Subprocess timeout for one helper invocation; changes no selection.
 			GMCLI_TIMEOUT_MS: "transport",
 		}),
+		heb: Object.freeze({
+			// Turns the nutrition stream's product-page reads on or off, so it
+			// decides whether that stream is collected at all
+			// (connectors/heb/index.ts hebNutritionEnabled).
+			HEB_COLLECT_NUTRITION: "collection_scope",
+		}),
 		slack: Object.freeze({
 			CHANNEL_ALLOWLIST: "collection_scope",
 			CHANNEL_TYPES: "collection_scope",

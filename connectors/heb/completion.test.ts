@@ -24,6 +24,26 @@ import { validateRecord } from "./schemas.ts";
 // they fire on the next tick instead of sleeping.
 after(skipPoliteDelays());
 
+// Nutrition is off unless the owner option is on. Most tests here exercise
+// nutrition collection, so they run with it on; the opt-in tests below turn
+// it off for their own duration.
+process.env.HEB_COLLECT_NUTRITION = "true";
+
+async function withNutritionOption<T>(
+	value: string | undefined,
+	run: () => Promise<T>,
+): Promise<T> {
+	const previous = process.env.HEB_COLLECT_NUTRITION;
+	if (value === undefined) delete process.env.HEB_COLLECT_NUTRITION;
+	else process.env.HEB_COLLECT_NUTRITION = value;
+	try {
+		return await run();
+	} finally {
+		if (previous === undefined) delete process.env.HEB_COLLECT_NUTRITION;
+		else process.env.HEB_COLLECT_NUTRITION = previous;
+	}
+}
+
 const FIXTURES_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
 	"__fixtures__",
@@ -347,6 +367,90 @@ test("collect: nutrition-only with products emits nutrition records without STAT
 	assert.deepEqual(
 		ctx.emitted.map((record) => record.stream),
 		["nutrition"],
+	);
+});
+
+test("collect: nutrition requested with the option unset reads no product page and says why", async () => {
+	const visits: string[] = [];
+	const ctx = makeContext(
+		["orders", "order_items", "nutrition"],
+		makeCollectPage({
+			detailHtml: WIDGET_DETAIL_HTML,
+			listHtml: singleItemOrdersList(),
+			visits,
+		}),
+	);
+
+	await withNutritionOption(undefined, () => hebConnector.collect(ctx));
+
+	assert.deepEqual(
+		visits.filter((url) => url.includes("/product-detail/")),
+		[],
+		"no product page is read while nutrition is off",
+	);
+	assert.ok(
+		ctx.emitted.some((record) => record.stream === "order_items"),
+		"order items are still collected",
+	);
+	assert.equal(
+		ctx.emitted.filter((record) => record.stream === "nutrition").length,
+		0,
+	);
+	const disabled = findMessages(ctx.protocolMessages, "SKIP_RESULT").filter(
+		(skip) => skip.reason === "disabled_by_option",
+	);
+	assert.equal(disabled.length, 1);
+	assert.equal(disabled[0]?.stream, "nutrition");
+	assert.equal(ctx.reportedStreamFailures.length, 0);
+});
+
+test("collect: nutrition requested with the option off (false) behaves as unset", async () => {
+	const visits: string[] = [];
+	const ctx = makeContext(
+		["nutrition"],
+		makeCollectPage({
+			detailHtml: WIDGET_DETAIL_HTML,
+			listHtml: singleItemOrdersList(),
+			visits,
+		}),
+	);
+
+	await withNutritionOption("false", () => hebConnector.collect(ctx));
+
+	assert.deepEqual(visits, [], "nutrition-only with the option off reads nothing");
+	assert.deepEqual(ctx.emitted, []);
+	assert.deepEqual(
+		findMessages(ctx.protocolMessages, "SKIP_RESULT").map((skip) => [
+			skip.stream,
+			skip.reason,
+		]),
+		[["nutrition", "disabled_by_option"]],
+	);
+});
+
+test("collect: nutrition is read when the option is on", async () => {
+	const visits: string[] = [];
+	const ctx = makeContext(
+		["nutrition"],
+		makeCollectPage({
+			detailHtml: WIDGET_DETAIL_HTML,
+			listHtml: singleItemOrdersList(),
+			visits,
+		}),
+	);
+
+	await withNutritionOption("true", () => hebConnector.collect(ctx));
+
+	assert.ok(visits.some((url) => url.includes("/product-detail/")));
+	assert.deepEqual(
+		ctx.emitted.map((record) => record.stream),
+		["nutrition"],
+	);
+	assert.equal(
+		findMessages(ctx.protocolMessages, "SKIP_RESULT").filter(
+			(skip) => skip.reason === "disabled_by_option",
+		).length,
+		0,
 	);
 });
 

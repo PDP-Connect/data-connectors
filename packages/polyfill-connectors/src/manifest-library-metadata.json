@@ -419,6 +419,18 @@
 		"file": "heb.json",
 		"manifest": {
 			"connector_key": "heb",
+			"options_schema": {
+				"type": "object",
+				"description": "Owner options for the H-E-B connector, resolved from the connector_instance_config_revisions spine. declared_option_kind is this connector's claim only; packages/polyfill-connectors/src/connector-config-option-kind-registry.ts decides the kind that gates self-activation.",
+				"properties": {
+					"HEB_COLLECT_NUTRITION": {
+						"type": "boolean",
+						"description": "When true, read the H-E-B product page of each purchased product to collect the nutrition stream. Off by default: long runs of product-page reads are where H-E-B's bot protection has redirected a signed-in session to sign-in and ended the run. Orders, order items and profile are collected either way.",
+						"default": false,
+						"declared_option_kind": "collection_scope"
+					}
+				}
+			},
 			"reason_display_messages": {
 				"empty_page_before_max_page": "We hit an empty page of orders before we expected to, so we stopped to check rather than assume we were done",
 				"heb_empty_history_after_prior_orders": "H-E-B reported no order history, but we previously collected orders for this account. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove your history is gone",
@@ -440,7 +452,8 @@
 				"source_reported_empty": "H-E-B showed us your order history and it has no orders in it",
 				"source_reported_empty_after_retention": "H-E-B no longer lists your orders because they're older than its retention window. Your collected orders are retained and untouched, and new orders will be collected normally",
 				"stream_collection_failed": "We couldn't confirm we reached the end of this H-E-B data, so we didn't mark it complete. The next run tries again",
-				"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+				"unparseable_order_date": "We skipped some orders because their dates couldn't be read",
+				"disabled_by_option": "Nutrition is turned off for this connection, so no H-E-B product pages were read. Turn on the nutrition option to collect it"
 			}
 		}
 	},

@@ -39,6 +39,7 @@ import {
 	politeDelay,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { readOptions } from "../../packages/polyfill-connectors/src/connector-options.ts";
 import {
 	type FingerprintCursor,
 	openFingerprintCursor,
@@ -2822,6 +2823,32 @@ export async function collectProfile(
 	await deps.emitRecord("profile", record);
 }
 
+/** Owner option (manifest `options_schema`). Nutrition reads one product
+ * page per purchased product. Long runs of those reads are where H-E-B's bot
+ * protection has redirected a live session to sign-in, ending the whole run,
+ * so nutrition runs only when the owner turns it on. Read per run, not at
+ * module load. */
+export function hebNutritionEnabled(): boolean {
+	return (
+		readOptions(null, {
+			envPrefix: "",
+			fields: { HEB_COLLECT_NUTRITION: { parse: "bool", default: false } },
+		}).HEB_COLLECT_NUTRITION === true
+	);
+}
+
+async function emitNutritionDisabled(
+	deps: Pick<EmitDeps, "emit">,
+): Promise<void> {
+	await deps.emit({
+		type: "SKIP_RESULT",
+		stream: "nutrition",
+		reason: "disabled_by_option",
+		message:
+			"H-E-B nutrition is off for this connection. Set the HEB_COLLECT_NUTRITION option to collect it.",
+	});
+}
+
 async function emitInventoryIncomplete(
 	deps: Pick<EmitDeps, "emit">,
 	stream: string,
@@ -3155,7 +3182,11 @@ export const hebConnector: BrowserConnectorConfig = {
 		const wantsOrders = requested.has("orders");
 		const wantsItems = requested.has("order_items");
 		const wantsProfile = requested.has("profile");
-		const wantsNutrition = requested.has("nutrition");
+		const nutritionRequested = requested.has("nutrition");
+		const wantsNutrition = nutritionRequested && hebNutritionEnabled();
+		if (nutritionRequested && !wantsNutrition) {
+			await emitNutritionDisabled({ emit });
+		}
 
 		if (wantsProfile) {
 			await collectProfile(page, {
