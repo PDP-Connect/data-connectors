@@ -32,7 +32,9 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import {
 	collectAllStreams,
 	collectOrderNodes,
+	DOORDASH_RETRYABLE_PATTERN,
 	MAX_SCROLL_PAGES,
+	waitForOrdersResponse,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { DoorDashOrderNode } from "./types.ts";
@@ -227,6 +229,7 @@ async function runCollectAllStreamsWithNodes(
 		void predicate;
 		let resolved = false;
 		return {
+			ok: () => true,
 			json: async () => {
 				if (resolved) {
 					return null;
@@ -390,5 +393,89 @@ test("collectAllStreams: order missing orderUuid is a record-level diagnostic, n
 	);
 	assertUserFacingProgress(
 		harness.protocolMessages.filter((m) => m.type === "PROGRESS"),
+	);
+});
+
+test("collectOrderNodes: zero-new overlap does not hide an older page and streak resets", async () => {
+	const bodies = [
+		graphqlEnvelope([makeOrderNode("new")]),
+		graphqlEnvelope([makeOrderNode("new")]),
+		graphqlEnvelope([makeOrderNode("old")]),
+		graphqlEnvelope([makeOrderNode("old")]),
+		graphqlEnvelope([makeOrderNode("old")]),
+		graphqlEnvelope([makeOrderNode("unreached")]),
+	];
+	let calls = 0;
+	const result = await collectOrderNodes({
+		page: fakePage(),
+		delay: async () => undefined,
+		scrollFn: async () => undefined,
+		waitForResponseFn: async (_page, action) => {
+			await action();
+			return bodies[calls++];
+		},
+	});
+	assert.deepEqual(
+		result.nodes.map((node) => node.orderUuid),
+		["new", "old"],
+	);
+	assert.equal(calls, 5);
+	assert.equal(result.truncated, false);
+});
+
+for (const failure of ["http", "json"]) {
+	test(`collectAllStreams: mid-walk ${failure} response fails retryably instead of completing`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const page = fakePage();
+		let calls = 0;
+		page.waitForResponse = (async () => {
+			calls += 1;
+			const initial = calls === 1;
+			return {
+				ok: () => initial || failure !== "http",
+				status: () => (initial ? 200 : failure === "http" ? 503 : 200),
+				// The 5xx carries a parseable body, so only the status check can catch it.
+				json: async () => {
+					if (initial || failure === "http")
+						return graphqlEnvelope([makeOrderNode("new")]);
+					throw new SyntaxError("synthetic HTML response");
+				},
+			};
+		}) as unknown as Page["waitForResponse"];
+		await assert.rejects(
+			collectAllStreams(
+				makeCtx(harness, ["orders", "order_items"], page),
+				async () => undefined,
+			),
+			(error: Error) =>
+				DOORDASH_RETRYABLE_PATTERN.test(error.message) &&
+				error.message.includes(
+					failure === "http" ? "HTTP 503" : "invalid JSON",
+				),
+		);
+		assert.equal(calls, 2);
+		assert.equal(harness.emitted.length, 0);
+		assert.equal(
+			harness.protocolMessages.some((message) => message.type === "STATE"),
+			false,
+		);
+	});
+}
+
+test("waitForOrdersResponse: only a response timeout is EOF", async () => {
+	const page = fakePage();
+	page.waitForResponse = (async () => {
+		throw Object.assign(new Error("synthetic timeout"), {
+			name: "TimeoutError",
+		});
+	}) as Page["waitForResponse"];
+	assert.equal(await waitForOrdersResponse(page, async () => undefined), null);
+	const closed = new Error("synthetic closed page");
+	page.waitForResponse = (async () => {
+		throw closed;
+	}) as Page["waitForResponse"];
+	await assert.rejects(
+		waitForOrdersResponse(page, async () => undefined),
+		(error) => error === closed,
 	);
 });

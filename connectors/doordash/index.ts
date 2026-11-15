@@ -27,7 +27,7 @@
  * Pagination: DoorDash's orders page infinite-scrolls, firing a repeat
  * `getConsumerOrdersWithDetails` request as the owner (or an automated
  * scroll) nears the bottom. Same approach as the legacy scraper: scroll,
- * capture, repeat, stop when a scroll yields no new orders or a page-count
+ * capture, repeat, stop after two consecutive zero-new scrolls or a page-count
  * ceiling is hit (`MAX_SCROLL_PAGES`, mirrors Reddit's `MAX_PAGES` safety
  * cap pattern from src/page-ceiling.ts).
  *
@@ -128,7 +128,7 @@ const SCROLL_SETTLE_MS = 3000;
 const RESPONSE_WAIT_TIMEOUT_MS = 12_000;
 
 export const DOORDASH_RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|fetch failed|net::ERR_/i;
+	/ECONN|ETIMEDOUT|fetch failed|net::ERR_|doordash_orders_response_failed/i;
 
 // ─── Network capture ─────────────────────────────────────────────────────
 
@@ -146,16 +146,31 @@ export async function waitForOrdersResponse(
 		.waitForResponse((res: Response) => ORDERS_GRAPHQL_URL_RE.test(res.url()), {
 			timeout: RESPONSE_WAIT_TIMEOUT_MS,
 		})
-		.catch((): null => null);
+		.then(
+			(response) => ({ response }),
+			(error: unknown) => ({ error }),
+		);
 	await action();
-	const response = await responsePromise;
-	if (!response) {
-		return null;
+	const outcome = await responsePromise;
+	if ("error" in outcome) {
+		if (
+			outcome.error instanceof Error &&
+			outcome.error.name === "TimeoutError"
+		) {
+			return null;
+		}
+		throw outcome.error;
+	}
+	const { response } = outcome;
+	if (!response.ok()) {
+		throw new Error(
+			"doordash_orders_response_failed: HTTP " + response.status(),
+		);
 	}
 	try {
 		return await response.json();
 	} catch {
-		return null;
+		throw new Error("doordash_orders_response_failed: invalid JSON");
 	}
 }
 
@@ -233,6 +248,7 @@ export async function collectOrderNodes(args: {
 		item_count: nodes.length,
 	});
 
+	let zeroNewScrolls = 0;
 	const walk = await walkPagesWithCeiling({
 		maxPages: MAX_SCROLL_PAGES,
 		fetchPage: async (pageNumber) => {
@@ -248,8 +264,9 @@ export async function collectOrderNodes(args: {
 				page_index: pageNumber,
 				item_count: nodes.length,
 			});
-			if (added === 0) {
-				// Scroll produced a response with nothing new — end of list.
+			zeroNewScrolls = added === 0 ? zeroNewScrolls + 1 : 0;
+			if (zeroNewScrolls >= 2) {
+				// One overlapping refetch is not evidence of exhaustion.
 				return false;
 			}
 			await delay(SCROLL_SETTLE_MS);
