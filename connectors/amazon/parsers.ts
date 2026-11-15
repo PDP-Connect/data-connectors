@@ -172,11 +172,11 @@ const DOLLAR_RE = /\$([\d,]+\.\d{2})/;
 const INT_RE = /^\d+$/;
 const FOPO_BR_RE = /<br\s*\/?>/i;
 const FOPO_AT_PRICE_RE = /@\s*(\$[\d,]+\.\d{2})/;
-const FOPO_CARD_TAIL_PREFIX_RE = /^\*/;
+const FOPO_CARD_TAIL_PREFIX_RE = /^\*+/;
 const HTML_TAG_RE = /<[^>]*>/g;
 const FOPO_QTY_RE = /\bQty:\s*(\d+(?:\.\d+)?)/i;
 const UFPO_ITEM_ROW_ID_RE = /^([A-Z0-9]{10})-item-grid-row$/;
-const UFPO_TOTAL_LABEL_RE = /total/i;
+const UFPO_TOTAL_LABEL_RE = /^(grand total|order total|total)$/i;
 
 const PAY_METHOD_MAX_LEN = 200;
 const ADDRESS_MAX_LEN = 240;
@@ -500,12 +500,17 @@ function parseUfpoGrandTotal(summaryEl: Element | null): string | null {
 		return null;
 	}
 	let total: string | null = null;
+	let priority = 0;
 	for (const row of summaryEl.querySelectorAll<HTMLElement>(".a-row")) {
-		const label = normText(row.querySelector("dt"));
+		const label = normText(row.querySelector("dt")).replace(/:$/, "").trim();
 		const value = normText(row.querySelector("dd"));
 		const match = value.match(DOLLAR_RE);
 		if (UFPO_TOTAL_LABEL_RE.test(label) && match?.[1]) {
-			total = `$${match[1]}`;
+			const rank = label.toLowerCase() === "total" ? 1 : 2;
+			if (rank >= priority) {
+				total = `$${match[1]}`;
+				priority = rank;
+			}
 		}
 	}
 	return total;
@@ -796,7 +801,8 @@ export function mergeDetailByKey(detailItems: DetailItem[]): {
 
 // ─── Order record + item merge ───────────────────────────────────────────
 
-const RETURNED_RE = /return/i;
+const RETURNED_RE =
+	/\breturn(?:ed)?\b.*\b(?:started|received|complete|completed)\b|\breturned\b|\brefund(?:ed| issued| completed)\b/i;
 
 /**
  * Merge list-page items with detail-page items into the final emit-ordered
