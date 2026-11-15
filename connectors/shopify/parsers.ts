@@ -174,12 +174,13 @@ function readDomOrderStatus(card: Element): string | null {
 	const candidates: string[] = [];
 	let afterOrderSummary = false;
 	for (const child of card.children) {
-		if (!child.matches("div, p, span") || child.children.length !== 0) continue;
-		const phrase = (child.textContent ?? "").replace(/\s+/g, " ").trim();
+		if (!child.matches("div, p, span")) continue;
+		const phrase = cardText(child);
 		if (SHOP_MONEY_RE.test(phrase) || SHOP_ITEM_COUNT_RE.test(phrase)) {
 			afterOrderSummary = true;
 			continue;
 		}
+		if (child.children.length !== 0) continue;
 		if (afterOrderSummary && SHOP_STATUS_RE.test(phrase)) candidates.push(phrase);
 	}
 	if (candidates.length !== 1) return null;

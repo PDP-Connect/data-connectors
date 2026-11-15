@@ -81,6 +81,16 @@ for (const [label, price] of [
 	});
 }
 
+test("parseDomOrderCards reads status after a nested order summary", () => {
+	const orders = parseDomOrderCards(
+		'<div class="order-card"><a href="/orders/nested-summary">Acme Goods</a><div><span>$5.00</span> <span>2 items</span></div><div>Delivered</div></div>',
+	);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.status, "Delivered");
+	assert.equal(orders[0]?.totalCents, 500);
+	assert.equal(orders[0]?.itemCount, 2);
+});
+
 // Synthetic adjacent inline fields must not merge into currency codes or counts.
 for (const { label, fields, totalCents, currency, itemCount } of [
 	{ label: "currency code and status", fields: '<span>19.99 EUR</span><span>Shipped</span>', totalCents: 1999, currency: "EUR", itemCount: null },
