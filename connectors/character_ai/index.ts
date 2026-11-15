@@ -472,8 +472,18 @@ export async function checkCharacterAiSession(
 	}
 	const failure = classifyFailure("/user/", response);
 	if (failure === null) {
-		const body = response.json;
-		return typeof body === "object" && body !== null && !Array.isArray(body)
+		// The observed /user/ envelope nests identity at user.user.
+		const body = response.json as { user?: { user?: unknown } } | null;
+		const user = body?.user?.user;
+		if (typeof user !== "object" || user === null || Array.isArray(user)) {
+			return "unknown";
+		}
+		const identity = user as Record<string, unknown>;
+		return (typeof identity.username === "string" &&
+			identity.username.trim().length > 0) ||
+			(typeof identity.id === "number" &&
+				Number.isSafeInteger(identity.id) &&
+				identity.id > 0)
 			? "signed_in"
 			: "unknown";
 	}
@@ -1165,23 +1175,28 @@ async function processChat(
 		return { status: "withheld", recordInScope, recordEmitted: false };
 	}
 	const { turns } = outcome;
+	const sorted = sortTurns(scopedTurns(scope, turns));
 	// A chat outside the chats scope is read only for its messages: its
 	// record is not emitted (the runtime would drop it, and a dropped record
 	// holds back the run's bounded progress).
-	const recordEmitted = recordInScope && wholeInWindow(scope, turns);
+	const recordEmitted =
+		recordInScope && wholeInWindow(scope, turns) && !sorted.generating;
 	if (recordEmitted) {
 		const parent = chat.character_name
 			? chat
 			: { ...chat, character_name: characterNameFromTurns(chat, turns) };
 		await ctx.emitRecord("chats", buildChatRecord(parent, hydrationOf(turns)));
-	} else if (recordInScope) {
+	} else if (recordInScope && !sorted.generating) {
 		connectorDiagnostic("character_ai", "chat_record_past_window", {});
 	}
 	if (!scope.wantMessages) {
-		return { status: "emitted", recordInScope, recordEmitted };
+		return {
+			status: sorted.generating ? "withheld" : "emitted",
+			recordInScope,
+			recordEmitted,
+		};
 	}
 	deps.tally.turnsRead += turns.length;
-	const sorted = sortTurns(scopedTurns(scope, turns));
 	if (sorted.generating) {
 		await recordGap(ctx, chat.chat_id, sorted.generating, deps);
 		return { status: "emitted", recordInScope, recordEmitted };
@@ -1283,20 +1298,10 @@ const NEEDS_CONNECTOR_UPGRADE = {
 	retryable: false,
 };
 
-/** Whether this run's scope can leave a chat with no turn to emit (a window or a resource filter). */
-function messagesNarrowed(scope: RunScope): boolean {
-	return (
-		scope.messagesRange !== null ||
-		scope.messageIds !== null ||
-		scope.chatIds !== null
-	);
-}
-
 async function finishMessages(
 	ctx: BrowserCollectContext,
 	requiredKeys: string[],
 	deps: RunDeps,
-	listed: number,
 ) {
 	const { tally } = deps;
 	await emitDetailCoverage(ctx, {
@@ -1314,19 +1319,7 @@ async function finishMessages(
 			{ stream: "messages" },
 		);
 	}
-	if (
-		listed > 0 &&
-		!messagesNarrowed(deps.scope) &&
-		tally.hydratedKeys.length > 0 &&
-		tally.turnsRead === 0
-	) {
-		await failStream(
-			ctx,
-			"messages",
-			`Character.AI listed ${listed} chat(s) but returned no turns for any of them.`,
-			RETRY_BY_RUNTIME,
-		);
-	}
+	// A successfully hydrated chat may legitimately contain zero turns.
 }
 
 /**
@@ -1374,7 +1367,6 @@ async function recoverOnly(
 				),
 		),
 		deps,
-		0,
 	);
 }
 
@@ -1467,7 +1459,6 @@ async function finishRun(
 					),
 			),
 			deps,
-			inventory.considered,
 		);
 	}
 	// Not read back by any run (the streams are not incremental): every run

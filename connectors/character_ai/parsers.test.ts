@@ -850,6 +850,10 @@ test("an unfinished turn makes its chat a gap; an unstorable turn is left out, t
 	// not held as a pending gap forever for it.
 	assert.equal(messagesOf(second).length, 2);
 	assert.equal(messagesOf(third).length, 0);
+	assert.ok(
+		!chatRecords(h).some((chat) => chat.id === third),
+		"generating parent must be withheld",
+	);
 	assert.equal(ofType(h.messages, "SKIP_RESULT").length, 0);
 	const coverage = coverageOf(h.messages, "messages");
 	assert.deepEqual(coverage?.hydrated_keys, [first]);
@@ -934,7 +938,7 @@ test("auth failures and bot checks throw with their error class", async () => {
 	);
 });
 
-test("listed chats with no turns at all fail the messages stream", async () => {
+test("listed zero-turn chats complete with hydrated coverage", async () => {
 	const route = defaultRoute(
 		Object.fromEntries(
 			CHAT_IDS.map((id) => [
@@ -945,8 +949,11 @@ test("listed chats with no turns at all fail the messages stream", async () => {
 	);
 	const h = harness(fakePage(route, []));
 	await collectCharacterAi(h.ctx);
-	assert.equal(h.failures.length, 1);
-	assert.match(h.failures[0]?.message ?? "", /returned no turns/);
+	assert.deepEqual(h.failures, []);
+	assert.equal(messageRecords(h).length, 0);
+	assert.ok(chatRecords(h).every((chat) => chat.turn_count === 0));
+	assert.deepEqual(coverageOf(h.messages, "messages")?.hydrated_keys, CHAT_IDS);
+	assert.equal(ofType(h.messages, "STATE").length, 1);
 });
 
 const GONE_CHAT = "0f0e0d0c-0b0a-4908-8706-050403020100";
@@ -1134,7 +1141,7 @@ test("session probe reads the user endpoint with the page token", async () => {
 	);
 });
 
-test("chats-only runs keep the hydration of a complete turn walk, whatever the bodies", async () => {
+test("chats-only runs withhold generating parents but keep completed unstorable hydration", async () => {
 	const [, second, third] = CHAT_IDS;
 	assert.ok(second && third);
 	const route = defaultRoute({
@@ -1144,7 +1151,8 @@ test("chats-only runs keep the hydration of a complete turn walk, whatever the b
 	const h = harness(fakePage(route, []), { streams: ["chats"] });
 	await collectCharacterAi(h.ctx);
 	const chats = h.records.filter((record) => record.stream === "chats");
-	assert.equal(chats.length, 3);
+	assert.equal(chats.length, 2);
+	assert.ok(chats.every((chat) => chat.data.id !== third));
 	for (const chat of chats) {
 		assert.equal(chat.data.turn_count, 3, String(chat.data.id));
 		assert.equal(
@@ -1157,7 +1165,7 @@ test("chats-only runs keep the hydration of a complete turn walk, whatever the b
 	assert.deepEqual(h.failures, []);
 	assert.equal(h.messages.at(-1)?.type, "STATE");
 
-	// With messages in scope the same chats are still hydrated; only their messages become gaps.
+	// The completed unstorable chat retains hydration; generating parents stay withheld.
 	const both = harness(fakePage(route, []));
 	await collectCharacterAi(both.ctx);
 	const gapped = both.records.find(
@@ -2487,5 +2495,30 @@ test("a leased gap that fails again is reported as attempted, by its lease", asy
 		ofType(h.messages, "DETAIL_GAP_RECOVERED").filter((m) => m.gap_id === "g1")
 			.length,
 		0,
+	);
+});
+
+test("session identity requires the observed nested user, not an arbitrary object", async () => {
+	assert.equal(
+		await checkCharacterAiSession(fakePage(() => json({}), [])),
+		"unknown",
+	);
+	assert.equal(
+		await checkCharacterAiSession(fakePage(() => json({ detail: "x" }), [])),
+		"unknown",
+	);
+	assert.equal(
+		await checkCharacterAiSession(fakePage(() => json({ user: {} }), [])),
+		"unknown",
+	);
+	assert.equal(
+		await checkCharacterAiSession(
+			fakePage(() => json({ user: { user: {} } }), []),
+		),
+		"unknown",
+	);
+	assert.equal(
+		await checkCharacterAiSession(fakePage(defaultRoute(), [])),
+		"signed_in",
 	);
 });
