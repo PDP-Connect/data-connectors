@@ -18,11 +18,21 @@
  *      failure.
  *   4. The on-demand history request is never resent after a reload; the
  *      chat is gapped and its gap says why the phone was not asked.
+ *   5. Each recovery or give-up writes one run-log line: the app's build
+ *      before and after, the screen it landed on, the seconds since the run
+ *      began and the reload count. A reload onto the "open in another
+ *      window" screen ends the run with its own non-retryable code.
+ *   6. The history-sync-on-demand switch is read once at run start for the
+ *      run log, and a chat gapped because it is off says so.
  */
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import {
+	DIAGNOSTIC_LINE_MAX_CHARS,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	makeRecordingEmit,
@@ -91,6 +101,10 @@ interface FakeOptions {
 	sendAnswer?: unknown;
 	/** Replace the walk's answer for the n-th (1-based) call. */
 	walkAnswer?: ((call: number, chatId: string) => unknown) | undefined;
+	/** The page context (build version, screen) for the n-th read. */
+	context?: ((call: number) => unknown) | undefined;
+	/** The history-sync-on-demand switch's answer. */
+	historyGate?: unknown;
 }
 
 function fakeWorld(options: FakeOptions) {
@@ -109,6 +123,7 @@ function fakeWorld(options: FakeOptions) {
 	};
 	let sessionReads = 0;
 	let readinessReads = 0;
+	let contextReads = 0;
 	const answer = (kind: Kind, value: unknown): Promise<unknown> => {
 		calls[kind] += 1;
 		const error = options.fail?.(kind, calls[kind]) ?? null;
@@ -126,10 +141,19 @@ function fakeWorld(options: FakeOptions) {
 				const error = options.readinessFailure?.(readinessReads) ?? null;
 				return error ? Promise.reject(error) : Promise.resolve(READY);
 			}
+			if (s.includes("WAWebBuildConstants") && options.context) {
+				contextReads += 1;
+				return Promise.resolve(options.context(contextReads));
+			}
 			if (s.includes("WAWebOfflineHandler"))
 				return Promise.resolve({ mode: "MAIN", resume_complete: true });
 			if (s.includes("sendPeerDataOperationRequest"))
 				return answer("send", options.sendAnswer ?? { sent: true });
+			if (
+				s.includes("isHistorySyncOnDemandEnabled") &&
+				"historyGate" in options
+			)
+				return Promise.resolve(options.historyGate);
 			if (s.includes("getModelsArray().map((c) =>"))
 				return answer("chats", chats);
 			if (s.includes("msgFindBefore") && options.walkAnswer)
@@ -182,6 +206,22 @@ async function runCollect(
 		return { harness, error };
 	}
 }
+
+/** Run-log lines written while `run` runs. */
+async function diagnosticsDuring<T>(
+	run: () => Promise<T>,
+): Promise<{ result: T; lines: string[] }> {
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		return { result: await run(), lines };
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+}
+
+const BUILD_BEFORE = "2.3000.1054700624";
+const BUILD_AFTER = "2.3000.1054712345";
 
 const gapsOf = (harness: RecordingEmit) =>
 	harness.protocolMessages
@@ -288,14 +328,95 @@ test("a history request interrupted by a reload is not resent; the chat's gap sa
 test("a history request the page refused names the page's reason in the gap", async () => {
 	const world = fakeWorld({
 		historyState: STATE_0,
-		sendAnswer: { sent: false, reason: "history_sync_on_demand_disabled" },
+		sendAnswer: {
+			sent: false,
+			reason: "history_sync_on_demand_gate_unverified",
+		},
 	});
 	const { harness, error } = await runCollect(world.page);
 	assert.equal(error, null);
 	const lastError = asObject(gapsOf(harness)[0]?.last_error);
 	assert.match(
 		String(lastError.message),
-		/no on-demand history request was sent this run \(history_sync_on_demand_disabled\)$/,
+		/no on-demand history request was sent this run \(history_sync_on_demand_gate_unverified\)$/,
+	);
+});
+
+test("a recovered reload writes one run-log line with the build before and after, the screen, the time and the count", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		fail: (kind, call) =>
+			kind === "chats" && call === 2 ? LOADER_GONE() : null,
+		// Read once at run start, then once per boot poll after the reload.
+		context: (call) => ({
+			version: call === 1 ? BUILD_BEFORE : BUILD_AFTER,
+			screen: "main",
+		}),
+	});
+	const { result, lines } = await diagnosticsDuring(() =>
+		runCollect(world.page),
+	);
+	assert.equal(result.error, null);
+	const reloadLines = lines.filter((line) => line.includes(" reload_"));
+	assert.equal(reloadLines.length, 1);
+	const line = reloadLines[0] ?? "";
+	assert.ok(line.startsWith("[whatsapp_web-diagnostic] reload_recovered {"));
+	const fields = JSON.parse(line.slice(line.indexOf("{")));
+	assert.deepEqual(
+		{ ...fields, secs: typeof fields.secs },
+		{
+			before: BUILD_BEFORE,
+			after: BUILD_AFTER,
+			screen: "main",
+			secs: "number",
+			reloads: 1,
+		},
+	);
+	assert.ok(line.length <= DIAGNOSTIC_LINE_MAX_CHARS, line);
+});
+
+test("a reload onto the open-in-another-window screen ends the run with its own non-retryable code", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		fail: (kind) => (kind === "groups" ? LOADER_GONE() : null),
+		context: (call) => ({
+			version: BUILD_BEFORE,
+			screen: call === 1 ? "main" : "takeover",
+		}),
+	});
+	const { result, lines } = await diagnosticsDuring(() =>
+		runCollect(world.page),
+	);
+	assert.equal(asObject(result.error).code, "whatsapp_web_opened_elsewhere");
+	assert.equal(asObject(result.error).retryable, false);
+	assert.equal(world.calls.groups, 1, "not retried");
+	assert.ok(
+		lines.some((line) =>
+			line.startsWith("[whatsapp_web-diagnostic] reload_takeover {"),
+		),
+		lines.join("\n"),
+	);
+});
+
+test("the history switch is read once at run start, and a chat gapped because it is off says so", async () => {
+	const world = fakeWorld({
+		historyState: STATE_0,
+		historyGate: false,
+		sendAnswer: { sent: false, reason: "history_sync_on_demand_disabled" },
+	});
+	const { result, lines } = await diagnosticsDuring(() =>
+		runCollect(world.page),
+	);
+	assert.equal(result.error, null);
+	assert.deepEqual(
+		lines.filter((line) => line.includes(" history_on_demand")),
+		['[whatsapp_web-diagnostic] history_on_demand {"enabled":false}'],
+	);
+	const lastError = asObject(gapsOf(result.harness)[0]?.last_error);
+	assert.equal(lastError.class, "history_remains_on_phone");
+	assert.match(
+		String(lastError.message),
+		/WhatsApp Web has on-demand history turned off for this client/,
 	);
 });
 

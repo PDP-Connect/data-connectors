@@ -49,6 +49,7 @@ import {
 	BrowserHandoffReadinessTimedOutError,
 	manualBrowserLogin,
 } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	createConnectorFailure,
@@ -599,6 +600,123 @@ export function isPageReloadError(error: unknown): boolean {
 /** How many mid-run page reloads one run recovers from before it stops. */
 const MAX_PAGE_RELOADS = 3;
 
+/** When the run began and the app's build version then, for reload diagnostics. */
+export interface RunStart {
+	startedMs: number;
+	version: string | null;
+}
+
+/** The screen a reload landed on; see PAGE_CONTEXT_SCRIPT. */
+type LandingScreen = "main" | "qr" | "takeover" | "unknown";
+
+interface PageContext {
+	version: string | null;
+	screen: LandingScreen;
+}
+
+const UNKNOWN_PAGE_CONTEXT: PageContext = { version: null, screen: "unknown" };
+
+/**
+ * The app's build version and the screen it shows: "takeover" when its
+ * socket is in the CONFLICT state, which is what WhatsApp Web shows as "open
+ * in another window" (whatsapp-web.js treats the same state as a takeover);
+ * "main" when the client knows its own user; "qr" when it shows its sign-in
+ * QR code; otherwise "unknown". Takeover is checked first because a client
+ * that another window took over still knows its user. It reads no chat,
+ * contact or message, and returns no user id.
+ */
+export const PAGE_CONTEXT_SCRIPT = `
+(() => {
+	const req = window.require;
+	const mod = (name) => { try { return typeof req === "function" ? req(name) : null; } catch { return null; } };
+	let version = null;
+	try { const build = mod("WAWebBuildConstants"); version = (build && build.VERSION_STR) || (window.Debug && window.Debug.VERSION) || null; } catch { version = null; }
+	let screen = "unknown";
+	try {
+		const socket = mod("WAWebSocketModel");
+		const states = mod("WAWebSocketConstants");
+		const conflict = states && states.SOCKET_STATE ? states.SOCKET_STATE.CONFLICT : undefined;
+		if (typeof conflict === "string" && socket && socket.Socket && socket.Socket.state === conflict) screen = "takeover";
+	} catch {}
+	if (screen === "unknown") {
+		const me = mod("WAWebUserPrefsMeUser");
+		try { if (me && (me.getMaybeMePnUser() || me.getMaybeMeLidUser())) screen = "main"; } catch {}
+	}
+	if (screen === "unknown") {
+		let mode = null;
+		try { const stream = mod("WAWebStreamModel"); mode = stream && stream.Stream ? stream.Stream.mode : null; } catch { mode = null; }
+		if (mode === "QR" || document.querySelector("div[data-ref] canvas, canvas[aria-label*='QR' i], canvas[aria-label*='scan' i]")) screen = "qr";
+	}
+	return { version: typeof version === "string" ? version : null, screen };
+})()
+`;
+
+/** A build version is digits and dots; anything else is treated as unreadable. */
+const BUILD_VERSION = /^\d{1,6}(?:\.\d{1,12}){1,3}$/;
+
+export function parsePageContext(value: unknown): PageContext {
+	if (typeof value !== "object" || value === null) return UNKNOWN_PAGE_CONTEXT;
+	const { version, screen } = value as { version?: unknown; screen?: unknown };
+	return {
+		version:
+			typeof version === "string" && BUILD_VERSION.test(version)
+				? version
+				: null,
+		screen:
+			screen === "main" ||
+			screen === "qr" ||
+			screen === "takeover" ||
+			screen === "unknown"
+				? screen
+				: "unknown",
+	};
+}
+
+/** One read of the page context; a page that can not answer is "unknown". */
+async function readPageContext(page: ScriptRunner): Promise<PageContext> {
+	try {
+		return parsePageContext(await page.evaluate(PAGE_CONTEXT_SCRIPT));
+	} catch {
+		return UNKNOWN_PAGE_CONTEXT;
+	}
+}
+
+type ReloadOutcome = "recovered" | "gave_up" | "signed_out" | "takeover";
+
+function reloadOutcome(error: unknown): ReloadOutcome {
+	const code =
+		typeof error === "object" && error !== null && "code" in error
+			? error.code
+			: undefined;
+	if (code === AUTH_FAILED_CODE) return "signed_out";
+	if (code === OPENED_ELSEWHERE_CODE) return "takeover";
+	return "gave_up";
+}
+
+/**
+ * The app's history-sync-on-demand switch, read once at run start for the
+ * run log: true, false, or "unverified" when it can not be read.
+ */
+export const HISTORY_GATE_SCRIPT = `
+(() => {
+	try {
+		const gate = window.require("WAWebSyncGatingUtils").isHistorySyncOnDemandEnabled();
+		return gate === true || gate === false ? gate : "unverified";
+	} catch { return "unverified"; }
+})()
+`;
+
+async function readHistoryGate(
+	page: ScriptRunner,
+): Promise<boolean | "unverified"> {
+	try {
+		const gate = await page.evaluate(HISTORY_GATE_SCRIPT);
+		return gate === true || gate === false ? gate : "unverified";
+	} catch {
+		return "unverified";
+	}
+}
+
 /**
  * The page's stores, read through a page that can reload mid-run (WhatsApp
  * Web reloads itself, for example to apply an update). A read that fails
@@ -620,18 +738,26 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 	private readonly streams: ReadonlySet<string>;
 	private readonly attempts: number;
 	private readonly waitMs: number;
+	private readonly startedMs: number;
+	/** The app's build version before the next reload, when known. */
+	private version: string | null;
+	/** What the latest boot poll saw, for the reload diagnostic. */
+	private landed: PageContext = UNKNOWN_PAGE_CONTEXT;
 	constructor(
 		inner: WhatsAppWebStores,
 		page: ScriptRunner,
 		streams: ReadonlySet<string>,
 		attempts = STORE_WAIT_ATTEMPTS,
 		waitMs = STORE_WAIT_MS,
+		run: RunStart = { startedMs: Date.now(), version: null },
 	) {
 		this.inner = inner;
 		this.page = page;
 		this.streams = streams;
 		this.attempts = attempts;
 		this.waitMs = waitMs;
+		this.startedMs = run.startedMs;
+		this.version = run.version;
 	}
 
 	private async read<T>(op: () => Promise<T>): Promise<T> {
@@ -650,6 +776,7 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 		for (;;) {
 			this.reloads += 1;
 			if (this.reloads > MAX_PAGE_RELOADS) {
+				this.reportReload("gave_up", await readPageContext(this.page));
 				throw createConnectorFailure(
 					"whatsapp_web_page_reloaded",
 					`the WhatsApp Web page reloaded ${String(this.reloads)} times during the run`,
@@ -659,19 +786,42 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 			console.error(
 				"whatsapp_web: the page reloaded mid-run; waiting for it to boot again",
 			);
+			this.landed = UNKNOWN_PAGE_CONTEXT;
 			try {
 				await this.awaitBoot();
+				this.reportReload("recovered", this.landed);
 				return;
 			} catch (error) {
-				if (!isPageReloadError(error)) throw error;
+				if (!isPageReloadError(error)) {
+					this.reportReload(reloadOutcome(error), this.landed);
+					throw error;
+				}
 				// A navigation during recovery consumes the same run-wide budget.
 			}
 		}
 	}
 
+	/**
+	 * One run-log line per recovery or give-up: the app's build version
+	 * before and after the reload, the screen it landed on, the seconds since
+	 * the run started and the reloads so far. No chat, contact or user id.
+	 */
+	private reportReload(outcome: ReloadOutcome, landed: PageContext): void {
+		connectorDiagnostic("whatsapp_web", `reload_${outcome}`, {
+			before: this.version,
+			after: landed.version,
+			screen: landed.screen,
+			secs: Math.max(0, Math.round((Date.now() - this.startedMs) / 1000)),
+			reloads: this.reloads,
+		});
+		if (landed.version !== null) this.version = landed.version;
+	}
+
 	/** Wait for the reloaded app: signed out ends the run, otherwise its stores. */
 	private async awaitBoot(): Promise<void> {
 		for (let i = 0; i < this.attempts; i++) {
+			this.landed = await readPageContext(this.page);
+			if (this.landed.screen === "takeover") throw openedElsewhereFailure();
 			let state: unknown = "loading";
 			try {
 				state = await this.page.evaluate(SESSION_STATE_SCRIPT);
@@ -777,6 +927,23 @@ export function upgradeFailure(code: string, message: string): Error {
 }
 
 const AUTH_FAILED_CODE = "whatsapp_web_auth_failed";
+const OPENED_ELSEWHERE_CODE = "whatsapp_web_opened_elsewhere";
+
+/**
+ * The reloaded page shows WhatsApp Web's "open in another window" screen.
+ * Only the owner can choose which window keeps WhatsApp Web, so a retry
+ * would land on the same screen.
+ */
+function openedElsewhereFailure(): Error {
+	return createConnectorFailure(
+		OPENED_ELSEWHERE_CODE,
+		"WhatsApp Web is open in another window: choose Use here in this browser, or close the other window, then run again",
+		{
+			retryable: false,
+			recoveryHint: { action: "manual_action_required", retryable: false },
+		},
+	);
+}
 
 /** The signed-in session is gone: the owner has to sign in again. */
 export function authFailure(message: string): Error {
@@ -1221,6 +1388,18 @@ interface HistoryOutcome {
 	notSent?: string | null;
 }
 
+/** Why the history that remains on the phone was not fetched this run. */
+function historyGapText(history: HistoryOutcome): string {
+	if (history.notSent === "page_reloaded_unconfirmed") {
+		return "the page reloaded while the on-demand history request was being sent; delivery is unconfirmed and it was not retried";
+	}
+	if (history.notSent === "history_sync_on_demand_disabled") {
+		return "WhatsApp Web has on-demand history turned off for this client, so the phone was not asked for older messages; a retry will not fetch them while it stays off";
+	}
+	if (history.requested) return "after this run's on-demand history request";
+	return `no on-demand history request was sent this run${history.notSent ? ` (${history.notSent})` : ""}`;
+}
+
 async function requestHistory(
 	stores: WhatsAppWebStores,
 	item: ChatItem,
@@ -1482,7 +1661,7 @@ export async function collectWith(
 				? {
 						reason: "retry_exhausted" as const,
 						class: "history_remains_on_phone",
-						message: `history state ${String(history.state)}; ${history.notSent === "page_reloaded_unconfirmed" ? "the page reloaded while the on-demand history request was being sent; delivery is unconfirmed and it was not retried" : history.requested ? "after this run's on-demand history request" : `no on-demand history request was sent this run${history.notSent ? ` (${history.notSent})` : ""}`}`,
+						message: `history state ${String(history.state)}; ${historyGapText(history)}`,
 					}
 				: null);
 		if (gap !== null) {
@@ -1862,7 +2041,8 @@ export function walkGap(walk: {
 
 /**
  * A failure the reload recovery raises for the whole run: the reloaded page
- * is signed out, or it reloaded more times than a run recovers from. It
+ * is signed out or open in another window, or it reloaded more times than a
+ * run recovers from. It
  * ends the run; it is never one chat's gap.
  */
 function isRunLevelFailure(error: unknown): boolean {
@@ -1871,7 +2051,9 @@ function isRunLevelFailure(error: unknown): boolean {
 			? error.code
 			: undefined;
 	return (
-		code === "whatsapp_web_auth_failed" || code === "whatsapp_web_page_reloaded"
+		code === AUTH_FAILED_CODE ||
+		code === OPENED_ELSEWHERE_CODE ||
+		code === "whatsapp_web_page_reloaded"
 	);
 }
 
@@ -2053,15 +2235,22 @@ export async function collect(
 	if (want.size === 0) return;
 	// Every script runs in the page's MAIN world: the app's module loader is
 	// not visible to an isolated world.
+	const startedMs = Date.now();
 	const freshLink = freshlyLinkedPages.delete(ctx.page);
 	const main = mainWorld(ctx.page);
 	await waitForStores(main, STORE_WAIT_ATTEMPTS, STORE_WAIT_MS, want);
+	const { version } = await readPageContext(main);
+	// Run log only: whether this client may ask the phone for older history.
+	connectorDiagnostic("whatsapp_web", "history_on_demand", {
+		enabled: await readHistoryGate(main),
+	});
 	const stores = new ReloadAwareStore(
 		new WhatsAppWebStore(main),
 		main,
 		want,
 		timings.reloadAttempts ?? STORE_WAIT_ATTEMPTS,
 		timings.reloadMs ?? STORE_WAIT_MS,
+		{ startedMs, version },
 	);
 	const tally = new TextTally();
 	try {
