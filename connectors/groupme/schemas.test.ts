@@ -2,10 +2,55 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "vitest";
-import { validateRecord } from "./schemas.ts";
+import {
+	DirectChatMessageSchema,
+	GroupMessageSchema,
+	GroupSchema,
+	validateRecord,
+} from "./schemas.ts";
 
 describe("GroupMe schemas", () => {
+	it("manifest attachment enums and group fields agree with runtime schemas", () => {
+		const manifest = JSON.parse(
+			readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+		);
+		for (const [name, schema] of [
+			["group_messages", GroupMessageSchema],
+			["direct_chat_messages", DirectChatMessageSchema],
+		] as const) {
+			const stream = manifest.streams.find(
+				(entry: { name: string }) => entry.name === name,
+			);
+			assert.deepEqual(
+				stream.schema.properties.attachments.items.properties.type.enum,
+				schema.shape.attachments.element.shape.type.options,
+			);
+		}
+		const group = manifest.streams.find(
+			(entry: { name: string }) => entry.name === "groups",
+		).schema;
+		assert.deepEqual(
+			Object.keys(group.properties).sort(),
+			Object.keys(GroupSchema.shape).sort(),
+		);
+		assert.deepEqual(
+			[...group.required].sort(),
+			Object.entries(GroupSchema.shape)
+				.filter(([, schema]) => !schema.isOptional())
+				.map(([key]) => key)
+				.sort(),
+		);
+		for (const key of ["member_count", "messages_count"]) {
+			assert.deepEqual(group.properties[key].type, ["number", "null"]);
+		}
+		for (const key of ["created_at", "updated_at"]) {
+			assert.equal(group.properties[key].type, "string");
+			assert.equal(group.properties[key].format, "date-time");
+		}
+	});
+
 	it("validates a valid group record", () => {
 		const record = {
 			id: "123456",

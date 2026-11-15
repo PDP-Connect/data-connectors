@@ -14823,7 +14823,7 @@
 				},
 				"connector_key": "groupme",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-				"version": "0.1.26",
+				"version": "0.2.0",
 				"display_name": "GroupMe",
 				"brand": {
 					"icon": "icon.svg",
@@ -14914,13 +14914,22 @@
 									"format": "date-time"
 								},
 								"member_count": {
-									"type": ["integer", "null"]
+									"type": ["number", "null"]
 								},
 								"messages_count": {
-									"type": ["integer", "null"]
+									"type": ["number", "null"]
 								}
 							},
-							"required": ["id", "created_at"]
+							"required": [
+								"id",
+								"name",
+								"description",
+								"avatar_url",
+								"created_at",
+								"updated_at",
+								"member_count",
+								"messages_count"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "updated_at",
@@ -14990,7 +14999,20 @@
 										"properties": {
 											"type": {
 												"type": "string",
-												"enum": ["image", "file", "location", "emoji"]
+												"enum": [
+													"mentions",
+													"event",
+													"reply",
+													"image",
+													"linked_image",
+													"video",
+													"emoji",
+													"poll",
+													"autokicked_member",
+													"postprocessing",
+													"file",
+													"location"
+												]
 											},
 											"url": {
 												"type": ["string", "null"]
@@ -15129,7 +15151,20 @@
 										"properties": {
 											"type": {
 												"type": "string",
-												"enum": ["image", "file", "location", "emoji"]
+												"enum": [
+													"mentions",
+													"event",
+													"reply",
+													"image",
+													"linked_image",
+													"video",
+													"emoji",
+													"poll",
+													"autokicked_member",
+													"postprocessing",
+													"file",
+													"location"
+												]
 											},
 											"url": {
 												"type": ["string", "null"]

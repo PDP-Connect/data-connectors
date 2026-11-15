@@ -94,7 +94,7 @@ function group(
 		avatar_url: null,
 		created_at: 1_700_000_000,
 		updated_at: 1_700_000_050,
-		members_count: 3,
+		member_count: 3,
 		messages_count: 10,
 		...overrides,
 	};
@@ -753,14 +753,15 @@ test("repeated/nonprogressing cursor: a forward page violating documented ascend
 /** Build a `globalThis.fetch` stub for the invalid-cursor-fallback test
  *  family: `/v3/groups` always succeeds with one group; the FIRST message
  *  fetch answers with `firstFetchStatus`; every subsequent fetch answers
- *  with a clean single-message backward-walk page (only reachable if the
- *  fallback actually fires). Returns the live fetch-count so a test can
- *  assert whether the fallback path was taken. */
+ *  with a clean single-message page. Both a forward retry and a backward
+ *  fallback can reach it, so expose the actual URLs as well as the count
+ *  to distinguish those paths. */
 function stubFirstFetchStatus(
 	firstFetchStatus: number,
 	persistent = false,
-): { fetchCount: () => number; restore: () => void } {
+): { fetchCount: () => number; fetchedUrls: URL[]; restore: () => void } {
 	let messageFetchCount = 0;
+	const fetchedUrls: URL[] = [];
 	const backwardPage = [
 		groupMessage({ id: "m-full-1", created_at: 1_700_000_100 }),
 	];
@@ -774,6 +775,7 @@ function stubFirstFetchStatus(
 				new Response(JSON.stringify({ response: [group()] }), { status: 200 }),
 			);
 		}
+		fetchedUrls.push(url);
 		messageFetchCount += 1;
 		if (messageFetchCount === 1) {
 			return Promise.resolve(
@@ -804,6 +806,7 @@ function stubFirstFetchStatus(
 	}) as typeof globalThis.fetch;
 	return {
 		fetchCount: () => messageFetchCount,
+		fetchedUrls,
 		restore: () => {
 			globalThis.fetch = original;
 		},
@@ -1020,6 +1023,14 @@ test("P1 regression: a transient 429 on the FIRST resumed fetch recovers in plac
 			2,
 			"the retry is in place; no fallback backward walk was attempted",
 		);
+		assert.deepEqual(
+			stub.fetchedUrls.map((url) => url.searchParams.get("after_id")),
+			["m-old-cursor", "m-old-cursor"],
+		);
+		assert.ok(
+			stub.fetchedUrls.every((url) => !url.searchParams.has("before_id")),
+		);
+		assert.equal(stub.fetchedUrls[0]?.pathname, stub.fetchedUrls[1]?.pathname);
 		assert.equal(
 			emitted.filter((r) => r.stream === "group_messages").length,
 			1,
@@ -1057,6 +1068,14 @@ test("P1 regression: a transient 500 on the FIRST resumed fetch recovers in plac
 			2,
 			"the retry is in place; no fallback backward walk was attempted",
 		);
+		assert.deepEqual(
+			stub.fetchedUrls.map((url) => url.searchParams.get("after_id")),
+			["m-old-cursor", "m-old-cursor"],
+		);
+		assert.ok(
+			stub.fetchedUrls.every((url) => !url.searchParams.has("before_id")),
+		);
+		assert.equal(stub.fetchedUrls[0]?.pathname, stub.fetchedUrls[1]?.pathname);
 		assert.equal(
 			emitted.filter((r) => r.stream === "group_messages").length,
 			1,
