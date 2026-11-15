@@ -800,14 +800,8 @@ export function isActualReturn(status: string | null | undefined): boolean {
 	if (!status) {
 		return false;
 	}
-	// Return-window text describes eligibility, not an actual return.
-	if (
-		/\beligible\s+through\b|\beligible\s+for\s+return\b|\bwindow\s+closed\b|\breturn\s+or\s+replace\s+items\b|\breturn\s+items\s*:/i.test(
-			status,
-		)
-	) {
-		return false;
-	}
+	// Affirmative phrases win even when eligibility text is also present.
+	// Window/eligibility wording alone does not match these phrases.
 	return /\breturned\b|\breturn\s+(?:is\s+)?(?:started|complete|received)\b|\brefund\s+(?:has\s+been\s+)?issued\b|\brefunded\b/i.test(
 		status,
 	);
