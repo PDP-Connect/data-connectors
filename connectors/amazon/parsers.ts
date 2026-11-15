@@ -798,9 +798,9 @@ const RETURNED_RE = /return/i;
 
 /**
  * Pair observations once per line, never sum quantities across surfaces.
- * Equal-sized ASIN groups pair in source order. Unequal groups are not
- * collapsed; name fallback is allowed only for a unique pair on both sides
- * with no conflicting ASIN. Unmatched observations retain their multiplicity.
+ * Detail lines determine multiplicity. List observations enrich at most one
+ * detail line each; redundant list observations never create extra lines.
+ * Name fallback requires a unique detail name and no conflicting ASIN.
  */
 export function mergeOrderItems(
 	listOrder: ListPageOrder,
@@ -810,6 +810,7 @@ export function mergeOrderItems(
 	const detailItems = detail?.items ?? [];
 	const pairs = new Map<number, number>();
 	const usedDetails = new Set<number>();
+	const coveredLists = new Set<number>();
 	const indexes = <T>(items: T[], keyOf: (item: T) => string) => {
 		const groups = new Map<string, number[]>();
 		items.forEach((item, index) => {
@@ -825,45 +826,59 @@ export function mergeOrderItems(
 	const detailAsins = indexes(detailItems, (item) => item.asin || "");
 	for (const [asin, left] of listAsins) {
 		const right = detailAsins.get(asin);
-		if (!right || left.length !== right.length) continue;
+		if (!right) continue;
 		left.forEach((listIndex, offset) => {
-			const detailIndex = right[offset]!;
+			coveredLists.add(listIndex);
+			const detailIndex = right[offset];
+			if (detailIndex === undefined) return;
 			pairs.set(listIndex, detailIndex);
 			usedDetails.add(detailIndex);
 		});
 	}
 
-	// Snapshot unmatched groups before matching: consuming one observation
-	// must never turn an initially ambiguous name into an apparent singleton.
 	const listNames = indexes(listItems, (item) => normalizeItemName(item.name));
 	const detailNames = indexes(detailItems, (item) =>
 		normalizeItemName(item.name),
 	);
 	for (const [name, listGroup] of listNames) {
-		const left = listGroup.filter((index) => !pairs.has(index));
-		const right = (detailNames.get(name) ?? []).filter(
-			(index) => !usedDetails.has(index),
-		);
-		if (left.length !== 1 || right.length !== 1) continue;
-		const listIndex = left[0]!;
+		const right = detailNames.get(name) ?? [];
+		if (right.length !== 1) continue;
 		const detailIndex = right[0]!;
-		const li = listItems[listIndex]!;
 		const di = detailItems[detailIndex]!;
-		if (li.asin && di.asin) continue;
-		pairs.set(listIndex, detailIndex);
-		usedDetails.add(detailIndex);
+		const left = listGroup.filter((index) => !coveredLists.has(index));
+		// Multiple ASINs sharing a title are not a unique product match.
+		const asins = new Set(
+			left.map((index) => listItems[index]!.asin).filter(Boolean),
+		);
+		if (asins.size > 1) continue;
+		for (const listIndex of left) {
+			const li = listItems[listIndex]!;
+			if (li.asin && di.asin && li.asin !== di.asin) continue;
+			coveredLists.add(listIndex);
+			if (usedDetails.has(detailIndex)) continue;
+			pairs.set(listIndex, detailIndex);
+			usedDetails.add(detailIndex);
+		}
 	}
 
-	const out: LineMergedItem[] = listItems.map((item, index) => {
+	const out: LineMergedItem[] = [];
+	const unmatchedKeys = new Set<string>();
+	listItems.forEach((item, index) => {
 		const detailIndex = pairs.get(index);
-		return detailIndex === undefined
-			? { ...item }
-			: { ...item, ...detailItems[detailIndex] };
+		if (detailIndex !== undefined) {
+			out.push({ ...item, ...detailItems[detailIndex] });
+		} else if (!coveredLists.has(index)) {
+			const key = item.asin
+				? `asin:${item.asin}`
+				: `name:${normalizeItemName(item.name)}`;
+			if (unmatchedKeys.has(key)) return;
+			unmatchedKeys.add(key);
+			out.push({ ...item });
+		}
 	});
 	detailItems.forEach((item, index) => {
 		if (!usedDetails.has(index)) out.push({ ...item });
 	});
-
 	// Reserve every legacy base id so a generated suffix cannot steal the
 	// ordinary id of another (possibly name-keyed) line. First occurrences
 	// keep their exact preexisting ids; only additional lines get suffixes.

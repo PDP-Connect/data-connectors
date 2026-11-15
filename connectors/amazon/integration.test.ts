@@ -3399,10 +3399,8 @@ test("emitOrderAndItems: every detail-page item becoming a record reports no sho
 	);
 });
 
-test("emitOrderAndItems: a detail item that never becomes a record reports a diagnostic without skipping order_items", async () => {
-	// Two detail items collapse to one record because they carry the same
-	// identity, so one of the items the page showed us is not in the database.
-	// Before this check that loss was silent.
+test("emitOrderAndItems: identical detail lines retain distinct records without a shortfall", async () => {
+	// Detail lines, unlike repeated list observations, are authoritative.
 	const { deps, protocolMessages, emitted } = makeRecordingDeps();
 	const detail = makeDetail({
 		items: [
@@ -3422,26 +3420,60 @@ test("emitOrderAndItems: a detail item that never becomes a record reports a dia
 	} finally {
 		setConnectorDiagnosticSink(undefined);
 	}
-	assert.deepEqual(diagnosticLines, [
-		'[amazon-diagnostic] item_count_shortfall {"declared_items":2,"emitted_items":1}',
-	]);
-	assertUserFacingProgress(protocolMessages);
-
-	const emittedItems = emitted.filter((r) => r.stream === "order_items").length;
-	const shortfalls = findItemCountShortfalls(protocolMessages);
-	assert.equal(emittedItems, 1, "the two detail rows collapsed to one record");
-	assert.equal(shortfalls.length, 1, "the lost item must be surfaced");
-	assert.equal(shortfalls[0]?.stream, "order_items");
-	assert.equal(
-		shortfalls[0]?.message,
-		"An order lists 2 items but we could only save 1",
-	);
+	assert.deepEqual(diagnosticLines, []);
+	const items = emitted.filter((r) => r.stream === "order_items");
+	assert.equal(items.length, 2);
+	assert.equal(items[0]?.data.id, "111-1234567-8901234|B000000001");
+	assert.equal(items[1]?.data.id, "111-1234567-8901234|B000000001|line:2");
+	assert.equal(findItemCountShortfalls(protocolMessages).length, 0);
 	assert.equal(
 		protocolMessages.filter(
 			(m) => (m as { type?: string }).type === "SKIP_RESULT",
 		).length,
 		0,
 		"a per-order issue must not mark the whole order_items stream skipped",
+	);
+});
+
+test("emitOrderAndItems: an emitter-rejected detail record still reports a shortfall", async () => {
+	const { deps, protocolMessages, emitted } = makeRecordingDeps();
+	const emitRecord = deps.emitRecord;
+	deps.emitRecord = async (stream, record, options) => {
+		// Refuse one detail record without calling beforeEmit; it was not saved.
+		if (
+			stream === "order_items" &&
+			record.id === "111-1234567-8901234|B000000002"
+		)
+			return;
+		await emitRecord(stream, record, options);
+	};
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	try {
+		const accepted = await emitOrderAndItems(
+			deps,
+			makeListOrder({ items: [] }),
+			makeDetail({
+				items: [
+					makeDetailItem({ asin: "B000000001", name: "Widget A" }),
+					makeDetailItem({ asin: "B000000002", name: "Widget B" }),
+				],
+			}),
+			"2026-01-05",
+		);
+		assert.equal(accepted, false);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.equal(emitted.filter((r) => r.stream === "order_items").length, 1);
+	assert.deepEqual(diagnosticLines, [
+		'[amazon-diagnostic] item_count_shortfall {"declared_items":2,"emitted_items":1}',
+	]);
+	assert.equal(findItemCountShortfalls(protocolMessages).length, 1);
+	assertUserFacingProgress(protocolMessages);
+	assert.equal(
+		protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
 	);
 });
 
