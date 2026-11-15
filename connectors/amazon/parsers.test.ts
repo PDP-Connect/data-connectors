@@ -936,6 +936,12 @@ test("buildOrderItemRecord: return eligibility is not a completed return", () =>
 		["Return started", true],
 		["Return received", true],
 		["Return completed", true],
+		["Return not received", false],
+		["Not returned", false],
+		["Not refunded", false],
+		["Refund wasn't issued", false],
+		["Refund issued. No further action needed", true],
+		["Return received; not eligible for exchange", true],
 	];
 	for (const [status, returned] of cases) {
 		const detail = parseOrderDetailDom(`<div id="orderDetails">

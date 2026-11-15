@@ -803,6 +803,13 @@ export function mergeDetailByKey(detailItems: DetailItem[]): {
 
 const RETURNED_RE =
 	/\breturn(?:ed)?\b.*\b(?:started|received|complete|completed)\b|\breturned\b|\brefund(?:ed| issued| completed)\b/i;
+/** A status that negates itself ("Not returned", "Return not received") is no return. */
+const NEGATED_STATUS_RE =
+	/\b(?:not|never)\s+(?:yet\s+|been\s+)?(?:returned|refunded|received|issued|started|completed?)\b|\bno\s+(?:return|refund)\b|n't\s+(?:been\s+)?(?:returned|refunded|received|issued)\b/i;
+
+function isReturnedStatus(status: string): boolean {
+	return RETURNED_RE.test(status) && !NEGATED_STATUS_RE.test(status);
+}
 
 /**
  * Merge list-page items with detail-page items into the final emit-ordered
@@ -875,7 +882,7 @@ export function buildOrderItemRecord(
 		quantity: merged.quantity ?? 1,
 		seller: merged.seller || null,
 		item_image_url: merged.item_image_url || null,
-		returned: RETURNED_RE.test(merged.refund_status || ""),
+		returned: isReturnedStatus(merged.refund_status || ""),
 		refund_status: merged.refund_status || null,
 	};
 }
