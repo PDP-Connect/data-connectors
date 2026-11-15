@@ -12,6 +12,8 @@ import type {
 
 export interface ApplePhotosState {
 	last_modified?: string;
+	/** Inode change-time watermark; missing on legacy states. */
+	changed_since?: string;
 }
 
 /** A single file discovered under the export directory. */

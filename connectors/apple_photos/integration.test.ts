@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { chmod, mkdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -199,35 +199,97 @@ test("apple_photos ignores unsupported file extensions", async () => {
 	}
 });
 
-test("apple_photos cursor carries forward: a second run with prior STATE only emits newer files", async () => {
-	const older = new Date("2024-06-01T00:00:00.000Z");
-	const newer = new Date("2024-06-10T00:00:00.000Z");
+test("apple_photos change-time cursor discovers backdated exports and replays only boundary files", async () => {
 	const dir = buildExportDirFixture([
-		{ relPath: "old.jpg", contents: Buffer.from("old"), mtime: older },
-		{ relPath: "new.jpg", contents: Buffer.from("new"), mtime: newer },
+		{ relPath: "old.jpg", contents: Buffer.from("old") },
 	]);
 	try {
+		// Separate inode-change timestamps even on coarse filesystems.
+		await new Promise((resolve) => setTimeout(resolve, 1100));
+		await writeFile(join(dir, "boundary.jpg"), "boundary");
+		const oldChange = (await stat(join(dir, "old.jpg"))).ctime.toISOString();
+		const boundaryChange = (
+			await stat(join(dir, "boundary.jpg"))
+		).ctime.toISOString();
+		assert.ok(oldChange < boundaryChange);
 		const first = await runApplePhotos(dir, ["photos"]);
-		const firstPhotos = records(first.messages, "photos");
-		assert.equal(firstPhotos.length, 2);
-		const firstState = states(first.messages).find(
-			(s) => s.stream === "photos",
-		);
-		assert.ok(firstState, "expected a photos STATE checkpoint");
+		const cursor = states(first.messages).find(
+			(row) => row.stream === "photos",
+		)?.cursor;
+		assert.ok(cursor);
 		assert.equal(
-			(firstState.cursor as { last_modified: string }).last_modified,
-			newer.toISOString(),
+			(cursor as { changed_since: string }).changed_since,
+			boundaryChange,
 		);
-
-		// Second run seeded with a cursor between old and new mtimes should
-		// only re-emit the newer file.
-		const second = await runApplePhotos(dir, ["photos"], {
-			photos: { last_modified: older.toISOString() },
+		await writeFile(join(dir, "backdated.jpg"), "backdated");
+		await utimes(
+			join(dir, "backdated.jpg"),
+			new Date("2000-01-01"),
+			new Date("2000-01-01"),
+		);
+		const second = await runApplePhotos(dir, ["photos"], { photos: cursor });
+		const photos = records(second.messages, "photos");
+		assert.deepEqual(photos.map((row) => row.filename).sort(), [
+			"backdated.jpg",
+			"boundary.jpg",
+		]);
+		assert.equal(
+			photos.find((row) => row.filename === "backdated.jpg")?.file_modified_at,
+			"2000-01-01T00:00:00.000Z",
+		);
+		const legacy = await runApplePhotos(dir, ["photos"], {
+			photos: { last_modified: "2099-01-01T00:00:00.000Z" },
 		});
-		const secondPhotos = records(second.messages, "photos");
-		assert.equal(secondPhotos.length, 1);
-		assert.equal(secondPhotos[0]?.filename, "new.jpg");
+		assert.equal(records(legacy.messages, "photos").length, 3);
 	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos regular-file export path is absent", async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: "not-directory.jpg", contents: Buffer.from("fixture") },
+	]);
+	try {
+		const result = await runApplePhotos(join(dir, "not-directory.jpg"), [
+			"photos",
+		]);
+		assert.equal(skips(result.messages)[0]?.reason, "export_not_found");
+		assert.equal(records(result.messages, "photos").length, 0);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos skipped subdirectory preserves change cursor with count-only diagnostic", {
+	skip: process.platform === "win32" || process.getuid?.() === 0,
+}, async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: "visible.jpg", contents: Buffer.from("visible") },
+	]);
+	const denied = join(dir, "private-subdirectory");
+	const since = "1999-01-01T00:00:00.000Z";
+	try {
+		await mkdir(denied);
+		await writeFile(join(denied, "hidden.jpg"), "hidden");
+		await chmod(denied, 0);
+		const result = await runApplePhotos(dir, ["photos"], {
+			photos: { changed_since: since },
+		});
+		assert.equal(records(result.messages, "photos").length, 1);
+		const cursor = states(result.messages).find(
+			(row) => row.stream === "photos",
+		)?.cursor;
+		assert.equal((cursor as { changed_since: string })?.changed_since, since);
+		const diagnostics = result.stderr
+			.split("\n")
+			.filter((line) => line.includes("walk_skipped"));
+		assert.equal(diagnostics.length, 1);
+		assert.match(diagnostics[0]!, /"count":1/);
+		assert.ok(!diagnostics[0]!.includes(dir));
+		assert.ok(!diagnostics[0]!.includes("private-subdirectory"));
+	} finally {
+		await chmod(denied, 0o700);
 		await rm(dir, { force: true, recursive: true });
 	}
 });
