@@ -177,7 +177,31 @@ test("last report supersedes derived reimbursement; reimbursement ids also dedup
 	);
 });
 
+test("owned export preserves plain numeric identifier strings", () => {
+	const parsed = parseExport(
+		lines(
+			expense("1234567", { reportID: "2345678", receiptID: "3456789" }),
+			report("2345678", "Reimbursed", {
+				entryID: "4567890",
+				reimbursed: "2026-02-01",
+			}),
+		),
+	);
+	assert.deepEqual(parsed.rejected, []);
+	assert.equal(parsed.expenses[0]?.id, "1234567");
+	assert.equal(parsed.expenses[0]?.report_id, "2345678");
+	assert.equal(parsed.expenses[0]?.receipt_present, true);
+	assert.equal(parsed.reports[0]?.id, "2345678");
+	assert.equal(parsed.reimbursements[0]?.id, "4567890");
+	assert.equal(parsed.reimbursements[0]?.report_id, "2345678");
+});
+
 test("every dynamic string in the owned template is JSON escaped, including optional defaults", () => {
+	assert.ok(
+		EXPORT_TEMPLATE.startsWith(
+			'<#setting number_format="computer"><#list reports as report>',
+		),
+	);
 	const fields = {
 		report: [
 			"reportID",
