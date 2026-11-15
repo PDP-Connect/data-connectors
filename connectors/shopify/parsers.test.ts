@@ -65,6 +65,42 @@ function synthCache(overrides: Partial<ApolloCache> = {}): ApolloCache {
 	};
 }
 
+// Synthetic markup: inline fragments must not become separate money tokens.
+for (const [label, price] of [
+	["split integer", "<span>$1</span><span>9.99</span>"],
+	["split currency and fraction", "<span>$</span><span>19</span><span>.99</span>"],
+]) {
+	test(`parseDomOrderCards preserves ${label} price fragments`, () => {
+		const orders = parseDomOrderCards(
+			`<div class="order-card"><a href="/orders/split-price">Acme Goods</a><div>${price}</div><div>Shipped</div></div>`,
+		);
+		assert.equal(orders.length, 1);
+		assert.equal(orders[0]?.totalCents, 1999);
+		assert.equal(orders[0]?.currency, "USD");
+		assert.equal(orders[0]?.status, "Shipped");
+	});
+}
+
+test("parseDomOrderCards separates adjacent price and status blocks", () => {
+	const orders = parseDomOrderCards(
+		'<div class="order-card"><a href="/orders/blocks">Acme Goods</a><div>$19.99</div><div>Shipped</div></div>',
+	);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.totalCents, 1999);
+	assert.equal(orders[0]?.status, "Shipped");
+});
+
+for (const tag of ["script", "style", "template", "noscript"]) {
+	test(`parseDomOrderCards ignores prices and statuses inside ${tag}`, () => {
+		const orders = parseDomOrderCards(
+			`<div class="order-card"><a href="/orders/hidden">Acme Goods</a><${tag}>$999.99 Cancelled</${tag}><div>$19.99</div><div>Shipped</div></div>`,
+		);
+		assert.equal(orders.length, 1);
+		assert.equal(orders[0]?.totalCents, 1999);
+		assert.equal(orders[0]?.status, "Shipped");
+	});
+}
+
 test("parseDomOrderCards maps legacy-shaped order cards to Shop records when Apollo is unavailable", () => {
 	const fixture = `
 		<div class="order-card">
