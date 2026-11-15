@@ -56,7 +56,7 @@ const SHOP_MONEY_RE =
 	/(?:\$\s*([\d,]+(?:\.\d{1,2})?)|([\d,]+(?:\.\d{1,2})?)\s*(USD|EUR|GBP|CAD)\b)/i;
 const SHOP_ITEM_COUNT_RE = /\b(\d+)\s*items?\b/i;
 const SHOP_STATUS_RE =
-	/\b(delivered|shipped|in transit|processing|cancelled|canceled|fulfilled)\b/i;
+	/^(delivered|shipped|in transit|processing|cancelled|canceled|fulfilled|partially fulfilled|not shipped)$/i;
 const SHOP_AMOUNT_LINE_RE =
 	/^(?:\$\s*[\d,]+(?:\.\d{1,2})?|[\d,]+(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|CAD))\b/i;
 
@@ -142,7 +142,7 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 		const amount = money
 			? Number((money[1] ?? money[2] ?? "").replaceAll(",", ""))
 			: Number.NaN;
-		const status = text.match(SHOP_STATUS_RE)?.[0] ?? null;
+		const status = readDomOrderStatus(card);
 		orders.push({
 			currency: money ? (money[3]?.toUpperCase() ?? "USD") : null,
 			detailUrl: canonicalShopUrl(orderUrl.href),
@@ -157,6 +157,28 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 		});
 	}
 	return orders;
+}
+
+
+// The scoped fixtures have a standalone status div, not a dedicated status
+// attribute. Never search the flattened card (which includes merchant/product
+// names). Accept only complete phrases from standalone non-link text blocks;
+// ambiguous blocks and unsupported layouts stay unknown.
+function readDomOrderStatus(card: Element): string | null {
+	const candidates: string[] = [];
+	let afterOrderSummary = false;
+	for (const child of card.children) {
+		if (!child.matches("div, p, span") || child.children.length !== 0) continue;
+		const phrase = (child.textContent ?? "").replace(/\s+/g, " ").trim();
+		if (SHOP_MONEY_RE.test(phrase) || SHOP_ITEM_COUNT_RE.test(phrase)) {
+			afterOrderSummary = true;
+			continue;
+		}
+		if (afterOrderSummary && SHOP_STATUS_RE.test(phrase)) candidates.push(phrase);
+	}
+	if (candidates.length !== 1) return null;
+	const phrase = candidates[0];
+	return phrase && !/^not shipped$/i.test(phrase) ? phrase : null;
 }
 
 function resolveCardOrderUrl(card: Element, fallback: URL): URL {
