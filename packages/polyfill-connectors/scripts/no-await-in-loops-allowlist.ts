@@ -6096,6 +6096,20 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "exportRange(): one year-long window at a time, so the export jobs share Expensify's request limits.",
 		},
 		{
+			path: "src/expensify-staging/collect.test.ts",
+			line: 216,
+			column: 3,
+			category: "test_assertion_sequencing",
+			note: "invalid-years test: each value gets a fresh harness and its own rejection assertion, so a failure names the value.",
+		},
+		{
+			path: "src/expensify-staging/collect.ts",
+			line: 105,
+			column: 4,
+			category: "ordered_protocol_emission",
+			note: "collectExpensify(): deps.emitRecord(): Collection Profile protocol emission requiring in-order delivery",
+		},
+		{
 			path: "src/playwright-download.ts",
 			line: 200,
 			column: 16,
