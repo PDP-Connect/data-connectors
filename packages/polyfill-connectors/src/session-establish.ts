@@ -131,6 +131,8 @@ export interface SessionEstablishArgs {
 	context: BrowserContext;
 	credentials?: EnsureSessionArgs["credentials"];
 	name: string;
+	/** Runtime observer of the explicit submission marker, never a checkpoint guess. */
+	onCredentialSubmit?: () => void;
 	page: Page;
 	progress: EnsureSessionArgs["progress"];
 	/**
@@ -284,6 +286,7 @@ export async function establishSession(
 				credentials: resolvedCredentials ?? initialCredentials,
 				onCredentialSubmit: () => {
 					credentialSubmitted = true;
+					args.onCredentialSubmit?.();
 				},
 				page,
 				sendInteraction,

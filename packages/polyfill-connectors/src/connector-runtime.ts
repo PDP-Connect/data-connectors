@@ -2116,7 +2116,9 @@ async function runInBrowser(args: {
 		// INTERACTION ever emitted, so the controller's mid-wait detector cannot
 		// help. The watchdog keys on checkpoint progress (paused while an
 		// interaction is open) and fails closed if establishment stalls.
+		let credentialSubmitted = false;
 		const watchdog = makeSessionEstablishWatchdog({
+			hasCredentialSubmitted: () => credentialSubmitted,
 			capture: baseCtx.capture,
 			name,
 			page,
@@ -2132,6 +2134,9 @@ async function runInBrowser(args: {
 			establishSession(
 				{ ensureSession, probeSession, probeSessionIsAuthoritative },
 				{
+					onCredentialSubmit: () => {
+						credentialSubmitted = true;
+					},
 					assist: watchdog.wrapAssist(browserAssist),
 					capture: baseCtx.capture,
 					checkpoint: watchdog.checkpoint,
@@ -2984,6 +2989,8 @@ export const SESSION_CHECKPOINT_PROGRESS = "Checking your sign-in";
  * without real-time sleeps.
  */
 export function makeSessionEstablishWatchdog(args: {
+	/** Read the explicit per-establishment submission latch at timeout. */
+	hasCredentialSubmitted?: () => boolean;
 	capture: CaptureSession | null;
 	deadlineMs?: number;
 	name: string;
@@ -3164,10 +3171,14 @@ export function makeSessionEstablishWatchdog(args: {
 				} | null;
 				const sinceMs = info?.sinceMs ?? deadlineMs;
 				const lastCheckpoint = info?.lastLabel ?? "<none>";
+				const postSubmit = args.hasCredentialSubmitted?.() === true;
 				throw new TerminalError(
 					`${args.name}_session_establish_timeout: no session-establishment progress for ${String(sinceMs)}ms ` +
 						`(last checkpoint: ${lastCheckpoint}); failing run closed`,
-					{ retryable: true },
+					{
+						retryable: !postSubmit,
+						...(postSubmit ? { code: "credential_submit_outcome_unknown" } : {}),
+					},
 				);
 			}
 		} finally {
