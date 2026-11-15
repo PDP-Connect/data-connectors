@@ -988,6 +988,7 @@ export async function runOnPageShim(
 			emitRecord.withheldAtOrAfterUntil,
 		);
 		const errors = finalized.errors;
+		await reportScopeCounts(shim, finalized.streams, outcome.counts);
 		const outcomesByStream = new Map(
 			finalized.streams.map((stream) => [stream.stream, stream]),
 		);
@@ -1114,5 +1115,32 @@ export async function runOnPageShim(
 			),
 		];
 		console.log(`[pageshim] stubHits=${JSON.stringify(hits)}`);
+	}
+}
+
+/**
+ * What each requested stream found, as `page.setData("scopeCounts", ...)`:
+ * `{<scope>: {found, ok}}`, ok false when the stream was skipped, left
+ * uncovered or has a detail gap. Hosts read it to tell an account that is
+ * empty (every stream answered, found nothing) from a connector that could
+ * not read (a stream failed), which an empty result alone cannot. Sent only
+ * after collect() returned; never fails the run.
+ */
+async function reportScopeCounts(
+	shim: { setData: (key: string, value: unknown) => Promise<void> },
+	streams: readonly { stream: string; scope: string; partial: boolean }[],
+	counts: Readonly<Record<string, number>>,
+): Promise<void> {
+	if (streams.length === 0 || streams.length > 64) return;
+	const report: Record<string, { found: number; ok: boolean }> = {};
+	for (const stream of streams)
+		report[stream.scope] = {
+			found: counts[stream.stream] ?? 0,
+			ok: !stream.partial,
+		};
+	try {
+		await shim.setData("scopeCounts", report);
+	} catch {
+		// A host that refuses the key loses only the detail, not the run.
 	}
 }
