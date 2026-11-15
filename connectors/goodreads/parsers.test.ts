@@ -51,6 +51,9 @@ test("partial dates keep the precision Goodreads printed", () => {
 	assert.equal(normalizePartialDate("Apr 31, 2023"), null);
 	assert.equal(normalizePartialDate("2023-02-30"), null);
 	assert.equal(normalizePartialDate("2023-13-01"), null);
+	assert.equal(normalizePartialDate("2023-13"), null);
+	assert.equal(normalizePartialDate("2023-00"), null);
+	assert.equal(normalizePartialDate("2023-12"), "2023-12");
 	assert.equal(normalizePartialDate("Feb 29, 2024"), "2024-02-29");
 	assert.equal(normalizePartialDate("Feb 29, 2023"), null);
 	assert.equal(normalizePartialDate(null), null);

@@ -218,7 +218,12 @@ export function normalizePartialDate(
 			? value
 			: null;
 	}
-	if (ISO_MONTH_RE.test(value)) return value;
+	const isoMonth = ISO_MONTH_RE.exec(value);
+	if (isoMonth) {
+		return isCalendarDay(Number(isoMonth[1]), Number(isoMonth[2]), 1)
+			? value
+			: null;
+	}
 	const full = MONTH_DAY_YEAR_RE.exec(value);
 	if (full) {
 		const month = MONTHS[(full[1] ?? "").toLowerCase()];
