@@ -212,7 +212,10 @@ test("parseTransactionStory marks a supported payment without date_created inval
 		withoutDate as VenmoStory,
 		"1234567890123456789",
 	);
-	assert.deepEqual(record, { kind: "invalid", reason: "missing_date_created" });
+	assert.deepEqual(record, {
+		kind: "ambiguous",
+		reason: "missing_date_created",
+	});
 });
 
 test("parseTransactionStory marks a supported payment without a story id invalid", () => {
@@ -220,7 +223,7 @@ test("parseTransactionStory marks a supported payment without a story id invalid
 	assert.deepEqual(
 		parseTransactionStory(withoutId as VenmoStory, RAW_USER.id),
 		{
-			kind: "invalid",
+			kind: "ambiguous",
 			reason: "missing_id",
 		},
 	);
@@ -272,7 +275,7 @@ test("partial payment snapshots cannot validate as complete", () => {
 			assert.equal(validateRecord("transactions", parsed.record).ok, false);
 			if (field === "actor")
 				assert.notEqual(parsed.record.is_owner_actor, false);
-		} else assert.equal(parsed.kind, "invalid");
+		} else assert.equal(parsed.kind, "ambiguous");
 	}
 });
 
@@ -321,7 +324,7 @@ test("parseTransactionStory treats a payment without an action as unfinished, no
 	assert.ok(story.payment);
 	delete story.payment.action;
 	assert.deepEqual(parseTransactionStory(story, RAW_USER.id), {
-		kind: "invalid",
+		kind: "ambiguous",
 		reason: "missing_action",
 	});
 });
@@ -335,4 +338,30 @@ test("optional payment note remains absent rather than a source null", () => {
 	);
 	assert.equal(Object.hasOwn(record, "note"), false);
 	assert.equal(validateRecord("transactions", record).ok, true);
+});
+
+test("unknown and malformed stories are ambiguous, never known exclusions", () => {
+	for (const [value, reason] of [
+		[{ id: "1", type: "payment" }, "missing_payment"],
+		[
+			{ ...RAW_PAY_STORY, payment: { action: "future_action" } },
+			"unknown_action",
+		],
+		[{ ...RAW_PAY_STORY, payment: [] }, "malformed_payment"],
+		[null, "malformed_story"],
+	] as const) {
+		assert.deepEqual(
+			parseTransactionStory(value as unknown as VenmoStory, RAW_USER.id),
+			{ kind: "ambiguous", reason },
+		);
+	}
+});
+
+test("incoming private pay remains supported", () => {
+	const parsed = parseTransactionStory(RAW_PAY_STORY, "9876543210987654321");
+	assert.equal(parsed.kind, "record");
+	if (parsed.kind !== "record") throw new Error("expected incoming payment");
+	assert.equal(parsed.record.audience, "private");
+	assert.equal(parsed.record.is_owner_actor, false);
+	assert.equal(validateRecord("transactions", parsed.record).ok, true);
 });
