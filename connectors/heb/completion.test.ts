@@ -249,7 +249,6 @@ function assertPartial(ctx: TestContext): void {
 	);
 }
 
-
 test("order schema rejection has one honest skip and value-free diagnostic", async (t) => {
 	const lines: string[] = [];
 	t.mock.method(process.stderr, "write", (chunk: unknown) => {
@@ -280,26 +279,48 @@ test("order schema rejection has one honest skip and value-free diagnostic", asy
 			sessionRepairRequired: false,
 		},
 		{
-			orderId: "HEB_PRIVATE_CANARY", orderDateRaw: "Oct 5, 2026",
-			fulfillmentMethod: "unknown", fulfillmentLocation: null, status: null,
-			statusCode: null, storeName: null, timeslotStart: null, timeslotEnd: null,
-			total: "$10.00", itemCount: 1, unfulfilledCount: null, source: "dom",
+			orderId: "HEB_PRIVATE_CANARY",
+			orderDateRaw: "Oct 5, 2026",
+			fulfillmentMethod: "unknown",
+			fulfillmentLocation: null,
+			status: null,
+			statusCode: null,
+			storeName: null,
+			timeslotStart: null,
+			timeslotEnd: null,
+			total: "$10.00",
+			itemCount: 1,
+			unfulfilledCount: null,
+			source: "dom",
 		} as Parameters<typeof processListOrder>[3],
 	);
 	assert.equal(ctx.emitted.length, 0);
 	const skips = findMessages(ctx.protocolMessages, "SKIP_RESULT");
 	assert.equal(skips.length, 1);
 	assert.equal(skips[0]?.reason, "record_failed_schema");
+	assert.deepEqual(skips, [
+		{
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "record_failed_schema",
+			message:
+				"A record H-E-B showed could not be stored because its shape did not match what the connector expects. The next run will try again.",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		},
+	]);
 	assert.deepEqual(skips[0]?.recovery_hint, {
 		action: "retry_by_runtime",
 		retryable: true,
 	});
 	assert.doesNotMatch(skips[0]?.message ?? "", /retained/);
-	const diagnostics = lines.filter((line) => line.includes("record_failed_schema"));
+	const diagnostics = lines.filter((line) =>
+		line.includes("record_failed_schema"),
+	);
 	assert.equal(diagnostics.length, 1);
 	const invalidId = ordersSchema.shape.id.safeParse("HEB_PRIVATE_CANARY");
 	assert.equal(invalidId.success, false);
-	if (invalidId.success) throw new Error("fixture must fail the real id schema");
+	if (invalidId.success)
+		throw new Error("fixture must fail the real id schema");
 	assert.ok(diagnostics[0]?.includes("orders"));
 	assert.ok(diagnostics[0]?.includes("id"));
 	const issue = invalidId.error.issues[0];
@@ -309,6 +330,24 @@ test("order schema rejection has one honest skip and value-free diagnostic", asy
 	// Check all stderr, including unrelated diagnostics, for the fixture value.
 	assert.ok(!lines.join("").includes("HEB_PRIVATE_CANARY"));
 	assert.doesNotMatch(diagnostics.join(""), /HEB_PRIVATE_CANARY|10\.00|Oct 5/);
+});
+
+test("collect: a valid list page emits no aggregate schema-rejection skip", async () => {
+	const ctx = makeContext(
+		["orders"],
+		makeCollectPage({ listHtml: onePageOrdersList() }),
+	);
+	await hebConnector.collect(ctx);
+	assert.ok(
+		ctx.emitted.some((record) => record.stream === "orders"),
+		"the page must actually be parsed and emit valid orders",
+	);
+	assert.deepEqual(
+		findMessages(ctx.protocolMessages, "SKIP_RESULT").filter(
+			(skip) => skip.reason === "record_failed_schema",
+		),
+		[],
+	);
 });
 
 test("collect: nutrition-only keeps owner-unbound empty-renderer results partial", async () => {

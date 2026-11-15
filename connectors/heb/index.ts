@@ -1074,6 +1074,7 @@ async function extractAndShapeCheckOrders(
 	const parsing = inspectOrderListParsing(html);
 	if (parsing.rejectedRows > 0 || parsing.missingIdentityRows > 0) {
 		// The prefilter exposes counts only, not rejected rows or Zod issues.
+		// Counts are per page by design, so they stay correct if the run stops early.
 		// Emit one aggregate; keep counts separate rather than inventing paths.
 		await emitSchemaRejected({ emit }, "orders", [], {
 			rejected_count: parsing.rejectedRows,
@@ -1831,7 +1832,8 @@ async function recoverPendingOrderItemDetailGapPage(
 				}
 			}
 			if (!result.inventoryComplete) {
-				if (!sourceInventoryComplete) await emitInventoryIncomplete(deps, "order_items");
+				if (!sourceInventoryComplete)
+					await emitInventoryIncomplete(deps, "order_items");
 				await deps.emit(
 					buildHebDetailGap(
 						locator.orderId,
@@ -2164,12 +2166,14 @@ async function fetchDetailAndRecordCoverage(
 			if (parsed.success) validItems.push(item);
 			else await emitSchemaRejected(deps, "order_items", parsed.error.issues);
 		}
-		result.evidence.rejectedRows += result.detail.items.length - validItems.length;
+		result.evidence.rejectedRows +=
+			result.detail.items.length - validItems.length;
 		result.detail.items = validItems;
 		result.evidence.acceptedIds =
 			result.evidence.rejectedRows === 0 ? [...result.evidence.sourceIds] : [];
 		result.inventoryComplete = inventoryIsComplete(result.evidence);
-		if (!sourceInventoryComplete) await emitInventoryIncomplete(deps, "order_items");
+		if (!sourceInventoryComplete)
+			await emitInventoryIncomplete(deps, "order_items");
 	}
 	if (deps.orderItemsCoverage) {
 		const outcome: DetailOutcome =
@@ -2798,12 +2802,7 @@ export async function collectProfile(
 		landedUrl,
 		html,
 	).loading;
-	if (
-		!responseSucceeded ||
-		landedUrl !== PROFILE_URL ||
-		loading ||
-		!record
-	) {
+	if (!responseSucceeded || landedUrl !== PROFILE_URL || loading || !record) {
 		// The profile is one record, not an enumeration: a page that did not
 		// load as the readable account profile is a failed read.
 		await reportReadFailure(
@@ -2847,6 +2846,14 @@ async function emitSchemaRejected(
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		message:
 			"A record H-E-B showed could not be stored because its shape did not match what the connector expects. The next run will try again.",
+		...(counts === undefined
+			? {}
+			: {
+					diagnostics: {
+						rejected_count: counts.rejected_count,
+						missing_identity_count: counts.missing_identity_count,
+					},
+				}),
 	});
 }
 
