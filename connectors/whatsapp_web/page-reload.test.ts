@@ -107,6 +107,8 @@ interface FakeOptions {
 	context?: ((call: number) => unknown) | undefined;
 	/** The history-sync-on-demand switch's answer. */
 	historyGate?: unknown;
+	/** Private own-account identity on each read, starting with run setup. */
+	account?: (call: number) => string | null;
 }
 
 function fakeWorld(options: FakeOptions) {
@@ -126,6 +128,7 @@ function fakeWorld(options: FakeOptions) {
 	let sessionReads = 0;
 	let readinessReads = 0;
 	let contextReads = 0;
+	let accountReads = 0;
 	const answer = (kind: Kind, value: unknown): Promise<unknown> => {
 		calls[kind] += 1;
 		const error = options.fail?.(kind, calls[kind]) ?? null;
@@ -134,6 +137,10 @@ function fakeWorld(options: FakeOptions) {
 	const page = {
 		evaluate: (script: unknown): Promise<unknown> => {
 			const s = String(script);
+			if (s.includes("const ownAccountIdentity")) {
+				accountReads += 1;
+				return Promise.resolve(options.account?.(accountReads) ?? null);
+			}
 			if (s.includes('"signed_in"')) {
 				sessionReads += 1;
 				return Promise.resolve(options.session?.() ?? "signed_in");
@@ -578,3 +585,50 @@ for (const kind of ["walk", "release"] as const) {
 		assert.equal(world.calls.walk, kind === "walk" ? 1 : 2);
 	});
 }
+
+for (const kind of ["groups", "chats"] as const) {
+	test(`a changed account after ${kind} reload stops before retry without leaking identity`, async () => {
+		const before = "synthetic-own-account-A";
+		const after = "synthetic-own-account-B";
+		const world = fakeWorld({
+			historyState: STATE_1,
+			account: (call) => (call === 1 ? before : after),
+			fail: (operation, call) =>
+				operation === kind && call === 1 ? LOADER_GONE() : null,
+		});
+		const { result, lines } = await diagnosticsDuring(() =>
+			runCollect(world.page),
+		);
+		assert.equal(asObject(result.error).code, "whatsapp_web_auth_failed");
+		assert.equal(asObject(result.error).retryable, false);
+		assert.equal(
+			world.calls[kind],
+			1,
+			"the other account's read was never retried",
+		);
+		assert.equal(
+			result.harness.emitted.some((e) => e.stream === kind),
+			false,
+		);
+		assert.ok(lines.some((line) => line.includes("reload_signed_out")));
+		for (const id of [before, after]) {
+			assert.equal(lines.join("\n").includes(id), false);
+			assert.equal(String(result.error).includes(id), false);
+			assert.equal(JSON.stringify(result.harness.emitted).includes(id), false);
+		}
+	});
+}
+
+test("the same account after a groups reload recovers normally", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		account: () => "synthetic-own-account-A",
+		fail: (kind, call) =>
+			kind === "groups" && call === 1 ? LOADER_GONE() : null,
+	});
+	const { harness, error } = await runCollect(world.page);
+	assert.equal(error, null);
+	assert.ok(world.calls.groups >= 2, "the failed groups read was retried");
+	assert.ok(harness.emitted.some((e) => e.stream === "groups"));
+	assert.deepEqual(gapsOf(harness), []);
+});

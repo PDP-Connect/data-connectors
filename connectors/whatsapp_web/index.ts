@@ -604,6 +604,8 @@ const MAX_PAGE_RELOADS = 3;
 export interface RunStart {
 	startedMs: number;
 	version: string | null;
+	/** Private comparison only; never emitted or logged. */
+	account: string | null;
 }
 
 /** The screen a reload landed on; see PAGE_CONTEXT_SCRIPT. */
@@ -739,6 +741,7 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 	private readonly attempts: number;
 	private readonly waitMs: number;
 	private readonly startedMs: number;
+	private readonly account: string | null;
 	/** The app's build version before the next reload, when known. */
 	private version: string | null;
 	/** What the latest boot poll saw, for the reload diagnostic. */
@@ -749,7 +752,7 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 		streams: ReadonlySet<string>,
 		attempts = STORE_WAIT_ATTEMPTS,
 		waitMs = STORE_WAIT_MS,
-		run: RunStart = { startedMs: Date.now(), version: null },
+		run: RunStart = { startedMs: Date.now(), version: null, account: null },
 	) {
 		this.inner = inner;
 		this.page = page;
@@ -758,6 +761,7 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 		this.waitMs = waitMs;
 		this.startedMs = run.startedMs;
 		this.version = run.version;
+		this.account = run.account;
 	}
 
 	private async read<T>(op: () => Promise<T>): Promise<T> {
@@ -836,6 +840,12 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 			}
 			if (state === "signed_in") break;
 			await wait(this.waitMs);
+		}
+		const account = await readOwnAccount(this.page);
+		if (this.account !== null && account !== null && this.account !== account) {
+			throw authFailure(
+				"WhatsApp Web switched to a different account during the run: link this browser to your own account and run again",
+			);
 		}
 		await waitForStores(this.page, this.attempts, this.waitMs, this.streams);
 	}
@@ -2240,6 +2250,7 @@ export async function collect(
 	const freshLink = freshlyLinkedPages.delete(ctx.page);
 	const main = mainWorld(ctx.page);
 	await waitForStores(main, STORE_WAIT_ATTEMPTS, STORE_WAIT_MS, want);
+	const account = await readOwnAccount(main);
 	const { version } = await readPageContext(main);
 	// Run log only: whether this client may ask the phone for older history.
 	connectorDiagnostic("whatsapp_web", "history_on_demand", {
@@ -2251,7 +2262,7 @@ export async function collect(
 		want,
 		timings.reloadAttempts ?? STORE_WAIT_ATTEMPTS,
 		timings.reloadMs ?? STORE_WAIT_MS,
-		{ startedMs, version },
+		{ startedMs, version, account },
 	);
 	const tally = new TextTally();
 	try {
@@ -2491,6 +2502,32 @@ export async function ensureSession(
 function sessionAuthFailure(diagnostic: string): Error {
 	console.error(`whatsapp_web: ${diagnostic}`);
 	return new Error(AUTH_FAILED_CODE);
+}
+
+/** Private own-account identity, never used as diagnostic or record data. */
+const OWN_ACCOUNT_SCRIPT = `
+(() => {
+	const ownAccountIdentity = () => {
+		try {
+			const me = window.require("WAWebUserPrefsMeUser");
+			const user = me.getMaybeMePnUser?.() || me.getMaybeMeLidUser?.();
+			if (!user) return null;
+			const id = user._serialized || user.toString();
+			return typeof id === "string" && id.length > 0 && id !== "[object Object]" ? id : null;
+		} catch { return null; }
+	};
+	return ownAccountIdentity();
+})()
+`;
+
+async function readOwnAccount(page: ScriptRunner): Promise<string | null> {
+	try {
+		const value = await page.evaluate(OWN_ACCOUNT_SCRIPT);
+		return typeof value === "string" && value.length > 0 ? value : null;
+	} catch (error) {
+		if (isPageReloadError(error)) throw error;
+		return null;
+	}
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────
