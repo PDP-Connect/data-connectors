@@ -781,7 +781,7 @@ test("mergeOrderItems: repeated ASIN lines retain quantities and stable first id
 	</div>`;
 	const list = parseOrdersListDom(html)[0];
 	assert.ok(list);
-	assert.equal(list.items.length, 2); // Base list parser discards line two.
+	assert.equal(list.items.length, 2); // The list parser keeps both lines.
 	const detail = makeDetail({
 		items: [1, 2].map((quantity) =>
 			makeDetailItem({ asin: "B000000001", name: "Milk", quantity }),
