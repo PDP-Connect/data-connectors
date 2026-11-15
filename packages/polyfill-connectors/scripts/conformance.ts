@@ -86,14 +86,34 @@ export function checkManifest(connector: string): Step {
 			capabilities?: { public_listing?: { tier?: string } };
 			streams?: unknown;
 		};
-		const streams = Array.isArray(manifest.streams)
-			? manifest.streams.length
-			: 0;
+		const entries: unknown[] = Array.isArray(manifest.streams)
+			? manifest.streams
+			: [];
+		const streams = entries.length;
 		if (streams === 0) {
 			return {
 				detail: "manifest declares no streams",
 				name: "manifest",
 				nextAction: `add at least one entry to the "streams" array in connectors/${connector}/manifest.json`,
+				verdict: "FAIL",
+			};
+		}
+		const invalidIndexes = entries.flatMap((entry, index) =>
+			typeof entry !== "object" ||
+			entry === null ||
+			Array.isArray(entry) ||
+			!("name" in entry) ||
+			typeof entry.name !== "string" ||
+			entry.name.trim().length === 0
+				? [index]
+				: [],
+		);
+		if (invalidIndexes.length > 0) {
+			return {
+				detail: `invalid stream entries at indexes: ${invalidIndexes.join(", ")}`,
+				name: "manifest",
+				nextAction:
+					"each streams entry needs an object with a non-empty string name",
 				verdict: "FAIL",
 			};
 		}

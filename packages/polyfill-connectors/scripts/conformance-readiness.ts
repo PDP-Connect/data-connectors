@@ -64,7 +64,7 @@ const PROOF_STRATEGIES: ReadonlySet<string> = new Set([
 const COVERAGE_RATCHET =
 	"connectors/_conformance/coverage-conformance-drivers.ts";
 
-/** The manifest's stream entries that are objects; `checkManifest` reports the rest. */
+/** Object stream entries; `checkManifest` rejects malformed entries and missing names. */
 function streamsOf(manifest: ReadinessManifest): ManifestStream[] {
 	return Array.isArray(manifest.streams)
 		? manifest.streams.filter(
@@ -156,7 +156,7 @@ export function checkEvidence(
  * apple_health).
  */
 const COVERAGE_EMISSION =
-	/DETAIL_COVERAGE|coverage_diagnostics|\b(?:build|emit)\w*Coverage\w*\s*\(/;
+	/\btype\s*:\s*["']DETAIL_COVERAGE["']|coverage_diagnostics|\b(?:build|emit)\w*Coverage\w*\s*\(/;
 
 export function checkCoverageProof(
 	connector: string,
@@ -275,7 +275,7 @@ export const SHARED_HELPER_RULES: readonly SharedHelperRule[] = [
  * error message; its default (/ECONN|ETIMEDOUT|timeout/i) matches neither.
  */
 const RETRYABLE_ERROR_THROWN =
-	/throw\s+new\s+\w*Error\(\s*[`'"][^`'"\n]*(?:rate_?limit|_5xx|http_\$\{|\b429\b|\b5\d\d\b)/i;
+	/throw\s+new\s+\w*Error\(\s*[`'"][^`'"\n]*(?:rate[ _-]?limit|_5xx|http[_\s]*\$\{|\b429\b|\b5\d\d\b)/i;
 /**
  * The governor throws ConnectorRateLimitedError (`<name>_rate_limited`) when
  * 429s persist. Unless the connector catches it, only `retryablePattern`

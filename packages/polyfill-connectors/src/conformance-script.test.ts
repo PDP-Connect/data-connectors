@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { checkManifest, readinessSteps } from "../scripts/conformance.ts";
 import {
@@ -29,6 +29,99 @@ test("conformance points a missing manifest at connectors/<key>/manifest.json", 
 	assert.equal(step.verdict, "FAIL");
 	assert.match(step.detail, /connectors\/no_such_connector\/manifest\.json/);
 	assert.doesNotMatch(step.nextAction ?? "", /manifests\//);
+});
+
+test("manifest rejects malformed stream entries and retains the empty-stream failure", () => {
+	const dir = mkdtempSync(join(connectorsDir, "__conformance_manifest_"));
+	const connector = basename(dir);
+	const write = (streams: unknown[]) =>
+		writeFileSync(join(dir, "manifest.json"), JSON.stringify({ streams }));
+	try {
+		write([
+			"transactions",
+			null,
+			{},
+			{ name: "" },
+			{ name: "   " },
+			{ name: 1 },
+			[],
+			{ name: "valid" },
+		]);
+		const malformed = checkManifest(connector);
+		assert.equal(malformed.verdict, "FAIL");
+		assert.match(malformed.detail, /indexes: 0, 1, 2, 3, 4, 5, 6/);
+		assert.match(
+			malformed.nextAction ?? "",
+			/object with a non-empty string name/,
+		);
+		write([]);
+		assert.equal(
+			checkManifest(connector).detail,
+			"manifest declares no streams",
+		);
+		write([{ name: "transactions" }]);
+		assert.equal(checkManifest(connector).verdict, "PASS");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("retryable errors include spaced and hyphenated rate limits and HTTP templates", () => {
+	const browserManifest: ReadinessManifest = {
+		runtime_requirements: { bindings: { browser: { required: true } } },
+	};
+	for (const message of [
+		'throw new Error("rate limited by provider");',
+		'throw new Error("rate limit reached");',
+		'throw new Error("rate-limit reached");',
+		'throw new Error("rate_limit reached");',
+		'throw new Error("ratelimit reached");',
+		"throw new Error(" + "`HTTP ${res.status}`" + ");",
+	]) {
+		const source = message + "\nrunConnector({ collect });";
+		assert.match(
+			checkSharedHelpers(source, browserManifest).nextAction ?? "",
+			/retryable-pattern/,
+			message,
+		);
+		assert.equal(
+			checkSharedHelpers(
+				source + "\nrunConnector({ retryablePattern: /rate|HTTP/i });",
+				browserManifest,
+			).verdict,
+			"PASS",
+		);
+	}
+});
+
+test("coverage requires an emission form rather than a throw-only message", () => {
+	const snapshotManifest: ReadinessManifest = {
+		streams: [
+			{ name: "highlights", coverage_strategy: "snapshot_import_receipt" },
+		],
+	};
+	assert.equal(
+		checkCoverageProof(
+			"x",
+			snapshotManifest,
+			'throw new Error("DETAIL_COVERAGE not supported");',
+			new Set(),
+		).verdict,
+		"UNKNOWN",
+	);
+	for (const source of [
+		'ctx.emit({ type: "DETAIL_COVERAGE", stream: "highlights" });',
+		"ctx.emit({ type: 'DETAIL_COVERAGE', stream: 'highlights' });",
+		"emitDetailCoverage(ctx, data);",
+		"buildFullScanCoverageMessage(stream, n);",
+		'const stream = "coverage_diagnostics";',
+	]) {
+		assert.equal(
+			checkCoverageProof("x", snapshotManifest, source, new Set()).verdict,
+			"PASS",
+			source,
+		);
+	}
 });
 
 // ─── evidence ─────────────────────────────────────────────────────────────
