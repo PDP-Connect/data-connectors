@@ -118,7 +118,7 @@ if (
 	process.argv[1] &&
 	resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-	const [, concurrency, ...files] = process.argv.slice(2);
+	const [concurrency, ...files] = process.argv.slice(2);
 	if (!/^[1-9][0-9]*$/.test(concurrency ?? "")) {
 		console.error(
 			"usage: node scripts/test-dispatch.mjs <concurrency> <test-files...>",
