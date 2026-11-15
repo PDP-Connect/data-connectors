@@ -807,7 +807,10 @@ function parseReadingNote(item: El, bookId: string): ReadingNote | null {
 	if (
 		!(highlightId || noteId) ||
 		!(highlightText || noteText || highlightId) ||
-		(hasNote === true) !== (noteText !== null)
+		// Only a flag that says the opposite of the card is a contradiction;
+		// a card without the flag is read by its text.
+		(hasNote === true && noteText === null) ||
+		(hasNote === false && noteText !== null)
 	) {
 		return null;
 	}

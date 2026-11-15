@@ -721,6 +721,39 @@ test("a page this connector does not know stops the listing as unreadable", asyn
 	);
 });
 
+test("a book printed again on a later page stops the listing, even when the count matches", async () => {
+	// The list moved while it was read: page 2 repeats a page-1 book. The
+	// distinct count still equals the library's five, but a repeat means a
+	// row may have been skipped or read before it changed.
+	const page1 = PRINT_PAGES["1"] ?? "";
+	const start = page1.indexOf('<tr id="review_90100001"');
+	const repeated = page1.slice(start, page1.indexOf("</tr>", start) + 5);
+	const page2 = (PRINT_PAGES["2"] ?? "").replace(
+		"</tbody>",
+		`${repeated}</tbody>`,
+	);
+	assert.ok(start >= 0 && page2.includes('id="review_90100001"'));
+	const h = harness(
+		signedInSite({
+			print: (path) => ({
+				body: path.includes("&page=2&")
+					? page2
+					: (PRINT_PAGES[
+							new URL(path, ORIGIN).searchParams.get("page") ?? ""
+						] ?? fixture("library-no-rows.html")),
+			}),
+		}),
+		{ books: {} },
+	);
+	await run(h);
+	assert.equal(recordsOf(h, "books").length, 0);
+	assert.deepEqual(
+		skips(h).map((skip) => [skip.stream, skip.reason]),
+		[["books", "collection_interrupted"]],
+	);
+	assert.match(h.failures[0]?.message ?? "", /listed one book twice/);
+});
+
 test("an AWS WAF challenge loads the page once, then the retry succeeds", async () => {
 	let cleared = false;
 	const h = harness(
@@ -1221,6 +1254,21 @@ test("shelves are saved only when the API's lists are shown to be whole", async 
 		[
 			"a tag on a book that the list lacks",
 			{ GoodreadsTags: dropTag("winter-list") },
+			"shelf_list_incomplete",
+		],
+		[
+			"a tag on a book that only the exclusive shelves list",
+			{
+				GoodreadsTags: dropTag("winter-list"),
+				GoodreadsShelves: (body) => {
+					const connection = connectionOf(body);
+					connection.edges.push({
+						node: { name: "winter-list", webUrl: null },
+					});
+					connection.totalCount = connection.edges.length;
+					return body;
+				},
+			},
 			"shelf_list_incomplete",
 		],
 		[

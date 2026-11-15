@@ -796,12 +796,13 @@ export function shelfListProblem(
 		names.add(item.name);
 	}
 	const exclusive = new Set(shelves.items.map((shelf) => shelf.name));
+	const tagNames = new Set(tags.items.map((tag) => tag.name));
 	const missing = new Set<string>();
 	for (const shelving of shelvings) {
 		if (shelving.shelf && !exclusive.has(shelving.shelf)) {
 			missing.add(shelving.shelf);
 		}
-		for (const tag of shelving.tags) if (!names.has(tag)) missing.add(tag);
+		for (const tag of shelving.tags) if (!tagNames.has(tag)) missing.add(tag);
 	}
 	if (missing.size > 0) {
 		return partial(`${missing.size} shelves named on books are not in it`);
@@ -1009,8 +1010,19 @@ async function readListing(
 			break;
 		}
 		for (const row of parsed.rows) {
-			if (!seen.has(row.id)) seen.set(row.id, row);
+			// A row seen on an earlier page means the list moved while it was
+			// read: a book can be missed even when the count still matches.
+			if (seen.has(row.id)) {
+				stop = {
+					message:
+						"Goodreads listed one book twice in your library list. The list may have changed while reading; run collection again.",
+					reason: "collection_interrupted",
+				};
+				break;
+			}
+			seen.set(row.id, row);
 		}
+		if (stop) break;
 		await ctx.progress?.(
 			`Reading your Goodreads library: ${seen.size} of ${expectedTotal} books`,
 			{ count: seen.size, stream, total: expectedTotal },

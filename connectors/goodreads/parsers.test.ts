@@ -511,6 +511,17 @@ test("a notes item whose ids or note flag do not add up is counted unreadable, n
 		assert.equal(parsed.unreadable, 1);
 		assert.equal(parsed.notes.length, 2);
 	}
+	// A card without the note flag is read by its text, not dropped.
+	const unflagged = parseReadingNotesPage(
+		page.replaceAll(' data-has-note="true"', ""),
+	);
+	assert.equal(unflagged.unreadable, 0);
+	assert.equal(unflagged.notes.length, 3);
+	// A flag that contradicts the card still makes it unreadable.
+	const contradicted = parseReadingNotesPage(
+		page.replace(' data-has-note="true"', ' data-has-note="false"'),
+	);
+	assert.equal(contradicted.unreadable, 1);
 	const unrecognised = parseReadingNotesPage("<html><body></body></html>");
 	assert.equal(unrecognised.recognised, false);
 	assert.equal(unrecognised.total, null);
