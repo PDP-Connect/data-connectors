@@ -916,9 +916,12 @@ test("mergeOrderItems: ambiguous detail names are retained rather than guessed",
 	);
 });
 
-
 test("mergeOrderItems: no-detail name-only observations coalesce with one ASIN in either order", () => {
-	const identified = { asin: "B000000001", name: "Milk", url: "/dp/B000000001" };
+	const identified = {
+		asin: "B000000001",
+		name: "Milk",
+		url: "/dp/B000000001",
+	};
 	const nameOnly = { asin: null, name: "  MILK  ", url: null };
 	for (const items of [
 		[identified, nameOnly],
@@ -931,7 +934,10 @@ test("mergeOrderItems: no-detail name-only observations coalesce with one ASIN i
 		const records = merged.map((item) =>
 			buildOrderItemRecord(list.orderId, "2024-01-15", item),
 		);
-		assert.deepEqual(records.map((item) => item.id), [list.orderId + "|B000000001"]);
+		assert.deepEqual(
+			records.map((item) => item.id),
+			[list.orderId + "|B000000001"],
+		);
 	}
 });
 
@@ -950,7 +956,9 @@ test("mergeOrderItems: no-detail name-only observations stay separate for two di
 		assert.equal(records.length, 3);
 		assert.deepEqual(
 			records.map((item) => item.id).sort(),
-			["|B000000001", "|B000000002", "|milk"].map((suffix) => list.orderId + suffix).sort(),
+			["|B000000001", "|B000000002", "|milk"]
+				.map((suffix) => list.orderId + suffix)
+				.sort(),
 		);
 	}
 });
@@ -985,9 +993,7 @@ test("buildOrderRecord: both list + detail present — detail wins for enrichmen
 	assert.equal(rec.delivery_status, "Arriving tomorrow");
 	assert.equal(rec.recipient_name, "Fictional Person");
 	assert.equal(rec.payment_method_summary, "Visa ending in 1234");
-	// Both surfaces saw items, so the larger count wins: max(1, 2) = 2. The
-	// zero case is where the two surfaces stop being interchangeable — see
-	// item-count-honesty.test.ts.
+	// The merged observations produce the two detail lines.
 	assert.equal(rec.item_count, 2);
 });
 
@@ -1013,6 +1019,46 @@ test("buildOrderRecord: detail null — falls back to list-page fields", () => {
 	assert.equal(rec.gift_order, false);
 	assert.equal(rec.digital_order, false);
 	assert.equal(rec.item_count, 2);
+});
+
+test("buildOrderRecord: item_count follows merged lines and preserves unknown versus empty", () => {
+	const milk = { asin: "B000000001", name: "Milk", url: null };
+	const repeatedList = makeListOrder({ items: [milk, { ...milk }] });
+	const emptyList = makeListOrder();
+	const oneDetail = makeDetail({
+		items: [makeDetailItem({ ...milk, quantity: 2 })],
+	});
+	const repeatedDetail = makeDetail({
+		items: [1, 2].map((quantity) => makeDetailItem({ ...milk, quantity })),
+	});
+	const cases: [string, ListPageOrder, OrderDetail | null, number | null][] = [
+		["redundant list with one detail line", repeatedList, oneDetail, 1],
+		["redundant list without detail", repeatedList, null, 1],
+		["repeated detail lines", repeatedList, repeatedDetail, 2],
+		["observed empty detail", emptyList, makeDetail(), 0],
+		["unobserved items", emptyList, null, null],
+		[
+			"name-only list observation joins its unique ASIN",
+			makeListOrder({
+				items: [milk, { asin: null, name: " milk ", url: null }],
+			}),
+			null,
+			1,
+		],
+	];
+	for (const [label, list, detail, expected] of cases) {
+		const record = buildOrderRecord(
+			list,
+			detail,
+			"2024-01-15",
+			"2024-01-20T00:00:00Z",
+		);
+		const items = mergeOrderItems(list, detail).map((item) =>
+			buildOrderItemRecord(list.orderId, "2024-01-15", item),
+		);
+		assert.equal(record.item_count, expected, label);
+		assert.equal(items.length, expected ?? 0, label);
+	}
 });
 
 test("buildOrderItemRecord: builds emit-ready shape with cents, returned flag, and itemId", () => {

@@ -975,7 +975,9 @@ function resolveItemCount(
 	listOrder: ListPageOrder,
 	detail: OrderDetail | null,
 ): number | null {
-	const counted = Math.max(listOrder.items.length, detail?.items?.length ?? 0);
+	// Count emitted lines, not redundant observations or quantities.
+	// Keep matching and multiplicity rules in one place.
+	const counted = mergeOrderItems(listOrder, detail).length;
 	if (counted > 0) {
 		return counted;
 	}
