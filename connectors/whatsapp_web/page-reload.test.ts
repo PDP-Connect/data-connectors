@@ -98,6 +98,8 @@ interface FakeOptions {
 	fail?: (kind: Kind, call: number) => Error | null;
 	session?: () => string;
 	readinessFailure?: ((call: number) => Error | null) | undefined;
+	/** Return unavailable stores from this 1-based readiness read onward. */
+	readinessNotReadyFrom?: number;
 	sendAnswer?: unknown;
 	/** Replace the walk's answer for the n-th (1-based) call. */
 	walkAnswer?: ((call: number, chatId: string) => unknown) | undefined;
@@ -139,7 +141,12 @@ function fakeWorld(options: FakeOptions) {
 			if (s.includes("require_function")) {
 				readinessReads += 1;
 				const error = options.readinessFailure?.(readinessReads) ?? null;
-				return error ? Promise.reject(error) : Promise.resolve(READY);
+				const ready =
+					options.readinessNotReadyFrom !== undefined &&
+					readinessReads >= options.readinessNotReadyFrom
+						? { ...READY, chats: false }
+						: READY;
+				return error ? Promise.reject(error) : Promise.resolve(ready);
 			}
 			if (s.includes("WAWebBuildConstants") && options.context) {
 				contextReads += 1;
@@ -551,3 +558,23 @@ test("an anchor release that fails for an ordinary reason leaves the stalled wal
 	assert.equal(gaps.length, 1);
 	assert.equal(asObject(gaps[0]?.last_error).class, "local_walk_page_cap");
 });
+
+for (const kind of ["walk", "release"] as const) {
+	test(`store readiness exhaustion during ${kind} recovery ends the run without a chat gap`, async () => {
+		const world = fakeWorld({
+			historyState: STATE_1,
+			...(kind === "release" ? { walkAnswer: unfinishedChunk } : {}),
+			fail: (operation, call) =>
+				operation === kind && call === 1 ? LOADER_GONE() : null,
+			// Initial collect setup succeeds; recovery never regains its stores.
+			readinessNotReadyFrom: 2,
+		});
+		const { harness, error } = await runCollect(world.page, chatsAndMessages);
+		assert.equal(asObject(error).code, "whatsapp_web_stores_not_ready");
+		assert.equal(asObject(error).retryable, true);
+		assert.deepEqual(gapsOf(harness), []);
+		assert.equal(world.readinessReads(), 1 + TIMINGS.reloadAttempts);
+		assert.equal(world.calls[kind], 1, "the failed operation was not retried");
+		assert.equal(world.calls.walk, kind === "walk" ? 1 : 2);
+	});
+}
