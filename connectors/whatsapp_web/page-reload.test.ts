@@ -80,7 +80,7 @@ const LOADER_GONE = () =>
 		"page.evaluate: TypeError: window.require is not a function\n    at eval (eval at evaluate (:337:30), <anonymous>:3:27)",
 	);
 
-type Kind = "chats" | "walk" | "send" | "contacts" | "groups";
+type Kind = "chats" | "walk" | "release" | "send" | "contacts" | "groups";
 
 interface FakeOptions {
 	historyState: string;
@@ -89,6 +89,8 @@ interface FakeOptions {
 	session?: () => string;
 	readinessFailure?: ((call: number) => Error | null) | undefined;
 	sendAnswer?: unknown;
+	/** Replace the walk's answer for the n-th (1-based) call. */
+	walkAnswer?: ((call: number, chatId: string) => unknown) | undefined;
 }
 
 function fakeWorld(options: FakeOptions) {
@@ -100,6 +102,7 @@ function fakeWorld(options: FakeOptions) {
 	const calls: Record<Kind, number> = {
 		chats: 0,
 		walk: 0,
+		release: 0,
 		send: 0,
 		contacts: 0,
 		groups: 0,
@@ -129,6 +132,8 @@ function fakeWorld(options: FakeOptions) {
 				return answer("send", options.sendAnswer ?? { sent: true });
 			if (s.includes("getModelsArray().map((c) =>"))
 				return answer("chats", chats);
+			if (s.includes("msgFindBefore") && options.walkAnswer)
+				return answer("walk", options.walkAnswer(calls.walk + 1, id));
 			if (s.includes("msgFindBefore"))
 				return answer("walk", {
 					chat_id: id,
@@ -143,6 +148,8 @@ function fakeWorld(options: FakeOptions) {
 				return answer("contacts", fixture("contacts"));
 			if (s.includes("WAWebGroupMetadataCollection.getModelsArray().map"))
 				return answer("groups", fixture("groups"));
+			if (s.includes("if (walks) walks.delete("))
+				return answer("release", true);
 			return Promise.reject(new Error("fake page: unexpected script"));
 		},
 	};
@@ -373,4 +380,53 @@ test("ordinary message read failures still produce a per-chat gap", async () => 
 	const gaps = gapsOf(harness);
 	assert.equal(gaps.length, 1);
 	assert.equal(asObject(gaps[0]?.last_error).class, "local_walk_failed");
+});
+
+/** A walk chunk that reads one message and says more remain. */
+const unfinishedChunk = (_call: number, chatId: string) => ({
+	chat_id: chatId,
+	status: 200,
+	memory: [{ ...memoryFixture[0], remote: chatId }],
+	messages: [],
+	complete: false,
+	anchored: true,
+	more: true,
+	token: "walk-1",
+	stop: null,
+});
+
+for (const [name, session, code] of [
+	["signed-out", "signed_out", "whatsapp_web_auth_failed"],
+	["an exhausted reload budget", "signed_in", "whatsapp_web_page_reloaded"],
+] as const) {
+	test(`releasing a stalled walk's anchor on a reloading page ends the run with ${name}, not a chat gap`, async () => {
+		// The second chunk brings nothing new, so the walk stops and releases
+		// its anchor; that release meets a reloading page.
+		const world = fakeWorld({
+			historyState: STATE_1,
+			walkAnswer: unfinishedChunk,
+			fail: (kind) => (kind === "release" ? LOADER_GONE() : null),
+			session: () => session,
+		});
+		const { harness, error } = await runCollect(world.page, chatsAndMessages);
+		assert.equal(asObject(error).code, code);
+		assert.equal(world.calls.walk, 2);
+		assert.ok(world.calls.release >= 1);
+		assert.deepEqual(gapsOf(harness), []);
+	});
+}
+
+test("an anchor release that fails for an ordinary reason leaves the stalled walk's gap on its chat", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		walkAnswer: unfinishedChunk,
+		fail: (kind) =>
+			kind === "release" ? new Error("ordinary release failure") : null,
+	});
+	const { harness, error } = await runCollect(world.page, chatsAndMessages);
+	assert.equal(error, null);
+	assert.equal(world.calls.release, 1);
+	const gaps = gapsOf(harness);
+	assert.equal(gaps.length, 1);
+	assert.equal(asObject(gaps[0]?.last_error).class, "local_walk_page_cap");
 });

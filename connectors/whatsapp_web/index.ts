@@ -1861,6 +1861,34 @@ export function walkGap(walk: {
 }
 
 /**
+ * A failure the reload recovery raises for the whole run: the reloaded page
+ * is signed out, or it reloaded more times than a run recovers from. It
+ * ends the run; it is never one chat's gap.
+ */
+function isRunLevelFailure(error: unknown): boolean {
+	const code =
+		typeof error === "object" && error !== null && "code" in error
+			? error.code
+			: undefined;
+	return (
+		code === "whatsapp_web_auth_failed" || code === "whatsapp_web_page_reloaded"
+	);
+}
+
+/** Drop a walk's anchor, best effort; a run-level failure still ends the run. */
+async function releaseWalk(
+	stores: WhatsAppWebStores,
+	chatId: string,
+	token: string,
+): Promise<void> {
+	try {
+		await stores.releaseChatWalk(chatId, token);
+	} catch (error) {
+		if (isRunLevelFailure(error)) throw error;
+	}
+}
+
+/**
  * Walk one chat's local store chunk by chunk until the store's own short
  * page (or a stop that is not the end, which becomes the chat's gap). Under
  * `sinceMs` the in-page walk also ends at the first full page wholly older
@@ -1901,22 +1929,12 @@ async function walkMessagesForChat(
 		try {
 			raw = await stores.readChatMessages(chatId, token, options.sinceMs);
 		} catch (error) {
-			const code =
-				typeof error === "object" && error !== null && "code" in error
-					? error.code
-					: undefined;
-			if (
-				code === "whatsapp_web_auth_failed" ||
-				code === "whatsapp_web_page_reloaded"
-			) {
-				throw error;
-			}
+			if (isRunLevelFailure(error)) throw error;
 			console.error(
 				`whatsapp_web: failed to read messages of chat ${chatId}:`,
 				error,
 			);
-			if (token !== null)
-				await stores.releaseChatWalk(chatId, token).catch(() => undefined);
+			if (token !== null) await releaseWalk(stores, chatId, token);
 			return {
 				emitted: state.seen.size,
 				gap: {
@@ -1983,7 +2001,7 @@ async function walkMessagesForChat(
 		}
 		token = parsed.token;
 		if (allWanted()) {
-			await stores.releaseChatWalk(chatId, token).catch(() => undefined);
+			await releaseWalk(stores, chatId, token);
 			return { emitted: state.seen.size, gap: unsafeGap(), reached: "wanted" };
 		}
 		// A chunk that brought no message the walk had not read is not
@@ -1992,7 +2010,7 @@ async function walkMessagesForChat(
 		// short page; there is no per-run cap that would leave older
 		// messages unreachable.
 		if (fresh === 0) {
-			await stores.releaseChatWalk(chatId, token).catch(() => undefined);
+			await releaseWalk(stores, chatId, token);
 			return {
 				emitted: state.seen.size,
 				gap: walkGap({ status: 200, complete: false, stop: "no_progress" }),

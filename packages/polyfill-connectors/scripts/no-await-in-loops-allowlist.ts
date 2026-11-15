@@ -5033,7 +5033,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/whatsapp_web/index.ts",
-			line: 2139,
+			line: 2157,
 			column: 9,
 			category: "bounded_retry_polling",
 			note: "probeWhatsAppSessionOnPage(): page.evaluate(): bounded three-attempt poll for the app to know its own user, a second apart",
@@ -5061,14 +5061,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/whatsapp_web/index.ts",
-			line: 1902,
+			line: 1930,
 			column: 10,
 			category: "dependent_pagination",
 			note: "walkMessagesForChat(): readChatMessages(): each walk chunk resumes from the anchor the previous chunk left in the page",
 		},
 		{
 			path: "connectors/whatsapp_web/index.ts",
-			line: 1972,
+			line: 1990,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "walkMessagesForChat(): emitRecord(): Collection Profile protocol emission requiring in-order delivery",
