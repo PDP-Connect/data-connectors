@@ -167,6 +167,26 @@ test("listEventsPage throws CalendarApiError on other non-2xx statuses", async (
 	);
 });
 
+for (const body of ["<html>", '{"items":']) {
+	test(`malformed HTTP 200 JSON is a sanitized CalendarApiError: ${body}`, async () => {
+		const transport = makeFetch([new Response(body, { status: 200 })]);
+		const client = new GoogleCalendarClient({
+			accessToken: "synthetic-calendar-json-test",
+			fetch: transport.fetch,
+		});
+		await assert.rejects(
+			() => client.listEventsPage("primary"),
+			(error: unknown) => {
+				assert.ok(error instanceof CalendarApiError);
+				assert.equal(error.status, 200);
+				assert.equal(error.message, "google_calendar_api_error: 200");
+				assert.equal(error.bodySnippet, "invalid_json_response");
+				return true;
+			},
+		);
+	});
+}
+
 test("constructor rejects an empty access token", () => {
 	assert.throws(
 		() => new GoogleCalendarClient({ accessToken: "  " }),

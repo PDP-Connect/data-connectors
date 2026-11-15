@@ -55,7 +55,6 @@ const HEADER_FOLD_RE = /\r?\n[ \t]+/g;
 const REFERENCES_HEADER_RE = /^references:\s*(.*)$/im;
 const ANGLE_ID_RE = /<([^>]+)>/g;
 const QUOTED_REPLY_RE = /^\s*>/;
-const HEX_ESCAPE_RE = /[=]([0-9A-Fa-f]{2})/g;
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -523,25 +522,7 @@ export function makeSnippet(
 	if (!buffer?.length) {
 		return null;
 	}
-	let decoded: string;
-	try {
-		const enc = (encoding || "").toLowerCase();
-		const cs = (charset || "utf8") as BufferEncoding;
-		if (enc === "base64") {
-			decoded = Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-		} else if (enc === "quoted-printable") {
-			// Minimal QP decode: =HH hex + soft line breaks (=\r?\n)
-			const raw = buffer.toString("ascii");
-			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-			decoded = unfolded.replace(HEX_ESCAPE_RE, (_, h: string) =>
-				String.fromCharCode(Number.parseInt(h, 16)),
-			);
-		} else {
-			decoded = buffer.toString(cs);
-		}
-	} catch {
-		decoded = buffer.toString("utf8");
-	}
+	const decoded = decodeBodyPart(buffer, encoding, charset);
 	// Drop lines that are obviously quoted replies ("> ...") and signature separators
 	const collapsed = decoded
 		.split(NEWLINE_SPLIT_RE)

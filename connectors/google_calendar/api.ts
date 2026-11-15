@@ -295,6 +295,11 @@ export class GoogleCalendarClient {
 		if (!response.ok) {
 			throw new CalendarApiError(response.status, text.slice(0, 500));
 		}
-		return text ? JSON.parse(text) : {};
+		try {
+			return text ? JSON.parse(text) : {};
+		} catch {
+			// Keep the API error classification without exposing response contents.
+			throw new CalendarApiError(response.status, "invalid_json_response");
+		}
 	}
 }

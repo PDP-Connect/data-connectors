@@ -405,6 +405,21 @@ test("findLeafByPath: returns the node at a given IMAP path", () => {
 
 // ─── decodeBodyPart ─────────────────────────────────────────────────────
 
+test("makeSnippet: quoted-printable decodes UTF-8 bytes before collapsing text", () => {
+	assert.equal(
+		makeSnippet(
+			Buffer.from("Caf=C3=\r\n=A9 =E2=82=AC\r\n> quoted reply", "ascii"),
+			"quoted-printable",
+			"utf-8",
+		),
+		"Café €",
+	);
+	assert.equal(
+		makeSnippet(Buffer.from("=C3=A9", "ascii"), "quoted-printable", null),
+		"é",
+	);
+});
+
 test("decodeBodyPart: plain utf8 passthrough", () => {
 	assert.equal(
 		decodeBodyPart(Buffer.from("hello world", "utf8"), null, "utf8"),
@@ -509,16 +524,10 @@ test("makeSnippet: drops quoted-reply lines and collapses whitespace", () => {
 	);
 });
 
-test("makeSnippet: quoted-printable does byte-wise decode (Latin-1 interpretation quirk)", () => {
-	// BUG (flagged, not fixed): makeSnippet's QP path uses String.fromCharCode
-	// per hex escape, which treats each =HH as a codepoint instead of a raw
-	// byte. For a UTF-8 'é' encoded as =C3=A9 this yields "Ã©" (Latin-1) rather
-	// than "é". decodeBodyPart does the correct byte-accumulation; makeSnippet
-	// does not. Documenting the current behavior here so a future fix is a
-	// conscious change, not a silent one.
+test("makeSnippet: quoted-printable decodes =HH escapes as bytes in the part's charset", () => {
 	const qpInput = Buffer.from("caf=C3=A9 snippet", "ascii");
 	const snippet = makeSnippet(qpInput, "quoted-printable", "utf8");
-	assert.equal(snippet, "cafÃ© snippet");
+	assert.equal(snippet, "caf\u00e9 snippet");
 });
 
 test("makeSnippet: respects maxChars (truncates)", () => {
