@@ -66,7 +66,7 @@
  * being duplicated.
  */
 
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { opendir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -103,13 +103,20 @@ function configuredExportDir(): string {
 
 function resolveExportDir(): string | null {
 	const dir = configuredExportDir();
-	return existsSync(dir) ? dir : null;
+	try {
+		return statSync(dir).isDirectory() ? dir : null;
+	} catch {
+		return null;
+	}
 }
 
 /** True if `dir` contains no entries at all (empty top-level listing). */
 async function isEmptyDir(dir: string): Promise<boolean> {
-	const entries = await readdir(dir);
-	return entries.length === 0;
+	try {
+		return (await readdir(dir)).length === 0;
+	} catch {
+		return false; // The walker records this failure and preserves the cursor.
+	}
 }
 
 function hasSupportedExtension(filename: string): boolean {
@@ -162,23 +169,34 @@ function coverageMessage(
  * file. Uses async iteration over opendir so entries are streamed rather
  * than materialized into one giant array.
  */
-async function* walkDir(dir: string): AsyncGenerator<DiscoveredFile> {
-	const handle = await opendir(dir);
-	for await (const entry of handle) {
-		const entryPath = join(dir, entry.name);
-		if (entry.isDirectory()) {
-			yield* walkDir(entryPath);
-			continue;
+async function* walkDir(
+	dir: string,
+	errors: { skipped: number },
+): AsyncGenerator<DiscoveredFile & { ctimeIso: string }> {
+	try {
+		const handle = await opendir(dir);
+		for await (const entry of handle) {
+			const entryPath = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				yield* walkDir(entryPath, errors);
+				continue;
+			}
+			if (!(entry.isFile() && hasSupportedExtension(entry.name))) continue;
+			try {
+				const st = await stat(entryPath);
+				if (!st.isFile()) continue;
+				yield {
+					path: entryPath,
+					sizeBytes: st.size,
+					mtimeIso: st.mtime.toISOString(),
+					ctimeIso: st.ctime.toISOString(),
+				};
+			} catch {
+				errors.skipped += 1;
+			}
 		}
-		if (!(entry.isFile() && hasSupportedExtension(entry.name))) {
-			continue;
-		}
-		const st = await stat(entryPath);
-		yield {
-			path: entryPath,
-			sizeBytes: st.size,
-			mtimeIso: st.mtime.toISOString(),
-		};
+	} catch {
+		errors.skipped += 1;
 	}
 }
 
@@ -224,8 +242,10 @@ runConnector({
 		}
 
 		const photosState = (state.photos ?? {}) as ApplePhotosState;
-		const since = photosState.last_modified;
-		let latest = since;
+		const since = photosState.changed_since;
+		let latestChanged = since;
+		let latest = photosState.last_modified;
+		const walkErrors = { skipped: 0 };
 		let fileCount = 0;
 		const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
 
@@ -235,9 +255,9 @@ runConnector({
 		});
 		await progress("Reading your exported photos");
 
-		for await (const file of walkDir(dir)) {
+		for await (const file of walkDir(dir, walkErrors)) {
 			fileCount += 1;
-			if (isBeforeCursor(file.mtimeIso, since)) {
+			if (isBeforeCursor(file.ctimeIso, since)) {
 				continue;
 			}
 			const filename = basename(file.path);
@@ -250,6 +270,7 @@ runConnector({
 			});
 			const record = buildPhotoRecord(file, filename, hydration);
 			latest = advanceCursor(latest, file.mtimeIso);
+			latestChanged = advanceCursor(latestChanged, file.ctimeIso);
 			await emitRecord("photos", { ...record });
 
 			if (fileCount % PROGRESS_INTERVAL_FILES === 0) {
@@ -268,6 +289,11 @@ runConnector({
 			pass: "emit",
 			phase: "emit",
 		});
+		if (walkErrors.skipped > 0) {
+			connectorDiagnostic("apple_photos", "walk_skipped", {
+				count: walkErrors.skipped,
+			});
+		}
 		await emitCoverageProgress(emit, {
 			filesScanned: fileCount,
 			reason: "collected",
@@ -277,7 +303,12 @@ runConnector({
 		await emit({
 			type: "STATE",
 			stream: "photos",
-			cursor: { last_modified: latest },
+			cursor: {
+				last_modified: latest,
+				// Preserve the incoming watermark on incomplete walks, including legacy
+				// absence, so an unread entry is not hidden by later successful files.
+				changed_since: walkErrors.skipped > 0 ? since : latestChanged,
+			},
 		});
 	},
 });

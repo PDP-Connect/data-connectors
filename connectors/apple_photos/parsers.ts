@@ -110,14 +110,14 @@ export function buildPhotoRecord(
 // ─── Cursor / watermark helpers ────────────────────────────────────────
 
 /**
- * Return true if `modifiedAt` falls on or before the incremental cursor
- * `since`. index.ts uses this to skip already-emitted files.
+ * Return true if `changedAt` falls strictly before the change-time cursor
+ * `since`. Equality is replayed idempotently to avoid same-millisecond loss.
  */
 export function isBeforeCursor(
-	modifiedAt: string,
+	changedAt: string,
 	since: string | undefined,
 ): boolean {
-	return Boolean(since && modifiedAt <= since);
+	return Boolean(since && changedAt < since);
 }
 
 /** Monotonic max of an existing cursor and a new ISO date string. */

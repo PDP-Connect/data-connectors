@@ -219,10 +219,10 @@ test("isBeforeCursor: no cursor → false (keep)", () => {
 	assert.equal(isBeforeCursor("2024-06-05T00:00:00.000Z", undefined), false);
 });
 
-test("isBeforeCursor: equal → true (skip already-emitted)", () => {
+test("isBeforeCursor: equal → false (replay boundary)", () => {
 	assert.equal(
 		isBeforeCursor("2024-06-05T00:00:00.000Z", "2024-06-05T00:00:00.000Z"),
-		true,
+		false,
 	);
 });
 
@@ -251,5 +251,12 @@ test("advanceCursor: next < prev → keeps prev (monotonic)", () => {
 	assert.equal(
 		advanceCursor("2024-06-06T00:00:00.000Z", "2024-06-05T00:00:00.000Z"),
 		"2024-06-06T00:00:00.000Z",
+	);
+});
+
+test("isBeforeCursor: strictly earlier change time skips", () => {
+	assert.equal(
+		isBeforeCursor("2024-06-04T00:00:00.000Z", "2024-06-05T00:00:00.000Z"),
+		true,
 	);
 });
