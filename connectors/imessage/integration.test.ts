@@ -225,8 +225,9 @@ async function assertLateMessageLookback(
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-lookback-"));
 	const dbPath = join(dir, "chat.db");
 	const t0 =
-		appleSecFromUnixMs(Date.parse("2024-06-05T13:00:00.000Z")) * unitsPerSecond;
-	const day = 24 * 60 * 60 * unitsPerSecond;
+		BigInt(appleSecFromUnixMs(Date.parse("2024-06-05T13:00:00.000Z"))) *
+		BigInt(unitsPerSecond);
+	const day = 24n * 60n * 60n * BigInt(unitsPerSecond);
 	try {
 		buildChatDbFixture(dbPath, {
 			chatIds: [1],
@@ -252,7 +253,10 @@ async function assertLateMessageLookback(
 		);
 		assert.ok(firstState);
 		const cursor = firstState.cursor as { last_apple_date: number };
-		assert.equal(cursor.last_apple_date, t0);
+		assert.equal(
+			cursor.last_apple_date,
+			unitsPerSecond === 1 ? Number(t0) : t0.toString(),
+		);
 
 		// Insert AFTER the first collection, rather than merely seeding an old
 		// row before the cursor exists. A strict .iterate(since) loses MSG-LATE.
@@ -262,8 +266,8 @@ async function assertLateMessageLookback(
 				"INSERT INTO message (ROWID, guid, handle_id, service, is_from_me, text, date, cache_has_attachments) VALUES (?, ?, NULL, 'iMessage', 1, 'synthetic late row', ?, 0)",
 			);
 			insert.run(2, "MSG-LATE", t0 - day);
-			insert.run(3, "MSG-TOO-OLD", t0 - 8 * day);
-			insert.run(4, "MSG-BOUNDARY", t0 - 7 * day);
+			insert.run(3, "MSG-TOO-OLD", t0 - 8n * day);
+			insert.run(4, "MSG-BOUNDARY", t0 - 7n * day);
 		} finally {
 			db.close();
 		}
@@ -304,10 +308,125 @@ test("iMessage replays late inserts within seven days using Apple seconds", asyn
 	await assertLateMessageLookback(1);
 });
 
-test("iMessage replays late inserts within seven days using Apple nanoseconds", {
-	todo: "node:sqlite throws on Apple nanosecond dates above Number.MAX_SAFE_INTEGER; reading them needs BigInt handling",
-}, async () => {
+test("iMessage replays late inserts within seven days using Apple nanoseconds", async () => {
 	await assertLateMessageLookback(1e9);
+});
+
+test("iMessage nanosecond dates match seconds and preserve exact cursor and lookback boundaries", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-exact-"));
+	const secondsPath = join(dir, "seconds.db");
+	const nanosPath = join(dir, "nanos.db");
+	const seconds = appleSecFromUnixMs(Date.parse("2024-06-05T13:00:00.000Z"));
+	const nanos = BigInt(seconds) * 1_000_000_000n + 1n;
+	const week = 7n * 24n * 60n * 60n * 1_000_000_000n;
+	const makeMessage = (date: number | bigint, read: number | bigint) => ({
+		chatId: 1,
+		dateAppleSec: date,
+		dateReadAppleSec: read,
+		guid: "EXACT-HEAD",
+		handleRowid: null,
+		isFromMe: true,
+		rowid: 1,
+		text: "synthetic",
+	});
+	try {
+		buildChatDbFixture(secondsPath, {
+			chatIds: [1],
+			messages: [makeMessage(seconds, seconds + 60)],
+		});
+		buildChatDbFixture(nanosPath, {
+			chatIds: [1],
+			messages: [makeMessage(nanos, nanos + 60_000_000_000n)],
+		});
+		const secondsRun = await runImessage(secondsPath, ["messages"]);
+		const first = await runImessage(nanosPath, ["messages"]);
+		assert.deepEqual(
+			records(first.messages, "messages"),
+			records(secondsRun.messages, "messages"),
+		);
+		const checkpoint = states(first.messages).find(
+			(s) => s.stream === "messages",
+		);
+		assert.ok(checkpoint);
+		assert.deepEqual(checkpoint.cursor, { last_apple_date: nanos.toString() });
+		// Exercise actual JSON persistence: no BigInt escapes into protocol STATE.
+		const state = JSON.parse(JSON.stringify({ messages: checkpoint.cursor }));
+		const unchanged = await runImessage(nanosPath, ["messages"], {}, state);
+		assert.deepEqual(
+			records(unchanged.messages, "messages"),
+			records(first.messages, "messages"),
+		);
+		assert.deepEqual(
+			states(unchanged.messages).find((s) => s.stream === "messages")?.cursor,
+			checkpoint.cursor,
+		);
+
+		const db = new DatabaseSync(nanosPath);
+		try {
+			const insert = db.prepare(
+				"INSERT INTO message (ROWID, guid, service, is_from_me, text, date, cache_has_attachments) VALUES (?, ?, 'iMessage', 1, 'synthetic', ?, 0)",
+			);
+			insert.run(2, "OUTSIDE", nanos - week - 1n);
+			insert.run(3, "BOUNDARY", nanos - week);
+			insert.run(4, "INSIDE", nanos - week + 1n);
+		} finally {
+			db.close();
+		}
+		const resumed = await runImessage(nanosPath, ["messages"], {}, state);
+		assert.deepEqual(
+			records(resumed.messages, "messages").map((m) => m.id),
+			["INSIDE", "EXACT-HEAD"],
+		);
+		assert.deepEqual(
+			states(resumed.messages).find((s) => s.stream === "messages")?.cursor,
+			checkpoint.cursor,
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("iMessage accepts an old numeric nanosecond cursor", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-old-state-"));
+	const dbPath = join(dir, "chat.db");
+	const oldCursor = 740_000_000_000_000_000;
+	const exact = BigInt(oldCursor);
+	try {
+		buildChatDbFixture(dbPath, {
+			chatIds: [1],
+			messages: [
+				{
+					chatId: 1,
+					dateAppleSec: exact,
+					guid: "OLD-STATE",
+					handleRowid: null,
+					isFromMe: true,
+					rowid: 1,
+					text: "synthetic",
+				},
+			],
+		});
+		const result = await runImessage(
+			dbPath,
+			["messages"],
+			{},
+			{
+				messages: { last_apple_date: oldCursor },
+			},
+		);
+		assert.deepEqual(
+			records(result.messages, "messages").map((m) => m.id),
+			["OLD-STATE"],
+		);
+		assert.deepEqual(
+			states(result.messages).find((s) => s.stream === "messages")?.cursor,
+			{
+				last_apple_date: exact.toString(),
+			},
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
 });
 
 test("iMessage skips a null-date message deterministically instead of stamping the run clock", async () => {

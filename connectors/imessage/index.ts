@@ -76,14 +76,14 @@ import {
 import { validateRecord } from "./schemas.ts";
 
 interface MessageRow {
-	cache_has_attachments: number | null;
-	chat_id: number | null;
-	date: number | null;
-	date_read: number | null;
+	cache_has_attachments: bigint | null;
+	chat_id: bigint | null;
+	date: bigint | number | null;
+	date_read: bigint | number | null;
 	guid: string | null;
 	handle: string | null;
-	id: number;
-	is_from_me: number;
+	id: bigint;
+	is_from_me: bigint;
 	service: string | null;
 	text: string | null;
 }
@@ -106,12 +106,12 @@ interface AttachmentRow {
 }
 
 // Apple cocoa epoch offset: seconds from 1970 to 2001-01-01 UTC.
-const APPLE_EPOCH_SEC = 978_307_200;
-const APPLE_NANOS_THRESHOLD = 1e10;
-const APPLE_NANOS_DIVISOR = 1e9;
-const MS_PER_SEC = 1000;
+const APPLE_EPOCH_SEC = 978_307_200n;
+const APPLE_NANOS_THRESHOLD = 10_000_000_000n;
+const APPLE_NANOS_DIVISOR = 1_000_000_000n;
+const MS_PER_SEC = 1000n;
 // Replay delayed iCloud sync/restore rows; id-keyed upserts absorb repeats.
-const MESSAGE_LOOKBACK_SECONDS = 7 * 24 * 60 * 60;
+const MESSAGE_LOOKBACK_SECONDS = 7n * 24n * 60n * 60n;
 // Messages are a lightweight row scan (no I/O beyond the SQLite read), so a
 // wide interval keeps PROGRESS noise low on large histories. Attachments
 // each do a stat + read + network blob upload — much more expensive per
@@ -210,17 +210,33 @@ function resolveSafeAttachmentPath(
 	return { ok: true, path: realCandidate };
 }
 
-function appleDateToIso(raw: number | null | undefined): string | null {
-	if (!raw) {
-		return null;
+function appleDateInteger(raw: unknown): bigint | null {
+	if (typeof raw === "bigint") return raw;
+	if (
+		typeof raw === "number" &&
+		Number.isFinite(raw) &&
+		Number.isInteger(raw)
+	) {
+		// Legacy numeric state is accepted as represented; already-lost bits
+		// cannot be recovered. New nanosecond cursors are decimal strings.
+		return BigInt(raw);
 	}
-	// Newer macOS: nanoseconds; older: seconds. Heuristic: > 1e10 → nanos.
-	const n = Number(raw);
-	if (!Number.isFinite(n)) {
-		return null;
-	}
-	const sec = n > APPLE_NANOS_THRESHOLD ? n / APPLE_NANOS_DIVISOR : n;
-	return new Date((APPLE_EPOCH_SEC + sec) * MS_PER_SEC).toISOString();
+	if (typeof raw === "string" && /^-?\d+$/.test(raw)) return BigInt(raw);
+	return null;
+}
+
+function appleDateToIso(
+	raw: bigint | number | null | undefined,
+): string | null {
+	const n = appleDateInteger(raw);
+	if (n === null || n === 0n) return null;
+	const millis =
+		n > APPLE_NANOS_THRESHOLD
+			? (n / APPLE_NANOS_DIVISOR) * MS_PER_SEC +
+				(n % APPLE_NANOS_DIVISOR) / 1_000_000n
+			: n * MS_PER_SEC;
+	const date = new Date(Number(APPLE_EPOCH_SEC * MS_PER_SEC + millis));
+	return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
 // Returns true when `table` exists in the opened database. chat.db's schema
@@ -253,11 +269,10 @@ function tableExists(db: DatabaseSync, table: string): boolean {
 // that's still strictly better than never surfacing it at all.
 function queryMessageRows(
 	db: DatabaseSync,
-	since: number,
+	since: bigint,
 ): IterableIterator<MessageRow> {
-	return db
-		.prepare(
-			`
+	const statement = db.prepare(
+		`
         SELECT m.ROWID as id, m.guid, m.handle_id, m.service, m.is_from_me,
                m.text, m.date, m.date_read, m.cache_has_attachments,
                h.id as handle,
@@ -268,14 +283,16 @@ function queryMessageRows(
         WHERE m.date > ? OR m.date IS NULL
         ORDER BY m.date ASC
       `,
-		)
-		.iterate(
-			since > 0
-				? since -
-						MESSAGE_LOOKBACK_SECONDS *
-							(since > APPLE_NANOS_THRESHOLD ? APPLE_NANOS_DIVISOR : 1)
-				: since,
-		) as IterableIterator<MessageRow>;
+	);
+	// Only this statement reads date/date_read. Other streams retain their types.
+	statement.setReadBigInts(true);
+	return statement.iterate(
+		since > 0n
+			? since -
+					MESSAGE_LOOKBACK_SECONDS *
+						(since > APPLE_NANOS_THRESHOLD ? APPLE_NANOS_DIVISOR : 1n)
+			: since,
+	) as IterableIterator<MessageRow>;
 }
 
 // One row per (chat, handle) membership pair — NOT one row per message, so
@@ -346,8 +363,8 @@ async function emitMessageRows({
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
 	rows: Iterable<MessageRow>;
-	since: number;
-}): Promise<number> {
+	since: bigint;
+}): Promise<bigint> {
 	let latestApple = since;
 	let itemOrdinal = 0;
 	let skippedNullDate = 0;
@@ -376,8 +393,9 @@ async function emitMessageRows({
 			date_read: appleDateToIso(r.date_read),
 			has_attachments: Boolean(r.cache_has_attachments),
 		});
-		if (r.date && Number(r.date) > latestApple) {
-			latestApple = Number(r.date);
+		const date = appleDateInteger(r.date);
+		if (date !== null && date > latestApple) {
+			latestApple = date;
 		}
 		if (itemOrdinal % PROGRESS_INTERVAL_ROWS === 0) {
 			connectorDiagnostic("imessage", "stage_progress", {
@@ -755,9 +773,10 @@ if (isMainModule(import.meta.url)) {
 
 			if (requested.has("messages")) {
 				const messagesState = (state.messages ?? {}) as {
-					last_apple_date?: number;
+					last_apple_date?: number | string;
 				};
-				const since = messagesState.last_apple_date ?? 0;
+				const since = appleDateInteger(messagesState.last_apple_date ?? 0);
+				if (since === null) throw new Error("imessage_cursor_invalid");
 				connectorDiagnostic("imessage", "stage_progress", {
 					phase: "index",
 					pass: "index",
@@ -771,7 +790,7 @@ if (isMainModule(import.meta.url)) {
 				// Row iteration is lazy: query errors surface while stepping the iterator,
 				// so the emit loop runs inside the failure boundary that maps any query
 				// failure to `imessage_db_query_failed` (and leaves STATE unemitted).
-				let latestApple: number;
+				let latestApple: bigint;
 				try {
 					const rows = queryMessageRows(db, since);
 					connectorDiagnostic("imessage", "stage_progress", {
@@ -798,7 +817,12 @@ if (isMainModule(import.meta.url)) {
 				await emit({
 					type: "STATE",
 					stream: "messages",
-					cursor: { last_apple_date: latestApple },
+					cursor: {
+						last_apple_date:
+							latestApple > APPLE_NANOS_THRESHOLD
+								? latestApple.toString()
+								: Number(latestApple),
+					},
 				});
 			}
 

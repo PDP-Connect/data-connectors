@@ -20,8 +20,8 @@ export interface FixtureHandle {
 export interface FixtureMessage {
 	chatId: number;
 	/** null simulates a chat.db row with message.date = NULL. */
-	dateAppleSec: number | null;
-	dateReadAppleSec?: number | null;
+	dateAppleSec: number | bigint | null;
+	dateReadAppleSec?: number | bigint | null;
 	guid: string;
 	handleRowid: number | null;
 	hasAttachments?: boolean;
@@ -105,8 +105,8 @@ function createSchema(db: Database.Database, opts: ChatDbFixtureOptions): void {
 }
 
 /**
- * Apple epoch is seconds/nanos since 2001-01-01. Fixtures use plain seconds
- * (the "older macOS" branch of the heuristic in index.ts's appleDateToIso).
+ * Apple epoch is seconds/nanos since 2001-01-01. Most fixtures use seconds;
+ * nanosecond fixtures pass bigint values to avoid rounding before SQLite.
  */
 export function appleSecFromUnixMs(unixMs: number): number {
 	const APPLE_EPOCH_SEC = 978_307_200;
