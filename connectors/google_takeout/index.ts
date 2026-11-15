@@ -197,7 +197,7 @@ async function collectLocationHistory(
 			continue;
 		}
 		const ts = new Date(tsUnixMs).toISOString();
-		if (since && ts <= since) {
+		if (since && ts < since) {
 			continue;
 		}
 		await emitRecord(stream, { ...buildLocationRecord(loc, ts) });
@@ -256,7 +256,7 @@ async function collectYoutubeWatchHistory(
 		if (!record) {
 			continue;
 		}
-		if (since && record.watched_at <= since) {
+		if (since && record.watched_at < since) {
 			continue;
 		}
 		await emitRecord(stream, { ...record });
@@ -310,7 +310,7 @@ async function collectSearchHistory(
 		if (!record) {
 			continue;
 		}
-		if (since && record.timestamp <= since) {
+		if (since && record.timestamp < since) {
 			continue;
 		}
 		await emitRecord(stream, { ...record });
@@ -428,7 +428,7 @@ async function emitPhotos(
 			continue;
 		}
 
-		if (since && record.event_time <= since) {
+		if (since && record.event_time < since) {
 			continue;
 		}
 
