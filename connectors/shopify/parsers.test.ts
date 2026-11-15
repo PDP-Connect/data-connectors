@@ -81,6 +81,24 @@ for (const [label, price] of [
 	});
 }
 
+// Synthetic adjacent inline fields must not merge into currency codes or counts.
+for (const { label, fields, totalCents, currency, itemCount } of [
+	{ label: "currency code and status", fields: '<span>19.99 EUR</span><span>Shipped</span>', totalCents: 1999, currency: "EUR", itemCount: null },
+	{ label: "complete price and item count", fields: '<span>$19.99</span><span>2 items</span>', totalCents: 1999, currency: "USD", itemCount: 2 },
+	{ label: "order number and item count", fields: '<span>Order #1001</span><span>2 items</span><span>$5.00</span>', totalCents: 500, currency: "USD", itemCount: 2 },
+	{ label: "complete price and status", fields: '<span>$19.99</span><span>Shipped</span>', totalCents: 1999, currency: "USD", itemCount: null },
+]) {
+	test(`parseDomOrderCards separates inline ${label}`, () => {
+		const orders = parseDomOrderCards(
+			`<div class="order-card"><a href="/orders/inline-fields">Acme Goods</a>${fields}</div>`,
+		);
+		assert.equal(orders.length, 1);
+		assert.equal(orders[0]?.totalCents, totalCents);
+		assert.equal(orders[0]?.currency, currency);
+		assert.equal(orders[0]?.itemCount, itemCount);
+	});
+}
+
 test("parseDomOrderCards separates adjacent price and status blocks", () => {
 	const orders = parseDomOrderCards(
 		'<div class="order-card"><a href="/orders/blocks">Acme Goods</a><div>$19.99</div><div>Shipped</div></div>',

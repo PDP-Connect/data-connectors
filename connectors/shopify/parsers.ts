@@ -66,12 +66,18 @@ const CARD_BLOCK_TAGS = new Set([
 ]);
 const CARD_HIDDEN_TAGS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
 
-// Keep inline price fragments together, but separate block-level fields.
+// Separate fields unless adjacent inline fragments continue an unfinished price.
 function cardText(node: Node): string {
-	const parts: string[] = [];
+	let text = "";
 	const walk = (current: Node): void => {
 		if (current.nodeType === 3) {
-			parts.push(current.nodeValue ?? "");
+			const fragment = current.nodeValue ?? "";
+			// SHOP_MONEY_RE accepts $ as its only currency symbol. A completed
+			// fraction or a block boundary must not absorb the next numeric field.
+			const continuesPrice = /(?:^|\s)\$[\d,]*(?:\.\d{0,1})?$/.test(text)
+				&& /^[\d.]/.test(fragment);
+			if (!continuesPrice) text += " ";
+			text += fragment;
 			return;
 		}
 		const tag = current.nodeType === 1
@@ -79,12 +85,12 @@ function cardText(node: Node): string {
 			: "";
 		if (CARD_HIDDEN_TAGS.has(tag)) return;
 		const block = CARD_BLOCK_TAGS.has(tag);
-		if (block) parts.push(" ");
+		if (block) text += " ";
 		for (const child of current.childNodes) walk(child);
-		if (block) parts.push(" ");
+		if (block) text += " ";
 	};
 	walk(node);
-	return parts.join("").replace(/\s+/g, " ").trim();
+	return text.replace(/\s+/g, " ").trim();
 }
 
 /**
