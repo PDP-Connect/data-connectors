@@ -402,6 +402,82 @@ test("parseOrdersListDom: cancelled order (no items, no total) parses alongside 
 
 // ─── parseOrderDetailDom ─────────────────────────────────────────────────
 
+function syntheticCancellationDetail(message: string, alert = ""): OrderDetail {
+	const detail = parseOrderDetailDom(`<div id="orderDetails">
+		<div data-component="cancelled">${message}</div>
+		<div data-component="alerts">${alert}</div>
+		<div data-component="chargeSummary">Grand Total: $42.99</div>
+		<div data-component="purchasedItemsRightGrid">
+			<div data-component="itemTitle"><a href="/dp/B01ABCDEFG">Synthetic remaining item</a></div>
+			<div data-component="unitPrice">$42.99</div>
+		</div>
+	</div>`);
+	assert.ok(detail);
+	return detail;
+}
+
+function assertWholeOrderCancellationControl(): void {
+	for (const text of [
+		"This order has been cancelled",
+		"Your order has been cancelled.",
+	]) {
+		const detail = syntheticCancellationDetail(text);
+		assert.equal(detail.status_detail, "This order has been cancelled");
+		assert.deepEqual(detail.items, []);
+		assert.equal(detail.grand_total, null);
+	}
+}
+
+test("parseOrderDetailDom: item cancellation preserves purchase unlike whole-order cancellation", () => {
+	assertWholeOrderCancellationControl();
+	const detail = syntheticCancellationDetail("One item has been cancelled");
+	assert.equal(detail.status_detail, "One item has been cancelled");
+	assert.equal(detail.grand_total, "$42.99");
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.items[0]?.asin, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.unit_price, "$42.99");
+});
+
+test("parseOrderDetailDom: unrecognized cancellation wording never destroys an order", () => {
+	assertWholeOrderCancellationControl();
+	for (const text of [
+		"A delivery option has been cancelled",
+		"Not this order has been cancelled",
+		"This order has been cancelled? Contact support",
+		"Cancellation pending",
+	]) {
+		const detail = syntheticCancellationDetail(text);
+		assert.equal(detail.status_detail, null, text);
+		assert.equal(detail.grand_total, "$42.99", text);
+		assert.equal(detail.items.length, 1, text);
+		assert.equal(detail.items[0]?.asin, "B01ABCDEFG", text);
+	}
+});
+
+test("parseOrderDetailDom: unrecognized cancellation keeps independent alert evidence", () => {
+	const detail = syntheticCancellationDetail(
+		"Cancellation pending",
+		"Arriving tomorrow",
+	);
+	assert.equal(detail.status_detail, "Arriving tomorrow");
+	assert.equal(detail.grand_total, "$42.99");
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.items[0]?.asin, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.unit_price, "$42.99");
+});
+
+test("parseOrderDetailDom: recognized item cancellation takes precedence over alerts", () => {
+	const detail = syntheticCancellationDetail(
+		"One item has been cancelled",
+		"Arriving tomorrow",
+	);
+	assert.equal(detail.status_detail, "One item has been cancelled");
+	assert.equal(detail.grand_total, "$42.99");
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.items[0]?.asin, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.unit_price, "$42.99");
+});
+
 test("parseOrderDetailDom: synthetic-minimal fixture parses full OrderDetail", () => {
 	const html = readFixture("order-detail-minimal.html");
 	const d = parseOrderDetailDom(html);
