@@ -467,3 +467,41 @@ test("Shop DOM links canonicalize both origins and reject lookalikes", () => {
 	const mixed = '<div class="order-card"><a href="https://shop.com/merchant/acme">Acme Goods</a><div>2 items · $19.99</div><a href="https://shop.app/orders/same-order">View order</a></div>';
 	assert.equal(parseDomOrderCards(mixed)[0]?.id, "https://shop.app/orders/same-order");
 });
+test("Shop DOM status retains qualifiers instead of matching positive substrings", () => {
+	for (const [phrase, expected] of [
+		["Not shipped", null],
+		["Partially fulfilled", "Partially fulfilled"],
+		["Delivered tomorrow", null],
+	] as const) {
+		const [order] = parseDomOrderCards(`<div class="order-card">
+			<a href="https://shop.app/orders/status-test">Acme Goods</a>
+			<div>1 item · $8.50</div><div>${phrase}</div>
+		</div>`);
+		assert.ok(order);
+		assert.equal(order.status, expected, phrase);
+	}
+});
+
+test("Shop DOM product and merchant names do not supply order status", () => {
+	for (const [merchant, product] of [
+		["Acme Goods", "Delivered Dreams T-shirt"],
+		["Acme Goods", "Delivered"],
+		["Shipped", "Everyday T-shirt"],
+	] as const) {
+		const [order] = parseDomOrderCards(`<div class="order-card">
+			<a href="https://shop.app/orders/name-test">${merchant}</a>
+			<div>${product}</div><div>1 item · $8.50</div>
+		</div>`);
+		assert.ok(order);
+		assert.equal(order.status, null);
+	}
+});
+
+test("Shop DOM conflicting full status phrases remain unknown", () => {
+	const [order] = parseDomOrderCards(`<div class="order-card">
+		<a href="https://shop.app/orders/conflict">Acme Goods</a>
+		<div>1 item · $8.50</div><div>Shipped</div><div>Delivered</div>
+	</div>`);
+	assert.ok(order);
+	assert.equal(order.status, null);
+});
