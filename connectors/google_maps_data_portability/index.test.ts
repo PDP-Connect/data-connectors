@@ -268,3 +268,139 @@ test("Google Maps Data Portability reports zero authorized groups without accept
 	assert.equal(coverage.considered, 1);
 	assert.equal(coverage.covered, 0);
 });
+
+test("checkpoint survives a later resource failure and resumes the first archive", async () => {
+	const streams = [
+		{
+			name: "archive_jobs",
+			resources: ["maps.starred_places", "myactivity.maps"],
+		},
+	];
+	const first = makeContext({ streams });
+	const fakeClient = new FakeGoogleDataPortabilityClient();
+	const initiate = fakeClient.initiateArchive.bind(fakeClient);
+	fakeClient.initiateArchive = (input) => {
+		if (input.resources[0] === "myactivity.maps") {
+			return Promise.reject(
+				Object.assign(new Error("synthetic 503"), { status: 503 }),
+			);
+		}
+		return initiate(input);
+	};
+	const env = {
+		GOOGLE_DATAPORTABILITY_ACCESS_TOKEN: "synthetic-regression-only",
+	};
+	await assert.rejects(
+		collectGoogleMapsDataPortability(first.ctx, {
+			clientFactory: () => fakeClient,
+			env,
+		}),
+		/synthetic 503/,
+	);
+	const checkpoint = first.messages.find((message) => message.type === "STATE");
+	assert.ok(checkpoint && checkpoint.type === "STATE");
+	const saved = checkpoint.cursor as {
+		google_maps_data_portability: {
+			archive_jobs: Record<string, { archive_job_id: string }>;
+		};
+	};
+	assert.equal(
+		saved.google_maps_data_portability.archive_jobs["maps.starred_places"]
+			?.archive_job_id,
+		"job-starred",
+	);
+	assert.equal(
+		saved.google_maps_data_portability.archive_jobs["myactivity.maps"],
+		undefined,
+	);
+	assert.equal(first.records.length, 1);
+
+	const resumed = makeContext({ streams, state: structuredClone(saved) });
+	const nextClient = new FakeGoogleDataPortabilityClient();
+	await collectGoogleMapsDataPortability(resumed.ctx, {
+		clientFactory: () => nextClient,
+		env,
+	});
+	assert.deepEqual(
+		nextClient.calls
+			.filter((call) => call.method === "getArchiveState")
+			.map((call) => call.input),
+		["job-starred"],
+	);
+	assert.deepEqual(
+		nextClient.calls
+			.filter((call) => call.method === "initiateArchive")
+			.map((call) => call.input),
+		[{ resources: ["myactivity.maps"] }],
+	);
+	const states = resumed.messages.filter((message) => message.type === "STATE");
+	assert.ok(states.length >= 2);
+	const last = states.at(-1);
+	assert.ok(last && last.type === "STATE");
+	const final = last.cursor as typeof saved;
+	assert.equal(
+		final.google_maps_data_portability.archive_jobs["maps.starred_places"]
+			?.archive_job_id,
+		"job-starred",
+	);
+	assert.equal(
+		final.google_maps_data_portability.archive_jobs["myactivity.maps"]
+			?.archive_job_id,
+		"job-activity",
+	);
+	// Earlier emitted snapshots must not be mutated by later resource progress.
+	const firstResumed = states[0];
+	assert.ok(firstResumed && firstResumed.type === "STATE");
+	const earlier = firstResumed.cursor as typeof saved;
+	assert.equal(
+		earlier.google_maps_data_portability.archive_jobs["myactivity.maps"],
+		undefined,
+	);
+});
+
+test("replacement archive does not inherit the previous archive timestamps", async () => {
+	const { ctx, records, messages } = makeContext({
+		streams: [{ name: "archive_jobs", resources: ["maps.starred_places"] }],
+		state: {
+			google_maps_data_portability: {
+				archive_jobs: {
+					"maps.starred_places": {
+						archive_job_id: "job-old",
+						state: "COMPLETE",
+						start_time: "2026-01-01T00:00:00Z",
+						export_time: "2026-01-02T00:00:00Z",
+					},
+				},
+			},
+		},
+	});
+	const fakeClient = new FakeGoogleDataPortabilityClient();
+	await collectGoogleMapsDataPortability(ctx, {
+		clientFactory: () => fakeClient,
+		env: { GOOGLE_DATAPORTABILITY_ACCESS_TOKEN: "synthetic-regression-only" },
+	});
+	assert.equal(records.length, 1);
+	const record = records[0]?.data;
+	assert.ok(record);
+	assert.equal(record.archive_job_id, "job-starred");
+	assert.equal(record.state, "IN_PROGRESS");
+	assert.equal(record.start_time, null);
+	assert.equal(record.export_time, null);
+	const state = messages.find((message) => message.type === "STATE");
+	assert.ok(state && state.type === "STATE");
+	const cursor = state.cursor as {
+		google_maps_data_portability: {
+			archive_jobs: Record<string, Record<string, unknown>>;
+		};
+	};
+	const job =
+		cursor.google_maps_data_portability.archive_jobs["maps.starred_places"];
+	assert.ok(job);
+	assert.equal(job.archive_job_id, "job-starred");
+	assert.equal(job.start_time, null);
+	assert.equal(job.export_time, null);
+	assert.deepEqual(
+		fakeClient.calls.map((call) => call.method),
+		["checkAccessType", "initiateArchive"],
+	);
+});

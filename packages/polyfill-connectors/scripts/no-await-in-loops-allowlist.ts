@@ -2835,7 +2835,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_maps_data_portability/index.ts",
-			line: 310,
+			line: 315,
 			column: 18,
 			category: "dependent_pagination",
 			note: "collectResourceGroup(): next request depends on the prior page's cursor/offset/response",

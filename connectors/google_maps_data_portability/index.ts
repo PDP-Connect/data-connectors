@@ -218,7 +218,8 @@ async function collectResourceGroup({
 }): Promise<ArchiveJobRecord> {
 	const prior = cursorForResource(state, resourceGroup);
 	let initiated: InitiateArchiveResult | null = null;
-	let archiveJobId = prior?.archive_job_id ?? null;
+	const priorArchiveJobId = prior?.archive_job_id ?? null;
+	let archiveJobId = priorArchiveJobId;
 	let stateName = prior?.state ?? null;
 	let startTime = prior?.start_time ?? null;
 	let exportTime = prior?.export_time ?? null;
@@ -234,6 +235,10 @@ async function collectResourceGroup({
 			...timeRange,
 		});
 		({ archiveJobId } = initiated);
+		if (archiveJobId !== priorArchiveJobId) {
+			startTime = null;
+			exportTime = null;
+		}
 		stateName = "IN_PROGRESS";
 	}
 
@@ -317,6 +322,16 @@ export async function collectGoogleMapsDataPortability(
 		});
 		await ctx.emitRecord("archive_jobs", record);
 		nextJobs[resourceGroup] = archiveCursorFromRecord(record);
+		await ctx.emit({
+			type: "STATE",
+			stream: "archive_jobs",
+			cursor: {
+				google_maps_data_portability: {
+					archive_jobs: { ...nextJobs },
+					fetched_at: nowIso(),
+				},
+			},
+		});
 		emitted.push(resourceGroup);
 	}
 
