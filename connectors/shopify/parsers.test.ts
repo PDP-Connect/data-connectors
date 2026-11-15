@@ -139,6 +139,15 @@ test("parseDomOrderCards reads status after a nested order summary", () => {
 	assert.equal(orders[0]?.itemCount, 2);
 });
 
+test("parseDomOrderCards does not treat a linked label as an order summary", () => {
+	const orders = parseDomOrderCards(
+		'<div class="order-card"><div><a href="/orders/example">2 Items</a></div><div>Delivered</div><div>$5.00</div></div>',
+	);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.status, null);
+	assert.equal(orders[0]?.totalCents, 500);
+});
+
 // Synthetic adjacent inline fields must not merge into currency codes or counts.
 for (const { label, fields, totalCents, currency, itemCount } of [
 	{

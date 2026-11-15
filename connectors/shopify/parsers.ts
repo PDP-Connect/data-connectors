@@ -196,6 +196,8 @@ function readDomOrderStatus(card: Element): string | null {
 	let afterOrderSummary = false;
 	for (const child of card.children) {
 		if (!child.matches("div, p, span")) continue;
+		// Merchant and product link labels are not order-summary evidence.
+		if (child.matches("a") || child.querySelector("a")) continue;
 		const phrase = cardText(child);
 		if (SHOP_MONEY_RE.test(phrase) || SHOP_ITEM_COUNT_RE.test(phrase)) {
 			afterOrderSummary = true;
