@@ -1024,6 +1024,49 @@ test("collect: a failed order-list navigation is a failed read for every order s
 	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
 });
 
+test("collect: each order-list page that drops identity-less rows emits its own aggregate skip with that page's counts", async () => {
+	const restoreTimers = collapseTimers();
+	try {
+		const dateForPage = (): string => "Jul 1, 2026";
+		const ctx = makeContext(
+			["orders"],
+			makeCollectPage({
+				detailHtml: WIDGET_DETAIL_HTML,
+				listHtml: "",
+				listHtmlForPage: (pageNum) =>
+					pagedOrdersList(pageNum, 2, dateForPage).replace(
+						"</main>",
+						`${'<a href="/my-account/order-history/not-an-order">x</a>'.repeat(pageNum)}</main>`,
+					),
+			}),
+		);
+
+		await hebConnector.collect(ctx);
+
+		const skips = findMessages(ctx.protocolMessages, "SKIP_RESULT").filter(
+			(skip) =>
+				skip.stream === "orders" && skip.reason === "record_failed_schema",
+		);
+		assert.equal(skips.length, 2);
+		assert.deepEqual(
+			skips.map((skip) => skip.diagnostics),
+			[
+				{ rejected_count: 1, missing_identity_count: 1 },
+				{ rejected_count: 2, missing_identity_count: 2 },
+			],
+		);
+		assert.deepEqual(
+			ctx.emitted
+				.filter((record) => record.stream === "orders")
+				.map((record) => record.data.id)
+				.sort(),
+			["HEB2000000001", "HEB2000000002"],
+		);
+	} finally {
+		restoreTimers();
+	}
+});
+
 test("collect: an order list whose cards no longer match the parser is a failed read that needs a connector upgrade", async () => {
 	const ctx = makeContext(
 		["orders"],
