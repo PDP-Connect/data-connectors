@@ -4,7 +4,7 @@
 import {
 	type CollectContext,
 	emitDetailCoverage,
-} from "../connector-runtime.ts";
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { parseExport } from "./parsers.ts";
 
 const STREAMS = ["expenses", "reports", "reimbursements"] as const;
