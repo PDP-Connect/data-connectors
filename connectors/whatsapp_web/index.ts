@@ -77,9 +77,9 @@ import {
 	parseHistoryAck,
 	parseStoresReadiness,
 	parseSyncState,
+	type SyncState,
 	secondsToIso,
 	storesReady,
-	type SyncState,
 	syncSettled,
 	TextTally,
 	type WaChat,
@@ -132,6 +132,13 @@ export interface CollectionTimings {
 	initialSyncMs?: number;
 	/** Every this many initial-sync reads, one progress message. */
 	initialSyncProgressEvery?: number;
+	/**
+	 * Reads of the page while it boots again after reloading mid-run, before
+	 * the interrupted read is retried. Unset means the store wait's own
+	 * attempts and interval.
+	 */
+	reloadAttempts?: number;
+	reloadMs?: number;
 }
 
 export const DEFAULT_TIMINGS: CollectionTimings = {
@@ -573,6 +580,142 @@ export class WhatsAppWebStore implements WhatsAppWebStores {
 	}
 	sendHistorySyncOnDemand(chatId: string): Promise<unknown> {
 		return sendHistorySyncOnDemand(this.page, chatId);
+	}
+}
+
+/**
+ * True for the errors a page read raises while the page reloads under it:
+ * the app's module loader is not defined yet on the new document, or the
+ * document the read ran in is gone. A closed page or browser is not one of
+ * them; that ends the run as before.
+ */
+export function isPageReloadError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /window\.require is not a function|Execution context was destroyed|Cannot find context with specified id|frame was detached/i.test(
+		message,
+	);
+}
+
+/** How many mid-run page reloads one run recovers from before it stops. */
+const MAX_PAGE_RELOADS = 3;
+
+/**
+ * The page's stores, read through a page that can reload mid-run (WhatsApp
+ * Web reloads itself, for example to apply an update). A read that fails
+ * because the page reloaded under it waits for the app to boot again and is
+ * retried: a signed-out app (its QR screen) ends the run as an auth failure,
+ * and stores that do not come back, or more than MAX_PAGE_RELOADS reloads in
+ * one run, end it as a retryable failure instead of an untyped error.
+ *
+ * Retrying a read is safe: each one is a plain read of the local stores, and
+ * a walk chunk whose page-side anchor was lost with the old document answers
+ * `lost_anchor`, which gaps the chat. The on-demand history request is never
+ * retried, so a reload can not make it twice; its gate check already turns a
+ * missing loader into `{sent: false}`.
+ */
+export class ReloadAwareStore implements WhatsAppWebStores {
+	private reloads = 0;
+	private readonly inner: WhatsAppWebStores;
+	private readonly page: ScriptRunner;
+	private readonly streams: ReadonlySet<string>;
+	private readonly attempts: number;
+	private readonly waitMs: number;
+	constructor(
+		inner: WhatsAppWebStores,
+		page: ScriptRunner,
+		streams: ReadonlySet<string>,
+		attempts = STORE_WAIT_ATTEMPTS,
+		waitMs = STORE_WAIT_MS,
+	) {
+		this.inner = inner;
+		this.page = page;
+		this.streams = streams;
+		this.attempts = attempts;
+		this.waitMs = waitMs;
+	}
+
+	private async read<T>(op: () => Promise<T>): Promise<T> {
+		for (;;) {
+			try {
+				return await op();
+			} catch (error) {
+				if (!isPageReloadError(error)) throw error;
+				await this.recover();
+			}
+		}
+	}
+
+	/** Count one reload and wait for the app to boot again. */
+	private async recover(): Promise<void> {
+		this.reloads += 1;
+		if (this.reloads > MAX_PAGE_RELOADS) {
+			throw createConnectorFailure(
+				"whatsapp_web_page_reloaded",
+				`the WhatsApp Web page reloaded ${String(this.reloads)} times during the run`,
+				{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
+			);
+		}
+		console.error(
+			"whatsapp_web: the page reloaded mid-run; waiting for it to boot again",
+		);
+		await this.awaitBoot();
+	}
+
+	/** Wait for the reloaded app: signed out ends the run, otherwise its stores. */
+	private async awaitBoot(): Promise<void> {
+		for (let i = 0; i < this.attempts; i++) {
+			let state: unknown = "loading";
+			try {
+				state = await this.page.evaluate(SESSION_STATE_SCRIPT);
+			} catch {
+				// The new document is not readable yet.
+			}
+			if (state === "signed_out") {
+				throw authFailure(
+					"WhatsApp Web signed out during the run: link this browser again",
+				);
+			}
+			if (state === "signed_in") break;
+			await wait(this.waitMs);
+		}
+		await waitForStores(this.page, this.attempts, this.waitMs, this.streams);
+	}
+
+	listChats(): Promise<unknown> {
+		return this.read(() => this.inner.listChats());
+	}
+	syncState(): Promise<unknown> {
+		return this.read(() => this.inner.syncState());
+	}
+	readChatMessages(
+		chatId: string,
+		token: string | null = null,
+		sinceMs: number | null = null,
+	): Promise<unknown> {
+		return this.read(() => this.inner.readChatMessages(chatId, token, sinceMs));
+	}
+	releaseChatWalk(chatId: string, token: string): Promise<unknown> {
+		return this.read(() => this.inner.releaseChatWalk(chatId, token));
+	}
+	listContacts(ids: readonly string[]): Promise<unknown> {
+		return this.read(() => this.inner.listContacts(ids));
+	}
+	listGroups(): Promise<unknown> {
+		return this.read(() => this.inner.listGroups());
+	}
+	/**
+	 * Never retried: whether a request interrupted by a reload went out is
+	 * unknown, so the page is waited for and the request reported as not
+	 * sent, which gaps the chat with that reason.
+	 */
+	async sendHistorySyncOnDemand(chatId: string): Promise<unknown> {
+		try {
+			return await this.inner.sendHistorySyncOnDemand(chatId);
+		} catch (error) {
+			if (!isPageReloadError(error)) throw error;
+			await this.recover();
+			return { sent: false, reason: "page_reloaded" };
+		}
 	}
 }
 
@@ -1057,11 +1200,23 @@ async function settleGroups(
 }
 
 /** The one history request a chat may get, and the state it leaves the chat in. */
+/**
+ * A chat's history state after its one on-demand request, and whether the
+ * request was sent. `notSent` is the page's reason when it was not (the gate
+ * read false or could not be read, or the send failed), so the chat's gap
+ * says why the phone was not asked.
+ */
+interface HistoryOutcome {
+	state: string | null;
+	requested: boolean;
+	notSent?: string | null;
+}
+
 async function requestHistory(
 	stores: WhatsAppWebStores,
 	item: ChatItem,
 	timings: CollectionTimings,
-): Promise<{ state: string | null; requested: boolean }> {
+): Promise<HistoryOutcome> {
 	let state = item.history_state;
 	if (!item.needsHistory) return { state, requested: false };
 	// The chat says it has not yet asked for the history that remains on
@@ -1074,7 +1229,13 @@ async function requestHistory(
 			`whatsapp_web: the on-demand history request for chat ${item.id} answered in an unexpected shape; treating it as not sent`,
 		);
 	}
-	if (ack?.sent !== true) return { state, requested: false };
+	if (ack?.sent !== true) {
+		return {
+			state,
+			requested: false,
+			notSent: ack === null ? "unexpected_answer" : (ack.reason ?? null),
+		};
+	}
 	for (let i = 0; i < timings.historyAttempts; i++) {
 		await wait(timings.historyMs);
 		const fresh = parseChatsPage(await stores.listChats());
@@ -1248,7 +1409,7 @@ export async function collectWith(
 		// (the chat's own last activity is), nor while only searching other
 		// chats for requested ids not found where they point.
 		const askPhone = options.askPhone && !olderThanWindow(item.lastActivityMs);
-		let history: { state: string | null; requested: boolean } = {
+		let history: HistoryOutcome = {
 			state: item.history_state,
 			requested: false,
 		};
@@ -1312,7 +1473,7 @@ export async function collectWith(
 				? {
 						reason: "retry_exhausted" as const,
 						class: "history_remains_on_phone",
-						message: `history state ${String(history.state)}; ${history.requested ? "after this run's on-demand history request" : "no on-demand history request was sent this run"}`,
+						message: `history state ${String(history.state)}; ${history.requested ? "after this run's on-demand history request" : `no on-demand history request was sent this run${history.notSent ? ` (${history.notSent})` : ""}`}`,
 					}
 				: null);
 		if (gap !== null) {
@@ -1858,7 +2019,13 @@ export async function collect(
 	const freshLink = freshlyLinkedPages.delete(ctx.page);
 	const main = mainWorld(ctx.page);
 	await waitForStores(main, STORE_WAIT_ATTEMPTS, STORE_WAIT_MS, want);
-	const stores = new WhatsAppWebStore(main);
+	const stores = new ReloadAwareStore(
+		new WhatsAppWebStore(main),
+		main,
+		want,
+		timings.reloadAttempts ?? STORE_WAIT_ATTEMPTS,
+		timings.reloadMs ?? STORE_WAIT_MS,
+	);
 	const tally = new TextTally();
 	try {
 		await collectWith(
