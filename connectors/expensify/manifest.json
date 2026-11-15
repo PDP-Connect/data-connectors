@@ -1,1 +1,407 @@
-{}
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/expensify",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/expensify",
+		"display": {
+			"name": "Expensify"
+		}
+	},
+	"connector_key": "expensify",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/expensify",
+	"version": "0.1.0",
+	"display_name": "Expensify",
+	"description": "Collects expenses, reports and reimbursements from an Expensify report export. Each run covers only the chosen history window, not the whole account.",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#0185FF"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true
+			}
+		}
+	},
+	"setup": {
+		"modality": "static_secret",
+		"credential_capture": {
+			"kind": "api_key",
+			"label": "Expensify integration credentials",
+			"description": "Use the partnerUserID and partnerUserSecret from Expensify's integrations page.",
+			"submit_label": "Create Expensify connection and start first sync",
+			"fields": [
+				{
+					"name": "partner_user_id",
+					"label": "Expensify partnerUserID",
+					"type": "text",
+					"required": true,
+					"secret": false,
+					"identity": true,
+					"autocomplete": "off",
+					"env": ["EXPENSIFY_PARTNER_USER_ID"]
+				},
+				{
+					"name": "secret",
+					"label": "Expensify partnerUserSecret",
+					"type": "password",
+					"required": true,
+					"secret": true,
+					"autocomplete": "off",
+					"help_url": "https://www.expensify.com/tools/integrations/",
+					"help_text": "Create integration credentials in Expensify, then paste the partnerUserSecret here.",
+					"env": ["EXPENSIFY_PARTNER_USER_SECRET"]
+				}
+			]
+		}
+	},
+	"capabilities": {
+		"human_interaction": [],
+		"public_listing": {
+			"tier": "development"
+		}
+	},
+	"streams": [
+		{
+			"name": "expenses",
+			"description": "Expense rows returned for the selected export window. Per-stream DETAIL_COVERAGE counts the parsed export inventory in that window only; no durable cursor or all-time completeness is claimed.",
+			"display": {
+				"label": "Expenses",
+				"detail": "Expense rows returned for the selected export window."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"minLength": 1
+					},
+					"report_id": {
+						"type": "string",
+						"minLength": 1
+					},
+					"merchant": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"original_merchant": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"expense_date": {
+						"type": ["string", "null"],
+						"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$",
+						"description": "Source-local date or date-time; no timezone is proved."
+					},
+					"amount_minor": {
+						"type": ["integer", "null"],
+						"minimum": -9007199254740991,
+						"maximum": 9007199254740991,
+						"description": "Integer minor units; currency may be unavailable."
+					},
+					"currency": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"report_amount_minor": {
+						"type": ["integer", "null"],
+						"minimum": -9007199254740991,
+						"maximum": 9007199254740991,
+						"description": "Integer minor units; currency may be unavailable."
+					},
+					"category": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"tag": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"comment": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"reimbursable": {
+						"type": ["boolean", "null"]
+					},
+					"billable": {
+						"type": ["boolean", "null"]
+					},
+					"card_bank": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"card_name": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"receipt_present": {
+						"type": "boolean"
+					},
+					"inserted_at": {
+						"type": ["string", "null"],
+						"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$",
+						"description": "Source-local date or date-time; no timezone is proved."
+					}
+				},
+				"required": [
+					"id",
+					"report_id",
+					"merchant",
+					"original_merchant",
+					"expense_date",
+					"amount_minor",
+					"currency",
+					"report_amount_minor",
+					"category",
+					"tag",
+					"comment",
+					"reimbursable",
+					"billable",
+					"card_bank",
+					"card_name",
+					"receipt_present",
+					"inserted_at"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "expense_date",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "report",
+					"stream": "reports",
+					"foreign_key": "report_id",
+					"cardinality": "has_one"
+				}
+			],
+			"views": [
+				{
+					"id": "full",
+					"label": "All exported fields",
+					"fields": [
+						"id",
+						"report_id",
+						"merchant",
+						"original_merchant",
+						"expense_date",
+						"amount_minor",
+						"currency",
+						"report_amount_minor",
+						"category",
+						"tag",
+						"comment",
+						"reimbursable",
+						"billable",
+						"card_bank",
+						"card_name",
+						"receipt_present",
+						"inserted_at"
+					]
+				}
+			]
+		},
+		{
+			"name": "reports",
+			"description": "Reports returned for the selected export window. Per-stream DETAIL_COVERAGE counts the parsed export inventory in that window only; no durable cursor or all-time completeness is claimed.",
+			"display": {
+				"label": "Reports",
+				"detail": "Reports returned for the selected export window."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"minLength": 1
+					},
+					"title": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"status": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"status_normalized": {
+						"type": "string",
+						"enum": [
+							"open",
+							"processing",
+							"approved",
+							"reimbursed",
+							"closed",
+							"unknown"
+						]
+					},
+					"currency": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"total_minor": {
+						"type": ["integer", "null"],
+						"minimum": -9007199254740991,
+						"maximum": 9007199254740991,
+						"description": "Integer minor units; currency may be unavailable."
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$",
+						"description": "Source-local date or date-time; no timezone is proved."
+					},
+					"submitted_at": {
+						"type": ["string", "null"],
+						"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$",
+						"description": "Source-local date or date-time; no timezone is proved."
+					},
+					"approved_at": {
+						"type": ["string", "null"],
+						"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$",
+						"description": "Source-local date or date-time; no timezone is proved."
+					},
+					"reimbursed_at": {
+						"type": ["string", "null"],
+						"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$",
+						"description": "Source-local date or date-time; no timezone is proved."
+					},
+					"policy_name": {
+						"type": ["string", "null"],
+						"minLength": 1
+					}
+				},
+				"required": [
+					"id",
+					"title",
+					"status",
+					"status_normalized",
+					"currency",
+					"total_minor",
+					"created_at",
+					"submitted_at",
+					"approved_at",
+					"reimbursed_at",
+					"policy_name"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"views": [
+				{
+					"id": "full",
+					"label": "All exported fields",
+					"fields": [
+						"id",
+						"title",
+						"status",
+						"status_normalized",
+						"currency",
+						"total_minor",
+						"created_at",
+						"submitted_at",
+						"approved_at",
+						"reimbursed_at",
+						"policy_name"
+					]
+				}
+			]
+		},
+		{
+			"name": "reimbursements",
+			"description": "Reimbursement facts derived from exported reports. Amounts are report totals, not observed settled cash. Per-stream DETAIL_COVERAGE counts the parsed export inventory in that window only; no durable cursor or all-time completeness is claimed.",
+			"display": {
+				"label": "Reimbursements",
+				"detail": "Reimbursement facts derived from exported reports. Amounts are report totals, not observed settled cash."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"minLength": 1
+					},
+					"report_id": {
+						"type": "string",
+						"minLength": 1
+					},
+					"reimbursed_at": {
+						"type": ["string", "null"],
+						"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$",
+						"description": "Source-local date or date-time; no timezone is proved."
+					},
+					"amount_minor": {
+						"type": ["integer", "null"],
+						"minimum": -9007199254740991,
+						"maximum": 9007199254740991,
+						"description": "Integer minor units; currency may be unavailable."
+					},
+					"amount_source": {
+						"type": "string",
+						"const": "report_total"
+					},
+					"currency": {
+						"type": ["string", "null"],
+						"minLength": 1
+					},
+					"method": {
+						"type": "string",
+						"enum": ["ach", "unknown"]
+					}
+				},
+				"required": [
+					"id",
+					"report_id",
+					"reimbursed_at",
+					"amount_minor",
+					"amount_source",
+					"currency",
+					"method"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"consent_time_field": "reimbursed_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"relationships": [
+				{
+					"name": "report",
+					"stream": "reports",
+					"foreign_key": "report_id",
+					"cardinality": "has_one"
+				}
+			],
+			"views": [
+				{
+					"id": "full",
+					"label": "All exported fields",
+					"fields": [
+						"id",
+						"report_id",
+						"reimbursed_at",
+						"amount_minor",
+						"amount_source",
+						"currency",
+						"method"
+					]
+				}
+			]
+		}
+	]
+}

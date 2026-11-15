@@ -29,6 +29,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["coros_browser", "coros-browser"],
     ["discord_browser", "discord-browser"],
     ["doordash", "doordash"],
+    ["expensify", "expensify"],
     ["facebook", "facebook"],
     ["fitbit", "fitbit"],
     ["garmin_browser", "garmin-browser"],

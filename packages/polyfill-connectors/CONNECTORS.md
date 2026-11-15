@@ -28,6 +28,7 @@ These connectors fetch via the platform's public HTTP API using a long-lived tok
 | github | `GITHUB_PERSONAL_ACCESS_TOKEN` | Manual: github.com/settings/tokens | ✅ | ✅ | 553 |
 | gmail | `GMAIL_ADDRESS` or `GMAIL_USER`; `GOOGLE_APP_PASSWORD_PDPP` or `GMAIL_APP_PASSWORD` | Google app password | ✅ | ✅ | ~27,359 |
 | notion | `NOTION_API_TOKEN` | Manual: notion.so/my-integrations → "New integration" | 🟡 code ready | ✅ (expected) | — |
+| expensify | `EXPENSIFY_PARTNER_USER_ID`, `EXPENSIFY_PARTNER_USER_SECRET` | Manual: expensify.com/tools/integrations → partner credentials | 🟡 code ready | ✅ (expected) | — |
 | oura | `OURA_PERSONAL_ACCESS_TOKEN` | Manual: cloud.ouraring.com/personal-access-tokens | 🟡 code ready | ✅ (expected) | — |
 | reddit | `REDDIT_USERNAME`, `REDDIT_PASSWORD` | Logged-in browser session against old.reddit.com JSON | 🟡 code ready | ⚠ browser session | — |
 | slack | `SLACK_WORKSPACE` + slackdump binary | Subprocess; wraps slackdump CLI | 🟡 code ready | ✅ (expected) | — |
