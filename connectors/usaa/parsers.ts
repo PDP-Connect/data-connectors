@@ -210,6 +210,14 @@ export function isoDate(raw: string | null | undefined): string | null {
 	return csvDate(value);
 }
 
+/** Inbox dates contain an abbreviated month and a caller-owned year. */
+function inboxDate(raw: string, year: number): string | null {
+	const parts = /^([a-z]{3})\.?\s+(\d{1,2})$/i.exec(raw.trim());
+	if (!parts?.[1] || !parts[2]) return null;
+	const month = STATEMENT_MONTHS.indexOf(parts[1].toLowerCase()) + 1;
+	return csvDate(`${year}-${month}-${parts[2]}`);
+}
+
 export function mmddyyyy(iso: string): string {
 	const [y, m, d] = iso.split("-");
 	return `${m}/${d}/${y}`;
@@ -848,10 +856,7 @@ export function buildInboxMessageRecord(
 	if (!m.date_short) {
 		return null;
 	}
-	const parsed = new Date(`${m.date_short} ${year}`);
-	const iso = Number.isNaN(parsed.getTime())
-		? null
-		: parsed.toISOString().slice(0, 10);
+	const iso = inboxDate(m.date_short, year);
 	const id = hashId(`${m.date_short}|${m.preview.slice(0, 120)}`);
 	return {
 		id,
