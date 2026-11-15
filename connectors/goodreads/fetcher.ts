@@ -22,12 +22,12 @@
 import {
 	type HttpRetryBudget,
 	parseRetryAfterMs,
-	RetryExhaustedError,
 } from "@pdpp/connector-protocol/http-retry";
 import type { Page } from "playwright";
 import {
 	type ConnectorHttpGovernor,
-	ConnectorRateLimitedError,
+	type GovernedHttpOutcome as Governed,
+	requestGovernedAnswer as governed,
 } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import { politeDelay } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { RetryBudget } from "../../packages/polyfill-connectors/src/provider-budget.ts";
@@ -186,60 +186,9 @@ export interface GoodreadsHttp {
 	retryBudget: GoodreadsRetryBudget;
 }
 
-/** An answer the governor can classify. */
-interface Answer {
-	retryAfter: string | null;
-	status: number;
-}
-
-export type Governed<T> =
-	| { ok: true; value: T }
-	| { ok: false; rateLimited: true }
-	| { ok: false; rateLimited: false; status: number | null };
-
-/**
- * Send one request through the governor. `send` throws on a network
- * failure. Fails as rate limited when 429s did not lift, otherwise with the
- * last status (null after network failures).
- */
-export async function governed<T extends Answer>(
-	http: GoodreadsHttp,
-	send: () => Promise<T>,
-): Promise<Governed<T>> {
-	try {
-		const result = await http.governor.request(
-			() => {
-				http.retryBudget.noteAttempt();
-				return send();
-			},
-			(answer: T) => {
-				http.retryBudget.noteAnswer(answer.retryAfter);
-				return {
-					headers:
-						answer.retryAfter === null
-							? {}
-							: { "retry-after": answer.retryAfter },
-					status: answer.status,
-					value: answer,
-				};
-			},
-		);
-		return { ok: true, value: result.value };
-	} catch (error) {
-		if (error instanceof ConnectorRateLimitedError) {
-			return { ok: false, rateLimited: true };
-		}
-		if (error instanceof RetryExhaustedError) {
-			const cause = error.originalCause as { status?: unknown } | undefined;
-			return {
-				ok: false,
-				rateLimited: false,
-				status: typeof cause?.status === "number" ? cause.status : null,
-			};
-		}
-		throw error;
-	}
-}
+export type { Governed };
+// Preserve the connector's public names while sharing only the adapter.
+export { governed };
 
 /** Load a URL in the page through the governor, retrying a failed load. */
 export async function navigate(
