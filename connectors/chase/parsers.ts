@@ -58,7 +58,6 @@ const AMOUNT_RE =
 const DATE_NUMERIC_RE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/;
 const DATE_MONTH_RE =
 	/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2})(?:,\s*(\d{4}))?\b/i;
-const ACTIVITY_DEBIT_RE = /-|\(|\bwithdrawal\b|\bpurchase\b|\bdebit\b/i;
 const PENDING_RE = /\bpending\b/i;
 const POSTED_RE = /\bposted\b|\bcompleted\b/i;
 const MONTH_DOT_RE = /\.$/;
@@ -365,8 +364,10 @@ function parseVisibleAmount(text: string): number | null {
 		return null;
 	}
 	const [raw] = match;
-	const sign = ACTIVITY_DEBIT_RE.test(text) ? -1 : 1;
-	const normalized = raw.replace(/[$,\s+-]/g, "");
+	// Descriptions are not debit labels. Only the matched monetary token
+	// establishes a sign; the observed unsigned MDS amount field is positive.
+	const sign = /^\s*[-(]/.test(raw) ? -1 : 1;
+	const normalized = raw.replace(/[$,()\s+-]/g, "");
 	const n = Number(normalized);
 	return Number.isFinite(n) ? Math.round(n * CENTS_MULTIPLIER) * sign : null;
 }
@@ -441,7 +442,8 @@ function parseMdsActivityDataValues(
 	referenceDateIso: string,
 ): Omit<CurrentActivityRow, "ui_transaction_id"> | null {
 	const parts = raw
-		.split(",")
+		// Keep digit grouping commas; date/description/amount separators still split.
+		.split(/(?<!\d),|,(?!\d{3}(?:[,.]|$))/)
 		.map((part) => normWhitespace(part))
 		.filter(Boolean);
 	if (parts.length < 3) {
@@ -991,16 +993,24 @@ export function chooseActivity(
 ): ActivityChoice {
 	const streamScope = requested.get(stream);
 	const timeRange = streamScope?.time_range;
-	if (timeRange?.since || timeRange?.until) {
+	const since = timeRange?.since ? Date.parse(timeRange.since) : null;
+	const until = timeRange?.until ? Date.parse(timeRange.until) : null;
+	if (
+		(since !== null || until !== null) &&
+		(since === null || Number.isFinite(since)) &&
+		(until === null || Number.isFinite(until))
+	) {
 		return {
 			activity: "date_range",
 			dateRange: {
-				from: timeRange.since
-					? new Date(Date.parse(timeRange.since)).toISOString().slice(0, 10)
-					: undefined,
-				to: timeRange.until
-					? new Date(Date.parse(timeRange.until)).toISOString().slice(0, 10)
-					: runDate.slice(0, 10),
+				from:
+					since !== null
+						? new Date(since).toISOString().slice(0, 10)
+						: undefined,
+				to:
+					until !== null
+						? new Date(until).toISOString().slice(0, 10)
+						: runDate.slice(0, 10),
 			},
 		};
 	}

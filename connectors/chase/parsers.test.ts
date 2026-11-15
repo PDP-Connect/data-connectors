@@ -895,3 +895,60 @@ test("parseStatementsListDom: local real capture parses ≥1 statement row", {
 		assert.ok(r.date_delivered_raw.length > 0);
 	}
 });
+
+test("parseCurrentActivityDom: monetary token signs ignore merchant punctuation and debit words", () => {
+	for (const [amount, cents] of [
+		["+$25.00", 2500],
+		["$25.00", 2500],
+		["-$25.00", -2500],
+		["−$25.00", -2500],
+		["($25.00)", -2500],
+	] as const) {
+		const rows = parseCurrentActivityDom(
+			`<div data-testid="transaction-row">Posted May 14 WAL-MART (PRIME) debit refund ${amount}</div>`,
+			"2026-05-15",
+		);
+		assert.equal(rows.length, 1, amount);
+		assert.equal(rows[0]?.amount_cents, cents, amount);
+	}
+});
+
+test("parseCurrentActivityDom: MDS amount grouping commas are not field separators", () => {
+	for (const [amount, cents] of [
+		["$1,234.56", 123456],
+		["-$1,234.56", -123456],
+		["($1,234.56)", -123456],
+		["$1,234,567.89", 123456789],
+	] as const) {
+		const rows = parseCurrentActivityDom(
+			`<table><tr class="mds-activity-table__row" data-values="May 14, 2026,SYNTHETIC MERCHANT,${amount},"></tr></table>`,
+			"2026-05-15",
+		);
+		assert.equal(rows.length, 1, amount);
+		assert.equal(rows[0]?.amount_cents, cents, amount);
+		assert.equal(rows[0]?.activity_date, "2026-05-14");
+		assert.equal(rows[0]?.description, "SYNTHETIC MERCHANT");
+	}
+});
+
+test("chooseActivity: invalid explicit bound falls back to cursor or bootstrap", () => {
+	for (const time_range of [
+		{ since: "not-a-date" },
+		{ until: "not-a-date" },
+		{ since: "2026-05-01", until: "not-a-date" },
+		{ since: "not-a-date", until: "2026-05-15" },
+	]) {
+		const requested = new Map([["transactions", { time_range }]]);
+		assert.deepEqual(
+			chooseActivity(requested, {}, "transactions", "ID", "2026-05-15"),
+			{ activity: "all" },
+		);
+		const state: TransactionsStateShape = {
+			per_account: { ID: { max_seen_date: "2026-05-14" } },
+		};
+		assert.deepEqual(
+			chooseActivity(requested, state, "transactions", "ID", "2026-05-15"),
+			{ activity: "since_last_statement" },
+		);
+	}
+});
