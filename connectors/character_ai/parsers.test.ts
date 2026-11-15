@@ -2240,6 +2240,28 @@ test("narrow then wide: a later run with a wider window collects what the narrow
 	}
 });
 
+test("a generating turn the messages scope leaves out still withholds its chat record", async () => {
+	const [, , third] = CHAT_IDS;
+	assert.ok(third);
+	const finished = (
+		turnsFor(third, "") as { turns: Array<{ turn_key: { turn_id: string } }> }
+	).turns[0]?.turn_key.turn_id;
+	assert.ok(finished);
+	const h = harness(
+		fakePage(
+			defaultRoute({ [third]: turnsWithCandidate(third, { is_final: false }) }),
+			[],
+		),
+		{ scope: { messages: { resources: [finished] } } },
+	);
+	await collectCharacterAi(h.ctx);
+	assert.ok(
+		!chatRecords(h).some((chat) => chat.id === third),
+		"generating parent must be withheld",
+	);
+	assert.ok(chatRecords(h).length > 0, "other chats are still emitted");
+});
+
 test("chats.resources reads only the named chats, from their own endpoint, and only their messages", async () => {
 	const [first, second] = CHAT_IDS;
 	assert.ok(first && second);

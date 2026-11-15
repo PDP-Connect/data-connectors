@@ -1176,22 +1176,25 @@ async function processChat(
 	}
 	const { turns } = outcome;
 	const sorted = sortTurns(scopedTurns(scope, turns));
+	// The chat record counts every turn, so a turn still generating anywhere
+	// in the chat withholds it, even one the messages scope leaves out.
+	const generating = sortTurns(turns).generating !== null;
 	// A chat outside the chats scope is read only for its messages: its
 	// record is not emitted (the runtime would drop it, and a dropped record
 	// holds back the run's bounded progress).
 	const recordEmitted =
-		recordInScope && wholeInWindow(scope, turns) && !sorted.generating;
+		recordInScope && wholeInWindow(scope, turns) && !generating;
 	if (recordEmitted) {
 		const parent = chat.character_name
 			? chat
 			: { ...chat, character_name: characterNameFromTurns(chat, turns) };
 		await ctx.emitRecord("chats", buildChatRecord(parent, hydrationOf(turns)));
-	} else if (recordInScope && !sorted.generating) {
+	} else if (recordInScope && !generating) {
 		connectorDiagnostic("character_ai", "chat_record_past_window", {});
 	}
 	if (!scope.wantMessages) {
 		return {
-			status: sorted.generating ? "withheld" : "emitted",
+			status: generating ? "withheld" : "emitted",
 			recordInScope,
 			recordEmitted,
 		};
