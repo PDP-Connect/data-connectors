@@ -6111,10 +6111,24 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/expensify/integration.test.ts",
-			line: 227,
+			line: 147,
 			column: 3,
 			category: "test_assertion_sequencing",
+			note: "invalid-history test: each raw value sets the shared environment option and restores it before the next, so a failure names the value.",
+		},
+		{
+			path: "connectors/expensify/integration.test.ts",
+			line: 264,
+			column: 4,
+			category: "test_assertion_sequencing",
 			note: "missing-credentials test: each credential is blanked and restored on its own, so a failure names the credential.",
+		},
+		{
+			path: "connectors/expensify/integration.test.ts",
+			line: 290,
+			column: 5,
+			category: "test_assertion_sequencing",
+			note: "credential-forwarding test: the success and failure cases run one after the other on fresh harnesses, so a failure names the case.",
 		},
 		{
 			path: "src/playwright-download.ts",

@@ -47,6 +47,10 @@ function harness(requested = streams, failure?: Error) {
 	}[] = [];
 	const messages: Parameters<Context["emit"]>[0][] = [];
 	const ranges: { from: string; to: string }[] = [];
+	const progress: string[] = [];
+	const factoryOptions: Parameters<
+		NonNullable<Parameters<typeof collect>[1]>
+	>[0][] = [];
 	const ctx: Context = {
 		credentials: {
 			EXPENSIFY_PARTNER_USER_ID: "fixture-user",
@@ -64,16 +68,21 @@ function harness(requested = streams, failure?: Error) {
 		emit: async (message) => {
 			messages.push(message);
 		},
-		progress: async () => {},
-	};
-	const factory: NonNullable<Parameters<typeof collect>[1]> = () => ({
-		async exportRange(range) {
-			ranges.push(range);
-			if (failure) throw failure;
-			return fixture;
+		progress: async (line) => {
+			progress.push(line);
 		},
-	});
-	return { ctx, factory, records, messages, ranges };
+	};
+	const factory: NonNullable<Parameters<typeof collect>[1]> = (options) => {
+		factoryOptions.push(options);
+		return {
+			async exportRange(range) {
+				ranges.push(range);
+				if (failure) throw failure;
+				return fixture;
+			},
+		};
+	};
+	return { ctx, factory, records, messages, ranges, progress, factoryOptions };
 }
 async function withHistory(value: string | undefined, fn: () => Promise<void>) {
 	const saved = process.env.EXPENSIFY_HISTORY_YEARS;
@@ -127,16 +136,26 @@ test("expensify requested streams stay isolated", async () => {
 });
 
 test("expensify invalid history fails before transport", async () => {
-	await withHistory("0", async () => {
-		const h = harness();
-		await assert.rejects(
-			collect(h.ctx, h.factory, now),
-			/positive safe integer/,
-		);
-		assert.deepEqual(h.ranges, []);
-		assert.deepEqual(h.records, []);
-		assert.deepEqual(h.messages, []);
-	});
+	for (const value of [
+		"0",
+		"-1",
+		"2.5",
+		"not-a-number",
+		"2027",
+		"9007199254740992",
+	]) {
+		await withHistory(value, async () => {
+			const h = harness();
+			await assert.rejects(
+				collect(h.ctx, h.factory, now),
+				/positive safe integer|fit UTC years/,
+			);
+			assert.deepEqual(h.ranges, []);
+			assert.deepEqual(h.records, []);
+			assert.deepEqual(h.messages, []);
+			assert.deepEqual(h.progress, []);
+		});
+	}
 });
 
 test("expensify client failure never reports successful full scan", async () => {
@@ -203,6 +222,21 @@ test("expensify manifest schemas match emitted records", async () => {
 				.amount_source,
 			"report_total",
 		);
+		assert.deepEqual(
+			Object.fromEntries(
+				manifest.streams.map(
+					(stream: { name: string; consent_time_field: string }) => [
+						stream.name,
+						stream.consent_time_field,
+					],
+				),
+			),
+			{
+				expenses: "expense_date",
+				reports: "created_at",
+				reimbursements: "reimbursed_at",
+			},
+		);
 		for (const stream of manifest.streams) {
 			assert.deepEqual(stream.primary_key, ["id"]);
 			assert.ok(stream.schema.properties[stream.consent_time_field]);
@@ -216,26 +250,59 @@ test("expensify manifest schemas match emitted records", async () => {
 });
 
 test("expensify missing credentials fail before client construction", async () => {
-	const h = harness();
 	for (const key of [
 		"EXPENSIFY_PARTNER_USER_ID",
 		"EXPENSIFY_PARTNER_USER_SECRET",
 	]) {
-		const original = h.ctx.credentials[key];
-		h.ctx.credentials[key] = "";
-		let built = false;
-		await assert.rejects(
-			collect(
-				h.ctx,
-				() => {
-					built = true;
-					return h.factory({} as never);
-				},
-				now,
-			),
-			/expensify_credentials_missing/,
-		);
-		assert.equal(built, false);
-		h.ctx.credentials[key] = original ?? "";
+		for (const value of [undefined, "", " ", "\t"]) {
+			const h = harness();
+			h.ctx.credentials.EXPENSIFY_PARTNER_USER_ID = "synthetic-partner-id-7";
+			h.ctx.credentials.EXPENSIFY_PARTNER_USER_SECRET = "synthetic-secret-9";
+			if (value === undefined) delete h.ctx.credentials[key];
+			else h.ctx.credentials[key] = value;
+			let thrown = "";
+			await assert.rejects(collect(h.ctx, h.factory, now), (error: unknown) => {
+				thrown = String(error);
+				return (
+					error instanceof Error &&
+					error.message === "expensify_credentials_missing"
+				);
+			});
+			assert.deepEqual(h.factoryOptions, []);
+			assert.deepEqual(h.ranges, []);
+			const output = JSON.stringify([h.messages, h.progress, thrown]);
+			assert.equal(output.includes("synthetic-partner-id-7"), false);
+			assert.equal(output.includes("synthetic-secret-9"), false);
+		}
 	}
+});
+
+test("expensify credentials reach the factory unchanged without disclosure", async () => {
+	await withHistory(undefined, async () => {
+		for (const failure of [undefined, new Error("credentials rejected")]) {
+			const h = harness(streams, failure);
+			const id = " synthetic-partner-id-7 ";
+			const secret = "\tsynthetic-secret-9 ";
+			h.ctx.credentials.EXPENSIFY_PARTNER_USER_ID = id;
+			h.ctx.credentials.EXPENSIFY_PARTNER_USER_SECRET = secret;
+			let thrown = "";
+			if (failure) {
+				await assert.rejects(
+					collect(h.ctx, h.factory, now),
+					(error: unknown) => {
+						thrown = String(error);
+						return error === failure;
+					},
+				);
+			} else {
+				await collect(h.ctx, h.factory, now);
+			}
+			assert.equal(h.factoryOptions.length, 1);
+			assert.equal(h.factoryOptions[0]?.partnerUserID, id);
+			assert.equal(h.factoryOptions[0]?.partnerUserSecret, secret);
+			const output = JSON.stringify([h.messages, h.progress, thrown]);
+			assert.equal(output.includes("synthetic-partner-id-7"), false);
+			assert.equal(output.includes("synthetic-secret-9"), false);
+		}
+	});
 });

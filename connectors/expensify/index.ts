@@ -25,8 +25,12 @@ export async function collect(
 ): Promise<void> {
 	const partnerUserID = ctx.credentials.EXPENSIFY_PARTNER_USER_ID;
 	const partnerUserSecret = ctx.credentials.EXPENSIFY_PARTNER_USER_SECRET;
-	if (!partnerUserID || !partnerUserSecret) {
+	if (!partnerUserID?.trim() || !partnerUserSecret?.trim()) {
 		throw new Error("expensify_credentials_missing");
+	}
+	const rawHistory = process.env.EXPENSIFY_HISTORY_YEARS;
+	if (rawHistory !== undefined && !/^[1-9][0-9]*$/.test(rawHistory)) {
+		throw new Error("Expensify years must be a positive safe integer");
 	}
 	const options = readOptions(null, {
 		envPrefix: "EXPENSIFY_",
