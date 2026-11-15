@@ -133,7 +133,10 @@ function isSignInUrl(url: string): boolean {
 		const parsed = new URL(url);
 		return (
 			SIGN_IN_PATH_RE.test(parsed.pathname) ||
-			!parsed.hostname.endsWith("goodreads.com")
+			!(
+				parsed.hostname === "goodreads.com" ||
+				parsed.hostname.endsWith(".goodreads.com")
+			)
 		);
 	} catch {
 		return false;

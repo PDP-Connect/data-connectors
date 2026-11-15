@@ -620,6 +620,22 @@ test("signed out: every requested stream stops with sign_in_required and nothing
 	assert.equal(h.failures.length, 5);
 });
 
+test("a redirect to a host that only ends in goodreads.com counts as signed out", async () => {
+	// The library page, sent to a lookalike host, answers 200 with a page
+	// that would otherwise read as the owner's library.
+	const lookalike: Site = () => ({
+		body: fixture("library-sidebar.html"),
+		url: "https://www.notgoodreads.com/review/list/90000001-synthetic-reader",
+	});
+	const h = harness(lookalike, { books: {} });
+	await run(h);
+	assert.deepEqual(h.records, []);
+	assert.deepEqual(
+		skips(h).map((skip) => [skip.stream, skip.reason]),
+		[["books", "sign_in_required"]],
+	);
+});
+
 test("an empty library is a legitimate empty run: shelves and a zero summary, no failure", async () => {
 	const h = harness(
 		signedInSite({
