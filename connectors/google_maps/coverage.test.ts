@@ -666,10 +666,16 @@ test("google_maps still declares full coverage when the incremental cursor suppr
 			join(importRoot, "Records.json"),
 			JSON.stringify(EXPORT_FIXTURE),
 		);
-		// A cursor past the newest fixture point: the re-import re-enumerates the
-		// whole boundary and emits nothing.
+		// A second run over an unchanged, already processed export re-enumerates
+		// the whole boundary and emits nothing.
+		const first = await runImport(importRoot);
+		const firstState = first.messages.find(
+			(message) =>
+				message.type === "STATE" && message.stream === "timeline_points",
+		) as { cursor?: unknown } | undefined;
+		assert.ok(firstState?.cursor, "first run saves a points cursor");
 		const { messages } = await runImport(importRoot, {
-			timeline_points: { last_timestamp: "2030-01-01T00:00:00.000Z" },
+			timeline_points: firstState.cursor,
 		});
 
 		const emitted = messages.filter(

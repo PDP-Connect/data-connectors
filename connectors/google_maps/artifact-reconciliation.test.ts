@@ -22,7 +22,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -46,6 +46,7 @@ async function runImport(
 async function runImportWithStderr(
 	importRoot: string,
 	streams: readonly string[] = ["timeline_points"],
+	state: Record<string, unknown> = {},
 ): Promise<{ messages: EmittedMessage[]; stderr: string }> {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
@@ -58,7 +59,7 @@ async function runImportWithStderr(
 		},
 		start: {
 			scope: { streams: streams.map((name) => ({ name })) },
-			state: {},
+			state,
 			type: "START",
 		},
 	});
@@ -377,5 +378,136 @@ test("progress is plain English and the old phase/pass detail moves to diagnosti
 		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("out-of-range timestamp does not abort later valid points", async () => {
+	const root = await mkdtemp(join(tmpdir(), "gm-date-range-"));
+	try {
+		await writeFile(
+			join(root, "Records.json"),
+			JSON.stringify({
+				locations: [
+					{
+						timestampMs: "8640000000000001",
+						latitudeE7: 10000000,
+						longitudeE7: 20000000,
+					},
+					{
+						timestampMs: "1761955200000",
+						latitudeE7: 10000000,
+						longitudeE7: 20000000,
+					},
+				],
+			}),
+		);
+		const messages = await runImport(root);
+		assert.equal(
+			messages.filter(
+				(m) => m.type === "RECORD" && m.stream === "timeline_points",
+			).length,
+			1,
+		);
+		assert.equal(
+			messages.some(
+				(m) => m.type === "SKIP_RESULT" && m.reason === "invalid_json",
+			),
+			false,
+		);
+		const coverage = coverageFor(messages, "timeline_points");
+		assert.equal(coverage.considered, 2);
+		assert.equal(coverage.covered, 1);
+	} finally {
+		await rm(root, { force: true, recursive: true });
+	}
+});
+
+function savedCursors(
+	messages: readonly EmittedMessage[],
+): Record<string, unknown> {
+	return Object.fromEntries(
+		messages.flatMap((m) => (m.type === "STATE" ? [[m.stream, m.cursor]] : [])),
+	);
+}
+function countRecords(
+	messages: readonly EmittedMessage[],
+	stream: string,
+): number {
+	return messages.filter((m) => m.type === "RECORD" && m.stream === stream)
+		.length;
+}
+const exportAt = (startTime: string) =>
+	JSON.stringify({
+		semanticSegments: [
+			{
+				startTime,
+				visit: {
+					topCandidate: { placeLocation: "geo:1,2", placeId: "synthetic" },
+				},
+			},
+		],
+	});
+
+test("new historical and changed artifacts emit once independently per stream", async () => {
+	const root = await mkdtemp(join(tmpdir(), "gm-artifact-receipts-"));
+	const streams = ["timeline_points", "timeline_segments"] as const;
+	try {
+		await mkdir(join(root, "november"));
+		await writeFile(
+			join(root, "november", "Timeline.json"),
+			exportAt("2026-11-01T12:00:00Z"),
+		);
+		const first = (
+			await runImportWithStderr(root, streams, {
+				timeline_points: { last_timestamp: "2026-12-01T00:00:00Z" },
+				timeline_segments: { last_start_time: "2026-12-01T00:00:00Z" },
+			})
+		).messages;
+		assert.equal(
+			countRecords(first, streams[0]),
+			1,
+			"legacy cursors replay all artifacts once",
+		);
+		assert.equal(countRecords(first, streams[1]), 1);
+		await mkdir(join(root, "october"));
+		await writeFile(
+			join(root, "october", "Timeline.json"),
+			exportAt("2026-10-01T12:00:00Z"),
+		);
+		const second = (
+			await runImportWithStderr(root, streams, savedCursors(first))
+		).messages;
+		assert.equal(countRecords(second, streams[0]), 1);
+		assert.equal(countRecords(second, streams[1]), 1);
+		assert.equal(coverageFor(second, streams[0]).covered, 2);
+		assert.equal(coverageFor(second, streams[1]).covered, 2);
+		const third = (
+			await runImportWithStderr(root, streams, savedCursors(second))
+		).messages;
+		assert.equal(countRecords(third, streams[0]), 0);
+		assert.equal(countRecords(third, streams[1]), 0);
+		// Change size as well as contents, independent of filesystem clock granularity.
+		await writeFile(
+			join(root, "october", "Timeline.json"),
+			exportAt("2026-10-02T12:00:00.000Z"),
+		);
+		const changed = (
+			await runImportWithStderr(root, streams, savedCursors(third))
+		).messages;
+		assert.equal(countRecords(changed, streams[0]), 1);
+		assert.equal(countRecords(changed, streams[1]), 1);
+		const pointsOnly = (await runImportWithStderr(root, ["timeline_points"]))
+			.messages;
+		const segmentsLater = (
+			await runImportWithStderr(root, streams, savedCursors(pointsOnly))
+		).messages;
+		assert.equal(countRecords(segmentsLater, streams[0]), 0);
+		assert.equal(
+			countRecords(segmentsLater, streams[1]),
+			2,
+			"point receipts never suppress first segment import",
+		);
+	} finally {
+		await rm(root, { force: true, recursive: true });
 	}
 });

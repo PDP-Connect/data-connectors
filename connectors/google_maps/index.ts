@@ -10,10 +10,10 @@
  * GOOGLE_MAPS_TIMELINE_DIR (defaults to ~/.pdpp/imports/google_maps/).
  */
 
-import { type Dirent, existsSync } from "node:fs";
+import { type Dirent, existsSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, relative } from "node:path";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -178,6 +178,7 @@ async function emitRequestedSkip(
 }
 
 interface LoadSummary {
+	processedArtifacts: string[];
 	complete: boolean;
 	latestPoint: string | undefined;
 	latestSegment: string | undefined;
@@ -272,12 +273,12 @@ async function emitProgressSafely(
 
 interface StreamLoadContext {
 	readonly ctx: CollectContext;
-	readonly pointSince: string | undefined;
+	pointArtifactProcessed: boolean;
 	readonly requestedPoints: boolean;
 	readonly requestedSegments: boolean;
 	readonly seenPointIds: Set<string>;
 	readonly seenSegmentIds: Set<string>;
-	readonly segmentSince: string | undefined;
+	segmentArtifactProcessed: boolean;
 	readonly summary: LoadSummary;
 }
 
@@ -315,10 +316,7 @@ async function processPointRecords(
 			load.summary.latestPoint,
 			timestamp,
 		);
-		if (
-			!load.requestedPoints ||
-			(load.pointSince && timestamp <= load.pointSince)
-		) {
+		if (!load.requestedPoints || load.pointArtifactProcessed) {
 			continue;
 		}
 		await emitRecordSafely(load.ctx, "timeline_points", record);
@@ -382,10 +380,7 @@ async function processSegmentRecords(
 			startTime,
 		);
 		recordUnrecognizedSegment(load.summary, segment);
-		if (
-			!load.requestedSegments ||
-			(load.segmentSince && startTime <= load.segmentSince)
-		) {
+		if (!load.requestedSegments || load.segmentArtifactProcessed) {
 			continue;
 		}
 		await emitRecordSafely(load.ctx, "timeline_segments", record);
@@ -483,6 +478,13 @@ function discoveryFailureMessage(reason: DiscoveryIncompleteReason): string {
 	}
 }
 
+// Discovery bounds this per-stream list to MAX_DISCOVERY_ENTRIES. No owner
+// absolute paths enter the cursor; legacy timestamp-only state has no receipts.
+function artifactIdentity(importDir: string, file: string): string {
+	const info = statSync(file);
+	return JSON.stringify([relative(importDir, file), info.size, info.mtimeMs]);
+}
+
 async function loadExports(
 	ctx: CollectContext,
 	importDir: string,
@@ -495,6 +497,7 @@ async function loadExports(
 	const pointSince = state.timeline_points?.last_timestamp;
 	const segmentSince = state.timeline_segments?.last_start_time;
 	const summary: LoadSummary = {
+		processedArtifacts: [],
 		complete: discovery.complete,
 		latestPoint: pointSince,
 		latestSegment: segmentSince,
@@ -509,10 +512,10 @@ async function loadExports(
 	};
 	const load: StreamLoadContext = {
 		ctx,
-		pointSince,
+		pointArtifactProcessed: false,
 		requestedPoints,
 		requestedSegments,
-		segmentSince,
+		segmentArtifactProcessed: false,
 		seenPointIds: new Set(),
 		seenSegmentIds: new Set(),
 		summary,
@@ -564,7 +567,17 @@ async function loadExports(
 		});
 		await ctx.progress(`Reading file ${fileOrdinal} of ${files.length}`);
 		try {
+			const identity = artifactIdentity(importDir, file);
+			load.pointArtifactProcessed =
+				state.timeline_points?.processed_artifacts?.includes(identity) === true;
+			load.segmentArtifactProcessed =
+				state.timeline_segments?.processed_artifacts?.includes(identity) ===
+				true;
 			await streamTimelineFile(load, file);
+			if (artifactIdentity(importDir, file) !== identity) {
+				throw new Error("Timeline artifact changed while reading");
+			}
+			summary.processedArtifacts.push(identity);
 		} catch (error) {
 			if (isGoogleMapsEmissionError(error)) {
 				throw error.cause;
@@ -587,7 +600,10 @@ async function finishPoints(
 	await ctx.emit({
 		type: "STATE",
 		stream: "timeline_points",
-		cursor: { last_timestamp: summary.latestPoint },
+		cursor: {
+			last_timestamp: summary.latestPoint,
+			processed_artifacts: summary.processedArtifacts,
+		},
 	});
 	// Artifact reconciliation, NOT an account-completeness claim. The denominator
 	// is every point element the parser produced from the uploaded file —
@@ -648,7 +664,10 @@ async function finishSegments(
 	await ctx.emit({
 		type: "STATE",
 		stream: "timeline_segments",
-		cursor: { last_start_time: summary.latestSegment },
+		cursor: {
+			last_start_time: summary.latestSegment,
+			processed_artifacts: summary.processedArtifacts,
+		},
 	});
 	// Same artifact reconciliation as `finishPoints`. `buildFullScanCoverageMessage`
 	// is deliberately NOT used when an element went unaccounted: it forces

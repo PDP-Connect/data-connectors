@@ -25,6 +25,7 @@ export type GoogleMapsSegmentKind =
 	| "unrecognized";
 
 export interface StreamTimestampState {
+	processed_artifacts?: string[];
 	last_start_time?: string;
 	last_timestamp?: string;
 }

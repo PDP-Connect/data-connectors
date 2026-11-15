@@ -85,7 +85,10 @@ function parseTimestampMs(value: unknown): string | null {
 	// converting it would put the point at 1970-01-01 — the head of the
 	// owner's timeline — instead of leaving it absent.
 	const ms = Number.parseInt(raw, 10);
-	return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null;
+	const date = new Date(ms);
+	return Number.isFinite(ms) && ms > 0 && Number.isFinite(date.getTime())
+		? date.toISOString()
+		: null;
 }
 
 function parseTimestamp(value: unknown): string | null {

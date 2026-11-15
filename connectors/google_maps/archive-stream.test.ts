@@ -588,3 +588,46 @@ test("a large archive of small elements is bounded by one element, not by archiv
 		rmSync(dir, { force: true, recursive: true });
 	}
 });
+
+test("direct visit fields have identical streamed and buffered records", async () => {
+	const input = {
+		semanticSegments: [
+			{
+				startTime: "2026-10-01T12:00:00Z",
+				endTime: "2026-10-01T13:00:00Z",
+				visit: {
+					placeLocation: "geo:1,2",
+					placeId: "p",
+					semanticType: "HOME",
+					probability: 0.8,
+				},
+			},
+			{
+				startTime: "2026-10-02T12:00:00Z",
+				visit: {
+					location: { latitude: 3, longitude: 4 },
+					placeId: "q",
+					semanticType: "WORK",
+					probability: 0.6,
+				},
+			},
+		],
+	};
+	const { dir, path } = writeTmpFile(JSON.stringify(input));
+	try {
+		const points: unknown[] = [],
+			segments: unknown[] = [];
+		await streamGoogleMapsExport(path, (event) => {
+			if (event.kind !== "element") return;
+			const result = parseGoogleMapsExportElement(event.format, event.value);
+			points.push(...result.points);
+			segments.push(...result.segments);
+		});
+		const buffered = parseGoogleMapsExport(input);
+		assert.equal(buffered.points.length, 2);
+		assert.deepEqual(points, buffered.points);
+		assert.deepEqual(segments, buffered.segments);
+	} finally {
+		rmSync(dir, { force: true, recursive: true });
+	}
+});

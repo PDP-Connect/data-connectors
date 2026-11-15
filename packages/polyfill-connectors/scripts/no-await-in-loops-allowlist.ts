@@ -2793,7 +2793,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_maps/archive-stream.ts",
-			line: 793,
+			line: 798,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "drain(): sequential event callbacks preserve source order and backpressure",
@@ -2814,21 +2814,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_maps/index.ts",
-			line: 309,
+			line: 310,
 			column: 9,
 			category: "ordered_protocol_emission",
 			note: "processPointRecords(): ordered schema admission and point protocol emission",
 		},
 		{
 			path: "connectors/google_maps/index.ts",
-			line: 375,
+			line: 373,
 			column: 9,
 			category: "ordered_protocol_emission",
 			note: "processSegmentRecords(): ordered schema admission and segment protocol emission",
 		},
 		{
 			path: "connectors/google_maps/index.ts",
-			line: 565,
+			line: 568,
 			column: 3,
 			category: "dependent_file_cursor",
 			note: "loadExports(): sequential file progress follows the discovered source order",
