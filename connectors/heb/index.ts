@@ -1073,7 +1073,12 @@ async function extractAndShapeCheckOrders(
 	const rawOrders = mergeOrdersListPage(structuredOrders, domOrders);
 	const parsing = inspectOrderListParsing(html);
 	if (parsing.rejectedRows > 0 || parsing.missingIdentityRows > 0) {
-		await emitSchemaRejected({ emit }, "orders", []);
+		// The prefilter exposes counts only, not rejected rows or Zod issues.
+		// Emit one aggregate; keep counts separate rather than inventing paths.
+		await emitSchemaRejected({ emit }, "orders", [], {
+			rejected_count: parsing.rejectedRows,
+			missing_identity_count: parsing.missingIdentityRows,
+		});
 	}
 	const orders: ListPageOrder[] = [];
 	for (const r of rawOrders) {
@@ -1999,7 +2004,9 @@ async function emitOrderAndItems(
 		const orderRecord = buildOrderRecord(listOrder, orderDate, deps.emittedAt);
 		const parsed = ordersSchema.safeParse(orderRecord);
 		const accepted = parsed.success;
-		if (!parsed.success) await emitSchemaRejected(deps, "orders", parsed.error.issues);
+		if (!parsed.success) {
+			await emitSchemaRejected(deps, "orders", parsed.error.issues);
+		}
 		if (
 			accepted &&
 			(!deps.ordersFingerprintCursor ||
@@ -2144,9 +2151,16 @@ async function fetchDetailAndRecordCoverage(
 		const sourceInventoryComplete = result.inventoryComplete;
 		const validItems: typeof result.detail.items = [];
 		for (const [itemIndex, item] of result.detail.items.entries()) {
-			const parsed = orderItemsSchema.safeParse(buildOrderItemRecord(
-				listOrder.orderId, orderDate, item, itemIndex, deps.emittedAt, result.detail.items,
-			));
+			const parsed = orderItemsSchema.safeParse(
+				buildOrderItemRecord(
+					listOrder.orderId,
+					orderDate,
+					item,
+					itemIndex,
+					deps.emittedAt,
+					result.detail.items,
+				),
+			);
 			if (parsed.success) validItems.push(item);
 			else await emitSchemaRejected(deps, "order_items", parsed.error.issues);
 		}
@@ -2813,21 +2827,26 @@ async function emitSchemaRejected(
 	deps: Pick<EmitDeps, "emit">,
 	stream: string,
 	issues: readonly { path: readonly PropertyKey[]; code: string }[],
+	counts?: { rejected_count: number; missing_identity_count: number },
 ): Promise<void> {
 	// Never log the rejected record, issue.message, or issue input values.
 	connectorDiagnostic("heb", "record_failed_schema", {
 		stream,
-		issues: JSON.stringify(issues.map(issue => ({
-			path: issue.path.map(String),
-			code: issue.code,
-		}))),
+		...counts,
+		issues: JSON.stringify(
+			issues.map((issue) => ({
+				path: issue.path.map(String),
+				code: issue.code,
+			})),
+		),
 	});
 	await deps.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason: "record_failed_schema",
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
-		message: "A record H-E-B showed could not be stored because its shape did not match what the connector expects. The next run will try again.",
+		message:
+			"A record H-E-B showed could not be stored because its shape did not match what the connector expects. The next run will try again.",
 	});
 }
 

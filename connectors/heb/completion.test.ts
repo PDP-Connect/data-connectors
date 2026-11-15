@@ -17,7 +17,7 @@ import {
 	makeRecordingEmit,
 	skipPoliteDelays,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { hebConnector, processListOrder, type EmitDeps } from "./index.ts";
+import { type EmitDeps, hebConnector, processListOrder } from "./index.ts";
 import { ordersSchema, validateRecord } from "./schemas.ts";
 
 // Pacing pauses are anti-bot courtesy that these tests do not assert on, so
@@ -258,13 +258,27 @@ test("order schema rejection has one honest skip and value-free diagnostic", asy
 	});
 	const ctx = makeContext(["orders"], makeCollectPage({ listHtml: "" }));
 	const deps: EmitDeps = {
-		emit: ctx.emit, emitRecord: ctx.emitRecord, emittedAt: EMITTED_AT,
-		progress: ctx.progress, sendInteraction: ctx.sendInteraction,
-		wantsOrders: true, wantsItems: false, emitItems: false,
-		orderItemsCoverage: undefined, ordersCoverage: undefined, ordersFingerprintCursor: undefined,
+		emit: ctx.emit,
+		emitRecord: ctx.emitRecord,
+		emittedAt: EMITTED_AT,
+		progress: ctx.progress,
+		sendInteraction: ctx.sendInteraction,
+		wantsOrders: true,
+		wantsItems: false,
+		emitItems: false,
+		orderItemsCoverage: undefined,
+		ordersCoverage: undefined,
+		ordersFingerprintCursor: undefined,
 	};
-	await processListOrder(ctx.page, deps,
-		{ detailAttempts: 0, isManualRun: false, manualRepairAttempted: false, sessionRepairRequired: false },
+	await processListOrder(
+		ctx.page,
+		deps,
+		{
+			detailAttempts: 0,
+			isManualRun: false,
+			manualRepairAttempted: false,
+			sessionRepairRequired: false,
+		},
 		{
 			orderId: "HEB_PRIVATE_CANARY", orderDateRaw: "Oct 5, 2026",
 			fulfillmentMethod: "unknown", fulfillmentLocation: null, status: null,
@@ -276,16 +290,24 @@ test("order schema rejection has one honest skip and value-free diagnostic", asy
 	const skips = findMessages(ctx.protocolMessages, "SKIP_RESULT");
 	assert.equal(skips.length, 1);
 	assert.equal(skips[0]?.reason, "record_failed_schema");
-	assert.deepEqual(skips[0]?.recovery_hint, { action: "retry_by_runtime", retryable: true });
+	assert.deepEqual(skips[0]?.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
 	assert.doesNotMatch(skips[0]?.message ?? "", /retained/);
-	const diagnostics = lines.filter(line => line.includes("record_failed_schema"));
+	const diagnostics = lines.filter((line) => line.includes("record_failed_schema"));
 	assert.equal(diagnostics.length, 1);
 	const invalidId = ordersSchema.shape.id.safeParse("HEB_PRIVATE_CANARY");
 	assert.equal(invalidId.success, false);
 	if (invalidId.success) throw new Error("fixture must fail the real id schema");
 	assert.ok(diagnostics[0]?.includes("orders"));
 	assert.ok(diagnostics[0]?.includes("id"));
-	assert.ok(diagnostics[0]?.includes(invalidId.error.issues[0]!.code));
+	const issue = invalidId.error.issues[0];
+	assert.ok(issue);
+	assert.ok(diagnostics[0]?.includes(issue.code));
+	assert.equal(skips[0]?.stream, "orders");
+	// Check all stderr, including unrelated diagnostics, for the fixture value.
+	assert.ok(!lines.join("").includes("HEB_PRIVATE_CANARY"));
 	assert.doesNotMatch(diagnostics.join(""), /HEB_PRIVATE_CANARY|10\.00|Oct 5/);
 });
 
