@@ -46,6 +46,13 @@ test("partial dates keep the precision Goodreads printed", () => {
 	assert.equal(normalizePartialDate("not set"), null);
 	assert.equal(normalizePartialDate("  "), null);
 	assert.equal(normalizePartialDate("Smarch 3, 2020"), null);
+	// A day the month does not have is no date, printed or ISO.
+	assert.equal(normalizePartialDate("Feb 30, 2023"), null);
+	assert.equal(normalizePartialDate("Apr 31, 2023"), null);
+	assert.equal(normalizePartialDate("2023-02-30"), null);
+	assert.equal(normalizePartialDate("2023-13-01"), null);
+	assert.equal(normalizePartialDate("Feb 29, 2024"), "2024-02-29");
+	assert.equal(normalizePartialDate("Feb 29, 2023"), null);
 	assert.equal(normalizePartialDate(null), null);
 });
 
