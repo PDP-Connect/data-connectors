@@ -1066,7 +1066,16 @@ export function mergeDetailByKey(detailItems: DetailItem[]): {
 
 // ─── Order record + item merge ───────────────────────────────────────────
 
-const RETURNED_RE = /return/i;
+export function isActualReturn(status: string | null | undefined): boolean {
+	if (!status) {
+		return false;
+	}
+	// Affirmative phrases win even when eligibility text is also present.
+	// Window/eligibility wording alone does not match these phrases.
+	return /\breturned\b|\breturn\s+(?:is\s+)?(?:started|complete|received)\b|\brefund\s+(?:has\s+been\s+)?issued\b|\brefunded\b/i.test(
+		status,
+	);
+}
 
 /**
  * Merge list-page items with detail-page items into the final emit-ordered
@@ -1139,7 +1148,7 @@ export function buildOrderItemRecord(
 		quantity: merged.quantity ?? 1,
 		seller: merged.seller || null,
 		item_image_url: merged.item_image_url || null,
-		returned: RETURNED_RE.test(merged.refund_status || ""),
+		returned: isActualReturn(merged.refund_status),
 		refund_status: merged.refund_status || null,
 	};
 }
