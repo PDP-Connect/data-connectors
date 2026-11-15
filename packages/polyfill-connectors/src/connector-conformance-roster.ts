@@ -88,6 +88,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	coros_browser: { testFile: "connectors/coros_browser/index.test.ts" },
 	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
+	expensify: { testFile: "connectors/expensify/integration.test.ts" },
 	facebook: { testFile: "connectors/facebook/collect.test.ts" },
 	garmin_browser: { testFile: "connectors/garmin_browser/index.test.ts" },
 	fitbit: { testFile: "connectors/fitbit/index.test.ts" },
