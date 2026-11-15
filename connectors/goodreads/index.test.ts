@@ -1698,6 +1698,56 @@ test("a token close to its end is read again before the next request", async () 
 	assert.equal(h.visits.length, 4);
 });
 
+test("a token read again for another member stops the run instead of reading their library", async () => {
+	const ownToken = (exp: number) =>
+		nextData((props) => {
+			props.jwtToken = fakeToken({ exp, user_id: Number(UID) });
+		});
+	const otherToken = nextData((props) => {
+		props.jwtToken = fakeToken({ exp: 4102444800, user_id: 12345 });
+	});
+	// At expiry: the first token is near its end, and the browser has signed
+	// in as someone else by the time it is read again.
+	let visits = 0;
+	const atExpiry = harness(
+		signedInSite(),
+		{ books: {}, shelves: {} },
+		{
+			bookPage: () => {
+				visits += 1;
+				return visits === 1
+					? ownToken(Math.floor(Date.now() / 1000) + 30)
+					: otherToken;
+			},
+		},
+	);
+	await run(atExpiry);
+	assert.equal(recordsOf(atExpiry, "books").length, 0);
+	assert.equal(skips(atExpiry)[0]?.reason, "source_unreadable");
+	assert.match(skips(atExpiry)[0]?.message ?? "", /different account/);
+
+	// After a refused token: the fresh page carries the other member's token.
+	let pages = 0;
+	const afterRefusal = harness(
+		signedInSite(),
+		{ books: {}, shelves: {} },
+		{
+			api: (op, variables, call) =>
+				op === "GoodreadsShelvings" && call === 0
+					? { body: "{}", status: 401 }
+					: fixtureApi()(op, variables, call),
+			bookPage: () => {
+				pages += 1;
+				return pages === 1 ? ownToken(4102444800) : otherToken;
+			},
+		},
+	);
+	await run(afterRefusal);
+	assert.equal(recordsOf(afterRefusal, "books").length, 0);
+	assert.equal(skips(afterRefusal)[0]?.reason, "source_unreadable");
+	assert.match(skips(afterRefusal)[0]?.message ?? "", /different account/);
+});
+
 test("a book page without a usable token stops books and shelves with a reason", async () => {
 	const cases: [string, (url: string) => string | null, string, RegExp][] = [
 		["no __NEXT_DATA__", () => null, "source_unreadable", /sign-in token/],

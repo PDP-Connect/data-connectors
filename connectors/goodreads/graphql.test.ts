@@ -29,9 +29,20 @@ test("a shelving needs a numeric book id and a date added; the rest may be missi
 		parseShelvingNode(node({ createdAt: "1614967200000" }))?.addedAtMs,
 		1614967200000,
 	);
+	// A time a Date can not hold is no time: the largest one still is.
+	assert.equal(
+		parseShelvingNode(node({ createdAt: 8.64e15 }))?.addedAtMs,
+		8.64e15,
+	);
+	assert.equal(
+		parseShelvingNode(node({ updatedAt: 8640000000000001 }))?.updatedAtMs,
+		null,
+	);
 	for (const broken of [
 		node({ createdAt: null }),
 		node({ createdAt: "2021-03-05" }),
+		node({ createdAt: 8640000000000001 }),
+		node({ createdAt: "8640000000000001" }),
 		node({ book: { legacyId: "abc" } }),
 		node({ book: null }),
 		null,

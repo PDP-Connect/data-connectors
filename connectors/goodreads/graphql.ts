@@ -110,7 +110,13 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const textOrNull = (value: unknown): string | null =>
 	typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 
-/** Epoch milliseconds, given as a number or a string of digits. */
+/** The largest epoch millisecond a Date can hold (ECMA-262 time value range). */
+const MAX_DATE_MS = 8.64e15;
+
+/**
+ * Epoch milliseconds, given as a number or a string of digits, and only
+ * within the range a Date can hold, so every value converts to an ISO time.
+ */
 function epochMs(value: unknown): number | null {
 	const n =
 		typeof value === "number"
@@ -118,7 +124,7 @@ function epochMs(value: unknown): number | null {
 			: typeof value === "string" && /^\d+$/.test(value)
 				? Number(value)
 				: Number.NaN;
-	return Number.isFinite(n) && n > 0 ? n : null;
+	return Number.isFinite(n) && n > 0 && n <= MAX_DATE_MS ? n : null;
 }
 
 const names = (
@@ -427,6 +433,13 @@ export async function openGraphql(
 	const first = await acquire();
 	if (!first.ok) return first;
 	let session = first.value;
+	// Every token read again later must be for the member the first one
+	// named: the browser can sign in as someone else mid-run, and a list
+	// read with that member's id would join their library to this one.
+	const owner = {
+		customerUri: session.customerUri,
+		memberId: session.memberId,
+	};
 
 	const post = async (
 		label: string,
@@ -437,6 +450,14 @@ export async function openGraphql(
 			if (now() > session.expiresAtMs - TOKEN_MARGIN_MS) {
 				const next = await acquire();
 				if (!next.ok) return next;
+				if (
+					next.value.memberId !== owner.memberId ||
+					next.value.customerUri !== owner.customerUri
+				) {
+					return unreadable(
+						`Goodreads issued a new API token for a different account while reading ${label}, so nothing more was read. Sign out of Goodreads and in again, then run collection again.`,
+					);
+				}
 				session = next.value;
 			}
 			const { token } = session;
