@@ -24,8 +24,19 @@ import {
 	GmcliError,
 	parseGmcliChatsJson,
 	parseGmcliMessagesJson,
+	redactGmcliOutput,
 } from "./index.ts";
 import { messagesSchema } from "./schemas.ts";
+
+test("bare single-segment synthetic session tokens are redacted", () => {
+	const token = "aB_9".repeat(10);
+	assert.equal(redactGmcliOutput(token), "[REDACTED]");
+	assert.equal(
+		redactGmcliOutput("failed: " + token + "!"),
+		"failed: [REDACTED]!",
+	);
+	assert.equal(redactGmcliOutput("short diagnostic"), "short diagnostic");
+});
 
 test("parseGmcliChatsJson parses the source-verified Conversation fixture shape", () => {
 	const chats = parseGmcliChatsJson(buildChatsJsonFixture());
