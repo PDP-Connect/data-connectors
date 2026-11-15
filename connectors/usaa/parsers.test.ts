@@ -694,6 +694,57 @@ test("buildInboxMessageRecord: parses 'MMM DD' + year into ISO date", () => {
 	assert.equal(rec.date_received, "2026-04-13");
 });
 
+test("buildInboxMessageRecord: calendar date is host-zone independent", () => {
+	const previous = process.env.TZ;
+	try {
+		for (const zone of ["Pacific/Auckland", "America/Los_Angeles"]) {
+			process.env.TZ = zone;
+			const rec = buildInboxMessageRecord(
+				{ status: "Read", date_short: "Apr 13", preview: "hi" }, 2026, "t",
+			);
+			assert.ok(rec);
+			assert.equal(rec.date_received, "2026-04-13", zone);
+		}
+	} finally {
+		if (previous === undefined) delete process.env.TZ;
+		else process.env.TZ = previous;
+	}
+});
+
+test("buildInboxMessageRecord: validates leap days without rollover", () => {
+	const m: InboxRow = { status: "Read", date_short: "Feb 29", preview: "hi" };
+	const invalid = buildInboxMessageRecord(m, 2025, "t");
+	const valid = buildInboxMessageRecord(m, 2024, "t");
+	assert.ok(invalid);
+	assert.ok(valid);
+	assert.equal(invalid.date_received, null);
+	assert.equal(valid.date_received, "2024-02-29");
+});
+
+test("buildInboxMessageRecord: unknown month keeps record with null date", () => {
+	const rec = buildInboxMessageRecord(
+		{ status: "Read", date_short: "Foo 13", preview: "hi" }, 2026, "t",
+	);
+	assert.ok(rec);
+	assert.equal(rec.date_received, null);
+});
+
+test("buildInboxMessageRecord: accepts trimmed abbreviated month variants", () => {
+	for (const date_short of [" apr. 3 ", "APR 03", "Apr\t3"]) {
+		const rec = buildInboxMessageRecord({ status: "Read", date_short, preview: "hi" }, 2026, "t");
+		assert.ok(rec);
+		assert.equal(rec.date_received, "2026-04-03", date_short);
+	}
+});
+
+test("buildInboxMessageRecord: rejects non-inbox formats and invalid days", () => {
+	for (const date_short of ["April 13", "Apr 13, 2026", "2026-04-13", "Feb 30", "Apr 31", "Apr 0"]) {
+		const rec = buildInboxMessageRecord({ status: "Read", date_short, preview: "hi" }, 2026, "t");
+		assert.ok(rec);
+		assert.equal(rec.date_received, null, date_short);
+	}
+});
+
 const CC_BILLING_KV: BillingKv = {
 	"Account Nickname": "My Card",
 	"Current Balance": "$123.45",
