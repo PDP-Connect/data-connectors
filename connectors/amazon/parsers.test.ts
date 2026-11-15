@@ -923,3 +923,81 @@ test("parseAmazonProfileDom: missing nav bar entirely (selector drift) degrades 
 	);
 	assert.deepEqual(record, { id: "me", name: null, is_prime: null });
 });
+
+test("buildOrderItemRecord: return eligibility is not a completed return", () => {
+	const cases: [string, boolean][] = [
+		["Return or replace items: Eligible through January 15, 2026", false],
+		["Return window closed on December 1, 2025", false],
+		["Eligible", false],
+		["Return or replace items", false],
+		["Returned", true],
+		["Refund issued", true],
+		["Refund completed", true],
+		["Return started", true],
+		["Return received", true],
+		["Return completed", true],
+	];
+	for (const [status, returned] of cases) {
+		const detail = parseOrderDetailDom(`<div id="orderDetails">
+			<div data-component="purchasedItemsRightGrid">
+				<div data-component="itemTitle"><a href="/dp/B01ABCDEFG">Widget</a></div>
+				<div data-component="itemReturnEligibility">${status}</div>
+			</div></div>`);
+		assert.ok(detail?.items[0]);
+		const record = buildOrderItemRecord(
+			"111-2222222-3333333",
+			"2026-01-01",
+			detail.items[0],
+		);
+		assert.equal(record.returned, returned, status);
+		assert.equal(record.refund_status, status);
+	}
+});
+
+test("parseOrderDetailDom: UFPO exact totals exclude subtotal and savings", () => {
+	const cases: [string[][], string | null][] = [
+		[
+			[
+				["Subtotal", "$40.00"],
+				["Grand Total", "$48.00"],
+				["Total savings", "$8.00"],
+			],
+			"$48.00",
+		],
+		[[["Subtotal", "$40.00"]], null],
+		[[["Total savings", "$8.00"]], null],
+		[
+			[
+				["Total:", "$40.00"],
+				["Order Total:", "$48.00"],
+			],
+			"$48.00",
+		],
+		[
+			[
+				[" GRAND TOTAL : ", "$48.00"],
+				["Total", "$40.00"],
+			],
+			"$48.00",
+		],
+		[[["Total", "$48.00"]], "$48.00"],
+	];
+	for (const [rows, expected] of cases) {
+		const detail = parseOrderDetailDom(`<div class="ufpo-item-list-table">
+			<div id="B01UFPO001-item-grid-row"><a href="/dp/B01UFPO001">Widget</a></div>
+			</div><dl class="ufpo-order-summary-list">
+			${rows.map(([label, value]) => `<div class="a-row"><dt>${label}</dt><dd>${value}</dd></div>`).join("")}
+			</dl>`);
+		assert.ok(detail);
+		assert.equal(detail.grand_total, expected, JSON.stringify(rows));
+	}
+});
+
+test("parseOrderDetailDom: FOPO removes the whole card masking prefix", () => {
+	const detail = parseOrderDetailDom(`<div id="f3_food_WfmInStoreOrderSummary">
+		<span id="wfm-payment-card-brand">Visa</span>
+		<span id="wfm-payment-card-tail">****5900</span></div>`);
+	assert.ok(detail);
+	assert.equal(detail.payment_method_summary, "Visa ending in 5900");
+	assert.equal(detail.payment_method_summary.includes("*"), false);
+});
