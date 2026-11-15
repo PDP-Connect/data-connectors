@@ -549,7 +549,9 @@ for (const submitted of [false, true]) {
 		let marked = false;
 		let calls = 0;
 		let entered!: () => void;
-		const ready = new Promise<void>((resolve) => { entered = resolve; });
+		const ready = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
 		const watchdog = makeSessionEstablishWatchdog({
 			capture: null,
 			name: "submit-fixture",
@@ -559,27 +561,39 @@ for (const submitted of [false, true]) {
 			now: clock.now,
 			hasCredentialSubmitted: () => marked,
 		});
-		const run = watchdog.run(() => establishSession(
-			{
-				probeSession: undefined,
-				ensureSession: async ({ onCredentialSubmit, checkpoint }) => {
-					// A submission-sounding label alone must never flip the latch.
-					await checkpoint("password-submit");
-					if (submitted) { calls += 1; onCredentialSubmit(); }
-					entered();
-					await new Promise<void>(() => {});
+		const run = watchdog.run(() =>
+			establishSession(
+				{
+					probeSession: undefined,
+					ensureSession: async ({ onCredentialSubmit, checkpoint }) => {
+						// A submission-sounding label alone must never flip the latch.
+						await checkpoint("password-submit");
+						if (submitted) {
+							calls += 1;
+							onCredentialSubmit();
+						}
+						entered();
+						await new Promise<void>(() => {
+							/* never settles: the watchdog must end establishment */
+						});
+					},
 				},
-			{
-				...makeEstablishArgs("submit-fixture"),
-				checkpoint: watchdog.checkpoint,
-				onCredentialSubmit: () => { marked = true; },
-			},
-		));
+				{
+					...makeEstablishArgs("submit-fixture"),
+					checkpoint: watchdog.checkpoint,
+					onCredentialSubmit: () => {
+						marked = true;
+					},
+				},
+			),
+		);
 		const rejected = assert.rejects(run, (err: unknown) => {
 			assert.ok(err instanceof Error);
 			assert.equal((err as { retryable?: boolean }).retryable, !submitted);
-			assert.equal((err as { code?: string }).code,
-				submitted ? "credential_submit_outcome_unknown" : undefined);
+			assert.equal(
+				(err as { code?: string }).code,
+				submitted ? "credential_submit_outcome_unknown" : undefined,
+			);
 			return true;
 		});
 		await ready;

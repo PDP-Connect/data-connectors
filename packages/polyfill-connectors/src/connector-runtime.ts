@@ -3177,7 +3177,9 @@ export function makeSessionEstablishWatchdog(args: {
 						`(last checkpoint: ${lastCheckpoint}); failing run closed`,
 					{
 						retryable: !postSubmit,
-						...(postSubmit ? { code: "credential_submit_outcome_unknown" } : {}),
+						...(postSubmit
+							? { code: "credential_submit_outcome_unknown" }
+							: {}),
 					},
 				);
 			}
