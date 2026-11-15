@@ -35,6 +35,50 @@ import type {
 	TransactionsStateShape,
 } from "./types.ts";
 
+test("calendar dates: statement delivery is host-zone independent", () => {
+	const previous = process.env.TZ;
+	try {
+		for (const zone of ["Pacific/Auckland", "America/Los_Angeles"]) {
+			process.env.TZ = zone;
+			for (const raw of ["Apr 13, 2026", "April 13, 2026", "04/13/2026", "2026-04-13"]) {
+				assert.equal(parseDateDelivered(raw), "2026-04-13", zone + ": " + raw);
+			}
+		}
+	} finally {
+		if (previous === undefined) delete process.env.TZ;
+		else process.env.TZ = previous;
+	}
+});
+
+test("calendar dates: statement delivery rejects rollover days", () => {
+	assert.equal(parseDateDelivered("Feb 29, 2025"), null);
+	assert.equal(parseDateDelivered("Apr 31, 2026"), null);
+	assert.equal(parseDateDelivered("2026-02-30"), null);
+	assert.equal(parseDateDelivered("Feb 29, 2024"), "2024-02-29");
+});
+
+test("calendar dates: recent activity resolves yearless dates before the scrape day", () => {
+	const rowsFor = (date: string, reference = "2027-01-02") =>
+		parseCurrentActivityDom(
+			`<table><tr data-transaction-id="txn_synthetic_01"><td>${date} Posted Synthetic merchant $12.34</td></tr></table>`,
+			reference,
+		);
+	for (const date of ["Dec 31", "12/31"]) {
+		const [row] = rowsFor(date);
+		assert.ok(row);
+		assert.equal(row.activity_date, "2026-12-31");
+		assert.equal(row.posted_date, "2026-12-31");
+		assert.equal(currentActivityId("SYNTHETIC", row), "SYNTHETIC|txn_synthetic_01");
+	}
+	for (const date of ["Jan 1", "1/1", "Jan 2", "1/2"]) {
+		assert.equal(rowsFor(date)[0]?.activity_date, date.includes("2") ? "2027-01-02" : "2027-01-01");
+	}
+	assert.equal(rowsFor("Dec 31, 2025")[0]?.activity_date, "2025-12-31");
+	assert.equal(rowsFor("12/31/25")[0]?.activity_date, "2025-12-31");
+	assert.deepEqual(rowsFor("Feb 30", "2027-03-02"), []);
+	assert.equal(rowsFor("Feb 29", "2024-03-02")[0]?.activity_date, "2024-02-29");
+});
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
 const LOCAL_RAW_DIR = join(__dirname, "..", "..", "fixtures", "chase", "raw");

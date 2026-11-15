@@ -41,6 +41,28 @@ import type {
 	StatementClosing,
 } from "./types.ts";
 
+test("isoDate: statement calendar dates are host-zone independent", () => {
+	const previous = process.env.TZ;
+	try {
+		for (const zone of ["Pacific/Auckland", "America/Los_Angeles"]) {
+			process.env.TZ = zone;
+			for (const raw of ["04/13/2026", "Apr 13, 2026", "April 13, 2026", "2026-04-13"]) {
+				assert.equal(isoDate(raw), "2026-04-13", zone + ": " + raw);
+			}
+		}
+	} finally {
+		if (previous === undefined) delete process.env.TZ;
+		else process.env.TZ = previous;
+	}
+});
+
+test("isoDate: rejects calendar rollover instead of normalizing it", () => {
+	assert.equal(isoDate("02/29/2025"), null);
+	assert.equal(isoDate("Apr 31, 2026"), null);
+	assert.equal(isoDate("2026-02-30"), null);
+	assert.equal(isoDate("02/29/2024"), "2024-02-29");
+});
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
 const LOCAL_RAW_DIR = join(__dirname, "..", "..", "fixtures", "usaa", "raw");
