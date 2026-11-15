@@ -60,6 +60,33 @@ const SHOP_STATUS_RE =
 const SHOP_AMOUNT_LINE_RE =
 	/^(?:\$\s*[\d,]+(?:\.\d{1,2})?|[\d,]+(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|CAD))\b/i;
 
+const CARD_BLOCK_TAGS = new Set([
+	"DIV", "P", "LI", "UL", "OL", "SECTION", "ARTICLE", "HEADER", "FOOTER",
+	"H1", "H2", "H3", "H4", "H5", "H6", "TR", "TD", "TH", "TABLE", "BR", "DT", "DD",
+]);
+const CARD_HIDDEN_TAGS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
+
+// Keep inline price fragments together, but separate block-level fields.
+function cardText(node: Node): string {
+	const parts: string[] = [];
+	const walk = (current: Node): void => {
+		if (current.nodeType === 3) {
+			parts.push(current.nodeValue ?? "");
+			return;
+		}
+		const tag = current.nodeType === 1
+			? (current as Element).tagName.toUpperCase()
+			: "";
+		if (CARD_HIDDEN_TAGS.has(tag)) return;
+		const block = CARD_BLOCK_TAGS.has(tag);
+		if (block) parts.push(" ");
+		for (const child of current.childNodes) walk(child);
+		if (block) parts.push(" ");
+	};
+	walk(node);
+	return parts.join("").replace(/\s+/g, " ").trim();
+}
+
 /**
  * Legacy-parity DOM fallback for cards visible when Apollo has not hydrated
  * its order connection. This follows the prior connector's Shop link/card
@@ -85,7 +112,7 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 			link.closest<HTMLElement>(
 				'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
 			) ?? link;
-		const text = (card.textContent ?? "").replace(/\s+/g, " ").trim();
+		const text = cardText(card);
 		if (text.length < 10) continue;
 		const key = text.slice(0, 120);
 		if (seen.has(key)) continue;
