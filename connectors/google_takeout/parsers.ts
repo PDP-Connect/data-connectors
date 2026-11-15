@@ -193,47 +193,84 @@ export function buildPhotoRecord(
 	};
 }
 
-// Google Takeout sidecar naming is inconsistent across export vintages and
-// truncates long filenames (see connector-primary-reconcile-0807.md §2):
-// legacy `<file>.json`, newer `<file>.supplemental-metadata.json`, and both
-// families can be truncated mid-suffix. Exact-name matching misses real
-// sidecars, so match by longest shared prefix among candidate JSON files in
-// the same directory instead of constructing one expected path.
+// Match complete names first; only a unique directory-wide truncated stem
+// may fall back to prefix matching. Edited variants use an explicit suffix.
 const SIDECAR_JSON_RE = /\.json$/i;
+const SUPPLEMENTAL_SUFFIX = "supplemental-metadata";
+const DUPLICATE_MARKER_RE = /\((\d+)\)$/;
+const EDITED_SUFFIX_RE = /-edited(?=\.[^.]+$)/i;
+const EXTENSION_RE = /\.[^.]+$/;
 
 /**
- * Pick the best-matching sidecar JSON filename for a media file from the
- * list of JSON filenames present in the same directory. Returns null when
- * no plausible candidate exists (a missing sidecar is expected, not an
- * error — see connector-primary-reconcile-0807.md §2).
+ * The media filename a sidecar describes, as far as its possibly truncated
+ * name tells: drops `.json`, a whole or cut-off `.supplemental-metadata`,
+ * and moves a duplicate marker back before the extension
+ * (`IMG.jpg(1).json` and `IMG.jpg.supplemental-metadata(1).json` describe
+ * `IMG(1).jpg`).
  */
+function sidecarStem(candidate: string): string {
+	let stem = candidate.replace(SIDECAR_JSON_RE, "");
+	const marker = DUPLICATE_MARKER_RE.exec(stem);
+	stem = stem.replace(DUPLICATE_MARKER_RE, "");
+	const dot = stem.lastIndexOf(".");
+	const tail = dot >= 0 ? stem.slice(dot + 1).toLowerCase() : "";
+	if (tail && SUPPLEMENTAL_SUFFIX.startsWith(tail)) {
+		stem = stem.slice(0, dot);
+	}
+	if (marker) {
+		const ext = EXTENSION_RE.exec(stem)?.[0] ?? "";
+		stem = `${stem.slice(0, stem.length - ext.length)}(${marker[1]})${ext}`;
+	}
+	return stem;
+}
+
+/** Same name, or same name without its extension (a Live Photo's HEIC and MP4). */
+function describesMedia(stem: string, name: string): boolean {
+	const base = name.replace(EDITED_SUFFIX_RE, "");
+	return base === stem || base.replace(EXTENSION_RE, "") === stem;
+}
+
+export function sidecarMediaMatches(
+	candidate: string,
+	mediaFilenamesInDir: readonly string[],
+): { matches: string[]; ambiguousCount: number } {
+	if (!SIDECAR_JSON_RE.test(candidate)) {
+		return { matches: [], ambiguousCount: 0 };
+	}
+	const stem = sidecarStem(candidate);
+	if (!stem) {
+		return { matches: [], ambiguousCount: 0 };
+	}
+	const exact = mediaFilenamesInDir.filter((name) =>
+		describesMedia(stem, name),
+	);
+	if (exact.length > 0) {
+		return { matches: exact, ambiguousCount: 0 };
+	}
+	const matches = mediaFilenamesInDir.filter((name) => name.startsWith(stem));
+	return matches.length > 1
+		? { matches: [], ambiguousCount: matches.length }
+		: { matches, ambiguousCount: 0 };
+}
+
+/** Directory callers must supply the complete media list to reject ambiguity. */
 export function matchSidecarFilename(
 	mediaFilename: string,
 	jsonFilenamesInDir: readonly string[],
+	mediaFilenamesInDir: readonly string[] = [mediaFilename],
 ): string | null {
 	const exact = `${mediaFilename}.json`;
 	if (jsonFilenamesInDir.includes(exact)) {
 		return exact;
 	}
-	// Truncated `.supplemental-metadata.json` variants and duplicate-marker
-	// reordering (`file.jpg(1).json`) both preserve the media file's own
-	// extension as a substring near the start of the sidecar name. Match the
-	// sidecar whose name starts with the longest prefix of `mediaFilename`.
 	let best: string | null = null;
-	let bestLen = 0;
 	for (const candidate of jsonFilenamesInDir) {
-		if (!SIDECAR_JSON_RE.test(candidate)) {
-			continue;
-		}
-		let shared = 0;
-		const max = Math.min(mediaFilename.length, candidate.length);
-		while (shared < max && mediaFilename[shared] === candidate[shared]) {
-			shared += 1;
-		}
-		// Require a meaningful prefix match (not just a shared leading char) to
-		// avoid pairing unrelated files that happen to start the same way.
-		if (shared > bestLen && shared >= Math.min(8, mediaFilename.length)) {
-			bestLen = shared;
+		if (
+			sidecarMediaMatches(candidate, mediaFilenamesInDir).matches.includes(
+				mediaFilename,
+			) &&
+			(best === null || candidate.length > best.length)
+		) {
 			best = candidate;
 		}
 	}

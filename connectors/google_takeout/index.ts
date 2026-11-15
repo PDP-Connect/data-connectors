@@ -41,6 +41,7 @@ import {
 	matchSidecarFilename,
 	photoEventTimeMs,
 	readJsonIf,
+	sidecarMediaMatches,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
@@ -332,9 +333,14 @@ interface DiscoveredPhotoFile {
 async function resolveSidecarMetadata(
 	file: DiscoveredPhotoFile,
 	jsonFilenamesByDir: Map<string, string[]>,
+	mediaFilenamesInDir: readonly string[],
 ): Promise<PhotoMetadataFile | null> {
 	const jsonInDir = jsonFilenamesByDir.get(file.dir) ?? [];
-	const sidecarName = matchSidecarFilename(file.name, jsonInDir);
+	const sidecarName = matchSidecarFilename(
+		file.name,
+		jsonInDir,
+		mediaFilenamesInDir,
+	);
 	if (!sidecarName) {
 		return null;
 	}
@@ -373,9 +379,14 @@ async function resolvePhotoEventTimeMs(
 async function buildPhotoRecordForFile(
 	file: DiscoveredPhotoFile,
 	jsonFilenamesByDir: Map<string, string[]>,
+	mediaFilenamesInDir: readonly string[],
 	maxBytes: number,
 ): Promise<PhotoRecord | null> {
-	const metadata = await resolveSidecarMetadata(file, jsonFilenamesByDir);
+	const metadata = await resolveSidecarMetadata(
+		file,
+		jsonFilenamesByDir,
+		mediaFilenamesInDir,
+	);
 	const tsMs = await resolvePhotoEventTimeMs(file, metadata);
 	if (tsMs === null) {
 		return null;
@@ -422,6 +433,9 @@ async function emitPhotos(
 		const record = await buildPhotoRecordForFile(
 			file,
 			jsonFilenamesByDir,
+			mediaEntries
+				.filter((entry) => entry.dir === file.dir)
+				.map((entry) => entry.name),
 			maxBytes,
 		);
 		if (!record) {
@@ -490,6 +504,25 @@ async function discoverPhotoFiles(photosDir: string): Promise<{
 		}
 	}
 
+	// Resolve ambiguity once per directory/sidecar, never once per photo.
+	for (const [dir, candidates] of jsonFilenamesByDir) {
+		const mediaNames = mediaEntries
+			.filter((file) => file.dir === dir)
+			.map((file) => file.name);
+		jsonFilenamesByDir.set(
+			dir,
+			candidates.filter((candidate) => {
+				const { ambiguousCount } = sidecarMediaMatches(candidate, mediaNames);
+				if (ambiguousCount > 0) {
+					connectorDiagnostic("google_takeout", "ambiguous_sidecar", {
+						matching_media: ambiguousCount,
+					});
+					return false;
+				}
+				return true;
+			}),
+		);
+	}
 	return { jsonFilenamesByDir, mediaEntries, unsupportedCount };
 }
 

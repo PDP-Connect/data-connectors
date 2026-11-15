@@ -229,6 +229,70 @@ test("photos stream discovers files, matches sidecars, and skips unsupported fil
 	}
 });
 
+test("ambiguous burst metadata is ignored without breaking unique or edited matches", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-burst-"));
+	try {
+		const dir = join(importRoot, "Photos");
+		await mkdir(dir, { recursive: true });
+		const names = [
+			"IMG_20240101_120000_001.jpg",
+			"IMG_20240101_120000_002.jpg",
+		];
+		await Promise.all(
+			names.map((name, i) =>
+				writeFile(join(dir, name), i === 0 ? TINY_JPEG_A : TINY_JPEG_B),
+			),
+		);
+		const timestamp = "2001-01-01T00:00:00.000Z";
+		await Promise.all(
+			(
+				[
+					["IMG_20240101_120000_.json", "Wrong burst metadata"],
+					["unique_long.json", "Unique"],
+					["original.jpg.json", "Original"],
+				] as const
+			).map(([sidecar, title]) =>
+				writeFile(
+					join(dir, sidecar),
+					JSON.stringify({ title, photoTakenTime: { timestamp } }),
+				),
+			),
+		);
+		await writeFile(
+			join(dir, "unique_long_filename.jpg"),
+			Buffer.from("unique"),
+		);
+		await writeFile(join(dir, "original-edited.jpg"), Buffer.from("edited"));
+		const { photos, stderr } = await runPhotosImport(importRoot);
+		assert.equal(photos.length, 4);
+		for (const name of names) {
+			const photo = photos.find((p) => p.filename === name);
+			assert.ok(photo);
+			assert.equal(photo.title, null);
+			assert.notEqual(photo.event_time, timestamp);
+		}
+		for (const [filename, title] of [
+			["unique_long_filename.jpg", "Unique"],
+			["original-edited.jpg", "Original"],
+		]) {
+			const photo = photos.find((p) => p.filename === filename);
+			assert.ok(photo);
+			assert.equal(photo.title, title);
+			assert.equal(photo.event_time, timestamp);
+		}
+		const diagnostics = stderr
+			.split("\n")
+			.filter((line) => line.includes("ambiguous_sidecar"));
+		assert.equal(diagnostics.length, 1);
+		assert.equal(
+			diagnostics[0],
+			'[google_takeout-diagnostic] ambiguous_sidecar {"matching_media":2}',
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
 test("requested missing Takeout stores emit redacted coverage progress", async () => {
 	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-missing-"));
 	try {

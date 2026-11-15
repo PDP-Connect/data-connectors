@@ -217,6 +217,58 @@ test("matchSidecarFilename does not pair unrelated short-prefix files", () => {
 	assert.equal(match, null);
 });
 
+test("matchSidecarFilename maps a duplicate-marker sidecar to its numbered copy", () => {
+	const media = ["IMG_1234.jpg", "IMG_1234(1).jpg"];
+	const sidecars = ["IMG_1234.jpg.json", "IMG_1234.jpg(1).json"];
+	assert.equal(
+		matchSidecarFilename("IMG_1234(1).jpg", sidecars, media),
+		"IMG_1234.jpg(1).json",
+	);
+	assert.equal(
+		matchSidecarFilename("IMG_1234.jpg", sidecars, media),
+		"IMG_1234.jpg.json",
+	);
+	assert.equal(
+		matchSidecarFilename(
+			"IMG_1234(1).jpg",
+			["IMG_1234.jpg.supplemental-metadata(1).json"],
+			media,
+		),
+		"IMG_1234.jpg.supplemental-metadata(1).json",
+	);
+});
+
+test("matchSidecarFilename strips a supplemental-metadata suffix cut off at any length", () => {
+	const name = "a_very_long_photo_filename_from_camera_x.jpg";
+	assert.equal(
+		matchSidecarFilename(name, [`${name}.suppl.json`], [name]),
+		`${name}.suppl.json`,
+	);
+	assert.equal(
+		matchSidecarFilename(name, [`${name}.s.json`], [name]),
+		`${name}.s.json`,
+	);
+});
+
+test("matchSidecarFilename gives an extensionless sidecar to both halves of a Live Photo", () => {
+	const media = ["IMG_1234.HEIC", "IMG_1234.MP4"];
+	assert.equal(
+		matchSidecarFilename("IMG_1234.HEIC", ["IMG_1234.json"], media),
+		"IMG_1234.json",
+	);
+	assert.equal(
+		matchSidecarFilename("IMG_1234.MP4", ["IMG_1234.json"], media),
+		"IMG_1234.json",
+	);
+});
+
+test("matchSidecarFilename refuses a truncated stem shared by burst siblings", () => {
+	const media = ["IMG_20240101_120000_001.jpg", "IMG_20240101_120000_002.jpg"];
+	const sidecars = ["IMG_20240101_120000_0.json"];
+	assert.equal(matchSidecarFilename(media[0] as string, sidecars, media), null);
+	assert.equal(matchSidecarFilename(media[1] as string, sidecars, media), null);
+});
+
 test("photoEventTimeMs prefers photoTakenTime over creationTime", () => {
 	const meta: PhotoMetadataFile = {
 		photoTakenTime: { timestamp: "2024-06-05T06:30:00Z" },
