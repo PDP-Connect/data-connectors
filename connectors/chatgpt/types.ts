@@ -177,8 +177,8 @@ export interface RawMemoryEntry {
 	id?: string;
 	name?: string;
 	type?: string | null;
-	updated_at?: string | null;
-	updatedAt?: string | null;
+	updated_at?: string | number | null;
+	updatedAt?: string | number | null;
 }
 
 export interface RawGizmoDisplay {

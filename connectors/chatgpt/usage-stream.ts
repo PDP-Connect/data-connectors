@@ -425,7 +425,7 @@ async function readSharedIds(
 				"shared_conversation_ids",
 			),
 		);
-		if (r.kind === "status" && r.status === 404) return ids;
+		if (r.kind === "status" && r.status === 404) return null;
 		if (r.kind !== "ok") return null;
 		const j = r.json as { items?: unknown; total?: unknown } | null;
 		const items = Array.isArray(j?.items) ? j.items : null;

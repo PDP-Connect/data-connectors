@@ -637,8 +637,7 @@ export function extractMessageWithBlob(
 			parent_id: node.parent ?? null,
 			children_ids: node.children ?? [],
 			role: m.author?.role ?? null,
-			content:
-				oversize || raw === null ? null : encodePdppSafeText(raw),
+			content: oversize || raw === null ? null : encodePdppSafeText(raw),
 			non_string_parts: extractNonStringParts(m.content),
 			content_type: m.content?.content_type ?? null,
 			model_slug: m.metadata?.model_slug ?? null,
@@ -718,7 +717,11 @@ export function buildMemoryRecord(m: RawMemoryEntry): RecordData | null {
 			tsToIso(m.created_at) ??
 			tsToIso(m.createdAt) ??
 			tsToIso(m.created_timestamp),
-		updated_at: m.updated_at || m.updatedAt || null,
+		// Epoch seconds become ISO; a string passes through unchanged, as before.
+		updated_at:
+			typeof (m.updated_at ?? m.updatedAt) === "number"
+				? tsToIso(m.updated_at ?? m.updatedAt)
+				: m.updated_at || m.updatedAt || null,
 		type: m.type || null,
 	};
 }

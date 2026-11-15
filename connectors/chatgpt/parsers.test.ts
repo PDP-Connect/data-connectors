@@ -2160,3 +2160,19 @@ test("encodeToolCallStrings: array holes stay holes and an explicit undefined st
 	assert.equal(Object.hasOwn(encodedUndefined, 0), true);
 	assert.equal(encodedUndefined[0], undefined);
 });
+
+test("memory updated_at epoch seconds normalize to a schema-valid ISO timestamp", () => {
+	for (const updated of [
+		{ updated_at: 1_700_000_000 },
+		{ updatedAt: 1_700_000_000 },
+	]) {
+		const record = buildMemoryRecord({
+			id: "memory-timestamp",
+			content: "Synthetic memory",
+			...updated,
+		});
+		assert.ok(record);
+		assert.equal(record.updated_at, "2023-11-14T22:13:20.000Z");
+		assert.equal(validateRecord("memories", record).ok, true);
+	}
+});
