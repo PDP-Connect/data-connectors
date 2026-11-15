@@ -312,7 +312,7 @@ export function deriveGroups(
 	for (const { card, uid } of contacts) {
 		for (const category of categoriesOf(card)) {
 			const group = membersByGroup.get(category) ?? { memberUids: [] };
-			group.memberUids.push(uid);
+			group.memberUids.push(card.uid ?? uid);
 			membersByGroup.set(category, group);
 		}
 	}
@@ -793,6 +793,14 @@ export async function collectAddressBook(
 		// partial, where dropping it would fabricate a complete claim.
 		resourcesEnumerated += unfetched;
 		unparseableResources += unfetched;
+		// Match full-query cursor pruning, never a delta or incomplete scan.
+		if (
+			fullBoundary &&
+			requested.has("contacts") &&
+			unparseableResources === 0
+		) {
+			entityCursor.dropUnseenIds();
+		}
 		for (const deletedHref of resolvedSyncResult.deletedHrefs) {
 			if (requested.has("contacts")) {
 				await emitRecord("contacts", contactTombstone(book.url, deletedHref));

@@ -13,6 +13,57 @@ import {
 } from "./discovery.ts";
 import { startFakeCardDavServer } from "./test-carddav-server.ts";
 
+test("discoverCardDav rejects cleartext origins before any request", async () => {
+	await Promise.all(
+		["http://example.com", "ftp://127.0.0.1", "http://localhost.example"].map(
+			async (originUrl) => {
+				let calls = 0;
+				await assert.rejects(
+					discoverCardDav({
+						originUrl,
+						authHeader: "Basic fixture",
+						fetchImpl: () => {
+							calls += 1;
+							return Promise.resolve(syntheticResponse(401, {}));
+						},
+					}),
+					(err: unknown) =>
+						err instanceof CardDavDiscoveryError &&
+						err.message === "carddav_discovery_insecure_origin",
+				);
+				assert.equal(calls, 0);
+			},
+		),
+	);
+});
+
+test("discoverCardDav allows HTTPS and HTTP loopback bootstrap", async () => {
+	await Promise.all(
+		[
+			"https://example.com",
+			"http://127.0.0.1",
+			"http://localhost",
+			"http://[::1]",
+		].map(async (originUrl) => {
+			let calls = 0;
+			await assert.rejects(
+				discoverCardDav({
+					originUrl,
+					authHeader: "Basic fixture",
+					fetchImpl: () => {
+						calls += 1;
+						return Promise.resolve(syntheticResponse(401, {}));
+					},
+				}),
+				(err: unknown) =>
+					err instanceof CardDavDiscoveryError &&
+					err.message === "carddav_auth_rejected",
+			);
+			assert.equal(calls, 1);
+		}),
+	);
+});
+
 /** Build a synthetic `DiscoveryFetchResponse` for tests that intercept a
  *  hop instead of hitting the fake network server — matches the real
  *  `body: ReadableStream` shape `readBoundedText` consumes. */

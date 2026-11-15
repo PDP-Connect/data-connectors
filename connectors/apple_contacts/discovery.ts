@@ -433,7 +433,17 @@ export async function discoverCardDav(args: {
 	originUrl: string;
 }): Promise<CardDavDiscoveryResult> {
 	const { authHeader, fetchImpl, originUrl } = args;
-	const startOrigin = originOf(originUrl);
+	const origin = new URL(originUrl);
+	const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
+		origin.hostname,
+	);
+	if (
+		origin.protocol !== "https:" &&
+		!(origin.protocol === "http:" && loopback)
+	) {
+		throw new CardDavDiscoveryError("carddav_discovery_insecure_origin");
+	}
+	const startOrigin = origin.origin;
 	const trustedOrigins: string[] = [startOrigin];
 	const visitedOrigins: string[] = [];
 

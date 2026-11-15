@@ -134,3 +134,109 @@ test("collectAddressBook: legacy token without an initialization boundary re-enu
 		"the initialized follow-up must resume its quiet token",
 	);
 });
+async function collectFixture(
+	state: Record<string, unknown>,
+	fetchImpl: DiscoveryFetch,
+	requested = new Map([["contacts", {}]]),
+) {
+	const newState: Record<string, unknown> = structuredClone(state);
+	const records: Array<{ stream: string; data: RecordData }> = [];
+	const result = await collectAddressBook({
+		authHeader: "Basic fixture",
+		book: { url: BOOK_URL },
+		bookCursor: openFingerprintCursor({ fingerprints: {} }),
+		collectionMode: undefined,
+		emit: () => Promise.resolve(),
+		emitRecord: (stream, data) => {
+			records.push({ stream, data });
+			return Promise.resolve();
+		},
+		fetchImpl,
+		newState,
+		progress: () => Promise.resolve(),
+		requested,
+		state,
+		trustedOrigins: ["https://contacts.example"],
+	});
+	return { newState, records, result };
+}
+
+function fullInventory(contacts: typeof CONTACTS): string {
+	return `<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">${contacts.map(vcardResponse).join("")}<D:sync-token>fixture-next</D:sync-token></D:multistatus>`;
+}
+
+test("full stale-token boundary prunes cursor inventory, quiet delta retains it", async () => {
+	const initial = await collectFixture({}, () =>
+		Promise.resolve(response(fullInventory(CONTACTS))),
+	);
+	const quiet = await collectFixture(initial.newState, () =>
+		Promise.resolve(response(quietSyncResponse)),
+	);
+	let requests = 0;
+	const resync = await collectFixture(initial.newState, () => {
+		requests += 1;
+		return Promise.resolve(
+			requests === 1
+				? { ...response(""), status: 507 }
+				: response(fullInventory(CONTACTS.slice(0, 1))),
+		);
+	});
+	const fingerprints = (value: Record<string, unknown>) =>
+		(
+			value.contacts as Record<string, { fingerprints: Record<string, string> }>
+		)[BOOK_KEY]?.fingerprints ?? {};
+	assert.equal(requests, 2);
+	assert.equal(resync.result.contactsBoundaryEstablished, true);
+	assert.equal(Object.keys(fingerprints(initial.newState)).length, 3);
+	assert.equal(Object.keys(fingerprints(quiet.newState)).length, 3);
+	assert.equal(Object.keys(fingerprints(resync.newState)).length, 1);
+	assert.ok(
+		(Object.keys(fingerprints(resync.newState))[0] ?? "").includes("alice.vcf"),
+	);
+	let fallbackRequests = 0;
+	const fallback = await collectFixture(initial.newState, () => {
+		fallbackRequests += 1;
+		return Promise.resolve(
+			fallbackRequests === 1
+				? { ...response(""), status: 501 }
+				: response(fullInventory(CONTACTS.slice(0, 1))),
+		);
+	});
+	assert.equal(fallbackRequests, 2);
+	assert.deepEqual(
+		fingerprints(resync.newState),
+		fingerprints(fallback.newState),
+	);
+	assert.equal(
+		resync.records.filter(({ data }) => data.deleted === true).length,
+		0,
+		"like the fallback, pruning changes STATE, not explicit tombstone emission",
+	);
+});
+
+test("CATEGORIES group member UIDs match emitted contact UIDs", async () => {
+	const xml = fullInventory(CONTACTS).replaceAll(
+		"END:VCARD",
+		"CATEGORIES:Friends\r\nEND:VCARD",
+	);
+	const collected = await collectFixture(
+		{},
+		() => Promise.resolve(response(xml)),
+		new Map([
+			["contacts", {}],
+			["contact_groups", {}],
+		]),
+	);
+	const contacts = collected.records.filter(
+		({ stream }) => stream === "contacts",
+	);
+	const groups = collected.records.filter(
+		({ stream }) => stream === "contact_groups",
+	);
+	assert.equal(groups.length, 1);
+	assert.deepEqual(
+		groups[0]?.data.member_uids,
+		contacts.map(({ data }) => data.uid),
+	);
+	assert.deepEqual(groups[0]?.data.member_uids, ["alice", "bob", "carol"]);
+});
