@@ -108,9 +108,9 @@ import {
 	GROUPME_ATTACHMENTS_SHORTFALL_DRIVER,
 	GROUPME_ATTACHMENTS_WITHHELD_DRIVER,
 	GROUPME_HIGH_VOLUME_DRIVER,
-	REDDIT_EXCLUDED_DRIVER,
 	GROUPME_ZERO_DIRECT_INVENTORY_DRIVER,
 	KNOWN_UNEXERCISED_COVERAGE,
+	REDDIT_EXCLUDED_DRIVER,
 	REDDIT_MALFORMED_DRIVER,
 	YNAB_ACCOUNT_STATS_TWO_BUDGETS_ONE_MALFORMED_DRIVER,
 	YNAB_ACCOUNT_STATS_ZERO_BUDGETS_DRIVER,
@@ -254,15 +254,18 @@ function allTargetConnectorKeys(): string[] {
 }
 
 /** Full inventory: every (connector, proof-required stream) pair across the roster. */
-function allRequiredStreamPairs(): Array<{
+function allRequiredStreamPairs(
+	read: (connectorKey: string) => ConnectorManifest | null = readManifest,
+	connectorKeys: readonly string[] = allTargetConnectorKeys(),
+): Array<{
 	connectorKey: string;
 	stream: string;
 }> {
 	const pairs: Array<{ connectorKey: string; stream: string }> = [];
-	for (const connectorKey of allTargetConnectorKeys()) {
-		const manifest = readManifest(connectorKey);
+	for (const connectorKey of connectorKeys) {
+		const manifest = read(connectorKey);
 		if (!manifest) {
-			continue;
+			throw new Error(`manifest missing for roster connector ${connectorKey}`);
 		}
 		for (const stream of proofRequiredStreams(manifest)) {
 			pairs.push({ connectorKey, stream });
@@ -430,11 +433,7 @@ async function runAndEvaluate(
 	}
 	const manifest = readManifest(manifestKey);
 	assert.ok(manifest, `manifest missing for ${manifestKey}`);
-	const envelope = deriveStreamEnvelope(
-		result.messages,
-		stream,
-		result.skippedRecords,
-	);
+	const envelope = envelopeForDriverResult(result, stream);
 	const verdict = evaluateStreamCoherence(
 		envelope,
 		proofDeclarationFor(manifest, stream),
@@ -490,11 +489,9 @@ test("verified-coverage conformance: every exercised required stream proves cove
 			continue;
 		}
 
-		const done = doneMessage(driverResult.messages);
-		if (done?.status === "failed") {
-			failures.push(
-				`${label}: driver's DONE reported status=failed — a registered happy-path fixture must succeed, not silently exempt this stream`,
-			);
+		const doneFailure = failedDoneFailure(driverResult, label);
+		if (doneFailure !== null) {
+			failures.push(doneFailure);
 			continue;
 		}
 
@@ -954,12 +951,19 @@ test("mutation: a driver's genuinely failed DONE (Apple Contacts, rejected crede
 		"a rejected-credential run's real DONE must report failed",
 	);
 	assert.equal(done?.error?.code, "auth_failed");
-	// The aggregate gate's own failed-DONE check (see the main test above)
-	// is what actually turns this into a hard failure for
-	// address_books/contacts/contact_groups; this pin exists so that check
-	// has a permanent, real-production counterexample to run against,
-	// independent of whether Apple Contacts' happy-path fixture currently
-	// passes.
+	const failures = ["address_books", "contacts", "contact_groups"].map(
+		(stream) => failedDoneFailure(result, `apple_contacts.${stream}`),
+	);
+	for (const [index, stream] of [
+		"address_books",
+		"contacts",
+		"contact_groups",
+	].entries()) {
+		assert.equal(
+			failures[index],
+			`apple_contacts.${stream}: driver's DONE reported status=failed — a registered happy-path fixture must succeed, not silently exempt this stream`,
+		);
+	}
 });
 
 // ─── singleton_presence: YNAB `account_stats` ──────────────────────────────
@@ -1298,5 +1302,66 @@ test("count boundary: an explicit in-process count is kept, including an explici
 			.collected,
 		1,
 		"a count for a different stream does not count for this one",
+	);
+});
+
+/** Shared aggregate failure: a failed run cannot exempt any covered stream. */
+function failedDoneFailure(
+	result: Extract<DriverResult, { exercised: true }>,
+	label: string,
+): string | null {
+	return doneMessage(result.messages)?.status === "failed"
+		? `${label}: driver's DONE reported status=failed — a registered happy-path fixture must succeed, not silently exempt this stream`
+		: null;
+}
+
+test("mutation: a missing roster manifest fails required-stream enumeration", () => {
+	const key = allTargetConnectorKeys()[0];
+	assert.ok(key, "nonempty real roster");
+	const readKeys: string[] = [];
+	assert.throws(
+		() =>
+			allRequiredStreamPairs(
+				(connectorKey) => {
+					readKeys.push(connectorKey);
+					return null;
+				},
+				[key],
+			),
+		(error) =>
+			error instanceof Error &&
+			error.message === `manifest missing for roster connector ${key}`,
+	);
+	assert.deepEqual(readKeys, [key]);
+	assert.deepEqual(
+		allRequiredStreamPairs(
+			() => ({
+				streams: [{ name: "items", coverage_strategy: "full_inventory" }],
+			}),
+			[key],
+		),
+		[{ connectorKey: key, stream: "items" }],
+	);
+});
+
+test("count boundary: capability pins retain driver enumeration and emitted counts", async () => {
+	const driver = CONNECTOR_DRIVERS.ynab;
+	assert.ok(driver);
+	const result: Extract<DriverResult, { exercised: true }> = {
+		exercised: true,
+		messages: [],
+		enumeratedCounts: { account_stats: 3 },
+		emittedCounts: { account_stats: 2 },
+	};
+	const actual = await runAndEvaluate(
+		{ ...driver, run: async () => result },
+		"account_stats",
+		"ynab",
+	);
+	assert.equal(actual.envelope.considered, 3);
+	assert.equal(actual.envelope.collected, 2);
+	assert.deepEqual(
+		actual.envelope,
+		envelopeForDriverResult(result, "account_stats"),
 	);
 });
