@@ -867,11 +867,12 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 	 * known id, the reloaded page must show an id of the same kind: until it
 	 * does (one kind can load before the other) the ids are read again, and if
 	 * none ever matches by kind the run ends as retryable rather than resume
-	 * under an account it could not confirm.
+	 * under an account it could not confirm. A run that began with no known
+	 * id has nothing to compare against, so it ends the same way.
 	 */
 	private async confirmSameAccount(): Promise<void> {
-		if (this.account.pn === null && this.account.lid === null) return;
-		for (let i = 0; i < this.attempts; i++) {
+		const known = this.account.pn !== null || this.account.lid !== null;
+		for (let i = 0; known && i < this.attempts; i++) {
 			const now = await readOwnAccount(this.page);
 			if (isOtherAccount(this.account, now)) {
 				throw authFailure(

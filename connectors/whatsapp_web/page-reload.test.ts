@@ -139,7 +139,12 @@ function fakeWorld(options: FakeOptions) {
 			const s = String(script);
 			if (s.includes("idOf(() => me.getMaybeMePnUser())")) {
 				accountReads += 1;
-				return Promise.resolve(options.account?.(accountReads) ?? null);
+				// One known account unless a test supplies its own reads.
+				return Promise.resolve(
+					options.account
+						? options.account(accountReads)
+						: { pn: "synthetic-pn-A", lid: null },
+				);
 			}
 			if (s.includes('"signed_in"')) {
 				sessionReads += 1;
@@ -640,6 +645,24 @@ test("an account known only by phone number before a reload and only by LID afte
 			call === 1
 				? { pn: "synthetic-pn-A", lid: null }
 				: { pn: null, lid: "synthetic-lid-B" },
+		fail: (kind, call) =>
+			kind === "groups" && call === 1 ? LOADER_GONE() : null,
+	});
+	const { harness, error } = await runCollect(world.page);
+	assert.equal(asObject(error).code, "whatsapp_web_page_reloaded");
+	assert.equal(asObject(error).retryable, true);
+	assert.equal(world.calls.groups, 1, "not retried");
+	assert.equal(
+		harness.emitted.some((e) => e.stream === "groups"),
+		false,
+	);
+});
+
+test("a run that began with no readable account does not resume after a reload, so the run ends retryable without retrying the read", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		account: (call) =>
+			call === 1 ? null : { pn: "synthetic-pn-B", lid: null },
 		fail: (kind, call) =>
 			kind === "groups" && call === 1 ? LOADER_GONE() : null,
 	});
