@@ -28,6 +28,7 @@ import type {
 export const API_BASE = "https://api.github.com";
 const NEXT_LINK_PATTERN = /<([^>]+)>; rel="next"/;
 const BODY_MAX_CHARS = 20_000;
+const TRAILING_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
 const GIST_FILES_CAP = 10;
 
 // ─── Link header parsing ────────────────────────────────────────────────
@@ -95,7 +96,9 @@ export function repoFullFromUrl(url: string | null | undefined): string | null {
 }
 
 export function truncateBody(body: string | null | undefined): string | null {
-	return typeof body === "string" ? body.slice(0, BODY_MAX_CHARS) : null;
+	return typeof body === "string"
+		? body.slice(0, BODY_MAX_CHARS).replace(TRAILING_HIGH_SURROGATE, "")
+		: null;
 }
 
 // ─── Record builders ────────────────────────────────────────────────────
@@ -243,7 +246,11 @@ export function issueRecord(it: GitHubIssue): Record<string, unknown> {
 		closed_at: it.closed_at ?? null,
 		is_pull_request: Boolean(it.pull_request),
 		pull_request_url: it.pull_request?.html_url ?? null,
-		draft: it.pull_request ? Boolean(it.draft) : null,
+		draft: it.pull_request
+			? typeof it.draft === "boolean"
+				? it.draft
+				: null
+			: null,
 	};
 }
 
@@ -451,6 +458,11 @@ export function laterIso(
 	}
 	if (!b) {
 		return a;
+	}
+	const aTime = Date.parse(a);
+	const bTime = Date.parse(b);
+	if (!Number.isNaN(aTime) && !Number.isNaN(bTime)) {
+		return aTime > bTime ? a : b;
 	}
 	return a > b ? a : b;
 }
