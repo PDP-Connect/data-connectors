@@ -23,33 +23,21 @@
  * makes no performance claim about it, only a correctness one (see
  * manifests/imessage.json's incremental:false on both streams).
  *
- * Attachment bytes are only ever read from inside a trusted root directory
- * (default ~/Library/Messages/Attachments, override via
- * IMESSAGE_ATTACHMENTS_ROOT — same override pattern as IMESSAGE_DB_PATH).
- * Every candidate path is canonicalized and verified to resolve inside that
- * root before any read; `../` traversal, an absolute path outside the root,
- * and a symlink that escapes the root are all rejected the same way a
- * missing file is: hydration_status="missing", no local path in the
- * diagnostic. This connector never reads attachment bytes from outside that
- * root, no matter what chat.db's attachment.filename column claims.
+ * Attachment paths are canonicalized and checked against the trusted root
+ * (default ~/Library/Messages/Attachments, override IMESSAGE_ATTACHMENTS_ROOT).
+ * Missing paths and paths resolving outside that root fail closed.
  *
- * That canonicalize-then-verify check and the eventual read are two
- * separate syscalls with a window between them (check-then-use / TOCTOU):
- * something with local write access to the Attachments tree could in
- * principle swap the final path component for an escaping symlink after
- * the check passes but before the read happens. readAttachmentFileSync()
- * closes that window by opening the already-canonical path with
- * O_NOFOLLOW and doing every subsequent operation (fstat, byte-cap check,
- * read) through that single fd — the kernel resolves the name to an inode
- * exactly once, and a symlink swapped in after the check causes the open
- * itself to fail rather than being silently followed. macOS (this
- * connector's only supported platform) provides O_NOFOLLOW unconditionally.
- * readAttachmentFileSync is exported (alongside resolveMaxAttachmentBytes
- * and resolveAttachmentsRoot, the existing pattern for this module's
- * independently-testable internals) specifically so a test can call this
- * exact primitive directly against a final-component symlink and assert
- * O_NOFOLLOW is what rejects it — no env-var backdoor that mutates a real
- * user's filesystem, no timing race, no source-text inspection.
+ * O_NOFOLLOW rejects a symlink at the final component only, not at intermediate
+ * directories. We stat the checked canonical path before opening, then compare
+ * its device/inode identity with fstat of the opened fd before reading bytes.
+ * Mismatch or stat failure closes the fd and returns a generic missing result.
+ * Subsequent size checks and reads use that same fd.
+ *
+ * These separate path operations are NOT atomic confinement: a writer able to
+ * replace intermediate directories before both stat and open can defeat the
+ * comparison. This is best-effort replacement detection, not an openat-style
+ * guarantee against a concurrently hostile Attachments tree. No raw local path
+ * is included in the mismatch diagnostic. macOS provides O_NOFOLLOW.
  *
  * `chat.db`'s schema (message/handle/chat/chat_message_join/
  * chat_handle_join/attachment/message_attachment_join tables) is entirely
@@ -68,6 +56,7 @@ import {
 	openSync,
 	readSync,
 	realpathSync,
+	statSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, sep } from "node:path";
@@ -121,6 +110,8 @@ const APPLE_EPOCH_SEC = 978_307_200;
 const APPLE_NANOS_THRESHOLD = 1e10;
 const APPLE_NANOS_DIVISOR = 1e9;
 const MS_PER_SEC = 1000;
+// Replay delayed iCloud sync/restore rows; id-keyed upserts absorb repeats.
+const MESSAGE_LOOKBACK_SECONDS = 7 * 24 * 60 * 60;
 // Messages are a lightweight row scan (no I/O beyond the SQLite read), so a
 // wide interval keeps PROGRESS noise low on large histories. Attachments
 // each do a stat + read + network blob upload — much more expensive per
@@ -278,7 +269,13 @@ function queryMessageRows(
         ORDER BY m.date ASC
       `,
 		)
-		.iterate(since) as IterableIterator<MessageRow>;
+		.iterate(
+			since > 0
+				? since -
+						MESSAGE_LOOKBACK_SECONDS *
+							(since > APPLE_NANOS_THRESHOLD ? APPLE_NANOS_DIVISOR : 1)
+				: since,
+		) as IterableIterator<MessageRow>;
 }
 
 // One row per (chat, handle) membership pair — NOT one row per message, so
@@ -489,25 +486,24 @@ function missingAttachmentResult(): AttachmentHydrationResult {
 	};
 }
 
-// Bounded local read with the check-then-read (TOCTOU) window closed: the
-// caller (resolveAttachmentHydration) has already canonicalized `localPath`
-// via realpathSync and verified it resolves inside the trusted root — but
-// between that check and any subsequent open, an attacker with local write
-// access to the Attachments tree could swap the final path component for a
-// symlink pointing outside the root (classic check-then-use race). Opening
-// with O_NOFOLLOW closes that window for the final component: if it has
-// become a symlink by the time this call runs, the open itself fails
-// (ELOOP) instead of silently following it. Every subsequent operation
-// (fstat, byte-cap check, read) happens through the SAME fd, so there is no
-// second path-based lookup left to race — the kernel resolved the name to
-// an inode exactly once. macOS (this connector's only supported platform)
-// supports O_NOFOLLOW; this primitive is not conditionally guarded.
+// Compare the stat captured before open with the opened descriptor, before
+// any bytes are read. This detects replacement between those observations,
+// but does not make path resolution atomic (see the module header).
+export function sameAttachmentIdentity(
+	expected: { dev: number; ino: number },
+	actual: { dev: number; ino: number },
+): boolean {
+	return expected.dev === actual.dev && expected.ino === actual.ino;
+}
+
 export function readAttachmentFileSync(
 	localPath: string,
 	maxBytes: number,
 ): AttachmentHydrationResult {
 	let fd: number;
+	let expected: { dev: number; ino: number };
 	try {
+		expected = statSync(localPath);
 		fd = openSync(localPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
 	} catch {
 		return missingAttachmentResult();
@@ -515,19 +511,13 @@ export function readAttachmentFileSync(
 	try {
 		let size: number;
 		try {
-			({ size } = fstatSync(fd));
-		} catch (err) {
-			return {
-				blobRef: null,
-				bytes: null,
-				contentSha256: null,
-				hydrationError:
-					err instanceof Error
-						? err.message
-						: "Failed to stat attachment file.",
-				hydrationStatus: "failed",
-				sizeBytes: null,
-			};
+			const actual = fstatSync(fd);
+			if (!sameAttachmentIdentity(expected, actual)) {
+				return missingAttachmentResult();
+			}
+			size = actual.size;
+		} catch {
+			return missingAttachmentResult();
 		}
 		if (size > maxBytes) {
 			return {

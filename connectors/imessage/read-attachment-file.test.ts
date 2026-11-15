@@ -31,6 +31,7 @@ import test from "node:test";
 import {
 	DEFAULT_MAX_ATTACHMENT_BYTES,
 	readAttachmentFileSync,
+	sameAttachmentIdentity,
 } from "./index.ts";
 
 test("readAttachmentFileSync rejects a final-component symlink (O_NOFOLLOW is the exercised authority)", async () => {
@@ -114,6 +115,13 @@ test("readAttachmentFileSync hydrates a real file nested several directories dee
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
+});
+
+test("sameAttachmentIdentity rejects either device or inode mismatch", () => {
+	const expected = { dev: 7, ino: 19 };
+	assert.equal(sameAttachmentIdentity(expected, { dev: 7, ino: 19 }), true);
+	assert.equal(sameAttachmentIdentity(expected, { dev: 8, ino: 19 }), false);
+	assert.equal(sameAttachmentIdentity(expected, { dev: 7, ino: 20 }), false);
 });
 
 test("readAttachmentFileSync returns missing for a genuinely absent file (no symlink involved)", () => {

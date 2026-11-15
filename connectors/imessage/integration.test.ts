@@ -15,6 +15,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
@@ -218,68 +219,95 @@ test("iMessage emits a one-to-one conversation and a monotonic date cursor", asy
 	}
 });
 
-test("iMessage cursor carries forward: a second run with prior STATE only emits newer messages", async () => {
-	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-"));
+async function assertLateMessageLookback(
+	unitsPerSecond: number,
+): Promise<void> {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-lookback-"));
 	const dbPath = join(dir, "chat.db");
-	const t0 = appleSecFromUnixMs(Date.parse("2024-06-05T13:00:00.000Z"));
+	const t0 =
+		appleSecFromUnixMs(Date.parse("2024-06-05T13:00:00.000Z")) * unitsPerSecond;
+	const day = 24 * 60 * 60 * unitsPerSecond;
 	try {
 		buildChatDbFixture(dbPath, {
 			chatIds: [1],
-			handles: [{ id: "+15551234567", rowid: 10 }],
 			messages: [
 				{
 					chatId: 1,
 					dateAppleSec: t0,
-					guid: "MSG-1",
-					handleRowid: 10,
-					isFromMe: false,
+					guid: "MSG-HEAD",
+					handleRowid: null,
+					isFromMe: true,
 					rowid: 1,
 					text: "first",
 				},
-				{
-					chatId: 1,
-					dateAppleSec: t0 + 120,
-					guid: "MSG-2",
-					handleRowid: 10,
-					isFromMe: false,
-					rowid: 2,
-					text: "second",
-				},
 			],
 		});
-
-		// First run's scope only requests message 1 by using its own date as the
-		// carried-forward cursor, then rerunning against the full fixture proves
-		// the cursor genuinely gates the query rather than the fixture happening
-		// to only contain new rows.
-		const first = await runImessage(
-			dbPath,
-			["messages"],
-			{},
-			{ messages: { last_apple_date: t0 - 1 } },
+		const first = await runImessage(dbPath, ["messages"]);
+		assert.deepEqual(
+			records(first.messages, "messages").map((m) => m.id),
+			["MSG-HEAD"],
 		);
-		const firstMsgs = records(first.messages, "messages");
-		assert.equal(firstMsgs.length, 2);
 		const firstState = states(first.messages).find(
 			(s) => s.stream === "messages",
 		);
-		assert.ok(firstState, "expected a messages STATE checkpoint");
-		const cursor = (firstState.cursor as { last_apple_date: number })
-			.last_apple_date;
-		assert.equal(cursor, t0 + 120);
+		assert.ok(firstState);
+		const cursor = firstState.cursor as { last_apple_date: number };
+		assert.equal(cursor.last_apple_date, t0);
 
+		// Insert AFTER the first collection, rather than merely seeding an old
+		// row before the cursor exists. A strict .iterate(since) loses MSG-LATE.
+		const db = new DatabaseSync(dbPath);
+		try {
+			const insert = db.prepare(
+				"INSERT INTO message (ROWID, guid, handle_id, service, is_from_me, text, date, cache_has_attachments) VALUES (?, ?, NULL, 'iMessage', 1, 'synthetic late row', ?, 0)",
+			);
+			insert.run(2, "MSG-LATE", t0 - day);
+			insert.run(3, "MSG-TOO-OLD", t0 - 8 * day);
+			insert.run(4, "MSG-BOUNDARY", t0 - 7 * day);
+		} finally {
+			db.close();
+		}
 		const second = await runImessage(
 			dbPath,
 			["messages"],
 			{},
-			{ messages: { last_apple_date: t0 } },
+			{ messages: cursor },
 		);
-		const secondMsgs = records(second.messages, "messages");
-		assert.equal(secondMsgs.length, 1);
-		assert.equal(secondMsgs[0]?.id, "MSG-2");
+		const ids = records(second.messages, "messages").map((m) => m.id);
+		assert.ok(
+			ids.includes("MSG-LATE"),
+			"one-day-late insert must be recovered",
+		);
+		assert.ok(
+			!ids.includes("MSG-TOO-OLD"),
+			"eight-day-old insert is outside the bound",
+		);
+		assert.ok(
+			!ids.includes("MSG-BOUNDARY"),
+			"the seven-day lower bound is strict",
+		);
+		assert.deepEqual(ids, ["MSG-LATE", "MSG-HEAD"]);
+		const secondState = states(second.messages).find(
+			(s) => s.stream === "messages",
+		);
+		assert.deepEqual(
+			secondState?.cursor,
+			cursor,
+			"replay cannot regress the cursor",
+		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
+}
+
+test("iMessage replays late inserts within seven days using Apple seconds", async () => {
+	await assertLateMessageLookback(1);
+});
+
+test("iMessage replays late inserts within seven days using Apple nanoseconds", {
+	todo: "node:sqlite throws on Apple nanosecond dates above Number.MAX_SAFE_INTEGER; reading them needs BigInt handling",
+}, async () => {
+	await assertLateMessageLookback(1e9);
 });
 
 test("iMessage skips a null-date message deterministically instead of stamping the run clock", async () => {
