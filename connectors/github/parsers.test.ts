@@ -800,3 +800,27 @@ test("organizationRecord: missing optional fields become null", () => {
 	assert.equal(rec.description, null);
 	assert.equal(rec.avatar_url, null);
 });
+
+test("issueRecord: missing PR draft stays unknown", () => {
+	const withoutDraft = { ...PR_FIXTURE };
+	delete withoutDraft.draft;
+	assert.equal(issueRecord(withoutDraft).draft, null);
+	assert.equal(issueRecord({ ...withoutDraft, draft: true }).draft, true);
+	assert.equal(issueRecord({ ...withoutDraft, draft: false }).draft, false);
+});
+
+test("truncateBody: does not split an emoji at the body limit", () => {
+	const prefix = "x".repeat(19_999);
+	const intact = `${"x".repeat(19_998)}😀`;
+	assert.equal(truncateBody(`${prefix}😀tail`), prefix);
+	assert.equal(truncateBody(`${intact}tail`), intact);
+});
+
+test("laterIso: compares mixed precision and preserves original strings", () => {
+	const seconds = "2026-11-15T14:00:00Z";
+	const millis = "2026-11-15T14:00:00.500Z";
+	assert.equal(laterIso(seconds, millis), millis);
+	assert.equal(laterIso(millis, seconds), millis);
+	assert.equal(laterIso("not-a-date", millis), "not-a-date");
+	assert.equal(laterIso(seconds, "not-a-date"), "not-a-date");
+});
