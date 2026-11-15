@@ -2765,14 +2765,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_contacts/index.ts",
-			line: 249,
+			line: 253,
 			column: 6,
 			category: "ordered_protocol_emission",
 			note: "ctx.emitRecord(): Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
 			path: "connectors/google_contacts/index.ts",
-			line: 376,
+			line: 381,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "ctx.emitRecord(): Collection Profile protocol emission requiring in-order delivery",

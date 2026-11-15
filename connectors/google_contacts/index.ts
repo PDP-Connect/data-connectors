@@ -198,6 +198,7 @@ interface SyncPeopleResult {
 	 *  deliberately suppressed as unchanged. A person whose record the shape
 	 *  check would reject is NOT counted, so a schema drift that silently
 	 *  drops contacts reads as a shortfall instead of a full green run. */
+	readonly rejected: boolean;
 	readonly covered: number;
 	readonly fullResync: boolean;
 	readonly nextSyncToken: string | null;
@@ -216,6 +217,7 @@ async function syncPeoplePages(args: {
 	let nextSyncToken: string | null = null;
 	let considered = 0;
 	let covered = 0;
+	let rejected = false;
 	const walk = await walkPagesWithCeiling({
 		maxPages,
 		fetchPage: async (pageNumber) => {
@@ -242,9 +244,11 @@ async function syncPeoplePages(args: {
 				// is what separates "accounted for" from "weighed and dropped".
 				// Without this the two counts could never diverge and the stream would
 				// report 100% coverage even while every contact was being rejected.
-				if (validateRecord("people", record).ok) {
-					covered += 1;
+				if (!validateRecord("people", record).ok) {
+					rejected = true;
+					continue;
 				}
+				covered += 1;
 				if (cursor.shouldEmit(record)) {
 					await ctx.emitRecord("people", record);
 				}
@@ -259,6 +263,7 @@ async function syncPeoplePages(args: {
 		nextSyncToken: walk.truncated ? (syncToken ?? null) : nextSyncToken,
 		considered: considered + (walk.truncated ? 1 : 0),
 		covered,
+		rejected,
 		truncated: walk.truncated,
 	};
 }
@@ -402,7 +407,7 @@ export async function collectGoogleContacts(
 	// A syncToken response is a PARTIAL delta; only a full resync (no
 	// syncToken, or the fallback path) may prune stale fingerprints — matching
 	// the Calendar connector's identical rule.
-	if (result.fullResync) {
+	if (result.fullResync && !result.rejected) {
 		peopleCursor.dropUnseenIds();
 	}
 	if (result.truncated) {
@@ -417,13 +422,19 @@ export async function collectGoogleContacts(
 			diagnostics: { page_limit: maxPages, unread_pages: 1 },
 		});
 	}
+	// A walk with a rejected contact keeps the previous token so the next run
+	// re-reads those changes. synced_at measures the token's age from the full
+	// listing that started it, so only a clean full listing resets it.
+	const syncToken = result.rejected
+		? state.people?.sync_token
+		: (result.nextSyncToken ?? undefined);
+	const syncedAt =
+		result.fullResync && !result.rejected
+			? new Date(now()).toISOString()
+			: state.people?.synced_at;
 	const nextPeopleState: PeopleState = {
-		...(result.nextSyncToken
-			? {
-					sync_token: result.nextSyncToken,
-					synced_at: new Date(now()).toISOString(),
-				}
-			: {}),
+		...(syncToken ? { sync_token: syncToken } : {}),
+		...(syncToken && syncedAt ? { synced_at: syncedAt } : {}),
 		fingerprints: peopleCursor.toState(),
 	};
 	await ctx.emit({ type: "STATE", stream: "people", cursor: nextPeopleState });

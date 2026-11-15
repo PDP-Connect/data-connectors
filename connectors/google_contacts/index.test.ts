@@ -778,3 +778,128 @@ test("an incremental syncToken run counts only what it enumerated, not the carry
 	);
 	assert.equal(coverage?.covered, 1, "and accounted for it");
 });
+
+test("rejected delta is replayed unchanged after validation recovers", async (t) => {
+	const { peopleSchema } = await import("./schemas.ts");
+	const person = makePerson({ resourceName: "people/retry-validation" });
+	const originalParse = peopleSchema.safeParse.bind(peopleSchema);
+	const rejectedParse = originalParse({ id: "" });
+	assert.equal(rejectedParse.success, false);
+	const validation = t.mock.method(
+		peopleSchema,
+		"safeParse",
+		() => rejectedParse,
+	);
+	const initial: GoogleContactsState = {
+		people: {
+			sync_token: "fixture-before",
+			synced_at: new Date(FIXED_NOW).toISOString(),
+			fingerprints: {},
+		},
+	};
+	const client = () =>
+		new FakePeopleClient({
+			onListConnections: (options) => {
+				assert.equal(options.syncToken, "fixture-before");
+				return {
+					people: [person],
+					nextPageToken: null,
+					nextSyncToken: "fixture-after",
+				};
+			},
+		});
+	const first = makeContext({ state: initial, streams: [{ name: "people" }] });
+	try {
+		await collectGoogleContacts(first.ctx, {
+			clientFactory: client,
+			now: () => FIXED_NOW,
+			...FAKE_TOKEN,
+		});
+	} finally {
+		validation.mock.restore();
+	}
+	const saved = lastStateCursor(
+		first.messages,
+		"people",
+	) as GoogleContactsState["people"];
+	assert.equal(saved?.sync_token, "fixture-before");
+	assert.deepEqual(saved?.fingerprints, {});
+	assert.equal(first.records.length, 0);
+	assert.equal(peopleCoverage(first.messages)?.covered, 0);
+	const second = makeContext({
+		state: { people: saved },
+		streams: [{ name: "people" }],
+	});
+	await collectGoogleContacts(second.ctx, {
+		clientFactory: client,
+		now: () => FIXED_NOW + 1000,
+		...FAKE_TOKEN,
+	});
+	assert.equal(second.records.length, 1);
+	assert.equal(second.records[0]?.data.id, person.resourceName);
+	assert.equal(
+		(
+			lastStateCursor(
+				second.messages,
+				"people",
+			) as GoogleContactsState["people"]
+		)?.sync_token,
+		"fixture-after",
+	);
+});
+
+test("daily deltas preserve full-sync age until day six refresh", async () => {
+	const day = 24 * 60 * 60 * 1000;
+	let state: GoogleContactsState = {};
+	const seen: Array<string | undefined> = [];
+	async function runDay(number: number) {
+		const client = new FakePeopleClient({
+			onListConnections: (options) => {
+				seen.push(options.syncToken);
+				return {
+					people: [],
+					nextPageToken: null,
+					nextSyncToken: "fixture-day-" + number,
+				};
+			},
+		});
+		const run = makeContext({ state, streams: [{ name: "people" }] });
+		await collectGoogleContacts(run.ctx, {
+			clientFactory: () => client,
+			now: () => FIXED_NOW + number * day,
+			...FAKE_TOKEN,
+		});
+		state = {
+			people: lastStateCursor(run.messages, "people") as NonNullable<
+				GoogleContactsState["people"]
+			>,
+		};
+	}
+	await runDay(0);
+	await runDay(1);
+	await runDay(2);
+	await runDay(3);
+	await runDay(4);
+	await runDay(5);
+	assert.equal(state.people?.synced_at, new Date(FIXED_NOW).toISOString());
+	await runDay(6);
+	assert.deepEqual(seen, [
+		undefined,
+		"fixture-day-0",
+		"fixture-day-1",
+		"fixture-day-2",
+		"fixture-day-3",
+		"fixture-day-4",
+		undefined,
+	]);
+	assert.equal(
+		state.people?.synced_at,
+		new Date(FIXED_NOW + 6 * day).toISOString(),
+	);
+	await runDay(7);
+	assert.equal(seen[7], "fixture-day-6");
+	assert.equal(
+		state.people?.synced_at,
+		new Date(FIXED_NOW + 6 * day).toISOString(),
+	);
+});
