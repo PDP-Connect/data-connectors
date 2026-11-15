@@ -916,6 +916,44 @@ test("mergeOrderItems: ambiguous detail names are retained rather than guessed",
 	);
 });
 
+
+test("mergeOrderItems: no-detail name-only observations coalesce with one ASIN in either order", () => {
+	const identified = { asin: "B000000001", name: "Milk", url: "/dp/B000000001" };
+	const nameOnly = { asin: null, name: "  MILK  ", url: null };
+	for (const items of [
+		[identified, nameOnly],
+		[nameOnly, identified],
+		[nameOnly, identified, { ...identified }, { ...nameOnly }],
+	]) {
+		const list = makeListOrder({ items });
+		const merged = mergeOrderItems(list, null);
+		assert.deepEqual(merged, [identified]);
+		const records = merged.map((item) =>
+			buildOrderItemRecord(list.orderId, "2024-01-15", item),
+		);
+		assert.deepEqual(records.map((item) => item.id), [list.orderId + "|B000000001"]);
+	}
+});
+
+test("mergeOrderItems: no-detail name-only observations stay separate for two distinct ASINs", () => {
+	const first = { asin: "B000000001", name: "Milk", url: null };
+	const second = { asin: "B000000002", name: "MILK", url: null };
+	const nameOnly = { asin: null, name: "  Milk  ", url: null };
+	for (const items of [
+		[first, nameOnly, second, { ...nameOnly }],
+		[nameOnly, second, first, { ...first }],
+	]) {
+		const list = makeListOrder({ items });
+		const records = mergeOrderItems(list, null).map((item) =>
+			buildOrderItemRecord(list.orderId, "2024-01-15", item),
+		);
+		assert.equal(records.length, 3);
+		assert.deepEqual(
+			records.map((item) => item.id).sort(),
+			["|B000000001", "|B000000002", "|milk"].map((suffix) => list.orderId + suffix).sort(),
+		);
+	}
+});
 test("buildOrderRecord: both list + detail present — detail wins for enrichment fields", () => {
 	const listOrder = makeListOrder({
 		orderId: "111-2222222-3333333",

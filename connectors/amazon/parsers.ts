@@ -861,6 +861,21 @@ export function mergeOrderItems(
 		}
 	}
 
+	// Without detail, a title-only observation adds no line when that title
+	// identifies exactly one ASIN in this order. Inspect the whole group
+	// first so observation order cannot change the decision.
+	if (detail === null) {
+		for (const group of listNames.values()) {
+			const asins = new Set(
+				group.map((index) => listItems[index]!.asin).filter(Boolean),
+			);
+			if (asins.size !== 1) continue;
+			for (const index of group) {
+				if (!listItems[index]!.asin) coveredLists.add(index);
+			}
+		}
+	}
+
 	const out: LineMergedItem[] = [];
 	const unmatchedKeys = new Set<string>();
 	listItems.forEach((item, index) => {
