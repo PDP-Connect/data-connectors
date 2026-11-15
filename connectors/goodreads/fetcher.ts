@@ -246,7 +246,7 @@ export async function navigate(
 	page: FetchPage,
 	http: GoodreadsHttp,
 	url: string,
-): Promise<boolean> {
+): Promise<Governed<Answer>> {
 	const loaded = await governed(http, async () => {
 		const response = await page.goto(url, {
 			timeout: NAVIGATION_TIMEOUT_MS,
@@ -261,7 +261,29 @@ export async function navigate(
 			status: response.status(),
 		};
 	});
-	return loaded.ok;
+	return loaded;
+}
+
+/** Keep navigation failures identical to failed page requests. */
+function fetchFailure(
+	answer: Extract<Governed<Answer>, { ok: false }>,
+	label: string,
+): FetchOutcome {
+	if (answer.rateLimited) {
+		return {
+			ok: false,
+			reason: "rate_limited",
+			message: `Goodreads asked this run to slow down (HTTP 429) while reading ${label}, and did not lift the limit in time.`,
+		};
+	}
+	return {
+		ok: false,
+		reason: "collection_interrupted",
+		message:
+			answer.status === null
+				? `Goodreads could not be reached while reading ${label}.`
+				: `Goodreads kept answering with an error (${answer.status}) while reading ${label}.`,
+	};
 }
 
 /** GET a goodreads.com path from the owner's page and classify the answer. */
@@ -282,36 +304,19 @@ export async function fetchHtml(
 				? { kind: raw.kind, retryAfter: null, status: 0 }
 				: raw;
 		});
-		if (!answer.ok) {
-			if (answer.rateLimited) {
-				return {
-					ok: false,
-					reason: "rate_limited",
-					message: `Goodreads asked this run to slow down (HTTP 429) while reading ${label}, and did not lift the limit in time.`,
-				};
-			}
-			return {
-				ok: false,
-				reason: "collection_interrupted",
-				message:
-					answer.status === null
-						? `Goodreads could not be reached while reading ${label}.`
-						: `Goodreads kept answering with an error (${answer.status}) while reading ${label}.`,
-			};
-		}
+		if (!answer.ok) return fetchFailure(answer, label);
 		const raw = answer.value;
 		if (raw.kind === "wrong_origin") {
 			originRecoveries += 1;
-			if (
-				originRecoveries > MAX_ORIGIN_RECOVERIES ||
-				!(await navigate(page, http, ANCHOR_URL))
-			) {
+			if (originRecoveries > MAX_ORIGIN_RECOVERIES) {
 				return {
 					ok: false,
 					reason: "collection_interrupted",
 					message: `The browser could not get back to Goodreads to read ${label}.`,
 				};
 			}
+			const loaded = await navigate(page, http, ANCHOR_URL);
+			if (!loaded.ok) return fetchFailure(loaded, label);
 			continue;
 		}
 		// A challenge is AWS WAF asking for a token, not for a slower pace: its
@@ -328,7 +333,12 @@ export async function fetchHtml(
 				};
 			}
 			// Let the challenge script run in a real page load, then try again.
-			await navigate(page, http, new URL(path, ORIGIN).toString());
+			const loaded = await navigate(
+				page,
+				http,
+				new URL(path, ORIGIN).toString(),
+			);
+			if (!loaded.ok) return fetchFailure(loaded, label);
 			await politeDelay(WAF_SETTLE_MS);
 			continue;
 		}

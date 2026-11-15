@@ -845,6 +845,34 @@ test("a rate limit asking for an hour stops the listing at once", async () => {
 	assert.equal(h.paths.filter((p) => p.includes("&page=2&")).length, 1);
 });
 
+for (const failure of ["rate_limited", "collection_interrupted"] as const) {
+	test(`pacing: failed WAF navigation stops as ${failure} without refetching`, async () => {
+		const h = harness(signedInSite({ print: () => WAF_CHALLENGE }), {
+			books: {},
+		});
+		h.ctx.page.goto = (async (url: string) => {
+			h.visits.push(url);
+			if (failure === "collection_interrupted") {
+				throw new Error("navigation connection reset");
+			}
+			return { status: () => 429, headers: () => ({}) };
+		}) as GoodreadsCollectContext["page"]["goto"];
+		await run(h);
+		assert.equal(skips(h).find((s) => s.stream === "books")?.reason, failure);
+		assert.equal(h.paths.filter((p) => p.includes("&page=1&")).length, 1);
+		assert.equal(h.visits.length, 3, "navigation exhausts all attempts");
+		assert.equal(h.clock.retries.length, 2);
+		assert.equal(h.graphql.length, 0);
+		assert.equal(recordsOf(h, "books").length, 0);
+		assert.equal(h.failures.length, 1);
+		assert.match(
+			h.failures[0]?.message ?? "",
+			failure === "rate_limited" ? /HTTP 429/ : /could not be reached/,
+		);
+		assert.doesNotMatch(h.failures[0]?.message ?? "", /verification check/);
+	});
+}
+
 test("pacing: the governor waits before every request, starting no faster than the old pause", async () => {
 	const h = harness(signedInSite(), ALL_STREAMS);
 	// A second pacing layer would sleep on the real clock: catch any pause of

@@ -399,7 +399,7 @@ export async function openGraphql(
 			attempt <= 2 && reading.kind === "missing";
 			attempt++
 		) {
-			if (!(await navigate(page, options.http, options.tokenPageUrl))) {
+			if (!(await navigate(page, options.http, options.tokenPageUrl)).ok) {
 				return {
 					ok: false,
 					reason: "collection_interrupted",
