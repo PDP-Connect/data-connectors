@@ -194,15 +194,20 @@ export function currencyToCentsFromStatement(
 
 // ─── Date helpers ────────────────────────────────────────────────────────
 
+const STATEMENT_MONTH_RE =
+	/^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2}),\s*(\d{4})$/i;
+const STATEMENT_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/** Statement calendar dates must not pass through local midnight and UTC. */
 export function isoDate(raw: string | null | undefined): string | null {
-	if (!raw) {
-		return null;
+	if (!raw) return null;
+	const value = raw.trim();
+	const month = STATEMENT_MONTH_RE.exec(value);
+	if (month?.[1] && month[2] && month[3]) {
+		const monthNumber = STATEMENT_MONTHS.indexOf(month[1].slice(0, 3).toLowerCase()) + 1;
+		return csvDate(`${month[3]}-${monthNumber}-${month[2]}`);
 	}
-	const d = new Date(raw);
-	if (Number.isNaN(d.getTime())) {
-		return null;
-	}
-	return d.toISOString().slice(0, 10);
+	return csvDate(value);
 }
 
 export function mmddyyyy(iso: string): string {
