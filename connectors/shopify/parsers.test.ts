@@ -120,6 +120,51 @@ test("parseDomOrderCards dedupes multiple Shop links in one card and keeps the o
 	assert.equal(orders.length, 1);
 	assert.equal(orders[0]?.detailUrl, "https://shop.app/orders/order-card");
 	assert.equal(orders[0]?.id, "https://shop.app/orders/order-card");
+
+	// No order link: preserve the historical text-prefix dedup and fallback ID.
+	const fallback = `
+		<div class="order-card"><a href="/merchant/acme">Acme Goods</a>
+			<div>1 item · $8.50</div></div>
+		<div class="order-card"><a href="/merchant/other">Acme Goods</a>
+			<div>1 item · $8.50</div></div>`;
+	const fallbackOrders = parseDomOrderCards(fallback);
+	assert.equal(fallbackOrders.length, 1);
+	assert.equal(fallbackOrders[0]?.id, "https://shop.app/merchant/acme");
+	assert.equal(fallbackOrders[0]?.detailUrl, "https://shop.app/merchant/acme");
+	assert.equal(fallbackOrders[0]?.totalCents, 850);
+	assert.deepEqual(parseDomOrderCards(
+		'<div class="order-card">Acme Goods · 1 item · $8.50</div>',
+	), [], "a card with no anchor remains omitted");
+});
+
+
+// Synthetic DOM fixtures: distinct purchases must not share a display-text key.
+test("parseDomOrderCards keeps identical cards with distinct order links", () => {
+	const fixture = ["A", "B"].map((id) => `
+		<div class="order-card">
+			<a href="/merchant/acme">Acme Goods</a>
+			<div>2 items · $19.99</div><div>Delivered</div>
+			<a href="/orders/${id}">View order</a>
+		</div>`).join("");
+	const orders = parseDomOrderCards(fixture);
+	assert.deepEqual(orders.map((order) => order.id), [
+		"https://shop.app/orders/A", "https://shop.app/orders/B",
+	]);
+	assert.deepEqual(orders.map((order) => order.detailUrl), orders.map((order) => order.id));
+	assert.deepEqual(orders.map((order) => order.totalCents), [1999, 1999]);
+});
+
+test("parseDomOrderCards dedupes one canonical order even when display text changes", () => {
+	const fixture = `
+		<div class="order-card"><a href="https://shop.app/orders/A">Acme Goods</a>
+			<div>2 items · $19.99</div><div>Shipped</div></div>
+		<div class="order-card"><a href="https://shop.com/orders/A">Acme Goods</a>
+			<div>2 items · $19.99</div><div>Delivered</div></div>`;
+	const orders = parseDomOrderCards(fixture);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.id, "https://shop.app/orders/A");
+	assert.equal(orders[0]?.detailUrl, "https://shop.app/orders/A");
+	assert.equal(orders[0]?.status, "Shipped", "retain the first observed card");
 });
 
 test("extractOrders parses every order reachable from ROOT_QUERY", () => {

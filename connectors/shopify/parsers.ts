@@ -60,6 +60,18 @@ const SHOP_STATUS_RE =
 const SHOP_AMOUNT_LINE_RE =
 	/^(?:\$\s*[\d,]+(?:\.\d{1,2})?|[\d,]+(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|CAD))\b/i;
 
+// textContent joins adjacent elements with no space ("$19.99" then "Shipped"
+// reads "$19.99Shipped"), which defeats the word-boundary status match.
+function cardText(node: Node): string {
+	const parts: string[] = [];
+	const walk = (current: Node): void => {
+		if (current.nodeType === 3) parts.push(current.nodeValue ?? "");
+		for (const child of current.childNodes) walk(child);
+	};
+	walk(node);
+	return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
 /**
  * Legacy-parity DOM fallback for cards visible when Apollo has not hydrated
  * its order connection. This follows the prior connector's Shop link/card
@@ -85,16 +97,20 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 			link.closest<HTMLElement>(
 				'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
 			) ?? link;
-		const text = (card.textContent ?? "").replace(/\s+/g, " ").trim();
+		const text = cardText(card);
 		if (text.length < 10) continue;
-		const key = text.slice(0, 120);
+		const orderUrl = resolveCardOrderUrl(card, url);
+		// Repeated purchases can have identical display text. Use the same
+		// canonical order identity we emit, retaining text fallback for cards
+		// with only merchant/generic links.
+		const key = /\/orders?\//.test(orderUrl.pathname)
+			? `order:${canonicalShopUrl(orderUrl.href)}`
+			: `text:${text.slice(0, 120)}`;
 		if (seen.has(key)) continue;
 		const money = text.match(SHOP_MONEY_RE);
 		const itemCount = text.match(SHOP_ITEM_COUNT_RE);
 		if (!money && !itemCount) continue;
 		seen.add(key);
-
-		const orderUrl = resolveCardOrderUrl(card, url);
 
 		const merchantName =
 			(card.textContent ?? "")
