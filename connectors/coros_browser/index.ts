@@ -307,7 +307,10 @@ export function classify(r: PageFetch, now = Date.now()): Outcome {
 			message: "The Training Hub page named no region this connector knows.",
 		};
 	}
-	if (r.status === 401 || r.status === 403) {
+	if (r.status === 401) {
+		return { ...signIn("COROS asked for sign-in (HTTP 401)."), refresh: true };
+	}
+	if (r.status === 403) {
 		return signIn(`COROS asked for sign-in (HTTP ${r.status}).`);
 	}
 	if (r.status === 429) {
@@ -323,6 +326,7 @@ export function classify(r: PageFetch, now = Date.now()): Outcome {
 			ok: false,
 			reason: "collection_interrupted",
 			message: `HTTP ${r.status}.`,
+			retryAfterMs: RATE_LIMIT_FALLBACK_MS,
 		};
 	}
 	let json: unknown;

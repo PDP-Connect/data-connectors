@@ -714,3 +714,122 @@ test("collect: the request budget stops the run with source_limit_reached", asyn
 		"source_limit_reached",
 	]);
 });
+
+test("collect: HTTP 401 recovers only after the one app reload", async () => {
+	const { page, gotos, paths } = fakePage(
+		corosApi(fixtureData(), (_data, path) =>
+			path === "/dashboard/query" && gotos.length === 0
+				? { status: 401, contentType: "text/plain", body: "" }
+				: undefined,
+		),
+	);
+	const { ctx, messages, records } = context(page, { profile: undefined });
+	await collectCorosBrowser(ctx, FAST, NOW);
+	assert.deepEqual(gotos, ["https://t.coros.com/"]);
+	assert.equal(paths.filter((p) => p === "/dashboard/query").length, 2);
+	assert.deepEqual(idsOf(records, "profile"), ["472000000000000101"]);
+	assert.deepEqual(skipsOf(messages), []);
+});
+
+test("collect: persistent HTTP 401 reloads exactly once then requires sign-in", async () => {
+	const { page, gotos, paths } = fakePage(
+		corosApi(fixtureData(), (_data, path) =>
+			path === "/dashboard/query"
+				? { status: 401, contentType: "text/plain", body: "" }
+				: undefined,
+		),
+	);
+	const { ctx, messages, records } = context(page, { profile: undefined });
+	await collectCorosBrowser(ctx, FAST, NOW);
+	assert.deepEqual(gotos, ["https://t.coros.com/"]);
+	assert.equal(paths.filter((p) => p === "/dashboard/query").length, 2);
+	assert.deepEqual(records, []);
+	assert.deepEqual(skipsOf(messages)[0]?.slice(0, 2), [
+		"profile",
+		"sign_in_required",
+	]);
+});
+
+test("collect: one HTTP 503 waits the fallback then completes the profile", async () => {
+	let reads = 0;
+	const sleeps: number[] = [];
+	const { page, gotos } = fakePage(
+		corosApi(fixtureData(), (_data, path) => {
+			if (path === "/dashboard/query" && ++reads === 1) {
+				return { status: 503, contentType: "text/plain", body: "" };
+			}
+			return undefined;
+		}),
+	);
+	const { ctx, messages, records } = context(page, { profile: undefined });
+	await collectCorosBrowser(
+		ctx,
+		{
+			...FAST,
+			sleep: async (ms) => {
+				sleeps.push(ms);
+			},
+		},
+		NOW,
+	);
+	assert.equal(reads, 2);
+	assert.deepEqual(
+		sleeps.filter((ms) => ms > 0),
+		[30_000],
+	);
+	assert.deepEqual(gotos, []);
+	assert.deepEqual(idsOf(records, "profile"), ["472000000000000101"]);
+	assert.deepEqual(skipsOf(messages), []);
+});
+
+test("collect: persistent HTTP 503 stops after the existing two retries", async () => {
+	const sleeps: number[] = [];
+	const { page, paths, gotos } = fakePage(
+		corosApi(fixtureData(), (_data, path) =>
+			path === "/dashboard/query"
+				? { status: 503, contentType: "text/plain", body: "" }
+				: undefined,
+		),
+	);
+	const { ctx, messages, records } = context(page, { profile: undefined });
+	await collectCorosBrowser(
+		ctx,
+		{
+			...FAST,
+			sleep: async (ms) => {
+				sleeps.push(ms);
+			},
+		},
+		NOW,
+	);
+	assert.equal(paths.filter((p) => p === "/dashboard/query").length, 3);
+	assert.deepEqual(
+		sleeps.filter((ms) => ms > 0),
+		[30_000, 30_000],
+	);
+	assert.deepEqual(gotos, []);
+	assert.deepEqual(records, []);
+	assert.deepEqual(skipsOf(messages)[0]?.slice(0, 2), [
+		"profile",
+		"collection_interrupted",
+	]);
+});
+
+test("collect: HTTP 403 still requires sign-in without refreshing", async () => {
+	const { page, gotos, paths } = fakePage(
+		corosApi(fixtureData(), (_data, path) =>
+			path === "/dashboard/query"
+				? { status: 403, contentType: "text/plain", body: "" }
+				: undefined,
+		),
+	);
+	const { ctx, messages, records } = context(page, { profile: undefined });
+	await collectCorosBrowser(ctx, FAST, NOW);
+	assert.deepEqual(gotos, []);
+	assert.equal(paths.filter((p) => p === "/dashboard/query").length, 1);
+	assert.deepEqual(records, []);
+	assert.deepEqual(skipsOf(messages)[0]?.slice(0, 2), [
+		"profile",
+		"sign_in_required",
+	]);
+});
