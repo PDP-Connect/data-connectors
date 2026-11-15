@@ -1245,6 +1245,17 @@ test("shelves are saved only when the API's lists are shown to be whole", async 
 			[["shelves", reason]],
 			label,
 		);
+		// Lists that disagree can agree next run (an edit between the
+		// requests); only lists Goodreads no longer serves need an upgrade.
+		assert.deepEqual(
+			skips(h).map((skip) => skip.recovery_hint),
+			[
+				reason === "shelf_list_incomplete"
+					? { action: "retry_by_runtime", retryable: true }
+					: { action: "retry_on_connector_upgrade", retryable: false },
+			],
+			label,
+		);
 		// The books are unaffected.
 		assert.equal(recordsOf(h, "books").length, 5, label);
 		assert.deepEqual(coverageOf(h), { books: [5, 5] }, label);
@@ -1494,6 +1505,33 @@ test("a resource selection keeps only the named books and shelves", async () => 
 	// The shelf check still sees the whole library.
 	assert.deepEqual(h.failures, []);
 });
+
+for (const stream of ["account_profile", "usage_summary"]) {
+	test(`singleton ${stream} claims coverage only without resource narrowing`, async () => {
+		const all = harness(signedInSite(), { [stream]: {} });
+		await run(all);
+		assert.equal(recordsOf(all, stream).length, 1);
+		assert.deepEqual(coverageOf(all)[stream], [1, 1]);
+		const excluded = "not-the-singleton-id";
+		assert.notEqual(recordsOf(all, stream)[0]?.id, excluded);
+
+		// The connector still emits the record for the runtime to filter.
+		const raw = harness(signedInSite(), {
+			[stream]: { resources: [excluded] },
+		});
+		await run(raw);
+		assert.equal(recordsOf(raw, stream).length, 1);
+		assert.equal(coverageOf(raw)[stream], undefined);
+
+		const filtered = runtimeFiltered(
+			harness(signedInSite(), { [stream]: { resources: [excluded] } }),
+		);
+		await run(filtered);
+		assert.equal(recordsOf(filtered, stream).length, 0);
+		assert.equal(coverageOf(filtered)[stream], undefined);
+		assert.deepEqual(filtered.failures, []);
+	});
+}
 
 test("a run that asks for none of this connector's streams does nothing", async () => {
 	const h = harness(signedInSite(), {});

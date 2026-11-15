@@ -137,8 +137,11 @@ interface Stop {
  * hint. `retryable` says whether a later run can succeed without a connector
  * change; it is also the stream failure's retryable flag, so the two agree.
  * A stop caused by Goodreads' pages (a site change) meets the same pages
- * next time, so only a connector update helps. Each branch returns a literal
- * so the repo's static hint check can read every action.
+ * next time, so only a connector update helps. Shelf lists that disagree
+ * are not that: the shelvings, shelves and tags are separate requests, and
+ * an edit between them (a tag removed mid-run) agrees again next run. Each
+ * branch returns a literal so the repo's static hint check can read every
+ * action.
  */
 function recoveryFor(reason: StopReason): {
 	action:
@@ -150,12 +153,11 @@ function recoveryFor(reason: StopReason): {
 	switch (reason) {
 		case "bot_challenge":
 			return { action: "manual_action_required", retryable: true };
-		case "shelf_list_incomplete":
 		case "source_unreadable":
 			return { action: "retry_on_connector_upgrade", retryable: false };
-		// An interruption, a list read in part, or a session that ended mid-run:
-		// the next run reads again and signs in again, with the saved details or
-		// by asking the owner.
+		// An interruption, a list read in part (shelf lists included), or a
+		// session that ended mid-run: the next run reads again and signs in
+		// again, with the saved details or by asking the owner.
 		default:
 			return { action: "retry_by_runtime", retryable: true };
 	}
@@ -827,6 +829,12 @@ function priorFingerprints(state: unknown): Record<string, string> {
 	);
 }
 
+function isNarrowed(
+	scope: ReturnType<GoodreadsCollectContext["requested"]["get"]>,
+): boolean {
+	return Boolean(scope?.time_range) || resourceSet(scope) !== null;
+}
+
 /**
  * Emit a stream's whole list of records, projected to the consent's fields,
  * and return how many were emitted.
@@ -861,7 +869,7 @@ async function emitStream<T extends { id: string }>(
 			string,
 			unknown
 		>;
-	const narrowed = Boolean(scope?.time_range) || resourceSet(scope) !== null;
+	const narrowed = isNarrowed(scope);
 	const projected = records.map((record) => ({
 		data: project(record),
 		id: record.id,
@@ -926,12 +934,14 @@ async function emitSingleton(
 	stream: string,
 	record: { id: string },
 ): Promise<void> {
+	const scope = ctx.requested.get(stream);
 	const data = projectFields(
 		stream,
 		record,
-		ctx.requested.get(stream)?.fields,
+		scope?.fields,
 	) as unknown as Record<string, unknown>;
 	await ctx.emitRecord(stream, data);
+	if (isNarrowed(scope)) return;
 	await ctx.emit(
 		buildDetailCoverageMessage({
 			considered: 1,
