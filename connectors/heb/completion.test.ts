@@ -17,8 +17,8 @@ import {
 	makeRecordingEmit,
 	skipPoliteDelays,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { hebConnector } from "./index.ts";
-import { validateRecord } from "./schemas.ts";
+import { hebConnector, processListOrder, type EmitDeps } from "./index.ts";
+import { ordersSchema, validateRecord } from "./schemas.ts";
 
 // Pacing pauses are anti-bot courtesy that these tests do not assert on, so
 // they fire on the next tick instead of sleeping.
@@ -248,6 +248,46 @@ function assertPartial(ctx: TestContext): void {
 		"unproven inventory is a retryable skip, not a fabricated stream failure",
 	);
 }
+
+
+test("order schema rejection has one honest skip and value-free diagnostic", async (t) => {
+	const lines: string[] = [];
+	t.mock.method(process.stderr, "write", (chunk: unknown) => {
+		lines.push(String(chunk));
+		return true;
+	});
+	const ctx = makeContext(["orders"], makeCollectPage({ listHtml: "" }));
+	const deps: EmitDeps = {
+		emit: ctx.emit, emitRecord: ctx.emitRecord, emittedAt: EMITTED_AT,
+		progress: ctx.progress, sendInteraction: ctx.sendInteraction,
+		wantsOrders: true, wantsItems: false, emitItems: false,
+		orderItemsCoverage: undefined, ordersCoverage: undefined, ordersFingerprintCursor: undefined,
+	};
+	await processListOrder(ctx.page, deps,
+		{ detailAttempts: 0, isManualRun: false, manualRepairAttempted: false, sessionRepairRequired: false },
+		{
+			orderId: "HEB_PRIVATE_CANARY", orderDateRaw: "Oct 5, 2026",
+			fulfillmentMethod: "unknown", fulfillmentLocation: null, status: null,
+			statusCode: null, storeName: null, timeslotStart: null, timeslotEnd: null,
+			total: "$10.00", itemCount: 1, unfulfilledCount: null, source: "dom",
+		} as Parameters<typeof processListOrder>[3],
+	);
+	assert.equal(ctx.emitted.length, 0);
+	const skips = findMessages(ctx.protocolMessages, "SKIP_RESULT");
+	assert.equal(skips.length, 1);
+	assert.equal(skips[0]?.reason, "record_failed_schema");
+	assert.deepEqual(skips[0]?.recovery_hint, { action: "retry_by_runtime", retryable: true });
+	assert.doesNotMatch(skips[0]?.message ?? "", /retained/);
+	const diagnostics = lines.filter(line => line.includes("record_failed_schema"));
+	assert.equal(diagnostics.length, 1);
+	const invalidId = ordersSchema.shape.id.safeParse("HEB_PRIVATE_CANARY");
+	assert.equal(invalidId.success, false);
+	if (invalidId.success) throw new Error("fixture must fail the real id schema");
+	assert.ok(diagnostics[0]?.includes("orders"));
+	assert.ok(diagnostics[0]?.includes("id"));
+	assert.ok(diagnostics[0]?.includes(invalidId.error.issues[0]!.code));
+	assert.doesNotMatch(diagnostics.join(""), /HEB_PRIVATE_CANARY|10\.00|Oct 5/);
+});
 
 test("collect: nutrition-only keeps owner-unbound empty-renderer results partial", async () => {
 	const page = makeCollectPage({
