@@ -710,13 +710,10 @@ export function parseOrderDetailDom(
 	let status_detail: string | null = null;
 	if (isCancelled) {
 		status_detail = "This order has been cancelled";
-	} else if (cancelledText) {
+	} else if (ITEM_CANCELLED_RE.test(cancelledText)) {
 		// Preserve the recognized partial cancellation without dropping
-		// purchased items. An unrecognized cancellation stays unknown.
-		if (
-			ITEM_CANCELLED_RE.test(cancelledText) &&
-			cancelledText.length < STATUS_MAX_LEN
-		) {
+		// purchased items. Unrecognized wording falls through to alerts.
+		if (cancelledText.length < STATUS_MAX_LEN) {
 			status_detail = cancelledText;
 		}
 	} else {

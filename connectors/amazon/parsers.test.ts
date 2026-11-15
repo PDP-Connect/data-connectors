@@ -402,9 +402,10 @@ test("parseOrdersListDom: cancelled order (no items, no total) parses alongside 
 
 // ─── parseOrderDetailDom ─────────────────────────────────────────────────
 
-function syntheticCancellationDetail(message: string): OrderDetail {
+function syntheticCancellationDetail(message: string, alert = ""): OrderDetail {
 	const detail = parseOrderDetailDom(`<div id="orderDetails">
 		<div data-component="cancelled">${message}</div>
+		<div data-component="alerts">${alert}</div>
 		<div data-component="chargeSummary">Grand Total: $42.99</div>
 		<div data-component="purchasedItemsRightGrid">
 			<div data-component="itemTitle"><a href="/dp/B01ABCDEFG">Synthetic remaining item</a></div>
@@ -451,6 +452,30 @@ test("parseOrderDetailDom: unrecognized cancellation wording never destroys an o
 		assert.equal(detail.items.length, 1, text);
 		assert.equal(detail.items[0]?.asin, "B01ABCDEFG", text);
 	}
+});
+
+test("parseOrderDetailDom: unrecognized cancellation keeps independent alert evidence", () => {
+	const detail = syntheticCancellationDetail(
+		"Cancellation pending",
+		"Arriving tomorrow",
+	);
+	assert.equal(detail.status_detail, "Arriving tomorrow");
+	assert.equal(detail.grand_total, "$42.99");
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.items[0]?.asin, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.unit_price, "$42.99");
+});
+
+test("parseOrderDetailDom: recognized item cancellation takes precedence over alerts", () => {
+	const detail = syntheticCancellationDetail(
+		"One item has been cancelled",
+		"Arriving tomorrow",
+	);
+	assert.equal(detail.status_detail, "One item has been cancelled");
+	assert.equal(detail.grand_total, "$42.99");
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.items[0]?.asin, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.unit_price, "$42.99");
 });
 
 test("parseOrderDetailDom: synthetic-minimal fixture parses full OrderDetail", () => {
