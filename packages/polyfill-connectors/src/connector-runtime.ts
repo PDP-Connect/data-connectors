@@ -1985,6 +1985,44 @@ export function createBrowserSurfaceAssistanceLifecycle({
 	};
 }
 
+/** Production session/watchdog composition; submission state belongs to one call. */
+export async function establishSessionWithSubmitWatchdog(
+	config: Parameters<typeof establishSession>[0],
+	args: Omit<
+		Parameters<typeof establishSession>[1],
+		"checkpoint" | "onCredentialSubmit"
+	>,
+	time: Pick<
+		Parameters<typeof makeSessionEstablishWatchdog>[0],
+		"now" | "deadlineMs" | "pollIntervalMs"
+	> = {},
+): Promise<void> {
+	let credentialSubmitted = false;
+	const watchdog = makeSessionEstablishWatchdog({
+		...time,
+		hasCredentialSubmitted: () => credentialSubmitted,
+		capture: args.capture,
+		name: args.name,
+		page: args.page,
+		// Preserve durable checkpoint progress even when capture is disabled.
+		progress: args.progress,
+	});
+	await watchdog.run(() =>
+		establishSession(config, {
+			...args,
+			onCredentialSubmit: () => {
+				credentialSubmitted = true;
+			},
+			assist: watchdog.wrapAssist(args.assist),
+			checkpoint: watchdog.checkpoint,
+			completeAssistance: watchdog.wrapCompleteAssistance(
+				args.completeAssistance,
+			),
+			sendInteraction: watchdog.wrapSendInteraction(args.sendInteraction),
+		}),
+	);
+}
+
 /** Run collect() inside an acquired browser context, with session + tracing. */
 async function runInBrowser(args: {
 	browser: BrowserConfig;
@@ -2116,43 +2154,21 @@ async function runInBrowser(args: {
 		// INTERACTION ever emitted, so the controller's mid-wait detector cannot
 		// help. The watchdog keys on checkpoint progress (paused while an
 		// interaction is open) and fails closed if establishment stalls.
-		let credentialSubmitted = false;
-		const watchdog = makeSessionEstablishWatchdog({
-			hasCredentialSubmitted: () => credentialSubmitted,
-			capture: baseCtx.capture,
-			name,
-			page,
-			// Checkpoints already name every sign-in phase, but they only ever wrote
-			// to `capture` — which is opt-in and was OFF in production, so a failed
-			// browser sign-in left ONE progress event for the whole run and the
-			// timeline could not say which phase it died in. Threading `progress`
-			// here puts the phase names on the durable timeline regardless of
-			// whether capture is enabled.
-			progress,
-		});
-		await watchdog.run(() =>
-			establishSession(
-				{ ensureSession, probeSession, probeSessionIsAuthoritative },
-				{
-					onCredentialSubmit: () => {
-						credentialSubmitted = true;
-					},
-					assist: watchdog.wrapAssist(browserAssist),
-					capture: baseCtx.capture,
-					checkpoint: watchdog.checkpoint,
-					completeAssistance: watchdog.wrapCompleteAssistance(
-						browserCompleteAssistance,
-					),
-					context: ctx,
-					credentials: baseCtx.credentials,
-					page: page as Page,
-					name,
-					progress,
-					...(resolveDeferredCredentials ? { resolveDeferredCredentials } : {}),
-					retryablePattern,
-					sendInteraction: watchdog.wrapSendInteraction(browserSendInteraction),
-				},
-			),
+		await establishSessionWithSubmitWatchdog(
+			{ ensureSession, probeSession, probeSessionIsAuthoritative },
+			{
+				assist: browserAssist,
+				capture: baseCtx.capture,
+				completeAssistance: browserCompleteAssistance,
+				context: ctx,
+				credentials: baseCtx.credentials,
+				page: page as Page,
+				name,
+				progress,
+				...(resolveDeferredCredentials ? { resolveDeferredCredentials } : {}),
+				retryablePattern,
+				sendInteraction: browserSendInteraction,
+			},
 		);
 		// Provider popups can carry an opener/postMessage callback after the
 		// initial sign-in probe. Keep them alive until run teardown.

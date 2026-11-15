@@ -28,6 +28,7 @@ import {
 	type AssistanceCompletionStatus,
 	type AssistanceRequest,
 	captureBrowserPage,
+	establishSessionWithSubmitWatchdog,
 	type InteractionRequest,
 	type InteractionResponse,
 	makeSessionEstablishWatchdog,
@@ -542,6 +543,53 @@ function makeEstablishArgs(
 			Promise.reject(new Error("sendInteraction must not be called"))) as never,
 	};
 }
+
+test("production submit-watchdog composition distinguishes submission and resets each call", async (t) => {
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	// Run the submitted case first, then two fresh pre-submit calls in this
+	// same module instance. Neither checkpoint labels nor a prior run may latch.
+	for (const submitted of [true, false, false]) {
+		const clock = makeClock();
+		let entered!: () => void;
+		const ready = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const run = establishSessionWithSubmitWatchdog(
+			{
+				probeSession: undefined,
+				ensureSession: async ({ onCredentialSubmit, checkpoint }) => {
+					await checkpoint("password-submit");
+					if (submitted) {
+						onCredentialSubmit();
+					}
+					entered();
+					await new Promise<void>(() => {
+						/* watchdog, not the session step, must settle the run */
+					});
+				},
+			},
+			makeEstablishArgs("production-submit-fixture"),
+			{ now: clock.now, deadlineMs: 100, pollIntervalMs: 2 },
+		);
+		const rejected = assert.rejects(run, (err: unknown) => {
+			assert.ok(err instanceof Error);
+			assert.match(
+				err.message,
+				/production-submit-fixture_session_establish_timeout/,
+			);
+			assert.equal((err as { retryable?: boolean }).retryable, !submitted);
+			assert.equal(
+				(err as { code?: string }).code,
+				submitted ? "credential_submit_outcome_unknown" : undefined,
+			);
+			return true;
+		});
+		await ready;
+		clock.advance(150);
+		t.mock.timers.tick(150);
+		await rejected;
+	}
+});
 
 for (const submitted of [false, true]) {
 	test(`watchdog observes explicit submission (${String(submitted)}) during a stalled ensureSession`, async () => {
