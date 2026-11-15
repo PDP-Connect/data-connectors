@@ -87,6 +87,7 @@ interface FakeOptions {
 	/** Throw for the n-th (1-based) call of a kind, or return null. */
 	fail?: (kind: Kind, call: number) => Error | null;
 	session?: () => string;
+	readinessFailure?: ((call: number) => Error | null) | undefined;
 	sendAnswer?: unknown;
 }
 
@@ -104,6 +105,7 @@ function fakeWorld(options: FakeOptions) {
 		groups: 0,
 	};
 	let sessionReads = 0;
+	let readinessReads = 0;
 	const answer = (kind: Kind, value: unknown): Promise<unknown> => {
 		calls[kind] += 1;
 		const error = options.fail?.(kind, calls[kind]) ?? null;
@@ -116,7 +118,11 @@ function fakeWorld(options: FakeOptions) {
 				sessionReads += 1;
 				return Promise.resolve(options.session?.() ?? "signed_in");
 			}
-			if (s.includes("require_function")) return Promise.resolve(READY);
+			if (s.includes("require_function")) {
+				readinessReads += 1;
+				const error = options.readinessFailure?.(readinessReads) ?? null;
+				return error ? Promise.reject(error) : Promise.resolve(READY);
+			}
 			if (s.includes("WAWebOfflineHandler"))
 				return Promise.resolve({ mode: "MAIN", resume_complete: true });
 			if (s.includes("sendPeerDataOperationRequest"))
@@ -140,17 +146,24 @@ function fakeWorld(options: FakeOptions) {
 			return Promise.reject(new Error("fake page: unexpected script"));
 		},
 	};
-	return { page, id, calls, sessionReads: () => sessionReads };
+	return {
+		page,
+		id,
+		calls,
+		sessionReads: () => sessionReads,
+		readinessReads: () => readinessReads,
+	};
 }
 
 async function runCollect(
 	page: unknown,
+	streams: Map<string, StreamScope> = requested,
 ): Promise<{ harness: RecordingEmit; error: unknown }> {
 	const harness = makeRecordingEmit(validateRecord);
 	try {
 		await collect(
 			{
-				requested,
+				requested: streams,
 				page: page as Parameters<typeof collect>[0]["page"],
 				emit: harness.emit,
 				emitRecord: harness.emitRecord,
@@ -261,7 +274,7 @@ test("a history request interrupted by a reload is not resent; the chat's gap sa
 	assert.equal(lastError.class, "history_remains_on_phone");
 	assert.match(
 		String(lastError.message),
-		/no on-demand history request was sent this run \(page_reloaded\)$/,
+		/delivery is unconfirmed and it was not retried$/,
 	);
 });
 
@@ -277,4 +290,87 @@ test("a history request the page refused names the page's reason in the gap", as
 		String(lastError.message),
 		/no on-demand history request was sent this run \(history_sync_on_demand_disabled\)$/,
 	);
+});
+
+// Messages are only collected together with their chats.
+const chatsAndMessages = new Map<string, StreamScope>(
+	["chats", "messages"].map((name) => [name, { name }]),
+);
+const CONTEXT_GONE = () =>
+	new Error("page.evaluate: Execution context was destroyed");
+
+test("a message walk that reloads into signed-out ends with auth failure, not a chat gap", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		fail: (kind) => (kind === "walk" ? LOADER_GONE() : null),
+		session: () => "signed_out",
+	});
+	const { harness, error } = await runCollect(world.page, chatsAndMessages);
+	assert.equal(asObject(error).code, "whatsapp_web_auth_failed");
+	assert.equal(asObject(error).retryable, false);
+	assert.deepEqual(gapsOf(harness), []);
+	assert.equal(world.calls.walk, 1);
+});
+
+test("a message walk that exhausts the reload budget ends the run, not a chat gap", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		fail: (kind) => (kind === "walk" ? LOADER_GONE() : null),
+	});
+	const { harness, error } = await runCollect(world.page, chatsAndMessages);
+	assert.equal(asObject(error).code, "whatsapp_web_page_reloaded");
+	assert.equal(asObject(error).retryable, true);
+	assert.equal(world.calls.walk, 4);
+	assert.deepEqual(gapsOf(harness), []);
+});
+
+test("a second navigation during readiness consumes budget and recovers", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		fail: (kind, call) =>
+			kind === "groups" && call === 1 ? LOADER_GONE() : null,
+		// First readiness read is initial collect setup; second is recovery.
+		readinessFailure: (call) => (call === 2 ? CONTEXT_GONE() : null),
+	});
+	const { harness, error } = await runCollect(world.page);
+	assert.equal(error, null);
+	assert.equal(world.readinessReads(), 3);
+	assert.equal(world.sessionReads(), 2);
+	assert.ok(world.calls.groups >= 2);
+	assert.deepEqual(gapsOf(harness), []);
+});
+
+test("continuous readiness navigation exhausts the shared reload budget", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		fail: (kind) => (kind === "groups" ? LOADER_GONE() : null),
+		readinessFailure: (call) => (call > 1 ? CONTEXT_GONE() : null),
+	});
+	const { error } = await runCollect(world.page);
+	assert.equal(asObject(error).code, "whatsapp_web_page_reloaded");
+	assert.equal(asObject(error).retryable, true);
+	assert.equal(
+		world.calls.groups,
+		1,
+		"read cannot retry before recovery succeeds",
+	);
+	assert.equal(
+		world.readinessReads(),
+		4,
+		"initial read plus three bounded recovery reads",
+	);
+	assert.equal(world.sessionReads(), 3);
+});
+
+test("ordinary message read failures still produce a per-chat gap", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		fail: (kind) =>
+			kind === "walk" ? new Error("ordinary local read failure") : null,
+	});
+	const { harness, error } = await runCollect(world.page, chatsAndMessages);
+	assert.equal(error, null);
+	const gaps = gapsOf(harness);
+	assert.equal(gaps.length, 1);
+	assert.equal(asObject(gaps[0]?.last_error).class, "local_walk_failed");
 });

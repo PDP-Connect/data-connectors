@@ -647,18 +647,26 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 
 	/** Count one reload and wait for the app to boot again. */
 	private async recover(): Promise<void> {
-		this.reloads += 1;
-		if (this.reloads > MAX_PAGE_RELOADS) {
-			throw createConnectorFailure(
-				"whatsapp_web_page_reloaded",
-				`the WhatsApp Web page reloaded ${String(this.reloads)} times during the run`,
-				{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
+		for (;;) {
+			this.reloads += 1;
+			if (this.reloads > MAX_PAGE_RELOADS) {
+				throw createConnectorFailure(
+					"whatsapp_web_page_reloaded",
+					`the WhatsApp Web page reloaded ${String(this.reloads)} times during the run`,
+					{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
+				);
+			}
+			console.error(
+				"whatsapp_web: the page reloaded mid-run; waiting for it to boot again",
 			);
+			try {
+				await this.awaitBoot();
+				return;
+			} catch (error) {
+				if (!isPageReloadError(error)) throw error;
+				// A navigation during recovery consumes the same run-wide budget.
+			}
 		}
-		console.error(
-			"whatsapp_web: the page reloaded mid-run; waiting for it to boot again",
-		);
-		await this.awaitBoot();
 	}
 
 	/** Wait for the reloaded app: signed out ends the run, otherwise its stores. */
@@ -667,8 +675,9 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 			let state: unknown = "loading";
 			try {
 				state = await this.page.evaluate(SESSION_STATE_SCRIPT);
-			} catch {
-				// The new document is not readable yet.
+			} catch (error) {
+				if (isPageReloadError(error)) throw error;
+				// Other transient unreadiness remains bounded by attempts.
 			}
 			if (state === "signed_out") {
 				throw authFailure(
@@ -705,8 +714,8 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 	}
 	/**
 	 * Never retried: whether a request interrupted by a reload went out is
-	 * unknown, so the page is waited for and the request reported as not
-	 * sent, which gaps the chat with that reason.
+	 * unknown, so the page is waited for and delivery reported as unconfirmed.
+	 * No second send is attempted.
 	 */
 	async sendHistorySyncOnDemand(chatId: string): Promise<unknown> {
 		try {
@@ -714,7 +723,7 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 		} catch (error) {
 			if (!isPageReloadError(error)) throw error;
 			await this.recover();
-			return { sent: false, reason: "page_reloaded" };
+			return { sent: false, reason: "page_reloaded_unconfirmed" };
 		}
 	}
 }
@@ -1473,7 +1482,7 @@ export async function collectWith(
 				? {
 						reason: "retry_exhausted" as const,
 						class: "history_remains_on_phone",
-						message: `history state ${String(history.state)}; ${history.requested ? "after this run's on-demand history request" : `no on-demand history request was sent this run${history.notSent ? ` (${history.notSent})` : ""}`}`,
+						message: `history state ${String(history.state)}; ${history.notSent === "page_reloaded_unconfirmed" ? "the page reloaded while the on-demand history request was being sent; delivery is unconfirmed and it was not retried" : history.requested ? "after this run's on-demand history request" : `no on-demand history request was sent this run${history.notSent ? ` (${history.notSent})` : ""}`}`,
 					}
 				: null);
 		if (gap !== null) {
@@ -1892,6 +1901,16 @@ async function walkMessagesForChat(
 		try {
 			raw = await stores.readChatMessages(chatId, token, options.sinceMs);
 		} catch (error) {
+			const code =
+				typeof error === "object" && error !== null && "code" in error
+					? error.code
+					: undefined;
+			if (
+				code === "whatsapp_web_auth_failed" ||
+				code === "whatsapp_web_page_reloaded"
+			) {
+				throw error;
+			}
 			console.error(
 				`whatsapp_web: failed to read messages of chat ${chatId}:`,
 				error,
