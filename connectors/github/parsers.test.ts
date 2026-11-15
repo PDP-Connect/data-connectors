@@ -562,6 +562,17 @@ test("laterIso: returns the larger of two ISO strings", () => {
 	assert.equal(laterIso("2026-02-01", "2026-01-01"), "2026-02-01");
 });
 
+test("laterIso: compares sub-millisecond digits and offsets as instants", () => {
+	const late = "2026-11-15T14:00:00.0009Z";
+	const early = "2026-11-15T14:00:00.0001Z";
+	assert.equal(laterIso(late, early), late);
+	assert.equal(laterIso(early, late), late);
+	const offsetLate = "2026-11-15T16:00:00.5+02:00";
+	const utcEarly = "2026-11-15T14:00:00.4999Z";
+	assert.equal(laterIso(offsetLate, utcEarly), offsetLate);
+	assert.equal(laterIso(utcEarly, offsetLate), offsetLate);
+});
+
 test("laterIso: null-tolerant", () => {
 	assert.equal(laterIso(null, "2026-01-01"), "2026-01-01");
 	assert.equal(laterIso("2026-01-01", null), "2026-01-01");

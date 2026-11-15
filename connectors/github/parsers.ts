@@ -459,10 +459,17 @@ export function laterIso(
 	if (!b) {
 		return a;
 	}
-	const aTime = Date.parse(a);
-	const bTime = Date.parse(b);
-	if (!Number.isNaN(aTime) && !Number.isNaN(bTime)) {
-		return aTime > bTime ? a : b;
+	// isOutsideTimeRange compares instants exactly (offsets and any number of
+	// fractional digits); Date.parse would collapse sub-millisecond digits.
+	// It also reports true for an unparseable value, so two true answers mean
+	// at least one side is not an instant.
+	const bBeforeA = isOutsideTimeRange({ since: a }, b);
+	const aBeforeB = isOutsideTimeRange({ since: b }, a);
+	if (bBeforeA !== aBeforeB) {
+		return bBeforeA ? a : b;
+	}
+	if (!bBeforeA) {
+		return b;
 	}
 	return a > b ? a : b;
 }
