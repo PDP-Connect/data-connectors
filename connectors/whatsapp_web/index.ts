@@ -506,7 +506,7 @@ export async function sendHistorySyncOnDemand(
 			await sendPeerDataOperationRequest(HISTORY_SYNC_ON_DEMAND, { chatId: ${JSON.stringify(chatId)} });
 			return { sent: true };
 		} catch (error) {
-			return { sent: false, reason: String((error && error.message) ?? error).slice(0, 300) };
+			return { sent: false, reason: "history_sync_on_demand_send_failed" };
 		}
 	})()
 	`);
@@ -857,12 +857,35 @@ export class ReloadAwareStore implements WhatsAppWebStores {
 				{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
 			);
 		}
-		if (isOtherAccount(this.account, await readOwnAccount(this.page))) {
-			throw authFailure(
-				"WhatsApp Web switched to a different account during the run: link this browser to your own account and run again",
-			);
-		}
 		await waitForStores(this.page, this.attempts, this.waitMs, this.streams);
+		await this.confirmSameAccount();
+	}
+
+	/**
+	 * Resume only into the account the run began with. A differing id of the
+	 * same kind ends the run as an auth failure. When the run began with a
+	 * known id, the reloaded page must show an id of the same kind: until it
+	 * does (one kind can load before the other) the ids are read again, and if
+	 * none ever matches by kind the run ends as retryable rather than resume
+	 * under an account it could not confirm.
+	 */
+	private async confirmSameAccount(): Promise<void> {
+		if (this.account.pn === null && this.account.lid === null) return;
+		for (let i = 0; i < this.attempts; i++) {
+			const now = await readOwnAccount(this.page);
+			if (isOtherAccount(this.account, now)) {
+				throw authFailure(
+					"WhatsApp Web switched to a different account during the run: link this browser to your own account and run again",
+				);
+			}
+			if (isSameAccount(this.account, now)) return;
+			await wait(this.waitMs);
+		}
+		throw createConnectorFailure(
+			"whatsapp_web_page_reloaded",
+			"the WhatsApp Web page reloaded and its account could not be confirmed as the one this run began with",
+			{ retryable: true, recoveryHint: RETRY_BY_RUNTIME },
+		);
 	}
 
 	listChats(): Promise<unknown> {
@@ -1425,6 +1448,25 @@ function historyGapText(history: HistoryOutcome): string {
 	return `no on-demand history request was sent this run${history.notSent ? ` (${history.notSent})` : ""}`;
 }
 
+/**
+ * The reasons a gap may name for an unsent history request. Anything else
+ * the page answers is reported as a failed send, so no page or exception
+ * text (which can carry a chat id) reaches a gap.
+ */
+const HISTORY_REASONS = new Set([
+	"history_sync_on_demand_gate_unverified",
+	"history_sync_on_demand_disabled",
+	"history_sync_on_demand_send_failed",
+	"page_reloaded_unconfirmed",
+]);
+
+function historyReason(reason: string | undefined): string | null {
+	if (reason === undefined) return null;
+	return HISTORY_REASONS.has(reason)
+		? reason
+		: "history_sync_on_demand_send_failed";
+}
+
 async function requestHistory(
 	stores: WhatsAppWebStores,
 	item: ChatItem,
@@ -1446,7 +1488,7 @@ async function requestHistory(
 		return {
 			state,
 			requested: false,
-			notSent: ack === null ? "unexpected_answer" : (ack.reason ?? null),
+			notSent: ack === null ? "unexpected_answer" : historyReason(ack.reason),
 		};
 	}
 	for (let i = 0; i < timings.historyAttempts; i++) {
@@ -2566,6 +2608,14 @@ function isOtherAccount(before: OwnAccount, after: OwnAccount): boolean {
 	const differs = (a: string | null, b: string | null) =>
 		a !== null && b !== null && a !== b;
 	return differs(before.pn, after.pn) || differs(before.lid, after.lid);
+}
+
+/** True when an id of the same kind is known on both sides and matches. */
+function isSameAccount(before: OwnAccount, after: OwnAccount): boolean {
+	return (
+		(before.pn !== null && before.pn === after.pn) ||
+		(before.lid !== null && before.lid === after.lid)
+	);
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────

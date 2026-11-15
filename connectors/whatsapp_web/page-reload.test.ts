@@ -633,19 +633,60 @@ test("the same account after a groups reload recovers normally", async () => {
 	assert.deepEqual(gapsOf(harness), []);
 });
 
-test("an account known by phone number before a reload and only by LID after it is not a different account", async () => {
+test("an account known only by phone number before a reload and only by LID after it is not confirmed, so the run ends retryable without retrying the read", async () => {
 	const world = fakeWorld({
 		historyState: STATE_1,
 		account: (call) =>
 			call === 1
 				? { pn: "synthetic-pn-A", lid: null }
-				: { pn: null, lid: "synthetic-lid-A" },
+				: { pn: null, lid: "synthetic-lid-B" },
+		fail: (kind, call) =>
+			kind === "groups" && call === 1 ? LOADER_GONE() : null,
+	});
+	const { harness, error } = await runCollect(world.page);
+	assert.equal(asObject(error).code, "whatsapp_web_page_reloaded");
+	assert.equal(asObject(error).retryable, true);
+	assert.equal(world.calls.groups, 1, "not retried");
+	assert.equal(
+		harness.emitted.some((e) => e.stream === "groups"),
+		false,
+	);
+});
+
+test("an id of the same kind that loads a moment after the reload confirms the account", async () => {
+	const world = fakeWorld({
+		historyState: STATE_1,
+		account: (call) =>
+			call === 1
+				? { pn: "synthetic-pn-A", lid: null }
+				: call === 2
+					? { pn: null, lid: "synthetic-lid-A" }
+					: { pn: "synthetic-pn-A", lid: "synthetic-lid-A" },
 		fail: (kind, call) =>
 			kind === "groups" && call === 1 ? LOADER_GONE() : null,
 	});
 	const { harness, error } = await runCollect(world.page);
 	assert.equal(error, null);
 	assert.ok(harness.emitted.some((e) => e.stream === "groups"));
+});
+
+test("a history request that fails with page text names only a fixed reason in the gap", async () => {
+	const world = fakeWorld({
+		historyState: STATE_0,
+		sendAnswer: {
+			sent: false,
+			reason: "cannot sync chat 15550001111@c.us",
+		},
+	});
+	const { harness, error } = await runCollect(world.page);
+	assert.equal(error, null);
+	const gaps = gapsOf(harness);
+	assert.equal(gaps.length, 1);
+	assert.equal(JSON.stringify(gaps).includes("15550001111"), false);
+	assert.match(
+		String(asObject(gaps[0]?.last_error).message),
+		/\(history_sync_on_demand_send_failed\)$/,
+	);
 });
 
 test("a reloaded page that never shows a signed-in session ends the run without retrying the read", async () => {
