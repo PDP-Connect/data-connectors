@@ -2842,14 +2842,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_messages/index.ts",
-			line: 696,
+			line: 704,
 			column: 14,
 			category: "dependent_pagination",
 			note: "fetchChatMessages(): next request depends on the prior page's cursor/offset/response",
 		},
 		{
 			path: "connectors/google_messages/index.ts",
-			line: 829,
+			line: 838,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",
