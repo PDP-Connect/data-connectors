@@ -104,6 +104,7 @@
  *     (each surface's "See more"/"View all" control gone and every click
  *     loaded rows, or its source-authored empty message shown); it emits
  *     coverage and STATE then, and still skips when any surface is unreached.
+ *     A schema-rejected ad also keeps the stream incomplete.
  *   v0.4.32 — scrape legacy targeting categories before advertiser pagination
  *     so slow advertiser expansion cannot consume their collection window.
  *   v0.4.25 — restores legacy profile capture, stream-gap reporting, initial
@@ -2845,7 +2846,8 @@ export async function collectAllStreams(
 			for (const ad of readableAds) {
 				await emitRecord("ads", ad as RecordData);
 			}
-			// Ads are complete when every ads surface was reached: each surface's
+			// Ads are complete only when every built record passes its schema and
+			// every ads surface was reached: each surface's
 			// `reached` flag is true only after its "See more"/"View all" control
 			// was clicked until it was gone and every click loaded rows (or its
 			// source-authored empty message was shown). Layout diagnostics alone
@@ -2854,10 +2856,21 @@ export async function collectAllStreams(
 			const unreached = [advertisers, adTopics, categories]
 				.filter((scrape) => !scrape.reached)
 				.map((scrape) => `${scrape.surface} (${scrape.step ?? "unread"})`);
-			await queueInventoryResult(ctx, "ads", readableAds.length, unreached.length === 0,
-				unreached.length > 0
-					? `the ads sections not reached: ${unreached.join(", ")}`
-					: undefined);
+			const dropped = ads.length - readableAds.length;
+			const reasons: string[] = [];
+			if (unreached.length > 0) {
+				reasons.push(`the ads sections not reached: ${unreached.join(", ")}`);
+			}
+			if (dropped > 0) {
+				reasons.push(`${dropped} built ad record(s) failed the ads schema`);
+			}
+			await queueInventoryResult(
+				ctx,
+				"ads",
+				readableAds.length,
+				unreached.length === 0 && dropped === 0,
+				reasons.length > 0 ? reasons.join("; ") : undefined,
+			);
 		}
 		await Promise.all(responseReads);
 		await checkAuthentication();

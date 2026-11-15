@@ -2008,6 +2008,73 @@ test("collectAllStreams: ads with every surface reached and verified empty is pr
 	assertAdsComplete(harness, 0);
 });
 
+test("collectAllStreams: a schema-rejected ad keeps the ads stream unproven even with every surface reached", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryComplete: true,
+		categoryRows: [
+			{ description: "Music affinity", name: "Music" },
+			// adsSchema caps description at 2000 characters, so this row is dropped.
+			{ description: "x".repeat(2001), name: "Travel" },
+		],
+		dialogComplete: [true, true, true],
+		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
+		fetchScript: {},
+		webInfoUser: null,
+	});
+	const requested = new Map([
+		["profile", { name: "profile" }],
+		["ads", { name: "ads" }],
+	]);
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		reportStreamFailure: makeReportStreamFailure(harness.emit),
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested,
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(
+		harnessCtx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+
+	// The valid rows of every surface still emit; only the oversized category
+	// row is missing.
+	const ads = harness.emitted.filter((e) => e.stream === "ads");
+	assert.deepEqual(ads.map((a) => a.data.kind).sort(), [
+		"ad_category",
+		"ad_topic",
+		"advertiser",
+	]);
+	assert.equal(
+		ads.some((a) => a.data.name === "Travel"),
+		false,
+	);
+	const skip = assertAdsUnproven(harness);
+	assert.match(skip.message, /1 built ad record\(s\) failed the ads schema/);
+});
+
 test("collectAllStreams: positive advertiser source count vetoes stale empty copy", async () => {
 	const harness = await collectAdsInChromium({
 		ads: htmlPage(
