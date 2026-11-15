@@ -172,13 +172,27 @@ function coverageMessage(
 async function* walkDir(
 	dir: string,
 	errors: { skipped: number },
+	root = dir,
+	ancestorChangeMs = 0,
 ): AsyncGenerator<DiscoveredFile & { ctimeIso: string }> {
 	try {
+		// Renaming an album into the export changes the album's ctime, not
+		// its descendants'. Carry the maximum down the walk; the export root
+		// is excluded so a new top-level file does not replay every file.
+		// Date values, not ctimeMs: Stats rounds ctimeMs into ctime, and
+		// new Date(ctimeMs) truncates, which would put the cursor below a
+		// file's own ctime.
+		if (dir !== root) {
+			ancestorChangeMs = Math.max(
+				ancestorChangeMs,
+				(await stat(dir)).ctime.getTime(),
+			);
+		}
 		const handle = await opendir(dir);
 		for await (const entry of handle) {
 			const entryPath = join(dir, entry.name);
 			if (entry.isDirectory()) {
-				yield* walkDir(entryPath, errors);
+				yield* walkDir(entryPath, errors, root, ancestorChangeMs);
 				continue;
 			}
 			if (!(entry.isFile() && hasSupportedExtension(entry.name))) continue;
@@ -189,7 +203,9 @@ async function* walkDir(
 					path: entryPath,
 					sizeBytes: st.size,
 					mtimeIso: st.mtime.toISOString(),
-					ctimeIso: st.ctime.toISOString(),
+					ctimeIso: new Date(
+						Math.max(st.ctime.getTime(), ancestorChangeMs),
+					).toISOString(),
 				};
 			} catch {
 				errors.skipped += 1;

@@ -2,7 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { chmod, mkdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	mkdir,
+	rename,
+	rm,
+	stat,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -291,5 +299,62 @@ test("apple_photos skipped subdirectory preserves change cursor with count-only 
 	} finally {
 		await chmod(denied, 0o700);
 		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos discovers old descendants of an album renamed into the export", async () => {
+	const root = buildEmptyExportDirFixture();
+	const exportDir = join(root, "export");
+	const stagedAlbum = join(root, "staging", "album");
+	const photo = join(stagedAlbum, "nested", "photo.jpg");
+	try {
+		await mkdir(exportDir);
+		await mkdir(join(stagedAlbum, "nested"), { recursive: true });
+		await writeFile(photo, "staged-old-photo");
+		const oldChange = (await stat(photo)).ctime.toISOString();
+		const nestedChange = (
+			await stat(join(stagedAlbum, "nested"))
+		).ctime.toISOString();
+		// Ensure a strict older-than relation, including coarse timestamp filesystems.
+		await new Promise((resolve) => setTimeout(resolve, 1100));
+		await writeFile(join(exportDir, "boundary.jpg"), "newer-boundary");
+		const first = await runApplePhotos(exportDir, ["photos"]);
+		const cursor = states(first.messages).find(
+			(row) => row.stream === "photos",
+		)?.cursor;
+		assert.ok(cursor);
+		const watermark = (cursor as { changed_since: string }).changed_since;
+		assert.equal(typeof watermark, "string");
+		assert.ok(
+			oldChange < watermark && nestedChange < watermark,
+			"fixture must defeat file-only and immediate-parent-only filtering",
+		);
+		assert.deepEqual(
+			records(first.messages, "photos").map((row) => row.filename),
+			["boundary.jpg"],
+		);
+
+		await rename(stagedAlbum, join(exportDir, "album"));
+		const movedPhoto = join(exportDir, "album", "nested", "photo.jpg");
+		assert.equal((await stat(movedPhoto)).ctime.toISOString(), oldChange);
+		assert.equal(
+			(await stat(join(exportDir, "album", "nested"))).ctime.toISOString(),
+			nestedChange,
+		);
+		assert.ok((await stat(movedPhoto)).ctime.toISOString() < watermark);
+		assert.ok(
+			(await stat(join(exportDir, "album"))).ctime.toISOString() >= watermark,
+		);
+		const second = await runApplePhotos(exportDir, ["photos"], {
+			photos: cursor,
+		});
+		const photos = records(second.messages, "photos");
+		assert.ok(
+			photos.some((row) => row.filename === "photo.jpg"),
+			"the moved ancestor, not the unchanged file or nested directory, admits the photo",
+		);
+		assert.equal(skips(second.messages).length, 0);
+	} finally {
+		await rm(root, { force: true, recursive: true });
 	}
 });
