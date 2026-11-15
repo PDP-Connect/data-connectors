@@ -2041,9 +2041,9 @@ export function walkGap(walk: {
 
 /**
  * A failure the reload recovery raises for the whole run: the reloaded page
- * is signed out or open in another window, or it reloaded more times than a
- * run recovers from. It
- * ends the run; it is never one chat's gap.
+ * is signed out or open in another window, its stores never become ready,
+ * or it reloaded more times than a run recovers from. It ends the run;
+ * it is never one chat's gap.
  */
 function isRunLevelFailure(error: unknown): boolean {
 	const code =
@@ -2053,7 +2053,8 @@ function isRunLevelFailure(error: unknown): boolean {
 	return (
 		code === AUTH_FAILED_CODE ||
 		code === OPENED_ELSEWHERE_CODE ||
-		code === "whatsapp_web_page_reloaded"
+		code === "whatsapp_web_page_reloaded" ||
+		code === "whatsapp_web_stores_not_ready"
 	);
 }
 
