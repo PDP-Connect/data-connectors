@@ -68,7 +68,10 @@ function synthCache(overrides: Partial<ApolloCache> = {}): ApolloCache {
 // Synthetic markup: inline fragments must not become separate money tokens.
 for (const [label, price] of [
 	["split integer", "<span>$1</span><span>9.99</span>"],
-	["split currency and fraction", "<span>$</span><span>19</span><span>.99</span>"],
+	[
+		"split currency and fraction",
+		"<span>$</span><span>19</span><span>.99</span>",
+	],
 ]) {
 	test(`parseDomOrderCards preserves ${label} price fragments`, () => {
 		const orders = parseDomOrderCards(
@@ -80,6 +83,51 @@ for (const [label, price] of [
 		assert.equal(orders[0]?.status, "Shipped");
 	});
 }
+
+for (const [currency, price] of [
+	["EUR", "<span>19</span><span>.99 EUR</span>"],
+	["USD", "<span>19</span><span>.99</span><span> USD</span>"],
+	["GBP", "<span>19</span><span>.99 GBP</span>"],
+	["CAD", "<span>19</span><span>.99 CAD</span>"],
+]) {
+	test(`parseDomOrderCards preserves split ${currency} suffix fractions`, () => {
+		const orders = parseDomOrderCards(
+			`<div class="order-card"><a href="/orders/euro">Acme Goods</a><div>${price}</div></div>`,
+		);
+		assert.equal(orders.length, 1);
+		assert.equal(orders[0]?.totalCents, 1999);
+		assert.equal(orders[0]?.currency, currency);
+	});
+}
+
+test("parseDomOrderCards keeps ISO price, item count and status boundaries", () => {
+	const orders = parseDomOrderCards(
+		'<div class="order-card"><a href="/orders/euro">Acme Goods</a><div><span>19.99 EUR</span> <span>2 items</span></div><div>Shipped</div></div>',
+	);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.totalCents, 1999);
+	assert.equal(orders[0]?.currency, "EUR");
+	assert.equal(orders[0]?.itemCount, 2);
+	assert.equal(orders[0]?.status, "Shipped");
+});
+
+test("parseDomOrderCards never joins an item count to an integer dollar price", () => {
+	const orders = parseDomOrderCards(
+		'<div class="order-card"><a href="/orders/count">Acme Goods</a><div><span>$19</span><span>2 items</span></div></div>',
+	);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.totalCents, 1900);
+	assert.equal(orders[0]?.itemCount, 2);
+});
+
+test("parseDomOrderCards keeps a block boundary before a fraction", () => {
+	const orders = parseDomOrderCards(
+		'<div class="order-card"><a href="/orders/blocks">Acme Goods</a><div>19</div><div>.99 EUR</div></div>',
+	);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.totalCents, 9900);
+	assert.equal(orders[0]?.currency, "EUR");
+});
 
 test("parseDomOrderCards reads status after a nested order summary", () => {
 	const orders = parseDomOrderCards(
@@ -93,10 +141,34 @@ test("parseDomOrderCards reads status after a nested order summary", () => {
 
 // Synthetic adjacent inline fields must not merge into currency codes or counts.
 for (const { label, fields, totalCents, currency, itemCount } of [
-	{ label: "currency code and status", fields: '<span>19.99 EUR</span><span>Shipped</span>', totalCents: 1999, currency: "EUR", itemCount: null },
-	{ label: "complete price and item count", fields: '<span>$19.99</span><span>2 items</span>', totalCents: 1999, currency: "USD", itemCount: 2 },
-	{ label: "order number and item count", fields: '<span>Order #1001</span><span>2 items</span><span>$5.00</span>', totalCents: 500, currency: "USD", itemCount: 2 },
-	{ label: "complete price and status", fields: '<span>$19.99</span><span>Shipped</span>', totalCents: 1999, currency: "USD", itemCount: null },
+	{
+		label: "currency code and status",
+		fields: "<span>19.99 EUR</span><span>Shipped</span>",
+		totalCents: 1999,
+		currency: "EUR",
+		itemCount: null,
+	},
+	{
+		label: "complete price and item count",
+		fields: "<span>$19.99</span><span>2 items</span>",
+		totalCents: 1999,
+		currency: "USD",
+		itemCount: 2,
+	},
+	{
+		label: "order number and item count",
+		fields: "<span>Order #1001</span><span>2 items</span><span>$5.00</span>",
+		totalCents: 500,
+		currency: "USD",
+		itemCount: 2,
+	},
+	{
+		label: "complete price and status",
+		fields: "<span>$19.99</span><span>Shipped</span>",
+		totalCents: 1999,
+		currency: "USD",
+		itemCount: null,
+	},
 ]) {
 	test(`parseDomOrderCards separates inline ${label}`, () => {
 		const orders = parseDomOrderCards(
@@ -196,26 +268,40 @@ test("parseDomOrderCards dedupes multiple Shop links in one card and keeps the o
 	assert.equal(fallbackOrders[0]?.id, "https://shop.app/merchant/acme");
 	assert.equal(fallbackOrders[0]?.detailUrl, "https://shop.app/merchant/acme");
 	assert.equal(fallbackOrders[0]?.totalCents, 850);
-	assert.deepEqual(parseDomOrderCards(
-		'<div class="order-card">Acme Goods · 1 item · $8.50</div>',
-	), [], "a card with no anchor remains omitted");
+	assert.deepEqual(
+		parseDomOrderCards(
+			'<div class="order-card">Acme Goods · 1 item · $8.50</div>',
+		),
+		[],
+		"a card with no anchor remains omitted",
+	);
 });
-
 
 // Synthetic DOM fixtures: distinct purchases must not share a display-text key.
 test("parseDomOrderCards keeps identical cards with distinct order links", () => {
-	const fixture = ["A", "B"].map((id) => `
+	const fixture = ["A", "B"]
+		.map(
+			(id) => `
 		<div class="order-card">
 			<a href="/merchant/acme">Acme Goods</a>
 			<div>2 items · $19.99</div><div>Delivered</div>
 			<a href="/orders/${id}">View order</a>
-		</div>`).join("");
+		</div>`,
+		)
+		.join("");
 	const orders = parseDomOrderCards(fixture);
-	assert.deepEqual(orders.map((order) => order.id), [
-		"https://shop.app/orders/A", "https://shop.app/orders/B",
-	]);
-	assert.deepEqual(orders.map((order) => order.detailUrl), orders.map((order) => order.id));
-	assert.deepEqual(orders.map((order) => order.totalCents), [1999, 1999]);
+	assert.deepEqual(
+		orders.map((order) => order.id),
+		["https://shop.app/orders/A", "https://shop.app/orders/B"],
+	);
+	assert.deepEqual(
+		orders.map((order) => order.detailUrl),
+		orders.map((order) => order.id),
+	);
+	assert.deepEqual(
+		orders.map((order) => order.totalCents),
+		[1999, 1999],
+	);
 });
 
 test("parseDomOrderCards dedupes one canonical order even when display text changes", () => {
@@ -270,13 +356,20 @@ test("extractOrders rounds decimal-string amounts to integer cents without float
 
 test("extractOrders preserves explicit empty total price fields", () => {
 	const cache = synthCache({
-		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{},"sortBy":"PLACED_AT"}': {
-			nodes: [{ __ref: "Order:1" }], pageInfo: { hasNextPage: false },
-		} },
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{},"sortBy":"PLACED_AT"}': {
+				nodes: [{ __ref: "Order:1" }],
+				pageInfo: { hasNextPage: false },
+			},
+		},
 		"Order:1": {
-			id: "gid://shopify/Order/1", createdAt: null, displayStatus: null,
-			shop: { __ref: "Shop:acme" }, effectiveTotalPrice: null,
-			lineItems: { nodes: [] }, totalItemCount: null,
+			id: "gid://shopify/Order/1",
+			createdAt: null,
+			displayStatus: null,
+			shop: { __ref: "Shop:acme" },
+			effectiveTotalPrice: null,
+			lineItems: { nodes: [] },
+			totalItemCount: null,
 		},
 	});
 	const [order] = extractOrders(cache);
@@ -377,11 +470,27 @@ test("Shopify row normalization preserves numeric IDs, numeric strings, and empt
 		totalCents: 0,
 	});
 	const coverage = extractOrdersWithCoverage(cache).fieldCoverage[0] ?? [];
-	assert.equal(coverage.length, 10, "each mapped field receives one coverage state");
-	assert.equal(coverage.find((entry) => entry.field === "placed_at")?.state, "EXPLICIT_EMPTY");
-	assert.equal(coverage.find((entry) => entry.field === "status")?.state, "EXPLICIT_EMPTY");
-	assert.equal(coverage.find((entry) => entry.field === "currency")?.state, "EXPLICIT_EMPTY");
-	assert.equal(coverage.find((entry) => entry.field === "merchant_name")?.state, "EXPLICIT_EMPTY");
+	assert.equal(
+		coverage.length,
+		10,
+		"each mapped field receives one coverage state",
+	);
+	assert.equal(
+		coverage.find((entry) => entry.field === "placed_at")?.state,
+		"EXPLICIT_EMPTY",
+	);
+	assert.equal(
+		coverage.find((entry) => entry.field === "status")?.state,
+		"EXPLICIT_EMPTY",
+	);
+	assert.equal(
+		coverage.find((entry) => entry.field === "currency")?.state,
+		"EXPLICIT_EMPTY",
+	);
+	assert.equal(
+		coverage.find((entry) => entry.field === "merchant_name")?.state,
+		"EXPLICIT_EMPTY",
+	);
 	assert.ok(coverage.every((entry) => entry.state !== "UNAVAILABLE"));
 });
 
@@ -404,34 +513,73 @@ test("invalid empty numeric source fields are discarded for omission accounting,
 	assert.equal(result.orders.length, 0);
 	assert.equal(result.discoveredRows, 1);
 	assert.equal(result.discardedRows, 1);
-	assert.deepEqual(result.withheldRows[0]?.fields.map(({ field, reason }) => ({ field, reason })), [
-		{ field: "total", reason: "malformed_value" },
-		{ field: "item_count", reason: "malformed_value" },
-	]);
+	assert.deepEqual(
+		result.withheldRows[0]?.fields.map(({ field, reason }) => ({
+			field,
+			reason,
+		})),
+		[
+			{ field: "total", reason: "malformed_value" },
+			{ field: "item_count", reason: "malformed_value" },
+		],
+	);
 });
 
 test("every Shop order connection needs explicit terminal pageInfo", () => {
-	const missing = { ROOT_QUERY: {
-		'deliveriesOrdersList:{"filter":{}}': { nodes: [] },
-	} };
-	assert.equal(hasNextOrdersPage(missing), true, "unknown pageInfo keeps the walk open");
-	assert.equal(hasVerifiedOrdersEnd(missing), false, "missing pageInfo is not terminal evidence");
-	const mixed = { ROOT_QUERY: {
-		'deliveriesOrdersList:{"filter":{}}': { nodes: [], pageInfo: { hasNextPage: false } },
-		'deliveriesOrdersList({"first":10})': { nodes: [], pageInfo: { hasNextPage: true } },
-	} };
-	assert.equal(hasNextOrdersPage(mixed), true, "a second connection still advertising a next page vetoes end");
+	const missing = {
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{}}': { nodes: [] },
+		},
+	};
+	assert.equal(
+		hasNextOrdersPage(missing),
+		true,
+		"unknown pageInfo keeps the walk open",
+	);
+	assert.equal(
+		hasVerifiedOrdersEnd(missing),
+		false,
+		"missing pageInfo is not terminal evidence",
+	);
+	const mixed = {
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{}}': {
+				nodes: [],
+				pageInfo: { hasNextPage: false },
+			},
+			'deliveriesOrdersList({"first":10})': {
+				nodes: [],
+				pageInfo: { hasNextPage: true },
+			},
+		},
+	};
+	assert.equal(
+		hasNextOrdersPage(mixed),
+		true,
+		"a second connection still advertising a next page vetoes end",
+	);
 	assert.equal(hasVerifiedOrdersEnd(mixed), false);
-	assert.equal(hasVerifiedOrdersEnd({ ROOT_QUERY: {
-		'deliveriesOrdersList:{"filter":{}}': { nodes: [], pageInfo: { hasNextPage: false } },
-	} }), true);
+	assert.equal(
+		hasVerifiedOrdersEnd({
+			ROOT_QUERY: {
+				'deliveriesOrdersList:{"filter":{}}': {
+					nodes: [],
+					pageInfo: { hasNextPage: false },
+				},
+			},
+		}),
+		true,
+	);
 });
 
 test("a malformed mapped field withholds the full order and reports only field reasons", () => {
 	const cache = synthCache({
-		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{}}': {
-			nodes: [{ __ref: "Order:1" }], pageInfo: { hasNextPage: false },
-		} },
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{}}': {
+				nodes: [{ __ref: "Order:1" }],
+				pageInfo: { hasNextPage: false },
+			},
+		},
 		"Order:1": {
 			id: "gid://shopify/Order/1",
 			createdAt: {},
@@ -445,24 +593,29 @@ test("a malformed mapped field withholds the full order and reports only field r
 	const result = extractOrdersWithCoverage(cache);
 	assert.equal(result.orders.length, 0);
 	assert.equal(result.discardedRows, 1);
-	assert.deepEqual(result.withheldRows, [{
-		fields: [
-			{ field: "placed_at", reason: "malformed_value" },
-			{ field: "status", reason: "malformed_value" },
-			{ field: "total", reason: "malformed_value" },
-			{ field: "currency", reason: "malformed_value" },
-			{ field: "merchant_name", reason: "missing_reference" },
-			{ field: "line_item_titles", reason: "missing_or_malformed_reference" },
-		],
-	}]);
+	assert.deepEqual(result.withheldRows, [
+		{
+			fields: [
+				{ field: "placed_at", reason: "malformed_value" },
+				{ field: "status", reason: "malformed_value" },
+				{ field: "total", reason: "malformed_value" },
+				{ field: "currency", reason: "malformed_value" },
+				{ field: "merchant_name", reason: "missing_reference" },
+				{ field: "line_item_titles", reason: "missing_or_malformed_reference" },
+			],
+		},
+	]);
 	assert.equal(JSON.stringify(result.withheldRows).includes("gid://"), false);
 });
 
 test("missing mapped scalar fields withhold the whole order instead of becoming empty values", () => {
 	const cache = synthCache({
-		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{}}': {
-			nodes: [{ __ref: "Order:1" }], pageInfo: { hasNextPage: false },
-		} },
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{}}': {
+				nodes: [{ __ref: "Order:1" }],
+				pageInfo: { hasNextPage: false },
+			},
+		},
 		"Order:1": {
 			id: "gid://shopify/Order/1",
 			shop: { __ref: "Shop:acme" },
@@ -470,30 +623,53 @@ test("missing mapped scalar fields withhold the whole order instead of becoming 
 		},
 	});
 	const result = extractOrdersWithCoverage(cache);
-	assert.equal(result.orders.length, 0, "partial cache data must not replace a stored whole record");
-	assert.deepEqual(result.withheldRows, [{ fields: [
-		{ field: "placed_at", reason: "missing_field" },
-		{ field: "status", reason: "missing_field" },
-		{ field: "total", reason: "missing_field" },
-		{ field: "currency", reason: "missing_field" },
-		{ field: "item_count", reason: "missing_field" },
-	] }]);
+	assert.equal(
+		result.orders.length,
+		0,
+		"partial cache data must not replace a stored whole record",
+	);
+	assert.deepEqual(result.withheldRows, [
+		{
+			fields: [
+				{ field: "placed_at", reason: "missing_field" },
+				{ field: "status", reason: "missing_field" },
+				{ field: "total", reason: "missing_field" },
+				{ field: "currency", reason: "missing_field" },
+				{ field: "item_count", reason: "missing_field" },
+			],
+		},
+	]);
 });
 
 test("an unreadable nodes body and invalid declared totals veto connection end", () => {
 	for (const nodes of [undefined, null, { 0: { __ref: "Order:1" } }]) {
 		const cache = synthCache({
-			ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{}}': { nodes, pageInfo: { hasNextPage: false } } },
+			ROOT_QUERY: {
+				'deliveriesOrdersList:{"filter":{}}': {
+					nodes,
+					pageInfo: { hasNextPage: false },
+				},
+			},
 		});
 		assert.equal(hasVerifiedOrdersEnd(cache), false);
 		assert.ok(extractOrdersWithCoverage(cache).discardedRows > 0);
 	}
-	for (const totalCount of [true, "not-a-number", Number.POSITIVE_INFINITY, 1.5, null, undefined]) {
+	for (const totalCount of [
+		true,
+		"not-a-number",
+		Number.POSITIVE_INFINITY,
+		1.5,
+		null,
+		undefined,
+	]) {
 		const cache = synthCache({
-			ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{}}': {
-				nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }],
-				pageInfo: { hasNextPage: false }, totalCount,
-			} },
+			ROOT_QUERY: {
+				'deliveriesOrdersList:{"filter":{}}': {
+					nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }],
+					pageInfo: { hasNextPage: false },
+					totalCount,
+				},
+			},
 		});
 		assert.equal(hasOrderCountMismatch(cache), true);
 	}
@@ -501,21 +677,30 @@ test("an unreadable nodes body and invalid declared totals veto connection end",
 
 test("cursor suffixes and filtered connections are not verified full-history end proof", () => {
 	const suffix = synthCache({
-		ROOT_QUERY: { 'deliveriesOrdersList({"first":10,"after":"middle"})': {
-			nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }], pageInfo: { hasNextPage: false },
-		} },
+		ROOT_QUERY: {
+			'deliveriesOrdersList({"first":10,"after":"middle"})': {
+				nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }],
+				pageInfo: { hasNextPage: false },
+			},
+		},
 	});
 	assert.equal(hasVerifiedOrdersEnd(suffix), false);
 	const accumulatedSuffix = synthCache({
-		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{},"after":"middle"}': {
-			nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }], pageInfo: { hasNextPage: false },
-		} },
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{},"after":"middle"}': {
+				nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }],
+				pageInfo: { hasNextPage: false },
+			},
+		},
 	});
 	assert.equal(hasVerifiedOrdersEnd(accumulatedSuffix), false);
 	const filtered = synthCache({
-		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{"status":"FULFILLED"}}': {
-			nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }], pageInfo: { hasNextPage: false },
-		} },
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{"status":"FULFILLED"}}': {
+				nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }],
+				pageInfo: { hasNextPage: false },
+			},
+		},
 	});
 	assert.equal(hasVerifiedOrdersEnd(filtered), false);
 });
@@ -524,11 +709,13 @@ test("cursor history end requires a connected first-to-terminal request chain", 
 	const first = synthCache({
 		ROOT_QUERY: {
 			'deliveriesOrdersList({"first":10})': {
-				nodes: [{ __ref: "Order:1" }], totalCount: 2,
+				nodes: [{ __ref: "Order:1" }],
+				totalCount: 2,
 				pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
 			},
 			'deliveriesOrdersList({"first":10,"after":"cursor-1"})': {
-				nodes: [{ __ref: "Order:2" }], totalCount: 2,
+				nodes: [{ __ref: "Order:2" }],
+				totalCount: 2,
 				pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
 			},
 		},
@@ -537,11 +724,13 @@ test("cursor history end requires a connected first-to-terminal request chain", 
 	const disconnected = synthCache({
 		ROOT_QUERY: {
 			'deliveriesOrdersList({"first":10})': {
-				nodes: [{ __ref: "Order:1" }], totalCount: 2,
+				nodes: [{ __ref: "Order:1" }],
+				totalCount: 2,
 				pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
 			},
 			'deliveriesOrdersList({"first":10,"after":"other"})': {
-				nodes: [{ __ref: "Order:2" }], totalCount: 2,
+				nodes: [{ __ref: "Order:2" }],
+				totalCount: 2,
 				pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
 			},
 		},
@@ -550,31 +739,47 @@ test("cursor history end requires a connected first-to-terminal request chain", 
 });
 
 test("a connected cursor chain has no outstanding continuation after its terminal frontier", () => {
-	const cache = synthCache({ ROOT_QUERY: {
-		'deliveriesOrdersList({"first":10})': {
-			nodes: [{ __ref: "Order:1" }],
-			pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+	const cache = synthCache({
+		ROOT_QUERY: {
+			'deliveriesOrdersList({"first":10})': {
+				nodes: [{ __ref: "Order:1" }],
+				pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+			},
+			'deliveriesOrdersList({"first":10,"after":"cursor-1"})': {
+				nodes: [{ __ref: "Order:2" }],
+				pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
+			},
 		},
-		'deliveriesOrdersList({"first":10,"after":"cursor-1"})': {
-			nodes: [{ __ref: "Order:2" }],
-			pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
-		},
-	} });
+	});
 	assert.equal(hasVerifiedOrdersEnd(cache), true);
-	assert.equal(hasNextOrdersPage(cache), false, "historical first-page continuation is already fulfilled");
+	assert.equal(
+		hasNextOrdersPage(cache),
+		false,
+		"historical first-page continuation is already fulfilled",
+	);
 });
 
-
 test("Shop DOM links canonicalize both origins and reject lookalikes", () => {
-	const card = (origin: string) => `<div class="order-card"><a href="${origin}/orders/same-order">Acme Goods</a><div>2 items · $19.99</div></div>`;
+	const card = (origin: string) =>
+		`<div class="order-card"><a href="${origin}/orders/same-order">Acme Goods</a><div>2 items · $19.99</div></div>`;
 	const expected = parseDomOrderCards(card("https://shop.app"));
 	assert.equal(expected.length, 1);
 	assert.deepEqual(parseDomOrderCards(card("https://shop.com")), expected);
-	for (const origin of ["https://shop.com.evil", "https://shop.app.evil", "http://shop.com", "https://shop.com:444", "https://evil.test/?shop.com"]) {
+	for (const origin of [
+		"https://shop.com.evil",
+		"https://shop.app.evil",
+		"http://shop.com",
+		"https://shop.com:444",
+		"https://evil.test/?shop.com",
+	]) {
 		assert.deepEqual(parseDomOrderCards(card(origin)), [], origin);
 	}
-	const mixed = '<div class="order-card"><a href="https://shop.com/merchant/acme">Acme Goods</a><div>2 items · $19.99</div><a href="https://shop.app/orders/same-order">View order</a></div>';
-	assert.equal(parseDomOrderCards(mixed)[0]?.id, "https://shop.app/orders/same-order");
+	const mixed =
+		'<div class="order-card"><a href="https://shop.com/merchant/acme">Acme Goods</a><div>2 items · $19.99</div><a href="https://shop.app/orders/same-order">View order</a></div>';
+	assert.equal(
+		parseDomOrderCards(mixed)[0]?.id,
+		"https://shop.app/orders/same-order",
+	);
 });
 test("Shop DOM status retains qualifiers instead of matching positive substrings", () => {
 	for (const [phrase, expected] of [
