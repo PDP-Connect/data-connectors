@@ -4,8 +4,9 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import {
-	buildFullScanCoverageMessage,
+	buildDetailCoverageMessage,
 	type CollectContext,
+	type RecordData,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { bookRecord, createExportReader, highlightRecord } from "./api.ts";
@@ -64,31 +65,42 @@ export async function collectReadwise(
 	const seen = new Set<string>();
 	let cursor: string | null = null;
 	let pages = 0;
-	const counts = { books: 0, highlights: 0 };
+	const counts = {
+		books: { considered: 0, covered: 0 },
+		highlights: { considered: 0, covered: 0 },
+	};
+	const emitSelected = async (
+		stream: (typeof STREAMS)[number],
+		data: RecordData,
+	) => {
+		if (ctx.isRecordSelected?.(stream, data) === false) return;
+		const count = counts[stream];
+		count.considered += 1;
+		// The runtime emits tombstones directly, without calling beforeEmit.
+		let accepted = data.is_deleted === true;
+		await ctx.emitRecord(stream, data, {
+			beforeEmit: async () => {
+				accepted = true;
+			},
+		});
+		if (accepted) count.covered += 1;
+	};
 
 	do {
 		if (++pages > MAX_PAGES) throw new Error("readwise_page_bound_exceeded");
 		const page = await readPage(token, cursor, updatedAfter);
 		for (const book of page.results) {
 			if (ctx.requested.has("books")) {
-				const record = bookRecord(book);
-				if (ctx.isRecordSelected?.("books", record) !== false) {
-					counts.books += 1;
-					await ctx.emitRecord("books", record);
-				}
+				await emitSelected("books", bookRecord(book));
 			}
 			if (ctx.requested.has("highlights")) {
 				for (const highlight of book.highlights ?? []) {
-					const record = highlightRecord(highlight, book);
-					if (ctx.isRecordSelected?.("highlights", record) !== false) {
-						counts.highlights += 1;
-						await ctx.emitRecord("highlights", record);
-					}
+					await emitSelected("highlights", highlightRecord(highlight, book));
 				}
 			}
 		}
 		await ctx.progress(
-			`Fetched ${counts.books} books and ${counts.highlights} highlights`,
+			`Collected ${counts.books.covered} books and ${counts.highlights.covered} highlights`,
 		);
 		cursor = page.nextPageCursor;
 		if (cursor !== null && seen.has(cursor))
@@ -100,8 +112,20 @@ export async function collectReadwise(
 		updated_after: new Date(runStartedAt - CURSOR_SKEW_MS).toISOString(),
 	};
 	for (const stream of streams) {
-		await ctx.emit(buildFullScanCoverageMessage(stream, counts[stream]));
-		await ctx.emit({ type: "STATE", stream, cursor: checkpoint });
+		const { considered, covered } = counts[stream];
+		await ctx.emit(
+			buildDetailCoverageMessage({
+				stream,
+				stateStream: stream,
+				requiredKeys: [],
+				hydratedKeys: [],
+				considered,
+				covered,
+			}),
+		);
+		if (covered === considered) {
+			await ctx.emit({ type: "STATE", stream, cursor: checkpoint });
+		}
 	}
 }
 

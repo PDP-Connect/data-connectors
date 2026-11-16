@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { makeEmitRecord } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { createExportReader } from "./api.ts";
 import { collectReadwise } from "./index.ts";
@@ -65,6 +66,64 @@ test("uses the oldest requested checkpoint and preserves numeric cursor zero", a
 		"2026-11-04T00:00:00.000Z",
 	);
 	assert.equal(urls[1]?.searchParams.get("pageCursor"), "0");
+});
+
+test("coverage counts records and tombstones the runtime accepted and only checkpoints complete streams", async () => {
+	const ctx = fixtureContext();
+	const emitter = makeEmitRecord({
+		requested: ctx.requested,
+		emit: ctx.emit,
+		emittedAt: ctx.emittedAt,
+		validateRecord,
+		isTombstone: (_stream, data) => data.is_deleted === true,
+		timeRangeFieldFor: () => null,
+	});
+	const read = createExportReader(
+		async () =>
+			Response.json({
+				nextPageCursor: null,
+				results: [
+					{
+						user_book_id: 11,
+						highlights: [
+							{ id: 101, text: "A synthetic highlight." },
+							{ id: 102, created_at: "2024-01-01" },
+							{ id: 103, is_deleted: true },
+						],
+					},
+				],
+			}),
+		async () => {},
+	);
+	await collectReadwise(
+		{ ...ctx, emitRecord: emitter.emit, isRecordSelected: emitter.isSelected },
+		read,
+	);
+	assert.deepEqual(
+		ctx.protocolMessages
+			.filter((message) => message.type === "RECORD")
+			.map(({ stream, key, op }) => [stream, key, op]),
+		[
+			["books", "11", undefined],
+			["highlights", "101", undefined],
+			["highlights", "103", "delete"],
+		],
+	);
+	assert.deepEqual(
+		ctx.protocolMessages
+			.filter((message) => message.type === "DETAIL_COVERAGE")
+			.map(({ stream, considered, covered }) => [stream, considered, covered]),
+		[
+			["books", 1, 1],
+			["highlights", 3, 2],
+		],
+	);
+	assert.deepEqual(
+		ctx.protocolMessages
+			.filter((message) => message.type === "STATE")
+			.map(({ stream }) => stream),
+		["books"],
+	);
 });
 
 for (const { end, error } of [
