@@ -97,3 +97,40 @@ test("statement records carry nullable transfer fields without changing existing
   assert.deepEqual(fields(transactionSchema.parse(row)), fields(row));
  }
 });
+
+test("modern checking statement text carries transfer detail into schema-valid records", () => {
+ const text = [
+  "SYNTHETIC CHECKING STATEMENT",
+  "TRANSACTIONS",
+  "Date Description Amount Balance",
+  "04/10 USAA FUNDS TRANSFER CR FROM RILEY IMAGINARY SAVINGS #4321, CONF# 1234567 12.34 112.34",
+  "04/11 SYNTHETIC BOOKSHOP -5.00 107.34",
+  "ENDING BALANCE 107.34",
+ ].join("\n");
+ const parsed = _internals.parseModernCheckingEra(text, {
+  closing: { closingYear: 2026, closingMonth: 4 },
+ });
+ assert.equal(parsed.length, 2, "both statement rows must be parsed");
+ const rows = _internals.buildStatementRecords(parsed, {
+  accountId: "SYNTHETIC-ACCOUNT", accountName: "Synthetic checking", period: "2026-04",
+ });
+ assert.equal(rows.length, 2);
+ const [transfer, purchase] = rows;
+ assert.ok(transfer);
+ assert.ok(purchase);
+ assert.equal(transfer.description, "USAA FUNDS TRANSFER CR FROM RILEY IMAGINARY SAVINGS #4321, CONF# 1234567");
+ assert.equal(transfer.date, "2026-04-10");
+ assert.equal(transfer.amount, 1234);
+ assert.deepEqual(fields(transfer), {
+  transfer_direction: "in", counterparty_name: "RILEY IMAGINARY",
+  counterparty_account_type: "SAVINGS", counterparty_last4: "4321",
+  transfer_confirmation_number: "1234567",
+ });
+ assert.equal(purchase.description, "SYNTHETIC BOOKSHOP");
+ assert.equal(purchase.date, "2026-04-11");
+ assert.equal(purchase.amount, -500);
+ assert.deepEqual(fields(purchase), Object.fromEntries(keys.map(key => [key, null])));
+ for (const row of rows) {
+  assert.deepEqual(fields(transactionSchema.parse(row)), fields(row));
+ }
+});
