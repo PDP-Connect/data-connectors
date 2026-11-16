@@ -45,9 +45,14 @@ function assertSafeRecognisableSvg(source, filename) {
 // only the mark's white shape (no ® glyph), scaled uniformly to fit 24x24, and
 // rewritten from even-odd to nonzero filling where needed:
 //   character_ai  https://character.ai/icon.svg
+//   coros_browser https://www.coros.com/public/images/COROS.svg, the site
+//                 favicon
 //   heb           https://www.heb.com/ header logo
 //   instinct      https://instinct.com/redesign/wordmark.svg, the "I" glyph
 //                 that app.instinct.com/favicon.ico shows
+//   mountain_project
+//                 https://www.mountainproject.com/img/climb/logoHex2.svg, the
+//                 climber tile that /img/climb/favicons/favicon-180.png shows
 //   oura*         https://static.ouraring.com/pdfs/Oura_BrandGuidelines_v1.pdf
 //   usaa          https://www.usaa.com/favicon.svg
 //   wholefoods    https://www.wholefoodsmarket.com/ header logo, the leaf O
@@ -56,13 +61,7 @@ function assertSafeRecognisableSvg(source, filename) {
 //   ynab          https://www.ynab.com/press, Tree Logo
 // A connector with no legitimately available mark is listed here and declares
 // no `brand`, so consumers fall back to the monogram instead of an invented logo.
-const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
-  // simple-icons carries no Mountain Project mark; the site's own logo is a
-  // wide wordmark (/img/climb/logoHex2.svg), not a square glyph.
-  "mountain_project.json",
-  // No COROS mark with checked provenance yet; monogram until one is sourced.
-  "coros_browser.json",
-]);
+const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([]);
 
 function assertRealBrandMarkShape(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);

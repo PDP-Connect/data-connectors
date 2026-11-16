@@ -9,8 +9,12 @@
 	},
 	"connector_key": "coros-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/coros-browser",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "COROS (Browser Sign-In)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#F8273B"
+	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
