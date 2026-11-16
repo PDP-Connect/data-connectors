@@ -1,17 +1,17 @@
-# Readwise Kindle highlights
+# Readwise
 
-Collects existing Kindle highlights through the Readwise v2 API into the
-`kindle_highlights` stream. It lists Kindle books and follows the export cursor
-for their highlights. The connector uses stable provider highlight IDs and
-emits provider deletion flags as tombstones.
+Collects the sources and highlights stored in Readwise through its v2 Highlight
+EXPORT API. The `books` stream includes books, articles and other sources.
+The `highlights` stream retains its source ID and title. Both streams use stable
+Readwise IDs and support incremental collection and provider deletion flags.
 
-Provide `READWISE_API_TOKEN` through the connector runtime. This connector
-reads Readwise data. It does not start Kindle synchronization or import books.
-The manifest declares the Development tier.
+Provide `READWISE_ACCESS_TOKEN` through the connector runtime. The manifest
+declares the Development tier. Text fields and tags use the reversible
+`pdpp-safe-escape-v1` encoding for literal backslashes and control characters
+that cannot be stored directly in the protocol. Other Unicode text is preserved.
 
-The connector tests exercise synthetic API responses, pagination, record
-validation, snapshot counts and credential isolation. Run them with
-`node --import tsx --test connectors/readwise/index.test.ts` from the repo root.
+Run `node --import tsx --test connectors/readwise/{api,index}.test.ts` from the
+repository root to check the synthetic API and collection fixtures.
 
 The icon uses the mark from [Readwise’s Safari pinned-tab SVG](https://d34adp677peecb.cloudfront.net/static/images/favicons/safari-pinned-tab.fea64b2bbb1d.svg),
 scaled to a 24 by 24 viewBox with the outer frame removed.

@@ -305,7 +305,8 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		training_sessions: { field: "start_date", format: "date" },
 	},
 	readwise: {
-		kindle_highlights: null,
+		books: null,
+		highlights: null,
 	},
 	reddit: {
 		comments: { field: "created_utc", format: "date-time" },

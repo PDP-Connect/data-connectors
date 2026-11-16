@@ -112,7 +112,7 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 	},
 	readwise: {
 		credentialKind: "personal_access_token",
-		secretEnvVars: ["READWISE_API_TOKEN"],
+		secretEnvVars: ["READWISE_ACCESS_TOKEN"],
 	},
 	reddit: {
 		credentialKind: "username_password",

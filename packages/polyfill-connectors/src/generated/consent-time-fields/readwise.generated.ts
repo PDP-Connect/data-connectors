@@ -16,6 +16,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
 > = {
 	readwise: {
-		kindle_highlights: null,
+		books: null,
+		highlights: null,
 	},
 };

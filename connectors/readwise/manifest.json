@@ -1,10 +1,16 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/readwise",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/readwise",
+		"display": {
+			"name": "Readwise"
+		}
+	},
 	"connector_key": "readwise",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/readwise",
-	"version": "0.1.1",
-	"display_name": "Readwise Kindle",
+	"version": "0.1.0",
+	"display_name": "Readwise",
 	"brand": {
 		"icon": "icon.svg",
 		"background_color": "#222222"
@@ -19,34 +25,136 @@
 			}
 		}
 	},
+	"setup": {
+		"modality": "static_secret",
+		"credential_capture": {
+			"kind": "personal_access_token",
+			"label": "Readwise access token",
+			"description": "Use the Readwise access token for the account whose highlights this connection should collect.",
+			"submit_label": "Create Readwise connection and start first sync",
+			"fields": [
+				{
+					"name": "secret",
+					"label": "Readwise access token",
+					"type": "password",
+					"required": true,
+					"secret": true,
+					"autocomplete": "off",
+					"help_url": "https://readwise.io/access_token",
+					"help_text": "Copy your access token from readwise.io/access_token, then paste it here.",
+					"env": ["READWISE_ACCESS_TOKEN"]
+				}
+			]
+		}
+	},
 	"capabilities": {
 		"human_interaction": [],
 		"refresh_policy": {
-			"recommended_mode": "manual",
-			"recommended_interval_seconds": 21600,
+			"recommended_mode": "automatic",
+			"recommended_interval_seconds": 86400,
 			"minimum_interval_seconds": 3600,
-			"maximum_staleness_seconds": 86400,
 			"interaction_posture": "none",
 			"rate_limit_sensitivity": "medium",
 			"bot_detection_sensitivity": "low",
-			"background_safe": false,
-			"rationale": "Manual bounded snapshot of existing Readwise Kindle highlights using the official API; never initiates Kindle synchronization."
+			"background_safe": true,
+			"rationale": "Readwise's export endpoint uses a long-lived token, is rate limited (HTTP 429 with Retry-After), and supports updatedAfter, so a daily incremental sync is enough."
 		},
 		"public_listing": {
 			"tier": "development"
 		},
 		"auth": {
 			"kind": "env",
-			"required": ["READWISE_API_TOKEN"]
+			"required": ["READWISE_ACCESS_TOKEN"]
 		}
 	},
 	"streams": [
 		{
-			"name": "kindle_highlights",
-			"description": "Existing Kindle highlights stored in Readwise, with book title, author, notes and locations.",
+			"name": "books",
+			"description": "Books, articles and other sources the owner has highlighted in Readwise.",
 			"display": {
-				"label": "Your Kindle highlights",
-				"detail": "Highlight text, notes, book title and author, Kindle location and Readwise links."
+				"label": "Your Readwise sources",
+				"detail": "Titles, authors, category, source, cover image, links, document notes and tags."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"title": {
+						"type": "string",
+						"x_pdpp_role": "primary-title"
+					},
+					"author": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "actor"
+					},
+					"category": {
+						"type": ["string", "null"]
+					},
+					"source": {
+						"type": ["string", "null"]
+					},
+					"cover_image_url": {
+						"type": ["string", "null"]
+					},
+					"source_url": {
+						"type": ["string", "null"]
+					},
+					"readwise_url": {
+						"type": ["string", "null"]
+					},
+					"document_note": {
+						"type": ["string", "null"]
+					},
+					"summary": {
+						"type": ["string", "null"]
+					},
+					"asin": {
+						"type": ["string", "null"]
+					},
+					"tags": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"is_deleted": {
+						"type": "boolean"
+					},
+					"text_encoding": {
+						"type": "string",
+						"enum": ["pdpp-safe-escape-v1"]
+					}
+				},
+				"required": ["id", "title", "tags", "is_deleted", "text_encoding"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["title", "author"],
+					"semantic_fields": ["title"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "highlights",
+			"required": true,
+			"description": "Every Readwise highlight with its note, tags, location and source book.",
+			"display": {
+				"label": "Your Readwise highlights",
+				"detail": "Highlighted text, your notes, tags, colour, favourite flag, location, and the title and author of the source."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -58,39 +166,36 @@
 					"book_id": {
 						"type": "string"
 					},
-					"title": {
-						"type": "string",
-						"x_pdpp_role": "primary-title"
+					"book_title": {
+						"type": "string"
 					},
-					"author": {
+					"book_author": {
+						"type": ["string", "null"]
+					},
+					"book_category": {
 						"type": ["string", "null"]
 					},
 					"text": {
-						"type": "string"
+						"type": "string",
+						"x_pdpp_role": "primary-title"
 					},
 					"note": {
 						"type": ["string", "null"]
 					},
+					"color": {
+						"type": ["string", "null"]
+					},
 					"location": {
-						"type": ["integer", "null"]
+						"type": ["number", "null"]
 					},
 					"location_type": {
 						"type": ["string", "null"]
 					},
-					"highlighted_at": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"updated_at": {
-						"type": "string",
-						"format": "date-time"
+					"url": {
+						"type": ["string", "null"]
 					},
 					"readwise_url": {
-						"type": "string"
-					},
-					"source": {
-						"type": "string",
-						"enum": ["kindle"]
+						"type": ["string", "null"]
 					},
 					"tags": {
 						"type": "array",
@@ -98,70 +203,70 @@
 							"type": "string"
 						}
 					},
-					"deleted": {
+					"is_favorite": {
 						"type": "boolean"
+					},
+					"is_discard": {
+						"type": "boolean"
+					},
+					"is_deleted": {
+						"type": "boolean"
+					},
+					"highlighted_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"x_pdpp_role": "event-time"
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"updated_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"text_encoding": {
+						"type": "string",
+						"enum": ["pdpp-safe-escape-v1"]
 					}
 				},
 				"required": [
 					"id",
 					"book_id",
-					"title",
-					"author",
+					"book_title",
 					"text",
-					"note",
-					"location",
-					"location_type",
-					"highlighted_at",
-					"updated_at",
-					"readwise_url",
-					"source",
 					"tags",
-					"deleted"
+					"is_favorite",
+					"is_discard",
+					"is_deleted",
+					"text_encoding"
 				]
 			},
 			"primary_key": ["id"],
-			"required": true,
+			"cursor_field": "updated_at",
 			"selection": {
 				"fields": true,
 				"resources": true
 			},
-			"incremental": false,
+			"incremental": true,
 			"query": {
-				"range_filters": {
-					"highlighted_at": ["gte", "gt", "lte", "lt"],
-					"updated_at": ["gte", "gt", "lte", "lt"]
-				},
 				"search": {
-					"lexical_fields": ["title", "author", "text", "note"],
-					"semantic_fields": ["title", "text", "note"]
+					"lexical_fields": ["text", "note", "book_title", "book_author"],
+					"semantic_fields": ["text", "note"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["highlighted_at"]
+				},
+				"range_filters": {
+					"highlighted_at": ["gte", "gt", "lte", "lt"]
 				}
 			},
-			"coverage_strategy": "snapshot_import_receipt",
-			"freshness_strategy": "manual_as_of"
+			"coverage_strategy": "checkpoint_window",
+			"freshness_strategy": "scheduled_window"
 		}
 	],
-	"source": {
-		"id": "https://registry.pdpp.dev/sources/readwise",
-		"display": {
-			"name": "Readwise Kindle"
-		}
-	},
-	"setup": {
-		"modality": "static_secret",
-		"credential_capture": {
-			"kind": "personal_access_token",
-			"label": "Readwise access token",
-			"fields": [
-				{
-					"name": "secret",
-					"label": "Readwise access token",
-					"type": "password",
-					"secret": true,
-					"required": true,
-					"env": ["READWISE_API_TOKEN"],
-					"help_url": "https://readwise.io/access_token"
-				}
-			]
-		}
+	"reason_display_messages": {
+		"readwise_auth_failed": "Readwise did not accept the access token. Copy a fresh token from readwise.io/access_token and connect again."
 	}
 }
