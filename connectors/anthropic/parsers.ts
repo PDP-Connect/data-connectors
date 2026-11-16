@@ -180,7 +180,30 @@ function bool(v: unknown): boolean | null {
 	return typeof v === "boolean" ? v : null;
 }
 
-const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+const ISO_DT_RE =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+/** Complete ISO datetime with a valid Gregorian calendar date and clock. */
+export function isIsoDateTime(value: string): boolean {
+	const match = ISO_DT_RE.exec(value);
+	if (match === null || match[0] !== value) return false;
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+	return (
+		month >= 1 &&
+		month <= 12 &&
+		day >= 1 &&
+		day <= (days[month - 1] ?? 0) &&
+		Number(match[4]) <= 23 &&
+		Number(match[5]) <= 59 &&
+		Number(match[6]) <= 59 &&
+		(match[7] === undefined || Number(match[7]) <= 23) &&
+		(match[8] === undefined || Number(match[8]) <= 59)
+	);
+}
 
 /** Claude export timestamps are already ISO-8601; pass through verbatim if
  * they parse as such, else null (D4: unparseable value is null, never
@@ -191,7 +214,7 @@ export function isoOrNull(v: unknown): string | null {
 	if (s === null) {
 		return null;
 	}
-	return ISO_DT_RE.test(s) ? s : null;
+	return isIsoDateTime(s) ? s : null;
 }
 
 // ─── conversations + messages (claude.conversations split) ─────────────────
@@ -904,10 +927,11 @@ export function parseProject(raw: unknown): {
 	if (id === null) {
 		return null;
 	}
-	const docsRaw = Array.isArray(raw.docs) ? raw.docs : [];
-	const documents = docsRaw
-		.map((d) => parseProjectDocument(d, id))
-		.filter((d): d is ProjectDocumentRecord => d !== null);
+	const docsRaw = Array.isArray(raw.docs) ? raw.docs.filter(isRecord) : [];
+	const parsedDocuments = docsRaw.map((d) => parseProjectDocument(d, id));
+	const documents = parsedDocuments.filter(
+		(d): d is ProjectDocumentRecord => d !== null,
+	);
 	const creator = isRecord(raw.creator) ? raw.creator : null;
 	const creatorUuid = creator === null ? null : str(creator.uuid);
 	const creatorFullName = creator === null ? null : str(creator.full_name);
@@ -927,8 +951,8 @@ export function parseProject(raw: unknown): {
 				update_time: isoOrNull(raw.updated_at),
 				// archived_at's presence/absence IS the archived signal in the export
 				// (matches legacy normalizeProject's `Boolean(p?.archived_at)` exactly)
-				// — a definite false, not an unknown, when the key is absent or null.
-				is_archived: raw.archived_at != null,
+				// — a definite false, not an unknown, when the key is absent, null or empty.
+				is_archived: Boolean(raw.archived_at),
 				prompt_template: encodedField(str(raw.prompt_template), tally),
 				creator:
 					creator !== null
@@ -942,16 +966,17 @@ export function parseProject(raw: unknown): {
 				is_private: bool(raw.is_private),
 				is_starter_project: bool(raw.is_starter_project),
 				archived_at: encodedField(raw.archived_at, tally),
-				raw_docs: docsRaw.filter(isRecord).map((doc) => {
+				raw_docs: docsRaw.map((doc, index) => {
 					// Copies of the document's own fields. Text over the inline cap
 					// lives in the document's record (as a blob) and is left out
-					// here, never cut; the document record reports the omission.
+					// here, never cut. Count the copy only if no document record exists.
 					const copy: OmissionTally = { fields: 0 };
 					const uuid = encodedField(doc.uuid, copy);
 					const filename = encodedField(doc.filename, copy);
 					const content = encodedField(doc.content, copy);
 					const createdAt = encodedField(doc.created_at, copy);
 					const updatedAt = encodedField(doc.updated_at, copy);
+					if (parsedDocuments[index] === null) tally.fields += copy.fields;
 					return {
 						...(typeof uuid === "string" ? { uuid } : {}),
 						...(typeof filename === "string" ? { filename } : {}),

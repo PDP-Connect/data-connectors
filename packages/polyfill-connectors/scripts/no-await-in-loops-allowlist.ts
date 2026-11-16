@@ -490,14 +490,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/anthropic/parsers.ts",
-			line: 594,
+			line: 617,
 			column: 17,
 			category: "dependent_file_cursor",
 			note: "parseJsonArrayChunks(): request the next bounded input chunk at the current offset.",
 		},
 		{
 			path: "connectors/anthropic/parsers.ts",
-			line: 695,
+			line: 718,
 			column: 5,
 			category: "shared_mutable_accumulator",
 			note: "parseJsonArrayChunks(): finishValue commits tokenizer state before scanning the next array value.",
@@ -518,7 +518,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/anthropic/parsers.test.ts",
-			line: 90,
+			line: 92,
 			column: 16,
 			category: "dependent_file_cursor",
 			note: "pipelined entry reader test: request each bounded chunk at the current offset.",
