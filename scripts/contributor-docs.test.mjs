@@ -134,3 +134,29 @@ test("the extractors skip placeholders and external links", () => {
 	assert.deepEqual(linkTargets(sample), ["AUTHORING.md"]);
 	assert.deepEqual(npmScripts(sample), ["conformance"]);
 });
+
+
+test("registration precedes replay evidence and numbered references follow the order", () => {
+	const text = readFileSync(join(root, "AUTHORING.md"), "utf8");
+	const steps = text.split("## Steps\n")[1].split("## Change an existing connector")[0];
+	const headings = [...steps.matchAll(/^(\d+)\. (.+)$/gm)];
+	assert.deepEqual(headings.map((match) => Number(match[1])), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+	const section = (number) => steps.slice(headings[number - 1].index,
+		headings[number]?.index ?? steps.length);
+	assert.match(section(4), /^4\. Give the connector its inputs/);
+	assert.match(section(5), /^5\. Register the connector in the shared files/);
+	assert.match(section(6), /^6\. Record a scenario/);
+	assert.match(section(7), /^7\. Replay the scenario/);
+	assert.match(section(8), /^8\. Write the claim/);
+	assert.match(section(9), /^9\. Run the conformance report/);
+	assert.deepEqual([...section(5).matchAll(/^   (\d+)\. /gm)].map((match) => Number(match[1])),
+		[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+	assert.ok(section(5).trimEnd().endsWith("Then run `npm test`. It fails until each of these is done, and each failing test names the file to change."));
+	assert.ok(section(8).includes("Commit `claim.json`, and nothing else from steps 6 to 8."));
+	assert.ok(section(8).includes("do steps 6 to 8 again."));
+	assert.ok(section(10).includes("Run `npm test` again after the claim is written."));
+	assert.ok(section(5).includes("The scaffold creates `connectors/<key>/pilot-fixture.test.ts` for this. A connector with its own collection test names that file instead."));
+	assert.ok(section(10).includes("line from step 7."));
+	assert.ok(text.includes("Make the change, then do step 4 and steps 6 to 9 for that connector."));
+	assert.doesNotMatch(text, /steps 5 to 7|steps 4 to 8|line from step 6/);
+});

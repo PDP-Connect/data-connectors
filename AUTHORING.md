@@ -115,7 +115,22 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
    The command prints each record and progress message as the connector emits them. Fix the connector until a run ends without an error and the records hold what you expect. This output holds your account data, so keep it on your machine.
 
-5. Record a scenario. The command runs the connector twice against your account. The first run starts from empty state, and the second starts from the state the first run saved.
+5. Register the connector in the shared files. A new connector also changes these files outside its directory.
+
+   1. Add `brand` to the manifest, with an `icon.svg` in the connector directory that is the platform's real mark (`connectors/character_ai/` is an example). If the platform has no mark you can use, leave `brand` out and add `"<key>.json"` to `CONNECTORS_WITHOUT_A_BRAND_MARK` in `scripts/brand-icon-fleet.test.mjs`.
+   2. Add `["<key>", "<public-key>"]` to `CONNECTOR_PUBLISH_INVENTORY` in `scripts/connector-publish-allowlist.mjs`. The public key is the directory name with hyphens in place of underscores. Add a third item, the reason, only if the connector cannot be published yet.
+   3. Add the connector to `REAL_UNLISTED_CONNECTORS` in `packages/polyfill-connectors/src/connector-conformance-roster.ts`, with the test file that runs its collection. The scaffold creates `connectors/<key>/pilot-fixture.test.ts` for this. A connector with its own collection test names that file instead.
+   4. Add a coverage driver to `CONNECTOR_DRIVERS` in `connectors/_conformance/coverage-conformance-drivers.ts`. A driver runs the connector against a fake local server and lists the streams it covers; `driveJellyfin` is an example.
+   5. Run `npm run connector-implementation-index:generate` and commit `connector-implementation-index.json`.
+   6. Regenerate the consent-time fields with [the generator](packages/polyfill-connectors/scripts/generate-consent-time-fields.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-consent-time-fields.ts)` and commit the generated files.
+   7. For a connector with saved credentials, regenerate the static-secret registry with [the generator](packages/polyfill-connectors/scripts/generate-static-secret-registry.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-static-secret-registry.ts)` and commit the generated file.
+   8. Run `npm run polyfill-library-metadata:generate` and commit `packages/polyfill-connectors/src/manifest-library-metadata.json`.
+   9. Raise the manifest count by one in the "every shipped manifest declares exactly one typed public lifecycle tier" test in `packages/polyfill-connectors/src/public-listing-manifest-honesty.test.ts`.
+   10. If `(cd packages/polyfill-connectors && npm run check:noAwaitInLoops-conformance)` reports a new finding, remove the sequential await or add a reviewed allowlist entry with the reason.
+
+   Then run `npm test`. It fails until each of these is done, and each failing test names the file to change.
+
+6. Record a scenario. The command runs the connector twice against your account. The first run starts from empty state, and the second starts from the state the first run saved.
 
    ```bash
    node --import tsx packages/polyfill-connectors/bin/scenario-record.ts <key>
@@ -123,7 +138,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
    It prints the path of the scenario file, under `packages/polyfill-connectors/runs/<key>/`. The scenario holds your account data and stays on your machine. For a browser connector, add `--record-har`. It also saves the HTTP archive (HAR) and the browser's storage state, and without them a browser scenario cannot replay.
 
-6. Replay the scenario against your code.
+7. Replay the scenario against your code.
 
    ```bash
    node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <scenario-path>
@@ -135,20 +150,20 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
    If your connector reads everything on each run, the second run repeats the first, and the verifier prints that it did not see incremental behavior. That is expected; say so in the PR.
 
-7. Write the claim.
+8. Write the claim.
 
    ```bash
    mkdir -p connectors/<key>/evidence
    node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <scenario-path> --json connectors/<key>/evidence/claim.json
    ```
 
-   1. Commit `claim.json`, and nothing else from steps 5 to 7. It holds digests and timestamps, not account data.
-   2. After each change to the code or the manifest, do steps 5 to 7 again. A claim from older code reads as stale.
+   1. Commit `claim.json`, and nothing else from steps 6 to 8. It holds digests and timestamps, not account data.
+   2. After each change to the code or the manifest, do steps 6 to 8 again. A claim from older code reads as stale.
    3. If the verifier cannot write the file, it prints a warning and still exits with the replay's result. Check that `verified_at` in the claim is the time of this run.
 
    [Scenario replay evidence](packages/polyfill-connectors/docs/connector-authoring-guide.md#92-scenario-replay-evidence-claimjson) describes each field.
 
-8. Run the conformance report.
+9. Run the conformance report.
 
    ```bash
    npm run conformance -- <key>
@@ -166,22 +181,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
    The [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) explains each check and what each tier needs.
 
-9. Register the connector in the shared files. A new connector also changes these files outside its directory.
-
-   1. Add `brand` to the manifest, with an `icon.svg` in the connector directory that is the platform's real mark (`connectors/character_ai/` is an example). If the platform has no mark you can use, leave `brand` out and add `"<key>.json"` to `CONNECTORS_WITHOUT_A_BRAND_MARK` in `scripts/brand-icon-fleet.test.mjs`.
-   2. Add `["<key>", "<public-key>"]` to `CONNECTOR_PUBLISH_INVENTORY` in `scripts/connector-publish-allowlist.mjs`. The public key is the directory name with hyphens in place of underscores. Add a third item, the reason, only if the connector cannot be published yet.
-   3. Add the connector to `REAL_UNLISTED_CONNECTORS` in `packages/polyfill-connectors/src/connector-conformance-roster.ts`, with the test file that runs its collection.
-   4. Add a coverage driver to `CONNECTOR_DRIVERS` in `connectors/_conformance/coverage-conformance-drivers.ts`. A driver runs the connector against a fake local server and lists the streams it covers; `driveJellyfin` is an example.
-   5. Run `npm run connector-implementation-index:generate` and commit `connector-implementation-index.json`.
-   6. Regenerate the consent-time fields with [the generator](packages/polyfill-connectors/scripts/generate-consent-time-fields.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-consent-time-fields.ts)` and commit the generated files.
-   7. For a connector with saved credentials, regenerate the static-secret registry with [the generator](packages/polyfill-connectors/scripts/generate-static-secret-registry.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-static-secret-registry.ts)` and commit the generated file.
-   8. Run `npm run polyfill-library-metadata:generate` and commit `packages/polyfill-connectors/src/manifest-library-metadata.json`.
-   9. Raise the manifest count by one in the "every shipped manifest declares exactly one typed public lifecycle tier" test in `packages/polyfill-connectors/src/public-listing-manifest-honesty.test.ts`.
-   10. If `(cd packages/polyfill-connectors && npm run check:noAwaitInLoops-conformance)` reports a new finding, remove the sequential await or add a reviewed allowlist entry with the reason.
-
-   Then run `npm test`. It fails until each of these is done, and each failing test names the file to change.
-
-10. Open the PR. Keep the version at `0.1.0` and choose the tier in `capabilities.public_listing.tier`.
+10. Open the PR. Run `npm test` again after the claim is written. Keep the version at `0.1.0` and choose the tier in `capabilities.public_listing.tier`.
 
     | Tier | Who sees the connector in the app | When to use it |
     |---|---|---|
@@ -193,11 +193,11 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
     1. What the connector collects.
     2. What it leaves out, and why.
-    3. How you tested it, with the `streams exercised` line from step 6.
+    3. How you tested it, with the `streams exercised` line from step 7.
     4. Each `conformance` line you left open, with its reason.
 
     Describe the connector, not the tools that helped you write it. On the PR, the "Connector evidence summary" job runs `conformance` with `--static`, which skips the tests and the mock-mutation check, so run the full report locally.
 
 ## Change an existing connector
 
-Make the change, then do steps 4 to 8 for that connector. A change to the code or the manifest needs a higher version in `manifest.json`, and a new `connector-implementation-index.json`; [docs/publishing.md](docs/publishing.md) gives the rule.
+Make the change, then do step 4 and steps 6 to 9 for that connector. A change to the code or the manifest needs a higher version in `manifest.json`, and a new `connector-implementation-index.json`; [docs/publishing.md](docs/publishing.md) gives the rule.
