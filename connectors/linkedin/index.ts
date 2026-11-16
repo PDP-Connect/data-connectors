@@ -898,7 +898,11 @@ export async function collectLinkedIn(
 	// Preserve the observed distinct count when no owner-bound summary is usable.
 	// This fallback is an observation, not evidence of a complete inventory.
 	const walkedDistinctCount = connectionsResult?.elements.length ?? 0;
-	const connectionCount: FieldRead<number> = read(beforeSummary.total ?? walkedDistinctCount);
+	const connectionCount: FieldRead<number> = beforeSummary.total !== undefined
+		? read(beforeSummary.total)
+		: connectionsResult?.terminationReason === "observed_end_unproven"
+			? read(walkedDistinctCount)
+			: unavailable("source_unavailable");
 	if (wantsProfileFields && beforeSummary.reason) {
 		await progress(`LinkedIn profile connection_count=${walkedDistinctCount} (walked distinct fallback): ${beforeSummary.reason}`, {
 			stream: "profile",

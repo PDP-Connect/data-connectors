@@ -318,12 +318,11 @@ function locationRead(dash: unknown): FieldRead<string> {
 	if (failed) {
 		locationBranch = failed;
 	} else if (parts.some((part) => part.kind === "read")) {
-		locationBranch = read(
-			parts
-				.flatMap((part) => (part.kind === "read" ? [part.value] : []))
-				.filter((part) => part.length > 0)
-				.join(", "),
-		);
+		const joined = parts
+			.flatMap((part) => (part.kind === "read" ? [part.value] : []))
+			.filter((part) => part.length > 0)
+			.join(", ");
+		locationBranch = joined.length > 0 ? read(joined) : EMPTY;
 	} else if (parts.some((part) => part.kind === "empty")) {
 		locationBranch = EMPTY;
 	} else {

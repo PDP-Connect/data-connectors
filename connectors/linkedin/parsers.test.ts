@@ -363,6 +363,21 @@ test("profileFieldReads: location joins preferredGeoPlace and countryCode, else 
 	);
 });
 
+test("profileFieldReads: empty location parts fall through to geoLocation", () => {
+	for (const location of [
+		{ preferredGeoPlace: "" },
+		{ preferredGeoPlace: "", basicLocation: { countryCode: "" } },
+	]) {
+		const reads = profileFieldReads(
+			profileSources({
+				location,
+				geoLocation: { geo: { defaultLocalizedName: "Austin, Texas" } },
+			}),
+		);
+		assert.deepEqual(reads.location, read("Austin, Texas"));
+	}
+});
+
 test("profileFieldReads: dash-only fields the decoration omits are unavailable, not null", () => {
 	const reads = profileFieldReads({
 		...profileSources({}),

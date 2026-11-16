@@ -1496,7 +1496,7 @@ test("collectLinkedIn: incomplete nested position paging withholds the experienc
 	);
 });
 
-test("collectLinkedIn: failed connection paging falls back to zero observed connections", async () => {
+test("collectLinkedIn: failed connection paging withholds the unobserved count", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const route = (path: string): unknown => {
 		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
@@ -1508,13 +1508,14 @@ test("collectLinkedIn: failed connection paging falls back to zero observed conn
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
-	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 0);
+	assert.equal(recording.emitted.filter((row) => row.stream === "profile").length, 0);
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(claimsFullCoverage(recording, "profile"), false);
 	assert.ok(
 		skipResults(recording).some(
 			(skip) =>
 				skip.stream === "profile" &&
-				!unavailableFieldsOf(skip).includes("connection_count"),
+				unavailableFieldsOf(skip).includes("connection_count"),
 		),
 	);
 });
@@ -1537,7 +1538,8 @@ test("collectLinkedIn: malformed connections page withholds coverage and exact c
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 0);
+	assert.equal(recording.emitted.filter((row) => row.stream === "profile").length, 0);
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(
 		recording.events.some(
 			(event) =>
@@ -1598,8 +1600,8 @@ test("collectLinkedIn: repeated connection pages cannot prove a count or emit du
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	// Missing dash fields still withhold the row; the count fallback is independent.
-	assert.ok(!withheldFieldsOf(recording, "profile").includes("connection_count"));
+	// An interrupted walk cannot supply the missing owner-bound count.
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	const connections = recording.emitted.filter(
 		(event) => event.stream === "connections",
 	);
@@ -1627,8 +1629,8 @@ test("collectLinkedIn: mismatched paging start vetoes connection completeness", 
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	// Missing dash fields still withhold the row; the count fallback is independent.
-	assert.ok(!withheldFieldsOf(recording, "profile").includes("connection_count"));
+	// An interrupted walk cannot supply the missing owner-bound count.
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(
 		recording.protocolMessages.some(
 			(message) =>
@@ -1655,8 +1657,8 @@ test("collectLinkedIn: a short reported full page cannot prove connection end", 
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	// Missing dash fields still withhold the row; the count fallback is independent.
-	assert.ok(!withheldFieldsOf(recording, "profile").includes("connection_count"));
+	// An interrupted walk cannot supply the missing owner-bound count.
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(
 		recording.protocolMessages.some(
 			(message) =>
@@ -2745,6 +2747,34 @@ for (const [summary, reason] of [
 	});
 }
 
+for (const stop of ["page_error", "page_budget"] as const) {
+	test(`profile without a usable summary withholds partial count after ${stop}`, async () => {
+		const recording = makeRecordingEmit(validateRecord);
+		const starts: number[] = [];
+		const ctx = buildCtx(["profile"], recording, (path) => {
+			if (path === "/voyager/api/me") return PROOF_ME;
+			if (path.includes("memberIdentity=")) return { elements: [proofProfile()] };
+			if (path === "/voyager/api/relationships/connectionsSummary/") return httpFailure(503);
+			if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+				const start = Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"));
+				starts.push(start);
+				if (stop === "page_error" && start > 0) return httpFailure(503);
+				return { elements: Array.from({ length: 40 }, (_, i) => ({
+					connectedMember: `urn:li:fsd_profile:partial-${start + i}`,
+					createdAt: 1_700_000_000_000,
+				})) };
+			}
+			return routeVoyagerPath(path);
+		});
+		await collectLinkedIn(ctx);
+		assert.ok(starts.length > 1, "must exercise a partial walk, not first-page failure");
+		assert.equal(recording.emitted.filter((row) => row.stream === "profile").length, 0);
+		assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
+		assert.equal(claimsFullCoverage(recording, "profile"), false);
+		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "profile"), false);
+	});
+}
+
 test("summary 40 cannot stop an 80-member source walk", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const ctx = buildCtx(["connections"], recording);
@@ -2811,7 +2841,9 @@ test("profile fallback counts distinct walked members before failed enrichment",
 		before: httpFailure(503), after: httpFailure(503),
 		connections: { elements: [member, member] }, resolution: httpFailure(404),
 	});
-	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 1);
+	assert.equal(recording.emitted.filter((row) => row.stream === "profile").length, 0);
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
+	assert.equal(claimsFullCoverage(recording, "profile"), false);
 	assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 0);
 	assert.ok(progressMessages.includes("LinkedIn profile connection_count=1 (walked distinct fallback): summary_request_failed"));
 });

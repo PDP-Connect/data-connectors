@@ -3283,14 +3283,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/linkedin/index.ts",
-			line: 957,
+			line: 961,
 			column: 14,
 			category: "ordered_protocol_emission",
 			note: "collectLinkedIn(): each profile section stream (including its skills walk) emits its records, coverage and gap before the next stream starts.",
 		},
 		{
 			path: "connectors/linkedin/index.ts",
-			line: 1141,
+			line: 1145,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitRows(): covered rows must reach the sink in source order before the stream's coverage result.",
@@ -3367,14 +3367,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/linkedin/integration.test.ts",
-			line: 2494,
+			line: 2496,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "The UPSERT-ONLY fixture cases share buildCtx's global fetch shim, so their runs must not overlap.",
 		},
 		{
 			path: "connectors/linkedin/integration.test.ts",
-			line: 2895,
+			line: 2927,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "The unproven skills-walk cases share collectProof's global fetch shim, so their runs must not overlap.",
