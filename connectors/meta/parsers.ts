@@ -238,7 +238,7 @@ export function postRecord(edge: InstagramTimelineEdge): PostRecord | null {
 		caption: node.caption?.text ?? null,
 		media_type: mediaTypeOf(node),
 		media_url: mediaUrlOf(node),
-		like_count: node.like_count ?? null,
+		like_count: nonNegativeIntOrNull(node.like_count),
 		comment_count: null,
 		location_name: null,
 		taken_at: isoFromTakenAt(node.taken_at, node.taken_at_timestamp),
@@ -251,7 +251,8 @@ export function postRecord(edge: InstagramTimelineEdge): PostRecord | null {
  *  reachable from a logged-in web session) — see the connector header for
  *  the honest coverage note this implies. */
 export function postLikeRecords(edge: InstagramTimelineEdge, onUnreadable?: () => void): PostLikeRecord[] {
-	const node = edge.node;
+	const node = edge?.node;
+	if (!node || typeof node !== "object") return [];
 	const postId = node.id ?? node.pk ?? node.media_id ?? node.code ?? null;
 	if (!postId) {
 		return [];
@@ -289,7 +290,7 @@ export function followingRecord(
 		full_name: user.full_name ?? null,
 		is_private: user.is_private ?? null,
 		is_verified: user.is_verified ?? null,
-		profile_pic_url: user.profile_pic_url ?? null,
+		profile_pic_url: nullIfEmpty(user.profile_pic_url),
 	};
 }
 

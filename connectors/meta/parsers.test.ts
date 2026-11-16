@@ -20,6 +20,41 @@ import {
 	stableAdId,
 } from "./parsers.ts";
 import type { InstagramTimelineEdge, InstagramWebInfoUser } from "./types.ts";
+import { validateRecord } from "./schemas.ts";
+
+test("postLikeRecords: null edges and nodes do not discard a later valid edge", () => {
+	const valid = makeEdge({ facepile_top_likers: [{ id: "u1", username: "alice" }] });
+	const edges = [null, { node: null }, valid];
+	const rows = edges.flatMap((edge) => postLikeRecords(edge as InstagramTimelineEdge));
+	assert.deepEqual(rows, [{
+		liker_ordinal: 0, post_id: "post1", profile_pic_url: "",
+		pk: "u1", id: "u1", user_id: "u1", username: "alice",
+	}]);
+	const [row] = rows;
+	assert.ok(row);
+	assert.equal(validateRecord("post_likes", row).ok, true);
+});
+
+test("followingRecord: an unset picture becomes schema-valid null", () => {
+	const record = followingRecord({ pk: "u1", username: "alice", profile_pic_url: "" });
+	assert.ok(record);
+	assert.equal(record.profile_pic_url, null);
+	assert.equal(validateRecord("following", record).ok, true);
+	const present = followingRecord({ pk: "u1", username: "alice", profile_pic_url: "https://example.com/alice.jpg" });
+	assert.equal(present?.profile_pic_url, "https://example.com/alice.jpg");
+});
+
+test("postRecord: malformed like counts become null without losing the post", () => {
+	for (const like_count of ["12", -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+		const record = postRecord(makeEdge({ like_count } as unknown as Partial<InstagramTimelineEdge["node"]>));
+		assert.ok(record);
+		assert.equal(record.like_count, null);
+		assert.equal(validateRecord("posts", record).ok, true);
+	}
+	for (const like_count of [0, 12]) {
+		assert.equal(postRecord(makeEdge({ like_count }))?.like_count, like_count);
+	}
+});
 
 for (const field of ["full_name", "biography", "profile_pic_url", "external_url"] as const) {
  for (const value of [{ text: "Alice" }, 42, false]) {
