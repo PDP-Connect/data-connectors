@@ -47,37 +47,52 @@ function readFixture(relPath: string): string {
 
 // ─── parseOrderDate ──────────────────────────────────────────────────────
 
-test("parseOrderDate: common value-span forms", () => {
-	const cases: [string, string][] = [
+test("parseOrderDate: calendar dates and explicit-zone instants are host-zone independent", () => {
+	const cases: [string | null | undefined, string | null][] = [
 		["January 5, 2024", "2024-01-05"],
 		["Jan 5, 2024", "2024-01-05"],
 		["December 31, 2023", "2023-12-31"],
-		// ISO date (Date parses as UTC midnight)
 		["2024-01-05", "2024-01-05"],
-		// RFC 2822-ish
+		["5 January 2024", "2024-01-05"],
+		["29 Feb 2024", "2024-02-29"],
+		["February 29, 2000", "2000-02-29"],
+		["February 29, 1900", null],
+		["February 30, 2024", null],
+		["2024-02-30", null],
+		["2023-02-29", null],
+		["2024-13-01", null],
+		["2024-01-00", null],
+		["Febtober 99, 2099", null],
 		["Fri, 05 Jan 2024 00:00:00 GMT", "2024-01-05"],
+		["2024-01-05T00:00:00Z", "2024-01-05"],
+		["2024-01-05T00:00:00+09:00", "2024-01-04"],
+		["2024-01-05T23:00:00-06:00", "2024-01-06"],
+		["2024-01-05T00:00:00", null],
+		["Ordered on January 5, 2024", null],
+		["not a date at all", null],
+		["", null],
+		[null, null],
+		[undefined, null],
 	];
-	for (const [raw, expected] of cases) {
-		assert.equal(parseOrderDate(raw), expected, `input=${JSON.stringify(raw)}`);
+	const previousTZ = process.env.TZ;
+	try {
+		for (const zone of ["UTC", "America/Chicago", "Asia/Tokyo"]) {
+			process.env.TZ = zone;
+			for (const [raw, expected] of cases) {
+				assert.equal(
+					parseOrderDate(raw),
+					expected,
+					"TZ=" + zone + " input=" + JSON.stringify(raw),
+				);
+			}
+		}
+	} finally {
+		if (previousTZ === undefined) {
+			delete process.env.TZ;
+		} else {
+			process.env.TZ = previousTZ;
+		}
 	}
-});
-
-test("parseOrderDate: returns null for empty / nullish / malformed", () => {
-	assert.equal(parseOrderDate(undefined), null);
-	assert.equal(parseOrderDate(null), null);
-	assert.equal(parseOrderDate(""), null);
-	assert.equal(parseOrderDate("not a date at all"), null);
-	assert.equal(parseOrderDate("Febtober 99, 2099"), null);
-});
-
-test("parseOrderDate: V8 Date parser is lenient with label-prefixed input", () => {
-	// Discovered while writing tests: `new Date("Ordered on January 5, 2024")`
-	// is accepted by V8 and yields the correct day — it silently ignores
-	// the prefix. In practice the connector never passes such strings
-	// (it calls findHeaderValue which returns the value span separately
-	// from the label), so this is a harmless quirk, not a bug. Recording
-	// the behavior in a test so any future divergence is intentional.
-	assert.equal(parseOrderDate("Ordered on January 5, 2024"), "2024-01-05");
 });
 
 // ─── parseCurrencyCents ──────────────────────────────────────────────────

@@ -730,15 +730,69 @@ export function parseAmazonProfileDom(html: string): ProfileRecord {
 	return { id: "me", name, is_prime };
 }
 
+const ORDER_DATE_MONTH_NAMES = [
+	"january",
+	"february",
+	"march",
+	"april",
+	"may",
+	"june",
+	"july",
+	"august",
+	"september",
+	"october",
+	"november",
+	"december",
+];
+const ORDER_DATE_MONTHS = new Map(
+	ORDER_DATE_MONTH_NAMES.flatMap((name, index) => [
+		[name, index + 1] as const,
+		[name.slice(0, 3), index + 1] as const,
+	]),
+);
+
 export function parseOrderDate(raw: string | null | undefined): string | null {
 	if (!raw) {
 		return null;
 	}
-	const d = new Date(raw);
-	if (Number.isNaN(d.getTime())) {
+	const value = raw.trim();
+	const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	const monthFirst = /^([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})$/.exec(value);
+	const dayFirst = /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/.exec(value);
+	if (iso || monthFirst || dayFirst) {
+		const named = monthFirst ?? dayFirst;
+		const year = Number(iso?.[1] ?? named?.[3]);
+		const month = iso
+			? Number(iso[2])
+			: (ORDER_DATE_MONTHS.get(
+					(monthFirst?.[1] ?? dayFirst?.[2] ?? "").toLowerCase(),
+				) ?? 0);
+		const day = Number(iso?.[3] ?? monthFirst?.[2] ?? dayFirst?.[1]);
+		const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+		const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+		if (month < 1 || month > 12 || day < 1 || day > (days[month - 1] ?? 0)) {
+			return null;
+		}
+		// A calendar day is not an instant: never convert it through host midnight.
+		return (
+			String(year).padStart(4, "0") +
+			"-" +
+			String(month).padStart(2, "0") +
+			"-" +
+			String(day).padStart(2, "0")
+		);
+	}
+	// Preserve Date's UTC-day conversion only for an explicit time AND zone.
+	// Zone-less datetimes and permissive label-prefixed dates are not day inputs.
+	if (
+		!/(?:T|\s)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:Z|[+-]\d{2}:?\d{2}|(?:GMT|UTC)(?:[+-]\d{2}:?\d{2})?|UT|[ECMP][SD]T)$/i.test(
+			value,
+		)
+	) {
 		return null;
 	}
-	return d.toISOString().slice(0, 10);
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
 }
 
 export function parseCurrencyCents(
