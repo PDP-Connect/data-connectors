@@ -482,6 +482,12 @@ export async function listGroups(page: ScriptRunner): Promise<unknown> {
 }
 
 /**
+ * How long the page waits for the phone to answer an on-demand history
+ * request before it reports the request as sent but unacknowledged.
+ */
+const HISTORY_SEND_ACK_MS = 5_000;
+
+/**
  * The single on-demand history request a chat may get, the same one the UI's
  * "get older messages from your phone" button sends. Gated by the app's own
  * history-sync-on-demand switch, sent only when that switch verifiably reads
@@ -491,6 +497,7 @@ export async function listGroups(page: ScriptRunner): Promise<unknown> {
 export async function sendHistorySyncOnDemand(
 	page: ScriptRunner,
 	chatId: string,
+	ackMs: number = HISTORY_SEND_ACK_MS,
 ): Promise<unknown> {
 	assertReadOnlyCall("sendHistorySyncOnDemand", { chatId });
 	return page.evaluate(`
@@ -502,12 +509,23 @@ export async function sendHistorySyncOnDemand(
 		if (gate !== true) return { sent: false, reason: gate === false ? "history_sync_on_demand_disabled" : "history_sync_on_demand_gate_unverified" };
 		const sendPeerDataOperationRequest = window.require("WAWebSendNonMessageDataRequest").sendPeerDataOperationRequest;
 		const HISTORY_SYNC_ON_DEMAND = window.require("WAWebProtobufsE2E.pb").Message$PeerDataOperationRequestType.HISTORY_SYNC_ON_DEMAND;
+		// The request's promise settles only when the phone answers, which
+		// may be never: wait for it a short, fixed time. A request still
+		// pending then was dispatched; the caller's bounded re-read of the
+		// chat decides whether its history arrived.
+		let request;
 		try {
-			await sendPeerDataOperationRequest(HISTORY_SYNC_ON_DEMAND, { chatId: ${JSON.stringify(chatId)} });
-			return { sent: true };
-		} catch (error) {
+			request = Promise.resolve(sendPeerDataOperationRequest(HISTORY_SYNC_ON_DEMAND, { chatId: ${JSON.stringify(chatId)} }));
+		} catch {
 			return { sent: false, reason: "history_sync_on_demand_send_failed" };
 		}
+		let timer;
+		const pending = new Promise((resolve) => { timer = setTimeout(() => resolve("pending"), ${JSON.stringify(ackMs)}); });
+		const settled = request.then(() => "acknowledged", () => "failed");
+		const outcome = await Promise.race([settled, pending]);
+		clearTimeout(timer);
+		if (outcome === "failed") return { sent: false, reason: "history_sync_on_demand_send_failed" };
+		return { sent: true, acknowledged: outcome === "acknowledged" };
 	})()
 	`);
 }

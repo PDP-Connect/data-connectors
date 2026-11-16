@@ -536,6 +536,8 @@ const stubMsg = (
  */
 function vmRunner(modules: Record<string, unknown>): ScriptRunner {
 	const sandbox = vm.createContext({
+		setTimeout,
+		clearTimeout,
 		window: {
 			require: (name: string) => {
 				if (!(name in modules)) throw new Error(`no module ${name}`);
@@ -748,6 +750,73 @@ test("fix 5: the history request is not sent when its gate cannot be verified or
 		true,
 	);
 	assert.equal(sent.length, 1);
+});
+
+test("the history request does not wait for the phone: a request that never settles still returns", async () => {
+	// Live on 0.1.11: with the gate on, sendPeerDataOperationRequest waited
+	// for the phone's answer, which never came, and the whole run hung on the
+	// first chat that needed history. The send must return within a bound and
+	// leave the settling to the caller's bounded re-read loop.
+	const sent: unknown[] = [];
+	let lateRejection: ((error: Error) => void) | undefined;
+	const runner = vmRunner({
+		WAWebSyncGatingUtils: { isHistorySyncOnDemandEnabled: () => true },
+		WAWebSendNonMessageDataRequest: {
+			sendPeerDataOperationRequest: (...args: unknown[]) => {
+				sent.push(args);
+				return new Promise((_resolve, reject) => {
+					lateRejection = reject;
+				});
+			},
+		},
+		"WAWebProtobufsE2E.pb": {
+			Message$PeerDataOperationRequestType: { HISTORY_SYNC_ON_DEMAND: 3 },
+		},
+	});
+	const started = Date.now();
+	const answer = asObject(
+		await sendHistorySyncOnDemand(runner, "peer-one@lid", 50),
+	);
+	assert.ok(Date.now() - started < 2_000, "the send returned within its bound");
+	assert.equal(answer.sent, true, "a dispatched request counts as sent");
+	assert.equal(answer.acknowledged, false);
+	assert.equal(sent.length, 1);
+	// A late failure of the unanswered request must not surface as an
+	// unhandled rejection in the page.
+	lateRejection?.(new Error("late"));
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	// A request that answers in time is acknowledged.
+	const quick = vmRunner({
+		WAWebSyncGatingUtils: { isHistorySyncOnDemandEnabled: () => true },
+		WAWebSendNonMessageDataRequest: {
+			sendPeerDataOperationRequest: async () => undefined,
+		},
+		"WAWebProtobufsE2E.pb": {
+			Message$PeerDataOperationRequestType: { HISTORY_SYNC_ON_DEMAND: 3 },
+		},
+	});
+	const acked = asObject(
+		await sendHistorySyncOnDemand(quick, "peer-one@lid", 50),
+	);
+	assert.equal(acked.sent, true);
+	assert.equal(acked.acknowledged, true);
+	// A request that fails before the bound is still not sent.
+	const failing = vmRunner({
+		WAWebSyncGatingUtils: { isHistorySyncOnDemandEnabled: () => true },
+		WAWebSendNonMessageDataRequest: {
+			sendPeerDataOperationRequest: async () => {
+				throw new Error("no socket");
+			},
+		},
+		"WAWebProtobufsE2E.pb": {
+			Message$PeerDataOperationRequestType: { HISTORY_SYNC_ON_DEMAND: 3 },
+		},
+	});
+	const failed = asObject(
+		await sendHistorySyncOnDemand(failing, "peer-one@lid", 50),
+	);
+	assert.equal(failed.sent, false);
+	assert.equal(failed.reason, "history_sync_on_demand_send_failed");
 });
 
 test("pageshim probe: signed in only when the app knows its own user, and it never navigates", async () => {
