@@ -969,14 +969,17 @@ export function parseProject(raw: unknown): {
 				raw_docs: docsRaw.map((doc, index) => {
 					// Copies of the document's own fields. Text over the inline cap
 					// lives in the document's record (as a blob) and is left out
-					// here, never cut. Count the copy only if no document record exists.
+					// here, never cut. The record tallies its own filename and keeps
+					// content as a blob, so count those copies only if no document
+					// record exists. The record turns an oversized timestamp into
+					// null without a tally, so always count the timestamp copies.
 					const copy: OmissionTally = { fields: 0 };
 					const uuid = encodedField(doc.uuid, copy);
 					const filename = encodedField(doc.filename, copy);
 					const content = encodedField(doc.content, copy);
-					const createdAt = encodedField(doc.created_at, copy);
-					const updatedAt = encodedField(doc.updated_at, copy);
 					if (parsedDocuments[index] === null) tally.fields += copy.fields;
+					const createdAt = encodedField(doc.created_at, tally);
+					const updatedAt = encodedField(doc.updated_at, tally);
 					return {
 						...(typeof uuid === "string" ? { uuid } : {}),
 						...(typeof filename === "string" ? { filename } : {}),
@@ -1170,8 +1173,6 @@ export interface RawOrganization {
 	created_at?: unknown;
 }
 
-const PLAN_ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
-
 function nonEmptyString(value: unknown): string | null {
 	return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -1207,19 +1208,13 @@ export function buildAccountPlanRecord(
 ): Record<string, unknown> | null {
 	const organizationId = nonEmptyString(org.uuid);
 	if (organizationId === null) return null;
-	const createdAt = nonEmptyString(org.created_at);
 	return {
 		// Keep the exported/default account at the legacy key.
 		id: isDefault ? "account_plan" : `account_plan:${organizationId}`,
 		is_default: isDefault,
 		account_id: organizationId,
 		account_structure: null,
-		account_created_at:
-			createdAt !== null &&
-			PLAN_ISO_DT_RE.test(createdAt) &&
-			!Number.isNaN(Date.parse(createdAt))
-				? createdAt
-				: null,
+		account_created_at: isoOrNull(org.created_at),
 		plan_type: planTypeOf(org),
 		plan_display_name: null,
 		subscription_plan: null,

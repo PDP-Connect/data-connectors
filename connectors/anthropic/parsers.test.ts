@@ -42,7 +42,7 @@ import {
 	resolveExportedProfile,
 } from "./parsers.ts";
 import { decodeEscapedText } from "./safe-escape.ts";
-import { validateRecord } from "./schemas.ts";
+import { accountPlanSchema, validateRecord } from "./schemas.ts";
 
 test("parseJsonArrayChunks reads bounded UTF-16 chunks and emits one value at a time", async () => {
 	const source = String.raw`[{"text":"a \"quoted\" value","nested":[1,true]},"😀",null]`;
@@ -1103,11 +1103,31 @@ test("buildAccountPlanRecord: carries only the organization id, creation time an
 test("buildAccountPlanRecord: an entry without an id gives no record; a bad creation time gives null", () => {
 	assert.equal(buildAccountPlanRecord({ capabilities: ["claude_pro"] }), null);
 	assert.equal(buildAccountPlanRecord({ uuid: "" }), null);
-	for (const created_at of ["yesterday", "", 1740830400, null])
+	for (const created_at of [
+		"yesterday",
+		"",
+		1740830400,
+		null,
+		"2026-01-01T00:00:00",
+		"2026-02-30T00:00:00Z",
+	])
 		assert.equal(
 			buildAccountPlanRecord({ uuid: "o", created_at })?.account_created_at,
 			null,
 		);
+});
+
+test("buildAccountPlanRecord output passes accountPlanSchema for valid and invalid creation times", () => {
+	for (const [created_at, expected] of [
+		["2026-01-01T00:00:00", null],
+		["2026-02-30T00:00:00Z", null],
+		["2026-01-01T00:00:00+05:30", "2026-01-01T00:00:00+05:30"],
+	] as const) {
+		const record = buildAccountPlanRecord({ uuid: "org-synthetic", created_at });
+		assert.ok(record);
+		assert.equal(record.account_created_at, expected, created_at);
+		assert.equal(accountPlanSchema.safeParse(record).success, true, created_at);
+	}
 });
 
 test("ISO timestamps require a complete valid datetime and preserve valid input", () => {
@@ -1162,6 +1182,20 @@ test("unidentified oversized raw doc counts its omission without double-counting
 		assert.equal(omittedFieldCountOf(identified.documents[0] ?? {}), 0);
 		assert.equal(oversizeTextOf(identified.documents[0] ?? {}), content);
 	}
+});
+
+test("an identified doc with an oversized timestamp counts the dropped raw copy", () => {
+	const oversized = "x".repeat(INLINE_TEXT_MAX_UNITS + 1);
+	const parsed = parseProject({
+		uuid: "synthetic-project",
+		name: "Synthetic",
+		docs: [{ uuid: "synthetic-doc", filename: "synthetic.txt", created_at: oversized }],
+	});
+	assert.ok(parsed);
+	assert.equal(parsed.documents.length, 1);
+	assert.equal(parsed.documents[0]?.create_time, null);
+	assert.equal("created_at" in (parsed.project.raw_docs?.[0] ?? {}), false);
+	assert.equal(omittedFieldCountOf(parsed.project), 1);
 });
 
 test("empty archived_at is not an archived project", () => {
