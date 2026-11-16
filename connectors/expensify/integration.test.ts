@@ -7,15 +7,18 @@ import test from "node:test";
 import type { StreamScope } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { collect, connectorConfig } from "./index.ts";
 import {
+	accountProfileSchema,
 	expensesSchema,
 	reimbursementsSchema,
 	reportsSchema,
+	workspacesSchema,
 } from "./schemas.ts";
 
 const manifest = JSON.parse(
 	readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
 );
 const streams = ["expenses", "reports", "reimbursements"];
+const allStreams = [...streams, "workspaces", "account_profile"];
 const fixture = [
 	JSON.stringify({
 		kind: "expense",
@@ -80,6 +83,19 @@ function harness(requested = streams, failure?: Error) {
 				if (failure) throw failure;
 				return fixture;
 			},
+			// One synthetic policy, so a request for workspaces or account_profile
+			// emits records the manifest checks below can inspect.
+			async listPolicies() {
+				return [
+					{
+						id: "POLICY0001",
+						name: "Sample Workspace",
+						type: "corporate",
+						role: "admin",
+						outputCurrency: "USD",
+					},
+				];
+			},
 		};
 	};
 	return { ctx, factory, records, messages, ranges, progress, factoryOptions };
@@ -101,7 +117,7 @@ test("expensify registration identity matches entrypoint", async () => {
 	assert.equal(connectorConfig.collect, collect);
 	assert.deepEqual(
 		manifest.streams.map((stream: { name: string }) => stream.name),
-		streams,
+		allStreams,
 	);
 	assert.deepEqual(connectorConfig.auth.required, [
 		["EXPENSIFY_PARTNER_USER_ID"],
@@ -177,13 +193,21 @@ test("expensify client failure never reports successful full scan", async () => 
 
 test("expensify manifest schemas match emitted records", async () => {
 	await withHistory(undefined, async () => {
-		const h = harness();
+		const h = harness(allStreams);
 		await collect(h.ctx, h.factory, now);
-		assert.equal(h.records.length, 3);
+		assert.deepEqual(h.records.map(({ stream }) => stream).sort(), [
+			"account_profile",
+			"expenses",
+			"reimbursements",
+			"reports",
+			"workspaces",
+		]);
 		const schemas = {
 			expenses: expensesSchema,
 			reports: reportsSchema,
 			reimbursements: reimbursementsSchema,
+			workspaces: workspacesSchema,
+			account_profile: accountProfileSchema,
 		};
 		for (const { stream, data } of h.records) {
 			const declared = manifest.streams.find(
@@ -235,11 +259,15 @@ test("expensify manifest schemas match emitted records", async () => {
 				expenses: "expense_date",
 				reports: "created_at",
 				reimbursements: "reimbursed_at",
+				// Current-state streams carry no consent-time field.
+				workspaces: undefined,
+				account_profile: undefined,
 			},
 		);
 		for (const stream of manifest.streams) {
 			assert.deepEqual(stream.primary_key, ["id"]);
-			assert.ok(stream.schema.properties[stream.consent_time_field]);
+			if (stream.consent_time_field !== undefined)
+				assert.ok(stream.schema.properties[stream.consent_time_field]);
 			for (const property of Object.values(stream.schema.properties) as {
 				format?: string;
 			}[]) {

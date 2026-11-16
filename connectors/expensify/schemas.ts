@@ -123,3 +123,24 @@ export const expenseExportSchema = z.object({
 	reimbursable: sourceBoolean,
 	billable: sourceBoolean,
 });
+
+export const workspacesSchema = z.object({
+	id,
+	name: z.string().min(1),
+	type: z.string().nullable(),
+	role: z.string().nullable(),
+	output_currency: z.string().nullable(),
+});
+const count = z.number().int().nonnegative().refine(Number.isSafeInteger);
+export const accountProfileSchema = z.object({
+	id: z.literal("account_profile"),
+	workspace_count: count,
+	admin_workspace_count: count,
+	export_window_from: localDate.unwrap(),
+	export_window_to: localDate.unwrap(),
+	expense_count: count,
+	report_count: count,
+	reimbursement_count: count,
+	earliest_expense_date: localDate,
+	latest_expense_date: localDate,
+});

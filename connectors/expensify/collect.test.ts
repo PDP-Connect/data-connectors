@@ -28,6 +28,22 @@ const fixture = [
 	}),
 ].join("\n");
 const streams = ["expenses", "reports", "reimbursements"];
+const policies = [
+	{
+		id: "p1",
+		name: "Workspace one",
+		type: "corporate",
+		role: "admin",
+		outputCurrency: "USD",
+	},
+	{
+		id: "p2",
+		name: "Workspace two",
+		type: null,
+		role: "user",
+		outputCurrency: null,
+	},
+];
 
 function harness(text = fixture, requested = streams) {
 	const records: {
@@ -37,8 +53,13 @@ function harness(text = fixture, requested = streams) {
 	const messages: Parameters<ExpensifyCollectDeps["emit"]>[0][] = [];
 	const progress: string[] = [];
 	const ranges: { from: string; to: string }[] = [];
+	let policyCalls = 0;
 	const deps: ExpensifyCollectDeps = {
 		client: {
+			async listPolicies() {
+				policyCalls++;
+				return policies;
+			},
 			async exportRange(range) {
 				ranges.push(range);
 				return text;
@@ -58,7 +79,15 @@ function harness(text = fixture, requested = streams) {
 	};
 	const coverage = () =>
 		messages.filter((message) => message.type === "DETAIL_COVERAGE");
-	return { deps, records, messages, progress, ranges, coverage };
+	return {
+		deps,
+		records,
+		messages,
+		progress,
+		ranges,
+		coverage,
+		policyCalls: () => policyCalls,
+	};
 }
 
 test("exports once, parses all streams and covers only the default three-year window", async () => {
@@ -235,4 +264,171 @@ test("a successfully empty export has measured zero coverage and no cursor", asy
 		h.messages.some((message) => message.type === "STATE"),
 		false,
 	);
+});
+
+test("workspace and account profile streams contain exact selected-window facts", async () => {
+	const h = harness(fixture, ["workspaces", "account_profile"]);
+	await collectExpensify(h.deps);
+	assert.equal(h.policyCalls(), 1);
+	assert.deepEqual(h.ranges, [{ from: "2023-11-15", to: "2026-11-15" }]);
+	assert.deepEqual(h.records, [
+		{
+			stream: "workspaces",
+			data: {
+				id: "p1",
+				name: "Workspace one",
+				type: "corporate",
+				role: "admin",
+				output_currency: "USD",
+			},
+		},
+		{
+			stream: "workspaces",
+			data: {
+				id: "p2",
+				name: "Workspace two",
+				type: null,
+				role: "user",
+				output_currency: null,
+			},
+		},
+		{
+			stream: "account_profile",
+			data: {
+				id: "account_profile",
+				workspace_count: 2,
+				admin_workspace_count: 1,
+				export_window_from: "2023-11-15",
+				export_window_to: "2026-11-15",
+				expense_count: 1,
+				report_count: 1,
+				reimbursement_count: 1,
+				earliest_expense_date: "2025-01-01",
+				latest_expense_date: "2025-01-01",
+			},
+		},
+	]);
+	assert.deepEqual(
+		h.coverage().map((row) => [row.stream, row.considered, row.covered]),
+		[
+			["workspaces", 2, 2],
+			["account_profile", 1, 1],
+		],
+	);
+});
+
+test("export-only streams never request policies", async () => {
+	const h = harness();
+	h.deps.client.listPolicies = async () => {
+		throw new Error("unrequested policies");
+	};
+	await collectExpensify(h.deps);
+	assert.equal(h.ranges.length, 1);
+});
+
+test("workspaces alone never requests an export", async () => {
+	const h = harness(fixture, ["workspaces"]);
+	h.deps.client.exportRange = async () => {
+		throw new Error("unrequested export");
+	};
+	await collectExpensify(h.deps);
+	assert.equal(h.policyCalls(), 1);
+	assert.deepEqual(
+		h.records.map((row) => row.stream),
+		["workspaces", "workspaces"],
+	);
+	assert.deepEqual(h.ranges, []);
+});
+
+test("policy-list failure is rethrown unchanged before any success evidence", async () => {
+	const h = harness(fixture, ["workspaces", "account_profile"]);
+	const failure = Object.assign(new Error("policy failed"), {
+		code: "expensify_request_failed",
+		retryable: true,
+	});
+	h.deps.client.listPolicies = async () => {
+		throw failure;
+	};
+	await assert.rejects(collectExpensify(h.deps), (error) => error === failure);
+	assert.deepEqual([h.records, h.messages, h.progress], [[], [], []]);
+});
+
+test("an empty profile is a singleton with zero counts and null expense dates", async () => {
+	const h = harness("", ["account_profile"]);
+	h.deps.client.listPolicies = async () => [];
+	await collectExpensify(h.deps);
+	assert.deepEqual(h.records, [
+		{
+			stream: "account_profile",
+			data: {
+				id: "account_profile",
+				workspace_count: 0,
+				admin_workspace_count: 0,
+				export_window_from: "2023-11-15",
+				export_window_to: "2026-11-15",
+				expense_count: 0,
+				report_count: 0,
+				reimbursement_count: 0,
+				earliest_expense_date: null,
+				latest_expense_date: null,
+			},
+		},
+	]);
+	assert.deepEqual(
+		h.coverage().map((row) => [row.considered, row.covered]),
+		[[1, 1]],
+	);
+});
+
+test("partial exports do not claim a complete profile and carry retry recovery", async () => {
+	const h = harness(fixture + "\nINVALID", ["account_profile", "expenses"]);
+	await collectExpensify(h.deps);
+	const profile = h.coverage().find((row) => row.stream === "account_profile");
+	assert.equal(profile?.considered, 1);
+	assert.equal(profile?.covered, 0);
+	for (const message of h.messages.filter(
+		(row) => row.type === "SKIP_RESULT",
+	)) {
+		assert.deepEqual(message.recovery_hint, {
+			action: "retry_by_runtime",
+			retryable: true,
+		});
+	}
+	assert.equal(
+		h.messages.filter((row) => row.type === "SKIP_RESULT").length,
+		2,
+	);
+});
+
+test("no requested streams makes neither client call", async () => {
+	const h = harness(fixture, []);
+	await collectExpensify(h.deps);
+	assert.equal(h.policyCalls(), 0);
+	assert.deepEqual([h.ranges, h.records, h.messages], [[], [], []]);
+});
+
+test("profile expense dates are extrema of accepted rows, ignoring missing dates", async () => {
+	const text = [
+		{
+			kind: "expense",
+			transactionID: "late",
+			reportID: "r",
+			created: "2025-05-03",
+		},
+		{ kind: "expense", transactionID: "missing", reportID: "r" },
+		{
+			kind: "expense",
+			transactionID: "early",
+			reportID: "r",
+			created: "2024-02-01",
+		},
+	]
+		.map((row) => JSON.stringify(row))
+		.join("\n");
+	const h = harness(text, ["account_profile"]);
+	await collectExpensify(h.deps);
+	assert.equal(h.records[0]!.data.expense_count, 3);
+	assert.equal(h.records[0]!.data.earliest_expense_date, "2024-02-01");
+	assert.equal(h.records[0]!.data.latest_expense_date, "2025-05-03");
+	assert.equal(h.policyCalls(), 1);
 });

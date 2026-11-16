@@ -9450,6 +9450,7 @@
 				},
 				"connector_key": "expensify",
 				"reason_display_messages": {
+					"expensify_export_incomplete": "Some export rows could not be read; the runtime can retry syncing.",
 					"expensify_request_failed": "The request failed; try syncing again later.",
 					"expensify_credentials_rejected": "The supplied credentials were rejected; update them in connection settings.",
 					"expensify_credentials_missing": "Required credentials are missing; add them in connection settings."
@@ -9845,6 +9846,169 @@
 									"amount_source",
 									"currency",
 									"method"
+								]
+							}
+						]
+					},
+					{
+						"name": "workspaces",
+						"required": false,
+						"description": "Full scan of policies visible to the connected account.",
+						"display": {
+							"label": "Workspaces",
+							"detail": "Full scan of policies visible to the connected account."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Stable Expensify policy identifier.",
+									"minLength": 1
+								},
+								"name": {
+									"type": "string",
+									"description": "Workspace policy name.",
+									"minLength": 1
+								},
+								"type": {
+									"type": ["string", "null"],
+									"description": "Policy type, if provided."
+								},
+								"role": {
+									"type": ["string", "null"],
+									"description": "The connected user's role in this policy."
+								},
+								"output_currency": {
+									"type": ["string", "null"],
+									"description": "Policy output currency, if provided."
+								}
+							},
+							"required": ["id", "name", "type", "role", "output_currency"],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window",
+						"views": [
+							{
+								"id": "full",
+								"label": "All fields",
+								"fields": ["id", "name", "type", "role", "output_currency"]
+							}
+						]
+					},
+					{
+						"name": "account_profile",
+						"required": false,
+						"description": "Singleton counts and date bounds for the selected export window, plus visible workspace counts. No names, emails or free text. Rejected export rows leave profile coverage incomplete.",
+						"display": {
+							"label": "Your Expensify account profile",
+							"detail": "Singleton counts and date bounds for the selected export window, plus visible workspace counts. No names, emails or free text. Rejected export rows leave profile coverage incomplete."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "Constant singleton identifier.",
+									"const": "account_profile"
+								},
+								"workspace_count": {
+									"type": "integer",
+									"description": "Number of policies visible to the connected account.",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"admin_workspace_count": {
+									"type": "integer",
+									"description": "Number of visible policies whose role is admin.",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"export_window_from": {
+									"type": "string",
+									"description": "Inclusive UTC export start date.",
+									"format": "date"
+								},
+								"export_window_to": {
+									"type": "string",
+									"description": "Inclusive UTC export end date.",
+									"format": "date"
+								},
+								"expense_count": {
+									"type": "integer",
+									"description": "Accepted expense records in the selected export window, not all-time.",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"report_count": {
+									"type": "integer",
+									"description": "Accepted report records in the selected export window, not all-time.",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"reimbursement_count": {
+									"type": "integer",
+									"description": "Accepted report-derived reimbursement records in the selected export window.",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"earliest_expense_date": {
+									"type": ["string", "null"],
+									"description": "Earliest accepted expense source-local date or date-time; null if none.",
+									"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$"
+								},
+								"latest_expense_date": {
+									"type": ["string", "null"],
+									"description": "Latest accepted expense source-local date or date-time; null if none.",
+									"pattern": "^\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2})?$"
+								}
+							},
+							"required": [
+								"id",
+								"workspace_count",
+								"admin_workspace_count",
+								"export_window_from",
+								"export_window_to",
+								"expense_count",
+								"report_count",
+								"reimbursement_count",
+								"earliest_expense_date",
+								"latest_expense_date"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": false
+						},
+						"incremental": false,
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "scheduled_window",
+						"views": [
+							{
+								"id": "full",
+								"label": "All fields",
+								"fields": [
+									"id",
+									"workspace_count",
+									"admin_workspace_count",
+									"export_window_from",
+									"export_window_to",
+									"expense_count",
+									"report_count",
+									"reimbursement_count",
+									"earliest_expense_date",
+									"latest_expense_date"
 								]
 							}
 						]

@@ -5,7 +5,9 @@ import {
 	type CollectContext,
 	emitDetailCoverage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type { createExpensifyClient } from "./client.ts";
 import { parseExport } from "./parsers.ts";
+import { accountProfileSchema, workspacesSchema } from "./schemas.ts";
 
 const STREAMS = ["expenses", "reports", "reimbursements"] as const;
 type Stream = (typeof STREAMS)[number];
@@ -20,7 +22,10 @@ type Reason = (typeof REASONS)[number];
 
 export interface ExpensifyCollectDeps
 	extends Pick<CollectContext, "emit" | "emitRecord" | "progress"> {
-	client: { exportRange(range: { from: string; to: string }): Promise<string> };
+	client: Pick<
+		ReturnType<typeof createExpensifyClient>,
+		"exportRange" | "listPolicies"
+	>;
 	now?: () => Date;
 	/** Both the runtime's requested Map and a Set of names have this seam. */
 	requested: { has(stream: string): boolean };
@@ -73,14 +78,48 @@ export async function collectExpensify(
 		(deps.now ?? (() => new Date()))(),
 	);
 	const selected = STREAMS.filter((stream) => deps.requested.has(stream));
-	if (selected.length === 0) {
+	const profileRequested = deps.requested.has("account_profile");
+	const workspacesRequested = deps.requested.has("workspaces");
+	if (selected.length === 0 && !profileRequested && !workspacesRequested) {
 		return;
 	}
 
 	// The client owns credentials and chunking. Preserve its exact error object,
 	// including code/retryable; no success evidence is emitted before it returns.
-	const text = await deps.client.exportRange(window);
-	const parsed = parseExport(text);
+	const policies =
+		workspacesRequested || profileRequested
+			? await deps.client.listPolicies()
+			: [];
+	const parsed =
+		selected.length > 0 || profileRequested
+			? parseExport(await deps.client.exportRange(window))
+			: null;
+	if (workspacesRequested) {
+		for (const policy of policies) {
+			await deps.emitRecord(
+				"workspaces",
+				workspacesSchema.parse({
+					id: policy.id,
+					name: policy.name,
+					type: policy.type,
+					role: policy.role,
+					output_currency: policy.outputCurrency,
+				}),
+			);
+		}
+		await emitDetailCoverage(
+			{ emit: deps.emit },
+			{
+				stream: "workspaces",
+				stateStream: "workspaces",
+				requiredKeys: [],
+				hydratedKeys: [],
+				considered: policies.length,
+				covered: policies.length,
+			},
+		);
+	}
+	if (parsed === null) return;
 	const reasons: Record<Reason, number> = {
 		invalid_json: 0,
 		invalid_export_row: 0,
@@ -110,6 +149,7 @@ export async function collectExpensify(
 				stream,
 				reason: "expensify_export_incomplete",
 				message: "Export rows rejected within the selected UTC window",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				diagnostics: {
 					window,
 					reasons: Object.fromEntries(
@@ -130,6 +170,51 @@ export async function collectExpensify(
 				hydratedKeys: [],
 				considered: rows.length + rejected,
 				covered: rows.length,
+			},
+		);
+	}
+	if (profileRequested) {
+		const dates = parsed.expenses
+			.map((row) => row.expense_date)
+			.filter((value): value is string => value !== null)
+			.sort();
+		await deps.emitRecord(
+			"account_profile",
+			accountProfileSchema.parse({
+				id: "account_profile",
+				workspace_count: policies.length,
+				admin_workspace_count: policies.filter(
+					(policy) => policy.role === "admin",
+				).length,
+				export_window_from: window.from,
+				export_window_to: window.to,
+				expense_count: parsed.expenses.length,
+				report_count: parsed.reports.length,
+				reimbursement_count: parsed.reimbursements.length,
+				earliest_expense_date: dates[0] ?? null,
+				latest_expense_date: dates.at(-1) ?? null,
+			}),
+		);
+		if (parsed.rejected.length > 0) {
+			await deps.emit({
+				type: "SKIP_RESULT",
+				stream: "account_profile",
+				reason: "expensify_export_incomplete",
+				message:
+					"Profile counts cover only accepted rows in the selected UTC window",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				diagnostics: { window, reasons },
+			});
+		}
+		await emitDetailCoverage(
+			{ emit: deps.emit },
+			{
+				stream: "account_profile",
+				stateStream: "account_profile",
+				requiredKeys: [],
+				hydratedKeys: [],
+				considered: 1,
+				covered: parsed.rejected.length === 0 ? 1 : 0,
 			},
 		);
 	}
