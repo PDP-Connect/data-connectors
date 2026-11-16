@@ -21974,6 +21974,7 @@
 				"streams": [
 					{
 						"name": "books",
+						"required": true,
 						"description": "Books, articles and other sources the owner has highlighted in Readwise.",
 						"display": {
 							"label": "Your Readwise sources",
@@ -22042,8 +22043,8 @@
 						"incremental": true,
 						"query": {
 							"search": {
-								"lexical_fields": ["title", "author"],
-								"semantic_fields": ["title"]
+								"lexical_fields": ["title", "author", "summary"],
+								"semantic_fields": ["title", "summary"]
 							},
 							"aggregations": {
 								"count": true
@@ -22160,10 +22161,11 @@
 							},
 							"aggregations": {
 								"count": true,
-								"group_by_time": ["highlighted_at"]
+								"group_by_time": ["highlighted_at", "created_at"]
 							},
 							"range_filters": {
-								"highlighted_at": ["gte", "gt", "lte", "lt"]
+								"highlighted_at": ["gte", "gt", "lte", "lt"],
+								"created_at": ["gte", "gt", "lte", "lt"]
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
