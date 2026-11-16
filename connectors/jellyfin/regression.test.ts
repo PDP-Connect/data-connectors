@@ -304,3 +304,83 @@ test("regression: distinct pages that happen to share a first item ID must still
 		await server.stop();
 	}
 });
+
+test("regression: capped pages enumerate every id exactly once", async () => {
+	const starts: number[] = [];
+	const items = Array.from({ length: 250 }, (_, i) => ({
+		Id: `capped-${i}`,
+		Name: `Item ${i}`,
+	}));
+	const server = await startPagedServer((start) => {
+		starts.push(start);
+		return { items: items.slice(start, start + 100), total: items.length };
+	});
+	try {
+		const { ctx, records } = makeContext({
+			credentials: {
+				base_url: await server.url,
+				secret: "synthetic-pagination-key",
+			},
+			streams: [{ name: "items" }],
+		});
+		await collect(ctx);
+		assert.deepEqual(starts, [0, 100, 200]);
+		assert.deepEqual(
+			records.filter((r) => r.stream === "items").map((r) => r.data.id),
+			items.map((item) => item.Id),
+		);
+	} finally {
+		await server.stop();
+	}
+});
+
+test("regression: total may shrink by one between full pages", async () => {
+	const starts: number[] = [];
+	const items = Array.from({ length: 600 }, (_, i) => ({
+		Id: `shrinking-${i}`,
+		Name: `Item ${i}`,
+	}));
+	const server = await startPagedServer((start) => {
+		starts.push(start);
+		const current = start === 0 ? items : items.slice(0, -1);
+		return { items: current.slice(start, start + 500), total: current.length };
+	});
+	try {
+		const { ctx, records } = makeContext({
+			credentials: {
+				base_url: await server.url,
+				secret: "synthetic-pagination-key",
+			},
+			streams: [{ name: "items" }],
+		});
+		await collect(ctx);
+		assert.deepEqual(starts, [0, 500]);
+		assert.deepEqual(
+			records.filter((r) => r.stream === "items").map((r) => r.data.id),
+			items.slice(0, -1).map((item) => item.Id),
+		);
+	} finally {
+		await server.stop();
+	}
+});
+
+test("regression: empty page before total fails without another request", async () => {
+	let pages = 0;
+	const server = await startPagedServer(() => {
+		pages += 1;
+		return { items: [], total: 1 };
+	});
+	try {
+		const { ctx } = makeContext({
+			credentials: {
+				base_url: await server.url,
+				secret: "synthetic-pagination-key",
+			},
+			streams: [{ name: "items" }],
+		});
+		await assert.rejects(collect(ctx), /jellyfin_pagination_non_advancing/);
+		assert.equal(pages, 1);
+	} finally {
+		await server.stop();
+	}
+});

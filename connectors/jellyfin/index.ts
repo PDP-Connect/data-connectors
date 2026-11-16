@@ -479,9 +479,9 @@ async function authenticateByName(
 
 /**
  * Validate TotalRecordCount: must be finite nonnegative integer.
- * Fail closed on missing/malformed/decreasing values.
+ * Fail closed on missing/malformed values; counts may decrease during collection.
  */
-function validateTotalRecordCount(value: unknown, priorTotal?: number): number {
+function validateTotalRecordCount(value: unknown): number {
 	if (typeof value !== "number") {
 		throw new Error("jellyfin_total_record_count_not_number");
 	}
@@ -493,12 +493,6 @@ function validateTotalRecordCount(value: unknown, priorTotal?: number): number {
 	}
 	if (Number.isInteger(value) === false) {
 		throw new Error("jellyfin_total_record_count_not_integer");
-	}
-	// Detect decreasing counts (indicates malformed response or server bug)
-	if (priorTotal !== undefined && value < priorTotal) {
-		throw new Error(
-			`jellyfin_total_record_count_decreased: ${value} < ${priorTotal}`,
-		);
 	}
 	return value;
 }
@@ -939,11 +933,15 @@ async function collectItemsForLibrary(
 		}
 		const totalCount = validateTotalRecordCount(
 			validatedItems.TotalRecordCount,
-			priorTotal,
 		);
 		priorTotal = totalCount;
 
 		const pageItems = validatedItems.Items;
+		if (pageItems.length === 0 && startIndex < totalCount) {
+			throw new Error(
+				`jellyfin_pagination_non_advancing: library ${libraryId} page ${pageCount} is empty before total ${totalCount}`,
+			);
+		}
 
 		// Detect actual repeated page: fingerprint the full ordered ID sequence,
 		// not just the first item — two distinct pages that happen to share a
@@ -969,7 +967,7 @@ async function collectItemsForLibrary(
 
 		lastPageFingerprint = currentPageFingerprint;
 
-		startIndex += pageSize;
+		startIndex += pageItems.length;
 		hasMore = startIndex < totalCount;
 		pageCount += 1;
 	}

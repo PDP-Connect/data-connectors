@@ -257,8 +257,8 @@ test("mutation: repeated-page detection catches non-advancing pagination", async
 });
 
 test("mutation: max-pages guard is testable with injected config", async () => {
-	// Create server that returns empty pages with huge claimed total
-	const emptyPagingServer = new (class {
+	// Server that returns one distinct item per page with a huge claimed total
+	const pagingServer = new (class {
 		private server: any;
 		private port = 0;
 
@@ -295,10 +295,18 @@ test("mutation: max-pages guard is testable with injected config", async () => {
 						}
 
 						if (path.includes("/Users/user-123/Items")) {
-							// Empty items but claim 1 million total (forces pagination loop)
+							// One distinct item per page, 1 million claimed (forces pagination loop)
 							res.writeHead(200);
 							res.end(
-								JSON.stringify({ Items: [], TotalRecordCount: 1_000_000 }),
+								JSON.stringify({
+									Items: [
+										{
+											Id: `item-${new URL(path, "http://localhost").searchParams.get("StartIndex") ?? "0"}`,
+											Name: "Item",
+										},
+									],
+									TotalRecordCount: 1_000_000,
+								}),
 							);
 							return;
 						}
@@ -328,7 +336,7 @@ test("mutation: max-pages guard is testable with injected config", async () => {
 		}
 	})();
 
-	const pagingUrl = await emptyPagingServer.start();
+	const pagingUrl = await pagingServer.start();
 
 	try {
 		// Set low max pages (3) for fast test
@@ -354,7 +362,7 @@ test("mutation: max-pages guard is testable with injected config", async () => {
 		);
 	} finally {
 		__setMaxPagesPerStream(1000); // Restore
-		await emptyPagingServer.stop();
+		await pagingServer.stop();
 	}
 });
 

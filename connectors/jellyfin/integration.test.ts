@@ -222,7 +222,7 @@ class FakeJellyfinServer {
 						// Test: decreasing TotalRecordCount
 						if (this.responseMode === "decreasing_total") {
 							// Page 1: claim 1000 items total
-							// Page 2: decrease to 600 items total (invalid, should fail)
+							// Page 2: decrease to 600 items total (items deleted mid-sync)
 							const total = startIndex === 0 ? 1000 : 600;
 							const items = Array.from({ length: 500 }, (_, i) => ({
 								Id: `item-${startIndex + i}`,
@@ -271,28 +271,20 @@ class FakeJellyfinServer {
 							return;
 						}
 
-						// Normal mode
-						if (startIndex === 0) {
-							const items = Array.from({ length: 50 }, (_, i) => ({
-								Id: `item-${i}`,
-								Name: `Item ${i}`,
-								Type: "Movie",
-								UserData: { PlayCount: 0, Played: false },
-							}));
+						// Normal mode: 100 items served 50 per page by StartIndex, the way
+						// a server that caps Limit below the requested page size answers.
+						{
+							const items = Array.from(
+								{ length: Math.max(0, Math.min(50, 100 - startIndex)) },
+								(_, i) => ({
+									Id: `item-${startIndex + i}`,
+									Name: `Item ${startIndex + i}`,
+									Type: "Movie",
+									UserData: { PlayCount: 0, Played: false },
+								}),
+							);
 							res.writeHead(200);
 							res.end(JSON.stringify({ Items: items, TotalRecordCount: 100 }));
-						} else if (startIndex === 500) {
-							const items = Array.from({ length: 50 }, (_, i) => ({
-								Id: `item-${500 + i}`,
-								Name: `Item ${500 + i}`,
-								Type: "Movie",
-								UserData: { PlayCount: 0, Played: false },
-							}));
-							res.writeHead(200);
-							res.end(JSON.stringify({ Items: items, TotalRecordCount: 100 }));
-						} else {
-							res.writeHead(200);
-							res.end(JSON.stringify({ Items: [], TotalRecordCount: 100 }));
 						}
 						return;
 					}
@@ -651,7 +643,7 @@ test("adversarial: malformed TotalRecordCount (string) fails closed", async () =
 	}
 });
 
-test("adversarial: decreasing TotalRecordCount fails closed", async () => {
+test("adversarial: decreasing TotalRecordCount completes at the new total", async () => {
 	const server = new FakeJellyfinServer();
 	server.setResponseMode("decreasing_total");
 	const baseUrl = await server.start();
@@ -668,7 +660,11 @@ test("adversarial: decreasing TotalRecordCount fails closed", async () => {
 			threwError = true;
 		});
 
-		assert.ok(threwError, "Should fail closed on decreasing TotalRecordCount");
+		assert.equal(
+			threwError,
+			false,
+			"a total that drops mid-sync (items deleted) must not abort the run",
+		);
 	} finally {
 		await server.stop();
 	}
