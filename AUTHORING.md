@@ -8,7 +8,14 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
 ## Before you start
 
-1. Install Node.js 24.15 or a later 24.x release, and npm. Then install the dependencies from the repository root. Run every command on this page from the root.
+1. Fork `PDP-Connect/data-connectors` on GitHub. Clone your fork and create a branch for the connector.
+
+   ```bash
+   git clone https://github.com/<your-user>/data-connectors.git
+   cd data-connectors && git switch -c <key>-connector
+   ```
+
+2. Install Node.js 24.15 or a later 24.x release, and npm. Then install the dependencies from the repository root. Run every command on this page from the root.
 
    ```bash
    npm ci
@@ -17,7 +24,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
    npm can warn that it blocked install scripts for some packages. The steps on this page do not need them.
 
-2. Choose the existing connector closest to yours, and read it before you write code.
+3. Choose the existing connector closest to yours, and read it before you write code.
 
    | Your source | Start from |
    |---|---|
@@ -26,7 +33,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
    | A website that needs a signed-in browser | `connectors/chatgpt/` |
    | A file the user exports and imports | `connectors/apple_health/` |
 
-3. List what the platform holds, from its API reference or its data export. A connector emits records in streams, one stream per kind of record, such as `orders` or `messages`. Your streams cover what a user expects to find. Add `account_profile`, `account_plan` or `usage_summary` streams where the platform has that data, and keep the fields the API returns unless you have a reason to drop them.
+4. List what the platform holds, from its API reference or its data export. A connector emits records in streams, one stream per kind of record, such as `orders` or `messages`. Your streams cover what a user expects to find. Add `account_profile`, `account_plan` or `usage_summary` streams where the platform has that data, and keep the fields the API returns unless you have a reason to drop them.
 
 ## Steps
 
@@ -91,7 +98,7 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
    2. `recommended_interval_seconds` is the default time between scheduled runs. It must be at least the minimum. The app warns a user who sets a shorter interval than either one.
    3. `maximum_staleness_seconds` is the data age after which the data counts as stale. Make it longer than the recommended interval.
    4. `rate_limit_sensitivity` and `bot_detection_sensitivity` (`low`, `medium` or `high`) say how quickly the platform limits or blocks frequent requests. The app does not read them yet; set them for the reviewer.
-   5. `rationale` gives your reasons in one or two sentences, and must not be empty. If the platform publishes no limit, keep the scaffold's intervals or longer ones, and say in `rationale` that no limit is published.
+   5. `rationale` gives your reasons in one or two sentences, and must not be empty. If the platform publishes no limit, keep the scaffold's intervals or longer ones, and say in `rationale` that no limit is published. The scaffold sets `minimum_interval_seconds` to 3600 (one hour), `recommended_interval_seconds` to 21600 (six hours) and `maximum_staleness_seconds` to 86400 (one day).
 
 4. Give the connector its inputs, then run it against your account.
 
@@ -122,8 +129,8 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
    3. Add the connector to `REAL_UNLISTED_CONNECTORS` in `packages/polyfill-connectors/src/connector-conformance-roster.ts`, with the test file that runs its collection. The scaffold creates `connectors/<key>/pilot-fixture.test.ts` for this. A connector with its own collection test names that file instead.
    4. Add a coverage driver to `CONNECTOR_DRIVERS` in `connectors/_conformance/coverage-conformance-drivers.ts`. A driver runs the connector against a fake local server and lists the streams it covers; `driveJellyfin` is an example.
    5. Run `npm run connector-implementation-index:generate` and commit `connector-implementation-index.json`.
-   6. Regenerate the consent-time fields with [the generator](packages/polyfill-connectors/scripts/generate-consent-time-fields.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-consent-time-fields.ts)` and commit the generated files.
-   7. For a connector with saved credentials, regenerate the static-secret registry with [the generator](packages/polyfill-connectors/scripts/generate-static-secret-registry.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-static-secret-registry.ts)` and commit the generated file.
+   6. Regenerate the consent-time fields with [the generator](packages/polyfill-connectors/scripts/generate-consent-time-fields.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-consent-time-fields.ts)`. Commit `packages/polyfill-connectors/src/generated/consent-time-fields.generated.ts` and the files in `packages/polyfill-connectors/src/generated/consent-time-fields/`.
+   7. For a connector with saved credentials, regenerate the static-secret registry with [the generator](packages/polyfill-connectors/scripts/generate-static-secret-registry.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-static-secret-registry.ts)`. Commit `packages/polyfill-connectors/src/generated/static-secret-registry.generated.ts`.
    8. Run `npm run polyfill-library-metadata:generate` and commit `packages/polyfill-connectors/src/manifest-library-metadata.json`.
    9. Raise the manifest count by one in the "every shipped manifest declares exactly one typed public lifecycle tier" test in `packages/polyfill-connectors/src/public-listing-manifest-honesty.test.ts`.
    10. If `(cd packages/polyfill-connectors && npm run check:noAwaitInLoops-conformance)` reports a new finding, remove the sequential await or add a reviewed allowlist entry with the reason.
