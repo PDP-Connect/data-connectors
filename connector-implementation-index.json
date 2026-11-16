@@ -28400,7 +28400,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.24",
+				"version": "0.2.25",
 				"display_name": "USAA",
 				"brand": {
 					"icon": "icon.svg",
@@ -28617,6 +28617,28 @@
 								},
 								"original_description": {
 									"type": ["string", "null"]
+								},
+								"transfer_direction": {
+									"type": ["string", "null"],
+									"enum": ["out", "in", null],
+									"description": "Transfer direction: out for money sent, in for money received; null when not recognized."
+								},
+								"counterparty_name": {
+									"type": ["string", "null"],
+									"description": "Counterparty name from the transfer description, or null when unavailable."
+								},
+								"counterparty_account_type": {
+									"type": ["string", "null"],
+									"description": "Counterparty account type from the transfer description, or null when unavailable."
+								},
+								"counterparty_last4": {
+									"type": ["string", "null"],
+									"pattern": "^[0-9]{4}$",
+									"description": "Last four digits of the counterparty account, or null when unavailable."
+								},
+								"transfer_confirmation_number": {
+									"type": ["string", "null"],
+									"description": "Transfer confirmation number from the description, or null when unavailable."
 								},
 								"category": {
 									"type": ["string", "null"]

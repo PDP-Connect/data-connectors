@@ -90,6 +90,14 @@ export const transactionSchema = z.object({
 	currency: z.string().regex(/^[A-Z]{3}$/, "must be ISO-4217 3-letter code"),
 	description: cleanString(300).nullable(),
 	original_description: cleanString(300).nullable(),
+	transfer_direction: z.enum(["out", "in"]).nullable(),
+	counterparty_name: cleanString(300).nullable(),
+	counterparty_account_type: cleanString(60).nullable(),
+	counterparty_last4: z
+		.string()
+		.regex(/^[0-9]{4}$/, "must be 4 digits")
+		.nullable(),
+	transfer_confirmation_number: cleanString(300).nullable(),
 	category: z.string().min(1).max(60).nullable(),
 	// Check number: 1-6 digit string when present
 	check_number: z

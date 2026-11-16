@@ -55,6 +55,7 @@ import {
 	fileUrlForPath as parsersFileUrlForPath,
 	safeAccountSlug,
 	sha256Hex,
+	transferRecordFields,
 	yearMonthFromDate,
 } from "./parsers.ts";
 import {
@@ -880,6 +881,7 @@ function buildStatementRecords(
 		account_name: accountName,
 		date: t.iso,
 		description: t.description,
+		...transferRecordFields(t.description),
 		original_description: t.description,
 		category: null,
 		amount: t.amount,
@@ -955,6 +957,7 @@ export async function parsePdfStatement({
 
 // Exposed for introspection / tests.
 export const _internals = {
+	buildStatementRecords,
 	parseModernCheckingEra,
 	parseCreditCardEra,
 	detectStatementYear,

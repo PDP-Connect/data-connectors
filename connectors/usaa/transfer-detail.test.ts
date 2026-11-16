@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { hashId, rowsToTransactions } from "./parsers.ts";
 import { transactionSchema } from "./schemas.ts";
+import { _internals } from "./statement-pdfs.ts";
 
 const keys = ["transfer_direction", "counterparty_name", "counterparty_account_type",
  "counterparty_last4", "transfer_confirmation_number"] as const;
@@ -62,4 +63,37 @@ test("transactions manifest declares all five nullable transfer fields with desc
  }
  assert.deepEqual(properties.transfer_direction.enum, ["out", "in", null]);
  assert.equal(properties.counterparty_last4.pattern, "^[0-9]{4}$");
+});
+
+test("statement records carry nullable transfer fields without changing existing fields or ids", () => {
+ const descriptions = [
+  "USAA FUNDS TRANSFER CR FROM RILEY IMAGINARY SAVINGS #4321, CONF# 1234567",
+  "SYNTHETIC BOOKSHOP",
+ ];
+ const txns = descriptions.map((description, ord) => ({
+  description, iso: "2026-04-10", amount: ord === 0 ? 1234 : -500,
+  balance: null, tupleKey: `2026-04-10|${ord === 0 ? "12.34" : "-5.00"}|${description}`, ord,
+ }));
+ const options = { accountId: "SYNTHETIC-ACCOUNT", accountName: "Synthetic checking", period: "2026-04" };
+ const rows = _internals.buildStatementRecords(txns, options);
+ assert.equal(rows.length, 2);
+ assert.deepEqual(fields(rows[0]!), {
+  transfer_direction: "in", counterparty_name: "RILEY IMAGINARY",
+  counterparty_account_type: "SAVINGS", counterparty_last4: "4321",
+  transfer_confirmation_number: "1234567",
+ });
+ assert.deepEqual(fields(rows[1]!), Object.fromEntries(keys.map(key => [key, null])));
+ // Independent pre-change mapper oracle: the five additions cannot alter any existing field.
+ const legacy = txns.map(t => ({
+  id: hashId(`${options.accountId}|${t.tupleKey}|#${t.ord}`),
+  account_id: options.accountId, account_name: options.accountName,
+  date: t.iso, description: t.description, original_description: t.description,
+  category: null, amount: t.amount, currency: "USD",
+  balance_after_cents: t.balance, check_number: null, source: "pdf_statement_2026-04",
+ }));
+ for (const [index, row] of rows.entries()) {
+  const withoutTransfer = Object.fromEntries(Object.entries(row).filter(([key]) => !keys.some(field => field === key)));
+  assert.deepEqual(withoutTransfer, legacy[index]);
+  assert.deepEqual(fields(transactionSchema.parse(row)), fields(row));
+ }
 });

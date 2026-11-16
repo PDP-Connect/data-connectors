@@ -180,6 +180,18 @@ export function parseTransferDetail(
 	return detail;
 }
 
+/** Additive record fields; transfer metadata never participates in identity. */
+export function transferRecordFields(description: string) {
+	const detail = parseTransferDetail(description);
+	return {
+		transfer_direction: detail?.direction ?? null,
+		counterparty_name: detail?.counterparty_name ?? null,
+		counterparty_account_type: detail?.counterparty_account_type ?? null,
+		counterparty_last4: detail?.counterparty_last4 ?? null,
+		transfer_confirmation_number: detail?.confirmation_number ?? null,
+	};
+}
+
 // ─── Hash + URL helpers ──────────────────────────────────────────────────
 
 export function hashId(s: string): string {
@@ -556,6 +568,7 @@ function csvRowToTransaction({
 		account_name: accountName,
 		date,
 		description,
+		...transferRecordFields(description),
 		original_description: original,
 		category: categoryRaw,
 		amount: amountCents,
