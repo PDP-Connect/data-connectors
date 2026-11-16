@@ -5,6 +5,7 @@ import { isMainModule } from "@pdpp/connector-protocol";
 import { readOptions } from "../../packages/polyfill-connectors/src/connector-options.ts";
 import {
 	type CollectContext,
+	createConnectorFailure,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { createExpensifyClient } from "./client.ts";
@@ -26,7 +27,14 @@ export async function collect(
 	const partnerUserID = ctx.credentials.EXPENSIFY_PARTNER_USER_ID;
 	const partnerUserSecret = ctx.credentials.EXPENSIFY_PARTNER_USER_SECRET;
 	if (!partnerUserID?.trim() || !partnerUserSecret?.trim()) {
-		throw new Error("expensify_credentials_missing");
+		throw createConnectorFailure(
+			"expensify_credentials_missing",
+			"expensify_credentials_missing",
+			{
+				retryable: false,
+				recoveryHint: { action: "manual_action_required" },
+			},
+		);
 	}
 	const rawHistory = process.env.EXPENSIFY_HISTORY_YEARS;
 	if (rawHistory !== undefined && !/^[1-9][0-9]*$/.test(rawHistory)) {

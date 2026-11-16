@@ -263,8 +263,18 @@ test("expensify missing credentials fail before client construction", async () =
 			let thrown = "";
 			await assert.rejects(collect(h.ctx, h.factory, now), (error: unknown) => {
 				thrown = String(error);
+				assert.ok(error instanceof Error);
+				assert.deepEqual("recoveryHint" in error && error.recoveryHint, {
+					action: "manual_action_required",
+					retryable: false,
+				});
 				return (
 					error instanceof Error &&
+					error.name === "TerminalError" &&
+					"code" in error &&
+					error.code === "expensify_credentials_missing" &&
+					"retryable" in error &&
+					error.retryable === false &&
 					error.message === "expensify_credentials_missing"
 				);
 			});

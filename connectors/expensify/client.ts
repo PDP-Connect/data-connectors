@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { createConnectorFailure } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { EXPORT_TEMPLATE } from "./template.ts";
 
 /** Rolling-window request pacing shared by file, download and retry calls. */
@@ -88,22 +89,22 @@ export function createExpensifyClient(options: ExpensifyClientOptions) {
 			responseCode === 407;
 		const message = `Expensify HTTP ${status ?? "unavailable"}${responseCode === undefined ? "" : ` responseCode ${responseCode}`}: ${reason}`;
 		// Never propagate response bodies, transport errors, filenames or supplied dates.
-		return Object.assign(
-			new Error(
-				partnerUserSecret
-					? message.split(partnerUserSecret).join("[redacted]")
-					: message,
-			),
+		const retryable =
+			!rejected &&
+			(status === undefined ||
+				status === 429 ||
+				(status ?? 0) >= 500 ||
+				(responseCode ?? 0) >= 500);
+		return createConnectorFailure(
+			rejected ? "expensify_credentials_rejected" : "expensify_request_failed",
+			partnerUserSecret
+				? message.split(partnerUserSecret).join("[redacted]")
+				: message,
 			{
-				code: rejected
-					? "expensify_credentials_rejected"
-					: "expensify_request_failed",
-				retryable:
-					!rejected &&
-					(status === undefined ||
-						status === 429 ||
-						(status ?? 0) >= 500 ||
-						(responseCode ?? 0) >= 500),
+				retryable,
+				recoveryHint: {
+					action: retryable ? "retry_by_runtime" : "manual_action_required",
+				},
 			},
 		);
 	}

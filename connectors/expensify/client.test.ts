@@ -127,8 +127,13 @@ function safeError(
 	retryable: boolean,
 ) {
 	assert.ok(error instanceof Error);
+	assert.equal(error.name, "TerminalError");
 	assert.equal("code" in error && error.code, code);
 	assert.equal("retryable" in error && error.retryable, retryable);
+	assert.deepEqual("recoveryHint" in error && error.recoveryHint, {
+		action: retryable ? "retry_by_runtime" : "manual_action_required",
+		retryable,
+	});
 	assert.ok(error.message.includes(status));
 	assert.ok(!error.message.includes(SYNTHETIC_SECRET));
 	return true;
@@ -227,6 +232,7 @@ for (const [status, responseCode] of [
 	[200, 401],
 	[200, 407],
 	[200, 500],
+	[500, undefined],
 	[403, undefined],
 ] as const) {
 	test(`classifies HTTP ${status} responseCode ${responseCode} without echoing a secret`, async () => {
@@ -251,7 +257,7 @@ for (const [status, responseCode] of [
 					? "expensify_credentials_rejected"
 					: "expensify_request_failed",
 				String(responseCode ?? status),
-				!rejected && responseCode === 500,
+				!rejected && (status === 500 || responseCode === 500),
 			),
 		);
 		assert.equal(f.calls.length, 1);

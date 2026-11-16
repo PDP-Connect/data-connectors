@@ -244,6 +244,17 @@
 		}
 	},
 	{
+		"file": "expensify.json",
+		"manifest": {
+			"connector_key": "expensify",
+			"reason_display_messages": {
+				"expensify_request_failed": "The request failed; try syncing again later.",
+				"expensify_credentials_rejected": "The supplied credentials were rejected; update them in connection settings.",
+				"expensify_credentials_missing": "Required credentials are missing; add them in connection settings."
+			}
+		}
+	},
+	{
 		"file": "facebook.json",
 		"manifest": {
 			"connector_key": "facebook",
