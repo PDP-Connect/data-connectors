@@ -165,7 +165,11 @@ test("authoring names checkout steps, refresh defaults and generated outputs", (
 			return Number(literal.replaceAll("_", ""));
 		});
 		assert.ok(values.every((value) => value === values[0]), field + " differs between scaffold templates");
-		const documented = [...refresh.matchAll(new RegExp("\x60" + field + "\x60 to (\\d+)\\b", "g"))];
+		const documentedValue = new RegExp("\x60" + field + "\x60 to (\\d+) \\(", "g");
+		for (const malformed of ["3600.5 (one hour)", "3600,000 (one hour)"]) {
+			assert.equal([...("\x60" + field + "\x60 to " + malformed).matchAll(documentedValue)].length, 0, malformed);
+		}
+		const documented = [...refresh.matchAll(documentedValue)];
 		assert.ok(documented.length > 0, "refresh policy must state " + field);
 		for (const match of documented) assert.equal(Number(match[1]), values[0], field);
 	}
