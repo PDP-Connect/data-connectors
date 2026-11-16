@@ -2849,7 +2849,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_messages/index.ts",
-			line: 838,
+			line: 840,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",

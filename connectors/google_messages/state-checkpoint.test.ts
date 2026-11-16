@@ -144,7 +144,11 @@ function runGoogleMessagesCustom(
 	messages: RawMessage[],
 	state: Record<string, unknown>,
 	env: Record<string, string> = {},
-): Promise<{ code: number | null; messages: EmittedMessage[] }> {
+): Promise<{
+	code: number | null;
+	messages: EmittedMessage[];
+	stderr: string;
+}> {
 	return runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
@@ -608,6 +612,11 @@ test("a message the shape check rejects is considered but NOT covered", async ()
 		fingerprints: Record<string, string>;
 	};
 	assert.equal(Object.hasOwn(cursor.fingerprints, "msg_bad"), false);
+	assert.match(
+		run.stderr,
+		/\[google_messages-diagnostic\] messages_rejected \{"phase":"emit","rejected":1\}/,
+	);
+	assert.doesNotMatch(run.stderr, /bad.body/);
 	assert.ok(
 		run.messages.some(
 			(m) =>

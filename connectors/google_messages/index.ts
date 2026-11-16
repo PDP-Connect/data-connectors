@@ -828,9 +828,11 @@ export async function collect({
 	// schema drift that discards every message still report full coverage.
 	let covered = 0;
 	let emitted = 0;
+	let rejected = 0;
 	for (const message of parsed) {
 		const record = { ...message };
 		if (!validateRecord("messages", record).ok) {
+			rejected += 1;
 			continue;
 		}
 		covered += 1;
@@ -838,6 +840,13 @@ export async function collect({
 			await emitRecord("messages", record);
 			emitted += 1;
 		}
+	}
+	if (rejected > 0) {
+		// Counts only: a rejected message's content never reaches a log.
+		connectorDiagnostic("google_messages", "messages_rejected", {
+			phase: "emit",
+			rejected,
+		});
 	}
 	connectorDiagnostic("google_messages", "emit_finished", {
 		phase: "emit",
