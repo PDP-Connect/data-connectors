@@ -10,6 +10,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import {
+	AGGREGATE_FILE,
+	SLICE_DIRECTORY,
+} from "../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = "packages/polyfill-connectors";
@@ -147,17 +151,33 @@ test("authoring names checkout steps, refresh defaults and generated outputs", (
 	assert.match(before, /^3\. Choose the existing connector/m);
 	assert.match(before, /^4\. List what the platform holds/m);
 	const refresh = text.split("3. Choose the refresh policy")[1].split("4. Give the connector")[0];
-	for (const interval of [
-		"`minimum_interval_seconds` to 3600 (one hour)",
-		"`recommended_interval_seconds` to 21600 (six hours)",
-		"`maximum_staleness_seconds` to 86400 (one day)",
-	]) assert.ok(refresh.includes(interval), interval);
+	const scaffold = readFileSync(join(root, pkg, "bin/connector-init.ts"), "utf8");
+	for (const field of [
+		"minimum_interval_seconds",
+		"recommended_interval_seconds",
+		"maximum_staleness_seconds",
+	]) {
+		const occurrences = [...scaffold.matchAll(new RegExp("\\b" + field + "\\s*:\\s*([^,\\n}]+)", "g"))];
+		assert.ok(occurrences.length > 0, "scaffold must define " + field);
+		const values = occurrences.map((match) => {
+			const literal = match[1].trim();
+			assert.match(literal, /^\d+(?:_\d+)*$/, field + " must be a numeric literal");
+			return Number(literal.replaceAll("_", ""));
+		});
+		assert.ok(values.every((value) => value === values[0]), field + " differs between scaffold templates");
+		const documented = [...refresh.matchAll(new RegExp("\x60" + field + "\x60 to (\\d+)\\b", "g"))];
+		assert.ok(documented.length > 0, "refresh policy must state " + field);
+		for (const match of documented) assert.equal(Number(match[1]), values[0], field);
+	}
 	const registration = text.split("5. Register the connector in the shared files.")[1].split("6. Record a scenario.")[0];
 	const consent = registration.split("   6. ")[1].split("   7. ")[0];
 	const secrets = registration.split("   7. ")[1].split("   8. ")[0];
-	assert.ok(consent.includes("packages/polyfill-connectors/src/generated/consent-time-fields.generated.ts"));
-	assert.ok(consent.includes("packages/polyfill-connectors/src/generated/consent-time-fields/"));
-	assert.ok(secrets.includes("packages/polyfill-connectors/src/generated/static-secret-registry.generated.ts"));
+	assert.ok(consent.includes("`" + pkg + "/src/generated/" + AGGREGATE_FILE + "`"));
+	assert.ok(consent.includes("`" + pkg + "/src/generated/" + SLICE_DIRECTORY + "/`"));
+	const registrySource = readFileSync(join(root, pkg, "scripts/generate-static-secret-registry.ts"), "utf8");
+	const outputPaths = [...registrySource.matchAll(/resolve\(\s*packageDir\s*,\s*(["'])([^"']+)\1\s*\)/g)];
+	assert.equal(outputPaths.length, 1, "registry generator must have one default output path");
+	assert.ok(secrets.includes("`" + pkg + "/" + outputPaths[0][2] + "`"));
 });
 
 test("registration precedes replay evidence and numbered references follow the order", () => {
