@@ -157,15 +157,24 @@ test("expensify invalid history fails before transport", async () => {
 		"-1",
 		"2.5",
 		"not-a-number",
+		"abc",
 		"2027",
 		"9007199254740992",
 	]) {
 		await withHistory(value, async () => {
 			const h = harness();
-			await assert.rejects(
-				collect(h.ctx, h.factory, now),
-				/positive safe integer|fit UTC years/,
-			);
+			await assert.rejects(collect(h.ctx, h.factory, now), (error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.equal(error.name, "TerminalError");
+				assert.equal("code" in error && error.code, "expensify_invalid_window");
+				assert.equal("retryable" in error && error.retryable, false);
+				assert.deepEqual("recoveryHint" in error && error.recoveryHint, {
+					action: "manual_action_required",
+					retryable: false,
+				});
+				return true;
+			});
+			if (value === "abc") assert.deepEqual(h.factoryOptions, []);
 			assert.deepEqual(h.ranges, []);
 			assert.deepEqual(h.records, []);
 			assert.deepEqual(h.messages, []);

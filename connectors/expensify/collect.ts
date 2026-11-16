@@ -3,6 +3,7 @@
 
 import {
 	type CollectContext,
+	createConnectorFailure,
 	emitDetailCoverage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { createExpensifyClient } from "./client.ts";
@@ -34,12 +35,24 @@ export interface ExpensifyCollectDeps
 
 function exportWindow(years: number, now: Date): { from: string; to: string } {
 	if (!Number.isSafeInteger(years) || years <= 0) {
-		throw new Error("Expensify years must be a positive safe integer");
+		throw createConnectorFailure(
+			"expensify_invalid_window",
+			"Expensify years must be a positive safe integer",
+			{
+				retryable: false,
+				recoveryHint: { action: "manual_action_required" },
+			},
+		);
 	}
 	const year = now.getUTCFullYear();
 	if (!Number.isFinite(now.getTime()) || year > 9999 || year - years < 0) {
-		throw new Error(
+		throw createConnectorFailure(
+			"expensify_invalid_window",
 			"Expensify export window must fit UTC years 0000 through 9999",
+			{
+				retryable: false,
+				recoveryHint: { action: "manual_action_required" },
+			},
 		);
 	}
 	const from = new Date(now.getTime());

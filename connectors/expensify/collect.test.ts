@@ -242,7 +242,18 @@ test("rejects invalid years before fetching or emitting", async () => {
 	for (const years of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
 		const h = harness();
 		h.deps.years = years;
-		await assert.rejects(collectExpensify(h.deps), /positive safe integer/);
+		await assert.rejects(collectExpensify(h.deps), (error: unknown) => {
+			assert.ok(error instanceof Error);
+			assert.equal(error.name, "TerminalError");
+			assert.equal("code" in error && error.code, "expensify_invalid_window");
+			assert.equal("retryable" in error && error.retryable, false);
+			assert.deepEqual("recoveryHint" in error && error.recoveryHint, {
+				action: "manual_action_required",
+				retryable: false,
+			});
+			return true;
+		});
+		assert.equal(h.policyCalls(), 0);
 		assert.deepEqual(
 			[h.ranges, h.records, h.messages, h.progress],
 			[[], [], [], []],
@@ -431,4 +442,26 @@ test("profile expense dates are extrema of accepted rows, ignoring missing dates
 	assert.equal(h.records[0]!.data.earliest_expense_date, "2024-02-01");
 	assert.equal(h.records[0]!.data.latest_expense_date, "2025-05-03");
 	assert.equal(h.policyCalls(), 1);
+});
+
+test("out-of-range UTC window is classified before fetching or emitting", async () => {
+	const h = harness(fixture, ["expenses", "workspaces", "account_profile"]);
+	h.deps.now = () => new Date("9999-12-31T00:00:00Z");
+	h.deps.years = 10000;
+	await assert.rejects(collectExpensify(h.deps), (error: unknown) => {
+		assert.ok(error instanceof Error);
+		assert.equal(error.name, "TerminalError");
+		assert.equal("code" in error && error.code, "expensify_invalid_window");
+		assert.equal("retryable" in error && error.retryable, false);
+		assert.deepEqual("recoveryHint" in error && error.recoveryHint, {
+			action: "manual_action_required",
+			retryable: false,
+		});
+		return true;
+	});
+	assert.equal(h.policyCalls(), 0);
+	assert.deepEqual(
+		[h.ranges, h.records, h.messages, h.progress],
+		[[], [], [], []],
+	);
 });

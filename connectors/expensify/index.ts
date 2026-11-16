@@ -38,7 +38,14 @@ export async function collect(
 	}
 	const rawHistory = process.env.EXPENSIFY_HISTORY_YEARS;
 	if (rawHistory !== undefined && !/^[1-9][0-9]*$/.test(rawHistory)) {
-		throw new Error("Expensify years must be a positive safe integer");
+		throw createConnectorFailure(
+			"expensify_invalid_window",
+			"Expensify years must be a positive safe integer",
+			{
+				retryable: false,
+				recoveryHint: { action: "manual_action_required" },
+			},
+		);
 	}
 	const options = readOptions(null, {
 		envPrefix: "EXPENSIFY_",
