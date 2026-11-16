@@ -135,7 +135,7 @@ export function highlightRecord(
 	};
 }
 
-export function exportPageUrl(
+function exportPageUrl(
 	cursor: string | null,
 	updatedAfter: string | null,
 ): string {
@@ -145,8 +145,8 @@ export function exportPageUrl(
 	}
 	if (updatedAfter) {
 		url.searchParams.set("updatedAfter", updatedAfter);
-		url.searchParams.set("includeDeleted", "true");
 	}
+	url.searchParams.set("includeDeleted", "true");
 	return url.toString();
 }
 

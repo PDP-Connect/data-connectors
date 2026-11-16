@@ -25,16 +25,53 @@ function fixtureContext(state: Record<string, unknown> = {}) {
 	};
 }
 
-test("adding highlights after syncing books starts from the beginning", async () => {
+test("adding highlights backfills history and still emits book deletions", async () => {
 	const ctx = fixtureContext({
 		books: { updated_after: "2026-11-05T00:00:00.000Z" },
 	});
-	const windows: (string | null)[] = [];
-	await collectReadwise(ctx, async (_token, _cursor, updatedAfter) => {
-		windows.push(updatedAfter);
-		return { nextPageCursor: null, results: [] };
+	const emitter = makeEmitRecord({
+		requested: ctx.requested,
+		emit: ctx.emit,
+		emittedAt: ctx.emittedAt,
+		validateRecord,
+		isTombstone: (_stream, data) => data.is_deleted === true,
+		timeRangeFieldFor: () => null,
 	});
-	assert.deepEqual(windows, [null]);
+	const read = createExportReader(async (input) => {
+		const { searchParams } = new URL(String(input));
+		const includesHistory = !searchParams.has("updatedAfter");
+		const includesDeleted = searchParams.get("includeDeleted") === "true";
+		return Response.json({
+			nextPageCursor: null,
+			results: [
+				...(includesHistory
+					? [
+							{
+								user_book_id: 11,
+								highlights: [{ id: 101, text: "Older highlight" }],
+							},
+						]
+					: []),
+				...(includesDeleted
+					? [{ user_book_id: 12, is_deleted: true, highlights: [] }]
+					: []),
+			],
+		});
+	});
+	await collectReadwise(
+		{ ...ctx, emitRecord: emitter.emit, isRecordSelected: emitter.isSelected },
+		read,
+	);
+	assert.deepEqual(
+		ctx.protocolMessages
+			.filter((message) => message.type === "RECORD")
+			.map(({ stream, key, op }) => [stream, key, op]),
+		[
+			["books", "11", undefined],
+			["highlights", "101", undefined],
+			["books", "12", "delete"],
+		],
+	);
 	assert.deepEqual(
 		ctx.protocolMessages
 			.filter((message) => message.type === "STATE")
@@ -66,6 +103,7 @@ test("uses the oldest requested checkpoint and preserves numeric cursor zero", a
 		"2026-11-04T00:00:00.000Z",
 	);
 	assert.equal(urls[1]?.searchParams.get("pageCursor"), "0");
+	assert.equal(urls[1]?.searchParams.get("includeDeleted"), "true");
 });
 
 test("coverage counts records and tombstones the runtime accepted and only checkpoints complete streams", async () => {

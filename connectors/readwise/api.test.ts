@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
 	type EmittedMessage,
@@ -11,11 +12,11 @@ import {
 	bookRecord,
 	createExportReader,
 	EXPORT_URL,
-	exportPageUrl,
 	highlightRecord,
 	type ReadwiseBook,
 } from "./api.ts";
 import { booksSchema, highlightsSchema, validateRecord } from "./schemas.ts";
+import { decodeEscapedText, encodeText } from "./text.ts";
 
 // Independent decoder for the declared transport format, not a punctuation guess.
 const decodeText = (value: unknown): string => {
@@ -96,31 +97,44 @@ test("highlightRecord denormalizes the book and validates", () => {
 	assert.ok(parsed.success, JSON.stringify(parsed.error?.issues));
 });
 
-for (const code of [0x92, 0x93, 0x94]) {
-	test(`U+${code.toString(16)} highlight is emitted without losing source text`, async () => {
-		const original = `Words ${String.fromCharCode(code)} remain; literal \\u0092; curly ’“”; emoji 🚀`;
-		const record = highlightRecord({ id: 456, text: original }, BOOK);
-		const messages: EmittedMessage[] = [];
-		const runtime = makeEmitRecord({
-			requested: new Map([["highlights", { name: "highlights" }]]),
-			emit: async (message) => {
-				messages.push(message);
-			},
-			emittedAt: "2026-11-05T00:00:00Z",
-			validateRecord,
-			isTombstone: (_, data) => data.is_deleted === true,
-			timeRangeFieldFor: () => null,
-		});
-		await runtime.emit("highlights", record);
-		assert.deepEqual(
-			messages.map((message) => message.type),
-			["RECORD"],
-		);
-		assert.equal(runtime.counters.totalSkipped, 0);
-		assert.equal(record.text_encoding, "pdpp-safe-escape-v1");
-		assert.equal(decodeText(record.text), original);
+test("Readwise matches the canonical pdpp-safe-escape-v1 bytes", () => {
+	const { vectors } = JSON.parse(
+		readFileSync(
+			new URL("../anthropic/safe-escape-vectors.json", import.meta.url),
+			"utf8",
+		),
+	) as { vectors: Array<{ raw: string; encoded: string }> };
+	assert.ok(vectors.length > 100);
+	for (const { raw, encoded } of vectors) {
+		assert.equal(encodeText(raw), encoded, JSON.stringify(raw));
+		assert.equal(decodeEscapedText(encoded), raw, JSON.stringify(raw));
+	}
+});
+
+test("C1 controls in a Readwise highlight survive a RECORD frame", async () => {
+	const original =
+		"Words \u0092\u0093\u0094 remain; literal \\u0092; curly ’“”; emoji 🚀";
+	const record = highlightRecord({ id: 456, text: original }, BOOK);
+	const messages: EmittedMessage[] = [];
+	const runtime = makeEmitRecord({
+		requested: new Map([["highlights", { name: "highlights" }]]),
+		emit: async (message) => {
+			messages.push(message);
+		},
+		emittedAt: "2026-11-05T00:00:00Z",
+		validateRecord,
+		isTombstone: (_, data) => data.is_deleted === true,
+		timeRangeFieldFor: () => null,
 	});
-}
+	await runtime.emit("highlights", record);
+	assert.deepEqual(
+		messages.map((message) => message.type),
+		["RECORD"],
+	);
+	assert.equal(runtime.counters.totalSkipped, 0);
+	assert.equal(record.text_encoding, "pdpp-safe-escape-v1");
+	assert.equal(decodeText(record.text), original);
+});
 
 test("all Readwise descriptive fields and tags retain their exact text", () => {
 	const original =
@@ -165,18 +179,6 @@ test("safe Unicode is unchanged and control escaping never truncates text at the
 	);
 });
 
-test("exportPageUrl adds incremental params only with a cursor date", () => {
-	assert.equal(exportPageUrl(null, null), EXPORT_URL);
-	const url = new URL(exportPageUrl("abc", "2024-01-01T00:00:00.000Z"));
-	assert.equal(url.pathname, "/api/v2/export/");
-	assert.equal(url.searchParams.get("pageCursor"), "abc");
-	assert.equal(
-		url.searchParams.get("updatedAfter"),
-		"2024-01-01T00:00:00.000Z",
-	);
-	assert.equal(url.searchParams.get("includeDeleted"), "true");
-});
-
 test("fetchExportPage sends the Token header and retries 429", async () => {
 	const calls: { url: string; auth: string | null }[] = [];
 	const sleeps: number[] = [];
@@ -201,7 +203,7 @@ test("fetchExportPage sends the Token header and retries 429", async () => {
 	const page = await read("tok", null, null);
 	assert.equal(page.results?.length, 1);
 	assert.equal(calls.length, 2);
-	assert.equal(calls[0]?.url, EXPORT_URL);
+	assert.equal(calls[0]?.url, new URL("?includeDeleted=true", EXPORT_URL).href);
 	assert.equal(calls[0]?.auth, "Token tok");
 	assert.deepEqual(sleeps, [2000]);
 });
