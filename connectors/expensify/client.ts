@@ -81,6 +81,7 @@ export function createExpensifyClient(options: ExpensifyClientOptions) {
 		status: number | undefined,
 		reason: string,
 		responseCode?: number,
+		kind: "status" | "transient" | "invalid" = "status",
 	) {
 		const rejected =
 			status === 401 ||
@@ -90,13 +91,19 @@ export function createExpensifyClient(options: ExpensifyClientOptions) {
 		const message = `Expensify HTTP ${status ?? "unavailable"}${responseCode === undefined ? "" : ` responseCode ${responseCode}`}: ${reason}`;
 		// Never propagate response bodies, transport errors, filenames or supplied dates.
 		const retryable =
-			!rejected &&
-			(status === undefined ||
-				status === 429 ||
-				(status ?? 0) >= 500 ||
-				(responseCode ?? 0) >= 500);
+			kind === "transient" ||
+			(kind === "status" &&
+				!rejected &&
+				(status === undefined ||
+					status === 429 ||
+					(status ?? 0) >= 500 ||
+					(responseCode ?? 0) >= 500));
 		return createConnectorFailure(
-			rejected ? "expensify_credentials_rejected" : "expensify_request_failed",
+			kind === "invalid"
+				? "expensify_invalid_window"
+				: kind === "status" && rejected
+					? "expensify_credentials_rejected"
+					: "expensify_request_failed",
 			partnerUserSecret
 				? message.split(partnerUserSecret).join("[redacted]")
 				: message,
@@ -115,7 +122,7 @@ export function createExpensifyClient(options: ExpensifyClientOptions) {
 			!Number.isFinite(timestamp) ||
 			new Date(timestamp).toISOString().slice(0, 10) !== value
 		) {
-			throw failure(undefined, "invalid calendar date");
+			throw failure(undefined, "invalid calendar date", undefined, "invalid");
 		}
 		return timestamp;
 	}
@@ -148,7 +155,7 @@ export function createExpensifyClient(options: ExpensifyClientOptions) {
 			try {
 				text = await response.text();
 			} catch {
-				throw failure(status, "response read failed");
+				throw failure(status, "response read failed", undefined, "transient");
 			}
 			let responseCode: number | undefined;
 			try {
@@ -194,7 +201,7 @@ export function createExpensifyClient(options: ExpensifyClientOptions) {
 		endDate: string;
 	}): Promise<string> {
 		if (date(startDate) > date(endDate))
-			throw failure(undefined, "reversed date range");
+			throw failure(undefined, "reversed date range", undefined, "invalid");
 		const fileName = (
 			await request(
 				{
@@ -225,7 +232,8 @@ export function createExpensifyClient(options: ExpensifyClientOptions) {
 	}): Promise<string> {
 		let start = date(from);
 		const end = date(to);
-		if (start > end) throw failure(undefined, "reversed date range");
+		if (start > end)
+			throw failure(undefined, "reversed date range", undefined, "invalid");
 		const chunks: string[] = [];
 		while (start <= end) {
 			const stop = Math.min(end, start + 364 * DAY);

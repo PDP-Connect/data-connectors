@@ -6069,7 +6069,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/expensify/client.test.ts",
-			line: 295,
+			line: 325,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "invalid-range test: each range is asserted on its own so a failure names the range.",
@@ -6083,14 +6083,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/expensify/client.ts",
-			line: 133,
+			line: 140,
 			column: 16,
 			category: "bounded_retry_polling",
 			note: "post(): an HTTP 429 retry is decided from the previous response, at most 3 retries.",
 		},
 		{
 			path: "connectors/expensify/client.ts",
-			line: 233,
+			line: 241,
 			column: 5,
 			category: "provider_pacing_backpressure",
 			note: "exportRange(): one year-long window at a time, so the export jobs share Expensify's request limits.",

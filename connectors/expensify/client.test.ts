@@ -286,13 +286,49 @@ test("file, download and concurrent exports share the same pacing quota", async 
 	);
 });
 
+for (const status of [200, 403, 500]) {
+	test(`body read failure after HTTP ${status} is retryable and redacted`, async () => {
+		let calls = 0;
+		const client = createExpensifyClient({
+			...credentials,
+			now: () => 0,
+			sleep: async () => {},
+			fetch: async () => {
+				calls++;
+				return {
+					status,
+					headers: new Headers(),
+					text: async () => {
+						throw new Error("SENTINEL-DO-NOT-LEAK");
+					},
+				};
+			},
+		});
+		await assert.rejects(client.exportReports(dates), (error) => {
+			safeError(error, "expensify_request_failed", String(status), true);
+			assert.ok(error instanceof Error);
+			assert.deepEqual("recoveryHint" in error && error.recoveryHint,
+				{ action: "retry_by_runtime", retryable: true });
+			assert.ok(!error.message.includes("SENTINEL-DO-NOT-LEAK"));
+			return true;
+		});
+		assert.equal(calls, 1);
+	});
+}
+
 test("invalid and reversed date ranges never dispatch", async () => {
 	const f = fixture([]);
 	for (const range of [
 		{ from: "2026-02-30", to: "2026-03-01" },
 		{ from: "2026-01-02", to: "2026-01-01" },
 	]) {
-		await assert.rejects(f.client.exportRange(range), /HTTP unavailable/);
+		await assert.rejects(f.client.exportRange(range), (error) => {
+			safeError(error, "expensify_invalid_window", "HTTP unavailable", false);
+			assert.ok(error instanceof Error);
+			assert.deepEqual("recoveryHint" in error && error.recoveryHint,
+				{ action: "manual_action_required", retryable: false });
+			return true;
+		});
 	}
 	assert.deepEqual(f.calls, []);
 });
