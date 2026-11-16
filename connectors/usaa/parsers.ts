@@ -109,6 +109,77 @@ const BACKFILL_DAYS_3MO = 90 * MS_PER_DAY;
 export const BACKFILL_17MO = 17 * DAYS_PER_MONTH * MS_PER_DAY;
 export const INCREMENTAL_OVERLAP_MS = 5 * MS_PER_DAY;
 
+// ─── Internal transfer descriptions ──────────────────────────────────────
+
+export interface TransferDetail {
+	direction: "out" | "in";
+	counterparty_name: string | null;
+	counterparty_account_type: string | null;
+	counterparty_last4: string | null;
+	confirmation_number: string | null;
+}
+
+const TRANSFER_SPACES_RE = /\s+/g;
+const TRANSFER_PREFIX_RE = /^USAA FUNDS TRANSFER (DB|CR)(?: (TO|FROM) (.+))?$/i;
+const TRANSFER_PENDING_RE = /^(TO|FROM) ACCOUNT: (.+) \*([^ ,]+)$/i;
+const TRANSFER_CONFIRMATION_RE = /, ?CONF# ?(\d+)$/i;
+const TRANSFER_ACCOUNT_RE = /^(.+) #([^ ,]+)$/;
+const TRANSFER_TYPE_RE = / (CHECKING|SAVINGS)$/i;
+const TRANSFER_LAST4_RE = /^\d{4}$/;
+
+/** Parse only the known transfer forms; never infer direction from a name. */
+export function parseTransferDetail(
+	description: string,
+): TransferDetail | null {
+	const text = description.trim().replace(TRANSFER_SPACES_RE, " ");
+	const pending = text.match(TRANSFER_PENDING_RE);
+	if (pending) {
+		const [, side = "", name = "", last4 = ""] = pending;
+		return {
+			direction: side.toUpperCase() === "TO" ? "out" : "in",
+			counterparty_name: name.trim(),
+			counterparty_account_type: null,
+			counterparty_last4: TRANSFER_LAST4_RE.test(last4) ? last4 : null,
+			confirmation_number: null,
+		};
+	}
+	const transfer = text.match(TRANSFER_PREFIX_RE);
+	if (!transfer) return null;
+	const [, kind = "", side, rest = ""] = transfer;
+	const direction = kind.toUpperCase() === "DB" ? "out" : "in";
+	const detail: TransferDetail = {
+		direction,
+		counterparty_name: null,
+		counterparty_account_type: null,
+		counterparty_last4: null,
+		confirmation_number: null,
+	};
+	if (!side) return detail;
+	if (side.toUpperCase() !== (direction === "out" ? "TO" : "FROM")) {
+		return null;
+	}
+	let tail = rest;
+	const confirmation = tail.match(TRANSFER_CONFIRMATION_RE);
+	if (confirmation) {
+		detail.confirmation_number = confirmation[1] ?? null;
+		tail = tail.slice(0, confirmation.index).trim();
+	}
+	// Greedy name capture uses the final account marker, preserving embedded #.
+	// Without a marker the whole tail is the name; the direction still holds.
+	const account = tail.match(TRANSFER_ACCOUNT_RE);
+	let name = (account?.[1] ?? tail).trim();
+	const accountType = name.match(TRANSFER_TYPE_RE);
+	if (accountType) {
+		detail.counterparty_account_type = accountType[1]?.toUpperCase() ?? null;
+		name = name.slice(0, accountType.index).trim();
+	}
+	if (!name) return null;
+	detail.counterparty_name = name;
+	const last4 = account?.[2] ?? "";
+	detail.counterparty_last4 = TRANSFER_LAST4_RE.test(last4) ? last4 : null;
+	return detail;
+}
+
 // ─── Hash + URL helpers ──────────────────────────────────────────────────
 
 export function hashId(s: string): string {

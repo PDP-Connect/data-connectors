@@ -27,6 +27,7 @@ import {
 	parseCreditCardEra,
 	parseCsv,
 	parseModernCheckingEra,
+	parseTransferDetail,
 	resolveAccountIdForRef,
 	rowsToTransactions,
 	safeAccountSlug,
@@ -63,6 +64,143 @@ function latestLocalRawDir(): string | null {
 		return null;
 	}
 }
+
+// Invented names and synthetic zero account suffixes only.
+const transferCases = [
+	[
+		"statement debit",
+		"USAA FUNDS TRANSFER DB TO ALEX SAMPLE CHECKING #0000, CONF# 000001",
+		"out",
+		"ALEX SAMPLE",
+		"CHECKING",
+		"0000",
+		"000001",
+	],
+	[
+		"statement credit",
+		"USAA FUNDS TRANSFER CR FROM MORGAN EXAMPLE SAVINGS #0000, CONF# 000002",
+		"in",
+		"MORGAN EXAMPLE",
+		"SAVINGS",
+		"0000",
+		"000002",
+	],
+	["bare debit", "USAA FUNDS TRANSFER DB", "out", null, null, null, null],
+	["bare credit", "USAA FUNDS TRANSFER CR", "in", null, null, null, null],
+	[
+		"pending debit",
+		"To Account: SAMPLE RESERVE *0000",
+		"out",
+		"SAMPLE RESERVE",
+		null,
+		"0000",
+		null,
+	],
+	[
+		"pending credit",
+		"From Account: SAMPLE RESERVE *0000",
+		"in",
+		"SAMPLE RESERVE",
+		null,
+		"0000",
+		null,
+	],
+	[
+		"no confirmation",
+		"USAA FUNDS TRANSFER DB TO ALEX SAMPLE SAVINGS #0000",
+		"out",
+		"ALEX SAMPLE",
+		"SAVINGS",
+		"0000",
+		null,
+	],
+	[
+		"no account type",
+		"USAA FUNDS TRANSFER CR FROM ALEX SAMPLE #0000, CONF# 000001",
+		"in",
+		"ALEX SAMPLE",
+		null,
+		"0000",
+		"000001",
+	],
+	[
+		"hash in name",
+		"USAA FUNDS TRANSFER DB TO SAMPLE # CLUB CHECKING #0000, CONF# 000001",
+		"out",
+		"SAMPLE # CLUB",
+		"CHECKING",
+		"0000",
+		"000001",
+	],
+	[
+		"short suffix",
+		"USAA FUNDS TRANSFER DB TO ALEX SAMPLE #000, CONF# 000001",
+		"out",
+		"ALEX SAMPLE",
+		null,
+		null,
+		"000001",
+	],
+	[
+		"no account marker",
+		"USAA FUNDS TRANSFER DB TO ALEX SAMPLE CHECKING, CONF# 000001",
+		"out",
+		"ALEX SAMPLE",
+		"CHECKING",
+		null,
+		"000001",
+	],
+	[
+		"long suffix",
+		"From Account: SAMPLE RESERVE *00000",
+		"in",
+		"SAMPLE RESERVE",
+		null,
+		null,
+		null,
+	],
+	[
+		"case and whitespace",
+		"  usaa   funds transfer cr from Alex   Sample savings #0000, conf# 000001  ",
+		"in",
+		"Alex Sample",
+		"SAVINGS",
+		"0000",
+		"000001",
+	],
+] as const;
+
+for (const [
+	label,
+	input,
+	direction,
+	name,
+	accountType,
+	last4,
+	confirmation,
+] of transferCases) {
+	test(`parseTransferDetail: ${label}`, () => {
+		assert.deepEqual(parseTransferDetail(input), {
+			direction,
+			counterparty_name: name,
+			counterparty_account_type: accountType,
+			counterparty_last4: last4,
+			confirmation_number: confirmation,
+		});
+	});
+}
+
+test("parseTransferDetail: unrelated or mismatched direction returns null", () => {
+	for (const input of [
+		"",
+		"CARD PURCHASE",
+		"prefix USAA FUNDS TRANSFER DB",
+		"USAA FUNDS TRANSFER DB FROM ALEX SAMPLE #0000",
+		"USAA FUNDS TRANSFER CR TO ALEX SAMPLE #0000",
+	]) {
+		assert.equal(parseTransferDetail(input), null);
+	}
+});
 
 // ─── hashId / sha256Hex ──────────────────────────────────────────────────
 
