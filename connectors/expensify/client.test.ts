@@ -296,3 +296,156 @@ test("invalid and reversed date ranges never dispatch", async () => {
 	}
 	assert.deepEqual(f.calls, []);
 });
+
+test("policy list uses the exact get job and drops owner", async () => {
+	const policies = [
+		{
+			id: "p1",
+			name: "First",
+			type: "team",
+			role: "admin",
+			outputCurrency: "USD",
+			owner: "synthetic@example.invalid",
+		},
+		{
+			id: "p2",
+			name: "Second",
+			type: null,
+			role: null,
+			outputCurrency: null,
+			owner: "other@example.invalid",
+		},
+	];
+	const f = fixture([
+		{
+			status: 200,
+			body: JSON.stringify({ responseCode: 200, policyList: policies }),
+		},
+	]);
+	assert.deepEqual(await f.client.listPolicies(), [
+		{
+			id: "p1",
+			name: "First",
+			type: "team",
+			role: "admin",
+			outputCurrency: "USD",
+		},
+		{ id: "p2", name: "Second", type: null, role: null, outputCurrency: null },
+	]);
+	assert.equal(f.calls.length, 1);
+	const call = f.calls[0]!;
+	assert.equal(
+		call.url,
+		"https://integrations.expensify.com/Integration-Server/ExpensifyIntegrations",
+	);
+	assert.equal(call.init.method, "POST");
+	assert.equal(call.init.redirect, "error");
+	assert.deepEqual(call.init.headers, {
+		"Content-Type": "application/x-www-form-urlencoded",
+	});
+	assert.equal(
+		call.init.body,
+		new URLSearchParams({
+			requestJobDescription: JSON.stringify({
+				type: "get",
+				inputSettings: { type: "policyList" },
+				credentials,
+			}),
+		}).toString(),
+	);
+});
+
+test("empty policy list is valid and 429 retries the identical job once", async () => {
+	const f = fixture([
+		{ status: 429, body: "synthetic rate limit", retryAfter: "2" },
+		{
+			status: 200,
+			body: JSON.stringify({ responseCode: 200, policyList: [] }),
+		},
+	]);
+	assert.deepEqual(await f.client.listPolicies(), []);
+	assert.equal(f.calls.length, 2);
+	assert.deepEqual(f.sleeps, [2000]);
+	assert.deepEqual(
+		f.calls.map((call) => call.at),
+		[0, 2000],
+	);
+	assert.equal(f.calls[0]!.init.body, f.calls[1]!.init.body);
+});
+
+test("malformed policies fail typed without exposing the response", async () => {
+	const valid = {
+		id: "p",
+		name: "Policy",
+		type: null,
+		role: null,
+		outputCurrency: null,
+	};
+	const malformed: unknown[] = [
+		null,
+		[],
+		{},
+		{ policyList: [] },
+		{ responseCode: "200", policyList: [] },
+		{ responseCode: 200, policyList: {} },
+	];
+	for (const bad of [
+		null,
+		[],
+		"bad",
+		{ ...valid, id: "" },
+		{ ...valid, name: "" },
+		{ ...valid, id: 4 },
+		{ ...valid, name: false },
+		{ ...valid, type: 7 },
+		{ ...valid, role: {} },
+		{ ...valid, outputCurrency: [] },
+		{ id: "p", name: "Policy" },
+	]) {
+		malformed.push({
+			responseCode: 200,
+			policyList: [valid, bad],
+			marker: "POLICY_BODY_MARKER",
+		});
+	}
+	const bodies = [
+		"POLICY_BODY_MARKER",
+		...malformed.map((value) => JSON.stringify(value)),
+	];
+	// Each body gets its own fixture, so the cases are independent.
+	await Promise.all(
+		bodies.map(async (body) => {
+			const f = fixture([{ status: 200, body }]);
+			await assert.rejects(f.client.listPolicies(), (error) => {
+				safeError(error, "expensify_request_failed", "200", false);
+				assert.ok(
+					error instanceof Error &&
+						!error.message.includes("POLICY_BODY_MARKER"),
+				);
+				return true;
+			});
+			assert.equal(f.calls.length, 1);
+		}),
+	);
+});
+
+test("policy requests consume the same pacer as exports", async () => {
+	const f = fixture([
+		...Array.from({ length: 4 }, () => ({
+			status: 200,
+			body: '{"responseCode":200,"policyList":[]}',
+		})),
+		{ status: 200, body: "file" },
+		{ status: 200, body: "export" },
+	]);
+	// In order on purpose: the pacer quota is what this test observes.
+	await f.client.listPolicies();
+	await f.client.listPolicies();
+	await f.client.listPolicies();
+	await f.client.listPolicies();
+	assert.equal(await f.client.exportReports(dates), "export");
+	assert.deepEqual(
+		f.calls.map((call) => call.at),
+		[0, 0, 0, 0, 0, 10_000],
+	);
+});

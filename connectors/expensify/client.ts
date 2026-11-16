@@ -239,5 +239,60 @@ export function createExpensifyClient(options: ExpensifyClientOptions) {
 		}
 		return chunks.join("\n");
 	}
-	return { exportReports, exportRange };
+	async function listPolicies(): Promise<
+		Array<{
+			id: string;
+			name: string;
+			type: string | null;
+			role: string | null;
+			outputCurrency: string | null;
+		}>
+	> {
+		const text = await request({
+			type: "get",
+			inputSettings: { type: "policyList" },
+		});
+		const malformed = () => failure(200, "invalid policy list");
+		let answer: unknown;
+		try {
+			answer = JSON.parse(text);
+		} catch {
+			throw malformed();
+		}
+		if (
+			answer === null ||
+			typeof answer !== "object" ||
+			Array.isArray(answer) ||
+			!("responseCode" in answer) ||
+			answer.responseCode !== 200 ||
+			!("policyList" in answer) ||
+			!Array.isArray(answer.policyList)
+		)
+			throw malformed();
+		return answer.policyList.map((entry: unknown) => {
+			if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+				throw malformed();
+			const row = entry as Record<string, unknown>;
+			const nullableString = (value: unknown): value is string | null =>
+				value === null || typeof value === "string";
+			if (
+				typeof row.id !== "string" ||
+				row.id.length === 0 ||
+				typeof row.name !== "string" ||
+				row.name.length === 0 ||
+				!nullableString(row.type) ||
+				!nullableString(row.role) ||
+				!nullableString(row.outputCurrency)
+			)
+				throw malformed();
+			return {
+				id: row.id,
+				name: row.name,
+				type: row.type,
+				role: row.role,
+				outputCurrency: row.outputCurrency,
+			};
+		});
+	}
+	return { exportReports, exportRange, listPolicies };
 }
