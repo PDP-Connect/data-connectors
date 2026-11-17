@@ -19887,7 +19887,7 @@
 				},
 				"connector_key": "notion",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Notion",
 				"brand": {
 					"icon": "icon.svg",
