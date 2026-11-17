@@ -217,9 +217,9 @@ function isLoadRowsSkip(
 
 /**
  * True when at least one direct_history row's date is genuinely ambiguous
- * without a dataset-inferred order (i.e. buildViewingActivityRecord with no
- * order fails to parse it, but the date field itself is non-empty — so the
- * row isn't simply missing a date, it's unresolvable field-order ambiguity).
+ * without a dataset-inferred order: no-order parsing fails, but at least
+ * one explicit field order builds a record. Malformed dates that fail both
+ * orders remain per-row skips rather than blocking the entire import.
  * Used only after inferDirectHistoryDateOrderFromRows already found no
  * disambiguating row, to distinguish "no ambiguous dates at all" (fine, the
  * whole file might just be empty/malformed for unrelated reasons) from
@@ -233,7 +233,11 @@ function hasAmbiguousDirectHistoryDates(
 		if (!dateRaw) {
 			return false;
 		}
-		return buildViewingActivityRecord(row, "direct_history", null) === null;
+		return (
+			buildViewingActivityRecord(row, "direct_history", null) === null &&
+			(buildViewingActivityRecord(row, "direct_history", "DMY") !== null ||
+				buildViewingActivityRecord(row, "direct_history", "MDY") !== null)
+		);
 	});
 }
 
