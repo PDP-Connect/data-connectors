@@ -448,7 +448,34 @@ test("fetchAllActivities: HTTP 200 GraphQL failures reject instead of certifying
 	},
 );
 
-[{ activities: { past: { activities: [] } } }, {}].forEach((data) => {
+[
+	{},
+	{ activities: null },
+	{ activities: {} },
+	{ activities: { past: null } },
+	{ activities: { past: {} } },
+	{ activities: { past: { activities: {} } } },
+	{ activities: [] },
+	{ activities: "invalid" },
+	{ activities: { past: [] } },
+	{ activities: { past: "invalid" } },
+	{ activities: { past: { activities: "invalid" } } },
+].forEach((data) => {
+	test(`fetchAllActivities: rejects malformed Activities data ${JSON.stringify(data)}`, async () => {
+		const { fetchPath } = makeScriptedFetch({
+			activitiesPages: [{ body: JSON.stringify({ data }) }],
+		});
+		await assert.rejects(fetchAllActivities(fetchPath, NO_DELAY), {
+			message:
+				"uber_graphql_error [endpoint Activities]: Malformed Activities data",
+		});
+	});
+});
+
+[
+	{ activities: { past: { activities: [] } } },
+	{ activities: { past: { activities: null } } },
+].forEach((data) => {
 	test(`fetchAllActivities: preserves empty history ${JSON.stringify(data)}`, async () => {
 		const { fetchPath } = makeScriptedFetch({
 			activitiesPages: [{ body: JSON.stringify({ data }) }],
@@ -458,4 +485,67 @@ test("fetchAllActivities: HTTP 200 GraphQL failures reject instead of certifying
 			truncated: false,
 		});
 	});
+});
+
+[
+	{
+		name: "errors without data",
+		bodies: [JSON.stringify({ errors: [{ message: "unavailable" }] })],
+	},
+	{
+		name: "errors with a real trip",
+		bodies: [
+			JSON.stringify({
+				...JSON.parse(activitiesBody([{ uuid: "trip-1" }])),
+				errors: [{ message: "partial response" }],
+			}),
+		],
+	},
+	{
+		name: "errors after a valid first page",
+		bodies: [
+			activitiesBody([{ uuid: "trip-1" }], "next-page"),
+			JSON.stringify({ errors: [{ message: "second page unavailable" }] }),
+		],
+	},
+	{
+		name: "missing Activities containers",
+		bodies: [JSON.stringify({ data: {} })],
+	},
+].forEach(({ name, bodies }) => {
+	test(`collectAllStreams: ${name} refuses before records, state, coverage or detail reads`, async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: bodies.map((body) => ({ body })),
+		});
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await assert.rejects(
+			collectAllStreams(ctx, fetchPath, NO_DELAY),
+			/uber_graphql_error/,
+		);
+		assert.deepEqual(emitted, []);
+		assert.deepEqual(messages, []);
+		assert.deepEqual(
+			calls,
+			bodies.map(() => "Activities"),
+		);
+	});
+});
+
+test("collectAllStreams: a genuinely empty feed emits zero-key coverage", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([]) }],
+	});
+	const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.deepEqual(emitted, []);
+	assert.deepEqual(calls, ["Activities"]);
+	assert.equal(messages.length, 1);
+	const coverage = messages[0];
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.stream, "trips");
+	assert.equal(coverage.state_stream, "trips");
+	assert.equal(coverage.considered, 0);
+	assert.equal(coverage.covered, 0);
+	assert.deepEqual(coverage.required_keys, []);
+	assert.deepEqual(coverage.hydrated_keys, []);
 });
