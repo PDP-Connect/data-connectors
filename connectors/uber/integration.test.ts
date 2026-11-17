@@ -410,7 +410,40 @@ for (const continuations of [
 	});
 }
 
-test("fetchAllActivities: fresh duplicate-only continuations still honor the page ceiling", async () => {
+test("fetchAllActivities: fresh new-trip continuations still honor the page ceiling", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: Array.from({ length: 201 }, (_, i) => ({
+			body: activitiesBody([{ uuid: `trip-${i}` }], `fresh-${i}`),
+		})),
+	});
+	const delays: number[] = [];
+	const result = await fetchAllActivities(fetchPath, async (ms) => {
+		delays.push(ms);
+	});
+	assert.equal(result.activities.length, 200);
+	assert.equal(result.truncated, true);
+	assert.equal(result.stopReason, "page_limit");
+	assert.equal(calls.length, 200);
+	assert.equal(delays.length, 199);
+});
+
+test("fetchAllActivities: two duplicate-only pages in a row still follow the cursor", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t1") },
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t2") },
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t3") },
+			{ body: activitiesBody([{ uuid: "trip-b" }], null) },
+		],
+	});
+	assert.deepEqual(await fetchAllActivities(fetchPath, NO_DELAY), {
+		activities: [{ uuid: "trip-a" }, { uuid: "trip-b" }],
+		truncated: false,
+	});
+	assert.equal(calls.length, 4);
+});
+
+test("fetchAllActivities: three duplicate-only pages in a row stop as truncated", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
 		activitiesPages: Array.from({ length: 200 }, (_, i) => ({
 			body: activitiesBody([{ uuid: "trip-a" }], `fresh-${i}`),
@@ -423,9 +456,31 @@ test("fetchAllActivities: fresh duplicate-only continuations still honor the pag
 	assert.deepEqual(result, {
 		activities: [{ uuid: "trip-a" }],
 		truncated: true,
+		stopReason: "duplicate_only_pages",
 	});
-	assert.equal(calls.length, 200);
-	assert.equal(delays.length, 199);
+	assert.equal(calls.length, 4);
+	assert.equal(delays.length, 3);
+});
+
+test("collectAllStreams: a duplicate-only page streak reports trips as stopped early", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: Array.from({ length: 4 }, (_, i) => ({
+			body: activitiesBody([{ uuid: "trip-a" }], `fresh-${i}`),
+		})),
+	});
+	const { ctx, messages } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	const skips = messages.filter(
+		(m) => (m as { type?: string }).type === "SKIP_RESULT",
+	) as { reason?: string; message?: string; diagnostics?: unknown }[];
+	assert.equal(skips.length, 1);
+	assert.equal(skips[0]?.reason, "trips_deferred_page_budget");
+	assert.deepEqual(skips[0]?.diagnostics, {
+		page_limit: 200,
+		duplicate_only_page_limit: 3,
+		stop_reason: "duplicate_only_pages",
+	});
+	assert.match(skips[0]?.message ?? "", /3 pages in a row with no new trips/);
 });
 
 // ─── Records-before-DETAIL_COVERAGE ordering ────────────────────────────────
