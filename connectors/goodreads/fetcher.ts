@@ -26,6 +26,7 @@ import {
 import type { Page } from "playwright";
 import {
 	type ConnectorHttpGovernor,
+	type GovernedHttpAnswer as Answer,
 	type GovernedHttpOutcome as Governed,
 	requestGovernedAnswer as governed,
 } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
