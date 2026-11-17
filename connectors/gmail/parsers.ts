@@ -60,8 +60,6 @@ const HEX_ESCAPE_RE = /[=]([0-9A-Fa-f]{2})/g;
 // ─── Constants ──────────────────────────────────────────────────────────
 
 export const SNIPPET_MAX_CHARS = 200;
-const KB = 1024;
-export const MAX_BODY_FIELD_CHARS = 32 * KB;
 
 // ─── BigInt narrowing ───────────────────────────────────────────────────
 
@@ -756,11 +754,15 @@ export function canonicalBodyBlobCandidates(params: {
 	bodyTextFull: string | null;
 }): CanonicalBodyBlobCandidate[] {
 	const candidates: CanonicalBodyBlobCandidate[] = [];
+	const { bodyText } = classifyBodySource(
+		params.bodyTextFull,
+		params.bodyHtmlFull,
+	);
 	for (const [value, jsonPath, mimeType] of [
-		[params.bodyTextFull, "/body_text", "text/plain"],
+		[bodyText, "/body_text", "text/plain"],
 		[params.bodyHtmlFull, "/body_html", "text/html"],
 	] as const) {
-		if (typeof value === "string" && safeTextPreview(value).kind === "binary") {
+		if (typeof value === "string" && bodyRequiresBlob(value)) {
 			candidates.push({
 				content: Buffer.from(value, "utf8"),
 				jsonPath,
@@ -771,21 +773,28 @@ export function canonicalBodyBlobCandidates(params: {
 	return candidates;
 }
 
-function truncateField(value: string | null, max: number): string | null {
-	if (value === null) {
-		return toCleanString(value);
-	}
-	if (value.length > max) {
-		return toCleanString(`${value.slice(0, max)}…[truncated]`);
-	}
-	return toCleanString(value);
+// Conservative inline limit, matching ChatGPT's inline-to-blob policy.
+// This is a routing threshold, never a truncation limit.
+const BODY_INLINE_MAX_CHARS = 1_048_576;
+
+function bodyRequiresBlob(value: string): boolean {
+	return (
+		value.length > BODY_INLINE_MAX_CHARS ||
+		safeTextPreview(value).kind === "binary"
+	);
+}
+
+function inlineBody(value: string | null): string | null {
+	return value !== null && bodyRequiresBlob(value)
+		? null
+		: toCleanString(value);
 }
 
 /**
  * Build the `message_bodies` RECORD payload for one message. Mirrors the
- * original in-loop semantics:
- *   - Truncate body_text / body_html to MAX_BODY_FIELD_CHARS + "…[truncated]"
- *   - Emit body_*_bytes from the FULL (pre-truncation) decoded body
+ * body routing semantics:
+ *   - Preserve complete inline bodies; oversized/control-rich fields use blobs
+ *   - Emit body_*_bytes from the FULL decoded body
  *   - Fall back to html_stripped when text/plain is absent/empty
  *   - charset = textCharset || htmlCharset || null
  *
@@ -811,8 +820,8 @@ export function buildMessageBodyRecord(params: {
 		id: params.gmMsgid,
 		message_id: params.gmMsgid,
 		message_received_at: params.receivedAt,
-		body_text: truncateField(bodyText, MAX_BODY_FIELD_CHARS),
-		body_html: truncateField(params.bodyHtmlFull, MAX_BODY_FIELD_CHARS),
+		body_text: inlineBody(bodyText),
+		body_html: inlineBody(params.bodyHtmlFull),
 		body_text_bytes: bodyText ? Buffer.byteLength(bodyText, "utf8") : null,
 		body_html_bytes: params.bodyHtmlFull
 			? Buffer.byteLength(params.bodyHtmlFull, "utf8")
