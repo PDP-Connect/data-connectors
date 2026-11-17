@@ -8,7 +8,7 @@
  *   - ids are `String(...)` of Readwise's numeric `user_book_id` / highlight id.
  *   - empty strings from the API are normalized to null.
  *   - `tags` are tag names only.
- *   - `is_deleted` is true only on incremental runs that pass includeDeleted;
+ *   - `is_deleted` comes from provider deletion flags on every export;
  *     the runtime treats those records as tombstones.
  */
 

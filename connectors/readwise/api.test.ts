@@ -11,7 +11,6 @@ import {
 import {
 	bookRecord,
 	createExportReader,
-	EXPORT_URL,
 	highlightRecord,
 	type ReadwiseBook,
 } from "./api.ts";
@@ -179,33 +178,73 @@ test("safe Unicode is unchanged and control escaping never truncates text at the
 	);
 });
 
-test("fetchExportPage sends the Token header and retries 429", async () => {
-	const calls: { url: string; auth: string | null }[] = [];
-	const sleeps: number[] = [];
-	let n = 0;
-	const fake = (async (url: string, init?: RequestInit) => {
-		calls.push({
-			url,
-			auth: new Headers(init?.headers).get("Authorization"),
-		});
-		n++;
-		if (n === 1) {
-			return new Response("slow down", {
-				status: 429,
-				headers: { "Retry-After": "2" },
+for (const { status, retryAfter } of [
+	{ status: 429, retryAfter: 2 },
+	{ status: 503, retryAfter: 0 },
+]) {
+	test(
+		"Readwise export retries HTTP " +
+			status +
+			" on the documented request path",
+		async () => {
+			const calls: { path: string; auth: string | null }[] = [];
+			const sleeps: number[] = [];
+			const read = createExportReader(
+				async (input, init) => {
+					const url = new URL(String(input));
+					calls.push({
+						path: url.pathname,
+						auth: new Headers(init?.headers).get("Authorization"),
+					});
+					assert.equal(url.origin, "https://readwise.io");
+					assert.ok(url.pathname === "/api/v2/export/");
+					assert.equal(url.searchParams.get("includeDeleted"), "true");
+					if (calls.length === 1) {
+						return new Response(null, {
+							status,
+							headers: { "Retry-After": String(retryAfter) },
+						});
+					}
+					return Response.json({
+						count: 1,
+						nextPageCursor: null,
+						results: [BOOK],
+					});
+				},
+				async (ms) => {
+					sleeps.push(ms);
+				},
+			);
+			const page = await read("fixture-token", null, null);
+			assert.deepEqual(
+				page.results.map(bookRecord).map(({ id }) => id),
+				["123"],
+			);
+			assert.deepEqual(calls, [
+				{ path: "/api/v2/export/", auth: "Token fixture-token" },
+				{ path: "/api/v2/export/", auth: "Token fixture-token" },
+			]);
+			assert.deepEqual(sleeps, [retryAfter * 1000]);
+		},
+	);
+}
+
+test("persistent Readwise 5xx failures exhaust retries with a retryable error", async () => {
+	let attempts = 0;
+	const read = createExportReader(
+		async () => {
+			attempts += 1;
+			return new Response(null, {
+				status: 503,
+				headers: { "Retry-After": "0" },
 			});
-		}
-		return Response.json({ count: 1, nextPageCursor: null, results: [BOOK] });
-	}) as typeof fetch;
-	const read = createExportReader(fake, async (ms) => {
-		sleeps.push(ms);
+		},
+		async () => {},
+	);
+	await assert.rejects(read("fixture-token", null, null), {
+		message: "readwise_export_retryable",
 	});
-	const page = await read("tok", null, null);
-	assert.equal(page.results?.length, 1);
-	assert.equal(calls.length, 2);
-	assert.equal(calls[0]?.url, new URL("?includeDeleted=true", EXPORT_URL).href);
-	assert.equal(calls[0]?.auth, "Token tok");
-	assert.deepEqual(sleeps, [2000]);
+	assert.equal(attempts, 4);
 });
 
 test("fetchExportPage maps 401 to an auth failure", async () => {

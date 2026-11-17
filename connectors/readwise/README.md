@@ -12,8 +12,9 @@ declares the Development tier. Text fields and tags use the reversible
 backslashes that would otherwise be interpreted as escapes. Other text is
 preserved.
 
-Run `node --import tsx --test connectors/readwise/{api,index}.test.ts` from the
-repository root to check the synthetic API and collection fixtures.
+Run `node --import tsx --test connectors/readwise/*.test.ts` from the
+repository root to check the API, collection and pilot shape fixtures. The
+committed pilot records are synthetic and cover both streams.
 
 The icon uses the mark from [Readwise’s Safari pinned-tab SVG](https://d34adp677peecb.cloudfront.net/static/images/favicons/safari-pinned-tab.fea64b2bbb1d.svg),
 scaled to a 24 by 24 viewBox with the outer frame removed.
