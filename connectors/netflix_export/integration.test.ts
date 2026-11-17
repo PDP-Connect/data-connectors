@@ -303,6 +303,73 @@ test("Netflix connector resolves a mixed direct_history dataset using the one ro
 	}
 });
 
+for (const dates of [
+	["25/03/2024", "03/25/2024"],
+	["03/25/2024", "25/03/2024"],
+]) {
+	test(`Netflix connector refuses conflicting date orders with an ambiguous row (${dates[0]} first)`, async () => {
+		const importRoot = await mkdtemp(
+			join(tmpdir(), "pdpp-netflix-conflicting-date-order-"),
+		);
+		try {
+			await writeFile(
+				join(importRoot, "NetflixViewingHistory.csv"),
+				`Title,Date\nInvented Moon,${dates[0]}\nInvented Sun,${dates[1]}\nInvented River,05/03/2024\n`,
+				"utf8",
+			);
+			const { messages } = await runNetflixImport(importRoot);
+			assert.equal(records(messages, "viewing_activity").length, 0);
+			const skips = messages.filter(
+				(message) => message.type === "SKIP_RESULT",
+			);
+			assert.equal(skips.length, 1);
+			const skip = skips[0];
+			if (skip?.type === "SKIP_RESULT") {
+				assert.equal(skip.reason, "ambiguous_date_order");
+			}
+		} finally {
+			await rm(importRoot, { force: true, recursive: true });
+		}
+	});
+}
+
+test("Netflix connector imports conflicting self-evident dates without ambiguous rows", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-self-evident-dates-"),
+	);
+	try {
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			"Title,Date\nInvented Moon,25/03/2024\nInvented Sun,03/25/2024\n",
+			"utf8",
+		);
+		const { messages } = await runNetflixImport(importRoot);
+		const emitted = records(messages, "viewing_activity");
+		assert.equal(emitted.length, 2);
+		assert.deepEqual(emitted.map((record) => record.title).sort(), [
+			"Invented Moon",
+			"Invented Sun",
+		]);
+		assert.ok(
+			emitted.every(
+				(record) => record.watched_at === "2024-03-25T00:00:00.000Z",
+			),
+		);
+		assert.equal(
+			messages.some((message) => message.type === "SKIP_RESULT"),
+			false,
+		);
+		const done = messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(done.status, "succeeded");
+			assert.equal(done.records_emitted, 2);
+		}
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
 test("Netflix connector emits a typed coverage-gap SKIP_RESULT when every date in the dataset is ambiguous", async () => {
 	const importRoot = await mkdtemp(
 		join(tmpdir(), "pdpp-netflix-all-ambiguous-"),

@@ -272,6 +272,22 @@ test("inferDirectHistoryDateOrder resolves a mixed dataset using the row that di
 	assert.equal(inferDirectHistoryDateOrder(dates), "DMY");
 });
 
+test("inferDirectHistoryDateOrder rejects conflicting evidence in either row order", () => {
+	for (const dates of [
+		["25/03/2024", "03/25/2024"],
+		["03/25/2024", "25/03/2024"],
+	]) {
+		assert.equal(inferDirectHistoryDateOrder(dates), null);
+	}
+});
+
+test("inferDirectHistoryDateOrder retains consistent evidence across multiple rows", () => {
+	assert.equal(
+		inferDirectHistoryDateOrder(["25/03/2024", "26/03/2024", "05/03/2024"]),
+		"DMY",
+	);
+});
+
 test("inferDirectHistoryDateOrder ignores ISO rows when inferring order (they don't inform DMY/MDY)", () => {
 	const order = inferDirectHistoryDateOrder([
 		"2024-01-15",

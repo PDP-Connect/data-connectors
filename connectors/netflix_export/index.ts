@@ -259,13 +259,13 @@ function resolveDateOrder(
 	if (order || !hasAmbiguousDirectHistoryDates(rows)) {
 		return { order };
 	}
-	// Every non-ISO date in this dataset is itself ambiguous (no row's fields
-	// disambiguate DD/MM vs MM/DD). Never guess, never silently drop every
-	// row — surface a typed, actionable coverage gap instead.
+	// At least one date needs an order, but the dataset provides no consistent
+	// evidence (none or conflicting). Never guess or silently drop rows:
+	// surface a typed, actionable coverage gap instead.
 	return {
 		reason: "ambiguous_date_order",
 		message:
-			"Every date in this Netflix viewing history CSV is ambiguous between DD/MM and MM/DD order (no row's day or month exceeds 12), so the field order can't be inferred from this dataset. Re-export with unambiguous dates, or supply a file where at least one row's day is > 12.",
+			"Some dates in this Netflix viewing history CSV need DD/MM or MM/DD order, but the rows either do not establish an order or disagree. Re-export with unambiguous dates, or supply a file whose date-order evidence is consistent.",
 	};
 }
 
