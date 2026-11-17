@@ -37,6 +37,7 @@ import {
 	makeReauth,
 	normalizeRedditTerminalError,
 	paginate,
+	REDDIT_RETRYABLE_PATTERN,
 	type RedditListingFetch,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -601,6 +602,51 @@ test("paginate: 500 → generic http_error", async () => {
 	);
 });
 
+for (const status of [0, 500, 503, 401, 404, 429]) {
+	test(`paginate: status ${status} retains exact message and retry classification`, async () => {
+		const endpoint = `${USER_PATH}/submitted.json`;
+		const { fetch } = makeScriptedFetch({
+			[endpoint]: [{ status, json: null }],
+		});
+		const expected =
+			status === 401
+				? `reddit_auth_failed: ${status} on ${endpoint}`
+				: status === 429
+					? `reddit_rate_limited: 429 on ${endpoint}`
+					: `reddit_http_${status}: ${endpoint}`;
+		await assert.rejects(
+			paginate(fetch, endpoint, null, null, NO_DELAY),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.equal(error.message, expected);
+				assert.equal(
+					REDDIT_RETRYABLE_PATTERN.test(error.message),
+					[0, 500, 503, 429].includes(status),
+				);
+				return true;
+			},
+		);
+	});
+}
+
+test("retry pattern excludes other HTTP classes, malformed codes and parse errors", () => {
+	for (const status of [400, 403, 404, 408, 499, 600, 5000]) {
+		assert.equal(
+			REDDIT_RETRYABLE_PATTERN.test(
+				`reddit_http_${status}: ${USER_PATH}/submitted.json`,
+			),
+			false,
+		);
+	}
+	assert.equal(
+		REDDIT_RETRYABLE_PATTERN.test(
+			"reddit_parse_error: invalid listing envelope",
+		),
+		false,
+	);
+	assert.equal(REDDIT_RETRYABLE_PATTERN.test("reddit_auth_failed: 403"), false);
+});
+
 // ─── Invariant 6b: mid-run stale-session self-heal (401/403) ────────────
 
 test("paginate: page 1 succeeds, page 2 401s, repair succeeds, retry of the SAME page succeeds", async () => {
@@ -701,7 +747,15 @@ test("paginate: repair itself fails (returns false) → terminal auth_failed, no
 			"submitted",
 			onAuthFailed,
 		),
-		/reddit_auth_failed/,
+		(error: unknown) => {
+			assert.ok(error instanceof Error);
+			assert.equal(
+				error.message,
+				`reddit_auth_failed: 403 on ${USER_PATH}/submitted.json`,
+			);
+			assert.equal(REDDIT_RETRYABLE_PATTERN.test(error.message), false);
+			return true;
+		},
 	);
 	assert.equal(reauthCalls, 1, "repair is attempted once even though it fails");
 	assert.equal(

@@ -106,7 +106,6 @@ import {
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import { createRepairBudget } from "../../packages/polyfill-connectors/src/repair-budget.ts";
-import { OUTPUT_FIELDS, validateRecord } from "./schemas.ts";
 import {
 	appendNewChildren,
 	classifyListingStatus,
@@ -123,6 +122,7 @@ import {
 	voteRecord,
 	voteStatsRecord,
 } from "./parsers.ts";
+import { OUTPUT_FIELDS, validateRecord } from "./schemas.ts";
 import type { RedditChild, RedditFetchResult, RedditListing } from "./types.ts";
 
 const USER_AGENT = "pdpp-reddit-connector/0.2 (polyfill; +https://pdpp.dev)";
@@ -138,9 +138,11 @@ const PAGE_DELAY_MS = 500;
  * this matches. The non-collision tests over this pattern remain as
  * defense-in-depth for the literals Reddit throws, and the pattern still
  * fully owns PRE-submit and collect-phase retry classification.
+ * Collect transport status 0 and HTTP 5xx failures are retryable; auth,
+ * other HTTP 4xx (except the existing 429 path), and parse errors are not.
  */
 export const REDDIT_RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|fetch failed|reddit_rate_limited/i;
+	/ECONN|ETIMEDOUT|fetch failed|reddit_rate_limited|reddit_http_(?:0|5\d\d)\b/i;
 
 const REDDIT_TERMINAL_DIAGNOSTIC_MAX = 240;
 const REDDIT_AUTH_FAILURE_RE =
