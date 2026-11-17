@@ -369,7 +369,22 @@ export async function fetchAllActivities(
 					`uber_graphql_error [endpoint Activities]: ${redactTransportDetail(detail).slice(0, 200)}`,
 				);
 			}
-			const page = parsed.data?.activities?.past?.activities ?? [];
+			const activities = parsed.data.activities;
+			const past = activities?.past;
+			if (
+				typeof activities !== "object" ||
+				activities === null ||
+				Array.isArray(activities) ||
+				typeof past !== "object" ||
+				past === null ||
+				Array.isArray(past) ||
+				!Array.isArray(past.activities)
+			) {
+				throw new Error(
+					"uber_graphql_error [endpoint Activities]: Malformed Activities data",
+				);
+			}
+			const page = past.activities;
 			let newOnPage = 0;
 			for (const activity of page) {
 				rawItemsSeen += 1;
