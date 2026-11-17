@@ -427,6 +427,43 @@ test("decodeBodyPart: quoted-printable decodes =HH + soft-break", () => {
 	assert.equal(decodeBodyPart(qp, "quoted-printable", "utf8"), "Hello World");
 });
 
+["us-ascii", "US-ASCII"].forEach((charset) => {
+	test(`decodeBodyPart: base64 decodes MIME charset ${charset}`, () => {
+		const body = Buffer.from(
+			Buffer.from("Hello world").toString("base64"),
+			"ascii",
+		);
+		assert.equal(decodeBodyPart(body, "base64", charset), "Hello world");
+	});
+});
+
+test("decodeBodyPart: quoted-printable supports Windows-1252 punctuation", () => {
+	assert.equal(
+		decodeBodyPart(
+			Buffer.from("=93Quoted=94", "ascii"),
+			"quoted-printable",
+			"windows-1252",
+		),
+		"\u201cQuoted\u201d",
+	);
+});
+
+test("decodeBodyPart: base64 supports ISO-8859-1", () => {
+	const body = Buffer.from(
+		Buffer.from([0x43, 0x61, 0x66, 0xe9]).toString("base64"),
+		"ascii",
+	);
+	assert.equal(decodeBodyPart(body, "base64", "iso-8859-1"), "Café");
+});
+
+test("decodeBodyPart: unknown charset retains base64 decoding before UTF-8 fallback", () => {
+	const body = Buffer.from(
+		Buffer.from("Café", "utf8").toString("base64"),
+		"ascii",
+	);
+	assert.equal(decodeBodyPart(body, "base64", "x-unknown-charset"), "Café");
+});
+
 test("decodeBodyPart: null/empty → empty string", () => {
 	assert.equal(decodeBodyPart(null, null, null), "");
 	assert.equal(decodeBodyPart(undefined, null, null), "");
@@ -524,6 +561,17 @@ test("makeSnippet: quoted-printable decodes bytes in the declared charset", () =
 			expected,
 		);
 	}
+});
+
+test("makeSnippet: unknown charset retains quoted-printable decoding before UTF-8 fallback", () => {
+	assert.equal(
+		makeSnippet(
+			Buffer.from("Caf=C3=A9 au lait", "ascii"),
+			"quoted-printable",
+			"x-unknown-charset",
+		),
+		"Café au lait",
+	);
 });
 
 test("makeSnippet: truncation does not leave half of a decoded surrogate pair", () => {

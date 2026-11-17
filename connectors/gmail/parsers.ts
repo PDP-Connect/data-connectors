@@ -400,6 +400,19 @@ function decodeQuotedPrintableBytes(buffer: Buffer): Buffer {
 	return Buffer.from(bytes);
 }
 
+/** Decode MIME charset labels without discarding transfer-decoded bytes. */
+export function decodeCharset(bytes: Buffer, charset: string | null): string {
+	const label = charset || "utf8";
+	if (Buffer.isEncoding(label)) {
+		return bytes.toString(label);
+	}
+	try {
+		return new TextDecoder(label).decode(bytes);
+	} catch {
+		return bytes.toString("utf8");
+	}
+}
+
 /**
  * Decode a body part buffer according to its MIME transfer encoding and
  * charset into a JavaScript string. Best-effort; never throws.
@@ -412,19 +425,14 @@ export function decodeBodyPart(
 	if (!buffer?.length) {
 		return "";
 	}
-	const cs = (charset || "utf8") as BufferEncoding;
-	try {
-		const enc = (encoding || "").toLowerCase();
-		if (enc === "base64") {
-			return Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-		}
-		if (enc === "quoted-printable") {
-			return decodeQuotedPrintableBytes(buffer).toString(cs);
-		}
-		return buffer.toString(cs);
-	} catch {
-		return buffer.toString("utf8");
+	const enc = (encoding || "").toLowerCase();
+	let bytes = buffer;
+	if (enc === "base64") {
+		bytes = Buffer.from(buffer.toString("ascii"), "base64");
+	} else if (enc === "quoted-printable") {
+		bytes = decodeQuotedPrintableBytes(buffer);
 	}
+	return decodeCharset(bytes, charset);
 }
 
 /**
@@ -526,22 +534,7 @@ export function makeSnippet(
 	if (!buffer?.length) {
 		return null;
 	}
-	let decoded: string;
-	try {
-		const enc = (encoding || "").toLowerCase();
-		const cs = (charset || "utf8") as BufferEncoding;
-		if (enc === "base64") {
-			decoded = Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-		} else if (enc === "quoted-printable") {
-			// Node names the MIME ISO-8859-1 charset "latin1".
-			const qpCharset = cs.toLowerCase() === "iso-8859-1" ? "latin1" : cs;
-			decoded = decodeQuotedPrintableBytes(buffer).toString(qpCharset);
-		} else {
-			decoded = buffer.toString(cs);
-		}
-	} catch {
-		decoded = buffer.toString("utf8");
-	}
+	const decoded = decodeBodyPart(buffer, encoding, charset);
 	// Drop lines that are obviously quoted replies ("> ...") and signature separators
 	const collapsed = decoded
 		.split(NEWLINE_SPLIT_RE)
