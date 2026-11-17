@@ -53,6 +53,55 @@ test("occurrenceKey hashes exactly the existing concatenation", () => {
 	assert.equal(occurrenceKey("a", "b", "c"), occurrenceKey("ab", "", "c"));
 });
 
+/** Collects every string key passed to Map#set while `run` executes. */
+async function mapKeysSetDuring(run: () => unknown): Promise<string[]> {
+	const keys: string[] = [];
+	const original = Map.prototype.set;
+	Map.prototype.set = function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+		if (typeof key === "string") keys.push(key);
+		return original.call(this, key, value);
+	};
+	try {
+		await run();
+	} finally {
+		Map.prototype.set = original;
+	}
+	return keys;
+}
+
+test("occurrence maps retain digests, not message text, in scan and both stream passes", async () => {
+	const body = "long-fixture-body-".repeat(500);
+	const lines = [
+		`[6/5/24, 9:15:22 AM] Alice: ${body}`,
+		`[6/5/24, 9:15:23 AM] Bob: ${body}`,
+	];
+	// One pass at a time: the spy patches a global.
+	const assertDigestsOnly = (name: string, keys: string[]) => {
+		const digests = keys.filter((key) => /^[a-f0-9]{64}$/.test(key));
+		assert.ok(digests.length >= 2, `${name}: expected digest keys`);
+		assert.ok(
+			keys.every((key) => !key.includes("long-fixture-body-")),
+			`${name}: a map key retained message text`,
+		);
+	};
+	assertDigestsOnly(
+		"scan",
+		await mapKeysSetDuring(() => scanWhatsAppChatIdentity("Chat.txt", lines)),
+	);
+	assertDigestsOnly(
+		"sync stream",
+		await mapKeysSetDuring(() =>
+			streamWhatsAppChatMessages(lines, "chat-1", () => {}),
+		),
+	);
+	assertDigestsOnly(
+		"async stream",
+		await mapKeysSetDuring(() =>
+			streamWhatsAppChatMessagesAsync(lines, "chat-1", () => {}),
+		),
+	);
+});
+
 /**
  * Test-only convenience: drives the real two-pass streaming API
  * (scanWhatsAppChatIdentity then streamWhatsAppChatMessages, exactly as
