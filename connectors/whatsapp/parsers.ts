@@ -261,6 +261,17 @@ export function messageContentFingerprint(
 		.slice(0, MESSAGE_ID_HASH_LENGTH);
 }
 
+/** Fixed-size occurrence-map key; preserve the legacy concatenation exactly. */
+export function occurrenceKey(
+	author: string,
+	sent_at: string,
+	content: string,
+): string {
+	return createHash("sha256")
+		.update(`${author}${sent_at}${content}`)
+		.digest("hex");
+}
+
 function deriveMessageId(
 	chatId: string,
 	message: Pick<ParsedWhatsAppMessage, "author" | "content" | "sent_at">,
@@ -761,7 +772,11 @@ class ChatIdentityAccumulator {
 		if (this.lastSentAt === null || message.sent_at > this.lastSentAt) {
 			this.lastSentAt = message.sent_at;
 		}
-		const dedupeKey = `${message.author}${message.sent_at}${message.content}`;
+		const dedupeKey = occurrenceKey(
+			message.author,
+			message.sent_at,
+			message.content,
+		);
 		const occurrenceIndex = this.occurrenceSeen.get(dedupeKey) ?? 0;
 		this.occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
 		this.fingerprintSampler.push(
@@ -870,7 +885,7 @@ export function streamWhatsAppChatMessages(
 			);
 		}
 		const hasAttachment = WHATSAPP_ATTACHMENT_RE.test(raw.content);
-		const dedupeKey = `${raw.author}${raw.sent_at}${raw.content}`;
+		const dedupeKey = occurrenceKey(raw.author, raw.sent_at, raw.content);
 		const occurrenceIndex = occurrenceSeen.get(dedupeKey) ?? 0;
 		occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
 		onMessage({
@@ -921,7 +936,7 @@ export async function streamWhatsAppChatMessagesAsync(
 			);
 		}
 		const hasAttachment = WHATSAPP_ATTACHMENT_RE.test(raw.content);
-		const dedupeKey = `${raw.author}${raw.sent_at}${raw.content}`;
+		const dedupeKey = occurrenceKey(raw.author, raw.sent_at, raw.content);
 		const occurrenceIndex = occurrenceSeen.get(dedupeKey) ?? 0;
 		occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
 		pending = onMessage({
