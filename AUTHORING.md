@@ -24,3 +24,9 @@ Follow the [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIS
 The historical Playwright scope catalog is frozen. A new Collection Profile stream does not automatically replace a Desktop scope or authorize writing raw records under a legacy scope ID. Such a replacement needs a separately reviewed projection and consumer activation.
 
 Implementation or manifest-contract changes require a connector version bump. Publication is selected by `scripts/select-publish-connectors.mjs` and signed from the protected main workflow.
+
+## Review and publish a connector
+
+1. **Review the PR.** The maintainer who picks it up checks that CI is green, the implementation matches the streams and scope declared in the manifest, and the evidence meets the proposed tier in the [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md). Ask for missing evidence or changes in the PR. Share only reviewed, scrubbed or synthetic examples.
+2. **Approve and merge when it is ready to publish.** For a publishable connector, check its entry in the [publish inventory](scripts/connector-publish-allowlist.mjs) and confirm the intended version. Merging an eligible change to `main` can publish it through the [connector publication workflow](.github/workflows/publish-polyfill-connectors.yml).
+3. **Confirm publication.** Open the workflow run for the merge and check that the connector version was signed and the catalog lists the same version and digest. Post the run and published digest in the PR. If publication fails or the entry is missing, post the failed step or missing entry and name the maintainer taking it from there. Confirm availability in Vana separately when applicable.

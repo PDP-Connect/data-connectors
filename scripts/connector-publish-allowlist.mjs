@@ -26,6 +26,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["chatgpt", "chatgpt"],
     ["claude_code", "claude-code"],
     ["codex", "codex"],
+    ["coros_browser", "coros-browser"],
     ["discord_browser", "discord-browser"],
     ["doordash", "doordash"],
     ["facebook", "facebook"],
@@ -67,6 +68,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["oura_browser", "oura-browser"],
     ["perplexity", "perplexity"],
     ["pocket", "pocket"],
+    ["polar_flow", "polar-flow"],
     ["reddit", "reddit"],
     ["shopify", "shopify"],
     [

@@ -2890,9 +2890,15 @@ export async function collectAllStreams(
 
 // ─── Entry ──────────────────────────────────────────────────────────────
 
+/** post_likes' manifest `primary_key`: a liker is one ordinal of one post. */
+export const META_RECORD_KEY_FIELDS = {
+	post_likes: ["post_id", "liker_ordinal"],
+} as const;
+
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		browser: { profileName: "meta" },
+		recordKeyFields: META_RECORD_KEY_FIELDS,
 		async collect(ctx: BrowserCollectContext): Promise<void> {
 			await collectAllStreams(ctx);
 		},

@@ -1,0 +1,14 @@
+{
+	"result": "0000",
+	"message": "OK",
+	"apiCode": "A1B2C3D4",
+	"data": {
+		"userId": "472000000000000101",
+		"nickname": "Canary Runner",
+		"email": "canary@example.invalid",
+		"headPic": "",
+		"role": 0,
+		"unit": 0,
+		"sportDataSummary": { "count": 3, "modelValidState": 1 }
+	}
+}
