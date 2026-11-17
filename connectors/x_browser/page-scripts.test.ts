@@ -62,23 +62,15 @@ function fakePage(
 	} = {},
 ) {
 	const sent: Xhr[] = [];
-	class Xhr {
-		private readonly listeners: Array<() => void> = [];
+	class Xhr extends EventTarget {
 		response: unknown = null;
 		responseText = "";
 		responseType = "";
 		status = 0;
-		addEventListener(type: string, listener: () => void): void {
-			if (type === "loadend") {
-				this.listeners.push(listener);
-			}
-		}
 		finish(status: number, body: string): void {
 			this.status = status;
 			this.responseText = body;
-			for (const listener of this.listeners) {
-				listener();
-			}
+			this.dispatchEvent(new Event("loadend"));
 		}
 		open(method: string, url: string): string {
 			return `opened ${method} ${url}`;
@@ -854,4 +846,77 @@ test("no page script uses eval or builds a function from text", () => {
 			/\beval\s*\(|new Function|setTimeout\s*\(\s*["'`]/,
 		);
 	}
+});
+
+test("reusing one XHR records only its own completion and leaves fetch unchanged", async () => {
+	const page = fakePage();
+	const fetchBody = '{"data":{"user":"fetch"}}';
+	const nativeResponse = {
+		status: 200,
+		clone: () => ({ text: async () => fetchBody }),
+	};
+	page.window["fetch"] = async () => nativeResponse;
+	page.run(INSTALL);
+	const xhr = new page.Xhr();
+	const firstVariables = '{"userId":"first"}';
+	const secondVariables = '{"screen_name":"second"}';
+	const firstBody = '{"data":{"likes":"first-response"}}';
+	const secondBody = '{"data":{"user":"second-response"}}';
+	xhr.open("GET", graphql("Likes", firstVariables));
+	xhr.send("first-request");
+	xhr.finish(200, firstBody);
+	xhr.open("GET", graphql("UserByScreenName", secondVariables));
+	xhr.send("second-request");
+	xhr.finish(201, secondBody);
+	assert.deepEqual(page.sent, [xhr, xhr]);
+	const expected = [
+		{
+			operation: "Likes",
+			variables: firstVariables,
+			status: 200,
+			body: firstBody,
+		},
+		{
+			operation: "UserByScreenName",
+			variables: secondVariables,
+			status: 201,
+			body: secondBody,
+		},
+	].map((entry) => ({
+		...entry,
+		wanted: true,
+		refused: false,
+		errorCode: null,
+		postCount: 0,
+	}));
+	const observed = [
+		...page.run(POLL_SCRIPT).entries,
+		...page.run(POLL_SCRIPT).entries,
+	];
+	assert.deepEqual(observed, expected);
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(`window[${JSON.stringify(OBSERVER_GLOBAL)}].seen`), 2);
+	const fetchInPage = page.window["fetch"] as (
+		input: string,
+	) => Promise<typeof nativeResponse>;
+	assert.equal(
+		await fetchInPage(graphql("UserByScreenName", '{"screen_name":"fetch"}')),
+		nativeResponse,
+	);
+	// Both fake fetch and clone.text are already-resolved promises.
+	await Promise.resolve();
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, [
+		{
+			operation: "UserByScreenName",
+			variables: '{"screen_name":"fetch"}',
+			status: 200,
+			wanted: true,
+			body: fetchBody,
+			refused: false,
+			errorCode: null,
+			postCount: 0,
+		},
+	]);
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(`window[${JSON.stringify(OBSERVER_GLOBAL)}].seen`), 3);
 });
