@@ -359,18 +359,23 @@ export function parseDashboardAccountsDom(html: string): ChaseAccount[] {
 	return results;
 }
 
-function parseVisibleAmount(text: string): number | null {
-	const match = AMOUNT_RE.exec(text.replace(/\u2212/g, "-"));
-	if (!match?.[0]) {
+function parseVisibleAmount(
+	text: string,
+	matchedAmount?: string,
+): number | null {
+	const raw =
+		matchedAmount ?? AMOUNT_RE.exec(text.replace(/\u2212/g, "-"))?.[0];
+	if (!raw) {
 		return null;
 	}
-	const [raw] = match;
-	const sign =
-		raw.trimStart().startsWith("-") ||
-		raw.trimStart().startsWith("(") ||
-		ACTIVITY_DEBIT_WORD_RE.test(text)
+	const token = raw.trimStart();
+	const sign = token.startsWith("+")
+		? 1
+		: token.startsWith("-") || token.startsWith("(")
 			? -1
-			: 1;
+			: ACTIVITY_DEBIT_WORD_RE.test(text)
+				? -1
+				: 1;
 	const normalized = raw.replace(/[$,\s+()\-]/g, "");
 	const n = Number(normalized);
 	return Number.isFinite(n) ? Math.round(n * CENTS_MULTIPLIER) * sign : null;
@@ -444,7 +449,16 @@ function parseMdsActivityDataValues(
 		firstComma >= 0 && PENDING_RE.test(normalizedRaw.slice(0, firstComma))
 			? firstComma + 1
 			: 0;
-	const amountMatch = AMOUNT_RE.exec(normalizedRaw.slice(searchStart));
+	const amountText = normalizedRaw.slice(searchStart);
+	const amounts = new RegExp(AMOUNT_RE.source, "g");
+	let amountMatch: RegExpExecArray | null = null;
+	for (
+		let match = amounts.exec(amountText);
+		match;
+		match = amounts.exec(amountText)
+	) {
+		amountMatch = match;
+	}
 	if (!amountMatch) return null;
 	const amountOffset = searchStart + amountMatch.index;
 	// Extract before splitting: commas inside a dollar amount are not columns.
@@ -489,7 +503,7 @@ function parseMdsActivityDataValues(
 		return null;
 	}
 
-	const amountCents = parseVisibleAmount(normalizedRaw.slice(searchStart));
+	const amountCents = parseVisibleAmount(amountText, amountMatch[0]);
 	if (amountCents === null) {
 		return null;
 	}

@@ -984,3 +984,23 @@ test("parseStatementsListDom: local real capture parses ≥1 statement row", {
 		assert.ok(r.date_delivered_raw.length > 0);
 	}
 });
+
+test("parseCurrentActivityDom: rightmost MDS money token and explicit signs win", () => {
+	const cases = [
+		["Apr 13, 2026,STORE (123),$50.00,Posted", 5000, "STORE"],
+		["Apr 13, 2026,PURCHASE REFUND,+$50.00,Posted", 5000, "PURCHASE REFUND"],
+		["Apr 13, 2026,COFFEE PURCHASE,$4.50,Posted", -450, "COFFEE PURCHASE"],
+		["Apr 13, 2026,TRANSFER,-$1,234.56,Posted", -123456, "TRANSFER"],
+	] as const;
+	for (const [values, amount, description] of cases) {
+		const rows = parseCurrentActivityDom(
+			`<table><tbody><tr class="mds-activity-table__row" data-values="${values}"></tr></tbody></table>`,
+			"2026-04-14",
+		);
+		assert.equal(rows.length, 1, values);
+		assert.equal(rows[0]?.amount_cents, amount, values);
+		assert.equal(rows[0]?.description, description, values);
+		assert.equal(rows[0]?.activity_date, "2026-04-13", values);
+		assert.equal(rows[0]?.status, "posted", values);
+	}
+});
