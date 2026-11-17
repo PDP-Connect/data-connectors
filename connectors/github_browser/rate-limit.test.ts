@@ -275,3 +275,27 @@ test("a waiter whose own window is still current clears it and sends after the r
 	assert.deepEqual(clock.sleeps, [30_000 + RATE_LIMIT_RESET_MARGIN_MS]);
 	assert.equal(sentAt, START_MS + 30_000 + RATE_LIMIT_RESET_MARGIN_MS);
 });
+
+test("a refusal from an older window retries only after the newer stored window resets", async () => {
+	const { clock, now, sleep } = fakeClock();
+	const pacer = createRateLimitPacer({ now, sleep });
+	const core = "https://api.github.com/users/sample-user/events/public";
+	let releaseNewer: (value: { status: number; rateLimit: RateLimitObservation }) => void = () => {};
+	const newer = pacer.send(core, () => new Promise<{ status: number; rateLimit: RateLimitObservation }>((resolve) => (releaseNewer = resolve)));
+	let sent = 0;
+	let retrySentAt: number | undefined;
+	const refusedThenOk = pacer.send(core, async () => {
+		sent += 1;
+		if (sent === 1) {
+			releaseNewer({ status: 200, rateLimit: limit(0, 90) });
+			await newer;
+			throw httpError(403, limit(0, 30));
+		}
+		retrySentAt = clock.ms;
+		return { status: 200, rateLimit: limit(59, 3690) };
+	});
+	await refusedThenOk;
+	assert.equal(sent, 2);
+	assert.deepEqual(clock.sleeps, [30_000 + RATE_LIMIT_RESET_MARGIN_MS, 60_000]);
+	assert.equal(retrySentAt, START_MS + 90_000 + RATE_LIMIT_RESET_MARGIN_MS);
+});

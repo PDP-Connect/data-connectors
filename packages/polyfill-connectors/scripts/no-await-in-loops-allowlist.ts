@@ -2485,17 +2485,10 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/github_browser/rate-limit.ts",
-			line: 109,
-			column: 24,
+			line: 112,
+			column: 25,
 			category: "bounded_retry_polling",
-			note: "Wait out a spent rate-limit window, then wait again only if another lane observed a newer spent window meanwhile; the run's total wait budget bounds the loop.",
-		},
-		{
-			path: "connectors/github_browser/rate-limit.ts",
-			line: 116,
-			column: 14,
-			category: "bounded_retry_polling",
-			note: "Retry a refused GitHub API request at most once, after the wait its own rate-limit headers name.",
+			note: "Wait out a spent rate-limit window, again only if another lane observed a newer spent window meanwhile, before the request and its one refusal retry; the run's total wait budget bounds the waits.",
 		},
 		{
 			path: "connectors/github_browser/rate-limit.test.ts",

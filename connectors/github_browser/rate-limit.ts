@@ -78,15 +78,17 @@ export function createRateLimitPacer({ now, sleep, maxTotalWaitMs = MAX_TOTAL_RA
 		if (ms > 0) await sleep(ms);
 		return true;
 	};
-	const observe = (resource: string, rateLimit: RateLimitObservation | undefined): void => {
-		if (rateLimit === undefined || rateLimit.remaining === null || rateLimit.resetEpochSeconds === null) return;
+	// Returns the window stored from this observation, or undefined when none was.
+	const observe = (resource: string, rateLimit: RateLimitObservation | undefined): Window | undefined => {
+		if (rateLimit === undefined || rateLimit.remaining === null || rateLimit.resetEpochSeconds === null) return undefined;
 		const next = { remaining: rateLimit.remaining, resetAtMs: rateLimit.resetEpochSeconds * 1000 };
 		// Concurrent lanes share a window and their responses can land out of
 		// order. A response from an older window never replaces a newer one, and
 		// within one window the lowest count wins: the allowance only falls.
 		const prior = windows.get(resource);
-		if (prior !== undefined && (next.resetAtMs < prior.resetAtMs || (next.resetAtMs === prior.resetAtMs && next.remaining > prior.remaining))) return;
+		if (prior !== undefined && (next.resetAtMs < prior.resetAtMs || (next.resetAtMs === prior.resetAtMs && next.remaining > prior.remaining))) return undefined;
 		windows.set(resource, next);
+		return next;
 	};
 	// Wait, in ms, that the headers of a refusal call for; null when they call for none.
 	const refusalWaitMs = (rateLimit: RateLimitObservation | undefined): number | null => {
@@ -102,14 +104,14 @@ export function createRateLimitPacer({ now, sleep, maxTotalWaitMs = MAX_TOTAL_RA
 	/** Send `request`, first waiting out a spent window, and handle one refusal. */
 	async function send<T extends Paced>(url: string, request: () => Promise<T>): Promise<T> {
 		const resource = resourceOf(url);
-		// Another lane can observe a newer spent window while this one sleeps:
-		// clear only the window waited for, then check again.
-		for (let spent = windows.get(resource); spent !== undefined && spent.remaining === 0; spent = windows.get(resource)) {
-			const waitMs = spent.resetAtMs - nowMs() + RATE_LIMIT_RESET_MARGIN_MS;
-			if (waitMs > 0 && !(await spend(waitMs))) break;
-			if (windows.get(resource) === spent) windows.delete(resource);
-		}
 		for (let attempt = 0; ; attempt += 1) {
+			// Another lane can observe a newer spent window while this one sleeps:
+			// clear only the window waited for, then check again.
+			for (let spent = windows.get(resource); spent !== undefined && spent.remaining === 0; spent = windows.get(resource)) {
+				const waitMs = spent.resetAtMs - nowMs() + RATE_LIMIT_RESET_MARGIN_MS;
+				if (waitMs > 0 && !(await spend(waitMs))) break;
+				if (windows.get(resource) === spent) windows.delete(resource);
+			}
 			let result: T | undefined;
 			let failure: unknown;
 			try {
@@ -118,12 +120,13 @@ export function createRateLimitPacer({ now, sleep, maxTotalWaitMs = MAX_TOTAL_RA
 				failure = error;
 			}
 			const rateLimit = result === undefined ? rateLimitOf(failure) : result.rateLimit;
-			observe(resource, rateLimit);
-			const refused = windows.get(resource);
+			const refused = observe(resource, rateLimit);
 			const status = result === undefined ? failureStatus(failure) : result.status;
 			const waitMs = status !== undefined && LIMIT_STATUSES.has(status) ? refusalWaitMs(rateLimit) : null;
 			if (attempt === 0 && waitMs !== null && (await spend(waitMs))) {
-				if (windows.get(resource) === refused) windows.delete(resource);
+				// Clear the refusal's own window; a newer spent one, if stored,
+				// is waited out before the retry.
+				if (refused !== undefined && windows.get(resource) === refused) windows.delete(resource);
 				continue;
 			}
 			if (result === undefined) throw failure;
