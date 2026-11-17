@@ -329,6 +329,7 @@ export async function fetchAllActivities(
 	fetchPath: UberPageFetch,
 	delay: (ms: number) => Promise<void> = politeDelay,
 ): Promise<{ activities: UberActivity[]; truncated: boolean }> {
+	const seenContinuations = new Set<string>();
 	const all: UberActivity[] = [];
 	const seenIds = new Set<string>();
 	let nextPageToken: string | undefined;
@@ -361,17 +362,24 @@ export async function fetchAllActivities(
 				);
 			}
 			const page = parsed.data?.activities?.past?.activities ?? [];
-			let newOnPage = 0;
 			for (const activity of page) {
 				const id = activityTripId(activity);
 				if (id && !seenIds.has(id)) {
 					seenIds.add(id);
 					all.push(activity);
-					newOnPage += 1;
 				}
 			}
 			const token = parsed.data?.activities?.past?.nextPageToken;
-			if (!token || newOnPage === 0) {
+			// Duplicate records do not prove exhaustion; only cursor progress does.
+			if (token) {
+				if (seenContinuations.has(token)) {
+					throw new Error(
+						"uber_graphql_error [endpoint Activities]: repeated continuation",
+					);
+				}
+				seenContinuations.add(token);
+			}
+			if (!token) {
 				return false;
 			}
 			nextPageToken = token;
