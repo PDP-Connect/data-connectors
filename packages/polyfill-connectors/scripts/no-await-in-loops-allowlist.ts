@@ -69,6 +69,41 @@ export interface NoAwaitInLoopsAllowlistEntry {
 export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[] =
 	[
 		{
+			path: "connectors/readwise/api.ts",
+			line: 159,
+			column: 17,
+			category: "dependent_file_cursor",
+			note: "Read each bounded response chunk before advancing the same body reader.",
+		},
+		{
+			path: "connectors/readwise/index.ts",
+			line: 91,
+			column: 16,
+			category: "dependent_pagination",
+			note: "The export response provides the cursor for the next page.",
+		},
+		{
+			path: "connectors/readwise/index.ts",
+			line: 94,
+			column: 5,
+			category: "ordered_protocol_emission",
+			note: "Preserve output order and backpressure when emitting a source record.",
+		},
+		{
+			path: "connectors/readwise/index.ts",
+			line: 98,
+			column: 6,
+			category: "ordered_protocol_emission",
+			note: "Preserve output order and backpressure when emitting a highlight.",
+		},
+		{
+			path: "connectors/readwise/index.ts",
+			line: 116,
+			column: 3,
+			category: "ordered_protocol_emission",
+			note: "Emit the coverage report for a stream before writing its checkpoint.",
+		},
+		{
 			path: "bench/claude-code-two-pass.ts",
 			line: 239,
 			column: 13,

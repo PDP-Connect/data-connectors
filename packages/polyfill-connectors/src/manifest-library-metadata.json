@@ -694,6 +694,15 @@
 		}
 	},
 	{
+		"file": "readwise.json",
+		"manifest": {
+			"connector_key": "readwise",
+			"reason_display_messages": {
+				"readwise_auth_failed": "Readwise did not accept the access token. Copy a fresh token from readwise.io/access_token and connect again."
+			}
+		}
+	},
+	{
 		"file": "shopify.json",
 		"manifest": {
 			"connector_key": "shopify",
