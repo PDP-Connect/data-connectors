@@ -563,3 +563,35 @@ test("collectAllStreams: order missing orderUuid is a record-level diagnostic, n
 		harness.protocolMessages.filter((m) => m.type === "PROGRESS"),
 	);
 });
+
+test("collectAllStreams: unreadable first page preserves later orders without certifying full history", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = capturePage([
+		"unreadable",
+		{ body: graphqlEnvelope([makeOrderNode("synthetic-later-order")]) },
+		"none",
+	]);
+	await collectAllStreams(
+		makeCtx(harness, ["orders", "order_items"], page),
+		async () => undefined,
+	);
+	assert.deepEqual(
+		harness.emitted
+			.filter((record) => record.stream === "orders")
+			.map((record) => record.data.id),
+		["synthetic-later-order"],
+	);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => [message.stream, message.reason]),
+		[
+			["orders", "older_pages_deferred_page_budget"],
+			["order_items", "older_pages_deferred_page_budget"],
+		],
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});

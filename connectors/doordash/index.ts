@@ -237,7 +237,7 @@ export async function collectOrderNodes(args: {
 		item_count: nodes.length,
 	});
 
-	let unreadable = false;
+	let unreadable = initialBody.kind === "unreadable";
 	let zeroAddResponses = 0;
 	const walk = await walkPagesWithCeiling({
 		maxPages: MAX_SCROLL_PAGES,
