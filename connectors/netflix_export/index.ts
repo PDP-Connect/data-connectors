@@ -385,7 +385,7 @@ async function collectViewingActivity(
 		if (
 			since &&
 			(schema === "direct_history"
-				? rec.watched_at < since
+				? rec.watched_at.slice(0, 10) < since.slice(0, 10)
 				: rec.watched_at <= since)
 		) {
 			skippedCount += 1;

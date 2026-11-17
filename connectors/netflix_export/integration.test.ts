@@ -628,6 +628,48 @@ test("Netflix direct_history replays the cursor day with stable occurrence ids b
 	}
 });
 
+test("Netflix direct_history replays the day of a full_export instant cursor", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-cross-schema-cursor-"),
+	);
+	try {
+		const fullExportPath = join(importRoot, "ViewingActivity.csv");
+		await writeFile(
+			fullExportPath,
+			"Profile Name,Start Time (UTC),Duration (H:MM:SS),Attributes,Title,Supplemental Video Type,Device Type,Bookmark,Latest Bookmark,Country\n" +
+				"Invented Profile,2024-06-15 10:30:00,0:10:00,,Invented Morning Orbit,,TV,0:10:00,0:10:00,US\n",
+			"utf8",
+		);
+		const first = await runNetflixImport(importRoot);
+		assertImportSucceeded(first.messages, 1);
+		const state = viewingActivityState(first.messages);
+		assert.deepEqual(state, {
+			viewing_activity: { last_timestamp: "2024-06-15T10:30:00.000Z" },
+		});
+
+		// Switch schemas, not state: only the day-precision file remains.
+		await rm(fullExportPath);
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			"Title,Date\nInvented Evening Comet,15/06/2024\nInvented Earlier Nebula,14/06/2024\n",
+			"utf8",
+		);
+		const second = await runNetflixImport(importRoot, state);
+		assertImportSucceeded(second.messages, 1);
+		const replayed = records(second.messages, "viewing_activity");
+		assert.equal(replayed.length, 1);
+		assert.equal(replayed[0]?.title, "Invented Evening Comet");
+		assert.equal(replayed[0]?.watched_at, "2024-06-15T00:00:00.000Z");
+		assert.equal(typeof replayed[0]?.id, "string");
+		assert.ok(
+			replayed.every((record) => record.title !== "Invented Earlier Nebula"),
+		);
+		assert.deepEqual(viewingActivityState(second.messages), state);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
 test("Netflix full_export still excludes an exact timestamp equal to its emitted cursor", async () => {
 	const importRoot = await mkdtemp(
 		join(tmpdir(), "pdpp-netflix-exact-cursor-"),
