@@ -465,3 +465,45 @@ test("out-of-range UTC window is classified before fetching or emitting", async 
 		[[], [], [], []],
 	);
 });
+
+
+for (const selection of ["runtime", "absent"] as const) {
+	for (const rejected of [false, true]) {
+		test("coverage counts selected rows with " + selection + " predicate and rejected=" + rejected, async () => {
+			const second = fixture
+				.replaceAll("expense-1", "expense-2")
+				.replaceAll("report-1", "report-2")
+				.replaceAll("payment-1", "payment-2");
+			const h = harness(
+				fixture + "\n" + second + (rejected ? "\nINVALID_FIXTURE_ROW" : ""),
+				[...streams, "workspaces", "account_profile"],
+			);
+			if (selection === "runtime") {
+				h.deps.isRecordSelected = (stream, data) =>
+					stream === "account_profile" ||
+					["expense-1", "report-1", "payment-1", "p1"].includes(String(data.id));
+			}
+			await collectExpensify(h.deps);
+			const count = selection === "runtime" ? 1 : 2;
+			for (const stream of [...streams, "workspaces"]) {
+				assert.equal(h.records.filter((row) => row.stream === stream).length, count);
+				const coverage = h.coverage().find((row) => row.stream === stream);
+				assert.equal(coverage?.covered, count);
+				assert.equal(coverage?.considered, count + (rejected && stream !== "workspaces" ? 1 : 0));
+			}
+			if (selection === "runtime") {
+				assert.deepEqual(
+					h.records.filter((row) => row.stream === "expenses" || row.stream === "workspaces")
+						.map(({stream, data}) => [stream, data.id]),
+					[["workspaces", "p1"], ["expenses", "expense-1"]],
+				);
+			}
+			const profile = h.records.find((row) => row.stream === "account_profile");
+			assert.equal(profile?.data.expense_count, 2, "profile inventory is not selection-filtered");
+			assert.equal(profile?.data.workspace_count, 2);
+			const coverage = h.coverage().find((row) => row.stream === "account_profile");
+			assert.equal(coverage?.considered, 1);
+			assert.equal(coverage?.covered, rejected ? 0 : 1);
+		});
+	}
+}

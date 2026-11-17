@@ -43,7 +43,7 @@ const fixture = [
 ].join("\n");
 const now = () => new Date("2026-11-15T23:59:59Z");
 type Context = Parameters<typeof collect>[0];
-function harness(requested = streams, failure?: Error) {
+function harness(requested = streams, failure?: Error, text = fixture) {
 	const records: {
 		stream: string;
 		data: Parameters<Context["emitRecord"]>[1];
@@ -81,7 +81,7 @@ function harness(requested = streams, failure?: Error) {
 			async exportRange(range) {
 				ranges.push(range);
 				if (failure) throw failure;
-				return fixture;
+				return text;
 			},
 			// One synthetic policy, so a request for workspaces or account_profile
 			// emits records the manifest checks below can inspect.
@@ -351,5 +351,35 @@ test("expensify credentials reach the factory unchanged without disclosure", asy
 			assert.equal(output.includes("synthetic-partner-id-7"), false);
 			assert.equal(output.includes("synthetic-secret-9"), false);
 		}
+	});
+});
+
+
+test("expensify coverage follows requested expense resources through runtime selection", async () => {
+	await withHistory(undefined, async () => {
+		const second = JSON.stringify({
+			kind: "expense",
+			transactionID: "expense-2",
+			reportID: "report-1",
+			merchant: "Second fixture",
+			created: "2025-01-02",
+			amount: 500,
+			currency: "USD",
+		});
+		const h = harness(["expenses"], undefined, fixture + "\n" + second);
+		h.ctx.requested.set("expenses", {name: "expenses", resources: ["expense-1"]});
+		h.ctx.isRecordSelected = (stream, data) => {
+			const scope = h.ctx.requested.get(stream);
+			return scope !== undefined &&
+				(scope.resources === undefined || scope.resources.includes(String(data.id)));
+		};
+		await collect(h.ctx, h.factory, now);
+		assert.deepEqual(h.records.map(({data}) => data.id), ["expense-1"]);
+		const coverage = h.messages.find(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === "expenses",
+		);
+		assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+		assert.equal(coverage.covered, 1);
+		assert.equal(coverage.considered, 1);
 	});
 });

@@ -6104,14 +6104,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/expensify/collect.ts",
-			line: 112,
+			line: 122,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "collectExpensify(): deps.emitRecord() for workspaces: Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
 			path: "connectors/expensify/collect.ts",
-			line: 157,
+			line: 161,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "collectExpensify(): deps.emitRecord(): Collection Profile protocol emission requiring in-order delivery",

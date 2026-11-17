@@ -23,6 +23,7 @@ type Reason = (typeof REASONS)[number];
 
 export interface ExpensifyCollectDeps
 	extends Pick<CollectContext, "emit" | "emitRecord" | "progress"> {
+	isRecordSelected?: CollectContext["isRecordSelected"];
 	client: Pick<
 		ReturnType<typeof createExpensifyClient>,
 		"exportRange" | "listPolicies"
@@ -108,17 +109,18 @@ export async function collectExpensify(
 			? parseExport(await deps.client.exportRange(window))
 			: null;
 	if (workspacesRequested) {
+		let covered = 0;
 		for (const policy of policies) {
-			await deps.emitRecord(
-				"workspaces",
-				workspacesSchema.parse({
-					id: policy.id,
-					name: policy.name,
-					type: policy.type,
-					role: policy.role,
-					output_currency: policy.outputCurrency,
-				}),
-			);
+			const row = workspacesSchema.parse({
+				id: policy.id,
+				name: policy.name,
+				type: policy.type,
+				role: policy.role,
+				output_currency: policy.outputCurrency,
+			});
+			if (deps.isRecordSelected?.("workspaces", row) === false) continue;
+			await deps.emitRecord("workspaces", row);
+			covered++;
 		}
 		await emitDetailCoverage(
 			{ emit: deps.emit },
@@ -127,8 +129,8 @@ export async function collectExpensify(
 				stateStream: "workspaces",
 				requiredKeys: [],
 				hydratedKeys: [],
-				considered: policies.length,
-				covered: policies.length,
+				considered: covered,
+				covered,
 			},
 		);
 	}
@@ -150,7 +152,9 @@ export async function collectExpensify(
 		`Expensify full scan for UTC ${window.from} through ${window.to}; not all-time coverage`,
 	);
 	for (const stream of selected) {
-		const rows = parsed[stream];
+		const rows = parsed[stream].filter(
+			(row) => deps.isRecordSelected?.(stream, row) !== false,
+		);
 		const failures = REASONS.filter((reason) => affects(reason, stream));
 		const rejected = failures.reduce((sum, reason) => sum + reasons[reason], 0);
 		for (const row of rows) {
@@ -171,7 +175,7 @@ export async function collectExpensify(
 				},
 			});
 		}
-		// Count the parsed inventory, not runtime-filtered emitted records. Unknown
+		// Count only selected parsed rows. Unknown
 		// rejected rows conservatively leave a hole in every affected requested
 		// stream. This is per-run/window detail coverage, not wholesale authority.
 		await emitDetailCoverage(

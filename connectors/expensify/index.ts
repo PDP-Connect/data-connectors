@@ -16,7 +16,7 @@ type ClientFactory = (
 ) => ExpensifyCollectDeps["client"];
 type Context = Pick<
 	CollectContext,
-	"credentials" | "requested" | "emit" | "emitRecord" | "progress"
+	"credentials" | "requested" | "emit" | "emitRecord" | "progress" | "isRecordSelected"
 >;
 
 export async function collect(
@@ -65,6 +65,7 @@ export async function collect(
 		requested: ctx.requested,
 		emit: ctx.emit,
 		emitRecord: ctx.emitRecord,
+		isRecordSelected: ctx.isRecordSelected,
 		progress: ctx.progress,
 	});
 }
