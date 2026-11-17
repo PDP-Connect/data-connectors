@@ -195,24 +195,26 @@ export async function collectExpensify(
 			.map((row) => row.expense_date)
 			.filter((value): value is string => value !== null)
 			.sort();
-		await deps.emitRecord(
-			"account_profile",
-			accountProfileSchema.parse({
-				id: "account_profile",
-				workspace_count: policies.length,
-				admin_workspace_count: policies.filter(
-					(policy) => policy.role === "admin",
-				).length,
-				export_window_from: window.from,
-				export_window_to: window.to,
-				expense_count: parsed.expenses.length,
-				report_count: parsed.reports.length,
-				reimbursement_count: parsed.reimbursements.length,
-				earliest_expense_date: dates[0] ?? null,
-				latest_expense_date: dates.at(-1) ?? null,
-			}),
-		);
-		if (parsed.rejected.length > 0) {
+		const profile = accountProfileSchema.parse({
+			id: "account_profile",
+			workspace_count: policies.length,
+			admin_workspace_count: policies.filter(
+				(policy) => policy.role === "admin",
+			).length,
+			export_window_from: window.from,
+			export_window_to: window.to,
+			expense_count: parsed.expenses.length,
+			report_count: parsed.reports.length,
+			reimbursement_count: parsed.reimbursements.length,
+			earliest_expense_date: dates[0] ?? null,
+			latest_expense_date: dates.at(-1) ?? null,
+		});
+		const selected =
+			deps.isRecordSelected?.("account_profile", profile) !== false;
+		if (selected) {
+			await deps.emitRecord("account_profile", profile);
+		}
+		if (selected && parsed.rejected.length > 0) {
 			await deps.emit({
 				type: "SKIP_RESULT",
 				stream: "account_profile",
@@ -230,8 +232,8 @@ export async function collectExpensify(
 				stateStream: "account_profile",
 				requiredKeys: [],
 				hydratedKeys: [],
-				considered: 1,
-				covered: parsed.rejected.length === 0 ? 1 : 0,
+				considered: selected ? 1 : 0,
+				covered: selected && parsed.rejected.length === 0 ? 1 : 0,
 			},
 		);
 	}

@@ -507,3 +507,35 @@ for (const selection of ["runtime", "absent"] as const) {
 		});
 	}
 }
+
+for (const rejected of [false, true]) {
+	test("unselected account profile has zero coverage with rejected=" + rejected, async () => {
+		const h = harness(fixture + (rejected ? "\nINVALID" : ""), [
+			"account_profile",
+			"expenses",
+		]);
+		h.deps.isRecordSelected = (stream) => stream !== "account_profile";
+		await collectExpensify(h.deps);
+		assert.equal(
+			h.records.filter((row) => row.stream === "account_profile").length,
+			0,
+		);
+		assert.equal(
+			h.messages.filter(
+				(row) => row.type === "SKIP_RESULT" && row.stream === "account_profile",
+			).length,
+			0,
+		);
+		assert.deepEqual(
+			h.coverage().map((row) => [row.stream, row.considered, row.covered]),
+			[
+				["expenses", rejected ? 2 : 1, 1],
+				["account_profile", 0, 0],
+			],
+		);
+		assert.deepEqual(
+			h.records.map(({ stream, data }) => [stream, data.id]),
+			[["expenses", "expense-1"]],
+		);
+	});
+}
