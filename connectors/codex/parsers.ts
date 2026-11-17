@@ -65,9 +65,19 @@ export function payloadOutputPreview(
 // ─── Epoch / ISO conversion ─────────────────────────────────────────────
 
 export function epochToIso(sec: number | null | undefined): string | null {
-	return Number.isFinite(sec) && typeof sec === "number" && sec > 0
-		? new Date(sec * 1000).toISOString()
-		: null;
+	if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) {
+		return null;
+	}
+	const date = new Date(sec * 1000);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function timestampToIso(value: string | null | undefined): string | null {
+	if (typeof value !== "string") {
+		return null;
+	}
+	const ms = Date.parse(value);
+	return Number.isNaN(ms) ? null : new Date(ms).toISOString();
 }
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────
@@ -182,8 +192,10 @@ export function buildThreadSessionRecord(
 		git_branch: t.git_branch || null,
 		repository_url: t.git_origin_url || null,
 		started_at:
-			epochToIso(t.created_at) || agg?.meta?.timestamp || agg?.firstTs || null,
-		last_event_at: epochToIso(t.updated_at) || agg?.lastTs || null,
+			epochToIso(t.created_at) ||
+			timestampToIso(agg?.meta?.timestamp) ||
+			timestampToIso(agg?.firstTs),
+		last_event_at: epochToIso(t.updated_at) || timestampToIso(agg?.lastTs),
 		message_count: messageCount,
 		function_call_count: functionCallCount,
 		// Codex can stuff large assistant output into `title` and
@@ -249,8 +261,8 @@ export function buildRolloutOnlySessionRecord(
 		git_commit: meta.git?.commit_hash || null,
 		git_branch: meta.git?.branch || null,
 		repository_url: meta.git?.repository_url || null,
-		started_at: meta.timestamp || agg.firstTs,
-		last_event_at: agg.lastTs,
+		started_at: timestampToIso(meta.timestamp) || timestampToIso(agg.firstTs),
+		last_event_at: timestampToIso(agg.lastTs),
 		message_count: agg.messageCount,
 		function_call_count: agg.functionCallCount,
 		title: null,
@@ -284,7 +296,7 @@ export function buildRuleRecord(args: {
 	return {
 		id: `rules:${args.ruleset}:${args.index}`,
 		ruleset: args.ruleset,
-		rule_text: textPreview(args.line, 4000),
+		rule_text: textPreview(args.line, 3999),
 		rule_index: args.index,
 		path: args.path,
 		mtime_epoch: args.mtime,
