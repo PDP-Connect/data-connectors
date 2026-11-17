@@ -88,16 +88,39 @@ function proofStreams(manifest: ReadinessManifest): ManifestStream[] {
 
 /**
  * Source text without comments, so a comment such as `// TODO emit
- * DETAIL_COVERAGE` neither satisfies nor triggers a rule. A `//` preceded by
- * `:` (a URL in a string) is kept.
+ * DETAIL_COVERAGE` neither satisfies nor triggers a rule. String and template
+ * literals are kept whole, so `"*\/*"` or `"//api"` never starts a comment.
+ * Regex literals are not parsed; a `/` after a backslash never starts one.
  */
 export function stripComments(source: string): string {
-	return source
-		.replace(/\/\*[\s\S]*?\*\//g, "")
-		.replace(/(^|[^:\\])\/\/[^\n]*/g, "$1");
+	let out = "";
+	let i = 0;
+	while (i < source.length) {
+		const c = source[i];
+		const next = source[i + 1];
+		if (c === '"' || c === "'" || c === "`") {
+			const start = i;
+			for (i += 1; i < source.length && source[i] !== c; i += 1) {
+				if (source[i] === "\\") i += 1;
+				else if (c !== "`" && source[i] === "\n") break;
+			}
+			i += 1;
+			out += source.slice(start, i);
+		} else if (c === "/" && source[i - 1] !== "\\" && next === "/") {
+			const end = source.indexOf("\n", i);
+			i = end === -1 ? source.length : end;
+		} else if (c === "/" && source[i - 1] !== "\\" && next === "*") {
+			const end = source.indexOf("*/", i + 2);
+			i = end === -1 ? source.length : end + 2;
+		} else {
+			out += c;
+			i += 1;
+		}
+	}
+	return out;
 }
 
-// ─── evidence: has the author recorded a real run of this exact code? ─────
+// ─── evidence: is a recorded claim bound to this exact code? ──────────────
 
 export type EvidenceStatus = "bound" | "malformed" | "none" | "stale";
 
@@ -110,14 +133,15 @@ export function checkEvidence(
 	detail: {
 		claim?: string | undefined;
 		malformedError?: string | undefined;
+		notEstablished?: readonly string[] | undefined;
 	} = {},
 ): Step {
-	const { claim, malformedError } = detail;
+	const { claim, malformedError, notEstablished = [] } = detail;
 	const commands = RECORD_COMMANDS.replaceAll("<key>", connector);
 	switch (status) {
 		case "bound":
 			return {
-				detail: `evidence/claim.json (${claim ?? "unknown claim"}) was recorded by the author from this exact source and manifest. CI does not re-run it; read its limitations.`,
+				detail: `evidence/claim.json (${claim ?? "unknown claim"}) is bound to this exact source and manifest. CI does not re-run it.${notEstablished.length > 0 ? ` It does not establish: ${notEstablished.join("; ")}.` : ""}`,
 				name: "evidence",
 				verdict: "PASS",
 			};
@@ -162,7 +186,7 @@ export function checkCoverageProof(
 	connector: string,
 	manifest: ReadinessManifest,
 	source: string,
-	unexercised: ReadonlySet<string>,
+	registry: CoverageRegistry,
 ): Step {
 	const streams = proofStreams(manifest);
 	if (streams.length === 0) {
@@ -181,21 +205,30 @@ export function checkCoverageProof(
 			verdict: "UNKNOWN",
 		};
 	}
-	// The ratchet lists required streams only: the oracle gate checks those.
-	const exempt = streams
-		.filter((s) => s.required !== false)
-		.map(streamName)
-		.filter((name) => unexercised.has(`${connector}.${name}`));
+	// The oracle gate checks required streams only.
+	const required = streams.filter((s) => s.required !== false).map(streamName);
+	const exempt = required.filter((name) =>
+		registry.unexercised.has(`${connector}.${name}`),
+	);
+	const addDriver = `add a driver for ${connector} in ${COVERAGE_RATCHET} (copy an in-process driver such as YNAB's) and remove any KNOWN_UNEXERCISED_COVERAGE entries for it; connectors/_conformance/coverage-conformance.test.ts then proves each stream`;
 	if (exempt.length > 0) {
 		return {
 			detail: `${exempt.join(", ")} listed in KNOWN_UNEXERCISED_COVERAGE: no test runs this connector through the shared coverage oracle`,
 			name: "coverage",
-			nextAction: `add a driver for ${connector} in ${COVERAGE_RATCHET} (copy an in-process driver such as YNAB's) and remove its KNOWN_UNEXERCISED_COVERAGE entries; connectors/_conformance/coverage-conformance.test.ts then proves each stream`,
+			nextAction: addDriver,
+			verdict: "UNKNOWN",
+		};
+	}
+	if (required.length > 0 && !registry.drivers.has(connector)) {
+		return {
+			detail: `no coverage driver for ${connector}: no test runs it through the shared coverage oracle, and the coverage ratchet in npm test fails for ${required.join(", ")}`,
+			name: "coverage",
+			nextAction: addDriver,
 			verdict: "UNKNOWN",
 		};
 	}
 	return {
-		detail: `${streams.length} stream(s) declare a coverage strategy; the source reports coverage, and no required stream is exempt from the coverage oracle`,
+		detail: `${streams.length} stream(s) declare a coverage strategy; the source reports coverage, and a coverage driver runs every required one through the shared coverage oracle`,
 		name: "coverage",
 		verdict: "PASS",
 	};
@@ -443,16 +476,37 @@ export function checkSemantics(manifest: ReadinessManifest): Step {
 
 // ─── parse helpers used by conformance.ts ──────────────────────────────────
 
+export interface CoverageRegistry {
+	/** Connector keys in `CONNECTOR_DRIVERS`. */
+	readonly drivers: ReadonlySet<string>;
+	/** `<connector>.<stream>` entries in `KNOWN_UNEXERCISED_COVERAGE`. */
+	readonly unexercised: ReadonlySet<string>;
+}
+
 /**
- * Reads the `KNOWN_UNEXERCISED_COVERAGE` set literal from the drivers file
- * as text. Importing that module would load every connector's driver.
+ * Reads `CONNECTOR_DRIVERS` keys and the `KNOWN_UNEXERCISED_COVERAGE` set
+ * from the drivers file as text. Importing that module would load every
+ * connector's driver. A missing block reads as empty, which makes the
+ * coverage step a gap, never a pass.
  */
-export function parseUnexercisedCoverage(driversSource: string): Set<string> {
-	const start = driversSource.indexOf("KNOWN_UNEXERCISED_COVERAGE");
-	if (start === -1) return new Set();
-	const open = driversSource.indexOf("new Set([", start);
-	const close = driversSource.indexOf("]);", open);
-	if (open === -1 || close === -1) return new Set();
-	const body = driversSource.slice(open, close).replace(/\/\/[^\n]*/g, "");
-	return new Set([...body.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? ""));
+export function parseCoverageRegistry(driversSource: string): CoverageRegistry {
+	const code = stripComments(driversSource);
+	const block = (marker: string, open: string, close: string) => {
+		const start = code.indexOf(marker);
+		const from = start === -1 ? -1 : code.indexOf(open, start);
+		const to = from === -1 ? -1 : code.indexOf(close, from);
+		return to === -1 ? "" : code.slice(from, to);
+	};
+	const drivers = block("CONNECTOR_DRIVERS:", "{", "\n};");
+	const unexercised = block("KNOWN_UNEXERCISED_COVERAGE", "new Set([", "]);");
+	return {
+		drivers: new Set(
+			[...drivers.matchAll(/^\t["']?([a-z0-9_]+)["']?:/gm)].map(
+				(m) => m[1] ?? "",
+			),
+		),
+		unexercised: new Set(
+			[...unexercised.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? ""),
+		),
+	};
 }

@@ -48,7 +48,7 @@ import {
 	fixturesDir,
 	packageRoot as PACKAGE_ROOT,
 	repoRoot,
-	manifestPath as seamManifestPath,
+	manifestPath,
 } from "../src/connector-paths.ts";
 import {
 	computeDeclarationDigest,
@@ -60,16 +60,12 @@ import {
 	checkSemantics,
 	checkSharedHelpers,
 	checkVersion,
-	parseUnexercisedCoverage,
+	parseCoverageRegistry,
 	type ReadinessManifest,
 	type Step,
 	type Verdict,
 } from "./conformance-readiness.ts";
 import { evaluateConnectorEvidence } from "./connector-evidence-summary.ts";
-
-function manifestPath(connector: string): string {
-	return seamManifestPath(connector);
-}
 
 export function checkManifest(connector: string): Step {
 	const file = manifestPath(connector);
@@ -352,9 +348,9 @@ function readinessStepsOrThrow(connector: string): Step[] {
 		"_conformance",
 		"coverage-conformance-drivers.ts",
 	);
-	const unexercised = existsSync(driversFile)
-		? parseUnexercisedCoverage(readFileSync(driversFile, "utf8"))
-		: new Set<string>();
+	const registry = parseCoverageRegistry(
+		existsSync(driversFile) ? readFileSync(driversFile, "utf8") : "",
+	);
 	const evidence = evaluateConnectorEvidence(
 		connector,
 		join(dir, "evidence", "claim.json"),
@@ -366,8 +362,9 @@ function readinessStepsOrThrow(connector: string): Step[] {
 		checkEvidence(connector, evidence.status, {
 			claim: evidence.claim,
 			malformedError: evidence.malformedError,
+			notEstablished: evidence.notEstablished,
 		}),
-		checkCoverageProof(connector, manifest, source, unexercised),
+		checkCoverageProof(connector, manifest, source, registry),
 		...(version ? [version] : []),
 		checkSharedHelpers(source, manifest),
 		checkSemantics(manifest),
@@ -448,8 +445,6 @@ function main(): void {
 			summary = `\nNOT READY — ${blocking.length} blocking failure(s).`;
 		} else if (unknown.length + softGaps.length > 0) {
 			summary = `\nNo blocking failures, but ${unknown.length + softGaps.length} check(s) could not run or found soft spots. That is a gap, not a pass.`;
-		} else if (softGaps.length > 0) {
-			summary = `\nNo blocking failures, but ${softGaps.length} advisory gap(s) above mean the suite has soft spots. This does NOT mean it works against a real account.`;
 		} else {
 			summary =
 				"\nNothing mechanical is wrong. This does NOT mean it works against a real account — only a real run shows that.";

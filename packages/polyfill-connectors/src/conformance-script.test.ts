@@ -13,7 +13,8 @@ import {
 	checkSharedHelpers,
 	checkVersion,
 	listOpenSemantics,
-	parseUnexercisedCoverage,
+	parseCoverageRegistry,
+	stripComments,
 	type ReadinessManifest,
 } from "../scripts/conformance-readiness.ts";
 import { connectorsDir } from "./connector-paths.ts";
@@ -45,7 +46,11 @@ test("evidence: no claim is a gap that names the record and verify commands", ()
 });
 
 test("evidence: bound passes, stale is weak, malformed fails", () => {
-	assert.equal(checkEvidence("x", "bound").verdict, "PASS");
+	const bound = checkEvidence("x", "bound", {
+		notEstablished: ["maintainer live run against the real provider"],
+	});
+	assert.equal(bound.verdict, "PASS");
+	assert.match(bound.detail, /does not establish: maintainer live run/);
 	assert.equal(checkEvidence("x", "stale").verdict, "WEAK");
 	const malformed = checkEvidence("x", "malformed", {
 		malformedError: "not valid JSON",
@@ -67,7 +72,7 @@ test("coverage: a declared strategy with no coverage report in the source is a g
 		"readwise",
 		snapshotManifest,
 		'ctx.emit({ type: "STATE", stream: "highlights" });',
-		new Set(),
+		{ drivers: new Set(), unexercised: new Set() },
 	);
 	assert.equal(step.verdict, "UNKNOWN");
 	assert.match(step.detail, /never reports coverage/);
@@ -79,7 +84,10 @@ test("coverage: a stream on the KNOWN_UNEXERCISED_COVERAGE ratchet is a gap", ()
 		"readwise",
 		snapshotManifest,
 		"await ctx.emit(buildFullScanCoverageMessage(stream, n));",
-		new Set(["readwise.highlights"]),
+		{
+			drivers: new Set(["readwise"]),
+			unexercised: new Set(["readwise.highlights"]),
+		},
 	);
 	assert.equal(step.verdict, "UNKNOWN");
 	assert.match(step.detail, /highlights listed in KNOWN_UNEXERCISED_COVERAGE/);
@@ -94,7 +102,7 @@ test("coverage: an optional stream on no ratchet passes once the source reports 
 			],
 		},
 		"await emitDetailCoverage(ctx, { stream: 'books' });",
-		new Set(),
+		{ drivers: new Set(), unexercised: new Set() },
 	);
 	assert.equal(step.verdict, "PASS");
 });
@@ -104,20 +112,50 @@ test("coverage: a coverage_diagnostics receipt counts as a coverage report", () 
 		"apple_health",
 		snapshotManifest,
 		'const COVERAGE_STREAM = "coverage_diagnostics";',
-		new Set(),
+		{ drivers: new Set(["apple_health"]), unexercised: new Set() },
 	);
 	assert.equal(step.verdict, "PASS");
 });
 
-test("parseUnexercisedCoverage reads the real ratchet without importing the drivers", () => {
+test("parseCoverageRegistry reads the real drivers file without importing it", () => {
 	const text = readFileSync(
 		join(connectorsDir, "_conformance", "coverage-conformance-drivers.ts"),
 		"utf8",
 	);
-	const set = parseUnexercisedCoverage(text);
-	assert.ok(set.has("chase.accounts"), "known ratchet entry present");
-	assert.ok(![...set].some((e) => e.includes("//")), "comments stripped");
-	assert.ok([...set].every((e) => /^[a-z0-9_]+\.[a-z0-9_]+$/.test(e)));
+	const { drivers, unexercised } = parseCoverageRegistry(text);
+	assert.ok(drivers.has("jellyfin"), "known driver present");
+	assert.ok(drivers.has("groupme"), "a driver given as a constant is present");
+	assert.ok(unexercised.has("chase.accounts"), "known ratchet entry present");
+	assert.ok([...unexercised].every((e) => /^[a-z0-9_]+\.[a-z0-9_]+$/.test(e)));
+	assert.deepEqual(parseCoverageRegistry(""), {
+		drivers: new Set(),
+		unexercised: new Set(),
+	});
+});
+
+test("coverage: a required stream with no coverage driver is a gap, not a pass", () => {
+	const step = checkCoverageProof(
+		"readwise",
+		snapshotManifest,
+		"await ctx.emit(buildFullScanCoverageMessage(stream, n));",
+		{ drivers: new Set(["ynab"]), unexercised: new Set() },
+	);
+	assert.equal(step.verdict, "UNKNOWN");
+	assert.match(step.detail, /no coverage driver for readwise/);
+});
+
+test("stripComments keeps string contents that look like comment markers", () => {
+	const source = [
+		'const headers = { Accept: "*/*" };',
+		'const path = "//api";',
+		"await ctx.emit(buildFullScanCoverageMessage(stream, n)); // done",
+		"/** A JSDoc block. */",
+	].join("\n");
+	const code = stripComments(source);
+	assert.match(code, /buildFullScanCoverageMessage/);
+	assert.match(code, /"\*\/\*"/);
+	assert.match(code, /"\/\/api"/);
+	assert.doesNotMatch(code, /done|JSDoc/);
 });
 
 test("coverage: a comment that names DETAIL_COVERAGE is not a coverage report", () => {
@@ -125,7 +163,7 @@ test("coverage: a comment that names DETAIL_COVERAGE is not a coverage report", 
 		"x",
 		snapshotManifest,
 		'// TODO emit DETAIL_COVERAGE\nctx.emit({ type: "STATE" });',
-		new Set(),
+		{ drivers: new Set(), unexercised: new Set() },
 	);
 	assert.equal(step.verdict, "UNKNOWN");
 });
@@ -136,7 +174,10 @@ test("readiness steps tolerate a malformed stream entry", () => {
 	} as unknown as ReadinessManifest;
 	assert.doesNotThrow(() => listOpenSemantics(manifest));
 	assert.equal(
-		checkCoverageProof("x", manifest, "", new Set()).verdict,
+		checkCoverageProof("x", manifest, "", {
+			drivers: new Set(),
+			unexercised: new Set(),
+		}).verdict,
 		"PASS",
 	);
 });
