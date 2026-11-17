@@ -1830,6 +1830,7 @@ function uncappedUsageHarness(
 	sidebarPages = 1,
 	taskPages = 1,
 	repeatSidebar = false,
+	lastTaskCursor?: string,
 ) {
 	const projects = Object.fromEntries(
 		projectIds.map((id, project) => [
@@ -1870,8 +1871,11 @@ function uncappedUsageHarness(
 					json: {
 						task_count: 1,
 						by_status: { active: 1 },
-						has_more: page + 1 < taskPages,
-						cursor: String(page + 1),
+						has_more: page + 1 < taskPages || lastTaskCursor !== undefined,
+						cursor:
+							page + 1 === taskPages && lastTaskCursor !== undefined
+								? lastTaskCursor
+								: String(page + 1),
 					},
 				});
 			}
@@ -1940,6 +1944,24 @@ test("usage profile reads six task pages as an exact count", async () => {
 	assert.equal(profile?.scheduled_task_count, 6);
 	assert.equal(sub(profile, "source_status").tasks, "ok");
 	assert.deepEqual(h.taskCursors, [0, 1, 2, 3, 4, 5]);
+});
+
+test("usage profile task pages that loop back to an earlier cursor are partial", async () => {
+	const h = uncappedUsageHarness([], 0, 1, 6, false, "1");
+	await h.run();
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(sub(profile, "source_status").tasks, "partial");
+	assert.equal(profile?.scheduled_task_count, 6);
+	assert.deepEqual(h.taskCursors, [0, 1, 2, 3, 4, 5]);
+});
+
+test("usage profile task page that echoes its own cursor ends the walk", async () => {
+	const h = uncappedUsageHarness([], 0, 1, 3, false, "2");
+	await h.run();
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(sub(profile, "source_status").tasks, "ok");
+	assert.equal(profile?.scheduled_task_count, 3);
+	assert.deepEqual(h.taskCursors, [0, 1, 2]);
 });
 
 test("usage sidebar reads 21 pages and feeds every project id", async () => {

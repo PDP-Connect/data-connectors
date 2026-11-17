@@ -660,11 +660,13 @@ async function readPagedCounts(
 					acc.by_status[k] = (acc.by_status[k] ?? 0) + v;
 			}
 		}
-		// Tasks carry no ids to compare, so an echoed cursor counts as done.
+		// Tasks carry no ids to compare, so every counted task is treated as
+		// new: a page that echoes its own cursor ends the walk, but one that
+		// points back to an earlier page is a loop and stays partial.
 		const fresh =
 			projection === "project_sidebar"
 				? acc.project_ids.length - projectsBefore
-				: 0;
+				: n;
 		const step = nextCursorStep(j, seen, cursor, n, fresh);
 		if ("done" in step) return { value: acc, status: step.done };
 		cursor = step.next;
