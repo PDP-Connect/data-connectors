@@ -691,6 +691,95 @@ test("parseCurrentActivityDom: extracts Chase MDS dashboard rows from data-value
 	);
 });
 
+test("parseCurrentActivityDom: MDS grouped amounts retain their complete cents and clean description", () => {
+	for (const [amount, expected] of [
+		["$1,234.56", 123456],
+		["-$1,234.56", -123456],
+		["−$1,234.56", -123456],
+		["($12.00)", -1200],
+	] as const) {
+		const rows = parseCurrentActivityDom(
+			`<table><tr class="mds-activity-table__row" data-values="Apr 13, 2026, SYNTHETIC LANDLORD, ${amount}, Posted"></tr></table>`,
+			"2026-05-15",
+		);
+		assert.deepEqual(rows, [
+			{
+				activity_date: "2026-04-13",
+				amount_cents: expected,
+				description: "SYNTHETIC LANDLORD",
+				memo: null,
+				posted_date: "2026-04-13",
+				status: "posted",
+				ui_transaction_id: null,
+			},
+		]);
+		assert.ok(!rows[0]?.description.includes("234.56"));
+	}
+});
+
+test("parseCurrentActivityDom: merchant punctuation is not a debit sign", () => {
+	for (const [description, amount, expected] of [
+		["WIDGET-MART REFUND", "$50.00", 5000],
+		["WIDGET-MART PURCHASE", "$50.00", -5000],
+		["WIDGET (TEST) REFUND", "$50.00", 5000],
+		["SYNTHETIC WITHDRAWAL", "$50.00", -5000],
+		["SYNTHETIC DEBIT", "$50.00", -5000],
+		["SYNTHETIC REFUND", "($12.00)", -1200],
+		["SYNTHETIC PAYMENT", "-$1,234.56", -123456],
+		["SYNTHETIC PAYMENT", "−$1,234.56", -123456],
+	] as const) {
+		for (const html of [
+			`<table><tr><td>Apr 13, 2026</td> <td>${description}</td> <td>${amount}</td> <td>Posted</td></tr></table>`,
+			`<table><tr class="mds-activity-table__row" data-values="Apr 13, 2026, ${description}, ${amount}, Posted"></tr></table>`,
+		]) {
+			const rows = parseCurrentActivityDom(html, "2026-05-15");
+			assert.equal(rows.length, 1, html);
+			assert.equal(rows[0]?.amount_cents, expected, html);
+			assert.equal(rows[0]?.description, description, html);
+		}
+	}
+});
+
+test("parseCurrentActivityDom: pending counts are not amounts or debit signs", () => {
+	assert.deepEqual(
+		parseCurrentActivityDom(
+			'<table><tr class="mds-activity-table__row" data-values="Pending (2),SYNTHETIC MERCHANT,$158.04,"></tr></table>',
+			"2026-05-15",
+		),
+		[
+			{
+				activity_date: "2026-05-15",
+				amount_cents: 15804,
+				description: "SYNTHETIC MERCHANT",
+				memo: null,
+				posted_date: null,
+				status: "pending",
+				ui_transaction_id: null,
+			},
+		],
+	);
+});
+
+test("parseCurrentActivityDom: no-comma MDS amount preserves all existing row fields", () => {
+	assert.deepEqual(
+		parseCurrentActivityDom(
+			'<table><tr class="mds-activity-table__row" data-transaction-id="synthetic_123" data-values="May 14, 2026,COMMA, MERCHANT,$98.84,"></tr></table>',
+			"2026-05-15",
+		),
+		[
+			{
+				activity_date: "2026-05-14",
+				amount_cents: 9884,
+				description: "COMMA, MERCHANT",
+				memo: null,
+				posted_date: "2026-05-14",
+				status: "posted",
+				ui_transaction_id: "synthetic_123",
+			},
+		],
+	);
+});
+
 // ─── parseStatementsListDom ──────────────────────────────────────────────
 
 test("parseStatementsListDom: extracts statement rows (tax documents skipped)", () => {
