@@ -142,6 +142,9 @@ export function installObserverScript(config: ObserverConfig): string {
 	const xhrOpen = XMLHttpRequest.prototype.open;
 	const xhrSend = XMLHttpRequest.prototype.send;
 	XMLHttpRequest.prototype.open = function (method, url) {
+		// A reused XHR keeps nothing from its last open: an unrelated URL
+		// must not inherit the previous request's operation.
+		requests.delete(this);
 		try {
 			const request = describe(url);
 			if (request) requests.set(this, request);

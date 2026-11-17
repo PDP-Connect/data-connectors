@@ -848,6 +848,26 @@ test("no page script uses eval or builds a function from text", () => {
 	}
 });
 
+test("reusing a GraphQL XHR for another URL records nothing for that completion", () => {
+	const page = fakePage();
+	page.run(INSTALL);
+	const xhr = new page.Xhr();
+	const variables = '{"userId":"first"}';
+	const body = '{"data":{"likes":"first-response"}}';
+	xhr.open("GET", graphql("Likes", variables));
+	xhr.send();
+	xhr.finish(200, body);
+	xhr.open("GET", "https://x.com/i/api/1.1/sample/other.json");
+	xhr.send();
+	xhr.finish(200, '{"data":{"other":"unrelated"}}');
+	const entries = page.run(POLL_SCRIPT).entries;
+	assert.equal(entries.length, 1);
+	assert.equal(entries[0].operation, "Likes");
+	assert.equal(entries[0].body, body);
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(`window[${JSON.stringify(OBSERVER_GLOBAL)}].seen`), 1);
+});
+
 test("reusing one XHR records only its own completion and leaves fetch unchanged", async () => {
 	const page = fakePage();
 	const fetchBody = '{"data":{"user":"fetch"}}';
