@@ -336,6 +336,76 @@ test("Netflix connector emits a typed coverage-gap SKIP_RESULT when every date i
 	}
 });
 
+test("Netflix connector skips only the malformed date between same-day rewatches", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-malformed-date-"),
+	);
+	try {
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			"Title,Date\nInvented Moon,2024-06-05\nInvented Moon,not-a-date\nInvented Moon,2024-06-05\n",
+			"utf8",
+		);
+		const { messages } = await runNetflixImport(importRoot);
+		const emitted = records(messages, "viewing_activity");
+		assert.equal(emitted.length, 2);
+		assert.equal(new Set(emitted.map((record) => record.id)).size, 2);
+		assert.ok(
+			emitted.every(
+				(record) =>
+					typeof record.id === "string" &&
+					record.id.length > 0 &&
+					record.title === "Invented Moon" &&
+					record.watched_at === "2024-06-05T00:00:00.000Z" &&
+					record.watched_at_raw === "2024-06-05",
+			),
+		);
+		assert.equal(
+			messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "ambiguous_date_order",
+			),
+			false,
+		);
+		assert.deepEqual(progressTexts(messages), [
+			"Reading 3 Netflix viewing records",
+		]);
+		// Per-row parse failures are omitted from records; DONE counts only the two valid rows.
+		const done = messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(done.status, "succeeded");
+			assert.equal(done.records_emitted, 2);
+		}
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("Netflix connector still refuses two genuinely ambiguous dates", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-ambiguous-pair-"),
+	);
+	try {
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			"Title,Date\nInvented Moon,03/04/2024\nInvented Sun,05/06/2024\n",
+			"utf8",
+		);
+		const { messages } = await runNetflixImport(importRoot);
+		assert.equal(records(messages, "viewing_activity").length, 0);
+		const skips = messages.filter((message) => message.type === "SKIP_RESULT");
+		assert.equal(skips.length, 1);
+		const skip = skips[0];
+		if (skip?.type === "SKIP_RESULT") {
+			assert.equal(skip.reason, "ambiguous_date_order");
+		}
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
 test("parseCSVFile reads and parses a complete direct_history CSV fixture", async () => {
 	const csvContent = `Title,Date
 "The Crown",2024-01-15
