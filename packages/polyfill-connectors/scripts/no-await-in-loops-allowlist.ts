@@ -2814,7 +2814,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/goodreads/fetcher.ts",
-			line: 251,
+			line: 252,
 			column: 18,
 			category: "bounded_retry_polling",
 			note: "A fetch goes through the HTTP governor (which owns bounded retries after network errors and 429/5xx); the loop only reloads once after a WAF challenge or returns to the site at most twice, each gated on the previous answer.",
