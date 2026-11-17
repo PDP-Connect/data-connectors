@@ -4635,7 +4635,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.15",
+				"version": "0.3.16",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -5693,7 +5693,7 @@
 												},
 												"truncated": {
 													"type": "boolean",
-													"description": "True when the run-wide budget (100 projects, 400 project pages) left projects or pages unread."
+													"description": "True when an explicit caller budget left projects or pages unread. By default all sidebar projects and their cursor pages are read; source failures, cursor cycles and the run wall-clock stop are reported separately."
 												},
 												"conversations_added": {
 													"type": "integer",
