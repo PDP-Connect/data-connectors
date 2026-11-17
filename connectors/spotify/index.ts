@@ -3650,9 +3650,19 @@ export async function spotifyCollect({
 	}
 }
 
+/**
+ * The ranking streams' manifest `primary_key`: one artist or track appears
+ * once per time window, so its key is `[id, time_range]`, not `id` alone.
+ */
+export const SPOTIFY_RECORD_KEY_FIELDS = {
+	top_artists: ["id", "time_range"],
+	top_tracks: ["id", "time_range"],
+} as const;
+
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "spotify",
+		recordKeyFields: SPOTIFY_RECORD_KEY_FIELDS,
 		validateRecord,
 		retryablePattern: spotifyRetryablePattern,
 		browser: { profileName: "spotify" },

@@ -1,0 +1,180 @@
+{
+	"2026-11-03": {
+		"dataPanelData": {
+			"dailyActivityGoal": 132.5,
+			"activeTime": 214,
+			"distanceFromSteps": 9312.7,
+			"stepCount": 12408,
+			"kiloCalories": 2486,
+			"sleepDuration": 452,
+			"inactivityAlertCount": 1,
+			"sleepPlus": true
+		},
+		"activityGraphData": {
+			"lastSync": 1793690160000,
+			"activityTimelineSamples": [
+				{ "time": 1793664000000, "value": 1.2 },
+				{ "time": 1793664600000, "value": 4.8 }
+			],
+			"activityTimelineIcons": [],
+			"activityZoneLimits": [0, 3.47, 6.93, 10.4, 14.73, 19.92, 30.32],
+			"heartRateTimelineSamples": [
+				{ "time": 1793664000000, "value": 58 },
+				{ "time": 1793664600000, "value": 61 }
+			],
+			"heartRateSummary": {
+				"dayMinimum": 54,
+				"dayMinimumDateTime": 1793703600000,
+				"dayMaximum": 176,
+				"dayMaximumDateTime": 1793689900000,
+				"nightMinimum": 47,
+				"nightMinimumDateTime": 1793674800000
+			},
+			"highSessionTimelineList": [],
+			"trainingTimelineList": [
+				{ "startTime": 1793689929000, "endTime": 1793692664000 }
+			]
+		},
+		"activityScoreData": {
+			"sleepDuration": 452,
+			"sedentaryDuration": 561,
+			"lightDuration": 162,
+			"moderateDuration": 38,
+			"vigorousDuration": 14
+		},
+		"activityBenefitFeedbackData": {
+			"mvpa": "GOOD",
+			"sitting": "NONE",
+			"improves": ["FITNESS"],
+			"promotes": [],
+			"aids": []
+		},
+		"miniGraphData": {
+			"sampleDate": 1793664000000,
+			"data": {
+				"date": 1793664000000,
+				"sleepPlus": true,
+				"calories": { "time": 1793664000000, "value": 2486 },
+				"dailyGoal": { "time": 1793664000000, "value": 132.5 },
+				"distance": { "time": 1793664000000, "value": 9312.7 },
+				"sleepAverage": { "time": 1793664000000, "value": 452 },
+				"nightLowHr": { "time": 1793664000000, "value": 47 }
+			},
+			"calorieReportUrl": "/training/report/activity/time/week/day/20261102/20261108?barChart=activityGoalCompletion&lineCharts=activityCalories",
+			"dailyGoalReportUrl": "/training/report/activity/time/week/day/20261102/20261108?barChart=activityGoalCompletion&lineCharts=inactivityAlertCount",
+			"distanceReportUrl": "/training/report/activity/time/week/day/20261102/20261108?barChart=activityDistance&lineCharts=activitySteps",
+			"sleepAvgReportUrl": "/training/report/activity/time/week/day/20261102/20261108?barChart=sleep&lineCharts="
+		}
+	},
+	"2026-11-04": {
+		"dataPanelData": {
+			"dailyActivityGoal": 71,
+			"activeTime": 118,
+			"distanceFromSteps": 4980.2,
+			"stepCount": 6611,
+			"kiloCalories": 1987,
+			"sleepDuration": 0,
+			"inactivityAlertCount": 3,
+			"sleepPlus": false
+		},
+		"activityGraphData": {
+			"lastSync": 1793776560000,
+			"activityTimelineSamples": [],
+			"activityTimelineIcons": [],
+			"activityZoneLimits": [0, 3.47, 6.93, 10.4, 14.73, 19.92, 30.32],
+			"heartRateTimelineSamples": [],
+			"heartRateSummary": {
+				"dayMinimum": 0,
+				"dayMinimumDateTime": null,
+				"dayMaximum": 0,
+				"dayMaximumDateTime": null,
+				"nightMinimum": 0,
+				"nightMinimumDateTime": null
+			},
+			"highSessionTimelineList": [],
+			"trainingTimelineList": []
+		},
+		"activityScoreData": {
+			"sleepDuration": 0,
+			"sedentaryDuration": 702,
+			"lightDuration": 96,
+			"moderateDuration": 22,
+			"vigorousDuration": 0
+		},
+		"activityBenefitFeedbackData": {
+			"mvpa": "NONE",
+			"sitting": "TOO_MUCH",
+			"improves": [],
+			"promotes": [],
+			"aids": []
+		},
+		"miniGraphData": null
+	},
+	"2026-11-05": {
+		"dataPanelData": {
+			"dailyActivityGoal": 0,
+			"activeTime": 0,
+			"distanceFromSteps": 0,
+			"stepCount": 0,
+			"kiloCalories": 0,
+			"sleepDuration": 0,
+			"inactivityAlertCount": 0,
+			"sleepPlus": false
+		},
+		"activityGraphData": {
+			"lastSync": null,
+			"activityTimelineSamples": [],
+			"activityTimelineIcons": [],
+			"activityZoneLimits": [0, 3.47, 6.93, 10.4, 14.73, 19.92, 30.32],
+			"heartRateTimelineSamples": [],
+			"heartRateSummary": {
+				"dayMinimum": 0,
+				"dayMinimumDateTime": null,
+				"dayMaximum": 0,
+				"dayMaximumDateTime": null,
+				"nightMinimum": 0,
+				"nightMinimumDateTime": null
+			},
+			"highSessionTimelineList": [],
+			"trainingTimelineList": []
+		},
+		"activityScoreData": {
+			"sleepDuration": 0,
+			"sedentaryDuration": 0,
+			"lightDuration": 0,
+			"moderateDuration": 0,
+			"vigorousDuration": 0
+		},
+		"activityBenefitFeedbackData": {
+			"mvpa": "NONE",
+			"sitting": "NONE",
+			"improves": [],
+			"promotes": [],
+			"aids": []
+		},
+		"miniGraphData": null
+	},
+	"2026-11-06": {
+		"dataPanelData": null,
+		"activityGraphData": {
+			"lastSync": null,
+			"activityTimelineSamples": [],
+			"activityTimelineIcons": [],
+			"activityZoneLimits": [0, 3.47, 6.93, 10.4, 14.73, 19.92, 30.32],
+			"heartRateTimelineSamples": [],
+			"heartRateSummary": {
+				"dayMinimum": 0,
+				"dayMinimumDateTime": null,
+				"dayMaximum": 0,
+				"dayMaximumDateTime": null,
+				"nightMinimum": 0,
+				"nightMinimumDateTime": null
+			},
+			"highSessionTimelineList": [],
+			"trainingTimelineList": []
+		},
+		"activityScoreData": null,
+		"activityBenefitFeedbackData": null,
+		"miniGraphData": null
+	}
+}

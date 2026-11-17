@@ -56,6 +56,23 @@ test("unescapeIcsText: \\n → newline, \\, → comma", () => {
 	assert.equal(unescapeIcsText("line1\\nline2\\, end"), "line1\nline2, end");
 });
 
+test("parseIcs: decodes escaped event text in a synthetic calendar", () => {
+	const [event] = parseIcs(
+		[
+			"BEGIN:VEVENT",
+			String.raw`SUMMARY:Demo\; review`,
+			String.raw`DESCRIPTION:First line\NSecond line with a literal \\n`,
+			String.raw`LOCATION:Sample Room\, Level 2`,
+			"END:VEVENT",
+		].join("\r\n"),
+		"Synthetic calendar",
+	);
+	assert.ok(event);
+	assert.equal(event.summary, "Demo; review");
+	assert.equal(event.description, "First line\nSecond line with a literal \\n");
+	assert.equal(event.location, "Sample Room, Level 2");
+});
+
 // ─── unfoldIcal ─────────────────────────────────────────────────────────
 
 test("unfoldIcal: collapses CRLF+space continuation into single line (fold char dropped)", () => {

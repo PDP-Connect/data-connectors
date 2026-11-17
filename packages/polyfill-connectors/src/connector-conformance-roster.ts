@@ -86,6 +86,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	apple_health: { testFile: "connectors/apple_health/index.test.ts" },
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
 	character_ai: { testFile: "connectors/character_ai/parsers.test.ts" },
+	coros_browser: { testFile: "connectors/coros_browser/index.test.ts" },
 	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
 	facebook: { testFile: "connectors/facebook/collect.test.ts" },
@@ -120,6 +121,9 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	netflix_export: { testFile: "connectors/netflix_export/integration.test.ts" },
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	perplexity: { testFile: "connectors/perplexity/index.test.ts" },
+	// Tier development. Reads the signed-in flow.polar.com web app's own JSON;
+	// shapes are inferred from the web bundle until a seeded account confirms them.
+	polar_flow: { testFile: "connectors/polar_flow/index.test.ts" },
 	// Real collector, Development tier: the artifact still depends on a host
 	// helper and installability is not yet proven.
 	slack: { testFile: "connectors/slack/integration.test.ts" },

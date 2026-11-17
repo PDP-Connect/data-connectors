@@ -60,6 +60,30 @@ function compactCursor(cursor: unknown): unknown {
 	return rest;
 }
 
+/**
+ * What the run found, as `page.setData("scopeCounts", ...)`:
+ * `{"strava.activities": {found, ok}}`, ok false when the list was only
+ * partly read (unreadable or unplaced activities, an unsupported range).
+ * The mobile host parses it into scope counts on a failed run, which is the
+ * only way it can tell an account with no activities (found 0, ok) from a
+ * connector that could not read the list: both arrive as an empty
+ * `{ activities }` scope and the host reports no data. Sent only after
+ * collect returned; never fails the run.
+ */
+async function reportScopeCounts(
+	page: ShimPage,
+	found: number,
+	ok: boolean,
+): Promise<void> {
+	try {
+		await page.setData("scopeCounts", {
+			"strava.activities": { found, ok },
+		});
+	} catch {
+		// A host that refuses the key loses only the detail, not the run.
+	}
+}
+
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
 	initialState: Record<string, unknown>,
@@ -93,23 +117,48 @@ function compactCursor(cursor: unknown): unknown {
 					requested.get("activities")?.time_range,
 					activitiesConsentField,
 				);
-				if (unsupported !== null) return;
+				if (unsupported !== null) {
+					await reportScopeCounts(page, 0, false);
+					return;
+				}
 				// No saved cursor, and a checkpoint without the id lists: see the
 				// note at the top of this file.
 				const stravaCtx = ctx as unknown as StravaCollectContext;
+				let found = 0;
+				let answered = true;
 				await collectStravaBrowser(
 					{
 						...stravaCtx,
 						state: {},
-						emit: (msg) =>
-							stravaCtx.emit(
+						emit: (msg) => {
+							if (msg.type === "SKIP_RESULT" && msg.stream === "activities")
+								answered = false;
+							return stravaCtx.emit(
 								msg.type === "STATE"
 									? { ...msg, cursor: compactCursor(msg.cursor) }
 									: msg,
-							),
+							);
+						},
+						emitRecord: (stream, record) => {
+							if (stream === "activities") found += 1;
+							return stravaCtx.emitRecord(stream, record);
+						},
+						...(stravaCtx.reportStreamFailure
+							? {
+									reportStreamFailure: (
+										...args: Parameters<
+											NonNullable<StravaCollectContext["reportStreamFailure"]>
+										>
+									) => {
+										answered = false;
+										return stravaCtx.reportStreamFailure?.(...args);
+									},
+								}
+							: {}),
 					},
 					{ failRunOnIncompleteList: true },
 				);
+				await reportScopeCounts(page, found, answered);
 			},
 			toScope: (_stream, records) => ({ activities: records }),
 			streamScopeRecords: {

@@ -453,3 +453,222 @@ test("page fetch uses the current WHOOP auth cookie without returning the token"
 	});
 	assert.equal(observedAuthorization, "bearer cookie-token");
 });
+
+const OK_RESPONSE = () => new Response('{"account":"ok"}', { status: 200 });
+
+/** A page fetch over this cookie string and localStorage: every Authorization it sends, in order, and `respond` answers each (200 ok by default). */
+function pageFetchFor(
+	cookie: string,
+	storage: Record<string, string>,
+	respond: (authorization: string | null) => Response = OK_RESPONSE,
+): { authorizations: Array<string | null>; fetchPath: WhoopFetch } {
+	const authorizations: Array<string | null> = [];
+	const page = {
+		evaluate: async (
+			fn: (args: {
+				apiBase: string;
+				requestPath: string;
+				preferredSource: number | null;
+			}) => Promise<unknown>,
+			args: unknown,
+		) => {
+			const priorDocument = Object.getOwnPropertyDescriptor(
+				globalThis,
+				"document",
+			);
+			const priorFetch = globalThis.fetch;
+			const priorStorage = Object.getOwnPropertyDescriptor(
+				globalThis,
+				"localStorage",
+			);
+			const store = { ...storage };
+			Object.defineProperty(globalThis, "document", {
+				configurable: true,
+				value: { cookie },
+			});
+			// Object.keys(localStorage) lists the stored keys, as in a browser.
+			Object.defineProperty(globalThis, "localStorage", {
+				configurable: true,
+				value: Object.assign(
+					Object.create({
+						getItem: (key: string) =>
+							Object.hasOwn(store, key) ? store[key] : null,
+					}),
+					store,
+				),
+			});
+			globalThis.fetch = (_input, init) => {
+				const authorization = new Headers(init?.headers).get("authorization");
+				authorizations.push(authorization);
+				return Promise.resolve(respond(authorization));
+			};
+			try {
+				return await fn(
+					args as {
+						apiBase: string;
+						requestPath: string;
+						preferredSource: number | null;
+					},
+				);
+			} finally {
+				globalThis.fetch = priorFetch;
+				if (priorDocument) {
+					Object.defineProperty(globalThis, "document", priorDocument);
+				} else {
+					Reflect.deleteProperty(globalThis, "document");
+				}
+				if (priorStorage) {
+					Object.defineProperty(globalThis, "localStorage", priorStorage);
+				} else {
+					Reflect.deleteProperty(globalThis, "localStorage");
+				}
+			}
+		},
+	} as Pick<Page, "evaluate"> as Page;
+	return { authorizations, fetchPath: makeWhoopPageFetch(page) };
+}
+
+/** One page fetch with this cookie string and localStorage: the Authorization it sent last (null: no request), all of them in order, and its result. */
+async function authorizationFor(
+	cookie: string,
+	storage: Record<string, string>,
+	respond?: (authorization: string | null) => Response,
+): Promise<{
+	authorization: string | null;
+	authorizations: Array<string | null>;
+	result: unknown;
+}> {
+	const { authorizations, fetchPath } = pageFetchFor(cookie, storage, respond);
+	const result = await fetchPath("/probe");
+	return {
+		authorization: authorizations.at(-1) ?? null,
+		authorizations,
+		result,
+	};
+}
+
+test("page fetch URL-decodes and unquotes the WHOOP auth cookie, as the web app reads it", async () => {
+	for (const cookie of [
+		`whoop-auth-token=${encodeURIComponent('"eyJ.cookie-token"')}`,
+		`whoop-auth-token=${encodeURIComponent("eyJ.cookie-token")}`,
+		"whoop-auth-token=eyJ.cookie-token",
+	]) {
+		const { authorization, result } = await authorizationFor(
+			`whoop-auth-user=fixture; ${cookie}`,
+			{},
+		);
+		assert.equal(authorization, "bearer eyJ.cookie-token", cookie);
+		assert.ok(
+			!JSON.stringify(result).includes("cookie-token"),
+			`${cookie}: the token left the page`,
+		);
+	}
+});
+
+test("without the cookie, page fetch uses the web app's whoop.security.accessToken, JSON-quoted or bare", async () => {
+	for (const stored of [
+		JSON.stringify("eyJ.stored-token"),
+		"eyJ.stored-token",
+	]) {
+		const { authorization } = await authorizationFor(
+			"whoop-auth-user=fixture",
+			{
+				"whoop.security.accessToken": stored,
+				"whoop.security.refreshToken": JSON.stringify("refresh-not-sent"),
+			},
+		);
+		assert.equal(authorization, "bearer eyJ.stored-token", stored);
+	}
+});
+
+test("the cookie wins over a stored token, and the old Cognito key is used only when neither is there", async () => {
+	const cognito = "CognitoIdentityServiceProvider.client.user.accessToken";
+	assert.equal(
+		(
+			await authorizationFor("whoop-auth-token=eyJ.cookie-token", {
+				"whoop.security.accessToken": "eyJ.stale",
+				[cognito]: "eyJ.cognito",
+			})
+		).authorization,
+		"bearer eyJ.cookie-token",
+	);
+	assert.equal(
+		(
+			await authorizationFor("", {
+				"whoop.security.accessToken": "eyJ.stored-token",
+				[cognito]: "eyJ.cognito",
+			})
+		).authorization,
+		"bearer eyJ.stored-token",
+	);
+	assert.equal(
+		(await authorizationFor("", { [cognito]: "eyJ.cognito" })).authorization,
+		"bearer eyJ.cognito",
+	);
+});
+
+test("an empty or malformed token is no token: a 401 with no request", async () => {
+	const cases: Array<[string, Record<string, string>]> = [
+		["whoop-auth-token=", {}],
+		[`whoop-auth-token=${encodeURIComponent('"unterminated')}`, {}],
+		["", { "whoop.security.accessToken": '""' }],
+		["", {}],
+	];
+	for (const [cookie, storage] of cases) {
+		const { authorization, result } = await authorizationFor(cookie, storage);
+		assert.equal(authorization, null, cookie);
+		assert.deepEqual(result, { status: 401, json: null });
+	}
+});
+
+test("a 401 on the cookie token is retried once with the stored token, which the next read then uses first", async () => {
+	const { authorizations, fetchPath } = pageFetchFor(
+		"whoop-auth-token=eyJ.cookie-token",
+		{ "whoop.security.accessToken": JSON.stringify("eyJ.stored-token") },
+		(authorization) =>
+			authorization === "bearer eyJ.stored-token"
+				? OK_RESPONSE()
+				: new Response("{}", { status: 401 }),
+	);
+	assert.deepEqual(await fetchPath("/probe"), {
+		status: 200,
+		json: { account: "ok" },
+	});
+	assert.deepEqual(authorizations, [
+		"bearer eyJ.cookie-token",
+		"bearer eyJ.stored-token",
+	]);
+	// The same page fetch, next request: the store that answered goes first.
+	assert.deepEqual(await fetchPath("/next"), {
+		status: 200,
+		json: { account: "ok" },
+	});
+	assert.deepEqual(authorizations.slice(2), ["bearer eyJ.stored-token"]);
+});
+
+test("a 401 is retried only with a second, different token, and only a 401", async () => {
+	const refuse = () => new Response("{}", { status: 401 });
+	const same = await authorizationFor(
+		"whoop-auth-token=eyJ.one",
+		{ "whoop.security.accessToken": "eyJ.one" },
+		refuse,
+	);
+	assert.deepEqual(same.authorizations, ["bearer eyJ.one"]);
+	assert.deepEqual(same.result, { status: 401, json: {} });
+	const only = await authorizationFor("whoop-auth-token=eyJ.one", {}, refuse);
+	assert.deepEqual(only.authorizations, ["bearer eyJ.one"]);
+	const both = await authorizationFor(
+		"whoop-auth-token=eyJ.one",
+		{ "whoop.security.accessToken": "eyJ.two" },
+		refuse,
+	);
+	assert.deepEqual(both.authorizations, ["bearer eyJ.one", "bearer eyJ.two"]);
+	assert.deepEqual(both.result, { status: 401, json: {} });
+	const server = await authorizationFor(
+		"whoop-auth-token=eyJ.one",
+		{ "whoop.security.accessToken": "eyJ.two" },
+		() => new Response("{}", { status: 500 }),
+	);
+	assert.deepEqual(server.authorizations, ["bearer eyJ.one"]);
+	assert.deepEqual(server.result, { status: 500, json: {} });
+});
