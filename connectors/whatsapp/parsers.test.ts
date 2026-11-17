@@ -53,6 +53,55 @@ test("parseWhatsAppDateTime: returns null for an impossible calendar date", () =
 	assert.ok(parseWhatsAppDateTime("6/5/24", "9:15:22 AM"));
 });
 
+test("parseWhatsAppDateTime: preserves local-time interpretation across DST transitions", () => {
+	assert.equal(
+		parseWhatsAppDateTime("3/10/24", "2:30 AM"),
+		"2024-03-10T08:30:00.000Z",
+	);
+	assert.equal(
+		parseWhatsAppDateTime("3/10/24", "1:30 AM"),
+		"2024-03-10T07:30:00.000Z",
+	);
+	assert.equal(
+		parseWhatsAppDateTime("11/3/24", "1:30 AM"),
+		"2024-11-03T06:30:00.000Z",
+	);
+});
+
+test("parseWhatsAppChatFile: a spring-forward gap keeps its own message", () => {
+	const parsed = parseWhatsAppChatFileForTest(
+		"WhatsApp Chat with Mira.txt",
+		[
+			"[3/10/24, 1:59 AM] Mira: before the gap",
+			"[3/10/24, 2:30 AM] Theo: inside the gap",
+		].join("\n"),
+	);
+
+	assert.equal(parsed.messages.length, 2);
+	assert.equal(parsed.messageCount, 2);
+	assert.deepEqual(parsed.participants, ["Mira", "Theo"]);
+	assert.deepEqual(
+		parsed.messages.map(({ author, content, sent_at }) => ({
+			author,
+			content,
+			sent_at,
+		})),
+		[
+			{
+				author: "Mira",
+				content: "before the gap",
+				sent_at: "2024-03-10T07:59:00.000Z",
+			},
+			{
+				author: "Theo",
+				content: "inside the gap",
+				sent_at: "2024-03-10T08:30:00.000Z",
+			},
+		],
+	);
+	assert.notEqual(parsed.messages[0]?.id, parsed.messages[1]?.id);
+});
+
 test("parseWhatsAppChatFile: an unparseable date folds into the prior message, never the run clock", () => {
 	const before = new Date().toISOString();
 	const parsed = parseWhatsAppChatFileForTest(
