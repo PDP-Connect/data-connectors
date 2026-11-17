@@ -300,18 +300,20 @@ async function runStream(args: RunStreamArgs): Promise<void> {
 	});
 	const items = await searchAll(token, filter, progress, streamName);
 	const streamState = state[streamName] as
-		| { last_edited_time?: string }
+		| { last_edited_time?: string; watermark_rule?: number }
 		| undefined;
-	const prior = streamState?.last_edited_time;
+	const prior =
+		streamState?.watermark_rule === 2
+			? streamState.last_edited_time
+			: undefined;
 	let latest = prior;
 	const validEditTimes: string[] = [];
 	let earliestRejected: string | undefined;
-	// Rows this run objectively accounted for — emitted-and-valid, or correctly
-	// suppressed as unchanged. NEVER aliased to `items.length`: the schema is
-	// strict (title ≤ 4000 chars, url ≤ 4096, safe-text), so a real page CAN be
-	// rejected, and a rejected page must not be claimed as covered just because
-	// it was enumerated. Tallied from the same `validateRecord` verdict the
-	// runtime's emitRecord applies.
+	// Only rule-2 watermarks prove old rows were validated; recheck legacy state.
+	// Count emitted-and-valid or correctly suppressed rows, not items.length.
+	// Strict title/url/safe-text bounds can reject real enumerated pages.
+	// Enumeration alone must never count a rejected page as covered.
+	// Use the same validateRecord verdict as the runtime's emitRecord.
 	let covered = 0;
 	for (const item of items) {
 		if (prior && item.last_edited_time && item.last_edited_time <= prior) {
@@ -382,7 +384,7 @@ async function runStream(args: RunStreamArgs): Promise<void> {
 	await emit({
 		type: "STATE",
 		stream: streamName,
-		cursor: { last_edited_time: latest || prior || null },
+		cursor: { last_edited_time: latest || prior || null, watermark_rule: 2 },
 	});
 }
 

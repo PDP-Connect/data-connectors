@@ -167,7 +167,10 @@ test("a steady-state run whose cursor suppresses every page still reads fully co
 	const messages = await runWithPages(
 		`[${page(GOOD_PAGE_ID, "Fine")}, ${page(BAD_PAGE_ID, "Also fine")}]`,
 		{
-			pages: { last_edited_time: "2030-01-01T00:00:00.000Z" },
+			pages: {
+				last_edited_time: "2030-01-01T00:00:00.000Z",
+				watermark_rule: 2,
+			},
 		},
 	);
 
@@ -212,14 +215,20 @@ test("rejected page holds the watermark across retries until repaired", async ()
 		${page(BAD_PAGE_ID, "x".repeat(4001), false, T2)},
 		${page(GOOD_PAGE_ID, "A", false, T1)}]`;
 	const first = await runWithPages(pages);
-	assert.deepEqual(pagesCursor(first), { last_edited_time: T1 });
+	assert.deepEqual(pagesCursor(first), {
+		last_edited_time: T1,
+		watermark_rule: 2,
+	});
 	assert.deepEqual(
 		emittedPageIds(first),
 		[GOOD_PAGE_ID, ARCHIVED_PAGE_ID].sort(),
 	);
 
 	const second = await runWithPages(pages, { pages: pagesCursor(first) });
-	assert.deepEqual(pagesCursor(second), { last_edited_time: T1 });
+	assert.deepEqual(pagesCursor(second), {
+		last_edited_time: T1,
+		watermark_rule: 2,
+	});
 	assert.deepEqual(emittedPageIds(second), [ARCHIVED_PAGE_ID]);
 	for (const messages of [first, second]) {
 		assert.equal(pagesCoverage(messages).considered, 3);
@@ -240,7 +249,10 @@ test("rejected page holds the watermark across retries until repaired", async ()
 			${page(GOOD_PAGE_ID, "A", false, T1)}]`,
 		{ pages: pagesCursor(second) },
 	);
-	assert.deepEqual(pagesCursor(repaired), { last_edited_time: T4 });
+	assert.deepEqual(pagesCursor(repaired), {
+		last_edited_time: T4,
+		watermark_rule: 2,
+	});
 	assert.deepEqual(
 		emittedPageIds(repaired),
 		[BAD_PAGE_ID, ARCHIVED_PAGE_ID].sort(),
@@ -254,7 +266,10 @@ test("all-valid enumeration advances to the maximum edit timestamp", async () =>
 			${page(GOOD_PAGE_ID, "A", false, T1)},
 			${page(BAD_PAGE_ID, "B", false, T2)}]`,
 	);
-	assert.deepEqual(pagesCursor(messages), { last_edited_time: T3 });
+	assert.deepEqual(pagesCursor(messages), {
+		last_edited_time: T3,
+		watermark_rule: 2,
+	});
 	assert.equal(pagesCoverage(messages).covered, 3);
 });
 
@@ -263,9 +278,53 @@ test("a valid timestamp equal to a rejection cannot advance the watermark", asyn
 		${page(GOOD_PAGE_ID, "A", false, T2)},
 		${page(BAD_PAGE_ID, "x".repeat(4001), false, T2)}]`;
 	const messages = await runWithPages(pages, {
-		pages: { last_edited_time: T1 },
+		pages: { last_edited_time: T1, watermark_rule: 2 },
 	});
-	assert.deepEqual(pagesCursor(messages), { last_edited_time: T1 });
+	assert.deepEqual(pagesCursor(messages), {
+		last_edited_time: T1,
+		watermark_rule: 2,
+	});
 	const fresh = await runWithPages(pages);
-	assert.deepEqual(pagesCursor(fresh), { last_edited_time: null });
+	assert.deepEqual(pagesCursor(fresh), {
+		last_edited_time: null,
+		watermark_rule: 2,
+	});
+});
+
+test("legacy watermark is revalidated once before marked suppression resumes", async () => {
+	const pages = `[${page(ARCHIVED_PAGE_ID, "C", false, T3)},
+		${page(BAD_PAGE_ID, "x".repeat(4001), false, T2)},
+		${page(GOOD_PAGE_ID, "A", false, T1)}]`;
+	const migrated = await runWithPages(pages, {
+		pages: { last_edited_time: T3 },
+	});
+	assert.deepEqual(pagesCursor(migrated), {
+		last_edited_time: T1,
+		watermark_rule: 2,
+	});
+	assert.deepEqual(
+		emittedPageIds(migrated),
+		[GOOD_PAGE_ID, ARCHIVED_PAGE_ID].sort(),
+	);
+	const marked = await runWithPages(pages, {
+		pages: { last_edited_time: T1, watermark_rule: 2 },
+	});
+	assert.deepEqual(pagesCursor(marked), {
+		last_edited_time: T1,
+		watermark_rule: 2,
+	});
+	assert.deepEqual(emittedPageIds(marked), [ARCHIVED_PAGE_ID]);
+	for (const messages of [migrated, marked]) {
+		assert.equal(pagesCoverage(messages).considered, 3);
+		assert.equal(pagesCoverage(messages).covered, 2);
+		const rejected = messages.filter(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.stream === "pages" &&
+				m.reason === "shape_check_failed",
+		);
+		assert.equal(rejected.length, 1, "the rejected page remains retryable");
+		assert.ok(rejected[0]?.type === "SKIP_RESULT");
+		assert.match(rejected[0].message, new RegExp(BAD_PAGE_ID));
+	}
 });
