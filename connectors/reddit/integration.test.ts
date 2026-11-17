@@ -647,6 +647,33 @@ test("retry pattern excludes other HTTP classes, malformed codes and parse error
 	assert.equal(REDDIT_RETRYABLE_PATTERN.test("reddit_auth_failed: 403"), false);
 });
 
+test("retry pattern reads the leading status, not an account name in the path", async () => {
+	// An account may be named like a retryable status; only the leading code
+	// may decide retryability.
+	const endpoint = "/user/reddit_http_500/submitted.json";
+	for (const [result, retryable] of [
+		[{ status: 404, json: null }, false],
+		// HTTP 200 with no listing: reddit_parse_error ... on <endpoint>.
+		[{ status: 200, json: null }, false],
+		[{ status: 0, json: null }, true],
+		[{ status: 503, json: null }, true],
+	] as const) {
+		const { fetch } = makeScriptedFetch({ [endpoint]: [result] });
+		await assert.rejects(
+			paginate(fetch, endpoint, null, null, NO_DELAY),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.equal(
+					REDDIT_RETRYABLE_PATTERN.test(error.message),
+					retryable,
+					error.message,
+				);
+				return true;
+			},
+		);
+	}
+});
+
 // ─── Invariant 6b: mid-run stale-session self-heal (401/403) ────────────
 
 test("paginate: page 1 succeeds, page 2 401s, repair succeeds, retry of the SAME page succeeds", async () => {

@@ -140,9 +140,12 @@ const PAGE_DELAY_MS = 500;
  * fully owns PRE-submit and collect-phase retry classification.
  * Collect transport status 0 and HTTP 5xx failures are retryable; auth,
  * other HTTP 4xx (except the existing 429 path), and parse errors are not.
+ * The status alternative is anchored to the message's leading code: the
+ * message ends with the account's endpoint path, and an account may be
+ * named like a retryable status.
  */
 export const REDDIT_RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|fetch failed|reddit_rate_limited|reddit_http_(?:0|5\d\d)\b/i;
+	/ECONN|ETIMEDOUT|fetch failed|reddit_rate_limited|^reddit_http_(?:0|5\d\d):/i;
 
 const REDDIT_TERMINAL_DIAGNOSTIC_MAX = 240;
 const REDDIT_AUTH_FAILURE_RE =
