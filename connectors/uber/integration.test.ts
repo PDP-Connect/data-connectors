@@ -460,6 +460,7 @@ test("fetchAllActivities: HTTP 200 GraphQL failures reject instead of certifying
 	{ activities: { past: [] } },
 	{ activities: { past: "invalid" } },
 	{ activities: { past: { activities: "invalid" } } },
+	{ activities: { past: { activities: null } } },
 ].forEach((data) => {
 	test(`fetchAllActivities: rejects malformed Activities data ${JSON.stringify(data)}`, async () => {
 		const { fetchPath } = makeScriptedFetch({
@@ -472,10 +473,7 @@ test("fetchAllActivities: HTTP 200 GraphQL failures reject instead of certifying
 	});
 });
 
-[
-	{ activities: { past: { activities: [] } } },
-	{ activities: { past: { activities: null } } },
-].forEach((data) => {
+[{ activities: { past: { activities: [] } } }].forEach((data) => {
 	test(`fetchAllActivities: preserves empty history ${JSON.stringify(data)}`, async () => {
 		const { fetchPath } = makeScriptedFetch({
 			activitiesPages: [{ body: JSON.stringify({ data }) }],

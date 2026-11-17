@@ -369,13 +369,13 @@ export async function fetchAllActivities(
 				typeof past !== "object" ||
 				past === null ||
 				Array.isArray(past) ||
-				(past.activities !== null && !Array.isArray(past.activities))
+				!Array.isArray(past.activities)
 			) {
 				throw new Error(
 					"uber_graphql_error [endpoint Activities]: Malformed Activities data",
 				);
 			}
-			const page = past.activities ?? [];
+			const page = past.activities;
 			let newOnPage = 0;
 			for (const activity of page) {
 				const id = activityTripId(activity);
