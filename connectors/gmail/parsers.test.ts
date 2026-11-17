@@ -509,16 +509,28 @@ test("makeSnippet: drops quoted-reply lines and collapses whitespace", () => {
 	);
 });
 
-test("makeSnippet: quoted-printable does byte-wise decode (Latin-1 interpretation quirk)", () => {
-	// BUG (flagged, not fixed): makeSnippet's QP path uses String.fromCharCode
-	// per hex escape, which treats each =HH as a codepoint instead of a raw
-	// byte. For a UTF-8 'é' encoded as =C3=A9 this yields "Ã©" (Latin-1) rather
-	// than "é". decodeBodyPart does the correct byte-accumulation; makeSnippet
-	// does not. Documenting the current behavior here so a future fix is a
-	// conscious change, not a silent one.
-	const qpInput = Buffer.from("caf=C3=A9 snippet", "ascii");
-	const snippet = makeSnippet(qpInput, "quoted-printable", "utf8");
-	assert.equal(snippet, "cafÃ© snippet");
+test("makeSnippet: quoted-printable decodes bytes in the declared charset", () => {
+	for (const [body, charset, expected] of [
+		["Caf=C3=A9 au lait", "utf-8", "Café au lait"],
+		["Caf=C3=A9 au lait", null, "Café au lait"],
+		["Caf=E9", "ISO-8859-1", "Café"],
+		["Caf=E9", "latin1", "Café"],
+		["hel=\r\nlo", "utf8", "hello"],
+		["hel=\nlo", "utf8", "hello"],
+		["Hello=20world=21", "utf8", "Hello world!"],
+	] as const) {
+		assert.equal(
+			makeSnippet(Buffer.from(body, "ascii"), "quoted-printable", charset),
+			expected,
+		);
+	}
+});
+
+test("makeSnippet: base64 behavior is unchanged", () => {
+	assert.equal(
+		makeSnippet(Buffer.from("SGVsbG8gd29ybGQh", "ascii"), "base64", "utf8"),
+		"Hello world!",
+	);
 });
 
 test("makeSnippet: respects maxChars (truncates)", () => {
