@@ -560,9 +560,16 @@ export function makeSnippet(
 	if (!cleaned) {
 		return null;
 	}
-	return cleaned.length > maxChars
-		? cleaned.slice(0, maxChars).trim()
-		: cleaned;
+	if (cleaned.length > maxChars) {
+		let end = maxChars;
+		const lastCodeUnit = cleaned.charCodeAt(end - 1);
+		// Do not leave a lone high surrogate when the cap splits a character.
+		if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
+			end -= 1;
+		}
+		return cleaned.slice(0, end).trim();
+	}
+	return cleaned;
 }
 
 // ─── Thread aggregation ────────────────────────────────────────────────

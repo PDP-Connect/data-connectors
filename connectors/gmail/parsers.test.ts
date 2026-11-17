@@ -526,6 +526,30 @@ test("makeSnippet: quoted-printable decodes bytes in the declared charset", () =
 	}
 });
 
+test("makeSnippet: truncation does not leave half of a decoded surrogate pair", () => {
+	const body = Buffer.from("a".repeat(199) + "=F0=9F=98=80", "ascii");
+	assert.equal(
+		makeSnippet(body, "quoted-printable", "UTF-8", 200),
+		"a".repeat(199),
+	);
+});
+
+test("makeSnippet: a complete surrogate pair at the cap is preserved", () => {
+	const body = Buffer.from("a".repeat(198) + "=F0=9F=98=80", "ascii");
+	assert.equal(
+		makeSnippet(body, "quoted-printable", "UTF-8", 200),
+		"a".repeat(198) + "\u{1F600}",
+	);
+});
+
+test("makeSnippet: a 250-character ASCII body still keeps its first 200 characters", () => {
+	const body = "abcde".repeat(50);
+	assert.equal(
+		makeSnippet(Buffer.from(body, "ascii"), null, "UTF-8", 200),
+		body.slice(0, 200),
+	);
+});
+
 test("makeSnippet: base64 behavior is unchanged", () => {
 	assert.equal(
 		makeSnippet(Buffer.from("SGVsbG8gd29ybGQh", "ascii"), "base64", "utf8"),
