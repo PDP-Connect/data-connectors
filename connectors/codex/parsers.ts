@@ -349,13 +349,17 @@ export function extendTimestampRange(
 	range: TimestampRange,
 	ts: string | null,
 ): void {
-	if (!ts) {
+	const iso = timestampToIso(ts);
+	if (ts === null || iso === null) {
 		return;
 	}
-	if (!range.firstTs || ts < range.firstTs) {
+	const instant = Date.parse(iso);
+	const first = timestampToIso(range.firstTs);
+	const last = timestampToIso(range.lastTs);
+	if (first === null || instant < Date.parse(first)) {
 		range.firstTs = ts;
 	}
-	if (!range.lastTs || ts > range.lastTs) {
+	if (last === null || instant > Date.parse(last)) {
 		range.lastTs = ts;
 	}
 }

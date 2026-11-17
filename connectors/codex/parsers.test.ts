@@ -316,6 +316,40 @@ test("buildRolloutOnlySessionRecord: maps meta fields, state_5-only fields null"
 	assert.equal(r.rollout_path, "/rollouts/foo.jsonl");
 });
 
+test("session builders: mixed-offset aggregate bounds stay chronological in either arrival order", () => {
+	for (const timestamps of [
+		["2026-07-31T14:00:00Z", "2026-07-31T15:00:00+02:00"],
+		["2026-07-31T15:00:00+02:00", "2026-07-31T14:00:00Z"],
+	]) {
+		const agg: RolloutAggregate = {
+			meta: {},
+			firstTs: null,
+			lastTs: null,
+			messageCount: 2,
+			functionCallCount: 0,
+			rolloutPath: "/invented/mixed-offset.jsonl",
+		};
+		for (const timestamp of timestamps) {
+			extendTimestampRange(agg, timestamp);
+		}
+		for (const record of [
+			buildRolloutOnlySessionRecord("synthetic", agg),
+			buildThreadSessionRecord(
+				"synthetic",
+				makeThreadRow({ created_at: null, updated_at: null }),
+				agg,
+			),
+		]) {
+			assert.equal(record.started_at, "2026-07-31T13:00:00.000Z");
+			assert.equal(record.last_event_at, "2026-07-31T14:00:00.000Z");
+			assert.ok(
+				Date.parse(record.started_at as string) <
+					Date.parse(record.last_event_at as string),
+			);
+		}
+	}
+});
+
 // ─── buildRuleRecord / buildPromptRecord / buildSkillRecord ─────────────
 
 test("buildRuleRecord: produces rules:<set>:<idx> id", () => {
@@ -400,6 +434,33 @@ test("extendTimestampRange: null ts no-op", () => {
 	extendTimestampRange(r, null);
 	assert.equal(r.firstTs, "2026-04-22T12:00:00Z");
 	assert.equal(r.lastTs, "2026-04-22T12:00:00Z");
+});
+
+test("extendTimestampRange: compares instants but preserves original offset strings", () => {
+	for (const timestamps of [
+		["2026-07-31T14:00:00Z", "2026-07-31T15:00:00+02:00"],
+		["2026-07-31T15:00:00+02:00", "2026-07-31T14:00:00Z"],
+	]) {
+		const range: TimestampRange = { firstTs: null, lastTs: null };
+		for (const timestamp of timestamps) {
+			extendTimestampRange(range, timestamp);
+		}
+		assert.deepEqual(range, {
+			firstTs: "2026-07-31T15:00:00+02:00",
+			lastTs: "2026-07-31T14:00:00Z",
+		});
+	}
+});
+
+test("extendTimestampRange: invalid calendar day never becomes an endpoint", () => {
+	const empty: TimestampRange = { firstTs: null, lastTs: null };
+	extendTimestampRange(empty, "2026-02-30T10:00:00Z");
+	assert.deepEqual(empty, { firstTs: null, lastTs: null });
+	const populated: TimestampRange = { firstTs: null, lastTs: null };
+	extendTimestampRange(populated, "2026-07-31T14:00:00Z");
+	const before = { ...populated };
+	extendTimestampRange(populated, "2026-02-30T10:00:00Z");
+	assert.deepEqual(populated, before);
 });
 
 // ─── Binary content tests ────────────────────────────────────────────────
