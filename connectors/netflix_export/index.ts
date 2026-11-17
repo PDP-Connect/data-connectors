@@ -40,6 +40,7 @@ import { runConnector } from "../../packages/polyfill-connectors/src/connector-r
 import {
 	buildViewingActivityRecord,
 	detectViewingActivitySchema,
+	directHistoryOccurrences,
 	extractViewingActivityArtifactFromFile,
 	inferDirectHistoryDateOrderFromRows,
 	parseCSVContentForValidation,
@@ -361,8 +362,17 @@ async function collectViewingActivity(
 		message: `Reading ${rows.length} Netflix viewing records`,
 	});
 
-	for (const row of rows) {
-		const rec = buildViewingActivityRecord(row, schema, dateOrder);
+	const occurrences =
+		schema === "direct_history"
+			? directHistoryOccurrences(rows, dateOrder)
+			: [];
+	for (const [index, row] of rows.entries()) {
+		const rec = buildViewingActivityRecord(
+			row,
+			schema,
+			dateOrder,
+			occurrences[index] ?? 1,
+		);
 
 		// Skip rows that couldn't be parsed
 		if (!rec) {
