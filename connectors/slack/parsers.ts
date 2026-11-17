@@ -317,6 +317,9 @@ function countReactions(reactions: SlackDataBlob["reactions"]): number {
 	}
 	let total = 0;
 	for (const x of reactions) {
+		if (x === null || typeof x !== "object") {
+			continue;
+		}
 		total += x.count ?? x.users?.length ?? 0;
 	}
 	return total;
