@@ -62,6 +62,7 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		icloud_notes: { testFile: "connectors/icloud_notes/integration.test.ts" },
 		oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
 		strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
+		goodreads: { testFile: "connectors/goodreads/index.test.ts" },
 		shopify: { testFile: "connectors/shopify/index.test.ts" },
 	};
 /**

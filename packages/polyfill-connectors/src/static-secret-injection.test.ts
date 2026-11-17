@@ -837,28 +837,37 @@ test("two gmail connections run with distinct injected secrets, scoped per run, 
  * complete unattended must say 'needs you to sign in' with a reachable
  * handoff, never 'Setup never completed'."
  *
- * H-E-B is the supported exception: its runtime has an owner-present browser
- * handoff, and `authOptional` lets that run proceed without saved credentials.
- * Keep this exception pinned to those connector behaviors so another optional
- * capture cannot strand an owner on an unattended login page.
+ * H-E-B and Goodreads are the supported exceptions: each runtime has an
+ * owner-present browser handoff, and `authOptional` lets that run proceed
+ * without saved credentials. Keep this exception pinned to those connector
+ * behaviors so another optional capture cannot strand an owner on an
+ * unattended login page.
  */
-test("(b) only H-E-B may use optional capture because its owner can reach browser sign-in", () => {
+test("(b) only H-E-B and Goodreads may use optional capture because their owners can reach browser sign-in", () => {
 	const optional = Object.keys(STATIC_SECRET_CONNECTOR_REGISTRY).filter(
 		(connectorId) => isStaticSecretCaptureOptional(connectorId),
 	);
-	assert.deepEqual(optional, ["heb"]);
-	const manifest = JSON.parse(readFileSync(manifestPath("heb"), "utf8")) as {
-		setup?: { credential_capture?: { required?: unknown } };
+	assert.deepEqual(optional, ["goodreads", "heb"]);
+	const handoff: Record<string, RegExp> = {
+		goodreads: /manualBrowserLogin/u,
+		heb: /ensureHebSession/u,
 	};
-	const source = readFileSync(connectorEntrypoint("heb"), "utf8");
-	assert.equal(manifest.setup?.credential_capture?.required, false);
-	assert.match(source, /authOptional:\s*true/u);
-	assert.match(source, /ensureHebSession/u);
-	assert.deepEqual(
-		buildConnectionScopedSecretEnv("heb", {
-			credentialKind: "username_password",
-			secret: "{}",
-		}),
-		{},
-	);
+	for (const connectorId of optional) {
+		const manifest = JSON.parse(
+			readFileSync(manifestPath(connectorId), "utf8"),
+		) as {
+			setup?: { credential_capture?: { required?: unknown } };
+		};
+		const source = readFileSync(connectorEntrypoint(connectorId), "utf8");
+		assert.equal(manifest.setup?.credential_capture?.required, false);
+		assert.match(source, /authOptional:\s*true/u);
+		assert.match(source, handoff[connectorId] as RegExp);
+		assert.deepEqual(
+			buildConnectionScopedSecretEnv(connectorId, {
+				credentialKind: "username_password",
+				secret: "{}",
+			}),
+			{},
+		);
+	}
 });

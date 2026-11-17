@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" /><title>Synthetic Goodreads fixture</title></head>
+<body>
+<header class="siteHeader">
+  <a class="siteHeader__subNavLink" href="/user/show/90000001-synthetic-reader">Profile</a>
+  <a class="siteHeader__subNavLink" href="/user/sign_out">Sign out</a>
+</header>
+<div id="content">
+<script type="text/javascript">/* inline script that also says checked and selected */ var f = { checked: true, selected: "x" };</script>
+<form class="account" action="/user/update" method="post">
+  <p><label for="user_email">Email</label><br/><input type="text" value="synthetic@example.invalid" name="user[email]" id="user_email" /></p>
+  <p><label for="user_country_code">Country</label><br/><select onchange="checkCountry();" name="user[country_code]" id="user_country_code"><option value="">Select</option> <option value="US">United States</option> <option selected="selected" value="NZ">New Zealand</option> <option value="">---</option> <option value="AF">Afghanistan</option></select></p>
+  <p><select name="user[country_code]" id="user_country_code_2"><option value="">Select</option> <option value="US">United States</option> <option selected="selected" value="NZ">New Zealand</option> <option value="">---</option> <option value="AF">Afghanistan</option></select></p>
+  <p><label for="user_locale">Language</label><select name="user[locale]" id="user_locale"><option value="en">English</option> <option selected="selected" value="fr">French</option> <option value="de">German</option></select></p>
+  <div class="accountFormBlock">
+    <label for="user_preference_visibility">Who can view my profile:</label>
+    <div class="visibilityInputBlock"><input onclick="$('user_preference_allow_followers').disabled=false; $('user_preference_allow_followers').checked = true;" type="radio" value="E" checked="checked" name="user_preference[visibility]" id="user_preference_visibility_e" /> <label for="user_preference_visibility_e">anyone (including search engines)</label></div>
+    <div class="visibilityInputBlock"><input onclick="$('user_preference_allow_followers').disabled=true; $('user_preference_allow_followers').checked = false;" type="radio" value="M" name="user_preference[visibility]" id="user_preference_visibility_m" /> <label for="user_preference_visibility_m">Goodreads members</label></div>
+    <div class="visibilityInputBlock"><input onclick="$('user_preference_allow_followers').disabled=true; $('user_preference_allow_followers').checked = false;" type="radio" value="P" name="user_preference[visibility]" id="user_preference_visibility_p" /> <label for="user_preference_visibility_p">friends only</label></div>
+  </div>
+  <p><input name="user_preference[allow_followers]" type="hidden" value="0" /><input type="checkbox" value="1" checked="checked" name="user_preference[allow_followers]" id="user_preference_allow_followers" /> <label for="user_preference_allow_followers">Allow non-friends to follow my reviews</label></p>
+  <p><input name="user[allow_nonfriend_review_comments]" type="hidden" value="0" /><input type="checkbox" value="1" name="user[allow_nonfriend_review_comments]" id="user_allow_nonfriend_review_comments" /> <label for="user_allow_nonfriend_review_comments">Allow non-friends to comment on my reviews</label></p>
+  <p><input name="user[searchable_by_email]" type="hidden" value="0" /><input type="checkbox" value="1" checked="checked" name="user[searchable_by_email]" id="user_searchable_by_email" /> <label for="user_searchable_by_email">Allow Goodreads members to search for me by email</label></p>
+</form>
+<form class="genres"><div class="gr-genresForm__checkBoxes"><label class="gr-genresForm__genreLabel"><input name="favorites[Art]" type="hidden" value="false"/><input name="favorites[Art]" type="checkbox" value="true" data-genre="Art"/><span>Art</span></label><label class="gr-genresForm__genreLabel"><input name="favorites[Mystery]" type="hidden" value="false"/><input name="favorites[Mystery]" type="checkbox" value="true" data-genre="Mystery" checked=""/><span>Mystery</span></label><label class="gr-genresForm__genreLabel"><input name="favorites[Poetry]" type="hidden" value="false"/><input name="favorites[Poetry]" type="checkbox" value="true" data-genre="Poetry" checked=""/><span>Poetry</span></label><label class="gr-genresForm__genreLabel"><input name="favorites[Science]" type="hidden" value="false"/><input name="favorites[Science]" type="checkbox" value="true" data-genre="Science"/><span>Science</span></label></div></form>
+<div class="apps">
+  <div id="amazon" class="box"><h2 class="inlineImages">Amazon</h2><div class='stacked'> Your Amazon account is linked and may be used to sign in to Goodreads </div> <a href="#unlinkAmazonAccountForm">Disconnect Amazon Account</a></div>
+  <div id="google" class="box"><h2 class="inlineImages">Google</h2><div id='preConnect'><p>Use your Google account to sign in to Goodreads.</p><form action="/google/login" method="post"><input type="submit" name="commit" value="Connect Google Account" class="gr-button" /></form></div></div>
+  <div id="apple" class="box"><h2 class="inlineImages">Apple</h2><a href="/ap-handler/apple">Connect Apple Account </a></div>
+</div>
+</div></body></html>

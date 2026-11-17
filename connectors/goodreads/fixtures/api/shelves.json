@@ -1,0 +1,41 @@
+{
+	"data": {
+		"getUserShelves": {
+			"totalCount": 4,
+			"pageInfo": {
+				"hasNextPage": false,
+				"nextPageToken": null
+			},
+			"edges": [
+				{
+					"node": {
+						"name": "read",
+						"displayName": "Read",
+						"webUrl": "https://www.goodreads.com/review/list/90000001?shelf=read"
+					}
+				},
+				{
+					"node": {
+						"name": "currently-reading",
+						"displayName": "Currently Reading",
+						"webUrl": "https://www.goodreads.com/review/list/90000001?shelf=currently-reading"
+					}
+				},
+				{
+					"node": {
+						"name": "to-read",
+						"displayName": "Want to Read",
+						"webUrl": "https://www.goodreads.com/review/list/90000001?shelf=to-read"
+					}
+				},
+				{
+					"node": {
+						"name": "abandoned",
+						"displayName": "Abandoned",
+						"webUrl": "https://www.goodreads.com/review/list/90000001?shelf=abandoned"
+					}
+				}
+			]
+		}
+	}
+}

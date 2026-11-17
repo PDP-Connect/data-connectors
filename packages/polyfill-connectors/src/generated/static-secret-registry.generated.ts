@@ -76,6 +76,15 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 			account_email: ["GMAIL_ADDRESS", "GMAIL_USER"],
 		},
 	},
+	goodreads: {
+		credentialKind: "username_password",
+		captureRequired: false,
+		secretFieldEnvVars: {
+			password: ["GOODREADS_PASSWORD"],
+			username: ["GOODREADS_USERNAME"],
+		},
+		optionalSecretBundleFields: ["username", "password"],
+	},
 	groupme: {
 		credentialKind: "access_token",
 		secretEnvVars: ["GROUPME_ACCESS_TOKEN"],

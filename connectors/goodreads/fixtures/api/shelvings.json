@@ -1,0 +1,218 @@
+{
+	"data": {
+		"getUserShelvings": {
+			"totalCount": 5,
+			"pageInfo": {
+				"hasNextPage": false,
+				"nextPageToken": null
+			},
+			"edges": [
+				{
+					"node": {
+						"createdAt": 1546442400000,
+						"updatedAt": 1554973200000,
+						"shelf": {
+							"name": "abandoned"
+						},
+						"taggings": [
+							{
+								"tag": {
+									"name": "winter-list"
+								}
+							}
+						],
+						"review": {
+							"rating": 4,
+							"createdAt": 1554973200000,
+							"updatedAt": 1554973200000,
+							"spoilerStatus": false
+						},
+						"book": {
+							"legacyId": 80000004,
+							"details": {
+								"publisher": "Tin Orchard Press",
+								"language": {
+									"name": "English"
+								}
+							},
+							"bookGenres": [
+								{
+									"genre": {
+										"name": "Fiction"
+									}
+								},
+								{
+									"genre": {
+										"name": "Literary Fiction"
+									}
+								}
+							],
+							"bookSeries": []
+						}
+					}
+				},
+				{
+					"node": {
+						"createdAt": 1614967200000,
+						"updatedAt": 1642681800000,
+						"shelf": {
+							"name": "read"
+						},
+						"taggings": [
+							{
+								"tag": {
+									"name": "favorites-synthetic"
+								}
+							}
+						],
+						"review": {
+							"rating": 5,
+							"createdAt": 1627848000000,
+							"updatedAt": 1642681800000,
+							"spoilerStatus": true
+						},
+						"book": {
+							"legacyId": 80000001,
+							"details": {
+								"publisher": "Harbour Light Books",
+								"language": {
+									"name": "English"
+								}
+							},
+							"bookGenres": [
+								{
+									"genre": {
+										"name": "Fantasy"
+									}
+								},
+								{
+									"genre": {
+										"name": "Adventure"
+									}
+								},
+								{
+									"genre": {
+										"name": "Maps"
+									}
+								}
+							],
+							"bookSeries": [
+								{
+									"seriesPlacement": "1",
+									"series": {
+										"title": "The Atlas Cycle"
+									}
+								}
+							]
+						}
+					}
+				},
+				{
+					"node": {
+						"createdAt": 1767199500000,
+						"updatedAt": 1770020100000,
+						"shelf": {
+							"name": "read"
+						},
+						"taggings": [],
+						"review": {
+							"rating": 2,
+							"createdAt": 1770020100000,
+							"updatedAt": 1770020100000,
+							"spoilerStatus": false
+						},
+						"book": {
+							"legacyId": 80000005,
+							"details": {
+								"publisher": null,
+								"language": null
+							},
+							"bookGenres": [],
+							"bookSeries": [
+								{
+									"seriesPlacement": "2.5",
+									"series": {
+										"title": "Unfinished Maps"
+									}
+								},
+								{
+									"seriesPlacement": null,
+									"series": {
+										"title": "Cartographers"
+									}
+								}
+							]
+						}
+					}
+				},
+				{
+					"node": {
+						"createdAt": 1781291100000,
+						"updatedAt": 1781291100000,
+						"shelf": {
+							"name": "to-read"
+						},
+						"taggings": [
+							{
+								"tag": {
+									"name": "winter-list"
+								}
+							}
+						],
+						"review": null,
+						"book": {
+							"legacyId": 80000002,
+							"details": {
+								"publisher": "Small Rivers",
+								"language": {
+									"name": "Spanish"
+								}
+							},
+							"bookGenres": [
+								{
+									"genre": {
+										"name": "Travel"
+									}
+								}
+							],
+							"bookSeries": []
+						}
+					}
+				},
+				{
+					"node": {
+						"createdAt": 1791554400000,
+						"updatedAt": 1793398200000,
+						"shelf": {
+							"name": "currently-reading"
+						},
+						"taggings": [],
+						"review": {
+							"rating": 3,
+							"createdAt": 1793398200000,
+							"updatedAt": 1793398200000,
+							"spoilerStatus": false
+						},
+						"book": {
+							"legacyId": 80000003,
+							"details": {
+								"publisher": "Quiet Machines Ltd",
+								"language": {
+									"name": "English"
+								}
+							},
+							"bookGenres": [
+								{
+									"genre": {
+										"name": "Science Fiction"
+									}
+								}
+							],
+							"bookSeries": []
+						}
+					}
+				}
+			]
+		}
+	}
+}
