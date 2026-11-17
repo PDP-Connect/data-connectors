@@ -505,21 +505,20 @@ function unambiguousOrderFor(
 /**
  * Infer direct_history's date field ordering (DD/MM vs MM/DD — Netflix's own
  * help center documents the immediate CSV but not its date encoding, so this
- * is never assumed) from the dataset as a whole: scan every row's Date value
- * for the first one that is unambiguous on its own (day or month > 12), and
- * apply that SAME ordering to the entire file. This is a per-upload
- * inference, not a per-row guess — a file mixing "15/03/2024" (unambiguous:
- * DMY) and "05/03/2024" (ambiguous alone) resolves the ambiguous row using
- * the order the unambiguous row already proved for this dataset.
+ * is never assumed) from the dataset as a whole. Scan every row's Date value
+ * for self-evident ordering (day or month > 12). Apply that order to ambiguous
+ * rows only when all such evidence agrees.
  *
- * Returns null only when every non-ISO row in the dataset is itself
- * ambiguous (no row has a field > 12) — callers must treat that as a real,
- * actionable gap (surface a typed coverage-gap / validation outcome asking
- * the owner to clarify date order), never silently guess or drop rows.
+ * Returns null when no row proves an order or rows prove both DMY and MDY.
+ * Callers must surface a typed coverage gap if any row needs an explicit
+ * order to parse, never silently guess or drop it. Files containing only
+ * self-evident dates can still be parsed row by row without a shared order.
  */
 export function inferDirectHistoryDateOrder(
 	dateStrings: readonly (string | undefined)[],
 ): DirectHistoryDateOrder | null {
+	let inferredOrder: DirectHistoryDateOrder | null = null;
+	let conflicting = false;
 	for (const raw of dateStrings) {
 		if (!raw) {
 			continue;
@@ -534,10 +533,13 @@ export function inferDirectHistoryDateOrder(
 		}
 		const order = unambiguousOrderFor(components);
 		if (order) {
-			return order;
+			if (inferredOrder && inferredOrder !== order) {
+				conflicting = true;
+			}
+			inferredOrder = order;
 		}
 	}
-	return null;
+	return conflicting ? null : inferredOrder;
 }
 
 /**
