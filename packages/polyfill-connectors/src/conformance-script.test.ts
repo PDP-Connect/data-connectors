@@ -14,8 +14,8 @@ import {
 	checkVersion,
 	listOpenSemantics,
 	parseCoverageRegistry,
-	stripComments,
 	type ReadinessManifest,
+	stripComments,
 } from "../scripts/conformance-readiness.ts";
 import { connectorsDir } from "./connector-paths.ts";
 

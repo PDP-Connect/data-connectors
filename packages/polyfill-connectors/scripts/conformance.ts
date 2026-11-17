@@ -46,9 +46,9 @@ import { KNOWN_SCAFFOLD_CONNECTORS } from "../src/connector-conformance-roster.t
 import {
 	connectorsDir as CONNECTORS_DIR,
 	fixturesDir,
+	manifestPath,
 	packageRoot as PACKAGE_ROOT,
 	repoRoot,
-	manifestPath,
 } from "../src/connector-paths.ts";
 import {
 	computeDeclarationDigest,
