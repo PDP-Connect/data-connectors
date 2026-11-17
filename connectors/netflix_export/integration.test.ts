@@ -88,6 +88,7 @@ function records(
 
 async function runNetflixImport(
 	importRoot: string,
+	state?: Record<string, unknown>,
 ): Promise<{ messages: EmittedMessage[]; stderr: string }> {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
@@ -100,6 +101,7 @@ async function runNetflixImport(
 			TZ: "America/Chicago",
 		},
 		start: {
+			...(state ? { state } : {}),
 			scope: { streams: [{ name: "viewing_activity" }] },
 			type: "START",
 		},
@@ -695,5 +697,94 @@ test("connector subprocess integration: emits viewing_activity records", async (
 		assert.ok(result.rows[1]?.title, "Second row has title");
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+function viewingActivityState(
+	messages: EmittedMessage[],
+): Record<string, unknown> {
+	const state = messages.find(
+		(message) =>
+			message.type === "STATE" && message.stream === "viewing_activity",
+	);
+	assert.ok(
+		state?.type === "STATE",
+		"expected an emitted viewing_activity cursor",
+	);
+	return { viewing_activity: state.cursor };
+}
+
+function assertImportSucceeded(
+	messages: EmittedMessage[],
+	count: number,
+): void {
+	const done = messages.at(-1);
+	assert.ok(done?.type === "DONE");
+	assert.equal(done.status, "succeeded");
+	assert.equal(done.records_emitted, count);
+}
+
+test("Netflix direct_history replays the cursor day with stable occurrence ids but excludes earlier days", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-netflix-cursor-day-"));
+	try {
+		const path = join(importRoot, "NetflixViewingHistory.csv");
+		const row = "Invented Moon,2024-06-05";
+		await writeFile(path, `Title,Date\n${row}\n`, "utf8");
+		const first = await runNetflixImport(importRoot);
+		assertImportSucceeded(first.messages, 1);
+		const original = records(first.messages, "viewing_activity");
+		assert.equal(original.length, 1);
+		assert.equal(typeof original[0]?.id, "string");
+		const state = viewingActivityState(first.messages);
+		assert.deepEqual(state, {
+			viewing_activity: { last_timestamp: "2024-06-05T00:00:00.000Z" },
+		});
+
+		await writeFile(path, `Title,Date\n${row}\n${row}\n`, "utf8");
+		const second = await runNetflixImport(importRoot, state);
+		assertImportSucceeded(second.messages, 2);
+		const replayed = records(second.messages, "viewing_activity");
+		assert.equal(replayed.length, 2);
+		assert.equal(replayed[0]?.id, original[0]?.id);
+		assert.equal(typeof replayed[1]?.id, "string");
+		assert.notEqual(replayed[1]?.id, original[0]?.id);
+		assert.ok(
+			replayed.every(
+				(record) => record.watched_at === "2024-06-05T00:00:00.000Z",
+			),
+		);
+		assert.deepEqual(viewingActivityState(second.messages), state);
+
+		await writeFile(path, "Title,Date\nInvented Moon,2024-06-04\n", "utf8");
+		const older = await runNetflixImport(importRoot, state);
+		assertImportSucceeded(older.messages, 0);
+		assert.deepEqual(records(older.messages, "viewing_activity"), []);
+		assert.deepEqual(viewingActivityState(older.messages), state);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("Netflix full_export still excludes an exact timestamp equal to its emitted cursor", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-exact-cursor-"),
+	);
+	try {
+		await writeFile(
+			join(importRoot, "ViewingActivity.csv"),
+			"Profile Name,Start Time (UTC),Duration (H:MM:SS),Attributes,Title,Supplemental Video Type,Device Type,Bookmark,Latest Bookmark,Country\n" +
+				"Invented Profile,2024-06-05 10:30:00,0:10:00,,Invented Moon,,TV,0:10:00,0:10:00,US\n",
+			"utf8",
+		);
+		const first = await runNetflixImport(importRoot);
+		assertImportSucceeded(first.messages, 1);
+		assert.equal(records(first.messages, "viewing_activity").length, 1);
+		const state = viewingActivityState(first.messages);
+		const second = await runNetflixImport(importRoot, state);
+		assertImportSucceeded(second.messages, 0);
+		assert.deepEqual(records(second.messages, "viewing_activity"), []);
+		assert.deepEqual(viewingActivityState(second.messages), state);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
 	}
 });
