@@ -245,6 +245,17 @@ export function checkVersion(
 	manifest: ReadinessManifest,
 	baseVersion: string | null | undefined,
 ): Step | null {
+	if (baseVersion === undefined) {
+		return {
+			advisory: true,
+			detail:
+				"base manifest could not be read; cannot tell whether the connector is new",
+			name: "version",
+			nextAction:
+				"make the git checkout and base ref available, then rerun conformance",
+			verdict: "UNKNOWN",
+		};
+	}
 	if (baseVersion !== null) return null;
 	const version = typeof manifest.version === "string" ? manifest.version : "";
 	if (version === "0.1.0") {
@@ -308,7 +319,7 @@ export const SHARED_HELPER_RULES: readonly SharedHelperRule[] = [
  * error message; its default (/ECONN|ETIMEDOUT|timeout/i) matches neither.
  */
 const RETRYABLE_ERROR_THROWN =
-	/throw\s+new\s+\w*Error\(\s*[`'"][^`'"\n]*(?:rate_?limit|_5xx|http_\$\{|\b429\b|\b5\d\d\b)/i;
+	/throw\s+new\s+\w*Error\(\s*[`'"][^`'"\n]*(?:rate[ _-]?limit|_5xx|http_\$\{|\b429\b|\b5\d\d\b)/i;
 /**
  * The governor throws ConnectorRateLimitedError (`<name>_rate_limited`) when
  * 429s persist. Unless the connector catches it, only `retryablePattern`

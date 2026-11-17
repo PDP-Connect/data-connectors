@@ -191,7 +191,14 @@ test("version: a new connector above 0.1.0 is flagged; 0.1.0 and existing connec
 	assert.match(flagged?.nextAction ?? "", /"version": "0\.1\.0"/);
 	assert.equal(checkVersion({ version: "0.1.0" }, null)?.verdict, "PASS");
 	assert.equal(checkVersion({ version: "2.3.0" }, "2.2.0"), null);
-	assert.equal(checkVersion({ version: "2.3.0" }, undefined), null);
+	const unknown = checkVersion({ version: "2.3.0" }, undefined);
+	assert.ok(unknown);
+	assert.equal(unknown.name, "version");
+	assert.equal(unknown.verdict, "UNKNOWN");
+	assert.equal(unknown.advisory, true);
+	assert.match(unknown.detail, /base manifest could not be read/i);
+	assert.match(unknown.detail, /whether the connector is new/i);
+	assert.ok(unknown.nextAction);
 });
 
 // ─── shared helpers ───────────────────────────────────────────────────────
@@ -358,4 +365,34 @@ test("readinessSteps: steam (governed API connector with a coverage driver) has 
 	assert.ok(byName.has("evidence"));
 	assert.ok(byName.has("semantics"));
 	assert.ok(!byName.has("reachability"), "the never-actionable step is gone");
+});
+
+for (const message of [
+	"rate_limit",
+	"ratelimit",
+	"rate limited, try again later",
+	"rate-limited",
+]) {
+	test(`shared helpers: thrown ${message} needs a retryablePattern`, () => {
+		const source = `throw new Error(${JSON.stringify(message)});\nrunConnector({ collect });`;
+		const step = checkSharedHelpers(source, browserManifest);
+		assert.equal(step.verdict, "WEAK");
+		assert.equal(step.advisory, true);
+		assert.match(step.nextAction ?? "", /retryable-pattern/);
+		assert.equal(
+			checkSharedHelpers(
+				`${source}\nrunConnector({ retryablePattern: /rate[ _-]?limit/i });`,
+				browserManifest,
+			).verdict,
+			"PASS",
+		);
+	});
+}
+
+test("shared helpers: unrelated thrown error stays PASS", () => {
+	const step = checkSharedHelpers(
+		'throw new Error("invalid configuration");\nrunConnector({ collect });',
+		browserManifest,
+	);
+	assert.equal(step.verdict, "PASS");
 });
