@@ -512,6 +512,21 @@ export function parseReferencesHeader(
 	return ids;
 }
 
+// Decode already transfer-decoded bytes; unknown MIME labels must not restore
+// quoted-printable escapes. Preserve Buffer's existing charset semantics first.
+function decodeSnippetCharset(bytes: Buffer, charset: string): string {
+	const normalized =
+		charset.toLowerCase() === "iso-8859-1" ? "latin1" : charset;
+	if (Buffer.isEncoding(normalized)) {
+		return bytes.toString(normalized);
+	}
+	try {
+		return new TextDecoder(normalized).decode(bytes);
+	} catch {
+		return bytes.toString("utf8");
+	}
+}
+
 /**
  * Decode a body part buffer according to its MIME transfer encoding, then
  * extract a plain-text snippet: strip quoted reply blocks and collapse
@@ -533,9 +548,8 @@ export function makeSnippet(
 		if (enc === "base64") {
 			decoded = Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
 		} else if (enc === "quoted-printable") {
-			// Node names the MIME ISO-8859-1 charset "latin1".
-			const qpCharset = cs.toLowerCase() === "iso-8859-1" ? "latin1" : cs;
-			decoded = decodeQuotedPrintableBytes(buffer).toString(qpCharset);
+			const bytes = decodeQuotedPrintableBytes(buffer);
+			decoded = decodeSnippetCharset(bytes, cs);
 		} else {
 			decoded = buffer.toString(cs);
 		}

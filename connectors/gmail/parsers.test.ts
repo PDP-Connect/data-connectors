@@ -526,6 +526,21 @@ test("makeSnippet: quoted-printable decodes bytes in the declared charset", () =
 	}
 });
 
+test("makeSnippet: quoted-printable supports MIME charsets and decoded fallback", () => {
+	for (const [body, charset, expected] of [
+		["Caf=E9", "windows-1252", "Café"],
+		["Hello=20world", "windows-1252", "Hello world"],
+		["new text\r\n=3E old reply", "windows-1252", "new text"],
+		["Hello=20world", "x-invented-charset", "Hello world"],
+		["Caf=C3=A9", "x-invented-charset", "Café"],
+	] as const) {
+		assert.equal(
+			makeSnippet(Buffer.from(body, "ascii"), "quoted-printable", charset),
+			expected,
+		);
+	}
+});
+
 test("makeSnippet: base64 behavior is unchanged", () => {
 	assert.equal(
 		makeSnippet(Buffer.from("SGVsbG8gd29ybGQh", "ascii"), "base64", "utf8"),
