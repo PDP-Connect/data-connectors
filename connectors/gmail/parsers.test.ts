@@ -28,7 +28,6 @@ import {
 	isGmailSystemLabel,
 	isInTimeRange,
 	labelParentName,
-	MAX_BODY_FIELD_CHARS,
 	makeSnippet,
 	parseReferencesHeader,
 	sanitizeForJsonl,
@@ -947,8 +946,8 @@ test("buildMessageBodyRecord: control-rich canonical fields become null without 
 	}
 });
 
-test("buildMessageBodyRecord: truncates body_text past MAX_BODY_FIELD_CHARS and tags truncation", () => {
-	const huge = "x".repeat(MAX_BODY_FIELD_CHARS + 100);
+test("buildMessageBodyRecord: preserves a 40,000-character plain body", () => {
+	const huge = "é".repeat(40_000);
 	const rec = buildMessageBodyRecord({
 		bodyTextFull: huge,
 		bodyHtmlFull: null,
@@ -960,9 +959,9 @@ test("buildMessageBodyRecord: truncates body_text past MAX_BODY_FIELD_CHARS and 
 	assert.ok(typeof rec.body_text === "string");
 	const body = rec.body_text;
 	assert.ok(body);
-	assert.ok(body.endsWith("…[truncated]"));
-	assert.ok(body.length < huge.length);
-	// Pre-truncation bytes recorded for the full body.
+	assert.equal(body.includes("…[truncated]"), false);
+	assert.equal(body, huge);
+	// UTF-8 byte count remains the full decoded body length.
 	assert.equal(rec.body_text_bytes, Buffer.byteLength(huge, "utf8"));
 });
 
@@ -1196,4 +1195,66 @@ test("real gmail fixtures (if present on disk) smoke-parse", {
 	// and round-trip parse them. Current fixtures format is JSONL, not raw
 	// IMAP objects, so no parsers target them directly yet.
 	assert.ok(true);
+});
+
+test("buildMessageBodyRecord: preserves a 40,000-character HTML body", () => {
+	const html = `<p>${"é".repeat(39_993)}</p>`;
+	const rec = buildMessageBodyRecord({
+		bodyTextFull: null,
+		bodyHtmlFull: html,
+		gmMsgid: "a",
+		receivedAt: "2024-03-01T10:00:00.000Z",
+		textCharset: null,
+		htmlCharset: "utf-8",
+	});
+	assert.equal(html.length, 40_000);
+	assert.equal(rec.body_html, html);
+	assert.equal(rec.body_text, "é".repeat(39_993));
+	assert.ok(typeof rec.body_html === "string");
+	assert.equal(rec.body_html.includes("…[truncated]"), false);
+	assert.equal(rec.body_html_bytes, Buffer.byteLength(html, "utf8"));
+	assert.equal(
+		rec.body_text_bytes,
+		Buffer.byteLength("é".repeat(39_993), "utf8"),
+	);
+	assert.equal(validateRecord("message_bodies", rec).ok, true);
+	assert.deepEqual(
+		canonicalBodyBlobCandidates({ bodyTextFull: null, bodyHtmlFull: html }),
+		[],
+	);
+});
+
+test("buildMessageBodyRecord: oversized plain and HTML bodies use exact blobs", () => {
+	for (const textOnly of [true, false]) {
+		const text = "é".repeat(1_048_577);
+		const html = `<p>${text}</p>`;
+		const params = {
+			bodyTextFull: textOnly ? text : null,
+			bodyHtmlFull: textOnly ? null : html,
+		};
+		const rec = buildMessageBodyRecord({
+			...params,
+			gmMsgid: "a",
+			receivedAt: "2024-03-01T10:00:00.000Z",
+			textCharset: "utf-8",
+			htmlCharset: "utf-8",
+		});
+		assert.equal(rec.body_text, null);
+		assert.equal(rec.body_html, null);
+		assert.equal(rec.body_text_bytes, Buffer.byteLength(text, "utf8"));
+		assert.equal(
+			rec.body_html_bytes,
+			textOnly ? null : Buffer.byteLength(html, "utf8"),
+		);
+		const candidates = canonicalBodyBlobCandidates(params);
+		assert.deepEqual(
+			candidates.map((candidate) => candidate.jsonPath),
+			textOnly ? ["/body_text"] : ["/body_text", "/body_html"],
+		);
+		assert.deepEqual(
+			candidates.map((candidate) => candidate.content),
+			textOnly ? [Buffer.from(text)] : [Buffer.from(text), Buffer.from(html)],
+		);
+		assert.equal(validateRecord("message_bodies", rec).ok, true);
+	}
 });
