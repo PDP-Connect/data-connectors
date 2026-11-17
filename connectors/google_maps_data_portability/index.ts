@@ -318,6 +318,17 @@ export async function collectGoogleMapsDataPortability(
 		await ctx.emitRecord("archive_jobs", record);
 		nextJobs[resourceGroup] = archiveCursorFromRecord(record);
 		emitted.push(resourceGroup);
+		// Save each created job before another resource can fail or consume its grant.
+		await ctx.emit({
+			type: "STATE",
+			stream: "archive_jobs",
+			cursor: {
+				google_maps_data_portability: {
+					archive_jobs: { ...nextJobs },
+					fetched_at: nowIso(),
+				},
+			},
+		});
 	}
 
 	await emitDetailCoverage(ctx, {
@@ -327,17 +338,6 @@ export async function collectGoogleMapsDataPortability(
 		hydratedKeys: emitted,
 		considered: selected.length,
 		covered: emitted.length,
-	});
-
-	await ctx.emit({
-		type: "STATE",
-		stream: "archive_jobs",
-		cursor: {
-			google_maps_data_portability: {
-				archive_jobs: nextJobs,
-				fetched_at: nowIso(),
-			},
-		},
 	});
 }
 

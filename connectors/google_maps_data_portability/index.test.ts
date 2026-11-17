@@ -268,3 +268,127 @@ test("Google Maps Data Portability reports zero authorized groups without accept
 	assert.equal(coverage.considered, 1);
 	assert.equal(coverage.covered, 0);
 });
+
+test("Google Maps Data Portability checkpoints each job before a later group fails and resumes it", async () => {
+	const streams = [
+		{
+			name: "archive_jobs",
+			resources: ["maps.starred_places", "myactivity.maps"],
+		},
+	];
+	const first = makeContext({ streams });
+	const failure = new Error("synthetic second-group failure");
+	class FailingSecondClient extends FakeGoogleDataPortabilityClient {
+		override initiateArchive(
+			input: InitiateArchiveInput,
+		): Promise<InitiateArchiveResult> {
+			if (input.resources[0] === "myactivity.maps") {
+				this.calls.push({ input, method: "initiateArchive" });
+				assert.equal(first.records.length, 1);
+				assert.equal(
+					first.messages.filter((message) => message.type === "STATE").length,
+					1,
+					"checkpoint must already exist before starting the next group",
+				);
+				return Promise.reject(failure);
+			}
+			return super.initiateArchive(input);
+		}
+	}
+	const failedClient = new FailingSecondClient();
+	const env = { GOOGLE_DATAPORTABILITY_ACCESS_TOKEN: "synthetic-test-token" };
+	await assert.rejects(
+		collectGoogleMapsDataPortability(first.ctx, {
+			clientFactory: () => failedClient,
+			env,
+		}),
+		(error: unknown) => error === failure,
+	);
+	const checkpoint = first.messages.find((message) => message.type === "STATE");
+	assert.ok(checkpoint);
+	assert.equal(checkpoint.stream, "archive_jobs");
+	const cursor = checkpoint.cursor as {
+		google_maps_data_portability: {
+			archive_jobs: Record<string, { archive_job_id: string; state: string }>;
+			fetched_at: string;
+		};
+	};
+	assert.equal(
+		cursor.google_maps_data_portability.archive_jobs["maps.starred_places"]
+			?.archive_job_id,
+		"job-starred",
+	);
+	assert.equal(
+		cursor.google_maps_data_portability.archive_jobs["maps.starred_places"]
+			?.state,
+		"IN_PROGRESS",
+	);
+	assert.equal(
+		cursor.google_maps_data_portability.archive_jobs["myactivity.maps"],
+		undefined,
+	);
+	assert.equal(typeof cursor.google_maps_data_portability.fetched_at, "string");
+	assert.equal(
+		first.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+		false,
+	);
+
+	const retry = makeContext({ streams, state: structuredClone(cursor) });
+	const resumedClient = new FakeGoogleDataPortabilityClient();
+	await collectGoogleMapsDataPortability(retry.ctx, {
+		clientFactory: () => resumedClient,
+		env,
+	});
+	assert.deepEqual(
+		resumedClient.calls.filter((call) => call.method === "getArchiveState"),
+		[{ method: "getArchiveState", input: "job-starred" }],
+	);
+	assert.deepEqual(
+		resumedClient.calls.filter((call) => call.method === "initiateArchive"),
+		[{ method: "initiateArchive", input: { resources: ["myactivity.maps"] } }],
+	);
+	assert.equal(retry.records[0]?.data.archive_job_id, "job-starred");
+});
+
+test("Google Maps Data Portability successful checkpoints accumulate both jobs without mutating earlier snapshots", async () => {
+	const fakeClient = new FakeGoogleDataPortabilityClient();
+	const { ctx, messages, records } = makeContext({
+		streams: [
+			{
+				name: "archive_jobs",
+				resources: ["maps.starred_places", "myactivity.maps"],
+			},
+		],
+	});
+	await collectGoogleMapsDataPortability(ctx, {
+		clientFactory: () => fakeClient,
+		env: { GOOGLE_DATAPORTABILITY_ACCESS_TOKEN: "synthetic-test-token" },
+	});
+	const states = messages.filter((message) => message.type === "STATE");
+	assert.equal(states.length, 2);
+	const jobs = states.map(
+		(message) =>
+			(
+				message.cursor as {
+					google_maps_data_portability: {
+						archive_jobs: Record<string, { archive_job_id: string }>;
+					};
+				}
+			).google_maps_data_portability.archive_jobs,
+	);
+	assert.deepEqual(Object.keys(jobs[0] ?? {}), ["maps.starred_places"]);
+	assert.deepEqual(
+		Object.fromEntries(
+			Object.entries(jobs[1] ?? {}).map(([key, job]) => [
+				key,
+				job.archive_job_id,
+			]),
+		),
+		{
+			"maps.starred_places": "job-starred",
+			"myactivity.maps": "job-activity",
+		},
+	);
+	assert.equal(records.length, 2);
+	assert.equal(messages.at(-1)?.type, "DETAIL_COVERAGE");
+});
