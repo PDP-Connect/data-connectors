@@ -694,6 +694,35 @@ test("buildInboxMessageRecord: parses 'MMM DD' + year into ISO date", () => {
 	assert.equal(rec.date_received, "2026-04-13");
 });
 
+
+test("buildInboxMessageRecord: yearless dates do not move past collection day", () => {
+	for (const [date_short, year, fetchedAt, expected] of [
+		["Dec 30", 2027, "2027-01-02T08:00:00Z", "2026-12-30"],
+		["Jan 2", 2027, "2027-01-02T08:00:00Z", "2027-01-02"],
+		["Apr 13", 2026, "2026-04-22T00:00:00Z", "2026-04-13"],
+		["Apr 13", 2026, "t", "2026-04-13"],
+	] as const) {
+		const row: InboxRow = { status: "UNREAD", date_short, preview: "Invented message" };
+		const before = buildInboxMessageRecord(row, year, "t");
+		const record = buildInboxMessageRecord(row, year, fetchedAt);
+		assert.ok(before);
+		assert.ok(record);
+		assert.equal(record.date_received, expected);
+		assert.deepEqual(record, { ...before, date_received: expected }, "only the date changes");
+	}
+});
+
+test("buildInboxMessageRecord: invalid collection days retain the caller year", () => {
+	for (const fetchedAt of ["t", "", "2027-02-30T00:00:00Z", "2027-13-02T00:00:00Z",
+		"2027-00-02T00:00:00Z", "2027-01-00T00:00:00Z", "0000-01-02T00:00:00Z",
+		"2027-1-02T00:00:00Z", "01/02/2027"]) {
+		const record = buildInboxMessageRecord(
+			{ status: "Read", date_short: "Dec 30", preview: "Invented message" }, 2027, fetchedAt,
+		);
+		assert.equal(record?.date_received, "2027-12-30", fetchedAt);
+	}
+});
+
 test("buildInboxMessageRecord: calendar date is host-zone independent", () => {
 	const previous = process.env.TZ;
 	try {

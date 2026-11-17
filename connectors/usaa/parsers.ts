@@ -849,14 +849,18 @@ export function buildAccountStatsRecord(
 export function buildInboxMessageRecord(
 	m: InboxRow,
 	year: number,
-	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
-	// Kept positionally so call sites and siblings stay stable.
-	_fetchedAt: string,
+	// Collection day chooses the year of a yearless date; collection time is not stored.
+	fetchedAt: string,
 ): InboxMessageRecord | null {
 	if (!m.date_short) {
 		return null;
 	}
-	const iso = inboxDate(m.date_short, year);
+	let iso = inboxDate(m.date_short, year);
+	const day = fetchedAt.slice(0, 10);
+	const collectionDay = /^\d{4}-\d{2}-\d{2}$/.test(day) ? csvDate(day) : null;
+	if (iso !== null && collectionDay !== null && iso > collectionDay) {
+		iso = inboxDate(m.date_short, year - 1);
+	}
 	const id = hashId(`${m.date_short}|${m.preview.slice(0, 120)}`);
 	return {
 		id,
