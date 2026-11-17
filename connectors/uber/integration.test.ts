@@ -443,6 +443,30 @@ test("fetchAllActivities: two duplicate-only pages in a row still follow the cur
 	assert.equal(calls.length, 4);
 });
 
+test("fetchAllActivities: a new trip resets the duplicate-only page streak", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t1") },
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t2") },
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t3") },
+			{ body: activitiesBody([{ uuid: "trip-b" }], "t4") },
+			{ body: activitiesBody([{ uuid: "trip-b" }], "t5") },
+			{ body: activitiesBody([{ uuid: "trip-b" }], "t6") },
+			{ body: activitiesBody([{ uuid: "trip-c" }], null) },
+		],
+	});
+	const delays: number[] = [];
+	const result = await fetchAllActivities(fetchPath, async (ms) => {
+		delays.push(ms);
+	});
+	assert.deepEqual(result, {
+		activities: [{ uuid: "trip-a" }, { uuid: "trip-b" }, { uuid: "trip-c" }],
+		truncated: false,
+	});
+	assert.equal(calls.length, 7);
+	assert.equal(delays.length, 6);
+});
+
 test("fetchAllActivities: three duplicate-only pages in a row stop as truncated", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
 		activitiesPages: Array.from({ length: 200 }, (_, i) => ({
