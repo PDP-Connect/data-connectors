@@ -380,8 +380,14 @@ async function collectViewingActivity(
 			continue;
 		}
 
-		// Skip rows before the since cursor
-		if (since && rec.watched_at <= since) {
+		// Replay the cursor day for day-precision history; occurrence ids upsert it.
+		// Full exports retain the exclusive exact-timestamp cursor.
+		if (
+			since &&
+			(schema === "direct_history"
+				? rec.watched_at < since
+				: rec.watched_at <= since)
+		) {
 			skippedCount += 1;
 			continue;
 		}
