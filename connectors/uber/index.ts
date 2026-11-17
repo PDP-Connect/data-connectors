@@ -344,7 +344,22 @@ export async function fetchAllActivities(
 				...(nextPageToken ? { nextPageToken } : {}),
 			});
 			assertUberOk(status, body, "Activities");
-			const parsed = JSON.parse(body) as UberActivitiesResponse;
+			const parsed = JSON.parse(body) as
+				| (UberActivitiesResponse & { errors?: { message?: unknown }[] })
+				| null;
+			if (
+				(Array.isArray(parsed?.errors) && parsed.errors.length > 0) ||
+				parsed?.data == null
+			) {
+				const message = Array.isArray(parsed?.errors)
+					? parsed.errors[0]?.message
+					: undefined;
+				const detail =
+					typeof message === "string" ? message : "Missing Activities data";
+				throw new Error(
+					`uber_graphql_error [endpoint Activities]: ${redactTransportDetail(detail).slice(0, 200)}`,
+				);
+			}
 			const page = parsed.data?.activities?.past?.activities ?? [];
 			let newOnPage = 0;
 			for (const activity of page) {

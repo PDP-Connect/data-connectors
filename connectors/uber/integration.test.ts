@@ -19,7 +19,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams, type UberPageFetch } from "./index.ts";
+import {
+	collectAllStreams,
+	fetchAllActivities,
+	UBER_RETRYABLE_PATTERN,
+	type UberPageFetch,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T00:00:00.000Z";
@@ -401,4 +406,56 @@ test("collectAllStreams: never calls globalThis.fetch — every read goes throug
 	} finally {
 		globalThis.fetch = original;
 	}
+});
+
+test("fetchAllActivities: HTTP 200 GraphQL failures reject instead of certifying empty history", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{
+				body: JSON.stringify({
+					errors: [{ message: "temporarily unavailable" }],
+					data: null,
+				}),
+			},
+		],
+	});
+	await assert.rejects(fetchAllActivities(fetchPath, NO_DELAY), {
+		message:
+			"uber_graphql_error [endpoint Activities]: temporarily unavailable",
+	});
+	assert.deepEqual(calls, ["Activities"]);
+	assert.equal(
+		UBER_RETRYABLE_PATTERN.test("uber_graphql_error [endpoint Activities]"),
+		false,
+	);
+	assert.equal(
+		UBER_RETRYABLE_PATTERN.test("uber_http_503 [endpoint Activities]"),
+		false,
+	);
+});
+
+[{ data: null }, {}, { errors: [{ message: "failed" }], data: {} }].forEach(
+	(body) => {
+		test(`fetchAllActivities: rejects failed envelope ${JSON.stringify(body)}`, async () => {
+			const { fetchPath } = makeScriptedFetch({
+				activitiesPages: [{ body: JSON.stringify(body) }],
+			});
+			await assert.rejects(
+				fetchAllActivities(fetchPath, NO_DELAY),
+				/uber_graphql_error/,
+			);
+		});
+	},
+);
+
+[{ activities: { past: { activities: [] } } }, {}].forEach((data) => {
+	test(`fetchAllActivities: preserves empty history ${JSON.stringify(data)}`, async () => {
+		const { fetchPath } = makeScriptedFetch({
+			activitiesPages: [{ body: JSON.stringify({ data }) }],
+		});
+		assert.deepEqual(await fetchAllActivities(fetchPath, NO_DELAY), {
+			activities: [],
+			truncated: false,
+		});
+	});
 });
