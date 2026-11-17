@@ -177,6 +177,70 @@ export class ConnectorRateLimitedError extends Error {
 	}
 }
 
+/** An answer the governor can classify. */
+export interface GovernedHttpAnswer {
+	retryAfter: string | null;
+	status: number;
+}
+
+/** Observation only: retry policy remains with the caller and governor. */
+export interface HttpAnswerRetryObserver {
+	noteAnswer(retryAfter: string | null): void;
+	noteAttempt(): void;
+}
+
+export type GovernedHttpOutcome<T> =
+	| { ok: true; value: T }
+	| { ok: false; rateLimited: true }
+	| { ok: false; rateLimited: false; status: number | null };
+
+/**
+ * Send one request through the governor. `send` throws on a network
+ * failure. Fails as rate limited when 429s did not lift, otherwise with the
+ * last status (null after network failures).
+ */
+export async function requestGovernedAnswer<T extends GovernedHttpAnswer>(
+	http: {
+		governor: Pick<ConnectorHttpGovernor, "request">;
+		retryBudget: HttpAnswerRetryObserver;
+	},
+	send: () => Promise<T>,
+): Promise<GovernedHttpOutcome<T>> {
+	try {
+		const result = await http.governor.request(
+			() => {
+				http.retryBudget.noteAttempt();
+				return send();
+			},
+			(answer: T) => {
+				http.retryBudget.noteAnswer(answer.retryAfter);
+				return {
+					headers:
+						answer.retryAfter === null
+							? {}
+							: { "retry-after": answer.retryAfter },
+					status: answer.status,
+					value: answer,
+				};
+			},
+		);
+		return { ok: true, value: result.value };
+	} catch (error) {
+		if (error instanceof ConnectorRateLimitedError) {
+			return { ok: false, rateLimited: true };
+		}
+		if (error instanceof RetryExhaustedError) {
+			const cause = error.originalCause as { status?: unknown } | undefined;
+			return {
+				ok: false,
+				rateLimited: false,
+				status: typeof cause?.status === "number" ? cause.status : null,
+			};
+		}
+		throw error;
+	}
+}
+
 const DEFAULT_MAX_ATTEMPTS = 4;
 const DEFAULT_BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_DELAY_MS = 60_000;

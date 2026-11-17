@@ -2772,7 +2772,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/goodreads/fetcher.ts",
-			line: 302,
+			line: 251,
 			column: 18,
 			category: "bounded_retry_polling",
 			note: "A fetch goes through the HTTP governor (which owns bounded retries after network errors and 429/5xx); the loop only reloads once after a WAF challenge or returns to the site at most twice, each gated on the previous answer.",
@@ -6199,6 +6199,20 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			column: 3,
 			category: "ordered_browser_interaction",
 			note: "fillVenmoOtpCode(): enter split digits in order to preserve focus and provider auto-advance.",
+		},
+		{
+			path: "src/connector-http-answer.test.ts",
+			line: 120,
+			column: 20,
+			category: "test_assertion_sequencing",
+			note: "exhausted-status test: each cause fixture is asserted on its own so a failure names the cause.",
+		},
+		{
+			path: "src/connector-http-answer.test.ts",
+			line: 134,
+			column: 3,
+			category: "test_assertion_sequencing",
+			note: "unknown-error test: each error is asserted on its own so a failure names the error.",
 		},
 		{
 			path: "src/playwright-download.ts",
