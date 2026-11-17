@@ -169,6 +169,53 @@ test("buildTweetRecord: missing or malformed media arrays count as zero", () => 
 	}
 });
 
+test("buildTweetRecord: URL counts reject non-arrays and preserve other fields", () => {
+	const tweet = {
+		id_str: "synthetic-url-count",
+		created_at: "2024-06-05T13:45:22.000Z",
+		full_text: "Synthetic tweet",
+		favorite_count: "3",
+		retweet_count: "2",
+		lang: "en",
+		in_reply_to_status_id_str: "parent",
+		in_reply_to_screen_name: "synthetic-parent",
+		extended_entities: { media: [{ id: "m1" }, { id: "m2" }] },
+	};
+	const expected = {
+		id: "synthetic-url-count",
+		text: "Synthetic tweet",
+		created_at: "2024-06-05T13:45:22.000Z",
+		favorite_count: 3,
+		retweet_count: 2,
+		lang: "en",
+		in_reply_to_status_id: "parent",
+		in_reply_to_screen_name: "synthetic-parent",
+		media_count: 2,
+		url_count: 0,
+	};
+	for (const urls of [{}, "not-an-array", null, undefined, []]) {
+		assert.deepEqual(
+			buildTweetRecord(
+				unwrapTweetEntry({ tweet: { ...tweet, entities: { urls } } }),
+			),
+			expected,
+		);
+	}
+	assert.deepEqual(buildTweetRecord(tweet), expected);
+	assert.deepEqual(
+		buildTweetRecord({
+			...tweet,
+			entities: {
+				urls: [
+					{ url: "https://example.invalid/a" },
+					{ url: "https://example.invalid/b" },
+				],
+			},
+		}),
+		{ ...expected, url_count: 2 },
+	);
+});
+
 test("buildTweetRecord: reply tweet populates reply fields", () => {
 	const t = unwrapTweetEntry(TWEET_REPLY);
 	const rec = buildTweetRecord(t);

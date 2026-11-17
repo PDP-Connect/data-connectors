@@ -81,7 +81,7 @@ export function buildTweetRecord(t: TweetShape): TweetOut | null {
 			: Array.isArray(t.entities?.media)
 				? t.entities.media.length
 				: 0,
-		url_count: (t.entities?.urls || []).length,
+		url_count: Array.isArray(t.entities?.urls) ? t.entities.urls.length : 0,
 	};
 }
 
