@@ -223,3 +223,55 @@ test("a response from an older window does not replace a newer one", async () =>
 	await pacer.send(core, async () => ({ status: 200, rateLimit: limit(59, 3640) }));
 	assert.deepEqual(clock.sleeps, [40_000 + RATE_LIMIT_RESET_MARGIN_MS]);
 });
+
+test("a newer exhausted window observed during a wait survives the waiter waking", async () => {
+	const clock = { ms: START_MS, sleeps: [] as number[] };
+	let releaseSleep: () => void = () => {};
+	let holdNext = true;
+	const pacer = createRateLimitPacer({
+		now: () => new Date(clock.ms),
+		sleep: (ms: number) => {
+			clock.sleeps.push(ms);
+			if (!holdNext) {
+				clock.ms += ms;
+				return Promise.resolve();
+			}
+			holdNext = false;
+			return new Promise<void>((resolve) => {
+				releaseSleep = () => {
+					clock.ms += ms;
+					resolve();
+				};
+			});
+		},
+	});
+	const core = "https://api.github.com/users/sample-user/events/public";
+	let releaseB: (value: { status: number; rateLimit: RateLimitObservation }) => void = () => {};
+	const inFlightB = pacer.send(core, () => new Promise<{ status: number; rateLimit: RateLimitObservation }>((resolve) => (releaseB = resolve)));
+	await pacer.send(core, async () => ({ status: 200, rateLimit: limit(0, 30) }));
+	let waiterSentAt: number | undefined;
+	const waiter = pacer.send(core, async () => {
+		waiterSentAt = clock.ms;
+		return { status: 200, rateLimit: limit(59, 3690) };
+	});
+	releaseB({ status: 200, rateLimit: limit(0, 90) });
+	await inFlightB;
+	releaseSleep();
+	await waiter;
+	assert.deepEqual(clock.sleeps, [30_000 + RATE_LIMIT_RESET_MARGIN_MS, 60_000]);
+	assert.equal(waiterSentAt, START_MS + 90_000 + RATE_LIMIT_RESET_MARGIN_MS);
+});
+
+test("a waiter whose own window is still current clears it and sends after the reset", async () => {
+	const { clock, now, sleep } = fakeClock();
+	const pacer = createRateLimitPacer({ now, sleep });
+	const core = "https://api.github.com/users/sample-user/events/public";
+	await pacer.send(core, async () => ({ status: 200, rateLimit: limit(0, 30) }));
+	let sentAt: number | undefined;
+	await pacer.send(core, async () => {
+		sentAt = clock.ms;
+		return { status: 200, rateLimit: limit(59, 3630) };
+	});
+	assert.deepEqual(clock.sleeps, [30_000 + RATE_LIMIT_RESET_MARGIN_MS]);
+	assert.equal(sentAt, START_MS + 30_000 + RATE_LIMIT_RESET_MARGIN_MS);
+});

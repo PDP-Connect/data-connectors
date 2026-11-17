@@ -102,10 +102,12 @@ export function createRateLimitPacer({ now, sleep, maxTotalWaitMs = MAX_TOTAL_RA
 	/** Send `request`, first waiting out a spent window, and handle one refusal. */
 	async function send<T extends Paced>(url: string, request: () => Promise<T>): Promise<T> {
 		const resource = resourceOf(url);
-		const spent = windows.get(resource);
-		if (spent !== undefined && spent.remaining === 0) {
+		// Another lane can observe a newer spent window while this one sleeps:
+		// clear only the window waited for, then check again.
+		for (let spent = windows.get(resource); spent !== undefined && spent.remaining === 0; spent = windows.get(resource)) {
 			const waitMs = spent.resetAtMs - nowMs() + RATE_LIMIT_RESET_MARGIN_MS;
-			if (waitMs <= 0 || (await spend(waitMs))) windows.delete(resource);
+			if (waitMs > 0 && !(await spend(waitMs))) break;
+			if (windows.get(resource) === spent) windows.delete(resource);
 		}
 		for (let attempt = 0; ; attempt += 1) {
 			let result: T | undefined;
@@ -117,10 +119,11 @@ export function createRateLimitPacer({ now, sleep, maxTotalWaitMs = MAX_TOTAL_RA
 			}
 			const rateLimit = result === undefined ? rateLimitOf(failure) : result.rateLimit;
 			observe(resource, rateLimit);
+			const refused = windows.get(resource);
 			const status = result === undefined ? failureStatus(failure) : result.status;
 			const waitMs = status !== undefined && LIMIT_STATUSES.has(status) ? refusalWaitMs(rateLimit) : null;
 			if (attempt === 0 && waitMs !== null && (await spend(waitMs))) {
-				windows.delete(resource);
+				if (windows.get(resource) === refused) windows.delete(resource);
 				continue;
 			}
 			if (result === undefined) throw failure;
