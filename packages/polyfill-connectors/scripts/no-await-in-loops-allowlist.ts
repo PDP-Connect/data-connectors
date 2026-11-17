@@ -2485,7 +2485,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/github_browser/rate-limit.ts",
-			line: 108,
+			line: 114,
 			column: 14,
 			category: "bounded_retry_polling",
 			note: "Retry a refused GitHub API request at most once, after the wait its own rate-limit headers name.",

@@ -80,7 +80,13 @@ export function createRateLimitPacer({ now, sleep, maxTotalWaitMs = MAX_TOTAL_RA
 	};
 	const observe = (resource: string, rateLimit: RateLimitObservation | undefined): void => {
 		if (rateLimit === undefined || rateLimit.remaining === null || rateLimit.resetEpochSeconds === null) return;
-		windows.set(resource, { remaining: rateLimit.remaining, resetAtMs: rateLimit.resetEpochSeconds * 1000 });
+		const next = { remaining: rateLimit.remaining, resetAtMs: rateLimit.resetEpochSeconds * 1000 };
+		// Concurrent lanes share a window and their responses can land out of
+		// order. A response from an older window never replaces a newer one, and
+		// within one window the lowest count wins: the allowance only falls.
+		const prior = windows.get(resource);
+		if (prior !== undefined && (next.resetAtMs < prior.resetAtMs || (next.resetAtMs === prior.resetAtMs && next.remaining > prior.remaining))) return;
+		windows.set(resource, next);
 	};
 	// Wait, in ms, that the headers of a refusal call for; null when they call for none.
 	const refusalWaitMs = (rateLimit: RateLimitObservation | undefined): number | null => {

@@ -197,3 +197,29 @@ test("history walks its search pages on the rate-limit headers with no fixed sle
 	assert.equal(requests[10]?.at, 60_000 + RATE_LIMIT_RESET_MARGIN_MS);
 	assert.equal(records.length, 1);
 });
+
+test("a slower response from the same window does not hide an exhausted allowance", async () => {
+	const { clock, now, sleep } = fakeClock();
+	const pacer = createRateLimitPacer({ now, sleep });
+	const core = "https://api.github.com/users/sample-user/events/public";
+	let releaseA: (value: { status: number; rateLimit: RateLimitObservation }) => void = () => {};
+	const slowA = pacer.send(core, () => new Promise<{ status: number; rateLimit: RateLimitObservation }>((resolve) => (releaseA = resolve)));
+	await pacer.send(core, async () => ({ status: 200, rateLimit: limit(0, 30) }));
+	releaseA({ status: 200, rateLimit: limit(1, 30) });
+	await slowA;
+	await pacer.send(core, async () => ({ status: 200, rateLimit: limit(59, 3630) }));
+	assert.deepEqual(clock.sleeps, [30_000 + RATE_LIMIT_RESET_MARGIN_MS]);
+});
+
+test("a response from an older window does not replace a newer one", async () => {
+	const { clock, now, sleep } = fakeClock();
+	const pacer = createRateLimitPacer({ now, sleep });
+	const core = "https://api.github.com/users/sample-user/events/public";
+	let releaseA: (value: { status: number; rateLimit: RateLimitObservation }) => void = () => {};
+	const slowA = pacer.send(core, () => new Promise<{ status: number; rateLimit: RateLimitObservation }>((resolve) => (releaseA = resolve)));
+	await pacer.send(core, async () => ({ status: 200, rateLimit: limit(0, 40) }));
+	releaseA({ status: 200, rateLimit: limit(5, 20) });
+	await slowA;
+	await pacer.send(core, async () => ({ status: 200, rateLimit: limit(59, 3640) }));
+	assert.deepEqual(clock.sleeps, [40_000 + RATE_LIMIT_RESET_MARGIN_MS]);
+});
