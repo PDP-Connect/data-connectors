@@ -55,7 +55,6 @@ const HEADER_FOLD_RE = /\r?\n[ \t]+/g;
 const REFERENCES_HEADER_RE = /^references:\s*(.*)$/im;
 const ANGLE_ID_RE = /<([^>]+)>/g;
 const QUOTED_REPLY_RE = /^\s*>/;
-const HEX_ESCAPE_RE = /[=]([0-9A-Fa-f]{2})/g;
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -379,6 +378,28 @@ export function findLeafByPath(
 
 // ─── Body decoding helpers ──────────────────────────────────────────────
 
+function decodeQuotedPrintableBytes(buffer: Buffer): Buffer {
+	const raw = buffer.toString("ascii");
+	const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
+	// Decode the =HH sequences as raw bytes, then interpret in charset.
+	const bytes: number[] = [];
+	let i = 0;
+	while (i < unfolded.length) {
+		if (
+			unfolded[i] === "=" &&
+			i + 2 < unfolded.length &&
+			HEX_PAIR_RE.test(unfolded.slice(i + 1, i + 3))
+		) {
+			bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
+			i += 3;
+		} else {
+			bytes.push(unfolded.charCodeAt(i));
+			i += 1;
+		}
+	}
+	return Buffer.from(bytes);
+}
+
 /**
  * Decode a body part buffer according to its MIME transfer encoding and
  * charset into a JavaScript string. Best-effort; never throws.
@@ -398,25 +419,7 @@ export function decodeBodyPart(
 			return Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
 		}
 		if (enc === "quoted-printable") {
-			const raw = buffer.toString("ascii");
-			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-			// Decode the =HH sequences as raw bytes, then interpret in charset.
-			const bytes: number[] = [];
-			let i = 0;
-			while (i < unfolded.length) {
-				if (
-					unfolded[i] === "=" &&
-					i + 2 < unfolded.length &&
-					HEX_PAIR_RE.test(unfolded.slice(i + 1, i + 3))
-				) {
-					bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
-					i += 3;
-				} else {
-					bytes.push(unfolded.charCodeAt(i));
-					i += 1;
-				}
-			}
-			return Buffer.from(bytes).toString(cs);
+			return decodeQuotedPrintableBytes(buffer).toString(cs);
 		}
 		return buffer.toString(cs);
 	} catch {
@@ -530,12 +533,9 @@ export function makeSnippet(
 		if (enc === "base64") {
 			decoded = Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
 		} else if (enc === "quoted-printable") {
-			// Minimal QP decode: =HH hex + soft line breaks (=\r?\n)
-			const raw = buffer.toString("ascii");
-			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-			decoded = unfolded.replace(HEX_ESCAPE_RE, (_, h: string) =>
-				String.fromCharCode(Number.parseInt(h, 16)),
-			);
+			// Node names the MIME ISO-8859-1 charset "latin1".
+			const qpCharset = cs.toLowerCase() === "iso-8859-1" ? "latin1" : cs;
+			decoded = decodeQuotedPrintableBytes(buffer).toString(qpCharset);
 		} else {
 			decoded = buffer.toString(cs);
 		}
