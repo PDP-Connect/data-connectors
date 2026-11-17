@@ -488,6 +488,17 @@ test("session builders normalize every timestamp fallback", () => {
 		["2026-07-31T14:01:26Z", "2026-07-31T14:01:26.000Z"],
 		["2026-07-31T14:01:26+02:00", "2026-07-31T12:01:26.000Z"],
 		["2026-07-31T14:01:26.123Z", "2026-07-31T14:01:26.123Z"],
+		["2026-07-31T14:01:26", null],
+		["2026-02-30T00:00:00Z", null],
+		["2026-01-01T24:00:00Z", null],
+		["2026-07-31T16:01:26+02:00", "2026-07-31T14:01:26.000Z"],
+		["0000-02-29T00:00:00Z", "0000-02-29T00:00:00.000Z"],
+		["0099-02-29T00:00:00Z", null],
+		["2026-00-01T00:00:00Z", null],
+		["2026-13-01T00:00:00Z", null],
+		["2026-01-00T00:00:00Z", null],
+		["2026-01-01T00:60:00Z", null],
+		["2026-01-01T00:00:60Z", null],
 		["invalid", null],
 		["+999999-01-01T00:00:00Z", null],
 	];
@@ -510,6 +521,25 @@ test("session builders normalize every timestamp fallback", () => {
 				assert.equal(record.last_event_at, expected);
 			}
 		}
+	}
+});
+
+test("session builders use first event when metadata timestamp is invalid", () => {
+	const agg: RolloutAggregate = {
+		meta: { timestamp: "2026-02-30T00:00:00Z" },
+		firstTs: "2026-07-31T16:01:26+02:00",
+		lastTs: "2026-07-31T14:01:26.123Z",
+		messageCount: 0,
+		functionCallCount: 0,
+		rolloutPath: "/invented/rollout.jsonl",
+	};
+	const row = makeThreadRow({ created_at: null, updated_at: null });
+	for (const record of [
+		buildRolloutOnlySessionRecord("synthetic", agg),
+		buildThreadSessionRecord("synthetic", row, agg),
+	]) {
+		assert.equal(record.started_at, "2026-07-31T14:01:26.000Z");
+		assert.equal(record.last_event_at, "2026-07-31T14:01:26.123Z");
 	}
 });
 
