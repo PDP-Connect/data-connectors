@@ -6524,7 +6524,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/anthropic_live/index.test.ts",
-			line: 413,
+			line: 457,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "Malformed organization cases run against isolated collector harnesses in sequence so each case's assertions finish before the next starts.",

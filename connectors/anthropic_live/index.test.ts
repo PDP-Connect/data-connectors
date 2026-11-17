@@ -397,6 +397,50 @@ test("parsers: plan family, usage fallback and message edge cases", () => {
 	);
 });
 
+test("usage limits reject unreadable entries instead of certifying an empty or partial inventory", () => {
+	for (const raw of [
+		{ limits: [null, {}] },
+		{ limits: [{ kind: "x" }, 5] },
+		{ limits: [{}] },
+		{ limits: [{ kind: "x" }, {}] },
+		{ five_hour: { utilization: "n/a" } },
+		{ five_hour: { utilization: 10 }, seven_day: { utilization: "n/a" } },
+		{ five_hour: 5 },
+	]) assert.equal(buildUsageLimitRecords(raw), null);
+	assert.deepEqual(buildUsageLimitRecords({ limits: [] }), []);
+	assert.deepEqual(buildUsageLimitRecords({ five_hour: null, seven_day: null }), []);
+	for (const raw of [
+		{ five_hour: null, seven_day: { utilization: 40 } },
+		{ seven_day: { utilization: 40 } },
+	]) {
+		assert.deepEqual(
+			buildUsageLimitRecords(raw)?.map((r) => [r.id, r.percent_used]),
+			[["weekly_all", 40]],
+		);
+	}
+});
+
+test("usage limits reject duplicate derived ids without changing retained ids", () => {
+	assert.equal(buildUsageLimitRecords({ limits: [
+		{ kind: "K", scope: { model: { display_name: "web" } } },
+		{ kind: "K", scope: { surface: "web" } },
+	] }), null);
+	assert.equal(buildUsageLimitRecords({ limits: [
+		{ kind: "A-B" }, { kind: "A B" },
+	] }), null);
+	assert.equal(buildUsageLimitRecords({ limits: [
+		{ kind: "K", scope: { model: { display_name: "A-B" } } },
+		{ kind: "K", scope: { model: { display_name: "A B" } } },
+	] }), null);
+	assert.deepEqual(buildUsageLimitRecords({ limits: [
+		{ kind: "Session", scope: { model: { display_name: "Model A" }, surface: "Web" }, percent: 10 },
+		{ kind: "Weekly All", scope: { surface: "Desktop" }, percent: 40 },
+	] })?.map((r) => [r.id, r.kind, r.scope_model, r.scope_surface, r.percent_used]), [
+		["session:model_a:web", "Session", "Model A", "Web", 10],
+		["weekly_all:desktop", "Weekly All", null, "Desktop", 40],
+	]);
+});
+
 test("organization selection follows the export connector's rule", () => {
 	assert.equal(selectChatOrganization(ORGS)?.uuid, ORG);
 	assert.equal(

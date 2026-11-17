@@ -316,23 +316,37 @@ function windowRecord(
  * `usage_limits` records: one per limit claude.ai reports. Claude reports
  * the share of each limit used and when it resets, never an absolute cap.
  * Reads `limits[]`; when a response has none, falls back to the older
- * `five_hour` / `seven_day` windows. Returns null when the body is not a
- * usage object, so a drifted response is a parse error, not "no limits".
+ * `five_hour` / `seven_day` windows. Returns null for a non-usage body,
+ * any unreadable limits entry or unreadable non-null legacy window, or duplicate
+ * derived ids. A drifted response is a parse error, not "no limits" or a partial
+ * inventory. Empty limits arrays and absent/null legacy windows remain empty;
+ * existing derived id formatting is preserved.
  */
 export function buildUsageLimitRecords(raw: unknown): RecordData[] | null {
 	if (!isRecord(raw)) return null;
 	const usage = raw as RawUsage;
+	const records: RecordData[] = [];
 	if (Array.isArray(usage.limits)) {
-		return usage.limits
-			.filter(isRecord)
-			.map((limit) => limitRecord(limit as RawUsageLimit))
-			.filter((record): record is RecordData => record !== null);
+		for (const limit of usage.limits) {
+			if (!isRecord(limit)) return null;
+			const record = limitRecord(limit as RawUsageLimit);
+			if (record === null) return null;
+			records.push(record);
+		}
+	} else {
+		if (!("five_hour" in raw || "seven_day" in raw)) return null;
+		for (const [value, kind, group] of [
+			[usage.five_hour, "session", "session"],
+			[usage.seven_day, "weekly_all", "weekly"],
+		] as const) {
+			if (value === null || value === undefined) continue;
+			const record = windowRecord(value, kind, group);
+			if (record === null) return null;
+			records.push(record);
+		}
 	}
-	if (!("five_hour" in raw || "seven_day" in raw)) return null;
-	return [
-		windowRecord(usage.five_hour, "session", "session"),
-		windowRecord(usage.seven_day, "weekly_all", "weekly"),
-	].filter((record): record is RecordData => record !== null);
+	const ids = new Set(records.map((record) => record.id));
+	return ids.size === records.length ? records : null;
 }
 
 /** Accounts with chat access only; never selects the conversation/export org. */
