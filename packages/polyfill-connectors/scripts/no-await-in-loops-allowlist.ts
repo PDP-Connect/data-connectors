@@ -3780,7 +3780,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/notion/index.ts",
-			line: 336,
+			line: 338,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",
