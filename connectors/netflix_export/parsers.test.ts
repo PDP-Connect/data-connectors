@@ -281,6 +281,18 @@ test("inferDirectHistoryDateOrder rejects conflicting evidence in either row ord
 	}
 });
 
+test("inferDirectHistoryDateOrder ignores an impossible date as order evidence", () => {
+	for (const dates of [
+		["25/03/2024", "03/99/2024", "05/03/2024"],
+		["03/99/2024", "25/03/2024", "05/03/2024"],
+		["25/03/2024", "02/30/2024", "05/03/2024"],
+		["02/30/2024", "25/03/2024", "05/03/2024"],
+	]) {
+		assert.equal(inferDirectHistoryDateOrder(dates), "DMY", dates.join(" "));
+	}
+	assert.equal(inferDirectHistoryDateOrder(["31/02/2024", "05/03/2024"]), null);
+});
+
 test("inferDirectHistoryDateOrder retains consistent evidence across multiple rows", () => {
 	assert.equal(
 		inferDirectHistoryDateOrder(["25/03/2024", "26/03/2024", "05/03/2024"]),

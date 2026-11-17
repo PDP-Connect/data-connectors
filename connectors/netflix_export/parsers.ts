@@ -532,7 +532,15 @@ export function inferDirectHistoryDateOrder(
 			continue;
 		}
 		const order = unambiguousOrderFor(components);
-		if (order) {
+		// An impossible date (03/99, 02/30) is skipped as a row; it is no
+		// evidence of field order either.
+		const valid =
+			order === "DMY"
+				? isoDayToUtcMidnight(components.year, components.b, components.a)
+				: order === "MDY"
+					? isoDayToUtcMidnight(components.year, components.a, components.b)
+					: null;
+		if (order && valid) {
 			if (inferredOrder && inferredOrder !== order) {
 				conflicting = true;
 			}

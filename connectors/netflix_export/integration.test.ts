@@ -333,6 +333,49 @@ for (const dates of [
 	});
 }
 
+for (const impossible of ["03/99/2024", "02/30/2024"]) {
+	for (const first of [true, false]) {
+		test(`Netflix connector skips impossible date ${impossible} without refusing the file (${first ? "first" : "second"})`, async () => {
+			const importRoot = await mkdtemp(
+				join(tmpdir(), "pdpp-netflix-impossible-evidence-"),
+			);
+			try {
+				const rows = [
+					`Invented Moon,25/03/2024`,
+					`Invented Gap,${impossible}`,
+				];
+				if (!first) rows.reverse();
+				await writeFile(
+					join(importRoot, "NetflixViewingHistory.csv"),
+					`Title,Date\n${rows.join("\n")}\nInvented River,05/03/2024\n`,
+					"utf8",
+				);
+				const { messages } = await runNetflixImport(importRoot);
+				const emitted = records(messages, "viewing_activity");
+				assert.deepEqual(
+					emitted
+						.map((record) => `${record.title} ${record.watched_at}`)
+						.sort(),
+					[
+						"Invented Moon 2024-03-25T00:00:00.000Z",
+						"Invented River 2024-03-05T00:00:00.000Z",
+					],
+				);
+				assert.equal(
+					messages.some(
+						(message) =>
+							message.type === "SKIP_RESULT" &&
+							message.reason === "ambiguous_date_order",
+					),
+					false,
+				);
+			} finally {
+				await rm(importRoot, { force: true, recursive: true });
+			}
+		});
+	}
+}
+
 test("Netflix connector imports conflicting self-evident dates without ambiguous rows", async () => {
 	const importRoot = await mkdtemp(
 		join(tmpdir(), "pdpp-netflix-self-evident-dates-"),
