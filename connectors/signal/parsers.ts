@@ -140,10 +140,19 @@ export interface BuiltMessage {
  */
 export function buildMessageRecord(row: SignalMessageRow): BuiltMessage {
 	const json = parseMessageJson(row.json);
+	// The cursor value must come from the same timestamp as sent_at: a sentAt
+	// outside Date's range falls back to receivedAtMs for sent_at, and keeping
+	// the raw sentAt as the cursor would move it past every real message.
+	const sentIso = signalEpochMsToIso(row.sentAt);
+	const receivedIso =
+		sentIso === null ? signalEpochMsToIso(row.receivedAtMs) : null;
+	const sentAtIso = sentIso ?? receivedIso;
 	const sentAtMs =
-		row.sentAt && row.sentAt > 0 ? row.sentAt : (row.receivedAtMs ?? null);
-	const sentAtIso =
-		signalEpochMsToIso(row.sentAt) ?? signalEpochMsToIso(row.receivedAtMs);
+		sentIso !== null
+			? Number(row.sentAt)
+			: receivedIso !== null
+				? Number(row.receivedAtMs)
+				: null;
 	return {
 		record: {
 			id: row.id,
@@ -156,7 +165,7 @@ export function buildMessageRecord(row: SignalMessageRow): BuiltMessage {
 				Array.isArray(json.attachments) && json.attachments.length > 0,
 			is_edited: Array.isArray(json.editHistory) && json.editHistory.length > 0,
 		},
-		sentAtMs: sentAtIso === null ? null : sentAtMs,
+		sentAtMs,
 	};
 }
 

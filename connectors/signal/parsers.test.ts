@@ -133,6 +133,23 @@ test("buildMessageRecord does not throw for an out-of-range sentAt", () => {
 	});
 });
 
+test("buildMessageRecord takes the cursor from receivedAtMs when an out-of-range sentAt falls back", () => {
+	const built = buildMessageRecord({
+		body: "invented message",
+		conversationId: "11111111-1111-1111-1111-111111111111",
+		id: "22222222-2222-2222-2222-222222222222",
+		json: null,
+		receivedAtMs: 1_717_594_922_000,
+		sentAt: 1_700_000_000_000_000_000,
+		sourceServiceId: null,
+		type: "incoming",
+	});
+	assert.equal(built.record.sent_at, "2024-06-05T13:42:02.000Z");
+	// The cursor must come from the same timestamp as sent_at; an
+	// out-of-range sentAt here would push the cursor past every real message.
+	assert.equal(built.sentAtMs, 1_717_594_922_000);
+});
+
 test("buildMessageRecord degrades has_attachments/is_edited to false on malformed json without failing", () => {
 	const built = buildMessageRecord({
 		body: "x",
