@@ -6714,7 +6714,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/slack_browser/web-api.ts",
-			line: 383,
+			line: 392,
 			column: 6,
 			category: "bounded_retry_polling",
 			note: "call(): the paced retry loop is gated on the prior attempt's verdict (ratelimited/5xx/network_error)",
