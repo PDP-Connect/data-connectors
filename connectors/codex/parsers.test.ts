@@ -283,7 +283,7 @@ test("buildThreadSessionRecord: falls back started_at to agg.firstTs", () => {
 		makeThreadRow({ created_at: null, updated_at: null }),
 		agg,
 	);
-	assert.equal(r.started_at, "2026-01-01T00:00:00Z");
+	assert.equal(r.started_at, "2026-01-01T00:00:00.000Z");
 });
 
 // ─── buildRolloutOnlySessionRecord ───────────────────────────────────────
@@ -309,7 +309,7 @@ test("buildRolloutOnlySessionRecord: maps meta fields, state_5-only fields null"
 	assert.equal(r.git_commit, "abc");
 	assert.equal(r.git_branch, "main");
 	assert.equal(r.repository_url, "u");
-	assert.equal(r.started_at, "2026-04-22T00:00:00Z");
+	assert.equal(r.started_at, "2026-04-22T00:00:00.000Z");
 	assert.equal(r.message_count, 5);
 	assert.equal(r.title, null);
 	assert.equal(r.archived, null);
@@ -414,4 +414,53 @@ test("payloadOutputPreview: binary content with U+0000 returns null preview with
 test("textPreview: string with U+0000 returns null", () => {
 	const result = textPreview("hello\x00world");
 	assert.equal(result, null);
+});
+
+test("epochToIso: out-of-range epoch is null and ordinary epoch is unchanged", () => {
+	assert.equal(epochToIso(1.7e15), null);
+	assert.equal(epochToIso(Number.MAX_VALUE), null);
+	assert.equal(epochToIso(1785506486), "2026-07-31T14:01:26.000Z");
+});
+
+test("session builders normalize every timestamp fallback", () => {
+	const cases: [string, string | null][] = [
+		["2026-07-31T14:01:26Z", "2026-07-31T14:01:26.000Z"],
+		["2026-07-31T14:01:26+02:00", "2026-07-31T12:01:26.000Z"],
+		["2026-07-31T14:01:26.123Z", "2026-07-31T14:01:26.123Z"],
+		["invalid", null],
+		["+999999-01-01T00:00:00Z", null],
+	];
+	for (const [timestamp, expected] of cases) {
+		for (const useMeta of [true, false]) {
+			const agg: RolloutAggregate = {
+				meta: useMeta ? { timestamp } : {},
+				firstTs: useMeta ? null : timestamp,
+				lastTs: timestamp,
+				messageCount: 0,
+				functionCallCount: 0,
+				rolloutPath: "/invented/rollout.jsonl",
+			};
+			const row = makeThreadRow({ created_at: null, updated_at: null });
+			for (const record of [
+				buildRolloutOnlySessionRecord("synthetic", agg),
+				buildThreadSessionRecord("synthetic", row, agg),
+			]) {
+				assert.equal(record.started_at, expected);
+				assert.equal(record.last_event_at, expected);
+			}
+		}
+	}
+});
+
+test("buildRuleRecord: ellipsis fits within 4000 characters", () => {
+	const record = buildRuleRecord({
+		ruleset: "invented",
+		line: "x".repeat(5000),
+		index: 0,
+		path: "/invented/example.rules",
+		mtime: 1,
+	});
+	assert.equal(typeof record.rule_text, "string");
+	assert.equal((record.rule_text as string).length, 4000);
+	assert.equal(record.rule_text, `${"x".repeat(3999)}…`);
 });
