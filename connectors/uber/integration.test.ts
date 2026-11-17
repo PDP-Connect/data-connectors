@@ -352,13 +352,18 @@ test("collectAllStreams: a page with no nextPageToken stops even with a full pag
 });
 
 test("fetchAllActivities: duplicate-only pages with fresh continuations retain later trips", async () => {
-	const { fetchPath, calls } = makeScriptedFetch({
+	const { fetchPath: scripted, calls } = makeScriptedFetch({
 		activitiesPages: [
 			{ body: activitiesBody([{ uuid: "trip-a" }], "t1") },
 			{ body: activitiesBody([{ uuid: "trip-a" }], "t2") },
 			{ body: activitiesBody([{ uuid: "trip-b" }], null) },
 		],
 	});
+	const sentTokens: unknown[] = [];
+	const fetchPath: UberPageFetch = (name, query, variables) => {
+		sentTokens.push(variables.nextPageToken);
+		return scripted(name, query, variables);
+	};
 	const delays: number[] = [];
 	const result = await fetchAllActivities(fetchPath, async (ms) => {
 		delays.push(ms);
@@ -368,6 +373,8 @@ test("fetchAllActivities: duplicate-only pages with fresh continuations retain l
 		truncated: false,
 	});
 	assert.deepEqual(calls, ["Activities", "Activities", "Activities"]);
+	// Each request carries the cursor the previous page returned.
+	assert.deepEqual(sentTokens, [undefined, "t1", "t2"]);
 	assert.equal(delays.length, 2);
 });
 
