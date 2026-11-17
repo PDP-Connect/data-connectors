@@ -345,6 +345,89 @@ test("collectAllStreams: a page with no nextPageToken stops even with a full pag
 	assert.equal(calls.filter((c) => c === "Activities").length, 1);
 });
 
+test("fetchAllActivities: duplicate-only pages with fresh continuations retain later trips", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t1") },
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t2") },
+			{ body: activitiesBody([{ uuid: "trip-b" }], null) },
+		],
+	});
+	const delays: number[] = [];
+	const result = await fetchAllActivities(fetchPath, async (ms) => {
+		delays.push(ms);
+	});
+	assert.deepEqual(result, {
+		activities: [{ uuid: "trip-a" }, { uuid: "trip-b" }],
+		truncated: false,
+	});
+	assert.deepEqual(calls, ["Activities", "Activities", "Activities"]);
+	assert.equal(delays.length, 2);
+});
+
+test("fetchAllActivities: duplicate terminal page without continuation is exhausted", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t1") },
+			{ body: activitiesBody([{ uuid: "trip-a" }], null) },
+		],
+	});
+	assert.deepEqual(await fetchAllActivities(fetchPath, NO_DELAY), {
+		activities: [{ uuid: "trip-a" }],
+		truncated: false,
+	});
+	assert.deepEqual(calls, ["Activities", "Activities"]);
+});
+
+for (const continuations of [
+	["t1", "t1"],
+	["t1", "t2", "t1"],
+]) {
+	test(`collectAllStreams: refuses continuation loop ${continuations.join("/")}`, async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: continuations.map((continuation) => ({
+				body: activitiesBody([{ uuid: "trip-a" }], continuation),
+			})),
+		});
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		const delays: number[] = [];
+		await assert.rejects(
+			collectAllStreams(ctx, fetchPath, async (ms) => {
+				delays.push(ms);
+			}),
+			{
+				message:
+					"uber_graphql_error [endpoint Activities]: repeated continuation",
+			},
+		);
+		assert.deepEqual(
+			calls,
+			continuations.map(() => "Activities"),
+		);
+		assert.equal(delays.length, continuations.length - 1);
+		assert.deepEqual(emitted, []);
+		assert.deepEqual(messages, []);
+	});
+}
+
+test("fetchAllActivities: fresh duplicate-only continuations still honor the page ceiling", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: Array.from({ length: 200 }, (_, i) => ({
+			body: activitiesBody([{ uuid: "trip-a" }], `fresh-${i}`),
+		})),
+	});
+	const delays: number[] = [];
+	const result = await fetchAllActivities(fetchPath, async (ms) => {
+		delays.push(ms);
+	});
+	assert.deepEqual(result, {
+		activities: [{ uuid: "trip-a" }],
+		truncated: true,
+	});
+	assert.equal(calls.length, 200);
+	assert.equal(delays.length, 199);
+});
+
 // ─── Records-before-DETAIL_COVERAGE ordering ────────────────────────────────
 
 test("collectAllStreams: records emit before DETAIL_COVERAGE for trips", async () => {
