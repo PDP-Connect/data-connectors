@@ -2236,3 +2236,73 @@ test("thread non-progress refuses its conversation within a few pages", async ()
 		}),
 	);
 });
+
+for (const method of ["conversations.history", "conversations.replies"]) {
+	test(`missing continuation is retryable without channel advancement: ${method}`, async () => {
+		const channel = "C0987654321";
+		const parentTs = `${FIXTURE_NOW_SECONDS - 500}.000001`;
+		const h = harness(["messages", "files"]);
+		let failedPages = 0;
+		const api = fakeApi((call) => {
+			if (call.method === "users.conversations")
+				return { ok: true, channels: [{ id: channel, name: "synthetic", is_channel: true }], response_metadata: { next_cursor: "" } };
+			if (call.method === method) {
+				failedPages++;
+				assert.equal(failedPages, 1);
+				return {
+					ok: true, has_more: true, response_metadata: { next_cursor: "" },
+					messages: [{ type: "message", user: "U0987654321", text: "synthetic",
+						ts: parentTs, ...(method === "conversations.replies" ? { thread_ts: parentTs } : {}) }],
+				};
+			}
+			if (call.method === "conversations.history")
+				return { ok: true, has_more: false, messages: [{
+					type: "message", user: "U0987654321", text: "synthetic parent",
+					ts: parentTs, reply_count: 1, latest_reply: parentTs,
+				}] };
+			throw new Error("Unexpected synthetic API call: " + call.method);
+		});
+		await run(h, api, { lookbackDays: 0, maxBackfillDays: 0 });
+		assert.equal(failedPages, 1, "must exercise the malformed page");
+		assert.equal(h.gaps().length, 1);
+		assert.equal(h.gaps()[0]?.record_key, channel);
+		assert.equal(h.gaps()[0]?.reason, "temporary_unavailable");
+		assert.equal((h.state("messages")?.channel_last_ts as Record<string, string>)?.[channel], undefined);
+		assert.equal(h.state("files"), undefined);
+	});
+}
+
+test("a 600-page directory reaches its terminal cursor and checkpoints", async () => {
+	const h = harness(["users"]);
+	let pages = 0;
+	const api = fakeApi((call) => {
+		assert.equal(call.method, "users.list");
+		pages++;
+		assert.ok(pages <= 600);
+		assert.equal(Number(call.params.cursor ?? "1"), pages);
+		return { ok: true, members: [{ id: "U" + String(pages).padStart(10, "0"), name: "synthetic" }],
+			response_metadata: { next_cursor: pages < 600 ? String(pages + 1) : "" } };
+	});
+	await run(h, api);
+	assert.equal(pages, 600);
+	assert.equal(h.of("users").length, 600);
+	assert.ok(h.state("users"));
+	assert.deepEqual(h.skips(), []);
+});
+
+test("a repeated directory cursor stops retryably without STATE", async () => {
+	const h = harness(["users"]);
+	let pages = 0;
+	const api = fakeApi((call) => {
+		assert.equal(call.method, "users.list");
+		pages++;
+		assert.ok(pages <= 2, "repeated cursor must stop before another fetch");
+		return { ok: true, members: [{ id: "U" + String(pages).padStart(10, "0"), name: "synthetic" }],
+			response_metadata: { next_cursor: "repeat" } };
+	});
+	await run(h, api);
+	assert.equal(pages, 2);
+	assert.equal(h.state("users"), undefined);
+	assert.equal(h.skips()[0]?.reason, "collection_interrupted");
+	assert.match(h.skips()[0]?.message ?? "", /page_cap_reached/);
+});

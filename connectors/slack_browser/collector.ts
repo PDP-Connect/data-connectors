@@ -116,7 +116,6 @@ export const THREAD_SCAN_BOUND_REASON = "thread_scan_bound_reached";
 export const MAX_SEARCH_PAGES = 100;
 /** How many conversations are read at once. */
 export const DEFAULT_CONCURRENCY = 3;
-const MAX_LIST_PAGES = 500;
 /** Slack allows up to 999 per history page; fewer round trips on busy channels. */
 const HISTORY_PAGE_LIMIT = "999";
 const LIST_PAGE_LIMIT = "200";
@@ -366,7 +365,8 @@ async function listAll<
 ): Promise<T[]> {
 	const pages: T[] = [];
 	let cursor = "";
-	for (let pageNo = 0; pageNo < MAX_LIST_PAGES; pageNo += 1) {
+	const cursors = new Set<string>();
+	while (true) {
 		const answer = parseAnswer(
 			schema,
 			method,
@@ -381,12 +381,12 @@ async function listAll<
 		if (cursor === "") {
 			return pages;
 		}
+		// A repeated continuation cannot establish the list's end.
+		if (cursors.has(cursor)) {
+			throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
+		}
+		cursors.add(cursor);
 	}
-	// The page cap ran out with a cursor still in hand: the list was not read
-	// to its end, and a STATE built on these pages would claim a boundary the
-	// source never named. The run fails instead; nothing moves past what was
-	// actually read.
-	throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
 }
 
 /**
@@ -813,7 +813,7 @@ async function emitThread(
 			}
 		}
 		cursor = answer.response_metadata?.next_cursor ?? "";
-		if (!answer.has_more || cursor === "") {
+		if (!answer.has_more) {
 			return;
 		}
 		const cause = cursors.has(cursor)
@@ -907,7 +907,7 @@ async function walkHistory(
 			{ count: run.messagesEmitted, stream: "messages" },
 		);
 		cursor = answer.response_metadata?.next_cursor ?? "";
-		if (!answer.has_more || cursor === "") {
+		if (!answer.has_more) {
 			return newestTs;
 		}
 		const cause = cursors.has(cursor)
