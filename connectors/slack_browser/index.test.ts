@@ -10,7 +10,7 @@ import {
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
-import { collectSlackBrowser } from "./collector.ts";
+import { collectSlackBrowser, searchSinceFloor } from "./collector.ts";
 import {
 	CLIENT_URL,
 	CONNECTOR_CONFIG,
@@ -962,6 +962,112 @@ test("a thread whose replies never say they end fails the conversation's read", 
 	assert.equal(cursor.C0123456789, undefined, "the cursor stays put");
 });
 
+test("search discovery reads 150 pages and keeps every thread parent", async () => {
+	const parents = Array.from({ length: 150 }, (_, i) =>
+		`1788000000.${String(i).padStart(6, "0")}`,
+	);
+	const api = fakeApi((call) => {
+		if (call.method !== "search.messages") return undefined;
+		const page = Number(call.params.page);
+		return {
+			ok: true,
+			messages: {
+				matches: [
+					{
+					iid: `synthetic-${page}`,
+					team: TEAM.id,
+					user: "U0123456789",
+					username: "Synthetic User",
+					ts: "1790500000.000900",
+					text: "Synthetic reply",
+					channel: { id: "C0123456789" },
+					permalink: `https://acme.slack.com/archives/C0123456789/p1790500000000900?thread_ts=${parents[page - 1]}`,
+					},
+				],
+				paging: { page, pages: 150 },
+			},
+		};
+	});
+	const found = await searchSinceFloor({ api }, TEAM, FLOOR_7D);
+	assert.equal(found?.complete, true);
+	assert.deepEqual(
+		[...(found?.threadsByChannel.get("C0123456789") ?? [])],
+		parents,
+	);
+	assert.deepEqual(
+		api.calls.map((c) => c.params.page),
+		Array.from({ length: 150 }, (_, i) => String(i + 1)),
+	);
+});
+
+test("search discovery retains pages 1-119 when page 120 fails", async () => {
+	const parents = Array.from({ length: 119 }, (_, i) =>
+		`1788000000.${String(i).padStart(6, "0")}`,
+	);
+	const api = fakeApi((call) => {
+		if (call.method !== "search.messages") return undefined;
+		const page = Number(call.params.page);
+		if (page === 120)
+			throw new SlackApiError("search.messages", "http_503", true, 503);
+		return {
+			ok: true,
+			messages: {
+				matches: [
+					{
+					iid: `synthetic-${page}`,
+					team: TEAM.id,
+					user: "U0123456789",
+					username: "Synthetic User",
+					ts: "1790500000.000900",
+					text: "Synthetic reply",
+					channel: { id: "C0123456789" },
+					permalink: `https://acme.slack.com/archives/C0123456789/p1790500000000900?thread_ts=${parents[page - 1]}`,
+					},
+				],
+				paging: { page, pages: 150 },
+			},
+		};
+	});
+	const found = await searchSinceFloor({ api }, TEAM, FLOOR_7D);
+	assert.equal(found?.complete, false);
+	assert.deepEqual(
+		[...(found?.threadsByChannel.get("C0123456789") ?? [])],
+		parents,
+	);
+	assert.deepEqual(
+		api.calls.map((c) => c.params.page),
+		Array.from({ length: 120 }, (_, i) => String(i + 1)),
+	);
+});
+
+test("search discovery continues through top-level-only pages", async () => {
+	const api = fakeApi((call) => {
+		if (call.method !== "search.messages") return undefined;
+		const page = Number(call.params.page);
+		return {
+			ok: true,
+			messages: {
+				matches: [
+					{
+						iid: `synthetic-${page}`,
+						team: TEAM.id,
+						user: "U0123456789",
+						username: "Synthetic User",
+						ts: "1790500000.000900",
+						text: "Synthetic top-level message",
+						channel: { id: "C0123456789" },
+					},
+				],
+				paging: { page, pages: 150 },
+			},
+		};
+	});
+	const found = await searchSinceFloor({ api }, TEAM, FLOOR_7D);
+	assert.equal(found?.complete, true);
+	assert.equal(found?.threadsByChannel.size, 0);
+	assert.equal(api.calls.length, 150);
+});
+
 test("a search page that does not report its own paging does not claim the thread list is complete", async () => {
 	const h = harness(ALL_STREAMS);
 	const api = await run(
@@ -1557,11 +1663,14 @@ test("with the whole history asked for, a later run still asks search for replie
 for (const [label, searchAnswer] of [
 	["search is refused", (): unknown => ({ ok: false, error: "missing_scope" })],
 	[
-		"search runs past its page cap",
-		(page: number): unknown => ({
-			ok: true,
-			messages: { matches: [], paging: { page, pages: 1000 } },
-		}),
+		"search refuses a later page",
+		(page: number): unknown =>
+			page === 120
+				? { ok: false, error: "missing_scope" }
+				: {
+						ok: true,
+						messages: { matches: [], paging: { page, pages: 1000 } },
+					},
 	],
 ] as const) {
 	test(`when ${label}, a later run scans below its starting line for threads with new replies`, async () => {
