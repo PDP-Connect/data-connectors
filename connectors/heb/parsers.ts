@@ -766,19 +766,36 @@ export function resolveLinklessOrderItems(
 	const { document } = parseHTML(html);
 	const claimed = new Set<number>();
 	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
-	for (const link of document.querySelectorAll(nameSelector)) {
-		const id = (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop();
+	const qtySelector = '[data-qe-id="orderItemQty"]';
+	const outerLines = [...document.querySelectorAll("li")].filter(
+		(line) =>
+			!line.parentElement?.closest("li") &&
+			line.querySelector(`${nameSelector}, ${qtySelector}`) !== null,
+	);
+	const ownCopy = (line: Element) => {
+		const own = line.cloneNode(true) as Element;
+		for (const nested of own.querySelectorAll("li")) nested.remove();
+		return own;
+	};
+	// Every linked outer line must take exactly one SSR item by the ids of its
+	// own and its nested substitutes' name links. If one cannot, the ledger of
+	// what is left over is unproven, so no linkless line is resolved.
+	let ledgerComplete = true;
+	for (const line of outerLines) {
+		if (!ownCopy(line).querySelector(nameSelector)) continue;
+		const ids = [...line.querySelectorAll(nameSelector)].map(
+			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "",
+		);
 		const index = items.findIndex((item, i) => !claimed.has(i) &&
-			(item.productId === id || item.substituteIds.includes(id ?? "")));
-		if (index >= 0) claimed.add(index);
+			(ids.includes(item.productId) || item.substituteIds.some((id) => ids.includes(id))));
+		if (index < 0) ledgerComplete = false;
+		else claimed.add(index);
 	}
 	const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
 	const numericId = (value: string) => value.replace(/^0+(?=\d)/, "");
-	for (const line of document.querySelectorAll("li")) {
-		if (line.parentElement?.closest("li")) continue;
-		const own = line.cloneNode(true) as Element;
-		for (const nested of own.querySelectorAll("li")) nested.remove();
-		if (own.querySelector(nameSelector) || !own.querySelector('[data-qe-id="orderItemQty"]')) continue;
+	for (const line of ledgerComplete ? outerLines : []) {
+		const own = ownCopy(line);
+		if (own.querySelector(nameSelector) || !own.querySelector(qtySelector)) continue;
 		const imageIds = new Set<string>();
 		for (const img of own.querySelectorAll("img")) {
 			for (const value of [img.getAttribute("src") ?? "", img.getAttribute("srcset") ?? ""]) {
@@ -793,14 +810,17 @@ export function resolveLinklessOrderItems(
 			}
 		}
 		const names = new Set([...own.querySelectorAll("p, span, div")].map((el) => normalize(normText(el))));
-		const imageMatches = items.map((_, i) => i).filter((i) => !claimed.has(i) && imageIds.has(numericId(items[i]!.productId)));
+		// Both keys are matched against every SSR item, claimed or not, so a key
+		// that names a claimed item still counts as contradicting evidence.
+		const imageMatches = items.map((_, i) => i).filter((i) => imageIds.has(numericId(items[i]!.productId)));
 		const textMatches = items.map((_, i) => i).filter((i) => {
 			const name = items[i]!.fullDisplayName;
-			return !claimed.has(i) && name !== null && names.has(normalize(name));
+			return name !== null && names.has(normalize(name));
 		});
 		if (imageMatches.length > 1 || textMatches.length > 1) continue;
 		const index = imageMatches[0] ?? textMatches[0];
 		if (index === undefined || (imageMatches.length && textMatches.length && imageMatches[0] !== textMatches[0])) continue;
+		if (claimed.has(index)) continue;
 		const item = items[index]!;
 		// A record needs a name; an unnamed SSR item leaves the line unresolved.
 		if (item.fullDisplayName === null) continue;

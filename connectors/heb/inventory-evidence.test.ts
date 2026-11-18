@@ -916,3 +916,35 @@ test("an order with a substitute still resolves its linkless line from the item 
 	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), true);
 	assert.equal(result.detail.items[2]?.name, "Left Over");
 });
+
+test("a linkless line's key that names a claimed SSR item still contradicts its other key", async () => {
+	const items = [
+		{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1 },
+		{ product: { id: "501", fullDisplayName: "Other" }, quantity: 1 },
+	];
+	const [imageClaimed, textClaimed] = await Promise.all([
+		resolveLinkless(items, itemRow(0) + linklessLine("500", "Other")),
+		resolveLinkless(items, itemRow(0) + linklessLine("501", "Widget")),
+	]);
+	for (const result of [imageClaimed, textClaimed]) {
+		assert.equal(result.evidence.linklessLines, 1);
+		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
+	}
+});
+
+test("a linked line that takes no SSR item leaves every linkless line unresolved", async () => {
+	const items = [
+		{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1 },
+		{ product: { id: "501", fullDisplayName: "Missing" }, quantity: 1 },
+		{ product: { id: "502", fullDisplayName: "Other" }, quantity: 1 },
+	];
+	const repeatedLink = itemRow(0).replace('data-index="0"', 'data-index="7"');
+	const [repeated, absent] = await Promise.all([
+		resolveLinkless(items, itemRow(0) + repeatedLink + linklessLine("502")),
+		resolveLinkless(items, itemRow(0) + itemRow(499) + linklessLine("502")),
+	]);
+	for (const result of [repeated, absent]) {
+		assert.equal(result.evidence.linklessLines, 1);
+		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
+	}
+});
