@@ -20,7 +20,6 @@
 import type { ApolloCache } from "./types.ts";
 
 export const ORDER_HISTORY_API_PAGE_SIZE = 10;
-const MAX_ORDER_HISTORY_API_PAGES = 100;
 const MAX_CONSECUTIVE_PAGE_FAILURES = 3;
 const DEFAULT_READ_BUDGET_MS = 1_500;
 
@@ -31,6 +30,13 @@ export interface OrderHistoryPageIdentity {
 
 // Provenance is kept outside Apollo's entity namespace and survives cached reads.
 const cacheIdentities = new WeakMap<ApolloCache, Readonly<OrderHistoryPageIdentity>>();
+
+export type OrderHistoryStopReason = "repeated_cursor" | "missing_cursor" | "no_new_order_ids";
+const cacheStopReasons = new WeakMap<ApolloCache, OrderHistoryStopReason>();
+
+export function orderHistoryCacheStopReason(cache: ApolloCache | null): OrderHistoryStopReason | null {
+	return cache === null ? null : cacheStopReasons.get(cache) ?? null;
+}
 
 export function orderHistoryCacheIdentity(cache: ApolloCache | null): Readonly<OrderHistoryPageIdentity> | null {
 	return cache === null ? null : cacheIdentities.get(cache) ?? null;
@@ -251,27 +257,27 @@ export interface OrderHistoryApiReader {
 
 /**
  * Pages through Shop's order-history endpoint in cursor order. Each `read()`
- * fetches pages until the chain ends, the time box is spent or the page
- * ceiling is reached, and returns every page read so far, so a caller that
+ * fetches pages until the chain ends, progress fails or the time box is spent,
+ * and returns every page read so far, so a caller that
  * re-reads after each step sees the history grow and then stop growing.
  * Returns `null` until a first usable page exists.
  */
 export function createOrderHistoryApiReader({
 	fetchPage,
 	readPageIdentity,
-	maxPages = MAX_ORDER_HISTORY_API_PAGES,
 	readBudgetMs = DEFAULT_READ_BUDGET_MS,
 	now = Date.now,
 }: {
 	fetchPage: FetchOrderHistoryPage;
 	/** Required for browser-backed readers; omitted only by synthetic fetchers. */
 	readPageIdentity?: () => Promise<OrderHistoryPageIdentity | null>;
-	maxPages?: number;
 	readBudgetMs?: number;
 	now?: () => number;
 }): OrderHistoryApiReader {
 	const pages: OrderHistoryApiPage[] = [];
 	const cursors = new Set<string>();
+	const orderIds = new Set<string>();
+	let stopReason: OrderHistoryStopReason | null = null;
 	let nextAfter: string | null = null;
 	let ended = false;
 	let consecutiveFailures = 0;
@@ -293,7 +299,7 @@ export function createOrderHistoryApiReader({
 		async read() {
 			if (!(await ownsPage())) return null;
 			const deadline = now() + readBudgetMs;
-			while (!ended && pages.length < maxPages && consecutiveFailures < MAX_CONSECUTIVE_PAGE_FAILURES) {
+			while (!ended && consecutiveFailures < MAX_CONSECUTIVE_PAGE_FAILURES) {
 				if (!(await ownsPage())) return null;
 				const reply = await fetchPage({ after: nextAfter, pageSize: ORDER_HISTORY_API_PAGE_SIZE,
 					...(identity === null ? {} : { identity }) });
@@ -304,13 +310,28 @@ export function createOrderHistoryApiReader({
 					break;
 				}
 				consecutiveFailures = 0;
-				pages.push({ after: nextAfter, connection, ...(identity === null ? {} : { identity }) });
+				let newOrderIds = 0;
+				for (const node of connection.nodes) {
+					const order = orderOf(node);
+					const id = order === null ? null : orderId(order.id);
+					if (id !== null && !orderIds.has(id)) {
+						orderIds.add(id);
+						newOrderIds += 1;
+					}
+				}
 				const cursor = connection.pageInfo.endCursor;
-				if (!connection.pageInfo.hasNextPage || typeof cursor !== "string" || cursor.length === 0 || cursors.has(cursor)) {
-					// A page that says more exist but gives no new cursor ends the walk
-					// unproven: the chain check in the parser will not connect it.
+				const more = connection.pageInfo.hasNextPage;
+				if (more && (typeof cursor !== "string" || cursor.length === 0)) stopReason = "missing_cursor";
+				else if (more && cursors.has(cursor as string)) stopReason = "repeated_cursor";
+				else if ((more && connection.nodes.length === 0) ||
+					(connection.nodes.length >= ORDER_HISTORY_API_PAGE_SIZE && newOrderIds === 0)) stopReason = "no_new_order_ids";
+				// A refused page cannot supply terminal evidence, even if it claims an end.
+				pages.push({ after: nextAfter, connection: stopReason === null ? connection
+					: { ...connection, pageInfo: { ...connection.pageInfo, hasNextPage: true } },
+					...(identity === null ? {} : { identity }) });
+				if (stopReason !== null || !more) {
 					ended = true;
-				} else {
+				} else if (typeof cursor === "string") {
 					cursors.add(cursor);
 					nextAfter = cursor;
 				}
@@ -319,6 +340,7 @@ export function createOrderHistoryApiReader({
 			if (!(await ownsPage()) || pages.length === 0) return null;
 			const cache = orderHistoryPagesToCache(pages);
 			if (identity !== null) cacheIdentities.set(cache, identity);
+			if (stopReason !== null) cacheStopReasons.set(cache, stopReason);
 			return cache;
 		},
 		async provesEmptyHistory() {

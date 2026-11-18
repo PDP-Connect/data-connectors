@@ -104,7 +104,7 @@ import {
 	resolveOrderId,
 } from "./parsers.ts";
 import {
-	createOrderHistoryApiReader, fetchOrderHistoryPageInPage, orderHistoryCacheIdentity,
+	createOrderHistoryApiReader, fetchOrderHistoryPageInPage, orderHistoryCacheIdentity, orderHistoryCacheStopReason,
 	sameOrderHistoryPage, type OrderHistoryPageIdentity,
 } from "./order-history-api.ts";
 import { validateRecord } from "./schemas.ts";
@@ -1257,7 +1257,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		terminal_evidence: pageComplete,
 		page_owner: walked.pageEvidence?.url ?? null,
 		page_navigation: walked.pageEvidence?.navigation ?? null,
-		end_reason: walked.reason,
+		end_reason: walked.reason, pagination_cause: orderHistoryCacheStopReason(cache),
 	});
 	// Row loss must not mask a failed page read. The failure path below
 	// retains the same withheld-row diagnostics without a companion skip.

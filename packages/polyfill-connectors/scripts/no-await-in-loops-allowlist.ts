@@ -4109,14 +4109,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/shopify/order-history-api.test.ts",
-			line: 291,
+			line: 345,
 			column: 17,
 			category: "test_assertion_sequencing",
 			note: "Run each navigation-change phase (during fetch, between pages, cached empty) in turn against a fresh reader before asserting it is rejected.",
 		},
 		{
 			path: "connectors/shopify/order-history-api.test.ts",
-			line: 314,
+			line: 368,
 			column: 18,
 			category: "test_assertion_sequencing",
 			note: "Read the cache on each attempt in turn to assert it never refetches or rebinds.",
@@ -4214,14 +4214,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/shopify/order-history-api.ts",
-			line: 92,
+			line: 98,
 			column: 21,
 			category: "bounded_retry_polling",
 			note: "fetchOrderHistoryPageInPage(): the GET form is tried only after the POST form gave no usable reply.",
 		},
 		{
 			path: "connectors/shopify/order-history-api.ts",
-			line: 297,
+			line: 303,
 			column: 11,
 			category: "dependent_pagination",
 			note: "read(): walk order-history pages in cursor order, checking before and after each request that the page still belongs to the bound navigation.",
