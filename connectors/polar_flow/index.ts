@@ -62,42 +62,34 @@ export const PROBE_PATH = "/api/account/users/current/user";
 
 type RangeStream = Exclude<Stream, "profile">;
 
-/** Per stream: the days one request covers, the history a first run reads, the days re-read each run. */
+/** Per stream: the days one request covers and the days re-read each run. */
 export interface StreamPlan {
 	windowDays: number;
-	initialDays: number;
 	overlapDays: number;
-	maxWindowsPerRun: number;
 }
 export const PLANS: Record<RangeStream, StreamPlan> = {
-	// The web app's training list asks for a month at a time; history is read two years back.
+	// The web app's training list asks for a month at a time.
 	training_sessions: {
 		windowDays: 31,
-		initialDays: 730,
 		overlapDays: 14,
-		maxWindowsPerRun: 40,
 	},
 	// loadFour answers [day-2, day+1]: four days per request. Today is partial, so the last days are re-read.
 	daily_activity: {
 		windowDays: 4,
-		initialDays: 90,
 		overlapDays: 3,
-		maxWindowsPerRun: 100,
 	},
 	// The sleep report answers 30 to 365 days per request.
 	sleep: {
 		windowDays: 365,
-		initialDays: 365,
 		overlapDays: 7,
-		maxWindowsPerRun: 5,
 	},
 	nightly_recharge: {
 		windowDays: 28,
-		initialDays: 365,
 		overlapDays: 7,
-		maxWindowsPerRun: 20,
 	},
 };
+/** Before Polar Flow's launch; days before the account return no rows. */
+export const HISTORY_START = "2012-01-01";
 /** The sleep report refuses a window shorter than this many days (from to `to`). */
 export const SLEEP_MIN_SPAN_DAYS = 30;
 /** loadFour's downsampling cap; Flow's own UI sends 200, and very small values answer 500. */
@@ -571,7 +563,7 @@ export function localDay(now: Date, offset: string | null): string {
 /**
  * Pure: the cursor this run starts from and the days it reads. A first run, a full refresh, a
  * grant that starts before the floor or past the cursor, or a cursor ahead of the owner's today
- * reads afresh from the grant's start or `initialDays` back. Otherwise the run re-reads
+ * reads afresh from the grant's start or 2012-01-01. Otherwise the run re-reads
  * `overlapDays` before `next_day` (Polar scores days late and devices sync late) and reads on.
  */
 export function planDays(
@@ -583,7 +575,7 @@ export function planDays(
 ): { cursor: Cursor; from: string; to: string } {
 	const { since, until } = grant;
 	const last = until && addDays(until, -1) < today ? addDays(until, -1) : today;
-	const start = since ?? addDays(today, 1 - plan.initialDays);
+	const start = since ?? HISTORY_START;
 	const tomorrow = addDays(today, 1);
 	const { next_day: next, floor } = prev;
 	if (
@@ -815,7 +807,7 @@ interface Walk {
 }
 
 /**
- * Reads a stream's windows oldest first, at most maxWindowsPerRun. A window read in full moves
+ * Reads a stream's windows oldest first, without an artificial history cap. A window read in full moves
  * `next_day` past it, until the first window holding an unreadable record: from there the cursor
  * stays, so the next run reads that window again, while this run still delivers what reads. The
  * hold is retried once: with `release` (the previous run held at this same `next_day`), an
@@ -839,10 +831,6 @@ async function walkStream(
 	};
 	let held = false;
 	for (const w of windows(from, to, plan.windowDays)) {
-		if (walk.progressed >= plan.maxWindowsPerRun) {
-			walk.deferred = true;
-			return walk;
-		}
 		const read = await readWindow(run, stream, w);
 		walk.unreadable += read.unreadable;
 		if (read.failure) {
