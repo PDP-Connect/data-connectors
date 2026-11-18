@@ -1030,6 +1030,23 @@ test("a linkless image naming a claimed item's substitute blocks elimination", a
 	assert.equal(r.evidence.linklessLines, 1);
 });
 
+test("a linkless image naming a claimed item's numeric substitute blocks elimination", async () => {
+	const results = await Promise.all([
+		resolveLinkless([{ ...ssrItem("500"), subbedProducts: [{ id: 777 }] }, ssrItem("501")], itemRow(0) + linklessLine("777")),
+		resolveLinkless([{ ...ssrItem("500"), subbedProducts: [{ product: { id: 777 } }] }, ssrItem("501")], itemRow(0) + linklessLine("777")),
+	]);
+	for (const r of results) assert.equal(r.evidence.linklessLines, 1);
+});
+
+test("a linked line's H-E-B image in a size folder with digits or underscores fits its SSR item", async () => {
+	const r = await resolveLinkless(
+		[ssrItem("500"), ssrItem("501")],
+		itemRow(499).replace("</li>", '<img src="https://images.heb.com/is/image/HEBGrocery/prd_medium2/000000500.jpg"></li>') + unrelatedLine(),
+	);
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.equal(r.detail.items[1]?.productId, "501");
+});
+
 test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {
 	const results = await Promise.all([
 		resolveLinkless([ssrItem("500"), { product: { id: 501, fullDisplayName: "SSR 501" }, quantity: 1 }], itemRow(0) + unrelatedLine()),
@@ -1053,14 +1070,14 @@ test("a linked line's prd-medium H-E-B image id fits its SSR item", async () => 
 test("the detail diagnostic says which linkless step refused, in counts and shapes only", async () => {
 	const [countMismatch, unfit, unread] = await Promise.all([
 		resolveLinkless([ssrItem("500"), ssrItem("501"), ssrItem("502")], itemRow(0) + unrelatedLine()),
-		resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(499).replace("</li>", '<img src="https://cdn.example.test/p/000000500_1.png"></li>') + unrelatedLine()),
+		resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(499).replace("</li>", '<img src="https://cdn.example.test/p/widget-name_000000500.png"><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/000000999.jpg"></li>') + unrelatedLine()),
 		resolveLinkless([{ product: { fullDisplayName: "No id" }, quantity: 1 }], itemRow(0)),
 	]);
 	const diag = (r: { diagnostic?: string }): string => r.diagnostic ?? "";
 	assert.match(diag(countMismatch), /linkless_trace=ssr:3,linked:1,unfit:0,by_img:0,ledger:complete,linkless:1,keyed:0,remaining:1,unclaimed:2,elim:0/);
 	assert.match(diag(unfit), /linkless_trace=ssr:2,linked:1,unfit:1,by_img:0,ledger:unplaced,linkless:1,/);
-	assert.match(diag(unfit), /unfit_img=cdn\.example\.test\/p\/#_#\.png/);
-	assert.doesNotMatch(diag(unfit), /500/);
+	assert.match(diag(unfit), /unfit_img=other_host\/other_path\/png\+heb_image\/hebgrocery_id\/jpg(;|$)/);
+	assert.doesNotMatch(diag(unfit), /500|999|widget|cdn|example/i);
 	assert.match(diag(unread), /ssr=unread:order\.orderItems\.#\.product\.id:invalid_union/);
 });
 

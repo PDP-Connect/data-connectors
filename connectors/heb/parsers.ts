@@ -755,6 +755,14 @@ export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
 /** Resolve only outer purchased lines, then use the existing DOM parser.
  * Synthetic name anchors carry SSR identity; quantities/prices remain DOM-owned.
  * `trace` reports, in counts and shapes only, how far resolution got. */
+/** The product id in an images.heb.com HEBGrocery path: an optional size
+ * folder (prd-small, prd_medium2 and the like; it has a letter, so it is not
+ * an id) and then the id, with an optional -1 or .jpg style suffix. Leading
+ * zeros are kept; callers compare ids without them. */
+function hebGroceryImageId(pathname: string): string | undefined {
+	return /^\/is\/image\/HEBGrocery\/(?:[\w-]*[a-z_][\w-]*\/)?(\d+)(?:[-.][^/]*)?$/i.exec(pathname)?.[1];
+}
+
 export function resolveLinklessOrderItems(
 	html: string,
 	items: readonly {
@@ -792,8 +800,7 @@ export function resolveLinklessOrderItems(
 					try {
 						const url = new URL(candidate.trim().split(/\s+/)[0] ?? "");
 						if (url.hostname !== "images.heb.com") continue;
-						// prd-small/<id>.jpg, prd-medium/<id>.jpg, <id>-1 and the like.
-						const id = /^\/is\/image\/HEBGrocery\/(?:[a-z-]+\/)?(\d+)(?:[-.][^/]*)?$/i.exec(url.pathname)?.[1];
+						const id = hebGroceryImageId(url.pathname);
 						if (id) ids.add(numericId(id));
 					} catch { /* Not an image URL. */ }
 				}
@@ -813,13 +820,22 @@ export function resolveLinklessOrderItems(
 		ids.every((id) => id === item.productId || item.substituteIds.includes(id));
 	let fitByImage = 0;
 	let unfitImage: string | null = null;
-	// Host and path with every digit run as #: the shape, never the id.
+	// Fixed classes of host, path and file type: never URL text, which can
+	// carry an id, a product name or an account value.
 	const imageShape = (own: Element) =>
-		[...own.querySelectorAll("img")].map((img) => {
+		[...own.querySelectorAll("img")].slice(0, 3).map((img) => {
 			const src = img.getAttribute("src") ?? "";
 			try {
 				const url = new URL(src);
-				return `${url.hostname}${url.pathname.replace(/\d+/g, "#")}`;
+				const host = url.hostname === "images.heb.com"
+					? "heb_image"
+					: url.hostname === "heb.com" || url.hostname.endsWith(".heb.com") ? "heb_other" : "other_host";
+				const path = hebGroceryImageId(url.pathname)
+					? "hebgrocery_id"
+					: url.pathname.startsWith("/is/image/HEBGrocery/") ? "hebgrocery_other" : "other_path";
+				const ext = /\.([a-z]+)$/i.exec(url.pathname)?.[1]?.toLowerCase();
+				const type = !ext ? "none" : ["jpg", "jpeg", "png", "webp", "gif", "avif"].includes(ext) ? ext : "other";
+				return `${host}/${path}/${type}`;
 			} catch {
 				return src.startsWith("data:") ? "data_uri" : src ? "relative" : "no_src";
 			}

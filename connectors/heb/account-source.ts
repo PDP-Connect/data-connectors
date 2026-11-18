@@ -151,10 +151,7 @@ export interface SourceOrderItem {
 	quantity: number | null;
 }
 
-const substituteId = z.union([
-	z.object({ id: text }).transform((sub) => sub.id),
-	z.object({ product: z.object({ id: text }) }).transform((sub) => sub.product.id),
-]);
+
 
 function productPageUrl(value: string | null | undefined, productId: string): string | null {
 	if (!value) return null;
@@ -172,6 +169,11 @@ function productPageUrl(value: string | null | undefined, productId: string): st
 
 /** A product id H-E-B may write as a string or a whole number. */
 const productIdText = z.union([text, z.number().int().nonnegative().transform(String)]);
+
+const substituteId = z.union([
+	z.object({ id: productIdText }).transform((sub) => sub.id),
+	z.object({ product: z.object({ id: productIdText }) }).transform((sub) => sub.product.id),
+]);
 
 /** Each SSR orderItem of this order (none when the payload is missing, names
  * another order, or any item lacks a product id), and the payload's shape for
