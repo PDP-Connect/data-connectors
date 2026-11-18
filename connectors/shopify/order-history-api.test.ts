@@ -15,8 +15,10 @@ import {
 	createOrderHistoryApiReader,
 	type OrderHistoryApiReply,
 	orderHistoryPagesToCache,
+	orderHistoryCacheStopReason,
 	readOrderHistoryConnection,
 } from "./order-history-api.ts";
+import { collectShopify, type CollectShopifyArgs } from "./index.ts";
 import {
 	extractOrdersWithCoverage,
 	hasNextOrdersPage,
@@ -242,22 +244,74 @@ test("a page that says more exist but repeats its cursor ends the walk unproven"
 	assert.ok(cache);
 	assert.equal(calls, 2);
 	assert.equal(hasVerifiedOrdersEnd(cache), false);
+	assert.equal(orderHistoryCacheStopReason(cache), "repeated_cursor");
+	const result = await collectReader(reader);
+	assert.equal(calls, 2, "a repeated cursor is never refetched");
+	assert.equal(result.messages.some((m) => m.type === "STATE"), false);
+	assert.ok(result.messages.some((m) => m.type === "SKIP_RESULT" && (m.diagnostics as Record<string, unknown> | undefined)?.pagination_cause === "repeated_cursor"));
 });
 
-test("the page ceiling stops the walk with more pages still advertised", async () => {
+test("fresh cursors with repeated full pages refuse after two fetches", async () => {
+	let calls = 0;
+	const nodes = Array.from({ length: 10 }, (_, i) => orderNode(`repeat-${i}`));
 	const reader = createOrderHistoryApiReader({
-		maxPages: 2,
+		readBudgetMs: 0,
+		fetchPage: async () => reply(nodes, { hasNextPage: true, endCursor: `cursor-${++calls}` }),
+	});
+	await reader.read();
+	const cache = await reader.read();
+	assert.ok(cache);
+	assert.equal(calls, 2);
+	assert.equal(extractOrdersWithCoverage(cache).orders.length, 10);
+	assert.equal(hasNextOrdersPage(cache), true);
+	assert.equal(hasVerifiedOrdersEnd(cache), false);
+	assert.equal(orderHistoryCacheStopReason(cache), "no_new_order_ids");
+	const result = await collectReader(reader);
+	assert.equal(calls, 2, "refused walks never refetch");
+	assert.equal(result.messages.some((m) => m.type === "STATE"), false);
+	assert.ok(result.messages.some((m) => m.type === "SKIP_RESULT" && (m.diagnostics as Record<string, unknown> | undefined)?.pagination_cause === "no_new_order_ids"));
+});
+
+test("101 pages collect all 1,001 orders and prove the terminal page", async () => {
+	let calls = 0;
+	const ids = Array.from({ length: 1_001 }, (_, i) => `history-${i}`);
+	const reader = createOrderHistoryApiReader({
+		now: () => 0,
 		fetchPage: async ({ after }) => {
-			const index = after === null ? 0 : Number(after.replace("cursor-", ""));
-			return reply([orderNode(`order-${String(index)}`)], { hasNextPage: true, endCursor: `cursor-${String(index + 1)}` });
+			const page = after === null ? 0 : Number(after);
+			calls += 1;
+			return reply(ids.slice(page * 10, page * 10 + 10).map((id) => orderNode(id)),
+				page === 100 ? { hasNextPage: false } : { hasNextPage: true, endCursor: String(page + 1) });
 		},
 	});
 	const cache = await reader.read();
 	assert.ok(cache);
-	assert.equal(extractOrdersWithCoverage(cache).orders.length, 2);
-	assert.equal(hasNextOrdersPage(cache), true);
-	assert.equal(hasVerifiedOrdersEnd(cache), false);
+	assert.equal(calls, 101);
+	assert.deepEqual(extractOrdersWithCoverage(cache).orders.map((order) => order.id), ids);
+	assert.equal(hasVerifiedOrdersEnd(cache), true);
+	assert.equal(orderHistoryCacheStopReason(cache), null);
+	const result = await collectReader(reader);
+	assert.equal(calls, 101);
+	assert.equal(result.ids.length, 1_001);
+	assert.equal(result.messages.some((m) => m.type === "SKIP_RESULT"), false);
+	assert.equal(result.messages.some((m) => m.type === "STATE"), true);
 });
+
+async function collectReader(reader: ReturnType<typeof createOrderHistoryApiReader>) {
+	const messages: Array<Parameters<CollectShopifyArgs["emit"]>[0]> = [];
+	const ids: string[] = [];
+	await collectShopify({
+		emit: async (message) => { messages.push(message); },
+		emitRecord: async (_stream, record) => { ids.push(String(record.id)); },
+		progress: async () => {},
+		readCache: () => reader.read(),
+		requested: new Map([["orders", { name: "orders" }]]),
+		scroll: async () => {},
+		wait: async () => {},
+		state: {},
+	});
+	return { messages, ids };
+}
 
 test("only an empty terminal first page that states no other total proves an empty history", async () => {
 	const proves = async (first: OrderHistoryApiReply): Promise<boolean> => {
@@ -317,4 +371,49 @@ test("HTTP 200 error and partial envelopes cannot add nodes or close a valid ear
 			assert.equal(hasVerifiedOrdersEnd(cache), false);
 		}
 	}
+});
+
+test("missing continuation cursors refuse with diagnostics and no STATE", async () => {
+	let calls = 0;
+	const reader = createOrderHistoryApiReader({
+		fetchPage: async () => { calls += 1; return reply([orderNode(ORDER_A)], { hasNextPage: true }); },
+	});
+	const cache = await reader.read();
+	assert.ok(cache);
+	assert.equal(orderHistoryCacheStopReason(cache), "missing_cursor");
+	assert.equal(hasVerifiedOrdersEnd(cache), false);
+	const result = await collectReader(reader);
+	assert.equal(calls, 1);
+	assert.equal(result.messages.some((m) => m.type === "STATE"), false);
+	assert.ok(result.messages.some((m) => m.type === "SKIP_RESULT" && (m.diagnostics as Record<string, unknown> | undefined)?.pagination_cause === "missing_cursor"));
+});
+
+test("an empty continuation page refuses rather than chasing fresh cursors", async () => {
+	let calls = 0;
+	const reader = createOrderHistoryApiReader({
+		fetchPage: async () => reply(++calls === 1 ? [orderNode(ORDER_A)] : [],
+			{ hasNextPage: true, endCursor: `cursor-${calls}` }),
+	});
+	const cache = await reader.read();
+	assert.ok(cache);
+	assert.equal(orderHistoryCacheStopReason(cache), "no_new_order_ids");
+	assert.equal(hasVerifiedOrdersEnd(cache), false);
+	await reader.read();
+	assert.equal(calls, 2);
+});
+
+test("a repeated full page cannot claim terminal evidence", async () => {
+	let calls = 0;
+	const nodes = Array.from({ length: 10 }, (_, i) => orderNode(`terminal-repeat-${i}`));
+	const reader = createOrderHistoryApiReader({
+		fetchPage: async () => reply(nodes, ++calls === 1
+			? { hasNextPage: true, endCursor: "next" } : { hasNextPage: false }),
+	});
+	const cache = await reader.read();
+	assert.ok(cache);
+	assert.equal(orderHistoryCacheStopReason(cache), "no_new_order_ids");
+	assert.equal(hasVerifiedOrdersEnd(cache), false);
+	const result = await collectReader(reader);
+	assert.equal(calls, 2);
+	assert.equal(result.messages.some((m) => m.type === "STATE"), false);
 });
