@@ -1919,6 +1919,7 @@ async function recoverPendingOrderItemDetailGapPage(
 						deps.emittedAt,
 						result.detail.items,
 					),
+					!recoveryOnly,
 				);
 				if (!accepted) result.evidence.rejectedRows += 1;
 			}
@@ -2080,9 +2081,13 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 async function emitValidatedItem(
 	deps: Pick<EmitDeps, "emit" | "emitRecord">,
 	record: ReturnType<typeof buildOrderItemRecord>,
+	failsInventory = true,
 ): Promise<boolean> {
 	if (!orderItemsSchema.safeParse(record).success) {
-		await emitInventoryIncomplete(deps, "order_items");
+		// A recovery-only run claims no inventory (see
+		// recoverPendingOrderItemDetailGapsBeforeForwardRun); its rejected row
+		// only keeps the order's gap pending.
+		if (failsInventory) await emitInventoryIncomplete(deps, "order_items");
 		return false;
 	}
 	await deps.emitRecord("order_items", record);

@@ -3291,6 +3291,35 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 	);
 });
 
+for (const recoveryOnly of [true, false]) test(`recoverPendingOrderItemDetailGapsBeforeForwardRun: a rejected recovered row ${recoveryOnly ? "keeps only its gap in recovery-only mode" : "still fails order_items in a forward run"}`, async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	// A locator date that is not YYYY-MM-DD fails the order_items schema, so the row is rejected.
+	const page = makePageStub({ content: DETAIL_HTML });
+	await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+		page,
+		{
+			detailGaps: [makeGap("HEB1000000007", "July 1, 2026")],
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: deps.emittedAt,
+			sendInteraction: deps.sendInteraction,
+			waitForHydration: deps.waitForHydration,
+		},
+		makeRunFlags(),
+		{ recoveryOnly, wantsItems: true, wantsNutrition: false },
+	);
+	assert.equal(emitted.filter((record) => record.stream === "order_items").length, 0);
+	assert.equal(findDetailGaps(protocolMessages).length, 1);
+	assert.equal(
+		protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "inventory_not_proven_complete",
+		),
+		!recoveryOnly,
+	);
+});
+
 test("recoverPendingOrderItemDetailGapsBeforeForwardRun: exhausted detail budget skips nutrition", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const flags = makeRunFlags({ detailAttempts: 100 });
