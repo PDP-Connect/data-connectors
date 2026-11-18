@@ -35,6 +35,8 @@ export interface InventoryEvidence {
 	lineCountProven?: boolean;
 	/** Source lines that own more than one product name link. */
 	multiNameLines?: number;
+	/** Parsed products whose emitted record id repeats another's. */
+	duplicateRecordIds?: number;
 	signal:
 		| { entity: InventoryEntity; exactTotal: number }
 		| { entity: InventoryEntity; explicitEnd: true }
@@ -94,7 +96,8 @@ function rowsAreRead(e: InventoryEvidence): boolean {
 		e.rejectedRows !== 0 ||
 		e.missingIdentityRows !== 0 ||
 		(e.linklessLines ?? 0) !== 0 ||
-		(e.multiNameLines ?? 0) !== 0
+		(e.multiNameLines ?? 0) !== 0 ||
+		(e.duplicateRecordIds ?? 0) !== 0
 	)
 		return false;
 	const source = new Set(e.sourceIds);

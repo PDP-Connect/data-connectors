@@ -72,6 +72,7 @@ import {
 	parseNutritionDom,
 	parseOrderDate,
 	inspectOrderDetailLines,
+	orderItemId,
 	parseOrderDetailDom,
 	parseOrdersListDom,
 	parseOrdersListStructured,
@@ -1118,6 +1119,12 @@ export async function fetchOrderDetail(
 		lineShape.lines === sourceItemTotal;
 	evidence.linklessLines = lineShape.linkless;
 	evidence.multiNameLines = lineShape.multiName;
+	// Distinct source lines must also become distinct records: two lines whose
+	// records share an id would overwrite one purchase with the other.
+	const recordIds = detail.items.map((item, itemIndex) =>
+		orderItemId(orderId, item, itemIndex, detail.items),
+	);
+	evidence.duplicateRecordIds = recordIds.length - new Set(recordIds).size;
 	evidence.responseSucceeded = responseSucceeded;
 	evidence.loading = surface.diagnostics.loading;
 	evidence.rejectedRows = detail.parsing?.rejectedRows ?? 0;

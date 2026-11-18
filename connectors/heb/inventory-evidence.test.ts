@@ -220,6 +220,7 @@ test("an order's own server total proves its rows only when every row was read a
 		{ lineCountProven: undefined },
 		{ linklessLines: 1 },
 		{ multiNameLines: 1 },
+		{ duplicateRecordIds: 1 },
 	] as Partial<InventoryEvidence>[])
 		assert.equal(
 			inventoryMatchesSourceTotal({ ...read, ...invalid }, 2),
@@ -792,4 +793,18 @@ test("a substituted line with one name link per line proves its one source line"
 	if (result.status !== "hydrated") return;
 	assert.equal(result.detail.items.length, 2);
 	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), true);
+});
+test("two lines whose records would share one id do not prove an order's lines", async () => {
+	const line = (quantity: number) =>
+		`<li data-index="0"><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><span data-qe-id="orderItemQty">Qty: ${quantity}</span></li>`;
+	const html = detailPage({ lines: 2 }).replace(itemRow(0) + itemRow(1), line(1) + line(2));
+	const result = await fetchOrderDetail(pageFor(html), order.orderId, {
+		waitForHydration: async () => {},
+		detailSurfaceTimeoutMs: 50,
+	});
+	assert.equal(result.status, "hydrated");
+	if (result.status !== "hydrated") return;
+	assert.equal(result.detail.items.length, 2);
+	assert.equal(result.evidence.duplicateRecordIds, 1);
+	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), false);
 });
