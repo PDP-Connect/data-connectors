@@ -7145,15 +7145,9 @@ test("runConversationsAndMessagesStreams: a genuine empty /conversations page re
 	);
 });
 
-test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mid-backlog does NOT advance the cursor past the un-listed older tail (data-loss regression)", async () => {
-	// The review's Finding 1 worst case: 168 full (30-item) pages, all newer
-	// than priorCursor, so the safety cap fires while there is genuinely more,
-	// OLDER backlog still to list. Before this fix, `listConversationsSinceCursor`
-	// returned `truncated: false` here, so the caller would advance the cursor
-	// to `maxUpdateTimeIso(convosToSync)` — always the NEWEST item's time, since
-	// pages are `order=updated` desc — silently and PERMANENTLY skipping every
-	// un-listed older conversation, because the cursor is a `>` "since"
-	// watermark and the walk never gets a second chance at them.
+test("runConversationsAndMessagesStreams: a no-new-id page does NOT advance the cursor past the un-listed older tail (data-loss regression)", async () => {
+	// A valid prefix followed by a repeated page must keep the watermark back.
+	// Older unread conversations must remain eligible on the next run.
 	const harness = makeRecordingEmit(validateRecord);
 	let calls = 0;
 	const api: ChatGptApi = {
@@ -7163,11 +7157,13 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 			await Promise.resolve();
 			if (path.startsWith("/conversations/search?")) {
 				calls += 1;
-				const base = 1_900_000_000 - calls * 1000;
+				assert.ok(calls <= 3, "a repeated page must stop promptly");
+				const page = Math.min(calls, 2);
+				const base = 1_900_000_000 - page * 1000;
 				const items: ConversationListItem[] = Array.from(
 					{ length: 30 },
 					(_, idx) =>
-						makeConvo({ id: `convo-${calls}-${idx}`, update_time: base - idx }),
+						makeConvo({ id: `convo-${page}-${idx}`, update_time: base - idx }),
 				);
 				return { status: 200, json: { items } };
 			}
@@ -7199,13 +7195,13 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	);
 
 	assert.ok(
-		calls > 50,
-		"sanity: the walk actually paged past the 5000-item cap",
+		calls === 3,
+		"the third page adds no new conversation id",
 	);
 	assert.equal(
 		harness.emitted.filter((r) => r.stream === "conversations").length > 0,
 		true,
-		"conversations genuinely listed before the cap still emit",
+		"conversations genuinely listed before nonprogress still emit",
 	);
 	const coverage = harness.protocolMessages.find(
 		(m) => m.type === "DETAIL_COVERAGE",
@@ -7213,7 +7209,7 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	assert.equal(
 		coverage,
 		undefined,
-		"a cap-truncated list must not claim coverage over its partial prefix",
+		"a no-progress list must not claim coverage over its partial prefix",
 	);
 	const states = harness.protocolMessages.filter(
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
@@ -7223,7 +7219,7 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 		backfill?: { position_hint: number; boundary_ids: string[] };
 	};
 	assert.equal(safetyState.last_update_time, priorCursor);
-	assert.equal(safetyState.backfill?.position_hint, 5010);
+	assert.equal(safetyState.backfill?.position_hint, 60);
 	assert.ok(safetyState.backfill?.boundary_ids.length);
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
@@ -13877,3 +13873,96 @@ test("pagination progress: a repeated gizmo cursor refuses without STATE", async
 	assert.match(skip.message ?? "", /repeat/i);
 	assert.deepEqual(skip.recovery_hint, { action: "retry_on_connector_upgrade", retryable: false });
 });
+
+test("full-history progress: 6000 conversations reach primary and search end", async () => {
+	const { deps, emitted, messages } = makeHarness({ fetchQueue: [], requested: ["conversations"] });
+	const rows = Array.from({ length: 6000 }, (_, i) =>
+		makeConvo({ id: `full-history-${i}`, update_time: 1_900_000_000 - i }),
+	);
+	const ends = new Set<string>();
+	deps.api = {
+		...deps.api,
+		fetch: (path): Promise<ChatGptFetchResult> => {
+			if (path.startsWith("/conversations?") || path.startsWith("/conversations/search?")) {
+				const url = new URL(path, "https://synthetic.invalid");
+				const primary = url.pathname === "/conversations";
+				const offset = Number(url.searchParams.get(primary ? "offset" : "cursor") ?? 0);
+				assert.ok(offset <= 6030, "walk must stop at the synthetic source end");
+				const items = rows.slice(offset, offset + (primary ? 100 : 30));
+				if (items.length === 0) ends.add(primary ? "primary" : "search");
+				return Promise.resolve({ status: 200, json: { items } });
+			}
+			if (path.startsWith("/conversation/")) return Promise.resolve(emptyConversationDetail(path));
+			throw new Error(`unexpected fetch ${path}`);
+		},
+	};
+	await runUnionStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+	assert.deepEqual([...ends].sort(), ["primary", "search"]);
+	assert.equal(new Set(emitted.filter((r) => r.stream === "conversations").map((r) => r.data.id)).size, 6000);
+	assert.ok(messages.some((m) => m.type === "DETAIL_COVERAGE" && m.stream === "conversations"));
+	assert.equal(messages.some((m) => m.type === "SKIP_RESULT"), false);
+	assert.ok(messages.some((m) => m.type === "STATE" && m.stream === "conversations"));
+});
+
+for (const scenario of ["empty continuation", "repeated ids"] as const) {
+	test(`full-history progress: gizmos ${scenario} skip without STATE`, async () => {
+		const { deps, messages } = makeHarness({
+			fetchQueue: [
+				{ status: 200, json: { items: [{ id: "gizmo-synthetic" }], cursor: "first" } },
+				{ status: 200, json: { items: scenario === "empty continuation" ? [] : [{ id: "gizmo-synthetic" }], cursor: "fresh" } },
+				{ status: 200, json: { items: [] } },
+			],
+			requested: ["custom_gpts"],
+		});
+		await runCustomGptsStream(deps);
+		assert.equal(messages.filter((m) => m.type === "STATE").length, 0);
+		assert.equal(customGptsCoverage(messages), undefined);
+		const skip = messages.find((m) => m.type === "SKIP_RESULT");
+		assert.ok(skip && skip.type === "SKIP_RESULT");
+		assert.equal(skip.reason, "pagination_cap_truncated");
+		assert.match(skip.message ?? "", scenario === "empty continuation" ? /empty.*cursor/i : /no new.*id/i);
+		assert.deepEqual(skip.recovery_hint, { action: "retry_on_connector_upgrade", retryable: false });
+	});
+}
+for (const scenario of ["primary repeated ids", "search repeated cursor"] as const) {
+	test(`full-history progress: ${scenario} keeps the watermark back`, async () => {
+		const { deps, messages } = makeHarness({ requested: ["conversations"] });
+		let reads = 0;
+		const prior = "2000-01-01T00:00:00.000Z";
+		deps.api = {
+			...deps.api,
+			fetch: (path): Promise<ChatGptFetchResult> => {
+				const primary = path.startsWith("/conversations?");
+				const search = path.startsWith("/conversations/search?");
+				if (primary || search) {
+					if (primary === (scenario === "primary repeated ids")) {
+						reads += 1;
+						assert.ok(reads <= (primary ? 2 : 1), "nonprogress must refuse promptly");
+						const items = Array.from({ length: primary ? 100 : 30 }, (_, i) =>
+							makeConvo({ id: `progress-${i}`, update_time: 1_900_000_000 - i }),
+						);
+						return Promise.resolve({ status: 200, json: {
+							items, ...(search ? { next_cursor: 0, has_more: true } : {}),
+						} });
+					}
+					return Promise.resolve({ status: 200, json: { items: [] } });
+				}
+				if (path.startsWith("/conversation/")) return Promise.resolve(emptyConversationDetail(path));
+				throw new Error(`unexpected fetch ${path}`);
+			},
+		};
+		await runUnionStreams(deps, {
+			conversations: { last_update_time: prior, detail_version: 2, detail_frontier: null, enumeration_version: 1 },
+		}, { detailPacing: NO_DETAIL_WAITS });
+		assert.equal(reads, scenario === "primary repeated ids" ? 2 : 1);
+		assert.equal(messages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+		assert.ok(messages.some((m) => m.type === "SKIP_RESULT"));
+		const states = messages.filter((m) => m.type === "STATE" && m.stream === "conversations");
+		assert.ok(states.length > 0);
+		for (const state of states) {
+			assert.ok(state.type === "STATE");
+			assert.equal((state.cursor as { last_update_time?: unknown }).last_update_time, prior);
+		}
+	});
+}
+
