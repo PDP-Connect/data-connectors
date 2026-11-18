@@ -3070,7 +3070,7 @@ const MAY = () => {
 	return { kept: () => account(true), reads: () => account(false) };
 };
 
-test("collect: a kept day older than ninety days that a narrower start reads cleanly is read again by a grant whose start reaches it, not by a grant with no start", async () => {
+test("collect: a kept day older than ninety days that a narrower start reads cleanly is read again by a grant whose start reaches it, and by a grant with no start, which starts at the oldest activity", async () => {
 	const may = MAY();
 	const first = await activitiesRun(
 		{ since: "2026-05-01T00:00:00.000Z" },
@@ -3088,12 +3088,12 @@ test("collect: a kept day older than ninety days that a narrower start reads cle
 	assert.deepEqual((statesOf(narrow).activities as { retry?: unknown }).retry, [
 		span("2026-04-30", "2026-05-18"),
 	]);
-	// A grant with no start reads history back to 4 August only.
+	// A grant with no start reads back to the account's oldest activity, 20 May.
 	const [open, reaching] = await Promise.all([
 		activitiesRun({}, narrow, may.reads()),
 		activitiesRun({ since: "2026-05-01T00:00:00.000Z" }, narrow, may.reads()),
 	]);
-	assert.equal(idsOf(open, "activities").includes("7001"), false);
+	assert.ok(idsOf(open, "activities").includes("7001"));
 	assert.ok(idsOf(reaching, "activities").includes("7001"));
 });
 

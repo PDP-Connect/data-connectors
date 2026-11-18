@@ -504,7 +504,8 @@ test("garmin_browser: sign-in and collection keep one headless Patchright page",
 			);
 			const reads = api.slice(readsBefore);
 			assert.equal(reads[0]?.path, PROBE_PATH);
-			assert.equal(reads.length, 1 + 90 + 4 + 4 + 90 + 4);
+			// The probe, the oldest-activity read, then each stream's reads.
+			assert.equal(reads.length, 1 + 1 + 90 + 4 + 4 + 90 + 4);
 			for (const r of reads) {
 				assert.equal(r.method, "GET", r.path);
 				assert.equal(r.session, true, r.path);
