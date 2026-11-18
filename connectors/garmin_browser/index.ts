@@ -44,7 +44,10 @@ export const LOGIN_URL = APP_URL;
 export const SIGN_IN_ORIGIN = "https://sso.garmin.com";
 /** The owner's settings: cheap, authenticated JSON, and where their time zone comes from. */
 export const PROBE_PATH = "/gc-api/userprofile-service/userprofile/settings";
-/** Minimum history (including today) when there are no activities or they began more recently. */
+/** Minimum history (including today) when there are no activities or they began more recently.
+ * Open limit: nothing Garmin returns to this connector names the first day of daily data (the
+ * settings carry only a name and time zone), and an empty day cannot tell "before the account"
+ * from "watch not worn", so an account with no activities reads 90 days. */
 export const INITIAL_DAYS = 90;
 /** A daily stream re-reads the last week each run: Garmin scores training status after the day, and watches sync late. */
 export const OVERLAP_DAYS = 7;
