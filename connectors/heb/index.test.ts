@@ -3142,6 +3142,10 @@ test("recoverPendingOrderItemDetailGaps: retains valid rows and keeps an unprove
 		1,
 		"unproven recovery retains the pending gap",
 	);
+	assert.ok(protocolMessages.some((message) =>
+		message.type === "SKIP_RESULT" && message.stream === "order_items" &&
+		message.reason === "inventory_not_proven_complete"),
+		"forward recovery still fails order_items when the gap cannot prove completeness");
 });
 
 test("recoverPendingOrderItemDetailGaps: a failed recovery re-emits a pending gap instead of silently dropping it", async () => {
@@ -3269,15 +3273,17 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 		true,
 		"recovery_only must suppress the forward scan even after recovering",
 	);
-	assert.ok(
+	assert.equal(
 		protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.stream === "nutrition" &&
 				message.reason === "inventory_not_proven_complete",
 		),
-		"nutrition must be marked incomplete before the recovery-only return",
+		false,
+		"recovery-only retains gaps without failing inventory for an unattempted list pass",
 	);
+	assert.equal(findDetailGaps(protocolMessages).length, 1);
+	assert.ok(emitted.some((record) => record.stream === "order_items"));
 	assert.equal(
 		emitted.filter((record) => record.stream === "nutrition").length,
 		0,

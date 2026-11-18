@@ -280,8 +280,9 @@ test("collect: missing order-list evidence reports retryable inventory skip for 
 	assertPartial(ctx);
 });
 
-test("collect: nutrition detail coverage gaps report stream_collection_failed and do not emit nutrition STATE", async () => {
+test("collect: forward nutrition detail coverage gaps stay partial and do not emit nutrition STATE", async () => {
 	const page = makeCollectPage({
+		detailHtml: WIDGET_DETAIL_HTML,
 		listHtml: onePageOrdersList(),
 	});
 	const ctx = makeContext(["order_items", "nutrition"], page, {
@@ -294,7 +295,7 @@ test("collect: nutrition detail coverage gaps report stream_collection_failed an
 				stream: "order_items",
 			},
 		],
-		recoveryOnly: true,
+		recoveryOnly: false,
 	});
 
 	await hebConnector.collect(ctx);
@@ -656,6 +657,36 @@ function backlogGaps(count: number): BrowserCollectContext["detailGaps"] {
 		} as const;
 	});
 }
+
+test("collect: recovery-only re-defers an unproven gap without an inventory failure", async () => {
+	const orderId = "HEB3000000000";
+	const total = 2;
+	const visits: string[] = [];
+	// One purchased line, but the SSR order lists two items: the gap cannot prove.
+	const orderItems = Array.from({ length: total }, (_, index) => ({
+		product: { id: String(500 + index), fullDisplayName: index === 0 ? "Widget" : "Gadget" },
+		quantity: 1,
+	}));
+	const detailHtml = `<html><body><main><ul><li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><span data-qe-id="checkoutItemPrice">$10.00</span><span data-qe-id="orderItemQty">Qty: 1</span></li></ul><section data-qe-id="orderSummaryCard"></section></main><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+		page: "/my-account/order-history/[orderId]", gssp: true,
+		props: { __N_SSP: true, pageProps: { order: { orderId, orderItems } } },
+	})}</script></body></html>`;
+	const ctx = makeContext(["orders", "order_items", "nutrition"], makeCollectPage({
+		listHtml: singleItemOrdersList(), detailHtml, visits,
+	}), { recoveryOnly: true, detailGaps: backlogGaps(1) });
+	await hebConnector.collect(ctx);
+	assert.ok(ctx.emitted.some(record => record.stream === "order_items" && record.data.order_id === orderId));
+	assert.ok(ctx.emitted.every(record => record.stream === "order_items"), "recovery emits only requested recovered details");
+	assert.equal(findMessages(ctx.protocolMessages, "DETAIL_GAP_RECOVERED").length, 0);
+	const pending = findMessages(ctx.protocolMessages, "DETAIL_GAP");
+	assert.equal(pending.length, 1);
+	assert.equal(pending[0]?.record_key, orderId);
+	assert.equal(findMessages(ctx.protocolMessages, "SKIP_RESULT").filter(
+		message => message.reason === "inventory_not_proven_complete").length, 0);
+	assert.equal(ctx.reportedStreamFailures.length, 0);
+	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0, "recovery cannot commit a list checkpoint");
+	assert.equal(visits.filter(url => url.includes("/my-account/your-orders")).length, 0, "no forward list pass");
+});
 
 const LISTED_ORDER_IDS = ["HEB1029384600", "HEB1029384700", "HEB1029384756"];
 

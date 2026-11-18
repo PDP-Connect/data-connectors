@@ -1863,6 +1863,7 @@ async function recoverPendingOrderItemDetailGapPage(
 	flags: RunFlags,
 	gaps: readonly BrowserCollectContext["detailGaps"][number][],
 	attemptCeiling: number,
+	recoveryOnly: boolean,
 ): Promise<{ recovered: number; reDeferred: number; skipped: number }> {
 	let recovered = 0;
 	let reDeferred = 0;
@@ -1928,7 +1929,9 @@ async function recoverPendingOrderItemDetailGapPage(
 				result.sourceItemTotal,
 			);
 			if (!result.inventoryComplete) {
-				await emitInventoryIncomplete(deps, "order_items");
+				// A recovery-only run claims no inventory, so its unproven order is
+				// only the pending gap below; a forward run also fails order_items.
+				if (!recoveryOnly) await emitInventoryIncomplete(deps, "order_items");
 				await deps.emit(
 					buildHebDetailGap(
 						locator.orderId,
@@ -1978,6 +1981,7 @@ export async function recoverPendingOrderItemDetailGaps(
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
 	attemptCeiling = MAX_DETAIL_ATTEMPTS_PER_RUN,
+	recoveryOnly = false,
 ): Promise<{ recovered: number; stoppedWithPending: boolean }> {
 	let recovered = 0;
 	let gaps = deps.detailGaps;
@@ -1988,6 +1992,7 @@ export async function recoverPendingOrderItemDetailGaps(
 			flags,
 			gaps,
 			attemptCeiling,
+			recoveryOnly,
 		);
 		recovered += result.recovered;
 		if (!deps.requestDetailGapPage) {
@@ -2018,8 +2023,12 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 	stoppedWithPending: boolean;
 	suppressForward: boolean;
 }> {
+	// A recovery-only run does no list pass, so it makes no inventory claim
+	// for any stream: the host ignores inventory facts from such a run, and an
+	// unproven-inventory skip would end it failed. Pending gaps stay as gaps.
+	const recoveryOnly = options.recoveryOnly === true;
 	if (!options.wantsItems) {
-		const suppressForward = options.recoveryOnly === true;
+		const suppressForward = recoveryOnly;
 		// A nutrition-only run does not recover `order_items` gaps (that would
 		// emit an unrequested stream), but a pending gap still means some order's
 		// products were never enumerated. Report it so the nutrition coverage gate
@@ -2029,14 +2038,6 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 					(gap) => gap.stream === "order_items" && gap.status === "pending",
 				).length
 			: 0;
-		if (suppressForward && options.wantsNutrition) {
-			await emitNutritionCoverageIncomplete(
-				deps,
-				"order_scan_suppressed",
-				"H-E-B nutrition was not collected because recovery-only mode suppressed the order-history scan.",
-				{ recovery_only: true },
-			);
-		}
 		return {
 			recovered: 0,
 			stoppedWithPending: pendingItemGaps > 0,
@@ -2048,18 +2049,18 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 		page,
 		deps,
 		flags,
-		options.recoveryOnly === true
+		recoveryOnly
 			? MAX_DETAIL_ATTEMPTS_PER_RUN
 			: Math.min(
 					MAX_DETAIL_ATTEMPTS_PER_RUN,
 					flags.detailAttempts + MAX_RECOVERY_ATTEMPTS_PER_RUN,
 				),
+		recoveryOnly,
 	);
 	const detailBudgetExhausted =
 		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN;
-	const suppressForward =
-		options.recoveryOnly === true || detailBudgetExhausted;
-	if (suppressForward && options.wantsNutrition) {
+	const suppressForward = recoveryOnly || detailBudgetExhausted;
+	if (suppressForward && !recoveryOnly && options.wantsNutrition) {
 		await emitNutritionCoverageIncomplete(
 			deps,
 			"order_scan_suppressed",
@@ -2067,7 +2068,6 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 			{
 				detail_budget_exhausted: detailBudgetExhausted,
 				detail_attempts: flags.detailAttempts,
-				recovery_only: options.recoveryOnly === true,
 			},
 		);
 	}
@@ -3435,6 +3435,9 @@ export const hebConnector: BrowserConnectorConfig = {
 			);
 		}
 		if (gapRecovery.suppressForward) {
+			// See recoverPendingOrderItemDetailGapsBeforeForwardRun: a
+			// recovery-only run claims no inventory, so it ends without skips.
+			if (ctx.recoveryOnly === true) return;
 			for (const stream of [
 				...(wantsOrders ? ["orders"] : []),
 				...(wantsItems ? ["order_items"] : []),
