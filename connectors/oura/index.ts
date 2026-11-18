@@ -33,12 +33,10 @@ import {
 	type RecordData,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import { ouraPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import { validateRecord } from "./schemas.ts";
 
 const API = "https://api.ouraring.com/v2/usercollection";
-const MAX_PAGES = 100;
 
 // Single per-provider send governor + retry layer (shared convergence
 // primitive). `maxAttempts: 1` keeps today's behavior byte-identical: a 429
@@ -190,40 +188,39 @@ async function oura<T>(
 	return JSON.parse(raw.body) as OuraListResponse<T>;
 }
 
-/**
- * Page one Oura collection. Exhausting the page ceiling and receiving no
- * `next_token` used to produce a byte-identical return value, so a capped walk
- * read as a finished one. `truncated` is the distinction the caller needs to
- * withhold its cursor and disclose the deferred tail.
- */
-async function fetchAll<T>(
+/** Walk to the provider's end token; refuse repeated tokens or stalled IDs. */
+async function fetchAll<T extends OuraRow>(
 	governor: OuraHttpGovernor,
 	endpoint: string,
 	token: string,
 	startDate: string | null,
-	maxPages: number,
-): Promise<{ rows: T[]; truncated: boolean }> {
+): Promise<{ rows: T[]; truncated: boolean; cause?: string }> {
 	const all: T[] = [];
+	const seenIds = new Set<string>();
+	const seenTokens = new Set<string>();
 	let nextToken: string | undefined;
-	const walk = await walkPagesWithCeiling({
-		maxPages,
-		fetchPage: async () => {
-			const params: OuraParams = {};
-			if (startDate) {
-				params.start_date = startDate;
-			}
-			if (nextToken) {
-				params.next_token = nextToken;
-			}
-			const json = await oura<T>(governor, endpoint, token, params);
-			if (Array.isArray(json.data)) {
-				all.push(...json.data);
-			}
-			nextToken = json.next_token || undefined;
-			return Boolean(nextToken);
-		},
-	});
-	return { rows: all, truncated: walk.truncated };
+	while (true) {
+		const params: OuraParams = {};
+		if (startDate) params.start_date = startDate;
+		if (nextToken) params.next_token = nextToken;
+		const json = await oura<T>(governor, endpoint, token, params);
+		const rows = Array.isArray(json.data) ? json.data : [];
+		const before = seenIds.size;
+		for (const row of rows) {
+			if (row.id && seenIds.has(row.id)) continue;
+			if (row.id) seenIds.add(row.id);
+			all.push(row);
+		}
+		nextToken = json.next_token || undefined;
+		if (!nextToken || rows.length === 0) return { rows: all, truncated: false };
+		if (seenTokens.has(nextToken)) {
+			return { rows: all, truncated: true, cause: "repeated_next_token" };
+		}
+		if (seenIds.size === before) {
+			return { rows: all, truncated: true, cause: "no_new_ids" };
+		}
+		seenTokens.add(nextToken);
+	}
 }
 
 /**
@@ -302,9 +299,6 @@ interface RunStreamArgs<T extends OuraRow> {
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	governor: OuraHttpGovernor;
-	/** Page ceiling actually enforced by this walk. Injectable so a test can
-	 *  reach the capped exit with a two-page fixture instead of 100 real pages. */
-	maxPages: number;
 	progress: (message: string, extra?: { stream?: string }) => Promise<void>;
 	requested: Map<string, { time_range?: { since?: string } }>;
 	state: Record<string, unknown>;
@@ -337,18 +331,16 @@ async function runStream<T extends OuraRow>(
 		emit,
 		emitRecord,
 		progress,
-		maxPages,
 		governor,
 	} = args;
 	const { streamName, endpoint, toRecord } = config;
 	await progress(`Fetching ${streamName}`, { stream: streamName });
 	const startDate = sinceFor(state, requested, streamName);
-	const { rows, truncated } = await fetchAll<T>(
+	const { rows, truncated, cause } = await fetchAll<T>(
 		governor,
 		endpoint,
 		token,
 		startDate,
-		maxPages,
 	);
 	const streamState = state[streamName] as { last_day?: string } | undefined;
 	const priorDay: string | null = streamState?.last_day || null;
@@ -366,25 +358,20 @@ async function runStream<T extends OuraRow>(
 			stream: streamName,
 			reason: "older_pages_deferred_page_budget",
 			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-			// The ceiling reported here is the one actually enforced, not the module
-			// default — otherwise a lowered cap would disclose a limit the walk
-			// never applied.
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+			message: `Oura ${streamName} stopped because pagination made no progress (${cause}); more days may be unread`,
 			diagnostics: {
-				page_limit: maxPages,
+				cause,
 				total_seen: rows.length,
 				unread_pages: 1,
 			},
 		});
+		return;
 	}
 
 	await emit({
 		type: "STATE",
 		stream: streamName,
-		// `last_day` is the next run's `start_date`. Advancing it after a capped
-		// walk would skip past days this run never read, so a truncated walk holds
-		// the day it started from and re-reads the same prefix next time.
-		cursor: { last_day: truncated ? priorDay : lastDay },
+		cursor: { last_day: lastDay },
 	});
 }
 
@@ -409,7 +396,6 @@ async function collectSleep(
 		emit,
 		emitRecord,
 		progress,
-		maxPages,
 		governor,
 	} = args;
 	const streamName = "sleep";
@@ -417,16 +403,16 @@ async function collectSleep(
 	const startDate = sinceFor(state, requested, streamName);
 
 	const [sessions, dailySleep] = await Promise.all([
-		fetchAll<OuraSleepSession>(governor, "sleep", token, startDate, maxPages),
+		fetchAll<OuraSleepSession>(governor, "sleep", token, startDate),
 		fetchAll<OuraDailySleep>(
 			governor,
 			"daily_sleep",
 			token,
 			startDate,
-			maxPages,
 		),
 	]);
 	const truncated = sessions.truncated || dailySleep.truncated;
+	const cause = sessions.cause ?? dailySleep.cause;
 	const streamState = state[streamName] as { last_day?: string } | undefined;
 	const priorDay: string | null = streamState?.last_day || null;
 	if (truncated) {
@@ -435,17 +421,12 @@ async function collectSleep(
 			stream: streamName,
 			reason: "older_pages_deferred_page_budget",
 			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+			message: `Oura ${streamName} stopped because pagination made no progress (${cause}); more days may be unread`,
 			diagnostics: {
-				page_limit: maxPages,
+				cause,
 				total_seen: sessions.rows.length,
 				unread_pages: 1,
 			},
-		});
-		await emit({
-			type: "STATE",
-			stream: streamName,
-			cursor: { last_day: priorDay },
 		});
 		return;
 	}
@@ -476,9 +457,6 @@ async function collectSleep(
 export interface OuraCollectOptions {
 	/** @see OuraHttpGovernor */
 	readonly httpGovernor?: OuraHttpGovernor;
-	/** Page ceiling actually enforced by each stream's walk. Injectable so a
-	 *  test can reach the capped exit with a two-page fixture. */
-	readonly maxPages?: number;
 }
 
 export async function collectOura(
@@ -486,7 +464,6 @@ export async function collectOura(
 	options: OuraCollectOptions = {},
 ): Promise<void> {
 	const { state, requested, credentials, emit, emitRecord, progress } = ctx;
-	const maxPages = options.maxPages ?? MAX_PAGES;
 	const governor = options.httpGovernor ?? httpGovernor;
 	const token = credentials.OURA_PERSONAL_ACCESS_TOKEN;
 	if (!token) {
@@ -501,7 +478,6 @@ export async function collectOura(
 			emit,
 			emitRecord,
 			progress,
-			maxPages,
 			governor,
 		});
 	}
@@ -519,7 +495,6 @@ export async function collectOura(
 			emit,
 			emitRecord,
 			progress,
-			maxPages,
 			governor,
 		});
 	}
@@ -537,7 +512,6 @@ export async function collectOura(
 			emit,
 			emitRecord,
 			progress,
-			maxPages,
 			governor,
 		});
 	}

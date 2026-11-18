@@ -9,7 +9,7 @@
 	},
 	"connector_key": "oura",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-	"version": "0.1.29",
+	"version": "0.1.30",
 	"display_name": "Oura",
 	"brand": {
 		"icon": "icon.svg",
@@ -330,6 +330,6 @@
 		}
 	],
 	"reason_display_messages": {
-		"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your Oura history, so some earlier days haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+		"older_pages_deferred_page_budget": "Oura stopped making progress while we were reading your history. Earlier days may be missing; no new resume point was saved"
 	}
 }

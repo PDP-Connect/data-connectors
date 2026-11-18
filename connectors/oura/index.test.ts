@@ -3,7 +3,7 @@
 
 /**
  * The page-ceiling correction: exhausting the guard and receiving no
- * `next_token` used to produce a byte-identical result, so a capped walk read
+ * `next_token` used to produce a byte-identical result, so a looping walk read
  * as a finished one. Oura's cursor is `last_day`, which becomes the next run's
  * `start_date` — advancing it after a cap would skip days this run never read.
  */
@@ -59,7 +59,12 @@ function withOuraPages<T>(
 	let index = 0;
 	globalThis.fetch = ((input: URL | string) => {
 		requested.push(new URL(String(input)));
-		const page = pages[index] ?? { data: [] };
+		assert.ok(
+			index < pages.length + 2,
+			"looping source must stop within a few requests",
+		);
+		const tail = pages.at(-1);
+		const page = pages[index] ?? (tail?.next_token ? tail : { data: [] });
 		index += 1;
 		return Promise.resolve(new Response(JSON.stringify(page), { status: 200 }));
 	}) as typeof globalThis.fetch;
@@ -193,10 +198,8 @@ test("a walk that exhausts naturally advances the cursor and discloses no trunca
 	);
 });
 
-test("a capped walk is distinguishable from an exhausted one and holds the cursor at unread history", async () => {
-	// Two pages, both advertising a next_token, with a 1-page ceiling: the
-	// provider still has more when the budget runs out. Advancing `last_day` to
-	// 2026-08-02 would make every unread day after it unreachable.
+test("a repeated page is distinguishable from exhaustion and emits no STATE", async () => {
+	// A repeated continuation is refusal, not exhaustion or a checkpoint.
 	const { ctx, messages, records } = makeContext({
 		state: { activity: { last_day: "2026-07-31" } },
 	});
@@ -207,11 +210,11 @@ test("a capped walk is distinguishable from an exhausted one and holds the curso
 				next_token: "tok-2",
 			},
 			{
-				data: [{ id: "a2", day: "2026-08-03", score: 85 }],
-				next_token: "tok-3",
+				data: [{ id: "a1", day: "2026-08-02", score: 80 }],
+				next_token: "tok-2",
 			},
 		],
-		() => collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 }),
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
 	);
 
 	assert.equal(records.length, 1, "the enumerated prefix may still be emitted");
@@ -221,18 +224,18 @@ test("a capped walk is distinguishable from an exhausted one and holds the curso
 	assert.equal(skip.reason, "older_pages_deferred_page_budget");
 	assert.match(
 		skip.message,
-		/1-page limit/,
-		"the disclosed ceiling must be the one actually enforced",
+		/repeated_next_token/,
+		"the actual refusal cause is disclosed",
 	);
 
 	assert.deepEqual(
 		lastStateCursor(messages, "activity"),
-		{ last_day: "2026-07-31" },
-		"a capped walk must hold the day it started from, never advance past unread history",
+		undefined,
+		"a looping walk must emit no checkpoint past unread history",
 	);
 });
 
-test("a capped walk with no prior cursor holds at null rather than claiming a latest day", async () => {
+test("a looping walk with no prior cursor emits no STATE rather than claiming a latest day", async () => {
 	const { ctx, messages } = makeContext();
 	await withOuraPages(
 		[
@@ -241,11 +244,11 @@ test("a capped walk with no prior cursor holds at null rather than claiming a la
 				next_token: "tok-2",
 			},
 			{
-				data: [{ id: "a2", day: "2026-08-03", score: 85 }],
-				next_token: "tok-3",
+				data: [{ id: "a1", day: "2026-08-02", score: 80 }],
+				next_token: "tok-2",
 			},
 		],
-		() => collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 }),
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
 	);
 
 	assert.ok(
@@ -254,26 +257,30 @@ test("a capped walk with no prior cursor holds at null rather than claiming a la
 	);
 	assert.deepEqual(
 		lastStateCursor(messages, "activity"),
-		{ last_day: null },
-		"a first run that is capped must not claim it reached a latest day",
+		undefined,
+		"a first run that loops must not claim it reached a latest day",
 	);
 });
 
-test("the page ceiling is what stops the walk — it does not fetch past its budget", async () => {
+test("a repeated token stops the walk before another request", async () => {
 	const { ctx } = makeContext();
 	const requested = await withOuraPages(
 		[
 			{ data: [{ id: "a1", day: "2026-08-01" }], next_token: "tok-2" },
-			{ data: [{ id: "a2", day: "2026-08-02" }], next_token: "tok-3" },
+			{ data: [{ id: "a2", day: "2026-08-02" }], next_token: "tok-2" },
 			{ data: [{ id: "a3", day: "2026-08-03" }], next_token: "tok-4" },
 		],
 		async (urls) => {
-			await collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 2 });
+			await collectOura(ctx, { httpGovernor: unpacedGovernor() });
 			return urls;
 		},
 	);
 
-	assert.equal(requested.length, 2, "a 2-page budget fetches exactly 2 pages");
+	assert.equal(
+		requested.length,
+		2,
+		"a repeated continuation stops after two pages",
+	);
 	assert.equal(
 		requested[0]?.searchParams.get("next_token"),
 		null,
@@ -287,7 +294,7 @@ test("the page ceiling is what stops the walk — it does not fetch past its bud
 });
 
 test("truncation is disclosed and the cursor withheld per stream, not once per run", async () => {
-	// Each Oura stream walks independently, so a cap reached on one stream must
+	// Each Oura stream walks independently, so a repeat on one stream must
 	// report and withhold on that stream alone.
 	const { ctx, messages } = makeContext({
 		state: {
@@ -306,12 +313,13 @@ test("truncation is disclosed and the cursor withheld per stream, not once per r
 					next_token: null,
 				},
 			],
-			// activity: still advertising more when the 1-page budget runs out.
+			// activity repeats its continuation token.
 			daily_activity: [
+				{ data: [{ id: "a1", day: "2026-08-06" }], next_token: "tok-2" },
 				{ data: [{ id: "a1", day: "2026-08-06" }], next_token: "tok-2" },
 			],
 		},
-		() => collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 }),
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
 	);
 
 	assert.equal(
@@ -327,12 +335,12 @@ test("truncation is disclosed and the cursor withheld per stream, not once per r
 
 	assert.ok(
 		truncationSkip(messages, "activity"),
-		"the capped stream discloses truncation",
+		"the looping stream discloses truncation",
 	);
 	assert.deepEqual(
 		lastStateCursor(messages, "activity"),
-		{ last_day: "2026-07-31" },
-		"the capped stream holds its own cursor",
+		undefined,
+		"the looping stream emits no STATE",
 	);
 });
 
@@ -430,9 +438,13 @@ test("sleep emits no partial records when its daily_sleep helper walk is truncat
 					],
 					next_token: "daily-sleep-next",
 				},
+				{
+					data: [{ id: "ds1", day: "2026-08-05" }],
+					next_token: "daily-sleep-next",
+				},
 			],
 		},
-		() => collectOura(ctx, { httpGovernor: unpacedGovernor(), maxPages: 1 }),
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
 	);
 
 	assert.equal(
@@ -446,7 +458,51 @@ test("sleep emits no partial records when its daily_sleep helper walk is truncat
 	);
 	assert.deepEqual(
 		lastStateCursor(messages, "sleep"),
-		{ last_day: "2026-07-01" },
-		"the sleep cursor is held until both joined resources are complete",
+		undefined,
+		"sleep emits no STATE until both joined resources are complete",
 	);
+});
+
+test("101 pages finish naturally with the same completion protocol as a short walk", async () => {
+	const { ctx, records, messages } = makeContext();
+	const pages = Array.from({ length: 101 }, (_, i) => ({
+		data: [{ id: `a${i}`, day: "2026-08-02", score: 80 }],
+		next_token: i === 100 ? null : `token-${i + 1}`,
+	}));
+	await withOuraPages(pages, async (urls) => {
+		await collectOura(ctx, { httpGovernor: unpacedGovernor() });
+		assert.equal(urls.length, 101);
+	});
+	assert.deepEqual(
+		records.map((r) => r.data.id),
+		pages.map((p) => p.data[0]?.id),
+	);
+	assert.equal(truncationSkip(messages, "activity"), undefined);
+	assert.deepEqual(lastStateCursor(messages, "activity"), {
+		last_day: "2026-08-02",
+	});
+	const short = makeContext();
+	await withOuraPages([{ data: pages[0]!.data, next_token: null }], () =>
+		collectOura(short.ctx, { httpGovernor: unpacedGovernor() }),
+	);
+	assert.deepEqual(messages, short.messages);
+});
+
+test("changing tokens with no new IDs refuses without STATE", async () => {
+	const { ctx, messages } = makeContext();
+	await withOuraPages(
+		[
+			{ data: [{ id: "a1", day: "2026-08-01" }], next_token: "one" },
+			{ data: [{ id: "a1", day: "2026-08-01" }], next_token: "two" },
+		],
+		async (urls) => {
+			await collectOura(ctx, { httpGovernor: unpacedGovernor() });
+			assert.equal(urls.length, 2);
+		},
+	);
+	assert.equal(
+		(truncationSkip(messages, "activity")?.diagnostics as Record<string, unknown> | undefined)?.cause,
+		"no_new_ids",
+	);
+	assert.equal(lastStateCursor(messages, "activity"), undefined);
 });
