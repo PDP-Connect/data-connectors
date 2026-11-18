@@ -110,7 +110,7 @@ async function reportVenmoStreamFailure(
 	await ctx.reportStreamFailure(stream, message, options);
 }
 
-export const MAX_FRIENDS_PAGES = 200;
+// Per-run transaction budget resumes unread history from STATE (backfill/head gaps).
 export const MAX_TRANSACTION_PAGES = 400;
 const HEAD_REFRESH_PAGES_WITH_PENDING_WORK = 100;
 const MAX_HEAD_GAPS = 4;
@@ -370,43 +370,52 @@ export async function fetchAllFriends(
 	ownerId: string,
 	progress: VenmoProgress,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<{ friends: VenmoUser[]; truncated: boolean }> {
+): Promise<{
+	friends: VenmoUser[];
+	truncated: boolean;
+	cause?: "repeated_offset" | "no_new_friend_ids";
+}> {
 	const all: VenmoUser[] = [];
+	const seenOffsets = new Set<number>();
+	const seenIds = new Set<string>();
 	let offset = 0;
-	const walk = await walkPagesWithCeiling({
-		maxPages: MAX_FRIENDS_PAGES,
-		fetchPage: async (pageNumber) => {
-			const pageIndex = pageNumber - 1;
-			await progress("Fetching Venmo friends page", {
-				stream: "friends",
-				phase: "fetch",
-				offset_ordinal: pageIndex,
-			});
-			const { status, body } = await fetchPath(`/users/${ownerId}/friends`, {
-				limit: String(FRIENDS_PAGE_SIZE),
-				offset: String(offset),
-			});
-			assertVenmoOk(status, body, "/users/{id}/friends");
-			const batch = parseVenmoInventory<VenmoUser>(body, "/users/{id}/friends");
-			all.push(...batch);
-			await progress("Fetched Venmo friends page", {
-				stream: "friends",
-				phase: "page",
-				item_count: batch.length,
-				total_seen: all.length,
-			});
-			// EXIT A — an empty page proves the offset walk is exhausted. A short
-			// non-empty page is not terminal: Venmo can return fewer than `limit`
-			// rows while more rows remain.
-			if (batch.length === 0) {
-				return false;
-			}
-			offset += batch.length;
-			await delay(PAGE_DELAY_MS);
-			return true;
-		},
-	});
-	return { friends: all, truncated: walk.truncated };
+	let pageIndex = 0;
+	while (true) {
+		if (seenOffsets.has(offset)) {
+			return { friends: all, truncated: true, cause: "repeated_offset" };
+		}
+		seenOffsets.add(offset);
+		await progress("Fetching Venmo friends page", {
+			stream: "friends",
+			phase: "fetch",
+			offset_ordinal: pageIndex,
+		});
+		const { status, body } = await fetchPath(`/users/${ownerId}/friends`, {
+			limit: String(FRIENDS_PAGE_SIZE),
+			offset: String(offset),
+		});
+		assertVenmoOk(status, body, "/users/{id}/friends");
+		const batch = parseVenmoInventory<VenmoUser>(body, "/users/{id}/friends");
+		all.push(...batch);
+		const priorIdCount = seenIds.size;
+		for (const friend of batch) {
+			if (typeof friend.id === "string" && friend.id) seenIds.add(friend.id);
+		}
+		await progress("Fetched Venmo friends page", {
+			stream: "friends",
+			phase: "page",
+			item_count: batch.length,
+			total_seen: all.length,
+		});
+		// A short non-empty page can have more rows behind it; only empty proves EOF.
+		if (batch.length === 0) return { friends: all, truncated: false };
+		if (seenIds.size === priorIdCount) {
+			return { friends: all, truncated: true, cause: "no_new_friend_ids" };
+		}
+		offset += batch.length;
+		pageIndex += 1;
+		await delay(PAGE_DELAY_MS);
+	}
 }
 
 export async function fetchTransactionsPage(
@@ -932,7 +941,7 @@ async function collectFriends(
 	delay: (ms: number) => Promise<void>,
 ): Promise<void> {
 	const { emit, emitRecord } = ctx;
-	const { friends, truncated } = await fetchAllFriends(
+	const { friends, truncated, cause } = await fetchAllFriends(
 		fetchPath,
 		ownerId,
 		progress,
@@ -985,7 +994,7 @@ async function collectFriends(
 		await reportVenmoStreamFailure(
 			ctx,
 			"friends",
-			`Venmo friends stopped at the ${MAX_FRIENDS_PAGES}-page limit with unread history`,
+			`Venmo friends enumeration stopped with unread history (cause: ${cause})`,
 			{ retryable: false },
 		);
 	}
