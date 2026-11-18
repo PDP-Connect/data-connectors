@@ -3246,3 +3246,172 @@ test("standalone: one retryable failure keeps the run retryable beside a non-ret
 		return true;
 	});
 });
+
+test("full history continues beyond the former 2000-page ceiling", async () => {
+	const template = (fixture("history").chat_events as Json[])[0] ?? {};
+	let pages = 0;
+	const { gateway } = fakeGateway({
+		"chat.history": (p) => {
+			if (p.session_id !== SIDE_CHAT) return historyFor(String(p.session_id));
+			const seq = p.before_seq === undefined ? 2001 : Number(p.before_seq) - 1;
+			pages += 1;
+			return {
+				chat_events: [{ ...template, message_id: `long-${seq}`, seq }],
+				has_more: seq > 1,
+				transcript_revision: 31,
+			};
+		},
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(pages, 2001);
+	assert.equal(
+		h.records("messages").filter((r) => r.session_id === SIDE_CHAT).length,
+		2001,
+	);
+	assert.equal(h.of("DETAIL_GAP").length, 0);
+	assertCompleteChats(h, SESSION_IDS.length);
+});
+
+test("full chat inventory continues beyond the former 1000-page ceiling", async () => {
+	const template = (SESSIONS.sessions as Json[])[0] ?? {};
+	const { gateway, calls } = fakeGateway({
+		"sessions.list": (p) => {
+			if (p.view === "archived") return { sessions: [] };
+			const n = p.cursor === undefined ? 0 : Number(p.cursor);
+			return {
+				sessions: [
+					{
+						...template,
+						session_id: `33333333-3333-4333-8333-${String(n).padStart(12, "0")}`,
+					},
+				],
+				...(n < 1000 ? { next_cursor: String(n + 1) } : {}),
+			};
+		},
+	});
+	const h = harness({ streams: ["conversations"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.records("conversations").length, 1001);
+	assertCompleteChats(h, 1001);
+	assert.equal(
+		calls.filter(
+			(c) => c.method === "sessions.list" && c.params.view !== "archived",
+		).length,
+		2002,
+	);
+});
+
+test("full activity continues beyond the former 500-page ceiling", async () => {
+	const day = (fixture("activity").days as Json[])[0] ?? {};
+	const template = (day.activities as Json[])[0] ?? {};
+	let pages = 0;
+	const { gateway } = fakeGateway({
+		"activity.list": () => {
+			const n = pages++;
+			if (n === 501) return { days: [] };
+			const item = {
+				...template,
+				message_id: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+				timestamp: new Date(Date.UTC(2026, 0, 31) - n * 60_000).toISOString(),
+			};
+			return { days: [{ ...day, count: 1, activities: [item] }] };
+		},
+	});
+	const h = harness({ streams: ["activities"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(pages, 502);
+	assert.equal(h.records("activities").length, 501);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.states("activities").length, 1);
+});
+
+test("full goals continue beyond the former 200-page ceiling", async () => {
+	const template = (fixture("goals-tracking").goals as Json[])[0] ?? {};
+	const { gateway, calls } = fakeGateway({
+		"goals.list": (p) => {
+			if (p.source !== "assistant_tracking")
+				return { goals: [], pagination: { has_next_page: false } };
+			const n = p.cursor === undefined ? 0 : Number(p.cursor);
+			return {
+				goals: [{ ...template, goal_id: `goal_long_${n}` }],
+				pagination: {
+					has_next_page: n < 200,
+					...(n < 200 ? { next_cursor: String(n + 1) } : {}),
+				},
+			};
+		},
+	});
+	const h = harness({ streams: ["goals"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.records("goals").length, 201);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.states("goals").length, 1);
+	assert.equal(calls.filter((c) => c.method === "goals.list").length, 203);
+});
+
+test("full library continues beyond the former 500-page ceiling", async () => {
+	const template = (fixture("library-recents").entries as Json[])[0] ?? {};
+	const { gateway, calls } = fakeGateway({
+		"fs.library": (p) => {
+			const n = Number(p.offset);
+			return {
+				entries: [
+					{ ...template, name: `file-${n}.md`, path: `notes/file-${n}.md` },
+				],
+				total: 501,
+				has_more: n < 500,
+			};
+		},
+	});
+	const h = harness({ streams: ["files"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.records("files").length, 501);
+	assert.deepEqual(h.failures, []);
+	assert.equal(h.states("files").length, 1);
+	assert.equal(calls.filter((c) => c.method === "fs.library").length, 1002);
+});
+
+test("a library repeating identities with advancing offsets refuses promptly without STATE", async () => {
+	const template = (fixture("library-recents").entries as Json[])[0] ?? {};
+	const { gateway, calls } = fakeGateway({
+		"fs.library": () => ({ entries: [template], has_more: true }),
+	});
+	const h = harness({ streams: ["files"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(calls.filter((c) => c.method === "fs.library").length, 2);
+	assert.equal(h.states("files").length, 0);
+	assert.match(h.failures[0]?.message ?? "", /no new/);
+});
+
+test("an activity cursor cycle refuses promptly even with fresh identities", async () => {
+	const day = (fixture("activity").days as Json[])[0] ?? {};
+	const template = (day.activities as Json[])[0] ?? {};
+	let pages = 0;
+	const { gateway } = fakeGateway({
+		"activity.list": () => {
+			const n = pages++;
+			return {
+				days: [
+					{
+						...day,
+						count: 1,
+						activities: [
+							{
+								...template,
+								message_id: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+								timestamp:
+									n % 2 ? "2026-01-30T00:00:00Z" : "2026-01-31T00:00:00Z",
+							},
+						],
+					},
+				],
+			};
+		},
+	});
+	const h = harness({ streams: ["activities"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.ok(pages <= 3);
+	assert.equal(h.states("activities").length, 0);
+	assert.match(h.failures[0]?.message ?? "", /repeat|page back/);
+});
