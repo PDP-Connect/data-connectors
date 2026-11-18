@@ -12,9 +12,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import example from "../../docs/submission-pilot.example.json" with {
 	type: "json",
 };
+import { connectorDir } from "../connector-paths.ts";
 import { checkSubmissionBehavior } from "./check.ts";
 
 const source = "A\u0001B\u0092 literal \\u0001";
@@ -37,9 +39,8 @@ function checkout(mode = "correct") {
 		join(dir, "manifest.json"),
 		'{"runtime_requirements":{"bindings":{"network":{"required":true}}},"streams":[{"name":"items"}]}',
 	);
-	const codec = new URL(
-		"../../../../connectors/anthropic/safe-escape.ts",
-		import.meta.url,
+	const codec = pathToFileURL(
+		join(connectorDir("anthropic"), "safe-escape.ts"),
 	).href;
 	writeFileSync(
 		join(dir, "index.ts"),
