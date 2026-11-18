@@ -12606,7 +12606,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.31",
+				"version": "0.2.32",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",
@@ -14490,7 +14490,7 @@
 				},
 				"connector_key": "google-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "Google Takeout",
 				"brand": {
 					"icon": "icon.svg",
@@ -14823,7 +14823,7 @@
 				},
 				"connector_key": "groupme",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "GroupMe",
 				"brand": {
 					"icon": "icon.svg",
@@ -16241,7 +16241,7 @@
 				},
 				"connector_key": "imessage",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "iMessage (macOS)",
 				"brand": {
 					"icon": "icon.svg",
@@ -29779,7 +29779,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.27",
+				"version": "0.2.28",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
