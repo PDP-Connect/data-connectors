@@ -642,6 +642,18 @@ test("latest history continuation response overrides stale bootstrap continuatio
 	}
 });
 
+test("history response accepts bounded continuation tokens above four KiB", () => {
+	const reply = (token: string) => ({
+		onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+			{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token } } } },
+		] } }],
+	});
+	const bounded = "x".repeat(5000);
+	assert.equal(readHistoryResponseEvidence(reply(bounded), "previous", new Set()).nextContinuation, bounded);
+	assert.equal(readHistoryResponseEvidence(reply("x".repeat(16385)), "previous", new Set()).nextContinuation, null);
+});
+
+
 test("a blocked page vetoes every kind of end evidence", () => {
 	const blocked = { ...NO_EVIDENCE, pageBlocked: true };
 	assert.equal(enumerationEnded({ ...blocked, domHasEndMarker: true }, 2), false);

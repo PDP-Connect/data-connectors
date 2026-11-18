@@ -171,7 +171,7 @@ class HistoryResponseTracker {
 		this.bootstrapHasContinuation = page.dataHasContinuation;
 		this.bootstrapRendererCounts = page.historyBootstrapRendererCounts ?? {};
 		for (const token of tokens.slice(0, 8))
-			if (token.length > 0 && token.length <= 4096) this.tokens.add(token);
+			if (token.length > 0 && token.length <= 16384) this.tokens.add(token);
 		this.bootstrapTokenCount = this.tokens.size;
 		this.seeded = true;
 		for (const queued of this.preSeedResponses.splice(0))
@@ -249,7 +249,7 @@ class HistoryResponseTracker {
 			typeof requestBody?.continuation === "string"
 				? requestBody.continuation
 				: null;
-		if (requestedContinuation && requestedContinuation.length > 4096) return;
+		if (requestedContinuation && requestedContinuation.length > 16384) return;
 		const initialHistoryRequest = requestBody?.browseId === "FEhistory";
 		if (
 			!initialHistoryRequest &&
