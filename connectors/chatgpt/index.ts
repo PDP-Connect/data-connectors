@@ -3191,7 +3191,6 @@ export async function processConversationDetail(
 }
 
 const PAGINATION_SAFETY_LIMIT = 5000;
-const GIZMO_MAX_PAGES = 50;
 
 /**
  * A 200 whose body failed to parse arrives as `res.json === null` (the api
@@ -3417,6 +3416,7 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 		stream: "custom_gpts",
 		message: "Fetching custom GPTs",
 	});
+	const seenCursors = new Set<string>();
 	let cursor: string | null = null;
 	let pages = 0;
 	let anyError = false;
@@ -3469,31 +3469,22 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 		// here rather than folded into the shared classifier's generic item shape.
 		cursor = (res.json?.cursor as string | null | undefined) ?? null;
 		pages += 1;
-		if (pages > GIZMO_MAX_PAGES) {
-			if (cursor !== null) {
-				// The source handed back another cursor — there is genuinely more to
-				// list — and the cap stopped the walk before following it. Treated
-				// identically to a fetch/parse failure: the enumerated boundary is a
-				// truncated prefix, not the whole account, so it must not prove
-				// coverage or commit STATE below.
-				deps.emit({
-					type: "SKIP_RESULT",
-					stream: "custom_gpts",
-					reason: "pagination_cap_truncated",
-					message: `gizmos/mine pagination stopped at the ${GIZMO_MAX_PAGES}-page safety cap with more pages remaining`,
-					recovery_hint: {
-						action: "retry_on_connector_upgrade",
-						retryable: false,
-					},
-					diagnostics: { pages, considered },
-				});
-				anyError = true;
-			}
-			// cursor === null here means the last page ALSO happened to be the
-			// final one (no more cursor to follow) — the cap and natural
-			// completion coincided, so this is honest completion, not truncation.
+		if (cursor !== null && seenCursors.has(cursor)) {
+			deps.emit({
+				type: "SKIP_RESULT",
+				stream: "custom_gpts",
+				reason: "pagination_cap_truncated",
+				message: "gizmos/mine pagination returned a repeated cursor",
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
+				diagnostics: { pages, considered },
+			});
+			anyError = true;
 			break;
 		}
+		if (cursor !== null) seenCursors.add(cursor);
 		if (!page.items.length) {
 			break;
 		}
@@ -3540,6 +3531,7 @@ export async function runSharedConversationsStream(
 	// the user deleted on the source) are pruned from the carry-forward map
 	// after a clean pass.
 	const fingerprintCursor = openFingerprintCursor(state.shared_conversations);
+	const seenIds = new Set<string>();
 	let offset = 0;
 	const limit = 100;
 	let sawError = false;
@@ -3580,6 +3572,7 @@ export async function runSharedConversationsStream(
 		if (!items.length) {
 			break;
 		}
+		let newIds = 0;
 		for (const s of items) {
 			const rec = buildSharedConversationRecord(s);
 			if (!rec) {
@@ -3590,6 +3583,11 @@ export async function runSharedConversationsStream(
 				);
 				continue;
 			}
+			const id = String(rec.id);
+			if (!seenIds.has(id)) {
+				seenIds.add(id);
+				newIds += 1;
+			}
 			covered += 1;
 			if (fingerprintCursor.shouldEmit(rec)) {
 				await deps.emitRecord("shared_conversations", rec);
@@ -3599,18 +3597,13 @@ export async function runSharedConversationsStream(
 			break;
 		}
 		offset += items.length;
-		if (offset > PAGINATION_SAFETY_LIMIT) {
-			// Reaching this line means the just-fetched page was a FULL page
-			// (`items.length === limit`, or the `items.length < limit` check above
-			// would already have broken the loop) — the source has more to give
-			// and the cap stopped the walk short of it. Treated identically to a
-			// fetch/parse failure: the enumerated boundary is a truncated prefix,
-			// not the whole account.
+		if (newIds === 0) {
+			// A full page with no new identity cannot advance this walk.
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "shared_conversations",
 				reason: "pagination_cap_truncated",
-				message: `shared_conversations pagination stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
+				message: "shared_conversations pagination repeated a page with no new ids",
 				recovery_hint: {
 					action: "retry_on_connector_upgrade",
 					retryable: false,
