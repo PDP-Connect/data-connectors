@@ -94,7 +94,11 @@ test("conformance reports the manifest's lifecycle tier", () => {
 				"--json",
 				"--static",
 			],
-			{ cwd: repoRoot, encoding: "utf8" },
+			{
+				cwd: repoRoot,
+				encoding: "utf8",
+				env: { ...process.env, CONFORMANCE_BASE_REF: "HEAD" },
+			},
 		),
 	);
 	assert.equal(report.tier, "supported");
