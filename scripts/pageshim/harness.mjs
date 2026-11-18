@@ -135,6 +135,7 @@ async function hostMain({
 	includeScopeEntries,
 	omitScopeEntries,
 	thinHost,
+	connectorEndEvidence,
 }) {
 	// Deadline time must continue advancing when fixture calendar time is frozen.
 	const elapsedNow = performance.now.bind(performance);
@@ -241,6 +242,7 @@ async function hostMain({
 	if (Object.keys(impl).join() !== methods.join())
 		throw new Error("harness shim drifted from SHIM_METHODS");
 	if (omitScopeEntries) delete impl.requestedScopeEntries;
+	if (connectorEndEvidence) impl.capabilities = () => ["connector-end-evidence/1"];
 	const page = new Proxy(impl, {
 		get(t, k) {
 			if (typeof k === "symbol" || k === "then") return undefined;
@@ -537,6 +539,7 @@ export async function runHarness({
 	loginWaitMs = 120_000,
 	env = {},
 	resultStreaming = false,
+	connectorEndEvidence = false,
 	resultSpoolDirectory = join(
 		process.cwd(),
 		".scratch",
@@ -565,6 +568,8 @@ export async function runHarness({
 	const states = { ...initialState };
 	const pendingStates = {};
 	const stateMessages = [];
+	const connectorMessages = [];
+	const connectorMessageOrders = [];
 	let stateWriteAttempts = 0;
 	let failedResultWrite = false;
 	let acceptedLegacyResult = false;
@@ -669,8 +674,12 @@ export async function runHarness({
 					}
 					return null;
 				case "setData":
+					if (a[0] === "connector:message") {
+						connectorMessages.push(JSON.parse(JSON.stringify(a[1])));
+						connectorMessageOrders.push(++eventOrder);
+					}
 					if (String(a[0]).startsWith("result:")) {
-						if (resultStreamNeverAck) return new Promise(() => {});
+						if (resultStreamNeverAck === true || resultStreamNeverAck === a[0]) return new Promise(() => {});
 						if (a[0] === "result:done") resultDoneAttemptOrder = ++eventOrder;
 						const ack = await streamHost.setData(a[0], a[1]);
 						if (a[0] === "result:done") {
@@ -816,7 +825,7 @@ export async function runHarness({
 						"Bridge request argument exceeds 256 Ki UTF-16 code units",
 				};
 			const result = await dispatch(method, args);
-			observeBridge?.(method, args, result);
+			await observeBridge?.(method, args, result);
 			const replyUnits = jsonPayloadUnits(result);
 			maxBridgePayloadUnits = Math.max(maxBridgePayloadUnits, replyUnits);
 			if (replyUnits > PAGE_BRIDGE_MAX_UNITS)
@@ -891,6 +900,7 @@ export async function runHarness({
 			includeScopeEntries: !legacyScopeBridge,
 			omitScopeEntries: missingScopeEntries,
 			thinHost: resultStreaming,
+			connectorEndEvidence,
 		});
 		const ret = await untilAborted(evaluated, signal);
 		sampling = false;
@@ -910,6 +920,8 @@ export async function runHarness({
 			resultWriteOrder,
 			states,
 			stateMessages,
+			connectorMessages,
+			connectorMessageOrders,
 			result,
 			streamResult: streamHost.mode === "stream" ? streamHost.summary() : null,
 			streamDone: streamHost.doneValue ?? null,

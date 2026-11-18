@@ -991,31 +991,9 @@ export function runConnector(config: RunConnectorConfig): void {
 		throw new Error("runConnector: config.collect required");
 	}
 
-	const {
-		name,
-		validateRecord,
-		collect,
-		browser,
-		normalizeTerminalError = (
-			error: TerminalErrorDetails,
-		): TerminalErrorDetails => error,
-		onDurableCommit,
-		recordKeyFields,
-		retryablePattern = DEFAULT_RETRYABLE_PATTERN,
-		timeRangeField,
-		isTombstone,
-		auth,
-		authOptional = false,
-	} = config;
-	// ensureSession/probeSession/probeSessionIsAuthoritative are only on
-	// BrowserConnectorConfig; extract after the browser-narrowing check.
-	const ensureSession = browser ? config.ensureSession : undefined;
-	const probeSession = browser ? config.probeSession : undefined;
-	const probeSessionIsAuthoritative = browser
-		? config.probeSessionIsAuthoritative
-		: undefined;
-
-	const timeRangeFieldFor = consentTimeFieldResolver(name, timeRangeField);
+	const { name, onDurableCommit } = config;
+	// Reject a misbound artifact before opening the Node transport, as before.
+	consentTimeFieldResolver(name, config.timeRangeField);
 
 	// Capture session: null unless PDPP_CAPTURE_FIXTURES=1.
 	const capture = createCaptureSession(name);
@@ -1064,69 +1042,6 @@ export function runConnector(config: RunConnectorConfig): void {
 		flushAndExitAfterRuntimeAck(code);
 	};
 
-	let observedCounters: { totalEmitted: number; totalSkipped: number } | null =
-		null;
-	// Every stream failure this run reported, by stream. DONE is derived from
-	// the whole set (see `streamFailureDone`), never from report order.
-	const reportedStreamFailures = new Map<string, StreamFailureRecord>();
-	const recordStreamFailure = (
-		stream: string,
-		message: string,
-		retryable: boolean,
-	): void => {
-		const prior = reportedStreamFailures.get(stream);
-		reportedStreamFailures.set(
-			stream,
-			prior === undefined
-				? { message, retryable }
-				: { message: prior.message, retryable: prior.retryable || retryable },
-		);
-	};
-
-	const observationsDeclared =
-		config.protocolCapabilities?.includes(OBSERVATION_CAPABILITY) ?? false;
-	if (observationsDeclared) {
-		setObservationSink(createWireObservationSink());
-	}
-
-	const emitFailed = (
-		message: string,
-		retryable = false,
-		records_emitted = observedCounters?.totalEmitted ?? 0,
-		code?: string,
-		errorBasis: readonly string[] = [],
-		recoveryHint?: TerminalErrorDetails["recovery_hint"],
-	): void => {
-		// The runtime ACK handshake may outlive every ref'd process handle. Mark
-		// the natural exit path before emitting DONE so it cannot contradict the
-		// failed terminal status if Node exits before the explicit callback.
-		process.exitCode = 1;
-		const normalized = composeNormalizedTerminalError({
-			message,
-			retryable,
-			code,
-			recoveryHint,
-			normalizeTerminalError,
-		});
-		// `DONE.error.basis` cites the OBSERVATION ids the failure rests on
-		// (Section 5.8). It is a connector claim, distinct from a diagnosis
-		// cause's basis; the runtime decides scope on its own records.
-		const terminalError =
-			observationsDeclared && errorBasis.length > 0
-				? { ...normalized, basis: errorBasis }
-				: normalized;
-		// Fire-and-forget. emit() resolves after stdout drains; we're about to
-		// exit(1) anyway, so we don't need to block. If it rejects (the write
-		// fails), the process is dying either way.
-		emit({
-			type: "DONE",
-			status: "failed",
-			records_emitted,
-			error: terminalError,
-		}).catch((): undefined => undefined);
-		flushAndExit(1);
-	};
-
 	let interactionCounter = 0;
 	const nextInteractionId = (): string => {
 		interactionCounter += 1;
@@ -1137,12 +1052,6 @@ export function runConnector(config: RunConnectorConfig): void {
 		detailGapPageCounter += 1;
 		return `dgp_${Date.now()}_${detailGapPageCounter}`;
 	};
-	let assistanceCounter = 0;
-	const nextAssistanceId = (): string => {
-		assistanceCounter += 1;
-		return `asst_${Date.now()}_${assistanceCounter}`;
-	};
-
 	const sendInteraction = (
 		req: InteractionRequest,
 	): Promise<InteractionResponse> => {
@@ -1308,6 +1217,135 @@ export function runConnector(config: RunConnectorConfig): void {
 		});
 	};
 
+	void runConnectorLifecycle(config, {
+		readStart,
+		emit,
+		sendInteraction,
+		requestDetailGapPage,
+		capture,
+		runBrowser: runInBrowser,
+		onFailure: () => {
+			process.exitCode = 1;
+		},
+	}).then(
+		({ exitCode }) => flushAndExit(exitCode),
+		() => flushAndExit(1),
+	);
+}
+
+/** Host I/O for the shared START-to-DONE lifecycle. No process exit on this path. */
+export interface ConnectorLifecycleTransport {
+	/** Await durable record/checkpoint output before the lifecycle emits DONE. */
+	beforeDone?: (withheldAtOrAfterUntil: ReadonlySet<string>) => Promise<void>;
+	readStart: () => Promise<StartMessage>;
+	emit: (message: EmittedMessage) => Promise<void>;
+	sendInteraction: BaseCollectContext["sendInteraction"];
+	requestDetailGapPage: BaseCollectContext["requestDetailGapPage"];
+	capture?: CaptureSession | null;
+	runBrowser?: typeof runInBrowser;
+	onFailure?: () => void;
+}
+
+/** The same awaited lifecycle for stdio and hosted transports. */
+export async function runConnectorLifecycle(
+	config: RunConnectorConfig,
+	transport: ConnectorLifecycleTransport,
+): Promise<{ exitCode: number; withheldAtOrAfterUntil: ReadonlySet<string> }> {
+	let withheldAtOrAfterUntil: ReadonlySet<string> = new Set();
+	const { readStart, emit, sendInteraction, requestDetailGapPage } = transport;
+	const capture = transport.capture ?? null;
+
+	const {
+		name,
+		validateRecord,
+		collect,
+		browser,
+		normalizeTerminalError = (
+			error: TerminalErrorDetails,
+		): TerminalErrorDetails => error,
+		recordKeyFields,
+		retryablePattern = DEFAULT_RETRYABLE_PATTERN,
+		timeRangeField,
+		isTombstone,
+		auth,
+		authOptional = false,
+	} = config;
+	// ensureSession/probeSession/probeSessionIsAuthoritative are only on
+	// BrowserConnectorConfig; extract after the browser-narrowing check.
+	const ensureSession = browser ? config.ensureSession : undefined;
+	const probeSession = browser ? config.probeSession : undefined;
+	const probeSessionIsAuthoritative = browser
+		? config.probeSessionIsAuthoritative
+		: undefined;
+
+	const timeRangeFieldFor = consentTimeFieldResolver(name, timeRangeField);
+
+	let observedCounters: { totalEmitted: number; totalSkipped: number } | null =
+		null;
+	// Every stream failure this run reported, by stream. DONE is derived from
+	// the whole set (see `streamFailureDone`), never from report order.
+	const reportedStreamFailures = new Map<string, StreamFailureRecord>();
+	const recordStreamFailure = (
+		stream: string,
+		message: string,
+		retryable: boolean,
+	): void => {
+		const prior = reportedStreamFailures.get(stream);
+		reportedStreamFailures.set(
+			stream,
+			prior === undefined
+				? { message, retryable }
+				: { message: prior.message, retryable: prior.retryable || retryable },
+		);
+	};
+
+	const observationsDeclared =
+		config.protocolCapabilities?.includes(OBSERVATION_CAPABILITY) ?? false;
+	if (observationsDeclared) {
+		setObservationSink(createWireObservationSink());
+	}
+
+	const emitFailed = async (
+		message: string,
+		retryable = false,
+		records_emitted = observedCounters?.totalEmitted ?? 0,
+		code?: string,
+		errorBasis: readonly string[] = [],
+		recoveryHint?: TerminalErrorDetails["recovery_hint"],
+	): Promise<void> => {
+		// The runtime ACK handshake may outlive every ref'd process handle. Mark
+		// the natural exit path before emitting DONE so it cannot contradict the
+		// failed terminal status if Node exits before the explicit callback.
+		transport.onFailure?.();
+		const normalized = composeNormalizedTerminalError({
+			message,
+			retryable,
+			code,
+			recoveryHint,
+			normalizeTerminalError,
+		});
+		// `DONE.error.basis` cites the OBSERVATION ids the failure rests on
+		// (Section 5.8). It is a connector claim, distinct from a diagnosis
+		// cause's basis; the runtime decides scope on its own records.
+		const terminalError =
+			observationsDeclared && errorBasis.length > 0
+				? { ...normalized, basis: errorBasis }
+				: normalized;
+		// Both transports must acknowledge DONE before settling the run.
+		await emit({
+			type: "DONE",
+			status: "failed",
+			records_emitted,
+			error: terminalError,
+		});
+	};
+
+	let assistanceCounter = 0;
+	const nextAssistanceId = (): string => {
+		assistanceCounter += 1;
+		return `asst_${Date.now()}_${assistanceCounter}`;
+	};
+
 	const progress = (
 		message: string,
 		extra: ProgressExtra = {},
@@ -1352,9 +1390,9 @@ export function runConnector(config: RunConnectorConfig): void {
 			stream,
 			reason: "stream_collection_failed",
 			message: normalizedMessage,
-			recovery_hint: options.recoveryHint ?? {
-				action: "retry_by_runtime",
-				retryable,
+			recovery_hint: {
+				action: options.recoveryHint?.action ?? "retry_by_runtime",
+				retryable: options.recoveryHint?.retryable ?? retryable,
 			},
 			...(options.diagnostics === undefined
 				? {}
@@ -1365,10 +1403,12 @@ export function runConnector(config: RunConnectorConfig): void {
 	// Kick off the run. The outer catch distinguishes TerminalError (which
 	// the runtime threw deliberately with an explicit retryable bit) from
 	// unexpected throws (where we pattern-match the message).
-	run().catch((err: unknown) => {
+	try {
+		return { exitCode: await run(), withheldAtOrAfterUntil };
+	} catch (err: unknown) {
 		const errorBasis = observationBasisOf(err);
 		if (err instanceof TerminalError) {
-			emitFailed(
+			await emitFailed(
 				err.message,
 				err.retryable,
 				undefined,
@@ -1376,19 +1416,20 @@ export function runConnector(config: RunConnectorConfig): void {
 				errorBasis,
 				err.recoveryHint,
 			);
-			return;
+			return { exitCode: 1, withheldAtOrAfterUntil };
 		}
 		const message = describeUnexpectedFailure(err);
-		emitFailed(
+		await emitFailed(
 			message,
 			retryablePattern.test(message),
 			undefined,
 			undefined,
 			errorBasis,
 		);
-	});
+		return { exitCode: 1, withheldAtOrAfterUntil };
+	}
 
-	async function run(): Promise<void> {
+	async function run(): Promise<number> {
 		const startMsg = await parseStart(readStart);
 		const scopeRequested = buildRequested(startMsg);
 		// §5.1: a bounded stream with no timestamp consent field cannot apply
@@ -1416,9 +1457,9 @@ export function runConnector(config: RunConnectorConfig): void {
 		if (requested.size === 0) {
 			// Every requested stream was skipped: nothing to collect, so the
 			// run ends here without opening a session.
+			await transport.beforeDone?.(withheldAtOrAfterUntil);
 			await emit({ type: "DONE", status: "succeeded", records_emitted: 0 });
-			flushAndExit(0);
-			return;
+			return 0;
 		}
 		// Deferred for browser connectors that declare BOTH `auth` and
 		// `probeSession`: a valid pre-authenticated browser profile must be
@@ -1461,6 +1502,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			recordKeyFields,
 		});
 		observedCounters = emitRecord.counters;
+		withheldAtOrAfterUntil = emitRecord.withheldAtOrAfterUntil;
 		const emittedAt = nowIso();
 		// After a record was withheld at or after `until`, a cursor may point
 		// past it, and a recovery receipt may close a gap whose record was
@@ -1534,7 +1576,8 @@ export function runConnector(config: RunConnectorConfig): void {
 						return credentials;
 					}
 				: undefined;
-			await runInBrowser({
+			if (!transport.runBrowser) throw new Error("Browser transport required");
+			await transport.runBrowser({
 				browser,
 				name,
 				sendInteraction,
@@ -1555,18 +1598,19 @@ export function runConnector(config: RunConnectorConfig): void {
 			await collect(baseCtx);
 		}
 
+		await transport.beforeDone?.(withheldAtOrAfterUntil);
 		const streamFailure = streamFailureDone(reportedStreamFailures);
 		if (streamFailure) {
-			emitFailed(
+			await emitFailed(
 				streamFailure.message,
 				streamFailure.retryable,
 				emitRecord.counters.totalEmitted,
 				"stream_collection_failed",
 			);
-			return;
+			return 1;
 		}
 		await finalizeRun(emitRecord.counters, progress, emit);
-		flushAndExit(0);
+		return 0;
 	}
 }
 

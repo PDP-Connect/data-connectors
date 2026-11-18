@@ -43,11 +43,20 @@ const rangeMode =
 			},
 			probe: async () => true,
 			collect: async ({ emit, emitRecord }) => {
+				if (rangeMode === "concurrent") {
+					await Promise.all([
+						emitRecord("conversations", { id: "retained", update_time: "2026-10-21T00:00:00.000Z" }),
+						...PAGESHIM_COVERAGE_MESSAGES.map((message) => emit(message)),
+						emitRecord("conversations", { id: "filtered", update_time: "2026-10-22T00:00:00.000Z" }),
+					]);
+					return;
+				}
 				if (rangeMode) {
 					await emitRecord("conversations", {
 						id: "retained",
 						update_time: "2026-10-21T00:00:00.000Z",
 					});
+					for (const message of PAGESHIM_COVERAGE_MESSAGES) await emit(message);
 					await emit({
 						type: "STATE",
 						stream: "conversations",
@@ -60,11 +69,7 @@ const rangeMode =
 					return;
 				}
 				if (PAGESHIM_COVERAGE_RECORD)
-					await emit({
-						type: "RECORD",
-						stream: "conversations",
-						data: { id: "one" },
-					});
+					await emitRecord("conversations", { id: "one" });
 				for (const message of PAGESHIM_COVERAGE_MESSAGES) await emit(message);
 				if (typeof PAGESHIM_TERMINAL_CODE === "string")
 					throw createConnectorFailure(
