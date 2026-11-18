@@ -1845,23 +1845,41 @@ test("a mid-list short page with no continuation pauses read-ahead instead of en
 	assert.equal(peakAfterShortPages, PRODUCTION_WIDTH);
 });
 
-test("search progress follows forward empty and duplicate-id pages before new rows", async () => {
+test("search progress follows forward empty pages before new rows", async () => {
 	const first = range("forward", 0, 30);
 	const pages: Pages = new Map<number, readonly Page[]>([
 		[0, [{ items: first, next_cursor: 30 }]],
 		[30, [{ items: [], next_cursor: 60 }]],
 		[60, [{ items: [], next_cursor: 90 }]],
-		[90, [{ items: first, next_cursor: 120 }]],
+		[90, [{ items: [], next_cursor: 120 }]],
 		[120, [{ items: [convo("after-forward-gaps")] }]],
 	]);
 	const result = await runFixture(pages, 1, 7);
-	assert.deepEqual(result.paths.map(cursorOf), [
-		0, 30, 30, 30, 60, 60, 60, 90, 120, 120, 120, 150, 150,
+	assert.deepEqual(result.paths.filter((path) => path.startsWith(SEARCH_PREFIX)).map(cursorOf), [
+		0, 30, 30, 30, 60, 60, 60, 90, 90, 90, 120, 120, 120, 150, 150,
 	]);
 	assert.equal(result.records.length, 31);
 	assert.ok(result.records.some((record) => record.data.id === "after-forward-gaps"));
 	assert.equal(result.messages.some((message) => message.type === "SKIP_RESULT"), false);
 	assert.ok(result.messages.some((message) => message.type === "DETAIL_COVERAGE"));
+});
+
+test("search progress refuses a forward page of already-seen ids", async () => {
+	const prior = "2000-01-01T00:00:00.000Z";
+	const first = range("dup-forward", 0, 30);
+	const pages: Pages = new Map<number, readonly Page[]>([
+		[0, [{ items: first, next_cursor: 30 }]],
+		[30, [{ items: first, next_cursor: 60 }]],
+		[60, [{ items: [convo("must-not-reach")] }]],
+	]);
+	const result = await runFixture(pages, 1, 7, {
+		conversations: { last_update_time: prior, detail_version: 2, detail_frontier: null, enumeration_version: 1 },
+	});
+	assert.equal(readsByCursor(result.paths).has(60), false);
+	assert.ok(result.messages.some((message) =>
+		message.type === "SKIP_RESULT" && message.reason === "pagination_cap_truncated"));
+	assert.equal(result.messages.some((message) => message.type === "DETAIL_COVERAGE"), false);
+	assert.equal(result.state?.last_update_time, prior);
 });
 
 test("search progress bounds consecutive forward pages without ids and holds the watermark", async () => {

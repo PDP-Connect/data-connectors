@@ -4429,14 +4429,17 @@ async function walkConversationSearch(
 		const forwardCursor =
 			nextCursor !== null && nextCursor > cursor && !seenCursors.has(nextCursor);
 		const addedIds = seenSourceIds.size > priorIdCount;
+		const pageHadItems = attempts.some((items) => items.length > 0);
+		// Only an empty page may carry the walk forward without a new id. A page of
+		// already-seen ids is a stalled or shifted source, so it refuses below.
 		forwardPagesWithoutIds =
-			!addedIds && forwardCursor ? forwardPagesWithoutIds + 1 : 0;
+			!addedIds && forwardCursor && !pageHadItems ? forwardPagesWithoutIds + 1 : 0;
 		const paginationFailure =
 			nextCursor !== null && !forwardCursor
 				? "conversations search returned a repeated or backward cursor"
 				: forwardPagesWithoutIds > maxForwardPagesWithoutIds
 					? "conversations search exceeded the forward-page progress guard without a new id"
-					: !addedIds && !forwardCursor && attempts.some((items) => items.length > 0)
+					: !addedIds && pageHadItems
 						? "conversations search page added no new conversation id"
 						: null;
 		if (paginationFailure !== null) {
