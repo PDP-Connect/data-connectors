@@ -39,6 +39,44 @@ export function inventoryIsComplete(e: InventoryEvidence | undefined): boolean {
 		!e ||
 		!e.ownerIdentity ||
 		e.ownerIdentity !== e.signedInOwnerIdentity ||
+		!e.signal ||
+		e.signal.entity !== e.entity ||
+		!rowsAreRead(e)
+	)
+		return false;
+	const total = new Set(e.sourceIds).size;
+	return "explicitEnd" in e.signal
+		? e.signal.explicitEnd === true
+		: Number.isSafeInteger(e.signal.exactTotal) &&
+				e.signal.exactTotal >= 0 &&
+				e.signal.exactTotal === total;
+}
+
+/** The signed-in session's server-rendered page for one order states how many
+ * item lines it holds (account-source.ts sourceOrderItemTotal). Like the
+ * server-rendered empty order history, that is account evidence without a
+ * provider owner id: the payload names the requested order, and H-E-B serves
+ * it only to the signed-in owner. Every row must still be read and accepted,
+ * and the distinct rows must number exactly that total. */
+export function inventoryMatchesSourceTotal(
+	e: InventoryEvidence | undefined,
+	sourceTotal: number | null,
+): boolean {
+	return (
+		e !== undefined &&
+		e.entity === "order_items" &&
+		sourceTotal !== null &&
+		Number.isSafeInteger(sourceTotal) &&
+		sourceTotal > 0 &&
+		rowsAreRead(e) &&
+		new Set(e.sourceIds).size === sourceTotal
+	);
+}
+
+/** One coherent, settled response for the requested resource, whose every
+ * source row has an identity and was accepted. Not a completeness signal. */
+function rowsAreRead(e: InventoryEvidence): boolean {
+	if (
 		!e.snapshotId ||
 		!e.requestedResource ||
 		e.requestedResource !== e.landedResource ||
@@ -46,25 +84,17 @@ export function inventoryIsComplete(e: InventoryEvidence | undefined): boolean {
 		e.loading ||
 		!e.coherent ||
 		e.rejectedRows !== 0 ||
-		e.missingIdentityRows !== 0 ||
-		!e.signal ||
-		e.signal.entity !== e.entity
+		e.missingIdentityRows !== 0
 	)
 		return false;
 	const source = new Set(e.sourceIds);
 	const accepted = new Set(e.acceptedIds);
-	if (
+	return !(
 		source.size !== e.sourceIds.length ||
 		accepted.size !== e.acceptedIds.length ||
 		source.size !== accepted.size ||
 		[...source].some((id) => !id || !accepted.has(id))
-	)
-		return false;
-	return "explicitEnd" in e.signal
-		? e.signal.explicitEnd === true
-		: Number.isSafeInteger(e.signal.exactTotal) &&
-				e.signal.exactTotal >= 0 &&
-				e.signal.exactTotal === source.size;
+	);
 }
 
 export function unprovenInventory(

@@ -18,6 +18,8 @@ import type { ProfileRecord } from "./types.ts";
 const SIGNED_IN_CONTROL: Record<string, string> = {
 	"/my-account/profile": 'a[href^="/oidc/prompt/edit_account"]',
 	"/my-account/your-orders": '[data-qe-id="orderResults"]',
+	// The order's summary card (subtotal, tax, payment method), live 2026-11-18.
+	"/my-account/order-history/[orderId]": '[data-qe-id="orderSummaryCard"]',
 };
 type ProfileReadFailure = {
 	gate: "signed_out_marker" | "next_data_missing" | "next_data_unparseable"
@@ -115,6 +117,23 @@ export function readAccountProfile(html: string): {
 
 export function parseAccountProfile(html: string): ProfileRecord | null {
 	return readAccountProfile(html).record;
+}
+
+const orderDetailSource = z.object({
+	order: z.object({ orderId: text, orderItems: z.array(z.object({})) }),
+});
+
+/** The number of item lines in this order's server-rendered payload
+ * (pageProps.order.orderItems; it matched the rendered rows on every order
+ * captured live on 2026-11-18). Null unless the page is the signed-in
+ * session's server response for exactly the requested order. */
+export function sourceOrderItemTotal(html: string, orderId: string): number | null {
+	const result = orderDetailSource.safeParse(
+		accountPageProps(html, "/my-account/order-history/[orderId]"),
+	);
+	return result.success && result.data.order.orderId === orderId
+		? result.data.order.orderItems.length
+		: null;
 }
 
 const emptyHistorySource = z.object({

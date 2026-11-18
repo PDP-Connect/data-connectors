@@ -15,6 +15,7 @@ import {
 import {
 	type InventoryEvidence,
 	inventoryIsComplete,
+	inventoryMatchesSourceTotal,
 } from "./inventory-evidence.ts";
 import {
 	inspectOrderListParsing,
@@ -179,6 +180,31 @@ const verified: InventoryEvidence = {
 	missingIdentityRows: 0,
 	signal: { entity: "order_items", exactTotal: 2 },
 };
+test("an order's own server total proves its rows only when every row was read and they number exactly that total", () => {
+	const read = { ...verified, ownerIdentity: null, signedInOwnerIdentity: null, signal: null };
+	assert.equal(inventoryIsComplete(read), false);
+	assert.equal(inventoryMatchesSourceTotal(read, 2), true);
+	for (const total of [null, 0, 1, 3, 2.5])
+		assert.equal(inventoryMatchesSourceTotal(read, total), false, String(total));
+	for (const invalid of [
+		{ entity: "orders" },
+		{ snapshotId: null },
+		{ landedResource: "https://www.heb.com/other" },
+		{ loading: true },
+		{ responseSucceeded: null },
+		{ coherent: false },
+		{ rejectedRows: 1 },
+		{ missingIdentityRows: 1 },
+		{ acceptedIds: ["line-1"] },
+		{ sourceIds: ["line-1", "line-1"] },
+	] as Partial<InventoryEvidence>[])
+		assert.equal(
+			inventoryMatchesSourceTotal({ ...read, ...invalid }, 2),
+			false,
+			JSON.stringify(invalid),
+		);
+});
+
 test("the evidence contract accepts only an exact same-entity owner-bound source response", () => {
 	assert.equal(inventoryIsComplete(verified), true);
 	assert.equal(
@@ -428,6 +454,108 @@ for (const [label, bad] of [
 			);
 		});
 }
+/** A synthetic order-detail page as H-E-B renders it for the signed-in owner
+ * (shape captured live on 2026-11-18; every value here is invented). */
+const detailPage = (opts: { lines: number; orderId?: string; control?: boolean }) => {
+	const data = {
+		page: "/my-account/order-history/[orderId]",
+		gssp: true,
+		props: {
+			__N_SSP: true,
+			pageProps: {
+				order: {
+					orderId: opts.orderId ?? order.orderId,
+					orderItems: Array.from({ length: opts.lines }, (_, i) => ({
+						sequenceNumber: i + 1,
+						quantity: 1,
+						product: { id: String(500 + i) },
+					})),
+				},
+			},
+		},
+	};
+	return `${itemRow(0)}${itemRow(1)}${opts.control === false ? "" : '<section data-qe-id="orderSummaryCard"></section>'}<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(data)}</script>`;
+};
+for (const recovery of [false, true]) {
+	const read = async (html: string) => {
+		const deps = sink();
+		const coverage = newOrderItemsCoverage();
+		const noInteraction = async () => {
+			throw new Error("unexpected interaction");
+		};
+		const recovered = recovery
+			? (
+					await recoverPendingOrderItemDetailGaps(
+						pageFor(html),
+						{
+							...deps,
+							sendInteraction: noInteraction,
+							detailSurfaceTimeoutMs: 50,
+							detailGaps: [
+								{
+									detail_locator: {
+										kind: "heb.order_detail",
+										order_id: order.orderId,
+										order_date: "2026-07-14",
+									},
+									gap_id: "gap-test",
+									record_key: order.orderId,
+									reference_only: true,
+									status: "pending",
+									stream: "order_items",
+								},
+							],
+						},
+						flags(),
+					)
+				).recovered
+			: (await processListOrder(
+					pageFor(html),
+					{
+						...deps,
+						detailSurfaceTimeoutMs: 50,
+						emitItems: true,
+						wantsItems: true,
+						wantsOrders: true,
+						orderItemsCoverage: coverage,
+						ordersCoverage: undefined,
+						ordersFingerprintCursor: undefined,
+						progress: async () => {},
+						sendInteraction: noInteraction,
+					},
+					flags(),
+					order,
+				),
+				coverage.hydrated.length);
+		return { deps, recovered };
+	};
+	const mode = recovery ? "recovery" : "fresh read";
+	test(`${mode}: an order whose server payload reports exactly its read rows is complete`, async () => {
+		const { deps, recovered } = await read(detailPage({ lines: 2 }));
+		assert.equal(recovered, 1);
+		assert.equal(deps.records.filter((r) => r.stream === "order_items").length, 2);
+		assert.ok(deps.messages.every((m) => m.type !== "DETAIL_GAP"));
+		assert.ok(deps.messages.every((m) => m.reason !== "inventory_not_proven_complete"));
+		if (recovery)
+			assert.ok(deps.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"));
+	});
+	for (const [label, html] of [
+		["a server total above the rows read", detailPage({ lines: 3 })],
+		["a server total below the rows read", detailPage({ lines: 1 })],
+		["another order's payload", detailPage({ lines: 2, orderId: "HEB999999" })],
+		["no signed-in summary card", detailPage({ lines: 2, control: false })],
+		["no server payload", itemRow(0) + itemRow(1)],
+		["a rejected row", `${detailPage({ lines: 3 })}${itemRow(2, "")}`],
+	] as const)
+		test(`${mode}: ${label} keeps the order's rows and its pending gap`, async () => {
+			const { deps, recovered } = await read(html);
+			assert.equal(recovered, 0);
+			assert.ok(deps.records.some((r) => r.stream === "order_items"));
+			assert.ok(deps.messages.some((m) => m.type === "DETAIL_GAP"));
+			assert.ok(deps.messages.every((m) => m.type !== "DETAIL_GAP_RECOVERED"));
+		});
+}
+
 test("parser reports observed rows and losses, including malformed list identities", () => {
 	const detail = parseOrderDetailDom(itemRow(0) + itemRow(1, ""));
 	assert.equal(detail?.parsing?.observedRows, 2);

@@ -46,11 +46,13 @@ import {
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
 	readAccountProfile,
+	sourceOrderItemTotal,
 	sourceReportsEmptyHistory,
 } from "./account-source.ts";
 import {
 	type InventoryEvidence,
 	inventoryIsComplete,
+	inventoryMatchesSourceTotal,
 	unprovenInventory,
 } from "./inventory-evidence.ts";
 import {
@@ -830,6 +832,8 @@ export type DetailFetchResult =
 			detail: OrderDetail;
 			evidence: InventoryEvidence;
 			inventoryComplete: boolean;
+			/** Item lines the order's own server payload reports; null when unproven. */
+			sourceItemTotal: number | null;
 			diagnostic?: string;
 			elapsedMs?: number;
 			pollCount?: number;
@@ -910,6 +914,19 @@ export interface HydrationDeps {
 	waitForHydration?: (() => Promise<void>) | undefined;
 	/** Between public product navigations; deterministic injection for tests. */
 	waitForProductPage?: (() => Promise<void>) | undefined;
+}
+
+/** An order's item rows are complete with an owner-bound list signal, or when
+ * every row was read and accepted and they number exactly the item lines the
+ * order's own server payload reports. Callers set acceptedIds first. */
+function detailItemsComplete(
+	evidence: InventoryEvidence,
+	sourceItemTotal: number | null,
+): boolean {
+	return (
+		inventoryIsComplete(evidence) ||
+		inventoryMatchesSourceTotal(evidence, sourceItemTotal)
+	);
 }
 
 export async function fetchOrderDetail(
@@ -1051,10 +1068,12 @@ export async function fetchOrderDetail(
 	evidence.loading = surface.diagnostics.loading;
 	evidence.rejectedRows = detail.parsing?.rejectedRows ?? 0;
 	evidence.missingIdentityRows = detail.parsing?.missingIdentityRows ?? 0;
+	const sourceItemTotal = sourceOrderItemTotal(html, orderId);
 	return {
 		detail,
 		evidence,
-		inventoryComplete: inventoryIsComplete(evidence),
+		inventoryComplete: detailItemsComplete(evidence, sourceItemTotal),
+		sourceItemTotal,
 		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
 		...metrics(),
 		status: "hydrated",
@@ -1840,11 +1859,14 @@ async function recoverPendingOrderItemDetailGapPage(
 						result.detail.items,
 					),
 				);
-				if (!accepted) {
-					result.evidence.rejectedRows += 1;
-					result.inventoryComplete = false;
-				}
+				if (!accepted) result.evidence.rejectedRows += 1;
 			}
+			result.evidence.acceptedIds =
+				result.evidence.rejectedRows === 0 ? [...result.evidence.sourceIds] : [];
+			result.inventoryComplete = detailItemsComplete(
+				result.evidence,
+				result.sourceItemTotal,
+			);
 			if (!result.inventoryComplete) {
 				await emitInventoryIncomplete(deps, "order_items");
 				await deps.emit(
@@ -2177,7 +2199,10 @@ async function fetchDetailAndRecordCoverage(
 		result.detail.items = validItems;
 		result.evidence.acceptedIds =
 			result.evidence.rejectedRows === 0 ? [...result.evidence.sourceIds] : [];
-		result.inventoryComplete = inventoryIsComplete(result.evidence);
+		result.inventoryComplete = detailItemsComplete(
+			result.evidence,
+			result.sourceItemTotal,
+		);
 	}
 	if (result.status === "hydrated" && !result.inventoryComplete)
 		await emitInventoryIncomplete(deps, "order_items");

@@ -6,6 +6,7 @@ import test from "node:test";
 import {
 	parseAccountProfile,
 	readAccountProfile,
+	sourceOrderItemTotal,
 	sourceReportsEmptyHistory,
 } from "./account-source.ts";
 
@@ -99,6 +100,29 @@ for (const [label, transform] of [
 ] as const)
 	test(`empty history rejects ${label}`, () =>
 		assert.equal(sourceReportsEmptyHistory(transform(orders)), false));
+
+const detailData = (orderId: string, lines: number, page = "/my-account/order-history/[orderId]") =>
+	JSON.stringify({
+		page,
+		gssp: true,
+		props: { __N_SSP: true, pageProps: { order: { orderId, orderItems: Array.from({ length: lines }, () => ({ quantity: 1 })) } } },
+	});
+const detail = (orderId: string, lines: number, page?: string) =>
+	`<section data-qe-id="orderSummaryCard"></section><script id="__NEXT_DATA__" type="application/json">${detailData(orderId, lines, page)}</script>`;
+
+test("an order page's server payload reports its item lines for the requested order only", () => {
+	assert.equal(sourceOrderItemTotal(detail("HEBSYNTH0001", 3), "HEBSYNTH0001"), 3);
+	assert.equal(sourceOrderItemTotal(detail("HEBSYNTH0001", 0), "HEBSYNTH0001"), 0);
+	for (const [label, html] of [
+		["another order", detail("HEBSYNTH0002", 3)],
+		["another route", detail("HEBSYNTH0001", 3, "/my-account/your-orders")],
+		["no summary card", detail("HEBSYNTH0001", 3).replace("orderSummaryCard", "unrelated")],
+		["no payload", '<section data-qe-id="orderSummaryCard"></section>'],
+		["no item list", detail("HEBSYNTH0001", 3).replace('"orderItems"', '"unrelated"')],
+		["malformed payload", detail("HEBSYNTH0001", 3).replace('"orderId"', '"orderId" BAD')],
+	] as const)
+		assert.equal(sourceOrderItemTotal(html, "HEBSYNTH0001"), null, label);
+});
 
 test("profile accepts absent optional address fields", () => {
 	const html = profile.replace('"nickname":"Home",', "").replace('"address2":null,', "");
