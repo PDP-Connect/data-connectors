@@ -114,11 +114,8 @@ const CONNECTED_APPS = "connected_apps";
 
 /** The app's own page size for chat.history. */
 export const HISTORY_LIMIT = 50;
-const MAX_HISTORY_PAGES = 2_000;
 export const ACTIVITY_LIMIT = 30;
-const MAX_ACTIVITY_PAGES = 500;
 export const LIBRARY_LIMIT = 48;
-const MAX_LIBRARY_PAGES = 500;
 /** Complete library walks before a library that keeps changing fails the stream. */
 const LIBRARY_WALKS = 3;
 /** What the web app sends with activity.list. */
@@ -132,10 +129,8 @@ const GOAL_VARIANTS: ReadonlyArray<Record<string, string>> = [
 	{ source: "assistant_tracking" },
 	{ status: "completed" },
 ];
-const MAX_GOAL_PAGES = 200;
-/** sessions.list page size, and pages per view before the walk fails. */
+/** The app's sessions.list page size; pagination continues to the source's end. */
 export const SESSIONS_LIMIT = 100;
-const MAX_SESSION_PAGES = 1_000;
 
 /** Gateway client lookups before the app counts as not signed in / not loaded. */
 const GATEWAY_WAIT_ATTEMPTS = 20;
@@ -709,7 +704,7 @@ const MAX_INVENTORY_PAIRS = 5;
 /**
  * One view's chats, read page by page as the app does: `{ limit }`, then
  * `{ limit, cursor: <next_cursor> }`, until an answer has no next_cursor. A
- * repeated cursor, a page cap, or has_more with no cursor fails the list;
+ * repeated cursor, or has_more with no cursor fails the list;
  * nothing is checkpointed from a list that did not end.
  */
 async function readChatView(
@@ -721,13 +716,7 @@ async function readChatView(
 	const seen = new Set<string>();
 	const cursors = new Set<string>();
 	let cursor: PageCursor | null = null;
-	for (let pageIndex = 0; ; pageIndex++) {
-		if (pageIndex >= MAX_SESSION_PAGES) {
-			throw new StreamFailure(
-				`Muse's ${label} is longer than ${MAX_SESSION_PAGES} pages; nothing was checkpointed.`,
-				false,
-			);
-		}
+	for (;;) {
 		const params: Record<string, unknown> = {
 			limit: SESSIONS_LIMIT,
 			...(archivedView ? { view: "archived" } : {}),
@@ -895,7 +884,7 @@ async function hydrateChat(
 							message: "the chat changed while it was read",
 						}
 					: { kind: "hydrated", revision };
-	for (let pageIndex = 0; pageIndex < MAX_HISTORY_PAGES; pageIndex++) {
+	for (let pageIndex = 0; ; pageIndex++) {
 		const params: Record<string, unknown> = {
 			limit: HISTORY_LIMIT,
 			session_id: sessionId,
@@ -1008,11 +997,6 @@ async function hydrateChat(
 		}
 		cursor = smallest;
 	}
-	return {
-		kind: "gap",
-		errorClass: "muse_history_page_cap",
-		message: `chat history is longer than ${MAX_HISTORY_PAGES} pages`,
-	};
 }
 
 /** The chat's current transcript revision from a one-message read; null when unknown. */
@@ -1656,14 +1640,15 @@ export async function runActivities(
 	const seen = new Set<string>();
 	let newest = prior;
 	let before: string | null = ceiling;
+	const cursors = new Set<string | null>();
 	try {
-		for (let pageIndex = 0; ; pageIndex++) {
-			if (pageIndex >= MAX_ACTIVITY_PAGES) {
+		for (;;) {
+			if (cursors.has(before)) {
 				throw new StreamFailure(
-					`Muse's activity log is longer than ${MAX_ACTIVITY_PAGES} pages; older activity was not read and nothing was checkpointed.`,
-					false,
+					"Muse's activity log repeated a paging cursor; nothing was checkpointed.",
 				);
 			}
+			cursors.add(before);
 			const params: Record<string, unknown> = {
 				limit: ACTIVITY_LIMIT,
 				before,
@@ -1774,13 +1759,7 @@ export async function runGoals(
 			const variantSeen = new Set<string>();
 			const cursors = new Set<string>();
 			let cursor: PageCursor | null = null;
-			for (let pageIndex = 0; ; pageIndex++) {
-				if (pageIndex >= MAX_GOAL_PAGES) {
-					throw new StreamFailure(
-						`Muse's ${label} goals are longer than ${MAX_GOAL_PAGES} pages; nothing was checkpointed.`,
-						false,
-					);
-				}
+			for (;;) {
 				const params =
 					cursor === null ? { ...variant } : { ...variant, cursor };
 				const page = parseGoals(await call(gateway, "goals.list", params));
@@ -1936,12 +1915,6 @@ async function walkLibrary(gateway: MuseGateway): Promise<LibraryWalk> {
 	let total: number | null = null;
 	let offset = 0;
 	for (let pageIndex = 0; ; pageIndex++) {
-		if (pageIndex >= MAX_LIBRARY_PAGES) {
-			throw new StreamFailure(
-				`Muse's file library is longer than ${MAX_LIBRARY_PAGES} pages; nothing was checkpointed.`,
-				false,
-			);
-		}
 		const page = parseLibrary(
 			await call(gateway, "fs.library", {
 				preset: "recents",
@@ -1973,7 +1946,13 @@ async function walkLibrary(gateway: MuseGateway): Promise<LibraryWalk> {
 				"Muse's file library said it had more files but returned no new ones; nothing was checkpointed.",
 			);
 		}
-		offset += page.entries.length;
+		const nextOffset = offset + page.entries.length;
+		if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
+			throw new StreamFailure(
+				"Muse's file library offset did not advance; nothing was checkpointed.",
+			);
+		}
+		offset = nextOffset;
 	}
 }
 
