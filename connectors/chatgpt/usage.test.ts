@@ -978,6 +978,76 @@ function sub(
 
 const many = (n: number) => Array.from({ length: n }, (_, i) => rawListItem(i));
 
+test("usage history reads 320 full list pages and the short final page", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+	const { run, harness, calls, inFlightMax } = runHarness(["usage_summary"], {
+		site: { conversations: many(32001), total: 101 },
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "coverage").conversations_listed, 32001);
+	assert.equal(sub(summary, "totals").conversations, 32001);
+	assert.equal(sub(summary, "coverage").listing_complete, true);
+	assert.ok(calls.some((c) => c.path.startsWith("/conversations?offset=32000&")));
+	assert.ok(harness.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"));
+	assert.ok(inFlightMax() <= 6);
+});
+
+test("usage history reads 60 full shared pages and the short final page", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+	const shared = Array.from({ length: 6001 }, (_, i) => ({ conversation_id: rawConvId(i) }));
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		routes: {
+			...siteRoutes({ conversations: many(6002) }),
+			"/shared_conversations": (_init, url) => {
+				const offset = Number(url.searchParams.get("offset"));
+				return json({ items: shared.slice(offset, offset + 100), total: 7000 });
+			},
+		},
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "totals").shared, 6001);
+	assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, 61);
+});
+
+test("usage history rejects a full list page with no new ids", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+	const repeated = many(100);
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		routes: {
+			...siteRoutes(),
+			"/conversations": (_init, url) => json({
+				items: url.searchParams.get("is_archived") === "true" ? [] : repeated,
+				total: 1,
+			}),
+		},
+	});
+	await run();
+	assert.equal(records(harness, "usage_summary").length, 0);
+	const skip = harness.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.equal((skip as { reason?: string } | undefined)?.reason, "conversation_list_unstable");
+	assert.ok(!harness.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"));
+	assert.ok(calls.filter((c) => c.path.startsWith("/conversations?") && !c.path.includes("archived")).length <= 5);
+});
+
+test("usage history keeps shared count unknown after a full repeated shared page", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+	const repeated = Array.from({ length: 100 }, (_, i) => ({ conversation_id: rawConvId(i) }));
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		routes: {
+			...siteRoutes({ conversations: many(100) }),
+			"/shared_conversations": () => json({ items: repeated, total: 200 }),
+		},
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "totals").shared, null);
+	assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, 2);
+	assert.ok(harness.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"));
+});
+
+
 test("a full run of both streams emits valid records and leaks no canary anywhere", async () => {
 	const { run, harness, calls } = runHarness([
 		"account_profile",
@@ -1566,10 +1636,11 @@ test("cursor steps honour explicit ends, empty pages and repeated cursors", () =
 			done: "ok",
 		},
 	);
+	// Empty pages with a fresh continuation do not prove source end.
 	assert.deepEqual(
 		nextCursorStep({ has_more: true, cursor: "c" }, seen, "b", 0, 0),
 		{
-			done: "ok",
+			next: "c",
 		},
 	);
 	// The last page echoes its own cursor: done, nothing refetched.
@@ -2004,3 +2075,126 @@ test("usage sidebar cursor cycle stops and remains partial", async () => {
 	assert.equal(sub(summary, "coverage").listing_complete, false);
 	assert.deepEqual(h.sidebarCursors, [0, 1, 2]);
 });
+
+type ProgressPagerTarget = "project" | "sidebar" | "tasks";
+function progressPagerHarness(
+	target: ProgressPagerTarget,
+	pageAt: (page: number) => { ids: number[]; has_more: boolean; cursor?: string },
+	maxPages: number,
+) {
+	const fake = fakeApi(siteRoutes({ conversations: [] }));
+	const harness = makeRecordingEmit(validateRecord);
+	let pages = 0;
+	const api: ChatGptApi = {
+		...fake.api,
+		fetch(path, opts) {
+			const url = new URL(path, "https://synthetic.invalid");
+			const isSidebar = url.pathname === "/gizmos/snorlax/sidebar";
+			const isProject = url.pathname === "/gizmos/g-p-Progress/conversations";
+			const isTasks = url.pathname === "/tasks";
+			const selected = target === "sidebar" ? isSidebar : target === "project" ? isProject : isTasks;
+			if (selected) {
+				assert.ok(++pages <= maxPages, "fresh-cursor non-progress must stop");
+				const page = pageAt(pages - 1);
+				const body = target === "project"
+					? { items: page.ids.map((id) => listItem(rawConvId(id))) }
+					: target === "sidebar"
+						? { item_count: page.ids.length, file_count: 0, project_ids: page.ids.map((id) => "g-p-Progress" + id) }
+						: { task_count: page.ids.length, by_status: {} };
+				return Promise.resolve({ status: 200, json: { ...body, has_more: page.has_more, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) } });
+			}
+			if (isSidebar) return Promise.resolve({ status: 200, json: {
+				item_count: target === "project" ? 1 : 0, file_count: 0,
+				project_ids: target === "project" ? ["g-p-Progress"] : [], has_more: false,
+			} });
+			return fake.api.fetch(path, opts);
+		},
+	};
+	const deps: StreamDeps = {
+		api, emit: harness.emit, emitRecord: harness.emitRecord,
+		progress: () => Promise.resolve(),
+		requested: new Map(["account_profile", "usage_summary"].map((name) => [name, { name }])),
+	};
+	return {
+		harness, pages: () => pages,
+		run: () => runUsageStreams(deps, {}, {
+			classifyError: () => "other", accountsCheckPath: "/accounts/check/v4-2023-04-27",
+			now: () => NOW_MS,
+		}),
+	};
+}
+function assertUsageCheckpoint(h: ReturnType<typeof makeRecordingEmit>, complete: boolean) {
+	assert.equal(h.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"), complete);
+	assert.equal(h.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE" && m.stream === "usage_summary"), complete);
+}
+
+test("cursor progress treats empty missing continuation as partial and absent has_more as end", () => {
+	assert.deepEqual(nextCursorStep({ has_more: true }, new Set(), null, 0, 0), { done: "partial" });
+	assert.deepEqual(nextCursorStep({}, new Set(), null, 0, 0), { done: "ok" });
+});
+
+for (const target of ["project", "sidebar", "tasks"] as const) {
+	test(`cursor progress reports missing continuation as partial: ${target}`, async () => {
+		process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+		const h = progressPagerHarness(target, () => ({ ids: [], has_more: true }), 1);
+		await h.run();
+		assert.equal(h.pages(), 1);
+		const [summary] = records(h.harness, "usage_summary");
+		assert.ok(summary);
+		if (target === "tasks") {
+			assert.equal(sub(records(h.harness, "account_profile")[0], "source_status").tasks, "partial");
+			assertUsageCheckpoint(h.harness, true);
+		} else {
+			assert.equal(sub(summary, "coverage").listing_complete, false);
+			assertUsageCheckpoint(h.harness, false);
+		}
+	});
+
+	test(`cursor progress follows an empty fresh page before items: ${target}`, async () => {
+		process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+		const h = progressPagerHarness(target, (page) => page === 0
+			? { ids: [], has_more: true, cursor: "1" }
+			: { ids: [1], has_more: false }, 2);
+		await h.run();
+		assert.equal(h.pages(), 2);
+		const [summary] = records(h.harness, "usage_summary");
+		assert.equal(sub(summary, "coverage").listing_complete, true);
+		if (target === "project") assert.equal(sub(summary, "totals").conversations, 1);
+		if (target === "sidebar") assert.equal(sub(sub(summary, "coverage"), "project_listing").projects, 1);
+		if (target === "tasks") assert.equal(records(h.harness, "account_profile")[0]?.scheduled_task_count, 1);
+		assertUsageCheckpoint(h.harness, true);
+	});
+
+	test(`cursor progress stops 17 fresh zero-new-item pages: ${target}`, async () => {
+		process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+		const count = target === "tasks" ? 17 : 18;
+		const h = progressPagerHarness(target, (page) => ({
+			ids: target === "tasks" ? [] : [1],
+			has_more: true, cursor: String(page + 1),
+		}), count);
+		await h.run();
+		assert.equal(h.pages(), count);
+		const [summary] = records(h.harness, "usage_summary");
+		assert.ok(summary, "partial listing still emits summary");
+		if (target === "tasks") {
+			assert.equal(sub(records(h.harness, "account_profile")[0], "source_status").tasks, "partial");
+			assertUsageCheckpoint(h.harness, true);
+		} else {
+			assert.equal(sub(summary, "coverage").listing_complete, false);
+			const listing = sub(sub(summary, "coverage"), "project_listing");
+			assert.equal(target === "project" ? listing.failed : listing.sidebar, target === "project" ? 1 : "partial");
+			assertUsageCheckpoint(h.harness, false);
+		}
+	});
+
+	test(`cursor progress resets the streak on new items: ${target}`, async () => {
+		process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+		const h = progressPagerHarness(target, (page) => ({
+			ids: page === 16 ? [2] : [],
+			has_more: page < 33, cursor: String(page + 1),
+		}), 34);
+		await h.run();
+		assert.equal(h.pages(), 34);
+		assertUsageCheckpoint(h.harness, true);
+	});
+}
