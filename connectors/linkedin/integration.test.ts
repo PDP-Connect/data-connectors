@@ -2883,6 +2883,36 @@ test("skills walk: a first page is completed from the owner's skills collection"
 	assert.equal(paths.filter((path) => path.includes("/dash/profileSkills?")).length, 2);
 });
 
+test("skills walk: 230 owner-bound skills complete across twelve pages", async () => {
+	const skills = Array.from({ length: 230 }, (_, i) => ({
+		entityUrn: `urn:li:fsd_skill:(12,${i + 1})`, name: `Synthetic skill ${i + 1}`,
+	}));
+	const profile = proofProfile();
+	profile.profileSkills = { elements: skills.slice(0, 20), paging: { start: 0, count: 20, total: skills.length } };
+	const { recording, paths } = await collectProof({ profile, skillsPage: skillsWalk(skills) });
+	assert.deepEqual(skillIds(recording), skills.map((skill) => skill.entityUrn));
+	assert.equal(claimsFullCoverage(recording, "skills"), true);
+	assert.equal(skipResults(recording).some((skip) => skip.stream === "skills"), false);
+	assert.deepEqual(paths.filter((path) => path.includes("/dash/profileSkills?"))
+		.map((path) => Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"))),
+		Array.from({ length: 12 }, (_, i) => i * 20));
+	assert.equal(recording.events.some((event) => event.kind === "message" &&
+		event.message.type === "STATE" && event.message.stream === "skills"), true);
+});
+
+test("skills walk: repeated owner-bound URNs stop immediately and keep only the first page", async () => {
+	const { recording, paths } = await collectProof({
+		profile: skillsFirstPageProfile(),
+		skillsPage: (start) => ({ elements: ALL_SKILLS.slice(0, 2), paging: { start, count: 2, total: 3 } }),
+	});
+	assert.deepEqual(paths.filter((path) => path.includes("/dash/profileSkills?"))
+		.map((path) => Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"))), [0, 2]);
+	assert.deepEqual(skillIds(recording), ALL_SKILLS.slice(0, 2).map((skill) => skill.entityUrn));
+	assert.equal(claimsFullCoverage(recording, "skills"), false);
+	assert.ok(skipResults(recording).some((skip) =>
+		skip.stream === "skills" && skip.reason === "linkedin_enumeration_unproven"));
+});
+
 test("skills walk: anything unproven keeps the first page and the gap", async (t) => {
 	const cases: Record<string, (start: number) => unknown> = {
 		"endpoint missing": () => httpFailure(404),

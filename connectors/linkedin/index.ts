@@ -324,7 +324,6 @@ async function fetchDashProfile(
 }
 
 const SKILLS_PAGE_SIZE = 20;
-const SKILLS_MAX_PAGES = 10;
 
 interface SkillsWalk {
 	/** Every skill, when the walk proved the whole list; otherwise absent. */
@@ -355,7 +354,8 @@ async function walkProfileSkills(
 	// Each page starts where the last one's rows ended: a server may return
 	// fewer than asked for.
 	let start = 0;
-	for (let index = 0; index < SKILLS_MAX_PAGES; index += 1) {
+	// Unique owner-bound rows advance toward the fixed total; repeats fail below.
+	for (;;) {
 		const result = await voyagerFetch<Record<string, unknown>>(page,
 			`/voyager/api/identity/dash/profileSkills?q=viewee&profileUrn=${urn}&start=${start}&count=${SKILLS_PAGE_SIZE}`,
 			capture, `skills-page-${String(start).padStart(4, "0")}`);
