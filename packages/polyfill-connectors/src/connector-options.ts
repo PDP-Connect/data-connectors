@@ -117,13 +117,10 @@ function coerce(
 			return BOOL_TRUE.test(String(raw).trim());
 		}
 		case "csv": {
-			if (Array.isArray(raw)) {
-				return raw;
-			}
-			return String(raw)
-				.split(",")
-				.map((s) => s.trim())
-				.filter(Boolean);
+			const items = Array.isArray(raw)
+				? raw.map(String)
+				: String(raw).split(",");
+			return items.map((s) => s.trim()).filter(Boolean);
 		}
 		default:
 			return String(raw);

@@ -33,7 +33,7 @@ import {
 } from "../../../connectors/gmail/index.ts";
 import { readSlackBrowserOptions } from "../../../connectors/slack_browser/index.ts";
 import { platformOptionKind } from "./connector-config-option-kind-registry.ts";
-import { readOptionsAsEnv } from "./connector-options.ts";
+import { readOptions, readOptionsAsEnv } from "./connector-options.ts";
 import { resolveOptionsSchemaFromManifest } from "./connector-options-schema.ts";
 import { manifestPath, packageRoot } from "./connector-paths.ts";
 import { runConnectorProtocolSubprocess } from "./test-harness.ts";
@@ -97,6 +97,25 @@ test("a bad START value is ignored the way a bad env value is", () => {
 	);
 	assert.equal(resolveMaxAttachmentBytes(env), 25 * 1024 * 1024);
 	assert.equal(resolveAttachmentBackfillPageByteBudget(env), 1024 * 1024);
+});
+
+test("a START list is cleaned exactly like the env list", () => {
+	const spec = {
+		envPrefix: "PDPP_TEST_CSV_",
+		fields: { LIST: { parse: "csv" as const, default: [] } },
+	};
+	const fromStart = readOptions(
+		{ connector_options: { LIST: [" C1 ", "", "C2"] } },
+		spec,
+	);
+	process.env.PDPP_TEST_CSV_LIST = " C1 ,, C2";
+	try {
+		const fromEnv = readOptions(null, spec);
+		assert.deepEqual(fromStart.LIST, ["C1", "C2"]);
+		assert.deepEqual(fromEnv.LIST, fromStart.LIST);
+	} finally {
+		delete process.env.PDPP_TEST_CSV_LIST;
+	}
 });
 
 test("ChatGPT pacing and run bounds come from START", () => {
