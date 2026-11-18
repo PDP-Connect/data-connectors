@@ -264,17 +264,22 @@ function stringList(value: unknown): string[] {
 		: [];
 }
 
-export function readSlackBrowserOptions(): SlackBrowserOptions {
-	const parsed = readOptions(null, {
-		envPrefix: "SLACK_",
-		fields: {
-			LOOKBACK_DAYS: { parse: "int", default: 7 },
-			MAX_BACKFILL_DAYS: { parse: "int", default: DEFAULT_MAX_BACKFILL_DAYS },
-			CHANNEL_ALLOWLIST: { parse: "csv", default: [] },
-			CHANNEL_TYPES: { parse: "csv", default: [...CONVERSATION_KINDS] },
-			WORKSPACE: { parse: "string", default: "" },
+export function readSlackBrowserOptions(
+	connectorOptions?: BrowserCollectContext["connectorOptions"],
+): SlackBrowserOptions {
+	const parsed = readOptions(
+		{ connector_options: connectorOptions },
+		{
+			envPrefix: "SLACK_",
+			fields: {
+				LOOKBACK_DAYS: { parse: "int", default: 7 },
+				MAX_BACKFILL_DAYS: { parse: "int", default: DEFAULT_MAX_BACKFILL_DAYS },
+				CHANNEL_ALLOWLIST: { parse: "csv", default: [] },
+				CHANNEL_TYPES: { parse: "csv", default: [...CONVERSATION_KINDS] },
+				WORKSPACE: { parse: "string", default: "" },
+			},
 		},
-	});
+	);
 	const kinds = stringList(parsed.CHANNEL_TYPES)
 		.map((kind) => kind.toLowerCase())
 		.filter(isConversationKind);
@@ -330,7 +335,7 @@ export async function collect(
 	ctx: BrowserCollectContext,
 	timing: { pollMs?: number; timeoutMs?: number } = {},
 ): Promise<void> {
-	const options = readSlackBrowserOptions();
+	const options = readSlackBrowserOptions(ctx.connectorOptions);
 	const signedIn = await openSlackClient(
 		ctx.page,
 		timing.pollMs,

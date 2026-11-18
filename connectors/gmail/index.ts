@@ -48,6 +48,10 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { flushAndExitAfterRuntimeAck } from "../../packages/polyfill-connectors/src/connector-exit.ts";
 import {
+	type StartMessageWithOptions,
+	readOptionsAsEnv,
+} from "../../packages/polyfill-connectors/src/connector-options.ts";
+import {
 	buildDetailCoverageMessage,
 	buildDetailGap,
 	buildFullScanCoverageMessage,
@@ -166,6 +170,23 @@ const POSITIVE_INTEGER_PATTERN = /^\d+$/;
 export const DEFAULT_ATTACHMENT_STALL_TIMEOUT_MS = 90_000;
 const ATTACHMENT_STALL_TIMEOUT_MS_ENV =
 	"PDPP_GMAIL_ATTACHMENT_STALL_TIMEOUT_MS";
+
+/**
+ * The settings this connector reads, declared in manifest `options_schema` and
+ * delivered in `START.connector_options`. Each is also still read from the env
+ * variable `PDPP_GMAIL_<name>` when the owner has set none, so a deployment
+ * that exports one keeps working. A test holds this list equal to the manifest.
+ */
+export const GMAIL_OPTIONS_ENV_PREFIX = "PDPP_GMAIL_";
+export const GMAIL_OPTION_NAMES = [
+	"ATTACHMENT_BACKFILL_PAGE_BYTES",
+	"ATTACHMENT_PROGRESS_MIN_BYTES",
+	"ATTACHMENT_PROGRESS_MIN_INTERVAL_MS",
+	"ATTACHMENT_RECOVERY_PAGE_BYTES",
+	"ATTACHMENT_STALL_TIMEOUT_MS",
+	"MAX_ATTACHMENT_BYTES",
+	"MESSAGES_BACKFILL_WINDOW_UIDS",
+] as const;
 
 // ─── imapflow interface augmentation ────────────────────────────────────
 
@@ -3282,6 +3303,7 @@ export async function recoverServedAttachmentGaps(
 		hydrateAttachment: HydrateAttachmentFn;
 		requested?: ReadonlyMap<string, StreamRequest>;
 		recoveredAttachmentGapIds?: Set<string>;
+		tuningEnv?: NodeJS.ProcessEnv | undefined;
 	},
 ): Promise<ServedAttachmentRecoverySummary> {
 	const servedGaps = servedAttachmentDetailGaps(deps.detailGaps);
@@ -3300,7 +3322,7 @@ export async function recoverServedAttachmentGaps(
 			served: 0,
 		};
 	}
-	const byteBudget = resolveAttachmentRecoveryPageByteBudget();
+	const byteBudget = resolveAttachmentRecoveryPageByteBudget(deps.tuningEnv);
 	const recoveryState: ServedAttachmentRecoveryState = {
 		admitted: 0,
 		admittedBytesTotal: 0,
@@ -3367,6 +3389,7 @@ async function recoverServedAttachmentGapsIfRequested(
 		hydrateAttachment: HydrateAttachmentFn;
 		requested?: ReadonlyMap<string, StreamRequest>;
 		recoveredAttachmentGapIds: Set<string>;
+		tuningEnv?: NodeJS.ProcessEnv | undefined;
 	},
 ): Promise<void> {
 	if (servedAttachmentDetailGaps(deps.detailGaps).length === 0) {
@@ -3382,6 +3405,7 @@ async function recoverServedAttachmentGapsIfRequested(
 		hydrateAttachment: deps.hydrateAttachment,
 		...(deps.requested ? { requested: deps.requested } : {}),
 		recoveredAttachmentGapIds: deps.recoveredAttachmentGapIds,
+		tuningEnv: deps.tuningEnv,
 	});
 	const { attachment_hydration_failure_outcome, ...attachmentRecoveryOutcome } =
 		recoverySummary;
@@ -4683,6 +4707,8 @@ interface AllMailDeps {
 	emittedAt: string;
 	recoveryOnly?: boolean;
 	requested: Map<string, StreamRequest>;
+	/** Owner-confirmed settings overlaid on the env; see `readOptionsAsEnv`. */
+	tuningEnv?: NodeJS.ProcessEnv | undefined;
 	/** Test seam; production uploads through the runtime blob endpoint. */
 	uploadBodyBlob?: UploadBodyBlobFn;
 }
@@ -4709,6 +4735,7 @@ function openProgressLedger(
 	uidnext: number,
 	requested: ReadonlyMap<string, StreamRequest>,
 	timeRanges: Partial<Record<LedgerStream, TimeBand | undefined>>,
+	tuningEnv?: NodeJS.ProcessEnv,
 ): GmailProgressLedger {
 	const messagesState = (state.messages ?? {}) as PriorMessagesState & {
 		progress?: unknown;
@@ -4729,7 +4756,7 @@ function openProgressLedger(
 		uidvalidity: session.uidvalidityNum,
 		uidnext,
 		requested: requestedLedgerStreams(requested),
-		windowUids: resolveMessagesBackfillWindowUids(),
+		windowUids: resolveMessagesBackfillWindowUids(tuningEnv),
 		timeRanges,
 	});
 }
@@ -4826,7 +4853,7 @@ export async function runAllMailPasses(
 		connectorId: process.env.PDPP_CONNECTOR_ID || DEFAULT_GMAIL_CONNECTOR_ID,
 		fetchAttachment: (msg, attachment) =>
 			fetchAttachmentPart(client, msg, attachment),
-		maxBytes: resolveMaxAttachmentBytes(),
+		maxBytes: resolveMaxAttachmentBytes(deps.tuningEnv),
 		// imapflow has no per-command cancel (see `AttachmentStallTimeoutError`
 		// doc comment): the only way to unblock a stalled FETCH is to close the
 		// whole connection. That's a whole-run failure, not a per-attachment one
@@ -4837,7 +4864,7 @@ export async function runAllMailPasses(
 		// `runAllMailPasses` — so the next run resumes cleanly rather than
 		// silently poisoning a completed stream.
 		onStall: () => client.close(),
-		stallTimeoutMs: resolveAttachmentStallTimeoutMs(),
+		stallTimeoutMs: resolveAttachmentStallTimeoutMs(deps.tuningEnv),
 		// Fire-and-forget by construction (`enforceTransferProgress` calls this
 		// synchronously and never awaits it) — a slow or failed PROGRESS emit can
 		// never add latency to the transfer or turn it into a failure. `.catch()`
@@ -4856,8 +4883,10 @@ export async function runAllMailPasses(
 				message: buildAttachmentTransferProgressMessage(progress),
 			}).catch((): undefined => undefined);
 		},
-		progressMinBytes: resolveAttachmentProgressMinBytes(),
-		progressMinIntervalMs: resolveAttachmentProgressMinIntervalMs(),
+		progressMinBytes: resolveAttachmentProgressMinBytes(deps.tuningEnv),
+		progressMinIntervalMs: resolveAttachmentProgressMinIntervalMs(
+			deps.tuningEnv,
+		),
 		uploadBlob: buildRuntimeBlobUploader(),
 	});
 	// One attachments detail-coverage accumulator for every attachment this run
@@ -4878,6 +4907,7 @@ export async function runAllMailPasses(
 			hydrateAttachment,
 			requested: deps.requested,
 			recoveredAttachmentGapIds,
+			tuningEnv: deps.tuningEnv,
 		});
 
 	if (deps.recoveryOnly === true) {
@@ -4900,6 +4930,7 @@ export async function runAllMailPasses(
 		session.uidnext,
 		deps.requested,
 		timeRanges,
+		deps.tuningEnv,
 	);
 	if (ledger.resetReason) {
 		gmailDiagnostic("progress_ledger_reset", { reason: ledger.resetReason });
@@ -4935,7 +4966,7 @@ export async function runAllMailPasses(
 		const inPage = (m: FetchMessageObject) =>
 			m.uid >= attachmentsPage.start && m.uid <= attachmentsPage.end;
 		const pageMetas = historicalMetas.filter(inPage);
-		const budget = resolveAttachmentBackfillPageByteBudget();
+		const budget = resolveAttachmentBackfillPageByteBudget(deps.tuningEnv);
 		const plan = planAttachmentBackfillPage(
 			pageMetas,
 			servedAttachmentRecoveryRequested
@@ -5459,6 +5490,11 @@ async function main(): Promise<void> {
 				detailGaps: startMsg.detail_gaps,
 				recoveryOnly,
 				requested,
+				tuningEnv: readOptionsAsEnv(
+					startMsg as StartMessageWithOptions,
+					GMAIL_OPTIONS_ENV_PREFIX,
+					GMAIL_OPTION_NAMES,
+				),
 			});
 		} finally {
 			lock.release();

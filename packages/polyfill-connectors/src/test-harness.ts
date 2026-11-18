@@ -199,6 +199,8 @@ export interface ConnectorSubprocessOptions {
 		 *  exercise the owner-triggered full-refresh bypass end to end rather than
 		 *  reaching past the wire to construct a CollectContext by hand. */
 		collection_mode?: "full_refresh" | "incremental";
+		/** Owner-confirmed settings the real runtime sends as `START.connector_options`. */
+		connector_options?: Record<string, unknown>;
 		/** Currently-pending detail gaps to replay on START, mirroring the real runtime's `detail_gaps` field. */
 		detail_gaps?: readonly DetailGapStartEntry[];
 		scope: {

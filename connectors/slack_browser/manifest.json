@@ -9,7 +9,7 @@
 	},
 	"connector_key": "slack-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Slack (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -1180,6 +1180,61 @@
 			"summary": {
 				"singular": "item",
 				"plural": "items"
+			}
+		}
+	},
+	"options_schema": {
+		"type": "object",
+		"description": "Settings for the Slack browser connector. Values are delivered in START.connector_options; the matching SLACK_<NAME> environment variable is read only when the owner has set none. Each one decides which workspaces, channels or history are collected, so each needs owner confirmation.",
+		"properties": {
+			"CHANNEL_ALLOWLIST": {
+				"type": "array",
+				"description": "Explicit list of channel IDs to include. Empty means every accessible channel of the selected types.",
+				"default": [],
+				"items": {
+					"type": "string"
+				},
+				"declared_option_kind": "collection_scope"
+			},
+			"CHANNEL_TYPES": {
+				"type": "array",
+				"description": "Channel types to read. Allowed values: public, private, im, mpim.",
+				"default": [
+					"public",
+					"private",
+					"im",
+					"mpim"
+				],
+				"items": {
+					"type": "string"
+				},
+				"enum": [
+					"public",
+					"private",
+					"im",
+					"mpim"
+				],
+				"declared_option_kind": "collection_scope"
+			},
+			"LOOKBACK_DAYS": {
+				"type": "integer",
+				"description": "How many days of message history to read per channel on a full refresh.",
+				"default": 7,
+				"minimum": 0,
+				"declared_option_kind": "collection_scope"
+			},
+			"MAX_BACKFILL_DAYS": {
+				"type": "integer",
+				"description": "Most days of history one run catches up after a long pause. 0 means no limit.",
+				"default": 90,
+				"minimum": 0,
+				"declared_option_kind": "collection_scope"
+			},
+			"WORKSPACE": {
+				"type": "string",
+				"description": "Subdomain, id or name of the one signed-in workspace to read. Empty means every signed-in workspace.",
+				"default": "",
+				"declared_option_kind": "collection_scope"
 			}
 		}
 	}

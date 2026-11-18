@@ -80,6 +80,7 @@ import {
 } from "./browser-window.ts";
 import { connectorDiagnostic } from "./connector-diagnostic.ts";
 import { flushAndExitAfterRuntimeAck } from "./connector-exit.ts";
+import type { StartMessageWithOptions } from "./connector-options.ts";
 import {
 	type CaptureSession,
 	createCaptureSession,
@@ -278,6 +279,13 @@ interface BaseCollectContext {
 		status: AssistanceCompletionStatus,
 		extra?: { message?: string },
 	) => Promise<void>;
+	/**
+	 * The owner-confirmed settings the runtime put in `START.connector_options`
+	 * (declared in the manifest's `options_schema`). Absent when the owner
+	 * confirmed none. Read it through `readOptions`/`readOptionsAsEnv`, which
+	 * also apply the env fallback and defaults.
+	 */
+	connectorOptions?: StartMessageWithOptions["connector_options"];
 	credentials: Credentials;
 	detailGaps: readonly DetailGapStartEntry[];
 	emit: (msg: EmittedMessage) => Promise<void>;
@@ -1508,6 +1516,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			sendInteraction,
 			emittedAt,
 			detailGaps: startMsg.detail_gaps ?? [],
+			connectorOptions: (startMsg as StartMessageWithOptions).connector_options,
 			requestDetailGapPage,
 			// §4.3: forward recovery_only from the START message so connectors can
 			// suppress the forward walk while draining non-pressure detail gaps.

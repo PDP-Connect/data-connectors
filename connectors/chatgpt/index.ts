@@ -40,6 +40,7 @@ import {
 	CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE,
 	ensureChatGptSession,
 } from "../../packages/polyfill-connectors/src/auto-login/chatgpt.ts";
+import { readOptionsAsEnv } from "../../packages/polyfill-connectors/src/connector-options.ts";
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
@@ -533,6 +534,23 @@ const CHATGPT_RETRY_BUDGET_CAPACITY_ENV = "PDPP_CHATGPT_RETRY_BUDGET_CAPACITY";
 const CHATGPT_RETRY_BUDGET_INITIAL_TOKENS_ENV =
 	"PDPP_CHATGPT_RETRY_BUDGET_INITIAL_TOKENS";
 const CHATGPT_CIRCUIT_BREAKER_ENV = "PDPP_CHATGPT_CIRCUIT_BREAKER";
+/**
+ * The settings this connector reads, declared in manifest `options_schema` and
+ * delivered in `START.connector_options`. Each is also still read from the env
+ * variable `PDPP_CHATGPT_<name>` when the owner has set none, so a deployment
+ * that exports one keeps working. A test holds this list equal to the manifest.
+ */
+export const CHATGPT_OPTIONS_ENV_PREFIX = "PDPP_CHATGPT_";
+export const CHATGPT_OPTION_NAMES = [
+	"BATCH_MAX_PARALLELISM",
+	"CIRCUIT_BREAKER",
+	"DETAIL_RATE_LIMIT_STOP_AFTER",
+	"MAX_DETAIL_FETCHES_PER_RUN",
+	"MAX_RUN_WALL_CLOCK_MS",
+	"PACING_INITIAL_INTERVAL_MS",
+	"PACING_MAX_INTERVAL_MS",
+	"PACING_MIN_INTERVAL_MS",
+] as const;
 // Cold-start DISCOVERY seed (ms), used ONLY when no fresh learned interval is
 // restored from durable state (see warm-start below). It is a one-time entry to
 // the AIMD ramp, NOT a hand-authored operating point: warm-start persists the
@@ -2397,6 +2415,8 @@ function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
  *  orchestration and the helpers are individually testable. */
 export interface StreamDeps {
 	api: ChatGptApi;
+	/** Owner-confirmed settings overlaid on the env; see `readOptionsAsEnv`. */
+	tuningEnv?: NodeJS.ProcessEnv;
 	/** Optional clock seam for deterministic list retry tests. */
 	sleep?: (milliseconds: number) => Promise<void>;
 	detailGaps?: CollectContext["detailGaps"];
@@ -6098,7 +6118,8 @@ export async function runMessagesAndConversationsWithDetail(
 	const seededRateLimited =
 		pacing.preDetailRateLimited ?? deps.preDetailPressure?.rateLimited ?? 0;
 	const densityTracker = new ChatGptRateLimitDensityTracker(
-		pacing.densityStopThreshold ?? resolveChatGptRateLimitDensityStop(),
+		pacing.densityStopThreshold ??
+			resolveChatGptRateLimitDensityStop(deps.tuningEnv),
 		seededRateLimited,
 	);
 	// Bounded-run budget. `pacing` wins for tests; production reads the run-scoped
@@ -6110,15 +6131,16 @@ export async function runMessagesAndConversationsWithDetail(
 		pacing.runBudget ??
 		deps.runBudget ??
 		new ChatGptRunBudget({
-			maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
-			maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
+			maxFetches: resolveChatGptMaxDetailFetchesPerRun(deps.tuningEnv),
+			maxWallClockMs: resolveChatGptMaxRunWallClockMs(deps.tuningEnv),
 		});
 	// Max per-key DETAIL_GAP rows a run-cap tail may materialize before folding
 	// the older remainder into one backlog gap. `pacing` wins for tests; otherwise
 	// env-resolved (Infinity = today's unbounded per-key behavior). This bounds the
 	// FOREGROUND WRITE burn of a cap trip; it does not change fetching.
 	const tailGapBound =
-		pacing.tailGapBound ?? resolveChatGptMaxTailDeferralGapsPerRun();
+		pacing.tailGapBound ??
+		resolveChatGptMaxTailDeferralGapsPerRun(deps.tuningEnv);
 	let emittedConversationDetailLaneStart = false;
 	const lane = createAdaptiveLane<ChatGptFetchResult>({
 		name: "chatgpt.conversationDetail",
@@ -6200,7 +6222,8 @@ export async function runMessagesAndConversationsWithDetail(
 	let batchEndpointUnavailable = false;
 	let consecutiveBatchFailures = 0;
 	const batchMaxParallelism =
-		pacing.batchMaxParallelism ?? resolveChatGptBatchMaxParallelism();
+		pacing.batchMaxParallelism ??
+		resolveChatGptBatchMaxParallelism(deps.tuningEnv);
 	const batchFallbackLog = deps.batchFallbackLog ?? { logged: false };
 	// Once run-cap or source-pressure deferral trips, all later conversation
 	// details are local bookkeeping: emit durable DETAIL_GAP rows for the tail,
@@ -8208,16 +8231,21 @@ export async function collectChatGpt(
 	// Run-scoped bounded-run envelope, created once so the gap-recovery pass
 	// and the forward-walk pass share one budget. By default ChatGPT has no
 	// fixed size/time cap; positive env values opt into explicit envelopes.
+	const tuningEnv = readOptionsAsEnv(
+		{ connector_options: ctx.connectorOptions },
+		CHATGPT_OPTIONS_ENV_PREFIX,
+		CHATGPT_OPTION_NAMES,
+	);
 	const runBudget = new ChatGptRunBudget({
-		maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
-		maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
+		maxFetches: resolveChatGptMaxDetailFetchesPerRun(tuningEnv),
+		maxWallClockMs: resolveChatGptMaxRunWallClockMs(tuningEnv),
 	});
 	// Warm-start: pass the RAW persisted pacing (interval + when it was
 	// learned) so ProviderPacing can apply the §10-E staleness guard itself —
 	// a stale interval (idle > 6h) cold-starts instead of bursting into a
 	// possibly-tightened quota. The descent compounds across fresh runs.
 	const providerBudget = resolveChatGptProviderBudget(
-		process.env,
+		tuningEnv,
 		readChatGptPersistedPacing(state),
 	);
 
@@ -8260,6 +8288,7 @@ export async function collectChatGpt(
 		requested,
 		requestDetailGapPage: ctx.requestDetailGapPage,
 		runBudget,
+		tuningEnv,
 	};
 
 	if (isChatGptSideEffectProbeEnabled()) {
