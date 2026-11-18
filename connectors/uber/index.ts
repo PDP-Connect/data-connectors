@@ -87,7 +87,6 @@ import {
 	politeDelay,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
 	activityTripId,
 	parseFareBreakdown,
@@ -108,12 +107,10 @@ const TRIPS_URL = `${RIDERS_ORIGIN}/trips`;
 const GRAPHQL_PATH = "/graphql";
 /** Uber's own default page size for the Activities feed, observed live. */
 const ACTIVITIES_PAGE_SIZE = 5;
-/** Safety ceiling, not an observed Uber limit — mirrors venmo's page-cap precedent. */
-const MAX_ACTIVITY_PAGES = 200;
 /**
  * Fresh cursors over pages with no new trip ids are not progress. After this
  * many in a row the walk stops and reports the history as truncated, rather
- * than spending the whole page budget on a feed that repeats itself.
+ * than walking forever through a feed that repeats itself.
  */
 const MAX_DUPLICATE_ONLY_PAGES = 3;
 const MAX_DETAIL_FETCHES = 200;
@@ -345,7 +342,7 @@ export async function fetchAllActivities(
 ): Promise<{
 	activities: UberActivity[];
 	truncated: boolean;
-	stopReason?: "page_limit" | "duplicate_only_pages";
+	stopReason?: "duplicate_only_pages";
 }> {
 	const seenContinuations = new Set<string>();
 	let duplicateOnlyPages = 0;
@@ -353,84 +350,78 @@ export async function fetchAllActivities(
 	const seenIds = new Set<string>();
 	let rawItemsSeen = 0;
 	let nextPageToken: string | undefined;
-	const walk = await walkPagesWithCeiling({
-		maxPages: MAX_ACTIVITY_PAGES,
-		fetchPage: async (pageNumber) => {
-			const { status, body } = await fetchPath("Activities", ACTIVITIES_QUERY, {
-				includePast: true,
-				includeUpcoming: false,
-				limit: ACTIVITIES_PAGE_SIZE,
-				orderTypes: ["RIDES", "TRAVEL"],
-				profileType: "PERSONAL",
-				...(nextPageToken ? { nextPageToken } : {}),
-			});
-			assertUberOk(status, body, "Activities");
-			const parsed = JSON.parse(body) as
-				| (UberActivitiesResponse & { errors?: { message?: unknown }[] })
-				| null;
-			if (
-				(Array.isArray(parsed?.errors) && parsed.errors.length > 0) ||
-				parsed?.data == null
-			) {
-				const message = Array.isArray(parsed?.errors)
-					? parsed.errors[0]?.message
-					: undefined;
-				const detail =
-					typeof message === "string" ? message : "Missing Activities data";
+	while (true) {
+		const { status, body } = await fetchPath("Activities", ACTIVITIES_QUERY, {
+			includePast: true,
+			includeUpcoming: false,
+			limit: ACTIVITIES_PAGE_SIZE,
+			orderTypes: ["RIDES", "TRAVEL"],
+			profileType: "PERSONAL",
+			...(nextPageToken ? { nextPageToken } : {}),
+		});
+		assertUberOk(status, body, "Activities");
+		const parsed = JSON.parse(body) as
+			| (UberActivitiesResponse & { errors?: { message?: unknown }[] })
+			| null;
+		if (
+			(Array.isArray(parsed?.errors) && parsed.errors.length > 0) ||
+			parsed?.data == null
+		) {
+			const message = Array.isArray(parsed?.errors)
+				? parsed.errors[0]?.message
+				: undefined;
+			const detail =
+				typeof message === "string" ? message : "Missing Activities data";
+			throw new Error(
+				`uber_graphql_error [endpoint Activities]: ${redactTransportDetail(detail).slice(0, 200)}`,
+			);
+		}
+		const activities = parsed.data.activities;
+		const past = activities?.past;
+		if (
+			typeof activities !== "object" ||
+			activities === null ||
+			Array.isArray(activities) ||
+			typeof past !== "object" ||
+			past === null ||
+			Array.isArray(past) ||
+			!Array.isArray(past.activities)
+		) {
+			throw new Error(
+				"uber_graphql_error [endpoint Activities]: Malformed Activities data",
+			);
+		}
+		const page = past.activities;
+		let newOnPage = 0;
+		for (const activity of page) {
+			rawItemsSeen += 1;
+			const id = activityTripId(activity);
+			if (id && !seenIds.has(id)) {
+				seenIds.add(id);
+				all.push(activity);
+				newOnPage += 1;
+			}
+		}
+		const token = parsed.data?.activities?.past?.nextPageToken;
+		// Duplicate records do not prove exhaustion; only cursor progress does.
+		if (token) {
+			if (seenContinuations.has(token)) {
 				throw new Error(
-					`uber_graphql_error [endpoint Activities]: ${redactTransportDetail(detail).slice(0, 200)}`,
+					"uber_graphql_error [endpoint Activities]: repeated continuation",
 				);
 			}
-			const activities = parsed.data.activities;
-			const past = activities?.past;
-			if (
-				typeof activities !== "object" ||
-				activities === null ||
-				Array.isArray(activities) ||
-				typeof past !== "object" ||
-				past === null ||
-				Array.isArray(past) ||
-				!Array.isArray(past.activities)
-			) {
-				throw new Error(
-					"uber_graphql_error [endpoint Activities]: Malformed Activities data",
-				);
-			}
-			const page = past.activities;
-			let newOnPage = 0;
-			for (const activity of page) {
-				rawItemsSeen += 1;
-				const id = activityTripId(activity);
-				if (id && !seenIds.has(id)) {
-					seenIds.add(id);
-					all.push(activity);
-					newOnPage += 1;
-				}
-			}
-			const token = parsed.data?.activities?.past?.nextPageToken;
-			// Duplicate records do not prove exhaustion; only cursor progress does.
-			if (token) {
-				if (seenContinuations.has(token)) {
-					throw new Error(
-						"uber_graphql_error [endpoint Activities]: repeated continuation",
-					);
-				}
-				seenContinuations.add(token);
-			}
-			if (!token) {
-				return false;
-			}
-			duplicateOnlyPages = newOnPage === 0 ? duplicateOnlyPages + 1 : 0;
-			if (duplicateOnlyPages >= MAX_DUPLICATE_ONLY_PAGES) {
-				return false;
-			}
-			nextPageToken = token;
-			if (pageNumber < MAX_ACTIVITY_PAGES) {
-				await delay(PAGE_DELAY_MS);
-			}
-			return true;
-		},
-	});
+			seenContinuations.add(token);
+		}
+		if (!token) {
+			break;
+		}
+		duplicateOnlyPages = newOnPage === 0 ? duplicateOnlyPages + 1 : 0;
+		if (duplicateOnlyPages >= MAX_DUPLICATE_ONLY_PAGES) {
+			break;
+		}
+		nextPageToken = token;
+		await delay(PAGE_DELAY_MS);
+	}
 	if (rawItemsSeen > 0 && seenIds.size === 0) {
 		throw new Error(
 			"uber_graphql_error [endpoint Activities]: no activity carried a trip id",
@@ -439,9 +430,7 @@ export async function fetchAllActivities(
 	if (duplicateOnlyPages >= MAX_DUPLICATE_ONLY_PAGES) {
 		return { activities: all, truncated: true, stopReason: "duplicate_only_pages" };
 	}
-	return walk.truncated
-		? { activities: all, truncated: true, stopReason: "page_limit" }
-		: { activities: all, truncated: false };
+	return { activities: all, truncated: false };
 }
 
 /** One trip's raw GetTrip result, kept as-is so the caller decides how to turn it into a trips RECORD. */
@@ -557,18 +546,11 @@ export async function collectAllStreams(
 					action: "retry_on_connector_upgrade",
 					retryable: false,
 				},
-				message:
-					stopReason === "duplicate_only_pages"
-						? `Uber activity feed stopped after ${MAX_DUPLICATE_ONLY_PAGES} pages in a row with no new trips, with more trip history possibly available`
-						: `Uber activity feed stopped at the ${MAX_ACTIVITY_PAGES}-page limit with more trip history possibly available`,
-				diagnostics:
-					stopReason === "duplicate_only_pages"
-						? {
-								page_limit: MAX_ACTIVITY_PAGES,
-								duplicate_only_page_limit: MAX_DUPLICATE_ONLY_PAGES,
-								stop_reason: "duplicate_only_pages",
-							}
-						: { page_limit: MAX_ACTIVITY_PAGES },
+				message: `Uber activity feed stopped after ${MAX_DUPLICATE_ONLY_PAGES} pages in a row with no new trips, with more trip history possibly available`,
+				diagnostics: {
+					duplicate_only_page_limit: MAX_DUPLICATE_ONLY_PAGES,
+					stop_reason: stopReason,
+				},
 			});
 		}
 		if (detailTruncated) {

@@ -423,21 +423,62 @@ for (const continuations of [
 	});
 }
 
-test("fetchAllActivities: fresh new-trip continuations still honor the page ceiling", async () => {
+test("fetchAllActivities: collects 201 fresh pages through the empty end", async () => {
+	const expected = Array.from({ length: 201 }, (_, i) => ({
+		uuid: `trip-${i}`,
+	}));
 	const { fetchPath, calls } = makeScriptedFetch({
-		activitiesPages: Array.from({ length: 201 }, (_, i) => ({
-			body: activitiesBody([{ uuid: `trip-${i}` }], `fresh-${i}`),
-		})),
+		activitiesPages: [
+			...expected.map((activity, i) => ({
+				body: activitiesBody([activity], `fresh-${i}`),
+			})),
+			{ body: activitiesBody([]) },
+		],
 	});
+	const tokens: unknown[] = [];
+	const checkedFetch: UberPageFetch = (operation, query, variables) => {
+		tokens.push(variables.nextPageToken);
+		return fetchPath(operation, query, variables);
+	};
 	const delays: number[] = [];
-	const result = await fetchAllActivities(fetchPath, async (ms) => {
+	const result = await fetchAllActivities(checkedFetch, async (ms) => {
 		delays.push(ms);
 	});
-	assert.equal(result.activities.length, 200);
-	assert.equal(result.truncated, true);
-	assert.equal(result.stopReason, "page_limit");
-	assert.equal(calls.length, 200);
-	assert.equal(delays.length, 199);
+	assert.deepEqual(result, { activities: expected, truncated: false });
+	assert.equal(calls.length, 202);
+	assert.deepEqual(tokens, [
+		undefined,
+		...expected.map((_, i) => `fresh-${i}`),
+	]);
+	assert.equal(delays.length, 201);
+});
+
+test("collectAllStreams: long activity history has no page-budget SKIP", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			...Array.from({ length: 201 }, (_, i) => ({
+				body: activitiesBody([{ uuid: `trip-${i}` }], `fresh-${i}`),
+			})),
+			{ body: activitiesBody([]) },
+		],
+		getTrip: Object.fromEntries(
+			Array.from({ length: 200 }, (_, i) => [
+				`trip-${i}`,
+				{ body: getTripBody({ status: "COMPLETED" }) },
+			]),
+		),
+	});
+	const { ctx, messages, emitted } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.equal(calls.filter((call) => call === "Activities").length, 202);
+	assert.equal(emitted.length, 200, "the separate detail limit is unchanged");
+	const skips = messages.filter((message) => message.type === "SKIP_RESULT");
+	assert.equal(skips.length, 1);
+	assert.equal(skips[0]?.reason, "trips_deferred_detail_budget");
+	assert.deepEqual(skips[0]?.diagnostics, {
+		detail_fetch_limit: 200,
+		total_trips: 201,
+	});
 });
 
 test("fetchAllActivities: two duplicate-only pages in a row still follow the cursor", async () => {
@@ -513,7 +554,6 @@ test("collectAllStreams: a duplicate-only page streak reports trips as stopped e
 	assert.equal(skips.length, 1);
 	assert.equal(skips[0]?.reason, "trips_deferred_page_budget");
 	assert.deepEqual(skips[0]?.diagnostics, {
-		page_limit: 200,
 		duplicate_only_page_limit: 3,
 		stop_reason: "duplicate_only_pages",
 	});

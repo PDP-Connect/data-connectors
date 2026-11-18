@@ -4648,7 +4648,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 512,
+			line: 354,
+			column: 28,
+			category: "dependent_pagination",
+			note: "Activities requests require the preceding nextPageToken; fetch and pacing remain sequential until exhaustion or a no-progress guard.",
+		},
+		{
+			path: "connectors/uber/index.ts",
+			line: 501,
 			column: 15,
 			category: "provider_pacing_backpressure",
 			note: "fetchGetTrip()/fetchFareBreakdown() per trip id, and emitRecord('trips'|'receipts', ...) after each — one detail-fetch loop shared by both streams, politely paced between trips (D5 revised: trips hydrates from GetTrip, receipts from GetReceipt).",
