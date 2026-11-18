@@ -32,6 +32,7 @@ import type { BrowserServices, LegacyContributionDay } from "./types.ts";
 const GITHUB = "https://github.com";
 const API = "https://api.github.com";
 const INVENTORY_PAGE_LIMIT = 60;
+const EVENTS_WINDOW = { window: "github_public_events", window_limit: 300, window_days: 30 } as const;
 const HISTORY_PAGE_SIZE = 100;
 const HISTORY_PAGE_LIMIT = 10;
 
@@ -120,7 +121,7 @@ export async function collectGitHubBrowser(
 			data = { id: snapshotId(stream), [stream]: rows.map(({ id: _id, ...row }) => row) };
 		else if (stream === "events") data = {
 			id: snapshotId(stream), events: rows, fetchedAt,
-			windowDescription: "GitHub public events API retention window (up to 300 events from the past 90 days).",
+			windowDescription: "GitHub public events API window: at most 300 events from the last 30 days.",
 		};
 		else if (stream === "history") data = {
 			id: snapshotId(stream), issues: rows.filter((row) => row.type === "issue"),
@@ -146,6 +147,7 @@ export async function collectGitHubBrowser(
 		stream: string,
 		counts: CoverageCounts,
 		metadata: Record<string, unknown> = {},
+		wholeInventory = true,
 	): Promise<void> => {
 		if (!(await flush(stream, true, counts))) {
 			await incomplete(stream, "invalid_snapshot_shape", counts);
@@ -155,12 +157,14 @@ export async function collectGitHubBrowser(
 			fetched_at: services.now().toISOString(),
 			...metadata,
 		}, counts);
-		await emitMessage(fullInventoryCoverage(stream, { kind: "enumerated", complete: true, considered: 1, covered: 1 }));
+		if (wholeInventory)
+			await emitMessage(fullInventoryCoverage(stream, { kind: "enumerated", complete: true, considered: 1, covered: 1 }));
 	};
 	const incomplete = async (
 		stream: string,
 		reason: string | CollectionFailure,
 		counts: CoverageCounts = { considered: 0, covered: 0 },
+		detail: Record<string, unknown> = {},
 	): Promise<void> => {
 		const failure: CollectionFailure = typeof reason === "string"
 			? { origin: "source", cause: reason, ...counts } : reason;
@@ -172,7 +176,7 @@ export async function collectGitHubBrowser(
 				recovery_hint: { action: "retry_by_runtime", retryable: true } }
 			: fullInventoryCoverage(stream, enumeration, failure.cause);
 		if (message.type === "SKIP_RESULT") {
-			message.diagnostics = { ...(asRecord(message.diagnostics) ?? {}), ...failure };
+			message.diagnostics = { ...(asRecord(message.diagnostics) ?? {}), ...failure, ...detail };
 			const requestFailed = failure.origin === "source" && ["source_request_failed", "http_rate_limited", "http_status_failed", "wrong_navigation"].includes(failure.cause);
 			// A requested profile that could not be read is a stream failure,
 			// including owner, shape and embedded-section failures.
@@ -295,7 +299,7 @@ export async function collectGitHubBrowser(
 			}
 			const reason = evidence.decide(covered);
 			if (reason === null) await complete(stream, counts());
-			else await incomplete(stream, reason, counts());
+			else await incomplete(stream, reason, counts(), evidence.guard === null ? {} : { guard: evidence.guard });
 		});
 	}
 
@@ -304,6 +308,8 @@ export async function collectGitHubBrowser(
 			const evidence = new InventoryEvidence(`${API}/users/${username}/events/public?per_page=100&page=1`, { pages: 3 });
 			let considered = 0;
 			let covered = 0;
+			// Which fields were unreadable, by event type: counts only, never row values.
+			const unreadable: Record<string, Record<string, number>> = {};
 			for (let request = evidence.next; request !== null; request = evidence.next) {
 				const response = await fetchJson(request.url, { considered, covered });
 				if (!Array.isArray(response.data)) {
@@ -312,6 +318,11 @@ export async function collectGitHubBrowser(
 				}
 				considered += response.data.length;
 				const events = response.data.map(raw => parseLegacyEventPageItem(raw));
+				for (const parsed of events) {
+					if (parsed.unreadableFields.length === 0) continue;
+					const byField = (unreadable[parsed.row?.type ?? "unknown"] ??= {});
+					for (const field of parsed.unreadableFields) byField[field] = (byField[field] ?? 0) + 1;
+				}
 				const rows = events.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
 				const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: events.every(parsed => parsed.complete),
 					rejectedRows: events.length - rows.length,
@@ -322,8 +333,11 @@ export async function collectGitHubBrowser(
 			}
 			// Neither a short page nor our loop limit establishes the source end.
 			const reason = evidence.decide(covered);
-			if (reason === null) await complete("events", { considered, covered });
-			else await incomplete("events", reason, { considered, covered });
+			// The Events API serves at most 300 events from the last 30 days, a platform
+			// limit: a fully accounted served window is a checkpoint, not the whole inventory.
+			const detail = Object.keys(unreadable).length === 0 ? {} : { unreadable_fields_by_type: unreadable };
+			if (reason === null) await complete("events", { considered, covered }, EVENTS_WINDOW, false);
+			else await incomplete("events", reason, { considered, covered }, detail);
 		});
 	}
 

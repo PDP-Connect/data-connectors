@@ -112,7 +112,7 @@ function isExpectedRequest(
 			url.origin === "https://github.com" &&
 			(profileRoute || starsRoute) &&
 			validSelection(url, starsRoute) &&
-			(cursorRequest ? !url.searchParams.has("page") : Number(url.searchParams.get("page")) === pageNumber) &&
+			(cursorRequest ? [null, "1"].includes(url.searchParams.get("page")) : Number(url.searchParams.get("page")) === pageNumber) &&
 			(starsRoute || url.searchParams.get("tab") === expectedTab)
 		);
 	} catch {
@@ -212,27 +212,57 @@ function validContinuation(
 	}
 }
 
+/** Which guard rejected a cursor link. A bounded enum: it never carries a cursor or markup. */
+export type CursorGuard =
+	| "cursor_extra_param"
+	| "cursor_path_mismatch"
+	| "cursor_tab_mismatch"
+	| "cursor_missing"
+	| "conflicting_next"
+	| "foreign_link"
+	| "multiple_paginators"
+	| "unknown_target"
+	| "counter_ambiguous";
+
 /**
- * The cursor value of a Next link that is a safe successor of `current`: same
- * origin, same path and same tab, one non-empty `after` value, nothing else.
- * Returns null for any other link, which stays an unknown continuation.
+ * GitHub echoes the `page` value of the request into its cursor links. A link may
+ * carry it once, equal to the current URL's own; a current URL without it permits none.
  */
-export function boundCursor(href: string, current: string): string | null {
+export function echoesPage(link: URL, current: URL): boolean {
+	const echoed = link.searchParams.getAll("page");
+	if (echoed.length === 0) return true;
+	const own = current.searchParams.getAll("page");
+	return echoed.length === 1 && own.length === 1 && echoed[0] === own[0];
+}
+
+/**
+ * Judge a cursor Next link against the page that carries it: same origin, same
+ * path and same tab, one non-empty `after` value, and nothing else but an echoed page.
+ * Returns the cursor value, or the first guard that rejected the link.
+ */
+export function inspectCursorLink(href: string, current: string): { cursor: string } | { guard: CursorGuard } {
 	try {
 		const next = new URL(href);
 		const from = new URL(current);
-		const cursor = next.searchParams.getAll("after");
-		const keys = Array.from(next.searchParams.keys());
 		if (next.origin !== "https://github.com" || from.origin !== next.origin ||
-			next.username !== "" || next.password !== "" || next.hash !== "" ||
-			next.pathname !== from.pathname || next.searchParams.get("tab") !== from.searchParams.get("tab") ||
-			cursor.length !== 1 || (cursor[0] ?? "").trim() === "" ||
-			!keys.every(key => key === "after" || key === "tab") ||
-			next.searchParams.getAll("tab").length !== (from.searchParams.has("tab") ? 1 : 0)) return null;
-		return cursor[0] ?? null;
+			next.username !== "" || next.password !== "" || next.hash !== "") return { guard: "foreign_link" };
+		if (next.pathname !== from.pathname) return { guard: "cursor_path_mismatch" };
+		if (next.searchParams.get("tab") !== from.searchParams.get("tab") ||
+			next.searchParams.getAll("tab").length !== (from.searchParams.has("tab") ? 1 : 0)) return { guard: "cursor_tab_mismatch" };
+		const cursor = next.searchParams.getAll("after");
+		if (cursor.length !== 1 || (cursor[0] ?? "").trim() === "") return { guard: "cursor_missing" };
+		if (!Array.from(next.searchParams.keys()).every(key => key === "after" || key === "tab" || key === "page") ||
+			!echoesPage(next, from)) return { guard: "cursor_extra_param" };
+		return { cursor: cursor[0] ?? "" };
 	} catch {
-		return null;
+		return { guard: "foreign_link" };
 	}
+}
+
+/** The cursor value of a Next link that is a safe successor of `current`, or null. */
+export function boundCursor(href: string, current: string): string | null {
+	const inspected = inspectCursorLink(href, current);
+	return "cursor" in inspected ? inspected.cursor : null;
 }
 
 /** Inventory routes are unfiltered. Reject selection-changing and duplicate params. */

@@ -130,3 +130,66 @@ test("numbered forward links without an enabled Next still withhold the walk", a
 	assert.deepEqual(result.records, []);
 	assert.equal(result.cause, "unknown_continuation");
 });
+
+// The starred tab as GitHub serves it to a signed-in owner, with invented names and
+// cursors. The first request carries `page=1`, and GitHub echoes that value into the
+// cursor links of every page.
+const starRow = (i: number) => `<div class="col-12 d-block width-full border-bottom"><h3><a href="/sample-owner/repo${i}">sample-owner/repo${i}</a></h3><p>Invented description ${i}</p><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div>`;
+const starCounter = `<nav aria-label="User profile"><a data-tab-item="stars" href="/sample-user?tab=stars">Stars <span class="Counter">45</span></a></nav>`;
+const starsPager = (inner: string) => `<div class="paginate-container"><div class="BtnGroup" data-test-selector="pagination">${inner}</div></div>`;
+const starsDisabled = (label: string) => `<button class="btn BtnGroup-item" disabled="disabled">${label}</button>`;
+const starsLink = (label: string, href: string) => `<a rel="nofollow" class="btn BtnGroup-item" href="${href}">${label}</a>`;
+const starsPage = (from: number, count: number, pager: string) =>
+	`${owner}${starCounter}<turbo-frame id="user-starred-repos">${Array.from({ length: count }, (_, i) => starRow(from + i)).join("")}${starsPager(pager)}</turbo-frame>`;
+const starsFirst = "https://github.com/sample-user?page=1&tab=stars";
+const starsHref = (query: string, path = "sample-user") => `https://github.com/${path}?${query.replaceAll("&", "&amp;")}`;
+
+async function walkStars(next: string, previous: string) {
+	const records: Array<Record<string, unknown>> = [];
+	const messages: Array<{ type: string; diagnostics?: unknown }> = [];
+	const requests: string[] = [];
+	await collectGitHubBrowser({
+		emit: async message => { messages.push(message); },
+		emitRecord: async (_stream, data) => { records.push(data); },
+		progress: async () => {}, requested: new Set(["starred"]), state: {},
+	}, {
+		openPage: async url => {
+			if (url === "https://github.com/") return { requestedUrl: url, currentUrl: url, html: owner };
+			requests.push(url);
+			const html = url === starsFirst
+				? starsPage(0, 30, starsDisabled("Previous") + starsLink("Next", next))
+				: starsPage(30, 15, starsLink("Previous", previous) + starsDisabled("Next"));
+			return { requestedUrl: url, currentUrl: url, html };
+		},
+		fetchPublicJson: async () => { throw new Error("an exact total needs no REST request"); },
+		now: () => new Date("2026-10-21T04:00:00Z"), sleep: async () => {},
+	});
+	const skip = messages.find(m => m.type === "SKIP_RESULT")?.diagnostics as { cause?: string; guard?: string } | undefined;
+	return { records, messages, requests, cause: skip?.cause, diagnostics: skip };
+}
+
+const goodNext = starsHref("after=cursor-one&page=1&tab=stars");
+const goodPrevious = starsHref("before=cursor-zero&page=1&tab=stars");
+
+test("a signed-in starred walk that echoes page=1 into its cursor links publishes all 45 rows", async () => {
+	const result = await walkStars(goodNext, goodPrevious);
+	assert.deepEqual(result.requests, [starsFirst, "https://github.com/sample-user?after=cursor-one&page=1&tab=stars"]);
+	assert.equal(result.records.length, 1);
+	assert.equal((result.records[0]?.starred as unknown[] | undefined)?.length, 45);
+	assert.deepEqual(result.messages.map(m => m.type), ["STATE", "DETAIL_COVERAGE"]);
+});
+
+for (const [label, next, previous, guard] of [
+	["a different page value", starsHref("after=cursor-one&page=2&tab=stars"), goodPrevious, "cursor_extra_param"],
+	["a repeated page key", starsHref("after=cursor-one&page=1&page=1&tab=stars"), goodPrevious, "cursor_extra_param"],
+	["a foreign path", starsHref("after=cursor-one&page=1&tab=stars", "other-user"), goodPrevious, "cursor_path_mismatch"],
+	["a different page value on Previous", goodNext, starsHref("before=cursor-zero&page=2&tab=stars"), undefined],
+	["a repeated page key on Previous", goodNext, starsHref("before=cursor-zero&page=1&page=1&tab=stars"), undefined],
+] as const) {
+	test(`a starred cursor link with ${label} still withholds the walk`, async () => {
+		const result = await walkStars(next, previous);
+		assert.deepEqual(result.records, []);
+		assert.equal(result.cause, "unknown_continuation");
+		if (guard !== undefined) assert.equal(result.diagnostics?.guard, guard);
+	});
+}

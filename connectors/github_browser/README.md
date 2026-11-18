@@ -10,7 +10,7 @@ All six streams keep their legacy aggregate envelopes and stable primary keys
 | profile | Validated profile identity, page navigation and readable nested collections establish singleton presence. Unreadable pinned repository, organization or achievement entries withhold the snapshot; no self inventory coverage or deletes. |
 | repositories | Readable, unique entries across every page, plus an exact repository counter matching distinct rows or explicit pagination end without a conflicting counter. |
 | starred | Readable, unique entries across every page, plus an exact Stars counter matching distinct rows or explicit pagination end without a conflicting counter. |
-| events | Validated, distinct REST rows on every page of one walk, ending on a bound Link header without rel=next, or an empty first page. Window: up to 300 events from the past 90 days. |
+| events | Validated, distinct REST rows on every page of one walk, ending on a bound Link header without rel=next, or an empty first page. Window: at most 300 events from the last 30 days (a platform limit), so a fully accounted window is a checkpoint with no whole-inventory coverage. |
 | history | Stable Search total_count, incomplete_results=false, validated distinct rows for both types. Exact total matching completes ordinary searches; totals above 1,000 require exactly 1,000 distinct items in the documented per-type window. An earlier API end does not prove that window complete. |
 | contributions | Every requested view's exact heading total matches the sum of distinct day counts; four-view/date-window checks still apply. |
 

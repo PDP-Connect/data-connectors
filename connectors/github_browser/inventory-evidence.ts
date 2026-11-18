@@ -17,7 +17,7 @@ export type Continuation =
 	/** No successor and no positive end evidence. */
 	| { kind: "unproven" }
 	/** Unreadable, ambiguous or unsupported continuation metadata. */
-	| { kind: "unknown"; reason: string }
+	| { kind: "unknown"; reason: string; guard?: string }
 	/** The page is not the requested page of this inventory; its rows are not evidence. */
 	| { kind: "unbound"; reason: string };
 
@@ -59,6 +59,7 @@ export class InventoryEvidence {
 	private readonly totals = new Set<number>();
 	private pages = 0;
 	private failure: string | null = null;
+	private failureGuard: string | null = null;
 	private endProven = false;
 	private lastPage: number | null = null;
 	private linkedPage = 0;
@@ -152,7 +153,7 @@ export class InventoryEvidence {
 		// remain binding even when its payload is not selected.
 		const missingList = page.continuation.kind === "unknown" && page.continuation.reason === "unreadable_list";
 		if (page.rejectedRows > 0 || (!page.rowsComplete && !missingList)) this.fail("discarded_rows");
-		if (page.continuation.kind === "unknown" && !missingList) this.fail(page.continuation.reason);
+		if (page.continuation.kind === "unknown" && !missingList) this.fail(page.continuation.reason, page.continuation.guard);
 	}
 
 	/**
@@ -183,7 +184,7 @@ export class InventoryEvidence {
 		if (noProgress) this.fail("no_progress");
 		this.pages += 1;
 		this.retain(page);
-		if (continuation.kind === "unknown") this.fail(continuation.reason);
+		if (continuation.kind === "unknown") this.fail(continuation.reason, continuation.guard);
 		else if (continuation.kind === "end") {
 			this.endProven = true;
 		} else if (continuation.kind === "next") {
@@ -218,8 +219,14 @@ export class InventoryEvidence {
 	}
 
 	/** A response that could not be read as a page of this inventory. */
-	fail(reason: string): void {
+	fail(reason: string, guard?: string): void {
+		if (this.failure === null && guard !== undefined) this.failureGuard = guard;
 		this.failure ??= reason;
+	}
+
+	/** Which guard rejected the continuation, when the first failure was a rejected one. */
+	get guard(): string | null {
+		return this.failureGuard;
 	}
 
 	/** Every continuation and every success witness must satisfy the same facts. */

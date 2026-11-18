@@ -21,7 +21,7 @@
  *   - pull_requests via updated_at (search ordered desc)
  *   - gists via `since` + updated_at
  *   - events via created_at (emit-side skip; the Events API has no `since`
- *     param). Provider-side 90-day rolling window: history older than that
+ *     param). Provider-side window of at most 300 events from the last 30 days: older history
  *     is genuinely unavailable, not a connector gap.
  *   - contributions via date (daily counts, GraphQL `contributionsCollection`)
  *   - pinned_repositories, organizations: no cursor. Both are small
@@ -1573,12 +1573,11 @@ async function emitGistsPage(
 }
 
 /**
- * GitHub's Events API is a rolling window: the docs state it returns "the
- * most recent 90 days" of a user's public activity, capped at 300 events /
- * 10 pages of 100 (in practice 3 pages cover the whole window). There is no
- * `since` query param, so incrementality is emit-side: skip any event whose
- * `created_at` is at or before the stored cursor rather than asking the API
- * to filter. History older than 90 days is genuinely unavailable — this is
+ * GitHub's Events API is a rolling window: the docs state it serves at most
+ * 300 events from the last 30 days of a user's public activity, as 3 pages of
+ * 100. There is no `since` query param, so incrementality is emit-side: skip
+ * any event whose `created_at` is at or before the stored cursor rather than
+ * asking the API to filter. Older history is genuinely unavailable — this is
  * stated honestly in the manifest description, not silently truncated.
  */
 const GITHUB_EVENTS_MAX_PAGES = 3;
@@ -1677,8 +1676,8 @@ export async function collectEvents(ctx: StreamCtx): Promise<void> {
 		});
 	}
 	// The provider's own window is the honest boundary here (there is no
-	// larger inventory to compare against — everything older than 90 days is
-	// unavailable to any caller, not just this connector), so a full,
+	// larger inventory to compare against — everything beyond the 300 events of
+	// the last 30 days is unavailable to any caller, not just this connector), so a full,
 	// non-early-stopped walk of the window can declare `considered` against
 	// what was actually enumerated this run.
 	await declareListConsidered(
