@@ -48,9 +48,8 @@ for (const [label, transform] of [
 		(s: string) => s.replace('"defaultAddress":false', '"unrelated":false'),
 	],
 	[
-		"unreadable address",
-		(s: string) =>
-			s.replace('"address1":"123 Example Street"', '"address1":null'),
+		"unreadable address id",
+		(s: string) => s.replace('"id":"synthetic-address"', '"id":null'),
 	],
 	[
 		"absent addresses",
@@ -111,6 +110,24 @@ test("profile accepts absent optional address fields", () => {
 	assert.deepEqual(parseAccountProfile(html), result.record);
 });
 
+test("profile keeps the parts of an address H-E-B saved without them all", () => {
+	const html = profile.replace('"address1":"123 Example Street"', '"address1":null').replace('"city":"Example City",', "");
+	const result = readAccountProfile(html);
+	assert.equal(result.failure, null);
+	assert.equal(result.record?.delivery_addresses[0]?.address, "TX 00000");
+	assert.equal(result.record?.delivery_addresses[0]?.label, "Home");
+});
+
+test("profile leaves out a saved address with no street, city, state or postal code", () => {
+	const empty = '{"id":"synthetic-empty","nickname":null,"address1":null,"address2":null,"city":"","defaultAddress":false}';
+	const html = profile.replace(/"addresses":\[/, `"addresses":[${empty},`);
+	const result = readAccountProfile(html);
+	assert.equal(result.failure, null);
+	assert.deepEqual(result.record?.delivery_addresses, [
+		{ address: "123 Example Street, Example City, TX 00000", label: "Home", is_primary: false },
+	]);
+});
+
 for (const replacement of ["", '"daytimeTelephoneNumber":"",', '"daytimeTelephoneNumber":"   ",']) {
 	test(`profile accepts optional phone: ${JSON.stringify(replacement)}`, () => {
 		const result = readAccountProfile(profile.replace('"daytimeTelephoneNumber":"2025550100",', replacement));
@@ -122,7 +139,8 @@ for (const replacement of ["", '"daytimeTelephoneNumber":"",', '"daytimeTelephon
 
 for (const [label, transform, gate, paths] of [
 	["missing primary marker", (s: string) => s.replace('"defaultAddress":false', '"unrelated":false'), "schema", ["addresses.0.defaultAddress"]],
-	["unreadable address", (s: string) => s.replace('"address1":"123 Example Street"', '"address1":null'), "schema", ["addresses.0.address1"]],
+	["unreadable address id", (s: string) => s.replace('"id":"synthetic-address"', '"id":null'), "schema", ["addresses.0.id"]],
+	["wrong address part type", (s: string) => s.replace('"address1":"123 Example Street"', '"address1":7'), "schema", ["addresses.0.address1"]],
 	["absent addresses", (s: string) => s.replace('"addresses":', '"unrelated":'), "schema", ["addresses"]],
 	["signed out", (s: string) => s.replace("/oidc/prompt/edit_account", "/login"), "signed_out_marker", []],
 	["wrong route", (s: string) => s.replace('"/my-account/profile"', '"/public"'), "ssr_route_mismatch", []],

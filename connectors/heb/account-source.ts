@@ -56,6 +56,8 @@ function accountPageProps(html: string, route: string): unknown {
 }
 
 const text = z.string().trim().min(1);
+/** A part of a saved address H-E-B may leave out: absent, null or blank reads as null. */
+const addressPart = z.string().trim().nullish().transform((value) => value || null);
 const profileSource = z.object({
 	profileId: text,
 	profile: z.object({
@@ -68,18 +70,21 @@ const profileSource = z.object({
 		z.object({
 			id: text,
 			nickname: z.string().nullish().transform((value) => value ?? null),
-			address1: text,
-			address2: z.string().nullish().transform((value) => value ?? null),
-			city: text,
-			state: text,
-			postalCode: text,
+			address1: addressPart,
+			address2: addressPart,
+			city: addressPart,
+			state: addressPart,
+			postalCode: addressPart,
 			defaultAddress: z.boolean(),
 		}),
 	),
 });
 
 /** The profile and complete address array are delivered in one SSR response.
- * Reject the aggregate if any address or primary marker cannot be read. */
+ * Reject the aggregate if any address id or primary marker cannot be read, or a
+ * part has the wrong type. H-E-B keeps saved addresses with parts left out
+ * (seen live 2026-11-18): such an address keeps the parts it has, and one with
+ * no street, city, state or postal code holds no address and is left out. */
 export function readAccountProfile(html: string): {
 	record: ProfileRecord | null;
 	failure: ProfileReadFailure | null;
@@ -99,13 +104,11 @@ export function readAccountProfile(html: string): {
 		name: `${profile.firstName} ${profile.lastName}`,
 		email: profile.email,
 		phone: profile.daytimeTelephoneNumber,
-		delivery_addresses: addresses.map((a) => ({
-			address: [a.address1, a.address2, `${a.city}, ${a.state} ${a.postalCode}`]
-				.filter(Boolean)
-				.join(", "),
-			label: a.nickname,
-			is_primary: a.defaultAddress,
-		})),
+		delivery_addresses: addresses.flatMap((a) => {
+			const region = [a.state, a.postalCode].filter(Boolean).join(" ");
+			const address = [a.address1, a.address2, a.city, region].filter(Boolean).join(", ");
+			return address ? [{ address, label: a.nickname, is_primary: a.defaultAddress }] : [];
+		}),
 	};
 	return { record, failure: null };
 }
