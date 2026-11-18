@@ -44,7 +44,7 @@ export const LOGIN_URL = APP_URL;
 export const SIGN_IN_ORIGIN = "https://sso.garmin.com";
 /** The owner's settings: cheap, authenticated JSON, and where their time zone comes from. */
 export const PROBE_PATH = "/gc-api/userprofile-service/userprofile/settings";
-/** A first run, or a run whose grant has no start, reads this many days up to the owner's today. */
+/** Minimum history (including today) when there are no activities or they began more recently. */
 export const INITIAL_DAYS = 90;
 /** A daily stream re-reads the last week each run: Garmin scores training status after the day, and watches sync late. */
 export const OVERLAP_DAYS = 7;
@@ -867,6 +867,7 @@ export function planDays(
 	grant: DayRange,
 	fullRefresh: boolean,
 	overlap: number,
+	initialStart = addDays(today, 1 - INITIAL_DAYS),
 ): { cursor: DayCursor; segments: Segment[]; held: Window[] } {
 	const { since, until } = grant;
 	const last = until && addDays(until, -1) < today ? addDays(until, -1) : today;
@@ -879,7 +880,7 @@ export function planDays(
 		!prev.floor ||
 		prev.floor > tomorrow ||
 		(since !== undefined && since > prev.next_day);
-	const start = since ?? addDays(today, 1 - INITIAL_DAYS);
+	const start = since ?? initialStart;
 	const cursor: DayCursor = fresh
 		? { next_day: start, floor: start }
 		: structuredClone(prev);
@@ -921,7 +922,7 @@ export function planDays(
 		segments.push({ kind: "forward", from, to: last, since: floor });
 	}
 	if (!fresh && start < floor) {
-		// History before the floor, back to the grant's start or, with none, INITIAL_DAYS: its own
+		// History before the floor, back to the grant's start or the discovered history floor: its own
 		// cursor, so the forward read keeps its place. Where it stopped holds for a later start too.
 		const saved = cursor.backfill;
 		let resume =
@@ -1301,6 +1302,28 @@ export async function collectGarminBrowser(
 	);
 	// A failure every later stream shares.
 	let stop: Failure | null = settings.ok ? null : settings;
+	// Discover the history floor once for streams whose grant has no lower bound.
+	let initialStart = addDays(today, 1 - INITIAL_DAYS);
+	let discoveryFailure: Failure | null = null;
+	if (settings.ok && streams.some(stream => ctx.requested.get(stream)?.time_range?.since === undefined)) {
+		await p.sleep(p.requestDelayMs);
+		const oldest = await fetchJson(ctx.page,
+			"/gc-api/activitylist-service/activities/search/activities?sortOrder=asc&start=0&limit=1", p, run);
+		const rows = oldest.ok && Array.isArray(oldest.json) ? oldest.json : null;
+		const row: unknown = rows?.[0];
+		const local = typeof row === "object" && row !== null
+			? (row as Record<string, unknown>).startTimeLocal : undefined;
+		const day = typeof local === "string" && /^\d{4}-\d{2}-\d{2}(?:[ T]|$)/.test(local)
+			? local.slice(0, 10) : undefined;
+		if (rows && (rows.length === 0 || (rows.length === 1 && day !== undefined && isDay(day)))) {
+			if (day !== undefined && day < initialStart) initialStart = day;
+		} else {
+			// Unknown history must never be checkpointed as a successful ninety-day read.
+			discoveryFailure = { ok: false, reason: "collection_interrupted",
+				message: "Oldest activity could not be read; retry before reading history." };
+		}
+	}
+
 	for (const stream of streams) {
 		const range = ctx.requested.get(stream)?.time_range;
 		const plan = planDays(
@@ -1309,10 +1332,12 @@ export async function collectGarminBrowser(
 			grantDays(stream, range),
 			ctx.collectionMode === "full_refresh",
 			OVERLAP[stream],
+			initialStart,
 		);
 		const s: StreamRun = { ctx, p, run, range, plan };
-		const walk: Walk = stop
-			? walkFrom(stop)
+		const failure = stop ?? (range?.since === undefined ? discoveryFailure : null);
+		const walk: Walk = failure
+			? walkFrom(failure)
 			: isDayStream(stream)
 				? await walkDays(s, stream)
 				: await walkWindows(s, stream);

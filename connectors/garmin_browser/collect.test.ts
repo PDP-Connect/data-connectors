@@ -139,6 +139,7 @@ const TRAINING = "/gc-api/metrics-service/metrics/trainingstatus/daily/";
 const SLEEP = "/gc-api/sleep-service/stats/sleep/daily/";
 const HRV = "/gc-api/hrv-service/hrv/daily/";
 const ACTIVITIES = "/gc-api/activitylist-service/activities/search/activities?";
+const OLDEST = `${ACTIVITIES}sortOrder=asc&start=0&limit=1`;
 /** AGAIN's sleep and HRV reads. */
 const SLEEP_AGAIN = AGAIN.map(([from, to]) => `${SLEEP}${from}/${to}`);
 const HRV_AGAIN = AGAIN.map(([from, to]) => `${HRV}${from}/${to}`);
@@ -152,11 +153,12 @@ const PREFIX: Record<Stream, string> = {
 const streamOf = (path: string): string =>
 	path === PROBE_PATH
 		? "settings"
+		: path === OLDEST ? "oldest"
 		: (STREAMS.find((stream) => path.startsWith(PREFIX[stream])) ?? "unknown");
 const isStream =
 	(stream: Stream) =>
 	(path: string): boolean =>
-		path.startsWith(PREFIX[stream]);
+		path !== OLDEST && path.startsWith(PREFIX[stream]);
 const isPath =
 	(wanted: string) =>
 	(path: string): boolean =>
@@ -430,12 +432,12 @@ test("collect: reads settings once, then each day of the daily streams and 28-da
 				`${ACTIVITIES}startDate=${from}&endDate=${to}&start=0&limit=100`,
 		),
 	);
-	assert.equal(fake.paths.length, 1 + 90 + 4 + 4 + 90 + 4);
+	assert.equal(fake.paths.length, 2 + 90 + 4 + 4 + 90 + 4);
 	// Streams one after another, in manifest order.
 	const order = fake.paths
 		.map(streamOf)
 		.filter((name, i, all) => name !== all[i - 1]);
-	assert.deepEqual(order, ["settings", ...STREAMS]);
+	assert.deepEqual(order, ["settings", "oldest", ...STREAMS]);
 	for (const path of fake.paths) {
 		assert.match(path, /^\/gc-api\//);
 		assert.doesNotMatch(path, /fixture-owner|displayName|epoch\/request/i);
@@ -475,7 +477,7 @@ test("collect: only the requested stream is read, emitted and checkpointed", asy
 	const h = await collect(fake, { streams: ["sleep"] });
 	assert.deepEqual(
 		new Set(fake.paths.map(streamOf)),
-		new Set(["settings", "sleep"]),
+		new Set(["settings", "oldest", "sleep"]),
 	);
 	assert.deepEqual(
 		new Set(h.emitted.map((record) => record.stream)),
@@ -1318,6 +1320,7 @@ test("collect: every request of a halved window, its full answers included, come
 	});
 	assert.deepEqual(fake.log, [
 		"read settings",
+		"sleep 5", "read oldest",
 		// Seven pieces of the window, then the three windows of its history.
 		...Array.from({ length: 10 }, () => ["sleep 5", "read activities"]).flat(),
 	]);
@@ -4005,4 +4008,43 @@ test("collect: PROGRESS and SKIP messages carry counts and statuses, never an id
 			);
 		}
 	}
+});
+
+test("collect: unbounded history begins at the oldest activity, 400 days ago", async () => {
+	const oldest = addDays(TODAY, -400);
+	const fake = fakeGarmin(site(data => {
+		data.activities.push({ activityId: 499999, startTimeLocal: oldest + " 10:00:00", startTimeGMT: oldest + " 10:00:00" });
+		data.daily[oldest] = { ...(data.daily["2026-09-16"] as object), calendarDate: oldest };
+	}));
+	const h = await collect(fake, { streams: ["daily_summaries"], pacing: { maxDaysPerRun: 500 } });
+	assert.equal(fake.paths[1], OLDEST);
+	assert.deepEqual(pathsOf(fake, "daily_summaries"), daysFrom(oldest, TODAY).map(day => DAILY + day));
+	assert.ok(idsOf(h, "daily_summaries").includes(oldest));
+	assert.deepEqual(statesOf(h), { daily_summaries: { next_day: addDays(TODAY, 1), floor: oldest } });
+});
+
+test("collect: no activities retains the ninety-day minimum", async () => {
+	const fake = fakeGarmin(site(data => { data.activities = []; }));
+	const h = await collect(fake, { streams: ["daily_summaries"] });
+	assert.equal(fake.paths[1], OLDEST);
+	assert.deepEqual(pathsOf(fake, "daily_summaries"), daysFrom(FLOOR, TODAY).map(day => DAILY + day));
+	assert.deepEqual(statesOf(h), { daily_summaries: FULL });
+});
+
+for (const answer of [response(500), json({ unexpected: [] }), json([{ startTimeLocal: "unreadable" }])]) {
+	test("collect: failed or unreadable oldest discovery is retryable without any STATE", async () => {
+		const fake = fakeGarmin(except(site(), isPath(OLDEST), answer));
+		const h = await collect(fake);
+		assert.deepEqual(fake.paths, [PROBE_PATH, OLDEST]);
+		assertSkips(h, "collection_interrupted", RETRY);
+		assert.deepEqual(statesOf(h), {});
+		assert.deepEqual(h.emitted, []);
+	});
+}
+
+test("collect: explicit since never requests oldest activity", async () => {
+	const fake = fakeGarmin();
+	await collect(fake, { streams: ["daily_summaries"], ranges: { daily_summaries: { since: FLOOR } } });
+	assert.equal(fake.paths.includes(OLDEST), false);
+	assert.deepEqual(pathsOf(fake, "daily_summaries"), daysFrom(FLOOR, TODAY).map(day => DAILY + day));
 });
