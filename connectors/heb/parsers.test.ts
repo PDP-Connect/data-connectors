@@ -1355,3 +1355,75 @@ test("buildNutritionRecord uses unknown error outcome and observed product name 
 			"https://images.heb.com/is/image/HEBGrocery/prd-small/000000999.jpg",
 	});
 });
+
+// Records captured from the 0.6.36 parser (c2e4a1b1f5) on this invented page:
+// unique, weighed, repeated-product and "N of M" lines. 0.6.37 changed how lines
+// are collected, not how a line becomes a record, so the output must not move.
+test("order item records for ordinary lines match the 0.6.36 output", () => {
+	const html = [
+		"<main><ul>",
+		"<li><a data-qe-id=\"itemRowDetailsName\" href=\"/product-detail/invented-apples/100001\">Invented apples</a><p data-qe-id=\"orderItemQty\">Qty: 2</p><p data-qe-id=\"checkoutItemPrice\">$3.00</p></li>",
+		"<li><a data-qe-id=\"itemRowDetailsName\" href=\"/product-detail/invented-bananas/100002\">Invented bananas</a><p data-qe-id=\"orderItemQty\">Qty: 1.25 of 2 lbs</p><p data-qe-id=\"checkoutItemPrice\">$1.10</p></li>",
+		"<li><a data-qe-id=\"itemRowDetailsName\" href=\"/product-detail/invented-apples/100001\">Invented apples</a><p data-qe-id=\"orderItemQty\">Qty: 1</p><p data-qe-id=\"checkoutItemPrice\">$1.50</p></li>",
+		"<li><a data-qe-id=\"itemRowDetailsName\" href=\"/product-detail/invented-cheese/100003\">Invented cheese</a><p data-qe-id=\"orderItemQty\">Qty: 3 of 3</p><p data-qe-id=\"checkoutItemPrice\">$9.00</p></li>",
+		"</ul></main>",
+	].join("\n");
+	const items = parseOrderDetailDom(html)?.items ?? [];
+	const records = items.map((item, index) =>
+		buildOrderItemRecord("HEB-PARITY", "2026-01-01", item, index, "2026-01-02T00:00:00Z", items),
+	);
+	assert.deepEqual(records, [
+		{
+			"id": "HEB-PARITY|100001|0",
+			"order_id": "HEB-PARITY",
+			"name": "Invented apples",
+			"department": null,
+			"product_id": "100001",
+			"product_url": "https://www.heb.com/product-detail/invented-apples/100001",
+			"image_url": "https://images.heb.com/is/image/HEBGrocery/prd-small/000100001.jpg",
+			"quantity": 2,
+			"line_total": "$3.00",
+			"line_total_cents": 300,
+			"order_date": "2026-01-01"
+		},
+		{
+			"id": "HEB-PARITY|100002",
+			"order_id": "HEB-PARITY",
+			"name": "Invented bananas",
+			"department": null,
+			"product_id": "100002",
+			"product_url": "https://www.heb.com/product-detail/invented-bananas/100002",
+			"image_url": "https://images.heb.com/is/image/HEBGrocery/prd-small/000100002.jpg",
+			"quantity": 1.25,
+			"line_total": "$1.10",
+			"line_total_cents": 110,
+			"order_date": "2026-01-01"
+		},
+		{
+			"id": "HEB-PARITY|100001|2",
+			"order_id": "HEB-PARITY",
+			"name": "Invented apples",
+			"department": null,
+			"product_id": "100001",
+			"product_url": "https://www.heb.com/product-detail/invented-apples/100001",
+			"image_url": "https://images.heb.com/is/image/HEBGrocery/prd-small/000100001.jpg",
+			"quantity": 1,
+			"line_total": "$1.50",
+			"line_total_cents": 150,
+			"order_date": "2026-01-01"
+		},
+		{
+			"id": "HEB-PARITY|100003",
+			"order_id": "HEB-PARITY",
+			"name": "Invented cheese",
+			"department": null,
+			"product_id": "100003",
+			"product_url": "https://www.heb.com/product-detail/invented-cheese/100003",
+			"image_url": "https://images.heb.com/is/image/HEBGrocery/prd-small/000100003.jpg",
+			"quantity": 3,
+			"line_total": "$9.00",
+			"line_total_cents": 900,
+			"order_date": "2026-01-01"
+		}
+	]);
+});

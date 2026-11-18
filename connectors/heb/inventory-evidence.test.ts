@@ -219,6 +219,7 @@ test("an order's own server total proves its rows only when every row was read a
 		{ lineCountProven: false },
 		{ lineCountProven: undefined },
 		{ linklessLines: 1 },
+		{ multiNameLines: 1 },
 	] as Partial<InventoryEvidence>[])
 		assert.equal(
 			inventoryMatchesSourceTotal({ ...read, ...invalid }, 2),
@@ -755,5 +756,40 @@ test("a browser row count that disagrees with the parsed html does not prove an 
 	if (result.status !== "hydrated") return;
 	assert.equal(result.sourceItemTotal, 1);
 	assert.equal(result.evidence.lineCountProven, false);
-	assert.equal(result.inventoryComplete, false);
+	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), false);
+});
+for (const [label, lineHtml] of [
+	[
+		"one line with two name links for the same product",
+		'<li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><span data-qe-id="orderItemQty">Qty: 1</span></li>',
+	],
+	[
+		"a line without its own name link whose substitute has one",
+		'<li><span data-qe-id="orderItemQty">Qty: 1</span><ul><li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/501">Substitute</a><span data-qe-id="orderItemQty">Qty: 1</span></li></ul></li>',
+	],
+] as const)
+	test(`${label} does not prove an order's lines`, async () => {
+		const html = detailPage({ lines: 1 }).replace(itemRow(0) + itemRow(1), lineHtml);
+		const result = await fetchOrderDetail(pageFor(html), order.orderId, {
+			waitForHydration: async () => {},
+			detailSurfaceTimeoutMs: 50,
+		});
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(result.sourceItemTotal, 1);
+		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), false);
+	});
+test("a substituted line with one name link per line proves its one source line", async () => {
+	const html = detailPage({ lines: 1 }).replace(
+		itemRow(0) + itemRow(1),
+		'<li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><span data-qe-id="orderItemQty">Qty: 1</span><ul><li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/501">Substitute</a><span data-qe-id="orderItemQty">Qty: 1</span></li></ul></li>',
+	);
+	const result = await fetchOrderDetail(pageFor(html), order.orderId, {
+		waitForHydration: async () => {},
+		detailSurfaceTimeoutMs: 50,
+	});
+	assert.equal(result.status, "hydrated");
+	if (result.status !== "hydrated") return;
+	assert.equal(result.detail.items.length, 2);
+	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), true);
 });

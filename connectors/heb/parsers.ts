@@ -707,25 +707,48 @@ function parseDetailItem(link: HTMLAnchorElement): DetailItem | null {
 // the emitted id for that case. No recommendation/footer product rail was
 // found on the real captured page (verified: only a "Quick actions" banner
 // with report/reorder buttons, no product-detail links).
-/** The order's purchased lines: each outermost <li> that holds a product name
- * link or a quantity. A substitute's nested <li> belongs to its outer line.
- * Same rule as the browser-side collector, applied to the html parsed. */
-export function countOrderDetailLines(html: string): number {
+export interface OrderDetailLineShape {
+	/** Outermost <li>s holding a product name link or a quantity. */
+	lines: number;
+	/** Outer lines with no name link of their own. A substitute's link in a
+	 * nested <li> does not name the purchased line. */
+	linkless: number;
+	/** Lines (outer or nested) that own more than one name link, so one line
+	 * would parse as several products. */
+	multiName: number;
+}
+
+/** The shape of an order's purchased lines, by the same outer-line rule as the
+ * browser-side collector, applied to the html parsed. A line owns a name link
+ * when the link's closest <li> is that line. */
+export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
 	const { document } = parseHTML(html);
+	const nameLinks = [
+		...document.querySelectorAll('a[data-qe-id="itemRowDetailsName"]'),
+	];
 	const lines = new Set(
 		[
-			...document.querySelectorAll(
-				'a[data-qe-id="itemRowDetailsName"], [data-qe-id="orderItemQty"]',
-			),
+			...nameLinks,
+			...document.querySelectorAll('[data-qe-id="orderItemQty"]'),
 		]
 			.map((element) => element.closest("li"))
 			.filter((element): element is HTMLLIElement => element !== null),
 	);
-	return [...lines].filter((line) => {
+	const outer = [...lines].filter((line) => {
 		for (let parent = line.parentElement; parent; parent = parent.parentElement)
 			if (lines.has(parent as HTMLLIElement)) return false;
 		return true;
-	}).length;
+	});
+	const ownLinks = new Map<Element, number>();
+	for (const link of nameLinks) {
+		const owner = link.closest("li");
+		if (owner) ownLinks.set(owner, (ownLinks.get(owner) ?? 0) + 1);
+	}
+	return {
+		lines: outer.length,
+		linkless: outer.filter((line) => !ownLinks.has(line)).length,
+		multiName: [...ownLinks.values()].filter((count) => count > 1).length,
+	};
 }
 
 export function parseOrderDetailDom(html: string): OrderDetail | null {

@@ -33,6 +33,8 @@ export interface InventoryEvidence {
 	/** One complete snapshot held exactly the source's line total, the parsed
 	 * html still holds that many lines, and the server total did not change. */
 	lineCountProven?: boolean;
+	/** Source lines that own more than one product name link. */
+	multiNameLines?: number;
 	signal:
 		| { entity: InventoryEntity; exactTotal: number }
 		| { entity: InventoryEntity; explicitEnd: true }
@@ -91,7 +93,8 @@ function rowsAreRead(e: InventoryEvidence): boolean {
 		!e.coherent ||
 		e.rejectedRows !== 0 ||
 		e.missingIdentityRows !== 0 ||
-		(e.linklessLines ?? 0) !== 0
+		(e.linklessLines ?? 0) !== 0 ||
+		(e.multiNameLines ?? 0) !== 0
 	)
 		return false;
 	const source = new Set(e.sourceIds);

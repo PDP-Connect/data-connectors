@@ -71,7 +71,7 @@ import {
 	mergeOrdersListPage,
 	parseNutritionDom,
 	parseOrderDate,
-	countOrderDetailLines,
+	inspectOrderDetailLines,
 	parseOrderDetailDom,
 	parseOrdersListDom,
 	parseOrdersListStructured,
@@ -728,7 +728,9 @@ async function collectDetailSurface(
 		actionableControl: latest.actionableControl,
 		clientHeight: latest.clientHeight,
 		collectedRows: collected.size,
-		linklessLines: latest.rows.filter((row) => !parseOrderDetailDom(row.html)?.items.length).length,
+		linklessLines: inspectOrderDetailLines(
+			latest.rows.map((row) => row.html).join(""),
+		).linkless,
 		expectedUnits,
 		lastAction,
 		lastError,
@@ -1106,14 +1108,16 @@ export async function fetchOrderDetail(
 	);
 	const sourceItemTotal = sourceOrderItemTotal(html, orderId);
 	evidence.coherent = surface.coherent;
+	const lineShape = inspectOrderDetailLines(surface.html);
 	// The browser's count is checked again here on the html actually parsed,
 	// against a server total that did not change while the page was read.
 	evidence.lineCountProven =
 		surface.lineCountMatches &&
 		initialSourceItemTotal !== null &&
 		sourceItemTotal === initialSourceItemTotal &&
-		countOrderDetailLines(surface.html) === sourceItemTotal;
-	evidence.linklessLines = surface.diagnostics.linklessLines;
+		lineShape.lines === sourceItemTotal;
+	evidence.linklessLines = lineShape.linkless;
+	evidence.multiNameLines = lineShape.multiName;
 	evidence.responseSucceeded = responseSucceeded;
 	evidence.loading = surface.diagnostics.loading;
 	evidence.rejectedRows = detail.parsing?.rejectedRows ?? 0;
