@@ -43,7 +43,7 @@ export const SUBSCRIPTION = {
 	billing_interval: "monthly",
 	next_charge_at: "2026-02-01T12:00:00Z",
 	plan_ending_at: null,
-	payment_method: { type: "card", last4: "4242" },
+	payment_method: { brand: "visa", country: "US", last4: "4242", type: "card" },
 };
 export const USAGE = {
 	five_hour: { utilization: 2, resets_at: at(50) },

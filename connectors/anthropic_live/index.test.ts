@@ -10,11 +10,12 @@ import {
 } from "./index.ts";
 import {
 	buildAccountPlanRecord,
+	paymentCountryOf,
 	buildMessageRecord,
 	buildUsageLimitRecords,
 	planTypeOf,
 } from "./parsers.ts";
-import { at, conv, harness, ORG, ORGS, uuid } from "./test-support.ts";
+import { at, conv, harness, ORG, ORGS, SUBSCRIPTION, uuid } from "./test-support.ts";
 
 /** The update time a STATE cursor has read through. */
 const through = (cursor: Record<string, unknown> | undefined) =>
@@ -257,8 +258,13 @@ test("account_plan matches the chatgpt account_plan fields and omits payment dat
 			expires_at: null,
 			cancels_at: null,
 			scheduled_plan_change: null,
+			payment_country: "US",
 		},
 	]);
+	// Only the country is read: brand, last4 and type never reach a record.
+	const serialized = JSON.stringify(h.emitted);
+	for (const leaked of ["visa", "4242", '"card"'])
+		assert.equal(serialized.includes(leaked), false, leaked);
 
 	// An unchanged plan is not re-emitted on the next run.
 	const again = harness([], {
@@ -292,6 +298,54 @@ test("account_plan is skipped, not nulled, when subscription_details fails trans
 	await collectAnthropicLive(free.ctx);
 	assert.equal(free.of("account_plan")[0]?.has_active_subscription, null);
 	assert.equal(free.of("account_plan")[0]?.renews_at, null);
+});
+
+test("payment_country is the card country when valid, otherwise null", async () => {
+	const withPayment = (payment_method: unknown) =>
+		harness([], {
+			streams: ["account_plan"],
+			route: (url) =>
+				url.pathname.endsWith("/subscription_details")
+					? {
+							status: 200,
+							body: { ...SUBSCRIPTION, payment_method },
+						}
+					: undefined,
+		});
+	const cases: Array<[string, unknown, string | null]> = [
+		["present", { country: "DE" }, "DE"],
+		["missing payment_method", undefined, null],
+		["null payment_method", null, null],
+		["no country", { brand: "visa" }, null],
+		["lowercase", { country: "us" }, null],
+		["three letters", { country: "USA" }, null],
+		["number", { country: 12 }, null],
+		["empty", { country: "" }, null],
+	];
+	for (const [name, payment, expected] of cases) {
+		const h = withPayment(payment);
+		await collectAnthropicLive(h.ctx);
+		const [record] = h.of("account_plan");
+		assert.equal(record?.payment_country, expected, name);
+		assert.equal(record?.has_active_subscription, true, name);
+		assert.deepEqual(h.skips(), [], name);
+	}
+});
+
+test("payment_country is null when subscription_details is unreadable", async () => {
+	for (const status of [403, 404]) {
+		const h = harness([], {
+			streams: ["account_plan"],
+			route: (url) =>
+				url.pathname.endsWith("/subscription_details")
+					? { status }
+					: undefined,
+		});
+		await collectAnthropicLive(h.ctx);
+		assert.equal(h.of("account_plan")[0]?.payment_country, null, String(status));
+		assert.deepEqual(h.skips(), []);
+	}
+	assert.equal(paymentCountryOf(null), null);
 });
 
 test("usage_limits emits one record per reported limit", async () => {
