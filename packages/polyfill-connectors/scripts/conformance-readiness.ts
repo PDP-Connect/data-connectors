@@ -25,6 +25,50 @@ export interface Step {
 	readonly verdict: Verdict;
 }
 
+/** Checklist requirements; old no-claim promotions keep their disclosed gaps. */
+export function requiredForReview(
+	step: Step,
+	context: {
+		readonly isKnownScaffold: boolean;
+		readonly promotedTier: boolean;
+		readonly legacyPromotion: boolean;
+		readonly noHttpExemption: boolean;
+	},
+): boolean {
+	if (!step.advisory && step.verdict === "FAIL") {
+		return true;
+	}
+	if (["manifest", "tests"].includes(step.name)) {
+		return true;
+	}
+	if (step.name === "coverage") {
+		return !context.isKnownScaffold;
+	}
+	if (!context.promotedTier || context.legacyPromotion) {
+		return false;
+	}
+	return (
+		["evidence", "pilot fixture"].includes(step.name) ||
+		(step.name === "mock mutation" &&
+			!(step.verdict === "UNKNOWN" && context.noHttpExemption))
+	);
+}
+
+/** A disclosed author assertion in entrypoint comments, not an HTTP analysis. */
+export function declaredNoHttpExemption(source: string): string | undefined {
+	const header =
+		source.match(
+			/^(?:#![^\n]*(?:\n|$))?\s*(?:(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*)*/,
+		)?.[0] ?? "";
+	const reason = header
+		.match(
+			/(?:^|\n)[\t ]*(?:\*|\/\/)[\t ]*@conformance-no-http[\t ]+([^\r\n]+)/,
+		)?.[1]
+		?.replace(/\*\/\s*$/, "")
+		.trim();
+	return reason || undefined;
+}
+
 interface SchemaProperty {
 	readonly description?: unknown;
 	readonly format?: unknown;

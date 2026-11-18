@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { checkManifest, readinessSteps } from "../scripts/conformance.ts";
@@ -12,17 +13,203 @@ import {
 	checkSemantics,
 	checkSharedHelpers,
 	checkVersion,
+	declaredNoHttpExemption,
 	listOpenSemantics,
 	parseCoverageRegistry,
 	type ReadinessManifest,
+	requiredForReview,
+	type Step,
 	stripComments,
 } from "../scripts/conformance-readiness.ts";
-import { connectorsDir } from "./connector-paths.ts";
+import { connectorsDir, repoRoot } from "./connector-paths.ts";
+
+test("JSON conformance identifies its revision, scan mode and dirty subject", () => {
+	const marker = join(
+		repoRoot,
+		`conformance-subject-${String(process.pid)}.txt`,
+	);
+	writeFileSync(marker, "owned synthetic report input\n", { flag: "wx" });
+	try {
+		const output = execFileSync(
+			process.execPath,
+			[
+				"--import",
+				"tsx",
+				"packages/polyfill-connectors/scripts/conformance.ts",
+				"readwise",
+				"--json",
+				"--static",
+			],
+			{
+				cwd: repoRoot,
+				encoding: "utf8",
+				env: { ...process.env, CONFORMANCE_BASE_REF: "HEAD" },
+			},
+		);
+		const report = JSON.parse(output);
+		assert.equal(report.schema, "pdpp.conformance-report/1");
+		assert.equal(report.mode, "static");
+		assert.equal(report.base_revision, report.subject.revision);
+		assert.equal(report.tier, "development");
+		assert.equal(
+			report.subject.revision,
+			execFileSync("git", ["rev-parse", "HEAD"], {
+				cwd: repoRoot,
+				encoding: "utf8",
+			}).trim(),
+		);
+		assert.equal(report.subject.clean, false);
+		assert.match(report.subject.source_digest, /^[a-f0-9]{64}$/);
+		assert.match(report.subject.declaration_digest, /^[a-f0-9]{64}$/);
+		assert.ok(
+			report.steps.some((step: { name: string }) => step.name === "evidence"),
+		);
+		assert.equal(
+			report.steps.find((step: { name: string }) => step.name === "coverage")
+				.required_for_review,
+			true,
+		);
+		assert.equal(
+			report.steps.find((step: { name: string }) => step.name === "evidence")
+				.required_for_review,
+			false,
+		);
+	} finally {
+		rmSync(marker);
+	}
+});
 
 test("conformance reports the manifest's lifecycle tier", () => {
 	const step = checkManifest("google_maps");
 	assert.equal(step.verdict, "PASS");
 	assert.match(step.detail, /lifecycle tier "supported"/);
+	const report = JSON.parse(
+		execFileSync(
+			process.execPath,
+			[
+				"--import",
+				"tsx",
+				"packages/polyfill-connectors/scripts/conformance.ts",
+				"google_maps",
+				"--json",
+				"--static",
+			],
+			{ cwd: repoRoot, encoding: "utf8" },
+		),
+	);
+	assert.equal(report.tier, "supported");
+	for (const name of ["evidence", "pilot fixture"]) {
+		assert.equal(
+			report.steps.find((finding: { name: string }) => finding.name === name)
+				.required_for_review,
+			false,
+		);
+	}
+});
+
+test("review requirements preserve tier rules and disclosed legacy exemptions", () => {
+	const promotion = {
+		isKnownScaffold: false,
+		promotedTier: true,
+		legacyPromotion: false,
+		noHttpExemption: false,
+	};
+	const finding = (name: string): Step => ({
+		name,
+		verdict: "UNKNOWN",
+		detail: "not established",
+	});
+	for (const name of [
+		"manifest",
+		"tests",
+		"coverage",
+		"evidence",
+		"pilot fixture",
+		"mock mutation",
+	]) {
+		assert.equal(requiredForReview(finding(name), promotion), true, name);
+	}
+	assert.equal(
+		requiredForReview(finding("evidence"), {
+			...promotion,
+			promotedTier: false,
+		}),
+		false,
+	);
+	assert.equal(
+		requiredForReview(finding("evidence"), {
+			...promotion,
+			legacyPromotion: true,
+		}),
+		false,
+	);
+	assert.equal(
+		requiredForReview(finding("coverage"), {
+			...promotion,
+			isKnownScaffold: true,
+		}),
+		false,
+	);
+	assert.equal(
+		requiredForReview(finding("mock mutation"), {
+			...promotion,
+			noHttpExemption: true,
+		}),
+		false,
+	);
+	assert.equal(
+		requiredForReview(
+			{ ...finding("evidence"), verdict: "FAIL" },
+			{ ...promotion, legacyPromotion: true },
+		),
+		true,
+	);
+});
+
+test("only an explicit leading no-HTTP assertion exempts UNKNOWN mutation", () => {
+	const header =
+		"#!/usr/bin/env node\n// Copyright\n/**\n * @conformance-no-http Reads the owner's local archive only.\n */\n";
+	assert.equal(
+		declaredNoHttpExemption(`${header}export {};`),
+		"Reads the owner's local archive only.",
+	);
+	assert.equal(declaredNoHttpExemption(`export {};\n${header}`), undefined);
+	assert.equal(
+		declaredNoHttpExemption("/**\n * @conformance-no-http   \n */"),
+		undefined,
+	);
+	const context = {
+		isKnownScaffold: false,
+		promotedTier: true,
+		legacyPromotion: false,
+		noHttpExemption: true,
+	};
+	for (const verdict of ["WEAK", "FAIL"] as const) {
+		assert.equal(
+			requiredForReview(
+				{
+					name: "mock mutation",
+					verdict,
+					detail: "path test incomplete",
+					advisory: true,
+				},
+				context,
+			),
+			true,
+		);
+	}
+	// An optional network binding is not an explicit declaration of no HTTP.
+	assert.equal(
+		requiredForReview(
+			{
+				name: "mock mutation",
+				verdict: "UNKNOWN",
+				detail: "hybrid optional API has no route assertions",
+			},
+			{ ...context, noHttpExemption: false },
+		),
+		true,
+	);
 });
 
 test("conformance points a missing manifest at connectors/<key>/manifest.json", () => {
@@ -72,7 +259,10 @@ test("coverage: a declared strategy with no coverage report in the source is a g
 		"readwise",
 		snapshotManifest,
 		'ctx.emit({ type: "STATE", stream: "highlights" });',
-		{ drivers: new Set(), unexercised: new Set() },
+		{
+			drivers: new Set(),
+			unexercised: new Set(),
+		},
 	);
 	assert.equal(step.verdict, "UNKNOWN");
 	assert.match(step.detail, /never reports coverage/);
@@ -112,7 +302,10 @@ test("coverage: a coverage_diagnostics receipt counts as a coverage report", () 
 		"apple_health",
 		snapshotManifest,
 		'const COVERAGE_STREAM = "coverage_diagnostics";',
-		{ drivers: new Set(["apple_health"]), unexercised: new Set() },
+		{
+			drivers: new Set(["apple_health"]),
+			unexercised: new Set(),
+		},
 	);
 	assert.equal(step.verdict, "PASS");
 });
@@ -163,7 +356,10 @@ test("coverage: a comment that names DETAIL_COVERAGE is not a coverage report", 
 		"x",
 		snapshotManifest,
 		'// TODO emit DETAIL_COVERAGE\nctx.emit({ type: "STATE" });',
-		{ drivers: new Set(), unexercised: new Set() },
+		{
+			drivers: new Set(),
+			unexercised: new Set(),
+		},
 	);
 	assert.equal(step.verdict, "UNKNOWN");
 });
