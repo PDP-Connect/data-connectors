@@ -112,12 +112,10 @@ export const LATE_REPLY_LOOKBACK_SECONDS = 7 * 24 * 3600;
 export const THREAD_LOOKBACK_SECONDS = 30 * 24 * 3600;
 /** The thread scan below a read's starting line stopped with older history left unscanned. */
 export const THREAD_SCAN_BOUND_REASON = "thread_scan_bound_reached";
-export const MAX_PAGES_PER_CONVERSATION = 2000;
 /** Search pages (100 matches each) a run reads before it stops trusting search for thread discovery. */
 export const MAX_SEARCH_PAGES = 100;
 /** How many conversations are read at once. */
 export const DEFAULT_CONCURRENCY = 3;
-const MAX_PAGES_PER_THREAD = 200;
 const MAX_LIST_PAGES = 500;
 /** Slack allows up to 999 per history page; fewer round trips on busy channels. */
 const HISTORY_PAGE_LIMIT = "999";
@@ -127,7 +125,7 @@ const SEARCH_PAGE_COUNT = "100";
 const THREAD_TS_IN_PERMALINK = /[?&]thread_ts=(\d{10}\.\d{1,6})/;
 /** A method answered `ok` with a body this connector's schema does not recognise. */
 const UNRECOGNISED_ANSWER = "unrecognised_answer";
-/** History or replies hit this connector's page cap with `has_more` still true. */
+/** History or replies stopped making progress with `has_more` still true; retained wire reason. */
 export const PAGE_CAP_REASON = "page_cap_reached";
 
 const FINGERPRINTED = [
@@ -768,7 +766,9 @@ async function emitThread(
 	includeParent: boolean,
 ): Promise<void> {
 	let cursor = "";
-	for (let pageNo = 0; pageNo < MAX_PAGES_PER_THREAD; pageNo += 1) {
+	const cursors = new Set<string>([""]);
+	const timestamps = new Set<string>();
+	for (let pageNo = 0; ; pageNo += 1) {
 		const params: Record<string, string> = {
 			channel: channelId,
 			ts: parentTs,
@@ -804,7 +804,10 @@ async function emitThread(
 			}
 			throw error;
 		}
+		let hasNewTs = false;
 		for (const reply of answer.messages ?? []) {
+			if (!timestamps.has(reply.ts)) hasNewTs = true;
+			timestamps.add(reply.ts);
 			if (reply.ts !== parentTs || (includeParent && pageNo === 0)) {
 				await emitMessage(run, channelId, reply);
 			}
@@ -813,11 +816,25 @@ async function emitThread(
 		if (!answer.has_more || cursor === "") {
 			return;
 		}
+		const cause = cursors.has(cursor)
+			? "repeated_cursor"
+			: !hasNewTs
+				? "no_new_ts"
+				: null;
+		if (cause !== null) {
+			await run.ctx.progress(
+				`${channelId}: stopped thread after ${pageNo + 1} pages with more replies left (${cause})`,
+				{ stream: "messages" },
+			);
+			throw new SlackApiError(
+				"conversations.replies",
+				PAGE_CAP_REASON,
+				true,
+				null,
+			);
+		}
+		cursors.add(cursor);
 	}
-	// The page cap ran out with `has_more` still true: the thread was not read
-	// to its end. Throwing sends the conversation to the gap handling instead
-	// of reporting a thread that was cut short as fully read.
-	throw new SlackApiError("conversations.replies", PAGE_CAP_REASON, true, null);
 }
 
 function historyParams(
@@ -851,7 +868,9 @@ async function walkHistory(
 ): Promise<string | null> {
 	let cursor = "";
 	let newestTs: string | null = null;
-	for (let pageNo = 0; pageNo < MAX_PAGES_PER_CONVERSATION; pageNo += 1) {
+	const cursors = new Set<string>([""]);
+	const timestamps = new Set<string>();
+	for (let pageNo = 0; ; pageNo += 1) {
 		const answer = parseAnswer(
 			historySchema,
 			"conversations.history",
@@ -861,7 +880,10 @@ async function walkHistory(
 				historyParams(conversation.id, window, cursor),
 			),
 		);
+		let hasNewTs = false;
 		for (const message of answer.messages ?? []) {
+			if (!timestamps.has(message.ts)) hasNewTs = true;
+			timestamps.add(message.ts);
 			const active =
 				isThreadParent(message) &&
 				threadActiveSince(message, window.activeSince);
@@ -888,17 +910,27 @@ async function walkHistory(
 		if (!answer.has_more || cursor === "") {
 			return newestTs;
 		}
+		const cause = cursors.has(cursor)
+			? "repeated_cursor"
+			: !hasNewTs
+				? "no_new_ts"
+				: null;
+		if (cause !== null) {
+			await run.ctx.progress(
+				`${conversationLabel(conversation)}: stopped after ${pageNo + 1} pages with more history left (${cause})`,
+				{ stream: "messages" },
+			);
+			// Do not return newestTs: the conversation has not been fully read,
+			// so its existing cursor must remain unchanged for retry.
+			throw new SlackApiError(
+				"conversations.history",
+				PAGE_CAP_REASON,
+				true,
+				null,
+			);
+		}
+		cursors.add(cursor);
 	}
-	await run.ctx.progress(
-		`${conversationLabel(conversation)}: stopped after ${MAX_PAGES_PER_CONVERSATION} pages with more history left`,
-		{ stream: "messages" },
-	);
-	// The page cap ran out with `has_more` still true: the messages between
-	// the last page read and the window floor were not read. Returning the
-	// newest ts would let the cursor move past them and lose them, so this
-	// goes to the conversation's gap handling: the read is retried next run
-	// and the cursor stays where it was.
-	throw new SlackApiError("conversations.history", PAGE_CAP_REASON, true, null);
 }
 
 /**

@@ -24796,7 +24796,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers the lookback window; a later read starts from its own checkpoint without a default catch-up limit (SLACK_MAX_BACKFILL_DAYS=0). An owner may choose a positive max-backfill window; workspace retention limits what Slack can serve."
+						"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers all history Slack serves by default (SLACK_LOOKBACK_DAYS=0); an owner may choose a positive lookback window; a later read starts from its own checkpoint without a default catch-up limit (SLACK_MAX_BACKFILL_DAYS=0). An owner may choose a positive max-backfill window; workspace retention limits what Slack can serve."
 					},
 					"public_listing": {
 						"tier": "development"
@@ -25174,7 +25174,7 @@
 					},
 					{
 						"name": "messages",
-						"description": "Messages in the conversations you belong to, read from the same Web API the Slack web client uses: the lookback window on a conversation's first read, then everything since its checkpoint. Thread replies are read for every thread that got a reply in that time, including replies to older parents. Thread structure preserved via thread_ts.",
+						"description": "Messages in the conversations you belong to, read from the same Web API the Slack web client uses: all available history on a conversation's first read by default (SLACK_LOOKBACK_DAYS=0, with positive values opting into a window), then everything since its checkpoint. Thread replies are read for every thread that got a reply in that time, including replies to older parents. Thread structure preserved via thread_ts.",
 						"display": {
 							"label": "Your Slack messages",
 							"detail": "Channel, author, timestamp, text, thread parent, reply count + reply_user_ids (who replied), edited-at, client_msg_id (dedup), subtype (joins/leaves/bot/tombstone), pinned status, block-kit metadata."
