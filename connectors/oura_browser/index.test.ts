@@ -265,3 +265,42 @@ test("a terminal page with an empty id withholds STATE", async () => {
   assert.deepEqual(h.records.map(({ data }) => data.id), [id(301)]);
   assert.equal(h.messages.some((message) => message.type === "STATE"), false);
 });
+
+test("a fresh run walks from 2015 and emits history older than 90 days", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-09-23T12:00:00Z"));
+  const row = { ...replay.daily_readiness[0], id: id(701), day: "2016-03-01", timestamp: "2016-03-01T08:15:00+00:00" };
+  const h = harness({ streams: ["readiness"], openRange: true, answers: inclusiveWindow([row]) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls[0]?.start, "2015-01-01");
+  assert.equal(h.calls[0]?.end, "2015-01-31");
+  assert.equal(h.calls.at(-1)?.end, "2026-09-24");
+  assert.ok(h.calls.length > 100);
+  h.calls.forEach((call, index) => {
+    assert.ok(call.start && call.end);
+    assert.ok(Date.parse(call.end) - Date.parse(call.start) <= 30 * 86_400_000);
+    if (index > 0) assert.equal(call.start, h.calls[index - 1]?.end);
+  });
+  assert.deepEqual(h.records.map(({ data }) => [data.id, data.day]), [[id(701), "2016-03-01"]]);
+  noSkip(h);
+});
+
+test("a same-account cursor retains the existing two-day overlap", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-09-23T12:00:00Z"));
+  const h = harness({ streams: ["readiness"], openRange: true,
+    state: { readiness: { api_v2: true, account: "account-a", next_day: DAY, requested_since: null } },
+    answers: () => ({ data: [], next_token: null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map(({ start, end }) => [start, end]), [["2026-09-21", "2026-09-24"]]);
+  noSkip(h);
+});
+
+test("an explicit range wins over the full-history floor and stored cursor", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-09-23T12:00:00Z"));
+  const h = harness({ streams: ["readiness"], ...WINDOW,
+    state: { readiness: { api_v2: true, account: "account-a", next_day: DAY, requested_since: null } },
+    answers: () => ({ data: [], next_token: null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map(({ start, end }) => [start, end]),
+    [["2026-08-01", "2026-08-31"], ["2026-08-31", "2026-09-01"]]);
+  noSkip(h);
+});
