@@ -876,7 +876,8 @@ export function resolveLinklessOrderItems(
 		const names = new Set([...own.querySelectorAll("p, span, div")].map((el) => normalize(normText(el))));
 		// Both keys are matched against every SSR item, claimed or not, so a key
 		// that names a claimed item still counts as contradicting evidence.
-		const imageMatches = items.map((_, i) => i).filter((i) => imageIds.has(numericId(items[i]!.productId)));
+		const imageMatches = items.map((_, i) => i).filter((i) =>
+			[items[i]!.productId, ...items[i]!.substituteIds].some((id) => imageIds.has(numericId(id))));
 		const textMatches = items.map((_, i) => i).filter((i) => {
 			const name = items[i]!.fullDisplayName;
 			return name !== null && names.has(normalize(name));

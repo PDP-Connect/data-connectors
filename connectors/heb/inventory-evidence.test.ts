@@ -1022,3 +1022,10 @@ test("elimination refuses count mismatch, claimed keys, nested-only images and o
  ]);
  for (const r of results) assert.equal(r.evidence.linklessLines, 1);
 });
+test("a linkless image naming a claimed item's substitute blocks elimination", async () => {
+	const r = await resolveLinkless(
+		[{ ...ssrItem("500"), subbedProducts: [{ id: "777" }] }, ssrItem("501")],
+		itemRow(0) + linklessLine("777"),
+	);
+	assert.equal(r.evidence.linklessLines, 1);
+});
