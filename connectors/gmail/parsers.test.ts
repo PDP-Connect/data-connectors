@@ -1174,3 +1174,36 @@ test("buildMessageBodyRecord: oversized plain and HTML bodies use exact blobs", 
 		assert.equal(validateRecord("message_bodies", rec).ok, true);
 	}
 });
+
+test("buildMessageBodyRecord: each body field routes to a blob only above 1,048,576 characters", () => {
+	const limit = 1_048_576;
+	const wrap = (n: number) => `<p>${"b".repeat(n - 7)}</p>`;
+	for (const [textLength, htmlLength] of [
+		[limit, limit + 1],
+		[limit + 1, limit],
+	] as const) {
+		const text = "a".repeat(textLength);
+		const html = wrap(htmlLength);
+		assert.equal(html.length, htmlLength);
+		const params = { bodyTextFull: text, bodyHtmlFull: html };
+		const rec = buildMessageBodyRecord({
+			...params,
+			gmMsgid: "a",
+			receivedAt: "2024-03-01T10:00:00.000Z",
+			textCharset: "utf-8",
+			htmlCharset: "utf-8",
+		});
+		assert.equal(rec.body_text, textLength === limit ? text : null);
+		assert.equal(rec.body_html, htmlLength === limit ? html : null);
+		assert.deepEqual(
+			canonicalBodyBlobCandidates(params).map((candidate) => ({
+				jsonPath: candidate.jsonPath,
+				length: candidate.content.length,
+			})),
+			textLength === limit
+				? [{ jsonPath: "/body_html", length: limit + 1 }]
+				: [{ jsonPath: "/body_text", length: limit + 1 }],
+		);
+		assert.equal(validateRecord("message_bodies", rec).ok, true);
+	}
+});
