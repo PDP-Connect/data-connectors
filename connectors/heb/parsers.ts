@@ -786,8 +786,11 @@ export function resolveLinklessOrderItems(
 		const ids = [...line.querySelectorAll(nameSelector)].map(
 			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "",
 		);
+		// Every id the line names (its own and its substitutes') must belong to
+		// the one SSR item, so a shared substitute cannot stand in for a
+		// contradictory original.
 		const index = items.findIndex((item, i) => !claimed.has(i) &&
-			(ids.includes(item.productId) || item.substituteIds.some((id) => ids.includes(id))));
+			ids.every((id) => id === item.productId || item.substituteIds.includes(id)));
 		if (index < 0) ledgerComplete = false;
 		else claimed.add(index);
 	}

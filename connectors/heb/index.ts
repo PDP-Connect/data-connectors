@@ -2397,9 +2397,11 @@ export async function runForwardScan(
 	let truncation: ListWalkStop = "no_new_order_ids";
 	let pagesRead = 0;
 	// H-E-B's own page count at the start of the walk, plus one page for
-	// orders placed while it runs. Pages past it would mean the list keeps
-	// growing under the walk, which no real history does; stop there as
-	// unproven rather than walk without end.
+	// orders placed while it runs. Pages past it mean the list grew under the
+	// walk by more than a page; the walk stops there as unproven (retryable)
+	// rather than risk walking without end. Known limit: if more than a page of
+	// orders arrives during one run, that run ends incomplete and the next run
+	// reads the rest.
 	let walkBound: number | null = null;
 	const fetchPage = async (pageNum: number): Promise<boolean> => {
 		const listPage = await loadListPage(

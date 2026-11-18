@@ -306,6 +306,8 @@ async function collectSyntheticHeb(input: {
 	repeatListPage?: boolean;
 	/** Each list page advertises one more page than itself. */
 	growingList?: boolean;
+	/** The page count each list page advertises. */
+	advertisedMax?: (pageNumber: number) => number;
 	emittedAt: string;
 	state: Record<string, unknown>;
 	streams: string[];
@@ -336,8 +338,8 @@ async function collectSyntheticHeb(input: {
 				if (input.growingList && listRequests.length > 10)
 					throw new Error("growing source did not stop within ten pages");
 				const id = 1_000_000_000 + (input.repeatListPage ? 1 : pageNumber);
-				const maxPage = input.growingList ? pageNumber + 1 : (input.listPages ?? 1);
-				const body = input.listPages === undefined && !input.growingList
+				const maxPage = input.advertisedMax?.(pageNumber) ?? (input.growingList ? pageNumber + 1 : (input.listPages ?? 1));
+				const body = input.listPages === undefined && !input.growingList && !input.advertisedMax
 					? listBody
 					: listBody.replaceAll("HEB1000000001", `HEB${id}`).replace(
 					'<a href="/my-account/your-orders?page=1">1</a>',
@@ -5519,6 +5521,16 @@ test("collect: a list that keeps adding pages stops one page past the count H-E-
 	});
 	assert.deepEqual(run.listRequests, [1, 2, 3]);
 	assert.equal(run.emitted.length, 3);
+	assertWithheldWithoutState(run, ["orders"]);
+	assert.ok(run.progressMessages.some((message) => message.includes("kept adding pages")));
+});
+
+test("collect: a list that grows by more than a page during the walk stops incomplete (known limit)", async () => {
+	const run = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER, emittedAt: SYNTHETIC_CLOCK, state: {},
+		streams: ["orders"], advertisedMax: (pageNumber) => (pageNumber === 1 ? 2 : 4),
+	});
+	assert.deepEqual(run.listRequests, [1, 2, 3]);
 	assertWithheldWithoutState(run, ["orders"]);
 	assert.ok(run.progressMessages.some((message) => message.includes("kept adding pages")));
 });

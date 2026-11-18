@@ -948,3 +948,16 @@ test("a linked line that takes no SSR item leaves every linkless line unresolved
 		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
 	}
 });
+
+test("a shared substitute cannot let a linked line take an SSR item whose original it contradicts", async () => {
+	const items = [
+		{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] },
+		{ product: { id: "600", fullDisplayName: "Hidden" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] },
+		{ product: { id: "502", fullDisplayName: "Other" }, quantity: 1 },
+	];
+	const substituted = (index: number) => itemRow(0).replace('data-index="0"', `data-index="${index}"`)
+		.replace("</li>", `<ul>${itemRow(1).replace('data-index="1"', `data-index="${index + 50}"`)}</ul></li>`);
+	const result = await resolveLinkless(items, substituted(0) + substituted(1) + linklessLine("502"));
+	assert.equal(result.evidence.linklessLines, 1);
+	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
+});
