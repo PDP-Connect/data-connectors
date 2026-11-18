@@ -199,6 +199,7 @@ async function fetchAll<T extends OuraRow>(
 	const seenIds = new Set<string>();
 	const seenTokens = new Set<string>();
 	let nextToken: string | undefined;
+	let consecutiveEmptyPages = 0;
 	while (true) {
 		const params: OuraParams = {};
 		if (startDate) params.start_date = startDate;
@@ -212,11 +213,20 @@ async function fetchAll<T extends OuraRow>(
 			all.push(row);
 		}
 		nextToken = json.next_token || undefined;
-		if (!nextToken || rows.length === 0) return { rows: all, truncated: false };
+		if (!nextToken) return { rows: all, truncated: false };
 		if (seenTokens.has(nextToken)) {
 			return { rows: all, truncated: true, cause: "repeated_next_token" };
 		}
-		if (seenIds.size === before) {
+		consecutiveEmptyPages = rows.length === 0 ? consecutiveEmptyPages + 1 : 0;
+		// A continuation is not EOF; repeated empty pages are a stalled source, not completion.
+		if (consecutiveEmptyPages >= 2) {
+			return {
+				rows: all,
+				truncated: true,
+				cause: "empty_pages_with_next_token",
+			};
+		}
+		if (rows.length > 0 && seenIds.size === before) {
 			return { rows: all, truncated: true, cause: "no_new_ids" };
 		}
 		seenTokens.add(nextToken);

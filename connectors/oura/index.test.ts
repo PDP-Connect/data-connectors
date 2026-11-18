@@ -506,3 +506,101 @@ test("changing tokens with no new IDs refuses without STATE", async () => {
 	);
 	assert.equal(lastStateCursor(messages, "activity"), undefined);
 });
+
+test("an empty page with a continuation reads the following rows", async () => {
+	const { ctx, messages, records } = makeContext();
+	await withOuraPages(
+		[
+			{ data: [], next_token: "synthetic-after-empty" },
+			{ data: [{ id: "after-empty", day: "2026-08-02" }], next_token: null },
+		],
+		async (urls) => {
+			await collectOura(ctx, { httpGovernor: unpacedGovernor() });
+			assert.equal(urls.length, 2);
+			assert.equal(urls[1]?.searchParams.get("next_token"), "synthetic-after-empty");
+		},
+	);
+	assert.deepEqual(records.map((record) => record.data.id), ["after-empty"]);
+	assert.equal(truncationSkip(messages, "activity"), undefined);
+	assert.deepEqual(lastStateCursor(messages, "activity"), { last_day: "2026-08-02" });
+});
+
+test("two consecutive empty continuation pages withhold STATE", async () => {
+	const { ctx, messages, records } = makeContext({
+		state: { activity: { last_day: "2026-07-01" } },
+	});
+	await withOuraPages(
+		[
+			{ data: [{ id: "kept", day: "2026-08-01" }], next_token: "synthetic-empty-one" },
+			{ data: [], next_token: "synthetic-empty-two" },
+			{ data: [], next_token: "synthetic-unread" },
+			{ data: [{ id: "unread", day: "2026-08-02" }], next_token: null },
+		],
+		async (urls) => {
+			await collectOura(ctx, { httpGovernor: unpacedGovernor() });
+			assert.equal(urls.length, 3);
+		},
+	);
+	assert.deepEqual(records.map((record) => record.data.id), ["kept"]);
+	assert.equal(
+		(truncationSkip(messages, "activity")?.diagnostics as Record<string, unknown> | undefined)?.cause,
+		"empty_pages_with_next_token",
+	);
+	assert.equal(lastStateCursor(messages, "activity"), undefined);
+});
+
+test("a final empty page without a continuation completes the walk", async () => {
+	const { ctx, messages, records } = makeContext();
+	await withOuraPages(
+		[
+			{ data: [{ id: "kept", day: "2026-08-01" }], next_token: "synthetic-empty-one" },
+			{ data: [], next_token: "synthetic-empty-final" },
+			{ data: [], next_token: null },
+		],
+		async (urls) => {
+			await collectOura(ctx, { httpGovernor: unpacedGovernor() });
+			assert.equal(urls.length, 3);
+		},
+	);
+	assert.deepEqual(records.map((record) => record.data.id), ["kept"]);
+	assert.equal(truncationSkip(messages, "activity"), undefined);
+	assert.deepEqual(lastStateCursor(messages, "activity"), { last_day: "2026-08-01" });
+});
+
+test("a nonempty page resets the consecutive empty continuation count", async () => {
+	const { ctx, messages, records } = makeContext();
+	await withOuraPages(
+		[
+			{ data: [], next_token: "synthetic-first" },
+			{ data: [{ id: "first", day: "2026-08-01" }], next_token: "synthetic-middle" },
+			{ data: [], next_token: "synthetic-last" },
+			{ data: [{ id: "last", day: "2026-08-02" }], next_token: null },
+		],
+		async (urls) => {
+			await collectOura(ctx, { httpGovernor: unpacedGovernor() });
+			assert.equal(urls.length, 4);
+		},
+	);
+	assert.deepEqual(records.map((record) => record.data.id), ["first", "last"]);
+	assert.equal(truncationSkip(messages, "activity"), undefined);
+	assert.deepEqual(lastStateCursor(messages, "activity"), { last_day: "2026-08-02" });
+});
+
+test("an empty page with a repeated continuation keeps its existing cause", async () => {
+	const { ctx, messages } = makeContext();
+	await withOuraPages(
+		[
+			{ data: [{ id: "first", day: "2026-08-01" }], next_token: "synthetic-repeat" },
+			{ data: [], next_token: "synthetic-repeat" },
+		],
+		async (urls) => {
+			await collectOura(ctx, { httpGovernor: unpacedGovernor() });
+			assert.equal(urls.length, 2);
+		},
+	);
+	assert.equal(
+		(truncationSkip(messages, "activity")?.diagnostics as Record<string, unknown> | undefined)?.cause,
+		"repeated_next_token",
+	);
+	assert.equal(lastStateCursor(messages, "activity"), undefined);
+});
