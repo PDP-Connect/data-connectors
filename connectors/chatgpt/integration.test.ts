@@ -10052,12 +10052,12 @@ test("runCustomGptsStream: paginates gizmos/mine and emits STATE when complete",
 	);
 });
 
-test("runCustomGptsStream: hitting the GIZMO_MAX_PAGES safety cap with a cursor still present is truncation — no coverage, no STATE", async () => {
-	// An account with more gizmos than 50 full pages can list. Every page
-	// returns a fresh cursor (the source genuinely has more), so the cap fires
-	// WHILE there is still more to walk — the exact scenario the review's
-	// Finding 1 named as previously invisible to this fix's own
-	// coverage/cursor machinery.
+test("runCustomGptsStream: a repeated cursor after 50 pages refuses — no coverage, no STATE", async () => {
+	// Progress continues beyond the historical page budget.
+	// After fifty distinct continuation cursors, the source repeats one.
+	// The repeat, rather than an account-size limit, must stop the walk.
+	// Preserve the no-coverage and no-checkpoint contract for a source
+	// whose pagination cannot advance.
 	const harness = makeRecordingEmit(validateRecord);
 	let calls = 0;
 	const api: ChatGptApi = {
@@ -10069,7 +10069,7 @@ test("runCustomGptsStream: hitting the GIZMO_MAX_PAGES safety cap with a cursor 
 			return {
 				status: 200,
 				json: {
-					cursor: `page-${calls + 1}`,
+					cursor: `page-${Math.min(calls + 1, 51)}`,
 					items: [{ id: `g-${calls}`, display_name: `GPT ${calls}` }],
 				},
 			};
@@ -10677,12 +10677,12 @@ test("runSharedConversationsStream: paginates shared conversations and emits STA
 	assert.equal(coverage.covered, 101);
 });
 
-test("runSharedConversationsStream: hitting the PAGINATION_SAFETY_LIMIT with more full pages remaining is truncation — no coverage, no STATE, no fingerprint pruning", async () => {
-	// 51 full (100-item) pages so offset crosses the 5000-item safety cap while
-	// every page is still full — unambiguous proof there was more to list.
-	// Finding 1's concrete scenario: this must not (a) prune fingerprint
-	// carry-forward entries the walk never observed, or (b) emit a false
-	// considered===covered proof of completeness.
+test("runSharedConversationsStream: a repeated full page after 5000 items refuses — no coverage, no STATE, no fingerprint pruning", async () => {
+	// Fifty full pages advance normally; the fifty-first repeats page fifty.
+	// Only lack of identity progress, not the historical item cap, stops it.
+	// Preserve the refusal assertions: do not prune fingerprints whose
+	// carry-forward entries the walk never observed, and do not emit a false
+	// considered===covered proof for an incomplete enumeration.
 	const harness = makeRecordingEmit(validateRecord);
 	let calls = 0;
 	const api: ChatGptApi = {
@@ -10692,9 +10692,9 @@ test("runSharedConversationsStream: hitting the PAGINATION_SAFETY_LIMIT with mor
 			await Promise.resolve();
 			calls += 1;
 			const items = Array.from({ length: 100 }, (_, idx) => ({
-				share_id: `s-${calls}-${idx}`,
-				conversation_id: `c-${calls}-${idx}`,
-				title: `Share ${calls}-${idx}`,
+				share_id: `s-${Math.min(calls, 50)}-${idx}`,
+				conversation_id: `c-${Math.min(calls, 50)}-${idx}`,
+				title: `Share ${Math.min(calls, 50)}-${idx}`,
 				create_time: 1_700_000_000,
 			}));
 			return { status: 200, json: { items } };
@@ -13789,4 +13789,91 @@ test("collectChatGpt: a tool-recipient message keeps its body out of tool_calls 
 	} finally {
 		rmSync(dir, { force: true, recursive: true });
 	}
+});
+
+test("pagination progress: 5100 shared conversations complete beyond the old cap", async () => {
+	const pages = Array.from({ length: 51 }, (_, page) => ({
+		status: 200,
+		json: { items: Array.from({ length: 100 }, (_, i) => ({
+			share_id: `long-share-${page * 100 + i}`,
+			conversation_id: `long-conversation-${page * 100 + i}`,
+			title: "Synthetic share",
+			create_time: 1_700_000_000,
+		})) },
+	}));
+	const { deps, emitted, messages } = makeHarness({
+		fetchQueue: [...pages, { status: 200, json: { items: [] } }],
+		requested: ["shared_conversations"],
+	});
+	await runSharedConversationsStream(deps);
+	const shares = emitted.filter((r) => r.stream === "shared_conversations");
+	assert.equal(shares.length, 5100);
+	assert.equal(new Set(shares.map((r) => r.data.id)).size, 5100);
+	assert.equal(messages.filter((m) => m.type === "STATE").length, 1);
+	assert.equal(messages.filter((m) => m.type === "SKIP_RESULT").length, 0);
+	assert.equal(sharedConversationsCoverage(messages)?.covered, 5100);
+});
+
+test("pagination progress: 60 gizmo pages complete beyond the old cap", async () => {
+	const { deps, emitted, messages } = makeHarness({
+		fetchQueue: Array.from({ length: 60 }, (_, page) => ({
+			status: 200,
+			json: {
+				items: [{ id: `long-gizmo-${page}`, display_name: "Synthetic GPT" }],
+				cursor: page === 59 ? null : `next-gizmo-${page}`,
+			},
+		})),
+		requested: ["custom_gpts"],
+	});
+	await runCustomGptsStream(deps);
+	const gizmos = emitted.filter((r) => r.stream === "custom_gpts");
+	assert.equal(gizmos.length, 60);
+	assert.equal(new Set(gizmos.map((r) => r.data.id)).size, 60);
+	assert.equal(messages.filter((m) => m.type === "STATE").length, 1);
+	assert.equal(messages.filter((m) => m.type === "SKIP_RESULT").length, 0);
+	assert.equal(customGptsCoverage(messages)?.covered, 60);
+});
+
+test("pagination progress: a repeated shared page refuses without STATE", async () => {
+	const items = Array.from({ length: 100 }, (_, i) => ({
+		share_id: `repeat-share-${i}`,
+		conversation_id: `repeat-conversation-${i}`,
+		title: "Synthetic share",
+		create_time: 1_700_000_000,
+	}));
+	const { deps, messages } = makeHarness({
+		fetchQueue: [
+			{ status: 200, json: { items } },
+			{ status: 200, json: { items } },
+			{ status: 200, json: { items: [] } },
+		],
+		requested: ["shared_conversations"],
+	});
+	await runSharedConversationsStream(deps);
+	assert.equal(messages.filter((m) => m.type === "STATE").length, 0);
+	assert.equal(sharedConversationsCoverage(messages), undefined);
+	const skip = messages.find((m) => m.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "pagination_cap_truncated");
+	assert.match(skip.message ?? "", /repeat/i);
+	assert.deepEqual(skip.recovery_hint, { action: "retry_on_connector_upgrade", retryable: false });
+});
+
+test("pagination progress: a repeated gizmo cursor refuses without STATE", async () => {
+	const { deps, messages } = makeHarness({
+		fetchQueue: [
+			{ status: 200, json: { items: [{ id: "repeat-gizmo-1" }], cursor: "again" } },
+			{ status: 200, json: { items: [{ id: "repeat-gizmo-2" }], cursor: "again" } },
+			{ status: 200, json: { items: [] } },
+		],
+		requested: ["custom_gpts"],
+	});
+	await runCustomGptsStream(deps);
+	assert.equal(messages.filter((m) => m.type === "STATE").length, 0);
+	assert.equal(customGptsCoverage(messages), undefined);
+	const skip = messages.find((m) => m.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "pagination_cap_truncated");
+	assert.match(skip.message ?? "", /repeat/i);
+	assert.deepEqual(skip.recovery_hint, { action: "retry_on_connector_upgrade", retryable: false });
 });
