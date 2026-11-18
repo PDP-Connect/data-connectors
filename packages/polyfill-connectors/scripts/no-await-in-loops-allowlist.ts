@@ -3010,6 +3010,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/heb/index.ts",
+			line: 2476,
+			column: 9,
+			category: "dependent_pagination",
+			note: "runForwardScan(): the next page depends on the source-end and new-ID progress checks from the previous page",
+		},
+		{
+			path: "connectors/heb/index.ts",
 			line: 528,
 			column: 13,
 			category: "ordered_browser_interaction",
