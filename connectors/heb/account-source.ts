@@ -136,6 +136,31 @@ export function sourceOrderItemTotal(html: string, orderId: string): number | nu
 		: null;
 }
 
+export interface SourceOrderItem {
+	productId: string;
+	substituteIds: string[];
+	fullDisplayName: string;
+	quantity: number;
+}
+
+export function readSourceOrderItems(html: string, orderId: string): SourceOrderItem[] {
+	const result = z.object({ order: z.object({
+		orderId: text,
+		orderItems: z.array(z.object({
+			product: z.object({ id: text, fullDisplayName: text }),
+			quantity: z.number().finite().nonnegative(),
+			subbedProducts: z.array(z.object({ id: text })).optional(),
+		})),
+	}) }).safeParse(accountPageProps(html, "/my-account/order-history/[orderId]"));
+	if (!result.success || result.data.order.orderId !== orderId) return [];
+	return result.data.order.orderItems.map((item) => ({
+		productId: item.product.id,
+		substituteIds: (item.subbedProducts ?? []).map((sub) => sub.id),
+		fullDisplayName: item.product.fullDisplayName,
+		quantity: item.quantity,
+	}));
+}
+
 const emptyHistorySource = z.object({
 	orders: z.array(z.unknown()).length(0),
 	page: z.literal(1),

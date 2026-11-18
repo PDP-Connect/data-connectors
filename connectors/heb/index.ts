@@ -47,6 +47,7 @@ import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/pag
 import {
 	readAccountProfile,
 	sourceOrderItemTotal,
+	readSourceOrderItems,
 	sourceReportsEmptyHistory,
 } from "./account-source.ts";
 import {
@@ -73,7 +74,7 @@ import {
 	parseOrderDate,
 	inspectOrderDetailLines,
 	orderItemId,
-	parseOrderDetailDom,
+	resolveLinklessOrderItems,
 	parseOrdersListDom,
 	parseOrdersListStructured,
 	resolveMaxPage,
@@ -1091,7 +1092,8 @@ export async function fetchOrderDetail(
 
 	if (landedUrl !== url)
 		return failed("parse_missing", "detail resource identity mismatch");
-	const detail = parseOrderDetailDom(surface.html);
+	const resolved = resolveLinklessOrderItems(surface.html, readSourceOrderItems(html, orderId));
+	const detail = resolved.detail;
 	if (!detail) {
 		return failed(
 			surface.diagnostics.settlement === "error"
@@ -1117,7 +1119,7 @@ export async function fetchOrderDetail(
 		initialSourceItemTotal !== null &&
 		sourceItemTotal === initialSourceItemTotal &&
 		lineShape.lines === sourceItemTotal;
-	evidence.linklessLines = lineShape.linkless;
+	evidence.linklessLines = resolved.unresolved;
 	evidence.multiNameLines = lineShape.multiName;
 	// Distinct source lines must also become distinct records: two lines whose
 	// records share an id would overwrite one purchase with the other.

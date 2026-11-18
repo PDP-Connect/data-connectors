@@ -752,6 +752,70 @@ export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
 	};
 }
 
+/** Resolve only outer purchased lines, then use the existing DOM parser.
+ * Synthetic name anchors carry SSR identity; quantities/prices remain DOM-owned. */
+export function resolveLinklessOrderItems(
+	html: string,
+	items: readonly { productId: string; substituteIds: string[]; fullDisplayName: string; quantity: number }[],
+): { detail: OrderDetail | null; unresolved: number } {
+	const { document } = parseHTML(html);
+	const claimed = new Set<number>();
+	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
+	for (const link of document.querySelectorAll(nameSelector)) {
+		const id = (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop();
+		const index = items.findIndex((item, i) => !claimed.has(i) &&
+			(item.productId === id || item.substituteIds.includes(id ?? "")));
+		if (index >= 0) claimed.add(index);
+	}
+	const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
+	const numericId = (value: string) => value.replace(/^0+(?=\d)/, "");
+	for (const line of document.querySelectorAll("li")) {
+		if (line.parentElement?.closest("li")) continue;
+		const own = line.cloneNode(true) as Element;
+		for (const nested of own.querySelectorAll("li")) nested.remove();
+		if (own.querySelector(nameSelector) || !own.querySelector('[data-qe-id="orderItemQty"]')) continue;
+		const imageIds = new Set<string>();
+		for (const img of own.querySelectorAll("img")) {
+			for (const value of [img.getAttribute("src") ?? "", img.getAttribute("srcset") ?? ""]) {
+				for (const candidate of value.split(",")) {
+					try {
+						const url = new URL(candidate.trim().split(/\s+/)[0] ?? "");
+						if (url.hostname !== "images.heb.com") continue;
+						const match = /^\/is\/image\/HEBGrocery\/prd-small\/(\d+)\.jpg$/.exec(url.pathname);
+						if (match?.[1]) imageIds.add(numericId(match[1]));
+					} catch { /* Not an image URL. */ }
+				}
+			}
+		}
+		const names = new Set([...own.querySelectorAll("p, span, div")].map((el) => normalize(normText(el))));
+		const imageMatches = items.map((_, i) => i).filter((i) => !claimed.has(i) && imageIds.has(numericId(items[i]!.productId)));
+		const textMatches = items.map((_, i) => i).filter((i) => !claimed.has(i) && names.has(normalize(items[i]!.fullDisplayName)));
+		if (imageMatches.length > 1 || textMatches.length > 1) continue;
+		const index = imageMatches[0] ?? textMatches[0];
+		if (index === undefined || (imageMatches.length && textMatches.length && imageMatches[0] !== textMatches[0])) continue;
+		claimed.add(index);
+		const item = items[index]!;
+		const anchor = document.createElement("a");
+		anchor.setAttribute("data-qe-id", "itemRowDetailsName");
+		anchor.setAttribute("href", "/product-detail/ssr/" + item.productId);
+		anchor.textContent = item.fullDisplayName;
+		anchor.setAttribute("data-ssr-resolved", "true");
+		line.insertBefore(anchor, line.firstChild);
+	}
+	const resolvedHtml = document.toString();
+	const detail = parseOrderDetailDom(resolvedHtml);
+	if (detail) {
+		// The temporary anchor is only a parser adapter, not an evidenced URL.
+		let index = 0;
+		for (const link of document.querySelectorAll<HTMLAnchorElement>(nameSelector)) {
+			if (!parseDetailItem(link)) continue;
+			if (link.hasAttribute("data-ssr-resolved")) detail.items[index]!.productUrl = null;
+			index++;
+		}
+	}
+	return { detail, unresolved: inspectOrderDetailLines(resolvedHtml).linkless };
+}
+
 export function parseOrderDetailDom(html: string): OrderDetail | null {
 	const { document } = parseHTML(html);
 	const links = [

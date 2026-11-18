@@ -812,3 +812,35 @@ test("two lines whose records would share one id do not prove an order's lines",
 	assert.equal(result.evidence.duplicateRecordIds, 1);
 	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), false);
 });
+
+for (const [label, image, name, copies, expected] of [
+	["image", "501", "", 1, true],
+	["text", "999", "  ssr   name ", 1, true],
+	["conflict", "501", "Other", 1, false],
+	["reused", "501", "", 2, false],
+	["unknown", "999", "Unknown", 1, false],
+	["nested", "501", "SSR Name", 1, false],
+] as const) {
+	test(`linkless SSR resolution: ${label}`, async () => {
+		const extra = label === "conflict" || label === "reused";
+		const items = [
+			{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1 },
+			{ product: { id: "501", fullDisplayName: "SSR Name" }, quantity: 1 },
+			...(extra ? [{ product: { id: "502", fullDisplayName: "Other" }, quantity: 1 }] : []),
+		];
+		const line = `<li><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/${image.padStart(9, "0")}.jpg"><p>${name}</p><span data-qe-id="orderItemQty">Qty: 3</span><span data-qe-id="checkoutItemPrice">$6.00</span></li>`;
+		const rows = label === "nested" ? itemRow(0).replace("</li>", `<ul>${line}</ul></li>`) : itemRow(0) + line.repeat(copies);
+		const data = { page: "/my-account/order-history/[orderId]", gssp: true, props: { __N_SSP: true, pageProps: { order: { orderId: order.orderId, orderItems: items } } } };
+		const html = rows + '<section data-qe-id="orderSummaryCard"></section>' + `<script id="__NEXT_DATA__">${JSON.stringify(data)}</script>`;
+		const result = await fetchOrderDetail(pageFor(html), order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50 });
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(result.evidence.linklessLines, expected ? 0 : 1);
+		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), expected);
+		if (expected) {
+			assert.equal(result.detail.items[1]?.name, "SSR Name");
+			assert.equal(result.detail.items[1]?.quantity, 3);
+			assert.equal(result.detail.items[1]?.lineTotal, "$6.00");
+		}
+	});
+}
