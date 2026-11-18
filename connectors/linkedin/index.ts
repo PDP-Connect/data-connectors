@@ -44,7 +44,7 @@
  *   - Any account where `-93` 404s/reshapes and a fallback decoration id is
  *     actually needed.
  *   - Non-US / non-EN locales, business/Premium accounts, accounts with
- *     >2000 connections (the CONNECTIONS_MAX truncation path), accounts
+ *     30,000 connections (LinkedIn's limit), accounts
  *     with categorized (non-flat) `profileSkills`, accounts with a
  *     `profileEducations[].grade` value set.
  *
@@ -123,7 +123,7 @@ const LINKEDIN_FEED_URL = "https://www.linkedin.com/feed/";
 const LINKEDIN_LOGIN_URL = "https://www.linkedin.com/login";
 const SESSION_COOKIE = /li_at|JSESSIONID/;
 const CONNECTIONS_PAGE_SIZE = 40;
-const CONNECTIONS_MAX = 2000;
+const CONNECTIONS_MAX = 30000; // LinkedIn's own first-degree connection limit.
 const RESOLVE_BATCH_SIZE = 20;
 const PAGE_DELAY_MS = 500;
 
@@ -435,7 +435,8 @@ async function fetchConnections(
 		...(error ? { error } : {}),
 	});
 
-	while (start < CONNECTIONS_MAX) {
+	// <= so an account at LinkedIn's limit still reads its empty end page.
+	while (start <= CONNECTIONS_MAX) {
 		const result = await voyagerFetch<VoyagerConnectionsResponse>(
 			page,
 			`/voyager/api/relationships/dash/connections?count=${CONNECTIONS_PAGE_SIZE}&q=search&sortType=RECENTLY_ADDED&start=${start}`,
@@ -545,7 +546,7 @@ async function fetchConnections(
 		await politeDelay(PAGE_DELAY_MS);
 	}
 
-	return finish(start >= CONNECTIONS_MAX ? "page_budget" : "malformed_page");
+	return finish(start > CONNECTIONS_MAX ? "page_budget" : "malformed_page");
 }
 
 /** Batch-resolve connection member URNs to profile summaries (name,
