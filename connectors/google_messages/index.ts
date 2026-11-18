@@ -446,7 +446,8 @@ export function parseGmcliMessagesJson(
 // presenting a partial history as complete.
 
 const DEFAULT_MESSAGES_PER_CHAT_LIMIT = 1_000_000;
-const DEFAULT_MAX_CHATS = 200;
+// Runaway-tool guard, not a platform limit; GMCLI_MAX_CHATS remains overridable.
+const DEFAULT_MAX_CHATS = 1_000_000;
 
 function resolveMessagesPerChatLimit(): number {
 	const raw = Number(process.env.GMCLI_MESSAGES_PER_CHAT_LIMIT);

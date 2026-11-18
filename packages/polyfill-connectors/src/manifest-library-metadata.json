@@ -362,7 +362,7 @@
 					"GMCLI_MAX_CHATS": {
 						"type": "integer",
 						"description": "How many conversations to scan per run. Chats are sorted most-recently-active first, so a lower value collects fewer conversations.",
-						"default": 200,
+						"default": 1000000,
 						"minimum": 1,
 						"declared_option_kind": "collection_scope"
 					},
