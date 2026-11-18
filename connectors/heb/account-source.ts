@@ -6,9 +6,19 @@ import { hasOrdersEmptyState } from "./parsers.ts";
 import type { ProfileRecord } from "./types.ts";
 
 /** Server-rendered account responses are scoped to the browser's authenticated
- * session. The logout control and SSR route must agree; a public shell or an
- * unrelated embedded object is not account evidence. No provider owner ID is
- * invented for the orders response, which does not expose one. */
+ * session. A signed-in-only control and the SSR route must agree; a public
+ * shell or an unrelated embedded object is not account evidence. No provider
+ * owner ID is invented for the orders response, which does not expose one.
+ *
+ * The control is per page. H-E-B no longer renders a sign-out link
+ * (/oidc/session/end) in either page's initial markup (live capture,
+ * 2026-11-18): the profile page carries its account-edit controls
+ * (/oidc/prompt/edit_account), and the orders page carries its results
+ * container, the same evidence the run-start session probe trusts. */
+const SIGNED_IN_CONTROL: Record<string, string> = {
+	"/my-account/profile": 'a[href^="/oidc/prompt/edit_account"]',
+	"/my-account/your-orders": '[data-qe-id="orderResults"]',
+};
 type ProfileReadFailure = {
 	gate: "signed_out_marker" | "next_data_missing" | "next_data_unparseable"
 		| "ssr_route_mismatch" | "schema" | "duplicate_address_id";
@@ -20,7 +30,8 @@ function readAccountPageProps(html: string, route: string): {
 	failure: ProfileReadFailure | null;
 } {
 	const { document } = parseHTML(html);
-	if (!document.querySelector('a[href="/oidc/session/end"]'))
+	const control = SIGNED_IN_CONTROL[route];
+	if (!control || !document.querySelector(control))
 		return { props: null, failure: { gate: "signed_out_marker", issue_paths: [] } };
 	const raw = document.querySelector("script#__NEXT_DATA__")?.textContent;
 	if (!raw) return { props: null, failure: { gate: "next_data_missing", issue_paths: [] } };

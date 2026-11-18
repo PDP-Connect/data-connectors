@@ -61,7 +61,7 @@ for (const [label, transform] of [
 		(s: string) =>
 			s.replace('"page":"/my-account/profile"', '"page":"/public"'),
 	],
-	["signed out", (s: string) => s.replace("/oidc/session/end", "/login")],
+	["signed out", (s: string) => s.replace("/oidc/prompt/edit_account", "/login")],
 	["non-SSR payload", (s: string) => s.replace('"gssp":true', '"gssp":false')],
 ] as const)
 	test(`profile withholds ${label}`, () =>
@@ -86,7 +86,7 @@ for (const [label, transform] of [
 		"missing terminal pages",
 		(s: string) => s.replace('"pages":[]', '"pages":null'),
 	],
-	["signed out", (s: string) => s.replace("/oidc/session/end", "/login")],
+	["signed out", (s: string) => s.replace('data-qe-id="orderResults"', 'data-qe-id="unrelated"')],
 	[
 		"missing empty state",
 		(s: string) => s.replace("Empty_box__synthetic", "Unrelated"),
@@ -124,7 +124,7 @@ for (const [label, transform, gate, paths] of [
 	["missing primary marker", (s: string) => s.replace('"defaultAddress":false', '"unrelated":false'), "schema", ["addresses.0.defaultAddress"]],
 	["unreadable address", (s: string) => s.replace('"address1":"123 Example Street"', '"address1":null'), "schema", ["addresses.0.address1"]],
 	["absent addresses", (s: string) => s.replace('"addresses":', '"unrelated":'), "schema", ["addresses"]],
-	["signed out", (s: string) => s.replace("/oidc/session/end", "/login"), "signed_out_marker", []],
+	["signed out", (s: string) => s.replace("/oidc/prompt/edit_account", "/login"), "signed_out_marker", []],
 	["wrong route", (s: string) => s.replace('"/my-account/profile"', '"/public"'), "ssr_route_mismatch", []],
 	["non-SSR", (s: string) => s.replace('"gssp":true', '"gssp":false'), "ssr_route_mismatch", []],
 	["missing SSP", (s: string) => s.replace('"__N_SSP":true', '"__N_SSP":false'), "ssr_route_mismatch", []],
@@ -148,4 +148,21 @@ test("profile still refuses malformed optional fields without including their va
 	assert.deepEqual(readAccountProfile(html), {
 		record: null, failure: { gate: "schema", issue_paths: ["addresses.0.nickname"] },
 	});
+});
+
+test("a sign-out link alone is no longer profile evidence", () => {
+	const html = profile.replace(
+		'<a href="/oidc/prompt/edit_account" data-component="link">Verify</a>',
+		'<a href="/oidc/session/end">Log out</a>',
+	);
+	assert.notEqual(html, profile);
+	assert.equal(readAccountProfile(html).failure?.gate, "signed_out_marker");
+});
+
+test("an account-edit control on another route is not orders evidence", () => {
+	const html = orders.replace(
+		'data-qe-id="orderResults"',
+		'data-qe-id="unrelated"><a href="/oidc/prompt/edit_account">Edit</a',
+	);
+	assert.equal(sourceReportsEmptyHistory(html), false);
 });
