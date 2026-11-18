@@ -2044,3 +2044,43 @@ test("GitHub repositories: 201 list pages reach normal coverage and STATE", asyn
 		short.coverages,
 	);
 });
+
+for (const scenario of ["one-empty", "two-empty", "terminal-empty", "reset-empty"]) {
+	test(`GitHub repositories: empty continuation ${scenario}`, async (t: TestContext) => {
+		const pages = scenario === "one-empty" ? [[], [1]]
+			: scenario === "two-empty" ? [[], []]
+			: scenario === "terminal-empty" ? [[]]
+			: [[], [1], [], [2]];
+		let calls = 0;
+		mockFetch(t, (input: string | URL | Request) => {
+			const current = new URL(String(input));
+			assert.equal(Number(current.searchParams.get("page") ?? "1"), calls + 1);
+			const ids = pages[calls++];
+			assert.ok(ids, "must not fetch beyond the scenario");
+			const next = new URL(current);
+			next.searchParams.set("page", String(calls + 1));
+			return Promise.resolve(jsonResponse(
+				ids.map(id => repoItem(id, "2026-06-01T00:00:00Z")),
+				calls < pages.length || scenario === "two-empty"
+					? { headers: { link: `<${next.href}>; rel="next"` } } : {},
+			));
+		});
+		const h = makeCtx(["repositories"]);
+		if (scenario === "two-empty") {
+			await assert.rejects(() => collectRepositories(h.ctx), isRetryableGithubGap);
+			assert.equal(calls, 2);
+			assert.deepEqual(h.states, []);
+			assert.deepEqual(h.coverages, []);
+			assert.deepEqual(h.skips[0]?.diagnostics, { cause: "empty_pages_with_next", page_count: 2 });
+			assert.deepEqual(h.skips[0]?.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		} else {
+			await collectRepositories(h.ctx);
+			assert.equal(calls, pages.length);
+			assert.deepEqual(h.records.map(r => String(r.data.id)), pages.flat().map(String));
+			assert.equal(h.states.length, 1);
+			assert.equal(h.coverages[0]?.considered, pages.flat().length);
+			assert.equal(h.coverages[0]?.covered, pages.flat().length);
+			assert.deepEqual(h.skips, []);
+		}
+	});
+}
