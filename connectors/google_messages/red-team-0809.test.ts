@@ -760,3 +760,64 @@ test("finding 2 — the chat-scan-limit reason has vetted display copy declared 
 		"gmcli_per_chat_limit_reached must also have vetted display copy in the manifest",
 	);
 });
+
+test("unset GMCLI_MAX_CHATS scans 250 conversations without a chat-scan gap", async () => {
+	const chats = Array.from({ length: 250 }, (_, i) =>
+		chat({
+			conversation_id: `synthetic_chat_${String(i).padStart(3, "0")}`,
+			last_message_time_ms: 1_000_000 + i * 1000,
+		}),
+	);
+	const messages = chats.map((c) =>
+		msg({
+			message_id: `msg_${c.conversation_id}`,
+			conversation_id: c.conversation_id,
+			timestamp_ms: 1000,
+		}),
+	);
+	const run = await runGoogleMessagesCustom(
+		chats,
+		messages,
+		{},
+		{ GMCLI_MAX_CHATS: "", GMCLI_MESSAGES_PER_CHAT_LIMIT: "" },
+		120_000,
+	);
+	assert.equal(run.code, 0);
+	const emitted = records(run.messages, "messages");
+	assert.equal(emitted.length, 250);
+	assert.deepEqual(
+		idsOf(emitted),
+		new Set(messages.map((message) => message.message_id)),
+	);
+	assert.deepEqual(
+		new Set(emitted.map((record) => record.chat_id)),
+		new Set(chats.map((conversation) => conversation.conversation_id)),
+	);
+	assert.equal(
+		skips(run.messages).some(
+			(skip) => skip.reason === "gmcli_chat_scan_limit_reached",
+		),
+		false,
+	);
+});
+
+test("unset GMCLI_MAX_CHATS probes the default million-chat guard plus one", async () => {
+	const calls: string[][] = [];
+	const invoker: GmcliInvoker = (args) => {
+		calls.push([...args]);
+		return Promise.resolve({ exitCode: 0, stderr: "", stdout: "[]" });
+	};
+	const previous = process.env.GMCLI_MAX_CHATS;
+	process.env.GMCLI_MAX_CHATS = "";
+	try {
+		await fetchAndParseGmcliMessages(invoker);
+	} finally {
+		if (previous === undefined) delete process.env.GMCLI_MAX_CHATS;
+		else process.env.GMCLI_MAX_CHATS = previous;
+	}
+	const probe = calls.find((args) => args[2] === "chats" && args[3] === "list");
+	assert.ok(probe);
+	const limitIndex = probe.indexOf("--limit");
+	assert.ok(limitIndex >= 0);
+	assert.equal(probe[limitIndex + 1], "1000001");
+});
