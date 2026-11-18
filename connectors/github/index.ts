@@ -518,7 +518,7 @@ export interface StreamCtx {
 async function failGithubPagination(
 	ctx: StreamCtx,
 	stream: string,
-	kind: "no_new_ids" | "repeated_next",
+	kind: "no_new_ids" | "repeated_next" | "empty_pages_with_next",
 	pageIndex: number,
 ): Promise<never> {
 	const repeated = kind === "repeated_next";
@@ -527,7 +527,9 @@ async function failGithubPagination(
 		: "github_pagination_cap_exceeded";
 	const message = repeated
 		? `GitHub ${stream} pagination returned a repeated next link after ${String(pageIndex)} page(s)`
-		: `GitHub ${stream} pagination returned no new IDs with more pages remaining (no_new_ids)`;
+		: kind === "empty_pages_with_next"
+			? `GitHub ${stream} pagination returned two empty pages with more pages remaining (empty_pages_with_next)`
+			: `GitHub ${stream} pagination returned no new IDs with more pages remaining (no_new_ids)`;
 	await ctx.emit({
 		type: "SKIP_RESULT",
 		stream,
@@ -560,15 +562,19 @@ function githubPageKey(path: string): string {
 	return url.href;
 }
 
+// Each list walk owns its IDs and consecutive-empty-page count.
+type GithubListProgress = { ids: Set<string>; emptyPages: number };
+
 async function nextGithubListPage(
 	ctx: StreamCtx,
 	stream: string,
 	next: string | null,
 	pageIndex: number,
 	visitedPaths: Set<string>,
-	seenIds: Set<string>,
+	progress: GithubListProgress,
 	ids: unknown[],
 ): Promise<string | null> {
+	const seenIds = progress.ids;
 	const before = seenIds.size;
 	for (const id of ids) {
 		if (typeof id === "string" || typeof id === "number")
@@ -578,7 +584,15 @@ async function nextGithubListPage(
 	if (next && visitedPaths.has(githubPageKey(next))) {
 		await failGithubPagination(ctx, stream, "repeated_next", pageIndex);
 	}
-	if (!next || ids.length === 0) return null;
+	if (!next) return null;
+	if (ids.length === 0) {
+		progress.emptyPages += 1;
+		if (progress.emptyPages > 1) {
+			await failGithubPagination(ctx, stream, "empty_pages_with_next", pageIndex);
+		}
+		return next;
+	}
+	progress.emptyPages = 0;
 	if (seenIds.size === before) {
 		await failGithubPagination(ctx, stream, "no_new_ids", pageIndex);
 	}
@@ -773,7 +787,7 @@ export async function collectRepositories(ctx: StreamCtx): Promise<void> {
 	let pageIndex = 0;
 	let totalSeen = 0;
 	const visitedPaths = new Set<string>();
-	const seenIds = new Set<string>();
+	const seenIds: GithubListProgress = { ids: new Set<string>(), emptyPages: 0 };
 	// Items the loop actually evaluated against the incremental cursor, summed
 	// across pages. This is the honest `considered` denominator: it excludes any
 	// page tail past an early stop match, which the loop never visits (see
@@ -916,7 +930,7 @@ export async function collectStarred(ctx: StreamCtx): Promise<void> {
 	// `emitStarredPage`). The honest `considered` denominator.
 	let totalEvaluated = 0;
 	const visitedPaths = new Set<string>();
-	const seenIds = new Set<string>();
+	const seenIds: GithubListProgress = { ids: new Set<string>(), emptyPages: 0 };
 	while (path && !stop) {
 		await guardGithubPagination(ctx, "starred", path, pageIndex, visitedPaths);
 		// Use star:timestamp media type to get starred_at
@@ -1068,7 +1082,7 @@ export async function collectIssues(ctx: StreamCtx): Promise<void> {
 	let pageIndex = 0;
 	let totalSeen = 0;
 	const visitedPaths = new Set<string>();
-	const seenIds = new Set<string>();
+	const seenIds: GithubListProgress = { ids: new Set<string>(), emptyPages: 0 };
 	while (path) {
 		await guardGithubPagination(ctx, "issues", path, pageIndex, visitedPaths);
 		const pageExtra = {
@@ -1386,7 +1400,7 @@ async function drainPrSearchWindow(
 	let reportedTotal = 0;
 	let latest = latestIn;
 	const visitedPaths = new Set<string>();
-	const seenIds = new Set<string>();
+	const seenIds: GithubListProgress = { ids: new Set<string>(), emptyPages: 0 };
 	while (path && !stop) {
 		await guardGithubPagination(
 			ctx,
@@ -1947,7 +1961,7 @@ export async function collectOrganizations(ctx: StreamCtx): Promise<void> {
 	let pageIndex = 0;
 	let totalSeen = 0;
 	const visitedPaths = new Set<string>();
-	const seenIds = new Set<string>();
+	const seenIds: GithubListProgress = { ids: new Set<string>(), emptyPages: 0 };
 	while (path) {
 		await guardGithubPagination(
 			ctx,
@@ -2006,7 +2020,7 @@ export async function collectGists(ctx: StreamCtx): Promise<void> {
 	let pageIndex = 0;
 	let totalSeen = 0;
 	const visitedPaths = new Set<string>();
-	const seenIds = new Set<string>();
+	const seenIds: GithubListProgress = { ids: new Set<string>(), emptyPages: 0 };
 	while (path) {
 		await guardGithubPagination(ctx, "gists", path, pageIndex, visitedPaths);
 		const pageExtra = {
