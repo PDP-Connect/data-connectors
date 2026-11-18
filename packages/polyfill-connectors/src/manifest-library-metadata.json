@@ -289,7 +289,7 @@
 			"connector_key": "github",
 			"reason_display_messages": {
 				"github_event_missing_fields": "We skipped some activity events that were missing required details",
-				"github_pagination_cap_exceeded": "GitHub returned more pages than this run could safely scan, so collection stopped before claiming complete coverage",
+				"github_pagination_cap_exceeded": "GitHub stopped returning new items while more pages were listed. Collection is incomplete; no new resume point was saved.",
 				"github_pagination_repeated_next": "GitHub repeated a pagination link, so collection stopped before claiming complete coverage",
 				"github_pinned_item_missing_identity": "We skipped a pinned repository whose identity was unavailable",
 				"pr_detail_fetch_failed": "We saved these pull requests but couldn't load every detail",

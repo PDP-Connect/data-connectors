@@ -162,20 +162,9 @@ export function createGithubHttpGovernor(
 	});
 }
 
-const DEFAULT_GITHUB_MAX_LIST_PAGES = 200;
-let maxGithubListPages = DEFAULT_GITHUB_MAX_LIST_PAGES;
-
 /** Runtime retry classification, including the governor's exhausted 5xx form. */
 export const GITHUB_RETRYABLE_PATTERN =
 	/github_malformed_response|rate(?:_| )limit(?:ed)?|ECONN|fetch failed|retryable status \d+/i;
-
-/** Test-only cap injection; production keeps the bounded default. */
-export function __setMaxGithubListPages(maxPages: number): void {
-	if (!Number.isInteger(maxPages) || maxPages <= 0) {
-		throw new Error("github_pagination_invalid_max_pages");
-	}
-	maxGithubListPages = maxPages;
-}
 
 /**
  * Re-seed the run governor warm-started from the prior run's learned rate,
@@ -529,7 +518,7 @@ export interface StreamCtx {
 async function failGithubPagination(
 	ctx: StreamCtx,
 	stream: string,
-	kind: "page_cap" | "repeated_next",
+	kind: "no_new_ids" | "repeated_next",
 	pageIndex: number,
 ): Promise<never> {
 	const repeated = kind === "repeated_next";
@@ -538,15 +527,13 @@ async function failGithubPagination(
 		: "github_pagination_cap_exceeded";
 	const message = repeated
 		? `GitHub ${stream} pagination returned a repeated next link after ${String(pageIndex)} page(s)`
-		: `GitHub ${stream} pagination reached its ${String(maxGithubListPages)}-page safety cap with more pages remaining`;
+		: `GitHub ${stream} pagination returned no new IDs with more pages remaining (no_new_ids)`;
 	await ctx.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason,
 		message,
-		diagnostics: repeated
-			? { page_count: pageIndex }
-			: { page_cap: maxGithubListPages, page_count: pageIndex },
+		diagnostics: { cause: kind, page_count: pageIndex },
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
 	});
 	throw createConnectorFailure("github_pagination_gap", message, {
@@ -561,13 +548,41 @@ async function guardGithubPagination(
 	pageIndex: number,
 	visitedPaths: Set<string>,
 ): Promise<void> {
-	if (pageIndex >= maxGithubListPages) {
-		await failGithubPagination(ctx, stream, "page_cap", pageIndex);
-	}
-	if (visitedPaths.has(path)) {
+	if (visitedPaths.has(githubPageKey(path))) {
 		await failGithubPagination(ctx, stream, "repeated_next", pageIndex);
 	}
-	visitedPaths.add(path);
+	visitedPaths.add(githubPageKey(path));
+}
+
+function githubPageKey(path: string): string {
+	const url = new URL(path, "https://api.github.com");
+	url.searchParams.sort();
+	return url.href;
+}
+
+async function nextGithubListPage(
+	ctx: StreamCtx,
+	stream: string,
+	next: string | null,
+	pageIndex: number,
+	visitedPaths: Set<string>,
+	seenIds: Set<string>,
+	ids: unknown[],
+): Promise<string | null> {
+	const before = seenIds.size;
+	for (const id of ids) {
+		if (typeof id === "string" || typeof id === "number")
+			seenIds.add(String(id));
+	}
+	// Repeated continuation is an explicit inconsistency, even on an empty page.
+	if (next && visitedPaths.has(githubPageKey(next))) {
+		await failGithubPagination(ctx, stream, "repeated_next", pageIndex);
+	}
+	if (!next || ids.length === 0) return null;
+	if (seenIds.size === before) {
+		await failGithubPagination(ctx, stream, "no_new_ids", pageIndex);
+	}
+	return next;
 }
 
 /**
@@ -758,6 +773,7 @@ export async function collectRepositories(ctx: StreamCtx): Promise<void> {
 	let pageIndex = 0;
 	let totalSeen = 0;
 	const visitedPaths = new Set<string>();
+	const seenIds = new Set<string>();
 	// Items the loop actually evaluated against the incremental cursor, summed
 	// across pages. This is the honest `considered` denominator: it excludes any
 	// page tail past an early stop match, which the loop never visits (see
@@ -804,7 +820,17 @@ export async function collectRepositories(ctx: StreamCtx): Promise<void> {
 		latestPushed = result.latest;
 		({ stop } = result);
 		totalEvaluated += result.evaluated;
-		path = page.nextUrl;
+		path = stop
+			? null
+			: await nextGithubListPage(
+					ctx,
+					"repositories",
+					page.nextUrl,
+					pageIndex + 1,
+					visitedPaths,
+					seenIds,
+					items.map((item) => item.id),
+				);
 		pageIndex += 1;
 	}
 	// The run evaluated `totalEvaluated` repositories against the incremental
@@ -890,6 +916,7 @@ export async function collectStarred(ctx: StreamCtx): Promise<void> {
 	// `emitStarredPage`). The honest `considered` denominator.
 	let totalEvaluated = 0;
 	const visitedPaths = new Set<string>();
+	const seenIds = new Set<string>();
 	while (path && !stop) {
 		await guardGithubPagination(ctx, "starred", path, pageIndex, visitedPaths);
 		// Use star:timestamp media type to get starred_at
@@ -932,7 +959,17 @@ export async function collectStarred(ctx: StreamCtx): Promise<void> {
 		({ stop } = result);
 		droppedTotal += result.dropped;
 		totalEvaluated += result.evaluated;
-		path = page.nextUrl;
+		path = stop
+			? null
+			: await nextGithubListPage(
+					ctx,
+					"starred",
+					page.nextUrl,
+					pageIndex + 1,
+					visitedPaths,
+					seenIds,
+					entries.map((entry) => entry.repo?.id),
+				);
 		pageIndex += 1;
 	}
 	// Stream-level skip evidence: a run that silently drops malformed/unavailable
@@ -1031,6 +1068,7 @@ export async function collectIssues(ctx: StreamCtx): Promise<void> {
 	let pageIndex = 0;
 	let totalSeen = 0;
 	const visitedPaths = new Set<string>();
+	const seenIds = new Set<string>();
 	while (path) {
 		await guardGithubPagination(ctx, "issues", path, pageIndex, visitedPaths);
 		const pageExtra = {
@@ -1053,7 +1091,15 @@ export async function collectIssues(ctx: StreamCtx): Promise<void> {
 			cursor_present: Boolean(page.nextUrl),
 		});
 		latestUpdated = await emitIssuesPage(ctx, items, until, latestUpdated);
-		path = page.nextUrl;
+		path = await nextGithubListPage(
+			ctx,
+			"issues",
+			page.nextUrl,
+			pageIndex + 1,
+			visitedPaths,
+			seenIds,
+			items.map((item) => item.id),
+		);
 		pageIndex += 1;
 	}
 	// `totalSeen` is every issue the run enumerated AND evaluated in its
@@ -1340,6 +1386,7 @@ async function drainPrSearchWindow(
 	let reportedTotal = 0;
 	let latest = latestIn;
 	const visitedPaths = new Set<string>();
+	const seenIds = new Set<string>();
 	while (path && !stop) {
 		await guardGithubPagination(
 			ctx,
@@ -1398,7 +1445,17 @@ async function drainPrSearchWindow(
 			count: Math.min(fetchedCount, totalCount),
 			total: totalCount,
 		});
-		path = page.nextUrl;
+		path = stop
+			? null
+			: await nextGithubListPage(
+					ctx,
+					"pull_requests",
+					page.nextUrl,
+					pageIndex + 1,
+					visitedPaths,
+					seenIds,
+					items.map((item) => item.id),
+				);
 		pageIndex += 1;
 	}
 	return {
@@ -1890,6 +1947,7 @@ export async function collectOrganizations(ctx: StreamCtx): Promise<void> {
 	let pageIndex = 0;
 	let totalSeen = 0;
 	const visitedPaths = new Set<string>();
+	const seenIds = new Set<string>();
 	while (path) {
 		await guardGithubPagination(
 			ctx,
@@ -1913,7 +1971,15 @@ export async function collectOrganizations(ctx: StreamCtx): Promise<void> {
 		for (const org of orgs) {
 			await ctx.emitRecord("organizations", organizationRecord(org));
 		}
-		path = page.nextUrl;
+		path = await nextGithubListPage(
+			ctx,
+			"organizations",
+			page.nextUrl,
+			pageIndex + 1,
+			visitedPaths,
+			seenIds,
+			orgs.map((org) => org.id),
+		);
 		pageIndex += 1;
 	}
 	await declareListConsidered(ctx, "organizations", totalSeen, totalSeen);
@@ -1940,6 +2006,7 @@ export async function collectGists(ctx: StreamCtx): Promise<void> {
 	let pageIndex = 0;
 	let totalSeen = 0;
 	const visitedPaths = new Set<string>();
+	const seenIds = new Set<string>();
 	while (path) {
 		await guardGithubPagination(ctx, "gists", path, pageIndex, visitedPaths);
 		const pageExtra = {
@@ -1962,7 +2029,15 @@ export async function collectGists(ctx: StreamCtx): Promise<void> {
 			cursor_present: Boolean(page.nextUrl),
 		});
 		latestUpdated = await emitGistsPage(ctx, items, until, latestUpdated);
-		path = page.nextUrl;
+		path = await nextGithubListPage(
+			ctx,
+			"gists",
+			page.nextUrl,
+			pageIndex + 1,
+			visitedPaths,
+			seenIds,
+			items.map((item) => item.id),
+		);
 		pageIndex += 1;
 	}
 	// Every gist enumerated AND evaluated in the run's boundary (full page walk,
