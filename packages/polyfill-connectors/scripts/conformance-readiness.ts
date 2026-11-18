@@ -64,8 +64,9 @@ export function declaredNoHttpExemption(source: string): string | undefined {
 		.match(
 			/(?:^|\n)[\t ]*(?:\*|\/\/|\/\*)[\t ]*@conformance-no-http[\t ]+([^\r\n]+)/,
 		)?.[1]
-		?.replace(/\*\/\s*$/, "")
-		.trim();
+		// A block comment's reason ends at its own close, not at the line's end.
+		?.split("*/")[0]
+		?.trim();
 	return reason || undefined;
 }
 

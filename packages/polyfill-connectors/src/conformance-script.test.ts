@@ -234,6 +234,29 @@ test("no-HTTP reasons support one-line block, multi-line block and line comments
 	}
 });
 
+test("a one-line block no-HTTP reason stops at its own comment close", () => {
+	for (const header of [
+		"/* @conformance-no-http */ // copyright",
+		"/* @conformance-no-http */ /* copyright */",
+	]) {
+		assert.equal(
+			declaredNoHttpExemption(`${header}\nexport {};`),
+			undefined,
+			header,
+		);
+	}
+	for (const header of [
+		"/* @conformance-no-http reads local files only */ // copyright",
+		"/* @conformance-no-http reads local files only */ /* copyright */",
+	]) {
+		assert.equal(
+			declaredNoHttpExemption(`${header}\nexport {};`),
+			"reads local files only",
+			header,
+		);
+	}
+});
+
 test("JSON no-HTTP note only qualifies UNKNOWN and PASS mock mutation findings", () => {
 	const directory = mkdtempSync(join(connectorsDir, "conformance-no-http-"));
 	const connector = basename(directory);
